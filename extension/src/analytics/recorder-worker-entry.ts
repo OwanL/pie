@@ -5,7 +5,7 @@ import {
   type AnalyticsDetailCapture,
   type AnalyticsObservation,
 } from '../../../shared/analytics/contracts.js';
-import { SqliteAnalyticsRecorder } from './sqlite-recorder.js';
+import { AnalyticsPrivacyScrubPendingError, SqliteAnalyticsRecorder } from './sqlite-recorder.js';
 
 type RecorderWorkerRequest = {
   type: 'captureBatch';
@@ -270,11 +270,20 @@ async function handle(raw: unknown): Promise<void> {
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    // Preserve machine-readable error identity across the IPC boundary. The
+    // supervisor converts any worker failure into a generic request error, so
+    // without a code a caller cannot distinguish a retryable condition (a
+    // privacy scrub whose fence is committed and pending) from a hard failure.
+    let errorCode: string | undefined;
+    if (message.startsWith('Analytics capture subject is deleted:')) errorCode = 'subject_deleted';
+    else if (error instanceof AnalyticsPrivacyScrubPendingError) errorCode = 'privacy_scrub_pending';
+    else if (error instanceof AnalyticsSourceConflictError) errorCode = 'source_conflict';
+    else if (/database is locked|\bdatabase table is locked\b/u.test(message)) errorCode = 'database_locked';
     await send({
       type: 'error',
       requestId: request.requestId,
       error: message,
-      ...(message.startsWith('Analytics capture subject is deleted:') ? { errorCode: 'subject_deleted' } : {}),
+      ...(errorCode === undefined ? {} : { errorCode }),
     }).catch(() => undefined);
   }
 }

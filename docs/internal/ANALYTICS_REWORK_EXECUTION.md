@@ -2896,6 +2896,110 @@ validation `validated`, 10k baseline `scenario-passed` with zero failed gates an
 in-line, and a 1M admission `validated` at projected peak `10,112,000,000` bytes. The 1M workload is
 running with the machine quiesced; its outcome is the next checkpoint.
 
+### Checkpoint 43: the flush fix held; a third lock source remains in the same race step
+
+The v8 run (`pie-p0-v8-20260912-r09/scale/scale.json`, build `9a4aa63006bfb3340392`, machine verified
+quiesced before launch) reproduced the same section profile as v7 and the same failure:
+
+| Evidence | v7 run | v8 run |
+|---|---|---|
+| `crossHostRefresh` | completed, delete `21,205` ms | completed, delete `21,243` ms |
+| `capacity` | completed | completed |
+| failing section | `privateDeleteRace` | `privateDeleteRace` |
+| failure | `AnalyticsRecorderWorkerRequestError: database is locked` | same |
+| max worker RSS | 283.1 MB | **283.1 MB** |
+
+**What the flush fix did and did not do.** The `PASSIVE` checkpoint removed one lock source: every
+helper's `flush()` previously demanded exclusive access. `crossHostRefresh` and `capacity` — both of
+which perform ordinary flushes against a live database — now complete reliably, and the deletion is
+consistently ~21.2 s instead of being killed at 30 s. But `privateDeleteRace` still reports
+`database is locked`, so **at least one further lock source survives inside that step**.
+
+`privateDeleteRace` is the one section that deliberately races a `deleteSession` against a concurrently
+writing helper. Its remaining candidate costs are the operations that legitimately require exclusive
+access — the private-close scrub's `wal_checkpoint(TRUNCATE)`, and the subject-scoped `DELETE`s over
+`analytics_observations` and `analytics_detail_payloads` — running while the second helper is mid-write.
+The scrub is *designed* to tolerate this (it records `scrub_state='pending'` and returns
+`AnalyticsPrivacyScrubPendingError`), but that typed error does not survive the worker IPC boundary: the
+supervisor converts any worker failure into `AnalyticsRecorderWorkerRequestError`, so the harness sees a
+generic "locked" rejection. The harness then asserts
+`privacyScrubRecovery.pending.length === 0`, which is only satisfiable if the first attempt succeeded.
+
+**This is not yet repaired.** Two directions are open and neither is applied: either distinguish the
+retryable scrub-pending condition across IPC so the harness's own recovery step runs (matching the
+designed contract), or make the scrub's truncation not require exclusive access. The first is closer to
+the documented design. The choice has not been made, and no gate has been relaxed.
+
+**Both 1M blockers now measured plainly.** `recorderWorkerRss` is `283.1` MB against the 256 MiB gate
+(V8 idle heap reservation, not a leak — checkpoint 35), and `inPlaceCorruption` cannot run because the
+run aborts before it. Everything else in the tier passes: 1,000,000 facts, 100,003 details, the full
+query suite including the repaired `storage`, `crossHostRefresh`, `capacity`, and a 7.17 GiB temporary
+footprint inside the 16 GiB cap.
+
+### Checkpoint 44: error identity now survives IPC; the lock-hold mechanism is under test
+
+**Implemented (pending verification): machine-readable error identity across the worker boundary.**
+The worker's IPC error envelope already carried an optional `errorCode` for one case. It now also
+classifies `privacy_scrub_pending` (the *designed* retryable state, where the deletion fence is committed
+and the WAL scrub is pending), `source_conflict`, and `database_locked`. Without this, the supervisor
+converts every worker failure into a generic `AnalyticsRecorderWorkerRequestError`, so a caller cannot
+tell a retryable pending condition from a hard failure — which is precisely why the 1M run reported a
+bare "database is locked" with no indication that the code had already committed a durable fence and
+intended a retry.
+
+**Mechanism under test — the delete's write-lock hold.**
+`deleteSession` wraps its entire body in `BEGIN IMMEDIATE`, which takes a **database-wide** write lock.
+`BUSY_TIMEOUT_MS` is 5,000 ms, while the measured 1M delete takes ~21 s. So an unrelated session's write
+that races the delete should fail with "database is locked" even though it touches entirely different
+rows. `pie-lock-hold-20260912-r01` measures that directly: it builds a database with two sessions, then
+races an unrelated write against a real `deleteSession`, recording the delete duration and whether the
+unrelated write succeeded, timed out, or failed. It also confirms the unrelated session's rows survive.
+
+If confirmed, the correct repair is to **narrow the write transaction** so it does not span the whole
+delete: resolve the subject and delete the subject-scoped rows in a bounded transaction, and move the
+long `PRAGMA wal_checkpoint(TRUNCATE)` out of it entirely. A 21-second database-wide write lock is
+indefensible for a per-session operation regardless of the gate, because it can block unrelated sessions
+— which the contract explicitly forbids ("a slow transcript write in session A must not hold a shared
+lock needed by unrelated session B").
+
+**Not yet applied.** The result decides whether the fix is transaction narrowing (most likely) or
+something narrower, and it will be applied only with the measurement in hand.
+
+### Checkpoint 45: the lock-hold hypothesis is disproved; error codes now cross IPC
+
+**The measurement disproved my own hypothesis.** `pie-lock-hold-20260912-r01` raced a real
+`deleteSession` against an unrelated session's write:
+
+| Measure | Result |
+|---|---|
+| delete duration (200,000 observations) | **139,210 ms** |
+| concurrent unrelated write | **succeeded in 3.7 ms**, no error |
+| deleted session rows after | 0 |
+| unrelated session rows after | 100,001 (intact) |
+
+So the delete does **not** hold a database-wide write lock for its duration, and an unrelated writer is
+not blocked by it. The `BEGIN IMMEDIATE` span was a plausible mechanism and it is **wrong**. This is the
+fourth hypothesis in this investigation that a direct measurement has eliminated, and it is recorded
+rather than quietly dropped from the narrative.
+
+A secondary fact from the same run is worth noting: `deleteSession` at **200,000** observations already
+takes **139 seconds**. That is far slower than the copy-scrub index measurement implied, which means the
+dominant cost is *not* the scrub predicate the index addressed — the index removed one 222 ms scan from a
+139-second operation. The delete's real cost lies elsewhere and is still unidentified; at 1M it exceeds
+the supervisor's 30 s bound, which is why the race step fails. **This supersedes the earlier attribution:
+the copy-scrub index was correct and necessary, but it is not the main cost.**
+
+**Landed (committed separately): machine-readable error identity across IPC.** The worker now classifies
+`privacy_scrub_pending`, `source_conflict` and `database_locked` in addition to the existing
+`subject_deleted`, and the supervisor already propagates `errorCode` onto the raised error. This matters
+because a `privacy_scrub_pending` result is the *designed* retryable state — a committed deletion fence
+with the WAL scrub pending — which the caller could not previously distinguish from a hard failure.
+
+**Next action.** Instrument the delete to attribute its own 139 seconds internally (per-phase timings
+for subject resolution, the observation/payload deletes, the accounting updates and the scrub), then
+repair whichever phase dominates. Guessing at a 139-second cost from the outside has now failed four
+times; the next measurement must come from inside the operation.
+
 **Independently verified repair carried forward.** The `storage` command fix is confirmed: `979` ms
 against a fresh 1M database, down from the `10,022` ms timeout, so `inPlaceCorruption` should now
 proceed past its terminal probe. All the other 1M gates continue to pass.
