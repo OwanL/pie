@@ -94,9 +94,14 @@ export class ActivationStore {
   }
 
   /** Read for an update, refusing to proceed when the on-disk bytes no longer
-   * match the caller's expectation (a concurrent writer won the revision). */
+   * match the caller's expectation (a concurrent writer won the revision).
+   *
+   * `mutate` receives the committed sha256 of the manifest it is replacing, so a
+   * caller can set `previousSha256` from the actual bytes rather than
+   * re-serializing them and hoping the encoding matches. `update` then verifies
+   * the caller used it, so a caller that guesses cannot commit a broken chain. */
   async update(
-    mutate: (current: ActivationManifest | null) => ActivationManifest,
+    mutate: (current: ActivationManifest | null, currentSha256: string | null) => ActivationManifest,
     options: { expectedSha256?: string | null } = {},
   ): Promise<ActivationReadResult> {
     mkdirSync(path.dirname(this.manifestPath), { recursive: true });
@@ -109,7 +114,7 @@ export class ActivationStore {
           `Activation manifest changed under the lock (expected ${String(expected)}, found ${String(current.sha256)}).`,
         );
       }
-      const next = mutate(current.manifest);
+      const next = mutate(current.manifest, current.sha256);
       // The contract requires the revision to advance by exactly one and the
       // previous hash to name the exact bytes being replaced.
       const expectedRevision = (current.manifest?.revision ?? 0) + 1;
