@@ -45,6 +45,7 @@ test('backend analytics activation validates exact active generation and rejects
       qualificationSha256: SHA,
       trialSha256: SHA_B,
       activatedAt: '2026-09-12T04:00:00.000Z',
+      cutoffReceiptSha256: SHA_B,
     });
     const active = store.read();
     const descriptor: AnalyticsBackendDescriptor = {

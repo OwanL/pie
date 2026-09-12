@@ -348,8 +348,7 @@ export class AnalyticsHandoffControl {
         this.options.onError?.(normalizeError(error), 'status.inventory');
         return fallback(['inventory-discovery-error']);
       }
-      let tracked: Promise<AnalyticsHandoffInventoryProof>;
-      tracked = underlying.then((proof) => {
+      const tracked: Promise<AnalyticsHandoffInventoryProof> = underlying.then((proof) => {
         if (this.inventoryReadInFlight === tracked) {
           if (!this.stopping) {
             this.inventoryCache = { expiresAtMs: this.now() + INVENTORY_CACHE_MS, proof };

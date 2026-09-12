@@ -133,6 +133,9 @@ export class StatsService implements RunObserver {
   private canonicalCacheEpoch = 0;
   private canonicalDirtyRevision: string | null = null;
   private canonicalRefreshRequested = false;
+  /** True only while the revision refresher has not yet established its first
+   * successful watermark. Lazy reads stay fail-closed during this window. */
+  private canonicalRevisionAwaitingBaseline = true;
   private canonicalSessionUsageRefresh: Promise<void> | null = null;
   private readonly canonicalSessionPathRefreshes = new Map<string, Promise<void>>();
   private readonly canonicalSessionPathEpochs = new Map<string, number>();
@@ -250,13 +253,34 @@ export class StatsService implements RunObserver {
       }
       const startup = (async () => {
         const canonicalQueryStartAt = performance.now();
-        await this.refreshCanonicalSessionUsage();
+        // Establish the revision baseline before hydrating any session rows.
+        // The refresher deliberately does not notify for its first successful
+        // read; starting it after hydration would therefore allow a peer
+        // delete to become the baseline and leave the hydrated cache stale.
+        const baselineRevision = await this.startCanonicalRevisionRefresh();
+        if (this.disposed) return;
+        if (baselineRevision === null) {
+          // A failed first read must not be followed by hydration: the first
+          // later successful refresher read is a silent baseline and could
+          // otherwise absorb a peer delete. Stay unknown until that baseline
+          // exists; getSessionUsage will then perform a fresh bounded read.
+          this.canonicalRevisionAwaitingBaseline = Boolean(this.analyticsReadModel);
+          this.invalidateCanonicalSessionCache(false);
+        } else {
+          this.canonicalRevisionAwaitingBaseline = false;
+          await this.refreshCanonicalSessionUsage();
+          if (this.disposed) return;
+          // A peer can commit while hydration is in flight. Compare the
+          // completed cache with a fresh durable watermark before exposing
+          // startup as complete. Unknown cache entries are safe; only a
+          // canonical snapshot at an older revision is stale data.
+          await this.reconcileCanonicalSessionUsageRevision(baselineRevision);
+        }
         if (this.disposed) return;
         this.recordStage('canonical-session-usage', canonicalQueryStartAt, {
           sessions: this.canonicalSessionUsageByPath.size,
         });
         this.started = true;
-        this.startCanonicalRevisionRefresh();
         this.scheduleRender();
       })();
       this.startPromise = startup;
@@ -1433,6 +1457,10 @@ export class StatsService implements RunObserver {
     // late read into a new helper process.
     if (this.disposed) return { samples: [], authority: 'unknown' };
     if (this.analyticsReadModel
+      && this.started
+      && !this.canonicalRevisionAwaitingBaseline
+      && this.analyticsRevisionRefresher
+      && this.analyticsRevisionRefresher.getStats().revision !== null
       && !this.canonicalSessionUsageRefresh
       && this.canonicalSessionPathRefreshes.size < this.analyticsReadModel.getMaxConcurrentQueries()
       && !this.canonicalSessionPathRefreshes.has(sessionPath)) {
@@ -1852,13 +1880,28 @@ export class StatsService implements RunObserver {
    * value at a bounded interval and re-renders on change. It never scans
    * history, never replays events and retains no per-history state. Dormant
    * under the legacy authority: there is no canonical revision to follow yet. */
-  private startCanonicalRevisionRefresh(): void {
-    if (!this.analyticsReadModel || this.analyticsRevisionRefresher) return;
+  private async startCanonicalRevisionRefresh(): Promise<string | null> {
+    if (!this.analyticsReadModel) return null;
+    if (this.analyticsRevisionRefresher) {
+      if (this.canonicalRevisionStart) await this.canonicalRevisionStart;
+      return this.analyticsRevisionRefresher.getStats().revision;
+    }
     this.analyticsRevisionRefresher = new CanonicalRevisionRefresher({
       readModel: this.analyticsReadModel,
       onRevisionChange: (revision) => {
         this.markCanonicalRevisionDirty(revision);
         this.scheduleRender();
+      },
+      onCheck: ({ revision }) => {
+        if (revision === null || !this.canonicalRevisionAwaitingBaseline) return;
+        this.canonicalRevisionAwaitingBaseline = false;
+        // A recovered first baseline is intentionally a non-change from the
+        // refresher's perspective, but it is a change from this host's
+        // fail-closed state: wake the renderer and hydrate on demand.
+        if (!this.disposed && this.started) {
+          this.markCanonicalRevisionDirty(revision);
+          this.scheduleRender();
+        }
       },
       onError: (error) => {
         appendPieLog('warn', 'analytics', 'canonical analytics revision refresh could not read the revision', {
@@ -1866,15 +1909,66 @@ export class StatsService implements RunObserver {
         });
       },
     });
-    const start = this.analyticsRevisionRefresher.start().then(() => undefined).catch((error: unknown) => {
+    const start = this.analyticsRevisionRefresher.start();
+    const drain = start.then(() => undefined, (error: unknown) => {
       appendPieLog('warn', 'analytics', 'canonical analytics revision refresh failed to start', {
         error: error instanceof Error ? error.message : String(error),
       });
     });
-    this.canonicalRevisionStart = start;
-    void start.finally(() => {
-      if (this.canonicalRevisionStart === start) this.canonicalRevisionStart = null;
-    });
+    this.canonicalRevisionStart = drain;
+    try {
+      return await start;
+    } catch {
+      return null;
+    } finally {
+      void drain.finally(() => {
+        if (this.canonicalRevisionStart === drain) this.canonicalRevisionStart = null;
+      });
+    }
+  }
+
+  /** Verify that startup hydration and its revision watermark describe the
+   * same durable snapshot. A failed baseline is represented by null; the
+   * independent watermark below still prevents a later first-successful
+   * baseline from silently accepting an older cache. */
+  private async reconcileCanonicalSessionUsageRevision(
+    baselineRevision: string | null,
+    allowRetry = true,
+  ): Promise<void> {
+    if (!this.analyticsReadModel || !this.canonicalCapture || this.disposed) return;
+    let currentRevision: string;
+    try {
+      currentRevision = canonicalRevisionString(await this.analyticsReadModel.readRevision());
+    } catch {
+      // Never expose a complete canonical snapshot without a readable durable
+      // watermark. The refresher will retry; the next explicit session read
+      // can hydrate one bounded path once the store is available again.
+      this.invalidateCanonicalSessionCache(false);
+      return;
+    }
+    const stale = [...this.canonicalSessionUsageByPath.values()].some((entry) => (
+      entry.snapshot.authority === 'canonical'
+      && canonicalRevision(entry.revision) !== canonicalRevision(currentRevision)
+    ));
+    if (!stale) return;
+    // Keep the baseline in the decision path for diagnostics and to make the
+    // failed-baseline case explicit without treating null as a revision.
+    if (baselineRevision !== null && canonicalRevision(currentRevision) < canonicalRevision(baselineRevision)) {
+      this.invalidateCanonicalSessionCache(false);
+      return;
+    }
+    this.markCanonicalRevisionDirty(currentRevision);
+    await this.refreshCanonicalSessionUsage();
+    if (allowRetry) {
+      await this.reconcileCanonicalSessionUsageRevision(null, false);
+    } else {
+      // A continuously changing store cannot be made current by an unbounded
+      // startup loop. Leave the host fail-closed until the revision refresher
+      // observes a stable watermark and schedules the next bounded refresh.
+      const stillCanonical = [...this.canonicalSessionUsageByPath.values()]
+        .some((entry) => entry.snapshot.authority === 'canonical');
+      if (stillCanonical) this.invalidateCanonicalSessionCache(false);
+    }
   }
 
   /** Observable refresh counters for idle-resource measurement. */

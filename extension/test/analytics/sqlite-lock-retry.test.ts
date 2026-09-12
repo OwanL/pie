@@ -41,7 +41,7 @@ test('uses one budget across partial subject transactions without replay account
   const budget = createSqliteLockRetryBudget();
   const committed: string[] = [];
   let accepted = 0;
-  let replayed = 0;
+  const replayed = 0;
   let laterSubjectReleased = false;
   const releaseTimer = setTimeout(() => { laterSubjectReleased = true; }, 40);
   let laterAttempts = 0;

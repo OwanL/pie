@@ -21,13 +21,8 @@ export interface ActivationRequest {
   trialSha256: string;
   /** Canonical ISO instant the generation became active. */
   activatedAt: string;
-  /** sha256 of the storage-cutoff receipt this generation was activated against.
-   *
-   * The manifest's `cutoffReceiptSha256` exists to tie an active generation to
-   * the cutoff that preceded it. It is optional because analytics activation and
-   * storage cutoff are separate, ordered gates: a generation may be activated
-   * without a cutoff having run, and the manifest then records null rather than
-   * inventing a receipt. */
+  /** Optional sha256 of the later P7b storage-cutoff receipt this generation is
+   * linked to. P7a analytics activation intentionally does not close sessions. */
   cutoffReceiptSha256?: string | null;
 }
 
@@ -89,11 +84,34 @@ export async function activateGeneration(
   request: ActivationRequest,
 ): Promise<ActivationOutcome> {
   const identity = requireEvidence(request);
+  const cutoffReceipt = cutoffReceiptSha256(request);
 
-  const current = store.read();
+  let current;
+  try {
+    current = store.read();
+  } catch (error) {
+    if (error instanceof ActivationManifestError && store.hasInterruptedActivation()) {
+      const recovered = await store.recoverInterruptedActivation(identity, cutoffReceipt);
+      return { manifest: recovered.manifest!, alreadyActive: false, revision: recovered.manifest!.revision };
+    }
+    throw error;
+  }
+  // Every transition below is fenced to the exact bytes observed by the
+  // preceding read/update.  This matters even though update() re-reads under
+  // its lock: two callers can both observe an absent manifest before either
+  // obtains that lock, and only the first caller may create the candidate.
+  let currentSha256 = current.sha256;
   const activeGeneration = current.manifest?.activeGeneration ?? null;
   if (activeGeneration) {
     if (activeGeneration.identity.generationId === identity.generationId) {
+      if (activeGeneration.identity.buildId !== identity.buildId
+        || activeGeneration.identity.qualificationSha256 !== identity.qualificationSha256
+        || activeGeneration.identity.trialSha256 !== identity.trialSha256
+        || activeGeneration.cutoffReceiptSha256 !== cutoffReceipt) {
+        throw new ActivationManifestError(
+          'The requested active generation carries different activation evidence; refusing idempotent adoption.',
+        );
+      }
       return { manifest: current.manifest!, alreadyActive: true, revision: current.manifest!.revision };
     }
     throw new ActivationManifestError(
@@ -137,8 +155,9 @@ export async function activateGeneration(
         previousSha256,
         successor: candidateEvidence(identity),
       };
-    });
+    }, { expectedSha256: currentSha256 });
     manifest = result.manifest;
+    currentSha256 = result.sha256;
   }
 
   // Step 2: candidate -> ready. Separate revision so an interruption between
@@ -153,8 +172,9 @@ export async function activateGeneration(
         previousSha256,
         successor: { ...successor, state: 'ready' },
       };
-    });
+    }, { expectedSha256: currentSha256 });
     manifest = result.manifest;
+    currentSha256 = result.sha256;
   }
 
   // Step 3: ready -> active. This revision writes the tombstone first (inside the
@@ -170,7 +190,7 @@ export async function activateGeneration(
     activatedAt: request.activatedAt,
     retiredAt: null,
     predecessorGenerationId: null,
-    cutoffReceiptSha256: cutoffReceiptSha256(request),
+    cutoffReceiptSha256: cutoffReceipt,
   };
   const result = await store.update((previous, previousSha256) => {
     if (!previous) throw new ActivationManifestError('Manifest disappeared between steps.');
@@ -182,7 +202,7 @@ export async function activateGeneration(
       activeGeneration: active,
       successor: null,
     };
-  });
+  }, { expectedSha256: currentSha256 });
   return { manifest: result.manifest!, alreadyActive: false, revision: result.manifest!.revision };
 }
 

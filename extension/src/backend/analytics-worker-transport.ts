@@ -6,7 +6,9 @@ import type {
 import {
   ANALYTICS_RUNTIME_BRIDGE_KEY,
   analyticsProducerIdentity,
-  createAnalyticsDetailPackets,
+  createAnalyticsDetailPacketSequence,
+  analyticsDetailTransportReservationBytes,
+  analyticsTransportDeliveryId,
   createAnalyticsDetailAbortPacket,
   createAnalyticsFactPacket,
   parseAnalyticsTransportAcknowledgement,
@@ -37,13 +39,14 @@ export type AnalyticsTransportFrameSettlement =
   | { status: 'failed'; error: Error };
 
 interface PendingDetailSend {
-  packets: AnalyticsTransportPacket[];
+  packets: Generator<AnalyticsTransportPacket, void>;
   start: AnalyticsTransportDetailStartPacket;
-  nextIndex: number;
   finished: boolean;
+  disposeRequested?: boolean;
 }
 
 const MAX_ACKNOWLEDGEMENT_STATE = 8_192;
+const DISPOSAL_SETTLEMENT_TIMEOUT_MS = 1_000;
 
 function greaterInt64(left: number | string, right: number | string | undefined): boolean {
   return right === undefined || BigInt(left) > BigInt(right);
@@ -63,6 +66,11 @@ export class AnalyticsWorkerTransport {
   private readonly detailSendQueue: PendingDetailSend[] = [];
   private pendingDetailBytes = 0;
   private pumpingDetail = false;
+  private activeDetailFrame: { job: PendingDetailSend } | undefined;
+  private disposalPromise?: Promise<void>;
+  private resolveDisposal?: () => void;
+  private disposalTimer?: ReturnType<typeof setTimeout>;
+  private disposalExpired = false;
   private readonly bridge: InstalledAnalyticsRuntimeBridge;
   private installed = false;
   private captureSubject: AnalyticsCaptureSubject;
@@ -151,21 +159,48 @@ export class AnalyticsWorkerTransport {
     this.installed = true;
   }
 
-  dispose(): void {
-    if (!this.installed) return;
+  /**
+   * Fence the bridge immediately, then give one frame already admitted to the
+   * bounded IPC writer a chance to settle.  The abort is emitted from that
+   * writer settlement callback, before the writer pumps its next frame.  This
+   * preserves detail-frame order without adding a writer-wide cancellation
+   * API; jobs that have only reached this local queue never need an abort.
+   */
+  dispose(): Promise<void> {
+    if (this.disposalPromise) return this.disposalPromise;
+    if (!this.installed) return Promise.resolve();
+    this.disposalPromise = new Promise<void>((resolve) => {
+      this.resolveDisposal = resolve;
+      this.disposalTimer = setTimeout(() => {
+        this.disposalExpired = true;
+        this.finishDisposal();
+      }, DISPOSAL_SETTLEMENT_TIMEOUT_MS);
+      this.disposalTimer.unref?.();
+    });
     const host = globalThis as unknown as Record<PropertyKey, unknown>;
     if (host[ANALYTICS_RUNTIME_BRIDGE_KEY] === this.bridge) delete host[ANALYTICS_RUNTIME_BRIDGE_KEY];
     this.installed = false;
+    const activeJob = this.activeDetailFrame?.job;
+    if (activeJob) {
+      activeJob.disposeRequested = true;
+      if (!activeJob.finished) this.releasePendingDelivery(activeJob.start.deliveryId);
+    }
     this.factWatermarks.clear();
     this.completeDetails.clear();
     this.pendingDeliveries.clear();
     this.factDeliveriesByProducer.clear();
     this.detailDeliveriesByPayload.clear();
+    for (const job of this.detailSendQueue) {
+      job.finished = true;
+      job.packets.return();
+    }
     this.detailSendQueue.length = 0;
     this.pendingDetailBytes = 0;
     this.pumpingDetail = false;
     this.captureSubjectRevision += 1;
     this.captureSubjectState = 'disabled';
+    if (!activeJob) this.finishDisposal();
+    return this.disposalPromise;
   }
 
   acknowledge(value: unknown): void {
@@ -203,7 +238,6 @@ export class AnalyticsWorkerTransport {
       ? observation.scope.workspaceId : undefined);
     this.assertAcknowledgementCapacity();
     const packet = createAnalyticsFactPacket(observation);
-    this.send(packet);
     const producerIdentity = observation.stableOriginId
       ? analyticsProducerIdentity(observation.generationId, observation.producerKind, observation.stableOriginId)
       : undefined;
@@ -216,31 +250,35 @@ export class AnalyticsWorkerTransport {
       deliveries.add(packet.deliveryId);
       this.factDeliveriesByProducer.set(producerIdentity, deliveries);
     }
+    // The sender may settle synchronously. Register ownership before sending
+    // so an immediate durable ACK is not lost; rejected admission rolls it back.
+    try { this.send(packet); } catch (error) {
+      this.releasePendingDelivery(packet.deliveryId);
+      throw error;
+    }
   }
 
   private submitDetail(capture: AnalyticsDetailCapture): void {
     this.assertCaptureEnvelope(capture.generationId, capture.captureSubject);
     this.assertProducerIdentity(capture.producer?.buildId, undefined, false);
     this.assertAcknowledgementCapacity();
-    const packets = createAnalyticsDetailPackets(capture);
-    const retainedTransportBytes = packets.reduce(
-      (total, packet) => total + Buffer.byteLength(JSON.stringify(packet), 'utf8'),
-      0,
-    );
-    const start = packets[0];
-    if (!start || start.kind !== 'detail.start') throw new Error('Analytics detail transport produced no start packet.');
-    if (this.pendingDeliveries.has(start.deliveryId)) {
-      throw new Error(`Analytics detail delivery ${start.deliveryId} is already pending.`);
+    const retainedTransportBytes = analyticsDetailTransportReservationBytes(capture.bytes.byteLength);
+    const deliveryId = analyticsTransportDeliveryId(capture.generationId, 'detail', capture.sourceKey);
+    if (this.pendingDeliveries.has(deliveryId)) {
+      throw new Error(`Analytics detail delivery ${deliveryId} is already pending.`);
     }
     if (this.pendingDeliveries.size >= 64 || this.pendingDetailBytes + retainedTransportBytes > 32 * 1024 * 1024) {
       throw new Error('Analytics worker detail transport capacity exceeded.');
     }
+    // Admission precedes byte copying, hashing and metadata normalization. The
+    // accepted job retains detached bytes and generates only one frame at a time.
+    const { start, packets } = createAnalyticsDetailPacketSequence(capture);
     this.pendingDeliveries.set(start.deliveryId, {
       kind: 'detail', payloadId: capture.payloadId, bytes: retainedTransportBytes, retainAcknowledgement: true,
     });
     this.detailDeliveriesByPayload.set(capture.payloadId, start.deliveryId);
     this.pendingDetailBytes += retainedTransportBytes;
-    this.detailSendQueue.push({ packets, start, nextIndex: 0, finished: false });
+    this.detailSendQueue.push({ packets, start, finished: false });
     this.pumpDetailQueue();
   }
 
@@ -256,30 +294,95 @@ export class AnalyticsWorkerTransport {
     const job = this.detailSendQueue[0];
     if (!job) return;
     this.pumpingDetail = true;
-    const packet = job.packets[job.nextIndex];
-    if (!packet) {
+    const next = job.packets.next();
+    if (next.done) {
       this.finishDetailSend(job);
       return;
     }
-    const accepted = this.sender.sendAnalyticsFrame(packet, (settlement) => {
-      queueMicrotask(() => {
-        if (job.finished || this.detailSendQueue[0] !== job) return;
-        if (settlement.status !== 'sent') {
-          this.abortDetailSend(job, settlement.status === 'failed' ? settlement.error.message : settlement.detail);
+    const packet = next.value;
+    const activeFrame = { job };
+    this.activeDetailFrame = activeFrame;
+    let accepted: boolean;
+    try {
+      accepted = this.sender.sendAnalyticsFrame(packet, (settlement) => {
+        // The writer calls settlement before pumping its next lane.  During
+        // disposal this synchronous branch places the abort immediately after
+        // the admitted detail frame, even when that frame was queued behind a
+        // different lane.  Normal delivery keeps its microtask fence so an
+        // early ACK cannot overlap the next detail frame.
+        if (job.disposeRequested) {
+          this.settleDisposedDetailFrame(activeFrame, settlement);
           return;
         }
-        job.nextIndex += 1;
-        this.pumpingDetail = false;
-        this.pumpDetailQueue();
+        queueMicrotask(() => {
+          if (this.activeDetailFrame !== activeFrame) return;
+          if (job.disposeRequested) {
+            this.settleDisposedDetailFrame(activeFrame, settlement);
+            return;
+          }
+          this.activeDetailFrame = undefined;
+          this.pumpingDetail = false;
+          if (job.finished || this.detailSendQueue[0] !== job) {
+            this.pumpDetailQueue();
+            return;
+          }
+          if (settlement.status !== 'sent') {
+            this.abortDetailSend(job, settlement.status === 'failed' ? settlement.error.message : settlement.detail);
+            return;
+          }
+          this.pumpDetailQueue();
+        });
       });
-    });
+    } catch (error) {
+      this.activeDetailFrame = undefined;
+      this.pumpingDetail = false;
+      this.abortDetailSend(job, error instanceof Error ? error.message : String(error));
+      return;
+    }
     if (!accepted) {
+      this.activeDetailFrame = undefined;
+      this.pumpingDetail = false;
       this.abortDetailSend(job, `Analytics transport rejected ${packet.kind}.`);
     }
   }
 
+  private settleDisposedDetailFrame(
+    activeFrame: { job: PendingDetailSend },
+    settlement: AnalyticsTransportFrameSettlement,
+  ): void {
+    if (this.activeDetailFrame !== activeFrame) return;
+    this.activeDetailFrame = undefined;
+    this.pumpingDetail = false;
+    if (this.disposalExpired || settlement.status !== 'sent') {
+      this.finishDisposal();
+      return;
+    }
+    const abort = createAnalyticsDetailAbortPacket(
+      activeFrame.job.start,
+      'transport_shutdown',
+      'Analytics worker transport closed before detail delivery completed.',
+    );
+    let accepted = false;
+    try {
+      accepted = this.sender.sendAnalyticsFrame(abort, () => this.finishDisposal());
+    } catch {
+      // A failed descriptor is covered by route-scoped host cleanup after the
+      // worker exit; never keep shutdown waiting for an impossible ACK.
+    }
+    if (!accepted) this.finishDisposal();
+  }
+
+  private finishDisposal(): void {
+    if (this.disposalTimer) clearTimeout(this.disposalTimer);
+    this.disposalTimer = undefined;
+    const resolve = this.resolveDisposal;
+    this.resolveDisposal = undefined;
+    resolve?.();
+  }
+
   private finishDetailSend(job: PendingDetailSend): void {
     job.finished = true;
+    job.packets.return();
     this.detailSendQueue.shift();
     this.pumpingDetail = false;
     this.pumpDetailQueue();
@@ -288,14 +391,16 @@ export class AnalyticsWorkerTransport {
   private abortDetailSend(job: PendingDetailSend, message: string): void {
     if (job.finished) return;
     job.finished = true;
+    job.packets.return();
     if (this.detailSendQueue[0] === job) this.detailSendQueue.shift();
     else {
       const index = this.detailSendQueue.indexOf(job);
       if (index >= 0) this.detailSendQueue.splice(index, 1);
     }
     this.pumpingDetail = false;
+    this.releasePendingDelivery(job.start.deliveryId);
     const abort = createAnalyticsDetailAbortPacket(job.start, 'transport_incomplete', truncateMessage(message));
-    this.sender.sendAnalyticsFrame(abort);
+    try { this.sender.sendAnalyticsFrame(abort); } catch { /* The original send already failed. */ }
     this.pumpDetailQueue();
   }
 
@@ -309,6 +414,21 @@ export class AnalyticsWorkerTransport {
       if (deliveries?.size === 0) this.factDeliveriesByProducer.delete(pending.producerIdentity);
     }
     if (pending.kind === 'detail') {
+      const job = this.detailSendQueue.find((candidate) => candidate.start.deliveryId === deliveryId);
+      if (job && !job.finished) {
+        job.finished = true;
+        job.packets.return();
+        const index = this.detailSendQueue.indexOf(job);
+        this.detailSendQueue.splice(index, 1);
+        if (index === 0) {
+          // The ACK does not settle a frame already accepted by the IPC writer.
+          // Retain that independent in-flight fence until its callback arrives.
+          if (this.activeDetailFrame?.job !== job) this.pumpingDetail = false;
+          // An early host rejection must stop the remaining chunks, while an
+          // unrelated queued delivery can still progress.
+          queueMicrotask(() => this.pumpDetailQueue());
+        }
+      }
       this.pendingDetailBytes = Math.max(0, this.pendingDetailBytes - (pending.bytes ?? 0));
       if (pending.payloadId && this.detailDeliveriesByPayload.get(pending.payloadId) === deliveryId) {
         this.detailDeliveriesByPayload.delete(pending.payloadId);

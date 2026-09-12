@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { ActivationManifestError } from '../../../shared/analytics/activation.js';
+import {
+  ACTIVATION_TOMBSTONE_SCHEMA_VERSION,
+  ActivationManifestError,
+} from '../../../shared/analytics/activation.js';
 import { ActivationStore } from '../../src/analytics/activation-store.js';
 import { activateGeneration } from '../../src/analytics/activation-sequence.js';
 
@@ -26,6 +29,7 @@ function request(overrides: Partial<Parameters<typeof activateGeneration>[1]> = 
     qualificationSha256: SHA,
     trialSha256: SHA_B,
     activatedAt: ACTIVATED_AT,
+    cutoffReceiptSha256: SHA_B,
     ...overrides,
   };
 }
@@ -106,6 +110,64 @@ test('resuming after the candidate step completes rather than duplicating eviden
   }
 });
 
+test('resuming after the tombstone write repairs only matching active evidence', async () => {
+  const { root, store } = tempStore();
+  try {
+    await store.update(() => ({
+      schemaVersion: 1,
+      revision: 1,
+      previousSha256: null,
+      everActive: false,
+      activeGeneration: null,
+      successor: {
+        identity: {
+          generationId: GENERATION_ID,
+          buildId: 'build-1',
+          qualificationSha256: SHA,
+          trialSha256: SHA_B,
+        },
+        state: 'candidate',
+        activatedAt: null,
+        retiredAt: null,
+        predecessorGenerationId: null,
+        cutoffReceiptSha256: null,
+      },
+      retiredHistory: [],
+    }), { expectedSha256: null });
+    const candidate = store.read();
+    await store.update((current, previousSha256) => ({
+      ...current!,
+      revision: current!.revision + 1,
+      previousSha256,
+      successor: { ...current!.successor!, state: 'ready' },
+    }));
+    const ready = store.read();
+    writeFileSync(store.tombstonePath, `${JSON.stringify({
+      schemaVersion: ACTIVATION_TOMBSTONE_SCHEMA_VERSION,
+      everActive: true,
+      firstActiveGenerationId: GENERATION_ID,
+      identity: {
+        generationId: GENERATION_ID,
+        buildId: 'build-1',
+        qualificationSha256: SHA,
+        trialSha256: SHA_B,
+      },
+      manifestRevision: ready.manifest!.revision + 1,
+      previousSha256: ready.sha256,
+      activatedAt: ACTIVATED_AT,
+      cutoffReceiptSha256: SHA_B,
+      recordedAt: ACTIVATED_AT,
+    })}\n`, 'utf8');
+    assert.notEqual(candidate.sha256, ready.sha256);
+    const outcome = await activateGeneration(store, request());
+    assert.equal(outcome.alreadyActive, false);
+    assert.equal(outcome.manifest.activeGeneration?.identity.generationId, GENERATION_ID);
+    assert.equal(store.read().authority, 'canonical');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('a different generation cannot displace an active one', async () => {
   const { root, store } = tempStore();
   try {
@@ -120,6 +182,34 @@ test('a different generation cannot displace an active one', async () => {
     );
     // The live authority must be untouched by the refusal.
     assert.equal(store.read().manifest?.activeGeneration?.identity.generationId, GENERATION_ID);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('concurrent different generations cannot replace the first candidate', async () => {
+  const { root, store } = tempStore();
+  try {
+    const requests = [
+      request(),
+      request({ generationId: OTHER_GENERATION_ID, buildId: 'build-2' }),
+    ];
+    const outcomes = await Promise.allSettled(requests.map((candidate) => activateGeneration(store, candidate)));
+    const winners = outcomes.filter((outcome) => outcome.status === 'fulfilled');
+    const losers = outcomes.filter((outcome) => outcome.status === 'rejected');
+    assert.equal(winners.length, 1, 'exactly one concurrent activation may win');
+    assert.equal(losers.length, 1, 'the competing activation must be refused');
+    const winnerIndex = outcomes.findIndex((outcome) => outcome.status === 'fulfilled');
+    assert.notEqual(winnerIndex, -1);
+    assert.equal(
+      store.read().manifest?.activeGeneration?.identity.generationId,
+      requests[winnerIndex].generationId,
+      'the loser must not replace the winner after its initial read',
+    );
+    const loser = outcomes.find((outcome) => outcome.status === 'rejected');
+    if (loser?.status === 'rejected') {
+      assert.match(String(loser.reason?.message ?? loser.reason), /already active|changed under the lock/);
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -177,13 +267,12 @@ test('malformed activation evidence is rejected before any write', async () => {
   }
 });
 
-test('a supplied cutoff receipt is recorded and a malformed one is refused', async () => {
+test('a supplied cutoff receipt is recorded and a malformed or missing one is refused', async () => {
   const { root, store } = tempStore();
   const receiptSha = 'd'.repeat(64);
   try {
-    // Analytics activation and storage cutoff are separate ordered gates, so the
-    // link is optional but must be a real hash when present - otherwise the
-    // manifest would claim a cutoff it cannot be checked against.
+    // An active manifest must carry the writer-fence receipt; otherwise it would
+    // claim canonical authority without a verifiable cutoff boundary.
     for (const malformed of ['not-a-hash', 'D'.repeat(64), receiptSha.slice(0, 63)]) {
       await assert.rejects(
         () => activateGeneration(store, request({ cutoffReceiptSha256: malformed })),
@@ -200,14 +289,14 @@ test('a supplied cutoff receipt is recorded and a malformed one is refused', asy
   }
 });
 
-test('activation without a cutoff records null rather than inventing a receipt', async () => {
+test('activation without a later storage cutoff keeps the link explicitly null', async () => {
   const { root, store } = tempStore();
   try {
-    await activateGeneration(store, request());
+    await activateGeneration(store, request({ cutoffReceiptSha256: null }));
     assert.equal(
       store.read().manifest?.activeGeneration?.cutoffReceiptSha256,
       null,
-      'a generation activated before any cutoff must not name one',
+      'P7a must not invent a later P7b storage cutoff receipt',
     );
   } finally {
     rmSync(root, { recursive: true, force: true });

@@ -123,7 +123,8 @@ test('per-boot handoff keys are fresh, bounded capabilities', () => {
   assert.notEqual(first, second);
   assert.ok(first.length >= 32 && first.length <= 128);
   assert.ok(second.length >= 32 && second.length <= 128);
-  assert.doesNotMatch(first, /[\r\n\u0000]/u);
+  assert.doesNotMatch(first, /[\r\n]/u);
+  assert.equal(first.includes(String.fromCharCode(0)), false);
 });
 
 test('inventory timeout is bounded while one unresolved census remains the single flight', async () => {

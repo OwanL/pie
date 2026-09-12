@@ -332,6 +332,166 @@ test('open private usage remains visible until close and a peer delete cannot re
   }
 });
 
+test('canonical startup establishes its revision baseline before hydration', async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'pie-canonical-startup-revision-'));
+  const databasePath = canonicalAnalyticsDatabasePath(path.join(root, 'analytics'));
+  const at = Date.parse('2026-01-15T12:00:00.000Z');
+  const writer = new SqliteAnalyticsRecorder(databasePath);
+  writer.submit(settlement({
+    invocationId: 'inv-startup-peer',
+    rootSessionId: 'root-startup-peer',
+    purpose: 'conversation',
+    settledAtMs: at,
+    inputTokens: 10,
+    outputTokens: 5,
+    reportedCostUsd: 0.03,
+  }));
+  closeFixtureWriter(writer);
+
+  const baseReadModel = new CanonicalAnalyticsReadModel({
+    databasePath,
+    workerScript,
+    execArgv,
+    revisionPollIntervalMs: 25,
+  });
+  const readModel = Object.create(baseReadModel) as CanonicalAnalyticsReadModel;
+  const originalReadRevision = baseReadModel.readRevision.bind(baseReadModel);
+  let holdFirstRead = true;
+  let signalBaselineStarted: () => void = () => undefined;
+  const baselineStarted = new Promise<void>((resolve) => { signalBaselineStarted = resolve; });
+  let releaseBaseline: () => void = () => undefined;
+  const baselineReleased = new Promise<void>((resolve) => { releaseBaseline = resolve; });
+  readModel.readRevision = async (signal?: AbortSignal): Promise<string> => {
+    if (holdFirstRead) {
+      holdFirstRead = false;
+      signalBaselineStarted();
+      await baselineReleased;
+    }
+    return originalReadRevision(signal);
+  };
+
+  const state = createInitialArchState();
+  const sessionPath = '/sessions/startup-peer.jsonl';
+  state.sessions.sessions.push({
+    path: sessionPath,
+    name: 'startup-peer',
+    cwd: '/sessions',
+    modifiedAt: new Date(at).toISOString(),
+    messageCount: 1,
+    sessionId: 'root-startup-peer',
+  });
+  state.sessions.activeSessionPath = sessionPath;
+  state.sessions.openTabPaths = [sessionPath];
+  const capture = new CanonicalAnalyticsCapture({
+    authority: 'canonical',
+    generationId: 'generation-historical',
+    workspaceId: 'workspace-historical',
+    buildId: 'test-build',
+    processGeneration: 'test-process',
+    sink: { submit: () => undefined },
+    detailSink: { submitDetail: () => undefined },
+    lifecycleSink: { bindPendingCreate: async () => undefined, deleteSession: async () => undefined },
+  });
+  const stats = new StatsService({
+    dataOutcomesRootPath: path.join(root, 'legacy'),
+    workspaceId: 'workspace-historical',
+    getArchState: () => state,
+    now: () => new Date(at + 2_000),
+    analyticsCapture: capture,
+    analyticsReadModel: readModel,
+  });
+  try {
+    const startup = stats.start();
+    await baselineStarted;
+
+    const deleteWriter = new SqliteAnalyticsRecorder(databasePath);
+    deleteWriter.deleteSession('root-startup-peer', 'private-close-startup-peer', at + 3_000);
+    deleteWriter.close();
+    const deletedRevision = await baseReadModel.readRevision();
+    assert.ok(BigInt(deletedRevision) > 0n, 'peer delete must commit before baseline release');
+
+    releaseBaseline();
+    await startup;
+    const usage = stats.getSessionUsage(sessionPath);
+    assert.equal(usage.authority, 'canonical');
+    assert.equal(usage.samples.length, 0, 'startup must not cache rows from before the peer delete');
+  } finally {
+    releaseBaseline();
+    await stats.shutdown();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('canonical startup remains fail-closed until a failed baseline recovers', async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'pie-canonical-revision-recovery-'));
+  const state = createInitialArchState();
+  const sessionPath = '/sessions/revision-recovery.jsonl';
+  state.sessions.sessions.push({
+    path: sessionPath,
+    name: 'revision-recovery',
+    cwd: '/sessions',
+    modifiedAt: new Date(1_700_000_000_000).toISOString(),
+    messageCount: 1,
+    sessionId: 'root-revision-recovery',
+  });
+  state.sessions.activeSessionPath = sessionPath;
+  state.sessions.openTabPaths = [sessionPath];
+  let revisionReads = 0;
+  let pathReads = 0;
+  const readModel = {
+    getMaxConcurrentQueries: () => 1,
+    readRevision: async () => {
+      revisionReads += 1;
+      if (revisionReads === 1) throw new Error('synthetic unavailable revision');
+      return '1';
+    },
+    readScopedProviderSettlements: async (scope: { kind: 'rootSession'; rootSessionId: string }) => {
+      pathReads += 1;
+      return {
+        revision: '1',
+        settlements: [],
+        truncated: false,
+        scope,
+      };
+    },
+  } as unknown as CanonicalAnalyticsReadModel;
+  const capture = new CanonicalAnalyticsCapture({
+    authority: 'canonical',
+    generationId: 'generation-historical',
+    workspaceId: 'workspace-historical',
+    buildId: 'test-build',
+    processGeneration: 'test-process',
+    sink: { submit: () => undefined },
+    detailSink: { submitDetail: () => undefined },
+    lifecycleSink: { bindPendingCreate: async () => undefined, deleteSession: async () => undefined },
+  });
+  const stats = new StatsService({
+    dataOutcomesRootPath: path.join(root, 'legacy'),
+    workspaceId: 'workspace-historical',
+    getArchState: () => state,
+    analyticsCapture: capture,
+    analyticsReadModel: readModel,
+  });
+  try {
+    assert.equal(stats.getSessionUsage(sessionPath).authority, 'unknown');
+    assert.equal(pathReads, 0, 'pre-start access must not bypass the revision baseline');
+    await stats.start();
+    assert.equal(stats.getSessionUsage(sessionPath).authority, 'unknown');
+    assert.equal(pathReads, 0, 'failed baseline must suppress lazy hydration');
+
+    const deadline = Date.now() + 4_000;
+    while (stats.getSessionUsage(sessionPath).authority !== 'canonical' && Date.now() < deadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal(stats.getSessionUsage(sessionPath).authority, 'canonical');
+    assert.ok(revisionReads >= 2, 'the refresher must retry after its failed baseline');
+    assert.ok(pathReads >= 1, 'recovered baseline must permit bounded hydration');
+  } finally {
+    await stats.shutdown();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('canonical refresh rejects a delayed pre-delete response instead of resurrecting rows', async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'pie-canonical-refresh-race-'));
   const databasePath = canonicalAnalyticsDatabasePath(path.join(root, 'analytics'));
@@ -767,6 +927,7 @@ test('canonical lazy hydration bounds distinct paths and reclaims epoch tokens',
   const blockedResolvers: Array<() => void> = [];
   const readModel = {
     getMaxConcurrentQueries: () => 2,
+    readRevision: async () => '1',
     readScopedProviderSettlements: async (scope: { rootSessionId: string }) => {
       queryCount += 1;
       active += 1;
@@ -805,6 +966,7 @@ test('canonical lazy hydration bounds distinct paths and reclaims epoch tokens',
     canonicalSessionPathEpochs: Map<string, number>;
   };
   try {
+    await stats.start();
     const paths = Array.from({ length: 320 }, (_, index) => `/sessions/lazy-${index}.jsonl`);
     for (const sessionPath of paths.slice(0, 4)) {
       assert.equal(stats.getSessionUsage(sessionPath).authority, 'unknown');

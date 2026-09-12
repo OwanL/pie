@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 
 import {
@@ -11,10 +12,16 @@ import {
 import {
   ANALYTICS_RUNTIME_BRIDGE_KEY,
   ANALYTICS_TRANSPORT_VERSION,
+  analyticsProducerIdentity,
   type AnalyticsTransportPacket,
   type InstalledAnalyticsRuntimeBridge,
 } from '../../../../shared/analytics/transport.js';
-import { AnalyticsWorkerTransport } from '../../../src/backend/analytics-worker-transport.js';
+import { AnalyticsWorkerTransport, type AnalyticsTransportFrameSettlement } from '../../../src/backend/analytics-worker-transport.js';
+import {
+  BoundedWorkerIpcWriter,
+  type WorkerIpcWriteTarget,
+} from '../../../src/backend/worker-frame-io.js';
+import { WORKER_IPC_VERSION } from '../../../src/backend/worker-protocol.js';
 
 function observation(
   rootSessionId: string,
@@ -332,6 +339,185 @@ test('detail transport serializes a legal large payload and aborts explicit init
   }
 });
 
+test('queued detail bytes and metadata survive producer mutation while frames await backpressure', async () => {
+  const sent: AnalyticsTransportPacket[] = [];
+  const callbacks: Array<(settlement: AnalyticsTransportFrameSettlement) => void> = [];
+  const transport = new AnalyticsWorkerTransport({
+    sendAnalyticsFrame: (packet, onSettled) => {
+      sent.push(packet);
+      if (onSettled) callbacks.push(onSettled);
+      return true;
+    },
+    requestAnalyticsSubjectRebind: async (subject) => subject,
+  }, {
+    generationId: 'generation-1', captureSubject: { kind: 'session', rootSessionId: 'root-1' }, buildId: 'build-1',
+  }, 'worker-1:1');
+  transport.install();
+  try {
+    const bridge = (globalThis as unknown as Record<PropertyKey, unknown>)[ANALYTICS_RUNTIME_BRIDGE_KEY] as InstalledAnalyticsRuntimeBridge;
+    const bytes = Buffer.alloc(2 * 1024 * 1024, 71);
+    const digest = createHash('sha256').update(bytes).digest('hex');
+    const captureSubject = { kind: 'session' as const, rootSessionId: 'root-1' };
+    const metadata = { attemptId: 'attempt-original', captureStage: 'terminal' };
+    bridge.submitDetail({ ...detail('root-1'), bytes, captureSubject, metadata });
+    assert.equal(sent.length, 1, 'only the start frame is sent before its callback');
+    bytes.fill(0);
+    captureSubject.rootSessionId = 'mutated-after-submit';
+    metadata.attemptId = 'mutated-after-submit';
+    while (callbacks.length > 0) {
+      assert.equal(callbacks.length, 1, 'at most one frame awaits settlement');
+      callbacks.shift()!({ status: 'sent' });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    const start = sent[0];
+    assert.ok(start?.kind === 'detail.start');
+    assert.equal(start.detail.metadata.attemptId, 'attempt-original');
+    const received = createHash('sha256');
+    let byteLength = 0;
+    for (const packet of sent) {
+      assert.deepEqual(packet.captureSubject, { kind: 'session', rootSessionId: 'root-1' });
+      if (packet.kind === 'detail.chunk') {
+        const chunk = Buffer.from(packet.data, 'base64');
+        received.update(chunk);
+        byteLength += chunk.byteLength;
+      }
+    }
+    assert.equal(byteLength, bytes.byteLength);
+    assert.equal(received.digest('hex'), digest);
+    assert.equal(start.sha256, digest);
+    assert.equal(sent.at(-1)?.kind, 'detail.end');
+  } finally { transport.dispose(); }
+});
+
+test('host rejection and disposal stop unsent detail frames and release queue admission', async () => {
+  const sent: AnalyticsTransportPacket[] = [];
+  const callbacks: Array<(settlement: AnalyticsTransportFrameSettlement) => void> = [];
+  const transport = new AnalyticsWorkerTransport({
+    sendAnalyticsFrame: (packet, onSettled) => {
+      sent.push(packet);
+      if (onSettled) callbacks.push(onSettled);
+      return true;
+    },
+    requestAnalyticsSubjectRebind: async (subject) => subject,
+  }, {
+    generationId: 'generation-1', captureSubject: { kind: 'session', rootSessionId: 'root-1' }, buildId: 'build-1',
+  }, 'worker-1:1');
+  transport.install();
+  try {
+    const bridge = (globalThis as unknown as Record<PropertyKey, unknown>)[ANALYTICS_RUNTIME_BRIDGE_KEY] as InstalledAnalyticsRuntimeBridge;
+    const large = detail('root-1', 16 * 1024 * 1024);
+    bridge.submitDetail(large);
+    assert.throws(() => bridge.submitDetail({ ...large, sourceKey: 'other', payloadId: 'other' }), /capacity exceeded/);
+    const start = sent[0]!;
+    transport.acknowledge({ version: 1, deliveryId: start.deliveryId, generationId: 'generation-1', status: 'rejected', code: 'subject_deleted', message: 'closed' });
+    callbacks.shift()!({ status: 'sent' });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(sent.length, 1, 'late frame callback must not resume a rejected detail');
+    bridge.submitDetail({ ...large, sourceKey: 'other', payloadId: 'other' });
+    assert.equal(sent.length, 2, 'rejected delivery released its capacity');
+    const disposal = transport.dispose();
+    callbacks.shift()!({ status: 'sent' });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(sent.length, 3, 'disposed transport emits one ordered abort for the admitted frame');
+    assert.equal(sent[2]!.kind, 'detail.abort');
+    callbacks.shift()!({ status: 'sent' });
+    await disposal;
+  } finally { transport.dispose(); }
+});
+
+test('an early rejected ACK cannot start another detail before the admitted frame settles', async () => {
+  const sent: AnalyticsTransportPacket[] = [];
+  const callbacks: Array<(settlement: AnalyticsTransportFrameSettlement) => void> = [];
+  const transport = new AnalyticsWorkerTransport({
+    sendAnalyticsFrame: (packet, onSettled) => {
+      sent.push(packet);
+      if (onSettled) callbacks.push(onSettled);
+      return true;
+    },
+    requestAnalyticsSubjectRebind: async (subject) => subject,
+  }, {
+    generationId: 'generation-1', captureSubject: { kind: 'session', rootSessionId: 'root-1' }, buildId: 'build-1',
+  }, 'worker-1:1');
+  transport.install();
+  try {
+    const bridge = (globalThis as unknown as Record<PropertyKey, unknown>)[ANALYTICS_RUNTIME_BRIDGE_KEY] as InstalledAnalyticsRuntimeBridge;
+    bridge.submitDetail(detail('root-1'));
+    bridge.submitDetail({ ...detail('root-1'), sourceKey: 'second', payloadId: 'second' });
+    transport.acknowledge({ version: 1, deliveryId: sent[0]!.deliveryId, generationId: 'generation-1', status: 'rejected', code: 'subject_deleted', message: 'closed' });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(sent.length, 1);
+    assert.equal(callbacks.length, 1);
+    callbacks.shift()!({ status: 'sent' });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(sent.length, 2);
+    assert.equal(sent[1]!.kind, 'detail.start');
+    assert.equal(callbacks.length, 1);
+  } finally { transport.dispose(); }
+});
+
+test('a queued fact envelope retains the same detached subject as its observation', () => {
+  const sent: AnalyticsTransportPacket[] = [];
+  const transport = new AnalyticsWorkerTransport({
+    sendAnalyticsFrame: (packet) => { sent.push(packet); return true; },
+    requestAnalyticsSubjectRebind: async (subject) => subject,
+  }, {
+    generationId: 'generation-1', captureSubject: { kind: 'session', rootSessionId: 'root-1' }, buildId: 'build-1',
+  }, 'worker-1:1');
+  transport.install();
+  try {
+    const bridge = (globalThis as unknown as Record<PropertyKey, unknown>)[ANALYTICS_RUNTIME_BRIDGE_KEY] as InstalledAnalyticsRuntimeBridge;
+    const captureSubject = { kind: 'session' as const, rootSessionId: 'root-1' };
+    bridge.submitObservation(observation('root-1', 'fact-1', 'origin-1', 1, { captureSubject }));
+    captureSubject.rootSessionId = 'mutated-after-submit';
+    const packet = sent[0];
+    assert.ok(packet?.kind === 'fact');
+    assert.deepEqual(packet.captureSubject, { kind: 'session', rootSessionId: 'root-1' });
+    assert.deepEqual(packet.captureSubject, packet.observation.captureSubject);
+  } finally { transport.dispose(); }
+});
+
+test('synchronous fact acknowledgement sees pending ownership registered before send', () => {
+  const transport = new AnalyticsWorkerTransport({
+    sendAnalyticsFrame: (packet) => {
+      transport.acknowledge({
+        version: 1, deliveryId: packet.deliveryId, generationId: packet.generationId, status: 'durable',
+        producerReconciliation: [{
+          producerIdentity: analyticsProducerIdentity('generation-1', 'subagent', 'origin-1'),
+          contiguousWatermark: 1, highestObservedSequence: 1, visibleGaps: [], pendingReceiptCount: 0,
+        }],
+      });
+      return true;
+    },
+    requestAnalyticsSubjectRebind: async (subject) => subject,
+  }, {
+    generationId: 'generation-1', captureSubject: { kind: 'session', rootSessionId: 'root-1' }, buildId: 'build-1',
+  }, 'worker-1:1');
+  transport.install();
+  try {
+    const bridge = (globalThis as unknown as Record<PropertyKey, unknown>)[ANALYTICS_RUNTIME_BRIDGE_KEY] as InstalledAnalyticsRuntimeBridge;
+    bridge.submitObservation(observation('root-1'));
+    assert.equal(bridge.readFactAcknowledgement('generation-1', 'origin-1'), 1);
+    assert.equal(bridge.readFactAcknowledgement('generation-1', 'origin-1'), undefined);
+  } finally { transport.dispose(); }
+});
+
+test('a sender that throws even for abort does not retain failed detail admission', () => {
+  const transport = new AnalyticsWorkerTransport({
+    sendAnalyticsFrame: () => { throw new Error('transport unavailable'); },
+    requestAnalyticsSubjectRebind: async (subject) => subject,
+  }, {
+    generationId: 'generation-1', captureSubject: { kind: 'session', rootSessionId: 'root-1' }, buildId: 'build-1',
+  }, 'worker-1:1');
+  transport.install();
+  try {
+    const bridge = (globalThis as unknown as Record<PropertyKey, unknown>)[ANALYTICS_RUNTIME_BRIDGE_KEY] as InstalledAnalyticsRuntimeBridge;
+    for (let retry = 0; retry < 3; retry += 1) {
+      bridge.submitDetail(detail('root-1'));
+      assert.equal(bridge.isDetailComplete('payload-1'), false);
+    }
+  } finally { transport.dispose(); }
+});
+
 test('acknowledgement state is consumed or released and lost ACK admission is bounded', () => {
   const sent: AnalyticsTransportPacket[] = [];
   const transport = new AnalyticsWorkerTransport({
@@ -422,5 +608,128 @@ test('terminal release drains every pending fact and detail disposition without 
     assert.equal(bridge.isDetailComplete('payload-1'), false);
   } finally {
     transport.dispose();
+  }
+});
+
+test('disposal abort follows a queued detail start in the real writer lane order', async () => {
+  class DeferredTarget implements WorkerIpcWriteTarget {
+    writable = true;
+    readonly frames: Array<Record<string, unknown>> = [];
+    readonly callbacks: Array<(error?: Error | null) => void> = [];
+
+    write(data: string, callback: (error?: Error | null) => void): boolean {
+      this.frames.push(JSON.parse(data) as Record<string, unknown>);
+      this.callbacks.push(callback);
+      return true;
+    }
+  }
+
+  const target = new DeferredTarget();
+  const writer = new BoundedWorkerIpcWriter(target);
+  const frameBase = {
+    ipcVersion: WORKER_IPC_VERSION,
+    coordinatorGeneration: 1,
+    workerId: 'worker-1',
+    workerGeneration: 1,
+    workerPid: process.pid,
+    rootSessionPath: '/worker-root.jsonl',
+    leasePath: '/worker-lease.json',
+    leaseRevision: 1,
+    sessionPath: '/worker-root.jsonl',
+  };
+  const sender = {
+    sendAnalyticsFrame: (packet: AnalyticsTransportPacket, onSettled?: (settlement: AnalyticsTransportFrameSettlement) => void): boolean => {
+      const result = writer.enqueue({ ...frameBase, kind: 'analytics.capture', packet } as never, {
+        onSettled: (settlement) => {
+          if (settlement.status === 'sent') onSettled?.({ status: 'sent' });
+          else if (settlement.status === 'rejected') onSettled?.({ status: 'rejected', reason: settlement.reason, detail: settlement.detail });
+          else if (settlement.status === 'failed') onSettled?.({ status: 'failed', error: settlement.error });
+        },
+      });
+      return result.accepted;
+    },
+    requestAnalyticsSubjectRebind: async (captureSubject: AnalyticsCaptureSubject) => captureSubject,
+  };
+  writer.enqueue({
+    ...frameBase,
+    kind: 'response',
+    requestId: 'blocker',
+    ok: true,
+    result: { kind: 'pong' },
+  } as never);
+  const transport = new AnalyticsWorkerTransport(sender, {
+    generationId: 'generation-1', captureSubject: { kind: 'session', rootSessionId: 'root-1' }, buildId: 'build-1',
+  }, 'worker-1:1');
+  transport.install();
+  try {
+    const bridge = (globalThis as unknown as Record<PropertyKey, unknown>)[ANALYTICS_RUNTIME_BRIDGE_KEY] as InstalledAnalyticsRuntimeBridge;
+    bridge.submitDetail(detail('root-1'));
+    assert.deepEqual(target.frames.map((frame) => frame.kind), ['response'], 'detail start is queued behind the active writer frame');
+
+    const disposed = transport.dispose();
+    assert.deepEqual(target.frames.map((frame) => frame.kind), ['response'], 'dispose does not overtake the queued start with an abort');
+    target.callbacks.shift()!(null);
+    assert.deepEqual(target.frames.map((frame) => frame.kind), ['response', 'analytics.capture']);
+    assert.equal((target.frames[1]!.packet as { kind: string }).kind, 'detail.start');
+    target.callbacks.shift()!(null);
+    assert.deepEqual(target.frames.map((frame) => frame.kind), ['response', 'analytics.capture', 'analytics.capture']);
+    assert.equal((target.frames[2]!.packet as { kind: string }).kind, 'detail.abort');
+    target.callbacks.shift()!(null);
+    await disposed;
+    writer.enqueue({
+      ...frameBase,
+      kind: 'response',
+      requestId: 'shutdown',
+      ok: true,
+      result: { kind: 'shutting-down' },
+    } as never);
+    assert.deepEqual(target.frames.map((frame) => frame.kind), [
+      'response', 'analytics.capture', 'analytics.capture', 'response',
+    ], 'shutdown response is admitted only after the ordered abort settles');
+  } finally {
+    await transport.dispose();
+  }
+});
+
+test('disposal deadline resolves an admitted detail whose writer callback never settles', async () => {
+  const sent: AnalyticsTransportPacket[] = [];
+  const callbacks: Array<(settlement: AnalyticsTransportFrameSettlement) => void> = [];
+  const originalSetTimeout = globalThis.setTimeout;
+  let deadlineCallback: (() => void) | undefined;
+  globalThis.setTimeout = ((callback: (...args: any[]) => void) => {
+    deadlineCallback = callback as () => void;
+    return 0 as unknown as ReturnType<typeof setTimeout>;
+  }) as typeof setTimeout;
+  const transport = new AnalyticsWorkerTransport({
+    sendAnalyticsFrame: (packet, onSettled) => {
+      sent.push(packet);
+      if (onSettled) callbacks.push(onSettled);
+      return true;
+    },
+    requestAnalyticsSubjectRebind: async (captureSubject) => captureSubject,
+  }, {
+    generationId: 'generation-1',
+    captureSubject: { kind: 'session', rootSessionId: 'root-1' },
+    buildId: 'build-1',
+  }, 'worker-1:1');
+  transport.install();
+  try {
+    const bridge = (globalThis as unknown as Record<PropertyKey, unknown>)[ANALYTICS_RUNTIME_BRIDGE_KEY] as InstalledAnalyticsRuntimeBridge;
+    bridge.submitDetail(detail('root-1'));
+
+    const disposed = transport.dispose();
+    assert.ok(deadlineCallback, 'disposal must install a finite settlement deadline');
+    deadlineCallback!();
+    await disposed;
+    assert.deepEqual(sent.map((packet) => packet.kind), ['detail.start']);
+    assert.equal(callbacks.length, 1);
+
+    callbacks[0]!({ status: 'sent' });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(sent.map((packet) => packet.kind), ['detail.start'], 'a late writer callback cannot resume a disposed transport or emit an abort');
+  } finally {
+    deadlineCallback?.();
+    globalThis.setTimeout = originalSetTimeout;
+    await transport.dispose();
   }
 });

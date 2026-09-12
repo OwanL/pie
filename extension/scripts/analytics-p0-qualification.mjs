@@ -853,6 +853,7 @@ async function runMixedScenario() {
   let dailyProjectionBeforePaced;
   let dailyProjectionAfterBurst;
   let mixedFailure;
+  let deferredCleanupFailure;
   let queryCleanupEvidence = { requested: 0, completed: true, timedOut: false };
   try {
   nativeCollector = await startWindowsProcessHandleCollector({
@@ -1471,8 +1472,9 @@ async function runMixedScenario() {
     // Cleanup is part of scenario completion. Preserve its evidence before
     // failing an otherwise successful run; never turn failed retirement into
     // a passing receipt or replace the original workload failure.
-    if (!failedBeforeCleanup && mixedFailure) throw mixedFailure;
+    if (!failedBeforeCleanup && mixedFailure) deferredCleanupFailure = mixedFailure;
   }
+  if (deferredCleanupFailure) throw deferredCleanupFailure;
 }
 
 function proofTreeBytes(directory) {

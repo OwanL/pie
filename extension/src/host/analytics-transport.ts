@@ -3,17 +3,20 @@ import { isDeepStrictEqual } from 'node:util';
 
 import type { AnalyticsDetailCapture, AnalyticsObservation } from '../../../shared/analytics/contracts.js';
 import {
+  ANALYTICS_ROUTE_CLOSED_EVENT,
   ANALYTICS_TRANSPORT_DETAIL_CHUNK_BYTES,
   ANALYTICS_TRANSPORT_MAX_DETAIL_BYTES,
   ANALYTICS_TRANSPORT_VERSION,
   analyticsProducerIdentity,
   parseAnalyticsTransportAcknowledgement,
   parseAnalyticsTransportIngressEnvelope,
+  parseAnalyticsTransportRoute,
   sameAnalyticsCaptureSubject,
   type AnalyticsTransportAcknowledgement,
   type AnalyticsTransportDetailStartPacket,
   type AnalyticsTransportIngressEnvelope,
   type AnalyticsTransportProducerReconciliation,
+  type AnalyticsTransportRoute,
 } from '../../../shared/analytics/transport.js';
 import {
   AnalyticsCaptureCapacityError,
@@ -108,6 +111,18 @@ export class HostAnalyticsTransport implements Disposable {
         // late ACK.
         if (event.event === 'backend.ready') {
           this.backendAvailable = true;
+          return;
+        }
+        if (event.event === ANALYTICS_ROUTE_CLOSED_EVENT) {
+          try {
+            const payload = event.payload;
+            if (!payload || typeof payload !== 'object' || Array.isArray(payload) || !('route' in payload)) {
+              throw new Error('Analytics route-closed event payload is invalid.');
+            }
+            this.clearPendingDetailsForRoute(parseAnalyticsTransportRoute(payload.route));
+          } catch (error) {
+            this.report(error);
+          }
           return;
         }
         if (event.event !== 'analytics.capture') return;
@@ -565,6 +580,12 @@ export class HostAnalyticsTransport implements Disposable {
   private clearPendingDetails(): void {
     this.pendingDetails.clear();
     this.pendingDetailBytes = 0;
+  }
+
+  private clearPendingDetailsForRoute(route: AnalyticsTransportRoute): void {
+    for (const [deliveryId, pending] of this.pendingDetails) {
+      if (this.sameRoute(pending.route, route)) this.dropPendingDetail(deliveryId);
+    }
   }
 
   private report(error: unknown): void {

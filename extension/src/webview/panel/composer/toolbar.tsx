@@ -258,9 +258,9 @@ export const ComposerToolbar = memo(function ComposerToolbar({
         <button
           type="button"
           class={`system-prompt-toggle-trigger privacy-mode-trigger${privacyMode ? ' active' : ''}`}
-          aria-label={privacyMode ? 'Privacy mode on — this session will not be saved when closed' : 'Enable privacy mode — do not save this session when closed'}
+          aria-label={privacyMode ? 'Privacy mode on: data deleted on session close' : 'Enable privacy mode: delete data on session close'}
           aria-pressed={privacyMode}
-          title={privacyMode ? 'Privacy mode on — analytics disabled and session data will be deleted when closed' : 'Enable privacy mode — disable analytics and delete session data when closed'}
+          title="Privacy mode: data deleted on session close"
           disabled={!sessionPath || isPendingTabPath(sessionPath)}
           onClick={() => onSetPrivacyMode?.(!privacyMode)}
         >

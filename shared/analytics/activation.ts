@@ -27,6 +27,9 @@ export const ACTIVATION_MAX_HISTORY_ENTRIES = 32;
 export const ACTIVATION_MAX_STRING_BYTES = 1_024;
 
 export const ACTIVATION_SCHEMA_VERSION = 1;
+/** Version 2 adds the complete first-activation recovery evidence. Version 1
+ * tombstones are deliberately unsupported rather than ambiguously upgraded. */
+export const ACTIVATION_TOMBSTONE_SCHEMA_VERSION = 2 as const;
 
 export type AnalyticsAuthority = 'legacy' | 'canonical';
 export type ActivationGenerationState = 'candidate' | 'ready' | 'active' | 'retired';
@@ -82,7 +85,7 @@ export interface ActivationEvidence {
   readonly retiredAt: string | null;
   /** Predecessor generation this one replaced, null for the first generation. */
   readonly predecessorGenerationId: string | null;
-  /** Cutoff receipt sha256 proving the writer fence, null until activated. */
+  /** Optional later P7b storage-cutoff receipt linked to this generation. */
   readonly cutoffReceiptSha256: string | null;
 }
 
@@ -119,6 +122,25 @@ export function isCanonicalInstant(value: unknown): value is string {
   const parsed = Date.parse(value);
   if (!Number.isFinite(parsed)) return false;
   return new Date(parsed).toISOString() === value;
+}
+
+/** The immutable evidence written before the first active manifest revision.
+ *
+ * This is intentionally a complete identity rather than only a generation id:
+ * after a crash between the tombstone and manifest writes, recovery may adopt
+ * the tombstone only when the caller supplies the exact same candidate evidence.
+ */
+export interface AnalyticsActivationTombstone {
+  readonly schemaVersion: typeof ACTIVATION_TOMBSTONE_SCHEMA_VERSION;
+  readonly everActive: true;
+  readonly firstActiveGenerationId: string;
+  readonly identity: ActivationGenerationIdentity;
+  /** Revision and predecessor hash of the active manifest being installed. */
+  readonly manifestRevision: number;
+  readonly previousSha256: string | null;
+  readonly activatedAt: string;
+  readonly cutoffReceiptSha256: string | null;
+  readonly recordedAt: string;
 }
 
 /** Restart nonces are helper-issued correlation values. Keep their grammar
@@ -349,9 +371,93 @@ export function validateActivationManifest(value: unknown): ActivationManifest {
   };
 }
 
+/** Validate the immutable pre-manifest activation marker. A marker is not an
+ * authority by itself; it is only usable by the explicit interrupted-activation
+ * recovery path after the requested evidence is matched exactly. */
+export function validateAnalyticsActivationTombstone(value: unknown): AnalyticsActivationTombstone {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ActivationManifestError('Activation tombstone must be an object.');
+  }
+  const raw = value as Record<string, unknown>;
+  if (raw.schemaVersion !== ACTIVATION_TOMBSTONE_SCHEMA_VERSION) {
+    throw new ActivationManifestError(
+      `Unsupported activation tombstone schema ${String(raw.schemaVersion)}; expected ${ACTIVATION_TOMBSTONE_SCHEMA_VERSION}.`,
+    );
+  }
+  assertExactKeys(value, [
+    'schemaVersion', 'everActive', 'firstActiveGenerationId', 'identity', 'manifestRevision', 'previousSha256',
+    'activatedAt', 'cutoffReceiptSha256', 'recordedAt',
+  ], 'Activation tombstone');
+  if (raw.everActive !== true) {
+    throw new ActivationManifestError('Activation tombstone everActive marker is invalid.');
+  }
+  const identity = raw.identity;
+  if (!identity || typeof identity !== 'object' || Array.isArray(identity)) {
+    throw new ActivationManifestError('Activation tombstone identity must be an object.');
+  }
+  assertExactKeys(identity, ['generationId', 'buildId', 'qualificationSha256', 'trialSha256'], 'Activation tombstone identity');
+  const identityRaw = identity as Record<string, unknown>;
+  const normalizedIdentity: ActivationGenerationIdentity = {
+    generationId: assertBoundedString(identityRaw.generationId, 'Activation tombstone identity.generationId', UUID_PATTERN),
+    buildId: assertBoundedString(identityRaw.buildId, 'Activation tombstone identity.buildId'),
+    qualificationSha256: assertBoundedString(
+      identityRaw.qualificationSha256,
+      'Activation tombstone identity.qualificationSha256',
+      SHA256_PATTERN,
+    ),
+    trialSha256: assertBoundedString(identityRaw.trialSha256, 'Activation tombstone identity.trialSha256', SHA256_PATTERN),
+  };
+  const firstActiveGenerationId = assertBoundedString(
+    raw.firstActiveGenerationId,
+    'Activation tombstone firstActiveGenerationId',
+    UUID_PATTERN,
+  );
+  if (firstActiveGenerationId !== normalizedIdentity.generationId) {
+    throw new ActivationManifestError('Activation tombstone firstActiveGenerationId does not match its identity.');
+  }
+  if (!Number.isSafeInteger(raw.manifestRevision) || (raw.manifestRevision as number) < 1) {
+    throw new ActivationManifestError('Activation tombstone manifestRevision must be a positive safe integer.');
+  }
+  const previousSha256 = raw.previousSha256 === null
+    ? null
+    : assertBoundedString(raw.previousSha256, 'Activation tombstone previousSha256', SHA256_PATTERN);
+  if ((raw.manifestRevision as number) === 1 && previousSha256 !== null) {
+    throw new ActivationManifestError('Activation tombstone revision 1 must not carry a previous hash.');
+  }
+  if ((raw.manifestRevision as number) > 1 && previousSha256 === null) {
+    throw new ActivationManifestError('Activation tombstone revisions after the first must carry a previous hash.');
+  }
+  if (!isCanonicalInstant(raw.activatedAt)) {
+    throw new ActivationManifestError('Activation tombstone activatedAt is not a canonical ISO instant.');
+  }
+  if (!isCanonicalInstant(raw.recordedAt)) {
+    throw new ActivationManifestError('Activation tombstone recordedAt is not a canonical ISO instant.');
+  }
+  const cutoffReceiptSha256 = raw.cutoffReceiptSha256 === null
+    ? null
+    : assertBoundedString(raw.cutoffReceiptSha256, 'Activation tombstone cutoffReceiptSha256', SHA256_PATTERN);
+  return {
+    schemaVersion: ACTIVATION_TOMBSTONE_SCHEMA_VERSION,
+    everActive: true,
+    firstActiveGenerationId,
+    identity: normalizedIdentity,
+    manifestRevision: raw.manifestRevision as number,
+    previousSha256,
+    activatedAt: raw.activatedAt,
+    cutoffReceiptSha256,
+    recordedAt: raw.recordedAt,
+  };
+}
+
 /** The authority this manifest selects. An absent manifest selects legacy;
- * a present-but-invalid manifest must fail startup before reaching here. */
+ * an ever-active manifest without an active generation is an interrupted or
+ * retired authority state and must fail closed rather than select legacy. */
 export function activationAuthority(manifest: ActivationManifest | null): AnalyticsAuthority {
+  if (manifest?.everActive && !manifest.activeGeneration) {
+    throw new ActivationManifestError(
+      'An ever-active analytics manifest has no active generation; refusing to re-enable legacy authority.',
+    );
+  }
   return manifest?.activeGeneration ? 'canonical' : 'legacy';
 }
 

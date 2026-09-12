@@ -6,6 +6,7 @@ import {
   type AnalyticsObservation,
 } from '../../../shared/analytics/contracts.js';
 import { AnalyticsPrivacyScrubPendingError, SqliteAnalyticsRecorder } from './sqlite-recorder.js';
+import { processObservationBatch } from './capture-batch-processing.js';
 import {
   createSqliteLockRetryBudget,
   isSqliteLockContention,
@@ -148,47 +149,14 @@ async function handle(raw: unknown): Promise<void> {
         const lockRetryBudget: SqliteLockRetryBudget = createSqliteLockRetryBudget();
         const rejections: Array<{ index: number; code: 'subject_deleted' | 'source_conflict'; error: string }> = [];
         if (firstKind === 'observation') {
-          // Preserve global queue order while retaining batch transactions for
-          // contiguous captures owned by the same subject. A deletion fence can
-          // reject that subject without discarding unrelated records in the IPC
-          // batch.
-          for (let start = 0; start < captures.length;) {
-            let end = start + 1;
-            while (end < captures.length && captures[end]!.subject === captures[start]!.subject) end += 1;
-            try {
-              await retrySqliteLock(() => recorder.submitBatch(
-                captures.slice(start, end).map((capture) => capture.value as AnalyticsObservation),
-              ), lockRetryBudget);
-            } catch (error) {
-              const deleted = deletedSubjectError(error);
-              if (deleted) {
-                for (let index = start; index < end; index += 1) {
-                  rejections.push({ index, code: 'subject_deleted', error: deleted });
-                }
-              } else if (error instanceof AnalyticsSourceConflictError) {
-                // The batch transaction retained every original row. Replay the
-                // bounded slice record-by-record so only changed identities are
-                // rejected and unrelated immutable facts still advance.
-                for (let index = start; index < end; index += 1) {
-                  try {
-                    await retrySqliteLock(
-                      () => recorder.submit(captures[index]!.value as AnalyticsObservation),
-                      lockRetryBudget,
-                    );
-                  } catch (recordError) {
-                    const recordDeleted = deletedSubjectError(recordError);
-                    if (recordDeleted) rejections.push({ index, code: 'subject_deleted', error: recordDeleted });
-                    else if (recordError instanceof AnalyticsSourceConflictError) {
-                      rejections.push({ index, code: 'source_conflict', error: recordError.message });
-                    } else throw recordError;
-                  }
-                }
-              } else {
-                throw error;
-              }
-            }
-            start = end;
-          }
+          rejections.push(...await processObservationBatch(
+            captures.map((capture) => ({
+              subject: capture.subject,
+              value: capture.value as AnalyticsObservation,
+            })),
+            recorder,
+            lockRetryBudget,
+          ));
         } else if (firstKind === 'detail') {
           for (let index = 0; index < captures.length; index += 1) {
             const detail = captures[index]!.value as AnalyticsDetailCapture;

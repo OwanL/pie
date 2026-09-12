@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { ANALYTICS_SCHEMA_VERSION, deriveAnalyticsIdempotencyKey, type AnalyticsObservation } from '../../../../shared/analytics/contracts.js';
-import { createAnalyticsFactPacket } from '../../../../shared/analytics/transport.js';
+import { ANALYTICS_ROUTE_CLOSED_EVENT, createAnalyticsFactPacket } from '../../../../shared/analytics/transport.js';
 import type { AnalyticsBranchObservedPayload } from '../../../src/shared/protocol/sessions.js';
 import { WORKER_IPC_VERSION, parseWorkerToCoordinatorFrame } from '../../../src/backend/worker-protocol.js';
 import { WorkerRuntimeRouter } from '../../../src/backend/worker-runtime-router.js';
@@ -75,6 +75,7 @@ test('router emits capture only for the exact live route and routes host ACK bac
       registerHot: async (target: string, owner: any) => ({
         ...owner, canonicalSessionPath: target, ownershipRevision: 3, nonce: 'lease-1',
       }),
+      reconcileCrash: async () => undefined,
     } as any,
     coordinatorGeneration: 7,
     analyticsActivation: {
@@ -207,4 +208,27 @@ test('router emits capture only for the exact live route and routes host ACK bac
   }
   assert.ok(internals.analyticsPendingDeliveries.size < 4_096);
   assert.ok(internals.analyticsPendingBytes <= 8 * 1024 * 1024);
+
+  internals.workerRootSessionPath = sessionPath;
+  internals.currentLeasePath = sessionPath;
+  await router.handleWorkerStateChange(sessionPath, {
+    status: 'exited',
+    pid: 123,
+    exitCode: 0,
+    exitSignal: null,
+    stdoutTail: '',
+    stderrTail: '',
+  } as any, { workerId: 'worker-1', workerGeneration: 1 });
+  const routeClosed = emitted.filter(([event]) => event === ANALYTICS_ROUTE_CLOSED_EVENT);
+  assert.equal(routeClosed.length, 1, 'confirmed worker retirement emits one exact route cleanup event');
+  assert.deepEqual((routeClosed[0]![1] as { route: unknown }).route, {
+    coordinatorGeneration: 7,
+    workerId: 'worker-1',
+    workerGeneration: 1,
+    workerPid: 123,
+    rootSessionPath: longPath,
+    leasePath: longPath,
+    leaseRevision: 3,
+  });
+  assert.equal(internals.analyticsPendingDeliveries.size, 0, 'route cleanup releases coordinator retention');
 });

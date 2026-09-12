@@ -455,6 +455,12 @@ export class WorkerRuntimeHost {
     if (this.disposed) return;
     this.disposed = true;
     this.gate.dispose();
+    // Fence the process-global producer bridge before disposing the SDK. The
+    // transport waits only for one already-admitted detail frame and emits its
+    // ordered abort before worker-server queues the shutdown response.
+    const analyticsTransport = this.analyticsTransport;
+    this.analyticsTransport = undefined;
+    await analyticsTransport?.dispose();
     const context = this.context;
     this.context = undefined;
     if (context) {
@@ -476,8 +482,6 @@ export class WorkerRuntimeHost {
     this.lifecycleStore?.close();
     this.lifecycleStore = undefined;
     this.lifecycleBarrier = undefined;
-    this.analyticsTransport?.dispose();
-    this.analyticsTransport = undefined;
   }
 
   private async promoteOnce(payload: WorkerRuntimePromotionPayload): Promise<void> {

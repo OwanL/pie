@@ -10,9 +10,12 @@ import type {
 import type { LiveLifecycleWatermark } from '../../shared/live-pipeline-protocol.js';
 import type { CanonicalAnalyticsCapture } from '../../analytics/canonical-capture.js';
 import type { CanonicalAnalyticsReadModel } from '../../analytics/query-entry.js';
+import type { ActivityIntervalRecord } from '../../shared/activity-interval';
+import type { BillableInvocationRecord } from '../../shared/billable-invocation';
 import type { ArchState } from '../core/arch-state';
 import type { Event } from '../core/events';
 import type { TaskBoundaryIntent, RunSnapshot, TurnLatencyMeasurement, TurnThroughputStatus } from '../run-analytics';
+import type { RunAnalyticsExportPayload, RunAnalyticsQueryResult } from '../run-analytics/query';
 
 export type DispatchArchEvent = (event: Event) => void;
 export type GetArchState = () => ArchState;
@@ -135,6 +138,32 @@ export interface RunObserver {
     stableSessionId?: string,
     pendingCreateOperationId?: string,
   ): void;
+}
+
+/**
+ * Host-facing StatsService surface.  SessionService only needs RunObserver;
+ * this wider port is kept structural so a rehearsal can use a filesystem-free
+ * implementation without inheriting the concrete storage/accounting state.
+ */
+export interface StatsServicePort extends RunObserver {
+  start(): Promise<void>;
+  shutdown(): Promise<void>;
+  flush(): Promise<void>;
+  onExperimentAssignmentChanged(assignment: string | null): void;
+  startNewTask(sessionPath: string): void;
+  continueTask(sessionPath: string): void;
+  queryRunAnalytics(): Promise<RunAnalyticsQueryResult>;
+  queryPersistedRunAnalytics(): Promise<RunAnalyticsQueryResult>;
+  exportRunAnalytics(targetPath: string): Promise<RunAnalyticsExportPayload>;
+  getStorageDir(): string;
+  getAnalyticsReadModel?(): CanonicalAnalyticsReadModel | undefined;
+  getAnalyticsRevisionRefreshStats?(): { revision: string | null } | undefined;
+  getWorkingTimeBySession(): Record<string, import('../../shared/protocol').WorkingTimeState>;
+  getSessionUsage(sessionPath: string): SessionUsageSnapshot;
+  getActivityIntervals(): readonly ActivityIntervalRecord[];
+  getBillableInvocationRecords(): readonly BillableInvocationRecord[];
+  getOpenRuns(): RunSnapshot[];
+  getPendingCompletedRuns(): RunSnapshot[];
 }
 
 export interface AssistantTurnIdentity {

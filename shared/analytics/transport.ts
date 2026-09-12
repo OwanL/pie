@@ -33,6 +33,15 @@ export interface AnalyticsTransportRoute {
   leaseRevision: number;
 }
 
+/** Backend event used to retire only host-side detail assemblies belonging to
+ * one confirmed worker route. This is intentionally route-scoped: a worker
+ * generation can be replaced while another generation continues producing. */
+export const ANALYTICS_ROUTE_CLOSED_EVENT = 'analytics.route.closed' as const;
+
+export interface AnalyticsTransportRouteClosedPayload {
+  route: AnalyticsTransportRoute;
+}
+
 export interface AnalyticsTransportFactPacket {
   version: typeof ANALYTICS_TRANSPORT_VERSION;
   kind: 'fact';
@@ -197,9 +206,9 @@ export function createAnalyticsFactPacket(
   return {
     version: ANALYTICS_TRANSPORT_VERSION,
     kind: 'fact',
-    deliveryId: analyticsTransportDeliveryId(observation.generationId, 'fact', observation.sourceKey),
-    generationId: observation.generationId,
-    captureSubject: observation.captureSubject,
+    deliveryId: analyticsTransportDeliveryId(normalized.generationId, 'fact', normalized.sourceKey),
+    generationId: normalized.generationId,
+    captureSubject: normalized.captureSubject,
     observation: normalized,
   };
 }
@@ -207,10 +216,27 @@ export function createAnalyticsFactPacket(
 export function createAnalyticsDetailPackets(
   capture: AnalyticsDetailCapture,
 ): AnalyticsTransportPacket[] {
-  const bytes = Buffer.from(capture.bytes);
-  if (bytes.byteLength > ANALYTICS_TRANSPORT_MAX_DETAIL_BYTES) {
+  return Array.from(createAnalyticsDetailPacketSequence(capture).packets);
+}
+
+/** Byte reservation for one detached payload, bounded metadata and one encoded
+ * frame. This is queue accounting, not a measurement of total JavaScript heap. */
+export function analyticsDetailTransportReservationBytes(byteLength: number): number {
+  if (!Number.isSafeInteger(byteLength) || byteLength < 0 || byteLength > ANALYTICS_TRANSPORT_MAX_DETAIL_BYTES) {
     throw new Error(`Analytics detail exceeds the ${ANALYTICS_TRANSPORT_MAX_DETAIL_BYTES}-byte transport bound.`);
   }
+  const frameBytes = Math.ceil(Math.min(byteLength, ANALYTICS_TRANSPORT_DETAIL_CHUNK_BYTES) / 3) * 4;
+  return byteLength + 4 * (ANALYTICS_TRANSPORT_MAX_DETAIL_START_BYTES + frameBytes + 8 * MAX_ID_BYTES);
+}
+
+/** Detach ownership before returning, but encode only the requested frame.
+ * Copying and hashing remain synchronous; this API makes no off-thread claim. */
+export function createAnalyticsDetailPacketSequence(capture: AnalyticsDetailCapture): {
+  start: AnalyticsTransportDetailStartPacket;
+  packets: Generator<AnalyticsTransportPacket, void>;
+} {
+  analyticsDetailTransportReservationBytes(capture.bytes.byteLength);
+  const bytes = Buffer.from(capture.bytes);
   const chunkCount = Math.max(1, Math.ceil(bytes.byteLength / ANALYTICS_TRANSPORT_DETAIL_CHUNK_BYTES));
   if (chunkCount > ANALYTICS_TRANSPORT_MAX_DETAIL_CHUNKS) throw new Error('Analytics detail chunk count exceeds the transport bound.');
   const sha256 = createHash('sha256').update(bytes).digest('hex');
@@ -223,43 +249,45 @@ export function createAnalyticsDetailPackets(
     version: ANALYTICS_TRANSPORT_VERSION,
     kind: 'detail.start',
     deliveryId,
-    generationId: capture.generationId,
-    captureSubject: capture.captureSubject,
-    payloadId: capture.payloadId,
-    sourceKey: capture.sourceKey,
+    generationId: detail.generationId,
+    captureSubject: detail.captureSubject,
+    payloadId: detail.payloadId,
+    sourceKey: detail.sourceKey,
     byteLength: bytes.byteLength,
     chunkCount,
     sha256,
     detail,
   };
   requireJsonByteBound(start, ANALYTICS_TRANSPORT_MAX_DETAIL_START_BYTES, 'Analytics detail start');
-  const packets: AnalyticsTransportPacket[] = [start];
-  for (let index = 0; index < chunkCount; index += 1) {
-    packets.push({
+  function* packets(): Generator<AnalyticsTransportPacket, void> {
+    yield start;
+    for (let index = 0; index < chunkCount; index += 1) {
+      yield {
+        version: ANALYTICS_TRANSPORT_VERSION,
+        kind: 'detail.chunk',
+        deliveryId,
+        generationId: detail.generationId,
+        captureSubject: detail.captureSubject,
+        payloadId: detail.payloadId,
+        index,
+        data: bytes.subarray(
+          index * ANALYTICS_TRANSPORT_DETAIL_CHUNK_BYTES,
+          Math.min(bytes.byteLength, (index + 1) * ANALYTICS_TRANSPORT_DETAIL_CHUNK_BYTES),
+        ).toString('base64'),
+      };
+    }
+    yield {
       version: ANALYTICS_TRANSPORT_VERSION,
-      kind: 'detail.chunk',
+      kind: 'detail.end',
       deliveryId,
-      generationId: capture.generationId,
-      captureSubject: capture.captureSubject,
-      payloadId: capture.payloadId,
-      index,
-      data: bytes.subarray(
-        index * ANALYTICS_TRANSPORT_DETAIL_CHUNK_BYTES,
-        Math.min(bytes.byteLength, (index + 1) * ANALYTICS_TRANSPORT_DETAIL_CHUNK_BYTES),
-      ).toString('base64'),
-    });
+      generationId: detail.generationId,
+      captureSubject: detail.captureSubject,
+      payloadId: detail.payloadId,
+      chunkCount,
+      sha256,
+    };
   }
-  packets.push({
-    version: ANALYTICS_TRANSPORT_VERSION,
-    kind: 'detail.end',
-    deliveryId,
-    generationId: capture.generationId,
-    captureSubject: capture.captureSubject,
-    payloadId: capture.payloadId,
-    chunkCount,
-    sha256,
-  });
-  return packets;
+  return { start, packets: packets() };
 }
 
 export function createAnalyticsDetailAbortPacket(

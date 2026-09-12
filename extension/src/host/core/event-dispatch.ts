@@ -28,6 +28,7 @@ import type {
   ToolProgressPayload,
   ToolStartedPayload,
 } from '../../shared/protocol';
+import { ANALYTICS_ROUTE_CLOSED_EVENT } from '../../../../shared/analytics/transport.js';
 import {
   isAgentSettledPayload,
   isAnalyticsBranchObservedPayload,
@@ -126,6 +127,11 @@ export function dispatchSessionBackendEvent(
   handlers: SessionBackendEventHandlers,
 ): void {
   switch (event.event) {
+    case ANALYTICS_ROUTE_CLOSED_EVENT:
+      // Consumed by HostAnalyticsTransport. It is deliberately invisible to
+      // the session/UI event projection while still travelling in-order over
+      // the backend event stream.
+      return;
     case 'live.semantic':
       dispatch(event, isTurnSemanticEnvelope, handlers.onTurnSemantic);
       return;

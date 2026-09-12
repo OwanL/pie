@@ -39,9 +39,11 @@ import type {
   WorkerToCoordinatorFrame,
 } from './worker-protocol';
 import {
+  ANALYTICS_ROUTE_CLOSED_EVENT,
   sameAnalyticsCaptureSubject,
   type AnalyticsTransportAcknowledgement,
   type AnalyticsTransportIngressEnvelope,
+  type AnalyticsTransportRouteClosedPayload,
 } from '../../../shared/analytics/transport.js';
 
 export type WorkerRuntimeRouteState =
@@ -747,6 +749,7 @@ export class WorkerRuntimeRouter {
         transition.retireStarted = true;
         this.markIntentionalWorkerStop(route.worker);
         await this.options.supervisor.stopWorker(route.currentLeasePath, reason);
+        this.closeAnalyticsRoute(route);
         this.extensionUiOwners.clearWorker(route.owner.workerId, route.owner.workerGeneration);
         this.clearPendingProviderAcquires(route);
         this.providerLeases.releaseOwner(route.owner, reason);
@@ -822,6 +825,7 @@ export class WorkerRuntimeRouter {
   private async stopTransitionRoute(route: HotWorkerRoute, reason: string): Promise<void> {
     this.markIntentionalWorkerStop(route.worker);
     await this.options.supervisor.stopWorker(route.currentLeasePath, reason);
+    this.closeAnalyticsRoute(route);
     this.extensionUiOwners.clearWorker(route.owner.workerId, route.owner.workerGeneration);
     this.clearPendingProviderAcquires(route);
     this.providerLeases.releaseOwner(route.owner, reason);
@@ -841,6 +845,28 @@ export class WorkerRuntimeRouter {
     const stopping = this.stopTransitionRoute(route, reason);
     transition.recoveryStops.set(key, stopping);
     return stopping;
+  }
+
+  /**
+   * A worker exit is narrower than a coordinator exit. HostAnalyticsTransport
+   * therefore needs an exact route fence to discard detail assemblies that may
+   * have received their start frame before this worker died. Emit once per
+   * retained route identity (session replacement can leave old and new lease
+   * identities in the same worker), then release the coordinator-side map.
+   */
+  private closeAnalyticsRoute(route: HotWorkerRoute): void {
+    const pending = route.analyticsPendingDeliveries;
+    if (!pending || pending.size === 0) return;
+    const emitted = new Set<string>();
+    for (const entry of pending.values()) {
+      const key = JSON.stringify(entry.route);
+      if (emitted.has(key)) continue;
+      emitted.add(key);
+      const payload: AnalyticsTransportRouteClosedPayload = { route: { ...entry.route } };
+      this.options.emit(ANALYTICS_ROUTE_CLOSED_EVENT, payload);
+    }
+    pending.clear();
+    route.analyticsPendingBytes = 0;
   }
 
   /** Priority Stop recovery after a compound transition exceeded its cooperative
@@ -898,6 +924,7 @@ export class WorkerRuntimeRouter {
     const retirement = (async () => {
       this.clearLiveSyncRetries(route.worker);
       await this.options.supervisor.stopWorker(route.currentLeasePath, reason);
+      this.closeAnalyticsRoute(route);
       // Keep an active response body fenced until process-tree death is
       // confirmed. Releasing before stop could overlap it with the next worker.
       this.extensionUiOwners.clearWorker(route.owner.workerId, route.owner.workerGeneration);
@@ -1016,6 +1043,7 @@ export class WorkerRuntimeRouter {
     this.clearPendingProviderAcquires(route);
     this.providerLeases.releaseOwner(route.owner, 'Worker crashed.');
     await this.options.supervisor.stopWorker(route.currentLeasePath, 'confirmed worker exit').catch(() => undefined);
+    this.closeAnalyticsRoute(route);
     await this.options.ownership.reconcileCrash({ owner: route.owner, processDeathConfirmed: true });
     if (!this.isCurrent(route) && !confirmedExitOwnsFailedTransition) return;
     this.currentPaths.delete(routeKey(route.currentLeasePath));
@@ -1550,6 +1578,7 @@ export class WorkerRuntimeRouter {
       }
       const failedRoute = owner ? this.workersById.get(owner.workerId) : undefined;
       if (failedRoute) {
+        this.closeAnalyticsRoute(failedRoute);
         this.clearPendingProviderAcquires(failedRoute);
         this.roots.delete(routeKey(failedRoute.rootSessionPath));
         this.currentPaths.delete(routeKey(failedRoute.currentLeasePath));
@@ -1959,6 +1988,10 @@ export class WorkerRuntimeRouter {
       && candidate.workerGeneration === worker.workerGeneration,
     )) return;
     await this.options.supervisor.stopWorker(worker.sessionPath, reason);
+    // A promoted replacement is addressable through workersById/currentPaths
+    // before it becomes the public root. It can therefore already have
+    // accepted analytics frames even though isCurrent(route) is false.
+    if (route) this.closeAnalyticsRoute(route);
   }
 
   private async withDeadline<T>(operation: Promise<T>, timeoutMs: number, message: string): Promise<T> {

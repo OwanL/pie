@@ -14,6 +14,140 @@ Owning specifications: runbook; `docs/ANALYTICS_REWORK_PLAN.md` §§1, 11.6, 17;
 
 ---
 
+## Checkpoint 52 - 2026-09-12T19:24Z, bounded transport shutdown and disabled baseline integration
+
+The current milestone remains uncommitted and unbuilt. Root reviewed the real writer-lane
+detail shutdown repair: bridge admission is fenced immediately, an already-admitted frame
+settles before its ordered abort, and worker shutdown awaits that bounded disposal. Confirmed
+worker retirement emits an exact route closure so the host releases only that route's incomplete
+assemblies. Focused tests pass 43/43; the finite-timeout regression is being completed. Ordinary
+fact frames still need their own settlement/drain fence, so this is not a complete all-host
+analytics drain claim.
+
+The canonical historical startup race now establishes the revision watcher's first successful
+baseline before hydration, verifies the hydrated revision, and stays unknown after a failed
+baseline until recovery. Ten focused historical tests pass, including deletion during startup
+and failed-baseline recovery. A separate total-disabled Stats/runtime port and aggregate timer
+gate are implemented; normal behavior defaults remain intact. The disabled policy is an exact
+process environment rehearsal opt-in, limited to fresh legacy authority. It creates no canonical
+loaded-generation receipt. Focused tests are not evidence that the actual host avoids all
+analytics effects; the separate matched browser fixture still has to demonstrate that behavior.
+
+All 17 TypeScript projects pass (`all-typecheck-r07.log`). Final affected tests and a new
+validation-only build remain next after the source freeze. Root caught a PowerShell UTF-8
+rewrite regression in host text during review and requested correction before freezing.
+
+Canonical scratch launch guards now enforce 4 GiB initial free physical memory and a 2 GiB
+reserve. Browser runs verify the provider's exact birth identity, and legacy fixture preparation
+refuses prior authority instead of erasing it. These script changes pass PowerShell syntax
+validation. They have not yet launched the new artifact. Live Code/Codex PIDs
+37056/26828/40940 remain alive and protected; no live restart or publication has occurred.
+Continue the active goal through real browser checks and the remaining contract requirements.
+
+Continuation at 19:28Z: detail transport/router focused tests now pass 44/44, including a
+withheld writer callback, explicit disposal deadline, and inert late callback. Review also
+covered an analytics-bearing quarantined route that had been promoted before becoming the public
+root; its confirmed stop now emits exact route closure. Root restored all accidentally reencoded
+host characters using the original HEAD vocabulary and froze the source.
+
+The affected run `npm-test-r07.log` returned **6,905 passed, 0 failed, 30 skipped**, with one
+handoff-control inventory-timeout test passing only on rerun after an empty response caused
+`Unexpected end of JSON input`. This is a flaky run, not clean qualification. The previously
+failing canonical startup deletion test passed first time. All 37 recorded path hashes match
+`test-source-r07.json` (`test-hash-check-r07.json`). The handoff flake remains under investigation;
+it does not justify a production cutover or a clean-suite claim. Matched disabled fixture
+preparation is recorded separately in `C:/dev/scratch/pie-total-disabled-ui-20260913-r01`; its
+inventory is still pre-launch evidence only. Both fixture launches clear inherited storage-cutoff
+authorization to preserve the matched pre-cutoff operating mode.
+
+Continuation at 19:32Z: the isolated extension suite (`extension-tests-r08.log`) passes
+**4,813 tests, 0 failures, 19 skips, without reruns**. All 41 path hashes match its source
+snapshot; the snapshot was captured during that run after agents had frozen source. All other
+packages passed on the first r07 attempt. Full lint is now clean (`lint-r08.log`): four existing
+diagnostics were repaired, with 11 focused tests passing. The qualification script now throws
+cleanup-only failure after its `finally` block, preserving partial evidence and original workload
+exceptions. The handoff control changes in this lint repair are binding style only. The parallel
+r07 flake remains recorded and under read-only diagnosis, rather than erased by the clean r08.
+The reviewed milestone is ready to commit and build without publication; actual browser and
+production qualification evidence remain outstanding.
+
+## Checkpoint 51 - 2026-09-12T18:45Z, activation review and isolated UI preparation
+
+Reviewed source milestone **4024d318afef206e7ad98e6ee585917576ce6a01** is committed and pushed
+to master. The frozen affected suite passed **6,875 tests, 0 failures, 30 skips, with no reruns**;
+all 17 TypeScript projects passed. Exact test, source-hash, staged-path and commit receipts are in
+`C:/dev/scratch/pie-projection-integration-20260913-r01` (`test-terminal-r05.json`,
+`test-hash-check-r05.json`, `stage-manifest-r05.json`, `commit-receipt-r05.json`). The milestone
+has not been published or loaded. The compiled output still names the older
+**162085c90d5c3ce52dce** artifact until a new validation build is explicitly recorded.
+
+Root found an authority defect: the activation reader selected legacy when an ever-active
+tombstone existed but the manifest was absent. The bounded repair is under review, including
+evidence-bound interrupted-write recovery, immutable tombstone lineage across successors, and
+validation before mutation. **Do not conflate the optional later storage-cutoff receipt with
+analytics activation admission.** Plan §12 and the contract's P7a/P7b ordering preserve open
+conversations at analytics activation and close them only at the later storage cutoff. A source
+comment suggesting a mandatory storage-cutoff hash cannot override those owning requirements.
+The missing-manifest state must still fail closed; ordinary startup may not silently resume old
+analytics writes.
+
+The isolated canonical browser fixture is prepared at
+`C:/dev/scratch/pie-canonical-ui-20260913-r01`, but has not been launched. It requires a fresh
+explicit output tree hash, coordinated host/renderer build ID, actual loaded-generation nonce,
+and verified ownership of loopback port 2997. The scratch activation identity is explicitly
+synthetic and cannot qualify production admission. Root's `run-private-close.mjs` passes syntax
+validation and will exercise ordinary capture, the real Privacy toggle, continued private capture,
+real close, SQLite deletion fencing, transcript removal, and reload stability. This is still a
+prepared test, not behavioral evidence. The toolbar now describes delete-on-close semantics;
+that small source edit is not yet built or loaded.
+
+The existing fixture's legacy Privacy comparison does **not** disable all analytics and cannot
+satisfy the matched analytics-disabled gate. Its labels and gate availability are explicit. The
+actual disabled seam remains to be implemented. Rich-detail review also confirms remaining
+synchronous producer serialization, packet-array allocation and supervisor reserialization;
+`setImmediate` alone is not off-thread execution. Scratch design notes document these gaps and
+the necessary immutable-ownership constraints without claiming acceptance.
+
+Live Code/Codex PIDs **37056/26828/40940** and Pie port **1997** remain protected. No restart of
+that chain is permitted without demonstrated recovery of this supervisor. Isolated launches have
+finite deadlines and exact birth/ancestry cleanup. No production activation, storage cutoff,
+data disposal or completion claim is made by this checkpoint. Continue the active goal.
+
+Continuation at 19:07Z: activation consistency now passes **44** focused tests. Exact SHA CAS
+protects candidate/ready/active transitions; invalid authority changes are rejected before replacing
+manifest bytes. Tombstone schema v2 retains complete first-activation evidence, supports bounded
+successor history, and refuses reconstruction from a tombstone alone. The existing optional later
+storage-cutoff link remains nullable. The recorder's contiguous-subject orchestration is now extracted
+into production code and tested against a real independent SQLite `BEGIN IMMEDIATE` lock: A commits,
+B fails, and exact A+B replay yields one row per subject, accepted=2, duplicates=1, watermark=2.
+The original IPC/supervisor tests also pass **21/21**. This is real durable partial-subject proof;
+the test does not claim an injected lock inside an actual IPC request.
+
+Root replaced full transport packet-array creation on the worker path with detached bytes and lazy
+chunk generation. Admission precedes copying/hashing; only one frame is intended to be in flight.
+Producer copying/hashing and other rich serialization still remain on the execution thread, and the
+reservation is queue byte accounting rather than measured total heap. Mutation, backpressure,
+rejected-ACK and disposal regressions pass, as do **26** host/production-bridge integration tests.
+Independent review found an early-ACK frame race and an actual writer/disposal ordering gap. The
+first is repaired; ordered bounded shutdown plus exact worker-route teardown is being implemented.
+Do not freeze or qualify this source unit before that integration is complete.
+
+The next full affected run (`npm-test-r06.log`, `test-terminal-r06.json`) returned **6,891 passed,
+0 failed, 30 skipped**, but the canonical historical private-peer-delete test passed only on rerun.
+All 19 frozen path hashes matched (`test-hash-check-r06.json`). This is explicitly a flaky run,
+not a clean qualification. Diagnosis found a real startup gap between usage hydration and the
+revision watcher's initial baseline. The correction must also cover a deletion during startup,
+not just await a baseline after stale hydration. A deterministic regression is being added. The
+subsequent transport changes are outside that r06 source fingerprint.
+
+`run-bounded-browser.ps1` now owns finite browser-child deadlines, memory reserve checks, real
+child exit markers, and exact observed birth/ancestry cleanup. Its intentional missing-build guard
+run (`wrappers/guard-missing-build-r01-normal-stream`) exited 1 for the absent build receipt,
+left no observed child processes, preserved the live supervisor, and made no provider request
+(fixture provider state remained last updated at 15:59:16Z). This validates the guard's failure path,
+not browser behavior or timeout recovery. The actual total-disabled Stats/runtime/aggregate policy
+is now an assigned implementation unit; no such UI mode has yet been exercised.
+
 ## Checkpoint 50 - 2026-09-12T17:27Z, continued audit with supervisor protected
 
 Reviewed milestone **fa418419** is committed and pushed to master. The live VS Code/Codex chain

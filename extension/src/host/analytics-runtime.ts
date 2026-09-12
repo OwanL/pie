@@ -96,6 +96,41 @@ export interface AnalyticsRuntimeReadiness {
   queryReady: boolean;
 }
 
+/** Narrow host seam shared by the normal canonical runtime and the
+ * filesystem-free rehearsal runtime. */
+export interface AnalyticsRuntimePort {
+  readonly analyticsTimeZone: string;
+  start(): Promise<AnalyticsRuntimeReadiness>;
+  recordLoadedGeneration(): void;
+  backendDescriptor(): AnalyticsBackendDescriptor | undefined;
+  stop(): Promise<void>;
+}
+
+/** Runtime used by the total-disabled rehearsal. It has no activation store,
+ * recorder, query worker, loaded receipt, or filesystem side effect. */
+export class DisabledAnalyticsRuntime implements AnalyticsRuntimePort {
+  readonly analyticsTimeZone = 'UTC';
+
+  async start(): Promise<AnalyticsRuntimeReadiness> {
+    return {
+      authority: 'legacy',
+      manifestRevision: null,
+      manifestSha256: null,
+      generationId: null,
+      recorderSchemaVersion: null,
+      projectionRevision: null,
+      recorderReady: false,
+      queryReady: false,
+    };
+  }
+
+  recordLoadedGeneration(): void { /* no activation receipt in this mode */ }
+
+  backendDescriptor(): undefined { return undefined; }
+
+  async stop(): Promise<void> { /* no helper to stop */ }
+}
+
 /** Owns the canonical recorder and query helpers for the extension host.
  *
  * Deliberately dormant until a valid **active** manifest exists. Under legacy
@@ -107,7 +142,7 @@ export interface AnalyticsRuntimeReadiness {
  * schema and projection revision before capture is considered ready. Any
  * failure raises so the host can fail closed rather than capturing into an
  * authority it cannot read back. */
-export class AnalyticsRuntime {
+export class AnalyticsRuntime implements AnalyticsRuntimePort {
   private readonly store: ActivationStore;
   private recorder: AnalyticsRecorderSupervisor | undefined;
   private queryClient: AnalyticsQueryClient | undefined;

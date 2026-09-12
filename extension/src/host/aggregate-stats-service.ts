@@ -7,7 +7,7 @@ import {
 import type { ArchState } from './core/arch-state';
 import type { TokenRateService } from './token-rate-service';
 import { RollingAggregateRate } from './rolling-aggregate-rate';
-import type { StatsService } from './stats-service';
+import type { StatsServicePort } from './stats-service';
 import {
   accumulateAggregateStats,
   finalizeAggregateStatsLayers,
@@ -65,7 +65,9 @@ import type { ProviderAccountingSummary } from '../analytics/sqlite-recorder.js'
 
 export interface AggregateStatsServiceDeps {
   getArchState: () => ArchState;
-  statsService: StatsService;
+  statsService: StatsServicePort;
+  /** Process-local rehearsal gate. Normal operation is enabled by default. */
+  enabled?: boolean;
   tokenRateService: TokenRateService;
   /** Resolve the agent dir containing `models.json` and the generated
    *  historical pricing catalog. Called each tick so a runtime `pie.agentDir`
@@ -119,6 +121,7 @@ interface LedgerOverlayCacheState {
 
 export class AggregateStatsService {
   private readonly deps: AggregateStatsServiceDeps;
+  private readonly enabled: boolean;
   private cached: AggregateStats = EMPTY_AGGREGATE_STATS;
   private readonly pricing: AggregatePricingCache;
   private readonly completedHistory: CompletedHistoryCache;
@@ -137,6 +140,7 @@ export class AggregateStatsService {
 
   constructor(deps: AggregateStatsServiceDeps) {
     this.deps = deps;
+    this.enabled = deps.enabled ?? true;
     this.pricing = new AggregatePricingCache({ getAgentDir: deps.getAgentDir });
     this.completedHistory = new CompletedHistoryCache({
       source: {
@@ -150,6 +154,7 @@ export class AggregateStatsService {
   start(): void {
     if (this.started) return;
     this.started = true;
+    if (!this.enabled) return;
     // Defer the first compute so the cold-start critical path (backend spawn +
     // session restore) gets the CPU first; the strip shows `ready:false` until
     // the first compute lands. The interval still runs from now, so the first
@@ -186,6 +191,7 @@ export class AggregateStatsService {
    * never stats/reads history and never polls backend metrics.
    */
   refreshLive(): void {
+    if (!this.enabled) return;
     this.liveRevision += 1;
     const archState = this.deps.getArchState();
     const ratesBySession = this.deps.tokenRateService.getRates();
@@ -252,6 +258,7 @@ export class AggregateStatsService {
   }
 
   private async tick(): Promise<void> {
+    if (!this.enabled) return;
     if (this.inFlight) return;
     this.inFlight = true;
     try {
@@ -284,9 +291,7 @@ export class AggregateStatsService {
     const pendingCompletedRuns = this.deps.statsService.getPendingCompletedRuns();
     const rollingRate = this.observeRollingRate(nowMs, openRuns, pendingCompletedRuns, ratesBySession);
 
-    const canonicalReadModel = (this.deps.statsService as StatsService & {
-      getAnalyticsReadModel?: () => CanonicalAnalyticsReadModel | undefined;
-    }).getAnalyticsReadModel?.();
+    const canonicalReadModel = this.deps.statsService.getAnalyticsReadModel?.();
     if (canonicalReadModel) {
       await this.recomputeCanonical(
         canonicalReadModel,
@@ -477,10 +482,7 @@ export class AggregateStatsService {
   }
 
   private observedCanonicalRevision(): string | null {
-    const statsService = this.deps.statsService as StatsService & {
-      getAnalyticsRevisionRefreshStats?: () => { revision: string | null } | undefined;
-    };
-    return statsService.getAnalyticsRevisionRefreshStats?.()?.revision ?? null;
+    return this.deps.statsService.getAnalyticsRevisionRefreshStats?.()?.revision ?? null;
   }
 
   private observeRollingRate(
@@ -677,7 +679,7 @@ export function aggregateStatsEqual(a: AggregateStats, b: AggregateStats): boole
 }
 
 function projectLedgerIfAvailable(
-  statsService: StatsService,
+  statsService: StatsServicePort,
   aggregate: AggregateStats,
   nowMs: number,
   cache: LedgerOverlayCacheState,
@@ -686,8 +688,8 @@ function projectLedgerIfAvailable(
   // invocation-ledger getter. Preserve their legacy projection; production
   // always supplies the ledger. When present, the getter is called on every
   // refresh so its authority lock/signature/privacy fence cannot be bypassed.
-  const getter = (statsService as StatsService & {
-    getBillableInvocationRecords?: () => ReturnType<StatsService['getBillableInvocationRecords']>;
+  const getter = (statsService as StatsServicePort & {
+    getBillableInvocationRecords?: () => ReturnType<StatsServicePort['getBillableInvocationRecords']>;
   }).getBillableInvocationRecords;
   if (!getter) return aggregate;
 

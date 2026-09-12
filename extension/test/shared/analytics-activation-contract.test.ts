@@ -7,6 +7,7 @@ import {
   activationAuthority,
   createCandidateManifest,
   isCanonicalInstant,
+  validateAnalyticsActivationTombstone,
   validateActivationManifest,
 } from '../../../shared/analytics/activation.js';
 
@@ -59,6 +60,44 @@ test('only an active generation selects canonical authority', () => {
     retiredHistory: [],
   });
   assert.equal(activationAuthority(manifest), 'canonical');
+});
+
+test('an ever-active retired or successor-only manifest cannot fall back to legacy', () => {
+  const retiredOnly = validateActivationManifest({
+    schemaVersion: ACTIVATION_SCHEMA_VERSION,
+    revision: 2,
+    previousSha256: SHA,
+    everActive: true,
+    activeGeneration: null,
+    successor: null,
+    retiredHistory: [{
+      identity: identity({ generationId: PREDECESSOR_ID }),
+      state: 'retired',
+      activatedAt: '2026-09-12T03:00:00.000Z',
+      retiredAt: '2026-09-12T04:00:00.000Z',
+      predecessorGenerationId: null,
+      cutoffReceiptSha256: null,
+    }],
+  });
+  assert.throws(() => activationAuthority(retiredOnly), /re-enable legacy authority/u);
+
+  const successorOnly = validateActivationManifest({
+    schemaVersion: ACTIVATION_SCHEMA_VERSION,
+    revision: 1,
+    previousSha256: null,
+    everActive: true,
+    activeGeneration: null,
+    successor: {
+      identity: identity({ generationId: PREDECESSOR_ID }),
+      state: 'ready',
+      activatedAt: null,
+      retiredAt: null,
+      predecessorGenerationId: null,
+      cutoffReceiptSha256: null,
+    },
+    retiredHistory: [],
+  });
+  assert.throws(() => activationAuthority(successorOnly), /re-enable legacy authority/u);
 });
 
 test('rejects a schema mismatch, bad revision, and missing previous hash', () => {
@@ -163,6 +202,26 @@ test('a candidate cannot carry a cutoff receipt', () => {
       retiredHistory: [],
     }),
     /carries a cutoff receipt/u,
+  );
+});
+
+test('an active generation may leave the later storage cutoff link null', () => {
+  const manifest = validateActivationManifest({
+    schemaVersion: ACTIVATION_SCHEMA_VERSION,
+    revision: 2,
+    previousSha256: SHA,
+    everActive: true,
+    activeGeneration: activeEvidence({ cutoffReceiptSha256: null }),
+    successor: null,
+    retiredHistory: [],
+  });
+  assert.equal(manifest.activeGeneration?.cutoffReceiptSha256, null);
+});
+
+test('pre-versioned activation tombstones fail closed instead of being upgraded', () => {
+  assert.throws(
+    () => validateAnalyticsActivationTombstone({ schemaVersion: 1, everActive: true }),
+    /Unsupported activation tombstone schema/u,
   );
 });
 
@@ -296,7 +355,7 @@ test('retired history is bounded and must be retired', () => {
       successor: null,
       // A valid *active* evidence placed in retired history: the entry itself is
       // otherwise well-formed, so only the retired-state requirement can reject.
-      retiredHistory: [{ ...entry(1), state: 'active', retiredAt: null }],
+      retiredHistory: [{ ...entry(1), state: 'active', retiredAt: null, cutoffReceiptSha256: SHA }],
     }),
     /must be in the retired state/u,
   );

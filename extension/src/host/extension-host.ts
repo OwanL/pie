@@ -30,7 +30,7 @@ import { TokenRateService } from './token-rate-service';
 import { AggregateStatsService } from './aggregate-stats-service';
 import { EMPTY_PROVIDER_GATE_STATS, type ProviderGateStats } from '../shared/protocol/aggregate-stats';
 import { OPEN_TABS_STORAGE_KEY, ACTIVE_SESSION_STORAGE_KEY, PINNED_TABS_STORAGE_KEY, PINNED_TAB_GROUPS_STORAGE_KEY, PRIVATE_SESSION_PATHS_STORAGE_KEY } from './session-service/state';
-import { StatsService } from './stats-service';
+import { DisabledStatsService, StatsService, type StatsServicePort } from './stats-service';
 import {
   CanonicalAnalyticsReadModel,
   canonicalAnalyticsDatabasePath,
@@ -68,7 +68,11 @@ import { isPendingTabPath } from '../shared/tab-behavior';
 import { appendPieLog } from './util/pie-log';
 import { CanonicalAnalyticsCapture } from '../analytics/canonical-capture.js';
 import { ActivationStore } from '../analytics/activation-store.js';
-import { AnalyticsRuntime } from './analytics-runtime.js';
+import {
+  AnalyticsRuntime,
+  DisabledAnalyticsRuntime,
+  type AnalyticsRuntimePort,
+} from './analytics-runtime.js';
 import { HostAnalyticsTransport } from './analytics-transport.js';
 import type { AnalyticsDetailCapture, AnalyticsObservation } from '../../../shared/analytics/contracts.js';
 import { AnalyticsHandoffControl } from './analytics-handoff-control.js';
@@ -78,6 +82,7 @@ import {
 } from './analytics-handoff-discovery.js';
 import { createPerBootAnalyticsHandoffKey } from '../../../shared/analytics/handoff.js';
 import { SessionLifecycleStore } from '../backend/session-lifecycle-store.js';
+import { isFreshLegacyActivationState, resolveAnalyticsPolicy } from './analytics-policy.js';
 
 
 export const SIDEBAR_VIEW_TYPE = 'pie.sessionsView';
@@ -147,7 +152,7 @@ export class PieExtension implements vscode.Disposable {
   private readonly sidebarProvider: SidebarViewProvider;
   private readonly tokenRateService: TokenRateService;
   private readonly aggregateStatsService: AggregateStatsService;
-  private readonly statsService: StatsService;
+  private readonly statsService: StatsServicePort;
   private readonly service: SessionService;
   private shutdownPromise: Promise<void> | null = null;
   /** Coalesce command-palette, notice-action, and browser requests that can
@@ -170,14 +175,14 @@ export class PieExtension implements vscode.Disposable {
   private readonly browserServer: BrowserServer;
   /** Owns the canonical recorder/query helpers once an activation is recorded.
    * Dormant under legacy authority: start() spawns nothing. */
-  private readonly analyticsRuntime: AnalyticsRuntime;
+  private readonly analyticsRuntime: AnalyticsRuntimePort;
   /** Owns worker/subagent/MCP capture ingress under canonical authority. */
   private readonly analyticsTransport?: HostAnalyticsTransport;
   /** Registers this host for future authenticated all-host handoff discovery.
    * The control endpoint reports incomplete inventory until runtime leases and
    * backend process evidence are reconciled by a separate producer. */
-  private readonly analyticsHandoffRegistry: SessionLifecycleStore;
-  private readonly analyticsHandoffControl: AnalyticsHandoffControl;
+  private readonly analyticsHandoffRegistry?: SessionLifecycleStore;
+  private readonly analyticsHandoffControl?: AnalyticsHandoffControl;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -188,221 +193,244 @@ export class PieExtension implements vscode.Disposable {
       context.globalStorageUri.fsPath,
     );
 
-    // Production producer seams are always constructed. The authority is read
-    // from the validated activation manifest rather than hardcoded, so a
-    // recorded activation takes effect on the next host start and an absent
-    // manifest stays legacy. A malformed manifest throws out of this
-    // constructor, which fails host startup closed instead of capturing into an
-    // authority the host cannot read back.
+    // Normal boots construct the producer seams below and read authority from
+    // the validated activation manifest rather than hardcoding it. The
+    // process-local total-disabled rehearsal takes the separate branch below
+    // before any analytics storage/helper/control object is constructed.
     const dataPaths = resolvePieDataPaths({
       dataDir: process.env.PIE_DATA_DIR,
       agentDir: process.env.PI_CODING_AGENT_DIR,
     });
-    this.analyticsHandoffRegistry = new SessionLifecycleStore(
-      path.join(dataPaths.stateDir, 'session-lifecycle.sqlite'),
-    );
-    const activation = new ActivationStore({ stateDir: dataPaths.stateDir }).read();
-    const analyticsWorkspaceId = getWorkspaceAnalyticsId(context);
+    const analyticsPolicy = resolveAnalyticsPolicy();
+    const analyticsDisabled = analyticsPolicy === 'total-disabled';
+    const analyticsWorkspaceId = analyticsDisabled ? 'analytics-disabled' : getWorkspaceAnalyticsId(context);
     const analyticsProcessGeneration = crypto.randomUUID();
-    const runtimeIdentity = getPieRuntimeIdentity(context);
-    // The environment override is an explicit launch-channel capability. A
-    // normal host boot creates a fresh in-memory key so an old boot's signed
-    // requests cannot be replayed; the key is never persisted or returned by
-    // the status endpoint. Until a trusted controller receives that key from
-    // the launch channel, this endpoint is host-local evidence only and does
-    // not constitute an all-host handoff capability.
-    const analyticsHandoffKey = process.env.PIE_ANALYTICS_HANDOFF_KEY?.trim()
-      || createPerBootAnalyticsHandoffKey();
-    const activeAnalyticsGenerationId = activation.authority === 'canonical'
-      ? activation.manifest?.activeGeneration?.identity.generationId
-      : undefined;
-    this.analyticsHandoffControl = new AnalyticsHandoffControl({
-      registry: this.analyticsHandoffRegistry,
-      identity: {
-        hostInstanceId: analyticsProcessGeneration,
-        workspaceId: analyticsWorkspaceId,
-        generationId: analyticsProcessGeneration,
-        buildId: PIE_BUILD_ID,
-        processId: process.pid,
-        capabilities: ['host-discovery', 'host-status'],
-      },
-      key: analyticsHandoffKey,
-      readInventory: async () => {
-        if (!runtimeIdentity) {
+    let analyticsRuntime: AnalyticsRuntimePort;
+    let analyticsTransport: HostAnalyticsTransport | undefined;
+    let analyticsHandoffRegistry: SessionLifecycleStore | undefined;
+    let analyticsHandoffControl: AnalyticsHandoffControl | undefined;
+    let statsService: StatsServicePort;
+
+    if (analyticsDisabled) {
+      // The rehearsal is valid only from a fresh legacy state. In particular,
+      // do not suppress an active/candidate authority and call that disabled.
+      const activation = new ActivationStore({ stateDir: dataPaths.stateDir }).read();
+      if (!isFreshLegacyActivationState(activation)) {
+        throw new Error('Total analytics-disabled rehearsal requires a fresh legacy activation state.');
+      }
+      analyticsRuntime = new DisabledAnalyticsRuntime();
+      statsService = new DisabledStatsService();
+    } else {
+      analyticsHandoffRegistry = new SessionLifecycleStore(
+        path.join(dataPaths.stateDir, 'session-lifecycle.sqlite'),
+      );
+      const activation = new ActivationStore({ stateDir: dataPaths.stateDir }).read();
+      const runtimeIdentity = getPieRuntimeIdentity(context);
+      // The environment override is an explicit launch-channel capability. A
+      // normal host boot creates a fresh in-memory key so an old boot's signed
+      // requests cannot be replayed; the key is never persisted or returned by
+      // the status endpoint. Until a trusted controller receives that key from
+      // the launch channel, this endpoint is host-local evidence only and does
+      // not constitute an all-host handoff capability.
+      const analyticsHandoffKey = process.env.PIE_ANALYTICS_HANDOFF_KEY?.trim()
+        || createPerBootAnalyticsHandoffKey();
+      const activeAnalyticsGenerationId = activation.authority === 'canonical'
+        ? activation.manifest?.activeGeneration?.identity.generationId
+        : undefined;
+      analyticsHandoffControl = new AnalyticsHandoffControl({
+        registry: analyticsHandoffRegistry,
+        identity: {
+          hostInstanceId: analyticsProcessGeneration,
+          workspaceId: analyticsWorkspaceId,
+          generationId: analyticsProcessGeneration,
+          buildId: PIE_BUILD_ID,
+          processId: process.pid,
+          capabilities: ['host-discovery', 'host-status'],
+        },
+        key: analyticsHandoffKey,
+        readInventory: async () => {
+          if (!runtimeIdentity) {
+            return {
+              kind: 'registered-hosts-only',
+              complete: false,
+              reason: 'runtime-generation-and-process-reconciliation-incomplete',
+              observedAtMs: Date.now(),
+              registeredHostCount: 0,
+              reconciledHostCount: 0,
+              reasonCodes: ['runtime-identity-unavailable'],
+            };
+          }
+          const discovery = await discoverAnalyticsHostWriters({
+            workspaceId: analyticsWorkspaceId,
+            registry: analyticsHandoffRegistry!,
+            runtimeRootPath: path.join(context.extensionPath, 'pie-runtime'),
+            runtimeIdentity,
+            ...(activeAnalyticsGenerationId ? { analyticsGenerationId: activeAnalyticsGenerationId } : {}),
+          });
           return {
             kind: 'registered-hosts-only',
             complete: false,
-            reason: 'runtime-generation-and-process-reconciliation-incomplete',
-            observedAtMs: Date.now(),
-            registeredHostCount: 0,
-            reconciledHostCount: 0,
-            reasonCodes: ['runtime-identity-unavailable'],
+            reason: discovery.complete
+              ? 'runtime-generation-and-process-reconciliation-unwired'
+              : 'runtime-generation-and-process-reconciliation-incomplete',
+            observedAtMs: discovery.observedAtMs,
+            registeredHostCount: discovery.hosts.length,
+            reconciledHostCount: discovery.hosts.filter(({ status }) => status === 'reconciled').length,
+            reasonCodes: [...new Set(discovery.reasons.map(({ code }) => code))].slice(0, 32),
           };
-        }
-        const discovery = await discoverAnalyticsHostWriters({
-          workspaceId: analyticsWorkspaceId,
-          registry: this.analyticsHandoffRegistry,
-          runtimeRootPath: path.join(context.extensionPath, 'pie-runtime'),
-          runtimeIdentity,
-          ...(activeAnalyticsGenerationId ? { analyticsGenerationId: activeAnalyticsGenerationId } : {}),
-        });
-        return {
-          kind: 'registered-hosts-only',
-          complete: false,
-          reason: discovery.complete
-            ? 'runtime-generation-and-process-reconciliation-unwired'
-            : 'runtime-generation-and-process-reconciliation-incomplete',
-          observedAtMs: discovery.observedAtMs,
-          registeredHostCount: discovery.hosts.length,
-          reconciledHostCount: discovery.hosts.filter(({ status }) => status === 'reconciled').length,
-          reasonCodes: [...new Set(discovery.reasons.map(({ code }) => code))].slice(0, 32),
-        };
-      },
-      onError: (error, stage) => appendPieLog('warn', 'analytics-handoff', stage, { error: error.message }),
-    });
-    const canonicalActive = activation.authority === 'canonical'
-      && activation.manifest?.activeGeneration !== undefined
-      && activation.manifest?.activeGeneration !== null
-      && activation.sha256 !== null;
-    // This is the sole descriptor snapshot shared by host capture, helper
-    // startup, backend construction, and loaded-generation evidence. The
-    // runtime rechecks the on-disk snapshot before readiness and refuses a
-    // transition observed during startup.
-    const activationDescriptor = canonicalActive
-      ? Object.freeze({
-          generationId: activation.manifest!.activeGeneration!.identity.generationId,
-          buildId: activation.manifest!.activeGeneration!.identity.buildId,
-          manifestRevision: activation.manifest!.revision,
-          manifestSha256: activation.sha256!,
-          workspaceId: analyticsWorkspaceId,
-          hostInstanceId: analyticsProcessGeneration,
-        })
-      : undefined;
-    // Under canonical authority the capture requires a generation id and fact,
-    // detail and lifecycle sinks, and throws without them. Those sinks come from
-    // the canonical helpers, which only exist once AnalyticsRuntime.start() has
-    // succeeded, so the runtime is created here and started in start() below.
-    const analyticsRuntime = new AnalyticsRuntime({
-      stateDir: dataPaths.stateDir,
-      analyticsDir: dataPaths.analyticsDir,
-      recorderWorkerScript: path.join(runtimeOutputDirectory(context), 'analytics-recorder-worker.js'),
-      queryWorkerScript: path.join(runtimeOutputDirectory(context), 'analytics-query-worker.js'),
-      buildId: PIE_BUILD_ID,
-      workspaceId: analyticsWorkspaceId,
-      processGeneration: analyticsProcessGeneration,
-      activationSnapshot: activation,
-      restartNonce: process.env.PIE_ANALYTICS_RESTART_NONCE?.trim() || null,
-      onError: (error, stage) => {
-        appendPieLog('error', 'analytics', `canonical analytics ${stage} failed`, {
-          error: error instanceof Error ? error.message : String(error),
-        });
-      },
-    });
+        },
+        onError: (error, stage) => appendPieLog('warn', 'analytics-handoff', stage, { error: error.message }),
+      });
+      const canonicalActive = activation.authority === 'canonical'
+        && activation.manifest?.activeGeneration !== undefined
+        && activation.manifest?.activeGeneration !== null
+        && activation.sha256 !== null;
+      // This is the sole descriptor snapshot shared by host capture, helper
+      // startup, backend construction, and loaded-generation evidence. The
+      // runtime rechecks the on-disk snapshot before readiness and refuses a
+      // transition observed during startup.
+      const activationDescriptor = canonicalActive
+        ? Object.freeze({
+            generationId: activation.manifest!.activeGeneration!.identity.generationId,
+            buildId: activation.manifest!.activeGeneration!.identity.buildId,
+            manifestRevision: activation.manifest!.revision,
+            manifestSha256: activation.sha256!,
+            workspaceId: analyticsWorkspaceId,
+            hostInstanceId: analyticsProcessGeneration,
+          })
+        : undefined;
+      // Under canonical authority the capture requires a generation id and fact,
+      // detail and lifecycle sinks, and throws without them. Those sinks come from
+      // the canonical helpers, which only exist once AnalyticsRuntime.start() has
+      // succeeded, so the runtime is created here and started in start() below.
+      const analyticsRuntimeImpl = new AnalyticsRuntime({
+        stateDir: dataPaths.stateDir,
+        analyticsDir: dataPaths.analyticsDir,
+        recorderWorkerScript: path.join(runtimeOutputDirectory(context), 'analytics-recorder-worker.js'),
+        queryWorkerScript: path.join(runtimeOutputDirectory(context), 'analytics-query-worker.js'),
+        buildId: PIE_BUILD_ID,
+        workspaceId: analyticsWorkspaceId,
+        processGeneration: analyticsProcessGeneration,
+        activationSnapshot: activation,
+        restartNonce: process.env.PIE_ANALYTICS_RESTART_NONCE?.trim() || null,
+        onError: (error, stage) => {
+          appendPieLog('error', 'analytics', `canonical analytics ${stage} failed`, {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        },
+      });
+      analyticsRuntime = analyticsRuntimeImpl;
+      // Under canonical authority the capture requires fact, detail and lifecycle
+      // sinks, and throws without them. Those sinks are the canonical recorder,
+      // which only exists after AnalyticsRuntime.start() succeeds. This holder is
+      // therefore the sink now: it forwards once the runtime has attached the real
+      // recorder and throws before that, so a record can never be silently dropped
+      // if a producer runs before the helpers are ready.
+      const runtimeSinks = {
+        preflightDetail: (value: unknown) => {
+          const sink = analyticsRuntimeImpl.sink;
+          if (!sink) throw new Error('Canonical detail sink is not ready; activation has not completed.');
+          sink.preflightDetail(value);
+        },
+        submit: (observation: AnalyticsObservation<object>) => {
+          const sink = analyticsRuntimeImpl.sink;
+          if (!sink) throw new Error('Canonical capture sink is not ready; activation has not completed.');
+          return sink.submit(observation);
+        },
+        submitDetail: (capture: AnalyticsDetailCapture) => {
+          const sink = analyticsRuntimeImpl.sink;
+          if (!sink) throw new Error('Canonical detail sink is not ready; activation has not completed.');
+          return sink.submitDetail(capture);
+        },
+        bindPendingCreate: (
+          pendingOperationId: string,
+          rootSessionId: string,
+          sourceKey: string,
+          timestampMs: number | string | bigint,
+        ) => {
+          const sink = analyticsRuntimeImpl.sink;
+          if (!sink) throw new Error('Canonical lifecycle sink is not ready; activation has not completed.');
+          return sink.bindPendingCreate(pendingOperationId, rootSessionId, sourceKey, timestampMs);
+        },
+        deleteSession: (
+          rootSessionId: string,
+          sourceKey: string,
+          timestampMs: number | string | bigint,
+          pendingOperationId?: string,
+        ) => {
+          const sink = analyticsRuntimeImpl.sink;
+          if (!sink) throw new Error('Canonical lifecycle sink is not ready; activation has not completed.');
+          return sink.deleteSession(rootSessionId, sourceKey, timestampMs, pendingOperationId);
+        },
+      };
+      analyticsTransport = canonicalActive
+        ? new HostAnalyticsTransport({
+            generationId: activationDescriptor!.generationId,
+            buildId: activationDescriptor!.buildId,
+            workspaceId: activationDescriptor!.workspaceId,
+            backend,
+            recorder: {
+              submitTracked: (observation, onDisposition) => {
+                const sink = analyticsRuntimeImpl.sink;
+                if (!sink) throw new Error('Canonical capture sink is not ready; activation has not completed.');
+                sink.submitTracked(observation, onDisposition);
+              },
+              submitTrackedDetail: (capture, onDisposition) => {
+                const sink = analyticsRuntimeImpl.sink;
+                if (!sink) throw new Error('Canonical detail sink is not ready; activation has not completed.');
+                sink.submitTrackedDetail(capture, onDisposition);
+              },
+            },
+            onError: (error) => appendPieLog('warn', 'analytics', 'worker analytics ingress rejected', {
+              error: error.message,
+            }),
+          })
+        : undefined;
+      const analyticsCapture = new CanonicalAnalyticsCapture({
+        authority: canonicalActive ? 'canonical' : 'legacy',
+        ...(canonicalActive
+          ? { generationId: activationDescriptor!.generationId }
+          : {}),
+        workspaceId: analyticsWorkspaceId,
+        buildId: PIE_BUILD_ID,
+        processGeneration: analyticsProcessGeneration,
+        ...(canonicalActive
+          ? { sink: runtimeSinks, detailSink: runtimeSinks, lifecycleSink: runtimeSinks }
+          : {}),
+      });
+
+      // P5 durable read model: path-only resolution until a consumer queries it
+      // (one disposable helper fork per query). The canonical data root shares
+      // the backend's explicit-failure resolution; queries against an absent
+      // database fail explicitly instead of falling back to legacy stores.
+      // Construction is unconditional; StatsService withholds the model unless
+      // canonical authority is active, so no consumer can read it early.
+      const analyticsReadModel = new CanonicalAnalyticsReadModel({
+        databasePath: canonicalAnalyticsDatabasePath(dataPaths.analyticsDir),
+        workerScript: path.join(runtimeOutputDirectory(context), 'analytics-query-worker.js'),
+        beforeProviderAggregateRead: (request) => analyticsRuntimeImpl.prepareProviderDailyProjection(request),
+      });
+
+      statsService = new StatsService({
+        dataOutcomesRootPath,
+        legacyUsageDataRootPath: context.globalStorageUri.fsPath,
+        workspaceId: getWorkspaceAnalyticsId(context),
+        legacyWorkspaceIds: getLegacyWorkspaceAnalyticsIds(),
+        scheduleRender: () => this.scheduleRender(),
+        getExperimentAssignment: () => this.getExperimentAssignment(),
+        getArchState: () => this.archState,
+        dispatchArchEvent: (event) => this.dispatchArchEvent(event),
+        getAgentDir: () => process.env.PI_CODING_AGENT_DIR?.trim() || null,
+        analyticsCapture,
+        analyticsReadModel,
+      });
+    }
+
     this.analyticsRuntime = analyticsRuntime;
-    // Under canonical authority the capture requires fact, detail and lifecycle
-    // sinks, and throws without them. Those sinks are the canonical recorder,
-    // which only exists after AnalyticsRuntime.start() succeeds. This holder is
-    // therefore the sink now: it forwards once the runtime has attached the real
-    // recorder and throws before that, so a record can never be silently dropped
-    // if a producer runs before the helpers are ready.
-    const runtimeSinks = {
-      preflightDetail: (value: unknown) => {
-        const sink = analyticsRuntime.sink;
-        if (!sink) throw new Error('Canonical detail sink is not ready; activation has not completed.');
-        sink.preflightDetail(value);
-      },
-      submit: (observation: AnalyticsObservation<object>) => {
-        const sink = analyticsRuntime.sink;
-        if (!sink) throw new Error('Canonical capture sink is not ready; activation has not completed.');
-        return sink.submit(observation);
-      },
-      submitDetail: (capture: AnalyticsDetailCapture) => {
-        const sink = analyticsRuntime.sink;
-        if (!sink) throw new Error('Canonical detail sink is not ready; activation has not completed.');
-        return sink.submitDetail(capture);
-      },
-      bindPendingCreate: (
-        pendingOperationId: string,
-        rootSessionId: string,
-        sourceKey: string,
-        timestampMs: number | string | bigint,
-      ) => {
-        const sink = analyticsRuntime.sink;
-        if (!sink) throw new Error('Canonical lifecycle sink is not ready; activation has not completed.');
-        return sink.bindPendingCreate(pendingOperationId, rootSessionId, sourceKey, timestampMs);
-      },
-      deleteSession: (
-        rootSessionId: string,
-        sourceKey: string,
-        timestampMs: number | string | bigint,
-        pendingOperationId?: string,
-      ) => {
-        const sink = analyticsRuntime.sink;
-        if (!sink) throw new Error('Canonical lifecycle sink is not ready; activation has not completed.');
-        return sink.deleteSession(rootSessionId, sourceKey, timestampMs, pendingOperationId);
-      },
-    };
-    this.analyticsTransport = canonicalActive
-      ? new HostAnalyticsTransport({
-          generationId: activationDescriptor!.generationId,
-          buildId: activationDescriptor!.buildId,
-          workspaceId: activationDescriptor!.workspaceId,
-          backend,
-          recorder: {
-            submitTracked: (observation, onDisposition) => {
-              const sink = analyticsRuntime.sink;
-              if (!sink) throw new Error('Canonical capture sink is not ready; activation has not completed.');
-              sink.submitTracked(observation, onDisposition);
-            },
-            submitTrackedDetail: (capture, onDisposition) => {
-              const sink = analyticsRuntime.sink;
-              if (!sink) throw new Error('Canonical detail sink is not ready; activation has not completed.');
-              sink.submitTrackedDetail(capture, onDisposition);
-            },
-          },
-          onError: (error) => appendPieLog('warn', 'analytics', 'worker analytics ingress rejected', {
-            error: error.message,
-          }),
-        })
-      : undefined;
-    const analyticsCapture = new CanonicalAnalyticsCapture({
-      authority: canonicalActive ? 'canonical' : 'legacy',
-      ...(canonicalActive
-        ? { generationId: activationDescriptor!.generationId }
-        : {}),
-      workspaceId: analyticsWorkspaceId,
-      buildId: PIE_BUILD_ID,
-      processGeneration: analyticsProcessGeneration,
-      ...(canonicalActive
-        ? { sink: runtimeSinks, detailSink: runtimeSinks, lifecycleSink: runtimeSinks }
-        : {}),
-    });
-
-    // P5 durable read model: path-only resolution until a consumer queries it
-    // (one disposable helper fork per query). The canonical data root shares
-    // the backend's explicit-failure resolution; queries against an absent
-    // database fail explicitly instead of falling back to legacy stores.
-    // Construction is unconditional; StatsService withholds the model unless
-    // canonical authority is active, so no consumer can read it early.
-    const analyticsReadModel = new CanonicalAnalyticsReadModel({
-      databasePath: canonicalAnalyticsDatabasePath(dataPaths.analyticsDir),
-      workerScript: path.join(runtimeOutputDirectory(context), 'analytics-query-worker.js'),
-      beforeProviderAggregateRead: (request) => analyticsRuntime.prepareProviderDailyProjection(request),
-    });
-
-    this.statsService = new StatsService({
-      dataOutcomesRootPath,
-      legacyUsageDataRootPath: context.globalStorageUri.fsPath,
-      workspaceId: getWorkspaceAnalyticsId(context),
-      legacyWorkspaceIds: getLegacyWorkspaceAnalyticsIds(),
-      scheduleRender: () => this.scheduleRender(),
-      getExperimentAssignment: () => this.getExperimentAssignment(),
-      getArchState: () => this.archState,
-      dispatchArchEvent: (event) => this.dispatchArchEvent(event),
-      getAgentDir: () => process.env.PI_CODING_AGENT_DIR?.trim() || null,
-      analyticsCapture,
-      analyticsReadModel,
-    });
+    this.analyticsTransport = analyticsTransport;
+    this.analyticsHandoffRegistry = analyticsHandoffRegistry;
+    this.analyticsHandoffControl = analyticsHandoffControl;
+    this.statsService = statsService;
 
     this.service = new SessionService(
       context,
@@ -434,12 +462,13 @@ export class PieExtension implements vscode.Disposable {
     this.tokenRateService = new TokenRateService({
       getArchState: () => this.archState,
       onActiveRateChanged: () => this.sidebarProvider.scheduleState(),
-      onRatesTick: () => this.aggregateStatsService.refreshLive(),
+      onRatesTick: analyticsDisabled ? undefined : () => this.aggregateStatsService.refreshLive(),
     });
 
     this.aggregateStatsService = new AggregateStatsService({
       getArchState: () => this.archState,
       statsService: this.statsService,
+      enabled: !analyticsDisabled,
       tokenRateService: this.tokenRateService,
       getAgentDir: () => process.env.PI_CODING_AGENT_DIR?.trim() || null,
       fetchProviderGateStats: () => this.backend
@@ -679,7 +708,7 @@ export class PieExtension implements vscode.Disposable {
 
   async start(): Promise<void> {
     this.updateStatusBar('Starting');
-    await this.analyticsHandoffControl.start();
+    await this.analyticsHandoffControl?.start();
     this.hydratePrivacyMarkers();
     this.tokenRateService.start();
     this.aggregateStatsService.start();
@@ -1301,7 +1330,7 @@ export class PieExtension implements vscode.Disposable {
       // drain. The registry retains this identity as stopping evidence: the
       // endpoint closing is not proof that backend/recorder writers drained,
       // and is never interpreted as proof that every writer was discovered.
-      await this.analyticsHandoffControl.stop();
+      await this.analyticsHandoffControl?.stop();
       // M2 (§7.4): stop the browser server FIRST — stop accepting
       // HTTP/upgrades, close tracked WebSocket clients, close/await the HTTP
       // server, dispose browser renderer sessions/hub — then continue the
@@ -1330,7 +1359,7 @@ export class PieExtension implements vscode.Disposable {
       this.backend.dispose();
       await this.analyticsRuntime.stop();
       this.analyticsTransport?.dispose();
-      this.analyticsHandoffRegistry.close();
+      this.analyticsHandoffRegistry?.close();
       this.service.dispose();
       this.sidebarProvider.dispose();
       await disposeLivePipelineTrace();

@@ -8,6 +8,7 @@ import type {
 } from '../../../shared/analytics/contracts.js';
 import { deriveAnalyticsIdempotencyKey } from '../../../shared/analytics/contracts.js';
 import {
+  ANALYTICS_ROUTE_CLOSED_EVENT,
   ANALYTICS_TRANSPORT_DETAIL_CHUNK_BYTES,
   ANALYTICS_TRANSPORT_MAX_DETAIL_BYTES,
   ANALYTICS_TRANSPORT_MAX_DETAIL_CHUNKS,
@@ -121,6 +122,10 @@ class FakeBackend implements AnalyticsTransportBackend {
 
   emit(value: AnalyticsTransportIngressEnvelope): void {
     this.eventListener?.({ event: 'analytics.capture', payload: value });
+  }
+
+  emitRouteClosed(closedRoute: AnalyticsTransportRoute): void {
+    this.eventListener?.({ event: ANALYTICS_ROUTE_CLOSED_EVENT, payload: { route: closedRoute } });
   }
 
   ready(): void {
@@ -262,6 +267,25 @@ test('shutdown rejects partial detail ownership before late chunks and waits for
   assert.deepEqual(transport.assemblyBacklog, { records: 0, bytes: 0 });
   transport.receive(ingress(framed.chunks[0]!));
   assert.equal(backend.requests.length, 1, 'late producer traffic is fenced after shutdown');
+  transport.dispose();
+});
+
+test('confirmed worker route closure clears only that route detail assemblies', () => {
+  const { backend, transport } = fixture();
+  const first = framedDetail(1);
+  const second = framedDetail(2);
+  const secondRoute = { ...route, workerId: 'worker-2', workerGeneration: 2, workerPid: 5678 };
+  transport.receive(ingress(first.start));
+  transport.receive(ingress(second.start, secondRoute));
+  assert.deepEqual(transport.assemblyBacklog, { records: 2, bytes: 3 });
+
+  backend.emitRouteClosed(route);
+  assert.deepEqual(transport.assemblyBacklog, { records: 1, bytes: 2 });
+  backend.emitRouteClosed({ ...route, workerGeneration: 2 });
+  assert.deepEqual(transport.assemblyBacklog, { records: 1, bytes: 2 }, 'nearby identity cannot clear another route');
+  backend.emitRouteClosed(secondRoute);
+  assert.deepEqual(transport.assemblyBacklog, { records: 0, bytes: 0 });
+  assert.equal(backend.requests.length, 0, 'route cleanup does not ACK a dead worker');
   transport.dispose();
 });
 
