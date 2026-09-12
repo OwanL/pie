@@ -94,6 +94,12 @@ export default defineConfig(({ mode }) => {
             'analytics-query-worker': path.join(srcDir, 'analytics', 'query-worker-entry.ts'),
             'analytics-query-client': path.join(srcDir, 'analytics', 'query-client.ts'),
             'analytics-sqlite-recorder': path.join(srcDir, 'analytics', 'sqlite-recorder.ts'),
+            // Emitted as entries, not only bundled into extension.js, so the
+            // detached one-shot activation helper can import the activation
+            // store and sequence directly. A module reachable only from
+            // extension.js is tree-shaken into it and has no exports to import.
+            'analytics-activation-store': path.join(srcDir, 'analytics', 'activation-store.ts'),
+            'analytics-activation-sequence': path.join(srcDir, 'analytics', 'activation-sequence.ts'),
             'cold-browse-helper-entry': path.join(srcDir, 'backend', 'cold-browse-helper-entry.ts'),
             'initial-context-estimate-worker': path.join(srcDir, 'backend', 'initial-context-estimate-worker.ts'),
             'phase4-worker-command-extension': path.join(rootDir, 'test', 'fixtures', 'phase4-worker-command-extension.ts'),
