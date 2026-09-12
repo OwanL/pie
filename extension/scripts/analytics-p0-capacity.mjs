@@ -175,9 +175,18 @@ export function validateMemoryTopologySamples(samples, { expectedPlan, recorderW
     const sampleInstances = new Set();
     let workerTotal = 0;
     let workerMaximum = 0;
+    // Required worker fields, plus optional heap detail. The heap fields were
+    // added to separate a retained heap from V8 reserving address space, which
+    // RSS alone cannot distinguish; they are validated below when present.
+    const requiredWorkerKeys = ['identity', 'rssBytes'];
+    const optionalWorkerKeys = ['heapTotalBytes', 'heapUsedBytes', 'externalBytes', 'arrayBuffersBytes'];
     for (const [workerIndex, worker] of sample.workers.entries()) {
-      if (!worker || typeof worker !== 'object' || Array.isArray(worker)
-        || JSON.stringify(Object.keys(worker).sort()) !== JSON.stringify(['identity', 'rssBytes'])) {
+      const workerKeys = worker && typeof worker === 'object' && !Array.isArray(worker)
+        ? Object.keys(worker).sort()
+        : [];
+      const workerShapeValid = requiredWorkerKeys.every((key) => workerKeys.includes(key))
+        && workerKeys.every((key) => requiredWorkerKeys.includes(key) || optionalWorkerKeys.includes(key));
+      if (!worker || typeof worker !== 'object' || Array.isArray(worker) || !workerShapeValid) {
         errors.push(`memory topology sample[${index}] worker[${workerIndex}] has an invalid shape`);
         continue;
       }
