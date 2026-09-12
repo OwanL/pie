@@ -14,7 +14,7 @@ Owning specifications: runbook; `docs/ANALYTICS_REWORK_PLAN.md` §§1, 11.6, 17;
 
 ---
 
-## Checkpoint 54 - 2026-09-13T20:08Z, corrected three-unit integration barrier
+## Checkpoint 54 - 2026-09-12T20:08Z, corrected three-unit integration barrier
 
 The frozen three-unit candidate was reviewed at checkout `f9853478ef4ffa2024557f1e7ad0f1f3e77212d3`.
 The first serialized affected run (`C:\dev\scratch\pie-projection-integration-20260913-r01\npm-test-r09.log`)
@@ -37,6 +37,20 @@ retains explicit offline `--export` input and DuckDB staging, and the legacy ext
 boundary remains fail-closed under canonical authority until the separately gated P7 replacement. No
 runtime publication, activation, restart, live data mutation, or build has occurred. The four user-owned
 model/settings files remain outside the reviewed allowlist.
+
+## Checkpoint 55 - 2026-09-12T20:12Z, committed candidate and validation artifact
+
+This follow-on documentation commit corrects Checkpoint 54's date label; the recorded run occurred on
+2026-09-12 UTC. After its bounded correction, the reviewed 22-path candidate was committed and pushed as
+`10d09fd58f64a7744c8abc4760b6106b38e301a2`; HEAD and `origin/master` matched. The four user-owned
+model/settings files remain dirty and excluded.
+
+The single authorized no-sync validation build passed (`build-terminal-r09.json`) with coordinated
+host/renderer build identity `70a6ad110e7649c8d69b`. It produced 41 output files; their frozen per-file
+hash manifest is `C:\dev\scratch\pie-projection-integration-20260913-r01\output-manifest-r09.json` with
+SHA-256 `1f0a2558fc5b790f5621308d71e504bb6f824220ab3fd676832be10839fd3413` and source Git tree
+`4c533c654278abe4b770e054570dbf94ec792fbf`. No publication, activation, restart, or live-host mutation
+occurred. The candidate remains P0-unqualified and the canonical activation/cutover gates remain closed.
 
 ## Checkpoint 53 - 2026-09-12T19:46Z, actual canonical launch exposes missing recorder schema status
 
