@@ -3826,7 +3826,25 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
    * genuinely required (private-close scrubbing). */
   checkpoint(): void {
     this.assertWritable();
-    this.database.exec('PRAGMA wal_checkpoint(PASSIVE)');
+    // A flush must make committed writes durable, and must never fail just
+    // because another helper is mid-write.
+    //
+    // TRUNCATE both checkpoints the frames and folds the WAL file back to zero
+    // bytes, which is the state the capacity calibration relies on. It needs
+    // exclusive access, so contention is reported as a `busy` flag rather than
+    // thrown, and is expected whenever another helper is writing. In that case
+    // fall back to PASSIVE, which still checkpoints the frames durably without
+    // requiring exclusivity; the WAL then stays non-empty until the next
+    // quiescent flush, and every capacity snapshot is taken with all helpers
+    // stopped.
+    //
+    // Truncating matters beyond tidiness: the calibration measures the database
+    // family as main + WAL + shared-memory. A WAL left over a quiescent
+    // boundary makes those totals depend on how much happened to be outstanding
+    // rather than on how much data is stored, so a later truncation moves the
+    // totals *backwards* while the database only grows.
+    const result = this.truncateWalAndRead();
+    if (toNumber(result.busy) !== 0) this.database.exec('PRAGMA wal_checkpoint(PASSIVE)');
   }
 
   /** Truncate the WAL, requiring exclusive access.
