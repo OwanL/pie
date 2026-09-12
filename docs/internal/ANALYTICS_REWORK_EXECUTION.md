@@ -2503,3 +2503,46 @@ worker RSS is now the open question rather than the serialization hop. All other
 1,000,000 facts, 100,003 details, handoff p99 `0.057` ms, responsiveness proxy p95 `13.6` ms, indexed
 query `1.90` ms, 2 MiB detail `4.22` ms, temporary footprint `7.94` GB within the 16 GiB cap, and
 `scaleHistoryRows` 1,000,000. Cleanup completed and removed the proof root.
+
+### Checkpoint 33: storage timeout fix verified; RSS breach attributed to the 2 KiB detail region
+
+**Verified repair.** Re-measuring the real `AnalyticsQueryClient` against a fresh 1M-fact + 100,000-detail
+database (`pie-query-client-timeout-20260912-r01/report.json`, schema version 6): the `storage` command
+is now **`979` ms**, down from the `10,022` ms that timed out. Every command is well inside the 10 s
+default — schema `360` ms, bounded settlements `60` ms, second bounded read `64` ms,
+`historicalDimensions` `81` ms, logical count `377` ms, default detail range `365` ms, full 2 MiB chunk
+walk `1,921` ms, total session `4,209` ms. The `inPlaceCorruption` failure was therefore this same bug;
+its terminal probe traverses the same read path. The maintained counter is doing its job.
+
+**RSS breach attributed.** The 1M report's topology samples
+(`pie-p0-repair-scale-20260912-r03/scale.json`, 219 samples) place the peak by phase:
+
+| Phase | Max worker RSS |
+|---|---|
+| facts (peak `after-fact-batch-400000`, four workers) | 207.9 MB |
+| **variable-details** (peak `after-detail-batch-72000`, single detail host) | **279.1 MB** |
+| nested-details | 63.9 MB |
+
+Within the detail phase the peak is in the **2 KiB region** and *declines* for larger payloads —
+2 KiB region max `279` MB, 32 KiB region `276` MB, 2 MiB region `270` MB. That independently reconfirms
+the earlier matrix finding that worker RSS scales with **payload count**, not payload volume, and it
+rules out the large-payload path as the driver. The detail phase uses one host for ~100,003 payloads
+while the fact phase spreads 1,000,000 facts across four workers, so a single worker absorbs roughly an
+order of magnitude more payload transitions than any fact-phase worker — which is why an incremental
+per-payload cost that is invisible at the fact phase becomes decisive here.
+
+**Remaining candidates (not yet isolated).** Two per-payload native costs survive in the worker path
+and neither is a retained collection (the recorder holds no accumulating maps or arrays, confirmed by
+inspection):
+
+1. **`minimumOwnedBytes`** in `recorder-supervisor.ts` performs a full recursive traversal of every
+   payload — a `pending` stack, a `WeakSet`, `Object.entries` per object and `key.length` accounting —
+   on each `enqueueCapture`, purely to estimate owned bytes for the preflight capacity check.
+2. **The transport envelope** re-serializes the whole capture with
+   `serialize({ kind, subject, value })`, so payload bytes already serialized at the producer are
+   serialized a second time for IPC, then deserialized in the worker.
+
+A three-point scaling measurement (50k / 100k / 200k details through the real supervisor) is running to
+establish whether worker RSS **plateaus** (a bounded allocator high-water, in which case the honest
+question is the gate's ceiling for a single detail host) or **grows without bound** (a genuine leak, in
+which case it is a defect to fix). The answer decides the next action and has not been assumed.
