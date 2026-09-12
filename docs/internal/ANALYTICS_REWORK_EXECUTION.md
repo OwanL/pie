@@ -3431,6 +3431,56 @@ construction. So wiring `AnalyticsRuntime` into the host is not optional cleanup
 recorder/query helpers and hand their sinks to the capture *before* an activation can succeed. This is
 the concrete shape of the remaining C3 work, and it is why the runtime needs a production caller.
 
+## P0 1M scenario passes every gate
+
+Run `pie-p0-scale-verify-20260912-r08`, scenario `scale`, seed `scale-verify-r08`, harness
+`p0-baseline-scale-v7-recorder-heap-ceiling`, recorder heap ceiling 128 MiB. Decision:
+**scenario-passed**, `failedGates: []`, 1,000,000 primary rows and 100,003 detail rows exactly.
+
+| Gate | Value | Gate |
+|---|---|---|
+| exactPrimaryRows | 1,000,000 | exact |
+| exactDetailRows | 100,003 | exact |
+| handoffP99 | 0.048 ms | <= 9 ms |
+| responsivenessProxyP95 | 19.5 ms | <= 50 ms |
+| indexedQuery | 1.16 ms | <= 250 ms |
+| largeDetailQuery | 3.16 ms | <= 9 s |
+| allHistoryProjection | 3,498 ms | <= 9 s |
+| recorderWorkerRss | 238.8 MiB | <= 256 MiB |
+| inPlaceCorruption | eligible | capacity calibration valid |
+| temporaryFootprint | 1.7 MiB at final | <= 16 GiB |
+
+Both gates that failed in the previous full run are now fixed, with the cause confirmed rather than
+inferred:
+
+- **allHistoryProjection 10,452 -> 3,498 ms.** The predicted value from the 400k-settlement probe was
+  about 2,300 ms; the real 1M figure is 3,498 ms, so the fix delivered 3.0x. The difference from the
+  prediction is expected — the probe fixture makes every fact a settlement, while the harness has one
+  settlement per four facts but also a colder cache.
+- **recorderWorkerRss 263.3 -> 238.8 MiB.** The heap ceiling is what changed it: the last topology sample
+  shows `heapTotal` 12.5 MiB against ~141 MiB unbounded, and `heapUsed` 7.8 MiB. The reported peak RSS of
+  238.8 MiB occurs earlier in the run, during a pass the ceiling bounds rather than eliminates. This
+  confirms the reservation explanation from the heap evidence and refutes the leak explanation.
+
+The capture-acknowledgement fix also shows up as a latency improvement rather than only a throughput one:
+`crossHostCommitVisibleMs` fell from 398 ms in the previous run to 72 ms.
+
+**One gate is qualified under a non-default setting, and that must be stated rather than implied.**
+`recorderWorkerRss` passes with `PIE_ANALYTICS_P0_RECORDER_HEAP_MB=128`. The runtime default remains
+unbounded, so the honest statement is that the gate is satisfiable and the lever is measured, not that the
+shipped default already satisfies it. Adopting 128 MiB as the production default is a separate decision
+that needs the ceiling to be exercised across the remaining workloads (A3-A8), because a bounded
+reservation could otherwise show up as a collection pause under sustained or burst load. Recording the
+setting in `report.environment.recorderHeapCeilingMb` is what keeps this visible in the evidence.
+
+**Still not established by this run.** The harness continues to declare, and this run does not contradict:
+the 10M tier, sustained 50 fact/s repeats in independently started processes, the five-minute 1 fact/s
+light loads, mixed load with cancellation, the real nested-producer coverage beyond the existing pair,
+the matched analytics-disabled agent/UI baseline, incremental host memory and query peak memory, and the
+schema-v2 upgrade plus partial-write faults. Those are the remaining P0 workloads, and this single
+`scenario-passed` result is not a claim about them.
+
+
 
 
 
