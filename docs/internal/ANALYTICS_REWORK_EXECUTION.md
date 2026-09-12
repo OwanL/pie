@@ -3037,6 +3037,48 @@ instrumenting the operation itself.
 confirm `deleteSubjectPayloads` collapses. Its result is the next checkpoint, and the milestone is not
 claimed fixed until that measurement returns.
 
+### Checkpoint 47: the payload fix verified (108x), but `privateDeleteRace` still locks
+
+**The reference-digest index is verified.** Re-running the profiled delete on the rebuilt code:
+
+| Phase | Before | After |
+|---|---|---|
+| `deleteSubjectPayloads` | 119,382 ms | **1,108 ms** (108×) |
+| whole `deleteSession` | 128,675 ms | **10,259 ms** |
+| `subjectByteSum` | 393 ms | 393 ms |
+| `providerAccountingLoop` | 1,641 ms | 1,616 ms |
+| `delete:analytics_provider_settlements` | 1,663 ms | 1,686 ms |
+| `deleteSubjectObservations` | 3,931 ms | 3,768 ms |
+
+Committed as `e0fda3c5` (schema v8).
+
+**But the 1M run still fails**, with the same profile and the same error:
+
+- failing section: `privateDeleteRace`
+- failure: `AnalyticsRecorderWorkerRequestError: database is locked`
+- `crossHostRefresh` completed, but its `crossHostDeleteVisibleMs` is **21,005 ms** — statistically
+  unchanged from the 21,205/21,243 ms before the fix
+
+**That unchanged number is the key evidence, and it means my fix addressed a different delete than the
+slow one here.** The `crossHostRefresh` delete covers a single root session on an already-ingested 1M
+database, whereas the profiled measurement that collapsed used a synthetic target with 100,000
+settlements and 10,000 details on that session. So the 21-second cost in `crossHostRefresh` has a
+*different* dominant phase than the one I repaired. The reference-digest index is a real, verified,
+108× win on payload-heavy deletes; it is **not** established as the cause of this specific 21 s.
+
+**Remaining candidates for the 21 s**, now the only ones not yet measured: the private-close scrub's
+`wal_checkpoint(TRUNCATE)` on a large WAL, and the subject byte-sum plus observation delete over a
+session whose rows are a substantial fraction of the 1M set. `pie-scrub-lock-20260912-r01` measures the
+truncation cost on a real 1M database with a large uncheckpointed WAL, and — the decisive part — holds
+a write lock and times how long a concurrent writer waits before failing at the shipped 5,000 ms
+`BUSY_TIMEOUT_MS`. That distinguishes "the lock is held too long" from "the writer does not wait long
+enough", which are opposite repairs.
+
+**RSS unchanged.** `recorderWorkerRss` is `281,231,360` bytes (268.2 MiB) against the 256 MiB gate. All
+other 1M gates continue to pass.
+
+No gate has been relaxed, nothing is activated, and the milestone is not claimed fixed.
+
 **Independently verified repair carried forward.** The `storage` command fix is confirmed: `979` ms
 against a fresh 1M database, down from the `10,022` ms timeout, so `inPlaceCorruption` should now
 proceed past its terminal probe. All the other 1M gates continue to pass.
