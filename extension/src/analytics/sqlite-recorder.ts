@@ -86,6 +86,7 @@ const FIXED_WRITER_STATEMENT_KEYS = [
   'detail.payload.insert', 'detail.reference.insert', 'generation.insert',
   'observation.registry.lookup', 'subject.deleted.present', 'copy.destination.lookup',
   'copy.scrubbed.upsert', 'observation.insert', 'subject.pending.lookup', 'subject.deleted.lookup',
+  'facts.bytes.add', 'facts.bytes.subtract',
 ] as const;
 const WRITER_STATEMENT_KEYS = new Set<string>(FIXED_WRITER_STATEMENT_KEYS);
 for (const kind of ['observations', 'details']) {
@@ -94,8 +95,8 @@ for (const kind of ['observations', 'details']) {
     WRITER_STATEMENT_KEYS.add(`delivery.${kind}.${outcome}.update`);
   }
 }
-// 40 fixed keys plus 12 delivery kind/outcome read/update combinations.
-if (WRITER_STATEMENT_KEYS.size !== 52) throw new Error('Analytics writer statement key inventory changed.');
+// 42 fixed keys plus 12 delivery kind/outcome read/update combinations.
+if (WRITER_STATEMENT_KEYS.size !== 54) throw new Error('Analytics writer statement key inventory changed.');
 const MAX_CACHED_WRITER_STATEMENTS = 64;
 const INSERT_GENERATION_SQL = `
   INSERT OR IGNORE INTO analytics_generations (generation_id, first_observed_at_ms) VALUES (?, ?)
@@ -139,7 +140,7 @@ function prepareWriterStatement(
 }
 
 const sqlite = createRequire(process.execPath)('node:sqlite') as SqliteModule;
-const DATABASE_SCHEMA_VERSION = 5;
+const DATABASE_SCHEMA_VERSION = 6;
 const BUSY_TIMEOUT_MS = 5_000;
 const MAX_PENDING_SEQUENCES_PER_PRODUCER = 4_096;
 const DEFAULT_QUERY_ROWS = 200;
@@ -1000,6 +1001,58 @@ function migrateV4(database: SqliteDatabase): void {
  * 250,000 settlements: the bounded read dropped from 30.7 ms to 0.8 ms once the
  * matching expression index existed, and the temp B-tree disappeared. This is
  * an additive index only; no stored value or ordering semantics change. */
+/** Maintain a running total of stored fact payload bytes.
+ *
+ * `readStorageSummary` reported `factsLogicalBytes` by running
+ * `SUM(LENGTH(payload_json))` over every observation. At 1,000,000 facts that
+ * full-table aggregate costs roughly ten seconds on the query helper's event
+ * loop, which made the `storage` logical command exceed the client's 10-second
+ * default (measured: `storage` 10,022 ms against every other worker command
+ * under 400 ms). The total is now a maintained counter, updated in the same
+ * transactions that insert and delete observations, so reading it is O(1) like
+ * the existing delivery accounting. The counter holds the same quantity the
+ * aggregate computed; only how it is obtained changes.
+ *
+ * `factsPayloadBytes` also lands on `analytics_delivery_accounting`, but that
+ * table is version-recreated by migrateV3's `retained_only` path, so the column
+ * is added by an idempotent ALTER here instead of in the CREATE statement. */
+function ensureFactByteCounter(database: SqliteDatabase): void {
+  const columns = database.prepare('PRAGMA table_info(analytics_delivery_accounting)').all() as Array<{ name: string }>;
+  if (!columns.some((column) => column.name === 'facts_payload_bytes')) {
+    database.exec(`
+      ALTER TABLE analytics_delivery_accounting
+        ADD COLUMN facts_payload_bytes TEXT NOT NULL DEFAULT '0';
+    `);
+  }
+  // Seed from the stored rows exactly once, then track incrementally. A zero
+  // counter with a non-empty table means it was never seeded.
+  const state = database.prepare(`
+    SELECT facts_payload_bytes AS bytes,
+      (SELECT COUNT(*) FROM analytics_observations) AS observations
+    FROM analytics_delivery_accounting WHERE singleton = 1
+  `).get() as { bytes: string; observations: number | bigint } | undefined;
+  if (!state) return;
+  if (BigInt(state.bytes) === 0n && toNumber(state.observations) > 0) {
+    database.exec(`
+      UPDATE analytics_delivery_accounting
+      SET facts_payload_bytes = CAST((
+        SELECT COALESCE(SUM(LENGTH(payload_json)), 0) FROM analytics_observations
+      ) AS TEXT)
+      WHERE singleton = 1;
+    `);
+  }
+}
+
+/** Serve the settlement projection's declared ordering from an index.
+ *
+ * `readProviderSettlements` orders by `CAST(projection_revision AS INTEGER),
+ * generation_id, invocation_id`. Because the leading key is a cast expression,
+ * SQLite cannot satisfy that ordering from any plain index and falls back to a
+ * full table SCAN plus a temporary B-tree — even when the caller supplies a
+ * small LIMIT, so a bounded page still reads every settlement. Measured at
+ * 250,000 settlements: the bounded read dropped from 30.7 ms to 0.8 ms once the
+ * matching expression index existed, and the temp B-tree disappeared. This is
+ * an additive index only; no stored value or ordering semantics change. */
 function migrateV5(database: SqliteDatabase): void {
   // IF NOT EXISTS keeps the step idempotent: a database may already carry the
   // index if an earlier run was interrupted between creating it and committing
@@ -1010,6 +1063,7 @@ function migrateV5(database: SqliteDatabase): void {
         CAST(projection_revision AS INTEGER), generation_id, invocation_id
       );
   `);
+  ensureFactByteCounter(database);
 }
 
 function databaseTransaction<T>(database: SqliteDatabase, operation: () => T): T {
@@ -1083,6 +1137,11 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       return;
     }
     if (version === 4) {
+      migrateV5(database);
+      database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
+      return;
+    }
+    if (version === 5) {
       migrateV5(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
     }
@@ -1451,6 +1510,43 @@ function emptyStoredProviderAccounting(): StoredProviderAccounting {
 
 type DeliveryKind = 'observations' | 'details';
 type DeliveryOutcome = 'accepted' | 'replayed' | 'deleted';
+
+/** Add one stored observation's payload size to the maintained counter.
+ *
+ * The delta is computed by SQLite's own `LENGTH(?)` rather than in JavaScript
+ * so the stored total is byte-for-byte the same expression the previous
+ * full-table `SUM(LENGTH(payload_json))` aggregate used. */
+function addFactBytes(
+  database: SqliteDatabase,
+  statements: WriterStatementCache | undefined,
+  payloadJson: string,
+): void {
+  prepareWriterStatement(database, statements, 'facts.bytes.add', `
+    UPDATE analytics_delivery_accounting
+    SET facts_payload_bytes = CAST(
+      CAST(facts_payload_bytes AS INTEGER) + LENGTH(?) AS TEXT
+    )
+    WHERE singleton = 1
+  `).run(payloadJson);
+}
+
+/** Subtract payload bytes removed by a deletion. The caller supplies a total
+ * already measured with SQLite's `LENGTH(payload_json)` inside the same
+ * transaction, so no value is left double-counted or stranded. */
+function subtractFactBytes(
+  database: SqliteDatabase,
+  statements: WriterStatementCache | undefined,
+  bytes: bigint,
+): void {
+  if (bytes === 0n) return;
+  prepareWriterStatement(database, statements, 'facts.bytes.subtract', `
+    UPDATE analytics_delivery_accounting
+    SET facts_payload_bytes = CAST(
+      MAX(0, CAST(facts_payload_bytes AS INTEGER) - ?) AS TEXT
+    )
+    WHERE singleton = 1
+  `).run(bytes.toString());
+}
 
 function incrementDeliveryAccounting(
   database: SqliteDatabase,
@@ -2330,6 +2426,7 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     recordSourceSequence(this.database, this.writerStatements, observation, registryKey, fingerprint, false);
     applyProviderSettlement(this.database, this.writerStatements, effectiveObservation, registryKey, fingerprint);
     applyTypedObservation(this.database, this.writerStatements, effectiveObservation, registryKey);
+    const payloadJson = serialize(effectiveObservation);
     this.writerStatements.prepare('observation.insert', `
       INSERT INTO analytics_observations (
         generation_id, source_key, registry_key, idempotency_key, fingerprint,
@@ -2353,10 +2450,11 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
       resolvedSubject.key,
       effectiveObservation.scope.rootSessionId ?? null,
       effectiveObservation.scope.invocationId ?? null,
-      serialize(effectiveObservation),
+      payloadJson,
     );
     this.writerStatements.prepare('generation.insert', INSERT_GENERATION_SQL)
       .run(effectiveObservation.generationId, canonicalInt64(effectiveObservation.observedAtMs));
+    addFactBytes(this.database, this.writerStatements, payloadJson);
     incrementDeliveryAccounting(this.database, this.writerStatements, 'observations', 'accepted');
     return 'accepted';
   }
@@ -2429,11 +2527,19 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
           projection_revision = ?
       WHERE source_root_session_id = ?
     `).run(revision, rootSessionId);
+    // Sum the removable payload bytes before removing the rows, so the
+    // maintained counter stays exactly equal to the aggregate it replaces.
+    const sourceCopyBytes = BigInt((this.database.prepare(`
+      SELECT COALESCE(SUM(LENGTH(payload_json)), 0) AS bytes FROM analytics_observations
+      WHERE entity_kind = 'copy'
+        AND json_extract(payload_json, '$.fields.sourceSessionId') = ?
+    `).get(rootSessionId) as { bytes: number | bigint }).bytes);
     const deletedSourceCopyObservations = toNumber(this.database.prepare(`
       DELETE FROM analytics_observations
       WHERE entity_kind = 'copy'
         AND json_extract(payload_json, '$.fields.sourceSessionId') = ?
     `).run(rootSessionId).changes);
+    subtractFactBytes(this.database, this.writerStatements, sourceCopyBytes);
     for (const table of [
       'analytics_provider_settlements',
       'analytics_execution_observations',
@@ -2450,9 +2556,14 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     ]) {
       this.database.prepare(`DELETE FROM ${table} WHERE ${subjectFilter}`).run(rootSessionId, rootSessionId);
     }
+    const subjectBytes = BigInt((this.database.prepare(`
+      SELECT COALESCE(SUM(LENGTH(payload_json)), 0) AS bytes FROM analytics_observations
+      WHERE ${subjectFilter}
+    `).get(rootSessionId, rootSessionId) as { bytes: number | bigint }).bytes);
     const deletedObservationCount = deletedSourceCopyObservations + toNumber(this.database.prepare(`
       DELETE FROM analytics_observations WHERE ${subjectFilter}
     `).run(rootSessionId, rootSessionId).changes);
+    subtractFactBytes(this.database, this.writerStatements, subjectBytes);
     const deletedPayloadCount = toNumber(this.database.prepare(`
       DELETE FROM analytics_detail_payloads WHERE ${subjectFilter}
     `).run(rootSessionId, rootSessionId).changes);
@@ -3038,9 +3149,12 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
         throw error;
       }
     };
+    // Maintained counter, not a full-table SUM(LENGTH(...)) aggregate: the
+    // aggregate is O(all facts) and made the `storage` command exceed the
+    // query client's default timeout at 1M rows. Same quantity, O(1) read.
     const facts = this.database.prepare(`
-      SELECT COALESCE(SUM(LENGTH(payload_json)), 0) AS bytes FROM analytics_observations
-    `).get() as { bytes: number | bigint };
+      SELECT facts_payload_bytes AS bytes FROM analytics_delivery_accounting WHERE singleton = 1
+    `).get() as { bytes: string };
     return {
       ...this.detailStorageStats(),
       databaseBytes: bytes(''),

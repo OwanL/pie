@@ -2410,3 +2410,96 @@ in-process measurement is not evidence of improvement and may look worse; that p
 gate measures. The authoritative number is the supervisor-driven worker measurement, whose result is
 recorded in the next checkpoint. The repair has **not** been claimed as a gate pass on the strength of
 any in-process figure.
+
+### Checkpoint 31: both P0 blockers repaired and measured; milestone `6b1fea05`
+
+**Recorder RSS — repaired and measured through the real topology.** The supervisor-driven measurement
+(`pie-worker-rss-20260912-r01/after.json`, build `03211e81c75810590de8`, 100,000-detail harness
+mixture) recorded `maxWorkerRss` **251.2 MiB** against the 256 MiB gate, down from the 331 MiB the 1M
+run recorded, with the trajectory rising then falling (`43, 212, 226, 251, 247, 221` MB) rather than
+growing monotonically — consistent with a bounded native high-water, not an unbounded leak. This is the
+number the gate actually samples; the earlier in-process figures measured a different path and are not
+comparable.
+
+The repair removes the redundant worker hop (proved a byte-level fixed point) and moves exclusion
+enforcement into `submitDetail`, in the same transaction that writes the manifest, content digest,
+payload and WAL record, reusing the sanitized decode instead of parsing twice. New focused tests prove
+a producer that **skips** redaction still cannot persist a secret (asserted against the reconstructed
+value and a raw scan of every `analytics_detail_content.body`) and that an already-sanitized capture
+remains a byte-level fixed point (exact replay is an idempotent duplicate). Recorder suite 26/26.
+
+**Query cost — repaired.** `readProviderSettlements` orders by
+`CAST(projection_revision AS INTEGER), generation_id, invocation_id`; no plain index can serve that
+cast-expression ordering, so SQLite scanned every settlement with a temporary B-tree even when the
+caller passed a small `LIMIT`. Schema **v5** adds the matching expression index
+(`analytics_provider_settlement_projection_order_idx`, created `IF NOT EXISTS` so a re-run after an
+interrupted migration cannot fail). Measured at 250,000 settlements: the bounded read fell from
+**30.7 ms to 0.8 ms** and the temp sort disappeared. A migration fixture proves v4→v5 preserves stored
+settlements and accounting totals while gaining index-served ordering; the fresh-database fixture
+asserts the index exists.
+
+**Barrier.** All 17 typecheck projects and lint pass; affected `npm test` passes 2/2 packages with
+zero failures; coordinated validation build `6b844cb0785446833c61`. Committed and pushed as
+`6b1fea05`; local `HEAD`, `origin/master` and the live remote all read
+`6b1fea059939f29c354483d80ea6f8344f3cb812`. The four user-owned model/settings files remain unstaged
+and uncommitted.
+
+**Still open.** The `inPlaceCorruption` query timeout remains unexplained — it did not reproduce in
+isolation, and the harness now records per-request `workerQueryTimings` so the next full 1M run will
+name the failing step. Because the schema version moved, the harness fingerprint moves again, so a
+fresh validation → attestation → 10k baseline → 1M admission cycle is required before the next 1M
+attempt. No gate has been relaxed and no runtime authority has changed.
+
+### Checkpoint 32: 1M re-run names the timeout; fact-byte counter repair
+
+The fresh cycle under `6b1fea05` (fingerprint `180c919f10cbf7ec43ae81643ba328ccfb62643572ece51c307b3048e35f075e`,
+build `6b844cb0785446833c61`) ran validation (`validated`, root-free), a 10k baseline
+(`scenario-passed`, zero failed gates, max worker RSS `104,759,296`), and a 1M admission
+(`validated`, projected peak `10,409,472,000` bytes and `605,016,064` bytes memory). The 1M workload
+then completed ingestion and reads but failed.
+
+**The per-request instrumentation worked exactly as intended and named the failure.** Of twelve worker
+commands, eleven resolved or rejected correctly and quickly — bounded settlements `71` ms, detail
+range `391` ms, the five-step 2 MiB chunk walk `382–397` ms each, schema `371` ms, logical count `401`
+ms, oversize rejection `59` ms, mutation rejection `368` ms. The twelfth was the culprit:
+
+- **`storage` — `10,022.8` ms, `rejected: Analytics query timed out after 10000ms`.**
+
+This is the same `Analytics query timed out after 10000ms` that failed `inPlaceCorruption`, so the
+timeout is now attributed rather than inferred: the fault phase's terminal probe follows the same read
+path, and the failing step is the `storage` logical command.
+
+**Root cause.** `readStorageSummary()` computed `factsLogicalBytes` with
+`SELECT COALESCE(SUM(LENGTH(payload_json)), 0) FROM analytics_observations` — a full-table aggregate
+over every stored observation — and `readStorageReadModel()` calls it on each `storage` request. At
+1,000,000 facts that is ~10 seconds on the query helper's single event loop, which is why this command
+alone exceeded the 10 s client default while its neighbours stayed under 400 ms. The same aggregate
+also runs inside `readDeliveryAccounting()`'s caller path, so the cost was paid on more than one
+command.
+
+**Repair — schema v6 maintained counter.** The total is now the `facts_payload_bytes` column on the
+existing `analytics_delivery_accounting` singleton, adjusted in the same transactions that insert and
+delete observations, on the precedent already set by `incrementDeliveryAccounting`. Three details
+matter for correctness:
+
+- The **insert** delta is computed by SQLite itself (`LENGTH(?)` on the bound JSON), not in JavaScript,
+  so the stored value is the identical expression the previous aggregate used — `LENGTH()` on TEXT
+  counts characters, and a JS `Buffer.byteLength` would have diverged on non-ASCII payloads.
+- **Deletions** sum the removable bytes with the same `LENGTH(payload_json)` inside the deleting
+  transaction, then subtract, so neither the source-copy scrub nor the subject scrub can strand bytes.
+- The migration **seeds** the column from the existing rows once, then tracks incrementally; the column
+  is added by an idempotent `ALTER` because `migrateV3`'s `retained_only` path recreates the accounting
+  table, so a column declared only in the CREATE statement would be lost on that path.
+
+A focused test proves the counter equals the full-table aggregate after inserts **and** after a subject
+deletion — the exact property that would otherwise silently drift. Recorder suite 27/27; schema
+assertions and the future-version rejection test move to v6.
+
+**1M outcome for this attempt.** `recorderWorkerRss` also failed at `292,663,296` bytes against the
+256 MiB gate. This is worse than the isolated 100k-detail measurement (251.2 MiB) despite the repair,
+so the repair alone does not bring the full 1M mixture under the gate; the measurement was taken with
+the full four-host fact load plus the detail mixture, and the relationship between payload count and
+worker RSS is now the open question rather than the serialization hop. All other gates passed:
+1,000,000 facts, 100,003 details, handoff p99 `0.057` ms, responsiveness proxy p95 `13.6` ms, indexed
+query `1.90` ms, 2 MiB detail `4.22` ms, temporary footprint `7.94` GB within the 16 GiB cap, and
+`scaleHistoryRows` 1,000,000. Cleanup completed and removed the proof root.

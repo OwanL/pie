@@ -384,7 +384,7 @@ test('v1 upgrade retains facts, detail, deletion fences, accounting, and source 
     }
 
     recorder = new SqliteAnalyticsRecorder(temp.databasePath);
-    assert.equal(recorder.getDatabaseSchemaVersion(), 5);
+    assert.equal(recorder.getDatabaseSchemaVersion(), 6);
     assert.equal(recorder.readDeliveryAccounting().deliveryHistoryCoverage, 'retained_only');
     assert.equal(recorder.countObservations('root-retained'), 1);
     assert.deepEqual(recorder.reconstructDetail('legacy-detail'), { retained: true });
@@ -571,14 +571,14 @@ test('recorder rejects unsupported newer database schema versions', () => {
   try {
     // One beyond the current schema: an unversioned future database must fail
     // closed rather than be read with today's assumptions.
-    raw.exec('PRAGMA user_version = 6');
+    raw.exec('PRAGMA user_version = 7');
   } finally {
     raw.close();
   }
   try {
     assert.throws(
       () => new SqliteAnalyticsRecorder(temp.databasePath),
-      /Unsupported newer analytics database schema version 6/,
+      /Unsupported newer analytics database schema version 7/,
     );
   } finally {
     rmSync(temp.root, { recursive: true, force: true });
@@ -1167,7 +1167,7 @@ test('logical query surface is native read-only, bounded, and reports snapshot/d
       ['query-a'],
       { maxRows: 2, maxCellBytes: 32 },
     );
-    assert.equal(result.databaseSchemaVersion, 5);
+    assert.equal(result.databaseSchemaVersion, 6);
     assert.equal(result.snapshotWatermark, 3);
     assert.deepEqual(result.generationIds, ['generation-1']);
     assert.equal(result.returnedRows, 2);
@@ -1452,7 +1452,7 @@ test('schema v5 adds the projection-order index without changing stored settleme
 
     const upgraded = new SqliteAnalyticsRecorder(temp.databasePath);
     try {
-      assert.equal(upgraded.getDatabaseSchemaVersion(), 5);
+      assert.equal(upgraded.getDatabaseSchemaVersion(), 6);
       const after = upgraded.readProviderSettlements();
       assert.deepEqual(after.settlements, before.settlements);
       assert.equal(upgraded.readProviderAccountingSummary().inputTokens.knownTotal, knownTotalBefore);
@@ -1477,6 +1477,38 @@ test('schema v5 adds the projection-order index without changing stored settleme
     }
   } finally {
     // Windows can briefly retain a handle after close; retry the cleanup.
+    rmSync(temp.root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});
+
+test('the maintained fact-byte counter equals the full-table aggregate across insert and delete', () => {
+  const temp = tempDatabase();
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  const raw = new DatabaseSync(temp.databasePath);
+  const aggregate = () => Number((raw.prepare(
+    'SELECT COALESCE(SUM(LENGTH(payload_json)), 0) AS bytes FROM analytics_observations',
+  ).get() as { bytes: number | bigint }).bytes);
+  try {
+    for (let index = 0; index < 6; index += 1) {
+      recorder.submit(observation({
+        sourceKey: `counter-${index}`,
+        sourceSequence: index + 1,
+        stableOriginId: 'counter-origin',
+        rootSessionId: index < 4 ? 'counter-root-a' : 'counter-root-b',
+        invocationId: `counter-invocation-${index}`,
+        fields: { invocationId: `counter-invocation-${index}`, outcome: 'success', inputTokens: 10 + index },
+      }));
+    }
+    // Deleting one subject must subtract exactly that subject's bytes.
+    recorder.deleteSession('counter-root-a', 'counter-close', 1_800);
+
+    const summary = recorder.readStorageSummary();
+    assert.equal(Number(summary.factsLogicalBytes), aggregate(), 'counter must equal the aggregate after delete');
+    assert.ok(aggregate() > 0, 'the retained subject must still be counted');
+    assert.equal(recorder.countObservations(), 2);
+  } finally {
+    raw.close();
+    recorder.close();
     rmSync(temp.root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });

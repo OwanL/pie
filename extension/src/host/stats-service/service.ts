@@ -28,6 +28,7 @@ import type {
   CanonicalAnalyticsCapture,
 } from '../../analytics/canonical-capture.js';
 import type { CanonicalAnalyticsReadModel } from '../../analytics/query-entry.js';
+import { CanonicalRevisionRefresher } from '../../analytics/revision-refresher.js';
 
 /** One persistent structured startup-stage measurement, also mirrored in
  *  memory for tests/diagnostics. Emitted for storage.start, the persisted
@@ -72,6 +73,7 @@ export class StatsService implements RunObserver {
   private readonly createId: () => string;
   private readonly canonicalCapture: CanonicalAnalyticsCapture | undefined;
   private readonly analyticsReadModel: CanonicalAnalyticsReadModel | undefined;
+  private analyticsRevisionRefresher: CanonicalRevisionRefresher | undefined;
   /** Exact create/duplicate origin retained after the pending path is replaced.
    * A close operation ID must never enter this map. */
   private readonly pendingCreateOperationBySessionPath = new Map<string, string>();
@@ -176,6 +178,7 @@ export class StatsService implements RunObserver {
     // legacy query consumers before P7 can select this authority.
     if (this.canonicalCapture) {
       this.started = true;
+      this.startCanonicalRevisionRefresh();
       return;
     }
     // Shutdown is terminal: never reactivate storage/restoration after it.
@@ -1113,9 +1116,40 @@ export class StatsService implements RunObserver {
     this.accounting.activityTimeline.flush();
   }
 
+  /** Start the bounded cross-host refresh once canonical authority is active.
+   *
+   * Only another host's committed summary, correction or private close is
+   * observable through the shared projection revision, so this reads that small
+   * value at a bounded interval and re-renders on change. It never scans
+   * history, never replays events and retains no per-history state. Dormant
+   * under the legacy authority: there is no canonical revision to follow yet. */
+  private startCanonicalRevisionRefresh(): void {
+    if (!this.analyticsReadModel || this.analyticsRevisionRefresher) return;
+    this.analyticsRevisionRefresher = new CanonicalRevisionRefresher({
+      readModel: this.analyticsReadModel,
+      onRevisionChange: () => this.scheduleRender(),
+      onError: (error) => {
+        appendPieLog('warn', 'analytics', 'canonical analytics revision refresh could not read the revision', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      },
+    });
+    void this.analyticsRevisionRefresher.start().catch((error: unknown) => {
+      appendPieLog('warn', 'analytics', 'canonical analytics revision refresh failed to start', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }
+
+  /** Observable refresh counters for idle-resource measurement. */
+  getAnalyticsRevisionRefreshStats(): ReturnType<CanonicalRevisionRefresher['getStats']> | undefined {
+    return this.analyticsRevisionRefresher?.getStats();
+  }
+
   async shutdown(): Promise<void> {
     if (this.canonicalCapture) {
       this.disposed = true;
+      this.analyticsRevisionRefresher?.stop();
       this.backgroundCompactionAbort.abort();
       return;
     }
@@ -1125,6 +1159,7 @@ export class StatsService implements RunObserver {
     // boundary instead of waiting out a large legacy catalogue. Unmigrated
     // runs resume on the next startup.
     this.disposed = true;
+    this.analyticsRevisionRefresher?.stop();
     this.backgroundCompactionAbort.abort();
     const background = this.backgroundWork;
     if (background) {
