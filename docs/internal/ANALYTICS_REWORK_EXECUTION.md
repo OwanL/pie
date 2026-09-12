@@ -2781,6 +2781,47 @@ conditions in-line** (4.75 GB available this time, so the separate-pass workarou
 `583,188,480` bytes memory. The 1M workload is running; with the diagnostic in place its failure — if it
 recurs — will name the request and the bound rather than reporting a signal.
 
+### Checkpoint 40: the diagnostic named the real cause — a `deleteSession` full scan
+
+**The reporting fix immediately paid for itself.** The 1M run failed again, and instead of a bare signal
+the report now reads:
+
+> `supervisor killed the worker after request 4 (deleteSession) exceeded 30000 ms; worker then exited (SIGTERM).`
+
+**Root cause.** `deleteSession` locates copy-sourced observations with
+`entity_kind = 'copy' AND json_extract(payload_json, '$.fields.sourceSessionId') = ?` and runs that
+predicate **twice** — once to sum the removed payload bytes for the maintained counter, then again as
+the `DELETE`. `entity_kind` had **no index**, so both were full scans of every observation. At 1M facts
+the pair plus the surrounding table deletes exceeded the supervisor's 30 s IPC bound, and the supervisor
+killed the worker. This is the `crossHostRefresh` step (its `deleteSession`) — exactly where the
+section-presence analysis had localised the failure.
+
+**A measurement error of my own, corrected.** The earlier delete-cost diagnostic reported `1,748` ms and
+appeared to exonerate this path. It was wrong: it incremented `i += 4`, producing **250,000**
+observations instead of the harness's 1,000,000, and used only 50 detail rows. A four-times-too-small
+fixture made a 30 s cost look like 1.7 s. The corrected script now writes one observation per index and
+100,000 details, and carries a comment recording the error so it cannot silently regress. This is the
+second time a measurement fixture, not the product, was the source of a wrong conclusion.
+
+**Repair — schema v7 partial copy-scrub index.** `ensureCopyScrubIndex` adds
+`analytics_copy_scrub_idx ON analytics_observations(entity_kind, root_session_id) WHERE entity_kind = 'copy'`.
+The predicate can never match a non-copy row, so the index stays a small fraction of the table however
+large history grows, and `json_extract` remains a residual filter over the few copy rows. Measured at
+1,000,000 observations with a realistic copy population: scrub scan **222 ms → 39 ms**, and the plan
+moves from `SCAN observations` to `SEARCH observations USING INDEX observations_copy_scrub_idx`. Additive
+only — no stored value, row count or ordering changes. A focused test asserts the predicate is served by
+the index with no full-table scan, and the migration fixture confirms v6 → v7 preserves rows.
+
+Also de-flaked two `revision-refresher` tests that asserted exact check counts after a fixed sleep and
+were failing under parallel suite load; they now await the observable condition instead.
+
+**Barrier.** 17 typecheck projects and lint pass; affected suite passes 2/2 packages; coordinated build
+`c8525f8c120387d69783`. Committed and pushed as `8c6220b8`.
+
+**Still open.** `recorderWorkerRss` remains above the gate (the plateau is V8 idle heap reservation, not
+a leak or per-payload cost — see checkpoint 35). A fresh cycle is required because the schema version
+moved again.
+
 **Independently verified repair carried forward.** The `storage` command fix is confirmed: `979` ms
 against a fresh 1M database, down from the `10,022` ms timeout, so `inPlaceCorruption` should now
 proceed past its terminal probe. All the other 1M gates continue to pass.
