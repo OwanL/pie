@@ -1172,7 +1172,10 @@ test('the narrow acknowledgement watermark tracks detail ingestion and deletion'
     assert.equal(recorder.readCompleteDetailWatermark(), recorder.readDeliveryAccounting().completeDetailWatermark);
     // A refused delivery is not accepted detail either.
     assert.throws(
-      () => recorder.submitDetail({ ...detail({ payloadId: 'watermark-late' }), captureSubject: { kind: 'session', rootSessionId: 'root-a' } }),
+      () => recorder.submitDetail({
+        ...detail({ payloadId: 'watermark-late', value: { body: 'late' } }),
+        captureSubject: { kind: 'session', rootSessionId: 'root-a' },
+      }),
       /capture subject is deleted/,
     );
     assert.equal(recorder.readCompleteDetailWatermark(), recorder.readDeliveryAccounting().completeDetailWatermark);

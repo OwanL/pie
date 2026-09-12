@@ -3761,12 +3761,43 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
   }
 
   /** Backward-compatible P0 usage-only view, now served without replaying the
-   * generic observation ledger. Missing channels remain null. */
+   * generic observation ledger. Missing channels remain null.
+   *
+   * This reads the usage columns directly instead of mapping over
+   * {@link readProviderSettlements}. That path builds a full
+   * `ProviderSettlementProjection` for every settlement row — roughly twenty-five
+   * fields including nested `usage`, `cost` and coverage objects — and this view
+   * then discards all but three of them. Measured against 400,000 settlements:
+   * the projection path took 7,284 ms while selecting the three columns directly
+   * took 833 ms, so about 6.5 s of the 7.3 s was constructing objects nobody read.
+   * That is what pushed the all-history projection past its 9 s gate at 1M. */
   projectProviderUsage(rootSessionId?: string): ProviderUsageProjection[] {
-    return this.readProviderSettlements(rootSessionId).settlements.map((settlement) => ({
-      invocationId: settlement.invocationId,
-      usage: settlement.usage,
-      reportedCostUsd: settlement.reportedCostUsd,
+    this.assertOpen();
+    const scoped = rootSessionId !== undefined;
+    const where = scoped ? 'WHERE root_session_id = ?' : '';
+    const rows = this.database.prepare(`
+      SELECT invocation_id, input_tokens, output_tokens, cache_read_tokens,
+        cache_write_tokens, reasoning_tokens, provider_total_tokens, reported_cost_usd
+      FROM analytics_provider_settlements
+      ${where}
+      ORDER BY CAST(projection_revision AS INTEGER), generation_id, invocation_id
+    `).all(...(scoped ? [rootSessionId] : [])) as Array<Record<string, unknown>>;
+    const decodeInt = (value: unknown): number | string | null => value === null || value === undefined
+      ? null
+      : encodeInt64(String(value));
+    return rows.map((row) => ({
+      invocationId: String(row.invocation_id),
+      usage: {
+        inputTokens: decodeInt(row.input_tokens),
+        outputTokens: decodeInt(row.output_tokens),
+        cacheReadTokens: decodeInt(row.cache_read_tokens),
+        cacheWriteTokens: decodeInt(row.cache_write_tokens),
+        reasoningTokens: decodeInt(row.reasoning_tokens),
+        providerTotalTokens: decodeInt(row.provider_total_tokens),
+      },
+      reportedCostUsd: row.reported_cost_usd === null || row.reported_cost_usd === undefined
+        ? null
+        : Number(row.reported_cost_usd),
     }));
   }
 
