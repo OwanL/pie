@@ -3125,3 +3125,70 @@ milestone is not claimed fixed until that returns.
 **Independently verified repair carried forward.** The `storage` command fix is confirmed: `979` ms
 against a fresh 1M database, down from the `10,022` ms timeout, so `inPlaceCorruption` should now
 proceed past its terminal probe. All the other 1M gates continue to pass.
+
+## The 1M failures were a chain, and the middle link was a vacuous test
+
+Four separate blockers were resolved in sequence. Each was only observable once the previous one was
+fixed, which is why the earlier runs kept reporting a different gate.
+
+**1. Deletion lock hold (`10783be8`, `1565cda1`, `5f36a889`).** A single whole-subject `DELETE` held the
+write lock longer than the 5 s busy timeout every other recorder uses, so a concurrent writer failed
+with `database is locked` instead of reaching the deletion fence and being rejected as `subject_deleted`.
+The fence is now committed first, then subject rows are removed in bounded `rowid` windows, one explicit
+transaction per batch. Measured at 200k rows: `deleteSubjectObservations` 769 → 135 ms,
+`deleteSubjectPayloads` 4,837 → 870 ms, removal total 5,606 → 983 ms, whole `deleteSession`
+6,581 → 1,979 ms. Per-row implicit transactions were the first shape and were wrong: this connection
+runs `synchronous = FULL` under WAL, so each implicit transaction costs an fsync — 2,000 rows measured
+3,905 ms that way against 5.9 ms in a single transaction.
+
+**2. Capacity calibration regression (`c0c845d2`).** This one was self-inflicted. An earlier commit
+replaced the flush checkpoint with `wal_checkpoint(PASSIVE)`, which checkpoints frames but never folds
+the WAL file back to zero bytes. The calibration measures the database family as main + WAL +
+shared-memory, so a WAL surviving a quiescent boundary makes those totals depend on how much happened
+to be outstanding rather than on how much data is stored. The later private-close scrub truncated it and
+the totals moved *backwards* between `after-primary-facts` and `after-variable-details` even though that
+pass only adds rows, failing `inPlaceCorruption` with "capacity calibration is invalid". A flush now
+tries `TRUNCATE` first and falls back to `PASSIVE` only when SQLite reports the truncation busy.
+
+**3. The private-race section was testing nothing at 1M (`4017e94f`).** This is the one that matters.
+The fixture submits `observation(i, i % 4)` for every `i` below the row target, and `observation()`
+derives `entityKey`, `invocationId` and the idempotency key from **`i` alone** — the host does not
+participate in identity. The race then built its observations from indexes *inside* that range:
+`initialPrivateFact` from `i = 20_000`, `lateFact` from `20_001`, and the unrelated write from `30_000`.
+
+At 10k rows those indexes sat above the fixture, so the section worked by luck. At 1M they are inside
+it, so every write reused a fixture identity and was rejected as an identity conflict:
+
+```
+Conflicting analytics observation for source key providerSettlement:…-invocation-30000
+```
+
+The consequence is worse than a failed assertion. Because the "private" fact was never stored, the
+privacy assertions — "no private bytes remain in main/WAL/shm" and "the late write is rejected as
+`subject_deleted`" — **passed while having written no private data at all**. The only visible symptom
+was the final unrelated-write count staying `0`, failing with `0 !== 1`. So at 1M scale the privacy
+boundary was unproven, and a passing run would have said otherwise.
+
+The race indexes now start at `90,100,000`, above any supported tier, and a **positive control** asserts
+the private fact and detail are each present *before* the race begins, so a fixture overlap fails loudly
+with an explicit "would be vacuous" message instead of passing quietly.
+
+**4. The retained-bytes check threw instead of checking (`5f1776c6`).** With the fixture corrected, the
+1M run got through the race assertions (both sides fulfilled, late write rejected as `subject_deleted`)
+and then failed with `RangeError: File size (6685298688) is greater than 2 GiB`. That check read each
+database-family file whole with `readFileSync`, which Node cannot do past its 2 GiB `Buffer` ceiling. It
+only started throwing now because the 1M database actually reaches ~6.7 GB and the identity bug had been
+stopping the run before this point. The scan now streams in 4 MiB chunks with a `needle.length - 1`
+overlap, verified against whole-file semantics for an absent needle, a needle exactly on a chunk
+boundary, a needle at both ends, a needle in the final bytes, an empty file, a file shorter than the
+needle, and a missing file (which throws `ENOENT` rather than silently reporting clean).
+
+**Process note.** The harness file is inside its own provenance fingerprint, so every harness edit
+correctly invalidates the baseline and costs one fresh baseline run plus one full 1M run. Harness
+changes should therefore be batched rather than made one at a time.
+
+**Correction to an earlier entry.** The `recorderWorkerRss` gate was previously recorded as a V8 idle
+heap reservation rather than a leak. The 1M topology samples contradict that: recorder RSS *tracks rows
+ingested* (about 69 MiB at 10k facts, ~200 MiB by 500k, peaking as high as 287 MiB), so it is not a flat
+idle reservation. The cause is not yet proven and the gate remains open.
+
