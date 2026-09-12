@@ -28,7 +28,7 @@ const outRoot = path.resolve(extensionRoot, 'out');
 const workerScript = path.join(outRoot, 'analytics-recorder-worker.js');
 const queryWorkerScript = path.join(outRoot, 'analytics-query-worker.js');
 const REPORT_SCHEMA_VERSION = 5;
-const HARNESS_VERSION = 'p0-baseline-scale-v6-heap-and-delete-attribution';
+const HARNESS_VERSION = 'p0-baseline-scale-v7-recorder-heap-ceiling';
 let AnalyticsRecorderSupervisor;
 let AnalyticsCaptureCapacityError;
 let SqliteAnalyticsRecorder;
@@ -217,11 +217,20 @@ function detailCapture(payloadId, rootSessionId, byteLength, valueOverride) {
 
 function supervisor(databasePath, extra = {}) {
   const callerLifecycle = extra.onWorkerLifecycle;
+  // Optional recorder heap ceiling, so the recorderWorkerRss gate can be
+  // qualified against a bounded reservation without a code change. The 1M
+  // topology samples show heapUsed around 12-25 MiB while heapTotal plateaus at
+  // ~141 MiB and RSS sits ~60 MiB above it, so RSS follows the reservation rather
+  // than the live heap. Unset means the runtime default, which is what the gate
+  // was measured against.
+  const heapCeilingMb = process.env.PIE_ANALYTICS_P0_RECORDER_HEAP_MB;
+  const heapOption = heapCeilingMb === undefined ? {} : { maxOldSpaceMb: Number(heapCeilingMb) };
   const helper = new AnalyticsRecorderSupervisor({
     enabled: true,
     workerScript,
     databasePath,
     maxBatchSize: 250,
+    ...heapOption,
     maxQueueRecords: 20_000,
     maxQueueBytes: matrix.bounds.maxQueueBytes,
     ...extra,
@@ -797,6 +806,11 @@ try {
     effectiveMemoryLimitBytes,
     initialFreeBytes,
     sqlite: 'node:sqlite bundled with Node',
+    // Recorded so the recorderWorkerRss evidence says which reservation the
+    // measurement was taken under. Null means the runtime default.
+    recorderHeapCeilingMb: process.env.PIE_ANALYTICS_P0_RECORDER_HEAP_MB === undefined
+      ? null
+      : Number(process.env.PIE_ANALYTICS_P0_RECORDER_HEAP_MB),
   };
   report.results.capacityProjection = {
     fixtureBytes: capacityFixture.fixtureBytes,
