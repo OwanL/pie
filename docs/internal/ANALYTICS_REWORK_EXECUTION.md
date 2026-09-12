@@ -3399,6 +3399,39 @@ legacy authority.
 not derived from the validated manifest, so C3 has to replace it with a manifest-derived authority rather
 than flip a constant.
 
+### C3 changes landed
+
+**Authority is now manifest-derived (`55217255`).** The literal `'legacy'` is replaced by a read of the
+validated activation manifest through the existing `ActivationStore`, using the `stateDir` the data-root
+resolver already returns. An absent manifest stays legacy; a recorded active generation selects canonical
+and supplies its `generationId`. A malformed or unreadable manifest throws out of the host constructor,
+which is the pre-existing fail-closed behaviour — the host refuses to start rather than capturing into an
+authority it cannot read back. No flag was flipped: activation still requires a valid active manifest
+written by the activation path.
+
+**The read-model authority gate moved into the accessor (`9579f977`).** `getAnalyticsReadModel()` was
+documented as requiring consumers to gate on canonical authority while returning the model regardless.
+It now returns `undefined` unless canonical authority is active, so the rule is enforced once instead of
+being repeated per consumer; C4 will add several consumers and one omission would silently reintroduce the
+bug. The accompanying test is a real guard: reverting the one-line check makes it fail.
+
+### A coupling the wiring change exposed
+
+`CanonicalAnalyticsCapture` throws when authority is canonical but the generation id or any of the fact,
+detail and lifecycle sinks is missing:
+
+```
+if (options.authority === 'canonical'
+  && (!options.generationId || !options.sink || !options.detailSink || !options.lifecycleSink)) throw ...
+```
+
+That is correct fail-closed behaviour, and it now matters in practice. With the authority derived from the
+manifest, a host that starts under an active manifest but has not yet wired those sinks throws at
+construction. So wiring `AnalyticsRuntime` into the host is not optional cleanup: the host must own the
+recorder/query helpers and hand their sinks to the capture *before* an activation can succeed. This is
+the concrete shape of the remaining C3 work, and it is why the runtime needs a production caller.
+
+
 
 
 
