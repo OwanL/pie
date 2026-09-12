@@ -2623,6 +2623,45 @@ This is a materially different situation from a leak: no data is mis-accounted a
 that should not be. The fix reduces the process's *reserved* footprint, so the honest risk to check is
 whether a tighter ceiling forces extra GC work and slows ingestion.
 
+### Checkpoint 36: heap ceiling added opt-in; no default adopted; copies removed
+
+The bounded-child comparison finished, and it does **not** justify a production default:
+
+| Variant | Peak worker RSS | Gate (256 MiB) |
+|---|---|---|
+| unbounded | 254.1 MB | pass |
+| 128 MiB ceiling | 237.6 MB | pass |
+| 192 MiB ceiling | 261.6 MB | **fail** |
+
+Isolated peaks oscillate across the gate rather than showing a clean improvement, and the full 1M run's
+peak (279.1 MB) exceeds every isolated variant — so the isolated numbers do not predict the full
+mixture. A heap ceiling is therefore **not adopted as a default**.
+
+**What landed instead is the lever, with the safety invariant intact.** `maxOldSpaceMb` is available but
+inert unless an operator sets it. The first implementation applied a default ceiling and was caught by
+`recorder-supervisor-exec-argv.test.ts`: the recorder deliberately inherits **no** `execArgv`, because an
+inherited loader/debug flag can turn the helper into a wrapper process and break the sole IPC ownership
+channel. That invariant was preserved rather than weakened — with no ceiling requested the child's
+`execArgv` stays empty (asserted), an explicit request adds exactly one flag while preserving caller
+entries, and a sub-floor value is rejected. This is the correct outcome: a memory default must not
+silently erode a process-isolation guarantee.
+
+**Behaviour-preserving optimisation.** `node:v8` `deserialize` accepts a `Uint8Array` view directly and
+`Buffer.compare` accepts `Uint8Array` arguments, so the per-payload `Buffer.from` copies in the exclusion
+boundary and the worker's batch decoder were pure overhead and have been removed. Verified by
+inspection of the Node APIs and by the unchanged exclusion and byte-level fixed-point tests. No value,
+fingerprint or stored byte changes.
+
+**Fingerprint moves** to `60e11fa42dafc3f040d585ea7722407ec142a3e7184306faad905dd1717bc4e0` at build
+`6be7f9bd2d637393bbbe`, requiring a fresh cycle. That cycle has started: validation `validated`
+(root-free), 10k baseline `scenario-passed` with zero failed gates and max worker RSS `72,900,608`, and
+a 1M admission `validated` at projected peak `10,394,624,000` bytes and `583,168,000` bytes memory. The
+full 1M workload is running; its outcome is the next checkpoint.
+
+**Milestone status unchanged in kind.** Every 1M gate except `recorderWorkerRss` was already passing, and
+the `storage` timeout fix means `inPlaceCorruption` is expected to clear. The RSS gate remains open and
+will be decided on the full-run evidence, not the isolated samples.
+
 **Independently verified repair carried forward.** The `storage` command fix is confirmed: `979` ms
 against a fresh 1M database, down from the `10,022` ms timeout, so `inPlaceCorruption` should now
 proceed past its terminal probe. All the other 1M gates continue to pass.
