@@ -4,14 +4,13 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import type { BillableInvocationRecord } from '../../src/shared/billable-invocation';
 import { BillableAccounting, type BillableAccountingDeps } from '../../src/host/billable-accounting/service';
-import type { CanonicalAnalyticsCapture } from '../../src/analytics/canonical-capture.js';
+import type { CanonicalAnalyticsCapture, CanonicalProviderSettlement } from '../../src/analytics/canonical-capture.js';
 
 function accountingWithCapture(
   tempDir: string,
   captureOutcome: 'submitted' | 'rejected' = 'submitted',
-  captured?: BillableInvocationRecord[],
+  captured?: CanonicalProviderSettlement[],
   captureGaps?: Array<{
     executionId: string;
     sourceKey: string;
@@ -32,7 +31,7 @@ function accountingWithCapture(
     activeOperationId: () => null,
     markDerivedExportDirty: () => undefined,
     canonicalCapture: {
-      captureProviderSettlement: (record: BillableInvocationRecord) => {
+      captureProviderSettlement: (record: CanonicalProviderSettlement) => {
         captured?.push(record);
         return captureOutcome;
       },
@@ -71,10 +70,10 @@ function tempDir(): string {
   return mkdtempSync(path.join(tmpdir(), 'pie-accounting-canonical-'));
 }
 
-test('canonical authority projects settled invocations as the authoritative live snapshot', () => {
+test('canonical accounting submits exact settlements without a host history projection', () => {
   const temp = tempDir();
   try {
-    const captured: BillableInvocationRecord[] = [];
+    const captured: CanonicalProviderSettlement[] = [];
     const accounting = accountingWithCapture(temp, 'submitted', captured);
 
     const before = accounting.projectSessionUsage('/sessions/a.jsonl');
@@ -87,22 +86,17 @@ test('canonical authority projects settled invocations as the authoritative live
     assert.equal(accounting.invocationLedger.projectAll().records.length, 0);
     assert.equal(accounting.exportRecords().length, 0);
 
-    const snapshot = accounting.projectSessionUsage('/sessions/a');
-    assert.equal(snapshot.authority, 'canonical');
-    assert.equal(snapshot.samples.length, 1);
-    const sample = snapshot.samples[0]!;
+    assert.deepEqual(accounting.projectSessionUsage('/sessions/a'), { samples: [], authority: 'unknown' });
+    const sample = captured[0]!;
     assert.equal(sample.sourceId, 'assistant:op-1');
     assert.equal(sample.kind, 'conversation');
-    assert.equal(sample.modelId, 'claude-x');
+    assert.equal(sample.model, 'claude-x');
     assert.equal(sample.inputTokens, 100);
     assert.equal(sample.outputTokens, 40);
-    assert.equal(sample.totalTokens, 150);
-    assert.equal(sample.reportedCostUsd, 0.02);
-    assert.equal(sample.tokenChannelsKnown, true);
+    assert.equal(sample.providerTotalTokens, 150);
+    assert.equal(sample.providerReportedCostUsd, 0.02);
     assert.equal(sample.provenance, 'exact');
-    assert.equal(snapshot.incompleteInvocationCount, 0);
-
-    // Session close drops the process-local settlements; no legacy fallback.
+    // Close does not introduce a legacy fallback.
     accounting.onSessionClosed('/sessions/a');
     assert.deepEqual(accounting.projectSessionUsage('/sessions/a'), { samples: [], authority: 'unknown' });
   } finally {
@@ -113,7 +107,7 @@ test('canonical authority projects settled invocations as the authoritative live
 test('canonical subagent reconciliation routes mixed attempt capture status item by item', () => {
   const temp = tempDir();
   try {
-    const captured: BillableInvocationRecord[] = [];
+    const captured: CanonicalProviderSettlement[] = [];
     const captureGaps: Array<{
       executionId: string;
       sourceKey: string;
@@ -239,16 +233,8 @@ test('canonical subagent reconciliation routes mixed attempt capture status item
       ['canonical-disabled', 'canonical-disabled'],
       'explicitly disabled fallback retains its canonical invocation identity on replay',
     );
-    const projected = accounting.projectSessionUsage('/sessions/mixed.jsonl');
-    assert.equal(projected.authority, 'canonical');
-    assert.deepEqual(
-      projected.samples.map((sample) => sample.sourceId).sort(),
-      [
-        'subagent:mixed-tool:0:invocation:raw-disabled',
-        'subagent:mixed-tool:0:invocation:raw-submitted',
-      ],
-    );
-    assert.equal(projected.samples.reduce((sum, sample) => sum + (sample.reportedCostUsd ?? 0), 0), 0.05);
+    assert.deepEqual(accounting.projectSessionUsage('/sessions/mixed.jsonl'), { samples: [], authority: 'unknown' });
+    assert.equal(captured[0]?.providerReportedCostUsd, 0.03);
     assert.equal(accounting.invocationLedger.projectAll().records.length, 0);
   } finally {
     rmSync(temp, { recursive: true, force: true });
@@ -266,10 +252,11 @@ test('rejected canonical capture is not projected and empty sessions stay honest
   }
 });
 
-test('canonical projection preserves unknown channels and re-pathing moves settlements', () => {
+test('canonical capture preserves unknown channels without retaining settlements during re-pathing', () => {
   const temp = tempDir();
   try {
-    const accounting = accountingWithCapture(temp);
+    const captured: CanonicalProviderSettlement[] = [];
+    const accounting = accountingWithCapture(temp, 'submitted', captured);
     accounting.observeAuxiliaryLlmUsage('/sessions/a', {
       kind: 'assistant_message',
       sourceId: 'assistant:op-2',
@@ -284,14 +271,16 @@ test('canonical projection preserves unknown channels and re-pathing moves settl
     assert.deepEqual(snapshot, { samples: [], authority: 'unknown' });
 
     accounting.replaceSessionPath('/sessions/a', '/sessions/b');
-    const moved = accounting.projectSessionUsage('/sessions/b');
-    assert.equal(moved.authority, 'canonical');
-    const sample = moved.samples[0]!;
+    assert.deepEqual(accounting.projectSessionUsage('/sessions/b'), { samples: [], authority: 'unknown' });
+    assert.equal(captured.length, 1);
+    const sample = captured[0]!;
     assert.equal(sample.sourceId, 'assistant:op-2');
-    assert.equal(sample.tokenChannelsKnown, false);
+    assert.equal(sample.inputTokens, undefined);
+    assert.equal(sample.outputTokens, undefined);
+    assert.equal(sample.cacheReadTokens, undefined);
+    assert.equal(sample.cacheWriteTokens, undefined);
     assert.equal(sample.instrumentationGap, true);
     assert.equal(sample.provenance, 'unknown');
-    assert.equal(moved.incompleteInvocationCount, 1);
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }

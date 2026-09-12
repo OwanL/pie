@@ -49,13 +49,24 @@ const REPORT_SCHEMA_VERSION = 5;
 const HARNESS_VERSION = 'p0-baseline-scale-v7-recorder-heap-ceiling';
 const ENDURANCE_HARNESS_VERSION = `${HARNESS_VERSION}-endurance-v1`;
 const MIXED_HARNESS_VERSION = `${HARNESS_VERSION}-mixed-v2-native-process-handle`;
+const MIN_RECORDER_HEAP_PROBE_MB = 64;
+const MAX_RECORDER_HEAP_PROBE_MB = 512;
 let AnalyticsRecorderSupervisor;
 let AnalyticsCaptureCapacityError;
 let SqliteAnalyticsRecorder;
 let AnalyticsQueryClient;
 
+function parseRecorderHeapProbe(value) {
+  if (!/^\d+$/.test(value)) throw new Error('--recorder-heap-probe-mb must be a decimal integer');
+  const mb = Number(value);
+  if (!Number.isSafeInteger(mb) || mb < MIN_RECORDER_HEAP_PROBE_MB || mb > MAX_RECORDER_HEAP_PROBE_MB) {
+    throw new Error(`--recorder-heap-probe-mb must be a safe integer from ${MIN_RECORDER_HEAP_PROBE_MB} to ${MAX_RECORDER_HEAP_PROBE_MB} MiB`);
+  }
+  return mb;
+}
+
 function parseArguments(argv) {
-  const options = { scenario: 'baseline', rows: undefined, seed: undefined, report: undefined, baselineReport: undefined, validate: false, smoke: false };
+  const options = { scenario: 'baseline', rows: undefined, seed: undefined, report: undefined, baselineReport: undefined, recorderHeapProbeMb: undefined, validate: false, smoke: false };
   const allowedScenarios = new Set(['baseline', 'scale', 'endurance', 'mixed']);
   const seen = new Set();
   for (let index = 0; index < argv.length; index++) {
@@ -72,7 +83,7 @@ function parseArguments(argv) {
       options.smoke = true;
       continue;
     }
-    if (argument === '--scenario' || argument === '--rows' || argument === '--seed' || argument === '--report' || argument === '--baseline-report') {
+    if (argument === '--scenario' || argument === '--rows' || argument === '--seed' || argument === '--report' || argument === '--baseline-report' || argument === '--recorder-heap-probe-mb') {
       if (seen.has(argument)) throw new Error(`Duplicate option: ${argument}`);
       seen.add(argument);
       const value = argv[++index];
@@ -82,6 +93,7 @@ function parseArguments(argv) {
       if (argument === '--seed') options.seed = value;
       if (argument === '--report') options.report = value;
       if (argument === '--baseline-report') options.baselineReport = value;
+      if (argument === '--recorder-heap-probe-mb') options.recorderHeapProbeMb = parseRecorderHeapProbe(value);
       continue;
     }
     throw new Error(`Unsupported or ambiguous option: ${argument}`);
@@ -118,7 +130,14 @@ function parseArguments(argv) {
   if (process.env.PIE_ANALYTICS_P0_ENDURANCE === '1') {
     throw new Error('PIE_ANALYTICS_P0_ENDURANCE is no longer an execution switch; use --scenario endurance [--smoke]');
   }
-  if ((options.scenario === 'endurance' || options.scenario === 'mixed') && !options.smoke && process.env.PIE_ANALYTICS_P0_RECORDER_HEAP_MB !== undefined) {
+  if (options.recorderHeapProbeMb !== undefined && (options.smoke || (options.scenario !== 'endurance' && options.scenario !== 'mixed'))) {
+    throw new Error('--recorder-heap-probe-mb is valid only for a full endurance or mixed scenario');
+  }
+  if (options.recorderHeapProbeMb !== undefined && process.env.PIE_ANALYTICS_P0_RECORDER_HEAP_MB !== undefined) {
+    throw new Error('--recorder-heap-probe-mb cannot be combined with PIE_ANALYTICS_P0_RECORDER_HEAP_MB');
+  }
+  if ((options.scenario === 'endurance' || options.scenario === 'mixed') && !options.smoke
+    && options.recorderHeapProbeMb === undefined && process.env.PIE_ANALYTICS_P0_RECORDER_HEAP_MB !== undefined) {
     throw new Error(`full ${options.scenario} load requires the production-default recorder heap; unset PIE_ANALYTICS_P0_RECORDER_HEAP_MB`);
   }
   return {
@@ -127,12 +146,22 @@ function parseArguments(argv) {
     seed: options.seed,
     report: path.resolve(options.report),
     baselineReport: options.baselineReport,
+    ...(options.recorderHeapProbeMb === undefined ? {} : { recorderHeapProbeMb: options.recorderHeapProbeMb }),
     validate: options.validate,
     smoke: options.smoke,
   };
 }
 
 const configuration = parseArguments(process.argv.slice(2));
+const effectiveRecorderHeapCeilingMb = configuration.recorderHeapProbeMb
+  ?? (process.env.PIE_ANALYTICS_P0_RECORDER_HEAP_MB === undefined
+    ? null
+    : Number(process.env.PIE_ANALYTICS_P0_RECORDER_HEAP_MB));
+const recorderHeapMode = configuration.recorderHeapProbeMb !== undefined
+  ? 'qualification-only-probe'
+  : effectiveRecorderHeapCeilingMb === null
+    ? 'production-default'
+    : configuration.smoke ? 'legacy-smoke-override' : 'legacy-env-override';
 const activeHarnessVersion = configuration.scenario === 'endurance'
   ? ENDURANCE_HARNESS_VERSION
   : configuration.scenario === 'mixed' ? MIXED_HARNESS_VERSION : HARNESS_VERSION;
@@ -287,8 +316,7 @@ function supervisor(databasePath, extra = {}) {
   // ~141 MiB and RSS sits ~60 MiB above it, so RSS follows the reservation rather
   // than the live heap. Unset means the runtime default, which is what the gate
   // was measured against.
-  const heapCeilingMb = process.env.PIE_ANALYTICS_P0_RECORDER_HEAP_MB;
-  const heapOption = heapCeilingMb === undefined ? {} : { maxOldSpaceMb: Number(heapCeilingMb) };
+  const heapOption = effectiveRecorderHeapCeilingMb === null ? {} : { maxOldSpaceMb: effectiveRecorderHeapCeilingMb };
   const helper = new AnalyticsRecorderSupervisor({
     enabled: true,
     workerScript,
@@ -367,59 +395,71 @@ function startWorkerMemorySampler(hosts, label, intervalMs = 1_000) {
     });
     return inFlight;
   };
+  const summarizeSamples = () => {
+    const byWorker = new Map();
+    let maxWorkerRssBytes = 0;
+    let maxWorkerHeapTotalBytes = 0;
+    let maxWorkerHeapUsedBytes = 0;
+    for (const sample of samples) {
+      for (const worker of sample.workers) {
+        const key = worker.identity.instanceId;
+        const summary = byWorker.get(key) ?? {
+          identity: worker.identity,
+          sampleCount: 0,
+          maxRssBytes: 0,
+          maxHeapTotalBytes: 0,
+          maxHeapUsedBytes: 0,
+          maxExternalBytes: 0,
+          maxArrayBuffersBytes: 0,
+        };
+        summary.sampleCount += 1;
+        summary.maxRssBytes = Math.max(summary.maxRssBytes, worker.rssBytes);
+        summary.maxHeapTotalBytes = Math.max(summary.maxHeapTotalBytes, worker.heapTotalBytes);
+        summary.maxHeapUsedBytes = Math.max(summary.maxHeapUsedBytes, worker.heapUsedBytes);
+        summary.maxExternalBytes = Math.max(summary.maxExternalBytes, worker.externalBytes);
+        summary.maxArrayBuffersBytes = Math.max(summary.maxArrayBuffersBytes, worker.arrayBuffersBytes);
+        byWorker.set(key, summary);
+        maxWorkerRssBytes = Math.max(maxWorkerRssBytes, worker.rssBytes);
+        maxWorkerHeapTotalBytes = Math.max(maxWorkerHeapTotalBytes, worker.heapTotalBytes);
+        maxWorkerHeapUsedBytes = Math.max(maxWorkerHeapUsedBytes, worker.heapUsedBytes);
+      }
+    }
+    return {
+      intervalMs,
+      sampleCount: samples.length,
+      firstObservedAt: samples[0]?.observedAt ?? null,
+      lastObservedAt: samples.at(-1)?.observedAt ?? null,
+      maxWorkerRssBytes,
+      maxWorkerHeapTotalBytes,
+      maxWorkerHeapUsedBytes,
+      workers: [...byWorker.values()],
+    };
+  };
   const timer = setInterval(() => {
     if (stopped) return;
     void collect().catch(() => void 0);
   }, intervalMs);
   void collect().catch(() => void 0);
   return {
+    snapshot() {
+      const summary = summarizeSamples();
+      return {
+        ...summary,
+        complete: !failure && summary.sampleCount > 0 && summary.workers.length === hosts.length,
+        ...(failure ? { error: failure.message } : {}),
+      };
+    },
     async stop() {
       stopped = true;
       clearInterval(timer);
       if (inFlight) await inFlight;
       await collect();
       if (failure) throw failure;
-      const byWorker = new Map();
-      let maxWorkerRssBytes = 0;
-      let maxWorkerHeapTotalBytes = 0;
-      let maxWorkerHeapUsedBytes = 0;
-      for (const sample of samples) {
-        for (const worker of sample.workers) {
-          const key = worker.identity.instanceId;
-          const summary = byWorker.get(key) ?? {
-            identity: worker.identity,
-            sampleCount: 0,
-            maxRssBytes: 0,
-            maxHeapTotalBytes: 0,
-            maxHeapUsedBytes: 0,
-            maxExternalBytes: 0,
-            maxArrayBuffersBytes: 0,
-          };
-          summary.sampleCount += 1;
-          summary.maxRssBytes = Math.max(summary.maxRssBytes, worker.rssBytes);
-          summary.maxHeapTotalBytes = Math.max(summary.maxHeapTotalBytes, worker.heapTotalBytes);
-          summary.maxHeapUsedBytes = Math.max(summary.maxHeapUsedBytes, worker.heapUsedBytes);
-          summary.maxExternalBytes = Math.max(summary.maxExternalBytes, worker.externalBytes);
-          summary.maxArrayBuffersBytes = Math.max(summary.maxArrayBuffersBytes, worker.arrayBuffersBytes);
-          byWorker.set(key, summary);
-          maxWorkerRssBytes = Math.max(maxWorkerRssBytes, worker.rssBytes);
-          maxWorkerHeapTotalBytes = Math.max(maxWorkerHeapTotalBytes, worker.heapTotalBytes);
-          maxWorkerHeapUsedBytes = Math.max(maxWorkerHeapUsedBytes, worker.heapUsedBytes);
-        }
-      }
-      if (samples.length === 0 || byWorker.size !== hosts.length) {
+      const summary = summarizeSamples();
+      if (summary.sampleCount === 0 || summary.workers.length !== hosts.length) {
         throw new Error(`${label}: continuous worker memory telemetry is incomplete`);
       }
-      return {
-        intervalMs,
-        sampleCount: samples.length,
-        firstObservedAt: samples[0].observedAt,
-        lastObservedAt: samples.at(-1).observedAt,
-        maxWorkerRssBytes,
-        maxWorkerHeapTotalBytes,
-        maxWorkerHeapUsedBytes,
-        workers: [...byWorker.values()],
-      };
+      return summary;
     },
   };
 }
@@ -526,7 +566,9 @@ async function runEnduranceScenario() {
   }, 0);
   report.results.endurance = {
     mode: smoke ? 'smoke' : 'full',
-    productionDefaultRecorderHeap: report.environment.recorderHeapCeilingMb === null,
+    productionDefaultRecorderHeap: effectiveRecorderHeapCeilingMb === null,
+    recorderHeapCeilingMb: effectiveRecorderHeapCeilingMb,
+    recorderHeapMode,
     requiredMemoryFields: [...ENDURANCE_REQUIRED_WORKER_MEMORY_FIELDS],
     samplerIntervalMs: 1_000,
     expectedFullDurationMs,
@@ -573,6 +615,7 @@ async function runEnduranceScenario() {
   };
   const enduranceValidation = validateEnduranceTrials(report.results.endurance, {
     mode: smoke ? 'smoke' : 'full',
+    recorderHeapProbeMb: configuration.recorderHeapProbeMb,
   });
   report.results.endurance.validation = {
     valid: enduranceValidation.valid,
@@ -603,9 +646,12 @@ async function runEnduranceScenario() {
     const sustainedGate = recordGate('enduranceSustainedLoad', sustainedComplete, 'two independent >=10,000-sample 50 fact/s trials at each of 1 and 4 hosts', (value) => value === true, {
       trials: sustainedTrials.map((trial) => ({ label: trial.label, elapsedMs: trial.elapsedMs, handoff: trial.handoff, observationToCommitted: trial.observationToCommitted, acceptedSampleCount: trial.acceptedSampleCount, peakBacklogRecords: trial.peakBacklogRecords, peakBacklogBytes: trial.peakBacklogBytes, endingBacklogRecords: trial.endingBacklogRecords, endingBacklogBytes: trial.endingBacklogBytes })),
     });
-    const memoryGate = recordGate('enduranceWorkerMemory', memoryComplete && report.results.endurance.productionDefaultRecorderHeap, 'continuous stats IPC with mandatory worker RSS and heap fields for every trial under the production-default heap', (value) => value === true, {
+    const memoryGate = recordGate('enduranceWorkerMemory', memoryComplete, configuration.recorderHeapProbeMb === undefined
+      ? 'continuous stats IPC with mandatory worker RSS and heap fields for every trial under the production-default heap'
+      : 'continuous stats IPC with mandatory worker RSS and heap fields for every trial under the explicit qualification-only heap probe', (value) => value === true, {
       requiredFields: report.results.endurance.requiredMemoryFields,
       productionDefaultRecorderHeap: report.results.endurance.productionDefaultRecorderHeap,
+      ...(configuration.recorderHeapProbeMb === undefined ? {} : { recorderHeapProbeMb: configuration.recorderHeapProbeMb }),
       trials: report.results.endurance.trials.map((trial) => ({ label: trial.label, workerMemory: trial.workerMemory })),
     });
     const pacingGate = recordGate('endurancePacing', pacingComplete, 'recorded offered rate must be recomputed from sample count and submission elapsed time within 2%', (value) => value === true, {
@@ -618,7 +664,9 @@ async function runEnduranceScenario() {
       decision: 'scenario-passed',
       failedGates: [],
       overallP0: 'unqualified',
-      reason: 'Endurance evidence is a separate workload result; mixed/UI/schema and remaining P0 gates are still unqualified.',
+      reason: configuration.recorderHeapProbeMb === undefined
+        ? 'Endurance evidence is a separate workload result; mixed/UI/schema and remaining P0 gates are still unqualified.'
+        : 'Endurance heap probe passed its workload gates, but probe evidence is qualification-only and overall P0 remains unqualified.',
     };
   }
   report.status = 'passed';
@@ -678,6 +726,34 @@ function groupQueryLifecycleEvents(events) {
   ));
 }
 
+function boundedFailureMessage(value, limit = 1_024) {
+  const message = value instanceof Error ? value.message : String(value ?? 'unknown failure');
+  return message.length <= limit ? message : `${message.slice(0, limit)}...`;
+}
+
+function recorderFailureEvidence(error) {
+  if (!error) return null;
+  const evidence = {
+    name: typeof error.name === 'string' ? error.name.slice(0, 128) : 'Error',
+    message: boundedFailureMessage(error),
+  };
+  if (typeof error.code === 'string') evidence.code = error.code.slice(0, 128);
+  if (Number.isSafeInteger(error.requestId)) evidence.requestId = error.requestId;
+  if (typeof error.requestType === 'string') evidence.requestType = error.requestType.slice(0, 64);
+  if (error.workerIdentity && typeof error.workerIdentity === 'object') {
+    const identity = error.workerIdentity;
+    if (Number.isSafeInteger(identity.pid) && Number.isSafeInteger(identity.spawnedAtMs)
+      && typeof identity.instanceId === 'string') {
+      evidence.workerIdentity = {
+        pid: identity.pid,
+        spawnedAtMs: identity.spawnedAtMs,
+        instanceId: identity.instanceId.slice(0, 128),
+      };
+    }
+  }
+  return evidence;
+}
+
 async function runMixedScenario() {
   const smoke = configuration.smoke;
   const plan = smoke ? MIXED_SMOKE_PLAN : MIXED_FULL_PLAN;
@@ -685,30 +761,53 @@ async function runMixedScenario() {
   // Qualification-only Windows instrumentation. It is initialized before
   // any workload child is spawned; its callbacks only enqueue bounded NDJSON
   // and never participate in query admission or completion.
-  const nativeCollector = await startWindowsProcessHandleCollector({
+  let nativeCollector;
+  let hosts = [];
+  let memorySampler;
+  let queryClient;
+  let saturationQueryClient;
+  let sampleTopology;
+  let timedQuery;
+  let timedSaturationQuery;
+  let scenarioAbortController;
+  const inFlightQueries = new Set();
+  let activeSaturationControllers = [];
+  const queryWorkerLifecycle = [];
+  const queryLifecycleEvents = [];
+  const queryTimings = [];
+  const saturationWorkerLifecycle = [];
+  const saturationLifecycleEvents = [];
+  const saturationQueryTimings = [];
+  const topologySamples = [];
+  const workerStatsBefore = [];
+  const delivery = { rows: 0, bytes: 0 };
+  const hostRssBefore = process.memoryUsage().rss;
+  const hostProcessCpuBefore = process.cpuUsage();
+  let hostRssPeak = hostRssBefore;
+  let nativeCollectorStopped = false;
+  let samplerStopped = false;
+  let recorderMemory;
+  let nativeProcessTelemetry;
+  let queryTopology;
+  let acceptedRowsBeforeDetail = 0;
+  let acceptedBytesBeforeDetail = 0;
+  let mixedFailure;
+  let queryCleanupEvidence = { requested: 0, completed: true, timedOut: false };
+  try {
+  nativeCollector = await startWindowsProcessHandleCollector({
     expectedImagePath: process.execPath,
     maxRequests: 64,
     maxActiveHandles: 32,
     maxDurationMs: smoke ? 30_000 : 600_000,
   });
-  let nativeCollectorStopped = false;
-  const delivery = { rows: 0, bytes: 0 };
-  const hosts = Array.from({ length: plan.hostCount }, () => supervisor(database, {
+  hosts = Array.from({ length: plan.hostCount }, () => supervisor(database, {
     maxBatchSize: 100,
     onDeliveryAcknowledged: (measurement) => {
       delivery.rows += measurement.records;
       delivery.bytes += measurement.bytes;
     },
   }));
-  const queryWorkerLifecycle = [];
-  const queryLifecycleEvents = [];
-  const queryTimings = [];
-  const topologySamples = [];
-  const hostRssBefore = process.memoryUsage().rss;
-  const hostProcessCpuBefore = process.cpuUsage();
-  let hostRssPeak = hostRssBefore;
-  const workerStatsBefore = [];
-  const sampleTopology = async (label) => {
+  sampleTopology = async (label) => {
     hostRssPeak = Math.max(hostRssPeak, process.memoryUsage().rss);
     const stats = await Promise.all(hosts.map((host) => host.workerStats()));
     hostRssPeak = Math.max(hostRssPeak, process.memoryUsage().rss);
@@ -738,9 +837,22 @@ async function runMixedScenario() {
   await Promise.all(hosts.map((host) => host.start()));
   const initialStats = await sampleTopology('started');
   workerStatsBefore.push(...initialStats);
-  const memorySampler = startWorkerMemorySampler(hosts, 'mixed');
-  let samplerStopped = false;
-  const queryClient = new AnalyticsQueryClient({
+  memorySampler = startWorkerMemorySampler(hosts, 'mixed');
+  scenarioAbortController = new AbortController();
+  scenarioAbortController.signal.addEventListener('abort', () => {
+    for (const controller of activeSaturationControllers) {
+      if (!controller.signal.aborted) controller.abort(new Error('mixed scenario cleanup'));
+    }
+  }, { once: true });
+  const trackInFlightQuery = (promise) => {
+    inFlightQueries.add(promise);
+    void promise.then(
+      () => inFlightQueries.delete(promise),
+      () => inFlightQueries.delete(promise),
+    );
+    return promise;
+  };
+  queryClient = new AnalyticsQueryClient({
     databasePath: database,
     workerScript: queryWorkerScript,
     timeoutMs: 10_000,
@@ -757,10 +869,10 @@ async function runMixedScenario() {
       else if (observed.phase === 'terminal') nativeCollector.recordTerminal(observed);
     },
   });
-  const timedQuery = async (label, request, signal) => {
+  timedQuery = async (label, request, signal) => {
     const started = performance.now();
     try {
-      const result = await queryClient.query(request, signal);
+      const result = await trackInFlightQuery(queryClient.query(request, signal ?? scenarioAbortController.signal));
       queryTimings.push({ label, ms: performance.now() - started, outcome: 'resolved' });
       return result;
     } catch (error) {
@@ -773,10 +885,7 @@ async function runMixedScenario() {
       throw error;
     }
   };
-  const saturationWorkerLifecycle = [];
-  const saturationLifecycleEvents = [];
-  const saturationQueryTimings = [];
-  const saturationQueryClient = new AnalyticsQueryClient({
+  saturationQueryClient = new AnalyticsQueryClient({
     databasePath: database,
     workerScript: queryWorkerScript,
     timeoutMs: 10_000,
@@ -790,13 +899,13 @@ async function runMixedScenario() {
       else if (observed.phase === 'terminal') nativeCollector.recordTerminal(observed);
     },
   });
-  const timedSaturationQuery = (label, request, signal) => {
+  timedSaturationQuery = (label, request, signal) => {
     const started = performance.now();
     // Attach the rejection handler in the same turn as submission. The
     // bounded queue's capacity rejection can be synchronous enough for
     // strict Node unhandled-rejection handling to run before allSettled is
     // reached; the normalized outcome still records it as rejected below.
-    return saturationQueryClient.query(request, signal).then(
+    return trackInFlightQuery(saturationQueryClient.query(request, signal)).then(
       (result) => {
         saturationQueryTimings.push({ label, ms: performance.now() - started, outcome: 'resolved' });
         return { outcome: 'resolved', result };
@@ -808,11 +917,6 @@ async function runMixedScenario() {
       },
     );
   };
-  let recorderMemory;
-  let queryTopology;
-  let acceptedRowsBeforeDetail = 0;
-  let acceptedBytesBeforeDetail = 0;
-  try {
     for (let index = 0; index < plan.fixtureRows; index += 1) {
       const hostIndex = index % hosts.length;
       hosts[hostIndex].submit(observation(index, hostIndex, Math.floor(index / hosts.length) + 1));
@@ -855,6 +959,7 @@ async function runMixedScenario() {
     acceptedBytesBeforeDetail = delivery.bytes;
 
     const saturationControllers = Array.from({ length: plan.saturationQueryCount }, () => new AbortController());
+    activeSaturationControllers = saturationControllers;
     const saturationStarted = performance.now();
     const saturationSubmitted = saturationControllers.length;
     const saturation = saturationControllers.map((controller, index) => timedSaturationQuery(
@@ -959,7 +1064,7 @@ async function runMixedScenario() {
     if (queryProcessObservations.length === 0 || queryProcessObservations.some((worker) => worker.processObservedAlive)) {
       throw new Error('mixed query workers were not all observed absent after their requests settled');
     }
-    const nativeProcessTelemetry = await nativeCollector.stop();
+    nativeProcessTelemetry = await nativeCollector.stop();
     nativeCollectorStopped = true;
     const nativeEvidenceValidation = nativeProcessTelemetry.enabled
       ? validateWindowsProcessEvidence(nativeProcessTelemetry, queryWorkerIdentities)
@@ -983,7 +1088,9 @@ async function runMixedScenario() {
       mode: smoke ? 'smoke' : 'full',
       fixtureRows: plan.fixtureRows,
       hostCount: plan.hostCount,
-      productionDefaultRecorderHeap: report.environment.recorderHeapCeilingMb === null,
+      productionDefaultRecorderHeap: effectiveRecorderHeapCeilingMb === null,
+      recorderHeapCeilingMb: effectiveRecorderHeapCeilingMb,
+      recorderHeapMode,
       queryWorkerHeapCeilingMb: 192,
       pacedIngest: pacedResult,
       burstIngest: burst,
@@ -1030,8 +1137,12 @@ async function runMixedScenario() {
       },
       recorderMemory: {
         ...recorderMemory,
-        peakProven: recorderMemory.peakProven !== false,
-        qualification: recorderMemory.peakProven === false ? 'unqualified' : 'measured-recorder-only',
+        // The sampler observes a 1-second high-water, so it cannot prove an
+        // exact process peak between samples or at process exit.
+        peakProven: false,
+        sampledHighWaterProven: recorderMemory.peakProven !== false,
+        peakMeasurementKind: 'periodic-sampler-high-water',
+        qualification: recorderMemory.peakProven === false ? 'unqualified' : 'measured-recorder-sampled-high-water-only',
       },
       queryHostTopology: queryTopology,
       nativeProcessTelemetry,
@@ -1054,7 +1165,10 @@ async function runMixedScenario() {
         queryProcessObservations,
       },
     };
-    const validation = validateMixedEvidence(report.results.mixed, { mode: smoke ? 'smoke' : 'full' });
+    const validation = validateMixedEvidence(report.results.mixed, {
+      mode: smoke ? 'smoke' : 'full',
+      recorderHeapProbeMb: configuration.recorderHeapProbeMb,
+    });
     report.results.mixed.validation = validation;
     if (!validation.valid) throw new Error(`mixed evidence validation failed: ${validation.errors.join('; ')}`);
     if (smoke) {
@@ -1087,14 +1201,132 @@ async function runMixedScenario() {
         decision: 'scenario-passed',
         failedGates: [],
         overallP0: 'unqualified',
-        reason: 'Mixed workload evidence is separate from the remaining P0, agent/UI and whole-topology memory gates.',
+        reason: configuration.recorderHeapProbeMb === undefined
+          ? 'Mixed workload evidence is separate from the remaining P0, agent/UI and whole-topology memory gates.'
+          : 'Mixed heap probe passed its workload gates, but probe evidence is qualification-only and overall P0 remains unqualified.',
       };
     }
     report.status = 'passed';
+  } catch (error) {
+    mixedFailure = error instanceof Error ? error : new Error(String(error));
+    throw error;
   } finally {
-    if (!samplerStopped) await memorySampler.stop().catch(() => void 0);
-    if (!nativeCollectorStopped) await nativeCollector.stop().catch(() => void 0);
-    await shutdownHelpers(hosts).catch(() => void 0);
+    const failedBeforeCleanup = mixedFailure !== undefined;
+    if (scenarioAbortController) {
+      const pendingQueries = [...inFlightQueries];
+      queryCleanupEvidence = { requested: pendingQueries.length, completed: true, timedOut: false };
+      if (pendingQueries.length > 0) {
+        scenarioAbortController.abort(new Error('mixed scenario cleanup'));
+        let settled = false;
+        let timeoutHandle;
+        await Promise.race([
+          Promise.allSettled(pendingQueries).then(() => { settled = true; }),
+          new Promise((resolve) => { timeoutHandle = setTimeout(resolve, 2_000); }),
+        ]);
+        if (settled && timeoutHandle) clearTimeout(timeoutHandle);
+        queryCleanupEvidence = {
+          requested: pendingQueries.length,
+          completed: settled,
+          timedOut: !settled,
+        };
+      }
+    }
+    if (!samplerStopped && memorySampler) {
+      const partialMemory = memorySampler.snapshot();
+      try {
+        recorderMemory = await memorySampler.stop();
+      } catch (error) {
+        recorderMemory = {
+          ...partialMemory,
+          complete: false,
+          peakProven: false,
+          error: boundedFailureMessage(error),
+        };
+      }
+    }
+    if (!nativeCollectorStopped && nativeCollector) {
+      try {
+        nativeProcessTelemetry = await nativeCollector.stop();
+      } catch (error) {
+        nativeProcessTelemetry = {
+          ...nativeCollector.snapshot(),
+          complete: false,
+          error: boundedFailureMessage(error),
+        };
+      }
+    }
+    const preShutdownHostFailures = hosts.map((host, hostIndex) => ({
+      hostIndex,
+      lastDeliveryError: recorderFailureEvidence(host.lastDeliveryError),
+      terminalError: recorderFailureEvidence(host.terminalError),
+      backlog: host.backlog,
+    }));
+    const preShutdownDelivery = { ...delivery };
+    const shutdownFailure = await shutdownHelpers(hosts).then(
+      () => null,
+      (error) => recorderFailureEvidence(error),
+    );
+    if (!mixedFailure && (shutdownFailure || queryCleanupEvidence.timedOut)) {
+      mixedFailure = new Error(shutdownFailure
+        ? 'Mixed recorder shutdown failed; see partial cleanup evidence.'
+        : 'Mixed query cleanup exceeded its bounded deadline.');
+    }
+    if (mixedFailure) {
+      const postShutdownHostFailures = hosts.map((host, hostIndex) => ({
+        hostIndex,
+        lastDeliveryError: recorderFailureEvidence(host.lastDeliveryError),
+        terminalError: recorderFailureEvidence(host.terminalError),
+        backlog: host.backlog,
+      }));
+      const partialFailureEvidence = {
+        complete: false,
+        phase: report.progress?.phase ?? null,
+        failure: recorderFailureEvidence(mixedFailure),
+        delivery: {
+          acknowledgedRows: delivery.rows,
+          acknowledgedBytes: delivery.bytes,
+          beforeShutdown: preShutdownDelivery,
+        },
+        recorder: {
+          lifecycleComplete: false,
+          lifecycle: structuredClone(recorderWorkerLifecycle),
+          hosts: preShutdownHostFailures,
+          postShutdownHosts: postShutdownHostFailures,
+          shutdownFailure,
+        },
+        query: {
+          lifecycleComplete: false,
+          workerLifecycle: structuredClone(queryWorkerLifecycle),
+          saturationWorkerLifecycle: structuredClone(saturationWorkerLifecycle),
+          requestLifecycle: structuredClone(queryLifecycleEvents),
+          saturationRequestLifecycle: structuredClone(saturationLifecycleEvents),
+          timings: structuredClone(queryTimings),
+          saturationTimings: structuredClone(saturationQueryTimings),
+          cleanup: queryCleanupEvidence,
+        },
+        recorderMemory: recorderMemory ?? { complete: false, sampleCount: 0, workers: [] },
+        nativeProcessTelemetry: nativeProcessTelemetry ?? { complete: false, receipts: [], rejections: [] },
+        note: 'Partial evidence is retained for diagnosis only. Incomplete lifecycle, sampler, collector, queue or delivery evidence cannot satisfy a qualification gate.',
+      };
+      report.results.mixed = {
+        ...(report.results.mixed ?? {}),
+        complete: false,
+        partial: true,
+        partialFailureEvidence,
+        recorderMemory: partialFailureEvidence.recorderMemory,
+        nativeProcessTelemetry: partialFailureEvidence.nativeProcessTelemetry,
+        acceptedRows: acceptedRowsBeforeDetail || delivery.rows,
+        acceptedBytes: acceptedBytesBeforeDetail || delivery.bytes,
+      };
+    }
+    if (mixedFailure && report.results.mixed) {
+      report.results.mixed.complete = false;
+      report.results.mixed.partial = true;
+    }
+    // Cleanup is part of scenario completion. Preserve its evidence before
+    // failing an otherwise successful run; never turn failed retirement into
+    // a passing receipt or replace the original workload failure.
+    if (!failedBeforeCleanup && mixedFailure) throw mixedFailure;
   }
 }
 
@@ -1495,6 +1727,10 @@ const report = {
     seed: configuration.seed,
     reportPath: configuration.report,
     ...((configuration.scenario === 'endurance' || configuration.scenario === 'mixed') ? { mode: configuration.smoke ? 'smoke' : 'full' } : {}),
+    ...(configuration.recorderHeapProbeMb === undefined ? {} : {
+      recorderHeapProbeMb: configuration.recorderHeapProbeMb,
+      recorderHeapMode: 'qualification-only-probe',
+    }),
     resolvedRowsFrom: configuration.scenario === 'endurance'
       ? 'not-applicable'
       : process.env.PIE_ANALYTICS_P0_ROWS !== undefined && process.argv.includes('--rows') === false ? 'environment' : 'arguments/default',
@@ -1612,9 +1848,8 @@ try {
     sqlite: 'node:sqlite bundled with Node',
     // Recorded so the recorderWorkerRss evidence says which reservation the
     // measurement was taken under. Null means the runtime default.
-    recorderHeapCeilingMb: process.env.PIE_ANALYTICS_P0_RECORDER_HEAP_MB === undefined
-      ? null
-      : Number(process.env.PIE_ANALYTICS_P0_RECORDER_HEAP_MB),
+    recorderHeapCeilingMb: effectiveRecorderHeapCeilingMb,
+    recorderHeapMode,
   };
   report.results.capacityProjection = {
     fixtureBytes: capacityFixture.fixtureBytes,
@@ -2769,6 +3004,38 @@ try {
       report.cleanup = { completed: false, rootRemoved: false, helpers: helperCleanup, error: cleanupError };
       report.status = 'failed';
     }
+  }
+  if (configuration.scenario === 'mixed' && report.results.mixed?.terminalWorkers) {
+    const terminalWorkers = report.results.mixed.terminalWorkers;
+    report.cleanup.ownedScenarioWorkers = {
+      owner: 'mixed terminalWorkers evidence',
+      recorderTerminalCount: Array.isArray(terminalWorkers.recorder) ? terminalWorkers.recorder.length : 0,
+      queryTerminalCount: Array.isArray(terminalWorkers.query) ? terminalWorkers.query.length : 0,
+      queryLifecycleComplete: terminalWorkers.queryLifecycleComplete === true,
+      complete: terminalWorkers.complete === true,
+    };
+  } else if (configuration.scenario === 'mixed' && report.results.mixed?.partialFailureEvidence) {
+    const partialEvidence = report.results.mixed.partialFailureEvidence;
+    report.cleanup.ownedScenarioWorkers = {
+      owner: 'mixed partial failure evidence',
+      recorderTerminalCount: Array.isArray(partialEvidence.recorder?.lifecycle)
+        ? partialEvidence.recorder.lifecycle.filter((event) => event?.state === 'terminal').length : 0,
+      queryTerminalCount: [
+        ...(Array.isArray(partialEvidence.query?.workerLifecycle) ? partialEvidence.query.workerLifecycle : []),
+        ...(Array.isArray(partialEvidence.query?.saturationWorkerLifecycle) ? partialEvidence.query.saturationWorkerLifecycle : []),
+      ].filter((event) => event?.state === 'terminal').length,
+      queryLifecycleComplete: false,
+      complete: false,
+    };
+  }
+  if ((configuration.scenario === 'mixed' || configuration.scenario === 'endurance')
+    && report.status === 'passed' && report.cleanup.completed === true) {
+    report.measurement = {
+      completed: true,
+      completedAt: new Date().toISOString(),
+      mode: configuration.smoke ? 'smoke' : 'full',
+      qualification: report.qualification?.overallP0 ?? 'unqualified',
+    };
   }
   ensureGateEvidence();
   const recordedFailedGates = Object.entries(report.gates)

@@ -9,6 +9,7 @@ import {
   type AnalyticsPrivacyMode,
   type Int64Value,
 } from '../../../shared/analytics/contracts.js';
+import { ANALYTICS_HANDOFF_MAX_STATUS_HOSTS } from '../../../shared/analytics/handoff.js';
 
 interface SqliteRunResult { changes: number | bigint }
 interface SqliteStatement {
@@ -62,13 +63,61 @@ const HOUR_MS = 60n * 60n * 1_000n;
 const DAY_MS = 24n * HOUR_MS;
 type PrivacyMode = AnalyticsPrivacyMode;
 type SessionCloseDisposition = AnalyticsCloseDisposition;
+// The host registry is an additive feature table. Keep the lifecycle
+// user_version at 3 so an older extension host can continue opening the same
+// database while this feature is still discovery-only.
 const SCHEMA_VERSION = 3;
+const ADDITIVE_HOST_REGISTRY_VERSION = 4;
 
 export type SessionCleanupState = 'open' | 'retained' | 'deleting' | 'deleted' | 'blocked';
 export type SessionCloseCause = 'user_close' | 'private_close' | 'forget' | 'expiry';
 export type LifecycleArtifactKind = 'transcript' | 'session_sidecar' | 'managed_cache' | 'external_reference';
 export type LifecycleArtifactLocationKind = 'root_relative' | 'fixed_absolute' | 'external';
 export type LifecycleArtifactState = 'present' | 'deleting' | 'deleted' | 'missing' | 'blocked';
+
+/** Durable identity of an extension host that can participate in a future
+ * all-host handoff. Registration is deliberately separate from completeness:
+ * a caller must reconcile this set with runtime-generation leases and process
+ * evidence before it may claim that every writer was quiesced. */
+export type AnalyticsHostState = 'registered' | 'stopping' | 'stopped' | 'unsupported';
+
+export interface AnalyticsHostRecord {
+  hostInstanceId: string;
+  workspaceId: string;
+  generationId: string;
+  buildId: string;
+  processId: number;
+  endpointName?: string;
+  capabilities: string[];
+  state: AnalyticsHostState;
+  registeredAtMs: string;
+  heartbeatAtMs: string;
+  stoppedAtMs?: string;
+  unsupportedReason?: string;
+  updatedAtMs: string;
+}
+
+export interface AnalyticsHostPage {
+  hosts: AnalyticsHostRecord[];
+  truncated: boolean;
+  nextCursor?: string;
+}
+
+interface AnalyticsHostRow {
+  host_instance_id: string;
+  workspace_id: string;
+  generation_id: string;
+  build_id: string;
+  process_id: number | bigint;
+  endpoint_name: string | null;
+  capabilities_json: string;
+  state: AnalyticsHostState;
+  registered_at_ms: string;
+  heartbeat_at_ms: string;
+  stopped_at_ms: string | null;
+  unsupported_reason: string | null;
+  updated_at_ms: string;
+}
 
 export interface SessionLifecycleRecord {
   sessionId: string;
@@ -155,6 +204,20 @@ function requireId(value: string, name: string): string {
   return value;
 }
 
+function requireHostField(value: string, name: string, maxLength = 512): string {
+  requireId(value, name);
+  if (value.length > maxLength) throw new Error(`${name} exceeds the bounded length.`);
+  return value;
+}
+
+function encodeHostCapabilities(capabilities: readonly string[]): string {
+  if (!Array.isArray(capabilities) || capabilities.length > 32) {
+    throw new Error('Analytics host capabilities exceed the bounded count.');
+  }
+  const normalized = [...new Set(capabilities)].map((capability) => requireHostField(capability, 'Analytics host capability', 128)).sort();
+  return JSON.stringify(normalized);
+}
+
 function optional(value: string | null): string | undefined {
   return value ?? undefined;
 }
@@ -193,6 +256,34 @@ function toArtifact(row: ArtifactRow): LifecycleArtifactRecord {
     state: row.state,
     cleanupOperationId: optional(row.cleanup_operation_id),
     cleanupError: optional(row.cleanup_error),
+    updatedAtMs: row.updated_at_ms,
+  };
+}
+
+function toAnalyticsHost(row: AnalyticsHostRow): AnalyticsHostRecord {
+  let capabilities: string[];
+  try {
+    const parsed = JSON.parse(row.capabilities_json) as unknown;
+    if (!Array.isArray(parsed) || parsed.some((value) => typeof value !== 'string')) {
+      throw new Error('capabilities are not a string array');
+    }
+    capabilities = [...new Set(parsed)].sort();
+  } catch {
+    throw new SessionLifecycleConflictError(`Analytics host ${row.host_instance_id} has corrupt capability evidence.`);
+  }
+  return {
+    hostInstanceId: row.host_instance_id,
+    workspaceId: row.workspace_id,
+    generationId: row.generation_id,
+    buildId: row.build_id,
+    processId: Number(row.process_id),
+    ...(row.endpoint_name ? { endpointName: row.endpoint_name } : {}),
+    capabilities,
+    state: row.state,
+    registeredAtMs: row.registered_at_ms,
+    heartbeatAtMs: row.heartbeat_at_ms,
+    ...(row.stopped_at_ms ? { stoppedAtMs: row.stopped_at_ms } : {}),
+    ...(row.unsupported_reason ? { unsupportedReason: row.unsupported_reason } : {}),
     updatedAtMs: row.updated_at_ms,
   };
 }
@@ -252,9 +343,13 @@ export class SessionLifecycleStore {
 
   private migrate(): void {
     const version = Number((this.database.pragma('user_version', { simple: true }) as number | bigint));
-    if (version > SCHEMA_VERSION) {
+    if (version > ADDITIVE_HOST_REGISTRY_VERSION) {
       throw new Error(`Unsupported session lifecycle schema version ${version}.`);
     }
+    // An earlier development build briefly encoded the additive host table as
+    // lifecycle schema v4. It changed no lifecycle columns, so normalize that
+    // marker back to v3 before an older host can reopen the shared database.
+    if (version === ADDITIVE_HOST_REGISTRY_VERSION) this.database.exec('PRAGMA user_version = 3');
     this.database.exec(`
       CREATE TABLE IF NOT EXISTS session_lifecycle (
         session_id TEXT PRIMARY KEY,
@@ -347,12 +442,172 @@ export class SessionLifecycleStore {
       );
       CREATE INDEX IF NOT EXISTS session_lifecycle_due ON session_lifecycle(cleanup_state, expires_at_ms);
       CREATE INDEX IF NOT EXISTS session_lifecycle_artifact_cleanup ON session_lifecycle_artifacts(session_id, state);
+      CREATE TABLE IF NOT EXISTS analytics_hosts (
+        host_instance_id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        generation_id TEXT NOT NULL,
+        build_id TEXT NOT NULL,
+        process_id INTEGER NOT NULL CHECK (process_id > 0),
+        endpoint_name TEXT,
+        capabilities_json TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('registered', 'stopping', 'stopped', 'unsupported')),
+        registered_at_ms TEXT NOT NULL,
+        heartbeat_at_ms TEXT NOT NULL,
+        stopped_at_ms TEXT,
+        unsupported_reason TEXT,
+        updated_at_ms TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS analytics_hosts_workspace ON analytics_hosts(workspace_id, state, host_instance_id);
+      CREATE INDEX IF NOT EXISTS analytics_hosts_workspace_host ON analytics_hosts(workspace_id, host_instance_id);
       PRAGMA user_version = ${SCHEMA_VERSION};
     `);
   }
 
   close(): void {
     this.database.close();
+  }
+
+  /** Register one host identity in the existing lifecycle authority. This is
+   * discovery/status evidence only: callers must reconcile it with runtime
+   * leases and process ownership before claiming an all-host fence. */
+  registerAnalyticsHost(
+    host: Omit<AnalyticsHostRecord, 'state' | 'heartbeatAtMs' | 'updatedAtMs'> & {
+      state?: AnalyticsHostState;
+      heartbeatAtMs?: Int64Value;
+      updatedAtMs?: Int64Value;
+    },
+  ): AnalyticsHostRecord {
+    const hostInstanceId = requireHostField(host.hostInstanceId, 'hostInstanceId');
+    const workspaceId = requireHostField(host.workspaceId, 'workspaceId');
+    const generationId = requireHostField(host.generationId, 'generationId');
+    const buildId = requireHostField(host.buildId, 'buildId');
+    if (!Number.isSafeInteger(host.processId) || host.processId <= 0) {
+      throw new Error('Analytics host processId must be a positive safe integer.');
+    }
+    const endpointName = host.endpointName ? requireHostField(host.endpointName, 'endpointName', 256) : undefined;
+    const capabilitiesJson = encodeHostCapabilities(host.capabilities);
+    const registeredAtMs = encodeTimestamp(host.registeredAtMs, 'registeredAtMs');
+    const heartbeatAtMs = encodeTimestamp(host.heartbeatAtMs ?? host.registeredAtMs, 'heartbeatAtMs');
+    const updatedAtMs = encodeTimestamp(host.updatedAtMs ?? host.registeredAtMs, 'updatedAtMs');
+    const state = host.state ?? 'registered';
+    if (state !== 'registered' && state !== 'unsupported') {
+      throw new Error(`Analytics host registration state ${state} is not admissible.`);
+    }
+    const unsupportedReason = host.unsupportedReason
+      ? requireHostField(host.unsupportedReason, 'unsupportedReason', 1_024)
+      : undefined;
+    return this.database.transaction(() => {
+      const existing = this.database.prepare('SELECT * FROM analytics_hosts WHERE host_instance_id = ?')
+        .get(hostInstanceId) as AnalyticsHostRow | undefined;
+      if (existing && (existing.workspace_id !== workspaceId
+        || existing.generation_id !== generationId
+        || existing.build_id !== buildId
+        || Number(existing.process_id) !== host.processId)) {
+        throw new SessionLifecycleConflictError(`Analytics host ${hostInstanceId} is bound to another process identity.`);
+      }
+      if (existing?.state === 'stopped') {
+        throw new SessionLifecycleConflictError(`Analytics host ${hostInstanceId} is terminal and cannot be re-registered.`);
+      }
+      this.database.prepare(`
+        INSERT INTO analytics_hosts (
+          host_instance_id, workspace_id, generation_id, build_id, process_id, endpoint_name,
+          capabilities_json, state, registered_at_ms, heartbeat_at_ms, stopped_at_ms,
+          unsupported_reason, updated_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+        ON CONFLICT(host_instance_id) DO UPDATE SET
+          endpoint_name = excluded.endpoint_name,
+          capabilities_json = excluded.capabilities_json,
+          state = excluded.state,
+          heartbeat_at_ms = excluded.heartbeat_at_ms,
+          stopped_at_ms = NULL,
+          unsupported_reason = excluded.unsupported_reason,
+          updated_at_ms = excluded.updated_at_ms
+      `).run(
+        hostInstanceId, workspaceId, generationId, buildId, host.processId, endpointName ?? null,
+        capabilitiesJson, state, registeredAtMs, heartbeatAtMs, unsupportedReason ?? null, updatedAtMs,
+      );
+      return toAnalyticsHost(this.database.prepare('SELECT * FROM analytics_hosts WHERE host_instance_id = ?')
+        .get(hostInstanceId) as AnalyticsHostRow);
+    })();
+  }
+
+  heartbeatAnalyticsHost(
+    hostInstanceId: string,
+    processId: number,
+    generationId: string,
+    nowMs: Int64Value,
+  ): AnalyticsHostRecord {
+    requireHostField(hostInstanceId, 'hostInstanceId');
+    requireHostField(generationId, 'generationId');
+    if (!Number.isSafeInteger(processId) || processId <= 0) throw new Error('Analytics host processId is invalid.');
+    const encodedNow = encodeTimestamp(nowMs, 'nowMs');
+    const result = this.database.prepare(`
+      UPDATE analytics_hosts SET heartbeat_at_ms = ?, stopped_at_ms = NULL, updated_at_ms = ?
+      WHERE host_instance_id = ? AND process_id = ? AND generation_id = ?
+        AND state IN ('registered', 'unsupported')
+    `).run(encodedNow, encodedNow, hostInstanceId, processId, generationId);
+    if (Number(result.changes) !== 1) throw new SessionLifecycleConflictError(`Analytics host ${hostInstanceId} heartbeat identity is stale.`);
+    return toAnalyticsHost(this.database.prepare('SELECT * FROM analytics_hosts WHERE host_instance_id = ?')
+      .get(hostInstanceId) as AnalyticsHostRow);
+  }
+
+  markAnalyticsHostState(
+    hostInstanceId: string,
+    processId: number,
+    generationId: string,
+    state: Extract<AnalyticsHostState, 'stopping' | 'stopped'>,
+    nowMs: Int64Value,
+  ): AnalyticsHostRecord {
+    requireHostField(hostInstanceId, 'hostInstanceId');
+    requireHostField(generationId, 'generationId');
+    if (!Number.isSafeInteger(processId) || processId <= 0) throw new Error('Analytics host processId is invalid.');
+    const encodedNow = encodeTimestamp(nowMs, 'nowMs');
+    const result = this.database.prepare(`
+      UPDATE analytics_hosts SET state = ?, heartbeat_at_ms = ?, stopped_at_ms = CASE WHEN ? = 'stopped' THEN ? ELSE stopped_at_ms END,
+        updated_at_ms = ?
+      WHERE host_instance_id = ? AND process_id = ? AND generation_id = ? AND state != 'stopped'
+    `).run(state, encodedNow, state, encodedNow, encodedNow, hostInstanceId, processId, generationId);
+    if (Number(result.changes) !== 1) throw new SessionLifecycleConflictError(`Analytics host ${hostInstanceId} state identity is stale.`);
+    return toAnalyticsHost(this.database.prepare('SELECT * FROM analytics_hosts WHERE host_instance_id = ?')
+      .get(hostInstanceId) as AnalyticsHostRow);
+  }
+
+  getAnalyticsHost(hostInstanceId: string): AnalyticsHostRecord | undefined {
+    requireHostField(hostInstanceId, 'hostInstanceId');
+    const row = this.database.prepare('SELECT * FROM analytics_hosts WHERE host_instance_id = ?')
+      .get(hostInstanceId) as AnalyticsHostRow | undefined;
+    return row ? toAnalyticsHost(row) : undefined;
+  }
+
+  listAnalyticsHosts(
+    workspaceId: string,
+    options: { limit?: number; cursor?: string } = {},
+  ): AnalyticsHostPage {
+    requireHostField(workspaceId, 'workspaceId');
+    const requestedLimit = options.limit ?? ANALYTICS_HANDOFF_MAX_STATUS_HOSTS;
+    if (!Number.isSafeInteger(requestedLimit) || requestedLimit < 1
+      || requestedLimit > ANALYTICS_HANDOFF_MAX_STATUS_HOSTS) {
+      throw new Error('Analytics host page limit is invalid.');
+    }
+    const cursor = options.cursor === undefined
+      ? undefined : requireHostField(options.cursor, 'host cursor', 256);
+    const rows = (cursor === undefined
+      ? this.database.prepare(`
+          SELECT * FROM analytics_hosts WHERE workspace_id = ? ORDER BY host_instance_id LIMIT ?
+        `).all(workspaceId, requestedLimit + 1)
+      : this.database.prepare(`
+          SELECT * FROM analytics_hosts
+          WHERE workspace_id = ? AND host_instance_id > ?
+          ORDER BY host_instance_id LIMIT ?
+        `).all(workspaceId, cursor, requestedLimit + 1)) as AnalyticsHostRow[];
+    const truncated = rows.length > requestedLimit;
+    const pageRows = truncated ? rows.slice(0, requestedLimit) : rows;
+    const hosts = pageRows.map(toAnalyticsHost);
+    return {
+      hosts,
+      truncated,
+      ...(truncated && hosts.length > 0 ? { nextCursor: hosts[hosts.length - 1]!.hostInstanceId } : {}),
+    };
   }
 
   get(sessionId: string): SessionLifecycleRecord | undefined {

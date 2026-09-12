@@ -12,6 +12,13 @@ type RecorderWorkerRequest = {
   requestId: number;
   items: Uint8Array[];
 } | {
+  type: 'prepareProviderDailyProjection';
+  requestId: number;
+  timeZone: string;
+  windowStartMs: number | string | bigint;
+  windowEndMs: number | string | bigint;
+  allowTimeZoneChange?: boolean;
+} | {
   type: 'bindPendingCreate';
   requestId: number;
   pendingOperationId: string;
@@ -236,6 +243,16 @@ async function handle(raw: unknown): Promise<void> {
           request.timestampMs,
         );
         await acknowledge(request.requestId, receipt);
+        return;
+      }
+      case 'prepareProviderDailyProjection': {
+        recorder.prepareProviderDailyProjection(
+          request.timeZone,
+          request.windowStartMs,
+          request.windowEndMs,
+          request.allowTimeZoneChange === true,
+        );
+        await acknowledge(request.requestId);
         return;
       }
       case 'deleteSession': {

@@ -271,11 +271,14 @@ test('canonical accounting seam is exclusive and never falls through to the lega
       occurredAt: '2026-09-10T00:00:03.000Z', inputTokens: 30, outputTokens: 3,
       cacheReadTokens: 0, cacheWriteTokens: 0, reportedCostUsd: 0.03, outcome: 'succeeded',
     });
-    const selected = accounting.projectSessionUsage('/session-exclusive.jsonl');
-    assert.deepEqual(selected.samples.map((sample) => sample.sourceId), [
-      'provider-response-a', 'provider-response-c',
-    ]);
-    assert.equal(selected.samples.reduce((total, sample) => total + (sample.reportedCostUsd ?? 0), 0), 0.04);
+    assert.deepEqual(accounting.projectSessionUsage('/session-exclusive.jsonl'), {
+      samples: [], authority: 'unknown',
+    }, 'selected-branch reads belong to the durable read model');
+    assert.deepEqual(observations.map((observation) => observation.scope.branchId),
+      ['entry-A', 'entry-B', 'entry-C'].map((entry) => capture.scopedBranchId({
+        sessionId: 'session-exclusive', sessionPath: '/session-exclusive.jsonl',
+        runId: 'run-exclusive', operationId: 'operation-exclusive',
+      }, entry)));
     assert.equal(observations.length, 3, 'A, B, and C remain globally captured exactly once');
     assert.equal(observations.reduce((total, observation) => (
       total + ('reportedCostUsd' in observation.fields

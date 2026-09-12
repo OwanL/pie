@@ -34,6 +34,15 @@ function isFiniteNonNegative(value) {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0;
 }
 
+const MIN_RECORDER_HEAP_PROBE_MB = 64;
+const MAX_RECORDER_HEAP_PROBE_MB = 512;
+
+function isSupportedRecorderHeapProbe(value) {
+  return Number.isSafeInteger(value)
+    && value >= MIN_RECORDER_HEAP_PROBE_MB
+    && value <= MAX_RECORDER_HEAP_PROBE_MB;
+}
+
 function isSafeNonNegativeInteger(value) {
   return Number.isSafeInteger(value) && value >= 0;
 }
@@ -319,7 +328,7 @@ export function validateQueryLifecycleReceipts(receipts, { expected } = {}) {
  * separate from memory qualification. Query-worker terminal samples are
  * validated when present, while cancellation gaps keep whole-topology memory
  * explicitly unqualified. */
-export function validateMixedEvidence(mixed, { mode = 'full' } = {}) {
+export function validateMixedEvidence(mixed, { mode = 'full', recorderHeapProbeMb } = {}) {
   const errors = [];
   const memoryErrors = [];
   const expected = mode === 'smoke' ? MIXED_SMOKE_PLAN : MIXED_FULL_PLAN;
@@ -327,9 +336,22 @@ export function validateMixedEvidence(mixed, { mode = 'full' } = {}) {
     return { valid: false, errors: ['mixed results are missing'], memoryValid: false, memoryErrors: ['mixed results are missing'] };
   }
   if (mixed.mode !== mode) errors.push(`mixed mode must be ${mode}`);
+  if (mixed.complete === false || mixed.partial === true) {
+    errors.push('mixed evidence is explicitly incomplete and cannot qualify');
+  }
   if (mixed.fixtureRows !== expected.fixtureRows) errors.push(`mixed fixture rows must be ${expected.fixtureRows}`);
   if (mixed.hostCount !== expected.hostCount) errors.push(`mixed host count must be ${expected.hostCount}`);
-  if (mixed.productionDefaultRecorderHeap !== true && mode === 'full') errors.push('full mixed load must use the production-default recorder heap');
+  if (recorderHeapProbeMb !== undefined) {
+    if (mode !== 'full') errors.push('recorder heap probes are valid only for full mixed load');
+    if (!isSupportedRecorderHeapProbe(recorderHeapProbeMb)) {
+      errors.push(`recorder heap probe must be a safe integer from ${MIN_RECORDER_HEAP_PROBE_MB} to ${MAX_RECORDER_HEAP_PROBE_MB} MiB`);
+    }
+    if (mixed.productionDefaultRecorderHeap !== false) errors.push('full mixed heap probe must be marked qualification-only');
+    if (mixed.recorderHeapMode !== 'qualification-only-probe') errors.push('mixed heap probe mode is not marked qualification-only');
+    if (mixed.recorderHeapCeilingMb !== recorderHeapProbeMb) errors.push('mixed heap probe value does not match the recorded recorder heap ceiling');
+  } else if (mixed.productionDefaultRecorderHeap !== true && mode === 'full') {
+    errors.push('full mixed load must use the production-default recorder heap');
+  }
 
   const expectedAcceptedRows = expected.fixtureRows + expected.paced.sampleCount + expected.burst.sampleCount;
   if (mixed.acceptedRows !== expectedAcceptedRows) errors.push(`accepted rows must be ${expectedAcceptedRows}`);
@@ -473,9 +495,23 @@ export function validateMixedEvidence(mixed, { mode = 'full' } = {}) {
       || topology?.queryWorkerTelemetryAvailable !== false) {
       memoryErrors.push('query-worker RSS/CPU telemetry claim is malformed');
     }
-    memoryErrors.push('query-worker RSS/CPU high-water is not measured; memory qualification is unavailable');
+    const available = Number.isSafeInteger(queryTelemetry?.availableCount) ? queryTelemetry.availableCount : 0;
+    const unavailable = Number.isSafeInteger(queryTelemetry?.unavailableCount) ? queryTelemetry.unavailableCount : 0;
+    const invalid = Number.isSafeInteger(queryTelemetry?.invalidCount) ? queryTelemetry.invalidCount : 0;
+    const workerCount = lifecycleWorkers.length;
+    const missing = Math.max(0, workerCount - available - unavailable - invalid);
+    const nativeReceipts = Array.isArray(mixed.nativeProcessTelemetry?.receipts)
+      ? mixed.nativeProcessTelemetry.receipts
+      : [];
+    const nativeAvailable = nativeReceipts.filter((receipt) => receipt?.status === 'available').length;
+    const nativeCoverage = nativeReceipts.length > 0
+      ? ` Native OS final-counter evidence is available for ${nativeAvailable}/${nativeReceipts.length} query workers.`
+      : '';
+    memoryErrors.push(`query-worker RSS/CPU high-water is incomplete: runtime terminal telemetry is available for ${available}/${workerCount} query workers; ${unavailable} unavailable, ${invalid} invalid, and ${missing} missing runtime sample(s).${nativeCoverage} Whole-topology memory remains unqualified.`);
   }
-  if (mixed.recorderMemory?.peakProven !== true
+  const recorderSampledHighWater = mixed.recorderMemory?.sampledHighWaterProven === true
+    || mixed.recorderMemory?.peakProven === true;
+  if (!recorderSampledHighWater
     || !isSafeNonNegativeInteger(mixed.recorderMemory?.maxWorkerRssBytes)
     || mixed.recorderMemory.maxWorkerRssBytes <= 0
     || !isSafeNonNegativeInteger(mixed.recorderMemory?.sampleCount)

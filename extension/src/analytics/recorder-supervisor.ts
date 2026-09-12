@@ -105,6 +105,9 @@ export interface AnalyticsRecorderSupervisorOptions {
 }
 
 interface PendingRequest {
+  requestId: number;
+  requestType: string;
+  workerIdentity?: AnalyticsWorkerIdentity;
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   stopsWorker: boolean;
@@ -230,10 +233,29 @@ class AnalyticsRecorderTransportError extends Error {
   }
 }
 
-class AnalyticsRecorderWorkerRequestError extends Error {
-  constructor(message: string, readonly code?: string) {
-    super(message);
+export interface AnalyticsRecorderWorkerRequestContext {
+  readonly requestId: number;
+  readonly requestType: string;
+  readonly workerIdentity: AnalyticsWorkerIdentity | null;
+}
+
+export class AnalyticsRecorderWorkerRequestError extends Error {
+  readonly code?: string;
+  readonly requestId?: number;
+  readonly requestType?: string;
+  readonly workerIdentity?: AnalyticsWorkerIdentity;
+
+  constructor(message: string, code?: string, context?: AnalyticsRecorderWorkerRequestContext) {
+    // Worker diagnostics are operational evidence, not an unbounded IPC log.
+    // Preserve enough detail to identify the failed request while keeping a
+    // malformed/hostile child response from retaining an arbitrary payload.
+    const diagnostic = typeof message === 'string' ? message : 'Analytics recorder returned a malformed error message.';
+    super(diagnostic.length <= 2_048 ? diagnostic : `${diagnostic.slice(0, 2_048)}...`);
     this.name = 'AnalyticsRecorderWorkerRequestError';
+    this.code = typeof code === 'string' ? code.slice(0, 128) : undefined;
+    this.requestId = context?.requestId;
+    this.requestType = context?.requestType;
+    if (context?.workerIdentity) this.workerIdentity = context.workerIdentity;
   }
 }
 
@@ -413,6 +435,20 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
   async flush(): Promise<void> {
     if (!this.options.enabled) return;
     await this.enqueueControl({ type: 'flush' });
+  }
+
+  /** Prepare the single active IANA calendar zone in the recorder. This is a
+   * control operation, intentionally separate from read-only aggregate reads. */
+  async prepareProviderDailyProjection(
+    timeZone: string,
+    windowStartMs: number | string | bigint,
+    windowEndMs: number | string | bigint,
+    allowTimeZoneChange = false,
+  ): Promise<void> {
+    if (!this.options.enabled) return;
+    await this.enqueueControl({
+      type: 'prepareProviderDailyProjection', timeZone, windowStartMs, windowEndMs, allowTimeZoneChange,
+    });
   }
 
   async bindPendingCreate(
@@ -882,6 +918,8 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
       return Promise.reject(this.failure ?? new AnalyticsRecorderTransportError('Analytics recorder worker is not connected.'));
     }
     const requestId = this.nextRequestId++;
+    const requestType = typeof message.type === 'string' ? message.type.slice(0, 64) : 'unknown';
+    const workerIdentity = this.workerIdentities.get(child);
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         if (!this.pending.delete(requestId)) return;
@@ -893,6 +931,9 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
         reject(error);
       }, timeoutMs);
       this.pending.set(requestId, {
+        requestId,
+        requestType,
+        workerIdentity,
         stopsWorker: message.type === 'shutdown',
         resolve: (value) => {
           clearTimeout(timeout);
@@ -929,15 +970,23 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
   }
 
   private onMessage(raw: unknown): void {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return;
     const message = raw as { type?: string; requestId?: number; error?: string; errorCode?: string; receipt?: unknown };
-    if ((message.type !== 'ack' && message.type !== 'error') || typeof message.requestId !== 'number') return;
-    const pending = this.pending.get(message.requestId);
+    const requestId = message.requestId;
+    if ((message.type !== 'ack' && message.type !== 'error')
+      || typeof requestId !== 'number' || !Number.isSafeInteger(requestId) || requestId <= 0) return;
+    const pending = this.pending.get(requestId);
     if (!pending) return;
-    this.pending.delete(message.requestId);
+    this.pending.delete(requestId);
     if (message.type === 'error') {
       pending.reject(new AnalyticsRecorderWorkerRequestError(
         message.error ?? 'Analytics recorder request failed.',
         message.errorCode,
+        {
+          requestId: pending.requestId,
+          requestType: pending.requestType,
+          workerIdentity: pending.workerIdentity ?? null,
+        },
       ));
     } else {
       // Fence the intentional helper exit before resolving shutdown back into

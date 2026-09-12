@@ -384,7 +384,7 @@ test('v1 upgrade retains facts, detail, deletion fences, accounting, and source 
     }
 
     recorder = new SqliteAnalyticsRecorder(temp.databasePath);
-    assert.equal(recorder.getDatabaseSchemaVersion(), 8);
+    assert.equal(recorder.getDatabaseSchemaVersion(), 9);
     assert.equal(recorder.readDeliveryAccounting().deliveryHistoryCoverage, 'retained_only');
     assert.equal(recorder.countObservations('root-retained'), 1);
     assert.deepEqual(recorder.reconstructDetail('legacy-detail'), { retained: true });
@@ -571,14 +571,14 @@ test('recorder rejects unsupported newer database schema versions', () => {
   try {
     // One beyond the current schema: an unversioned future database must fail
     // closed rather than be read with today's assumptions.
-    raw.exec('PRAGMA user_version = 9');
+    raw.exec('PRAGMA user_version = 10');
   } finally {
     raw.close();
   }
   try {
     assert.throws(
       () => new SqliteAnalyticsRecorder(temp.databasePath),
-      /Unsupported newer analytics database schema version 9/,
+      /Unsupported newer analytics database schema version 10/,
     );
   } finally {
     rmSync(temp.root, { recursive: true, force: true });
@@ -1201,7 +1201,7 @@ test('logical query surface is native read-only, bounded, and reports snapshot/d
       ['query-a'],
       { maxRows: 2, maxCellBytes: 32 },
     );
-    assert.equal(result.databaseSchemaVersion, 8);
+    assert.equal(result.databaseSchemaVersion, 9);
     assert.equal(result.snapshotWatermark, 3);
     assert.deepEqual(result.generationIds, ['generation-1']);
     assert.equal(result.returnedRows, 2);
@@ -1486,7 +1486,7 @@ test('schema v5 adds the projection-order index without changing stored settleme
 
     const upgraded = new SqliteAnalyticsRecorder(temp.databasePath);
     try {
-      assert.equal(upgraded.getDatabaseSchemaVersion(), 8);
+      assert.equal(upgraded.getDatabaseSchemaVersion(), 9);
       const after = upgraded.readProviderSettlements();
       assert.deepEqual(after.settlements, before.settlements);
       assert.equal(upgraded.readProviderAccountingSummary().inputTokens.knownTotal, knownTotalBefore);

@@ -19,7 +19,10 @@ import {
   type AnalyticsLoadedGenerationReceipt,
   validateAnalyticsLoadedGenerationReceipt,
 } from '../../../shared/analytics/activation.js';
-import { canonicalAnalyticsDatabasePath } from '../analytics/query-entry.js';
+import {
+  canonicalAnalyticsDatabasePath,
+  type CanonicalAggregateRequest,
+} from '../analytics/query-entry.js';
 import { AnalyticsRecorderSupervisor } from '../analytics/recorder-supervisor.js';
 import { AnalyticsQueryClient } from '../analytics/query-client.js';
 import { ActivationStore, type ActivationReadResult } from '../analytics/activation-store.js';
@@ -70,6 +73,9 @@ export interface AnalyticsRuntimeOptions {
   activationSnapshot?: Pick<ActivationReadResult, 'manifest' | 'sha256' | 'authority'>;
   /** Optional helper-issued restart correlation nonce for loaded evidence. */
   restartNonce?: string | null;
+  /** Stable active IANA calendar zone for the canonical projection. It is
+   * captured once per host and never selected from competing read requests. */
+  timeZone?: string;
   onError?: (error: unknown, stage: string) => void;
 }
 
@@ -110,10 +116,24 @@ export class AnalyticsRuntime {
    * fail the next backend spawn instead of silently changing this host's
    * worker authority mid-process. */
   private activationDescriptor: AnalyticsBackendDescriptor | undefined;
+  private readonly timeZone: string;
+  private preparedDailyProjectionKey: string | undefined;
+  private preparingDailyProjection: Promise<void> | undefined;
   private stopped = false;
 
   constructor(private readonly options: AnalyticsRuntimeOptions) {
     this.store = new ActivationStore({ stateDir: options.stateDir });
+    const configuredTimeZone = options.timeZone?.trim()
+      || Intl.DateTimeFormat().resolvedOptions().timeZone
+      || 'UTC';
+    try {
+      // Validate once at construction so a malformed machine/configuration
+      // value cannot become a late read-path mutation or fallback.
+      new Intl.DateTimeFormat('en-US', { timeZone: configuredTimeZone }).format(new Date(0));
+    } catch {
+      throw new ActivationManifestError(`Analytics timezone is not a valid IANA name: ${configuredTimeZone}`);
+    }
+    this.timeZone = configuredTimeZone;
     if (options.restartNonce !== undefined && options.restartNonce !== null
       && !isAnalyticsRestartNonce(options.restartNonce)) {
       throw new ActivationManifestError('Analytics restart correlation nonce has an invalid format or exceeds 128 bytes.');
@@ -136,6 +156,57 @@ export class AnalyticsRuntime {
   activeDescriptor(): AnalyticsBackendDescriptor {
     if (this.activationDescriptor) return this.activationDescriptor;
     return this.descriptorFromActivation(this.readActivation());
+  }
+
+  /** The stable zone selected for this runtime instance. */
+  get analyticsTimeZone(): string {
+    return this.timeZone;
+  }
+
+  /** Prepare the writer-owned local-day window before a read. Requests for a
+   * competing zone fail closed; this runtime never turns every UI read into a
+   * last-writer-wins timezone rebuild. The window key excludes its moving
+   * `now` endpoint, while callers provide the next local midnight endpoint. */
+  async prepareProviderDailyProjection(request: CanonicalAggregateRequest): Promise<void> {
+    if (this.stopped) throw new ActivationManifestError('Analytics runtime has stopped.');
+    if (request.timeZone !== undefined && request.timeZone !== this.timeZone) {
+      throw new ActivationManifestError(
+        `Analytics aggregate timezone ${request.timeZone} does not match the configured runtime timezone ${this.timeZone}.`,
+      );
+    }
+    const windowStartMs = request.dailyWindowStartMs ?? request.weekStartMs;
+    const windowEndMs = request.dailyWindowEndMs ?? request.weekEndMs;
+    if (!Number.isSafeInteger(windowStartMs) || !Number.isSafeInteger(windowEndMs)
+      || windowStartMs >= windowEndMs) {
+      throw new RangeError('Analytics daily projection window is invalid.');
+    }
+    const key = `${this.timeZone}\0${windowStartMs}\0${windowEndMs}`;
+    for (;;) {
+      if (this.preparedDailyProjectionKey === key) return;
+      const pending = this.preparingDailyProjection;
+      if (!pending) break;
+      await pending;
+    }
+    const recorder = this.recorder;
+    if (!recorder || this.readiness?.authority !== 'canonical') {
+      throw new ActivationManifestError('Canonical recorder is not ready for daily projection preparation.');
+    }
+    const promise = (async () => {
+      await recorder.prepareProviderDailyProjection(
+        this.timeZone,
+        windowStartMs,
+        windowEndMs,
+        false,
+      );
+      if (this.stopped) throw new ActivationManifestError('Analytics runtime stopped during daily projection preparation.');
+      this.preparedDailyProjectionKey = key;
+    })();
+    this.preparingDailyProjection = promise;
+    try {
+      await promise;
+    } finally {
+      if (this.preparingDailyProjection === promise) this.preparingDailyProjection = undefined;
+    }
   }
 
   private descriptorFromActivation(
@@ -361,6 +432,7 @@ export class AnalyticsRuntime {
   async stop(): Promise<void> {
     this.stopped = true;
     this.activationDescriptor = undefined;
+    this.preparedDailyProjectionKey = undefined;
     const recorder = this.recorder;
     this.recorder = undefined;
     this.queryClient = undefined;

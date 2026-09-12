@@ -26,6 +26,12 @@ import { canonicalAnalyticsToolEntityId } from '../../../shared/analytics/transp
 export type AnalyticsAuthority = 'legacy' | 'canonical';
 export type AnalyticsCaptureStatus = 'disabled' | 'submitted' | 'rejected';
 
+/** Canonical evidence permits absent producer dates, unlike legacy ledger rows. */
+export type CanonicalProviderSettlement = Omit<BillableInvocationRecord, 'startedAt' | 'endedAt'> & {
+  startedAt?: string | undefined;
+  endedAt?: string | undefined;
+};
+
 export interface CanonicalAnalyticsLifecycleSink {
   bindPendingCreate(
     pendingOperationId: string,
@@ -64,13 +70,17 @@ export interface AnalyticsSessionContext {
   operationId?: string | null;
 }
 
-function timestamp(value: string | number | undefined, fallback: number): number {
+function optionalTimestamp(value: string | number | undefined): number | null {
   if (typeof value === 'number' && Number.isFinite(value)) return Math.trunc(value);
   if (typeof value === 'string') {
     const parsed = Date.parse(value);
     if (Number.isFinite(parsed)) return parsed;
   }
-  return fallback;
+  return null;
+}
+
+function timestamp(value: string | number | undefined, fallback: number): number {
+  return optionalTimestamp(value) ?? fallback;
 }
 
 /** Stable fallback only for pre-identity observations. The path itself is not
@@ -170,7 +180,7 @@ export class CanonicalAnalyticsCapture {
     );
   }
 
-  captureProviderSettlement(record: BillableInvocationRecord): AnalyticsCaptureStatus {
+  captureProviderSettlement(record: CanonicalProviderSettlement): AnalyticsCaptureStatus {
     if (!record.sessionPath && !record.sessionId) return 'rejected';
     const sessionPath = record.sessionPath ?? `session-id:${record.sessionId}`;
     const context: AnalyticsSessionContext = {
@@ -186,9 +196,11 @@ export class CanonicalAnalyticsCapture {
       purpose: record.kind,
       provider: record.provider,
       dispatchedModel: record.model,
-      startedAtMs: timestamp(record.startedAt, 0),
-      endedAtMs: timestamp(record.endedAt, 0),
-      settledAtMs: timestamp(record.endedAt, 0),
+      startedAtMs: optionalTimestamp(record.startedAt),
+      endedAtMs: optionalTimestamp(record.endedAt),
+      // Missing source time belongs to the undated bucket. Receipt time and
+      // the Unix epoch are not substitutes for a settlement's calendar date.
+      settledAtMs: optionalTimestamp(record.endedAt),
       outcome: record.outcome,
       coverage: record.instrumentationGap ? 'unknown' : 'known',
       ...(record.inputTokens === undefined ? {} : { inputTokens: record.inputTokens }),
@@ -226,7 +238,10 @@ export class CanonicalAnalyticsCapture {
       record.invocationId,
       'providerSettlement',
       `provider-settlement:${record.invocationId}`,
-      timestamp(record.endedAt, Date.now()),
+      // This required envelope time must be stable across exact redelivery.
+      // Zero denotes unavailable source time here; nullable settledAtMs above
+      // remains the sole calendar authority. Recorder receipt time is separate.
+      timestamp(record.endedAt, 0),
       fields,
       {
         invocationId: record.invocationId,

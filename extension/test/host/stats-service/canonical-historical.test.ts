@@ -135,6 +135,9 @@ test('canonical historical session and aggregate projections survive a new host 
     settlement({ invocationId: 'inv-conversation', rootSessionId: 'root-historical', purpose: 'conversation', settledAtMs: at, inputTokens: 100, outputTokens: 50, reportedCostUsd: 0.04 }),
     settlement({ invocationId: 'inv-retry', rootSessionId: 'root-historical', purpose: 'retry', settledAtMs: at + 1_000, inputTokens: 200, reportedCostUsd: 0.01 }),
   ]);
+  // The projection is writer-maintained. Prepare the UTC local-day envelope
+  // before handing the database to the disposable read helper.
+  writer.prepareProviderDailyProjection('UTC', Date.parse('2026-01-09T00:00:00.000Z'), Date.parse('2026-01-16T00:00:00.000Z'));
   closeFixtureWriter(writer);
 
   const readModel = new CanonicalAnalyticsReadModel({ databasePath, workerScript, execArgv, timeoutMs: 20_000, revisionPollIntervalMs: 25 });
@@ -175,6 +178,7 @@ test('canonical historical session and aggregate projections survive a new host 
     fetchProviderGateStats: async () => EMPTY_PROVIDER_GATE_STATS,
     onChanged: () => undefined,
     now: () => new Date(at + 2_000),
+    analyticsTimeZone: 'UTC',
   });
   try {
     await stats.start();
@@ -200,6 +204,7 @@ test('canonical historical session and aggregate projections survive a new host 
     assert.ok(BigInt(revision) > 0n);
     await (aggregate as unknown as { recompute(): Promise<void> }).recompute();
     assert.equal(aggregate.getAggregateStats().totalCost, 0.07);
+    await (stats as unknown as { refreshCanonicalSessionUsage(): Promise<void> }).refreshCanonicalSessionUsage();
     assert.equal(stats.getSessionUsage('/sessions/historical.jsonl').samples.length, 3);
 
     const deleteWriter = new SqliteAnalyticsRecorder(databasePath);

@@ -1,3 +1,8 @@
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 // @ts-expect-error The test runner imports this plain ESM validation module directly.
@@ -19,7 +24,7 @@ type MixedValidation = {
   };
   MIXED_SMOKE_PLAN: typeof mixedValidationModule.MIXED_FULL_PLAN;
   summarizeMixedTimingSamples: (values: number[]) => { samples: number; medianMs: number; maxMs: number };
-  validateMixedEvidence: (mixed: any, options: { mode: 'full' | 'smoke' }) => {
+  validateMixedEvidence: (mixed: any, options: { mode: 'full' | 'smoke'; recorderHeapProbeMb?: number }) => {
     valid: boolean;
     errors: string[];
     memoryValid: boolean;
@@ -104,6 +109,8 @@ function validMixed(mode: 'full' | 'smoke' = 'full') {
     fixtureRows: plan.fixtureRows,
     hostCount: plan.hostCount,
     productionDefaultRecorderHeap: true,
+    recorderHeapCeilingMb: null as number | null,
+    recorderHeapMode: 'production-default',
     acceptedRows: plan.fixtureRows + plan.paced.sampleCount + plan.burst.sampleCount,
     acceptedBytes: 10_000,
     endingBacklogRecords: 0,
@@ -148,7 +155,13 @@ function validMixed(mode: 'full' | 'smoke' = 'full') {
       afterCommitVisible: true,
       afterDeleteVisible: false,
     },
-    recorderMemory: { peakProven: true, maxWorkerRssBytes: 1_000, sampleCount: mode === 'full' ? 2 : 1 },
+    recorderMemory: {
+      peakProven: false,
+      sampledHighWaterProven: true,
+      peakMeasurementKind: 'periodic-sampler-high-water',
+      maxWorkerRssBytes: 1_000,
+      sampleCount: mode === 'full' ? 2 : 1,
+    },
     queryHostTopology: {
       hostPeakRssBytes: 2_000,
       hostCpuDeltaMicros: 500,
@@ -194,6 +207,58 @@ test('mixed validation rejects incomplete indexed timing evidence', () => {
   const result = validateMixedEvidence(mixed, { mode: 'full' });
   assert.equal(result.valid, false);
   assert.match(result.errors.join('; '), /indexed lookup timings/u);
+});
+
+test('mixed validation rejects a finally-captured partial failure envelope', () => {
+  const mixed: any = validMixed('full');
+  mixed.complete = false;
+  mixed.partial = true;
+  mixed.partialFailureEvidence = {
+    complete: false,
+    phase: 'mixed-burst-after-5000',
+    failure: { name: 'AnalyticsRecorderWorkerRequestError', message: 'database is locked', requestId: 7, requestType: 'captureBatch' },
+    delivery: { acknowledgedRows: 10_000, acknowledgedBytes: 1_000 },
+    recorder: { lifecycleComplete: false, lifecycle: [], hosts: [] },
+    query: { lifecycleComplete: false, workerLifecycle: [], requestLifecycle: [] },
+    recorderMemory: { complete: false, sampleCount: 1, workers: [] },
+    nativeProcessTelemetry: { complete: false, receipts: [], rejections: [] },
+  };
+  const result = validateMixedEvidence(mixed, { mode: 'full' });
+  assert.equal(result.valid, false);
+  assert.match(result.errors.join('; '), /explicitly incomplete/u);
+});
+
+test('mixed setup failure writes partial evidence and retires owned helpers', { timeout: 15_000 }, () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'pie-mixed-finally-failure-'));
+  const reportPath = path.join(root, 'mixed-failure.json');
+  const scriptPath = fileURLToPath(new URL('../../scripts/analytics-p0-qualification.mjs', import.meta.url));
+  try {
+    const result = spawnSync(process.execPath, [
+      scriptPath,
+      '--scenario', 'mixed',
+      '--smoke',
+      '--seed', 'mixed-finally-failure-test',
+      '--report', reportPath,
+    ], {
+      cwd: path.resolve(path.dirname(scriptPath), '../..'),
+      env: { ...process.env, PIE_ANALYTICS_P0_RECORDER_HEAP_MB: '16' },
+      encoding: 'utf8',
+      timeout: 10_000,
+    });
+    assert.equal(result.error, undefined, result.error?.message);
+    assert.equal(result.status, 1, `injected setup failure must fail: ${result.stderr}`);
+    const report = JSON.parse(readFileSync(reportPath, 'utf8'));
+    assert.equal(report.status, 'failed');
+    assert.equal(report.results.mixed.complete, false);
+    assert.equal(report.results.mixed.partial, true);
+    assert.equal(report.results.mixed.partialFailureEvidence.complete, false);
+    assert.equal(report.results.mixed.partialFailureEvidence.query.cleanup.completed, true);
+    assert.equal(report.cleanup.completed, true);
+    assert.equal(report.cleanup.helpers.remaining, 0, 'finally must retire helpers created before setup failure');
+    assert.equal(report.cleanup.ownedScenarioWorkers.complete, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('mixed validation rejects unresolved saturation and a visible deleted refresh', () => {
@@ -302,4 +367,56 @@ test('mixed smoke remains functional-only and rejects a non-default full heap', 
   const fullResult = validateMixedEvidence(full, { mode: 'full' });
   assert.equal(fullResult.valid, false);
   assert.match(fullResult.errors.join('; '), /production-default recorder heap/u);
+});
+
+test('mixed full accepts only an explicitly bound qualification-only heap probe', () => {
+  const probe = validMixed('full');
+  probe.productionDefaultRecorderHeap = false;
+  probe.recorderHeapCeilingMb = 128;
+  probe.recorderHeapMode = 'qualification-only-probe';
+  assert.equal(validateMixedEvidence(probe, { mode: 'full', recorderHeapProbeMb: 128 }).valid, true);
+
+  const omitted = validateMixedEvidence(probe, { mode: 'full' });
+  assert.equal(omitted.valid, false);
+  assert.match(omitted.errors.join('; '), /production-default recorder heap/u);
+
+  const mismatched = validateMixedEvidence(probe, { mode: 'full', recorderHeapProbeMb: 129 });
+  assert.equal(mismatched.valid, false);
+  assert.match(mismatched.errors.join('; '), /does not match/u);
+});
+
+test('mixed recorder evidence distinguishes sampled high-water from a proven process peak', () => {
+  const mixed = validMixed('full');
+  assert.equal(mixed.recorderMemory.peakProven, false);
+  assert.equal(mixed.recorderMemory.sampledHighWaterProven, true);
+  assert.equal(validateMixedEvidence(mixed, { mode: 'full' }).valid, true);
+});
+
+test('mixed memory error reports native final-counter coverage when runtime samples are unavailable', () => {
+  const mixed: any = validMixed('full');
+  const nativeIdentity = mixed.terminalWorkers.query[0].identity;
+  mixed.nativeProcessTelemetry = {
+    enabled: true,
+    platform: 'win32',
+    qualificationOnly: true,
+    overhead: { collectorProcessExcludedFromWorkloadTotals: true, pairedBaselineRequired: true, protocolBytes: 0, protocolWrites: 0 },
+    rejections: [],
+    receipts: [{
+      requestKey: '00000000-0000-4000-8000-000000000101:1',
+      identity: nativeIdentity,
+      status: 'available',
+      reason: null,
+      memory: { peakWorkingSetBytes: 4_096, units: 'bytes' },
+      cpu: { userCpuTimeMicros: 1, systemCpuTimeMicros: 1, units: 'microseconds' },
+      final: { handleRetainedThroughExit: true, exitTime100ns: '1' },
+      handleRetainedThroughExit: true,
+      handleClosed: true,
+      registration: { creationWindowMatch: true, creationTime100ns: '1', imagePath: 'node.exe' },
+    }],
+  };
+  const result = validateMixedEvidence(mixed, { mode: 'full' });
+  assert.equal(result.valid, false);
+  assert.match(result.errors.join('; '), /native process telemetry/u);
+  assert.match(result.memoryErrors.join('; '), /runtime terminal telemetry is available for 0\/16/u);
+  assert.match(result.memoryErrors.join('; '), /Native OS final-counter evidence is available for 1\/1/u);
 });

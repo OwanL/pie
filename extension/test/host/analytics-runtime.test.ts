@@ -23,7 +23,7 @@ const SHA = 'a'.repeat(64);
 const SHA_B = 'b'.repeat(64);
 const ACTIVATED_AT = '2026-09-12T04:00:00.000Z';
 
-function tempRuntime(activationSnapshot?: ReturnType<ActivationStore['read']>) {
+function tempRuntime(activationSnapshot?: ReturnType<ActivationStore['read']>, timeZone = 'UTC') {
   const root = mkdtempSync(path.join(tmpdir(), 'pie-analytics-runtime-'));
   const stateDir = path.join(root, 'state');
   const analyticsDir = path.join(root, 'analytics');
@@ -38,6 +38,7 @@ function tempRuntime(activationSnapshot?: ReturnType<ActivationStore['read']>) {
     workspaceId: 'workspace-1',
     processGeneration: 'process-1',
     activationSnapshot,
+    timeZone,
   });
   return { root, stateDir, analyticsDir, runtime };
 }
@@ -258,6 +259,51 @@ test('the sink and reads accessors stay undefined until a helper is actually sta
     assert.equal(runtime.getReadiness()?.authority, 'legacy');
     assert.equal(runtime.sink, undefined, 'legacy authority must not expose a sink');
     assert.equal(runtime.reads, undefined, 'legacy authority must not expose reads');
+  } finally {
+    await runtime.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('daily projection preparation is writer-owned, stable-zone, and rechecks a queued window', async () => {
+  const { root, runtime } = tempRuntime();
+  let releaseFirst!: () => void;
+  const first = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const calls: Array<[string, number | string | bigint, number | string | bigint]> = [];
+  const internals = runtime as unknown as {
+    recorder: {
+      prepareProviderDailyProjection: (...args: [string, number | string | bigint, number | string | bigint, boolean]) => Promise<void>;
+      shutdown: () => Promise<void>;
+    };
+    readiness: { authority: 'canonical' };
+  };
+  internals.readiness = { authority: 'canonical' };
+  internals.recorder = {
+    prepareProviderDailyProjection: async (timeZone, start, end) => {
+      calls.push([timeZone, start, end]);
+      if (calls.length === 1) await first;
+    },
+    shutdown: async () => undefined,
+  };
+  const request = (start: number, end: number, timeZone = 'UTC') => ({
+    todayStartMs: start, todayEndMs: end, weekStartMs: start, weekEndMs: end,
+    dailyWindowStartMs: start, dailyWindowEndMs: end, timeZone,
+  });
+  try {
+    const firstWindow = runtime.prepareProviderDailyProjection(request(1_700_000_000_000, 1_700_604_800_000));
+    const secondWindow = runtime.prepareProviderDailyProjection(request(1_700_086_400_000, 1_700_691_200_000));
+    const duplicateSecondWindow = runtime.prepareProviderDailyProjection(request(1_700_086_400_000, 1_700_691_200_000));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(calls.length, 1, 'a different window waits for the in-flight writer command');
+    releaseFirst();
+    await Promise.all([firstWindow, secondWindow, duplicateSecondWindow]);
+    assert.equal(calls.length, 2, 'the queued window is prepared after the first completes');
+    await runtime.prepareProviderDailyProjection(request(1_700_086_400_000, 1_700_691_200_000));
+    assert.equal(calls.length, 2, 'the same window is coalesced after completion');
+    await assert.rejects(
+      () => runtime.prepareProviderDailyProjection(request(1_700_086_400_000, 1_700_691_200_000, 'America/New_York')),
+      ActivationManifestError,
+    );
   } finally {
     await runtime.stop();
     rmSync(root, { recursive: true, force: true });

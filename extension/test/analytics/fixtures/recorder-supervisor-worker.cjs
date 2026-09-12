@@ -22,6 +22,18 @@ function append(value) {
 async function handle(request) {
   if (request.type === 'captureBatch') {
     const envelopes = request.items.map((item) => deserialize(Buffer.from(item)));
+    if (envelopes.some((envelope) => ['request-error', 'request-error-long', 'request-error-malformed'].includes(envelope.value.sourceKey))) {
+      const long = envelopes.some((envelope) => envelope.value.sourceKey === 'request-error-long');
+      const malformed = envelopes.some((envelope) => envelope.value.sourceKey === 'request-error-malformed');
+      if (malformed) await send(['invalid-frame']);
+      await send({
+        type: 'error',
+        requestId: request.requestId,
+        error: malformed ? { toString: null } : long ? `database is locked ${'x'.repeat(5_000)}` : 'database is locked',
+        errorCode: malformed ? { invalid: true } : 'SQLITE_BUSY',
+      });
+      return;
+    }
     if (envelopes.some((envelope) => envelope.value.sourceKey === 'crash-once') && !fs.existsSync(crashMarker)) {
       fs.writeFileSync(crashMarker, '1');
       process.exit(12);

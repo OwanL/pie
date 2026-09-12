@@ -60,6 +60,14 @@ type CanonicalSessionReadResult = {
   unknown?: boolean;
 };
 
+type CanonicalPrivateCloseOperation = {
+  rootSessionId: string;
+  pendingCreateOperationId?: string;
+  phase: 'closing' | 'deleted';
+  runtimeRetired: boolean;
+  promise: Promise<void>;
+};
+
 function canonicalRevision(value: string | number): bigint {
   return BigInt(value);
 }
@@ -127,6 +135,9 @@ export class StatsService implements RunObserver {
   private canonicalSessionUsageRefresh: Promise<void> | null = null;
   private readonly canonicalSessionPathRefreshes = new Map<string, Promise<void>>();
   private readonly canonicalSessionPathEpochs = new Map<string, number>();
+  /** An entry is an in-flight close until the recorder deletion resolves, then
+   * remains as an ephemeral display/capture fence until runtime retirement. */
+  private readonly canonicalPrivateClosesByPath = new Map<string, CanonicalPrivateCloseOperation>();
   /** Exact create/duplicate origin retained after the pending path is replaced.
    * A close operation ID must never enter this map. */
   private readonly pendingCreateOperationBySessionPath = new Map<string, string>();
@@ -472,6 +483,10 @@ export class StatsService implements RunObserver {
     return this.getArchState().sessions.privacyModeBySession[sessionPath] === true;
   }
 
+  private isCanonicalCloseActive(sessionPath: string): boolean {
+    return this.canonicalCapture !== undefined && this.canonicalPrivateClosesByPath.has(sessionPath);
+  }
+
   private syncWorkingTimeBreakdown(sessionPath: string): void {
     const run = this.tracker.getMostRelevantRun(sessionPath);
     if (run) this.workingTime.observeRun(run);
@@ -512,31 +527,79 @@ export class StatsService implements RunObserver {
     return `${sessionPath}\0${toolId}`;
   }
 
-  /** Enable/disable host-side privacy bookkeeping. Enabling immediately drops
-   *  the current in-memory run and removes any already-written analytics for
-   *  this session; the mode itself remains host-only. */
+  /** Clear private display state while the operational close deletes its facts. */
   async closePrivateSessionAnalytics(
     sessionPath: string,
     pendingCreateOperationId?: string,
     stableRootSessionId?: string,
   ): Promise<void> {
     if (this.canonicalCapture) {
-      // A private close is a local privacy fence as well as a durable delete.
-      // Drop any previously answered snapshot before awaiting the writer so a
-      // close cannot leave private rows visible during the delete handshake.
-      this.invalidateCanonicalSessionCache();
-      const pendingOrigin = pendingCreateOperationId
-        ?? this.pendingCreateOperationBySessionPath.get(sessionPath);
-      await this.canonicalCapture.closeSession(
-        stableRootSessionId?.trim() || resolveSessionIdentity(sessionPath).sessionId,
-        'on',
-        this.now().getTime(),
-        pendingOrigin,
-      );
-      this.pendingCreateOperationBySessionPath.delete(sessionPath);
+      // Resolve the durable identity before looking for a concurrent close.
+      // The cleanup operation must never become the analytics subject.
+      const rootSessionId = stableRootSessionId?.trim() || resolveSessionIdentity(sessionPath).sessionId;
+      const pendingOrigin = pendingCreateOperationId?.trim()
+        || this.pendingCreateOperationBySessionPath.get(sessionPath);
+      const existing = this.canonicalPrivateClosesByPath.get(sessionPath);
+      if (existing) {
+        if (existing.rootSessionId !== rootSessionId
+          || existing.pendingCreateOperationId !== pendingOrigin) {
+          throw new Error(`Concurrent canonical private close identity conflicts for ${sessionPath}.`);
+        }
+        await existing.promise;
+        return;
+      }
+
+      const operation: CanonicalPrivateCloseOperation = {
+        rootSessionId,
+        ...(pendingOrigin ? { pendingCreateOperationId: pendingOrigin } : {}),
+        phase: 'closing',
+        runtimeRetired: false,
+        promise: Promise.resolve(),
+      };
+      this.canonicalPrivateClosesByPath.set(sessionPath, operation);
+      operation.promise = this.performCanonicalPrivateClose(sessionPath, operation);
+      await operation.promise;
       return;
     }
     await this.setSessionPrivacy(sessionPath, true);
+  }
+
+  private async performCanonicalPrivateClose(
+    sessionPath: string,
+    operation: CanonicalPrivateCloseOperation,
+  ): Promise<void> {
+    // Hide the old answer immediately, but retain all local live state until
+    // the durable deletion fence has committed so a failed close is retryable.
+    this.invalidateCanonicalSessionCache();
+    this.scheduleRender();
+    try {
+      await this.canonicalCapture!.closeSession(
+        operation.rootSessionId,
+        'on',
+        this.now().getTime(),
+        operation.pendingCreateOperationId,
+      );
+    } catch (error) {
+      if (this.canonicalPrivateClosesByPath.get(sessionPath) === operation) {
+        this.canonicalPrivateClosesByPath.delete(sessionPath);
+      }
+      this.invalidateCanonicalSessionCache();
+      this.scheduleRender();
+      throw error;
+    }
+
+    this.pendingCreateOperationBySessionPath.delete(sessionPath);
+    operation.phase = 'deleted';
+    this.tracker.discardSession(sessionPath);
+    this.workingTime.resetSession(sessionPath, false);
+    this.releaseCanonicalSessionCorrelations(sessionPath);
+    // Keep the ephemeral fence until the runtime's existing close callback;
+    // late local events must not recreate the discarded state.
+    this.invalidateCanonicalSessionCache();
+    this.scheduleRender();
+    if (operation.runtimeRetired && this.canonicalPrivateClosesByPath.get(sessionPath) === operation) {
+      this.canonicalPrivateClosesByPath.delete(sessionPath);
+    }
   }
 
   async setSessionPrivacy(sessionPath: string, enabled: boolean): Promise<void> {
@@ -564,7 +627,9 @@ export class StatsService implements RunObserver {
 
   prepareForSend(sessionPath: string, inputs: ComposerInput[], initialUserMessage = ''): string {
     if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return 'private-run';
-    const runId = this.tracker.prepareForSend(sessionPath, inputs, initialUserMessage);
+    const runId = this.isCanonicalCloseActive(sessionPath)
+      ? this.currentRunId(sessionPath) ?? this.createId()
+      : this.tracker.prepareForSend(sessionPath, inputs, initialUserMessage);
     this.canonicalCapture?.captureExecution(
       this.analyticsContext(sessionPath),
       runId,
@@ -577,7 +642,7 @@ export class StatsService implements RunObserver {
   }
 
   onAssistantTurnStarted(sessionPath: string, turnId: string): void {
-    this.accounting.observeAssistantTurnStarted(sessionPath);
+    if (!this.isCanonicalCloseActive(sessionPath)) this.accounting.observeAssistantTurnStarted(sessionPath);
     const context = this.analyticsContext(sessionPath);
     const executionId = context.runId ?? context.operationId ?? `turn:${turnId}`;
     this.canonicalCapture?.captureExecution(
@@ -589,6 +654,7 @@ export class StatsService implements RunObserver {
       { runId: context.runId ?? undefined, turnId, operationKind: 'assistant-turn', source: 'host' },
     );
     if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
+    if (this.isCanonicalCloseActive(sessionPath)) return;
     this.tracker.onAssistantTurnStarted(sessionPath, turnId);
   }
 
@@ -598,7 +664,9 @@ export class StatsService implements RunObserver {
     occurredAt: string,
     details: unknown,
   ): void {
-    this.accounting.observeSkillPruningUsage(sessionPath, messageId, occurredAt, details);
+    if (!this.isCanonicalCloseActive(sessionPath)) {
+      this.accounting.observeSkillPruningUsage(sessionPath, messageId, occurredAt, details);
+    }
     const context = this.analyticsContext(sessionPath);
     this.canonicalCapture?.captureFeature(
       context,
@@ -608,6 +676,7 @@ export class StatsService implements RunObserver {
       { feature: 'pruning', decision: 'provider-settled', ruleVersion: 'legacy-adapter-v1' },
     );
     if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
+    if (this.isCanonicalCloseActive(sessionPath)) return;
     this.tracker.onSkillPruningUsage(sessionPath, messageId, occurredAt, details);
     this.syncWorkingTimeBreakdown(sessionPath);
   }
@@ -621,7 +690,9 @@ export class StatsService implements RunObserver {
     latency?: TurnLatencyMeasurement,
     billing?: { modelId?: string; provider?: string; occurredAt?: string; operationId?: string; durableEntryId?: string },
   ): void {
-    this.accounting.observeAssistantTurnEnded(sessionPath, turnId, durationMs, usage, status, billing);
+    if (!this.isCanonicalCloseActive(sessionPath)) {
+      this.accounting.observeAssistantTurnEnded(sessionPath, turnId, durationMs, usage, status, billing);
+    }
     const context = this.analyticsContext(sessionPath);
     const executionId = context.runId ?? context.operationId ?? `turn:${turnId}`;
     const observedAtMs = stableEvidenceTime(billing?.occurredAt);
@@ -658,6 +729,7 @@ export class StatsService implements RunObserver {
       );
     }
     if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
+    if (this.isCanonicalCloseActive(sessionPath)) return;
     this.tracker.onAssistantTurnEnded(sessionPath, turnId, durationMs, usage, status, latency);
     this.syncWorkingTimeBreakdown(sessionPath);
   }
@@ -700,6 +772,7 @@ export class StatsService implements RunObserver {
     selectionId?: string,
     selectionObservedAt?: number,
   ): void {
+    if (this.isCanonicalCloseActive(sessionPath)) return;
     this.accounting.observeSessionUsageSnapshot(sessionPath, sessionId, snapshot);
     const context = this.analyticsContext(sessionPath);
     const state = this.canonicalBranchEntriesBySession.get(sessionPath) ?? { captured: new Set<string>() };
@@ -754,6 +827,7 @@ export class StatsService implements RunObserver {
     selectedEntryId: string,
     observedAt: number,
   ): void {
+    if (this.isCanonicalCloseActive(sessionPath)) return;
     this.accounting.observeBranchEntry(sessionPath, entryId, parentEntryId, selectedEntryId);
     const state = this.canonicalBranchEntriesBySession.get(sessionPath) ?? { captured: new Set<string>() };
     const previousSelectedEntryId = state.selectedEntryId;
@@ -809,6 +883,7 @@ export class StatsService implements RunObserver {
       toolCall.startedAt ?? this.now().getTime(),
     );
     if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
+    if (this.isCanonicalCloseActive(sessionPath)) return;
     this.tracker.onToolStarted(sessionPath, toolCall);
     this.workingTime.onToolStarted(sessionPath, toolCall);
     const runId = this.currentRunId(sessionPath);
@@ -835,7 +910,8 @@ export class StatsService implements RunObserver {
   }
 
   onToolFinished(sessionPath: string, toolCall: ToolCall): void {
-    this.accounting.observeSubagentToolResult(sessionPath, toolCall);
+    const closing = this.isCanonicalCloseActive(sessionPath);
+    if (!closing) this.accounting.observeSubagentToolResult(sessionPath, toolCall);
     this.canonicalCapture?.captureTool(
       this.analyticsContext(sessionPath),
       toolCall,
@@ -845,6 +921,7 @@ export class StatsService implements RunObserver {
         ? toolCall.startedAt + toolCall.durationMs : this.now().getTime(),
     );
     if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
+    if (closing) return;
     // Close the live wall-time interval before durable telemetry catches up;
     // the service reconciles the two sources without double-counting.
     this.workingTime.onToolFinished(sessionPath, toolCall);
@@ -883,12 +960,14 @@ export class StatsService implements RunObserver {
   }
 
   onInterrupted(sessionPath: string): void {
-    if (this.isPrivateSession(sessionPath)) return;
+    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
+    if (this.isCanonicalCloseActive(sessionPath)) return;
     this.tracker.onInterrupted(sessionPath);
   }
 
   onCompaction(sessionPath: string): void {
-    if (this.isPrivateSession(sessionPath)) return;
+    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
+    if (this.isCanonicalCloseActive(sessionPath)) return;
     this.tracker.onCompaction(sessionPath);
   }
 
@@ -896,8 +975,9 @@ export class StatsService implements RunObserver {
     sessionPath: string,
     sample: Omit<AuxiliaryLlmUsagePayload, 'sessionPath'>,
   ): void {
+    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
+    if (this.isCanonicalCloseActive(sessionPath)) return;
     const observed = this.accounting.observeAuxiliaryLlmUsage(sessionPath, sample);
-    if (this.isPrivateSession(sessionPath)) return;
     if (observed.channelsKnown) {
       this.tracker.onAuxiliaryLlmUsage(sessionPath, observed.sample);
     }
@@ -908,8 +988,9 @@ export class StatsService implements RunObserver {
     sessionPath: string,
     timing?: { sourceId: string; occurredAt: string; attempt: number; scheduledDelayMs: number },
   ): void {
+    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
+    if (this.isCanonicalCloseActive(sessionPath)) return;
     this.accounting.observeAutoRetry(sessionPath, timing);
-    if (this.isPrivateSession(sessionPath)) return;
     this.tracker.onAutoRetry(sessionPath, timing);
     this.syncWorkingTimeBreakdown(sessionPath);
   }
@@ -920,7 +1001,8 @@ export class StatsService implements RunObserver {
     measuredDelayMs: number | undefined,
     durationMs: number,
   ): void {
-    if (this.isPrivateSession(sessionPath)) return;
+    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
+    if (this.isCanonicalCloseActive(sessionPath)) return;
     this.tracker.onAutoRetryMeasured(sessionPath, sourceId, measuredDelayMs, durationMs);
     const endedAtMs = this.now().getTime();
     const elapsed = Math.max(0, measuredDelayMs ?? durationMs);
@@ -947,28 +1029,33 @@ export class StatsService implements RunObserver {
   }
 
   onMessageEdited(sessionPath: string, _messageId: string): void {
-    if (this.isPrivateSession(sessionPath)) return;
+    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
+    if (this.isCanonicalCloseActive(sessionPath)) return;
     this.tracker.onMessageEdited(sessionPath);
   }
 
   onTruncatedAfter(sessionPath: string, _messageId: string): void {
-    if (this.isPrivateSession(sessionPath)) return;
+    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
+    if (this.isCanonicalCloseActive(sessionPath)) return;
     this.tracker.onTruncatedAfter(sessionPath);
   }
 
   onBackendError(sessionPath: string | undefined, code: string): void {
-    if (!sessionPath || this.isPrivateSession(sessionPath)) return;
+    if (!sessionPath || (this.isPrivateSession(sessionPath) && !this.canonicalCapture)) return;
+    if (this.isCanonicalCloseActive(sessionPath)) return;
     this.tracker.onBackendError(sessionPath, code);
   }
 
   onContextUsageChanged(sessionPath: string, tokens: number | null, limit: number): void {
-    if (this.isPrivateSession(sessionPath)) return;
+    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
+    if (this.isCanonicalCloseActive(sessionPath)) return;
     this.tracker.onContextUsageChanged(sessionPath, tokens, limit);
   }
 
   onBusyChanged(sessionPath: string, busy: boolean): void {
+    if (this.isCanonicalCloseActive(sessionPath)) return;
     this.workingTime.onBusyChanged(sessionPath, busy);
-    if (this.isPrivateSession(sessionPath)) return;
+    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
     this.tracker.onBusyChanged(sessionPath, busy);
     const nowIso = this.now().toISOString();
     if (busy && (this.activeBusyIntervalsBySession[sessionPath]?.size ?? 0) === 0) {
@@ -1026,13 +1113,26 @@ export class StatsService implements RunObserver {
     thinkingLevel: ThinkingLevel | undefined,
     provider?: string,
   ): void {
-    if (this.isPrivateSession(sessionPath)) return;
+    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
+    if (this.isCanonicalCloseActive(sessionPath)) return;
     this.tracker.onModelConfigChanged(sessionPath, modelId, thinkingLevel, provider);
   }
 
   onUnsupportedInputAttempt(sessionPath: string): void {
-    if (this.isPrivateSession(sessionPath)) return;
+    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
+    if (this.isCanonicalCloseActive(sessionPath)) return;
     this.tracker.onUnsupportedInputAttempt(sessionPath);
+  }
+
+  private releaseCanonicalSessionCorrelations(sessionPath: string): void {
+    this.canonicalBranchEntriesBySession.delete(sessionPath);
+    this.accounting.onSessionClosed(sessionPath);
+    const intervals = this.activeBusyIntervalsBySession[sessionPath];
+    for (const intervalId of intervals ?? []) delete this.activeBusyStartedAtByInterval[intervalId];
+    delete this.activeBusyIntervalsBySession[sessionPath];
+    for (const key of Object.keys(this.activeToolIntervalBySessionAndTool)) {
+      if (key.startsWith(`${sessionPath}\0`)) delete this.activeToolIntervalBySessionAndTool[key];
+    }
   }
 
   onSessionClosed(sessionPath: string): void {
@@ -1041,13 +1141,19 @@ export class StatsService implements RunObserver {
       // Session-close retention/deletion is deliberately not inferred here.
       // P2b resolves the durable close disposition before invoking recorder
       // deletion; this observer only releases producer-local correlation.
+      const close = this.canonicalPrivateClosesByPath.get(sessionPath);
+      if (close?.phase === 'closing') {
+        // Runtime retirement can race the recorder deletion. Keep the local
+        // state and close fence until the durable operation has settled so a
+        // failed deletion can be retried without rehydrating a half-cleared
+        // session.
+        close.runtimeRetired = true;
+        return;
+      }
       this.tracker.onSessionClosed(sessionPath);
-      this.accounting.onSessionClosed(sessionPath);
-      const intervals = this.activeBusyIntervalsBySession[sessionPath];
-      for (const intervalId of intervals ?? []) delete this.activeBusyStartedAtByInterval[intervalId];
-      delete this.activeBusyIntervalsBySession[sessionPath];
-      for (const key of Object.keys(this.activeToolIntervalBySessionAndTool)) {
-        if (key.startsWith(`${sessionPath}\0`)) delete this.activeToolIntervalBySessionAndTool[key];
+      this.releaseCanonicalSessionCorrelations(sessionPath);
+      if (close?.phase === 'deleted' && this.canonicalPrivateClosesByPath.get(sessionPath) === close) {
+        this.canonicalPrivateClosesByPath.delete(sessionPath);
       }
       return;
     }
@@ -1102,12 +1208,14 @@ export class StatsService implements RunObserver {
   }
 
   startNewTask(sessionPath: string): void {
-    if (this.isPrivateSession(sessionPath)) return;
+    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
+    if (this.isCanonicalCloseActive(sessionPath)) return;
     this.tracker.startNewTask(sessionPath);
   }
 
   continueTask(sessionPath: string): void {
-    if (this.isPrivateSession(sessionPath)) return;
+    if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
+    if (this.isCanonicalCloseActive(sessionPath)) return;
     this.tracker.continueTask(sessionPath);
   }
 
@@ -1156,12 +1264,17 @@ export class StatsService implements RunObserver {
 
   /** Host-owned cumulative agent working-time clocks for renderer projection. */
   getWorkingTimeBySession(): Record<string, WorkingTimeState> {
-    return this.workingTime.getStates();
+    const states = this.workingTime.getStates();
+    if (this.canonicalPrivateClosesByPath.size === 0) return states;
+    const visible = { ...states };
+    for (const sessionPath of this.canonicalPrivateClosesByPath.keys()) delete visible[sessionPath];
+    return visible;
   }
 
   /** Ledger-backed session usage projection for UI and fixture conservation checks. */
   getSessionUsage(sessionPath: string): SessionUsageSnapshot {
     if (!this.canonicalCapture) return this.accounting.projectSessionUsage(sessionPath);
+    if (this.canonicalPrivateClosesByPath.has(sessionPath)) return { samples: [], authority: 'unknown' };
     const durable = this.canonicalSessionUsageByPath.get(sessionPath);
     if (durable) {
       durable.lastUsed = ++this.canonicalSessionUsageUseSequence;
@@ -1185,6 +1298,9 @@ export class StatsService implements RunObserver {
       void refresh.finally(() => {
         if (this.canonicalSessionPathRefreshes.get(sessionPath) === refresh) {
           this.canonicalSessionPathRefreshes.delete(sessionPath);
+          if (!this.canonicalSessionUsageByPath.has(sessionPath)) {
+            this.canonicalSessionPathEpochs.delete(sessionPath);
+          }
         }
         this.scheduleRender();
       }).catch(() => undefined);
@@ -1204,7 +1320,10 @@ export class StatsService implements RunObserver {
 
   /** Current in-memory runs for live aggregate updates; does not touch disk. */
   getOpenRuns(): RunSnapshot[] {
-    return this.tracker.getOpenRuns().filter((run) => !this.isPrivateSession(run.sessionPath));
+    return this.tracker.getOpenRuns().filter((run) => (
+      !this.canonicalPrivateClosesByPath.has(run.sessionPath)
+      && (this.canonicalCapture || !this.isPrivateSession(run.sessionPath))
+    ));
   }
 
   /** Finalized snapshots waiting for their batched JSONL append. This is the
@@ -1283,7 +1402,8 @@ export class StatsService implements RunObserver {
           if (!displayedPathRank.has(sessionPath)) displayedPathRank.set(sessionPath, displayedPathRank.size);
         }
         const sessions = [...sessionState.sessions]
-          .filter((session) => displayedPathRank.has(session.path))
+          .filter((session) => displayedPathRank.has(session.path)
+            && !this.canonicalPrivateClosesByPath.has(session.path))
           .sort((left, right) => displayedPathRank.get(left.path)! - displayedPathRank.get(right.path)!)
           .slice(0, MAX_CANONICAL_DISPLAYED_SESSION_REFRESH_ENTRIES);
         let nextIndex = 0;
@@ -1410,7 +1530,7 @@ export class StatsService implements RunObserver {
     scopeKey: string,
     epoch: number,
   ): void {
-    if (epoch !== this.canonicalCacheEpoch) return;
+    if (epoch !== this.canonicalCacheEpoch || this.canonicalPrivateClosesByPath.has(sessionPath)) return;
     this.removeCanonicalSessionCache(sessionPath);
     let storedSnapshot = snapshot;
     let estimatedBytes = this.estimateCanonicalSessionUsageBytes(snapshot);
@@ -1624,8 +1744,18 @@ export class StatsService implements RunObserver {
         revisionRefreshDrain,
         this.canonicalSessionUsageRefresh,
         ...this.canonicalSessionPathRefreshes.values(),
+        ...[...this.canonicalPrivateClosesByPath.values()].map(({ promise }) => promise),
       ].filter((promise): promise is Promise<void> => promise !== null);
       await Promise.allSettled(refreshes);
+      this.clearCanonicalSessionCache();
+      this.canonicalSessionPathEpochs.clear();
+      this.canonicalSessionPathRefreshes.clear();
+      this.canonicalPrivateClosesByPath.clear();
+      this.canonicalBranchEntriesBySession.clear();
+      this.pendingCreateOperationBySessionPath.clear();
+      this.analyticsRevisionRefresher = undefined;
+      this.canonicalRevisionStart = null;
+      this.canonicalSessionUsageRefresh = null;
       return;
     }
     // Terminal: block start reactivation immediately, then drain the tracked

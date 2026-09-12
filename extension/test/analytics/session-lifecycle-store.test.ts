@@ -94,6 +94,111 @@ test('schema-v2 lifecycle databases add durable pending-create ownership', () =>
   }
 });
 
+test('additive analytics host registry keeps the lifecycle schema version compatible with old hosts', () => {
+  const temp = tempDatabase();
+  const { DatabaseSync } = createRequire(process.execPath)('node:sqlite') as {
+    DatabaseSync: new (location: string) => {
+      prepare(sql: string): { get(...params: unknown[]): unknown };
+      close(): void;
+    };
+  };
+  let store = new SessionLifecycleStore(temp.databasePath);
+  store.registerAnalyticsHost({
+    hostInstanceId: 'host-additive', workspaceId: 'workspace-additive',
+    generationId: 'generation-additive', buildId: 'build-additive', processId: 1,
+    capabilities: ['host-status'], registeredAtMs: '1',
+  });
+  store.close();
+  const oldReader = new DatabaseSync(temp.databasePath);
+  try {
+    const version = oldReader.prepare('PRAGMA user_version').get() as { user_version: number | bigint };
+    assert.equal(Number(version.user_version), 3);
+    oldReader.prepare('SELECT session_id, cleanup_state FROM session_lifecycle').get();
+  } finally {
+    oldReader.close();
+  }
+  store = new SessionLifecycleStore(temp.databasePath);
+  try {
+    assert.equal(store.getAnalyticsHost('host-additive')?.state, 'registered');
+  } finally {
+    store.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('analytics host pagination uses a workspace and host ordering index', () => {
+  const temp = tempDatabase();
+  const { DatabaseSync } = createRequire(process.execPath)('node:sqlite') as {
+    DatabaseSync: new (location: string) => {
+      prepare(sql: string): { all(...params: unknown[]): unknown[] };
+      close(): void;
+    };
+  };
+  const store = new SessionLifecycleStore(temp.databasePath);
+  store.registerAnalyticsHost({
+    hostInstanceId: 'host-page-a', workspaceId: 'workspace-page',
+    generationId: 'generation-page-a', buildId: 'build-page', processId: 101,
+    capabilities: ['host-status'], registeredAtMs: '1',
+  });
+  store.registerAnalyticsHost({
+    hostInstanceId: 'host-page-b', workspaceId: 'workspace-page',
+    generationId: 'generation-page-b', buildId: 'build-page', processId: 102,
+    capabilities: ['host-status'], registeredAtMs: '2',
+  });
+  const page = store.listAnalyticsHosts('workspace-page', { limit: 1 });
+  assert.deepEqual(page.hosts.map((host) => host.hostInstanceId), ['host-page-a']);
+  assert.equal(page.nextCursor, 'host-page-a');
+  const database = new DatabaseSync(temp.databasePath);
+  try {
+    const plan = database.prepare(`
+      EXPLAIN QUERY PLAN
+      SELECT * FROM analytics_hosts
+      WHERE workspace_id = ? AND host_instance_id > ?
+      ORDER BY host_instance_id LIMIT ?
+    `).all('workspace-page', 'host-page-a', 2) as Array<{ detail?: string }>;
+    assert.ok(
+      plan.some((entry) => entry.detail?.includes('analytics_hosts_workspace_host')),
+      `pagination query must use the bounded workspace/host index: ${JSON.stringify(plan)}`,
+    );
+  } finally {
+    database.close();
+    store.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('stopping and stopped host identities cannot be revived by heartbeat or registration', () => {
+  const temp = tempDatabase();
+  const store = new SessionLifecycleStore(temp.databasePath);
+  const host = {
+    hostInstanceId: 'host-terminal', workspaceId: 'workspace-terminal',
+    generationId: 'generation-terminal', buildId: 'build-terminal', processId: 201,
+    capabilities: ['host-status'], registeredAtMs: '1',
+  };
+  try {
+    store.registerAnalyticsHost(host);
+    store.markAnalyticsHostState(host.hostInstanceId, host.processId, host.generationId, 'stopping', 2);
+    assert.throws(
+      () => store.heartbeatAnalyticsHost(host.hostInstanceId, host.processId, host.generationId, 3),
+      /heartbeat identity is stale/,
+    );
+    assert.equal(store.getAnalyticsHost(host.hostInstanceId)?.state, 'stopping');
+    store.markAnalyticsHostState(host.hostInstanceId, host.processId, host.generationId, 'stopped', 4);
+    assert.throws(
+      () => store.registerAnalyticsHost(host),
+      /terminal and cannot be re-registered/,
+    );
+    assert.throws(
+      () => store.heartbeatAnalyticsHost(host.hostInstanceId, host.processId, host.generationId, 5),
+      /heartbeat identity is stale/,
+    );
+    assert.equal(store.getAnalyticsHost(host.hostInstanceId)?.state, 'stopped');
+  } finally {
+    store.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
 test('pending-create origin survives private close, restart, and cleanup replay without resurrection', async () => {
   const temp = tempDatabase();
   const sessions = path.join(temp.root, 'sessions');

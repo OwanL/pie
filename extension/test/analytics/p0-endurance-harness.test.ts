@@ -22,12 +22,14 @@ type EnduranceTrial = {
 type EndurancePlan = Readonly<{ label: string; ratePerSecond: number; sampleCount: number; hostCount: number; minimumElapsedMs: number }>;
 type EnduranceValidationModule = {
   ENDURANCE_REQUIRED_WORKER_MEMORY_FIELDS: readonly string[];
+  ENDURANCE_FULL_TRIALS: readonly EndurancePlan[];
   ENDURANCE_SMOKE_TRIALS: readonly EndurancePlan[];
   validateEnduranceTerminalReceipt: (endurance: any, receipt: any, options: { reportSha256: string }) => { valid: boolean; errors: string[] };
-  validateEnduranceTrials: (endurance: any, options: { mode: 'smoke'; enforcePacing?: boolean }) => { valid: boolean; errors: string[] };
+  validateEnduranceTrials: (endurance: any, options: { mode: 'smoke' | 'full'; enforcePacing?: boolean; recorderHeapProbeMb?: number }) => { valid: boolean; errors: string[] };
 };
 const {
   ENDURANCE_REQUIRED_WORKER_MEMORY_FIELDS,
+  ENDURANCE_FULL_TRIALS,
   ENDURANCE_SMOKE_TRIALS,
   validateEnduranceTerminalReceipt,
   validateEnduranceTrials,
@@ -37,12 +39,24 @@ function reportPath(directory: string): string {
   return path.join(directory, 'endurance.json');
 }
 
-function validSmokeEndurance() {
+function cleanHarnessEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  // The old switch is intentionally tested below, but an inherited copy from
+  // a prior endurance invocation must not turn positive fixture runs into
+  // that negative argument test.
+  delete env.PIE_ANALYTICS_P0_ENDURANCE;
+  return { ...env, ...overrides };
+}
+
+function validSmokeEndurance(mode: 'smoke' | 'full' = 'smoke') {
+  const plans = mode === 'full' ? ENDURANCE_FULL_TRIALS : ENDURANCE_SMOKE_TRIALS;
   return {
-    mode: 'smoke',
+    mode,
     productionDefaultRecorderHeap: true,
+    recorderHeapCeilingMb: null as number | null,
+    recorderHeapMode: 'production-default',
     summary: { lightP99Pooled: null },
-    trials: ENDURANCE_SMOKE_TRIALS.map((target, trialIndex) => {
+    trials: plans.map((target, trialIndex) => {
       const submissionElapsedMs = target.sampleCount * 1_000 / target.ratePerSecond;
       return {
         target,
@@ -80,7 +94,7 @@ test('endurance mode rejects the old environment execution switch', () => {
     const report = reportPath(directory);
     const result = spawnSync(process.execPath, [harness, '--scenario', 'endurance', '--smoke', '--seed', 'arg-check', '--report', report], {
       cwd: repositoryRoot,
-      env: { ...process.env, PIE_ANALYTICS_P0_ENDURANCE: '1' },
+      env: cleanHarnessEnv({ PIE_ANALYTICS_P0_ENDURANCE: '1' }),
       encoding: 'utf8',
       windowsHide: true,
     });
@@ -98,7 +112,7 @@ test('full endurance mode rejects harness-only heap ceilings', () => {
     const report = reportPath(directory);
     const result = spawnSync(process.execPath, [harness, '--scenario', 'endurance', '--seed', 'heap-check', '--report', report], {
       cwd: repositoryRoot,
-      env: { ...process.env, PIE_ANALYTICS_P0_RECORDER_HEAP_MB: '128' },
+      env: cleanHarnessEnv({ PIE_ANALYTICS_P0_RECORDER_HEAP_MB: '128' }),
       encoding: 'utf8',
       windowsHide: true,
     });
@@ -110,13 +124,123 @@ test('full endurance mode rejects harness-only heap ceilings', () => {
   }
 });
 
+test('smoke report labels a legacy environment heap ceiling as an override', () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'pie-p0-endurance-legacy-heap-'));
+  try {
+    const report = reportPath(directory);
+    const result = spawnSync(process.execPath, [
+      harness,
+      '--validate',
+      '--scenario', 'endurance',
+      '--smoke',
+      '--seed', 'legacy-heap-check',
+      '--report', report,
+    ], {
+      cwd: repositoryRoot,
+      env: cleanHarnessEnv({ PIE_ANALYTICS_P0_RECORDER_HEAP_MB: '128' }),
+      encoding: 'utf8',
+      windowsHide: true,
+    });
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    const evidence = JSON.parse(readFileSync(report, 'utf8')) as {
+      environment: { recorderHeapCeilingMb: number; recorderHeapMode: string };
+      qualification: { overallP0: string };
+    };
+    assert.equal(evidence.environment.recorderHeapCeilingMb, 128);
+    assert.equal(evidence.environment.recorderHeapMode, 'legacy-smoke-override');
+    assert.equal(evidence.qualification.overallP0, 'unqualified');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('full endurance heap probe is explicit and remains qualification-only', () => {
+  const endurance = validSmokeEndurance('full');
+  endurance.productionDefaultRecorderHeap = false;
+  endurance.recorderHeapCeilingMb = 128;
+  endurance.recorderHeapMode = 'qualification-only-probe';
+  assert.equal(validateEnduranceTrials(endurance, { mode: 'full', recorderHeapProbeMb: 128 }).valid, true);
+
+  const omitted = validateEnduranceTrials(endurance, { mode: 'full' });
+  assert.equal(omitted.valid, false);
+  assert.match(omitted.errors.join('; '), /production-default recorder heap/u);
+
+  const mismatched = validateEnduranceTrials(endurance, { mode: 'full', recorderHeapProbeMb: 129 });
+  assert.equal(mismatched.valid, false);
+  assert.match(mismatched.errors.join('; '), /does not match/u);
+});
+
+test('heap probe CLI records its candidate without making validation qualified', () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'pie-p0-endurance-probe-'));
+  try {
+    const report = reportPath(directory);
+    const cleanEnv = cleanHarnessEnv();
+    delete cleanEnv.PIE_ANALYTICS_P0_RECORDER_HEAP_MB;
+    const result = spawnSync(process.execPath, [
+      harness,
+      '--validate',
+      '--scenario', 'endurance',
+      '--seed', 'probe-check',
+      '--report', report,
+      '--recorder-heap-probe-mb', '128',
+    ], {
+      cwd: repositoryRoot,
+      env: cleanEnv,
+      encoding: 'utf8',
+      windowsHide: true,
+    });
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    const evidence = JSON.parse(readFileSync(report, 'utf8')) as {
+      configuration: { recorderHeapProbeMb: number; recorderHeapMode: string };
+      environment: { recorderHeapCeilingMb: number };
+      qualification: { decision: string; overallP0: string };
+    };
+    assert.equal(evidence.configuration.recorderHeapProbeMb, 128);
+    assert.equal(evidence.configuration.recorderHeapMode, 'qualification-only-probe');
+    assert.equal(evidence.environment.recorderHeapCeilingMb, 128);
+    assert.equal(evidence.qualification.decision, 'unqualified');
+    assert.equal(evidence.qualification.overallP0, 'unqualified');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('heap probe CLI rejects unsupported values before creating a report', () => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'pie-p0-endurance-probe-invalid-'));
+  try {
+    const cleanEnv = cleanHarnessEnv();
+    delete cleanEnv.PIE_ANALYTICS_P0_RECORDER_HEAP_MB;
+    for (const [index, value] of ['63', '513', '128.5'].entries()) {
+      const report = path.join(directory, `invalid-${index}.json`);
+      const result = spawnSync(process.execPath, [
+        harness,
+        '--validate',
+        '--scenario', 'endurance',
+        '--seed', `probe-invalid-${index}`,
+        '--report', report,
+        '--recorder-heap-probe-mb', value,
+      ], {
+        cwd: repositoryRoot,
+        env: cleanEnv,
+        encoding: 'utf8',
+        windowsHide: true,
+      });
+      assert.notEqual(result.status, 0, `${value} unexpectedly accepted`);
+      assert.match(`${result.stdout}\n${result.stderr}`, /recorder-heap-probe-mb/u);
+      assert.equal(result.error, undefined);
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('endurance smoke records independent condition results and mandatory memory telemetry', { timeout: 30_000 }, () => {
   const directory = mkdtempSync(path.join(tmpdir(), 'pie-p0-endurance-smoke-'));
   try {
     const report = reportPath(directory);
     const result = spawnSync(process.execPath, [harness, '--scenario', 'endurance', '--smoke', '--seed', 'smoke-check', '--report', report], {
       cwd: repositoryRoot,
-      env: { ...process.env },
+      env: cleanHarnessEnv(),
       encoding: 'utf8',
       windowsHide: true,
     });

@@ -163,7 +163,7 @@ function createLegacyFixture(version: 2 | 3): { root: string; databasePath: stri
 }
 
 function assertPreservedLegacyUsage(recorder: SqliteAnalyticsRecorder): void {
-  assert.equal(recorder.getDatabaseSchemaVersion(), 8);
+  assert.equal(recorder.getDatabaseSchemaVersion(), 9);
   const read = recorder.readProviderSettlements();
   assert.equal(read.settlements.length, 1);
   assert.equal(read.settlements[0]?.invocationId, 'legacy-invocation');
@@ -189,7 +189,7 @@ function assertPreservedLegacyUsage(recorder: SqliteAnalyticsRecorder): void {
 }
 
 for (const version of [2, 3] as const) {
-  test(`schema-v${version} provider rows and totals migrate to v4 without fabricated branch identity`, () => {
+  test(`schema-v${version} provider rows and totals migrate to current schema without fabricated branch identity`, () => {
     const fixture = createLegacyFixture(version);
     let recorder: SqliteAnalyticsRecorder | undefined;
     try {
@@ -206,7 +206,7 @@ test('fresh recorder creates branch and session-copy tables', () => {
   const root = mkdtempSync(path.join(tmpdir(), 'pie-analytics-branch-migration-v4-'));
   const databasePath = path.join(root, 'analytics.sqlite');
   const recorder = new SqliteAnalyticsRecorder(databasePath);
-  assert.equal(recorder.getDatabaseSchemaVersion(), 8);
+  assert.equal(recorder.getDatabaseSchemaVersion(), 9);
   recorder.close();
   const raw = new DatabaseSync(databasePath);
   try {

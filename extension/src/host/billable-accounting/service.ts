@@ -22,6 +22,7 @@ import { loadModelPricing } from '../../backend/pricing';
 import { pricingForPromptTokens, type ModelTokenPricing } from '../../../../shared/pricing-core';
 import { resolvePricingCatalogKey } from '../../shared/model-id';
 import type { RunAnalyticsExportPayload } from '../run-analytics/query';
+import type { CanonicalProviderSettlement } from '../../analytics/canonical-capture.js';
 
 const MIGRATION_ACTIVITY_BATCH_SIZE = 128;
 /** Event-loop yield bounds for migration so an already-migrated giant single
@@ -105,7 +106,7 @@ export interface BillableAccountingDeps {
   /** Canonical capture is an exclusive authority switch, never a dual-write.
    * Omitted for the legacy authority and historical tests. */
   canonicalCapture?: {
-    captureProviderSettlement(record: BillableInvocationRecord): 'disabled' | 'submitted' | 'rejected';
+    captureProviderSettlement(record: CanonicalProviderSettlement): 'disabled' | 'submitted' | 'rejected';
     captureExecution(
       context: { sessionId: string | null; sessionPath: string; runId?: string | null; operationId?: string | null },
       executionId: string,
@@ -132,7 +133,6 @@ interface AppendUsageOptions {
   /** Historical migration batches derived activity writes to avoid one
    * synchronous read-modify-write of the full timeline per ledger row. */
   deferredActivity?: ActivityIntervalRecord[];
-  canonicalProjectionOnly?: boolean;
   /** Canonical replay cannot use receipt time as a fallback for a stable
    * producer source. Missing producer time remains the deterministic epoch. */
   stableMissingTime?: boolean;
@@ -155,7 +155,6 @@ export class BillableAccounting {
    * UI. The durable authority is the canonical store (P5 read model); these
    * process-local rows keep the live projection synchronous and agree with
    * what the recorder persisted. Dropped on session close/forget. */
-  private readonly canonicalSettlementsBySession = new Map<string, Map<string, BillableInvocationRecord>>();
   private readonly pendingInvocationWrites = new Map<string, BillableInvocationRecord>();
   private pricingCache?: {
     signature: string;
@@ -564,17 +563,8 @@ export class BillableAccounting {
           continue;
         }
         if (this.deps.canonicalCapture && receipt?.factStatus === 'submitted') {
-          // Only a real producer invocation may enter the live projection.
-          // Attempt, omitted and inclusive aggregate rows remain reconciliation
-          // evidence and add no synthetic provider settlement.
-          if (sample.producerEvidenceKind === 'providerInvocation') {
-            this.appendUsageSample(sessionPath, sample, {
-              kind: 'subagent',
-              toolId: toolCall.id,
-              canonicalProjectionOnly: true,
-              stableMissingTime: true,
-            });
-          }
+          // The child owns these facts. The durable read model projects them;
+          // retaining parent copies would duplicate history in the host.
           continue;
         }
         this.appendUsageSample(sessionPath, sample, {
@@ -802,8 +792,11 @@ export class BillableAccounting {
       ...(sample.reportedCostUsd !== undefined ? { reportedCostUsd: sample.reportedCostUsd } : {}),
       ...(sample.parentOperationId ? { parentOperationId: sample.parentOperationId } : {}),
       endedAt: sample.occurredAt,
-      startedAt: sample.startedAt
-        ?? new Date(Math.max(0, Date.parse(sample.occurredAt) - (sample.durationMs ?? 0))).toISOString(),
+      startedAt: sample.startedAt ?? (
+        validIso(sample.occurredAt) && Number.isFinite(sample.durationMs)
+          ? new Date(Math.max(0, Date.parse(sample.occurredAt) - sample.durationMs!)).toISOString()
+          : undefined
+      ),
       ...((sample.instrumentationGap || !channelsKnown) ? {
         instrumentationGap: true,
         instrumentationGapReason: sample.instrumentationGapReason
@@ -883,7 +876,6 @@ export class BillableAccounting {
     delete this.pendingRetryBySession[sessionPath];
     delete this.assistantInvocationObservedBySession[sessionPath];
     delete this.lastFailedAssistantSettlementBySession[sessionPath];
-    this.canonicalSettlementsBySession.delete(sessionPath);
   }
 
   /** Close a private session: scrub process-local rows, release the privacy
@@ -910,9 +902,6 @@ export class BillableAccounting {
     delete this.branchParentsBySession[oldPath];
     delete this.currentBranchLeafBySession[oldPath];
     delete this.currentBranchDepthBySession[oldPath];
-    const settlements = this.canonicalSettlementsBySession.get(oldPath);
-    if (settlements) this.canonicalSettlementsBySession.set(newPath, settlements);
-    this.canonicalSettlementsBySession.delete(oldPath);
   }
 
   /** Flush queued ledger writes that failed transiently; retained rows keep
@@ -935,12 +924,10 @@ export class BillableAccounting {
     }
   }
 
-  /** Ledger/canonical-backed session usage projection for UI and fixture
-   *  conservation checks. Canonical mode projects the in-memory settlements
-   *  this host captured; empty means the projection is not answerable
-   *  synchronously (authority `unknown`) and the P5 canonical read model is
-   *  the async authority — legacy JSONL is never substituted. */
+  /** Synchronous legacy ledger projection. Canonical usage belongs to the
+   *  durable read model; this seam cannot answer it or substitute local rows. */
   projectSessionUsage(sessionPath: string): SessionUsageSnapshot {
+    if (this.deps.canonicalCapture) return { samples: [], authority: 'unknown' };
     const currentSources = this.currentBranchSourcesBySession[sessionPath];
     const currentEntries = this.currentBranchEntriesBySession[sessionPath];
     const filter = (record: BillableInvocationRecord): boolean => (
@@ -952,13 +939,6 @@ export class BillableAccounting {
       || ((record.kind === 'conversation' || record.kind === 'retry') && record.sourceId.startsWith('assistant:')
         && currentEntries?.has(record.sourceId.slice('assistant:'.length)) === true)
     );
-    const canonical = this.canonicalSettlementsBySession.get(sessionPath);
-    if (this.deps.canonicalCapture) {
-      if (!canonical || canonical.size === 0) {
-        return { samples: [], authority: 'unknown' };
-      }
-      return sessionUsageSnapshotFromLedger([...canonical.values()].filter(filter), 'canonical');
-    }
     const records = this.invocationLedger.projectSession({ sessionPath }).records.filter(filter);
     return sessionUsageSnapshotFromLedger(records);
   }
@@ -1134,24 +1114,18 @@ export class BillableAccounting {
       ...costEvidence,
     };
     if (this.deps.canonicalCapture) {
-      const capture = options.canonicalProjectionOnly
-        ? 'submitted'
-        : this.deps.canonicalCapture.captureProviderSettlement(record);
+      const capture = this.deps.canonicalCapture.captureProviderSettlement({
+        ...record,
+        // Legacy normalization supplies fallback dates. Canonical facts retain
+        // only producer evidence so missing dates remain in the undated bucket.
+        startedAt: validIso(sample.startedAt),
+        endedAt: validIso(sample.endedAt),
+      });
       if (capture === 'rejected') {
         appendPieLog('warn', 'canonical-analytics', 'provider settlement capture rejected', {
           invocationId: record.invocationId,
           sourceId: record.sourceId,
         });
-      } else if (capture === 'submitted') {
-        // Live consumer path: keep the settled record in the bounded process-local
-        // projection so the synchronous session-usage UI reads the same facts the
-        // recorder persisted. Durable historical queries use the P5 read model.
-        let settlements = this.canonicalSettlementsBySession.get(sessionPath);
-        if (!settlements) {
-          settlements = new Map();
-          this.canonicalSettlementsBySession.set(sessionPath, settlements);
-        }
-        settlements.set(record.invocationId, record);
       }
       // Canonical mode never falls through to the legacy JSONL ledger. P5
       // replaces the legacy query consumers before P7 is allowed to select

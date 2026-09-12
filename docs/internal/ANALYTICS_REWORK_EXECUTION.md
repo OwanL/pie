@@ -14,6 +14,136 @@ Owning specifications: runbook; `docs/ANALYTICS_REWORK_PLAN.md` §§1, 11.6, 17;
 
 ---
 
+## Checkpoint 49 - 2026-09-12T17:05Z, projection/private-close checkpoint validated
+
+The second frozen default affected run broadened to the full fast suite and passed all seven package
+groups: **6,844 passed, zero failed, 30 skipped**. Logs and terminal receipts are in
+`C:/dev/scratch/pie-projection-integration-20260913-r01/`. All 45 captured changed-file hashes matched
+after the run. Extension typecheck passed; the no-sync build validation passed with coordinated host
+and renderer build **162085c90d5c3ce52dce**. No publication, live restart, analytics activation or
+storage cutoff occurred. Live Code/Codex 37056/26828/40940 remain protected.
+
+The reviewed source milestone comprises schema-v9 maintained provider/model/day projections with
+writer-owned runtime preparation, fixed timezone and window-race handling, exact BigInt aggregation,
+numeric date indexing, streaming dimension reads, retained cost coverage and undated rows, and a
+bounded 16-zone formatter cache. Projection/migration/historical follow-up tests pass 15/15, including
+sums beyond signed int64 and same-zone rollover. Per-database projection statement caching is deferred
+to the next measured workload; no memory cap or P0 acceptance is selected from these unit tests.
+
+Other reviewed units: coalesced private deletion with retryable failure and late-local-event fencing;
+removal of redundant canonical host settlement history; nullable source dates preserved through the
+accounting adapter and exact redelivery; bounded authenticated handoff status in compatible lifecycle
+storage; and full mixed failure receipts, bounded request diagnostics and owned cleanup. The initial
+full-suite failures remain recorded below. The subagent fixture now uses its durable four-invocation
+oracle. Positive endurance fixtures isolate the deprecated environment switch while retaining its
+negative test; the exact original inheritance cause is not yet established by root review.
+
+Unfinished discovery source/test files remain excluded from the reviewed milestone. Its synthetic
+tests pass but actual Windows birth parsing and ownership/generation validation still require fixes.
+Execution-identity follow-on remains design-only: use existing operation/live-turn identity and true
+agent-settled completion, not mutation acceptance or runId. Canonical execution/activity metrics,
+export, full qualification, actual all-host quiescence and qualified activation/cutover remain open.
+The goal is active and this checkpoint is not completion.
+
+---
+
+## Checkpoint 48 - 2026-09-12, source review continues with live supervisor protected
+
+The live Code/Codex processes 37056/26828/40940 remain running. No live restart, publication,
+authority switch or storage disposal is authorized merely by this checkpoint. Goal remains active.
+The last reviewed/pushed commit is still ec991324 and last validated isolated UI build is 1372.
+
+Root removed the redundant canonical settlement map from BillableAccounting. Canonical synchronous
+accounting reads now return unknown; StatsService's durable read model remains the consumer authority.
+Already-submitted child settlements remain child-owned without parent copies. Twelve focused accounting
+and capture tests pass, including exact capture fields, unknown channels, branch attribution and
+reconciliation ownership. Existing durable selected-branch coverage remains in canonical-historical.test.ts.
+The adapter also preserves unavailable producer dates before capture, rather than filling them from
+legacy normalization; a SQLite-backed adapter test proves undated costs survive and real epoch zero
+remains distinct. One initial test setup omitted required sinks; corrected setup passes.
+
+Private-close review/fixes pass seven focused tests (coalescing and identity conflicts, failure
+restoration, stale reads, late-event masking and shutdown cleanup). Handoff corrections pass 21
+focused tests: old lifecycle schema remains readable, socket/nonce/status bounds are explicit,
+pagination uses its actual composite index, and stopped identities cannot be revived by heartbeat
+or registration. These are source-only checks. The broader accounting/private/historical set passed
+30/31; historical aggregate's new calendar preparation fixture is the outstanding integration failure.
+
+Three Luna agents continue: qualification_audit owns schema-v9 provider/model/day projection integration
+and exact totals/timezone/index review; overnight_recovery owns private-close coalescing, failure recovery
+and late-event masking, then bounded handoff registry review; cutover_audit owns partial mixed-failure
+evidence, request context and cleanup of failures during setup. Their files are not globally frozen yet.
+No heavy probe may start until these source units are integrated and a new validated build is identified.
+The failed first 128 MiB probe remains failed evidence, not a memory-cap decision.
+
+Integration at 16:55Z: extension typecheck r02 passes after aligning the billing dependency seam with
+nullable canonical producer dates and declaring scalar provider rows as query records. Evidence is
+`C:/dev/scratch/pie-projection-integration-20260913-r01/`. The first default affected run broadened to
+the full fast suite and failed: 6,833 passed, nine failed, 30 skipped. Failures: three branch-migration
+schema assertions; one historical aggregate assertion; three endurance harness cases; one terminal
+watermark fixture; one subagent fixture expecting the removed process-local canonical map. The
+subagent assertion now checks the durable four-invocation oracle and unknown synchronous parent
+read (three focused tests pass). The terminal-watermark file passes all seven unchanged under the
+focused runner; execution-identity edits briefly overlapped the first source freeze and were withdrawn
+by their owner, so a genuinely frozen rerun is needed before diagnosing that as a runtime regression.
+Projection and harness owners are repairing their assigned failures. No build or commit follows a
+failing suite.
+
+The new read-only discovery module and tests remain untracked and excluded from this milestone.
+Root review found that Windows CIM CreationDate JSON is not raw DMTF; actual process-birth parsing,
+malformed backend ownership and distinct activation/process generations need correction before its
+synthetic reconciliation tests can be considered real machine evidence. All admission flags stay closed.
+
+---
+
+## Checkpoint 47 - 2026-09-12T16:15Z, SDK/UI milestone committed; next source units active
+
+**The live Code/Codex chain remains protected. No publication, authority switch, storage cutoff,
+or live restart has occurred.** Reviewed milestone `ec99132426e3757590c412f86e0e6a1f54acac1d`
+contains exactly the 37 paths from checkpoint 46 and is pushed to `origin/master`. The commit
+receipt is `C:/dev/scratch/pie-default-affected-20260913-r02/commit-receipt-ec991324.json`.
+The title repeats the previous milestone; its scoped contents and receipt identify this batch.
+
+Actual isolated SDK/UI verification of build `1372b06402ed86ae7b13` passed: normal stream (one
+fixture provider request), actual write/read tool roundtrip (three requests and verified owned
+file), cancellation (provider abort), and all four unchanged browser smokes. Console/page error
+counts were zero. Evidence, traces, copy hashes and process receipts are in
+`C:/dev/scratch/pie-fixture-ui-20260913-r02/ui-qualification-summary.json`. The fresh empty-session
+smoke setup failure and initial tool-driver path mismatch remain separate evidence. These runs
+used legacy authority with capture enabled; they are not a matched analytics-disabled baseline or
+canonical qualification. Both owned isolated Code trees were retired after identity/ancestry checks.
+The live host and Codex processes 37056/26828/40940 were left running.
+
+Uncommitted follow-ons: root's nullable provider-date adapter preserves undated usage rather than
+inventing epoch time (seven focused tests pass). Root's canonical private live-event/cache-close
+unit permits open-private live events, clears local run/timing state during close, and prevents
+rehydration while its deletion acknowledgement is pending (three focused tests pass). Independent
+review is pending. These source changes are newer than the verified 1372 build.
+
+The handoff foundation adds an authenticated status endpoint and host records to the existing
+lifecycle database, with completeness explicitly false. Root review requires bounded socket/drain
+behavior, malformed-frame error containment, bounded status output and genuine replay protection
+before integration. Registry records and endpoint shutdown are not proof that writers are quiet.
+Runtime-lease/backend-process reconciliation and actual all-host quiescence remain unimplemented.
+
+The qualification harness now has a distinct full mixed/endurance heap-probe mode; production
+defaults and admission remain unchanged. Its focused tests pass, with fixture typing/report-label
+corrections in progress. A same-build full mixed probe at 128 MiB is authorized only with exclusive
+workload access, at least 4 GiB initial free RAM, a 2 GiB reserve and a finite owned-process deadline.
+The prior uncapped mixed run exceeded the 256 MiB recorder threshold; no cap is selected yet.
+Incremental provider/model/calendar projections are the other active source unit. All P0, canonical
+consumer, all-host handoff and actual activation/cutover completion gates remain open.
+
+The first same-build 128 MiB mixed probe subsequently failed after its 5,000-fact burst with
+`AnalyticsRecorderWorkerRequestError: database is locked`; it did not reach complete gate evaluation.
+Its original report and terminal receipt are in
+`C:/dev/scratch/pie-mixed-heap-probe-20260913-r01/`. Wrapper exit was 1; child exit code was unavailable
+and is not inferred. Worker/build artifacts and harness source hashes were unchanged during the run.
+No heap default is selected, no successful memory qualification is claimed, and exact failed-request
+diagnosis plus preservation of partial failure telemetry are required before another heavy run.
+
+---
+
 ## Checkpoint 46 - 2026-09-12T15:50Z, current integrated source and evidence boundary
 
 **Current state: reviewed source-only milestone; the live VS Code/Codex chain remains protected.** No

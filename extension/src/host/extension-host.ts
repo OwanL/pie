@@ -71,6 +71,8 @@ import { ActivationStore } from '../analytics/activation-store.js';
 import { AnalyticsRuntime } from './analytics-runtime.js';
 import { HostAnalyticsTransport } from './analytics-transport.js';
 import type { AnalyticsDetailCapture, AnalyticsObservation } from '../../../shared/analytics/contracts.js';
+import { AnalyticsHandoffControl } from './analytics-handoff-control.js';
+import { SessionLifecycleStore } from '../backend/session-lifecycle-store.js';
 
 
 export const SIDEBAR_VIEW_TYPE = 'pie.sessionsView';
@@ -153,6 +155,11 @@ export class PieExtension implements vscode.Disposable {
   private readonly analyticsRuntime: AnalyticsRuntime;
   /** Owns worker/subagent/MCP capture ingress under canonical authority. */
   private readonly analyticsTransport?: HostAnalyticsTransport;
+  /** Registers this host for future authenticated all-host handoff discovery.
+   * The control endpoint reports incomplete inventory until runtime leases and
+   * backend process evidence are reconciled by a separate producer. */
+  private readonly analyticsHandoffRegistry: SessionLifecycleStore;
+  private readonly analyticsHandoffControl: AnalyticsHandoffControl;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -173,9 +180,25 @@ export class PieExtension implements vscode.Disposable {
       dataDir: process.env.PIE_DATA_DIR,
       agentDir: process.env.PI_CODING_AGENT_DIR,
     });
+    this.analyticsHandoffRegistry = new SessionLifecycleStore(
+      path.join(dataPaths.stateDir, 'session-lifecycle.sqlite'),
+    );
     const activation = new ActivationStore({ stateDir: dataPaths.stateDir }).read();
     const analyticsWorkspaceId = getWorkspaceAnalyticsId(context);
     const analyticsProcessGeneration = crypto.randomUUID();
+    this.analyticsHandoffControl = new AnalyticsHandoffControl({
+      registry: this.analyticsHandoffRegistry,
+      identity: {
+        hostInstanceId: analyticsProcessGeneration,
+        workspaceId: analyticsWorkspaceId,
+        generationId: analyticsProcessGeneration,
+        buildId: PIE_BUILD_ID,
+        processId: process.pid,
+        capabilities: ['host-discovery', 'host-status'],
+      },
+      key: process.env.PIE_ANALYTICS_HANDOFF_KEY,
+      onError: (error, stage) => appendPieLog('warn', 'analytics-handoff', stage, { error: error.message }),
+    });
     const canonicalActive = activation.authority === 'canonical'
       && activation.manifest?.activeGeneration !== undefined
       && activation.manifest?.activeGeneration !== null
@@ -298,6 +321,7 @@ export class PieExtension implements vscode.Disposable {
     const analyticsReadModel = new CanonicalAnalyticsReadModel({
       databasePath: canonicalAnalyticsDatabasePath(dataPaths.analyticsDir),
       workerScript: path.join(runtimeOutputDirectory(context), 'analytics-query-worker.js'),
+      beforeProviderAggregateRead: (request) => analyticsRuntime.prepareProviderDailyProjection(request),
     });
 
     this.statsService = new StatsService({
@@ -356,6 +380,7 @@ export class PieExtension implements vscode.Disposable {
         .request<ProviderGateStats>('provider_gate.metrics', undefined, { timeoutMs: 2000 })
         .catch(() => EMPTY_PROVIDER_GATE_STATS),
       onChanged: () => this.sidebarProvider.scheduleState(),
+      analyticsTimeZone: analyticsRuntime.analyticsTimeZone,
     });
 
     this.sidebarProvider = new SidebarViewProvider(
@@ -588,6 +613,7 @@ export class PieExtension implements vscode.Disposable {
 
   async start(): Promise<void> {
     this.updateStatusBar('Starting');
+    await this.analyticsHandoffControl.start();
     this.hydratePrivacyMarkers();
     this.tokenRateService.start();
     this.aggregateStatsService.start();
@@ -1205,6 +1231,11 @@ export class PieExtension implements vscode.Disposable {
     }
 
     this.shutdownPromise = (async () => {
+      // Stop accepting authenticated handoff requests before host producers
+      // drain. The registry retains this identity as stopping evidence: the
+      // endpoint closing is not proof that backend/recorder writers drained,
+      // and is never interpreted as proof that every writer was discovered.
+      await this.analyticsHandoffControl.stop();
       // M2 (§7.4): stop the browser server FIRST — stop accepting
       // HTTP/upgrades, close tracked WebSocket clients, close/await the HTTP
       // server, dispose browser renderer sessions/hub — then continue the
@@ -1233,6 +1264,7 @@ export class PieExtension implements vscode.Disposable {
       this.backend.dispose();
       await this.analyticsRuntime.stop();
       this.analyticsTransport?.dispose();
+      this.analyticsHandoffRegistry.close();
       this.service.dispose();
       this.sidebarProvider.dispose();
       await disposeLivePipelineTrace();

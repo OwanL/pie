@@ -25,6 +25,15 @@ export const ENDURANCE_SMOKE_TRIALS = Object.freeze([
   Object.freeze({ label: 'smoke-sustained-50ps-4hosts-repeat-b', ratePerSecond: 50, sampleCount: 20, hostCount: 4, minimumElapsedMs: 0 }),
 ]);
 
+const MIN_RECORDER_HEAP_PROBE_MB = 64;
+const MAX_RECORDER_HEAP_PROBE_MB = 512;
+
+function isSupportedRecorderHeapProbe(value) {
+  return Number.isSafeInteger(value)
+    && value >= MIN_RECORDER_HEAP_PROBE_MB
+    && value <= MAX_RECORDER_HEAP_PROBE_MB;
+}
+
 function isSafeNonNegativeInteger(value) {
   return Number.isSafeInteger(value) && value >= 0;
 }
@@ -110,6 +119,7 @@ export function validateEnduranceTrials(endurance, {
   mode = 'full',
   minimumMemorySamples = mode === 'full' ? 2 : 1,
   enforcePacing = mode === 'full',
+  recorderHeapProbeMb,
 } = {}) {
   const errors = [];
   const expectedTrials = mode === 'smoke' ? ENDURANCE_SMOKE_TRIALS : ENDURANCE_FULL_TRIALS;
@@ -145,7 +155,17 @@ export function validateEnduranceTrials(endurance, {
     validatedTrials.push({ label: expected.label, pacing, workerMemory: trial?.workerMemory });
   }
   if (endurance.summary?.lightP99Pooled !== null) errors.push('lightP99Pooled must remain null; light p99 is not pooled');
-  if (mode === 'full' && endurance.productionDefaultRecorderHeap !== true) errors.push('full endurance must use the production-default recorder heap');
+  if (recorderHeapProbeMb !== undefined) {
+    if (mode !== 'full') errors.push('recorder heap probes are valid only for full endurance load');
+    if (!isSupportedRecorderHeapProbe(recorderHeapProbeMb)) {
+      errors.push(`recorder heap probe must be a safe integer from ${MIN_RECORDER_HEAP_PROBE_MB} to ${MAX_RECORDER_HEAP_PROBE_MB} MiB`);
+    }
+    if (endurance.productionDefaultRecorderHeap !== false) errors.push('full endurance heap probe must be marked qualification-only');
+    if (endurance.recorderHeapMode !== 'qualification-only-probe') errors.push('endurance heap probe mode is not marked qualification-only');
+    if (endurance.recorderHeapCeilingMb !== recorderHeapProbeMb) errors.push('endurance heap probe value does not match the recorded recorder heap ceiling');
+  } else if (mode === 'full' && endurance.productionDefaultRecorderHeap !== true) {
+    errors.push('full endurance must use the production-default recorder heap');
+  }
   return { valid: errors.length === 0, errors, trials: validatedTrials };
 }
 

@@ -36,6 +36,9 @@ export type AnalyticsQueryRequest =
       todayEndMs: number;
       weekStartMs: number;
       weekEndMs: number;
+      timeZone?: string;
+      dailyWindowStartMs?: number;
+      dailyWindowEndMs?: number;
       maxGroups?: number;
       maxResultBytes?: number;
     }

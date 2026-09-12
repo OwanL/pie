@@ -98,7 +98,7 @@ function tempRoot(): string {
 }
 
 function assertSnapshotMetadata(result: AnalyticsQuerySnapshotMetadata): void {
-  assert.equal(result.databaseSchemaVersion, 8);
+  assert.equal(result.databaseSchemaVersion, 9);
   assert.equal(typeof result.projectionRevision === 'number' || typeof result.projectionRevision === 'string', true);
   assert.equal(typeof result.snapshotWatermark === 'number' || typeof result.snapshotWatermark === 'string', true);
   assert.equal(result.generationIds.length > 0, true);
@@ -154,6 +154,7 @@ test('canonical read model serves schema, bounded queries, settlements, accounti
         settledAtMs: 1_750_000_120_000,
       }),
     ]);
+    writer.prepareProviderDailyProjection('UTC', 1_750_000_000_000, 1_750_000_200_000);
     writer.submitDetail(detailCapture({
       generationId: 'generation-1',
       payloadId: 'payload-large',
@@ -164,12 +165,17 @@ test('canonical read model serves schema, bounded queries, settlements, accounti
     writer.close();
   }
 
+  let aggregatePreparationCalls = 0;
   const readModel = new CanonicalAnalyticsReadModel({
     databasePath,
     workerScript,
     execArgv,
     timeoutMs: 20_000,
     revisionPollIntervalMs: 50,
+    beforeProviderAggregateRead: async (request) => {
+      aggregatePreparationCalls += 1;
+      assert.equal(request.timeZone, 'UTC');
+    },
   });
 
   // Schema: canonical views and logical commands resolve through the helper.
@@ -212,7 +218,7 @@ test('canonical read model serves schema, bounded queries, settlements, accounti
   const query = await readModel.executeQuery({
     sql: 'SELECT invocation_id, provider, effective_cost_usd FROM analytics_provider_usage_v1 ORDER BY invocation_id',
   });
-  assert.equal(query.databaseSchemaVersion, 8);
+  assert.equal(query.databaseSchemaVersion, 9);
   assertSnapshotMetadata(query);
   assert.equal(query.returnedRows, 4);
   assert.deepEqual(query.truncation, { rowLimit: false, byteLimit: false, cellLimit: false });
@@ -252,20 +258,23 @@ test('canonical read model serves schema, bounded queries, settlements, accounti
     todayEndMs: 1_750_000_200_000,
     weekStartMs: 1_750_000_000_000,
     weekEndMs: 1_750_000_060_000,
+    timeZone: 'UTC',
   });
+  assert.equal(aggregatePreparationCalls, 1, 'aggregate reads invoke the writer-owned preparation seam before forking the reader');
   assert.equal(String(aggregate.accounting.revision), String(aggregate.revision));
   assert.ok(BigInt(aggregate.snapshotWatermark) >= 4n);
   assert.deepEqual(aggregate.truncation, { rowLimit: false, byteLimit: false, cellLimit: false });
   assert.equal(aggregate.groups.length, 2);
   const anthropic = aggregate.groups.find((row) => row.provider === 'anthropic');
   assert.equal(anthropic?.today_cost, 0.05);
-  assert.equal(anthropic?.week_cost, 0.04);
+  assert.equal(anthropic?.week_cost, 0.05);
 
   const boundedAggregate = await readModel.readProviderAggregateSummary({
     todayStartMs: 1_750_000_000_000,
     todayEndMs: 1_750_000_200_000,
     weekStartMs: 1_750_000_000_000,
     weekEndMs: 1_750_000_200_000,
+    timeZone: 'UTC',
     maxGroups: 1,
   });
   assert.equal(boundedAggregate.groups.length, 1);

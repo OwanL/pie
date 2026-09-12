@@ -14,6 +14,10 @@ import {
   localDateString,
   type AggregateStatsAccumulator,
 } from './stats-service/aggregate-stats';
+import {
+  addLocalCalendarDaysMs,
+  localCalendarDayStartMs,
+} from '../../../shared/analytics/metrics.js';
 import type { RunSnapshot } from './run-analytics';
 import type { TokenRateIndicatorState } from '../shared/token-rate';
 import type { ModelPricingRecord } from '../../../shared/pricing-core';
@@ -89,6 +93,8 @@ export interface AggregateStatsServiceDeps {
   onCompletedSourceEntryVisited?: (kind: 'day' | 'cost_sample' | 'token_sample' | 'throughput_hour') => void;
   /** Clock seam for deterministic date-boundary tests. */
   now?: () => Date;
+  /** Stable canonical local-day zone selected by AnalyticsRuntime. */
+  analyticsTimeZone?: string;
 }
 
 /** Recompute interval. Trades responsiveness vs disk read frequency; the mtime
@@ -407,11 +413,17 @@ export class AggregateStatsService {
     // Accounting and provider/model groups are read by one bounded recorder
     // transaction. This prevents a provider grouping result from being paired
     // with a newer or older maintained accounting projection.
+    const todayStartMs = localCalendarDayStartMs(nowMs, this.deps.analyticsTimeZone ?? 'UTC');
+    const dailyWindowStartMs = addLocalCalendarDaysMs(todayStartMs, -6, this.deps.analyticsTimeZone ?? 'UTC');
+    const dailyWindowEndMs = addLocalCalendarDaysMs(todayStartMs, 1, this.deps.analyticsTimeZone ?? 'UTC');
     const aggregate = await readModel.readProviderAggregateSummary({
-      todayStartMs: localDayStartMs(nowMs),
+      todayStartMs,
       todayEndMs: nowMs,
-      weekStartMs: addLocalDaysMs(localDayStartMs(nowMs), -6),
+      weekStartMs: dailyWindowStartMs,
       weekEndMs: nowMs,
+      timeZone: this.deps.analyticsTimeZone,
+      dailyWindowStartMs,
+      dailyWindowEndMs,
       maxGroups: CANONICAL_AGGREGATE_MAX_GROUP_ROWS,
       maxResultBytes: CANONICAL_AGGREGATE_MAX_RESULT_BYTES,
     });
@@ -658,16 +670,6 @@ function canonicalRevisionAtLeast(left: number | string, right: number | string)
   }
 }
 
-function localDayStartMs(ms: number): number {
-  const date = new Date(ms);
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
-}
-
-function addLocalDaysMs(ms: number, days: number): number {
-  const date = new Date(ms);
-  date.setDate(date.getDate() + days);
-  return date.getTime();
-}
 
 /** Complete structural equality for protocol aggregates and accumulator caches. */
 export function aggregateStatsEqual(a: AggregateStats, b: AggregateStats): boolean {

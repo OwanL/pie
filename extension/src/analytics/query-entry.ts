@@ -63,6 +63,9 @@ export interface CanonicalAnalyticsReadModelOptions {
   execArgv?: readonly string[];
   /** Optional non-blocking request lifecycle diagnostics. */
   onQueryLifecycle?: (event: AnalyticsQueryLifecycleEvent) => void;
+  /** Runtime-owned writer preparation for the active calendar window. The
+   * read model itself never mutates the SQLite projection. */
+  beforeProviderAggregateRead?: (request: CanonicalAggregateRequest) => Promise<void>;
 }
 
 export interface CanonicalQueryRequest {
@@ -92,6 +95,12 @@ export interface CanonicalAggregateRequest {
   todayEndMs: number;
   weekStartMs: number;
   weekEndMs: number;
+  /** The single active IANA calendar zone prepared by the recorder writer. */
+  timeZone?: string;
+  /** Stable writer preparation envelope. These are kept out of the helper
+   * payload because the helper reads only the already-prepared projection. */
+  dailyWindowStartMs?: number;
+  dailyWindowEndMs?: number;
   maxGroups?: number;
   maxResultBytes?: number;
 }
@@ -129,6 +138,7 @@ export class CanonicalAnalyticsReadModel {
   private readonly maxResultBytes: number;
   private readonly maxDetailBytes: number;
   private readonly revisionPollIntervalMs: number;
+  private readonly beforeProviderAggregateRead?: (request: CanonicalAggregateRequest) => Promise<void>;
 
   constructor(options: CanonicalAnalyticsReadModelOptions) {
     this.maxConcurrentQueries = boundedPositiveInteger(
@@ -162,6 +172,7 @@ export class CanonicalAnalyticsReadModel {
       MAX_RESULT_BYTES,
       'maxDetailBytes',
     );
+    this.beforeProviderAggregateRead = options.beforeProviderAggregateRead;
     this.revisionPollIntervalMs = boundedPositiveInteger(
       options.revisionPollIntervalMs,
       DEFAULT_REVISION_POLL_INTERVAL_MS,
@@ -321,9 +332,17 @@ export class CanonicalAnalyticsReadModel {
       || !Number.isSafeInteger(request.todayEndMs)
       || !Number.isSafeInteger(request.weekStartMs)
       || !Number.isSafeInteger(request.weekEndMs)
+      || (request.dailyWindowStartMs !== undefined && !Number.isSafeInteger(request.dailyWindowStartMs))
+      || (request.dailyWindowEndMs !== undefined && !Number.isSafeInteger(request.dailyWindowEndMs))
       || request.todayStartMs > request.todayEndMs
-      || request.weekStartMs > request.weekEndMs) {
+      || request.weekStartMs > request.weekEndMs
+      || (request.dailyWindowStartMs !== undefined && request.dailyWindowEndMs !== undefined
+        && request.dailyWindowStartMs > request.dailyWindowEndMs)) {
       throw new RangeError('Canonical aggregate date bounds must be ordered safe integers.');
+    }
+    if (request.timeZone !== undefined
+      && (typeof request.timeZone !== 'string' || !request.timeZone || request.timeZone.includes('\0'))) {
+      throw new RangeError('Canonical aggregate timeZone must be a non-empty IANA name.');
     }
     const maxGroups = request.maxGroups === undefined
       ? undefined
@@ -334,15 +353,21 @@ export class CanonicalAnalyticsReadModel {
       MAX_RESULT_BYTES,
       'aggregate maxResultBytes',
     );
-    return this.client.query<ProviderAggregateReadModel>({
+    return (async () => {
+      if (this.beforeProviderAggregateRead) await this.beforeProviderAggregateRead(request);
+      return this.client.query<ProviderAggregateReadModel>({
       type: 'providerAggregate',
       todayStartMs: request.todayStartMs,
       todayEndMs: request.todayEndMs,
       weekStartMs: request.weekStartMs,
       weekEndMs: request.weekEndMs,
+      timeZone: request.timeZone,
+      dailyWindowStartMs: request.dailyWindowStartMs,
+      dailyWindowEndMs: request.dailyWindowEndMs,
       maxGroups,
       maxResultBytes,
-    }, signal);
+      }, signal);
+    })();
   }
 
   /** Historical provider/tool/activity/feature dimension membership. */

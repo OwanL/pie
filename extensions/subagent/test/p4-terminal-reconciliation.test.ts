@@ -309,20 +309,9 @@ test('subagent producer facts reconcile through SQLite without terminal aggregat
     );
     assert.equal(accounting.invocationLedger.projectAll().records.length, 0);
 
-    const live = accounting.projectSessionUsage('/fixture/root.jsonl');
-    assert.equal(live.authority, 'canonical');
-    assert.deepEqual(
-      live.samples.map((sample) => [
-        sample.sourceId,
-        sample.reportedCostUsd,
-      ]).sort((left, right) => String(left[0]).localeCompare(String(right[0]))),
-      [
-        ['subagent:root-subagent-tool:0:invocation:child-provider-.02', 0.02],
-        ['subagent:root-subagent-tool:0:invocation:child-provider-.03', 0.03],
-        ['subagent:root-subagent-tool:0.0:invocation:nested-provider-.04', 0.04],
-      ],
-    );
-    assert.equal(live.samples.reduce((sum, sample) => sum + (sample.reportedCostUsd ?? 0), 0), 0.09);
+    assert.deepEqual(accounting.projectSessionUsage('/fixture/root.jsonl'), {
+      samples: [], authority: 'unknown',
+    }, 'the parent retains no duplicate settlement history; the durable four-invocation oracle above is authoritative');
 
     // Exact producer redelivery is an idempotent replay. The terminal sideband
     // and inclusive usage are never a second settlement authority.

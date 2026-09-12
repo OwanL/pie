@@ -603,15 +603,30 @@ function datePart(parts: Intl.DateTimeFormatPart[], type: Intl.DateTimeFormatPar
   return value;
 }
 
-/** Local calendar keys are derived through Intl, never by subtracting 24h of
- * milliseconds, so DST transitions do not move a settlement across a day. */
-export function localCalendarDayKey(timestampMs: Int64Value, timeZone: string): string {
-  const parts = new Intl.DateTimeFormat('en-US', {
+const CALENDAR_FORMATTER_CACHE_LIMIT = 16;
+const calendarFormatterCache = new Map<string, Intl.DateTimeFormat>();
+
+function calendarFormatter(timeZone: string): Intl.DateTimeFormat {
+  const cached = calendarFormatterCache.get(timeZone);
+  if (cached) return cached;
+  const formatter = new Intl.DateTimeFormat('en-US', {
     timeZone,
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
-  }).formatToParts(dateFromInt64(timestampMs));
+  });
+  if (calendarFormatterCache.size >= CALENDAR_FORMATTER_CACHE_LIMIT) {
+    const oldest = calendarFormatterCache.keys().next().value;
+    if (oldest !== undefined) calendarFormatterCache.delete(oldest);
+  }
+  calendarFormatterCache.set(timeZone, formatter);
+  return formatter;
+}
+
+/** Local calendar keys are derived through Intl, never by subtracting 24h of
+ * milliseconds, so DST transitions do not move a settlement across a day. */
+export function localCalendarDayKey(timestampMs: Int64Value, timeZone: string): string {
+  const parts = calendarFormatter(timeZone).formatToParts(dateFromInt64(timestampMs));
   return `${datePart(parts, 'year').padStart(4, '0')}-${datePart(parts, 'month').padStart(2, '0')}-${datePart(parts, 'day').padStart(2, '0')}`;
 }
 
@@ -625,6 +640,39 @@ export function localCalendarWeekDateKeys(timestampMs: Int64Value, timeZone: str
     const date = new Date(Date.UTC(year, month - 1, day - (6 - index)));
     return `${date.getUTCFullYear().toString().padStart(4, '0')}-${(date.getUTCMonth() + 1).toString().padStart(2, '0')}-${date.getUTCDate().toString().padStart(2, '0')}`;
   });
+}
+
+/** Return the first representable instant of the local calendar date. This
+ * deliberately searches the zone's calendar boundary instead of subtracting
+ * a fixed offset, so a DST transition (including a skipped midnight) is
+ * handled by the same Intl authority as localCalendarDayKey. */
+function calendarDayStartForKey(target: string, timeZone: string): number {
+  const [year, month, day] = target.split('-').map(Number);
+  let low = Date.UTC(year, month - 1, day) - 3 * 86_400_000;
+  let high = Date.UTC(year, month - 1, day) + 3 * 86_400_000;
+  while (localCalendarDayKey(low, timeZone) >= target) low -= 86_400_000;
+  while (localCalendarDayKey(high, timeZone) < target) high += 86_400_000;
+  while (high - low > 1) {
+    const middle = low + Math.floor((high - low) / 2);
+    if (localCalendarDayKey(middle, timeZone) < target) low = middle;
+    else high = middle;
+  }
+  return high;
+}
+
+export function localCalendarDayStartMs(timestampMs: Int64Value, timeZone: string): number {
+  return calendarDayStartForKey(localCalendarDayKey(timestampMs, timeZone), timeZone);
+}
+
+/** Move by local calendar dates. The result is the start of the requested
+ * date, which is the boundary shape required by maintained daily windows. */
+export function addLocalCalendarDaysMs(timestampMs: Int64Value, days: number, timeZone: string): number {
+  if (!Number.isSafeInteger(days)) throw new RangeError('Calendar day offset must be a safe integer.');
+  const target = localCalendarDayKey(timestampMs, timeZone);
+  const [year, month, day] = target.split('-').map(Number);
+  const shifted = new Date(Date.UTC(year, month - 1, day + days));
+  const shiftedKey = `${shifted.getUTCFullYear().toString().padStart(4, '0')}-${(shifted.getUTCMonth() + 1).toString().padStart(2, '0')}-${shifted.getUTCDate().toString().padStart(2, '0')}`;
+  return calendarDayStartForKey(shiftedKey, timeZone);
 }
 
 export interface LocalCostBucketResult {

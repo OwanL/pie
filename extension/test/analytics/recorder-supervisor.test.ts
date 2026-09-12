@@ -15,6 +15,7 @@ import {
 } from '../../../shared/analytics/contracts.js';
 import {
   AnalyticsCaptureCapacityError,
+  AnalyticsRecorderWorkerRequestError,
   AnalyticsRecorderSupervisor,
   type AnalyticsRecorderCaptureDisposition,
   type AnalyticsWorkerLifecycleEvent,
@@ -228,6 +229,85 @@ test('deletion-fence rejection is visible per record and cannot discard or block
     assert.equal(supervisor.backlog.queuedRecords, 0);
     await supervisor.shutdown();
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('worker request failure retains bounded request and worker identity context', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'pie-recorder-request-error-'));
+  const logPath = path.join(root, 'capture.log');
+  const lifecycle: AnalyticsWorkerLifecycleEvent[] = [];
+  const supervisor = new AnalyticsRecorderSupervisor({
+    enabled: true,
+    workerScript,
+    databasePath: logPath,
+    maxAutomaticRestarts: 0,
+    onWorkerLifecycle: (event) => lifecycle.push(event),
+  });
+  try {
+    await supervisor.start();
+    supervisor.submit(observation('request-error'));
+    await eventually(() => supervisor.lastDeliveryError instanceof AnalyticsRecorderWorkerRequestError, 'worker request failure was not retained');
+    const failure = supervisor.lastDeliveryError;
+    assert.ok(failure instanceof AnalyticsRecorderWorkerRequestError);
+    assert.equal(failure.message, 'database is locked');
+    assert.equal(failure.code, 'SQLITE_BUSY');
+    assert.equal(failure.requestId, 1);
+    assert.equal(failure.requestType, 'captureBatch');
+    const spawned = lifecycle.find((event) => event.state === 'spawned');
+    assert.ok(spawned?.state === 'spawned');
+    assert.deepEqual(failure.workerIdentity, spawned.identity);
+    assert.equal(supervisor.backlog.queuedRecords, 1, 'failed capture remains owned for diagnosis/recovery');
+  } finally {
+    await supervisor.shutdown().catch(() => {});
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('worker request failure bounds child diagnostic text without losing its request identity', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'pie-recorder-request-error-long-'));
+  const supervisor = new AnalyticsRecorderSupervisor({
+    enabled: true,
+    workerScript,
+    databasePath: path.join(root, 'capture.log'),
+    maxAutomaticRestarts: 0,
+  });
+  try {
+    await supervisor.start();
+    supervisor.submit(observation('request-error-long'));
+    await eventually(() => supervisor.lastDeliveryError instanceof AnalyticsRecorderWorkerRequestError, 'long worker request failure was not retained');
+    const failure = supervisor.lastDeliveryError;
+    assert.ok(failure instanceof AnalyticsRecorderWorkerRequestError);
+    assert.ok(failure.message.length <= 2_051, 'child diagnostic text must stay bounded');
+    assert.match(failure.message, /^database is locked/u);
+    assert.equal(failure.requestId, 1);
+    assert.equal(failure.requestType, 'captureBatch');
+  } finally {
+    await supervisor.shutdown().catch(() => {});
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('malformed worker error payload is normalized while preserving bounded request context', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'pie-recorder-request-error-malformed-'));
+  const supervisor = new AnalyticsRecorderSupervisor({
+    enabled: true,
+    workerScript,
+    databasePath: path.join(root, 'capture.log'),
+    maxAutomaticRestarts: 0,
+  });
+  try {
+    await supervisor.start();
+    supervisor.submit(observation('request-error-malformed'));
+    await eventually(() => supervisor.lastDeliveryError instanceof AnalyticsRecorderWorkerRequestError, 'malformed worker request failure was not retained');
+    const failure = supervisor.lastDeliveryError;
+    assert.ok(failure instanceof AnalyticsRecorderWorkerRequestError);
+    assert.equal(failure.message, 'Analytics recorder returned a malformed error message.');
+    assert.equal(failure.code, undefined);
+    assert.equal(failure.requestId, 1);
+    assert.equal(failure.requestType, 'captureBatch');
+  } finally {
+    await supervisor.shutdown().catch(() => {});
     rmSync(root, { recursive: true, force: true });
   }
 });

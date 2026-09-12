@@ -124,6 +124,9 @@ process.on('message', (raw: unknown) => {
         todayEndMs: message.todayEndMs,
         weekStartMs: message.weekStartMs,
         weekEndMs: message.weekEndMs,
+        timeZone: message.timeZone,
+        dailyWindowStartMs: message.dailyWindowStartMs,
+        dailyWindowEndMs: message.dailyWindowEndMs,
         maxGroups,
       });
     } else if (message.type === 'historicalDimensions') {

@@ -23,12 +23,27 @@ import {
 import {
   calculateCompleteCostUsd,
   costWithinParityTolerance,
+  localCalendarDayKey,
+  localCalendarWeekDateKeys,
   normalizeUsageChannels,
   type CoverageMetric,
   type EffectiveCostMetric,
   type NormalizedUsageChannels,
 } from '../../../shared/analytics/metrics.js';
 import { sanitizeAnalyticsDetail } from '../../../shared/sensitive-redaction.js';
+import {
+  applyProviderProjection,
+  createProviderProjectionSchema,
+  decrementProviderSessionPresence,
+  incrementProviderSessionPresence,
+  prepareProviderDailyProjection,
+  readProviderModelGroups,
+  rebuildProviderProjection,
+  settlementFromDatabaseRow,
+  type ProviderProjectionAggregateRequest,
+  type ProviderProjectionDatabase,
+  type ProviderProjectionSettlement,
+} from './provider-model-projection.js';
 
 interface SqliteRunResult {
   changes: number | bigint;
@@ -140,7 +155,7 @@ function prepareWriterStatement(
 }
 
 const sqlite = createRequire(process.execPath)('node:sqlite') as SqliteModule;
-const DATABASE_SCHEMA_VERSION = 8;
+const DATABASE_SCHEMA_VERSION = 9;
 const BUSY_TIMEOUT_MS = 5_000;
 const MAX_PENDING_SEQUENCES_PER_PRODUCER = 4_096;
 const DEFAULT_QUERY_ROWS = 200;
@@ -324,6 +339,11 @@ export interface ProviderAggregateReadRequest {
   weekStartMs: number;
   weekEndMs: number;
   maxGroups?: number;
+  /** One agreed active calendar zone. The writer must prepare this zone. */
+  timeZone?: string;
+  /** Writer preparation envelope used to fence a concurrent rollover. */
+  dailyWindowStartMs?: number;
+  dailyWindowEndMs?: number;
 }
 
 export interface ProviderAggregateReadModel {
@@ -1140,6 +1160,34 @@ function migrateV7(database: SqliteDatabase): void {
   ensureReferenceDigestIndex(database);
 }
 
+/** Schema v8 -> v9: retain provider/model/purpose/workspace dimensions in
+ * writer-maintained all-time and bounded local-day summaries. The backfill is
+ * deliberately one-off and streams settlement rows; ordinary reads never
+ * rebuild either table or scan settlement history. */
+function migrateV8(database: SqliteDatabase): void {
+  createProviderProjectionSchema(database as unknown as ProviderProjectionDatabase);
+  database.exec(`
+    UPDATE analytics_provider_settlements
+    SET workspace_coverage = CASE
+      WHEN json_extract((SELECT payload_json FROM analytics_observations observation
+        WHERE observation.registry_key = analytics_provider_settlements.observation_registry_key),
+        '$.scope.workspaceCoverage') IN ('known', 'unknown', 'not_applicable')
+        THEN json_extract((SELECT payload_json FROM analytics_observations observation
+          WHERE observation.registry_key = analytics_provider_settlements.observation_registry_key),
+          '$.scope.workspaceCoverage')
+      ELSE 'unknown' END,
+      workspace_key = CASE
+        WHEN json_extract((SELECT payload_json FROM analytics_observations observation
+          WHERE observation.registry_key = analytics_provider_settlements.observation_registry_key),
+          '$.scope.workspaceCoverage') = 'known'
+          THEN COALESCE(json_extract((SELECT payload_json FROM analytics_observations observation
+            WHERE observation.registry_key = analytics_provider_settlements.observation_registry_key),
+            '$.scope.workspaceId'), '')
+        ELSE '' END;
+  `);
+  rebuildProviderProjection(database as unknown as ProviderProjectionDatabase);
+}
+
 function databaseTransaction<T>(database: SqliteDatabase, operation: () => T): T {
   database.exec('BEGIN IMMEDIATE');
   try {
@@ -1187,6 +1235,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV5(database);
       migrateV6(database);
       migrateV7(database);
+      migrateV8(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
@@ -1197,6 +1246,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV5(database);
       migrateV6(database);
       migrateV7(database);
+      migrateV8(database);
       backfillV2(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
@@ -1207,6 +1257,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV5(database);
       migrateV6(database);
       migrateV7(database);
+      migrateV8(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
@@ -1215,6 +1266,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV5(database);
       migrateV6(database);
       migrateV7(database);
+      migrateV8(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
@@ -1222,6 +1274,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV5(database);
       migrateV6(database);
       migrateV7(database);
+      migrateV8(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
@@ -1229,17 +1282,25 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV5(database);
       migrateV6(database);
       migrateV7(database);
+      migrateV8(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
     if (version === 6) {
       migrateV6(database);
       migrateV7(database);
+      migrateV8(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
     if (version === 7) {
       migrateV7(database);
+      migrateV8(database);
+      database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
+      return;
+    }
+    if (version === 8) {
+      migrateV8(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
     }
   });
@@ -1762,6 +1823,7 @@ function applyProviderSettlement(
     INSERT INTO analytics_provider_settlements (
       generation_id, invocation_id, observation_registry_key, settlement_fingerprint,
       capture_subject_kind, capture_subject_key, root_session_id, execution_id, branch_id,
+      workspace_key, workspace_coverage,
       provider, dispatched_model, reported_model, effective_model, purpose, outcome, settled_at_ms,
       input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
       reasoning_tokens, provider_total_tokens,
@@ -1771,7 +1833,7 @@ function applyProviderSettlement(
       reported_cost_usd, calculated_cost_usd,
       calculated_cost_complete, effective_cost_usd, effective_cost_source,
       effective_cost_coverage, projection_revision
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     observation.generationId,
     invocationId,
@@ -1782,6 +1844,8 @@ function applyProviderSettlement(
     observation.scope.rootSessionId ?? null,
     observation.scope.executionId ?? null,
     observation.scope.branchId ?? null,
+    observation.scope.workspaceCoverage === 'known' ? observation.scope.workspaceId ?? '' : '',
+    observation.scope.workspaceCoverage,
     optionalString(fields.provider),
     dispatchedModel,
     reportedModel,
@@ -1816,10 +1880,31 @@ function applyProviderSettlement(
     cacheReadTokens: normalizedSqlValue(normalized.cacheReadTokens),
     cacheWriteTokens: normalizedSqlValue(normalized.cacheWriteTokens),
     reasoningTokens: normalizedSqlValue(normalized.reasoningTokens),
-    providerTotalTokens: optionalToken(fields, 'providerTotalTokens'),
+    providerTotalTokens: normalizedSqlValue(normalized.totalTokens),
     effectiveCost: costs.effectiveCost,
     effectiveSource: costs.effectiveSource,
   };
+  const projectionSettlement: ProviderProjectionSettlement = {
+    provider: optionalString(fields.provider),
+    model: reportedModel ?? dispatchedModel,
+    purpose: optionalString(fields.purpose),
+    settledAtMs: settledAt,
+    workspaceKey: observation.scope.workspaceCoverage === 'known' ? observation.scope.workspaceId ?? '' : '',
+    workspaceCoverage: observation.scope.workspaceCoverage,
+    inputTokens: accountingValues.inputTokens,
+    outputTokens: accountingValues.outputTokens,
+    cacheReadTokens: accountingValues.cacheReadTokens,
+    cacheWriteTokens: accountingValues.cacheWriteTokens,
+    reasoningTokens: accountingValues.reasoningTokens,
+    providerTotalTokens: normalizedSqlValue(normalized.totalTokens),
+    effectiveCostUsd: costs.effectiveCost,
+    effectiveCostSource: costs.effectiveSource,
+    effectiveCostCoverage: costs.effectiveCoverage,
+  };
+  applyProviderProjection(database as unknown as ProviderProjectionDatabase, projectionSettlement, revision, 1);
+  if (observation.scope.rootSessionId) {
+    incrementProviderSessionPresence(database as unknown as ProviderProjectionDatabase, observation.scope.rootSessionId, revision);
+  }
   updateProviderAccountingProjection(database, statements, 'global', '*', revision, accountingValues, 1);
   if (observation.scope.rootSessionId) {
     updateProviderAccountingProjection(database, statements, 'session', observation.scope.rootSessionId, revision, accountingValues, 1);
@@ -2165,78 +2250,6 @@ function boundedTimestamp(value: number, name: string): number {
   return value;
 }
 
-function providerAggregateGroupSql(): string {
-  const cost = (window: string) => `
-    SUM(CASE WHEN ${window} AND effective_cost_coverage = 'known'
-      THEN COALESCE(effective_cost_usd, 0) ELSE 0 END)`;
-  const input = (window: string) => `
-    SUM(CASE WHEN ${window} AND input_tokens IS NOT NULL
-      THEN CAST(input_tokens AS INTEGER) ELSE 0 END)`;
-  const output = (window: string) => `
-    SUM(CASE WHEN ${window} AND output_tokens IS NOT NULL
-      THEN CAST(output_tokens AS INTEGER) ELSE 0 END)`;
-  const cacheRead = (window: string) => `
-    SUM(CASE WHEN ${window} AND cache_read_tokens IS NOT NULL
-      THEN CAST(cache_read_tokens AS INTEGER) ELSE 0 END)`;
-  const cacheWrite = (window: string) => `
-    SUM(CASE WHEN ${window} AND cache_write_tokens IS NOT NULL
-      THEN CAST(cache_write_tokens AS INTEGER) ELSE 0 END)`;
-  const unknown = (window: string) => `
-    SUM(CASE WHEN ${window} AND effective_cost_coverage = 'unknown' THEN 1 ELSE 0 END)`;
-  const unpriced = (window: string) => `
-    SUM(CASE WHEN ${window} AND effective_cost_coverage = 'not_applicable'
-      THEN 1 ELSE 0 END)`;
-  const gap = (window: string) => `
-    SUM(CASE WHEN ${window} AND (effective_cost_coverage = 'unknown'
-      OR input_tokens IS NULL OR output_tokens IS NULL
-      OR cache_read_tokens IS NULL OR cache_write_tokens IS NULL)
-      THEN 1 ELSE 0 END)`;
-  const today = 'CAST(settled_at_ms AS INTEGER) >= bounds.today_start AND CAST(settled_at_ms AS INTEGER) <= bounds.today_end';
-  const week = 'CAST(settled_at_ms AS INTEGER) >= bounds.week_start AND CAST(settled_at_ms AS INTEGER) <= bounds.week_end';
-  return `
-    WITH bounds(today_start, today_end, week_start, week_end) AS (
-      SELECT ?, ?, ?, ?
-    ), session_count AS (
-      SELECT COUNT(DISTINCT root_session_id) AS value
-      FROM analytics_provider_settlements
-    )
-    SELECT
-      COALESCE(provider, 'unknown') AS provider,
-      COALESCE(effective_model, 'unknown') AS model,
-      session_count.value AS session_count,
-      ${cost('1')} AS all_cost,
-      ${input('1')} AS all_input,
-      ${output('1')} AS all_output,
-      ${cacheRead('1')} AS all_cache_read,
-      ${cacheWrite('1')} AS all_cache_write,
-      ${unknown('1')} AS all_unknown,
-      ${unpriced('1')} AS all_unpriced,
-      ${gap('1')} AS all_gap,
-      ${cost(today)} AS today_cost,
-      ${input(today)} AS today_input,
-      ${output(today)} AS today_output,
-      ${cacheRead(today)} AS today_cache_read,
-      ${cacheWrite(today)} AS today_cache_write,
-      ${unknown(today)} AS today_unknown,
-      ${unpriced(today)} AS today_unpriced,
-      ${gap(today)} AS today_gap,
-      ${cost(week)} AS week_cost,
-      ${input(week)} AS week_input,
-      ${output(week)} AS week_output,
-      ${cacheRead(week)} AS week_cache_read,
-      ${cacheWrite(week)} AS week_cache_write,
-      ${unknown(week)} AS week_unknown,
-      ${unpriced(week)} AS week_unpriced,
-      ${gap(week)} AS week_gap
-    FROM analytics_provider_settlements
-    CROSS JOIN bounds
-    CROSS JOIN session_count
-    GROUP BY provider, effective_model
-    ORDER BY provider, effective_model
-    LIMIT ?
-  `;
-}
-
 function providerSettlementProjection(
   row: Record<string, unknown>,
   inheritedForSession?: string,
@@ -2361,6 +2374,31 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
 
   submit<Fields extends object>(observation: SequencedAnalyticsObservation<Fields>): void {
     this.submitBatch([observation]);
+  }
+
+  /** Writer-only calendar preparation. Read helpers never call this method:
+   * changing the active IANA zone and rebuilding the bounded seven-day table
+   * is an explicit recorder command owned by the runtime/supervisor. */
+  prepareProviderDailyProjection(
+    timeZone: string,
+    windowStartMs: number | string | bigint,
+    windowEndMs: number | string | bigint,
+    allowTimeZoneChange = false,
+  ): void {
+    this.assertWritable();
+    const start = canonicalInt64(windowStartMs as Int64Value);
+    const end = canonicalInt64(windowEndMs as Int64Value);
+    this.transaction(() => {
+      const revision = nextProjectionRevision(this.database, this.writerStatements);
+      prepareProviderDailyProjection(
+        this.database as unknown as ProviderProjectionDatabase,
+        timeZone,
+        start,
+        end,
+        revision,
+        allowTimeZoneChange,
+      );
+    });
   }
 
   submitBatch<Fields extends object>(observations: readonly SequencedAnalyticsObservation<Fields>[]): void {
@@ -2680,10 +2718,17 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     const settlementsStarted = performance.now();
     const removedSettlements = this.database.prepare(`
       SELECT normalized_base_input_tokens AS input_tokens,
+        normalized_base_input_tokens,
         normalized_output_tokens AS output_tokens,
+        normalized_output_tokens,
         normalized_cache_read_tokens AS cache_read_tokens,
+        normalized_cache_read_tokens,
         normalized_cache_write_tokens AS cache_write_tokens,
-        reasoning_tokens, provider_total_tokens, effective_cost_usd, effective_cost_source
+        normalized_cache_write_tokens,
+        reasoning_tokens, provider_total_tokens, normalized_total_tokens AS normalized_total_tokens,
+        effective_cost_usd, effective_cost_source, effective_cost_coverage,
+        provider, effective_model, purpose, settled_at_ms,
+        workspace_key, workspace_coverage, root_session_id
       FROM analytics_provider_settlements WHERE ${subjectFilter}
     `).iterate(rootSessionId, rootSessionId) as Iterable<Record<string, unknown>>;
     let settlementRows = 0;
@@ -2700,7 +2745,15 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
         effectiveSource: row.effective_cost_source === null
           ? null
           : row.effective_cost_source as 'reported' | 'calculated',
-      }, -1);
+        }, -1);
+      applyProviderProjection(this.database as unknown as ProviderProjectionDatabase, settlementFromDatabaseRow(row), revision, -1);
+      if (row.root_session_id !== null && row.root_session_id !== undefined) {
+        decrementProviderSessionPresence(
+          this.database as unknown as ProviderProjectionDatabase,
+          String(row.root_session_id),
+          revision,
+        );
+      }
     }
     mark(`providerAccountingLoop(${settlementRows} rows)`, settlementsStarted);
     const projectionsStarted = performance.now();
@@ -2901,6 +2954,11 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
             ? null
             : row.effective_cost_source as 'reported' | 'calculated',
         }, 1);
+        incrementProviderSessionPresence(
+          this.database as unknown as ProviderProjectionDatabase,
+          rootSessionId,
+          revision,
+        );
       }
       for (const table of [
         'analytics_provider_settlements',
@@ -3380,7 +3438,7 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
       `).all() as Array<{ name: string }>;
       return {
         ...metadata,
-        projectionVersion: 1,
+        projectionVersion: 2,
         logicalCommands: ['schema', 'query', 'detail', 'storage'],
         views: views.map((row) => row.name),
         detail: { defaultRangeBytes: 64 * 1024, representationEncoding: 'node-v8' },
@@ -3819,6 +3877,11 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     if (todayStartMs > todayEndMs || weekStartMs > weekEndMs) {
       throw new RangeError('Canonical aggregate date bounds must be ordered.');
     }
+    const configuredTimeZone = this.database.prepare(
+      'SELECT time_zone FROM analytics_provider_daily_state WHERE singleton = 1',
+    ).get() as { time_zone: string | null } | undefined;
+    const timeZone = request.timeZone ?? configuredTimeZone?.time_zone ?? 'UTC';
+    if (!timeZone || timeZone.includes('\0')) throw new Error('Canonical aggregate timezone is required.');
     const maxGroups = boundedPositiveInteger(
       request.maxGroups,
       DEFAULT_QUERY_ROWS,
@@ -3828,14 +3891,19 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     return this.snapshot(() => {
       const revision = this.getProjectionRevision();
       const accounting = this.readProviderAccountingSummaryInSnapshot(undefined, revision);
-      const rows = this.database.prepare(providerAggregateGroupSql()).all(
-        todayStartMs,
-        todayEndMs,
-        weekStartMs,
-        weekEndMs,
-        maxGroups + 1,
-      ) as Array<Record<string, unknown>>;
-      const truncated = rows.length > maxGroups;
+      const projection = readProviderModelGroups(
+        this.database as unknown as ProviderProjectionDatabase,
+        {
+          timeZone,
+          todayDay: localCalendarDayKey(todayStartMs, timeZone),
+          weekDays: localCalendarWeekDateKeys(todayStartMs, timeZone),
+          maxGroups,
+          windowStartMs: request.dailyWindowStartMs === undefined ? undefined : canonicalInt64(request.dailyWindowStartMs as Int64Value),
+          windowEndMs: request.dailyWindowEndMs === undefined ? undefined : canonicalInt64(request.dailyWindowEndMs as Int64Value),
+        } satisfies ProviderProjectionAggregateRequest,
+      );
+      const rows = projection.rows as Array<Record<string, unknown>>;
+      const truncated = projection.truncated;
       return {
         revision,
         snapshotWatermark: this.readObservationWatermark(),
