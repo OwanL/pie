@@ -3369,6 +3369,37 @@ narrow alternative directly rather than reasoning about the code.
 `recorderWorkerRss` remains the one gate needing a decision rather than a fix; the heap evidence is in the
 entry above.
 
+## P7a C3 survey: what is dormant and what is missing
+
+Inspected the activation seam rather than assuming it from the milestone list. The supporting pieces are
+in place and correctly gated, but the consumer switchover has not been started.
+
+**Correctly gated already.** `CanonicalAnalyticsCapture.enabled` is `authority === 'canonical'`, and
+`StatsService` derives `canonicalCapture` from `options.analyticsCapture?.enabled`, so under legacy
+authority the capture is `undefined` and `StatsService.start()` falls through to the legacy restore path.
+The canonical capture is therefore genuinely inert while unactivated, which is the property that matters
+for accidental dual-writes.
+
+**Missing.** `AnalyticsRuntime` (C2) is constructed **only in its own test**
+(`extension/test/host/analytics-runtime.test.ts`); there is no production caller, so nothing in the host
+owns the canonical helper lifecycle yet. `getAnalyticsReadModel()` likewise has **no production
+consumer** — its only occurrence in `extension/src` is its own declaration.
+
+**A gate that exists in prose but not in code.** `getAnalyticsReadModel()` is documented as "Present
+whenever the host wired it; its queries are read-only and fail explicitly when the canonical database is
+absent. Consumers must gate on canonical authority until the P7a cutover", and `extension-host.ts`
+constructs the read model unconditionally at startup. The accessor returns it regardless of authority, so
+the "consumers must gate" rule is currently an unenforced convention with no consumers to enforce it
+against. Before C4 adds consumers, the authority check should live in one place rather than being
+repeated in every consumer, because a single consumer that forgets it would read canonical data under
+legacy authority.
+
+**Still hardcoded.** `extension-host.ts` passes `authority: 'legacy'` literally to
+`CanonicalAnalyticsCapture`. That is correct today and is the honest value while unactivated, but it is
+not derived from the validated manifest, so C3 has to replace it with a manifest-derived authority rather
+than flip a constant.
+
+
 
 
 
