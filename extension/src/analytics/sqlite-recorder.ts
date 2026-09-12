@@ -2661,15 +2661,21 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     `).get(rootSessionId, rootSessionId) as { bytes: number | bigint }).bytes);
     mark('subjectByteSum', subjectSumStarted);
     const observationDeleteStarted = performance.now();
-    const deletedObservationCount = deletedSourceCopyObservations + toNumber(this.database.prepare(`
-      DELETE FROM analytics_observations WHERE ${subjectFilter}
-    `).run(rootSessionId, rootSessionId).changes);
+    // Delete in bounded statements rather than one statement over the whole
+    // subject. A single DELETE across ~1,000,000 rows holds the database write
+    // lock for its entire duration (measured ~20 s at scale), which exceeds the
+    // 5 s busy timeout every other recorder shares, so a concurrent writer fails
+    // with "database is locked" instead of being rejected by the committed
+    // fence. Each batch statement commits independently, releasing the lock
+    // between batches, so the lock is never held for the whole removal.
+    const deletedObservationCount = deletedSourceCopyObservations
+      + this.deleteSubjectRowsInBatches('analytics_observations', subjectFilter, rootSessionId);
     mark('deleteSubjectObservations', observationDeleteStarted);
     subtractFactBytes(this.database, this.writerStatements, subjectBytes);
     const payloadDeleteStarted = performance.now();
-    const deletedPayloadCount = toNumber(this.database.prepare(`
-      DELETE FROM analytics_detail_payloads WHERE ${subjectFilter}
-    `).run(rootSessionId, rootSessionId).changes);
+    const deletedPayloadCount = this.deleteSubjectRowsInBatches(
+      'analytics_detail_payloads', subjectFilter, rootSessionId,
+    );
     mark('deleteSubjectPayloads', payloadDeleteStarted);
     // The reference cleanup trigger deletes content exactly when its last owner
     // is removed, atomically with these payload deletes. No history sweep is
@@ -3825,6 +3831,42 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
    * Used by the private-close scrub, which must physically remove private bytes
    * from the WAL. A concurrent writer legitimately prevents this, so callers
    * must tolerate failure and keep the fence pending for a later retry. */
+  /** Delete a subject's rows from one table in bounded statements.
+   *
+   * One `DELETE ... WHERE subject = ?` over a large subject holds the database
+   * write lock for the statement's whole duration — measured ~20 s for ~1M rows
+   * at scale — which exceeds the 5 s busy timeout every recorder shares, so a
+   * concurrent writer fails as "database is locked". Deleting a bounded rowid
+   * window per statement releases the lock between batches, so the longest
+   * any other writer waits is one batch. Total work is unchanged; only how it is
+   * divided.
+   *
+   * `rowid` is used rather than `LIMIT` because SQLite only accepts `LIMIT` on a
+   * DELETE when compiled with the optional extension; a rowid window is
+   * portable and cannot skip rows as long as the window is re-read after each
+   * delete (which it is, since deleted rows leave the window empty). */
+  private deleteSubjectRowsInBatches(
+    table: 'analytics_observations' | 'analytics_detail_payloads',
+    subjectFilter: string,
+    rootSessionId: string,
+    batchSize = 5_000,
+  ): number {
+    const selectWindow = this.database.prepare(`
+      SELECT rowid AS rid FROM ${table} WHERE ${subjectFilter} LIMIT ?
+    `);
+    const deleteWindow = this.database.prepare(`
+      DELETE FROM ${table} WHERE rowid = ?
+    `);
+    let deleted = 0;
+    for (;;) {
+      // Each iteration is its own implicit transaction, so the write lock is
+      // released between batches.
+      const window = selectWindow.all(rootSessionId, rootSessionId, batchSize) as Array<{ rid: number | bigint }>;
+      if (window.length === 0) return deleted;
+      for (const row of window) deleted += toNumber(deleteWindow.run(row.rid).changes);
+    }
+  }
+
   truncateWal(): void {
     this.assertWritable();
     this.database.exec('PRAGMA wal_checkpoint(TRUNCATE)');
