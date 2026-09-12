@@ -37,7 +37,7 @@ import {
 } from '../analytics/query-entry.js';
 import { resolvePieDataPaths } from '../../../shared/pie-data-root.js';
 import { toErrorMessage } from './util/error-message';
-import type { WebviewToHostMessage, ViewState } from '../shared/protocol';
+import { PIE_BUILD_ID, type WebviewToHostMessage, type ViewState } from '../shared/protocol';
 import { EffectRunner } from './core/effect-runner';
 import { dispatch } from './core/dispatch';
 import { initialArchState, type ArchState } from './core/reducer';
@@ -69,6 +69,7 @@ import { appendPieLog } from './util/pie-log';
 import { CanonicalAnalyticsCapture } from '../analytics/canonical-capture.js';
 import { ActivationStore } from '../analytics/activation-store.js';
 import { AnalyticsRuntime } from './analytics-runtime.js';
+import { HostAnalyticsTransport } from './analytics-transport.js';
 import type { AnalyticsDetailCapture, AnalyticsObservation } from '../../../shared/analytics/contracts.js';
 
 
@@ -150,6 +151,8 @@ export class PieExtension implements vscode.Disposable {
   /** Owns the canonical recorder/query helpers once an activation is recorded.
    * Dormant under legacy authority: start() spawns nothing. */
   private readonly analyticsRuntime: AnalyticsRuntime;
+  /** Owns worker/subagent/MCP capture ingress under canonical authority. */
+  private readonly analyticsTransport?: HostAnalyticsTransport;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -171,6 +174,26 @@ export class PieExtension implements vscode.Disposable {
       agentDir: process.env.PI_CODING_AGENT_DIR,
     });
     const activation = new ActivationStore({ stateDir: dataPaths.stateDir }).read();
+    const analyticsWorkspaceId = getWorkspaceAnalyticsId(context);
+    const analyticsProcessGeneration = crypto.randomUUID();
+    const canonicalActive = activation.authority === 'canonical'
+      && activation.manifest?.activeGeneration !== undefined
+      && activation.manifest?.activeGeneration !== null
+      && activation.sha256 !== null;
+    // This is the sole descriptor snapshot shared by host capture, helper
+    // startup, backend construction, and loaded-generation evidence. The
+    // runtime rechecks the on-disk snapshot before readiness and refuses a
+    // transition observed during startup.
+    const activationDescriptor = canonicalActive
+      ? Object.freeze({
+          generationId: activation.manifest!.activeGeneration!.identity.generationId,
+          buildId: activation.manifest!.activeGeneration!.identity.buildId,
+          manifestRevision: activation.manifest!.revision,
+          manifestSha256: activation.sha256!,
+          workspaceId: analyticsWorkspaceId,
+          hostInstanceId: analyticsProcessGeneration,
+        })
+      : undefined;
     // Under canonical authority the capture requires a generation id and fact,
     // detail and lifecycle sinks, and throws without them. Those sinks come from
     // the canonical helpers, which only exist once AnalyticsRuntime.start() has
@@ -180,9 +203,11 @@ export class PieExtension implements vscode.Disposable {
       analyticsDir: dataPaths.analyticsDir,
       recorderWorkerScript: path.join(runtimeOutputDirectory(context), 'analytics-recorder-worker.js'),
       queryWorkerScript: path.join(runtimeOutputDirectory(context), 'analytics-query-worker.js'),
-      buildId: `pie-${String(context.extension.packageJSON.version ?? 'unknown')}`,
-      workspaceId: getWorkspaceAnalyticsId(context),
-      processGeneration: crypto.randomUUID(),
+      buildId: PIE_BUILD_ID,
+      workspaceId: analyticsWorkspaceId,
+      processGeneration: analyticsProcessGeneration,
+      activationSnapshot: activation,
+      restartNonce: process.env.PIE_ANALYTICS_RESTART_NONCE?.trim() || null,
       onError: (error, stage) => {
         appendPieLog('error', 'analytics', `canonical analytics ${stage} failed`, {
           error: error instanceof Error ? error.message : String(error),
@@ -190,8 +215,6 @@ export class PieExtension implements vscode.Disposable {
       },
     });
     this.analyticsRuntime = analyticsRuntime;
-    const canonicalActive = activation.manifest?.activeGeneration !== undefined
-      && activation.manifest?.activeGeneration !== null;
     // Under canonical authority the capture requires fact, detail and lifecycle
     // sinks, and throws without them. Those sinks are the canonical recorder,
     // which only exists after AnalyticsRuntime.start() succeeds. This holder is
@@ -230,14 +253,37 @@ export class PieExtension implements vscode.Disposable {
         return sink.deleteSession(rootSessionId, sourceKey, timestampMs, pendingOperationId);
       },
     };
+    this.analyticsTransport = canonicalActive
+      ? new HostAnalyticsTransport({
+          generationId: activationDescriptor!.generationId,
+          buildId: activationDescriptor!.buildId,
+          workspaceId: activationDescriptor!.workspaceId,
+          backend,
+          recorder: {
+            submitTracked: (observation, onDisposition) => {
+              const sink = analyticsRuntime.sink;
+              if (!sink) throw new Error('Canonical capture sink is not ready; activation has not completed.');
+              sink.submitTracked(observation, onDisposition);
+            },
+            submitTrackedDetail: (capture, onDisposition) => {
+              const sink = analyticsRuntime.sink;
+              if (!sink) throw new Error('Canonical detail sink is not ready; activation has not completed.');
+              sink.submitTrackedDetail(capture, onDisposition);
+            },
+          },
+          onError: (error) => appendPieLog('warn', 'analytics', 'worker analytics ingress rejected', {
+            error: error.message,
+          }),
+        })
+      : undefined;
     const analyticsCapture = new CanonicalAnalyticsCapture({
       authority: canonicalActive ? 'canonical' : 'legacy',
       ...(canonicalActive
-        ? { generationId: activation.manifest!.activeGeneration!.identity.generationId }
+        ? { generationId: activationDescriptor!.generationId }
         : {}),
-      workspaceId: getWorkspaceAnalyticsId(context),
-      buildId: `pie-${String(context.extension.packageJSON.version ?? 'unknown')}`,
-      processGeneration: crypto.randomUUID(),
+      workspaceId: analyticsWorkspaceId,
+      buildId: PIE_BUILD_ID,
+      processGeneration: analyticsProcessGeneration,
       ...(canonicalActive
         ? { sink: runtimeSinks, detailSink: runtimeSinks, lifecycleSink: runtimeSinks }
         : {}),
@@ -292,6 +338,7 @@ export class PieExtension implements vscode.Disposable {
           this.sidebarProvider.isRendererOwnerCurrent(rendererId, viewGeneration, rendererGeneration)
           || this.browserServer.isRendererOwnerCurrent(rendererId, viewGeneration, rendererGeneration),
       },
+      () => this.analyticsRuntime.backendDescriptor(),
     );
 
     this.tokenRateService = new TokenRateService({
@@ -1170,18 +1217,24 @@ export class PieExtension implements vscode.Disposable {
       this.tokenRateService.dispose();
       this.aggregateStatsService.dispose();
 
-      // Stop capture and drain the recorder before anything else that can
-      // produce a capture: statsService owns the capture sink, so its shutdown
-      // must complete first, then the canonical helpers are released.
+      // Stop host-side producers first. The transport then fences new backend
+      // ingress and gives partial detail assemblies a bounded terminal
+      // rejection while the backend channel is still available.
       await this.statsService.shutdown();
-      await this.analyticsRuntime.stop();
-      this.service.dispose();
-      this.sidebarProvider.dispose();
-      // Bootstrap releases this window's runtime lease after shutdown resolves.
-      // A fire-and-forget dispose would let retention delete worker files while
-      // the backend is still draining and closing its supervised workers.
+      await this.analyticsTransport?.shutdown();
+      // Closing stdin fences the coordinator and all worker producers. Keep the
+      // recorder alive until the backend has confirmed exit so accepted queue
+      // work still drains without allowing late backend traffic into a torn
+      // down transport. Release the backend client's event/lease ownership
+      // immediately after its process confirms exit; host-local analytics
+      // teardown below does not use this client because ingress is fenced and
+      // acknowledgments were settled above.
       await this.backend.stop();
       this.backend.dispose();
+      await this.analyticsRuntime.stop();
+      this.analyticsTransport?.dispose();
+      this.service.dispose();
+      this.sidebarProvider.dispose();
       await disposeLivePipelineTrace();
       this.statusBar.dispose();
     })();

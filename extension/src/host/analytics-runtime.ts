@@ -1,20 +1,54 @@
-import { createHash } from 'node:crypto';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import {
+  closeSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import path from 'node:path';
 
 import {
+  ANALYTICS_LOADED_GENERATION_SCHEMA_VERSION,
   ActivationManifestError,
+  isAnalyticsRestartNonce,
   type ActivationManifest,
+  type AnalyticsBackendDescriptor,
+  type AnalyticsLoadedGenerationReceipt,
+  validateAnalyticsLoadedGenerationReceipt,
 } from '../../../shared/analytics/activation.js';
 import { canonicalAnalyticsDatabasePath } from '../analytics/query-entry.js';
 import { AnalyticsRecorderSupervisor } from '../analytics/recorder-supervisor.js';
 import { AnalyticsQueryClient } from '../analytics/query-client.js';
-import { ActivationStore } from '../analytics/activation-store.js';
+import { ActivationStore, type ActivationReadResult } from '../analytics/activation-store.js';
 
 /** Written by a host that completed canonical readiness, so post-restart
  * evidence can show which generation is loaded rather than only which one the
  * manifest records. */
 export const LOADED_GENERATION_FILENAME = 'analytics-loaded-generation-v1.json';
+
+export function writeLoadedGenerationReceiptAtomically(stateDir: string, payload: AnalyticsLoadedGenerationReceipt): void {
+  const destination = path.join(stateDir, LOADED_GENERATION_FILENAME);
+  const temporary = path.join(stateDir, `.${LOADED_GENERATION_FILENAME}.${process.pid}-${randomUUID()}.tmp`);
+  const bytes = `${JSON.stringify(payload, null, 2)}\n`;
+  let descriptor: number | undefined;
+  try {
+    writeFileSync(temporary, bytes, { encoding: 'utf8', flag: 'wx' });
+    descriptor = openSync(temporary, 'r+');
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = undefined;
+    renameSync(temporary, destination);
+  } catch (error) {
+    if (descriptor !== undefined) {
+      try { closeSync(descriptor); } catch { /* preserve the original failure */ }
+    }
+    try { unlinkSync(temporary); } catch { /* best-effort cleanup */ }
+    throw error;
+  }
+}
 
 /** Explicit per-extension paths the runtime needs. Everything is derived, never
  * searched for: the whole point of the authority switch is that there is exactly
@@ -30,8 +64,19 @@ export interface AnalyticsRuntimeOptions {
   workspaceId: string;
   /** Fresh per host process; distinct from workspaceId. */
   processGeneration: string;
+  /** Activation bytes read while constructing the host. Startup must use this
+   * same authority snapshot, and fail closed if it changes before helpers are
+   * ready. */
+  activationSnapshot?: Pick<ActivationReadResult, 'manifest' | 'sha256' | 'authority'>;
+  /** Optional helper-issued restart correlation nonce for loaded evidence. */
+  restartNonce?: string | null;
   onError?: (error: unknown, stage: string) => void;
 }
+
+export type AnalyticsRuntimeActivationSnapshot = Pick<
+  ActivationReadResult,
+  'manifest' | 'sha256' | 'authority'
+>;
 
 export interface AnalyticsRuntimeReadiness {
   authority: 'legacy' | 'canonical';
@@ -61,10 +106,18 @@ export class AnalyticsRuntime {
   private recorder: AnalyticsRecorderSupervisor | undefined;
   private queryClient: AnalyticsQueryClient | undefined;
   private readiness: AnalyticsRuntimeReadiness | undefined;
+  /** Descriptor captured at canonical startup. A later manifest update must
+   * fail the next backend spawn instead of silently changing this host's
+   * worker authority mid-process. */
+  private activationDescriptor: AnalyticsBackendDescriptor | undefined;
   private stopped = false;
 
   constructor(private readonly options: AnalyticsRuntimeOptions) {
     this.store = new ActivationStore({ stateDir: options.stateDir });
+    if (options.restartNonce !== undefined && options.restartNonce !== null
+      && !isAnalyticsRestartNonce(options.restartNonce)) {
+      throw new ActivationManifestError('Analytics restart correlation nonce has an invalid format or exceeds 128 bytes.');
+    }
   }
 
   /** Validated activation state, or null when no manifest exists. Throws on a
@@ -80,32 +133,46 @@ export class AnalyticsRuntime {
 
   /** Bounded identity for the active generation. Derived from validated bytes so
    * a stale in-memory value cannot outlive an on-disk change. */
-  activeDescriptor(): {
-    generationId: string;
-    buildId: string;
-    manifestRevision: number;
-    manifestSha256: string;
-    workspaceId: string;
-    hostInstanceId: string;
-  } {
-    const { manifest, sha256, authority } = this.readActivation();
+  activeDescriptor(): AnalyticsBackendDescriptor {
+    if (this.activationDescriptor) return this.activationDescriptor;
+    return this.descriptorFromActivation(this.readActivation());
+  }
+
+  private descriptorFromActivation(
+    activation: AnalyticsRuntimeActivationSnapshot,
+  ): AnalyticsBackendDescriptor {
+    const { manifest, sha256, authority } = activation;
     if (authority !== 'canonical' || !manifest?.activeGeneration || !sha256) {
       throw new ActivationManifestError('No active canonical analytics generation is recorded.');
     }
-    return {
+    return Object.freeze({
       generationId: manifest.activeGeneration.identity.generationId,
       buildId: manifest.activeGeneration.identity.buildId,
       manifestRevision: manifest.revision,
       manifestSha256: sha256,
       workspaceId: this.options.workspaceId,
       hostInstanceId: this.options.processGeneration,
-    };
+    });
+  }
+
+  private assertStartupActivationUnchanged(current: AnalyticsRuntimeActivationSnapshot): void {
+    const expected = this.options.activationSnapshot;
+    if (!expected) return;
+    if (expected.authority !== current.authority
+      || expected.sha256 !== current.sha256
+      || (expected.manifest?.revision ?? null) !== (current.manifest?.revision ?? null)) {
+      throw new ActivationManifestError(
+        'Analytics activation changed during host startup; refusing to mix authority snapshots.',
+      );
+    }
   }
 
   /** Start helpers only if canonical authority is active. Returns the readiness
    * snapshot; `recorderReady` is false under legacy authority by design. */
   async start(): Promise<AnalyticsRuntimeReadiness> {
-    const { manifest, sha256, authority } = this.readActivation();
+    const activation = this.readActivation();
+    this.assertStartupActivationUnchanged(activation);
+    const { manifest, sha256, authority } = activation;
     if (authority !== 'canonical') {
       // No helper, no probe, no database creation. Legacy authority stays the
       // sole writer until an explicit activation happens.
@@ -121,7 +188,7 @@ export class AnalyticsRuntime {
       };
       return this.readiness;
     }
-    const descriptor = this.activeDescriptor();
+    const descriptor = this.descriptorFromActivation(activation);
     if (descriptor.buildId !== this.options.buildId) {
       // Running one build while the manifest names another is exactly the state
       // that makes "which code is loaded" unknowable; fail closed.
@@ -129,6 +196,7 @@ export class AnalyticsRuntime {
         `Active analytics generation build ${descriptor.buildId} does not match the loaded build ${this.options.buildId}.`,
       );
     }
+    this.activationDescriptor = descriptor;
     const recorder = new AnalyticsRecorderSupervisor({
       enabled: true,
       workerScript: this.options.recorderWorkerScript,
@@ -163,6 +231,19 @@ export class AnalyticsRuntime {
       if (schema.databaseSchemaVersion !== recorderSchemaVersion) {
         throw new ActivationManifestError(
           `Canonical schema mismatch: recorder reports ${recorderSchemaVersion}, query reports ${schema.databaseSchemaVersion}.`,
+        );
+      }
+      // The helper probe may have yielded while the activation writer replaced
+      // the manifest. Never publish readiness for a descriptor that no longer
+      // names the current authority snapshot.
+      const currentActivation = this.readActivation();
+      this.assertStartupActivationUnchanged(currentActivation);
+      if (currentActivation.authority !== 'canonical'
+        || currentActivation.sha256 !== descriptor.manifestSha256
+        || currentActivation.manifest?.revision !== descriptor.manifestRevision
+        || currentActivation.manifest.activeGeneration?.identity.generationId !== descriptor.generationId) {
+        throw new ActivationManifestError(
+          'Analytics activation changed while canonical helpers were starting; refusing readiness.',
         );
       }
       this.readiness = {
@@ -203,23 +284,32 @@ export class AnalyticsRuntime {
   recordLoadedGeneration(): void {
     if (this.readiness?.authority !== 'canonical') return;
     try {
-      const descriptor = this.activeDescriptor();
-      const payload = {
-        schemaVersion: 1,
+      const descriptor = this.activationDescriptor;
+      if (!descriptor) return;
+      const current = this.readActivation();
+      if (current.authority !== 'canonical'
+        || current.sha256 !== descriptor.manifestSha256
+        || current.manifest?.revision !== descriptor.manifestRevision
+        || current.manifest.activeGeneration?.identity.generationId !== descriptor.generationId) {
+        this.options.onError?.(
+          new ActivationManifestError('Analytics activation changed before loaded evidence could be recorded.'),
+          'loaded-generation',
+        );
+        return;
+      }
+      const payload = validateAnalyticsLoadedGenerationReceipt({
+        schemaVersion: ANALYTICS_LOADED_GENERATION_SCHEMA_VERSION,
         generationId: descriptor.generationId,
         buildId: descriptor.buildId,
         manifestRevision: descriptor.manifestRevision,
         manifestSha256: descriptor.manifestSha256,
         workspaceId: descriptor.workspaceId,
         hostInstanceId: descriptor.hostInstanceId,
+        restartNonce: this.options.restartNonce ?? null,
         loadedAt: new Date().toISOString(),
-      };
+      });
       mkdirSync(this.options.stateDir, { recursive: true });
-      writeFileSync(
-        path.join(this.options.stateDir, LOADED_GENERATION_FILENAME),
-        `${JSON.stringify(payload, null, 2)}\n`,
-        'utf8',
-      );
+      writeLoadedGenerationReceiptAtomically(this.options.stateDir, payload);
     } catch {
       // Diagnostic only. Never fail a working activation over this record.
     }
@@ -242,11 +332,19 @@ export class AnalyticsRuntime {
     return this.queryClient;
   }
 
+  /** The immutable descriptor a production backend must echo and validate.
+   * It is available only after canonical readiness; legacy, candidate and
+   * ready-only manifests cannot accidentally opt a child into capture. */
+  backendDescriptor(): AnalyticsBackendDescriptor | undefined {
+    if (this.readiness?.authority !== 'canonical') return undefined;
+    return this.activationDescriptor;
+  }
+
   /** Identity used for the backend's activation descriptor echo. Null under
    * legacy authority, where the backend carries no canonical descriptor. */
   backendDescriptorArguments(): string[] {
-    if (this.readiness?.authority !== 'canonical') return [];
-    const descriptor = this.activeDescriptor();
+    const descriptor = this.backendDescriptor();
+    if (!descriptor) return [];
     return [
       `--analyticsGenerationId=${descriptor.generationId}`,
       `--analyticsBuildId=${descriptor.buildId}`,
@@ -262,6 +360,7 @@ export class AnalyticsRuntime {
    * terminates with its response — so only the recorder needs shutting down. */
   async stop(): Promise<void> {
     this.stopped = true;
+    this.activationDescriptor = undefined;
     const recorder = this.recorder;
     this.recorder = undefined;
     this.queryClient = undefined;

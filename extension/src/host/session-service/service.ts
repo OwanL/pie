@@ -33,6 +33,7 @@ import { resolveLiveDetail } from './detail-retrieval';
 import type { LiveSubagentDetailAddress, DetailCursor, DetailPageRef } from '../../shared/protocol/subagent-detail';
 import { DetailSubscriptionService } from './detail-subscriptions';
 import { PrivateSessionCleanup } from './private-session-cleanup';
+import type { AnalyticsBackendDescriptor } from '../../../../shared/analytics/activation.js';
 
 /** Host-owned identities the detail subscription service fences its
  *  imperatives with: the current webview document generation and the current
@@ -91,6 +92,7 @@ export class SessionService implements vscode.Disposable {
     onSessionCompleted?: OnSessionCompleted,
     private readonly runObserver: RunObserver = NOOP_RUN_OBSERVER,
     private readonly detailHostInfo: DetailHostInfo = DEFAULT_DETAIL_HOST_INFO,
+    private readonly getAnalyticsBackendDescriptor: () => AnalyticsBackendDescriptor | undefined = () => undefined,
   ) {
     this.getArchState = getArchState;
     this.dispatchArch = dispatchArch;
@@ -252,6 +254,7 @@ export class SessionService implements vscode.Disposable {
       },
       getArchState: this.getArchState,
       dispatchArch: this.dispatchArch,
+      getAnalyticsBackendDescriptor: this.getAnalyticsBackendDescriptor,
     });
   }
 

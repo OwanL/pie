@@ -30,6 +30,10 @@ export interface AnalyticsTransportBackend {
 
 export interface HostAnalyticsTransportOptions {
   generationId: string;
+  /** Expected producer identity for this host/backend authority. Optional for
+   * compatibility with protocol-only tests; production always supplies both. */
+  buildId?: string;
+  workspaceId?: string;
   backend: AnalyticsTransportBackend;
   recorder: HostAnalyticsRecorder;
   maxPendingDetails?: number;
@@ -63,6 +67,14 @@ interface AnalyticsAcknowledgementTarget {
   payloadId?: string;
 }
 
+interface PendingRecorderOwnership {
+  target: AnalyticsAcknowledgementTarget;
+  settled: boolean;
+  ignoreLate: boolean;
+  settlement: Promise<void>;
+  resolve: () => void;
+}
+
 /** Host-owned bounded ingress. It takes synchronous recorder ownership before
  * returning from an event callback and sends only recorder-durable per-record
  * dispositions back to the exact worker route. */
@@ -71,7 +83,12 @@ export class HostAnalyticsTransport implements Disposable {
   private readonly subscriptions: Array<{ dispose(): void }>;
   private pendingDetailBytes = 0;
   private disposed = false;
+  private shuttingDown = false;
   private backendAvailable = true;
+  private readonly pendingAcknowledgements = new Set<Promise<unknown>>();
+  private readonly pendingRecorderOwnership = new Set<PendingRecorderOwnership>();
+  private shutdownPromise?: Promise<void>;
+  private shutdownDeadline?: number;
   private readonly maxPendingDetails: number;
   private readonly maxPendingDetailBytes: number;
 
@@ -85,12 +102,21 @@ export class HostAnalyticsTransport implements Disposable {
     }
     this.subscriptions = [
       options.backend.onEvent((event) => {
+        // BackendClient retains this transport across coordinator restarts.
+        // Re-arm ingress only at the replacement generation's ready boundary;
+        // captures from a dead generation remain dropped and cannot receive a
+        // late ACK.
+        if (event.event === 'backend.ready') {
+          this.backendAvailable = true;
+          return;
+        }
         if (event.event !== 'analytics.capture') return;
         this.receive(event.payload);
       }),
       options.backend.onExit(() => {
         this.backendAvailable = false;
         this.clearPendingDetails();
+        this.invalidateRecorderOwnership();
       }),
     ];
   }
@@ -98,8 +124,74 @@ export class HostAnalyticsTransport implements Disposable {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.shuttingDown = true;
     for (const subscription of this.subscriptions) subscription.dispose();
     this.clearPendingDetails();
+    this.invalidateRecorderOwnership();
+  }
+
+  /** Stop admitting backend ingress and give every partially assembled detail
+   * an explicit terminal result while the backend channel is still available.
+   * The bounded wait covers a wedged request channel; disposal then releases all
+   * subscriptions and late recorder dispositions cannot send acknowledgements. */
+  async shutdown(timeoutMs = 2_000): Promise<void> {
+    if (this.disposed) return;
+    if (!this.shutdownPromise) {
+      const boundedTimeout = Number.isFinite(timeoutMs) ? Math.max(0, timeoutMs) : 2_000;
+      const operation = this.shutdownOnce(boundedTimeout);
+      const tracked = operation.finally(() => {
+        if (this.shutdownPromise === tracked) this.shutdownPromise = undefined;
+      });
+      this.shutdownPromise = tracked;
+    }
+    await this.shutdownPromise;
+  }
+
+  private async shutdownOnce(timeoutMs: number): Promise<void> {
+    this.shuttingDown = true;
+    const deadline = Date.now() + timeoutMs;
+    this.shutdownDeadline = deadline;
+    for (const [deliveryId, pending] of [...this.pendingDetails]) {
+      const envelope: AnalyticsTransportIngressEnvelope = {
+        route: pending.route,
+        packet: pending.start,
+      };
+      this.dropPendingDetail(deliveryId);
+      this.reject(envelope, 'transport_shutdown', new Error('Analytics transport closed before detail assembly completed.'));
+    }
+
+    await this.waitForRecorderOwnership(deadline);
+    // A recorder that did not return a disposition by the bounded shutdown
+    // deadline cannot be allowed to create a late ACK against a stopped
+    // backend. Give its producer an explicit terminal rejection while the
+    // backend channel is still available, then make later callbacks no-ops.
+    for (const ownership of [...this.pendingRecorderOwnership]) {
+      this.terminalizeRecorderOwnership(ownership);
+    }
+    await this.waitForAcknowledgements(deadline);
+    this.shutdownDeadline = undefined;
+  }
+
+  private async waitForRecorderOwnership(deadline: number): Promise<void> {
+    while (this.pendingRecorderOwnership.size > 0) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) return;
+      await Promise.race([
+        Promise.allSettled([...this.pendingRecorderOwnership].map((ownership) => ownership.settlement)),
+        new Promise<void>((resolve) => setTimeout(resolve, remainingMs)),
+      ]);
+    }
+  }
+
+  private async waitForAcknowledgements(deadline: number): Promise<void> {
+    while (this.pendingAcknowledgements.size > 0) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) return;
+      await Promise.race([
+        Promise.allSettled([...this.pendingAcknowledgements]),
+        new Promise<void>((resolve) => setTimeout(resolve, remainingMs)),
+      ]);
+    }
   }
 
   get assemblyBacklog(): Readonly<{ records: number; bytes: number }> {
@@ -122,7 +214,7 @@ export class HostAnalyticsTransport implements Disposable {
 
   /** Public for focused protocol tests; production enters through onEvent. */
   receive(value: unknown): void {
-    if (this.disposed) return;
+    if (this.disposed || this.shuttingDown) return;
     let envelope: AnalyticsTransportIngressEnvelope;
     try {
       envelope = parseAnalyticsTransportIngressEnvelope(value);
@@ -150,18 +242,30 @@ export class HostAnalyticsTransport implements Disposable {
     const target = this.acknowledgementTarget(envelope, observation.stableOriginId
       ? analyticsProducerIdentity(observation.generationId, observation.producerKind, observation.stableOriginId)
       : undefined);
+    const ownership = this.trackRecorderOwnership(target);
     try {
+      this.assertProducerIdentity(observation.producer.buildId, observation.scope.workspaceCoverage === 'known'
+        ? observation.scope.workspaceId : undefined, true);
       this.options.recorder.submitTracked(observation, (disposition) => {
-        this.acknowledge(target, this.factAcknowledgement(target, disposition));
+        this.settleRecorderOwnership(ownership, this.factAcknowledgement(target, disposition));
       });
     } catch (error) {
-      this.reject(envelope, this.captureRejectionCode(error), error);
+      if (!ownership.settled) {
+        this.cancelRecorderOwnership(ownership);
+        this.reject(envelope, this.captureRejectionCode(error), error);
+      }
     }
   }
 
   private receiveDetailStart(envelope: AnalyticsTransportIngressEnvelope): void {
     if (envelope.packet.kind !== 'detail.start') return;
     const packet = envelope.packet;
+    try {
+      this.assertProducerIdentity(packet.detail.producer?.buildId, undefined, false);
+    } catch (error) {
+      this.reject(envelope, 'producer_identity', error);
+      return;
+    }
     const existing = this.pendingDetails.get(packet.deliveryId);
     if (existing) {
       if (!this.sameRoute(existing.route, envelope.route)) {
@@ -251,12 +355,16 @@ export class HostAnalyticsTransport implements Disposable {
     this.dropPendingDetail(packet.deliveryId);
     const capture: AnalyticsDetailCapture = { ...pending.start.detail, bytes };
     const target = this.acknowledgementTarget(envelope, undefined, pending.start.payloadId);
+    const ownership = this.trackRecorderOwnership(target);
     try {
       this.options.recorder.submitTrackedDetail(capture, (disposition) => {
-        this.acknowledge(target, this.detailAcknowledgement(target, disposition));
+        this.settleRecorderOwnership(ownership, this.detailAcknowledgement(target, disposition));
       });
     } catch (error) {
-      this.reject(envelope, this.captureRejectionCode(error), error);
+      if (!ownership.settled) {
+        this.cancelRecorderOwnership(ownership);
+        this.reject(envelope, this.captureRejectionCode(error), error);
+      }
     }
   }
 
@@ -365,8 +473,18 @@ export class HostAnalyticsTransport implements Disposable {
       this.report(error);
       return;
     }
-    void this.options.backend.request('analytics.ack', { route: target.route, acknowledgement: boundedAcknowledgement }).catch((error) => {
+    let request: Promise<unknown>;
+    try {
+      request = this.options.backend.request('analytics.ack', { route: target.route, acknowledgement: boundedAcknowledgement });
+    } catch (error) {
       this.report(error);
+      return;
+    }
+    this.pendingAcknowledgements.add(request);
+    void request.catch((error) => {
+      this.report(error);
+    }).finally(() => {
+      this.pendingAcknowledgements.delete(request);
     });
   }
 
@@ -391,6 +509,59 @@ export class HostAnalyticsTransport implements Disposable {
     this.pendingDetailBytes = Math.max(0, this.pendingDetailBytes - pending.start.byteLength);
   }
 
+  private trackRecorderOwnership(target: AnalyticsAcknowledgementTarget): PendingRecorderOwnership {
+    let resolve!: () => void;
+    const ownership: PendingRecorderOwnership = {
+      target,
+      settled: false,
+      ignoreLate: false,
+      settlement: new Promise<void>((resolveSettlement) => { resolve = resolveSettlement; }),
+      resolve: () => resolve(),
+    };
+    this.pendingRecorderOwnership.add(ownership);
+    return ownership;
+  }
+
+  private settleRecorderOwnership(ownership: PendingRecorderOwnership, acknowledgement: AnalyticsTransportAcknowledgement): void {
+    if (ownership.settled) return;
+    if (this.shutdownDeadline !== undefined && Date.now() >= this.shutdownDeadline) {
+      this.terminalizeRecorderOwnership(ownership);
+      return;
+    }
+    ownership.settled = true;
+    this.pendingRecorderOwnership.delete(ownership);
+    ownership.resolve();
+    if (!ownership.ignoreLate) this.acknowledge(ownership.target, acknowledgement);
+  }
+
+  private cancelRecorderOwnership(ownership: PendingRecorderOwnership): void {
+    if (ownership.settled) return;
+    ownership.settled = true;
+    ownership.ignoreLate = true;
+    this.pendingRecorderOwnership.delete(ownership);
+    ownership.resolve();
+  }
+
+  private terminalizeRecorderOwnership(ownership: PendingRecorderOwnership): void {
+    if (ownership.settled) return;
+    ownership.ignoreLate = true;
+    ownership.settled = true;
+    this.pendingRecorderOwnership.delete(ownership);
+    ownership.resolve();
+    this.acknowledge(
+      ownership.target,
+      this.rejectedAcknowledgement(
+        ownership.target,
+        'transport_shutdown',
+        'Analytics transport closed before recorder disposition completed.',
+      ),
+    );
+  }
+
+  private invalidateRecorderOwnership(): void {
+    for (const ownership of [...this.pendingRecorderOwnership]) this.cancelRecorderOwnership(ownership);
+  }
+
   private clearPendingDetails(): void {
     this.pendingDetails.clear();
     this.pendingDetailBytes = 0;
@@ -401,7 +572,24 @@ export class HostAnalyticsTransport implements Disposable {
   }
 
   private captureRejectionCode(error: unknown): string {
+    if (error instanceof AnalyticsProducerIdentityError) return 'producer_identity';
     return error instanceof AnalyticsCaptureCapacityError ? 'capture_capacity' : 'capture_submission';
+  }
+
+  private assertProducerIdentity(buildId: string | undefined, workspaceId: string | undefined, requireWorkspace: boolean): void {
+    if (this.options.buildId !== undefined && buildId !== this.options.buildId) {
+      throw new AnalyticsProducerIdentityError('Analytics producer build does not match the active host build.');
+    }
+    if (requireWorkspace && this.options.workspaceId !== undefined && workspaceId !== this.options.workspaceId) {
+      throw new AnalyticsProducerIdentityError('Analytics producer workspace does not match the active host workspace.');
+    }
+  }
+}
+
+class AnalyticsProducerIdentityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AnalyticsProducerIdentityError';
   }
 }
 

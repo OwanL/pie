@@ -1,19 +1,29 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { ACTIVATION_SCHEMA_VERSION, ActivationManifestError } from '../../../shared/analytics/activation.js';
+import {
+  ACTIVATION_SCHEMA_VERSION,
+  ANALYTICS_LOADED_GENERATION_SCHEMA_VERSION,
+  ActivationManifestError,
+  validateAnalyticsLoadedGenerationReceipt,
+} from '../../../shared/analytics/activation.js';
 import { ActivationStore } from '../../src/analytics/activation-store.js';
-import { AnalyticsRuntime, analyticsWorkspaceId } from '../../src/host/analytics-runtime.js';
+import {
+  AnalyticsRuntime,
+  analyticsWorkspaceId,
+  LOADED_GENERATION_FILENAME,
+  writeLoadedGenerationReceiptAtomically,
+} from '../../src/host/analytics-runtime.js';
 
 const GENERATION_ID = '2f6e2b1c-9d4a-4e7b-8c3f-1a2b3c4d5e6f';
 const SHA = 'a'.repeat(64);
 const SHA_B = 'b'.repeat(64);
 const ACTIVATED_AT = '2026-09-12T04:00:00.000Z';
 
-function tempRuntime() {
+function tempRuntime(activationSnapshot?: ReturnType<ActivationStore['read']>) {
   const root = mkdtempSync(path.join(tmpdir(), 'pie-analytics-runtime-'));
   const stateDir = path.join(root, 'state');
   const analyticsDir = path.join(root, 'analytics');
@@ -27,6 +37,7 @@ function tempRuntime() {
     buildId: 'build-1',
     workspaceId: 'workspace-1',
     processGeneration: 'process-1',
+    activationSnapshot,
   });
   return { root, stateDir, analyticsDir, runtime };
 }
@@ -100,6 +111,49 @@ test('a malformed manifest fails startup closed rather than selecting legacy', a
   }
 });
 
+test('a manifest transition between host construction and runtime start fails closed', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'pie-analytics-runtime-transition-'));
+  const stateDir = path.join(root, 'state');
+  const activationSnapshot = new ActivationStore({ stateDir }).read();
+  const runtime = new AnalyticsRuntime({
+    stateDir,
+    analyticsDir: path.join(root, 'analytics'),
+    recorderWorkerScript: path.join(root, 'missing-recorder-worker.js'),
+    queryWorkerScript: path.join(root, 'missing-query-worker.js'),
+    buildId: 'build-1',
+    workspaceId: 'workspace-1',
+    processGeneration: 'process-1',
+    activationSnapshot,
+  });
+  try {
+    await writeManifest(stateDir, {
+      schemaVersion: ACTIVATION_SCHEMA_VERSION,
+      revision: 1,
+      previousSha256: null,
+      everActive: true,
+      activeGeneration: {
+        identity: { generationId: GENERATION_ID, buildId: 'build-1', qualificationSha256: SHA, trialSha256: SHA_B },
+        state: 'active',
+        activatedAt: ACTIVATED_AT,
+        retiredAt: null,
+        predecessorGenerationId: null,
+        cutoffReceiptSha256: SHA_B,
+      },
+      successor: null,
+      retiredHistory: [],
+    });
+    await assert.rejects(
+      () => runtime.start(),
+      /changed during host startup/u,
+      'legacy construction must not become canonical after the descriptor was captured',
+    );
+    assert.equal(runtime.backendDescriptorArguments().length, 0);
+  } finally {
+    await runtime.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('an active manifest naming a different build refuses to start capture', async () => {
   const { root, runtime, stateDir } = tempRuntime();
   try {
@@ -156,6 +210,38 @@ test('analyticsWorkspaceId is deterministic and fixed length', () => {
   assert.equal(first, analyticsWorkspaceId('seed-a'));
   assert.equal(first.length, 32);
   assert.notEqual(first, analyticsWorkspaceId('seed-b'));
+});
+
+test('loaded-generation receipts use the shared bounded schema and atomic replacement', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'pie-analytics-loaded-receipt-'));
+  const payload = {
+    schemaVersion: ANALYTICS_LOADED_GENERATION_SCHEMA_VERSION,
+    generationId: GENERATION_ID,
+    buildId: 'build-1',
+    manifestRevision: 4,
+    manifestSha256: SHA,
+    workspaceId: 'workspace-1',
+    hostInstanceId: 'host-1',
+    restartNonce: 'restart-1',
+    loadedAt: '2026-09-12T04:00:00.000Z',
+  } as const;
+  try {
+    writeLoadedGenerationReceiptAtomically(root, payload);
+    const file = path.join(root, LOADED_GENERATION_FILENAME);
+    assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), payload);
+    assert.deepEqual(readdirSync(root), [LOADED_GENERATION_FILENAME]);
+    assert.deepEqual(validateAnalyticsLoadedGenerationReceipt(payload), payload);
+    assert.throws(
+      () => validateAnalyticsLoadedGenerationReceipt({ ...payload, restartNonce: 'bad nonce' }),
+      /restartNonce is invalid/u,
+    );
+    assert.throws(
+      () => validateAnalyticsLoadedGenerationReceipt({ ...payload, loadedAt: '2026-09-12' }),
+      /loadedAt is not a canonical/u,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('the sink and reads accessors stay undefined until a helper is actually started', async () => {

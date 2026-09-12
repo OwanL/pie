@@ -199,6 +199,8 @@ export class AnalyticsWorkerTransport {
 
   private submitObservation(observation: AnalyticsObservation<object>): void {
     this.assertCaptureEnvelope(observation.generationId, observation.captureSubject);
+    this.assertProducerIdentity(observation.producer.buildId, observation.scope.workspaceCoverage === 'known'
+      ? observation.scope.workspaceId : undefined);
     this.assertAcknowledgementCapacity();
     const packet = createAnalyticsFactPacket(observation);
     this.send(packet);
@@ -218,6 +220,7 @@ export class AnalyticsWorkerTransport {
 
   private submitDetail(capture: AnalyticsDetailCapture): void {
     this.assertCaptureEnvelope(capture.generationId, capture.captureSubject);
+    this.assertProducerIdentity(capture.producer?.buildId, undefined, false);
     this.assertAcknowledgementCapacity();
     const packets = createAnalyticsDetailPackets(capture);
     const retainedTransportBytes = packets.reduce(
@@ -320,6 +323,15 @@ export class AnalyticsWorkerTransport {
     }
     if (this.captureSubjectState !== 'active') {
       throw new Error(`Analytics capture subject transition is ${this.captureSubjectState}.`);
+    }
+  }
+
+  private assertProducerIdentity(buildId: string | undefined, workspaceId: string | undefined, requireWorkspace = true): void {
+    if (buildId !== this.activation.buildId) {
+      throw new Error('Analytics producer build does not match worker activation.');
+    }
+    if (requireWorkspace && this.activation.workspaceId !== undefined && workspaceId !== this.activation.workspaceId) {
+      throw new Error('Analytics producer workspace does not match worker activation.');
     }
   }
 

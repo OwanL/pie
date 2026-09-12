@@ -20,6 +20,10 @@ test('deriveTrustedSdkRoot trusts the containing node_modules tree only', () => 
 class ImmediateReadyStream extends PassThrough {
   private emitted = false;
 
+  constructor(private readonly analyticsActivation?: Record<string, unknown>) {
+    super();
+  }
+
   override on(eventName: string | symbol, listener: (...args: any[]) => void): this {
     const result = super.on(eventName, listener);
     if (!this.emitted && eventName === 'data') {
@@ -32,6 +36,7 @@ class ImmediateReadyStream extends PassThrough {
           sdkVersion: '0.0.0-test',
           protocolVersion: PROTOCOL_VERSION,
           authPath: '/mock/auth.json',
+          ...(this.analyticsActivation ? { analyticsActivation: this.analyticsActivation } : {}),
         },
       }) + '\n'));
     }
@@ -40,10 +45,15 @@ class ImmediateReadyStream extends PassThrough {
 }
 
 class FakeChildProcess extends EventEmitter {
-  readonly stdout: PassThrough = new ImmediateReadyStream();
+  readonly stdout: PassThrough;
   readonly stderr = new PassThrough();
   readonly stdin = new PassThrough();
   killCount = 0;
+
+  constructor(analyticsActivation?: Record<string, unknown>) {
+    super();
+    this.stdout = new ImmediateReadyStream(analyticsActivation);
+  }
 
   kill(): boolean {
     this.killCount += 1;
@@ -173,6 +183,58 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
     assert.equal(spawnedEnv?.PIE_LEGACY_SESSION_SETTINGS_DIR, path.join(agentDir, 'data/outcomes/session-reviews'));
     assert.equal(spawnedEnv?.PIE_DATA_DIR, dataRoot);
     assert.equal(spawnedEnv?.PIE_CACHE_DIR, path.join(dataRoot, 'cache'));
+
+    const activation = {
+      generationId: '2f6e2b1c-9d4a-4e7b-8c3f-1a2b3c4d5e6f',
+      buildId: 'build-1',
+      manifestRevision: 4,
+      manifestSha256: 'a'.repeat(64),
+      workspaceId: 'workspace-1',
+      hostInstanceId: 'host-1',
+    };
+    const descriptorProc = new FakeChildProcess(activation);
+    nextProc = descriptorProc as unknown as cp.ChildProcess;
+    const descriptorClient = new BackendClient({ orphanReaper: noOrphans });
+    const descriptorPayload = await descriptorClient.start({
+      nodePath: '/mock/node',
+      backendPath: '/mock/backend.js',
+      sdkPath: '/mock/sdk',
+      cwd: '/mock/cwd',
+      analyticsActivation: activation,
+    });
+    assert.deepEqual(descriptorPayload.analyticsActivation, activation);
+    assert.deepEqual(spawnArgs?.slice(-12), [
+      '--analyticsGenerationId', activation.generationId,
+      '--analyticsBuildId', activation.buildId,
+      '--analyticsManifestRevision', '4',
+      '--analyticsManifestSha256', activation.manifestSha256,
+      '--analyticsWorkspaceId', activation.workspaceId,
+      '--analyticsHostInstanceId', activation.hostInstanceId,
+    ]);
+    descriptorClient.dispose();
+
+    const mismatchedActivation = { ...activation, workspaceId: 'workspace-other' };
+    const mismatchedProc = new FakeChildProcess(mismatchedActivation);
+    nextProc = mismatchedProc as unknown as cp.ChildProcess;
+    const mismatchedClient = new BackendClient({ orphanReaper: noOrphans });
+    let mismatchedReadyEvents = 0;
+    const mismatchedEvents = mismatchedClient.onEvent((event) => {
+      if (event.event === 'backend.ready') mismatchedReadyEvents += 1;
+    });
+    await assert.rejects(
+      mismatchedClient.start({
+        nodePath: '/mock/node',
+        backendPath: '/mock/backend.js',
+        sdkPath: '/mock/sdk',
+        cwd: '/mock/cwd',
+        analyticsActivation: activation,
+      }),
+      /analytics activation descriptor mismatch/u,
+    );
+    assert.equal(mismatchedReadyEvents, 0, 'a mismatched ready payload is rejected before public event delivery');
+    assert.equal(mismatchedProc.killCount, 1, 'the mismatched child is stopped before it can rearm consumers');
+    mismatchedEvents.dispose();
+    mismatchedClient.dispose();
 
     const correlatedFailures: any[] = [];
     const failureSubscription = client.onDidCorrelatedRequestFail((failure) => correlatedFailures.push(failure));

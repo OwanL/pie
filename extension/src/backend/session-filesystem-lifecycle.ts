@@ -32,6 +32,41 @@ interface MutationLockOwner {
   acquiredAtMs: number;
 }
 
+const MAX_MUTATION_LOCK_TOKEN_LENGTH = 256;
+
+function parseMutationLockOwner(value: unknown, expectedSessionId: string): MutationLockOwner {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new SessionLifecycleConflictError('Session mutation barrier owner evidence is invalid.');
+  }
+  const candidate = value as Record<string, unknown>;
+  if (candidate.schema !== 1
+    || !Number.isSafeInteger(candidate.pid)
+    || (candidate.pid as number) <= 0
+    || typeof candidate.token !== 'string'
+    || candidate.token.length === 0
+    || candidate.token.length > MAX_MUTATION_LOCK_TOKEN_LENGTH
+    || candidate.token.includes('\u0000')
+    || candidate.token.includes('/')
+    || candidate.token.includes('\\')
+    || candidate.sessionId !== expectedSessionId
+    || typeof candidate.sessionId !== 'string'
+    || candidate.sessionId.length === 0
+    || candidate.sessionId.includes('\u0000')
+    || !Number.isSafeInteger(candidate.acquiredAtMs)
+    || (candidate.acquiredAtMs as number) < 0) {
+    throw new SessionLifecycleConflictError(
+      'Session mutation barrier owner evidence is invalid or bound to another session.',
+    );
+  }
+  return {
+    schema: 1,
+    pid: candidate.pid as number,
+    token: candidate.token as string,
+    sessionId: candidate.sessionId as string,
+    acquiredAtMs: candidate.acquiredAtMs as number,
+  };
+}
+
 export interface SessionMutationBarrierOptions {
   store: SessionLifecycleStore;
   lockRoot: string;
@@ -191,11 +226,15 @@ export class SessionFilesystemMutationBarrier {
     const takeoverPath = `${lockPath}.takeover`;
     if (existsSync(takeoverPath)) {
       try {
-        const takeoverOwner = JSON.parse(readFileSync(path.join(takeoverPath, 'owner.json'), 'utf8')) as MutationLockOwner;
+        const takeoverOwner = parseMutationLockOwner(
+          JSON.parse(readFileSync(path.join(takeoverPath, 'owner.json'), 'utf8')) as unknown,
+          sessionId,
+        );
         if (!this.processAlive(takeoverOwner.pid)) rmSync(takeoverPath, { recursive: true, force: true });
-      } catch {
+      } catch (error) {
         // Atomically published owner directories cannot be ownerless. Corrupt
         // takeover evidence fails closed instead of being reclaimed by time.
+        if (error instanceof SessionLifecycleConflictError) throw error;
       }
       return false;
     }
@@ -212,11 +251,15 @@ export class SessionFilesystemMutationBarrier {
     try {
       let currentOwner: MutationLockOwner;
       try {
-        currentOwner = JSON.parse(readFileSync(path.join(lockPath, 'owner.json'), 'utf8')) as MutationLockOwner;
-      } catch {
+        currentOwner = parseMutationLockOwner(
+          JSON.parse(readFileSync(path.join(lockPath, 'owner.json'), 'utf8')) as unknown,
+          sessionId,
+        );
+      } catch (error) {
         // The lock directory itself is atomically published. Missing/corrupt
         // owner evidence is unsafe corruption, never permission for takeover.
-        return false;
+        if (error instanceof SessionLifecycleConflictError) throw error;
+        throw new SessionLifecycleConflictError('Session mutation barrier owner evidence is unreadable.');
       }
       if (this.processAlive(currentOwner.pid)) return false;
       rmSync(lockPath, { recursive: true, force: true });
@@ -322,14 +365,29 @@ export class SessionLifecycleCleaner {
     this.now = options.now ?? Date.now;
   }
 
+  /** Whether this cleaner can complete the coupled private analytics delete.
+   * Cutoff admission uses the actual cleaner capability rather than a separate
+   * caller flag, so a private close cannot be admitted with an unwired adapter. */
+  get hasAnalyticsDeletionAdapter(): boolean {
+    return typeof this.options.analytics?.deleteSession === 'function';
+  }
+
+  get analyticsDeletionAdapter(): AnalyticsLifecycleDeletionAdapter | undefined {
+    return this.options.analytics;
+  }
+
   async closeSession(
     sessionId: string,
     operationId: string,
     cause: SessionCloseCause = 'user_close',
   ): Promise<SessionCloseResolution> {
-    const closed = this.options.barrier.runAdministrative(sessionId, 'session.close', () => (
-      this.options.store.resolveClose(sessionId, operationId, this.now(), cause)
-    ));
+    const closed = this.options.barrier.runAdministrative(sessionId, 'session.close', () => {
+      const current = this.options.store.get(sessionId);
+      if (current?.privacyMode === 'on' && !this.hasAnalyticsDeletionAdapter) {
+        throw new Error(`Private analytics deletion adapter is unavailable for ${sessionId}; refusing close.`);
+      }
+      return this.options.store.resolveClose(sessionId, operationId, this.now(), cause);
+    });
     if (closed.disposition === 'delete' && closed.cleanupState !== 'deleted') {
       await this.cleanupSession(
         sessionId,

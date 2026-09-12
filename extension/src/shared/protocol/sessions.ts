@@ -116,6 +116,9 @@ export interface BackendReadyPayload {
   protocolVersion: number;
   /** Resolved path to the auth.json file used by the backend. */
   authPath?: string;
+  /** Echo of the immutable canonical analytics authority snapshot, when the
+   * host started this backend under canonical analytics authority. */
+  analyticsActivation?: import('../../../../shared/analytics/activation.js').AnalyticsBackendDescriptor;
 }
 
 export type SessionPrimaryOperationKind =

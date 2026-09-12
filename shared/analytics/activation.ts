@@ -31,6 +31,38 @@ export const ACTIVATION_SCHEMA_VERSION = 1;
 export type AnalyticsAuthority = 'legacy' | 'canonical';
 export type ActivationGenerationState = 'candidate' | 'ready' | 'active' | 'retired';
 
+/**
+ * Immutable identity passed from a canonical extension host to its backend.
+ * The manifest revision and byte hash fence the descriptor to the exact
+ * authority snapshot the host started with; they are deliberately carried
+ * alongside the generation/build identity rather than re-derived in the
+ * child process.
+ */
+export interface AnalyticsBackendDescriptor {
+  readonly generationId: string;
+  readonly buildId: string;
+  readonly manifestRevision: number;
+  readonly manifestSha256: string;
+  readonly workspaceId: string;
+  readonly hostInstanceId: string;
+}
+
+/** Post-readiness evidence written by the host process that actually loaded a
+ * canonical generation. The host identity and optional restart nonce prevent a
+ * stale marker from being mistaken for evidence from a later restart. */
+export const ANALYTICS_LOADED_GENERATION_SCHEMA_VERSION = 1 as const;
+export interface AnalyticsLoadedGenerationReceipt {
+  readonly schemaVersion: typeof ANALYTICS_LOADED_GENERATION_SCHEMA_VERSION;
+  readonly generationId: string;
+  readonly buildId: string;
+  readonly manifestRevision: number;
+  readonly manifestSha256: string;
+  readonly workspaceId: string;
+  readonly hostInstanceId: string;
+  readonly restartNonce: string | null;
+  readonly loadedAt: string;
+}
+
 /** A generation is identified by a UUID plus the exact build it was validated
  * against. Neither is inferred from the current process. */
 export interface ActivationGenerationIdentity {
@@ -79,6 +111,7 @@ export class ActivationManifestError extends Error {
 
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+const ANALYTICS_RESTART_NONCE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 
 /** True when `value` is a canonical ISO instant that round-trips exactly. */
 export function isCanonicalInstant(value: unknown): value is string {
@@ -86,6 +119,14 @@ export function isCanonicalInstant(value: unknown): value is string {
   const parsed = Date.parse(value);
   if (!Number.isFinite(parsed)) return false;
   return new Date(parsed).toISOString() === value;
+}
+
+/** Restart nonces are helper-issued correlation values. Keep their grammar
+ * bounded so a receipt cannot carry arbitrary environment text. */
+export function isAnalyticsRestartNonce(value: unknown): value is string {
+  return typeof value === 'string'
+    && Buffer.byteLength(value, 'utf8') <= 128
+    && ANALYTICS_RESTART_NONCE_PATTERN.test(value);
 }
 
 function assertBoundedString(value: unknown, label: string, pattern?: RegExp): string {
@@ -107,6 +148,46 @@ function assertExactKeys(value: object, expected: readonly string[], label: stri
   if (actual.length !== wanted.length || actual.some((key, index) => key !== wanted[index])) {
     throw new ActivationManifestError(`${label} has unexpected keys: ${actual.join(', ')}.`);
   }
+}
+
+/** Validate the small post-readiness receipt written by the loaded host. This
+ * is shared with readers so the marker cannot be accepted merely because it
+ * parses as JSON. */
+export function validateAnalyticsLoadedGenerationReceipt(value: unknown): AnalyticsLoadedGenerationReceipt {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ActivationManifestError('Loaded generation receipt must be an object.');
+  }
+  assertExactKeys(value, [
+    'schemaVersion', 'generationId', 'buildId', 'manifestRevision', 'manifestSha256',
+    'workspaceId', 'hostInstanceId', 'restartNonce', 'loadedAt',
+  ], 'Loaded generation receipt');
+  const raw = value as Record<string, unknown>;
+  if (raw.schemaVersion !== ANALYTICS_LOADED_GENERATION_SCHEMA_VERSION) {
+    throw new ActivationManifestError('Unsupported loaded generation receipt schema.');
+  }
+  const restartNonce = raw.restartNonce === null
+    ? null
+    : raw.restartNonce;
+  if (restartNonce !== null && !isAnalyticsRestartNonce(restartNonce)) {
+    throw new ActivationManifestError('Loaded generation receipt restartNonce is invalid.');
+  }
+  if (!isCanonicalInstant(raw.loadedAt)) {
+    throw new ActivationManifestError('Loaded generation receipt loadedAt is not a canonical ISO instant.');
+  }
+  if (!Number.isSafeInteger(raw.manifestRevision) || (raw.manifestRevision as number) < 1) {
+    throw new ActivationManifestError('Loaded generation receipt manifestRevision must be positive.');
+  }
+  return {
+    schemaVersion: ANALYTICS_LOADED_GENERATION_SCHEMA_VERSION,
+    generationId: assertBoundedString(raw.generationId, 'Loaded generation receipt generationId', UUID_PATTERN),
+    buildId: assertBoundedString(raw.buildId, 'Loaded generation receipt buildId'),
+    manifestRevision: raw.manifestRevision as number,
+    manifestSha256: assertBoundedString(raw.manifestSha256, 'Loaded generation receipt manifestSha256', SHA256_PATTERN),
+    workspaceId: assertBoundedString(raw.workspaceId, 'Loaded generation receipt workspaceId'),
+    hostInstanceId: assertBoundedString(raw.hostInstanceId, 'Loaded generation receipt hostInstanceId'),
+    restartNonce,
+    loadedAt: raw.loadedAt,
+  };
 }
 
 function validateEvidence(value: unknown, label: string): ActivationEvidence {

@@ -27,6 +27,7 @@ import { toErrorMessage } from '../util/error-message';
 import { appendPieLog } from '../util/pie-log';
 import { publishBackendReady } from './backend-ready';
 import { seedHistoryCompactionEnvironment } from './runtime-prefs-bootstrap';
+import type { AnalyticsBackendDescriptor } from '../../../../shared/analytics/activation.js';
 import type { ArchState } from '../core/arch-state';
 import type { Event } from '../core/events';
 
@@ -60,6 +61,8 @@ interface StartSessionBackendOptions {
   openSession: (sessionPath: string) => void;
   getArchState: () => ArchState;
   dispatchArch: (event: Event) => void;
+  /** Snapshot the host's canonical activation at each backend spawn. */
+  getAnalyticsBackendDescriptor?: () => AnalyticsBackendDescriptor | undefined;
 }
 
 function resolveWorkspaceCwd(): string {
@@ -387,7 +390,13 @@ async function startBackendWithLogging(
       restoredStartupPath,
       cwd: workspaceCwd,
     });
-    await options.backend.start({ nodePath, sdkPath, backendPath, cwd: workspaceCwd });
+    await options.backend.start({
+      nodePath,
+      sdkPath,
+      backendPath,
+      cwd: workspaceCwd,
+      analyticsActivation: options.getAnalyticsBackendDescriptor?.(),
+    });
     const durationMs = Math.max(0, Math.round(performance.now() - spawnStart));
     bootLog('session-startup', 'backend.started', {
       restoredStartupPath,

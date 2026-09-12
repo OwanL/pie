@@ -100,6 +100,12 @@ export default defineConfig(({ mode }) => {
             // extension.js is tree-shaken into it and has no exports to import.
             'analytics-activation-store': path.join(srcDir, 'analytics', 'activation-store.ts'),
             'analytics-activation-sequence': path.join(srcDir, 'analytics', 'activation-sequence.ts'),
+            // Emitted so the activation helper can perform and verify the storage
+            // cutoff through the same code the backend uses, rather than a
+            // reimplementation that could drift from the real close barriers.
+            'storage-cutoff': path.join(srcDir, 'backend', 'storage-cutoff.ts'),
+            'session-lifecycle-store': path.join(srcDir, 'backend', 'session-lifecycle-store.ts'),
+            'session-filesystem-lifecycle': path.join(srcDir, 'backend', 'session-filesystem-lifecycle.ts'),
             'cold-browse-helper-entry': path.join(srcDir, 'backend', 'cold-browse-helper-entry.ts'),
             'initial-context-estimate-worker': path.join(srcDir, 'backend', 'initial-context-estimate-worker.ts'),
             'phase4-worker-command-extension': path.join(rootDir, 'test', 'fixtures', 'phase4-worker-command-extension.ts'),

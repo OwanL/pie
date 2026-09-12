@@ -9,6 +9,8 @@ import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { BoundedEventLoopHistogram } from '../shared/live-pipeline-trace';
 import { resolveSessionIdentity } from '../shared/session-identity';
 import { resolvePieDataPaths } from '../../../shared/pie-data-root.js';
+import { ActivationStore } from '../analytics/activation-store.js';
+import type { AnalyticsBackendDescriptor } from '../../../shared/analytics/activation.js';
 import { attachJsonlLineReader, JSONL_MAX_LINE_BYTES } from '../shared/jsonl';
 import { toErrorMessage, parseJsonOrThrow } from '../shared/error-message';
 import { updateSettingsJsonObject } from '../shared/settings-json-update';
@@ -273,6 +275,10 @@ export class BackendServer {
   private readonly startupCwd: string;
   /** Host-authoritative generation shared by backend, coordinator, worker, and detail fences. */
   private readonly backendGeneration: number;
+  /** Immutable canonical analytics authority snapshot supplied by the host.
+   * When present, startup validates it against the active manifest before any
+   * worker route can be promoted. */
+  private readonly analyticsActivation?: AnalyticsBackendDescriptor;
   private sessionDir?: string;
   private sessionDirResolved = false;
   private agentDir = '';
@@ -417,6 +423,8 @@ export class BackendServer {
     /** Test seam for causally blocking a cold catalog operation at the public
      * JSONL/writer boundary. Production always constructs the default. */
     sessionCatalog?: SessionCatalog;
+    /** Canonical analytics descriptor from the extension host. */
+    analyticsActivation?: AnalyticsBackendDescriptor;
   }) {
     this.sdkPath = options.sdkPath;
     this.startupCwd = options.cwd;
@@ -424,6 +432,7 @@ export class BackendServer {
     if (!Number.isSafeInteger(this.backendGeneration) || this.backendGeneration <= 0) {
       throw new Error('backendGeneration must be a positive safe integer.');
     }
+    this.analyticsActivation = options.analyticsActivation;
     this.hostPid = options.hostPid;
     this.lifetimeFd = options.lifetimeFd;
     this.workerEntryPath = options.workerEntryPath;
@@ -461,6 +470,51 @@ export class BackendServer {
       browseHelper: this.coldBrowseHelper,
     });
     return this.coldSessionStore;
+  }
+
+  /** Validate the host-supplied descriptor against the exact active manifest
+   * bytes before installing the router. A candidate/ready generation, a stale
+   * revision, or any build/generation mismatch therefore cannot reach a
+   * worker. Legacy direct callers remain valid while no canonical authority
+   * is active. */
+  private validateAnalyticsActivation(): void {
+    const dataPaths = resolvePieDataPaths({
+      dataDir: process.env.PIE_DATA_DIR,
+      agentDir: this.agentDir,
+    });
+    const read = new ActivationStore({ stateDir: dataPaths.stateDir }).read();
+    const active = read.manifest?.activeGeneration;
+    if (!this.analyticsActivation) {
+      if (read.authority === 'canonical') {
+        throw new Error('Canonical analytics authority is active but the backend descriptor is missing.');
+      }
+      return;
+    }
+    const descriptor = this.analyticsActivation;
+    if (read.authority !== 'canonical' || !active) {
+      throw new Error('Analytics backend descriptor names an authority with no active generation.');
+    }
+    if (active.identity.generationId !== descriptor.generationId) {
+      throw new Error('Analytics backend generation does not match the active manifest.');
+    }
+    if (active.identity.buildId !== descriptor.buildId) {
+      throw new Error('Analytics backend build does not match the active manifest.');
+    }
+    if (read.manifest?.revision !== descriptor.manifestRevision) {
+      throw new Error('Analytics backend manifest revision is stale.');
+    }
+    if (read.sha256 !== descriptor.manifestSha256) {
+      throw new Error('Analytics backend manifest hash is stale.');
+    }
+    for (const [name, value] of Object.entries(descriptor)) {
+      if (name === 'manifestRevision') continue;
+      if (typeof value !== 'string' || value.length === 0) {
+        throw new Error(`Analytics backend descriptor ${name} is invalid.`);
+      }
+    }
+    if (!Number.isSafeInteger(descriptor.manifestRevision) || descriptor.manifestRevision <= 0) {
+      throw new Error('Analytics backend descriptor manifest revision is invalid.');
+    }
   }
 
   private coldManagerKey(sessionPath: string): string {
@@ -602,6 +656,7 @@ export class BackendServer {
           { mode: 'cold-coordinator' },
         );
         this.agentDir = this.sdk.getAgentDir();
+        this.validateAnalyticsActivation();
         this.getSessionDir();
         this.initializeColdSessionStore();
         if (process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION === 'p7b-authorized-v1') {
@@ -707,6 +762,15 @@ export class BackendServer {
     this.workerRuntimeRouter = new WorkerRuntimeRouter({
         supervisor: this.workerSupervisor!,
         coordinatorGeneration: this.backendGeneration,
+        ...(this.analyticsActivation
+          ? {
+              analyticsActivation: {
+                generationId: this.analyticsActivation.generationId,
+                buildId: this.analyticsActivation.buildId,
+                workspaceId: this.analyticsActivation.workspaceId,
+              },
+            }
+          : {}),
         coldStore,
         ownership: this.sessionOwnershipAuthority,
         emit: (event, payload) => this.emit(event, payload),
@@ -842,6 +906,7 @@ export class BackendServer {
       sdkVersion: this.sdk.VERSION,
       protocolVersion: PROTOCOL_VERSION,
       authPath,
+      ...(this.analyticsActivation ? { analyticsActivation: this.analyticsActivation } : {}),
     });
 
     this.startSessionCatalogPolling();

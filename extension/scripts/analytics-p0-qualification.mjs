@@ -21,6 +21,13 @@ import {
   summarizeTimingSamples,
   planBoundedLoadBatches,
 } from './analytics-p0-capacity.mjs';
+import {
+  ENDURANCE_FULL_TRIALS,
+  ENDURANCE_SMOKE_TRIALS,
+  ENDURANCE_REQUIRED_WORKER_MEMORY_FIELDS,
+  recomputeEnduranceTrialPacing,
+  validateEnduranceTrials,
+} from './analytics-p0-endurance-validation.mjs';
 
 const extensionRoot = path.resolve(import.meta.dirname, '..');
 const repositoryRoot = path.resolve(extensionRoot, '..');
@@ -29,14 +36,15 @@ const workerScript = path.join(outRoot, 'analytics-recorder-worker.js');
 const queryWorkerScript = path.join(outRoot, 'analytics-query-worker.js');
 const REPORT_SCHEMA_VERSION = 5;
 const HARNESS_VERSION = 'p0-baseline-scale-v7-recorder-heap-ceiling';
+const ENDURANCE_HARNESS_VERSION = `${HARNESS_VERSION}-endurance-v1`;
 let AnalyticsRecorderSupervisor;
 let AnalyticsCaptureCapacityError;
 let SqliteAnalyticsRecorder;
 let AnalyticsQueryClient;
 
 function parseArguments(argv) {
-  const options = { scenario: 'baseline', rows: undefined, seed: undefined, report: undefined, baselineReport: undefined, validate: false };
-  const allowedScenarios = new Set(['baseline', 'scale']);
+  const options = { scenario: 'baseline', rows: undefined, seed: undefined, report: undefined, baselineReport: undefined, validate: false, smoke: false };
+  const allowedScenarios = new Set(['baseline', 'scale', 'endurance']);
   const seen = new Set();
   for (let index = 0; index < argv.length; index++) {
     const argument = argv[index];
@@ -44,6 +52,12 @@ function parseArguments(argv) {
       if (seen.has(argument)) throw new Error(`Duplicate option: ${argument}`);
       seen.add(argument);
       options.validate = true;
+      continue;
+    }
+    if (argument === '--smoke') {
+      if (seen.has(argument)) throw new Error(`Duplicate option: ${argument}`);
+      seen.add(argument);
+      options.smoke = true;
       continue;
     }
     if (argument === '--scenario' || argument === '--rows' || argument === '--seed' || argument === '--report' || argument === '--baseline-report') {
@@ -60,14 +74,16 @@ function parseArguments(argv) {
     }
     throw new Error(`Unsupported or ambiguous option: ${argument}`);
   }
-  if (!allowedScenarios.has(options.scenario)) throw new Error(`Unsupported P0 scenario: ${options.scenario}; only baseline and scale are implemented`);
+  if (!allowedScenarios.has(options.scenario)) throw new Error(`Unsupported P0 scenario: ${options.scenario}; use baseline, scale, or endurance`);
+  if (options.smoke && options.scenario !== 'endurance') throw new Error('--smoke is valid only for the endurance scenario');
+  if (options.scenario === 'endurance' && options.rows !== undefined) throw new Error('--rows is not valid for the endurance scenario');
   const environmentRows = process.env.PIE_ANALYTICS_P0_ROWS;
-  const rowText = options.rows ?? environmentRows ?? (options.scenario === 'scale' ? '1000000' : '10000');
+  const rowText = options.scenario === 'endurance' ? '10000' : options.rows ?? environmentRows ?? (options.scenario === 'scale' ? '1000000' : '10000');
   if (!/^\d+$/.test(rowText)) throw new Error('--rows must be a decimal integer');
   const rows = Number(rowText);
   if (!Number.isSafeInteger(rows) || rows < 10_000) throw new Error('--rows must be a safe integer >= 10000');
   const expectedRows = options.scenario === 'scale' ? 1_000_000 : 10_000;
-  if (rows !== expectedRows) throw new Error(`${options.scenario} requires exactly ${expectedRows} rows; larger tiers need a separately reviewed harness`);
+  if (options.scenario !== 'endurance' && rows !== expectedRows) throw new Error(`${options.scenario} requires exactly ${expectedRows} rows; larger tiers need a separately reviewed harness`);
   if (options.seed === undefined) throw new Error('--seed is required for reproducible qualification evidence');
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(options.seed)) {
     throw new Error('--seed must be 1-128 characters using letters, digits, dot, underscore or hyphen, starting with a letter or digit');
@@ -87,7 +103,12 @@ function parseArguments(argv) {
   if (options.scenario === 'baseline' && options.baselineReport) {
     throw new Error('--baseline-report is valid only for the scale scenario');
   }
-  if (process.env.PIE_ANALYTICS_P0_ENDURANCE === '1') throw new Error('PIE_ANALYTICS_P0_ENDURANCE is unsupported; use the separately reviewed endurance qualification');
+  if (process.env.PIE_ANALYTICS_P0_ENDURANCE === '1') {
+    throw new Error('PIE_ANALYTICS_P0_ENDURANCE is no longer an execution switch; use --scenario endurance [--smoke]');
+  }
+  if (options.scenario === 'endurance' && !options.smoke && process.env.PIE_ANALYTICS_P0_RECORDER_HEAP_MB !== undefined) {
+    throw new Error('full endurance requires the production-default recorder heap; unset PIE_ANALYTICS_P0_RECORDER_HEAP_MB');
+  }
   return {
     scenario: options.scenario,
     rows,
@@ -95,10 +116,12 @@ function parseArguments(argv) {
     report: path.resolve(options.report),
     baselineReport: options.baselineReport,
     validate: options.validate,
+    smoke: options.smoke,
   };
 }
 
 const configuration = parseArguments(process.argv.slice(2));
+const activeHarnessVersion = configuration.scenario === 'endurance' ? ENDURANCE_HARNESS_VERSION : HARNESS_VERSION;
 const requestedRows = configuration.rows;
 const scopedId = (value) => `${configuration.seed}-${value}`;
 const requestedDetail = Math.floor(requestedRows / 10);
@@ -110,16 +133,22 @@ const detailCounts = {
 const matrix = {
   scenario: configuration.scenario,
   fixtureSeed: configuration.seed,
-  facts: { rows: requestedRows, producerHosts: [1, 2, 4], measuredHosts: 4, modelsProviders: 12 },
-  detail: { total: requestedDetail, sizes: detailCounts, nestedDepth: 2 },
-  load: [`${requestedRows} finite burst`, 'four concurrent producer helpers'],
-  reads: ['single-session indexed count', 'all-history provider projection x10', 'small/2MiB detail reconstruction'],
-  lifecycle: ['clean helper restart x3', 'private delete racing late detail from another helper'],
+  facts: { rows: configuration.scenario === 'endurance' ? null : requestedRows, producerHosts: [1, 2, 4], measuredHosts: 4, modelsProviders: 12 },
+  detail: configuration.scenario === 'endurance'
+    ? { total: null, sizes: {}, nestedDepth: 0 }
+    : { total: requestedDetail, sizes: detailCounts, nestedDepth: 2 },
+  load: configuration.scenario === 'endurance'
+    ? ['two independent 1 fact/s light trials (>=300 seconds each)', 'two independent 50 fact/s sustained trials at each of 1 and 4 hosts (>=10,000 samples each)']
+    : [`${requestedRows} finite burst`, 'four concurrent producer helpers'],
+  reads: configuration.scenario === 'endurance' ? [] : ['single-session indexed count', 'all-history provider projection x10', 'small/2MiB detail reconstruction'],
+  lifecycle: configuration.scenario === 'endurance' ? ['fresh database/helper per trial'] : ['clean helper restart x3', 'private delete racing late detail from another helper'],
   bounds: { minUnusedDiskBytes: 20 * 1024 ** 3, maxTemporaryBytes: 16 * 1024 ** 3, maxQueueBytes: 64 * 1024 ** 2 },
   intentionallyNotClaimed: [
     ...(configuration.scenario !== 'scale' ? ['1M rows'] : []),
     '10M rows; this bounded harness rejects that input',
-    'five-minute light load and repeated sustained-load processes',
+    ...(configuration.scenario === 'endurance' && configuration.smoke
+      ? ['five-minute light load and repeated sustained-load processes']
+      : []),
     'mixed load, schema-v2/partial-write, and the broader fault matrix',
     'matched analytics-disabled/enabled agent and live VS Code UI baseline',
   ],
@@ -256,6 +285,110 @@ function summarizeLight(values) {
   return { samples: summary.samples, p50Ms: summary.p50Ms, p95Ms: summary.p95Ms, maxMs: summary.maxMs };
 }
 
+function requiredWorkerMemorySample(stats, label) {
+  const processStats = stats?.process;
+  const identity = processStats?.workerIdentity;
+  if (!identity || typeof identity.instanceId !== 'string' || !Number.isSafeInteger(identity.pid)
+    || !Number.isSafeInteger(identity.spawnedAtMs)) {
+    throw new Error(`${label}: worker identity telemetry is missing`);
+  }
+  const fields = ['rss', 'heapTotal', 'heapUsed', 'external', 'arrayBuffers'];
+  for (const field of fields) {
+    if (!Number.isSafeInteger(processStats[field]) || processStats[field] < 0) {
+      throw new Error(`${label}: worker ${field} memory telemetry is missing or invalid`);
+    }
+  }
+  return {
+    identity: { instanceId: identity.instanceId, pid: identity.pid, spawnedAtMs: identity.spawnedAtMs },
+    rssBytes: processStats.rss,
+    heapTotalBytes: processStats.heapTotal,
+    heapUsedBytes: processStats.heapUsed,
+    externalBytes: processStats.external,
+    arrayBuffersBytes: processStats.arrayBuffers,
+  };
+}
+
+/** Poll the existing stats IPC during a rate condition. Boundary samples are
+ * insufficient for a sustained-load memory result because a worker can peak
+ * between flushes. The sampler is deliberately kept in the harness so this
+ * follow-on does not change production recorder behavior. */
+function startWorkerMemorySampler(hosts, label, intervalMs = 1_000) {
+  const samples = [];
+  let inFlight;
+  let failure;
+  let stopped = false;
+  const collect = async () => {
+    if (failure) throw failure;
+    if (inFlight) return inFlight;
+    inFlight = (async () => {
+      const stats = await Promise.all(hosts.map((host) => host.workerStats()));
+      const workers = stats.map((entry, index) => requiredWorkerMemorySample(entry, `${label} sample ${samples.length} host ${index + 1}`));
+      samples.push({ observedAt: new Date().toISOString(), workers });
+    })().catch((error) => {
+      failure = error instanceof Error ? error : new Error(String(error));
+      throw failure;
+    }).finally(() => {
+      inFlight = undefined;
+    });
+    return inFlight;
+  };
+  const timer = setInterval(() => {
+    if (stopped) return;
+    void collect().catch(() => void 0);
+  }, intervalMs);
+  void collect().catch(() => void 0);
+  return {
+    async stop() {
+      stopped = true;
+      clearInterval(timer);
+      if (inFlight) await inFlight;
+      await collect();
+      if (failure) throw failure;
+      const byWorker = new Map();
+      let maxWorkerRssBytes = 0;
+      let maxWorkerHeapTotalBytes = 0;
+      let maxWorkerHeapUsedBytes = 0;
+      for (const sample of samples) {
+        for (const worker of sample.workers) {
+          const key = worker.identity.instanceId;
+          const summary = byWorker.get(key) ?? {
+            identity: worker.identity,
+            sampleCount: 0,
+            maxRssBytes: 0,
+            maxHeapTotalBytes: 0,
+            maxHeapUsedBytes: 0,
+            maxExternalBytes: 0,
+            maxArrayBuffersBytes: 0,
+          };
+          summary.sampleCount += 1;
+          summary.maxRssBytes = Math.max(summary.maxRssBytes, worker.rssBytes);
+          summary.maxHeapTotalBytes = Math.max(summary.maxHeapTotalBytes, worker.heapTotalBytes);
+          summary.maxHeapUsedBytes = Math.max(summary.maxHeapUsedBytes, worker.heapUsedBytes);
+          summary.maxExternalBytes = Math.max(summary.maxExternalBytes, worker.externalBytes);
+          summary.maxArrayBuffersBytes = Math.max(summary.maxArrayBuffersBytes, worker.arrayBuffersBytes);
+          byWorker.set(key, summary);
+          maxWorkerRssBytes = Math.max(maxWorkerRssBytes, worker.rssBytes);
+          maxWorkerHeapTotalBytes = Math.max(maxWorkerHeapTotalBytes, worker.heapTotalBytes);
+          maxWorkerHeapUsedBytes = Math.max(maxWorkerHeapUsedBytes, worker.heapUsedBytes);
+        }
+      }
+      if (samples.length === 0 || byWorker.size !== hosts.length) {
+        throw new Error(`${label}: continuous worker memory telemetry is incomplete`);
+      }
+      return {
+        intervalMs,
+        sampleCount: samples.length,
+        firstObservedAt: samples[0].observedAt,
+        lastObservedAt: samples.at(-1).observedAt,
+        maxWorkerRssBytes,
+        maxWorkerHeapTotalBytes,
+        maxWorkerHeapUsedBytes,
+        workers: [...byWorker.values()],
+      };
+    },
+  };
+}
+
 async function runRateCondition(parentRoot, label, ratePerSecond, sampleCount, hostCount) {
   const rateDatabasePath = path.join(parentRoot, `${configuration.seed}-${label}.sqlite`);
   const commitLatency = [];
@@ -265,49 +398,195 @@ async function runRateCondition(parentRoot, label, ratePerSecond, sampleCount, h
   }));
   await Promise.all(hosts.map((host) => host.start()));
   const workerBefore = await Promise.all(hosts.map((host) => host.workerStats()));
-  const cpuBefore = process.cpuUsage();
-  const startedAt = performance.now();
-  const handoff = [];
-  let peakBacklogBytes = 0;
-  for (let index = 0; index < sampleCount; index++) {
-    const targetAt = startedAt + (index * 1_000 / ratePerSecond);
-    const delay = targetAt - performance.now();
-    if (delay > 1) await new Promise((resolve) => setTimeout(resolve, delay));
-    const host = index % hostCount;
-    const started = performance.now();
-    hosts[host].submit(observation(1_000_000_000 + index, host, Math.floor(index / hostCount) + 1));
-    handoff.push(performance.now() - started);
-    peakBacklogBytes = Math.max(peakBacklogBytes, ...hosts.map((entry) => entry.backlog.queuedBytes + entry.backlog.inFlightBytes));
-    if (index % 1_000 === 999) checkResourceEnvelope(`${label}-after-${index + 1}`);
+  const memorySampler = startWorkerMemorySampler(hosts, label);
+  let samplerStopped = false;
+  try {
+    const cpuBefore = process.cpuUsage();
+    const startedAt = performance.now();
+    const handoff = [];
+    let peakBacklogRecords = 0;
+    let peakBacklogBytes = 0;
+    for (let index = 0; index < sampleCount; index++) {
+      const targetAt = startedAt + (index * 1_000 / ratePerSecond);
+      const delay = targetAt - performance.now();
+      if (delay > 1) await new Promise((resolve) => setTimeout(resolve, delay));
+      const host = index % hostCount;
+      const started = performance.now();
+      hosts[host].submit(observation(1_000_000_000 + index, host, Math.floor(index / hostCount) + 1));
+      handoff.push(performance.now() - started);
+      peakBacklogRecords = Math.max(peakBacklogRecords, ...hosts.map((entry) => entry.backlog.queuedRecords + entry.backlog.inFlightRecords));
+      peakBacklogBytes = Math.max(peakBacklogBytes, ...hosts.map((entry) => entry.backlog.queuedBytes + entry.backlog.inFlightBytes));
+      if (index % 1_000 === 999) checkResourceEnvelope(`${label}-after-${index + 1}`);
+    }
+    const submissionElapsedMs = performance.now() - startedAt;
+    const drainStarted = performance.now();
+    await Promise.all(hosts.map((host) => host.flush()));
+    const drainMs = performance.now() - drainStarted;
+    const elapsedMs = performance.now() - startedAt;
+    const cpu = process.cpuUsage(cpuBefore);
+    const workerAfter = await Promise.all(hosts.map((host) => host.workerStats()));
+    const workerCpuMicros = workerAfter.reduce((total, entry, index) => {
+      const before = workerBefore[index].process.cpuUsage;
+      return total + entry.process.cpuUsage.user + entry.process.cpuUsage.system - before.user - before.system;
+    }, 0);
+    const workerMemory = await memorySampler.stop();
+    samplerStopped = true;
+    const endingBacklogRecords = hosts.reduce((sum, host) => sum + host.backlog.queuedRecords + host.backlog.inFlightRecords, 0);
+    const endingBacklogBytes = hosts.reduce((sum, host) => sum + host.backlog.queuedBytes + host.backlog.inFlightBytes, 0);
+    return {
+      label,
+      ratePerSecond,
+      sampleCount,
+      hostCount,
+      submissionElapsedMs,
+      offeredRatePerSecond: sampleCount / (submissionElapsedMs / 1_000),
+      drainMs,
+      elapsedMs,
+      deliveredRateIncludingDrainPerSecond: sampleCount / (elapsedMs / 1_000),
+      handoff: ratePerSecond === 1 ? summarizeLight(handoff) : summarize(handoff),
+      observationToCommitted: ratePerSecond === 1 ? summarizeLight(commitLatency) : summarize(commitLatency),
+      acceptedSampleCount: commitLatency.length,
+      peakBacklogRecords,
+      peakBacklogBytes,
+      endingBacklogRecords,
+      endingBacklogBytes,
+      producerCpuOneCorePercent: ((cpu.user + cpu.system) / (elapsedMs * 1_000)) * 100,
+      workerCpuOneCorePercent: (workerCpuMicros / (elapsedMs * 1_000)) * 100,
+      workerMemory,
+    };
+  } finally {
+    if (!samplerStopped) await memorySampler.stop().catch(() => void 0);
+    await shutdownHelpers(hosts);
   }
-  const submissionElapsedMs = performance.now() - startedAt;
-  const drainStarted = performance.now();
-  await Promise.all(hosts.map((host) => host.flush()));
-  const drainMs = performance.now() - drainStarted;
-  const elapsedMs = performance.now() - startedAt;
-  const cpu = process.cpuUsage(cpuBefore);
-  const workerAfter = await Promise.all(hosts.map((host) => host.workerStats()));
-  const workerCpuMicros = workerAfter.reduce((total, entry, index) => {
-    const before = workerBefore[index].process.cpuUsage;
-    return total + entry.process.cpuUsage.user + entry.process.cpuUsage.system - before.user - before.system;
-  }, 0);
-  await shutdownHelpers(hosts);
+}
+
+function enduranceTrialDecision(trial, result, smoke) {
+  const correctSampleCount = result.sampleCount === trial.sampleCount;
+  const committedAllSamples = result.acceptedSampleCount === trial.sampleCount;
+  const drainedBacklog = result.endingBacklogRecords === 0 && result.endingBacklogBytes === 0;
+  const durationSatisfied = result.elapsedMs >= trial.minimumElapsedMs;
+  const memoryComplete = result.workerMemory?.sampleCount >= 1
+    && result.workerMemory.workers?.length === trial.hostCount
+    && result.workerMemory.workers.every((worker) => worker.sampleCount >= 1);
+  const pacing = recomputeEnduranceTrialPacing(result, trial);
+  const completed = correctSampleCount && committedAllSamples && drainedBacklog && durationSatisfied && memoryComplete && pacing.passed;
   return {
-    label,
-    ratePerSecond,
-    sampleCount,
-    hostCount,
-    submissionElapsedMs,
-    offeredRatePerSecond: sampleCount / (submissionElapsedMs / 1_000),
-    drainMs,
-    elapsedMs,
-    deliveredRateIncludingDrainPerSecond: sampleCount / (elapsedMs / 1_000),
-    handoff: ratePerSecond === 1 ? summarizeLight(handoff) : summarize(handoff),
-    observationToCommitted: ratePerSecond === 1 ? summarizeLight(commitLatency) : summarize(commitLatency),
-    peakBacklogBytes,
-    producerCpuOneCorePercent: ((cpu.user + cpu.system) / (elapsedMs * 1_000)) * 100,
-    workerCpuOneCorePercent: (workerCpuMicros / (elapsedMs * 1_000)) * 100,
+    decision: smoke ? 'smoke-unqualified' : completed ? 'measured' : 'failed',
+    requirements: {
+      sampleCount: { actual: result.sampleCount, expected: trial.sampleCount, satisfied: correctSampleCount },
+      committedSampleCount: { actual: result.acceptedSampleCount, expected: trial.sampleCount, satisfied: committedAllSamples },
+      endingBacklog: { records: result.endingBacklogRecords, bytes: result.endingBacklogBytes, satisfied: drainedBacklog },
+      minimumElapsedMs: { actual: result.elapsedMs, expected: trial.minimumElapsedMs, satisfied: durationSatisfied },
+      offeredRate: { actual: pacing.derivedOfferedRatePerSecond, expected: trial.ratePerSecond, reported: pacing.reportedOfferedRatePerSecond, satisfied: pacing.passed },
+      continuousWorkerMemory: { actualSamples: result.workerMemory?.sampleCount ?? 0, expectedWorkers: trial.hostCount, satisfied: memoryComplete },
+    },
   };
+}
+
+async function runEnduranceScenario() {
+  const smoke = configuration.smoke;
+  const trials = smoke ? ENDURANCE_SMOKE_TRIALS : ENDURANCE_FULL_TRIALS;
+  const expectedFullDurationMs = ENDURANCE_FULL_TRIALS.reduce((sum, trial) => {
+    return sum + (trial.ratePerSecond === 1 ? trial.minimumElapsedMs : trial.sampleCount * 1_000 / trial.ratePerSecond);
+  }, 0);
+  report.results.endurance = {
+    mode: smoke ? 'smoke' : 'full',
+    productionDefaultRecorderHeap: report.environment.recorderHeapCeilingMb === null,
+    requiredMemoryFields: [...ENDURANCE_REQUIRED_WORKER_MEMORY_FIELDS],
+    samplerIntervalMs: 1_000,
+    expectedFullDurationMs,
+    provenanceFingerprint: report.provenance.fingerprint,
+    trials: [],
+  };
+  checkpoint('endurance-start', { mode: smoke ? 'smoke' : 'full', trialCount: trials.length });
+  for (const trial of trials) {
+    checkResourceEnvelope(`${trial.label}-before`);
+    const result = await runRateCondition(root, trial.label, trial.ratePerSecond, trial.sampleCount, trial.hostCount);
+    const decision = enduranceTrialDecision(trial, result, smoke);
+    report.results.endurance.trials.push({
+    ...result,
+      target: trial,
+      ...decision,
+    });
+    checkResourceEnvelope(`${trial.label}-after`);
+    checkpoint('endurance-trial-complete', {
+      label: trial.label,
+      decision: decision.decision,
+      workerMemorySamples: result.workerMemory.sampleCount,
+    });
+  }
+  const completedTrials = report.results.endurance.trials.filter((trial) => trial.decision === 'measured');
+  const lightTrials = report.results.endurance.trials.filter((trial) => trial.target.ratePerSecond === 1);
+  const sustainedTrials = report.results.endurance.trials.filter((trial) => trial.target.ratePerSecond === 50);
+  const lightComplete = lightTrials.length === 2 && lightTrials.every((trial) => trial.decision === 'measured');
+  const sustainedByHost = new Map([1, 4].map((hostCount) => [
+    hostCount,
+    sustainedTrials.filter((trial) => trial.target.hostCount === hostCount),
+  ]));
+  const sustainedComplete = sustainedByHost.size === 2
+    && [...sustainedByHost.values()].every((trialsForHost) => trialsForHost.length === 2
+      && trialsForHost.every((trial) => trial.decision === 'measured'));
+  const memoryComplete = report.results.endurance.trials.length === trials.length
+    && report.results.endurance.trials.every((trial) => trial.workerMemory?.sampleCount >= 1
+      && trial.workerMemory.workers?.length === trial.target.hostCount);
+  report.results.endurance.summary = {
+    completedTrials: completedTrials.length,
+    lightTrials: lightTrials.length,
+    sustainedTrials: sustainedTrials.length,
+    lightP99Pooled: null,
+    memoryTelemetryComplete: memoryComplete,
+  };
+  const enduranceValidation = validateEnduranceTrials(report.results.endurance, {
+    mode: smoke ? 'smoke' : 'full',
+  });
+  report.results.endurance.validation = {
+    valid: enduranceValidation.valid,
+    errors: enduranceValidation.errors,
+    pacing: enduranceValidation.trials.map((trial) => ({ label: trial.label, ...trial.pacing })),
+  };
+  if (!enduranceValidation.valid) {
+    throw new Error(`endurance evidence validation failed: ${enduranceValidation.errors.join('; ')}`);
+  }
+  const pacingComplete = !smoke && enduranceValidation.trials.length === trials.length
+    && enduranceValidation.trials.every((trial) => trial.pacing.passed);
+  if (smoke) {
+    recordUnqualified('enduranceLightLoad', 'Smoke mode exercises trial scheduling only; full 300-second trials were not run.');
+    recordUnqualified('enduranceSustainedLoad', 'Smoke mode exercises trial scheduling only; full 10,000-sample trials were not run.');
+    recordUnqualified('enduranceWorkerMemory', 'Smoke mode is explicitly unqualified, even though stats IPC was sampled.');
+    recordUnqualified('endurancePacing', 'Smoke mode exercises pacing/report mechanics only; full offered-rate qualification was not run.');
+    report.qualification = {
+      scenario: configuration.scenario,
+      decision: 'scenario-passed',
+      failedGates: [],
+      overallP0: 'unqualified',
+      reason: 'Short smoke mode validates endurance scheduling and report mechanics only.',
+    };
+  } else {
+    const lightGate = recordGate('enduranceLightLoad', lightComplete, 'two independent >=300-second 1 fact/s trials', (value) => value === true, {
+      trials: lightTrials.map((trial) => ({ label: trial.label, elapsedMs: trial.elapsedMs, handoff: trial.handoff, observationToCommitted: trial.observationToCommitted, acceptedSampleCount: trial.acceptedSampleCount, peakBacklogRecords: trial.peakBacklogRecords, peakBacklogBytes: trial.peakBacklogBytes, endingBacklogRecords: trial.endingBacklogRecords, endingBacklogBytes: trial.endingBacklogBytes })),
+    });
+    const sustainedGate = recordGate('enduranceSustainedLoad', sustainedComplete, 'two independent >=10,000-sample 50 fact/s trials at each of 1 and 4 hosts', (value) => value === true, {
+      trials: sustainedTrials.map((trial) => ({ label: trial.label, elapsedMs: trial.elapsedMs, handoff: trial.handoff, observationToCommitted: trial.observationToCommitted, acceptedSampleCount: trial.acceptedSampleCount, peakBacklogRecords: trial.peakBacklogRecords, peakBacklogBytes: trial.peakBacklogBytes, endingBacklogRecords: trial.endingBacklogRecords, endingBacklogBytes: trial.endingBacklogBytes })),
+    });
+    const memoryGate = recordGate('enduranceWorkerMemory', memoryComplete && report.results.endurance.productionDefaultRecorderHeap, 'continuous stats IPC with mandatory worker RSS and heap fields for every trial under the production-default heap', (value) => value === true, {
+      requiredFields: report.results.endurance.requiredMemoryFields,
+      productionDefaultRecorderHeap: report.results.endurance.productionDefaultRecorderHeap,
+      trials: report.results.endurance.trials.map((trial) => ({ label: trial.label, workerMemory: trial.workerMemory })),
+    });
+    const pacingGate = recordGate('endurancePacing', pacingComplete, 'recorded offered rate must be recomputed from sample count and submission elapsed time within 2%', (value) => value === true, {
+      toleranceFraction: 0.02,
+      trials: report.results.endurance.validation.pacing,
+    });
+    if (!lightGate || !sustainedGate || !memoryGate || !pacingGate) throw new Error('endurance trials did not meet their declared completion requirements');
+    report.qualification = {
+      scenario: configuration.scenario,
+      decision: 'scenario-passed',
+      failedGates: [],
+      overallP0: 'unqualified',
+      reason: 'Endurance evidence is a separate workload result; mixed/UI/schema and remaining P0 gates are still unqualified.',
+    };
+  }
+  report.status = 'passed';
 }
 
 function proofTreeBytes(directory) {
@@ -446,7 +725,11 @@ function artifactProvenance() {
       : []),
   ];
   const fingerprintInput = {
-    harnessVersion: HARNESS_VERSION,
+    harnessVersion: activeHarnessVersion,
+    // The source candidate is part of the admission fingerprint. Artifact
+    // hashes bind the packaged files, while this prevents a report from being
+    // accepted after the same files are moved to a different source revision.
+    gitHead,
     hostBuildId,
     rendererBuildId,
     files: Object.fromEntries(Object.entries(files).map(([name, value]) => [name, value.sha256 ?? null])),
@@ -691,15 +974,18 @@ const capacityComponentSnapshots = {};
 const prewriteCapacityChecks = [];
 const report = {
   schemaVersion: REPORT_SCHEMA_VERSION,
-  harnessVersion: HARNESS_VERSION,
+  harnessVersion: activeHarnessVersion,
   status: 'running',
   generatedAt: new Date().toISOString(),
   configuration: {
     scenario: configuration.scenario,
-    rows: requestedRows,
+    rows: configuration.scenario === 'endurance' ? null : requestedRows,
     seed: configuration.seed,
     reportPath: configuration.report,
-    resolvedRowsFrom: process.env.PIE_ANALYTICS_P0_ROWS !== undefined && process.argv.includes('--rows') === false ? 'environment' : 'arguments/default',
+    ...(configuration.scenario === 'endurance' ? { mode: configuration.smoke ? 'smoke' : 'full' } : {}),
+    resolvedRowsFrom: configuration.scenario === 'endurance'
+      ? 'not-applicable'
+      : process.env.PIE_ANALYTICS_P0_ROWS !== undefined && process.argv.includes('--rows') === false ? 'environment' : 'arguments/default',
   },
   matrix,
   provenance: { valid: false, errors: ['initialization did not complete'] },
@@ -872,6 +1158,19 @@ try {
 }
 
 function ensureGateEvidence() {
+  if (configuration.scenario === 'endurance') {
+    for (const [name, reason] of [
+      ['enduranceLightLoad', 'Endurance light-load trials did not complete.'],
+      ['enduranceSustainedLoad', 'Endurance sustained-load trials did not complete.'],
+      ['enduranceWorkerMemory', 'Continuous worker memory telemetry did not complete.'],
+      ['rateConditions', 'The independent endurance scenario does not execute the separate 1,000 fact/s burst conditions.'],
+      ['mixedLoad', 'Mixed ingestion/query load is a separate qualification scenario.'],
+      ['matchedAgentUi', 'Agent and UI baseline is a separate qualification scenario.'],
+    ]) {
+      if (!report.gates[name]) recordUnqualified(name, reason);
+    }
+    return;
+  }
   const tableRows = report.results.tableRows;
   const peakPhysicalBytes = report.results.resourceEnvelope?.samples?.length > 0
     ? Math.max(...report.results.resourceEnvelope.samples.map((sample) => sample.physicalBytes))
@@ -1026,6 +1325,9 @@ try {
   if (projectedPeakBytes > matrix.bounds.effectiveTemporaryLimitBytes) throw new Error(`projected proof tree ${projectedPeakBytes} exceeds effective temporary limit ${matrix.bounds.effectiveTemporaryLimitBytes}`);
   if (projectedPeakMemoryBytes > effectiveMemoryLimitBytes) throw new Error(`projected peak memory ${projectedPeakMemoryBytes} exceeds safe available-memory limit ${effectiveMemoryLimitBytes}`);
   checkResourceEnvelope('preflight');
+  if (configuration.scenario === 'endurance') {
+    await runEnduranceScenario();
+  } else {
   const realProducerProbe = execFileSync(process.execPath, [
     path.join(extensionRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs'),
     path.join(extensionRoot, 'scripts', 'analytics-real-producer-probe.ts'),
@@ -1675,33 +1977,6 @@ try {
       effectiveMemoryLimitBytes: report.environment.effectiveMemoryLimitBytes,
     };
   }
-  if (process.env.PIE_ANALYTICS_P0_ENDURANCE === '1') {
-    report.results.rateConditions.push(
-      await runRateCondition(root, 'sustained-50ps-repeat-a', 50, 10_000, 1),
-      await runRateCondition(root, 'sustained-50ps-repeat-b', 50, 10_000, 4),
-      await runRateCondition(root, 'light-1ps-repeat-a', 1, 300, 1),
-      await runRateCondition(root, 'light-1ps-repeat-b', 1, 300, 1),
-    );
-    const idleDatabasePath = path.join(root, 'idle.sqlite');
-    const idleHost = supervisor(idleDatabasePath);
-    await idleHost.start();
-    const idleBefore = await idleHost.workerStats();
-    const idleStarted = performance.now();
-    await new Promise((resolve) => setTimeout(resolve, 60_000));
-    const idleAfter = await idleHost.workerStats();
-    const idleElapsedMs = performance.now() - idleStarted;
-    const idleCpuMicros = idleAfter.process.cpuUsage.user + idleAfter.process.cpuUsage.system
-      - idleBefore.process.cpuUsage.user - idleBefore.process.cpuUsage.system;
-    report.results.idle = {
-      elapsedMs: idleElapsedMs,
-      workerCpuOneCorePercent: (idleCpuMicros / (idleElapsedMs * 1_000)) * 100,
-      rssBefore: idleBefore.process.rss,
-      rssAfter: idleAfter.process.rss,
-      historyPollingOrReplay: false,
-    };
-    await shutdownHelper(idleHost);
-  }
-
   assert.equal(activeHelpers.size, 0, 'all recorder helpers must be stopped before the destructive fault');
   assert.equal(activeReaders.size, 0, 'all in-process readers must be closed before the destructive fault');
   const recorderTerminalEvidence = requireTerminalWorkerEvidence(recorderWorkerLifecycle, 'recorder');
@@ -1859,6 +2134,7 @@ try {
   report.qualification = { scenario: configuration.scenario, decision: failedGates.length === 0 ? 'scenario-passed' : 'scenario-failed', failedGates, overallP0: 'unqualified' };
   if (failedGates.length > 0) throw new Error(`numeric qualification gates failed: ${failedGates.join(', ')}`);
   report.status = 'passed';
+  }
 } catch (error) {
   report.status = 'failed';
   report.failure = {

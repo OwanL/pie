@@ -123,6 +123,10 @@ class FakeBackend implements AnalyticsTransportBackend {
     this.eventListener?.({ event: 'analytics.capture', payload: value });
   }
 
+  ready(): void {
+    this.eventListener?.({ event: 'backend.ready', payload: {} });
+  }
+
   exit(): void {
     this.exitListener?.();
   }
@@ -151,7 +155,12 @@ class FakeRecorder implements HostAnalyticsRecorder {
   }
 }
 
-function fixture(options: { maxPendingDetails?: number; maxPendingDetailBytes?: number } = {}): {
+function fixture(options: {
+  maxPendingDetails?: number;
+  maxPendingDetailBytes?: number;
+  buildId?: string;
+  workspaceId?: string;
+} = {}): {
   backend: FakeBackend;
   recorder: FakeRecorder;
   transport: HostAnalyticsTransport;
@@ -162,6 +171,8 @@ function fixture(options: { maxPendingDetails?: number; maxPendingDetailBytes?: 
   const errors: Error[] = [];
   const transport = new HostAnalyticsTransport({
     generationId: 'generation-1',
+    buildId: options.buildId,
+    workspaceId: options.workspaceId,
     backend,
     recorder,
     ...options,
@@ -219,6 +230,61 @@ test('fact ACK is sent only after recorder disposition and preserves durable/rej
     code: 'capture_capacity',
     message: 'queue full',
   });
+});
+
+test('current-generation facts with stale producer build or workspace are rejected before recorder ownership', () => {
+  for (const overrides of [
+    { producer: { buildId: 'stale-build', processId: 10, processGeneration: 'process-1' } },
+    { scope: { workspaceCoverage: 'known' as const, workspaceId: 'stale-workspace', rootSessionId: 'root-1' } },
+  ]) {
+    const { backend, recorder, transport } = fixture({ buildId: 'build-1', workspaceId: 'workspace-1' });
+    const packet = createAnalyticsFactPacket(observation(overrides));
+    transport.receive(ingress(packet));
+    assert.equal(recorder.facts.length, 0);
+    assert.equal(acknowledgement(backend).status, 'rejected');
+    assert.equal(acknowledgement(backend).code, 'producer_identity');
+    transport.dispose();
+  }
+});
+
+test('shutdown rejects partial detail ownership before late chunks and waits for terminal ACK submission', async () => {
+  const framed = framedDetail(ANALYTICS_TRANSPORT_DETAIL_CHUNK_BYTES + 1);
+  const { backend, transport } = fixture();
+  transport.receive(ingress(framed.start));
+  assert.deepEqual(transport.assemblyBacklog, {
+    records: 1,
+    bytes: framed.start.byteLength,
+  });
+
+  await transport.shutdown(100);
+  assert.equal(acknowledgement(backend).status, 'rejected');
+  assert.equal(acknowledgement(backend).code, 'transport_shutdown');
+  assert.deepEqual(transport.assemblyBacklog, { records: 0, bytes: 0 });
+  transport.receive(ingress(framed.chunks[0]!));
+  assert.equal(backend.requests.length, 1, 'late producer traffic is fenced after shutdown');
+  transport.dispose();
+});
+
+test('shutdown tracks a deferred recorder disposition before stopping the backend', async () => {
+  const { backend, recorder, transport } = fixture();
+  const packet = createAnalyticsFactPacket(observation());
+  transport.receive(ingress(packet));
+  const shutdown = transport.shutdown(200);
+  setTimeout(() => recorder.factDispositions[0]!(durable()), 5);
+  await shutdown;
+  assert.equal(backend.requests.length, 1, 'the deferred disposition is ACKed before shutdown completes');
+  assert.equal(acknowledgement(backend).status, 'durable');
+});
+
+test('shutdown terminalizes an unresolved recorder disposition and ignores its late callback', async () => {
+  const { backend, recorder, transport } = fixture();
+  transport.receive(ingress(createAnalyticsFactPacket(observation())));
+  await transport.shutdown(15);
+  assert.equal(backend.requests.length, 1);
+  assert.equal(acknowledgement(backend).code, 'transport_shutdown');
+  recorder.factDispositions[0]!(durable());
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(backend.requests.length, 1, 'a callback after terminal rejection cannot create a second ACK');
 });
 
 test('late recorder dispositions after transport disposal never send an ACK', () => {
@@ -540,6 +606,22 @@ test('late recorder dispositions after backend replacement, exit, or dispose do 
     recorder.factDispositions[0]!(durable());
     assert.equal(backend.requests.length, 0);
   }
+});
+
+test('backend ready re-arms the retained transport for a replacement coordinator generation', () => {
+  const { backend, recorder, transport } = fixture();
+  transport.receive(ingress(createAnalyticsFactPacket(observation())));
+  backend.exit();
+  recorder.factDispositions[0]!(durable());
+  assert.equal(backend.requests.length, 0, 'the dead generation cannot receive a late ACK');
+
+  backend.generation = 2;
+  backend.ready();
+  const replacement = createAnalyticsFactPacket(observation({ sourceKey: 'replacement-source' }));
+  transport.receive(ingress(replacement, { coordinatorGeneration: 2 }));
+  assert.equal(recorder.facts.length, 2);
+  recorder.factDispositions[1]!(durable());
+  assert.equal(acknowledgement(backend).deliveryId, replacement.deliveryId);
 });
 
 test('rejection messages are truncated on a UTF-8 boundary', () => {

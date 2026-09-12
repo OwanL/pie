@@ -1620,6 +1620,31 @@ export class WorkerRuntimeHost {
     }
     if (!payload.writeLease || typeof payload.writeLease !== 'object' || Array.isArray(payload.writeLease)) throw new Error('Invalid runtime promotion writeLease.');
     if (!payload.openedPayload || typeof payload.openedPayload !== 'object' || Array.isArray(payload.openedPayload)) throw new Error('Invalid runtime promotion openedPayload.');
+    if (payload.analytics !== undefined) {
+      const analytics = payload.analytics;
+      if (!analytics || typeof analytics !== 'object' || Array.isArray(analytics)
+        || typeof analytics.generationId !== 'string' || analytics.generationId.length === 0
+        || typeof analytics.buildId !== 'string' || analytics.buildId.length === 0
+        || (analytics.workspaceId !== undefined
+          && (typeof analytics.workspaceId !== 'string' || analytics.workspaceId.length === 0))
+        || !analytics.captureSubject || typeof analytics.captureSubject !== 'object'
+        || Array.isArray(analytics.captureSubject)) {
+        throw new Error('Invalid runtime promotion analytics activation.');
+      }
+      const subject = analytics.captureSubject as { kind?: unknown; rootSessionId?: unknown; operationId?: unknown; hostId?: unknown };
+      if (subject.kind === 'session' && (typeof subject.rootSessionId !== 'string' || subject.rootSessionId.length === 0)) {
+        throw new Error('Invalid runtime promotion analytics session subject.');
+      }
+      if (subject.kind === 'pendingCreate' && (typeof subject.operationId !== 'string' || subject.operationId.length === 0)) {
+        throw new Error('Invalid runtime promotion analytics pending-create subject.');
+      }
+      if (subject.kind === 'host' && (typeof subject.hostId !== 'string' || subject.hostId.length === 0)) {
+        throw new Error('Invalid runtime promotion analytics host subject.');
+      }
+      if (subject.kind !== 'session' && subject.kind !== 'pendingCreate' && subject.kind !== 'host') {
+        throw new Error('Invalid runtime promotion analytics subject kind.');
+      }
+    }
   }
 }
 

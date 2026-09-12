@@ -21,6 +21,7 @@ function observation(
   sourceKey = 'fact-1',
   stableOriginId = 'origin-1',
   sourceSequence = 1,
+  overrides: Partial<AnalyticsObservation<object>> = {},
 ): AnalyticsObservation<object> {
   const base: Omit<AnalyticsObservation<object>, 'idempotencyKey'> = {
     schemaVersion: ANALYTICS_SCHEMA_VERSION,
@@ -33,12 +34,13 @@ function observation(
     entityKey: `execution-${sourceKey}`,
     observationKind: 'end',
     observedAtMs: 100,
-    scope: { workspaceCoverage: 'known', rootSessionId },
+    scope: { workspaceCoverage: 'known', workspaceId: 'workspace-1', rootSessionId },
     captureSubject: { kind: 'session', rootSessionId },
     producer: { buildId: 'build-1', processGeneration: 'process-1' },
     fields: { outcome: 'succeeded' },
   };
-  return { ...base, idempotencyKey: deriveAnalyticsIdempotencyKey(base) };
+  const value = { ...base, ...overrides };
+  return { ...value, idempotencyKey: deriveAnalyticsIdempotencyKey(value) };
 }
 
 function detail(rootSessionId: string, byteLength = 3): AnalyticsDetailCapture {
@@ -149,6 +151,33 @@ test('worker transport installs one process bridge and advances only exact pendi
     transport.dispose();
   }
   assert.equal((globalThis as unknown as Record<PropertyKey, unknown>)[ANALYTICS_RUNTIME_BRIDGE_KEY], undefined);
+});
+
+test('worker transport rejects current-generation observations with stale build or workspace provenance', () => {
+  for (const overrides of [
+    { producer: { buildId: 'stale-build', processGeneration: 'process-1' } },
+    { scope: { workspaceCoverage: 'known' as const, workspaceId: 'stale-workspace', rootSessionId: 'root-1' } },
+  ]) {
+    const transport = new AnalyticsWorkerTransport({
+      sendAnalyticsFrame: () => true,
+      requestAnalyticsSubjectRebind: async (captureSubject) => captureSubject,
+    }, {
+      generationId: 'generation-1',
+      captureSubject: { kind: 'session', rootSessionId: 'root-1' },
+      workspaceId: 'workspace-1',
+      buildId: 'build-1',
+    }, 'worker-1:1');
+    transport.install();
+    try {
+      const bridge = (globalThis as unknown as Record<PropertyKey, unknown>)[ANALYTICS_RUNTIME_BRIDGE_KEY] as InstalledAnalyticsRuntimeBridge;
+      assert.throws(
+        () => bridge.submitObservation(observation('root-1', 'stale-source', 'stale-origin', 1, overrides)),
+        /producer (build|workspace)/,
+      );
+    } finally {
+      transport.dispose();
+    }
+  }
 });
 
 test('worker transport keeps a dropped subject rebind pending without blocking the caller', () => {

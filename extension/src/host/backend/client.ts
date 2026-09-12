@@ -22,6 +22,7 @@ import { reapOrphanedBackends, type OrphanReapResult } from './orphan-reaper';
 import { deriveTrustedSdkRoot } from './trusted-sdk-root';
 import type { CommitAwareRequestOptions } from '../core/effect-runner';
 import { createOperationalIncident, type OperationalIncident } from '../../shared/incidents.js';
+import type { AnalyticsBackendDescriptor } from '../../../../shared/analytics/activation.js';
 import {
   assertProtocolVersion,
   type BackendReadyPayload,
@@ -36,6 +37,8 @@ export interface BackendStartOptions {
   backendPath: string;
   sdkPath: string;
   cwd: string;
+  /** Immutable canonical analytics authority snapshot for this generation. */
+  analyticsActivation?: AnalyticsBackendDescriptor;
 }
 
 export interface BackendClientOptions {
@@ -45,6 +48,53 @@ export interface BackendClientOptions {
   orphanReaper?: () => Promise<OrphanReapResult>;
   /** Test/diagnostic override for backend stdout record bounds. */
   stdoutMaxLineBytes?: number;
+}
+
+const ANALYTICS_DESCRIPTOR_KEYS = [
+  'buildId', 'generationId', 'hostInstanceId', 'manifestRevision',
+  'manifestSha256', 'workspaceId',
+].sort();
+
+function sameAnalyticsBackendDescriptor(
+  left: AnalyticsBackendDescriptor | undefined,
+  right: AnalyticsBackendDescriptor | undefined,
+): boolean {
+  if (!left || !right) return left === right;
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  if (leftKeys.length !== ANALYTICS_DESCRIPTOR_KEYS.length
+    || rightKeys.length !== ANALYTICS_DESCRIPTOR_KEYS.length
+    || leftKeys.some((key, index) => key !== ANALYTICS_DESCRIPTOR_KEYS[index])
+    || rightKeys.some((key, index) => key !== ANALYTICS_DESCRIPTOR_KEYS[index])) return false;
+  return left.generationId === right.generationId
+    && left.buildId === right.buildId
+    && left.manifestRevision === right.manifestRevision
+    && left.manifestSha256 === right.manifestSha256
+    && left.workspaceId === right.workspaceId
+    && left.hostInstanceId === right.hostInstanceId;
+}
+
+function validateBackendReadyPayload(
+  payload: BackendReadyPayload,
+  generation: number,
+  expectedAnalyticsActivation: AnalyticsBackendDescriptor | undefined,
+): Error | undefined {
+  try {
+    assertProtocolVersion('backend.ready', payload.protocolVersion);
+    if (payload.backendGeneration !== undefined && payload.backendGeneration !== generation) {
+      throw new Error(`Backend generation mismatch: expected ${generation}, received ${payload.backendGeneration}.`);
+    }
+    if (!sameAnalyticsBackendDescriptor(payload.analyticsActivation, expectedAnalyticsActivation)) {
+      throw new Error(
+        expectedAnalyticsActivation
+          ? 'Backend analytics activation descriptor mismatch.'
+          : 'Backend unexpectedly advertised an analytics activation descriptor.',
+      );
+    }
+    return undefined;
+  } catch (error) {
+    return error instanceof Error ? error : new Error(String(error));
+  }
 }
 
 export interface CorrelatedBackendFailure {
@@ -209,6 +259,14 @@ export class BackendClient implements vscode.Disposable {
   private stopPromise?: Promise<void>;
   private generation = 0;
   private readonly intentionalStops = new WeakSet<cp.ChildProcess>();
+  /** Validate a ready descriptor before any public event listener (including
+   * the retained analytics transport) can re-arm the new coordinator. */
+  private readyValidation?: {
+    generation: number;
+    process: cp.ChildProcess;
+    validate: (payload: BackendReadyPayload) => Error | undefined;
+    reject: (error: Error) => void;
+  };
 
   readonly onEvent = this.events.event;
   readonly onExit = this.exits.event;
@@ -319,6 +377,16 @@ export class BackendClient implements vscode.Disposable {
     // identity the host uses to reject stale traffic after restart.
     const generation = this.generation + 1;
     this.generation = generation;
+    const analyticsArgs = options.analyticsActivation
+      ? [
+          '--analyticsGenerationId', options.analyticsActivation.generationId,
+          '--analyticsBuildId', options.analyticsActivation.buildId,
+          '--analyticsManifestRevision', String(options.analyticsActivation.manifestRevision),
+          '--analyticsManifestSha256', options.analyticsActivation.manifestSha256,
+          '--analyticsWorkspaceId', options.analyticsActivation.workspaceId,
+          '--analyticsHostInstanceId', options.analyticsActivation.hostInstanceId,
+        ]
+      : [];
     const proc = cp.spawn(
       options.nodePath,
       [
@@ -328,6 +396,7 @@ export class BackendClient implements vscode.Disposable {
         '--hostPid', String(process.pid),
         '--backendGeneration', String(generation),
         '--lifetimeFd', '3',
+        ...analyticsArgs,
       ],
       {
         cwd: options.cwd,
@@ -427,6 +496,9 @@ export class BackendClient implements vscode.Disposable {
         exitDisposable.dispose();
         errorDisposable.dispose();
         clearTimeout(timeout);
+        if (this.readyValidation?.generation === generation && this.readyValidation.process === proc) {
+          this.readyValidation = undefined;
+        }
         reject(error);
       };
 
@@ -439,7 +511,20 @@ export class BackendClient implements vscode.Disposable {
         exitDisposable.dispose();
         errorDisposable.dispose();
         clearTimeout(timeout);
+        if (this.readyValidation?.generation === generation && this.readyValidation.process === proc) {
+          this.readyValidation = undefined;
+        }
         resolve(payload);
+      };
+
+      this.readyValidation = {
+        generation,
+        process: proc,
+        validate: (payload) => validateBackendReadyPayload(payload, generation, options.analyticsActivation),
+        reject: (error) => {
+          finishReject(error);
+          this.forceStopProcess();
+        },
       };
 
       const readyDisposable = this.onEvent((event) => {
@@ -450,10 +535,8 @@ export class BackendClient implements vscode.Disposable {
 
         try {
           const payload = event.payload as BackendReadyPayload;
-          assertProtocolVersion('backend.ready', payload.protocolVersion);
-          if (payload.backendGeneration !== undefined && payload.backendGeneration !== generation) {
-            throw new Error(`Backend generation mismatch: expected ${generation}, received ${payload.backendGeneration}.`);
-          }
+          const validationError = validateBackendReadyPayload(payload, generation, options.analyticsActivation);
+          if (validationError) throw validationError;
           finishResolve(payload);
         } catch (error) {
           finishReject(error instanceof Error ? error : new Error(String(error)));
@@ -716,6 +799,17 @@ export class BackendClient implements vscode.Disposable {
       }
 
       if (isEventEnvelope(value)) {
+        if (value.event === 'backend.ready') {
+          const validation = this.readyValidation;
+          if (validation && validation.generation === this.generation && this.proc === validation.process) {
+            const validationError = validation.validate(value.payload as BackendReadyPayload);
+            if (validationError) {
+              this.traceLineReceipt(value, traceStartedAt, line, 'failure');
+              validation.reject(validationError);
+              return;
+            }
+          }
+        }
         this.traceLineReceipt(value, traceStartedAt, line, 'success');
         this.events.fire(value);
         return;

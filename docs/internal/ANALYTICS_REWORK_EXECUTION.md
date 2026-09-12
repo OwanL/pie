@@ -14,6 +14,104 @@ Owning specifications: runbook; `docs/ANALYTICS_REWORK_PLAN.md` §§1, 11.6, 17;
 
 ---
 
+## Checkpoint 44 - 2026-09-12T13:04Z, reviewed analytics handoff and r03 integration barrier
+
+**State: reviewed source-only milestone; no publication, activation, storage cutoff, live host
+restart, or current-data mutation occurred.** The 35 analytics paths are explicitly recorded at
+`C:/dev/scratch/pie-integration-verification-20260913-r03/proposed-analytics-stage-paths.json`;
+the four protected settings/model paths, Git locks, stash, and scratch artifacts are excluded.
+The final no-sync build passed with coordinated build ID `97a23913a62c2f0e06c0`. The default
+affected runner selected the full fast suite and passed **7/7 packages: 6,768 passed, 0 failed, 30
+skipped**. Focused cutover validation passed 16 storage-cutoff tests and 2 recovery tests. A
+separate diagnostics unit is editing `pie-logger.ts`/`stream-telemetry.ts` and tests outside this
+milestone; those changes are not staged. The isolated UI copy has four passing checks at build
+`079d6f61052eded0c0a3`; refresh against `97a23913a62c2f0e06c0` is pending. The r03 before/after
+SHA-256 comparison shows protected files unchanged; no Git locks were present and the stash was
+unchanged.
+
+### Qualification and audit status
+
+The endurance report remains scenario evidence, not a P0 claim: the original
+`C:/dev/scratch/pie-p0-endurance-full-20260912-r01/endurance.json` has SHA-256
+`1ac2c8d5f5bdf517359748610689c3b61257539914349ac3b8df2ad77e42bd20`, uses a fresh database and
+generated payload mix under the production-default recorder heap, and records `overallP0:
+unqualified`. Its adjunct is bound to that exact report hash, recomputes six independent pacing
+trials and binds 12 worker identities, but only observes post-hoc process absence: no worker exit
+code, signal, shutdown receipt, r08 1M-row history, or richer UI workload is claimed.
+
+Authoritative OPEN gates remain P0 qualification, candidate/trial admission, all-host producer
+coverage, and canonical historical consumers. The admission validator still does not recompute
+the complete gate set and the live candidate validator remains unavailable. Legacy writers remain
+until the authority switch; detail workspace attribution and the legacy UI/read path remain
+incomplete.
+
+The P2c/P6 audit correction is recorded: supported cache source/install seams are already present
+(`pi-mcp-adapter@2.20.1`, `pi-web-access@0.27.0`); only the Copilot marker moved. Diagnostics
+boot/stream bounds remain in progress under the separate diagnostics unit.
+
+### Integration evidence
+
+Durable logs and results are under
+`C:/dev/scratch/pie-integration-verification-20260913-r03/` (`build-validate.log`,
+`root-default-affected.log`, `final-handoff.json`, and the earlier shutdown-fix checkpoint).
+This source-only milestone is bounded for the authorized scoped commit; build/test green does not
+imply activation or qualification.
+
+---
+## Checkpoint 43 — 2026-09-12T11:45Z, isolated recovery/UI preflight boundary
+
+**State: active fresh Codex goal; user asleep, no interrupting action permitted.** The live VS Code
+host and Codex supervisor remain untouched. No repository build, npm install, publication, runtime
+activation, cutover, session closure or live-data mutation occurred in this unit. A bounded source
+unit now wires the canonical backend descriptor and worker capture ingress through the host/backend/
+worker chain; focused parser, client, and retained-transport restart tests plus extension typecheck
+pass. The current
+checkout is at `master` @ `3ec17a77464b7239e708cdf5d9c3a86aa6e515e4`; the existing stash and protected
+configuration/model files remain preserved. Current writer ownership is the two Luna tracks: activation
+admission and endurance. The handoff records the 53 DeepSeek commits to `3ec17a77` as supplied by the
+active goal context.
+
+### Qualification and implementation boundary
+
+The `pie-p0-scale-verify-20260912-r08` result is **scenario-only**: the 1M scenario passed with the
+non-default `PIE_ANALYTICS_P0_RECORDER_HEAP_MB=128` ceiling. It is not full P0 qualification. The
+audited gaps remain arbitrary-evidence handling, activation qualification, historical reads, and
+cutoff coordination. The backend descriptor source gap is closed for this bounded unit, but it has
+not been built, loaded, or exercised under a live canonical activation. The r04 activation rehearsal
+remains synthetic: empty inventory, no restart, and `loadedGenerationId: null`.
+
+### Live and isolated runtime evidence
+
+The live topology is `Code.exe` PID `37056` → utility `Code.exe` PID `26828` → `codex.exe` PID
+`40940`. PID `26828` owns `127.0.0.1:1997`. Its live lease proves installed generation
+`84e4356f…`, build `2674553cd8bc69e0ab53`, is loaded. Repository `extension/out` has newer build
+`fdeae41fd7c3c14ce068` but no immutable selection, so it is not loaded. Read-only `GET /health` and
+`GET /` on 1997 returned 200 and served renderer assets matching generation `84e4356f…`.
+
+The isolated copy and scratch agent roots are under
+`C:/dev/scratch/pie-overnight-recovery-preflight-20260912-r01/ui-isolated/`; no auth file was copied.
+The first hidden launch wrapper exited before producing a child Code process or port 2997. One
+corrective wrapper retry also produced no isolated process, listener, or user-data log. Therefore
+isolated restart/recovery and new-source UI behavior remain unverified; only the concrete preparation
+procedure and failure boundary are recorded. The current host and port 1997 remain alive.
+
+Detailed sanitized evidence: `C:/dev/scratch/pie-overnight-recovery-preflight-20260912-r01/` (`baseline.json`,
+`process-runtime.json`, `ui-ingress.json`, `r04-limitations.json`, `isolated-smoke.json`,
+`recommended-next-unit.md`). Source validation: focused `rpc.test.ts`, `backend-client.test.ts`,
+`analytics-transport.test.ts`, and `backend-analytics-activation.test.ts` (69 passing tests);
+`npm.cmd run extension:typecheck` passes.
+
+### Next executable unit
+
+Diagnose the isolated VS Code launch boundary using only the existing scratch wrapper/copy, then retry
+the isolated process once only if its executable invocation is corrected without touching the live host.
+If it starts, verify its own PID ancestry, port 2997, packaged/source build identity, `/health`, `/`,
+and no-spend UI controls; restart only that owned process tree and verify it returns. Do not infer
+automatic recovery of PID 40940 from this test. Keep analytics activation, storage cutoff, and any
+live Pie session disposal closed until the missing qualification and cutover evidence are complete.
+
+---
+
 ## Checkpoint 1 — 2026-09-09T10:4xZ, bounded preflight (this session)
 
 **State: PREFLIGHT COMPLETE. Execution not started. No product code changed. Working tree clean.**
@@ -3480,10 +3578,27 @@ the matched analytics-disabled agent/UI baseline, incremental host memory and qu
 schema-v2 upgrade plus partial-write faults. Those are the remaining P0 workloads, and this single
 `scenario-passed` result is not a claim about them.
 
+## Endurance follow-on evidence: `pie-p0-endurance-full-20260912-r01`
 
+The independent endurance scenario completed six fresh-database trials under the production-default
+recorder heap: two 1 fact/s trials lasting at least 300 seconds, and two 50 fact/s trials at each of
+1 host and 4 hosts with 10,000 accepted samples per trial. All six ended with an empty backlog and
+continuous worker RSS, heap total/used, external and array-buffer high-water telemetry for every
+recorded worker. Recomputed offered rates were 1.0033/1.0033 fact/s for the light trials and
+50.0045/50.0028 fact/s (1 host), 50.0011/50.0041 fact/s (4 hosts), within the 2% pacing tolerance.
 
+The immutable original report is
+`C:\dev\scratch\pie-p0-endurance-full-20260912-r01\endurance.json`, SHA-256
+`1ac2c8d5f5bdf517359748610689c3b61257539914349ac3b8df2ad77e42bd20`, with launch provenance at
+commit `3ec17a77464b7239e708cdf5d9c3a86aa6e515e4` and its recorded artifact fingerprint. The
+hash-bound adjunct
+`C:\dev\scratch\pie-p0-endurance-full-20260912-r01\endurance-adjunct.json` verifies all 12
+worker identities and records post-hoc process absence. The run metadata recorded a null child exit
+code; the adjunct deliberately makes no exit-code or signal claim. The scratch deadline wrapper was
+corrected to refresh the process object before recording a future exit code; that correction does not
+rewrite the historical metadata.
 
-
-
-
-
+This evidence remains **P0-unqualified overall**. It measures the endurance harness's fresh database
+and generated payload mix, not the r08 1M-row history, richer payload distribution, mixed/UI workload,
+schema-v2 faults, or 10M tier. Smoke mode is scheduling/report-mechanics coverage only and cannot
+replace these full trials. Missing gates remain explicitly unqualified.
