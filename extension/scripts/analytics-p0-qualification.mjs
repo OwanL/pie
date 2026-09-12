@@ -1362,13 +1362,37 @@ try {
     timeoutMs: 10_000,
     onWorkerLifecycle: (event) => queryWorkerLifecycle.push(structuredClone(event)),
   });
-  const boundedQuery = await queryClient.query({ type: 'providerSettlements' });
+  // Attribute each worker-query duration so a timeout names its own request
+  // instead of leaving the failing step to inference. A rejected request is
+  // recorded before it propagates.
+  const workerQueryTimings = [];
+  // Attach the live array to the report immediately: if a query rejects, the
+  // failure path still publishes every timing recorded up to and including the
+  // failing request, so a timeout names its own step.
+  report.results.workerQueryTimings = workerQueryTimings;
+  const timedWorkerQuery = async (label, request) => {
+    const started = performance.now();
+    try {
+      const result = await queryClient.query(request);
+      workerQueryTimings.push({ label, ms: performance.now() - started, outcome: 'resolved' });
+      return result;
+    } catch (error) {
+      workerQueryTimings.push({
+        label,
+        ms: performance.now() - started,
+        outcome: 'rejected',
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
+  };
+  const boundedQuery = await timedWorkerQuery('boundedProviderSettlements', { type: 'providerSettlements' });
   assert.equal(boundedQuery.settlements.length, Math.min(200, Math.ceil(matrix.facts.rows / 4)));
   await assert.rejects(
-    queryClient.query({ type: 'providerSettlements', maxResultBytes: 1 }),
+    timedWorkerQuery('oversizeResultRejection', { type: 'providerSettlements', maxResultBytes: 1 }),
     /exceeds 1 bytes/,
   );
-  const defaultDetailRange = await queryClient.query({
+  const defaultDetailRange = await timedWorkerQuery('detailDefaultRange', {
     type: 'detail', payloadId: largeDetailId,
   });
   assert.equal(defaultDetailRange.bytes.byteLength, 64 * 1024);
@@ -1376,7 +1400,7 @@ try {
   const detailParts = [];
   let detailOffset = 0;
   do {
-    const part = await queryClient.query({
+    const part = await timedWorkerQuery(`detailChunkWalk:${detailOffset}`, {
       type: 'detail',
       payloadId: largeDetailId,
       offset: detailOffset,
@@ -1388,18 +1412,18 @@ try {
   } while (detailOffset !== null);
   const explicitLargeDetail = deserialize(Buffer.concat(detailParts));
   assert.equal(explicitLargeDetail.messages[0].content[0].text.length, 2 * 1024 ** 2);
-  const schemaDescription = await queryClient.query({ type: 'schema' });
+  const schemaDescription = await timedWorkerQuery('schema', { type: 'schema' });
   assert.equal(schemaDescription.databaseSchemaVersion, 4);
-  const logicalQuery = await queryClient.query({
+  const logicalQuery = await timedWorkerQuery('logicalCount', {
     type: 'query',
     sql: 'SELECT COUNT(*) AS count FROM analytics_provider_usage_v1',
   });
   assert.equal(logicalQuery.rows[0].count, Math.ceil(matrix.facts.rows / 4));
   await assert.rejects(
-    queryClient.query({ type: 'query', sql: 'DELETE FROM analytics_observations' }),
+    timedWorkerQuery('mutationRejection', { type: 'query', sql: 'DELETE FROM analytics_observations' }),
     /not authorized/,
   );
-  const storageQuery = await queryClient.query({ type: 'storage' });
+  const storageQuery = await timedWorkerQuery('storage', { type: 'storage' });
   assert.equal(storageQuery.storage.payloadCount, matrix.detail.total + 3);
   const cancelController = new AbortController();
   const cancelStarted = performance.now();
@@ -1420,6 +1444,7 @@ try {
     defaultRowLimit: boundedQuery.settlements.length,
     defaultResultBytes: 256 * 1024,
     defaultDetailRangeBytes: defaultDetailRange.bytes.byteLength,
+    workerQueryTimings,
     logicalCommands: schemaDescription.logicalCommands,
     nativeReadOnlyMutationDenied: true,
     snapshotWatermark: logicalQuery.snapshotWatermark,

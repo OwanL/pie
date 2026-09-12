@@ -2256,3 +2256,114 @@ deleted or cut over; the four user-owned model/settings files and `stash@{0}` re
    `p4-terminal-reconciliation.test.ts`), so bounding it is a contract decision, not a one-line change.
 4. After those repairs: validation → attestation → 10k baseline → 1M admission → 1M workload, then the
    remaining P0 follow-on workloads and the P4/P7 cutover units.
+
+### Checkpoint 28: read-path costs measured; the query timeout is not yet reproduced
+
+Two scratch-only diagnostics (no repository source change) measured the committed candidate
+`a0b1b009` / build `03607185be5a983ec979` at a synthetic 1M facts + 100,003 details
+(`pie-query-cost-diagnostic-20260912-r01`, `pie-query-client-timeout-20260912-r01`; both removed their
+proof roots).
+
+**Confirmed and attributable:**
+- `projectProviderUsage()` → `readProviderSettlements()` with **no limit** is an unbounded `SELECT *`
+  over 250,000 settlements: p50 `4,478` ms, **p95 `5,009` ms**, max `5,009` ms. Bounding the same
+  query to `LIMIT 200` costs only `322` ms. The `ORDER BY CAST(projection_revision AS INTEGER),
+  generation_id, invocation_id` yields `SCAN` + `USE TEMP B-TREE FOR ORDER BY` whether or not a limit
+  is applied, so the ordering cannot use an index and the limit is applied only after the full sort.
+  This is a genuine read-path cost at 1M and should be repaired.
+- `MAX(commit_sequence)` (`SEARCH analytics_observations`) is `0.0` ms — the watermark preamble is
+  **not** a cost, ruling that hypothesis out.
+- The four dimension aggregates are `0.2` ms at the native level (`COVERING INDEX`), and the full
+  `readHistoricalDimensionSummary()` is `28` ms. The `3,800` ms seen in the 1M run was therefore
+  contention noise from the concurrent workload, not intrinsic query cost.
+- The representative-query budget is **not** enforced for the all-history projection or the dimension
+  summary: only `largeDetailQuery` is gated. The projection's p95 landing just inside 9 s in the run
+  was a coincidence of the gate's absence, not a pass.
+
+**Not reproduced — do not attribute yet:** the `Analytics query timed out after 10000ms` failure did
+**not** reproduce in isolation. Against a settled 1M-fact + 100,003-detail database the real
+`AnalyticsQueryClient` resolved every step well inside the 10 s default: schema `403` ms, bounded
+`providerSettlements` `362` ms, second bounded query `375` ms, `historicalDimensions` `87` ms, logical
+count `413` ms, `storage` `2,074` ms, default 64 KiB detail range `404` ms, full chunked 2 MiB detail
+walk `2,112` ms; total `6,232` ms. Worker spawn→ready was `43` ms. The failure is therefore either
+load-dependent (query issued while the recorder/detail helpers were active, as the 1M run did) or
+belongs to a step that only executes in the full harness. The harness now records a
+`workerQueryTimings` array — attached to the report before the first request so a rejection still
+publishes every timing up to and including the failing step — so the next 1M run will name the step
+instead of leaving it to inference.**Root cause of the timeout remains open.**
+
+### Checkpoint 29: recorder RSS growth isolated to per-payload v8 (de)serialization
+
+A controlled matrix (`pie-detail-rss-diagnostic-20260912-r01`, `pie-native-micro-20260912-r01`,
+`pie-pragma-rss-diagnostic-20260912-r01`, `pie-tx-rss-diagnostic-20260912-r01`; all scratch-only,
+scoped to `a0b1b009`) isolates the `recorderWorkerRss` failure. Each configuration runs in its own
+process against a disposable database.
+
+| Configuration | Payloads | Logical bytes | Peak RSS |
+|---|---|---|---|
+| `rejected` (validation runs, zero inserts) | 100,000 | 6 MB | 115 MB |
+| `bytes-64` (64-byte payloads, inserted) | 100,000 | 6 MB | 212 MB |
+| `tiny` (2 KiB) | 100,000 | 195 MB | 307 MB |
+| `tiny-dedup` (2 KiB, one shared content row) | 100,000 | 195 MB | 305 MB |
+| `medium` (32 KiB) | 5,000 | 156 MB | 280 MB |
+| `large` (2 MiB) | 100 | 200 MB | 194 MB |
+| `mixed` (the harness mixture) | 100,000 | 539 MB | 348 MB |
+
+**Findings (each rules out a hypothesis):**
+1. **Not the payload bytes.** `bytes-64` inserts 6 MB of payload and still reaches 212 MB, while
+   `large` moves 200 MB and reaches only 194 MB. RSS tracks **payload count**, not volume.
+2. **Not retained recorder/JS state.** Samples taken after forced GC keep `heapUsed` at ~7 MB while
+   RSS climbs to 261 MB (`mixed`), so the growth is native/off-heap, not JS garbage or a JS-resident
+   map. `external` and `arrayBuffers` stay at ~2 MB and 0 MB.
+3. **Not SQLite cache or mmap.** A raw `node:sqlite` database under the recorder's exact pragmas
+   (`WAL`, `synchronous = FULL`, `secure_delete = ON`), same 100,000×2 KiB volume and same 398 MB
+   database, peaks at **58 MB**. Default `cache_size` is already `-2000` (2 MB) and `mmap_size` is
+   already `0`; forcing `cache_size = 2000` moved RSS *up* to 65 MB. Neither setting is the driver.
+4. **Not commit granularity.** The same raw workload with one commit per row (vs. batched) peaked at
+   57 MB with the same database file, so per-payload transactions are not the driver.
+5. **Prime suspect: `node:v8` (de)serialization.** Micro-isolating the recorder's per-payload native
+   work over 100,000 iterations with forced GC, flat heap throughout: `Buffer.from` `50` MB, sha256
+   digest `51` MB, `serialize` `74` MB, and **`deserialize` `98` MB** — both v8 operations grow
+   monotonically while crypto and buffer paths stay flat. The ingest path calls
+   `deserialize(Buffer.from(capture.bytes))` per detail at `sqlite-recorder.ts:2092`, and the worker
+   entry performs a **double round-trip**, `deserialize` → `sanitizeAnalyticsDetail` → `serialize`,
+   before `submitDetail` (`recorder-worker-entry.ts:196-197`). At the measured ~1 KB per
+   deserialize iteration, 100,000 details accounts for roughly the observed growth.
+6. The growth is **not linear**: `deserialize` plateaus at ~104 MB between 200,000 and 400,000
+   iterations, so this is a bounded native allocator high-water rather than an unbounded leak. Whether
+   the recorder path also plateaus (and at what level relative to the 256 MiB gate) is still being
+   measured at 200,000 and 400,000 payloads; the answer decides whether the repair is "reduce
+   per-payload native churn" or "the gate needs a justified ceiling".
+
+**Consequence for the gate.** `recorderWorkerRss` is currently defined per *worker process* during
+ordinary ingestion (≤ 256 MiB). The evidence shows the peak is a function of (a) how many detail
+payloads a single recorder helper ingests and (b) per-payload v8 native churn — not of history size,
+schema, cache configuration or payload volume. The repair direction is to remove redundant
+serialization round-trips from the capture path before considering any gate change; changing the gate
+without that repair would hide real native churn.
+
+**The serialization chain (traced, source evidence).** Each detail payload currently passes through v8
+serialization/deserialization up to four times on one hop:
+
+1. `canonical-capture.ts:376` — producer runs `serialize(sanitizeAnalyticsDetail(...))` to build
+   `capture.bytes`.
+2. `recorder-supervisor.ts:541` — the supervisor re-serializes the whole envelope with
+   `serialize({ kind, subject, value })` for transport, i.e. it serializes bytes that are already
+   serialized.
+3. `recorder-worker-entry.ts:196` — the worker runs
+   `sanitizeAnalyticsDetail(deserialize(Buffer.from(detail.bytes)))`, adding a *second* sanitize pass
+   over content already sanitized at the producer.
+4. `recorder-worker-entry.ts:197` — the worker re-serializes that result back into `bytes` before
+   handing it to `submitDetail`, which then runs `deserialize(Buffer.from(capture.bytes))` a second
+   time at `sqlite-recorder.ts:2092` to build its content-addressed manifest.
+
+Steps 3–4 are a redundant round-trip: the worker deserializes, re-sanitizes and re-serializes purely
+to pass the same value one call deeper, where it is deserialized again. Removing that round-trip is the
+scoped repair candidate; it preserves the worker-side exclusion guarantee as long as the single
+surviving sanitize boundary is the last one before the manifest/digest/WAL writer, which the
+`recorder-worker-entry` comment already identifies as its intent. This is a correctness-sensitive
+change (it moves which layer owns the final exclusion) and needs focused privacy tests, not just a
+memory measurement.
+
+P0 remains unqualified; the 1M tier remains failed on `recorderWorkerRss` and the unresolved
+`inPlaceCorruption` timeout.
