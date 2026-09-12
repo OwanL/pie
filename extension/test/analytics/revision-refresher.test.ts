@@ -7,7 +7,7 @@ function fakeReadModel(values: Array<string | Error>) {
   let index = 0;
   return {
     calls: 0,
-    readRevision(): Promise<string> {
+    readRevision(_signal?: AbortSignal): Promise<string> {
       this.calls += 1;
       const value = values[Math.min(index, values.length - 1)];
       index += 1;
@@ -90,6 +90,39 @@ test('stop is terminal and releases the timer', async () => {
   await wait(300);
   assert.equal(model.calls, callsAtStop, 'no checks may occur after stop');
   await assert.rejects(() => refresher.start(), /stopped/);
+});
+
+test('stop aborts and drains an in-flight revision read before teardown', async () => {
+  let started = false;
+  let aborted = false;
+  let resolveRead: ((value: string) => void) | undefined;
+  const model = {
+    readRevision(signal?: AbortSignal): Promise<string> {
+      started = true;
+      return new Promise<string>((resolve, reject) => {
+        resolveRead = resolve;
+        signal?.addEventListener('abort', () => {
+          aborted = true;
+          reject(signal.reason ?? new Error('aborted'));
+        }, { once: true });
+      });
+    },
+  };
+  const changes: string[] = [];
+  const refresher = new CanonicalRevisionRefresher({
+    readModel: model as any,
+    onRevisionChange: (revision) => changes.push(revision),
+    intervalMs: 100,
+  });
+  const start = refresher.start();
+  while (!started) await new Promise<void>((resolve) => setImmediate(resolve));
+  const drain = refresher.stop();
+  await drain;
+  resolveRead?.('1');
+  await start;
+  assert.equal(aborted, true, 'stop must abort the helper read');
+  assert.deepEqual(changes, [], 'a stopped read must not notify its owner');
+  assert.equal(refresher.getStats().checks, 0, 'an aborted read is not a completed check');
 });
 
 test('rejects a poll interval below the floor', () => {

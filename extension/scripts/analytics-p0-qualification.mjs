@@ -28,6 +28,17 @@ import {
   recomputeEnduranceTrialPacing,
   validateEnduranceTrials,
 } from './analytics-p0-endurance-validation.mjs';
+import {
+  MIXED_FULL_PLAN,
+  MIXED_SMOKE_PLAN,
+  summarizeMixedTimingSamples,
+  validateMixedEvidence,
+  validateQueryLifecycleReceipts,
+} from './analytics-p0-mixed-validation.mjs';
+import {
+  startWindowsProcessHandleCollector,
+  validateWindowsProcessEvidence,
+} from './windows-process-handle-collector.mjs';
 
 const extensionRoot = path.resolve(import.meta.dirname, '..');
 const repositoryRoot = path.resolve(extensionRoot, '..');
@@ -37,6 +48,7 @@ const queryWorkerScript = path.join(outRoot, 'analytics-query-worker.js');
 const REPORT_SCHEMA_VERSION = 5;
 const HARNESS_VERSION = 'p0-baseline-scale-v7-recorder-heap-ceiling';
 const ENDURANCE_HARNESS_VERSION = `${HARNESS_VERSION}-endurance-v1`;
+const MIXED_HARNESS_VERSION = `${HARNESS_VERSION}-mixed-v2-native-process-handle`;
 let AnalyticsRecorderSupervisor;
 let AnalyticsCaptureCapacityError;
 let SqliteAnalyticsRecorder;
@@ -44,7 +56,7 @@ let AnalyticsQueryClient;
 
 function parseArguments(argv) {
   const options = { scenario: 'baseline', rows: undefined, seed: undefined, report: undefined, baselineReport: undefined, validate: false, smoke: false };
-  const allowedScenarios = new Set(['baseline', 'scale', 'endurance']);
+  const allowedScenarios = new Set(['baseline', 'scale', 'endurance', 'mixed']);
   const seen = new Set();
   for (let index = 0; index < argv.length; index++) {
     const argument = argv[index];
@@ -74,8 +86,8 @@ function parseArguments(argv) {
     }
     throw new Error(`Unsupported or ambiguous option: ${argument}`);
   }
-  if (!allowedScenarios.has(options.scenario)) throw new Error(`Unsupported P0 scenario: ${options.scenario}; use baseline, scale, or endurance`);
-  if (options.smoke && options.scenario !== 'endurance') throw new Error('--smoke is valid only for the endurance scenario');
+  if (!allowedScenarios.has(options.scenario)) throw new Error(`Unsupported P0 scenario: ${options.scenario}; use baseline, scale, endurance, or mixed`);
+  if (options.smoke && options.scenario !== 'endurance' && options.scenario !== 'mixed') throw new Error('--smoke is valid only for the endurance or mixed scenario');
   if (options.scenario === 'endurance' && options.rows !== undefined) throw new Error('--rows is not valid for the endurance scenario');
   const environmentRows = process.env.PIE_ANALYTICS_P0_ROWS;
   const rowText = options.scenario === 'endurance' ? '10000' : options.rows ?? environmentRows ?? (options.scenario === 'scale' ? '1000000' : '10000');
@@ -106,8 +118,8 @@ function parseArguments(argv) {
   if (process.env.PIE_ANALYTICS_P0_ENDURANCE === '1') {
     throw new Error('PIE_ANALYTICS_P0_ENDURANCE is no longer an execution switch; use --scenario endurance [--smoke]');
   }
-  if (options.scenario === 'endurance' && !options.smoke && process.env.PIE_ANALYTICS_P0_RECORDER_HEAP_MB !== undefined) {
-    throw new Error('full endurance requires the production-default recorder heap; unset PIE_ANALYTICS_P0_RECORDER_HEAP_MB');
+  if ((options.scenario === 'endurance' || options.scenario === 'mixed') && !options.smoke && process.env.PIE_ANALYTICS_P0_RECORDER_HEAP_MB !== undefined) {
+    throw new Error(`full ${options.scenario} load requires the production-default recorder heap; unset PIE_ANALYTICS_P0_RECORDER_HEAP_MB`);
   }
   return {
     scenario: options.scenario,
@@ -121,7 +133,9 @@ function parseArguments(argv) {
 }
 
 const configuration = parseArguments(process.argv.slice(2));
-const activeHarnessVersion = configuration.scenario === 'endurance' ? ENDURANCE_HARNESS_VERSION : HARNESS_VERSION;
+const activeHarnessVersion = configuration.scenario === 'endurance'
+  ? ENDURANCE_HARNESS_VERSION
+  : configuration.scenario === 'mixed' ? MIXED_HARNESS_VERSION : HARNESS_VERSION;
 const requestedRows = configuration.rows;
 const scopedId = (value) => `${configuration.seed}-${value}`;
 const requestedDetail = Math.floor(requestedRows / 10);
@@ -130,18 +144,38 @@ const detailCounts = {
   '32KiB': Math.floor(requestedDetail * 0.049),
   '2MiB': requestedDetail - Math.floor(requestedDetail * 0.95) - Math.floor(requestedDetail * 0.049),
 };
+const mixedMatrixRows = configuration.scenario === 'mixed'
+  ? (configuration.smoke ? MIXED_SMOKE_PLAN.fixtureRows : requestedRows)
+  : requestedRows;
+const mixedPlanForMatrix = configuration.smoke ? MIXED_SMOKE_PLAN : MIXED_FULL_PLAN;
+const mixedMatrixHosts = configuration.scenario === 'mixed'
+  ? [mixedPlanForMatrix.hostCount]
+  : [1, 2, 4];
 const matrix = {
   scenario: configuration.scenario,
   fixtureSeed: configuration.seed,
-  facts: { rows: configuration.scenario === 'endurance' ? null : requestedRows, producerHosts: [1, 2, 4], measuredHosts: 4, modelsProviders: 12 },
+  facts: {
+    rows: configuration.scenario === 'endurance' ? null : mixedMatrixRows,
+    producerHosts: mixedMatrixHosts,
+    measuredHosts: configuration.scenario === 'endurance' ? 4 : mixedMatrixHosts.length === 1 ? mixedMatrixHosts[0] : 4,
+    modelsProviders: 12,
+  },
   detail: configuration.scenario === 'endurance'
     ? { total: null, sizes: {}, nestedDepth: 0 }
+    : configuration.scenario === 'mixed'
+      ? { total: 1, sizes: { '32KiB': 1 }, nestedDepth: 1 }
     : { total: requestedDetail, sizes: detailCounts, nestedDepth: 2 },
   load: configuration.scenario === 'endurance'
     ? ['two independent 1 fact/s light trials (>=300 seconds each)', 'two independent 50 fact/s sustained trials at each of 1 and 4 hosts (>=10,000 samples each)']
-    : [`${requestedRows} finite burst`, 'four concurrent producer helpers'],
-  reads: configuration.scenario === 'endurance' ? [] : ['single-session indexed count', 'all-history provider projection x10', 'small/2MiB detail reconstruction'],
-  lifecycle: configuration.scenario === 'endurance' ? ['fresh database/helper per trial'] : ['clean helper restart x3', 'private delete racing late detail from another helper'],
+    : configuration.scenario === 'mixed'
+      ? [`${mixedPlanForMatrix.paced.ratePerSecond} fact/s paced ingestion concurrent with one broad scan and repeated indexed lookups`, `${mixedPlanForMatrix.burst.ratePerSecond} fact/s ${configuration.smoke ? 'short' : 'five-second'} burst`, 'multi-query saturation cancellation']
+      : [`${requestedRows} finite burst`, 'four concurrent producer helpers'],
+  reads: configuration.scenario === 'endurance' ? [] : configuration.scenario === 'mixed'
+    ? ['one bounded broad scan', 'ten individual indexed lookups', 'full detail reconstruction']
+    : ['single-session indexed count', 'all-history provider projection x10', 'small/2MiB detail reconstruction'],
+  lifecycle: configuration.scenario === 'endurance' ? ['fresh database/helper per trial'] : configuration.scenario === 'mixed'
+    ? ['non-writing refresh after commit and delete', 'terminal recorder/query worker cleanup']
+    : ['clean helper restart x3', 'private delete racing late detail from another helper'],
   bounds: { minUnusedDiskBytes: 20 * 1024 ** 3, maxTemporaryBytes: 16 * 1024 ** 3, maxQueueBytes: 64 * 1024 ** 2 },
   intentionallyNotClaimed: [
     ...(configuration.scenario !== 'scale' ? ['1M rows'] : []),
@@ -149,7 +183,8 @@ const matrix = {
     ...(configuration.scenario === 'endurance' && configuration.smoke
       ? ['five-minute light load and repeated sustained-load processes']
       : []),
-    'mixed load, schema-v2/partial-write, and the broader fault matrix',
+    ...(configuration.scenario !== 'mixed' ? ['mixed load'] : []),
+    'schema-v2/partial-write, and the broader fault matrix',
     'matched analytics-disabled/enabled agent and live VS Code UI baseline',
   ],
 };
@@ -589,6 +624,480 @@ async function runEnduranceScenario() {
   report.status = 'passed';
 }
 
+async function runMixedIngest(hosts, label, offset, ratePerSecond, sampleCount, targetDurationMs = null) {
+  const startedAt = performance.now();
+  const handoffMs = [];
+  let peakBacklogRecords = 0;
+  let peakBacklogBytes = 0;
+  for (let index = 0; index < sampleCount; index += 1) {
+    const targetAt = startedAt + (index * 1_000 / ratePerSecond);
+    const delay = targetAt - performance.now();
+    if (delay > 1) await new Promise((resolve) => setTimeout(resolve, delay));
+    const hostIndex = index % hosts.length;
+    const submitStarted = performance.now();
+    hosts[hostIndex].submit(observation(offset + index, hostIndex, Math.floor((offset + index) / hosts.length) + 1));
+    handoffMs.push(performance.now() - submitStarted);
+    peakBacklogRecords = Math.max(peakBacklogRecords, ...hosts.map((host) => host.backlog.queuedRecords + host.backlog.inFlightRecords));
+    peakBacklogBytes = Math.max(peakBacklogBytes, ...hosts.map((host) => host.backlog.queuedBytes + host.backlog.inFlightBytes));
+    if (index % 1_000 === 999) checkResourceEnvelope(`${label}-after-${index + 1}`);
+  }
+  const submissionElapsedMs = performance.now() - startedAt;
+  const drainStarted = performance.now();
+  await Promise.all(hosts.map((host) => host.flush()));
+  const drainMs = performance.now() - drainStarted;
+  const elapsedMs = performance.now() - startedAt;
+  return {
+    label,
+    ratePerSecond,
+    sampleCount,
+    ...(targetDurationMs === null ? {} : { targetDurationMs }),
+    submissionElapsedMs,
+    offeredRatePerSecond: sampleCount / (submissionElapsedMs / 1_000),
+    drainMs,
+    elapsedMs,
+    handoff: summarizeMixedTimingSamples(handoffMs.length >= 10 ? handoffMs : [...handoffMs, ...handoffMs].slice(0, 10)),
+    peakBacklogRecords,
+    peakBacklogBytes,
+  };
+}
+
+function groupQueryLifecycleEvents(events) {
+  const grouped = new Map();
+  for (const event of events) {
+    const key = `${event.clientId}:${event.requestId}`;
+    const receipt = grouped.get(key) ?? {
+      clientId: event.clientId,
+      requestId: event.requestId,
+      events: [],
+    };
+    receipt.events.push(event);
+    grouped.set(key, receipt);
+  }
+  return [...grouped.values()].sort((left, right) => (
+    left.clientId.localeCompare(right.clientId) || left.requestId - right.requestId
+  ));
+}
+
+async function runMixedScenario() {
+  const smoke = configuration.smoke;
+  const plan = smoke ? MIXED_SMOKE_PLAN : MIXED_FULL_PLAN;
+  const database = databasePath;
+  // Qualification-only Windows instrumentation. It is initialized before
+  // any workload child is spawned; its callbacks only enqueue bounded NDJSON
+  // and never participate in query admission or completion.
+  const nativeCollector = await startWindowsProcessHandleCollector({
+    expectedImagePath: process.execPath,
+    maxRequests: 64,
+    maxActiveHandles: 32,
+    maxDurationMs: smoke ? 30_000 : 600_000,
+  });
+  let nativeCollectorStopped = false;
+  const delivery = { rows: 0, bytes: 0 };
+  const hosts = Array.from({ length: plan.hostCount }, () => supervisor(database, {
+    maxBatchSize: 100,
+    onDeliveryAcknowledged: (measurement) => {
+      delivery.rows += measurement.records;
+      delivery.bytes += measurement.bytes;
+    },
+  }));
+  const queryWorkerLifecycle = [];
+  const queryLifecycleEvents = [];
+  const queryTimings = [];
+  const topologySamples = [];
+  const hostRssBefore = process.memoryUsage().rss;
+  const hostProcessCpuBefore = process.cpuUsage();
+  let hostRssPeak = hostRssBefore;
+  const workerStatsBefore = [];
+  const sampleTopology = async (label) => {
+    hostRssPeak = Math.max(hostRssPeak, process.memoryUsage().rss);
+    const stats = await Promise.all(hosts.map((host) => host.workerStats()));
+    hostRssPeak = Math.max(hostRssPeak, process.memoryUsage().rss);
+    const workers = stats.map((entry) => ({
+      identity: {
+        pid: entry.process.workerIdentity.pid,
+        spawnedAtMs: entry.process.workerIdentity.spawnedAtMs,
+        instanceId: entry.process.workerIdentity.instanceId,
+      },
+      rssBytes: entry.process.rss,
+      heapTotalBytes: entry.process.heapTotal,
+      heapUsedBytes: entry.process.heapUsed,
+      externalBytes: entry.process.external,
+      arrayBuffersBytes: entry.process.arrayBuffers,
+      cpuUsage: entry.process.cpuUsage,
+    }));
+    topologySamples.push({
+      label,
+      observedAt: new Date().toISOString(),
+      hostProcessRssBytes: hostRssPeak,
+      workers,
+      totalWorkerRssBytes: workers.reduce((sum, worker) => sum + worker.rssBytes, 0),
+      maxWorkerRssBytes: Math.max(...workers.map((worker) => worker.rssBytes)),
+    });
+    return stats;
+  };
+  await Promise.all(hosts.map((host) => host.start()));
+  const initialStats = await sampleTopology('started');
+  workerStatsBefore.push(...initialStats);
+  const memorySampler = startWorkerMemorySampler(hosts, 'mixed');
+  let samplerStopped = false;
+  const queryClient = new AnalyticsQueryClient({
+    databasePath: database,
+    workerScript: queryWorkerScript,
+    timeoutMs: 10_000,
+    maxConcurrentQueries: 2,
+    // One broad scan plus ten indexed requests are intentionally admitted as
+    // a bounded batch. Saturation cancellation uses a separate client below
+    // so this ordinary workload cannot hide its observed queue fence.
+    maxQueuedQueries: plan.indexedLookupCount + 4,
+    onWorkerLifecycle: (event) => queryWorkerLifecycle.push(structuredClone(event)),
+    onQueryLifecycle: (event) => {
+      const observed = structuredClone(event);
+      queryLifecycleEvents.push(observed);
+      if (observed.phase === 'spawned') nativeCollector.registerWorker(observed);
+      else if (observed.phase === 'terminal') nativeCollector.recordTerminal(observed);
+    },
+  });
+  const timedQuery = async (label, request, signal) => {
+    const started = performance.now();
+    try {
+      const result = await queryClient.query(request, signal);
+      queryTimings.push({ label, ms: performance.now() - started, outcome: 'resolved' });
+      return result;
+    } catch (error) {
+      queryTimings.push({
+        label,
+        ms: performance.now() - started,
+        outcome: 'rejected',
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
+  };
+  const saturationWorkerLifecycle = [];
+  const saturationLifecycleEvents = [];
+  const saturationQueryTimings = [];
+  const saturationQueryClient = new AnalyticsQueryClient({
+    databasePath: database,
+    workerScript: queryWorkerScript,
+    timeoutMs: 10_000,
+    maxConcurrentQueries: 2,
+    maxQueuedQueries: plan.saturationQueueCapacity,
+    onWorkerLifecycle: (event) => saturationWorkerLifecycle.push(structuredClone(event)),
+    onQueryLifecycle: (event) => {
+      const observed = structuredClone(event);
+      saturationLifecycleEvents.push(observed);
+      if (observed.phase === 'spawned') nativeCollector.registerWorker(observed);
+      else if (observed.phase === 'terminal') nativeCollector.recordTerminal(observed);
+    },
+  });
+  const timedSaturationQuery = (label, request, signal) => {
+    const started = performance.now();
+    // Attach the rejection handler in the same turn as submission. The
+    // bounded queue's capacity rejection can be synchronous enough for
+    // strict Node unhandled-rejection handling to run before allSettled is
+    // reached; the normalized outcome still records it as rejected below.
+    return saturationQueryClient.query(request, signal).then(
+      (result) => {
+        saturationQueryTimings.push({ label, ms: performance.now() - started, outcome: 'resolved' });
+        return { outcome: 'resolved', result };
+      },
+      (error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        saturationQueryTimings.push({ label, ms: performance.now() - started, outcome: 'rejected', error: message });
+        return { outcome: 'rejected', error };
+      },
+    );
+  };
+  let recorderMemory;
+  let queryTopology;
+  let acceptedRowsBeforeDetail = 0;
+  let acceptedBytesBeforeDetail = 0;
+  try {
+    for (let index = 0; index < plan.fixtureRows; index += 1) {
+      const hostIndex = index % hosts.length;
+      hosts[hostIndex].submit(observation(index, hostIndex, Math.floor(index / hosts.length) + 1));
+      if (index % 1_000 === 999) await new Promise((resolve) => setImmediate(resolve));
+    }
+    await Promise.all(hosts.map((host) => host.flush()));
+    await sampleTopology('after-fixture');
+    checkResourceEnvelope('mixed-after-fixture');
+
+    const broadScan = timedQuery('broadScan', {
+      type: 'query',
+      sql: 'SELECT root_session_id, entity_kind, observed_at_ms FROM analytics_observations ORDER BY observed_at_ms DESC LIMIT 250',
+      maxRows: 250,
+      maxQueryBytes: 128 * 1024,
+      maxResultBytes: 192 * 1024,
+    });
+    const indexedLookups = Promise.all(Array.from({ length: plan.indexedLookupCount }, (_, index) => timedQuery(
+      `indexedLookup:${index + 1}`,
+      {
+        type: 'query',
+        sql: 'SELECT COUNT(*) AS count FROM analytics_observations WHERE root_session_id = ?',
+        parameters: [scopedId(`root-${smoke ? 0 : index % 10}`)],
+        maxRows: 2,
+        maxResultBytes: 64 * 1024,
+      },
+    )));
+    const paced = runMixedIngest(hosts, 'mixed-paced', plan.fixtureRows + 1_000_000, plan.paced.ratePerSecond, plan.paced.sampleCount);
+    const [broadResult, indexedResults, pacedResult] = await Promise.all([broadScan, indexedLookups, paced]);
+    assert.ok(broadResult.returnedRows > 0, 'mixed broad scan must return rows');
+    assert.equal(indexedResults.length, plan.indexedLookupCount);
+    assert.ok(indexedResults.every((result) => result.rows?.[0]?.count > 0), 'mixed indexed lookups must find fixture roots');
+    const indexedTimings = queryTimings
+      .filter((entry) => entry.label.startsWith('indexedLookup:') && entry.outcome === 'resolved')
+      .map((entry) => entry.ms);
+
+    const burst = await runMixedIngest(hosts, 'mixed-burst', plan.fixtureRows + 2_000_000, plan.burst.ratePerSecond, plan.burst.sampleCount, plan.burst.durationMs);
+    await sampleTopology('after-burst');
+    checkResourceEnvelope('mixed-after-burst');
+    acceptedRowsBeforeDetail = delivery.rows;
+    acceptedBytesBeforeDetail = delivery.bytes;
+
+    const saturationControllers = Array.from({ length: plan.saturationQueryCount }, () => new AbortController());
+    const saturationStarted = performance.now();
+    const saturationSubmitted = saturationControllers.length;
+    const saturation = saturationControllers.map((controller, index) => timedSaturationQuery(
+      `saturation:${index + 1}`,
+      { type: 'qualificationSpin', iterations: 2_000_000_000 },
+      controller.signal,
+    ));
+    await waitFor(() => new Set(saturationWorkerLifecycle
+      .filter((event) => event.state === 'ready')
+      .map((event) => event.identity.instanceId)).size >= 2, 2_000);
+    await new Promise((resolve) => setImmediate(resolve));
+    setTimeout(() => saturationControllers.forEach((controller) => controller.abort(new Error('mixed saturation cancellation'))), smoke ? 20 : 100);
+    await Promise.all(saturation);
+    const saturationLifecycleValidation = validateTerminalWorkerEvidence(saturationWorkerLifecycle);
+    if (!saturationLifecycleValidation.valid) {
+      throw new Error(`mixed saturation worker lifecycle is invalid: ${saturationLifecycleValidation.errors.join('; ')}`);
+    }
+
+    const reconstructionHost = hosts[0];
+    const payloadId = 'mixed-full-reconstruction';
+    const reconstruction = detailCapture(payloadId, 'mixed-reconstruction-root', 32 * 1024);
+    reconstructionHost.submitDetail(reconstruction);
+    await reconstructionHost.flush();
+    const reconstructionReader = openReader(database);
+    const reconstructed = reconstructionReader.reconstructDetail(reconstruction.payloadId);
+    const metadata = reconstructionReader.detailMetadata(reconstruction.payloadId);
+    closeReader(reconstructionReader);
+    assert.equal(reconstructed.messages[0].content[0].text.length, 32 * 1024);
+    const detailRange = await timedQuery('fullDetailRange', {
+      type: 'detail',
+      payloadId: reconstruction.payloadId,
+      maxBytes: 64 * 1024,
+      maxResultBytes: 96 * 1024,
+    });
+
+    const refreshWriter = supervisor(database);
+    await refreshWriter.start();
+    const refreshRoot = scopedId('mixed-refresh-root');
+    const refreshFactIndex = plan.fixtureRows + 3_000_000;
+    const refreshObservationIndex = refreshFactIndex + ((4 - (refreshFactIndex % 4)) % 4);
+    const refreshObservation = observation(refreshObservationIndex, 0, Math.floor(refreshObservationIndex / hosts.length) + 1);
+    refreshObservation.scope.rootSessionId = refreshRoot;
+    refreshObservation.captureSubject.rootSessionId = refreshRoot;
+    refreshWriter.submit(refreshObservation);
+    await refreshWriter.flush();
+    const afterCommit = await timedQuery('refreshAfterCommit', { type: 'providerSettlements', rootSessionId: refreshRoot });
+    await refreshWriter.deleteSession(refreshRoot, scopedId('mixed-refresh-delete'), 1_780_300_000_000);
+    const afterDelete = await timedQuery('refreshAfterDelete', { type: 'providerSettlements', rootSessionId: refreshRoot });
+    await shutdownHelper(refreshWriter);
+    const finalStats = await sampleTopology('before-shutdown');
+    const recorderWorkerCpuDeltaMicros = finalStats.reduce((total, entry, index) => {
+      const before = workerStatsBefore[index].process.cpuUsage;
+      return total + entry.process.cpuUsage.user + entry.process.cpuUsage.system - before.user - before.system;
+    }, 0);
+    const hostProcessCpu = process.cpuUsage(hostProcessCpuBefore);
+    try {
+      recorderMemory = await memorySampler.stop();
+    } catch (error) {
+      recorderMemory = {
+        peakProven: false,
+        sampleCount: 0,
+        maxWorkerRssBytes: null,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+    samplerStopped = true;
+    const endingBacklogRecords = hosts.reduce((sum, host) => sum + host.backlog.queuedRecords + host.backlog.inFlightRecords, 0);
+    const endingBacklogBytes = hosts.reduce((sum, host) => sum + host.backlog.queuedBytes + host.backlog.inFlightBytes, 0);
+    const recorderTerminalEvidencePromise = shutdownHelpers(hosts);
+    await recorderTerminalEvidencePromise;
+    const recorderTerminalEvidence = requireTerminalWorkerEvidence(recorderWorkerLifecycle, 'mixed recorder');
+    const allQueryWorkerLifecycle = [...queryWorkerLifecycle, ...saturationWorkerLifecycle];
+    const queryWorkerLifecycleValidation = validateTerminalWorkerEvidence(allQueryWorkerLifecycle);
+    if (!queryWorkerLifecycleValidation.valid) {
+      throw new Error(`mixed query worker lifecycle is invalid: ${queryWorkerLifecycleValidation.errors.join('; ')}`);
+    }
+    const queryLifecycleReceipts = groupQueryLifecycleEvents([
+      ...queryLifecycleEvents,
+      ...saturationLifecycleEvents,
+    ]);
+    const queryLifecycleReceiptValidation = validateQueryLifecycleReceipts(queryLifecycleReceipts, { expected: plan });
+    if (!queryLifecycleReceiptValidation.valid) {
+      throw new Error(`mixed query lifecycle receipts are invalid: ${queryLifecycleReceiptValidation.errors.join('; ')}`);
+    }
+    const queryWorkerIdentities = queryLifecycleReceiptValidation.workerIdentities;
+    const queryProcessObservations = queryWorkerIdentities.map((identity) => {
+      let alive;
+      let error;
+      try {
+        alive = processIsAlive(identity.pid);
+      } catch (observationError) {
+        alive = true;
+        error = observationError instanceof Error ? observationError.message : String(observationError);
+      }
+      return {
+        identity,
+        processObservedAlive: alive,
+        observationKind: 'post-hoc-process-absence',
+        ...(error ? { error } : {}),
+      };
+    });
+    if (queryProcessObservations.length === 0 || queryProcessObservations.some((worker) => worker.processObservedAlive)) {
+      throw new Error('mixed query workers were not all observed absent after their requests settled');
+    }
+    const nativeProcessTelemetry = await nativeCollector.stop();
+    nativeCollectorStopped = true;
+    const nativeEvidenceValidation = nativeProcessTelemetry.enabled
+      ? validateWindowsProcessEvidence(nativeProcessTelemetry, queryWorkerIdentities)
+      : { valid: true, errors: [] };
+    if (!nativeEvidenceValidation.valid) {
+      throw new Error(`mixed native process evidence is invalid: ${nativeEvidenceValidation.errors.join('; ')}`);
+    }
+    queryTopology = {
+      hostPeakRssBytes: hostRssPeak,
+      hostCpuDeltaMicros: hostProcessCpu.user + hostProcessCpu.system,
+      recorderWorkerCpuDeltaMicros,
+      hostProcessCpuDeltaMicros: hostProcessCpu.user + hostProcessCpu.system,
+      queryWorkerRssBytes: null,
+      queryWorkerCpuDeltaMicros: null,
+      queryWorkerTelemetryAvailable: false,
+      queryWorkerTelemetry: queryLifecycleReceiptValidation.summary.queryWorkerTelemetry,
+      topologySamples,
+      note: 'Query-worker terminal telemetry is persisted per lifecycle receipt; forced cancellation has explicit null evidence, so whole-topology memory remains unqualified until every spawned worker has a valid terminal sample and IPC framing limits are addressed.',
+    };
+    report.results.mixed = {
+      mode: smoke ? 'smoke' : 'full',
+      fixtureRows: plan.fixtureRows,
+      hostCount: plan.hostCount,
+      productionDefaultRecorderHeap: report.environment.recorderHeapCeilingMb === null,
+      queryWorkerHeapCeilingMb: 192,
+      pacedIngest: pacedResult,
+      burstIngest: burst,
+      acceptedBytes: acceptedBytesBeforeDetail,
+      acceptedRows: acceptedRowsBeforeDetail,
+      endingBacklogRecords,
+      endingBacklogBytes,
+      broadScan: { completed: true, count: 1, returnedRows: broadResult.returnedRows, truncation: broadResult.truncation },
+      indexedLookups: {
+        count: indexedTimings.length,
+        timingsMs: indexedTimings,
+        summary: summarizeMixedTimingSamples(indexedTimings),
+      },
+      queryTimings,
+      querySaturation: {
+        requested: saturationSubmitted,
+        maxConcurrentQueries: plan.saturationMaxConcurrentQueries,
+        maxQueuedQueries: plan.saturationQueueCapacity,
+        observedMaxActiveWorkers: queryLifecycleReceiptValidation.summary.observedMaxActiveWorkers,
+        observedMaxQueuedQueries: queryLifecycleReceiptValidation.summary.observedMaxQueuedQueries,
+        queueCapacityReached: queryLifecycleReceiptValidation.summary.observedMaxQueuedQueries > 0,
+        capacityRejected: queryLifecycleReceiptValidation.summary.capacityRejected,
+        workerLifecycleComplete: saturationLifecycleValidation.valid && queryLifecycleReceiptValidation.valid,
+        rejected: queryLifecycleReceiptValidation.summary.saturationRejected,
+        resolved: queryLifecycleReceiptValidation.summary.saturationResolved,
+        unsettled: saturationSubmitted - queryLifecycleReceiptValidation.summary.saturationSettled,
+        completed: queryLifecycleReceiptValidation.summary.saturationSettled === saturationSubmitted,
+        elapsedMs: performance.now() - saturationStarted,
+        timings: saturationQueryTimings,
+      },
+      fullReconstruction: {
+        verified: true,
+        payloadId: reconstruction.payloadId,
+        payloadBytes: metadata?.logicalBytes ?? 0,
+        rangeBytes: detailRange.bytes.byteLength,
+      },
+      nonWritingRefresh: {
+        completed: true,
+        readerWriting: false,
+        afterCommitVisible: afterCommit.settlements.length === 1,
+        afterDeleteVisible: afterDelete.settlements.length !== 0,
+        afterCommitCount: afterCommit.settlements.length,
+        afterDeleteCount: afterDelete.settlements.length,
+      },
+      recorderMemory: {
+        ...recorderMemory,
+        peakProven: recorderMemory.peakProven !== false,
+        qualification: recorderMemory.peakProven === false ? 'unqualified' : 'measured-recorder-only',
+      },
+      queryHostTopology: queryTopology,
+      nativeProcessTelemetry,
+      candidateArtifacts: {
+        provenanceValid: report.provenance.valid,
+        gitHead: report.provenance.gitHead,
+        coordinatedBuildId: report.provenance.coordinatedBuildId,
+        fingerprint: report.provenance.fingerprint,
+        files: report.provenance.files,
+      },
+      terminalWorkers: {
+        complete: recorderTerminalEvidence.length > 0 && queryWorkerLifecycleValidation.valid
+          && queryLifecycleReceiptValidation.valid
+          && queryProcessObservations.every((worker) => !worker.processObservedAlive),
+        recorder: recorderTerminalEvidence,
+        query: queryWorkerIdentities,
+        queryLifecycle: queryLifecycleReceipts,
+        queryLifecycleComplete: queryLifecycleReceiptValidation.valid,
+        queryLifecycleErrors: queryLifecycleReceiptValidation.errors,
+        queryProcessObservations,
+      },
+    };
+    const validation = validateMixedEvidence(report.results.mixed, { mode: smoke ? 'smoke' : 'full' });
+    report.results.mixed.validation = validation;
+    if (!validation.valid) throw new Error(`mixed evidence validation failed: ${validation.errors.join('; ')}`);
+    if (smoke) {
+      recordUnqualified('mixedLoad', 'Short mixed smoke validates scheduling/report mechanics only; no P0 workload claim is made.');
+      recordUnqualified('mixedQueryCancellation', 'Short mixed smoke is explicitly unqualified.');
+      recordUnqualified('mixedCrossHostRefresh', 'Short mixed smoke is explicitly unqualified.');
+      recordUnqualified('mixedDetailReconstruction', 'Short mixed smoke is explicitly unqualified.');
+      recordUnqualified('mixedWorkerMemory', 'Whole-topology memory is unavailable; smoke is explicitly unqualified.');
+      report.qualification = {
+        scenario: 'mixed',
+        decision: 'scenario-passed',
+        failedGates: [],
+        overallP0: 'unqualified',
+        reason: 'Short mixed smoke validates mechanics only; it is not qualification evidence.',
+      };
+    } else {
+      const functional = recordGate('mixedLoad', validation.valid, 'paced ingest, broad scan, indexed lookups, burst, reconstruction, refresh, cancellation and terminal cleanup', (value) => value === true, {
+        acceptedRows: delivery.rows,
+        acceptedBytes: delivery.bytes,
+        validationErrors: validation.errors,
+      });
+      recordGate('mixedQueryCancellation', report.results.mixed.querySaturation.completed && report.results.mixed.querySaturation.rejected === plan.saturationQueryCount, 'all saturation queries must reject and settle', (value) => value === true);
+      recordGate('mixedCrossHostRefresh', report.results.mixed.nonWritingRefresh.afterCommitVisible && !report.results.mixed.nonWritingRefresh.afterDeleteVisible, 'read-only helper observes commit then delete', (value) => value === true);
+      recordGate('mixedDetailReconstruction', report.results.mixed.fullReconstruction.verified, 'full detail payload must reconstruct', (value) => value === true);
+      if (validation.memoryValid) recordGate('mixedWorkerMemory', true, 'continuous recorder and query-worker high-water RSS/CPU telemetry', (value) => value === true);
+      else recordUnqualified('mixedWorkerMemory', validation.memoryErrors.join('; '));
+      if (!functional) throw new Error('mixed functional qualification gate failed');
+      report.qualification = {
+        scenario: 'mixed',
+        decision: 'scenario-passed',
+        failedGates: [],
+        overallP0: 'unqualified',
+        reason: 'Mixed workload evidence is separate from the remaining P0, agent/UI and whole-topology memory gates.',
+      };
+    }
+    report.status = 'passed';
+  } finally {
+    if (!samplerStopped) await memorySampler.stop().catch(() => void 0);
+    if (!nativeCollectorStopped) await nativeCollector.stop().catch(() => void 0);
+    await shutdownHelpers(hosts).catch(() => void 0);
+  }
+}
+
 function proofTreeBytes(directory) {
   let total = 0;
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
@@ -690,6 +1199,9 @@ function artifactProvenance() {
     ['extension/out/analytics-query-worker.js', queryWorkerScript],
     ['extension/scripts/analytics-p0-qualification.mjs', path.join(extensionRoot, 'scripts', 'analytics-p0-qualification.mjs')],
     ['extension/scripts/analytics-p0-capacity.mjs', path.join(extensionRoot, 'scripts', 'analytics-p0-capacity.mjs')],
+    ['extension/scripts/analytics-p0-mixed-validation.mjs', path.join(extensionRoot, 'scripts', 'analytics-p0-mixed-validation.mjs')],
+    ['extension/scripts/windows-process-handle-collector.mjs', path.join(extensionRoot, 'scripts', 'windows-process-handle-collector.mjs')],
+    ['extension/scripts/windows-process-handle-collector.ps1', path.join(extensionRoot, 'scripts', 'windows-process-handle-collector.ps1')],
     ['extension/scripts/analytics-real-producer-probe.ts', path.join(extensionRoot, 'scripts', 'analytics-real-producer-probe.ts')],
     ['extensions/subagent/src/analytics-capture.ts', path.join(repositoryRoot, 'extensions', 'subagent', 'src', 'analytics-capture.ts')],
     ['extensions/subagent/src/runtime-trace.ts', path.join(repositoryRoot, 'extensions', 'subagent', 'src', 'runtime-trace.ts')],
@@ -982,7 +1494,7 @@ const report = {
     rows: configuration.scenario === 'endurance' ? null : requestedRows,
     seed: configuration.seed,
     reportPath: configuration.report,
-    ...(configuration.scenario === 'endurance' ? { mode: configuration.smoke ? 'smoke' : 'full' } : {}),
+    ...((configuration.scenario === 'endurance' || configuration.scenario === 'mixed') ? { mode: configuration.smoke ? 'smoke' : 'full' } : {}),
     resolvedRowsFrom: configuration.scenario === 'endurance'
       ? 'not-applicable'
       : process.env.PIE_ANALYTICS_P0_ROWS !== undefined && process.argv.includes('--rows') === false ? 'environment' : 'arguments/default',
@@ -1077,9 +1589,15 @@ try {
   projectedPeakBytes = calibratedCapacityProjection?.projectedPeakBytes
     ?? Math.ceil(capacityFixture.fixtureBytes * 2);
   initialAvailableMemoryBytes = os.freemem();
+  // The short mixed smoke has one recorder host and two query workers; keep
+  // its preflight reservation bounded to that mechanical workload. It remains
+  // function-only and never qualifies topology memory.
+  const workloadMemoryReservationBytes = configuration.scenario === 'mixed' && configuration.smoke
+    ? 256 * 1024 ** 2
+    : (4 * 256 + 512) * 1024 ** 2;
   projectedPeakMemoryBytes = configuration.scenario === 'scale' && baselineEvidence?.accepted
     ? Math.ceil(Math.max(baselineEvidence.topologyPeakBytes * 1.25, process.memoryUsage().rss + 512 * 1024 ** 2))
-    : Math.ceil(process.memoryUsage().rss + (4 * 256 + 512) * 1024 ** 2);
+    : Math.ceil(process.memoryUsage().rss + workloadMemoryReservationBytes);
   effectiveMemoryLimitBytes = Math.floor(initialAvailableMemoryBytes * 0.75);
   report.provenance = provenance;
   report.environment = {
@@ -1166,6 +1684,36 @@ function ensureGateEvidence() {
       ['rateConditions', 'The independent endurance scenario does not execute the separate 1,000 fact/s burst conditions.'],
       ['mixedLoad', 'Mixed ingestion/query load is a separate qualification scenario.'],
       ['matchedAgentUi', 'Agent and UI baseline is a separate qualification scenario.'],
+    ]) {
+      if (!report.gates[name]) recordUnqualified(name, reason);
+    }
+    return;
+  }
+  if (configuration.scenario === 'mixed') {
+    for (const [name, reason] of [
+      ['mixedLoad', 'Mixed workload did not complete its functional gate.'],
+      ['mixedQueryCancellation', 'Mixed query cancellation did not complete its functional gate.'],
+      ['mixedCrossHostRefresh', 'Mixed non-writing refresh did not complete its functional gate.'],
+      ['mixedDetailReconstruction', 'Mixed full detail reconstruction did not complete its functional gate.'],
+      ['mixedWorkerMemory', 'Recorder or query-worker memory telemetry is incomplete; memory remains unqualified.'],
+      ['exactPrimaryRows', 'Mixed scenario uses a separate finite fixture and does not claim the baseline exact-row gate.'],
+      ['exactDetailRows', 'Mixed scenario does not claim the baseline detail-row gate.'],
+      ['handoffP99', 'Mixed scenario reports individual workload timings and does not claim baseline handoff p99.'],
+      ['responsivenessProxyP95', 'A standalone event-loop proxy is not UI or agent evidence.'],
+      ['indexedQuery', 'Mixed indexed lookup timings are reported separately from the baseline gate.'],
+      ['largeDetailQuery', 'Mixed detail reconstruction is reported separately from the baseline gate.'],
+      ['temporaryFootprint', 'Mixed scenario does not claim the baseline capacity gate.'],
+      ['reservedFreeDisk', 'Mixed scenario does not claim the baseline capacity gate.'],
+      ['recorderWorkerRss', 'Mixed recorder high-water telemetry is reported under the mixed memory gate.'],
+      ['inPlaceCorruption', 'Mixed scenario does not execute the destructive corruption check.'],
+      ['scaleHistoryRows', 'Scale scenario was not selected.'],
+      ['tenMillionHistory', 'Not executed; capacity tier remains unqualified.'],
+      ['enduranceLightLoad', 'Endurance scenario was not selected.'],
+      ['schemaV2AndFaults', 'Not executed by this mixed scenario.'],
+      ['matchedAgentUi', 'The standalone harness is not a live agent or UI baseline.'],
+      ['incrementalHostMemory', 'No matched analytics-disabled host baseline was executed.'],
+      ['queryPeakMemory', 'Query-worker RSS telemetry is unavailable through the existing read-only client.'],
+      ['rateConditions', 'The mixed scenario has its own paced and burst workload.'],
     ]) {
       if (!report.gates[name]) recordUnqualified(name, reason);
     }
@@ -1327,6 +1875,8 @@ try {
   checkResourceEnvelope('preflight');
   if (configuration.scenario === 'endurance') {
     await runEnduranceScenario();
+  } else if (configuration.scenario === 'mixed') {
+    await runMixedScenario();
   } else {
   const realProducerProbe = execFileSync(process.execPath, [
     path.join(extensionRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs'),

@@ -11,6 +11,7 @@ import {
   WorkerRequestTimeoutError,
   type WorkerClientScheduler,
 } from '../../../src/backend/worker-client';
+import { WORKER_IPC_VERSION } from '../../../src/backend/worker-protocol';
 
 const fixture = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../fixtures/phase2-worker-fixture.mjs');
 const sdkPatchIdentity = {
@@ -50,6 +51,12 @@ function createClient(mode: string, extra: Partial<ConstructorParameters<typeof 
   // workerId stays deterministic: some frames assert lease ownership against
   // the canonical fixture-* identity.
   const uniqueMode = `${mode}-${process.pid}-${(uniqueClientCounter += 1)}`;
+  const { env: extraEnv, ...extraOptions } = extra;
+  const fixtureEnv = {
+    ...extraEnv,
+    PIE_WORKER_FIXTURE_MODE: mode,
+    PIE_WORKER_FIXTURE_IPC_VERSION: String(WORKER_IPC_VERSION),
+  };
   return new WorkerClient({
     workerEntryPath: fixture,
     coordinatorGeneration: 1,
@@ -60,8 +67,8 @@ function createClient(mode: string, extra: Partial<ConstructorParameters<typeof 
     heartbeatIntervalMs: 1_000,
     startupTimeoutMs: 5_000,
     diagnosticByteLimit: 1_024,
-    env: { PIE_WORKER_FIXTURE_MODE: mode },
-    ...extra,
+    ...extraOptions,
+    env: fixtureEnv,
   });
 }
 let uniqueClientCounter = 0;

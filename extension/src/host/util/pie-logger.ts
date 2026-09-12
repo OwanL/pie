@@ -17,7 +17,12 @@ const LEVEL_RANK: Record<LogLevel, number> = {
   error: 50,
 };
 
-const BOOT_TRACE_PATH = path.join(os.tmpdir(), 'pie-boot-trace.jsonl');
+const PIE_TEST_LOG_DIR = process.env['NODE_TEST_CONTEXT']
+  ? path.join(os.tmpdir(), 'pie-test-logs', `process-${process.pid}`)
+  : undefined;
+const BOOT_TRACE_PATH = PIE_TEST_LOG_DIR
+  ? path.join(PIE_TEST_LOG_DIR, 'pie-boot-trace.jsonl')
+  : path.join(os.tmpdir(), 'pie-boot-trace.jsonl');
 // Never let `node:test` children share the live extension's persistent log.
 // Several failure-path tests intentionally emit errors, and the logger tests
 // delete/rotate their target. A process-local test directory preserves those
@@ -486,6 +491,12 @@ export function getPieLogPath(): string {
   return PIE_LOG_PATH;
 }
 
+/** Absolute path of the opt-in boot trace (test callers may use this to clean
+ * only their process-local diagnostic file). */
+export function getBootTracePath(): string {
+  return BOOT_TRACE_PATH;
+}
+
 /** Directory containing the persistent pie log file. */
 export function getPieLogDir(): string {
   return PIE_LOG_DIR;
@@ -507,9 +518,25 @@ function appendBootTraceSync(record: Record<string, unknown>): void {
   }
   try {
     fsSync.mkdirSync(path.dirname(BOOT_TRACE_PATH), { recursive: true });
+    rotateSyncLogIfNeeded(BOOT_TRACE_PATH);
     fsSync.appendFileSync(BOOT_TRACE_PATH, `${JSON.stringify(record)}\n`, 'utf8');
   } catch {
     // Ignore trace write failures; tracing must never affect extension behaviour.
+  }
+}
+
+/** Rotate a synchronous diagnostic file using the same one-backup, 5 MiB
+ * policy as the persistent pie logger. Boot tracing is opt-in, but it can run
+ * through very chatty startup/recovery paths and must not grow forever. */
+function rotateSyncLogIfNeeded(logPath: string): void {
+  try {
+    const stat = fsSync.statSync(logPath);
+    if (stat.size < MAX_LOG_BYTES) return;
+    const backup = `${logPath}.1`;
+    fsSync.rmSync(backup, { force: true });
+    fsSync.renameSync(logPath, backup);
+  } catch {
+    // Rotation failures are non-fatal; keep appending to the active file.
   }
 }
 

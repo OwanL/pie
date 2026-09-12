@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
 
+import { WORKER_IPC_VERSION } from '../../../src/backend/worker-protocol';
 import { WorkerRuntimeRouter } from '../../../src/backend/worker-runtime-router';
 import type { CoordinatorToHostDetailMessage, LiveSubagentDetailAddress } from '../../../src/shared/protocol/subagent-detail';
 
@@ -66,7 +67,7 @@ test('router fences detail generation/path/address/subscription ownership and fo
   const payload = { kind: 'json-segment' as const, encoding: 'utf8-json' as const, segmentId: 'segment', semanticPath: [], startByte: 0, endByte: 4, totalBytes: 4, startCodePoint: 0, endCodePoint: 4, totalCodePoints: 4, text: 'null' };
   const checksum = createHash('sha256').update(JSON.stringify(payload)).digest('hex');
   const frameBase = {
-    ipcVersion: 1 as const, coordinatorGeneration: 1, workerId: hot.owner.workerId, workerGeneration: hot.owner.workerGeneration,
+    ipcVersion: WORKER_IPC_VERSION, coordinatorGeneration: 1, workerId: hot.owner.workerId, workerGeneration: hot.owner.workerGeneration,
     workerPid: 1, rootSessionPath: sessionPath, leasePath: sessionPath, leaseRevision: 1, sessionPath, seq: 1,
   };
   await router.handleWorkerFrame(sessionPath, { ...frameBase, kind: 'detail.page', subscriptionId: 'subscription-1', ref: { baselineRevision: 1, pageIndex: 0, pageCount: 1 }, payload, payloadBytes: Buffer.byteLength(JSON.stringify(payload)), checksum });

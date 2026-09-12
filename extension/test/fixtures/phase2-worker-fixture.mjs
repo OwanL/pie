@@ -9,8 +9,12 @@ const readFd = Number(args.get('--ipc-read-fd'));
 const writeFd = Number(args.get('--ipc-write-fd'));
 const input = new Socket({ fd: readFd, readable: true, writable: false });
 const output = new Socket({ fd: writeFd, readable: false, writable: true });
+const ipcVersion = Number(process.env.PIE_WORKER_FIXTURE_IPC_VERSION);
+if (!Number.isSafeInteger(ipcVersion) || ipcVersion <= 0) {
+  throw new Error('PIE_WORKER_FIXTURE_IPC_VERSION is required.');
+}
 const identity = {
-  ipcVersion: 1,
+  ipcVersion,
   coordinatorGeneration: Number(args.get('--coordinator-generation')),
   workerId: args.get('--worker-id'),
   workerGeneration: Number(args.get('--worker-generation')),

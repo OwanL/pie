@@ -21,6 +21,8 @@ interface DiagRecord {
   thinking: number;
   snapshotPosts: number;
   ackCount: number;
+  ackSamplesRetained: number;
+  ackSamplesDropped: number;
   ackMin: number | null;
   ackP50: number | null;
   ackP95: number | null;
@@ -33,7 +35,8 @@ interface DiagRecord {
 const DIAG_PATH = getDiagPath();
 
 function clearDiagFile(): void {
-  fs.writeFileSync(DIAG_PATH, '', 'utf8');
+  fs.rmSync(DIAG_PATH, { force: true });
+  fs.rmSync(`${DIAG_PATH}.1`, { force: true });
 }
 
 function resetWindow(): void {
@@ -43,7 +46,12 @@ function resetWindow(): void {
 }
 
 function readRecords(): DiagRecord[] {
-  const text = fs.readFileSync(DIAG_PATH, 'utf8').trim();
+  let text = '';
+  try {
+    text = fs.readFileSync(DIAG_PATH, 'utf8').trim();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
   return text ? text.split('\n').map((line) => JSON.parse(line) as DiagRecord) : [];
 }
 
@@ -60,7 +68,7 @@ function recordAndFlush(record: () => void): DiagRecord {
 
 test.after(() => {
   setStreamDiagEnabled(false);
-  fs.rmSync(DIAG_PATH, { force: true });
+  clearDiagFile();
 });
 
 test('enable/disable toggle round-trips and diagnostic path is stable', () => {
@@ -93,6 +101,8 @@ test('flush reports exact event and watchdog counts', () => {
   assert.equal(record.wdThrottled, 1);
   assert.equal(record.wdReload, 1);
   assert.equal(record.ackCount, 0);
+  assert.equal(record.ackSamplesRetained, 0);
+  assert.equal(record.ackSamplesDropped, 0);
 });
 
 test('flush computes latency count, bounds, and percentiles', () => {
@@ -104,6 +114,8 @@ test('flush computes latency count, bounds, and percentiles', () => {
   });
 
   assert.equal(record.ackCount, 4);
+  assert.equal(record.ackSamplesRetained, 4);
+  assert.equal(record.ackSamplesDropped, 0);
   assert.equal(record.ackMin, 10);
   assert.equal(record.ackP50, 30);
   assert.equal(record.ackP95, 100);
@@ -125,6 +137,41 @@ test('flush handles one and two latency samples', () => {
     [pair.ackMin, pair.ackP50, pair.ackP95, pair.ackMax],
     [5, 500, 500, 500],
   );
+});
+
+test('long ACK bursts retain bounded samples while preserving total/min/max and drop count', () => {
+  const record = recordAndFlush(() => {
+    for (let index = 0; index < 100_000; index += 1) recordAckLatency(index);
+  });
+
+  assert.equal(record.ackCount, 100_000);
+  assert.ok(record.ackSamplesRetained <= 4096, 'retained ACK samples must stay bounded');
+  assert.equal(record.ackSamplesRetained + record.ackSamplesDropped, record.ackCount);
+  assert.equal(record.ackMin, 0);
+  assert.equal(record.ackMax, 99_999);
+  assert.ok(record.ackP50 !== null);
+  assert.ok(record.ackP95 !== null);
+});
+
+test('stream diagnostic rotates at a fixed size and keeps one backup', () => {
+  resetWindow();
+  fs.writeFileSync(DIAG_PATH, 'first'.repeat(1_100_000), 'utf8');
+  setStreamDiagEnabled(true);
+  recordStreamEvent('delta');
+  flushStreamDiag();
+  setStreamDiagEnabled(false);
+  assert.ok(fs.existsSync(`${DIAG_PATH}.1`), 'rotation should retain one backup');
+  assert.match(fs.readFileSync(`${DIAG_PATH}.1`, 'utf8'), /^first/);
+  assert.match(fs.readFileSync(DIAG_PATH, 'utf8'), /"deltas":1/);
+
+  fs.writeFileSync(DIAG_PATH, 'second'.repeat(1_100_000), 'utf8');
+  setStreamDiagEnabled(true);
+  recordSnapshotPost();
+  flushStreamDiag();
+  setStreamDiagEnabled(false);
+  assert.doesNotMatch(fs.readFileSync(`${DIAG_PATH}.1`, 'utf8'), /^first/);
+  assert.match(fs.readFileSync(`${DIAG_PATH}.1`, 'utf8'), /^second/);
+  assert.equal(fs.existsSync(`${DIAG_PATH}.2`), false, 'rotation is one-deep');
 });
 
 test('disabled recording and idle flush produce no output', () => {

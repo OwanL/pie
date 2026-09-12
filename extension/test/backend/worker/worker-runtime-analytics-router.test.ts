@@ -3,6 +3,8 @@ import test from 'node:test';
 
 import { ANALYTICS_SCHEMA_VERSION, deriveAnalyticsIdempotencyKey, type AnalyticsObservation } from '../../../../shared/analytics/contracts.js';
 import { createAnalyticsFactPacket } from '../../../../shared/analytics/transport.js';
+import type { AnalyticsBranchObservedPayload } from '../../../src/shared/protocol/sessions.js';
+import { WORKER_IPC_VERSION, parseWorkerToCoordinatorFrame } from '../../../src/backend/worker-protocol.js';
 import { WorkerRuntimeRouter } from '../../../src/backend/worker-runtime-router.js';
 
 function opened(sessionPath: string, sessionId: string) {
@@ -88,7 +90,7 @@ test('router emits capture only for the exact live route and routes host ACK bac
   const route = await router.promote(sessionPath);
   const packet = createAnalyticsFactPacket(observation('root-1', 'fact-1'));
   const frameBase = {
-    ipcVersion: 1 as const,
+    ipcVersion: WORKER_IPC_VERSION,
     coordinatorGeneration: 7,
     workerId: route.owner.workerId,
     workerGeneration: route.owner.workerGeneration,
@@ -144,9 +146,28 @@ test('router emits capture only for the exact live route and routes host ACK bac
     event: 'session.opened',
     payload: opened(sessionPath, 'root-3') as any,
   });
-  await router.handleWorkerFrame(sessionPath, {
+  const branchPayload = {
+    sessionPath,
+    entryId: 'entry-B',
+    parentEntryId: 'entry-A',
+    selectedEntryId: 'entry-B',
+    observedAt: 1_767_225_600_000,
+  } satisfies AnalyticsBranchObservedPayload;
+  const branchDecoded = parseWorkerToCoordinatorFrame({
     ...frameBase,
     seq: 6,
+    kind: 'runtime.event',
+    event: 'analytics.branch',
+    payload: branchPayload,
+  }, { ...frameBase, expectedSeq: 6 });
+  assert.equal(branchDecoded.status, 'accepted');
+  if (branchDecoded.status === 'accepted') {
+    await router.handleWorkerFrame(sessionPath, branchDecoded.frame);
+    assert.deepEqual(emitted.at(-1), ['analytics.branch', branchPayload]);
+  }
+  await router.handleWorkerFrame(sessionPath, {
+    ...frameBase,
+    seq: 7,
     kind: 'analytics.capture',
     packet: createAnalyticsFactPacket(observation('root-3', 'fact-3')),
   });
@@ -168,10 +189,10 @@ test('router emits capture only for the exact live route and routes host ACK bac
   const largeFact = createAnalyticsFactPacket(observation('root-3', 'large-fact'));
   largeFact.observation.fields = { payload: 'x'.repeat(100_000) };
   largeFact.observation.idempotencyKey = deriveAnalyticsIdempotencyKey(largeFact.observation);
-  await router.handleWorkerFrame(sessionPath, { ...longFrameBase, seq: 7, kind: 'analytics.capture', packet: largeFact });
+  await router.handleWorkerFrame(sessionPath, { ...longFrameBase, seq: 8, kind: 'analytics.capture', packet: largeFact });
   assert.equal(internals.analyticsPendingDeliveries.size, 1);
   assert.ok(internals.analyticsPendingBytes < 70_000, 'coordinator retains route identity, not the large fact payload');
-  let sequence = 8;
+  let sequence = 9;
   while (!sent.some((frame: any) => frame.kind === 'analytics.ack'
       && frame.acknowledgement?.code === 'router_capacity')) {
     const sourceKey = `capacity-${sequence}`;

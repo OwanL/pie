@@ -1,4 +1,9 @@
-import { EMPTY_AGGREGATE_STATS, type AggregateStats, type ProviderGateStats } from '../shared/protocol/aggregate-stats';
+import {
+  EMPTY_AGGREGATE_STATS,
+  type AggregateProviderCost,
+  type AggregateStats,
+  type ProviderGateStats,
+} from '../shared/protocol/aggregate-stats';
 import type { ArchState } from './core/arch-state';
 import type { TokenRateService } from './token-rate-service';
 import { RollingAggregateRate } from './rolling-aggregate-rate';
@@ -22,6 +27,8 @@ import {
 } from './billable-invocation-ledger/aggregate';
 import { AggregatePricingCache } from './aggregate-pricing-cache';
 import { CompletedHistoryCache, type CompletedHistoryMtimeFn } from './completed-history-cache';
+import type { CanonicalAnalyticsReadModel } from '../analytics/query-entry.js';
+import type { ProviderAccountingSummary } from '../analytics/sqlite-recorder.js';
 
 /**
  * Measures aggregate usage stats across ALL sessions host-side — total + per-
@@ -271,6 +278,21 @@ export class AggregateStatsService {
     const pendingCompletedRuns = this.deps.statsService.getPendingCompletedRuns();
     const rollingRate = this.observeRollingRate(nowMs, openRuns, pendingCompletedRuns, ratesBySession);
 
+    const canonicalReadModel = (this.deps.statsService as StatsService & {
+      getAnalyticsReadModel?: () => CanonicalAnalyticsReadModel | undefined;
+    }).getAnalyticsReadModel?.();
+    if (canonicalReadModel) {
+      await this.recomputeCanonical(
+        canonicalReadModel,
+        nowMs,
+        runningSessionPaths,
+        openTabCount,
+        rollingRate,
+        liveRevisionAtStart,
+      );
+      return;
+    }
+
     const pricing = await this.pricing.load();
     const pendingRunIds = new Set(pendingCompletedRuns.map((run) => run.runId));
 
@@ -352,6 +374,103 @@ export class AggregateStatsService {
     }
   }
 
+  /** Canonical authority has durable provider settlements but no RunSnapshot
+   * transcript replay. Use the maintained accounting summary plus bounded SQL
+   * provider/model groups; leave run-only fields at their explicit empty values
+   * until a canonical run summary projection exists. A truncated group result
+   * is rejected so an apparently plausible partial history never reaches UI. */
+  private async recomputeCanonical(
+    readModel: CanonicalAnalyticsReadModel,
+    nowMs: number,
+    runningSessionPaths: string[],
+    openTabCount: number,
+    rollingRate: number,
+    liveRevisionAtStart: number,
+  ): Promise<void> {
+    let providerGate = this.cached.providerGate;
+    try {
+      // Poll the live gate before the durable read. The aggregate transaction
+      // is then the last slow await in this path, so a steady stream of gate
+      // updates cannot make every otherwise-consistent snapshot stale.
+      providerGate = await this.deps.fetchProviderGateStats();
+    } catch (error) {
+      appendPieLog('warn', 'aggregate-stats', 'provider_gate.metrics poll failed; retaining cached', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    // The revision refresher already performs the bounded cross-host poll.
+    // Use its last observed value as a synchronous fence around this read;
+    // starting another helper query here both adds latency and can starve
+    // publication while peers are committing benign updates.
+    const observedRevisionBeforeRead = this.observedCanonicalRevision();
+    // Accounting and provider/model groups are read by one bounded recorder
+    // transaction. This prevents a provider grouping result from being paired
+    // with a newer or older maintained accounting projection.
+    const aggregate = await readModel.readProviderAggregateSummary({
+      todayStartMs: localDayStartMs(nowMs),
+      todayEndMs: nowMs,
+      weekStartMs: addLocalDaysMs(localDayStartMs(nowMs), -6),
+      weekEndMs: nowMs,
+      maxGroups: CANONICAL_AGGREGATE_MAX_GROUP_ROWS,
+      maxResultBytes: CANONICAL_AGGREGATE_MAX_RESULT_BYTES,
+    });
+    if (aggregate.truncation.rowLimit || aggregate.truncation.byteLimit || aggregate.truncation.cellLimit) {
+      throw new Error('Canonical aggregate provider grouping exceeded its bounded read limit.');
+    }
+    const { accounting, groups } = aggregate;
+    const overlay = canonicalAccountingOverlay(accounting, groups);
+    const sessionCount = groups.length === 0
+      ? 0
+      : metricInteger(groups[0]?.session_count, 'global session count');
+    const runningSessionCount = new Set(runningSessionPaths).size;
+    const next = applyLedgerUsageOverlay({
+      ...EMPTY_AGGREGATE_STATS,
+      runningSessionCount,
+      openTabCount,
+      liveTokensPerSecond: rollingRate,
+      activeGenerationTokensPerSecond: this.cached.activeGenerationTokensPerSecond,
+      // Canonical execution/activity summaries are a separate bounded metric
+      // projection. Do not count provider invocations as transcript runs.
+      runCount: 0,
+      sessionCount,
+      ready: true,
+      providerGate: this.cached.providerGate,
+    }, overlay);
+    next.providerGate = providerGate;
+    const observedRevisionAfterRead = this.observedCanonicalRevision();
+    const observedRevision = observedRevisionAfterRead ?? observedRevisionBeforeRead;
+    if (observedRevision !== null && !canonicalRevisionAtLeast(aggregate.revision, observedRevision)) {
+      appendPieLog('debug', 'aggregate-stats', 'canonical aggregate snapshot became stale before publish', {
+        snapshotRevision: String(aggregate.revision),
+        observedRevision,
+      });
+      return;
+    }
+    if (this.liveRevision !== liveRevisionAtStart) {
+      // The durable canonical result remains internally consistent even when
+      // a 200 ms token-rate tick ran while it was loading. Merge the latest
+      // bounded live fields synchronously instead of discarding the historical
+      // snapshot (canonical mode has no completed-history layer for
+      // refreshLive() to rebuild).
+      const latestArchState = this.deps.getArchState();
+      next.runningSessionCount = new Set(latestArchState.sessions.runningSessionPaths).size;
+      next.openTabCount = latestArchState.sessions.openTabPaths.length;
+      next.liveTokensPerSecond = this.rollingRate.getRate();
+    }
+    if (!aggregateStatsEqual(this.cached, next)) {
+      this.cached = next;
+      this.deps.onChanged();
+    }
+  }
+
+  private observedCanonicalRevision(): string | null {
+    const statsService = this.deps.statsService as StatsService & {
+      getAnalyticsRevisionRefreshStats?: () => { revision: string | null } | undefined;
+    };
+    return statsService.getAnalyticsRevisionRefreshStats?.()?.revision ?? null;
+  }
+
   private observeRollingRate(
     nowMs: number,
     openRuns: RunSnapshot[],
@@ -414,6 +533,140 @@ export class AggregateStatsService {
     for (const run of pendingCompletedRuns) effectiveOpenById.set(run.runId, run);
     return accumulateAggregateStats([...effectiveOpenById.values()], pricing);
   }
+}
+
+const CANONICAL_AGGREGATE_MAX_GROUP_ROWS = 10_000;
+const CANONICAL_AGGREGATE_MAX_RESULT_BYTES = 2 * 1024 * 1024;
+
+function canonicalAccountingOverlay(
+  accounting: ProviderAccountingSummary,
+  rows: Array<Record<string, unknown>>,
+): LedgerUsageOverlay {
+  const allByProvider = providerGroups(rows, 'all');
+  const todayByProvider = providerGroups(rows, 'today');
+  const weekByProvider = providerGroups(rows, 'week');
+  const today = groupedTotals(rows, 'today');
+  const week = groupedTotals(rows, 'week');
+  const all = groupedTotals(rows, 'all');
+  const totalCost = metricNumber(accounting.effectiveCostUsd.knownTotal, 'global effective cost');
+  const totalInputTokens = metricNumber(accounting.inputTokens.knownTotal, 'global input tokens');
+  const totalOutputTokens = metricNumber(accounting.outputTokens.knownTotal, 'global output tokens');
+  const totalCacheReadTokens = metricNumber(accounting.cacheReadTokens.knownTotal, 'global cache-read tokens');
+  const totalCacheWriteTokens = metricNumber(accounting.cacheWriteTokens.knownTotal, 'global cache-write tokens');
+  if (accounting.invocationCount > 0 && rows.length === 0) {
+    throw new Error('Canonical accounting has invocations but no provider grouping rows.');
+  }
+  return {
+    todayCost: today.cost,
+    todayCostByProvider: todayByProvider,
+    todayInputTokens: today.input,
+    todayOutputTokens: today.output,
+    todayCostSeries: [],
+    todayInputTokenSeries: [],
+    todayTokenSeries: [],
+    todayProductivityInputTokens: today.input,
+    weekCost: week.cost,
+    weekCostByProvider: weekByProvider,
+    weekCostSeries: [],
+    weekProductivityInputTokens: week.input,
+    dailyCost: [],
+    totalCost,
+    costByProvider: allByProvider,
+    totalInputTokens,
+    totalOutputTokens,
+    totalCacheReadTokens,
+    totalCacheWriteTokens,
+    billableAccounting: {
+      invocationCount: accounting.invocationCount,
+      todayUnknownInvocationCount: today.unknown,
+      todayUnpricedInvocationCount: today.unpriced,
+      todayInstrumentationGapInvocationCount: today.gap,
+      weekUnknownInvocationCount: week.unknown,
+      weekUnpricedInvocationCount: week.unpriced,
+      weekInstrumentationGapInvocationCount: week.gap,
+      unknownInvocationCount: all.unknown,
+      unpricedInvocationCount: all.unpriced,
+      instrumentationGapInvocationCount: all.gap,
+    },
+  };
+}
+
+function providerGroups(rows: Array<Record<string, unknown>>, prefix: string): AggregateProviderCost[] {
+  const grouped = new Map<string, AggregateProviderCost>();
+  for (const row of rows) {
+    const provider = String(row.provider ?? 'unknown');
+    const current = grouped.get(provider) ?? {
+      provider,
+      cost: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+    };
+    current.cost += metricNumber(row[`${prefix}_cost`], `${prefix} provider cost`);
+    current.inputTokens += metricNumber(row[`${prefix}_input`], `${prefix} provider input tokens`);
+    current.outputTokens += metricNumber(row[`${prefix}_output`], `${prefix} provider output tokens`);
+    current.cacheReadTokens += metricNumber(row[`${prefix}_cache_read`], `${prefix} provider cache-read tokens`);
+    current.cacheWriteTokens += metricNumber(row[`${prefix}_cache_write`], `${prefix} provider cache-write tokens`);
+    grouped.set(provider, current);
+  }
+  return [...grouped.values()].sort((left, right) => right.cost - left.cost || left.provider.localeCompare(right.provider));
+}
+
+function groupedTotals(rows: Array<Record<string, unknown>>, prefix: string): {
+  cost: number;
+  input: number;
+  output: number;
+  unknown: number;
+  unpriced: number;
+  gap: number;
+} {
+  const total = { cost: 0, input: 0, output: 0, unknown: 0, unpriced: 0, gap: 0 };
+  for (const row of rows) {
+    total.cost += metricNumber(row[`${prefix}_cost`], `${prefix} cost`);
+    total.input += metricNumber(row[`${prefix}_input`], `${prefix} input tokens`);
+    total.output += metricNumber(row[`${prefix}_output`], `${prefix} output tokens`);
+    total.unknown += metricInteger(row[`${prefix}_unknown`], `${prefix} unknown count`);
+    total.unpriced += metricInteger(row[`${prefix}_unpriced`], `${prefix} unpriced count`);
+    total.gap += metricInteger(row[`${prefix}_gap`], `${prefix} instrumentation gap count`);
+  }
+  return total;
+}
+
+function metricNumber(value: unknown, name: string): number {
+  if (value === null || value === undefined) return 0;
+  const result = typeof value === 'bigint' ? Number(value) : Number(value);
+  if (!Number.isFinite(result) || result < 0 || !Number.isSafeInteger(result) && Number.isInteger(result)) {
+    throw new Error(`Canonical ${name} is not a finite representable number.`);
+  }
+  return result;
+}
+
+function metricInteger(value: unknown, name: string): number {
+  const result = metricNumber(value, name);
+  if (!Number.isSafeInteger(result)) throw new Error(`Canonical ${name} exceeds the safe integer range.`);
+  return result;
+}
+
+function canonicalRevisionAtLeast(left: number | string, right: number | string): boolean {
+  try {
+    return BigInt(left) >= BigInt(right);
+  } catch {
+    // The read model validates revisions as decimal strings. Keep a defensive
+    // lexical fallback for test doubles that use another representation.
+    return String(left) >= String(right);
+  }
+}
+
+function localDayStartMs(ms: number): number {
+  const date = new Date(ms);
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+}
+
+function addLocalDaysMs(ms: number, days: number): number {
+  const date = new Date(ms);
+  date.setDate(date.getDate() + days);
+  return date.getTime();
 }
 
 /** Complete structural equality for protocol aggregates and accumulator caches. */

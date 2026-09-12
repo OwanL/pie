@@ -27,8 +27,46 @@ import type {
   AnalyticsSessionContext,
   CanonicalAnalyticsCapture,
 } from '../../analytics/canonical-capture.js';
+import { analyticsRootSessionId } from '../../analytics/canonical-capture.js';
 import type { CanonicalAnalyticsReadModel } from '../../analytics/query-entry.js';
+import type { ProviderSettlementScope, ScopedProviderSettlementReadModel } from '../../analytics/sqlite-recorder.js';
 import { CanonicalRevisionRefresher } from '../../analytics/revision-refresher.js';
+import { sessionUsageSnapshotFromCanonicalSettlements } from '../../analytics/canonical-usage.js';
+
+const MAX_CANONICAL_SESSION_CACHE_ENTRIES = 256;
+/** Eager refresh is for the small displayed/running surface only. The cache
+ * can retain more history for explicit lazy reads, but a revision invalidation
+ * must never turn the whole session catalogue into a query batch. */
+const MAX_CANONICAL_DISPLAYED_SESSION_REFRESH_ENTRIES = 32;
+const MAX_CANONICAL_SESSION_CACHE_SAMPLES = 4_000;
+const MAX_CANONICAL_SESSION_CACHE_BYTES = 4 * 1024 * 1024;
+
+type CanonicalSessionUsageCacheEntry = {
+  snapshot: SessionUsageSnapshot;
+  revision: string;
+  scopeKey: string;
+  epoch: number;
+  estimatedBytes: number;
+  sampleCount: number;
+  lastUsed: number;
+};
+
+type CanonicalSessionReadResult = {
+  revision: string;
+  settlements: ScopedProviderSettlementReadModel['settlements'];
+  truncated: boolean;
+  scopeKey: string;
+  branchId?: string;
+  unknown?: boolean;
+};
+
+function canonicalRevision(value: string | number): bigint {
+  return BigInt(value);
+}
+
+function canonicalRevisionString(value: string | number): string {
+  return canonicalRevision(value).toString();
+}
 
 /** One persistent structured startup-stage measurement, also mirrored in
  *  memory for tests/diagnostics. Emitted for storage.start, the persisted
@@ -74,6 +112,21 @@ export class StatsService implements RunObserver {
   private readonly canonicalCapture: CanonicalAnalyticsCapture | undefined;
   private readonly analyticsReadModel: CanonicalAnalyticsReadModel | undefined;
   private analyticsRevisionRefresher: CanonicalRevisionRefresher | undefined;
+  private canonicalRevisionStart: Promise<void> | null = null;
+  /** Last bounded canonical read-model result per visible session path. The
+   * durable key is the root session ID; the path is only a host-side lookup
+   * key and is never sent to the canonical store. Entries carry the read
+   * revision/scope so an older helper response can never replace a newer one. */
+  private readonly canonicalSessionUsageByPath = new Map<string, CanonicalSessionUsageCacheEntry>();
+  private canonicalSessionUsageCacheBytes = 0;
+  private canonicalSessionUsageCacheSamples = 0;
+  private canonicalSessionUsageUseSequence = 0;
+  private canonicalCacheEpoch = 0;
+  private canonicalDirtyRevision: string | null = null;
+  private canonicalRefreshRequested = false;
+  private canonicalSessionUsageRefresh: Promise<void> | null = null;
+  private readonly canonicalSessionPathRefreshes = new Map<string, Promise<void>>();
+  private readonly canonicalSessionPathEpochs = new Map<string, number>();
   /** Exact create/duplicate origin retained after the pending path is replaced.
    * A close operation ID must never enter this map. */
   private readonly pendingCreateOperationBySessionPath = new Map<string, string>();
@@ -174,11 +227,32 @@ export class StatsService implements RunObserver {
   }
 
   async start(): Promise<void> {
-    // Canonical capture has no legacy restore/import fallback. P5 must replace
-    // legacy query consumers before P7 can select this authority.
+    // Canonical capture has no legacy restore/import fallback. Restore the
+    // bounded durable session projection before making the host usable; the
+    // old early return left every post-restart session view empty.
     if (this.canonicalCapture) {
-      this.started = true;
-      this.startCanonicalRevisionRefresh();
+      if (this.disposed || this.started) return;
+      if (this.startPromise) {
+        await this.startPromise;
+        return;
+      }
+      const startup = (async () => {
+        const canonicalQueryStartAt = performance.now();
+        await this.refreshCanonicalSessionUsage();
+        if (this.disposed) return;
+        this.recordStage('canonical-session-usage', canonicalQueryStartAt, {
+          sessions: this.canonicalSessionUsageByPath.size,
+        });
+        this.started = true;
+        this.startCanonicalRevisionRefresh();
+        this.scheduleRender();
+      })();
+      this.startPromise = startup;
+      try {
+        await startup;
+      } finally {
+        this.startPromise = null;
+      }
       return;
     }
     // Shutdown is terminal: never reactivate storage/restoration after it.
@@ -447,6 +521,10 @@ export class StatsService implements RunObserver {
     stableRootSessionId?: string,
   ): Promise<void> {
     if (this.canonicalCapture) {
+      // A private close is a local privacy fence as well as a durable delete.
+      // Drop any previously answered snapshot before awaiting the writer so a
+      // close cannot leave private rows visible during the delete handshake.
+      this.invalidateCanonicalSessionCache();
       const pendingOrigin = pendingCreateOperationId
         ?? this.pendingCreateOperationBySessionPath.get(sessionPath);
       await this.canonicalCapture.closeSession(
@@ -625,6 +703,8 @@ export class StatsService implements RunObserver {
     this.accounting.observeSessionUsageSnapshot(sessionPath, sessionId, snapshot);
     const context = this.analyticsContext(sessionPath);
     const state = this.canonicalBranchEntriesBySession.get(sessionPath) ?? { captured: new Set<string>() };
+    const previousSelectedEntryId = state.selectedEntryId;
+    const previousSelectedDepth = state.selectedDepth;
     const entries = snapshot.branchEntryIds ?? [];
     let startIndex = 0;
     if (state.selectedDepth !== undefined && state.selectedEntryId !== undefined) {
@@ -652,6 +732,10 @@ export class StatsService implements RunObserver {
       state.selectedEntryId = snapshot.branchId ?? entries[entries.length - 1];
       state.selectedDepth = entries.length;
       this.canonicalBranchEntriesBySession.set(sessionPath, state);
+      if (this.canonicalCapture
+        && (previousSelectedEntryId !== state.selectedEntryId || previousSelectedDepth !== state.selectedDepth)) {
+        this.invalidateCanonicalSessionCache();
+      }
     }
     if (snapshot.branchId && selectionId) {
       this.canonicalCapture?.captureBranchSelection(
@@ -672,6 +756,8 @@ export class StatsService implements RunObserver {
   ): void {
     this.accounting.observeBranchEntry(sessionPath, entryId, parentEntryId, selectedEntryId);
     const state = this.canonicalBranchEntriesBySession.get(sessionPath) ?? { captured: new Set<string>() };
+    const previousSelectedEntryId = state.selectedEntryId;
+    const previousSelectedDepth = state.selectedDepth;
     state.captured.add(entryId);
     if (state.selectedEntryId !== undefined
       && state.selectedDepth !== undefined
@@ -682,6 +768,10 @@ export class StatsService implements RunObserver {
     }
     state.selectedEntryId = selectedEntryId;
     this.canonicalBranchEntriesBySession.set(sessionPath, state);
+    if (this.canonicalCapture
+      && (previousSelectedEntryId !== state.selectedEntryId || previousSelectedDepth !== state.selectedDepth)) {
+      this.invalidateCanonicalSessionCache();
+    }
     const context = this.analyticsContext(sessionPath);
     this.canonicalCapture?.captureBranchEdge(context, entryId, parentEntryId, observedAt);
     this.canonicalCapture?.captureBranchSelection(
@@ -991,6 +1081,7 @@ export class StatsService implements RunObserver {
       this.canonicalBranchEntriesBySession.delete(oldPath);
       this.canonicalBranchEntriesBySession.set(newPath, capturedBranchEntries);
     }
+    if (this.canonicalCapture) this.invalidateCanonicalSessionCache();
     const pendingOrigin = pendingCreateOperationId
       ?? this.pendingCreateOperationBySessionPath.get(oldPath);
     if (!pendingOrigin) return;
@@ -1032,7 +1123,14 @@ export class StatsService implements RunObserver {
   }
 
   async queryRunAnalytics(): Promise<RunAnalyticsQueryResult> {
-    if (this.canonicalCapture) throw new Error('Canonical analytics read model is not wired; P5 activation fence remains closed.');
+    if (this.canonicalCapture) {
+      await this.start();
+      // RunSnapshot is a legacy transcript/run shape and has no canonical
+      // equivalent. Returning an explicit empty run layer keeps legacy cache
+      // consumers from reading the wrong authority; canonical usage is served
+      // by getSessionUsage and AggregateStatsService below.
+      return { completedRuns: [], openRuns: [] };
+    }
     await this.start();
     return this.filterPrivateAnalytics(await this.storage.queryRunAnalytics());
   }
@@ -1063,7 +1161,35 @@ export class StatsService implements RunObserver {
 
   /** Ledger-backed session usage projection for UI and fixture conservation checks. */
   getSessionUsage(sessionPath: string): SessionUsageSnapshot {
-    return this.accounting.projectSessionUsage(sessionPath);
+    if (!this.canonicalCapture) return this.accounting.projectSessionUsage(sessionPath);
+    const durable = this.canonicalSessionUsageByPath.get(sessionPath);
+    if (durable) {
+      durable.lastUsed = ++this.canonicalSessionUsageUseSequence;
+      return durable.snapshot;
+    }
+    // Shutdown is terminal for the host service. A renderer can still ask
+    // for a projection while its final render is draining; never turn that
+    // late read into a new helper process.
+    if (this.disposed) return { samples: [], authority: 'unknown' };
+    if (this.analyticsReadModel
+      && !this.canonicalSessionUsageRefresh
+      && this.canonicalSessionPathRefreshes.size < this.analyticsReadModel.getMaxConcurrentQueries()
+      && !this.canonicalSessionPathRefreshes.has(sessionPath)) {
+      // Session catalog hydration can legitimately happen after StatsService
+      // startup. Kick off one bounded read on the first projection instead of
+      // requiring a second host start. Until that read answers, canonical
+      // authority is explicitly unknown; the process-local ledger is never a
+      // substitute for durable canonical history.
+      const refresh = this.refreshCanonicalSessionPath(sessionPath);
+      this.canonicalSessionPathRefreshes.set(sessionPath, refresh);
+      void refresh.finally(() => {
+        if (this.canonicalSessionPathRefreshes.get(sessionPath) === refresh) {
+          this.canonicalSessionPathRefreshes.delete(sessionPath);
+        }
+        this.scheduleRender();
+      }).catch(() => undefined);
+    }
+    return { samples: [], authority: 'unknown' };
   }
 
   /** Correlated activity authority used by conservation tests and exports. */
@@ -1091,7 +1217,9 @@ export class StatsService implements RunObserver {
   /** Query the completed-data cache source without forcing pending analytics
    * to flush. Intended for mtime-gated host rollups. */
   async queryPersistedRunAnalytics(): Promise<RunAnalyticsQueryResult> {
-    if (this.canonicalCapture) throw new Error('Canonical analytics read model is not wired; P5 activation fence remains closed.');
+    if (this.canonicalCapture) {
+      return await this.queryRunAnalytics();
+    }
     await this.start();
     return this.filterPrivateAnalytics(await this.storage.queryPersistedRunAnalytics());
   }
@@ -1122,6 +1250,333 @@ export class StatsService implements RunObserver {
     this.accounting.activityTimeline.flush();
   }
 
+  /** Rehydrate each known session from the canonical root-session projection.
+   * Every query is capped by the read-model transport. A truncated session is
+   * left unknown rather than exposing a partial usage history. */
+  private async refreshCanonicalSessionUsage(): Promise<void> {
+    if (!this.analyticsReadModel || !this.canonicalCapture) return;
+    const readModel = this.analyticsReadModel;
+    if (this.canonicalSessionUsageRefresh) return await this.canonicalSessionUsageRefresh;
+    const refresh = (async () => {
+      let firstPass = true;
+      for (;;) {
+        // A revision/branch invalidation that arrives while a helper is in
+        // flight increments the epoch and requests another pass. The old
+        // pass may finish, but none of its responses can enter the cache.
+        this.canonicalRefreshRequested = false;
+        this.canonicalDirtyRevision = null;
+        const epoch = ++this.canonicalCacheEpoch;
+        this.clearCanonicalSessionCache();
+        // Startup/revision work is limited to the actual displayed/running UI
+        // surface. The session catalogue may be much larger than that surface;
+        // omitted paths hydrate lazily when requested and remain unknown until
+        // their bounded durable read answers. Keep the active path first so a
+        // large open-tab/running set cannot starve the current renderer.
+        const sessionState = this.getArchState().sessions;
+        const displayedPathOrder = [
+          ...(sessionState.activeSessionPath ? [sessionState.activeSessionPath] : []),
+          ...sessionState.runningSessionPaths,
+          ...sessionState.openTabPaths,
+        ];
+        const displayedPathRank = new Map<string, number>();
+        for (const sessionPath of displayedPathOrder) {
+          if (!displayedPathRank.has(sessionPath)) displayedPathRank.set(sessionPath, displayedPathRank.size);
+        }
+        const sessions = [...sessionState.sessions]
+          .filter((session) => displayedPathRank.has(session.path))
+          .sort((left, right) => displayedPathRank.get(left.path)! - displayedPathRank.get(right.path)!)
+          .slice(0, MAX_CANONICAL_DISPLAYED_SESSION_REFRESH_ENTRIES);
+        let nextIndex = 0;
+        const workerCount = Math.min(sessions.length, readModel.getMaxConcurrentQueries());
+        const readWorker = async (): Promise<void> => {
+          for (;;) {
+            // Finish the already-running reads, then give the latest dirty
+            // revision priority over more work from an invalidated pass.
+            if (this.disposed || epoch !== this.canonicalCacheEpoch) return;
+            const index = nextIndex;
+            nextIndex += 1;
+            const session = sessions[index];
+            if (!session) return;
+            try {
+              const result = await this.readCanonicalSessionPath(session.path);
+              this.applyCanonicalSessionRead(session.path, result, epoch);
+            } catch (error) {
+              // Do not expose a prior durable snapshot or the local ledger
+              // after a failed refresh: either could be stale across a
+              // close/delete. An invalidated epoch rejects this response.
+              if (epoch === this.canonicalCacheEpoch) {
+                this.cacheCanonicalUnknown(session.path, '0', 'read-error', epoch);
+                appendPieLog('warn', 'analytics', 'canonical session usage read failed', {
+                  path: session.path,
+                  error: error instanceof Error ? error.message : String(error),
+                });
+              }
+            }
+          }
+        };
+        await Promise.all(Array.from({ length: workerCount }, () => readWorker()));
+        // The first pass always runs. Later passes are required only when an
+        // invalidation was observed while the previous pass was reading.
+        if (this.disposed || (!firstPass && !this.canonicalRefreshRequested && !this.canonicalDirtyRevision)) break;
+        firstPass = false;
+        if (this.disposed || (!this.canonicalRefreshRequested && !this.canonicalDirtyRevision)) break;
+      }
+    })();
+    this.canonicalSessionUsageRefresh = refresh;
+    try {
+      await refresh;
+    } catch (error) {
+      appendPieLog('warn', 'analytics', 'canonical session usage refresh failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      if (this.canonicalSessionUsageRefresh === refresh) this.canonicalSessionUsageRefresh = null;
+    }
+  }
+
+  /** Invalidate every host-side canonical snapshot before a revision or scope
+   * transition. The next durable read is the only source allowed to repopulate
+   * the cache. */
+  private invalidateCanonicalSessionCache(schedule = true): void {
+    this.canonicalCacheEpoch += 1;
+    this.canonicalRefreshRequested = true;
+    this.clearCanonicalSessionCache();
+    if (schedule && !this.disposed && this.analyticsReadModel && this.canonicalCapture
+      && !this.canonicalSessionUsageRefresh) {
+      void this.refreshCanonicalSessionUsage();
+    }
+  }
+
+  private markCanonicalRevisionDirty(revision: string): void {
+    this.canonicalCacheEpoch += 1;
+    this.canonicalRefreshRequested = true;
+    if (this.canonicalDirtyRevision === null
+      || canonicalRevision(revision) > canonicalRevision(this.canonicalDirtyRevision)) {
+      this.canonicalDirtyRevision = canonicalRevisionString(revision);
+    }
+    this.clearCanonicalSessionCache();
+    if (!this.disposed && this.analyticsReadModel && this.canonicalCapture
+      && !this.canonicalSessionUsageRefresh) {
+      void this.refreshCanonicalSessionUsage();
+    }
+  }
+
+  private clearCanonicalSessionCache(): void {
+    this.canonicalSessionUsageByPath.clear();
+    this.canonicalSessionUsageCacheBytes = 0;
+    this.canonicalSessionUsageCacheSamples = 0;
+    for (const sessionPath of this.canonicalSessionPathEpochs.keys()) {
+      if (!this.canonicalSessionPathRefreshes.has(sessionPath)) {
+        this.canonicalSessionPathEpochs.delete(sessionPath);
+      }
+    }
+  }
+
+  private removeCanonicalSessionCache(sessionPath: string): void {
+    const entry = this.canonicalSessionUsageByPath.get(sessionPath);
+    if (!entry) return;
+    this.canonicalSessionUsageByPath.delete(sessionPath);
+    this.canonicalSessionUsageCacheBytes -= entry.estimatedBytes;
+    this.canonicalSessionUsageCacheSamples -= entry.sampleCount;
+    if (!this.canonicalSessionPathRefreshes.has(sessionPath)) {
+      this.canonicalSessionPathEpochs.delete(sessionPath);
+    }
+  }
+
+  private estimateCanonicalSessionUsageBytes(snapshot: SessionUsageSnapshot): number {
+    try {
+      // This is only a deterministic serialized-size proxy. Entry and sample
+      // counts are bounded independently; this value is not a heap
+      // measurement, so host heap qualification remains pending.
+      return JSON.stringify(snapshot).length * 2;
+    } catch {
+      return Number.MAX_SAFE_INTEGER;
+    }
+  }
+
+  private cacheCanonicalUnknown(
+    sessionPath: string,
+    revision: string,
+    scopeKey: string,
+    epoch: number,
+  ): void {
+    this.cacheCanonicalSessionUsage(sessionPath, { samples: [], authority: 'unknown' }, revision, scopeKey, epoch);
+  }
+
+  private cacheCanonicalSessionUsage(
+    sessionPath: string,
+    snapshot: SessionUsageSnapshot,
+    revision: string,
+    scopeKey: string,
+    epoch: number,
+  ): void {
+    if (epoch !== this.canonicalCacheEpoch) return;
+    this.removeCanonicalSessionCache(sessionPath);
+    let storedSnapshot = snapshot;
+    let estimatedBytes = this.estimateCanonicalSessionUsageBytes(snapshot);
+    let sampleCount = snapshot.samples.length;
+    // A complete but too-large session cannot be represented safely in this
+    // bounded host cache. Preserve truthful unknown coverage instead of
+    // retaining an unbounded all-history object.
+    if (sampleCount > MAX_CANONICAL_SESSION_CACHE_SAMPLES
+      || estimatedBytes > MAX_CANONICAL_SESSION_CACHE_BYTES) {
+      storedSnapshot = { samples: [], authority: 'unknown' };
+      estimatedBytes = this.estimateCanonicalSessionUsageBytes(storedSnapshot);
+      sampleCount = 0;
+    }
+    this.canonicalSessionUsageByPath.set(sessionPath, {
+      snapshot: storedSnapshot,
+      revision,
+      scopeKey,
+      epoch,
+      estimatedBytes,
+      sampleCount,
+      lastUsed: ++this.canonicalSessionUsageUseSequence,
+    });
+    this.canonicalSessionUsageCacheBytes += estimatedBytes;
+    this.canonicalSessionUsageCacheSamples += sampleCount;
+    while (this.canonicalSessionUsageByPath.size > MAX_CANONICAL_SESSION_CACHE_ENTRIES
+      || this.canonicalSessionUsageCacheBytes > MAX_CANONICAL_SESSION_CACHE_BYTES
+      || this.canonicalSessionUsageCacheSamples > MAX_CANONICAL_SESSION_CACHE_SAMPLES) {
+      let oldestPath: string | undefined;
+      let oldestUse = Number.POSITIVE_INFINITY;
+      for (const [path, entry] of this.canonicalSessionUsageByPath) {
+        if (entry.lastUsed < oldestUse) {
+          oldestUse = entry.lastUsed;
+          oldestPath = path;
+        }
+      }
+      if (oldestPath === undefined) break;
+      this.removeCanonicalSessionCache(oldestPath);
+    }
+  }
+
+  private applyCanonicalSessionRead(
+    sessionPath: string,
+    result: CanonicalSessionReadResult,
+    epoch: number,
+  ): void {
+    if (this.disposed || epoch !== this.canonicalCacheEpoch) return;
+    if (result.unknown || result.truncated) {
+      this.cacheCanonicalUnknown(sessionPath, result.revision, result.scopeKey, epoch);
+      return;
+    }
+    const snapshot = sessionUsageSnapshotFromCanonicalSettlements(
+      result.settlements,
+      result.branchId ? { branchId: result.branchId } : undefined,
+    );
+    this.cacheCanonicalSessionUsage(sessionPath, snapshot, result.revision, result.scopeKey, epoch);
+  }
+
+  private async readCanonicalSessionPath(sessionPath: string): Promise<CanonicalSessionReadResult> {
+    const identity = this.sessionIdentity(sessionPath);
+    const rootSessionId = identity.sessionId ?? analyticsRootSessionId(null, sessionPath);
+    const readModel = this.analyticsReadModel!;
+    // The normal unbranched path is one bounded helper query. Branch metadata
+    // already observed by the host selects the durable branch directly; after
+    // restart, a root read is used only to detect branch rows before the
+    // additional selection lookup.
+    const hasObservedBranch = this.canonicalBranchEntriesBySession.get(sessionPath)?.selectedEntryId !== undefined;
+    if (hasObservedBranch) {
+      const revision = canonicalRevisionString(await readModel.readRevision());
+      return await this.readCanonicalSelectedBranch(rootSessionId, revision);
+    }
+    const rootResult = await readModel.readScopedProviderSettlements(
+      { kind: 'rootSession', rootSessionId },
+      { limit: MAX_CANONICAL_SESSION_CACHE_SAMPLES, maxResultBytes: MAX_CANONICAL_SESSION_CACHE_BYTES },
+    );
+    const rootRead: CanonicalSessionReadResult = {
+      revision: canonicalRevisionString(rootResult.revision),
+      settlements: rootResult.settlements,
+      truncated: rootResult.truncated,
+      scopeKey: JSON.stringify(rootResult.scope),
+    };
+    if (rootResult.truncated || !rootResult.settlements.some((settlement) => settlement.branchId !== null)) {
+      return rootRead;
+    }
+    return await this.readCanonicalSelectedBranch(rootSessionId, rootRead.revision);
+  }
+
+  private async readCanonicalSelectedBranch(
+    rootSessionId: string,
+    revision: string,
+  ): Promise<CanonicalSessionReadResult> {
+    const readModel = this.analyticsReadModel!;
+    const selection = await readModel.executeQuery({
+      sql: `SELECT generation_id, branch_id
+            FROM analytics_current_branch_selections
+            WHERE root_session_id = ?
+            ORDER BY generation_id, branch_id
+            LIMIT 3`,
+      parameters: [rootSessionId],
+      maxRows: 3,
+      maxQueryBytes: 4 * 1024,
+      maxResultBytes: 64 * 1024,
+    });
+    if (selection.truncation.byteLimit || selection.truncation.cellLimit || selection.rows.length > 1) {
+      return { revision, settlements: [], truncated: false, scopeKey: `unknown:${rootSessionId}`, unknown: true };
+    }
+    const branchSelection = selection.rows[0];
+    const generationId = typeof branchSelection?.generation_id === 'string'
+      ? branchSelection.generation_id.trim() : '';
+    const branchId = typeof branchSelection?.branch_id === 'string'
+      ? branchSelection.branch_id.trim() : '';
+    if (branchSelection === undefined || !generationId || !branchId) {
+      return { revision, settlements: [], truncated: false, scopeKey: `unknown:${rootSessionId}`, unknown: true };
+    }
+    const scope: ProviderSettlementScope = { kind: 'selectedBranch', generationId, rootSessionId };
+    const result = await readModel.readScopedProviderSettlements(scope, {
+      limit: MAX_CANONICAL_SESSION_CACHE_SAMPLES,
+      expectedRevision: revision,
+      maxResultBytes: MAX_CANONICAL_SESSION_CACHE_BYTES,
+    });
+    const scopeKey = JSON.stringify(scope);
+    return {
+      revision: canonicalRevisionString(result.revision),
+      settlements: result.settlements,
+      truncated: result.truncated,
+      scopeKey,
+      ...(scope.kind === 'selectedBranch' ? { branchId } : {}),
+      ...(scope.kind === 'selectedBranch' && result.selectionCoverage !== 'known' ? { unknown: true } : {}),
+    };
+  }
+
+  private async refreshCanonicalSessionPath(sessionPath: string): Promise<void> {
+    if (!this.analyticsReadModel || !this.canonicalCapture) return;
+    if (this.canonicalSessionUsageRefresh) {
+      await this.canonicalSessionUsageRefresh;
+      return;
+    }
+    const epoch = this.canonicalCacheEpoch;
+    const pathRefreshEpoch = (this.canonicalSessionPathEpochs.get(sessionPath) ?? 0) + 1;
+    this.canonicalSessionPathEpochs.set(sessionPath, pathRefreshEpoch);
+    try {
+      const result = await this.readCanonicalSessionPath(sessionPath);
+      if (!this.disposed && epoch === this.canonicalCacheEpoch
+        && this.canonicalSessionPathEpochs.get(sessionPath) === pathRefreshEpoch) {
+        this.applyCanonicalSessionRead(sessionPath, result, epoch);
+      }
+    } catch (error) {
+      if (!this.disposed && epoch === this.canonicalCacheEpoch
+        && this.canonicalSessionPathEpochs.get(sessionPath) === pathRefreshEpoch) {
+        this.cacheCanonicalUnknown(sessionPath, '0', 'read-error', epoch);
+        appendPieLog('warn', 'analytics', 'canonical session usage read failed', {
+          path: sessionPath,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    } finally {
+      // Once this request has completed, its token is only needed while a
+      // cache entry or a newer request still refers to the path. Reclaim it
+      // for paths that remain uncached so a long-lived session catalogue
+      // cannot grow this map without bound.
+      if (!this.canonicalSessionUsageByPath.has(sessionPath)
+        && this.canonicalSessionPathEpochs.get(sessionPath) === pathRefreshEpoch) {
+        this.canonicalSessionPathEpochs.delete(sessionPath);
+      }
+    }
+  }
+
   /** Start the bounded cross-host refresh once canonical authority is active.
    *
    * Only another host's committed summary, correction or private close is
@@ -1133,17 +1588,24 @@ export class StatsService implements RunObserver {
     if (!this.analyticsReadModel || this.analyticsRevisionRefresher) return;
     this.analyticsRevisionRefresher = new CanonicalRevisionRefresher({
       readModel: this.analyticsReadModel,
-      onRevisionChange: () => this.scheduleRender(),
+      onRevisionChange: (revision) => {
+        this.markCanonicalRevisionDirty(revision);
+        this.scheduleRender();
+      },
       onError: (error) => {
         appendPieLog('warn', 'analytics', 'canonical analytics revision refresh could not read the revision', {
           error: error instanceof Error ? error.message : String(error),
         });
       },
     });
-    void this.analyticsRevisionRefresher.start().catch((error: unknown) => {
+    const start = this.analyticsRevisionRefresher.start().then(() => undefined).catch((error: unknown) => {
       appendPieLog('warn', 'analytics', 'canonical analytics revision refresh failed to start', {
         error: error instanceof Error ? error.message : String(error),
       });
+    });
+    this.canonicalRevisionStart = start;
+    void start.finally(() => {
+      if (this.canonicalRevisionStart === start) this.canonicalRevisionStart = null;
     });
   }
 
@@ -1155,8 +1617,15 @@ export class StatsService implements RunObserver {
   async shutdown(): Promise<void> {
     if (this.canonicalCapture) {
       this.disposed = true;
-      this.analyticsRevisionRefresher?.stop();
+      const revisionRefreshDrain = this.analyticsRevisionRefresher?.stop();
       this.backgroundCompactionAbort.abort();
+      const refreshes = [
+        this.canonicalRevisionStart,
+        revisionRefreshDrain,
+        this.canonicalSessionUsageRefresh,
+        ...this.canonicalSessionPathRefreshes.values(),
+      ].filter((promise): promise is Promise<void> => promise !== null);
+      await Promise.allSettled(refreshes);
       return;
     }
     // Terminal: block start reactivation immediately, then drain the tracked

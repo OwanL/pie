@@ -14,6 +14,121 @@ Owning specifications: runbook; `docs/ANALYTICS_REWORK_PLAN.md` §§1, 11.6, 17;
 
 ---
 
+## Checkpoint 46 - 2026-09-12T15:50Z, current integrated source and evidence boundary
+
+**Current state: reviewed source-only milestone; the live VS Code/Codex chain remains protected.** No
+authority cutover, storage cutoff, live restart, publication, or live-data mutation occurred. The
+working tree is uncommitted at `d752005a3ea5ddefb687414130dfb6d8a1c782d8`; the explicit r04 analytics
+allowlist and hashes are recorded at
+`C:\dev\scratch\pie-default-affected-20260913-r02\proposed-analytics-stage-paths-r04.json`.
+
+The default affected runner completed all three selected packages: **4,746 tests, 4,727 passed, 0
+failed, and 19 skipped**. The extension contributed 4,734 tests (4,715 passed, 19 skipped), scripts
+8 passed, and subagent 4 passed. The durable log and corrected package-total adjunct are
+`C:\dev\scratch\pie-default-affected-20260913-r02\npm-test.log` and
+`C:\dev\scratch\pie-default-affected-20260913-r02\terminal-receipt-correction-adjunct.json`.
+
+The no-sync extension build validation passed with coordinated host/renderer id
+`1372b06402ed86ae7b13`; UI refresh and browser verification against that build are still pending.
+The full mixed report is
+`C:\dev\scratch\pie-mixed-full-20260913-r01\mixed-full.json`; its original bytes remain unchanged.
+The hash-bound truthful adjunct is
+`C:\dev\scratch\pie-mixed-full-20260913-r01\mixed-full-truthful-adjunct.json`.
+
+The mixed run passed its four functional gates with 25,001 accepted rows, including paced ingest,
+broad/indexed reads, the 1,000 fact/s burst, cancellation, detail reconstruction, and commit/delete
+refresh. All 5 recorder and 16 query workers have terminal lifecycle evidence, all 21 owned worker
+PIDs were absent post-run, and cleanup removed the owned root. Recorder-only sampled peak RSS was
+284,987,392 bytes (271.79 MiB), above the 256 MiB ceiling. Native final-counter receipts were
+available for 13/16 query workers; the remaining three are explicit unavailable observations. Query
+worker RSS/CPU high-water and formal header measurement remain unavailable, so the run is
+**scenario-passed but P0-unqualified overall**. The adjunct interprets these facts without rewriting
+the source report or converting post-hoc absence into an exit-code claim.
+
+The 1M/10M history tiers, fresh-history endurance-to-r08 equivalence, total host/query memory,
+matched agent/UI behavior, schema-v2 fault coverage, and authority/cutover admission remain open.
+The seven protected model/settings/lock paths retain their baseline hashes and stay outside the
+allowlist. The post-freeze query lifecycle test guard is TypeScript narrowing only; it does not alter
+runtime behavior.
+
+---
+
+## Checkpoint 45 - 2026-09-12T14:38Z, SDK behavior verified; canonical and query fixes pending
+
+**The live VS Code/Codex chain remains protected. No live publication, activation, cutoff or restart
+has occurred.** The user is asleep and explicitly forbids an action that could interrupt this session
+and leave it idle. Toy recovery evidence does not authorize restarting the current supervisor.
+
+The preceding reviewed milestone was committed and pushed as
+`d752005a3ea5ddefb687414130dfb6d8a1c782d8` on `master`. Subsequent source changes are uncommitted.
+The isolated host was refreshed from no-sync build `23148386d0d80e696d0e` with exact output-file
+hash matching. That build predates the latest cache and query instrumentation changes.
+
+Actual SDK execution through the isolated web UI now passes a local deterministic provider's normal
+stream, real write/read tool roundtrip, and cancellation (provider observed abort). The first real SDK
+send exposed a missing `analytics.branch` worker IPC variant; the pending source fix adds bounded
+validation and advances the internal IPC version with matching producer/router tests. Evidence is
+`C:/dev/scratch/pie-fixture-ui-20260913-r01/sdk-fixture-execution-summary.json`, with traces and
+screenshots in `runs/legacy-authority/`. These are legacy-authority runs with capture enabled, not
+an analytics-disabled baseline or canonical qualification. The unchanged four-check UI smoke suite
+also passed on isolated build `97a23913a62c2f0e06c0`.
+
+Pending canonical historical changes remove local accounting fallback, display open private-session
+usage, reject stale refreshes after revision/deletion, use durable selected-branch scope, and bound
+the host historical cache. Focused serial tests pass, but intermittent parallel SQLite errors are
+under investigation; default parallel acceptance is still open. Aggregate SQL queries now avoid
+materializing global raw history. Required execution/activity metrics and export remain incomplete.
+Separate bounded diagnostics changes pass 25 focused tests; real production ACK latency remains
+unmeasured because the ACK-recording hook has no production caller.
+
+Mixed-load smoke machinery now persists query lifecycle receipts and derives queue/worker checks
+from those identities. Earlier smoke passes remain mechanics-only. Query terminal resource telemetry
+is being implemented; forced cancellation cannot claim an unavailable post-exit memory peak. Full
+mixed execution and a fresh coordinated build/default affected test run are pending these source units.
+
+A throwaway Luna thread resumed automatically through a detached finite watchdog after forced loss
+of its owned CLI process. The resumed turn completed and wrote the expected semantic marker; the
+strict byte receipt reports failure because of a trailing newline, and interrupted tool state was not
+lossless. Evidence: `C:/dev/scratch/codex-recovery-toy-20260913-r01/recovery-toy-receipt.json` and
+`watchdog-result.json`. This proves only the tested toy wrapper behavior, not current Code-host or
+app-server recovery. Live processes 37056, 26828 and 40940 remained alive.
+
+Follow-up source review found an undrained interval revision read in `CanonicalRevisionRefresher`.
+Its pending fix tracks and aborts the query, suppresses post-stop callbacks, and gives shutdown an
+awaitable drain. Arbitrary writer-close sleeps were removed. Serial focused coverage passes 12 tests;
+default parallel and affected acceptance are pending the aggregate snapshot unit. Lazy history reads
+now have disposal/concurrency guards and reclaim per-path tokens. Root review also repaired activation
+negative fixtures so all 22 failed gates are rejected at their intended boundary; eight admission tests
+pass without opening live admission. Query telemetry and mixed validator coverage passes 20 tests;
+the full mixed plan now requires 10,000 paced samples, with smoke unchanged at 20.
+
+The current aggregate unit is making accounting and provider groups atomic at one projection revision.
+It is not a complete metrics replacement: incremental provider/model/day projections, execution/activity
+metrics, and avoidance of historical scans during ordinary summary refresh remain required follow-ons.
+
+Subsequent default parallel lifecycle coverage passed 19 tests. The first affected run then failed
+13 unrelated checks (12 stale IPC-version fixtures and one timeout-observer race). Their focused
+repairs pass 28 tests; the affected run remains failed evidence until rerun. A separate deliberately
+held response fixture could hang when its helper read failed or cleanup waited on the held response.
+Its handshake now rejects with bounded diagnostics and always releases before shutdown; seven tests
+pass. Refresh scope is being narrowed to actual displayed demand to prevent catalogue-wide hydration
+from starving the active session. Aggregate publication now avoids requiring a quiescent store or
+unchanging live rate tick; focused starvation coverage passes two tests.
+
+The Windows native-handle toy probe proves final memory/CPU counters remain readable after natural
+and forced exit through a handle acquired while the process is alive. Evidence is
+`C:/dev/scratch/pie-windows-process-handle-probe-20260913-r01/handle-probe-results-r02.json`.
+A finite qualification-only collector is implemented and its first 15 focused tests pass, but review
+found malformed-terminal settlement and unsupported through-exit claims in unavailable receipts.
+Those corrections and a fresh integration pass are pending; no full mixed run is yet claimed.
+
+P0 full qualification, candidate admission, all-host handoff production, canonical consumer completion,
+and actual activation/cutover remain open. Existing hard-closed admission flags must remain closed
+until their actual producers and validators exist. Protected model/settings files and lock files are
+excluded from implementation staging; retain the existing stash.
+
+---
+
 ## Checkpoint 44 - 2026-09-12T13:04Z, reviewed analytics handoff and r03 integration barrier
 
 **State: reviewed source-only milestone; no publication, activation, storage cutoff, live host
@@ -3602,3 +3717,35 @@ This evidence remains **P0-unqualified overall**. It measures the endurance harn
 and generated payload mix, not the r08 1M-row history, richer payload distribution, mixed/UI workload,
 schema-v2 faults, or 10M tier. Smoke mode is scheduling/report-mechanics coverage only and cannot
 replace these full trials. Missing gates remain explicitly unqualified.
+
+## Final integration milestone: bounded mixed workload and source evidence
+
+The reviewed source tree is recorded at commit `d752005a3ea5ddefb687414130dfb6d8a1c782d8`. The
+default affected test run completed all three selected packages: 4,746 tests, 4,727 passed, 0 failed,
+and 19 skipped. The extension contributed 4,734 tests (4,715 passed, 19 skipped), scripts 8 passed,
+and subagent 4 passed. The durable log and corrected package-total adjunct are
+`C:\dev\scratch\pie-default-affected-20260913-r02\npm-test.log` and
+`C:\dev\scratch\pie-default-affected-20260913-r02\terminal-receipt-correction-adjunct.json`.
+
+`npm.cmd run extension:build:validate` passed with coordinated build and renderer id
+`1372b06402ed86ae7b13`; its terminal receipt and log are
+`C:\dev\scratch\pie-collector-build-20260913-r01\terminal-receipt-r02.json` and
+`C:\dev\scratch\pie-collector-build-20260913-r01\extension-build-validate-r02.log`. The mixed
+report is `C:\dev\scratch\pie-mixed-full-20260913-r01\mixed-full.json`, with its original log and
+terminal receipt retained beside it. Its functional gates passed for 25,001 accepted rows: paced
+ingest, broad and indexed reads, the 1,000 fact/s burst, cancellation, full detail reconstruction,
+and non-writing commit/delete refresh. Recorder-only high-water RSS reached 284,987,392 bytes,
+above the 256 MiB ceiling; query-worker RSS/CPU high-water was unavailable and native process
+receipts were available for 13 of 16 observations. The scenario is therefore **scenario-passed but
+P0-unqualified overall**. This report does not qualify the 1M/10M history tiers, endurance light and
+sustained repeats, matched agent/UI behavior, total host/query memory, or schema-v2 fault coverage.
+The standalone event-loop proxy remains separate from UI evidence.
+
+The explicit unstaged analytics allowlist, including the reviewed source, tests, Windows collector,
+diagnostics, execution document, and admission test, is
+`C:\dev\scratch\pie-default-affected-20260913-r02\proposed-analytics-stage-paths-r04.json`.
+It contains 37 paths. The seven protected model/settings/lock paths remain excluded and their
+baseline hashes are unchanged; the two additional observed lockfiles are recorded separately in the
+manifest. The post-freeze `query-client-lifecycle.test.ts` terminal-state guard is a TypeScript
+narrowing-only test change; build/type validation passed and runtime behavior is unchanged. No
+authority cutover or publication is implied by this checkpoint.

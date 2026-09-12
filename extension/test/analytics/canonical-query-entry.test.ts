@@ -244,6 +244,39 @@ test('canonical read model serves schema, bounded queries, settlements, accounti
   const sessionAccounting = await readModel.readProviderAccountingSummary('root-a');
   assert.equal(sessionAccounting.invocationCount, 2);
 
+  // Accounting and bounded provider/model/date groups share one recorder
+  // snapshot and revision. The week end also proves the date bounds are not
+  // silently widened to the current time.
+  const aggregate = await readModel.readProviderAggregateSummary({
+    todayStartMs: 1_750_000_000_000,
+    todayEndMs: 1_750_000_200_000,
+    weekStartMs: 1_750_000_000_000,
+    weekEndMs: 1_750_000_060_000,
+  });
+  assert.equal(String(aggregate.accounting.revision), String(aggregate.revision));
+  assert.ok(BigInt(aggregate.snapshotWatermark) >= 4n);
+  assert.deepEqual(aggregate.truncation, { rowLimit: false, byteLimit: false, cellLimit: false });
+  assert.equal(aggregate.groups.length, 2);
+  const anthropic = aggregate.groups.find((row) => row.provider === 'anthropic');
+  assert.equal(anthropic?.today_cost, 0.05);
+  assert.equal(anthropic?.week_cost, 0.04);
+
+  const boundedAggregate = await readModel.readProviderAggregateSummary({
+    todayStartMs: 1_750_000_000_000,
+    todayEndMs: 1_750_000_200_000,
+    weekStartMs: 1_750_000_000_000,
+    weekEndMs: 1_750_000_200_000,
+    maxGroups: 1,
+  });
+  assert.equal(boundedAggregate.groups.length, 1);
+  assert.equal(boundedAggregate.truncation.rowLimit, true);
+  assert.throws(() => readModel.readProviderAggregateSummary({
+    todayStartMs: 2,
+    todayEndMs: 1,
+    weekStartMs: 1,
+    weekEndMs: 2,
+  }), /date bounds/u);
+
   // Historical dimensions are durable membership, not synthesized aggregates.
   const dimensions = await readModel.readHistoricalDimensions();
   assert.ok((dimensions.providers as Array<{ provider?: string }>).some((row) => row.provider === 'anthropic'));

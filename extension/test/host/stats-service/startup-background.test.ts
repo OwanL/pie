@@ -242,7 +242,8 @@ test('a deferred ledger-heal cannot push new working time after startup restored
     const counters = { renders: 0 };
     const stats = new StatsService(optionsFor(analyticsRoot, tempDir, createInitialArchState(), counters));
 
-    await stats.start();
+    try {
+      await stats.start();
     assert.equal(stats.getActivityIntervals().length, 0,
       'startup must resolve before healing projects the ledger into the timeline');
     assert.deepEqual(stats.getWorkingTimeBySession(), {},
@@ -263,7 +264,10 @@ test('a deferred ledger-heal cannot push new working time after startup restored
         'timeline-healing',
         'historical-migration',
       ],
-    );
+      );
+    } finally {
+      await stats.shutdown();
+    }
   });
 });
 

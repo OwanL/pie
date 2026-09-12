@@ -1,6 +1,10 @@
 import { serialize } from 'node:v8';
 
-import type { AnalyticsQueryRequest } from './query-client.js';
+import type {
+  AnalyticsQueryRequest,
+  AnalyticsQueryWorkerTelemetry,
+  AnalyticsQueryWorkerTelemetrySamplePhase,
+} from './query-client.js';
 import { SqliteAnalyticsRecorder } from './sqlite-recorder.js';
 
 const databasePath = process.env.PIE_ANALYTICS_DATABASE_PATH;
@@ -38,6 +42,44 @@ function send(message: unknown): void {
   if (process.connected) process.send?.(message);
 }
 
+/** Capture the disposable helper's own high-water memory after the result has
+ * been encoded. A forced kill has no opportunity to produce this sample. */
+function sampleWorkerTelemetry(
+  runtimeSamplePhase: AnalyticsQueryWorkerTelemetrySamplePhase,
+): AnalyticsQueryWorkerTelemetry | undefined {
+  try {
+    const resourceUsage = process.resourceUsage();
+    const currentMemory = process.memoryUsage();
+    if (!Number.isSafeInteger(resourceUsage.maxRSS) || resourceUsage.maxRSS <= 0
+      || resourceUsage.maxRSS > Math.floor(Number.MAX_SAFE_INTEGER / 1024)
+      || !Number.isSafeInteger(resourceUsage.userCPUTime) || resourceUsage.userCPUTime < 0
+      || !Number.isSafeInteger(resourceUsage.systemCPUTime) || resourceUsage.systemCPUTime < 0
+      || !Number.isSafeInteger(currentMemory.rss) || currentMemory.rss <= 0
+      || !Number.isSafeInteger(currentMemory.heapTotal) || currentMemory.heapTotal < 0
+      || !Number.isSafeInteger(currentMemory.heapUsed) || currentMemory.heapUsed < 0
+      || !Number.isSafeInteger(currentMemory.external) || currentMemory.external < 0
+      || !Number.isSafeInteger(currentMemory.arrayBuffers) || currentMemory.arrayBuffers < 0) {
+      return undefined;
+    }
+    return {
+      workerIdentity,
+      maxRssBytes: resourceUsage.maxRSS * 1024,
+      userCpuTimeMicros: resourceUsage.userCPUTime,
+      systemCpuTimeMicros: resourceUsage.systemCPUTime,
+      currentMemory: {
+        rssBytes: currentMemory.rss,
+        heapTotalBytes: currentMemory.heapTotal,
+        heapUsedBytes: currentMemory.heapUsed,
+        externalBytes: currentMemory.external,
+        arrayBuffersBytes: currentMemory.arrayBuffers,
+      },
+      runtimeSamplePhase,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 process.on('message', (raw: unknown) => {
   if (!recorder) return;
   const message = raw as QueryMessage;
@@ -73,6 +115,17 @@ process.on('message', (raw: unknown) => {
       });
     } else if (message.type === 'providerAccounting') {
       result = recorder.readProviderAccountingSummary(message.rootSessionId);
+    } else if (message.type === 'providerAggregate') {
+      const maxGroups = message.maxGroups === undefined
+        ? undefined
+        : boundedInteger(message.maxGroups, DEFAULT_ROW_LIMIT, MAX_ROW_LIMIT);
+      result = recorder.readProviderAggregateSummary({
+        todayStartMs: message.todayStartMs,
+        todayEndMs: message.todayEndMs,
+        weekStartMs: message.weekStartMs,
+        weekEndMs: message.weekEndMs,
+        maxGroups,
+      });
     } else if (message.type === 'historicalDimensions') {
       result = recorder.readHistoricalDimensionSummary();
     } else if (message.type === 'qualificationSpin') {
@@ -89,12 +142,21 @@ process.on('message', (raw: unknown) => {
     if (bytes.byteLength > maximum) {
       throw new Error(`Analytics query result exceeds ${maximum} bytes.`);
     }
-    send({ type: 'result', requestId: message.requestId, bytes });
+    const telemetry = sampleWorkerTelemetry('after-result-serialization');
+    send({
+      type: 'result',
+      requestId: message.requestId,
+      bytes,
+      ...(telemetry ? { telemetry } : { telemetryStatus: 'unavailable-runtime' }),
+    });
   } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const telemetry = sampleWorkerTelemetry('after-error-message-formatting');
     send({
       type: 'error',
       requestId: message.requestId,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage,
+      ...(telemetry ? { telemetry } : { telemetryStatus: 'unavailable-runtime' }),
     });
   }
 });

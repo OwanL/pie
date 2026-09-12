@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { CoordinatorProviderNetworkLeaseAuthority } from '../../../src/backend/coordinator-provider-network-lease';
+import { WORKER_IPC_VERSION } from '../../../src/backend/worker-protocol';
 import { SessionTransitionInProgressError, WorkerRuntimeRouter } from '../../../src/backend/worker-runtime-router';
 
 function opened(sessionPath: string) {
@@ -246,7 +247,7 @@ test('replacement worker provider acquire is correlated beneath a transitioning 
   assert.equal(router.getRoute(sessionPath).state, 'transitioning');
 
   await router.handleWorkerFrame(sessionPath, {
-    ipcVersion: 1,
+    ipcVersion: WORKER_IPC_VERSION,
     coordinatorGeneration: 1,
     workerId: 'transition-provider-worker-2',
     workerGeneration: 2,

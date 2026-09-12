@@ -4,14 +4,17 @@ import test from 'node:test';
 import { SDK_PATCH_IDENTITY_VERSION } from '../../../src/backend/sdk-patch-barrier';
 import { deriveAnalyticsIdempotencyKey, type AnalyticsObservation } from '../../../../shared/analytics/contracts.js';
 import { createAnalyticsFactPacket } from '../../../../shared/analytics/transport.js';
+import type { AnalyticsBranchObservedPayload } from '../../../src/shared/protocol/sessions.js';
 import {
   WORKER_IPC_MAX_FRAME_BYTES,
   WORKER_IPC_MAX_ORDINARY_FRAME_BYTES,
   WORKER_IPC_VERSION,
   parseCoordinatorToWorkerFrame,
   parseWorkerToCoordinatorFrame,
+  validateWorkerIpcFrameDraft,
   type WorkerFrameBase,
   type WorkerFrameExpectation,
+  type WorkerRuntimeEventFrame,
 } from '../../../src/backend/worker-protocol';
 
 const base: WorkerFrameBase = {
@@ -269,6 +272,43 @@ test('Phase 4 identity rejects root alias drift and stale lease path or revision
     { ...frame, leasePath: 'C:/sessions/old-lease.jsonl' },
     { ...frame, leaseRevision: base.leaseRevision - 1 },
   ]) assert.equal(parseWorkerToCoordinatorFrame(changed, expected).status, 'invalid');
+});
+
+test('worker IPC carries the durable analytics branch shape through draft and decode validation', () => {
+  const payload = {
+    sessionPath: base.sessionPath,
+    entryId: 'entry-B',
+    parentEntryId: 'entry-A',
+    selectedEntryId: 'entry-B',
+    observedAt: 1_767_225_600_000,
+  } satisfies AnalyticsBranchObservedPayload;
+  const frame = {
+    ...base,
+    kind: 'runtime.event',
+    event: 'analytics.branch',
+    payload,
+  } satisfies WorkerRuntimeEventFrame<'analytics.branch'>;
+
+  const draft = { ...frame } as Record<string, unknown>;
+  delete draft.seq;
+  assert.equal(validateWorkerIpcFrameDraft(draft), undefined);
+  const decoded = parseWorkerToCoordinatorFrame(frame, expected);
+  assert.equal(decoded.status, 'accepted');
+  if (decoded.status === 'accepted' && decoded.frame.kind === 'runtime.event') {
+    assert.deepEqual(decoded.frame.payload, payload);
+  }
+
+  for (const malformed of [
+    { ...payload, entryId: '' },
+    { ...payload, parentEntryId: 7 },
+    { ...payload, observedAt: Number.POSITIVE_INFINITY },
+    { ...payload, unexpected: true },
+    (() => { const { selectedEntryId: _selected, ...missing } = payload; return missing; })(),
+  ]) {
+    const result = parseWorkerToCoordinatorFrame({ ...frame, payload: malformed }, expected);
+    assert.equal(result.status, 'invalid');
+    if (result.status === 'invalid') assert.match(result.detail, /analytics\.branch/);
+  }
 });
 
 test('protocol rejects exact extra fields, malformed correlated unions, and unsafe integers', () => {

@@ -45,6 +45,8 @@ export class CanonicalRevisionRefresher {
   private checks = 0;
   private changes = 0;
   private lastDurationMs = 0;
+  private currentCheck: Promise<void> | undefined;
+  private currentCheckAbort: AbortController | undefined;
 
   constructor(options: CanonicalRevisionRefresherOptions) {
     this.readModel = options.readModel;
@@ -64,6 +66,7 @@ export class CanonicalRevisionRefresher {
   async start(): Promise<string | null> {
     if (this.stopped) throw new Error('CanonicalRevisionRefresher is stopped.');
     await this.check();
+    if (this.stopped) return this.revision;
     this.running = true;
     this.rearm();
     return this.revision;
@@ -80,21 +83,50 @@ export class CanonicalRevisionRefresher {
     };
   }
 
-  stop(): void {
+  /** Stop future polling, abort an interval read if one is in flight, and
+   * resolve only after that read has reached its terminal state. Existing
+   * callers may ignore the returned promise; owners that remove resources
+   * can await it to prove no revision callback remains outstanding. */
+  stop(): Promise<void> {
     this.stopped = true;
     this.running = false;
     if (this.timer !== undefined) {
       clearTimeout(this.timer);
       this.timer = undefined;
     }
+    this.currentCheckAbort?.abort(new Error('Canonical revision refresh stopped.'));
+    return this.currentCheck?.then(() => undefined, () => undefined) ?? Promise.resolve();
   }
 
   /** One revision read. Serialized by {@link running} so an interval cannot
    * overlap a still-pending read on a slow host. */
-  private async check(): Promise<void> {
+  private check(): Promise<void> {
+    if (this.currentCheck) return this.currentCheck;
+    const controller = new AbortController();
+    const check = this.performCheck(controller.signal);
+    this.currentCheck = check;
+    this.currentCheckAbort = controller;
+    // The returned rejection is handled by the owner of check(); this branch
+    // only clears the tracking slot and must never become an unhandled
+    // promise from a timer callback.
+    void check.then(
+      () => this.clearCurrentCheck(check),
+      () => this.clearCurrentCheck(check),
+    );
+    return check;
+  }
+
+  private clearCurrentCheck(check: Promise<void>): void {
+    if (this.currentCheck !== check) return;
+    this.currentCheck = undefined;
+    this.currentCheckAbort = undefined;
+  }
+
+  private async performCheck(signal: AbortSignal): Promise<void> {
     const startedAt = performance.now();
     try {
-      const current = await this.readModel.readRevision();
+      const current = await this.readModel.readRevision(signal);
+      if (this.stopped || signal.aborted) return;
       this.lastDurationMs = performance.now() - startedAt;
       this.checks += 1;
       this.failing = false;
@@ -106,6 +138,7 @@ export class CanonicalRevisionRefresher {
       }
       this.onCheck?.({ revision: current, changed, durationMs: this.lastDurationMs });
     } catch (error) {
+      if (this.stopped || signal.aborted) return;
       this.lastDurationMs = performance.now() - startedAt;
       this.checks += 1;
       // Report only the transition into failure; an unreachable database must

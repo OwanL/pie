@@ -314,6 +314,26 @@ export interface ProviderAccountingSummary {
   effectiveCostUsd: EffectiveCostMetric;
 }
 
+/** One bounded aggregate read. The accounting projection and provider/model
+ * groups are produced in the same SQLite snapshot and carry the same
+ * projection revision, so a consumer cannot pair facts from different
+ * commits. */
+export interface ProviderAggregateReadRequest {
+  todayStartMs: number;
+  todayEndMs: number;
+  weekStartMs: number;
+  weekEndMs: number;
+  maxGroups?: number;
+}
+
+export interface ProviderAggregateReadModel {
+  revision: number | string;
+  snapshotWatermark: number | string;
+  accounting: ProviderAccountingSummary;
+  groups: Array<Record<string, unknown>>;
+  truncation: AnalyticsQueryTruncation;
+}
+
 export interface SourceSequenceGap {
   from: number | string;
   to: number | string;
@@ -2140,6 +2160,83 @@ function boundedPositiveInteger(value: number | undefined, fallback: number, max
   return Math.min(candidate, maximum);
 }
 
+function boundedTimestamp(value: number, name: string): number {
+  if (!Number.isSafeInteger(value)) throw new RangeError(`${name} must be a safe integer timestamp.`);
+  return value;
+}
+
+function providerAggregateGroupSql(): string {
+  const cost = (window: string) => `
+    SUM(CASE WHEN ${window} AND effective_cost_coverage = 'known'
+      THEN COALESCE(effective_cost_usd, 0) ELSE 0 END)`;
+  const input = (window: string) => `
+    SUM(CASE WHEN ${window} AND input_tokens IS NOT NULL
+      THEN CAST(input_tokens AS INTEGER) ELSE 0 END)`;
+  const output = (window: string) => `
+    SUM(CASE WHEN ${window} AND output_tokens IS NOT NULL
+      THEN CAST(output_tokens AS INTEGER) ELSE 0 END)`;
+  const cacheRead = (window: string) => `
+    SUM(CASE WHEN ${window} AND cache_read_tokens IS NOT NULL
+      THEN CAST(cache_read_tokens AS INTEGER) ELSE 0 END)`;
+  const cacheWrite = (window: string) => `
+    SUM(CASE WHEN ${window} AND cache_write_tokens IS NOT NULL
+      THEN CAST(cache_write_tokens AS INTEGER) ELSE 0 END)`;
+  const unknown = (window: string) => `
+    SUM(CASE WHEN ${window} AND effective_cost_coverage = 'unknown' THEN 1 ELSE 0 END)`;
+  const unpriced = (window: string) => `
+    SUM(CASE WHEN ${window} AND effective_cost_coverage = 'not_applicable'
+      THEN 1 ELSE 0 END)`;
+  const gap = (window: string) => `
+    SUM(CASE WHEN ${window} AND (effective_cost_coverage = 'unknown'
+      OR input_tokens IS NULL OR output_tokens IS NULL
+      OR cache_read_tokens IS NULL OR cache_write_tokens IS NULL)
+      THEN 1 ELSE 0 END)`;
+  const today = 'CAST(settled_at_ms AS INTEGER) >= bounds.today_start AND CAST(settled_at_ms AS INTEGER) <= bounds.today_end';
+  const week = 'CAST(settled_at_ms AS INTEGER) >= bounds.week_start AND CAST(settled_at_ms AS INTEGER) <= bounds.week_end';
+  return `
+    WITH bounds(today_start, today_end, week_start, week_end) AS (
+      SELECT ?, ?, ?, ?
+    ), session_count AS (
+      SELECT COUNT(DISTINCT root_session_id) AS value
+      FROM analytics_provider_settlements
+    )
+    SELECT
+      COALESCE(provider, 'unknown') AS provider,
+      COALESCE(effective_model, 'unknown') AS model,
+      session_count.value AS session_count,
+      ${cost('1')} AS all_cost,
+      ${input('1')} AS all_input,
+      ${output('1')} AS all_output,
+      ${cacheRead('1')} AS all_cache_read,
+      ${cacheWrite('1')} AS all_cache_write,
+      ${unknown('1')} AS all_unknown,
+      ${unpriced('1')} AS all_unpriced,
+      ${gap('1')} AS all_gap,
+      ${cost(today)} AS today_cost,
+      ${input(today)} AS today_input,
+      ${output(today)} AS today_output,
+      ${cacheRead(today)} AS today_cache_read,
+      ${cacheWrite(today)} AS today_cache_write,
+      ${unknown(today)} AS today_unknown,
+      ${unpriced(today)} AS today_unpriced,
+      ${gap(today)} AS today_gap,
+      ${cost(week)} AS week_cost,
+      ${input(week)} AS week_input,
+      ${output(week)} AS week_output,
+      ${cacheRead(week)} AS week_cache_read,
+      ${cacheWrite(week)} AS week_cache_write,
+      ${unknown(week)} AS week_unknown,
+      ${unpriced(week)} AS week_unpriced,
+      ${gap(week)} AS week_gap
+    FROM analytics_provider_settlements
+    CROSS JOIN bounds
+    CROSS JOIN session_count
+    GROUP BY provider, effective_model
+    ORDER BY provider, effective_model
+    LIMIT ?
+  `;
+}
+
 function providerSettlementProjection(
   row: Record<string, unknown>,
   inheritedForSession?: string,
@@ -3709,55 +3806,103 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     }));
   }
 
+  /** Bounded global provider aggregate. Accounting, grouped dimensions, the
+   * projection revision, and the observation watermark are all read while one
+   * SQLite read transaction is open. Only aggregate rows (plus one sentinel
+   * row for truncation detection) are materialized. */
+  readProviderAggregateSummary(request: ProviderAggregateReadRequest): ProviderAggregateReadModel {
+    this.assertOpen();
+    const todayStartMs = boundedTimestamp(request.todayStartMs, 'todayStartMs');
+    const todayEndMs = boundedTimestamp(request.todayEndMs, 'todayEndMs');
+    const weekStartMs = boundedTimestamp(request.weekStartMs, 'weekStartMs');
+    const weekEndMs = boundedTimestamp(request.weekEndMs, 'weekEndMs');
+    if (todayStartMs > todayEndMs || weekStartMs > weekEndMs) {
+      throw new RangeError('Canonical aggregate date bounds must be ordered.');
+    }
+    const maxGroups = boundedPositiveInteger(
+      request.maxGroups,
+      DEFAULT_QUERY_ROWS,
+      MAX_QUERY_ROWS,
+      'provider aggregate maxGroups',
+    );
+    return this.snapshot(() => {
+      const revision = this.getProjectionRevision();
+      const accounting = this.readProviderAccountingSummaryInSnapshot(undefined, revision);
+      const rows = this.database.prepare(providerAggregateGroupSql()).all(
+        todayStartMs,
+        todayEndMs,
+        weekStartMs,
+        weekEndMs,
+        maxGroups + 1,
+      ) as Array<Record<string, unknown>>;
+      const truncated = rows.length > maxGroups;
+      return {
+        revision,
+        snapshotWatermark: this.readObservationWatermark(),
+        accounting,
+        groups: truncated ? rows.slice(0, maxGroups) : rows,
+        truncation: { rowLimit: truncated, byteLimit: false, cellLimit: false },
+      };
+    });
+  }
+
   /** Exact once-per-invocation accounting with explicit missingness. A total
    * value is null whenever any contributing invocation lacks that channel. */
   readProviderAccountingSummary(rootSessionId?: string): ProviderAccountingSummary {
     this.assertOpen();
-    return this.snapshot(() => {
-      const scoped = rootSessionId !== undefined;
-      const row = this.database.prepare(`
-        SELECT summary_json FROM analytics_provider_accounting_projections
-        WHERE subject_kind = ? AND subject_key = ?
-      `).get(scoped ? 'session' : 'global', rootSessionId ?? '*') as { summary_json: string } | undefined;
-      const stored = row ? JSON.parse(row.summary_json) as StoredProviderAccounting : emptyStoredProviderAccounting();
-      const invocationCount = Number(stored.occurrenceCount);
-      const channel = (name: AccountingChannel): CoverageMetric => {
-        const value = stored.channels[name];
-        const knownCount = Number(value.knownCount);
-        const unknownCount = Number(value.unknownCount);
-        const knownTotal = encodeInt64(value.knownTotal);
-        return {
-          occurrenceCount: invocationCount,
-          knownCount,
-          unknownCount,
-          knownTotal,
-          value: unknownCount === 0 ? knownTotal : null,
-          complete: unknownCount === 0,
-        };
-      };
-      const costKnownCount = Number(stored.cost.knownCount);
-      const costUnknownCount = Number(stored.cost.unknownCount);
+    return this.snapshot(() => this.readProviderAccountingSummaryInSnapshot(
+      rootSessionId,
+      this.getProjectionRevision(),
+    ));
+  }
+
+  private readProviderAccountingSummaryInSnapshot(
+    rootSessionId: string | undefined,
+    revision: number | string,
+  ): ProviderAccountingSummary {
+    const scoped = rootSessionId !== undefined;
+    const row = this.database.prepare(`
+      SELECT summary_json FROM analytics_provider_accounting_projections
+      WHERE subject_kind = ? AND subject_key = ?
+    `).get(scoped ? 'session' : 'global', rootSessionId ?? '*') as { summary_json: string } | undefined;
+    const stored = row ? JSON.parse(row.summary_json) as StoredProviderAccounting : emptyStoredProviderAccounting();
+    const invocationCount = Number(stored.occurrenceCount);
+    const channel = (name: AccountingChannel): CoverageMetric => {
+      const value = stored.channels[name];
+      const knownCount = Number(value.knownCount);
+      const unknownCount = Number(value.unknownCount);
+      const knownTotal = encodeInt64(value.knownTotal);
       return {
-        revision: this.getProjectionRevision(),
-        invocationCount,
-        inputTokens: channel('inputTokens'),
-        outputTokens: channel('outputTokens'),
-        cacheReadTokens: channel('cacheReadTokens'),
-        cacheWriteTokens: channel('cacheWriteTokens'),
-        reasoningTokens: channel('reasoningTokens'),
-        providerTotalTokens: channel('providerTotalTokens'),
-        effectiveCostUsd: {
-          occurrenceCount: invocationCount,
-          knownCount: costKnownCount,
-          unknownCount: costUnknownCount,
-          reportedCount: Number(stored.cost.reportedCount),
-          calculatedCount: Number(stored.cost.calculatedCount),
-          knownTotal: stored.cost.knownTotal,
-          value: costUnknownCount === 0 ? stored.cost.knownTotal : null,
-          complete: costUnknownCount === 0,
-        },
+        occurrenceCount: invocationCount,
+        knownCount,
+        unknownCount,
+        knownTotal,
+        value: unknownCount === 0 ? knownTotal : null,
+        complete: unknownCount === 0,
       };
-    });
+    };
+    const costKnownCount = Number(stored.cost.knownCount);
+    const costUnknownCount = Number(stored.cost.unknownCount);
+    return {
+      revision,
+      invocationCount,
+      inputTokens: channel('inputTokens'),
+      outputTokens: channel('outputTokens'),
+      cacheReadTokens: channel('cacheReadTokens'),
+      cacheWriteTokens: channel('cacheWriteTokens'),
+      reasoningTokens: channel('reasoningTokens'),
+      providerTotalTokens: channel('providerTotalTokens'),
+      effectiveCostUsd: {
+        occurrenceCount: invocationCount,
+        knownCount: costKnownCount,
+        unknownCount: costUnknownCount,
+        reportedCount: Number(stored.cost.reportedCount),
+        calculatedCount: Number(stored.cost.calculatedCount),
+        knownTotal: stored.cost.knownTotal,
+        value: costUnknownCount === 0 ? stored.cost.knownTotal : null,
+        complete: costUnknownCount === 0,
+      },
+    };
   }
 
   /** Backward-compatible P0 usage-only view, now served without replaying the
@@ -4015,9 +4160,6 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
    * also produces the command payload so revision/coverage cannot be paired
    * with rows from another commit. */
   private readQuerySnapshotMetadata(): AnalyticsQuerySnapshotMetadata {
-    const watermarkRow = this.database.prepare(`
-      SELECT COALESCE(MAX(commit_sequence), 0) AS watermark FROM analytics_observations
-    `).get() as { watermark: number | bigint };
     const generations = this.database.prepare(`
       SELECT generation_id FROM analytics_generations ORDER BY first_observed_at_ms, generation_id LIMIT 1001
     `).all() as Array<{ generation_id: string }>;
@@ -4027,7 +4169,7 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     return {
       databaseSchemaVersion: this.getDatabaseSchemaVersion(),
       projectionRevision: this.getProjectionRevision(),
-      snapshotWatermark: encodeInt64(BigInt(watermarkRow.watermark)),
+      snapshotWatermark: this.readObservationWatermark(),
       generationIds: generations.map((row) => row.generation_id),
       generationIdsTruncated,
       pendingDetailCoverage: {
@@ -4038,6 +4180,13 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
       },
       truncation: { rowLimit: false, byteLimit: false, cellLimit: false },
     };
+  }
+
+  private readObservationWatermark(): number | string {
+    const row = this.database.prepare(`
+      SELECT COALESCE(MAX(commit_sequence), 0) AS watermark FROM analytics_observations
+    `).get() as { watermark: number | bigint };
+    return encodeInt64(BigInt(row.watermark));
   }
 
   private snapshot<T>(operation: () => T): T {

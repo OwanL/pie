@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { WorkerRuntimeRouter } from '../../../src/backend/worker-runtime-router';
+import { WORKER_IPC_VERSION } from '../../../src/backend/worker-protocol';
 import { BackendError } from '../../../src/backend/server-io';
 
 function opened(sessionPath: string) {
@@ -271,7 +272,7 @@ test('replacement commit rekeys destination ownership and leaves source independ
   });
   const first = await router.promote(source);
   await router.handleWorkerFrame(source, {
-    ipcVersion: 1, coordinatorGeneration: 1, workerId: first.owner.workerId,
+    ipcVersion: WORKER_IPC_VERSION, coordinatorGeneration: 1, workerId: first.owner.workerId,
     workerGeneration: first.owner.workerGeneration, workerPid: 1, rootSessionPath: source,
     leasePath: source, leaseRevision: 1, sessionPath: source, seq: 1,
     kind: 'ownership.commit', requestId: 'commit',
@@ -293,7 +294,7 @@ test('replacement commit rekeys destination ownership and leaves source independ
     ownershipRevision: 2, nonce: 'destination-lease',
   };
   await router.handleWorkerFrame(source, {
-    ipcVersion: 1, coordinatorGeneration: 1, workerId: first.owner.workerId,
+    ipcVersion: WORKER_IPC_VERSION, coordinatorGeneration: 1, workerId: first.owner.workerId,
     workerGeneration: first.owner.workerGeneration, workerPid: 1, rootSessionPath: source,
     leasePath: destination, leaseRevision: 2, sessionPath: source, seq: 2,
     kind: 'ownership.consume', requestId: 'destination-consume',
@@ -305,7 +306,7 @@ test('replacement commit rekeys destination ownership and leaves source independ
     canonicalDestinationPath: destination,
   });
   await router.handleWorkerFrame(source, {
-    ipcVersion: 1, coordinatorGeneration: 1, workerId: first.owner.workerId,
+    ipcVersion: WORKER_IPC_VERSION, coordinatorGeneration: 1, workerId: first.owner.workerId,
     workerGeneration: first.owner.workerGeneration, workerPid: 1, rootSessionPath: source,
     leasePath: destination, leaseRevision: 2, sessionPath: source, seq: 3,
     kind: 'ownership.runtimeReady', requestId: 'destination-ready',
@@ -349,7 +350,7 @@ test('confirmed worker crash reconciles only checkpointed live identities and cl
   });
   const route = await router.promote(sessionPath);
   const frame = (event: any, payload: any, seq: number): any => ({
-    ipcVersion: 1, coordinatorGeneration: 1, workerId: route.owner.workerId,
+    ipcVersion: WORKER_IPC_VERSION, coordinatorGeneration: 1, workerId: route.owner.workerId,
     workerGeneration: route.owner.workerGeneration, workerPid: 1, rootSessionPath: sessionPath,
     leasePath: sessionPath, leaseRevision: 1, sessionPath, seq, kind: 'runtime.event', event, payload,
   });
@@ -429,7 +430,7 @@ test('busy sequence remains monotonic when a durable session is re-promoted to a
 
   const emitBusy = async (route: Awaited<ReturnType<typeof router.promote>>, busy: boolean) => {
     await router.handleWorkerFrame(sessionPath, {
-      ipcVersion: 1, coordinatorGeneration: 1, workerId: route.owner.workerId,
+      ipcVersion: WORKER_IPC_VERSION, coordinatorGeneration: 1, workerId: route.owner.workerId,
       workerGeneration: route.owner.workerGeneration, workerPid: 1, rootSessionPath: sessionPath,
       leasePath: sessionPath, leaseRevision: route.currentLeaseRevision, sessionPath, seq: 1,
       kind: 'runtime.event', event: 'busy.changed', payload: { sessionPath, busy, seq: 1 },
@@ -460,7 +461,7 @@ test('worker router drops stale and cross-session events', async () => {
     buildPromotionSnapshot: async () => { throw new Error('unused'); },
   });
   await router.handleWorkerFrame('/root', {
-    ipcVersion: 1, coordinatorGeneration: 1, workerId: 'stale', workerGeneration: 1, workerPid: 1,
+    ipcVersion: WORKER_IPC_VERSION, coordinatorGeneration: 1, workerId: 'stale', workerGeneration: 1, workerPid: 1,
     rootSessionPath: '/root', leasePath: '/other', leaseRevision: 1, sessionPath: '/root', seq: 1,
     kind: 'runtime.event', event: 'busy.changed', payload: { sessionPath: '/other', busy: true },
   });

@@ -19,13 +19,14 @@ import {
   getLogLevel,
   flushPieLogger,
   getPieLogPath,
+  getBootTracePath,
   showPieLogs,
   redactSensitive,
 } from '../../../src/host/util/pie-logger';
 
 const LIVE_PIE_LOG_PATH = path.join(os.tmpdir(), 'pie-logs', 'pie.log');
 const PIE_LOG_PATH = getPieLogPath();
-const BOOT_TRACE_PATH = path.join(os.tmpdir(), 'pie-boot-trace.jsonl');
+const BOOT_TRACE_PATH = getBootTracePath();
 
 interface FakeLogChannel {
   logLevel: number;
@@ -62,6 +63,16 @@ async function clearLogFiles(): Promise<void> {
     // ignore
   }
 }
+
+function clearBootTraceFiles(): void {
+  fs.rmSync(BOOT_TRACE_PATH, { force: true });
+  fs.rmSync(`${BOOT_TRACE_PATH}.1`, { force: true });
+}
+
+test.after(() => {
+  setBootTraceEnabled(false);
+  clearBootTraceFiles();
+});
 
 test('node:test logger output is isolated from the live Pie runtime log', () => {
   assert.notEqual(PIE_LOG_PATH, LIVE_PIE_LOG_PATH);
@@ -249,11 +260,7 @@ test('auditLog is gated by devMode and runtimeAuditLogEnabled', async () => {
 test('bootLog writes to boot-trace jsonl and main log when enabled', async () => {
   resetState();
   await clearLogFiles();
-  try {
-    fs.rmSync(BOOT_TRACE_PATH, { force: true });
-  } catch {
-    // ignore
-  }
+  clearBootTraceFiles();
   setBootTraceEnabled(true);
 
   const originalInfo = console.info;
@@ -276,11 +283,7 @@ test('bootLog writes to boot-trace jsonl and main log when enabled', async () =>
 test('bootTraceSync writes only to boot-trace jsonl', async () => {
   resetState();
   await clearLogFiles();
-  try {
-    fs.rmSync(BOOT_TRACE_PATH, { force: true });
-  } catch {
-    // ignore
-  }
+  clearBootTraceFiles();
   setBootTraceEnabled(true);
 
   const originalWarn = console.warn;
@@ -296,6 +299,28 @@ test('bootTraceSync writes only to boot-trace jsonl', async () => {
   const bootLines = fs.readFileSync(BOOT_TRACE_PATH, 'utf8').trim().split('\n');
   const last = JSON.parse(bootLines[bootLines.length - 1]);
   assert.equal(last.event, 'sync.event');
+});
+
+test('boot trace rotates at the persistent diagnostic bound and keeps one backup', () => {
+  resetState();
+  clearBootTraceFiles();
+  setBootTraceEnabled(true);
+  try {
+    fs.writeFileSync(BOOT_TRACE_PATH, 'first'.repeat(1_100_000), 'utf8');
+    bootTraceSync('boot-scope', 'rotation.first');
+    assert.ok(fs.existsSync(`${BOOT_TRACE_PATH}.1`), 'rotation should retain one backup');
+    assert.match(fs.readFileSync(`${BOOT_TRACE_PATH}.1`, 'utf8'), /^first/);
+    assert.match(fs.readFileSync(BOOT_TRACE_PATH, 'utf8'), /rotation\.first/);
+
+    fs.writeFileSync(BOOT_TRACE_PATH, 'second'.repeat(1_100_000), 'utf8');
+    bootTraceSync('boot-scope', 'rotation.second');
+    assert.doesNotMatch(fs.readFileSync(`${BOOT_TRACE_PATH}.1`, 'utf8'), /^first/);
+    assert.match(fs.readFileSync(`${BOOT_TRACE_PATH}.1`, 'utf8'), /^second/);
+    assert.equal(fs.existsSync(`${BOOT_TRACE_PATH}.2`), false, 'rotation is one-deep');
+  } finally {
+    setBootTraceEnabled(false);
+    clearBootTraceFiles();
+  }
 });
 
 test('assertInvariant throws in dev mode and logs in production', () => {

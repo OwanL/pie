@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -149,29 +149,56 @@ test('malformed and partial rehearsal reports are rejected', () => {
   const { root, options, qualification, trial } = fixture();
   try {
     writeFileSync(qualification.path, '{"q":1}\n');
-    assert.throws(() => validateActivationEvidenceStructure(options), ActivationEvidenceError);
-    writeFileSync(qualification.path, readFileSync(qualification.path));
+    assert.throws(() => validateActivationEvidenceStructure(options), /qualification report: schemaVersion/u);
+    writeFileSync(qualification.path, qualification.bytes);
+    validateActivationEvidenceStructure(options);
     writeFileSync(trial.path, '{"t":1}\n');
-    assert.throws(() => validateActivationEvidenceStructure(options), ActivationEvidenceError);
+    assert.throws(() => validateActivationEvidenceStructure(options), /candidate trial report: schemaVersion/u);
     assert.equal(existsSync(path.join(root, 'analytics-activation-v1.json')), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test('failed, stale, and mismatched bindings fail closed', () => {
+test('each failed qualification gate is rejected without deleting the other gate evidence', () => {
+  const { root, options, qualification } = fixture();
+  try {
+    validateActivationEvidenceStructure(options);
+    for (const gateName of REQUIRED_QUALIFICATION_GATES) {
+      const report = structuredClone(qualification.report);
+      report.qualification.overallP0 = 'qualified';
+      report.gates[gateName].decision = 'failed';
+      writeJson(qualification.path, report);
+      assert.throws(
+        () => admitActivationEvidence(options),
+        (error) => error instanceof ActivationEvidenceError
+          && error.message === `qualification report: required gate ${gateName} is not passed with evidence`,
+        gateName,
+      );
+    }
+    assert.equal(existsSync(path.join(root, 'analytics-activation-v1.json')), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('stale and mismatched bindings fail closed at the intended validation boundary', () => {
   const cases = [
-    { name: 'failed gate', qualification: { gates: { exactPrimaryRows: { decision: 'failed', actual: 0, threshold: 1, evidence: {} } } } },
-    { name: 'stale source', options: { sourceHead: 'c'.repeat(40) } },
-    { name: 'stale build', options: { buildId: 'old-build' } },
-    { name: 'wrong generation', trial: { bindings: { generationId: '22222222-2222-4222-8222-222222222222' } } },
-    { name: 'incomplete trial check', trial: { checks: { isolatedRoots: { decision: 'unqualified', evidence: {} } } } },
+    { name: 'stale source', options: { sourceHead: 'c'.repeat(40) }, expected: /provenance.gitHead does not match/u },
+    { name: 'stale build', options: { buildId: 'old-build' }, expected: /provenance.coordinatedBuildId does not match/u },
+    { name: 'wrong generation', mutate: (report) => { report.bindings.generationId = '22222222-2222-4222-8222-222222222222'; }, expected: /generationId binding mismatches/u },
+    { name: 'incomplete trial check', mutate: (report) => { report.checks.isolatedRoots.decision = 'unqualified'; }, expected: /required check isolatedRoots is incomplete/u },
   ];
   for (const entry of cases) {
-    const { root, options } = fixture(entry);
+    const { root, options, trial } = fixture();
     try {
+      validateActivationEvidenceStructure(options);
+      if (entry.mutate) {
+        entry.mutate(trial.report);
+        writeJson(trial.path, trial.report);
+      }
       const combinedOptions = { ...options, ...(entry.options ?? {}) };
-      assert.throws(() => validateActivationEvidenceStructure(combinedOptions), ActivationEvidenceError, entry.name);
+      assert.throws(() => validateActivationEvidenceStructure(combinedOptions), entry.expected, entry.name);
       assert.equal(existsSync(path.join(root, 'analytics-activation-v1.json')), false, entry.name);
     } finally {
       rmSync(root, { recursive: true, force: true });

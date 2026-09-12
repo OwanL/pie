@@ -1,4 +1,10 @@
-import { AnalyticsQueryClient } from './query-client.js';
+import {
+  AnalyticsQueryClient,
+} from './query-client.js';
+import type {
+  AnalyticsQueryAdmissionSnapshot,
+  AnalyticsQueryLifecycleEvent,
+} from './query-client.js';
 import type {
   AnalyticsDetailRangeResult,
   AnalyticsReadOnlyQueryResult,
@@ -6,6 +12,7 @@ import type {
   AnalyticsStorageReadModel,
   HistoricalDimensionSummary,
   ProviderAccountingSummary,
+  ProviderAggregateReadModel,
   ProviderSettlementScope,
   ProviderSettlementReadModel,
   ScopedProviderSettlementReadModel,
@@ -54,6 +61,8 @@ export interface CanonicalAnalyticsReadModelOptions {
   maxOldSpaceMb?: number;
   /** Fork exec args for the disposable helper (defaults to inherited exec args). */
   execArgv?: readonly string[];
+  /** Optional non-blocking request lifecycle diagnostics. */
+  onQueryLifecycle?: (event: AnalyticsQueryLifecycleEvent) => void;
 }
 
 export interface CanonicalQueryRequest {
@@ -75,6 +84,15 @@ export interface CanonicalDetailRequest {
 export interface CanonicalSettlementRequest {
   rootSessionId?: string;
   limit?: number;
+  maxResultBytes?: number;
+}
+
+export interface CanonicalAggregateRequest {
+  todayStartMs: number;
+  todayEndMs: number;
+  weekStartMs: number;
+  weekEndMs: number;
+  maxGroups?: number;
   maxResultBytes?: number;
 }
 
@@ -106,24 +124,30 @@ function canonicalRevisionValue(value: number | string): string {
  */
 export class CanonicalAnalyticsReadModel {
   private readonly client: AnalyticsQueryClient;
+  private readonly maxConcurrentQueries: number;
   private readonly maxRows: number;
   private readonly maxResultBytes: number;
   private readonly maxDetailBytes: number;
   private readonly revisionPollIntervalMs: number;
 
   constructor(options: CanonicalAnalyticsReadModelOptions) {
+    this.maxConcurrentQueries = boundedPositiveInteger(
+      options.maxConcurrentQueries,
+      2,
+      64,
+      'maxConcurrentQueries',
+    );
     this.client = new AnalyticsQueryClient({
       databasePath: options.databasePath,
       workerScript: options.workerScript,
       timeoutMs: boundedPositiveInteger(options.timeoutMs, DEFAULT_TIMEOUT_MS, 3_600_000, 'timeoutMs'),
-      maxConcurrentQueries: options.maxConcurrentQueries === undefined
-        ? undefined
-        : boundedPositiveInteger(options.maxConcurrentQueries, 2, 64, 'maxConcurrentQueries'),
+      maxConcurrentQueries: this.maxConcurrentQueries,
       maxQueuedQueries: options.maxQueuedQueries === undefined
         ? undefined
         : boundedPositiveInteger(options.maxQueuedQueries, 16, 1024, 'maxQueuedQueries'),
       maxOldSpaceMb: options.maxOldSpaceMb,
       execArgv: options.execArgv,
+      onQueryLifecycle: options.onQueryLifecycle,
     });
     this.maxRows = boundedPositiveInteger(options.maxRows, DEFAULT_MAX_ROWS, MAX_ROWS, 'maxRows');
     this.maxResultBytes = boundedPositiveInteger(
@@ -144,6 +168,16 @@ export class CanonicalAnalyticsReadModel {
       60_000,
       'revisionPollIntervalMs',
     );
+  }
+
+  /** Actual per-instance query admission capacity used by startup hydration. */
+  getMaxConcurrentQueries(): number {
+    return this.maxConcurrentQueries;
+  }
+
+  /** O(1) current admission state for bounded diagnostics. */
+  getAdmissionSnapshot(): AnalyticsQueryAdmissionSnapshot {
+    return this.client.getAdmissionSnapshot();
   }
 
   /** Resolved logical commands, views, and projection versions for this store. */
@@ -247,16 +281,22 @@ export class CanonicalAnalyticsReadModel {
    * original invocation identities and carry explicit coverage. */
   readScopedProviderSettlements(
     scope: ProviderSettlementScope,
-    page: { limit?: number; offset?: number; expectedRevision?: number | string } = {},
+    page: { limit?: number; offset?: number; expectedRevision?: number | string; maxResultBytes?: number } = {},
     signal?: AbortSignal,
   ): Promise<ScopedProviderSettlementReadModel> {
+    const maxResultBytes = boundedPositiveInteger(
+      page.maxResultBytes,
+      this.maxResultBytes,
+      MAX_RESULT_BYTES,
+      'scoped settlement maxResultBytes',
+    );
     return this.client.query<ScopedProviderSettlementReadModel>({
       type: 'scopedProviderSettlements',
       scope,
       limit: page.limit ?? this.maxRows,
       offset: page.offset,
       expectedRevision: page.expectedRevision,
-      maxResultBytes: this.maxResultBytes,
+      maxResultBytes,
     }, signal);
   }
 
@@ -268,6 +308,40 @@ export class CanonicalAnalyticsReadModel {
     return this.client.query<ProviderAccountingSummary>({
       type: 'providerAccounting',
       rootSessionId,
+    }, signal);
+  }
+
+  /** Accounting and bounded provider/model/date groups from one recorder
+   * snapshot. The result revision is the authority for consumer freshness. */
+  readProviderAggregateSummary(
+    request: CanonicalAggregateRequest,
+    signal?: AbortSignal,
+  ): Promise<ProviderAggregateReadModel> {
+    if (!request || !Number.isSafeInteger(request.todayStartMs)
+      || !Number.isSafeInteger(request.todayEndMs)
+      || !Number.isSafeInteger(request.weekStartMs)
+      || !Number.isSafeInteger(request.weekEndMs)
+      || request.todayStartMs > request.todayEndMs
+      || request.weekStartMs > request.weekEndMs) {
+      throw new RangeError('Canonical aggregate date bounds must be ordered safe integers.');
+    }
+    const maxGroups = request.maxGroups === undefined
+      ? undefined
+      : boundedPositiveInteger(request.maxGroups, this.maxRows, MAX_ROWS, 'aggregate maxGroups');
+    const maxResultBytes = boundedPositiveInteger(
+      request.maxResultBytes,
+      this.maxResultBytes,
+      MAX_RESULT_BYTES,
+      'aggregate maxResultBytes',
+    );
+    return this.client.query<ProviderAggregateReadModel>({
+      type: 'providerAggregate',
+      todayStartMs: request.todayStartMs,
+      todayEndMs: request.todayEndMs,
+      weekStartMs: request.weekStartMs,
+      weekEndMs: request.weekEndMs,
+      maxGroups,
+      maxResultBytes,
     }, signal);
   }
 

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { WorkerRuntimeRouter } from '../../../src/backend/worker-runtime-router';
+import { WORKER_IPC_VERSION } from '../../../src/backend/worker-protocol';
 import { CoordinatorProviderNetworkLeaseAuthority } from '../../../src/backend/coordinator-provider-network-lease';
 import {
   WorkerRequestEnqueueError,
@@ -117,7 +118,7 @@ function makeRouter(client: any, extra: { supervisor?: Record<string, unknown>; 
 
 function eventFrame(route: any, sessionPath: string, event: string, payload: any, seq: number): any {
   return {
-    ipcVersion: 1, coordinatorGeneration: 1, workerId: route.owner.workerId,
+    ipcVersion: WORKER_IPC_VERSION, coordinatorGeneration: 1, workerId: route.owner.workerId,
     workerGeneration: route.owner.workerGeneration, workerPid: 1, rootSessionPath: sessionPath,
     leasePath: sessionPath, leaseRevision: 1, sessionPath, seq, kind: 'runtime.event', event, payload,
   };
@@ -153,7 +154,7 @@ test('forced interrupt retires authority, terminalizes once, and drops late reti
 
 function providerFrame(route: any, sessionPath: string, kind: string, body: Record<string, unknown>): any {
   return {
-    ipcVersion: 1, coordinatorGeneration: 1, workerId: route.owner.workerId,
+    ipcVersion: WORKER_IPC_VERSION, coordinatorGeneration: 1, workerId: route.owner.workerId,
     workerGeneration: route.owner.workerGeneration, workerPid: 1, rootSessionPath: sessionPath,
     leasePath: sessionPath, leaseRevision: 1, sessionPath, seq: 1, kind, ...body,
   };
@@ -167,7 +168,7 @@ test('phase6 replacement forwards an explicit pre-start continuation settlement 
   route.currentLeasePath = replacementPath;
 
   await router.handleWorkerFrame(sessionPath, {
-    ipcVersion: 1,
+    ipcVersion: WORKER_IPC_VERSION,
     coordinatorGeneration: route.owner.coordinatorGeneration,
     workerId: route.owner.workerId,
     workerGeneration: route.owner.workerGeneration,
@@ -659,7 +660,7 @@ test('phase6 runtime.report is retained without replacing configured authority',
   const { router, sessionPath } = makeRouter(makeClient());
   const route = await router.promote(sessionPath);
   await router.handleWorkerFrame(sessionPath, {
-    ipcVersion: 1, coordinatorGeneration: 1, workerId: route.owner.workerId,
+    ipcVersion: WORKER_IPC_VERSION, coordinatorGeneration: 1, workerId: route.owner.workerId,
     workerGeneration: route.owner.workerGeneration, workerPid: 1, rootSessionPath: sessionPath,
     leasePath: sessionPath, leaseRevision: 1, sessionPath, seq: 1,
     kind: 'runtime.report', domain: 'catalog',
@@ -671,7 +672,7 @@ test('phase6 runtime.report is retained without replacing configured authority',
   assert.equal((reports[0]!.models[0] as { id: string }).id, 'runtime-discovered');
   // A stale/cross-session report is dropped by the identity fence.
   await router.handleWorkerFrame('/other', {
-    ipcVersion: 1, coordinatorGeneration: 1, workerId: 'stale', workerGeneration: 9, workerPid: 1,
+    ipcVersion: WORKER_IPC_VERSION, coordinatorGeneration: 1, workerId: 'stale', workerGeneration: 9, workerPid: 1,
     rootSessionPath: '/other', leasePath: '/other', leaseRevision: 1, sessionPath: '/other', seq: 1,
     kind: 'runtime.report', domain: 'catalog', payload: { models: [] },
   });
@@ -1426,13 +1427,13 @@ test('phase6 concurrent settings mutations serialize revisions so no worker skip
   };
   await Promise.all([
     router.handleWorkerFrame(sessionPath, {
-      ipcVersion: 1, coordinatorGeneration: 1, workerId: route.owner.workerId,
+      ipcVersion: WORKER_IPC_VERSION, coordinatorGeneration: 1, workerId: route.owner.workerId,
       workerGeneration: route.owner.workerGeneration, workerPid: 1, rootSessionPath: sessionPath,
       leasePath: sessionPath, leaseRevision: 1, sessionPath, seq: 1,
       kind: 'settings.mutate', requestId: 'mutate-1', updates: { defaultModel: 'one' },
     }),
     router.handleWorkerFrame(sessionPath, {
-      ipcVersion: 1, coordinatorGeneration: 1, workerId: route.owner.workerId,
+      ipcVersion: WORKER_IPC_VERSION, coordinatorGeneration: 1, workerId: route.owner.workerId,
       workerGeneration: route.owner.workerGeneration, workerPid: 1, rootSessionPath: sessionPath,
       leasePath: sessionPath, leaseRevision: 1, sessionPath, seq: 2,
       kind: 'settings.mutate', requestId: 'mutate-2', updates: { defaultModel: 'two' },

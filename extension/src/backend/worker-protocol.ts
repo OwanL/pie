@@ -14,6 +14,7 @@ import {
 } from '../shared/protocol/subagent-detail.js';
 import type { JsonStructuralPatchOperation } from '../shared/json-structural-patch.js';
 import type { LazyDetailRef } from '../shared/protocol/messages.js';
+import type { AnalyticsBranchObservedPayload } from '../shared/protocol/sessions.js';
 import type {
   SdkSessionOwnershipReservation,
   SdkSessionReplacementIntent,
@@ -29,9 +30,11 @@ import {
   type AnalyticsTransportPacket,
 } from '../../../shared/analytics/transport.js';
 import type { AnalyticsCaptureSubject } from '../../../shared/analytics/contracts.js';
+import { isAnalyticsBranchObservedPayload } from '../shared/protocol/event-payloads.js';
 
 /** Private coordinator/worker protocol. It is intentionally independent from the public RPC protocol. */
-export const WORKER_IPC_VERSION = 1 as const;
+/** v2 adds the typed `analytics.branch` runtime event. */
+export const WORKER_IPC_VERSION = 2 as const;
 export const WORKER_IPC_MAX_FRAME_BYTES = JSONL_MAX_LINE_BYTES;
 export const WORKER_IPC_MAX_ORDINARY_FRAME_BYTES = 256 * 1024;
 export const WORKER_IPC_MAX_HEARTBEAT_FRAME_BYTES = 16 * 1024;
@@ -108,10 +111,21 @@ export type WorkerRuntimeEventName =
   | 'compaction.started'
   | 'compaction.ended'
   | 'auxiliary-llm.usage'
+  | 'analytics.branch'
   | 'live.semantic'
   | 'live.lifecycle'
   | 'operational-error'
   | 'error';
+
+/**
+ * The worker IPC envelope is the versioned wire schema for this payload. Keep
+ * the branch shape shared with the host consumer so a durable SDK observation
+ * cannot be accepted by one side and rejected by the other.
+ */
+export type WorkerAnalyticsBranchPayload = AnalyticsBranchObservedPayload & WorkerJsonObject;
+
+export type WorkerRuntimeEventPayload<E extends WorkerRuntimeEventName> =
+  [E] extends ['analytics.branch'] ? WorkerAnalyticsBranchPayload : WorkerJsonObject;
 
 export type WorkerSyncDomain =
   | 'settings'
@@ -352,10 +366,10 @@ export interface WorkerRuntimeReadyFrame extends WorkerFrameBase {
   };
 }
 
-export interface WorkerRuntimeEventFrame extends WorkerFrameBase {
+export interface WorkerRuntimeEventFrame<E extends WorkerRuntimeEventName = WorkerRuntimeEventName> extends WorkerFrameBase {
   kind: 'runtime.event';
-  event: WorkerRuntimeEventName;
-  payload: WorkerJsonObject;
+  event: E;
+  payload: WorkerRuntimeEventPayload<E>;
 }
 
 export interface WorkerAnalyticsCaptureFrame extends WorkerFrameBase {
@@ -949,7 +963,7 @@ const RUNTIME_EVENT_NAMES: ReadonlySet<WorkerRuntimeEventName> = new Set([
   'message.queuedDelivered', 'tool.started', 'tool.progress', 'tool.finished',
   'agent.settled', 'busy.changed', 'contextUsage.changed', 'extension_ui.request', 'preflight.failed',
   'retry.started', 'retry.ended', 'retry.measured',
-  'compaction.started', 'compaction.ended', 'auxiliary-llm.usage', 'live.semantic',
+  'compaction.started', 'compaction.ended', 'auxiliary-llm.usage', 'analytics.branch', 'live.semantic',
   'live.lifecycle', 'operational-error', 'error',
 ]);
 
@@ -1027,7 +1041,32 @@ function validateRuntimeEvent(value: Record<string, unknown>, requireSeq: boolea
   const extra = exactKeys(value, [...baseKeys(requireSeq), 'event', 'payload']);
   if (extra) return extra;
   if (typeof value.event !== 'string' || !RUNTIME_EVENT_NAMES.has(value.event as WorkerRuntimeEventName)) return 'runtime.event.event is invalid.';
+  if (value.event === 'analytics.branch') return validateAnalyticsBranchPayload(value.payload);
   return validateJsonObject(value.payload, 'runtime.event.payload');
+}
+
+function validateAnalyticsBranchPayload(value: unknown): string | undefined {
+  if (!isRecord(value)) return 'runtime.event.analytics.branch.payload must be an object.';
+  const extra = exactKeys(value, ['sessionPath', 'entryId', 'selectedEntryId', 'observedAt'], ['parentEntryId']);
+  if (extra) return `runtime.event.analytics.branch.payload ${extra}`;
+  if (!isAnalyticsBranchObservedPayload(value)) return 'runtime.event.analytics.branch.payload has an invalid shape.';
+  if (!boundedString(value.sessionPath, MAX_SESSION_PATH_BYTES) || value.sessionPath.includes('\0')) {
+    return 'runtime.event.analytics.branch.payload.sessionPath must be a bounded non-empty path.';
+  }
+  if (!boundedString(value.entryId, MAX_ID_BYTES) || value.entryId.includes('\0')) {
+    return 'runtime.event.analytics.branch.payload.entryId must be a bounded non-empty identifier.';
+  }
+  if (!boundedString(value.selectedEntryId, MAX_ID_BYTES) || value.selectedEntryId.includes('\0')) {
+    return 'runtime.event.analytics.branch.payload.selectedEntryId must be a bounded non-empty identifier.';
+  }
+  if (value.parentEntryId !== undefined && value.parentEntryId !== null
+      && (!boundedString(value.parentEntryId, MAX_ID_BYTES) || value.parentEntryId.includes('\0'))) {
+    return 'runtime.event.analytics.branch.payload.parentEntryId must be null or a bounded identifier.';
+  }
+  if (typeof value.observedAt !== 'number' || !Number.isFinite(value.observedAt)) {
+    return 'runtime.event.analytics.branch.payload.observedAt must be a finite number.';
+  }
+  return undefined;
 }
 
 function validateRuntimeReport(value: Record<string, unknown>, requireSeq: boolean): string | undefined {
