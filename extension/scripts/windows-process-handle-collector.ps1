@@ -311,6 +311,7 @@ function Complete-Registration {
             final = [ordered]@{
                 exitTime100ns = ([string]$snapshot.ExitTime100ns)
                 handleRetainedThroughExit = $true
+                observationKind = 'retained-through-exit'
             }
             handleRetainedThroughExit = $true
             handleClosed = $false
@@ -322,6 +323,7 @@ function Complete-Registration {
         $closed = [PieWindowsProcessHandleCollectorR01]::CloseExact($handle)
         $Registration.handle = [IntPtr]::Zero
         if ($null -ne $Registrations) { $Registrations.Remove($Registration.requestKey) | Out-Null }
+        $finalizedKeys[$Registration.requestKey] = $true
         # Emit a small close acknowledgement only after the receipt. The Node
         # wrapper uses it to prove no active native handles remain at shutdown.
         Write-CollectorEvent ([ordered]@{
@@ -340,12 +342,13 @@ Add-Type -TypeDefinition $collectorType -ErrorAction Stop
 
 $registrations = @{}
 $requestCount = 0
+$finalizedKeys = @{}
 $startedAt = [DateTime]::UtcNow
 $deadline = $startedAt.AddMilliseconds($MaxDurationMs)
 $shutdown = $false
 Write-CollectorEvent ([ordered]@{
     type = 'ready'
-    version = 'windows-process-handle-collector-r01'
+    version = 'windows-process-handle-collector-r02'
     expectedImagePath = $ExpectedImagePath
     maxRequests = $MaxRequests
     maxActiveHandles = $MaxActiveHandles
@@ -430,20 +433,25 @@ try {
             }
             $handle = [PieWindowsProcessHandleCollectorR01]::OpenExact($registration.identity.pid)
             if ($handle -eq [IntPtr]::Zero) {
+                # The worker exited and the process object was fully reaped before
+                # the registration arrived. No final counter is recoverable; the
+                # receipt stays honestly unavailable instead of guessing identity.
                 Write-UnavailableReceipt $registration 'open-process-failed'
                 continue
             }
             $registration.handle = $handle
             $handlePid = [PieWindowsProcessHandleCollectorR01]::ProcessId($handle)
-            $imagePath = [PieWindowsProcessHandleCollectorR01]::ImagePath($handle)
-            $registration.imagePath = $imagePath
-            $snapshot = [PieWindowsProcessHandleCollectorR01]::Read($handle)
-            if ($handlePid -ne [uint32]$registration.identity.pid -or [StringComparer]::OrdinalIgnoreCase.Equals($imagePath, $ExpectedImagePath) -eq $false) {
-                Write-UnavailableReceipt $registration 'identity-image-mismatch' 0 0 $false
+            if ($handlePid -ne [uint32]$registration.identity.pid) {
+                Write-UnavailableReceipt $registration 'identity-pid-mismatch' 0 0 $false
                 [PieWindowsProcessHandleCollectorR01]::CloseExact($handle) | Out-Null
                 $registration.handle = [IntPtr]::Zero
                 continue
             }
+            # Read the creation/exit times BEFORE the image check: the creation
+            # time bound to the declared spawn window is the authoritative
+            # identity proof against PID reuse, and one-shot query workers can
+            # terminate between fork and registration.
+            $snapshot = [PieWindowsProcessHandleCollectorR01]::Read($handle)
             if (-not $snapshot.TimesOk) {
                 Write-UnavailableReceipt $registration 'registration-process-times-unavailable' 0 $snapshot.TimesError $false
                 [PieWindowsProcessHandleCollectorR01]::CloseExact($handle) | Out-Null
@@ -454,13 +462,86 @@ try {
             $registration.creationTime100ns = [string]$snapshot.CreationTime100ns
             $registration.creationTimeUnixMs = $creationUnixMs
             $registration.creationWindowMatch = $creationUnixMs -ge [double]$registration.spawnWindowStartMs -and $creationUnixMs -le [double]$registration.spawnWindowEndMs
-            if (-not $registration.creationWindowMatch -or $snapshot.ExitTime100ns -ne [UInt64]0) {
-                $reason = if ($snapshot.ExitTime100ns -ne [UInt64]0) { 'registration-terminal-race' } else { 'creation-time-outside-spawn-window' }
-                Write-UnavailableReceipt $registration $reason 0 0 $false
+            if (-not $registration.creationWindowMatch) {
+                Write-UnavailableReceipt $registration 'creation-time-outside-spawn-window' 0 0 $false
                 [PieWindowsProcessHandleCollectorR01]::CloseExact($handle) | Out-Null
                 $registration.handle = [IntPtr]::Zero
                 continue
             }
+            $imagePath = [PieWindowsProcessHandleCollectorR01]::ImagePath($handle)
+            if ($snapshot.ExitTime100ns -ne [UInt64]0) {
+                # The worker terminated before this registration could bind a
+                # live handle. With the creation window matched and the handle
+                # open on the still-referenced process object, the kernel's
+                # final CPU counters remain readable, but this Windows build
+                # zeroes the working-set counters once the address space is
+                # torn down. Only a non-zero final peak is real memory
+                # evidence; a zeroed counter stays honestly unavailable.
+                if ($snapshot.MemoryOk -and [UInt64]$snapshot.PeakWorkingSetSize -gt [UInt64]0) {
+                    Write-CollectorEvent ([ordered]@{
+                        type = 'receipt'
+                        requestKey = $registration.requestKey
+                        clientId = $registration.clientId
+                        requestId = $registration.requestId
+                        identity = [ordered]@{
+                            instanceId = $registration.identity.instanceId
+                            pid = $registration.identity.pid
+                            spawnedAtMs = $registration.identity.spawnedAtMs
+                        }
+                        status = 'available'
+                        reason = $null
+                        memory = [ordered]@{
+                            peakWorkingSetBytes = [UInt64]$snapshot.PeakWorkingSetSize
+                            units = 'bytes'
+                        }
+                        cpu = [ordered]@{
+                            userCpuTimeMicros = [UInt64]([math]::Floor([double]$snapshot.UserTime100ns / 10.0))
+                            systemCpuTimeMicros = [UInt64]([math]::Floor([double]$snapshot.KernelTime100ns / 10.0))
+                            units = 'microseconds'
+                        }
+                        registration = [ordered]@{
+                            spawnWindowStartMs = $registration.spawnWindowStartMs
+                            spawnWindowEndMs = $registration.spawnWindowEndMs
+                            observedAtMs = $registration.observedAtMs
+                            creationTime100ns = ([string]$registration.creationTime100ns)
+                            creationTimeUnixMs = $registration.creationTimeUnixMs
+                            creationWindowMatch = $registration.creationWindowMatch
+                            imagePath = if ($imagePath.Length -gt 0) { $imagePath } else { $null }
+                        }
+                        final = [ordered]@{
+                            exitTime100ns = ([string]$snapshot.ExitTime100ns)
+                            handleRetainedThroughExit = $false
+                            observationKind = 'post-exit-object'
+                        }
+                        handleRetainedThroughExit = $false
+                        handleClosed = $false
+                        memoryError = $null
+                        timesError = $null
+                    })
+                } else {
+                    $zeroedReason = if ($snapshot.MemoryOk) { 'post-exit-final-memory-zeroed' } else { 'final-memory-unavailable' }
+                    Write-UnavailableReceipt $registration $zeroedReason $snapshot.MemoryError 0 $false
+                }
+                $finalizedKeys[$registration.requestKey] = $true
+                $closed = [PieWindowsProcessHandleCollectorR01]::CloseExact($handle)
+                $registration.handle = [IntPtr]::Zero
+                Write-CollectorEvent ([ordered]@{
+                    type = 'closed'
+                    requestKey = $registration.requestKey
+                    handleCloseOk = [bool]$closed
+                })
+                continue
+            }
+            if ([StringComparer]::OrdinalIgnoreCase.Equals($imagePath, $ExpectedImagePath) -eq $false) {
+                # The process is live, so an unreadable or unexpected image is a
+                # genuine identity failure, not an exit race.
+                $registration.imagePath = if ($imagePath.Length -gt 0) { $imagePath } else { $null }
+                Write-UnavailableReceipt $registration 'identity-image-mismatch' 0 0 $false
+                [PieWindowsProcessHandleCollectorR01]::CloseExact($handle) | Out-Null
+                $registration.handle = [IntPtr]::Zero
+                continue
+            }
+            $registration.imagePath = $imagePath
             $registrations[$registration.requestKey] = $registration
             Write-CollectorEvent ([ordered]@{
                 type = 'registered'
@@ -481,6 +562,11 @@ try {
             }
             $registration = $registrations[$message.requestKey]
             if ($null -eq $registration) {
+                if ($finalizedKeys.ContainsKey($message.requestKey)) {
+                    # A post-exit final receipt already settled this request;
+                    # a late terminal must not emit a conflicting duplicate.
+                    continue
+                }
                 if ((Test-StringBounded $message.clientId 128) -and ($message.requestId -is [int] -or $message.requestId -is [long] -or $message.requestId -is [double]) -and (Test-Identity $message.identity) -and $message.requestKey -eq ("{0}:{1}" -f $message.clientId, $message.requestId)) {
                     $fallback = [pscustomobject]@{
                         requestKey = [string]$message.requestKey
@@ -501,6 +587,7 @@ try {
                         handle = [IntPtr]::Zero
                     }
                     Write-UnavailableReceipt $fallback 'missing-registration' 0 0 $false
+                    $finalizedKeys[$fallback.requestKey] = $true
                 } else {
                     Write-CollectorEvent ([ordered]@{ type = 'protocol-error'; reason = 'missing-registration-identity' })
                 }

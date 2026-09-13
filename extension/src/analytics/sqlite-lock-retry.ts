@@ -6,7 +6,12 @@
  * already in flight when the budget expires.
  */
 export const SQLITE_NATIVE_BUSY_TIMEOUT_MS = 5_000;
-export const SQLITE_CAPTURE_LOCK_RETRY_BUDGET_MS = 8_000;
+// A four-writer burst can legitimately keep one SQLite connection waiting for
+// several native busy-timeout windows while the other writers drain. Keep the
+// retry budget below the supervisor's 30-second capture timeout. One in-flight
+// operation can outlive the budget by its native wait plus execution time;
+// the supervisor retains and replays the batch if its request timeout expires.
+export const SQLITE_CAPTURE_LOCK_RETRY_BUDGET_MS = 20_000;
 export const SQLITE_CAPTURE_LOCK_RETRY_MAX_DELAY_MS = 200;
 
 export interface SqliteLockRetryBudget {

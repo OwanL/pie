@@ -10,6 +10,9 @@ import type {
 import type { LiveLifecycleWatermark } from '../../shared/live-pipeline-protocol.js';
 import type { CanonicalAnalyticsCapture } from '../../analytics/canonical-capture.js';
 import type { CanonicalAnalyticsReadModel } from '../../analytics/query-entry.js';
+import type { ActivityProjectionReadModel } from '../../analytics/activity-projection.js';
+import type { ToolFacetProjectionReadModel } from '../../analytics/tool-facet.js';
+import type { AnalyticsQuerySnapshotMetadata } from '../../analytics/sqlite-recorder.js';
 import type { ActivityIntervalRecord } from '../../shared/activity-interval';
 import type { BillableInvocationRecord } from '../../shared/billable-invocation';
 import type { ArchState } from '../core/arch-state';
@@ -145,6 +148,36 @@ export interface RunObserver {
  * this wider port is kept structural so a rehearsal can use a filesystem-free
  * implementation without inheriting the concrete storage/accounting state.
  */
+export type CanonicalActivityProjection = ActivityProjectionReadModel & AnalyticsQuerySnapshotMetadata;
+export type CanonicalToolFacetProjection = ToolFacetProjectionReadModel & AnalyticsQuerySnapshotMetadata;
+export type CanonicalProjectionScope = ActivityProjectionReadModel['scope'];
+
+/** One bounded canonical activity read for a global or root-session scope.
+ * `projection` is null only when the read is unavailable; a successful read
+ * retains its own truncation and unknown-count metadata. */
+export interface CanonicalActivityProjectionSnapshot {
+  authority: 'canonical' | 'unknown';
+  scope: CanonicalProjectionScope;
+  projection: CanonicalActivityProjection | null;
+}
+
+/** One bounded canonical tool/file facet read for a global or root-session
+ * scope. Facet rows are evidence/proxies as classified by the projection; they
+ * are not verified worktree changes or a process census. */
+export interface CanonicalToolFacetProjectionSnapshot {
+  authority: 'canonical' | 'unknown';
+  scope: CanonicalProjectionScope;
+  projection: CanonicalToolFacetProjection | null;
+}
+
+/** Canonical activity surfaces consumed by host statistics. The two reads are
+ * independently qualified because activity summaries and facet rows have
+ * different coverage and truncation semantics. */
+export interface CanonicalActivityStats {
+  activity: CanonicalActivityProjectionSnapshot;
+  toolFacets: CanonicalToolFacetProjectionSnapshot;
+}
+
 export interface StatsServicePort extends RunObserver {
   start(): Promise<void>;
   shutdown(): Promise<void>;
@@ -159,6 +192,9 @@ export interface StatsServicePort extends RunObserver {
   getAnalyticsReadModel?(): CanonicalAnalyticsReadModel | undefined;
   getAnalyticsRevisionRefreshStats?(): { revision: string | null } | undefined;
   getWorkingTimeBySession(): Record<string, import('../../shared/protocol').WorkingTimeState>;
+  getCanonicalActivityProjection(sessionPath?: string): CanonicalActivityProjectionSnapshot;
+  getCanonicalToolFacetProjection(sessionPath?: string): CanonicalToolFacetProjectionSnapshot;
+  getCanonicalActivityStats(sessionPath?: string): CanonicalActivityStats;
   getSessionUsage(sessionPath: string): SessionUsageSnapshot;
   getActivityIntervals(): readonly ActivityIntervalRecord[];
   getBillableInvocationRecords(): readonly BillableInvocationRecord[];

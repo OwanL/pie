@@ -7,4 +7,10 @@ export {
   type RunObserver,
   type StatsServicePort,
   type StatsServiceOptions,
+  type CanonicalActivityProjection,
+  type CanonicalActivityProjectionSnapshot,
+  type CanonicalActivityStats,
+  type CanonicalProjectionScope,
+  type CanonicalToolFacetProjection,
+  type CanonicalToolFacetProjectionSnapshot,
 } from './types';

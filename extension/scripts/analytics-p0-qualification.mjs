@@ -48,7 +48,7 @@ const queryWorkerScript = path.join(outRoot, 'analytics-query-worker.js');
 const REPORT_SCHEMA_VERSION = 5;
 const HARNESS_VERSION = 'p0-baseline-scale-v7-recorder-heap-ceiling';
 const ENDURANCE_HARNESS_VERSION = `${HARNESS_VERSION}-endurance-v1`;
-const MIXED_HARNESS_VERSION = `${HARNESS_VERSION}-mixed-v2-native-process-handle`;
+const MIXED_HARNESS_VERSION = `${HARNESS_VERSION}-mixed-v3-exit-bound-native-telemetry`;
 const MIN_RECORDER_HEAP_PROBE_MB = 64;
 const MAX_RECORDER_HEAP_PROBE_MB = 512;
 const MIXED_MEMORY_INITIAL_FLOOR_BYTES = 4 * 1024 ** 3;
@@ -433,19 +433,22 @@ function requiredWorkerMemorySample(stats, label) {
 /** Poll the existing stats IPC during a rate condition. Boundary samples are
  * insufficient for a sustained-load memory result because a worker can peak
  * between flushes. The sampler is deliberately kept in the harness so this
- * follow-on does not change production recorder behavior. */
-function startWorkerMemorySampler(hosts, label, intervalMs = 1_000) {
+ * follow-on does not change production recorder behavior. Phases are labels
+ * attached to each sample at collection time so the report can attribute the
+ * high-water to the workload phase that produced it. */
+function startWorkerMemorySampler(hosts, label, intervalMs = 1_000, { initialPhase = 'unmarked' } = {}) {
   const samples = [];
   let inFlight;
   let failure;
   let stopped = false;
+  let currentPhase = initialPhase;
   const collect = async () => {
     if (failure) throw failure;
     if (inFlight) return inFlight;
     inFlight = (async () => {
       const stats = await Promise.all(hosts.map((host) => host.workerStats()));
       const workers = stats.map((entry, index) => requiredWorkerMemorySample(entry, `${label} sample ${samples.length} host ${index + 1}`));
-      samples.push({ observedAt: new Date().toISOString(), workers });
+      samples.push({ observedAt: new Date().toISOString(), phase: currentPhase, workers });
     })().catch((error) => {
       failure = error instanceof Error ? error : new Error(String(error));
       throw failure;
@@ -453,6 +456,13 @@ function startWorkerMemorySampler(hosts, label, intervalMs = 1_000) {
       inFlight = undefined;
     });
     return inFlight;
+  };
+  const markPhase = (phaseLabel) => {
+    if (stopped) throw new Error(`${label}: sampler phase cannot be marked after stop`);
+    if (typeof phaseLabel !== 'string' || phaseLabel.length === 0 || phaseLabel.length > 64) {
+      throw new Error(`${label}: sampler phase label must be a non-empty string of at most 64 characters`);
+    }
+    currentPhase = phaseLabel;
   };
   const summarizeSamples = () => {
     const byWorker = new Map();
@@ -483,6 +493,26 @@ function startWorkerMemorySampler(hosts, label, intervalMs = 1_000) {
         maxWorkerHeapUsedBytes = Math.max(maxWorkerHeapUsedBytes, worker.heapUsedBytes);
       }
     }
+    const phases = [];
+    for (const sample of samples) {
+      const last = phases.at(-1);
+      if (last && last.label === sample.phase) {
+        last.sampleCount += 1;
+        for (const worker of sample.workers) {
+          last.maxWorkerRssBytes = Math.max(last.maxWorkerRssBytes, worker.rssBytes);
+          last.maxWorkerHeapTotalBytes = Math.max(last.maxWorkerHeapTotalBytes, worker.heapTotalBytes);
+          last.maxWorkerHeapUsedBytes = Math.max(last.maxWorkerHeapUsedBytes, worker.heapUsedBytes);
+        }
+      } else {
+        phases.push({
+          label: sample.phase,
+          sampleCount: 1,
+          maxWorkerRssBytes: Math.max(...sample.workers.map((worker) => worker.rssBytes)),
+          maxWorkerHeapTotalBytes: Math.max(...sample.workers.map((worker) => worker.heapTotalBytes)),
+          maxWorkerHeapUsedBytes: Math.max(...sample.workers.map((worker) => worker.heapUsedBytes)),
+        });
+      }
+    }
     return {
       intervalMs,
       sampleCount: samples.length,
@@ -491,6 +521,7 @@ function startWorkerMemorySampler(hosts, label, intervalMs = 1_000) {
       maxWorkerRssBytes,
       maxWorkerHeapTotalBytes,
       maxWorkerHeapUsedBytes,
+      phases,
       workers: [...byWorker.values()],
     };
   };
@@ -500,6 +531,7 @@ function startWorkerMemorySampler(hosts, label, intervalMs = 1_000) {
   }, intervalMs);
   void collect().catch(() => void 0);
   return {
+    mark: markPhase,
     snapshot() {
       const summary = summarizeSamples();
       return {
@@ -813,6 +845,80 @@ function recorderFailureEvidence(error) {
   return evidence;
 }
 
+function queryWorkerIdentityKey(identity) {
+  return `${identity.instanceId}:${identity.pid}:${identity.spawnedAtMs}`;
+}
+
+/** Build the mixed query-worker topology evidence by unioning runtime terminal
+ * samples with native OS final-counter receipts. Forced cancellation leaves
+ * runtime telemetry explicitly null, so whole-topology memory becomes
+ * qualified only when every spawned worker is covered by at least one valid
+ * source; the claimed RSS/CPU must equal the recomputed union, and the
+ * validator rechecks both against the persisted evidence. */
+function buildQueryWorkerTopology({ hostRssPeak, hostProcessCpu, recorderWorkerCpuDeltaMicros, topologySamples, lifecycleReceipts, workerIdentities, nativeEvidence, queryWorkerTelemetry }) {
+  const runtimeCovered = new Map();
+  for (const receipt of lifecycleReceipts) {
+    const terminal = receipt?.events?.find((event) => event.phase === 'terminal');
+    const telemetry = terminal?.telemetry;
+    if (terminal?.telemetryStatus === 'available' && telemetry && terminal.identity
+      && Number.isSafeInteger(telemetry.maxRssBytes) && telemetry.maxRssBytes > 0
+      && Number.isSafeInteger(telemetry.userCpuTimeMicros) && Number.isSafeInteger(telemetry.systemCpuTimeMicros)) {
+      runtimeCovered.set(queryWorkerIdentityKey(terminal.identity), {
+        source: 'runtime-terminal',
+        rssBytes: telemetry.maxRssBytes,
+        cpuDeltaMicros: telemetry.userCpuTimeMicros + telemetry.systemCpuTimeMicros,
+      });
+    }
+  }
+  const nativeCovered = new Map();
+  for (const receipt of nativeEvidence?.receipts ?? []) {
+    if (receipt?.status === 'available' && receipt.identity && receipt.memory
+      && Number.isSafeInteger(receipt.memory.peakWorkingSetBytes) && receipt.memory.peakWorkingSetBytes > 0
+      && receipt.cpu && Number.isSafeInteger(receipt.cpu.userCpuTimeMicros)
+      && Number.isSafeInteger(receipt.cpu.systemCpuTimeMicros)) {
+      nativeCovered.set(queryWorkerIdentityKey(receipt.identity), {
+        source: 'native-os-final',
+        rssBytes: receipt.memory.peakWorkingSetBytes,
+        cpuDeltaMicros: receipt.cpu.userCpuTimeMicros + receipt.cpu.systemCpuTimeMicros,
+      });
+    }
+  }
+  const workerKeys = new Set(workerIdentities.map(queryWorkerIdentityKey));
+  const union = new Map([...nativeCovered]);
+  for (const [key, value] of runtimeCovered) union.set(key, value);
+  const inTopology = (key) => workerKeys.has(key);
+  const unionComplete = workerKeys.size > 0 && [...workerKeys].every((key) => union.has(key));
+  const coveredValues = [...union.entries()].filter(([key]) => inTopology(key)).map(([, value]) => value);
+  const coverage = {
+    workerCount: workerKeys.size,
+    runtimeCoveredCount: [...runtimeCovered.keys()].filter(inTopology).length,
+    nativeAvailableCount: [...nativeCovered.keys()].filter(inTopology).length,
+    unionCoveredCount: [...union.keys()].filter(inTopology).length,
+    unionComplete,
+    nativeOnlyWorkers: workerIdentities
+      .filter((identity) => !runtimeCovered.has(queryWorkerIdentityKey(identity))
+        && nativeCovered.has(queryWorkerIdentityKey(identity)))
+      .map((identity) => ({ ...identity, source: 'native-os-final' })),
+  };
+  return {
+    hostPeakRssBytes: hostRssPeak,
+    hostCpuDeltaMicros: hostProcessCpu.user + hostProcessCpu.system,
+    recorderWorkerCpuDeltaMicros,
+    hostProcessCpuDeltaMicros: hostProcessCpu.user + hostProcessCpu.system,
+    queryWorkerRssBytes: unionComplete && coveredValues.length > 0
+      ? Math.max(...coveredValues.map((value) => value.rssBytes))
+      : null,
+    queryWorkerCpuDeltaMicros: unionComplete && coveredValues.length > 0
+      ? coveredValues.reduce((total, value) => total + value.cpuDeltaMicros, 0)
+      : null,
+    queryWorkerTelemetryAvailable: unionComplete,
+    queryWorkerTelemetryCoverage: coverage,
+    queryWorkerTelemetry,
+    topologySamples,
+    note: 'Query-worker memory coverage unions runtime terminal samples with native OS final-counter receipts. Forced cancellation keeps runtime evidence explicitly null; native receipts cover those workers only when the collector bound them, so any worker covered by neither source keeps whole-topology memory unqualified.',
+  };
+}
+
 async function runMixedScenario() {
   const smoke = configuration.smoke;
   const plan = smoke ? MIXED_SMOKE_PLAN : MIXED_FULL_PLAN;
@@ -860,6 +966,7 @@ async function runMixedScenario() {
     expectedImagePath: process.execPath,
     maxRequests: 64,
     maxActiveHandles: 32,
+    ...(smoke ? {} : { minActiveHandles: 2 }),
     maxDurationMs: smoke ? 30_000 : 600_000,
   });
   hosts = Array.from({ length: plan.hostCount }, () => supervisor(database, {
@@ -899,7 +1006,7 @@ async function runMixedScenario() {
   await Promise.all(hosts.map((host) => host.start()));
   const initialStats = await sampleTopology('started');
   workerStatsBefore.push(...initialStats);
-  memorySampler = startWorkerMemorySampler(hosts, 'mixed');
+  memorySampler = startWorkerMemorySampler(hosts, 'mixed', 1_000, { initialPhase: 'startup' });
   scenarioAbortController = new AbortController();
   scenarioAbortController.signal.addEventListener('abort', () => {
     for (const controller of activeSaturationControllers) {
@@ -979,6 +1086,7 @@ async function runMixedScenario() {
       },
     );
   };
+    memorySampler.mark('fixture');
     for (let index = 0; index < plan.fixtureRows; index += 1) {
       const hostIndex = index % hosts.length;
       hosts[hostIndex].submit(observation(index, hostIndex, Math.floor(index / hosts.length) + 1));
@@ -987,6 +1095,7 @@ async function runMixedScenario() {
     await Promise.all(hosts.map((host) => host.flush()));
     await sampleTopology('after-fixture');
     checkResourceEnvelope('mixed-after-fixture');
+    memorySampler.mark('projection-prep');
 
     // Preparation is an explicit writer control. It rebuilds the fixture once;
     // all paced and burst provider settlements below then exercise incremental
@@ -1023,6 +1132,7 @@ async function runMixedScenario() {
       fixtureProviderFacts: expectedFixtureProviderFacts,
     });
 
+    memorySampler.mark('paced-queries');
     const broadScan = timedQuery('broadScan', {
       type: 'query',
       sql: 'SELECT root_session_id, entity_kind, observed_at_ms FROM analytics_observations ORDER BY observed_at_ms DESC LIMIT 250',
@@ -1049,6 +1159,7 @@ async function runMixedScenario() {
       .filter((entry) => entry.label.startsWith('indexedLookup:') && entry.outcome === 'resolved')
       .map((entry) => entry.ms);
 
+    memorySampler.mark('burst');
     const burst = await runMixedIngest(hosts, 'mixed-burst', plan.fixtureRows + 2_000_000, plan.burst.ratePerSecond, plan.burst.sampleCount, plan.burst.durationMs);
     await sampleTopology('after-burst');
     checkResourceEnvelope('mixed-after-burst');
@@ -1082,6 +1193,7 @@ async function runMixedScenario() {
     acceptedRowsBeforeDetail = delivery.rows;
     acceptedBytesBeforeDetail = delivery.bytes;
 
+    memorySampler.mark('saturation');
     const saturationControllers = Array.from({ length: plan.saturationQueryCount }, () => new AbortController());
     activeSaturationControllers = saturationControllers;
     const saturationStarted = performance.now();
@@ -1102,6 +1214,7 @@ async function runMixedScenario() {
       throw new Error(`mixed saturation worker lifecycle is invalid: ${saturationLifecycleValidation.errors.join('; ')}`);
     }
 
+    memorySampler.mark('detail-refresh');
     const reconstructionHost = hosts[0];
     const payloadId = 'mixed-full-reconstruction';
     const reconstruction = detailCapture(payloadId, 'mixed-reconstruction-root', 32 * 1024);
@@ -1196,18 +1309,16 @@ async function runMixedScenario() {
     if (!nativeEvidenceValidation.valid) {
       throw new Error(`mixed native process evidence is invalid: ${nativeEvidenceValidation.errors.join('; ')}`);
     }
-    queryTopology = {
-      hostPeakRssBytes: hostRssPeak,
-      hostCpuDeltaMicros: hostProcessCpu.user + hostProcessCpu.system,
+    queryTopology = buildQueryWorkerTopology({
+      hostRssPeak,
+      hostProcessCpu,
       recorderWorkerCpuDeltaMicros,
-      hostProcessCpuDeltaMicros: hostProcessCpu.user + hostProcessCpu.system,
-      queryWorkerRssBytes: null,
-      queryWorkerCpuDeltaMicros: null,
-      queryWorkerTelemetryAvailable: false,
-      queryWorkerTelemetry: queryLifecycleReceiptValidation.summary.queryWorkerTelemetry,
       topologySamples,
-      note: 'Query-worker terminal telemetry is persisted per lifecycle receipt; forced cancellation has explicit null evidence, so whole-topology memory remains unqualified until every spawned worker has a valid terminal sample and IPC framing limits are addressed.',
-    };
+      lifecycleReceipts: queryLifecycleReceipts,
+      workerIdentities: queryWorkerIdentities,
+      nativeEvidence: nativeProcessTelemetry,
+      queryWorkerTelemetry: queryLifecycleReceiptValidation.summary.queryWorkerTelemetry,
+    });
     report.results.mixed = {
       mode: smoke ? 'smoke' : 'full',
       fixtureRows: plan.fixtureRows,

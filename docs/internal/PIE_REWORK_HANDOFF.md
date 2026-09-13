@@ -47,7 +47,28 @@ The user requested sustained overnight work, feature work stopping by 03:00 and 
 by 07:00 on 2026-09-14 Pacific/Auckland. Morning usability takes priority: defer incomplete
 features, preserve live sessions, and do not activate/cut over without proven gates.
 
-Remaining main work: live activity consumers; remaining rich producer/handoff coverage;
+Additional reviewed source: StatsService now hydrates bounded, revision-fenced activity
+and facet read models (service accessors only, not UI/branch integration). Recorder capture
+avoids duplicate envelope/array/JSON allocations; contended lock retries share a bounded
+20-second worker budget, with intact-batch replay if the supervisor deadline wins.
+Exhausted-lock recovery tests were updated and pass. Resource collection now combines
+runtime and identity-bound native terminal receipts, covering forced-cancellation workers.
+
+Production-default mixed probe `pie-p0-mixed-20260914-r01/p0-qualification.json` in OS temp
+was functionally passed but remains P0-unqualified: recorder RSS 270,524,416 bytes exceeds
+268,435,456. Query-worker topology coverage was 16/16 via runtime/native evidence union.
+This measured result precedes the subsequent allocation reductions; do not infer a memory
+pass from those code changes. Actual-host P2c cache use remains unproven (startup path
+and older cache files are not causal evidence). No live activation is authorized by these
+results. Remaining qualifications will not be forced to meet the morning deadline.
+
+Latest stability check: focused recorder/collector tests 53 passed; affected extension
+4,892 passed, 19 skipped, zero failures. Typecheck/lint/build passed. Build
+`fecd8274163d41c31ca8` staged runtime
+`3335b51944ac1a55b7740dab97c05d8e532a865e535d70453fa7850fda7c0308`.
+Logs: OS-temp `pie-stability-0200-8GB8vE/`. Source remains inactive behind existing gates.
+
+Remaining main work: live UI/branch-specific activity integration; remaining rich producer/handoff coverage;
 P0 resource/scale and matched UI evidence; actual-host P2c cache-use evidence; final P7
 qualification authority and ordered activation/cutoff execution. No activation or
 storage cutoff has occurred. Cosmetic cleanup is deferred per user priority. Commit and

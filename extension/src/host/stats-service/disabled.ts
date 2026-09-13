@@ -2,6 +2,12 @@ import type { ActivityIntervalRecord } from '../../shared/activity-interval';
 import type { BillableInvocationRecord } from '../../shared/billable-invocation';
 import type { SessionUsageSnapshot, WorkingTimeState } from '../../shared/protocol';
 import type { CanonicalAnalyticsReadModel } from '../../analytics/query-entry.js';
+import { analyticsRootSessionId } from '../../analytics/canonical-capture.js';
+import type {
+  CanonicalActivityProjectionSnapshot,
+  CanonicalActivityStats,
+  CanonicalToolFacetProjectionSnapshot,
+} from './types';
 import type { RunSnapshot } from '../run-analytics';
 import type { RunAnalyticsExportPayload, RunAnalyticsQueryResult } from '../run-analytics/query';
 import {
@@ -81,6 +87,33 @@ export class DisabledStatsService implements StatsServicePort {
 
   getWorkingTimeBySession(): Record<string, WorkingTimeState> {
     return {};
+  }
+
+  getCanonicalActivityProjection(sessionPath?: string): CanonicalActivityProjectionSnapshot {
+    return {
+      authority: 'unknown',
+      scope: sessionPath === undefined
+        ? { kind: 'global' }
+        : { kind: 'session', rootSessionId: analyticsRootSessionId(null, sessionPath) },
+      projection: null,
+    };
+  }
+
+  getCanonicalToolFacetProjection(sessionPath?: string): CanonicalToolFacetProjectionSnapshot {
+    return {
+      authority: 'unknown',
+      scope: sessionPath === undefined
+        ? { kind: 'global' }
+        : { kind: 'session', rootSessionId: analyticsRootSessionId(null, sessionPath) },
+      projection: null,
+    };
+  }
+
+  getCanonicalActivityStats(sessionPath?: string): CanonicalActivityStats {
+    return {
+      activity: this.getCanonicalActivityProjection(sessionPath),
+      toolFacets: this.getCanonicalToolFacetProjection(sessionPath),
+    };
   }
 
   getSessionUsage(_sessionPath: string): SessionUsageSnapshot {

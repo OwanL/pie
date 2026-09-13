@@ -187,6 +187,12 @@ function validMixed(mode: 'full' | 'smoke' = 'full') {
       peakMeasurementKind: 'periodic-sampler-high-water',
       maxWorkerRssBytes: 1_000,
       sampleCount: mode === 'full' ? 2 : 1,
+      ...(mode === 'full' ? {
+        phases: [
+          { label: 'startup', sampleCount: 1, maxWorkerRssBytes: 800, maxWorkerHeapTotalBytes: 900, maxWorkerHeapUsedBytes: 500 },
+          { label: 'burst', sampleCount: 1, maxWorkerRssBytes: 1_000, maxWorkerHeapTotalBytes: 1_100, maxWorkerHeapUsedBytes: 700 },
+        ],
+      } : {}),
     },
     queryHostTopology: {
       hostPeakRssBytes: 2_000,
@@ -457,7 +463,7 @@ test('mixed memory error reports native final-counter coverage when runtime samp
       reason: null,
       memory: { peakWorkingSetBytes: 4_096, units: 'bytes' },
       cpu: { userCpuTimeMicros: 1, systemCpuTimeMicros: 1, units: 'microseconds' },
-      final: { handleRetainedThroughExit: true, exitTime100ns: '1' },
+      final: { handleRetainedThroughExit: true, exitTime100ns: '1', observationKind: 'retained-through-exit' },
       handleRetainedThroughExit: true,
       handleClosed: true,
       registration: { creationWindowMatch: true, creationTime100ns: '1', imagePath: 'node.exe' },
@@ -467,5 +473,154 @@ test('mixed memory error reports native final-counter coverage when runtime samp
   assert.equal(result.valid, false);
   assert.match(result.errors.join('; '), /native process telemetry/u);
   assert.match(result.memoryErrors.join('; '), /runtime terminal telemetry is available for 0\/16/u);
+  assert.match(result.memoryErrors.join('; '), /Union coverage with valid native OS final-counter receipts is 0\/16/u);
   assert.match(result.memoryErrors.join('; '), /Native OS final-counter evidence is available for 1\/1/u);
+});
+
+function unionCoverageFixture() {
+  const mixed: any = validMixed('full');
+  const lifecycle: any[] = mixed.terminalWorkers.queryLifecycle;
+  for (const receipt of lifecycle) {
+    const terminal = receipt.events.find((event: any) => event.phase === 'terminal');
+    if (!terminal) continue;
+    if (receipt.events[0].requestType === 'qualificationSpin') {
+      terminal.telemetryStatus = 'unavailable-cancelled';
+      terminal.telemetry = null;
+    } else {
+      terminal.telemetryStatus = 'available';
+      terminal.telemetry = {
+        workerIdentity: terminal.identity,
+        maxRssBytes: 4_096 + receipt.requestId,
+        userCpuTimeMicros: 10,
+        systemCpuTimeMicros: 5,
+        currentMemory: { rssBytes: 4_000, heapTotalBytes: 4_000, heapUsedBytes: 3_000, externalBytes: 0, arrayBuffersBytes: 0 },
+        runtimeSamplePhase: 'after-result-serialization',
+      };
+    }
+  }
+  const spinReceipts = lifecycle.filter((receipt: any) => receipt.events[0].requestType === 'qualificationSpin'
+    && receipt.events.some((event: any) => event.phase === 'spawned'));
+  const spinWorkers = spinReceipts
+    .map((receipt: any) => receipt.events.find((event: any) => event.phase === 'spawned').identity);
+  // The real collector emits a receipt for every registered worker; fast
+  // one-shot workers whose race was lost stay honestly unavailable and rely
+  // on their runtime terminal samples.
+  const ordinaryReceipts = lifecycle.filter((receipt: any) => receipt.events[0].requestType !== 'qualificationSpin');
+  mixed.nativeProcessTelemetry = {
+    enabled: true,
+    platform: 'win32',
+    qualificationOnly: true,
+    overhead: { collectorProcessExcludedFromWorkloadTotals: true, pairedBaselineRequired: true, protocolBytes: 0, protocolWrites: 0 },
+    rejections: [],
+    receipts: [
+      ...spinWorkers.map((identity: any, index: number) => ({
+        requestKey: `saturation-client:${index + 1}`,
+        identity,
+        status: 'available',
+        reason: null,
+        memory: { peakWorkingSetBytes: 5_000 + index, units: 'bytes' },
+        cpu: { userCpuTimeMicros: 20, systemCpuTimeMicros: 30, units: 'microseconds' },
+        final: { exitTime100ns: '1', handleRetainedThroughExit: true, observationKind: 'retained-through-exit' },
+        handleRetainedThroughExit: true,
+        handleClosed: true,
+        registration: { creationWindowMatch: true, creationTime100ns: '1', imagePath: 'node.exe' },
+      })),
+      ...ordinaryReceipts.map((receipt: any) => ({
+        requestKey: `ordinary-client:${receipt.requestId}`,
+        identity: receipt.events.find((event: any) => event.phase === 'spawned').identity,
+        status: 'unavailable',
+        reason: 'open-process-failed',
+        memory: null,
+        cpu: null,
+        handleRetainedThroughExit: false,
+        handleClosed: true,
+      })),
+    ],
+  };
+  return mixed;
+}
+
+test('mixed memory qualifies through runtime and native union coverage of every query worker', () => {
+  const mixed = unionCoverageFixture();
+  const ordinaryMaxRss = 4_096 + 14;
+  const nativePeak = 5_001;
+  mixed.queryHostTopology = {
+    ...mixed.queryHostTopology,
+    queryWorkerRssBytes: nativePeak,
+    queryWorkerCpuDeltaMicros: 14 * 15 + 2 * 50,
+    queryWorkerTelemetryAvailable: true,
+    queryWorkerTelemetryCoverage: {
+      workerCount: 16,
+      runtimeCoveredCount: 14,
+      nativeAvailableCount: 2,
+      unionCoveredCount: 16,
+      unionComplete: true,
+      nativeOnlyWorkers: [],
+    },
+  };
+  const result = validateMixedEvidence(mixed, { mode: 'full' });
+  assert.equal(result.valid, true, result.errors.join('; '));
+  assert.equal(result.memoryValid, true, result.memoryErrors.join('; '));
+});
+
+test('mixed memory rejects claimed union RSS/CPU that the persisted evidence does not support', () => {
+  const mixed = unionCoverageFixture();
+  mixed.queryHostTopology = {
+    ...mixed.queryHostTopology,
+    queryWorkerRssBytes: 999,
+    queryWorkerCpuDeltaMicros: 1,
+    queryWorkerTelemetryAvailable: true,
+    queryWorkerTelemetryCoverage: {
+      workerCount: 16,
+      runtimeCoveredCount: 14,
+      nativeAvailableCount: 2,
+      unionCoveredCount: 16,
+      unionComplete: true,
+      nativeOnlyWorkers: [],
+    },
+  };
+  const result = validateMixedEvidence(mixed, { mode: 'full' });
+  assert.equal(result.valid, true);
+  assert.equal(result.memoryValid, false);
+  assert.match(result.memoryErrors.join('; '), /does not match the persisted terminal evidence/u);
+});
+
+test('mixed memory stays unqualified when a worker is covered by neither source', () => {
+  const mixed = unionCoverageFixture();
+  mixed.nativeProcessTelemetry.receipts = mixed.nativeProcessTelemetry.receipts.slice(1);
+  const result = validateMixedEvidence(mixed, { mode: 'full' });
+  assert.equal(result.valid, false);
+  assert.match(result.errors.join('; '), /native process telemetry.*missing/u);
+  assert.match(result.memoryErrors.join('; '), /Union coverage with valid native OS final-counter receipts is 15\/16/u);
+});
+
+test('mixed recorder high-water above the 256 MiB ordinary-ingestion gate fails memory with phase evidence', () => {
+  const mixed: any = validMixed('full');
+  mixed.recorderMemory = {
+    ...mixed.recorderMemory,
+    maxWorkerRssBytes: 285_000_000,
+    phases: [
+      { label: 'startup', sampleCount: 1, maxWorkerRssBytes: 80_000_000, maxWorkerHeapTotalBytes: 90_000_000, maxWorkerHeapUsedBytes: 50_000_000 },
+      { label: 'burst', sampleCount: 1, maxWorkerRssBytes: 285_000_000, maxWorkerHeapTotalBytes: 150_000_000, maxWorkerHeapUsedBytes: 30_000_000 },
+    ],
+  };
+  const result = validateMixedEvidence(mixed, { mode: 'full' });
+  assert.equal(result.memoryValid, false);
+  assert.match(result.memoryErrors.join('; '), /exceeds the 268435456-byte \(256 MiB\) ordinary-ingestion gate by 16564544 bytes/u);
+  assert.match(result.memoryErrors.join('; '), /The highest phase is "burst" at 285000000 bytes/u);
+  assert.match(result.memoryErrors.join('; '), /No production-default memory qualification is claimed/u);
+});
+
+test('mixed full recorder memory requires phase attribution that covers the sampled window', () => {
+  const mixed: any = validMixed('full');
+  delete mixed.recorderMemory.phases;
+  const missingResult = validateMixedEvidence(mixed, { mode: 'full' });
+  assert.equal(missingResult.memoryValid, false);
+  assert.match(missingResult.memoryErrors.join('; '), /recorder phase attribution does not cover/u);
+
+  const inconsistent: any = validMixed('full');
+  inconsistent.recorderMemory.phases[1].sampleCount = 2;
+  const inconsistentResult = validateMixedEvidence(inconsistent, { mode: 'full' });
+  assert.equal(inconsistentResult.memoryValid, false);
+  assert.match(inconsistentResult.memoryErrors.join('; '), /recorder phase attribution does not cover/u);
 });

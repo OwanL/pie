@@ -2382,6 +2382,7 @@ function applyTypedObservation(
   statements: WriterStatementCache | undefined,
   observation: AnalyticsObservation<object>,
   registryKey: string,
+  payloadJson: string,
 ): boolean {
   const fields = observation.fields as Record<string, unknown>;
   const common = [
@@ -2462,7 +2463,7 @@ function applyTypedObservation(
       optionalString(fields.outcome),
       optionalTimestamp(fields.startedAtMs, 'fields.startedAtMs'),
       optionalTimestamp(fields.endedAtMs, 'fields.endedAtMs'),
-      serialize(observation),
+      payloadJson,
       revision,
     );
     prepareWriterStatement(database, statements, 'typed.execution.state.upsert', `
@@ -2540,7 +2541,7 @@ function applyTypedObservation(
       optionalString(fields.outcome),
       optionalTimestamp(fields.startedAtMs, 'fields.startedAtMs'),
       optionalTimestamp(fields.executionEndedAtMs, 'fields.executionEndedAtMs'),
-      serialize(observation),
+      payloadJson,
       revision,
     );
     prepareWriterStatement(database, statements, 'typed.tool.state.upsert', `
@@ -2584,7 +2585,7 @@ function applyTypedObservation(
       subjectKey(observation),
       observation.scope.rootSessionId ?? null,
       facetColumns.cwd,
-      serialize(observation),
+      payloadJson,
       revision,
     );
     prepareWriterStatement(database, statements, 'typed.toolfacet.state.upsert', `
@@ -2650,7 +2651,7 @@ function applyTypedObservation(
       optionalTimestamp(fields.endedAtMs, 'fields.endedAtMs'),
       optionalNonNegativeFloat(fields.durationMs),
       optionalString(fields.coverage),
-      serialize(observation),
+      payloadJson,
       revision,
     );
     // The state row mirrors the merged span, so a late begin after a terminal
@@ -2701,7 +2702,7 @@ function applyTypedObservation(
       optionalString(fields.ruleVersion),
       optionalNonNegativeFloat(fields.measuredSizeEffect),
       optionalNonNegativeFloat(fields.estimatedSizeEffect),
-      serialize(observation),
+      payloadJson,
       revision,
     );
     return true;
@@ -2842,7 +2843,7 @@ function backfillV2(database: SqliteDatabase): void {
     assertValidAnalyticsObservation(observation);
     recordSourceSequence(database, undefined, observation, row.registry_key, row.fingerprint, false);
     applyProviderSettlement(database, undefined, observation, row.registry_key, row.fingerprint);
-    applyTypedObservation(database, undefined, observation, row.registry_key);
+    applyTypedObservation(database, undefined, observation, row.registry_key, row.payload_json);
   }
 }
 
@@ -3317,8 +3318,8 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
         };
     recordSourceSequence(this.database, this.writerStatements, observation, registryKey, fingerprint, false);
     applyProviderSettlement(this.database, this.writerStatements, effectiveObservation, registryKey, fingerprint);
-    applyTypedObservation(this.database, this.writerStatements, effectiveObservation, registryKey);
     const payloadJson = serialize(effectiveObservation);
+    applyTypedObservation(this.database, this.writerStatements, effectiveObservation, registryKey, payloadJson);
     this.writerStatements.prepare('observation.insert', `
       INSERT INTO analytics_observations (
         generation_id, source_key, registry_key, idempotency_key, fingerprint,

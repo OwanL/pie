@@ -49,8 +49,13 @@ export async function processObservationBatch(
     let end = start + 1;
     while (end < captures.length && captures[end]!.subject === captures[start]!.subject) end += 1;
     try {
+      // Materialize only the value batch required by the recorder. Avoid the
+      // intermediate slice of capture references followed by a second mapped
+      // array; the envelopes remain owned by the worker for this request.
+      const values = new Array<AnalyticsObservation>(end - start);
+      for (let index = start; index < end; index += 1) values[index - start] = captures[index]!.value;
       await retrySqliteLock(
-        () => recorder.submitBatch(captures.slice(start, end).map((capture) => capture.value)),
+        () => recorder.submitBatch(values),
         lockRetryBudget,
       );
     } catch (error) {

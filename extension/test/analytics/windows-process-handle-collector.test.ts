@@ -34,7 +34,38 @@ test('native collector receipt validation rejects malformed final identity and c
   };
   const result = validateWindowsProcessReceipt(malformed, expected);
   assert.equal(result.valid, false);
-  assert.match(result.errors.join('; '), /working set|exit identity|registration|closure/u);
+  assert.match(result.errors.join('; '), /working set|exit identity|registration|closure|observation kind/u);
+});
+
+test('native collector accepts a post-exit final-counter receipt bound by creation time', () => {
+  const expected = identity(1237);
+  const receipt = {
+    requestKey: 'client:1',
+    identity: expected,
+    status: 'available',
+    reason: null,
+    memory: { peakWorkingSetBytes: 4_718_592, units: 'bytes' },
+    cpu: { userCpuTimeMicros: 900, systemCpuTimeMicros: 700, units: 'microseconds' },
+    final: { exitTime100ns: '13400990000000000', handleRetainedThroughExit: false, observationKind: 'post-exit-object' },
+    handleRetainedThroughExit: false,
+    handleClosed: true,
+    registration: {
+      creationWindowMatch: true,
+      creationTime100ns: '13400989999000000',
+      imagePath: null,
+    },
+  };
+  const result = validateWindowsProcessReceipt(receipt, expected);
+  assert.equal(result.valid, true, result.errors.join('; '));
+
+  const retentionForged = { ...receipt, handleRetainedThroughExit: true };
+  assert.equal(validateWindowsProcessReceipt(retentionForged, expected).valid, false);
+  const zeroPeak = { ...receipt, memory: { peakWorkingSetBytes: 0, units: 'bytes' } };
+  assert.equal(validateWindowsProcessReceipt(zeroPeak, expected).valid, false);
+  const unknownKind = { ...receipt, final: { ...receipt.final, observationKind: 'post-exit' } };
+  assert.equal(validateWindowsProcessReceipt(unknownKind, expected).valid, false);
+  const resolvedImage = { ...receipt, registration: { ...receipt.registration, imagePath: 'node.exe' } };
+  assert.equal(validateWindowsProcessReceipt(resolvedImage, expected).valid, true);
 });
 
 test('native collector evidence accepts an explicit unavailable race for the bound worker', () => {
@@ -67,6 +98,32 @@ test('native collector evidence accepts an explicit unavailable race for the bou
   const forged = validateWindowsProcessEvidence(evidence, [expected]);
   assert.equal(forged.valid, false);
   assert.match(forged.errors.join('; '), /retention through exit/u);
+});
+
+test('Windows collector reports an honest unavailable receipt when the worker was reaped before binding', { skip: process.platform !== 'win32', timeout: 20_000 }, async () => {
+  const collector = await startWindowsProcessHandleCollector({ maxRequests: 4, maxActiveHandles: 1, maxDurationMs: 10_000 });
+  assert.equal(collector.enabled, true, JSON.stringify(collector.snapshot()));
+  const child = spawn(process.execPath, [toy, 'natural'], { stdio: 'ignore', windowsHide: true });
+  const identityValue = { ...identity(1238), pid: child.pid };
+  const clientId = '00000000-0000-4000-8000-000000000301';
+  try {
+    const [code, signal] = await once(child, 'exit') as [number | null, NodeJS.Signals | null];
+    assert.equal(code !== null || signal !== null, true);
+    // Register only after full reaping so the handle is provably unrecoverable.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    // The send itself succeeds; the collector's receipt is what records the
+    // unrecoverable race.
+    assert.equal(collector.registerWorker({ phase: 'spawned', clientId, requestId: 1, identity: identityValue }), true);
+    const evidence = await collector.stop();
+    assert.equal(evidence.receipts.length, 1, JSON.stringify(evidence));
+    assert.equal(evidence.receipts[0].status, 'unavailable', JSON.stringify(evidence));
+    assert.equal(['open-process-failed', 'post-exit-final-memory-zeroed'].includes(evidence.receipts[0].reason), true, JSON.stringify(evidence));
+    const validation = validateWindowsProcessEvidence(evidence, [identityValue]);
+    assert.equal(validation.valid, true, validation.errors.join('; '));
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+    await collector.stop();
+  }
 });
 
 test('Windows collector records a forged terminal separately and preserves the valid handle', { skip: process.platform !== 'win32', timeout: 20_000 }, async () => {

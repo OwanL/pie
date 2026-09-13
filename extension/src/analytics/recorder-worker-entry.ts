@@ -44,11 +44,19 @@ type RecorderWorkerRequest = {
   requestId: number;
 };
 
-interface SerializedCaptureEnvelope {
-  kind: 'observation' | 'detail';
+interface SerializedObservationEnvelope {
+  kind: 'observation';
   subject: string;
-  value: AnalyticsObservation | AnalyticsDetailCapture;
+  value: AnalyticsObservation;
 }
+
+interface SerializedDetailEnvelope {
+  kind: 'detail';
+  subject: string;
+  value: AnalyticsDetailCapture;
+}
+
+type SerializedCaptureEnvelope = SerializedObservationEnvelope | SerializedDetailEnvelope;
 
 interface PendingCreateRecorder {
   bindPendingCreate(
@@ -149,11 +157,10 @@ async function handle(raw: unknown): Promise<void> {
         const lockRetryBudget: SqliteLockRetryBudget = createSqliteLockRetryBudget();
         const rejections: Array<{ index: number; code: 'subject_deleted' | 'source_conflict'; error: string }> = [];
         if (firstKind === 'observation') {
+          // The decoded envelopes already have the ObservationCapture shape;
+          // retain that array instead of allocating one wrapper DTO per fact.
           rejections.push(...await processObservationBatch(
-            captures.map((capture) => ({
-              subject: capture.subject,
-              value: capture.value as AnalyticsObservation,
-            })),
+            captures as readonly SerializedObservationEnvelope[],
             recorder,
             lockRetryBudget,
           ));

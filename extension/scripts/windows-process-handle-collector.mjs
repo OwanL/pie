@@ -4,7 +4,7 @@ import { createInterface } from 'node:readline';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const COLLECTOR_VERSION = 'windows-process-handle-collector-r01';
+const COLLECTOR_VERSION = 'windows-process-handle-collector-r02';
 const IDENTITY_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const DEFAULT_MAX_REQUESTS = 256;
 const DEFAULT_MAX_ACTIVE_HANDLES = 64;
@@ -75,16 +75,38 @@ export function validateWindowsProcessReceipt(receipt, expectedIdentity) {
       || receipt.cpu.units !== 'microseconds') {
       errors.push('collector final CPU counters are invalid');
     }
-    if (!receipt.final || receipt.final.handleRetainedThroughExit !== true
-      || typeof receipt.final.exitTime100ns !== 'string' || !/^\d+$/u.test(receipt.final.exitTime100ns)) {
+    if (!receipt.final || typeof receipt.final.exitTime100ns !== 'string' || !/^\d+$/u.test(receipt.final.exitTime100ns)) {
       errors.push('collector final exit identity is missing');
     }
-    if (receipt.handleRetainedThroughExit !== true) errors.push('collector did not retain the handle through exit');
     if (receipt.handleClosed !== true) errors.push('collector did not prove handle closure');
+    // One-shot query workers can terminate between fork and registration. A
+    // retained-through-exit receipt proves handle retention across exit; a
+    // post-exit-object receipt reads the kernel's final counters from an open
+    // handle on the still-referenced process object. Both require the
+    // creation-time window match as the authoritative identity binding.
+    if (!receipt.final
+      || !['retained-through-exit', 'post-exit-object'].includes(receipt.final.observationKind)) {
+      errors.push('collector final observation kind is missing or invalid');
+    }
+    if (receipt.final?.observationKind === 'retained-through-exit') {
+      if (receipt.final.handleRetainedThroughExit !== true || receipt.handleRetainedThroughExit !== true) {
+        errors.push('collector did not retain the handle through exit');
+      }
+      if (typeof receipt.registration?.imagePath !== 'string' || receipt.registration.imagePath.length === 0) {
+        errors.push('collector registration identity binding is incomplete');
+      }
+    } else if (receipt.final?.observationKind === 'post-exit-object') {
+      if (receipt.final.handleRetainedThroughExit !== false || receipt.handleRetainedThroughExit !== false) {
+        errors.push('post-exit collector receipts cannot claim handle retention through exit');
+      }
+      const imagePath = receipt.registration?.imagePath;
+      if (imagePath !== null && (typeof imagePath !== 'string' || imagePath.length === 0)) {
+        errors.push('collector post-exit registration image must be null or a resolved image path');
+      }
+    }
     if (!receipt.registration || receipt.registration.creationWindowMatch !== true
       || typeof receipt.registration.creationTime100ns !== 'string'
-      || !/^\d+$/u.test(receipt.registration.creationTime100ns)
-      || typeof receipt.registration.imagePath !== 'string' || receipt.registration.imagePath.length === 0) {
+      || !/^\d+$/u.test(receipt.registration.creationTime100ns)) {
       errors.push('collector registration identity binding is incomplete');
     }
   } else {

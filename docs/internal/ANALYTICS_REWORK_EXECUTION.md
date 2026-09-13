@@ -14,6 +14,27 @@ Owning specifications: runbook; `docs/ANALYTICS_REWORK_PLAN.md` §§1, 11.6, 17;
 
 ---
 
+## Stability checkpoint - 2026-09-14, before 03:00 Pacific/Auckland
+
+Milestone `4177608b` was pushed. Subsequent reviewed source adds service-layer bounded
+activity/facet hydration, reduced recorder capture allocation, and 20-second shared
+SQLite lock retry (supervisor timeout still retains/replays whole requests). Exhausted
+lock regression tests pass. New native/runtime telemetry union covers forced-cancellation
+query workers; resource claims are independently recomputed from recorded evidence.
+
+Default mixed probe OS-temp `pie-p0-mixed-20260914-r01/p0-qualification.json`: functional
+pass, P0-unqualified; recorder RSS270,524,416B exceeds256MiB, query worker coverage16/16.
+No before/after memory qualification is inferred from later allocation reduction.
+P2c actual-host cache use remains unproven. No activation/restart/cutoff performed.
+
+Focused recorder/collector tests53 passed. Affected extension4,892 passed/19 skipped,
+zero failures; root typecheck/lint/build passed. Logs OS-temp
+`pie-stability-0200-8GB8vE/`. Build `fecd8274163d41c31ca8` staged runtime
+`3335b51944ac1a55b7740dab97c05d8e532a865e535d70453fa7850fda7c0308`.
+Loaded behavior is still only user-verified for the earlier generation. Morning
+stability takes precedence: further work focuses on verification and supported bugs,
+not forcing unqualified activation or unfinished UI/branch metrics into the release.
+
 ## Overnight checkpoint - 2026-09-13 23:50 Pacific/Auckland
 
 Schema-13 tool/file facets and bounded activity/facet query APIs are integrated with

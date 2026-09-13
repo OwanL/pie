@@ -91,7 +91,7 @@ test('real SQLite subject-group partial commit is reconciled by exact batch repl
   // The real native recorder timeout is intentionally retained. A short outer
   // deadline makes the first lock boundary fail after that native wait while
   // keeping the focused proof finite; the existing worker test covers retry
-  // inside the normal eight-second budget.
+  // inside the normal twenty-second budget.
   const shortBudget: SqliteLockRetryBudget = { deadlineMs: performance.now() + 250 };
   try {
     await assert.rejects(

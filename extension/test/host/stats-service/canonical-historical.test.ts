@@ -92,6 +92,75 @@ function settlement(options: {
   return { ...base, idempotencyKey: deriveAnalyticsIdempotencyKey(base) };
 }
 
+function activityObservation(options: {
+  spanId: string;
+  rootSessionId: string;
+  kind: string;
+  coverage: 'observed' | 'estimated' | 'unknown';
+  durationMs: number | null;
+  startedAtMs?: number | null;
+  endedAtMs?: number | null;
+}): AnalyticsObservation<object> {
+  const base: Omit<AnalyticsObservation<object>, 'idempotencyKey'> = {
+    schemaVersion: ANALYTICS_SCHEMA_VERSION,
+    generationId: 'generation-activity-consumer',
+    producerKind: 'test',
+    sourceKey: `activity:${options.spanId}`,
+    entityKind: 'activitySpan',
+    entityKey: options.spanId,
+    observationKind: 'observation',
+    observedAtMs: options.endedAtMs ?? options.startedAtMs ?? 1_750_000_000_000,
+    scope: {
+      workspaceCoverage: 'known',
+      workspaceId: 'workspace-activity-consumer',
+      rootSessionId: options.rootSessionId,
+    },
+    captureSubject: { kind: 'session', rootSessionId: options.rootSessionId },
+    producer: { buildId: 'test-build', processGeneration: 'test-process' },
+    fields: {
+      spanId: options.spanId,
+      kind: options.kind,
+      startedAtMs: options.startedAtMs ?? null,
+      endedAtMs: options.endedAtMs ?? null,
+      durationMs: options.durationMs,
+      clockDomain: 'wall-clock-utc',
+      coverage: options.coverage,
+    },
+  };
+  return { ...base, idempotencyKey: deriveAnalyticsIdempotencyKey(base) };
+}
+
+function toolFacetObservation(rootSessionId: string, toolCallId: string): AnalyticsObservation<object> {
+  const base: Omit<AnalyticsObservation<object>, 'idempotencyKey'> = {
+    schemaVersion: ANALYTICS_SCHEMA_VERSION,
+    generationId: 'generation-activity-consumer',
+    producerKind: 'test',
+    sourceKey: `tool-facet:${toolCallId}`,
+    entityKind: 'toolFacet',
+    entityKey: `${toolCallId}:file-activity`,
+    observationKind: 'observation',
+    observedAtMs: 1_750_000_000_000,
+    scope: {
+      workspaceCoverage: 'known',
+      workspaceId: 'workspace-activity-consumer',
+      rootSessionId,
+    },
+    captureSubject: { kind: 'session', rootSessionId },
+    producer: { buildId: 'test-build', processGeneration: 'test-process' },
+    fields: {
+      toolCallId,
+      facetId: `${toolCallId}:file-activity`,
+      commands: ['apply_patch'],
+      cwd: '/workspace',
+      observedPaths: ['src/changed.ts'],
+      attemptedAddedLines: 4,
+      attemptedRemovedLines: 1,
+      verification: 'unverified',
+    },
+  };
+  return { ...base, idempotencyKey: deriveAnalyticsIdempotencyKey(base) };
+}
+
 function branchObservation(options: {
   branchId: string;
   parentBranchId: string | null;
@@ -223,6 +292,167 @@ test('canonical historical session and aggregate projections survive a new host 
     assert.equal(stats.getSessionUsage('/sessions/historical.jsonl').samples.length, 0);
   } finally {
     aggregate.dispose();
+    await stats.shutdown();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('StatsService hydrates bounded canonical activity and facets, refreshes them, and converges after peer deletion', async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'pie-canonical-activity-consumer-'));
+  const databasePath = canonicalAnalyticsDatabasePath(path.join(root, 'analytics'));
+  const sessionPath = '/sessions/activity.jsonl';
+  const at = Date.parse('2026-01-15T12:00:00.000Z');
+  const writer = new SqliteAnalyticsRecorder(databasePath);
+  writer.submitBatch([
+    activityObservation({
+      spanId: 'span-a-1',
+      rootSessionId: 'root-activity-a',
+      kind: 'tool',
+      coverage: 'observed',
+      durationMs: 1_200,
+      startedAtMs: at,
+      endedAtMs: at + 1_200,
+    }),
+    activityObservation({
+      spanId: 'span-b-1',
+      rootSessionId: 'root-activity-b',
+      kind: 'child',
+      coverage: 'estimated',
+      durationMs: 300,
+      startedAtMs: at + 100,
+      endedAtMs: at + 400,
+    }),
+    activityObservation({
+      spanId: 'span-a-unknown',
+      rootSessionId: 'root-activity-a',
+      kind: 'preflight',
+      coverage: 'unknown',
+      durationMs: null,
+      startedAtMs: at + 4_000,
+      endedAtMs: at + 3_000,
+    }),
+    toolFacetObservation('root-activity-a', 'tool-a-1'),
+    toolFacetObservation('root-activity-b', 'tool-b-1'),
+    // Replayed terminal evidence is idempotent at the recorder and must not
+    // inflate the consumer's facet count.
+    toolFacetObservation('root-activity-a', 'tool-a-1'),
+  ]);
+  closeFixtureWriter(writer);
+
+  const readModel = new CanonicalAnalyticsReadModel({
+    databasePath,
+    workerScript,
+    execArgv,
+    timeoutMs: 20_000,
+    revisionPollIntervalMs: 25,
+  });
+  const state = createInitialArchState();
+  state.sessions.sessions.push({
+    path: sessionPath,
+    name: 'activity',
+    cwd: '/sessions',
+    modifiedAt: new Date(at).toISOString(),
+    messageCount: 1,
+    sessionId: 'root-activity-a',
+  });
+  state.sessions.activeSessionPath = sessionPath;
+  state.sessions.openTabPaths = [sessionPath];
+  const capture = new CanonicalAnalyticsCapture({
+    authority: 'canonical',
+    generationId: 'generation-activity-consumer',
+    workspaceId: 'workspace-activity-consumer',
+    buildId: 'test-build',
+    processGeneration: 'test-process',
+    sink: { submit: () => undefined },
+    detailSink: { submitDetail: () => undefined },
+    lifecycleSink: { bindPendingCreate: async () => undefined, deleteSession: async () => undefined },
+  });
+  const stats = new StatsService({
+    dataOutcomesRootPath: path.join(root, 'legacy'),
+    workspaceId: 'workspace-activity-consumer',
+    getArchState: () => state,
+    now: () => new Date(at + 2_000),
+    analyticsCapture: capture,
+    analyticsReadModel: readModel,
+  });
+  const waitFor = async (predicate: () => boolean): Promise<void> => {
+    for (let index = 0; index < 100; index += 1) {
+      if (predicate()) return;
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal(predicate(), true, 'canonical activity refresh did not converge');
+  };
+  try {
+    await stats.start();
+    const global = stats.getCanonicalActivityStats();
+    assert.equal(global.activity.authority, 'canonical');
+    assert.equal(global.activity.projection?.scope.kind, 'global');
+    assert.equal(global.activity.projection?.totals.spanCount, 3);
+    assert.equal(global.activity.projection?.totals.observedCount, 1);
+    assert.equal(global.activity.projection?.totals.estimatedCount, 1);
+    assert.equal(global.activity.projection?.totals.unknownCount, 1);
+    assert.equal(global.activity.projection?.totals.measuredUnknownCount, 1);
+    assert.equal(global.activity.projection?.totals.measuredTotalMs, 1_500);
+    assert.equal(global.toolFacets.authority, 'canonical');
+    assert.equal(global.toolFacets.projection?.facets.length, 2);
+    assert.deepEqual(
+      global.toolFacets.projection?.facets.map((facet) => facet.rootSessionId).sort(),
+      ['root-activity-a', 'root-activity-b'],
+    );
+
+    const selected = stats.getCanonicalActivityStats(sessionPath);
+    assert.equal(selected.activity.authority, 'canonical');
+    assert.equal(selected.activity.projection?.scope.kind, 'session');
+    assert.equal(selected.activity.projection?.totals.spanCount, 2);
+    assert.equal(selected.activity.projection?.totals.unknownCount, 1);
+    assert.equal(selected.activity.projection?.totals.measuredUnknownCount, 1);
+    assert.equal(selected.activity.projection?.totals.measuredTotalMs, 1_200);
+    assert.equal(selected.toolFacets.projection?.facets.length, 1);
+    assert.deepEqual(selected.toolFacets.projection?.facets[0]?.observedPaths, ['src/changed.ts']);
+
+    const beforeRefresh = await readModel.readRevision();
+    const lateWriter = new SqliteAnalyticsRecorder(databasePath);
+    lateWriter.submitBatch([
+      activityObservation({
+        spanId: 'span-a-2',
+        rootSessionId: 'root-activity-a',
+        kind: 'tool',
+        coverage: 'observed',
+        durationMs: 700,
+        startedAtMs: at + 2_000,
+        endedAtMs: at + 2_700,
+      }),
+      toolFacetObservation('root-activity-a', 'tool-a-2'),
+    ]);
+    closeFixtureWriter(lateWriter);
+    const refreshedRevision = await readModel.waitForRevision(beforeRefresh, { maxWaitMs: 2_000 });
+    assert.ok(BigInt(refreshedRevision) > BigInt(beforeRefresh));
+    await waitFor(() => stats.getCanonicalActivityProjection(sessionPath).projection?.totals.spanCount === 3);
+    assert.equal(stats.getCanonicalActivityProjection(sessionPath).projection?.totals.measuredTotalMs, 1_900);
+    assert.equal(stats.getCanonicalToolFacetProjection(sessionPath).projection?.facets.length, 2);
+
+    const beforeDelete = await readModel.readRevision();
+    const deleteWriter = new SqliteAnalyticsRecorder(databasePath);
+    deleteWriter.deleteSession('root-activity-a', 'private-close-activity', at + 3_000);
+    closeFixtureWriter(deleteWriter);
+    const deletedRevision = await readModel.waitForRevision(beforeDelete, { maxWaitMs: 2_000 });
+    assert.ok(BigInt(deletedRevision) > BigInt(beforeDelete));
+    await waitFor(() => {
+      const deleted = stats.getCanonicalActivityProjection(sessionPath);
+      return deleted.authority === 'canonical' && deleted.projection?.totals.spanCount === 0;
+    });
+    assert.equal(stats.getCanonicalToolFacetProjection(sessionPath).projection?.facets.length, 0);
+    // A peer delete is scoped to the selected root session; the global read
+    // still retains activity belonging to another root.
+    await waitFor(() => {
+      const globalAfterDelete = stats.getCanonicalActivityProjection();
+      return globalAfterDelete.authority === 'canonical'
+        && globalAfterDelete.projection?.totals.spanCount === 1;
+    });
+    const globalFacetsAfterDelete = stats.getCanonicalToolFacetProjection();
+    assert.equal(globalFacetsAfterDelete.projection?.facets.length, 1);
+    assert.equal(globalFacetsAfterDelete.projection?.facets[0]?.rootSessionId, 'root-activity-b');
+  } finally {
     await stats.shutdown();
     rmSync(root, { recursive: true, force: true });
   }

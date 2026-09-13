@@ -1,4 +1,4 @@
-import { validateWindowsProcessEvidence } from './windows-process-handle-collector.mjs';
+import { validateWindowsProcessEvidence, validateWindowsProcessReceipt } from './windows-process-handle-collector.mjs';
 
 export const MIXED_FULL_PLAN = Object.freeze({
   mode: 'full',
@@ -45,6 +45,12 @@ function isSupportedRecorderHeapProbe(value) {
 
 function isSafeNonNegativeInteger(value) {
   return Number.isSafeInteger(value) && value >= 0;
+}
+
+export const MIXED_RECORDER_RSS_GATE_BYTES = 268_435_456;
+
+function workerIdentityKeyOf(identity) {
+  return `${identity.instanceId}:${identity.pid}:${identity.spawnedAtMs}`;
 }
 
 function isDecimalInteger(value) {
@@ -336,6 +342,7 @@ export function validateQueryLifecycleReceipts(receipts, { expected } = {}) {
 export function validateMixedEvidence(mixed, { mode = 'full', recorderHeapProbeMb } = {}) {
   const errors = [];
   const memoryErrors = [];
+  const nativeAvailableByWorker = new Map();
   const expected = mode === 'smoke' ? MIXED_SMOKE_PLAN : MIXED_FULL_PLAN;
   if (!mixed || typeof mixed !== 'object' || Array.isArray(mixed)) {
     return { valid: false, errors: ['mixed results are missing'], memoryValid: false, memoryErrors: ['mixed results are missing'] };
@@ -489,6 +496,18 @@ export function validateMixedEvidence(mixed, { mode = 'full', recorderHeapProbeM
     if (!nativeValidation.valid) {
       errors.push(...nativeValidation.errors.map((error) => `native process telemetry: ${error}`));
     }
+    // Only individually valid available receipts bound to a persisted worker
+    // identity may substitute for runtime samples in whole-topology memory
+    // coverage; a malformed receipt invalidates its own coverage without
+    // discarding the independent evidence for other workers.
+    for (const receipt of Array.isArray(mixed.nativeProcessTelemetry?.receipts)
+      ? mixed.nativeProcessTelemetry.receipts : []) {
+      if (receipt?.status !== 'available' || !receipt.identity) continue;
+      const expected = lifecycleWorkers.find((worker) => workerIdentityKeyOf(worker) === workerIdentityKeyOf(receipt.identity));
+      if (expected && validateWindowsProcessReceipt(receipt, expected).valid) {
+        nativeAvailableByWorker.set(workerIdentityKeyOf(receipt.identity), receipt);
+      }
+    }
   }
   if (saturation?.requested !== expected.saturationQueryCount
     || saturation.maxConcurrentQueries !== expected.saturationMaxConcurrentQueries
@@ -533,11 +552,63 @@ export function validateMixedEvidence(mixed, { mode = 'full', recorderHeapProbeM
     memoryErrors.push('host RSS/CPU topology telemetry is malformed');
   }
   const queryTelemetry = lifecycleValidation.summary?.queryWorkerTelemetry;
+  // Recompute whole-topology coverage from the persisted evidence instead of
+  // trusting the report's claim. Runtime terminal samples and native OS final
+  // counters are complementary sources: forced cancellation has explicit null
+  // runtime evidence, and fast one-shot workers can exit before the native
+  // collector binds them, so a worker is covered when either source validates.
+  const runtimeCoveredByWorker = new Map();
+  for (const receipt of Array.isArray(lifecycle) ? lifecycle : []) {
+    const terminal = receipt?.events?.find((event) => event?.phase === 'terminal');
+    const identity = terminal?.identity;
+    if (terminal?.telemetryStatus === 'available' && identity
+      && validQueryWorkerTelemetry(terminal.telemetry, identity)) {
+      runtimeCoveredByWorker.set(workerIdentityKeyOf(identity), {
+        rssBytes: terminal.telemetry.maxRssBytes,
+        cpuDeltaMicros: terminal.telemetry.userCpuTimeMicros + terminal.telemetry.systemCpuTimeMicros,
+      });
+    }
+  }
+  const workerKeys = new Set(lifecycleWorkers.map(workerIdentityKeyOf));
+  const unionCoveredKeys = new Set([...runtimeCoveredByWorker.keys(), ...nativeAvailableByWorker.keys()]
+    .filter((key) => workerKeys.has(key)));
+  const unionComplete = workerKeys.size > 0 && [...workerKeys].every((key) => unionCoveredKeys.has(key));
+  const available = Number.isSafeInteger(queryTelemetry?.availableCount) ? queryTelemetry.availableCount : 0;
+  const unavailable = Number.isSafeInteger(queryTelemetry?.unavailableCount) ? queryTelemetry.unavailableCount : 0;
+  const invalid = Number.isSafeInteger(queryTelemetry?.invalidCount) ? queryTelemetry.invalidCount : 0;
+  const workerCount = lifecycleWorkers.length;
+  const missing = Math.max(0, workerCount - available - unavailable - invalid);
+  const nativeReceipts = Array.isArray(mixed.nativeProcessTelemetry?.receipts)
+    ? mixed.nativeProcessTelemetry.receipts
+    : [];
+  const nativeAvailable = nativeReceipts.filter((receipt) => receipt?.status === 'available').length;
   if (topology?.queryWorkerTelemetryAvailable === true) {
-    if (!isSafeNonNegativeInteger(topology.queryWorkerRssBytes) || topology.queryWorkerRssBytes <= 0
-      || !isSafeNonNegativeInteger(topology.queryWorkerCpuDeltaMicros)
-      || !queryTelemetry?.complete) {
-      memoryErrors.push('query-worker RSS/CPU telemetry is incomplete; whole-topology memory remains unqualified');
+    if (!unionComplete) {
+      memoryErrors.push(`query-worker RSS/CPU high-water is incomplete: runtime terminal telemetry is available for ${available}/${workerCount} query workers; ${unavailable} unavailable, ${invalid} invalid, and ${missing} missing runtime sample(s). Union coverage with valid native OS final-counter receipts is ${unionCoveredKeys.size}/${workerCount}. Whole-topology memory remains unqualified.`);
+    } else {
+      const coverage = topology.queryWorkerTelemetryCoverage;
+      if (!coverage || typeof coverage !== 'object' || Array.isArray(coverage)
+        || coverage.workerCount !== workerCount
+        || coverage.unionCoveredCount !== unionCoveredKeys.size
+        || coverage.unionComplete !== true) {
+        memoryErrors.push('claimed query-worker coverage provenance does not match the persisted terminal evidence');
+      }
+      let expectedRss = 0;
+      let expectedCpuDeltaMicros = 0;
+      for (const key of workerKeys) {
+        const runtimeSample = runtimeCoveredByWorker.get(key);
+        const nativeReceipt = nativeAvailableByWorker.get(key);
+        const source = runtimeSample ?? {
+          rssBytes: nativeReceipt.memory.peakWorkingSetBytes,
+          cpuDeltaMicros: nativeReceipt.cpu.userCpuTimeMicros + nativeReceipt.cpu.systemCpuTimeMicros,
+        };
+        expectedRss = Math.max(expectedRss, source.rssBytes);
+        expectedCpuDeltaMicros += source.cpuDeltaMicros;
+      }
+      if (topology.queryWorkerRssBytes !== expectedRss
+        || topology.queryWorkerCpuDeltaMicros !== expectedCpuDeltaMicros) {
+        memoryErrors.push(`claimed query-worker RSS/CPU does not match the persisted terminal evidence (expected max RSS ${expectedRss} bytes and total CPU ${expectedCpuDeltaMicros} micros across ${workerCount} covered workers)`);
+      }
     }
   } else {
     if (topology?.queryWorkerRssBytes !== null
@@ -545,19 +616,10 @@ export function validateMixedEvidence(mixed, { mode = 'full', recorderHeapProbeM
       || topology?.queryWorkerTelemetryAvailable !== false) {
       memoryErrors.push('query-worker RSS/CPU telemetry claim is malformed');
     }
-    const available = Number.isSafeInteger(queryTelemetry?.availableCount) ? queryTelemetry.availableCount : 0;
-    const unavailable = Number.isSafeInteger(queryTelemetry?.unavailableCount) ? queryTelemetry.unavailableCount : 0;
-    const invalid = Number.isSafeInteger(queryTelemetry?.invalidCount) ? queryTelemetry.invalidCount : 0;
-    const workerCount = lifecycleWorkers.length;
-    const missing = Math.max(0, workerCount - available - unavailable - invalid);
-    const nativeReceipts = Array.isArray(mixed.nativeProcessTelemetry?.receipts)
-      ? mixed.nativeProcessTelemetry.receipts
-      : [];
-    const nativeAvailable = nativeReceipts.filter((receipt) => receipt?.status === 'available').length;
     const nativeCoverage = nativeReceipts.length > 0
       ? ` Native OS final-counter evidence is available for ${nativeAvailable}/${nativeReceipts.length} query workers.`
       : '';
-    memoryErrors.push(`query-worker RSS/CPU high-water is incomplete: runtime terminal telemetry is available for ${available}/${workerCount} query workers; ${unavailable} unavailable, ${invalid} invalid, and ${missing} missing runtime sample(s).${nativeCoverage} Whole-topology memory remains unqualified.`);
+    memoryErrors.push(`query-worker RSS/CPU high-water is incomplete: runtime terminal telemetry is available for ${available}/${workerCount} query workers; ${unavailable} unavailable, ${invalid} invalid, and ${missing} missing runtime sample(s). Union coverage with valid native OS final-counter receipts is ${unionCoveredKeys.size}/${workerCount}.${nativeCoverage} Whole-topology memory remains unqualified.`);
   }
   const recorderSampledHighWater = mixed.recorderMemory?.sampledHighWaterProven === true
     || mixed.recorderMemory?.peakProven === true;
@@ -567,6 +629,37 @@ export function validateMixedEvidence(mixed, { mode = 'full', recorderHeapProbeM
     || !isSafeNonNegativeInteger(mixed.recorderMemory?.sampleCount)
     || mixed.recorderMemory.sampleCount < (mode === 'full' ? 2 : 1)) {
     memoryErrors.push('continuous recorder worker RSS high-water telemetry is incomplete');
+  }
+  if (mode === 'full' && recorderSampledHighWater) {
+    const phases = Array.isArray(mixed.recorderMemory?.phases) ? mixed.recorderMemory.phases : [];
+    let phasesValid = phases.length >= 2;
+    let phaseSampleTotal = 0;
+    let worstPhase = null;
+    for (const phase of phases) {
+      if (!phase || typeof phase.label !== 'string' || phase.label.length === 0
+        || !isSafeNonNegativeInteger(phase.sampleCount)
+        || !isSafeNonNegativeInteger(phase.maxWorkerRssBytes)) {
+        phasesValid = false;
+        break;
+      }
+      phaseSampleTotal += phase.sampleCount;
+      if (!worstPhase || phase.maxWorkerRssBytes > worstPhase.maxWorkerRssBytes) worstPhase = phase;
+    }
+    if (!phasesValid || phaseSampleTotal !== mixed.recorderMemory.sampleCount) {
+      memoryErrors.push('recorder phase attribution does not cover the sampled high-water window');
+      worstPhase = null;
+    }
+    if (worstPhase && worstPhase.maxWorkerRssBytes > mixed.recorderMemory.maxWorkerRssBytes) {
+      memoryErrors.push('recorder phase high-water exceeds the reported sampler high-water');
+    }
+    if (recorderSampledHighWater
+      && isSafeNonNegativeInteger(mixed.recorderMemory?.maxWorkerRssBytes)
+      && mixed.recorderMemory.maxWorkerRssBytes > MIXED_RECORDER_RSS_GATE_BYTES) {
+      const phaseDetail = worstPhase
+        ? ` The highest phase is "${worstPhase.label}" at ${worstPhase.maxWorkerRssBytes} bytes.`
+        : '';
+      memoryErrors.push(`recorder worker sampled high-water RSS ${mixed.recorderMemory.maxWorkerRssBytes} bytes exceeds the ${MIXED_RECORDER_RSS_GATE_BYTES}-byte (256 MiB) ordinary-ingestion gate by ${mixed.recorderMemory.maxWorkerRssBytes - MIXED_RECORDER_RSS_GATE_BYTES} bytes.${phaseDetail} No production-default memory qualification is claimed.`);
+    }
   }
   return {
     valid: errors.length === 0,

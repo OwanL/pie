@@ -544,7 +544,7 @@ test('worker retries a capture transaction after the native busy window without 
   }
 });
 
-test('worker exhausts the shared lock window and retains the failed batch for recovery', { timeout: 20_000 }, async () => {
+test('worker exhausts the shared lock window and retains the failed batch for recovery', { timeout: 40_000 }, async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'pie-recorder-capture-lock-exhausted-'));
   const databasePath = path.join(root, 'analytics.sqlite');
   const supervisor = new AnalyticsRecorderSupervisor({
@@ -568,7 +568,7 @@ test('worker exhausts the shared lock window and retains the failed batch for re
     await eventually(
       () => supervisor.lastDeliveryError instanceof AnalyticsRecorderWorkerRequestError,
       'the exhausted worker lock window was not reported',
-      12_000,
+      27_000,
     );
     const failure = supervisor.lastDeliveryError;
     assert.ok(failure instanceof AnalyticsRecorderWorkerRequestError);

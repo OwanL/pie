@@ -15,7 +15,17 @@ import { analyzeToolCall, type ToolCallAnalysis } from '../../shared/tool-call-a
 import { resolveSessionCwd } from '../core/file-change-derivation.js';
 import { RunAnalyticsStorage } from './storage';
 import { SessionRunTracker } from './tracker';
-import type { AssistantTurnIdentity, RunObserver, StatsServiceOptions } from './types';
+import type {
+  AssistantTurnIdentity,
+  CanonicalActivityProjection,
+  CanonicalActivityProjectionSnapshot,
+  CanonicalActivityStats,
+  CanonicalProjectionScope,
+  CanonicalToolFacetProjection,
+  CanonicalToolFacetProjectionSnapshot,
+  RunObserver,
+  StatsServiceOptions,
+} from './types';
 import { resolveSessionIdentity } from '../../shared/session-identity';
 import { defaultCreateId, defaultNow } from './helpers';
 import { WorkingTimeService } from '../working-time-service';
@@ -37,6 +47,11 @@ import { CanonicalRevisionRefresher } from '../../analytics/revision-refresher.j
 import { sessionUsageSnapshotFromCanonicalSettlements } from '../../analytics/canonical-usage.js';
 
 const MAX_CANONICAL_SESSION_CACHE_ENTRIES = 256;
+const MAX_CANONICAL_ACTIVITY_KINDS = 64;
+const MAX_CANONICAL_TOOL_FACETS = 200;
+const MAX_CANONICAL_ACTIVITY_RESULT_BYTES = 256 * 1024;
+const MAX_CANONICAL_ACTIVITY_CACHE_ENTRIES = 256;
+const MAX_CANONICAL_ACTIVITY_CACHE_BYTES = 4 * 1024 * 1024;
 /** Eager refresh is for the small displayed/running surface only. The cache
  * can retain more history for explicit lazy reads, but a revision invalidation
  * must never turn the whole session catalogue into a query batch. */
@@ -61,6 +76,26 @@ type CanonicalSessionReadResult = {
   scopeKey: string;
   branchId?: string;
   unknown?: boolean;
+};
+
+type CanonicalActivityReadResult = {
+  revision: string;
+  scope: CanonicalProjectionScope;
+  scopeKey: string;
+  activity: CanonicalActivityProjection | null;
+  toolFacets: CanonicalToolFacetProjection | null;
+  activityError?: unknown;
+  toolFacetsError?: unknown;
+};
+
+type CanonicalActivityCacheEntry = {
+  activity: CanonicalActivityProjectionSnapshot;
+  toolFacets: CanonicalToolFacetProjectionSnapshot;
+  revision: string;
+  scopeKey: string;
+  epoch: number;
+  estimatedBytes: number;
+  lastUsed: number;
 };
 
 type CanonicalPrivateCloseOperation = {
@@ -156,6 +191,14 @@ export class StatsService implements RunObserver {
   private canonicalSessionUsageRefresh: Promise<void> | null = null;
   private readonly canonicalSessionPathRefreshes = new Map<string, Promise<void>>();
   private readonly canonicalSessionPathEpochs = new Map<string, number>();
+  /** Bounded persisted activity/facet reads share the session usage refresh
+   * epoch, so a peer revision or deletion invalidates every canonical surface
+   * together. Session entries remain keyed by visible path; durable reads use
+   * the resolved root session ID and never the path. */
+  private readonly canonicalActivityByPath = new Map<string, CanonicalActivityCacheEntry>();
+  private canonicalGlobalActivity: CanonicalActivityCacheEntry | null = null;
+  private canonicalActivityCacheBytes = 0;
+  private canonicalActivityUseSequence = 0;
   /** An entry is an in-flight close until the recorder deletion resolves, then
    * remains as an ephemeral display/capture fence until runtime retirement. */
   private readonly canonicalPrivateClosesByPath = new Map<string, CanonicalPrivateCloseOperation>();
@@ -285,6 +328,9 @@ export class StatsService implements RunObserver {
           this.invalidateCanonicalSessionCache(false);
         } else {
           this.canonicalRevisionAwaitingBaseline = false;
+          // The bounded pass hydrates provider usage plus the global and
+          // displayed-session activity/facet projections. It remains one
+          // revision-fenced refresh rather than an agent-path query.
           await this.refreshCanonicalSessionUsage();
           if (this.disposed) return;
           // A peer can commit while hydration is in flight. Compare the
@@ -1546,6 +1592,64 @@ export class StatsService implements RunObserver {
     return visible;
   }
 
+  /** Bounded canonical activity projection for the global scope or one
+   * visible session. `totals.measuredTotalMs` is additive measured work, not
+   * the busy wall-time union; callers must retain the `truncated` and
+   * known/unknown counts from the projection. */
+  getCanonicalActivityProjection(sessionPath?: string): CanonicalActivityProjectionSnapshot {
+    if (this.canonicalActivityReadSuppressed(sessionPath)) {
+      return {
+        authority: 'unknown',
+        scope: this.canonicalProjectionScope(sessionPath),
+        projection: null,
+      };
+    }
+    const entry = this.canonicalActivityCacheEntry(sessionPath);
+    if (entry) {
+      entry.lastUsed = ++this.canonicalActivityUseSequence;
+      return entry.activity;
+    }
+    this.scheduleCanonicalActivityHydration(sessionPath);
+    return {
+      authority: 'unknown',
+      scope: this.canonicalProjectionScope(sessionPath),
+      projection: null,
+    };
+  }
+
+  /** Bounded canonical tool/file facet projection for the global scope or one
+   * visible session. Returned rows retain their explicit verification and
+   * attempted-change qualification; they are not verified worktree changes. */
+  getCanonicalToolFacetProjection(sessionPath?: string): CanonicalToolFacetProjectionSnapshot {
+    if (this.canonicalActivityReadSuppressed(sessionPath)) {
+      return {
+        authority: 'unknown',
+        scope: this.canonicalProjectionScope(sessionPath),
+        projection: null,
+      };
+    }
+    const entry = this.canonicalActivityCacheEntry(sessionPath);
+    if (entry) {
+      entry.lastUsed = ++this.canonicalActivityUseSequence;
+      return entry.toolFacets;
+    }
+    this.scheduleCanonicalActivityHydration(sessionPath);
+    return {
+      authority: 'unknown',
+      scope: this.canonicalProjectionScope(sessionPath),
+      projection: null,
+    };
+  }
+
+  /** The two canonical activity surfaces are returned separately qualified;
+   * one unavailable projection must not make the other look complete. */
+  getCanonicalActivityStats(sessionPath?: string): CanonicalActivityStats {
+    return {
+      activity: this.getCanonicalActivityProjection(sessionPath),
+      toolFacets: this.getCanonicalToolFacetProjection(sessionPath),
+    };
+  }
+
   /** Ledger-backed session usage projection for UI and fixture conservation checks. */
   getSessionUsage(sessionPath: string): SessionUsageSnapshot {
     if (!this.canonicalCapture) return this.accounting.projectSessionUsage(sessionPath);
@@ -1559,31 +1663,11 @@ export class StatsService implements RunObserver {
     // for a projection while its final render is draining; never turn that
     // late read into a new helper process.
     if (this.disposed) return { samples: [], authority: 'unknown' };
-    if (this.analyticsReadModel
-      && this.started
-      && !this.canonicalRevisionAwaitingBaseline
-      && this.analyticsRevisionRefresher
-      && this.analyticsRevisionRefresher.getStats().revision !== null
-      && !this.canonicalSessionUsageRefresh
-      && this.canonicalSessionPathRefreshes.size < this.analyticsReadModel.getMaxConcurrentQueries()
-      && !this.canonicalSessionPathRefreshes.has(sessionPath)) {
-      // Session catalog hydration can legitimately happen after StatsService
-      // startup. Kick off one bounded read on the first projection instead of
-      // requiring a second host start. Until that read answers, canonical
-      // authority is explicitly unknown; the process-local ledger is never a
-      // substitute for durable canonical history.
-      const refresh = this.refreshCanonicalSessionPath(sessionPath);
-      this.canonicalSessionPathRefreshes.set(sessionPath, refresh);
-      void refresh.finally(() => {
-        if (this.canonicalSessionPathRefreshes.get(sessionPath) === refresh) {
-          this.canonicalSessionPathRefreshes.delete(sessionPath);
-          if (!this.canonicalSessionUsageByPath.has(sessionPath)) {
-            this.canonicalSessionPathEpochs.delete(sessionPath);
-          }
-        }
-        this.scheduleRender();
-      }).catch(() => undefined);
-    }
+    // Session catalog hydration can legitimately happen after StatsService
+    // startup. Kick off one bounded read on the first projection instead of
+    // requiring a second host start. The same read hydrates canonical activity
+    // and facets; until it answers, each surface stays explicitly unknown.
+    this.scheduleCanonicalActivityHydration(sessionPath);
     return { samples: [], authority: 'unknown' };
   }
 
@@ -1648,6 +1732,225 @@ export class StatsService implements RunObserver {
     this.accounting.activityTimeline.flush();
   }
 
+  private canonicalProjectionScope(sessionPath?: string): CanonicalProjectionScope {
+    if (sessionPath === undefined) return { kind: 'global' };
+    return { kind: 'session', rootSessionId: this.canonicalRootSessionId(sessionPath) };
+  }
+
+  private canonicalRootSessionId(sessionPath: string): string {
+    const identity = this.sessionIdentity(sessionPath);
+    return identity.sessionId ?? analyticsRootSessionId(null, sessionPath);
+  }
+
+  private canonicalActivityCacheEntry(sessionPath?: string): CanonicalActivityCacheEntry | undefined {
+    return sessionPath === undefined
+      ? this.canonicalGlobalActivity ?? undefined
+      : this.canonicalActivityByPath.get(sessionPath);
+  }
+
+  private canonicalActivityReadSuppressed(sessionPath?: string): boolean {
+    return sessionPath === undefined
+      ? this.canonicalPrivateClosesByPath.size > 0
+      : this.canonicalPrivateClosesByPath.has(sessionPath);
+  }
+
+  private canHydrateCanonicalActivity(): boolean {
+    return !this.disposed
+      && Boolean(this.analyticsReadModel && this.canonicalCapture)
+      && this.started
+      && !this.canonicalRevisionAwaitingBaseline
+      && Boolean(this.analyticsRevisionRefresher
+        && this.analyticsRevisionRefresher.getStats().revision !== null);
+  }
+
+  private scheduleCanonicalActivityHydration(sessionPath?: string): void {
+    if (!this.canHydrateCanonicalActivity()) return;
+    if (this.canonicalSessionUsageRefresh) return;
+    if (sessionPath === undefined) {
+      // The global projection is hydrated by the same bounded pass as the
+      // displayed sessions. This preserves one revision/epoch fence and never
+      // turns a global read into a history-sized scan.
+      void this.refreshCanonicalSessionUsage();
+      return;
+    }
+    const readModel = this.analyticsReadModel!;
+    if (this.canonicalSessionPathRefreshes.size >= readModel.getMaxConcurrentQueries()
+      || this.canonicalSessionPathRefreshes.has(sessionPath)) return;
+    const refresh = this.refreshCanonicalSessionPath(sessionPath);
+    this.canonicalSessionPathRefreshes.set(sessionPath, refresh);
+    void refresh.finally(() => {
+      if (this.canonicalSessionPathRefreshes.get(sessionPath) === refresh) {
+        this.canonicalSessionPathRefreshes.delete(sessionPath);
+        if (!this.canonicalSessionUsageByPath.has(sessionPath)
+          && !this.canonicalActivityByPath.has(sessionPath)) {
+          this.canonicalSessionPathEpochs.delete(sessionPath);
+        }
+      }
+      this.scheduleRender();
+    }).catch(() => undefined);
+  }
+
+  private estimateCanonicalActivityBytes(entry: CanonicalActivityCacheEntry): number {
+    try {
+      // This is a deterministic serialized-size proxy used only to bound the
+      // host cache; it is not a heap measurement or a qualification claim.
+      return JSON.stringify(entry).length * 2;
+    } catch {
+      return Number.MAX_SAFE_INTEGER;
+    }
+  }
+
+  private removeCanonicalActivityCache(sessionPath?: string): void {
+    if (sessionPath === undefined) {
+      if (!this.canonicalGlobalActivity) return;
+      this.canonicalActivityCacheBytes = Math.max(
+        0,
+        this.canonicalActivityCacheBytes - this.canonicalGlobalActivity.estimatedBytes,
+      );
+      this.canonicalGlobalActivity = null;
+      return;
+    }
+    const entry = this.canonicalActivityByPath.get(sessionPath);
+    if (!entry) return;
+    this.canonicalActivityByPath.delete(sessionPath);
+    this.canonicalActivityCacheBytes = Math.max(
+      0,
+      this.canonicalActivityCacheBytes - entry.estimatedBytes,
+    );
+  }
+
+  private clearCanonicalActivityCache(): void {
+    this.canonicalActivityByPath.clear();
+    this.canonicalGlobalActivity = null;
+    this.canonicalActivityCacheBytes = 0;
+  }
+
+  private cacheCanonicalActivityRead(
+    sessionPath: string | undefined,
+    result: CanonicalActivityReadResult,
+    epoch: number,
+  ): void {
+    if (this.disposed || epoch !== this.canonicalCacheEpoch
+      || (sessionPath !== undefined && this.canonicalPrivateClosesByPath.has(sessionPath))) return;
+    this.removeCanonicalActivityCache(sessionPath);
+    const activity: CanonicalActivityProjectionSnapshot = {
+      authority: result.activity ? 'canonical' : 'unknown',
+      scope: result.activity?.scope ?? result.scope,
+      projection: result.activity,
+    };
+    const toolFacets: CanonicalToolFacetProjectionSnapshot = {
+      authority: result.toolFacets ? 'canonical' : 'unknown',
+      scope: result.toolFacets?.scope ?? result.scope,
+      projection: result.toolFacets,
+    };
+    const entry: CanonicalActivityCacheEntry = {
+      activity,
+      toolFacets,
+      revision: result.revision,
+      scopeKey: result.scopeKey,
+      epoch,
+      estimatedBytes: 0,
+      lastUsed: ++this.canonicalActivityUseSequence,
+    };
+    entry.estimatedBytes = this.estimateCanonicalActivityBytes(entry);
+    // The helper already caps each result. Keep an additional host-side bound
+    // so a malformed/future adapter cannot retain an unbounded object.
+    if (entry.estimatedBytes > MAX_CANONICAL_ACTIVITY_CACHE_BYTES) {
+      entry.activity = { authority: 'unknown', scope: result.scope, projection: null };
+      entry.toolFacets = { authority: 'unknown', scope: result.scope, projection: null };
+      entry.estimatedBytes = this.estimateCanonicalActivityBytes(entry);
+    }
+    if (sessionPath === undefined) this.canonicalGlobalActivity = entry;
+    else this.canonicalActivityByPath.set(sessionPath, entry);
+    this.canonicalActivityCacheBytes += entry.estimatedBytes;
+
+    while (this.canonicalActivityByPath.size + (this.canonicalGlobalActivity ? 1 : 0)
+      > MAX_CANONICAL_ACTIVITY_CACHE_ENTRIES
+      || this.canonicalActivityCacheBytes > MAX_CANONICAL_ACTIVITY_CACHE_BYTES) {
+      let oldestPath: string | undefined;
+      let oldestEntry: CanonicalActivityCacheEntry | null = this.canonicalGlobalActivity;
+      if (oldestEntry) oldestPath = undefined;
+      for (const [path, candidate] of this.canonicalActivityByPath) {
+        if (!oldestEntry || candidate.lastUsed < oldestEntry.lastUsed) {
+          oldestEntry = candidate;
+          oldestPath = path;
+        }
+      }
+      if (!oldestEntry) break;
+      this.removeCanonicalActivityCache(oldestPath);
+    }
+  }
+
+  private applyCanonicalActivityRead(
+    sessionPath: string | undefined,
+    result: CanonicalActivityReadResult,
+    epoch: number,
+  ): void {
+    this.cacheCanonicalActivityRead(sessionPath, result, epoch);
+    if (result.activityError !== undefined) {
+      appendPieLog('warn', 'analytics', 'canonical activity projection read failed', {
+        ...(sessionPath === undefined ? {} : { path: sessionPath }),
+        error: result.activityError instanceof Error ? result.activityError.message : String(result.activityError),
+      });
+    }
+    if (result.toolFacetsError !== undefined) {
+      appendPieLog('warn', 'analytics', 'canonical tool facet projection read failed', {
+        ...(sessionPath === undefined ? {} : { path: sessionPath }),
+        error: result.toolFacetsError instanceof Error ? result.toolFacetsError.message : String(result.toolFacetsError),
+      });
+    }
+  }
+
+  private async readCanonicalActivityScope(sessionPath?: string): Promise<CanonicalActivityReadResult> {
+    const readModel = this.analyticsReadModel!;
+    const scope = this.canonicalProjectionScope(sessionPath);
+    const rootSessionId = scope.kind === 'session' ? scope.rootSessionId : undefined;
+    const activityReader = readModel.readActivityProjection;
+    const facetReader = readModel.readToolFacetProjection;
+    const activityPromise: Promise<CanonicalActivityProjection | null> = typeof activityReader === 'function'
+      ? Promise.resolve().then(() => activityReader.call(readModel, {
+        ...(rootSessionId === undefined ? {} : { rootSessionId }),
+        maxKinds: MAX_CANONICAL_ACTIVITY_KINDS,
+        maxResultBytes: MAX_CANONICAL_ACTIVITY_RESULT_BYTES,
+      }))
+      : Promise.resolve(null);
+    const facetPromise: Promise<CanonicalToolFacetProjection | null> = typeof facetReader === 'function'
+      ? Promise.resolve().then(() => facetReader.call(readModel, {
+        ...(rootSessionId === undefined ? {} : { rootSessionId }),
+        limit: MAX_CANONICAL_TOOL_FACETS,
+        maxResultBytes: MAX_CANONICAL_ACTIVITY_RESULT_BYTES,
+      }))
+      : Promise.resolve(null);
+    const [activityRead, facetRead] = await Promise.allSettled([activityPromise, facetPromise]);
+    const activity = activityRead.status === 'fulfilled' ? activityRead.value : null;
+    const toolFacets = facetRead.status === 'fulfilled' ? facetRead.value : null;
+    const revisions = [
+      activity?.projectionRevision,
+      activity?.revision,
+      toolFacets?.projectionRevision,
+      toolFacets?.revision,
+    ];
+    let revision = this.analyticsRevisionRefresher?.getStats().revision ?? '0';
+    for (const candidate of revisions) {
+      if (candidate === undefined || candidate === null) continue;
+      try {
+        if (canonicalRevision(candidate) > canonicalRevision(revision)) revision = canonicalRevisionString(candidate);
+      } catch {
+        // A malformed adapter result remains unavailable through the normal
+        // cache fence; do not let it poison revision ordering.
+      }
+    }
+    return {
+      revision: canonicalRevisionString(revision),
+      scope,
+      scopeKey: JSON.stringify(scope),
+      activity,
+      toolFacets,
+      ...(activityRead.status === 'rejected' ? { activityError: activityRead.reason } : {}),
+      ...(facetRead.status === 'rejected' ? { toolFacetsError: facetRead.reason } : {}),
+    };
+  }
+
   /** Rehydrate each known session from the canonical root-session projection.
    * Every query is capped by the read-model transport. A truncated session is
    * left unknown rather than exposing a partial usage history. */
@@ -1685,6 +1988,19 @@ export class StatsService implements RunObserver {
             && !this.canonicalPrivateClosesByPath.has(session.path))
           .sort((left, right) => displayedPathRank.get(left.path)! - displayedPathRank.get(right.path)!)
           .slice(0, MAX_CANONICAL_DISPLAYED_SESSION_REFRESH_ENTRIES);
+        const globalActivityRead = this.readCanonicalActivityScope();
+        const hydrateGlobalActivity = globalActivityRead.then((result) => {
+          if (!this.disposed && epoch === this.canonicalCacheEpoch) {
+            this.applyCanonicalActivityRead(undefined, result, epoch);
+            this.scheduleRender();
+          }
+        }).catch((error: unknown) => {
+          if (!this.disposed && epoch === this.canonicalCacheEpoch) {
+            appendPieLog('warn', 'analytics', 'canonical global activity projection refresh failed', {
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        });
         let nextIndex = 0;
         const workerCount = Math.min(sessions.length, readModel.getMaxConcurrentQueries());
         const readWorker = async (): Promise<void> => {
@@ -1696,24 +2012,36 @@ export class StatsService implements RunObserver {
             nextIndex += 1;
             const session = sessions[index];
             if (!session) return;
-            try {
-              const result = await this.readCanonicalSessionPath(session.path);
-              this.applyCanonicalSessionRead(session.path, result, epoch);
-            } catch (error) {
+            const [usageRead, activityRead] = await Promise.allSettled([
+              this.readCanonicalSessionPath(session.path),
+              this.readCanonicalActivityScope(session.path),
+            ]);
+            if (usageRead.status === 'fulfilled') {
+              this.applyCanonicalSessionRead(session.path, usageRead.value, epoch);
+            } else if (epoch === this.canonicalCacheEpoch) {
               // Do not expose a prior durable snapshot or the local ledger
               // after a failed refresh: either could be stale across a
               // close/delete. An invalidated epoch rejects this response.
-              if (epoch === this.canonicalCacheEpoch) {
-                this.cacheCanonicalUnknown(session.path, '0', 'read-error', epoch);
-                appendPieLog('warn', 'analytics', 'canonical session usage read failed', {
-                  path: session.path,
-                  error: error instanceof Error ? error.message : String(error),
-                });
-              }
+              this.cacheCanonicalUnknown(session.path, '0', 'read-error', epoch);
+              appendPieLog('warn', 'analytics', 'canonical session usage read failed', {
+                path: session.path,
+                error: usageRead.reason instanceof Error ? usageRead.reason.message : String(usageRead.reason),
+              });
+            }
+            if (activityRead.status === 'fulfilled') {
+              this.applyCanonicalActivityRead(session.path, activityRead.value, epoch);
+            } else if (epoch === this.canonicalCacheEpoch) {
+              appendPieLog('warn', 'analytics', 'canonical session activity projection refresh failed', {
+                path: session.path,
+                error: activityRead.reason instanceof Error ? activityRead.reason.message : String(activityRead.reason),
+              });
             }
           }
         };
-        await Promise.all(Array.from({ length: workerCount }, () => readWorker()));
+        await Promise.all([
+          hydrateGlobalActivity,
+          ...Array.from({ length: workerCount }, () => readWorker()),
+        ]);
         // The first pass always runs. Later passes are required only when an
         // invalidation was observed while the previous pass was reading.
         if (this.disposed || (!firstPass && !this.canonicalRefreshRequested && !this.canonicalDirtyRevision)) break;
@@ -1764,6 +2092,7 @@ export class StatsService implements RunObserver {
     this.canonicalSessionUsageByPath.clear();
     this.canonicalSessionUsageCacheBytes = 0;
     this.canonicalSessionUsageCacheSamples = 0;
+    this.clearCanonicalActivityCache();
     for (const sessionPath of this.canonicalSessionPathEpochs.keys()) {
       if (!this.canonicalSessionPathRefreshes.has(sessionPath)) {
         this.canonicalSessionPathEpochs.delete(sessionPath);
@@ -1950,18 +2279,28 @@ export class StatsService implements RunObserver {
     const pathRefreshEpoch = (this.canonicalSessionPathEpochs.get(sessionPath) ?? 0) + 1;
     this.canonicalSessionPathEpochs.set(sessionPath, pathRefreshEpoch);
     try {
-      const result = await this.readCanonicalSessionPath(sessionPath);
-      if (!this.disposed && epoch === this.canonicalCacheEpoch
-        && this.canonicalSessionPathEpochs.get(sessionPath) === pathRefreshEpoch) {
-        this.applyCanonicalSessionRead(sessionPath, result, epoch);
-      }
-    } catch (error) {
-      if (!this.disposed && epoch === this.canonicalCacheEpoch
-        && this.canonicalSessionPathEpochs.get(sessionPath) === pathRefreshEpoch) {
+      const [usageRead, activityRead] = await Promise.allSettled([
+        this.readCanonicalSessionPath(sessionPath),
+        this.readCanonicalActivityScope(sessionPath),
+      ]);
+      const current = !this.disposed
+        && epoch === this.canonicalCacheEpoch
+        && this.canonicalSessionPathEpochs.get(sessionPath) === pathRefreshEpoch;
+      if (usageRead.status === 'fulfilled' && current) {
+        this.applyCanonicalSessionRead(sessionPath, usageRead.value, epoch);
+      } else if (usageRead.status === 'rejected' && current) {
         this.cacheCanonicalUnknown(sessionPath, '0', 'read-error', epoch);
         appendPieLog('warn', 'analytics', 'canonical session usage read failed', {
           path: sessionPath,
-          error: error instanceof Error ? error.message : String(error),
+          error: usageRead.reason instanceof Error ? usageRead.reason.message : String(usageRead.reason),
+        });
+      }
+      if (activityRead.status === 'fulfilled' && current) {
+        this.applyCanonicalActivityRead(sessionPath, activityRead.value, epoch);
+      } else if (activityRead.status === 'rejected' && current) {
+        appendPieLog('warn', 'analytics', 'canonical session activity projection refresh failed', {
+          path: sessionPath,
+          error: activityRead.reason instanceof Error ? activityRead.reason.message : String(activityRead.reason),
         });
       }
     } finally {
@@ -1970,6 +2309,7 @@ export class StatsService implements RunObserver {
       // for paths that remain uncached so a long-lived session catalogue
       // cannot grow this map without bound.
       if (!this.canonicalSessionUsageByPath.has(sessionPath)
+        && !this.canonicalActivityByPath.has(sessionPath)
         && this.canonicalSessionPathEpochs.get(sessionPath) === pathRefreshEpoch) {
         this.canonicalSessionPathEpochs.delete(sessionPath);
       }
@@ -2049,9 +2389,20 @@ export class StatsService implements RunObserver {
       this.invalidateCanonicalSessionCache(false);
       return;
     }
+    const projectionIsStale = (
+      projection: CanonicalActivityProjectionSnapshot | CanonicalToolFacetProjectionSnapshot,
+    ): boolean => projection.authority === 'canonical'
+      && projection.projection !== null
+      && canonicalRevision(projection.projection.projectionRevision) !== canonicalRevision(currentRevision);
+    const activityEntries = [
+      ...(this.canonicalGlobalActivity ? [this.canonicalGlobalActivity] : []),
+      ...this.canonicalActivityByPath.values(),
+    ];
     const stale = [...this.canonicalSessionUsageByPath.values()].some((entry) => (
       entry.snapshot.authority === 'canonical'
       && canonicalRevision(entry.revision) !== canonicalRevision(currentRevision)
+    )) || activityEntries.some((entry) => (
+      projectionIsStale(entry.activity) || projectionIsStale(entry.toolFacets)
     ));
     if (!stale) return;
     // Keep the baseline in the decision path for diagnostics and to make the
@@ -2068,8 +2419,15 @@ export class StatsService implements RunObserver {
       // A continuously changing store cannot be made current by an unbounded
       // startup loop. Leave the host fail-closed until the revision refresher
       // observes a stable watermark and schedules the next bounded refresh.
+      const refreshedActivityEntries = [
+        ...(this.canonicalGlobalActivity ? [this.canonicalGlobalActivity] : []),
+        ...this.canonicalActivityByPath.values(),
+      ];
       const stillCanonical = [...this.canonicalSessionUsageByPath.values()]
-        .some((entry) => entry.snapshot.authority === 'canonical');
+        .some((entry) => entry.snapshot.authority === 'canonical')
+        || refreshedActivityEntries.some((entry) => (
+          entry.activity.authority === 'canonical' || entry.toolFacets.authority === 'canonical'
+        ));
       if (stillCanonical) this.invalidateCanonicalSessionCache(false);
     }
   }
