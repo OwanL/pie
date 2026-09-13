@@ -9,7 +9,9 @@ const SAFE_TOOL_RENDER_FIELDS = [
   'parallelGroupId',
   'executionId',
   'startedAt',
+  'endedAt',
   'durationMs',
+  'durationClockDomain',
   'seq',
 ] as const satisfies readonly (keyof ToolCall)[];
 
@@ -102,8 +104,14 @@ export function reconcileDurableTerminalToolMetadata(
         ? { parallelGroupId: live.parallelGroupId }
         : {}),
       ...(call.startedAt === undefined ? { startedAt: live.startedAt } : {}),
+      ...(call.endedAt === undefined && live.terminal?.endedAt !== undefined
+        ? { endedAt: live.terminal.endedAt }
+        : {}),
       ...(call.durationMs === undefined && live.terminal?.durationMs !== undefined
         ? { durationMs: live.terminal.durationMs }
+        : {}),
+      ...(call.durationClockDomain === undefined && live.terminal?.durationClockDomain !== undefined
+        ? { durationClockDomain: live.terminal.durationClockDomain }
         : {}),
       ...(call.executionId === undefined ? { executionId: live.executionId } : {}),
       ...(call.seq === undefined ? { seq: live.seq } : {}),

@@ -100,8 +100,16 @@ export function upsertAssistantToolPart(parts: ChatMessagePart[], toolCall: Tool
     merged.startedAt = nextToolCall.startedAt;
   }
 
+  if (nextToolCall.endedAt !== undefined) {
+    merged.endedAt = nextToolCall.endedAt;
+  }
+
   if (nextToolCall.durationMs !== undefined) {
     merged.durationMs = nextToolCall.durationMs;
+  }
+
+  if (nextToolCall.durationClockDomain !== undefined) {
+    merged.durationClockDomain = nextToolCall.durationClockDomain;
   }
 
   if (nextToolCall.parallelGroupId !== undefined) {

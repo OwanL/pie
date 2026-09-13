@@ -22,6 +22,7 @@ import {
 import type { ActivityIntervalRecord } from '../shared/activity-interval.js';
 import type { BillableInvocationRecord } from '../shared/billable-invocation.js';
 import type { ToolCall } from '../shared/protocol.js';
+import type { DurationClockDomain } from '../shared/timing.js';
 import { sanitizeAnalyticsDetail } from '../shared/sensitive-redaction.js';
 import { canonicalAnalyticsToolEntityId } from '../../../shared/analytics/transport.js';
 
@@ -83,6 +84,10 @@ function optionalTimestamp(value: string | number | undefined): number | null {
 
 function timestamp(value: string | number | undefined, fallback: number): number {
   return optionalTimestamp(value) ?? fallback;
+}
+
+function optionalNonNegativeDuration(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
 /** Stable fallback only for pre-identity observations. The path itself is not
@@ -417,12 +422,21 @@ export class CanonicalAnalyticsCapture {
       || analyticsPendingOperationId(context.operationId, context.sessionPath);
     const scopedToolCallId = canonicalAnalyticsToolEntityId(sessionIdentity, toolCall.id);
     const payloadId = `${scopedToolCallId}:${phase}`;
+    const startedAtMs = optionalTimestamp(toolCall.startedAt);
+    const endedAtMs = optionalTimestamp(toolCall.endedAt);
+    const durationMs = optionalNonNegativeDuration(toolCall.durationMs);
+    const monotonicDuration = toolCall.durationClockDomain === 'monotonic-same-process';
+    const executionEndedAtMs = endedAtMs ?? (
+      toolCall.endedAt === undefined
+      && !monotonicDuration && startedAtMs !== null && durationMs !== null
+        ? startedAtMs + durationMs
+        : null
+    );
     const fields: AnalyticsToolCallFields = {
       toolCallId: scopedToolCallId,
       toolDefinitionId: toolCall.name,
-      startedAtMs: toolCall.startedAt ?? null,
-      executionEndedAtMs: toolCall.startedAt !== undefined && toolCall.durationMs !== undefined
-        ? toolCall.startedAt + toolCall.durationMs : null,
+      startedAtMs,
+      executionEndedAtMs,
       outcome: toolCall.status,
       ...(phase === 'begin' ? { argumentsPayloadId: payloadId } : { resultPayloadId: payloadId }),
       durableEntryId: toolCall.durableEntryId ?? null,
@@ -486,17 +500,47 @@ export class CanonicalAnalyticsCapture {
 
   captureActivity(context: AnalyticsSessionContext, interval: ActivityIntervalRecord): AnalyticsCaptureStatus {
     const startedAtMs = optionalTimestamp(interval.startedAt);
-    const hasEndEvidence = interval.endedAt !== undefined;
-    const endedAtMs = optionalTimestamp(interval.endedAt);
+    const explicitEndedAtMs = optionalTimestamp(interval.endedAt);
+    const hasExplicitEndedAt = interval.endedAt !== undefined;
+    const hasSuppliedDuration = interval.durationMs !== undefined;
+    const suppliedDurationMs = optionalNonNegativeDuration(interval.durationMs);
+    const monotonicDuration = interval.durationClockDomain === 'monotonic-same-process';
+    // Keep the producer's wall endpoint separate from duration. In particular,
+    // a monotonic duration has no compatible wall endpoint to synthesize. The
+    // unmarked legacy start+duration shape is the one permitted fallback.
+    const legacyFallbackEndedAtMs = !hasExplicitEndedAt && !monotonicDuration
+      && startedAtMs !== null && suppliedDurationMs !== null
+      ? startedAtMs + suppliedDurationMs
+      : null;
+    const endedAtMs = explicitEndedAtMs ?? legacyFallbackEndedAtMs;
     const orderedBounds = startedAtMs !== null && endedAtMs !== null && endedAtMs >= startedAtMs;
+    const hasMonotonicDuration = monotonicDuration && suppliedDurationMs !== null;
+    const durationMs = hasMonotonicDuration
+      ? suppliedDurationMs
+      : !monotonicDuration
+        ? hasSuppliedDuration
+          ? orderedBounds ? suppliedDurationMs : null
+          : orderedBounds ? endedAtMs! - startedAtMs! : null
+        : null;
+    // A present-but-invalid wall bound is still failed end evidence; do not
+    // reinterpret it as an open interval and mark it observed. A measured
+    // monotonic duration is independent end evidence even without a wall end.
+    const hasEndEvidence = interval.outcome !== undefined
+      || interval.endedAt !== undefined
+      || hasSuppliedDuration;
+    const coverage = hasMonotonicDuration
+      || (!monotonicDuration && startedAtMs !== null && endedAtMs !== null && orderedBounds && durationMs !== null)
+      || (startedAtMs !== null && !hasEndEvidence)
+      ? 'observed' as const
+      : 'unknown' as const;
     const fields: AnalyticsActivitySpanFields = {
       spanId: interval.intervalId,
       kind: interval.kind,
       startedAtMs,
       endedAtMs,
-      durationMs: orderedBounds ? endedAtMs - startedAtMs : null,
-      clockDomain: 'wall-clock-utc',
-      coverage: startedAtMs !== null && (!hasEndEvidence || orderedBounds) ? 'observed' : 'unknown',
+      durationMs,
+      clockDomain: hasMonotonicDuration ? 'monotonic-same-process' : 'wall-clock-utc',
+      coverage,
     };
     return this.submit(context, 'activitySpan', interval.intervalId, hasEndEvidence ? 'end' : 'begin',
       `activity:${interval.intervalId}:${hasEndEvidence ? 'end' : 'begin'}`,
@@ -507,7 +551,20 @@ export class CanonicalAnalyticsCapture {
   }
 
   /** Retry wait and full retry episode are different measured intervals. A
-   * terminal episode duration cannot fill a missing provider-attempt wait. */
+   * terminal episode duration cannot fill a missing provider-attempt wait.
+   *
+   * Clock provenance: durations are consumed exactly as forwarded, never
+   * re-derived here by endpoint subtraction. A payload marked
+   * `durationClockDomain: 'monotonic-same-process'` carries same-process
+   * `performance.now()` deltas measured at the producer's seams; they stay
+   * valid observed durations even when their wall bounds are missing or
+   * reversed by a wall-clock jump, and such a span reports the measured
+   * duration's domain in `clockDomain` while `startedAtMs`/`endedAtMs` remain
+   * wall-clock-utc correlation anchors. Unmarked durations are
+   * wall-clock-utc `Date.now()` deltas whose samples can straddle a jump, so
+   * one computed against reversed bounds is unknown — never a clamped zero —
+   * and needs present ordered bounds to count as observed. A missing,
+   * nonfinite, or negative duration stays unknown in either domain. */
   captureRetryTiming(
     context: AnalyticsSessionContext,
     retryId: string,
@@ -517,6 +574,7 @@ export class CanonicalAnalyticsCapture {
       endedAt?: number;
       measuredDelayMs?: number;
       durationMs: number;
+      durationClockDomain?: DurationClockDomain;
     },
   ): AnalyticsCaptureStatus {
     if (!retryId.trim()) return 'rejected';
@@ -531,9 +589,12 @@ export class CanonicalAnalyticsCapture {
       ['retry_wait', waitEndedAtMs, timing.measuredDelayMs],
       ['retry_episode', endedAtMs, timing.durationMs],
     ] as const) {
-      const reversed = startedAtMs !== null && end !== null && end < startedAtMs;
-      const durationMs = !reversed && typeof duration === 'number' && Number.isFinite(duration) && duration >= 0
-        ? duration : null;
+      const finiteNonNegative = typeof duration === 'number' && Number.isFinite(duration) && duration >= 0;
+      const monotonic = timing.durationClockDomain === 'monotonic-same-process';
+      // Unmarked wall-derived durations inherit the wall bounds' failure
+      // modes; only measured monotonic durations survive reversed bounds.
+      const reversed = !monotonic && startedAtMs !== null && end !== null && end < startedAtMs;
+      const durationMs = finiteNonNegative && !reversed ? duration : null;
       const spanId = `activity:${kind}:${retryKey}`;
       const result = this.submit(context, 'activitySpan', spanId, 'end', `${spanId}:end`, observedAtMs, {
         spanId,
@@ -541,8 +602,10 @@ export class CanonicalAnalyticsCapture {
         startedAtMs,
         endedAtMs: end,
         durationMs,
-        clockDomain: 'wall-clock-utc',
-        coverage: !reversed && startedAtMs !== null && end !== null && durationMs !== null ? 'observed' : 'unknown',
+        clockDomain: monotonic && durationMs !== null ? 'monotonic-same-process' : 'wall-clock-utc',
+        coverage: monotonic
+          ? durationMs !== null ? 'observed' : 'unknown'
+          : !reversed && startedAtMs !== null && end !== null && durationMs !== null ? 'observed' : 'unknown',
       } satisfies AnalyticsActivitySpanFields);
       if (status !== 'rejected') status = result;
     }

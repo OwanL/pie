@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   createSessionManagerFence,
+  createSessionManagerFenceRegistry,
   FENCED_ENTRY_ID,
 } from '../../../src/backend/session-manager-fence';
 import type { MutableSdkSessionManager } from '../../../src/backend/session-manager-fence';
@@ -95,6 +96,55 @@ test('mutation methods are no-ops after invalidation', () => {
   assert.equal(wrapped._persist({ type: 'message' }), undefined);
 
   assert.deepEqual(manager.calls as Call[], []);
+});
+
+test('an admitted async mutation drains while retired writes fail closed', async () => {
+  const manager = createMockManager();
+  let releasePersist!: () => void;
+  manager._persist = async () => await new Promise<void>((resolve) => {
+    releasePersist = resolve;
+  });
+  const { manager: wrapped, fence } = createSessionManagerFence(manager);
+
+  const pending = wrapped._persist({ type: 'message' });
+  assert.equal(fence.activeMutationCount(), 1);
+  fence.invalidate();
+  assert.equal(wrapped.appendMessage({ role: 'user' }), FENCED_ENTRY_ID);
+  assert.equal(await fence.waitForIdle(0), 1);
+
+  releasePersist();
+  await pending;
+  assert.equal(await fence.waitForIdle(), 0);
+  assert.equal(fence.activeMutationCount(), 0);
+});
+
+test('ownership-lease revocation also retires the wrapped manager', () => {
+  const manager = createMockManager();
+  let revoked = 0;
+  manager.revokePieWriteLease = () => { revoked += 1; };
+  const { manager: wrapped, fence } = createSessionManagerFence(manager);
+
+  wrapped.revokePieWriteLease?.();
+
+  assert.equal(revoked, 1);
+  assert.equal(fence.isInvalidated(), true);
+  assert.equal(wrapped.appendMessage({ role: 'user' }), FENCED_ENTRY_ID);
+});
+
+test('registry revocation rejects writes from every retired manager', () => {
+  const registry = createSessionManagerFenceRegistry();
+  const managerA = createMockManager();
+  const managerB = createMockManager();
+  const fencedA = createSessionManagerFence(managerA);
+  const fencedB = createSessionManagerFence(managerB);
+  registry.register(fencedA.fence);
+  registry.register(fencedB.fence);
+
+  registry.revoke();
+
+  assert.equal(fencedA.manager.appendMessage({ role: 'user' }), FENCED_ENTRY_ID);
+  assert.equal(fencedB.manager.appendMessage({ role: 'user' }), FENCED_ENTRY_ID);
+  assert.equal(registry.activeMutationCount(), 0);
 });
 
 test('read APIs still work after invalidation', () => {

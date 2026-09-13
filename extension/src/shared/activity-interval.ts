@@ -1,3 +1,5 @@
+import type { DurationClockDomain } from './timing.js';
+
 export const ACTIVITY_INTERVAL_KINDS = [
   'operation',
   'busy',
@@ -21,8 +23,15 @@ export interface ActivityIntervalRecord {
   readonly parentOperationId: string | null;
   readonly invocationId: string | null;
   readonly toolId: string | null;
+  /** Producer grouping retained for parallel rendering/correlation; wall union
+   * uses the actual producer timestamps rather than group aggregates. */
+  readonly parallelGroupId?: string;
   readonly kind: ActivityIntervalKind;
   readonly startedAt: string;
   readonly endedAt?: string;
+  /** Producer-forwarded duration; absent means the elapsed time is unknown. */
+  readonly durationMs?: number;
+  /** Clock provenance of durationMs; absent retains wall-clock timing. */
+  readonly durationClockDomain?: DurationClockDomain;
   readonly outcome?: 'succeeded' | 'failed' | 'cancelled' | 'unknown';
 }

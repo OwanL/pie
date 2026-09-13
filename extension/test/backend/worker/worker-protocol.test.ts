@@ -146,6 +146,7 @@ test('Phase 4 protocol accepts every closed runtime, ownership, provider, and sy
     { ...base, kind: 'runtime.command', requestId: 'command', operation: 'message.send', payload: { params: { text: 'hello' }, publicRequestId: 'public-1' } },
     { ...base, kind: 'runtime.command', requestId: 'duplicate-command', operation: 'session.duplicateHot', payload: { params: { sessionPath: base.leasePath }, publicRequestId: 'public-duplicate' } },
     { ...base, kind: 'runtime.command', requestId: 'snapshot-command', operation: 'session.snapshot', payload: { params: { sessionPath: base.leasePath }, publicRequestId: 'public-snapshot' } },
+    { ...base, kind: 'runtime.command', requestId: 'manager-fence-command', operation: 'session.managerFence', payload: { params: { timeoutMs: 2_000 }, publicRequestId: 'writer-fence' } },
     { ...base, kind: 'ownership.reserved', requestId: 'reserve', reservation },
     { ...base, kind: 'ownership.committed', requestId: 'commit', authorization },
     { ...base, kind: 'ownership.aborted', requestId: 'abort', reservationId: reservation.reservationId },

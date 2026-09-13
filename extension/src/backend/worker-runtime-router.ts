@@ -120,7 +120,7 @@ export interface HotWorkerRoute {
     terminalAttemptId?: string;
     preflightOnly?: boolean;
     messageId?: string;
-    tools: Array<{ requestId: string; messageId: string; toolCallId: string; name?: string; input?: WorkerJsonValue; startedAt?: number }>;
+    tools: Array<{ requestId: string; messageId: string; toolCallId: string; name?: string; input?: WorkerJsonValue; startedAt?: number; parallelGroupId?: string }>;
     /** Last observed context usage (bounded). */
     usage?: { tokens: number; contextWindow: number; percent: number };
     /** Last durability-confirmed session entry identity (bounded). */
@@ -317,6 +317,10 @@ export class WorkerRuntimeRouter {
   private readonly runtimeReadyTimeoutMs: number;
   private providerPolicy: WorkerJsonObject = {};
   private disposed = false;
+  /** Once the authenticated host writer fence closes, no cold session may
+   * promote a new manager in this coordinator generation. Existing workers
+   * are fenced through their own registries by `fenceSessionManagers()`. */
+  private writerFenceRevoked = false;
   private readonly detailSubscriptions = new Map<string, DetailSubscriptionOwner>();
   private readonly extensionUiOwners = new ExtensionUiOwnerRegistry();
   /** Unexpected worker loss can be observed first by a failed coordinator
@@ -415,6 +419,33 @@ export class WorkerRuntimeRouter {
 
   async routeExisting(request: RequestEnvelope): Promise<WorkerJsonValue> {
     return await this.routeCommand(request, false);
+  }
+
+  /** Revoke every currently promoted worker's manager admission. The
+   * coordinator flag closes the cold-promotion race before the worker IPC
+   * drain begins; each worker registry then invalidates and drains its own
+   * synchronous persistence boundary. */
+  async fenceSessionManagers(timeoutMs = 2_000): Promise<void> {
+    if (this.disposed) throw new Error('Worker runtime router is disposed.');
+    this.writerFenceRevoked = true;
+    const workers = [...new Set(this.workersById.values())];
+    await Promise.all(workers.map(async (route) => {
+      const response = await route.worker.client.requestFrame!({
+        kind: 'runtime.command',
+        operation: 'session.managerFence',
+        payload: asWorkerJsonObject({ publicRequestId: 'writer-fence', params: { timeoutMs } }),
+      }, 'response');
+      if (!response.ok) throw new BackendError(response.error.code, response.error.message);
+      const payload = response.result.kind === 'runtime.command'
+        ? response.result.payload
+        : undefined;
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+        || payload.activeWriterCount !== 0
+        || payload.admissionRevoked !== true
+        || payload.writersDrained !== true) {
+        throw new Error(`Worker ${route.owner.workerId} returned an invalid session-manager fence acknowledgement.`);
+      }
+    }));
   }
 
   /** Duplicate through the sole hot owner without moving the public
@@ -646,6 +677,9 @@ export class WorkerRuntimeRouter {
     const root = this.roots.get(key);
     if (root?.state === 'transitioning') throw new SessionTransitionInProgressError(sessionPath);
     const current = root ?? this.currentPaths.get(key);
+    if (this.writerFenceRevoked && current?.state !== 'hot') {
+      throw new BackendError('WRITER_FENCE_REVOKED', 'Session manager admission is revoked for this worker generation.');
+    }
     if (current?.state === 'hot') {
       this.assertCurrentOwner(current, sessionPath);
       return current;
@@ -1479,7 +1513,9 @@ export class WorkerRuntimeRouter {
   }
 
   private async promoteOnce(sessionPath: string): Promise<HotWorkerRoute> {
+    this.assertWriterAdmission();
     const snapshot = await this.options.buildPromotionSnapshot(sessionPath);
+    this.assertWriterAdmission();
     const exactSessionPath = snapshot.exactSessionPath ?? snapshot.openedPayload.session.path;
     const grant = this.options.coldStore.serializePromotionGrant(
       exactSessionPath,
@@ -1499,7 +1535,9 @@ export class WorkerRuntimeRouter {
         return { leasePath: lease.canonicalSessionPath, leaseRevision: lease.ownershipRevision };
       });
       if (!owner || !lease) throw new Error('Worker ownership was not prepared before spawn.');
+      this.assertWriterAdmission();
       await this.syncStartup(worker, snapshot);
+      this.assertWriterAdmission();
       const route: HotWorkerRoute = {
         state: 'hot',
         rootSessionPath: lease.canonicalSessionPath,
@@ -1586,6 +1624,12 @@ export class WorkerRuntimeRouter {
       }
       snapshot.abortPromotion?.();
       throw error;
+    }
+  }
+
+  private assertWriterAdmission(): void {
+    if (this.writerFenceRevoked) {
+      throw new BackendError('WRITER_FENCE_REVOKED', 'Session manager admission is revoked for this worker generation.');
     }
   }
 
@@ -2328,6 +2372,7 @@ export class WorkerRuntimeRouter {
           ...(typeof payload.name === 'string' ? { name: payload.name } : {}),
           ...(payload.input !== undefined ? { input: payload.input } : {}),
           ...(typeof payload.startedAt === 'number' ? { startedAt: payload.startedAt } : {}),
+          ...(typeof payload.parallelGroupId === 'string' ? { parallelGroupId: payload.parallelGroupId } : {}),
         },
       ].slice(-64);
     } else if (event === 'tool.finished' && typeof payload.toolCallId === 'string') {

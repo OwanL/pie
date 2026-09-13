@@ -53,6 +53,17 @@ import {
   type ExecutionSummaryDeliveryCoverage,
   type ExecutionSummaryScope,
 } from './execution-summary.js';
+import {
+  applyActivityProjection,
+  createActivityProjectionSchema,
+  movePendingActivityProjection,
+  readActivityProjection,
+  removeActivityProjectionForRoot,
+  type ActivityProjectionDatabase,
+  type ActivityProjectionReadModel,
+  type ActivityProjectionReadRequest,
+  type ActivityProjectionSpanState,
+} from './activity-projection.js';
 
 interface SqliteRunResult {
   changes: number | bigint;
@@ -103,7 +114,7 @@ const FIXED_WRITER_STATEMENT_KEYS = [
   'typed.execution.state.upsert', 'typed.execution.summary.lookup',
   'typed.execution.summary.upsert', 'typed.execution.summary.delete',
   'typed.tool.observation.insert', 'typed.tool.state.upsert',
-  'typed.activity.observation.insert', 'typed.activity.state.upsert',
+  'typed.activity.observation.insert', 'typed.activity.state.lookup', 'typed.activity.state.upsert',
   'typed.feature.observation.insert',
   'typed.branch.selection.insert', 'typed.branch.selection-current.upsert',
   'typed.branch.edge.lookup', 'typed.branch.edge.parent.lookup', 'typed.branch.edge.upsert',
@@ -121,8 +132,8 @@ for (const kind of ['observations', 'details']) {
     WRITER_STATEMENT_KEYS.add(`delivery.${kind}.${outcome}.update`);
   }
 }
-// 46 fixed keys plus 12 delivery kind/outcome read/update combinations.
-if (WRITER_STATEMENT_KEYS.size !== 58) throw new Error('Analytics writer statement key inventory changed.');
+// 47 fixed keys plus 12 delivery kind/outcome read/update combinations.
+if (WRITER_STATEMENT_KEYS.size !== 59) throw new Error('Analytics writer statement key inventory changed.');
 const MAX_CACHED_WRITER_STATEMENTS = 64;
 const INSERT_GENERATION_SQL = `
   INSERT OR IGNORE INTO analytics_generations (generation_id, first_observed_at_ms) VALUES (?, ?)
@@ -166,7 +177,7 @@ function prepareWriterStatement(
 }
 
 const sqlite = createRequire(process.execPath)('node:sqlite') as SqliteModule;
-const DATABASE_SCHEMA_VERSION = 11;
+const DATABASE_SCHEMA_VERSION = 12;
 const BUSY_TIMEOUT_MS = 5_000;
 const MAX_PENDING_SEQUENCES_PER_PRODUCER = 4_096;
 const DEFAULT_QUERY_ROWS = 200;
@@ -1415,6 +1426,51 @@ function migrateV10(database: SqliteDatabase): void {
   `);
 }
 
+/** Schema v11 -> v12: bounded activity projection members and scoped additive
+ * summaries, seeded from retained activity states without fabricated values.
+ * Stored null anchors, durations and coverage stay exactly as captured; a
+ * span's measured clock domain is recovered from the observation that actually
+ * delivered a measured duration and stays unknown when no observation proves
+ * one. Late evidence merged into the state rows before this upgrade is
+ * seeded as-is, never collapsed or reconstructed. */
+function migrateV11(database: SqliteDatabase): void {
+  createActivityProjectionSchema(database as unknown as ActivityProjectionDatabase);
+  const rows = database.prepare(`
+    SELECT s.generation_id, s.span_id, s.capture_subject_kind, s.capture_subject_key,
+      s.root_session_id, s.activity_kind, s.started_at_ms, s.ended_at_ms,
+      s.duration_ms, s.coverage,
+      (SELECT json_extract(o.payload_json, '$.fields.clockDomain')
+        FROM analytics_activity_observations o
+        WHERE o.generation_id = s.generation_id AND o.span_id = s.span_id
+          AND json_extract(o.payload_json, '$.fields.durationMs') IS NOT NULL
+        ORDER BY o.rowid DESC LIMIT 1) AS clock_domain
+    FROM analytics_activity_states s
+    ORDER BY s.rowid
+  `).iterate() as Iterable<Record<string, unknown>>;
+  for (const row of rows) {
+    applyActivityProjection(database as unknown as ActivityProjectionDatabase, {
+      generationId: String(row.generation_id),
+      spanId: String(row.span_id),
+      captureSubjectKind: String(row.capture_subject_kind),
+      captureSubjectKey: String(row.capture_subject_key),
+      rootSessionId: row.root_session_id === null || row.root_session_id === undefined
+        ? null : String(row.root_session_id),
+      kind: row.activity_kind === null || row.activity_kind === undefined
+        ? null : String(row.activity_kind),
+      clockDomain: row.clock_domain === null || row.clock_domain === undefined
+        ? null : String(row.clock_domain),
+      startedAtMs: row.started_at_ms === null || row.started_at_ms === undefined
+        ? null : String(row.started_at_ms),
+      endedAtMs: row.ended_at_ms === null || row.ended_at_ms === undefined
+        ? null : String(row.ended_at_ms),
+      durationMs: row.duration_ms === null || row.duration_ms === undefined
+        ? null : Number(row.duration_ms),
+      coverage: row.coverage === null || row.coverage === undefined
+        ? null : String(row.coverage),
+    }, '0');
+  }
+}
+
 function databaseTransaction<T>(database: SqliteDatabase, operation: () => T): T {
   database.exec('BEGIN IMMEDIATE');
   try {
@@ -1465,6 +1521,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV8(database);
       migrateV9(database);
       migrateV10(database);
+      migrateV11(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
@@ -1478,6 +1535,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV8(database);
       migrateV9(database);
       migrateV10(database);
+      migrateV11(database);
       backfillV2(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
@@ -1491,6 +1549,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV8(database);
       migrateV9(database);
       migrateV10(database);
+      migrateV11(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
@@ -1502,6 +1561,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV8(database);
       migrateV9(database);
       migrateV10(database);
+      migrateV11(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
@@ -1512,6 +1572,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV8(database);
       migrateV9(database);
       migrateV10(database);
+      migrateV11(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
@@ -1522,6 +1583,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV8(database);
       migrateV9(database);
       migrateV10(database);
+      migrateV11(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
@@ -1531,6 +1593,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV8(database);
       migrateV9(database);
       migrateV10(database);
+      migrateV11(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
@@ -1539,6 +1602,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV8(database);
       migrateV9(database);
       migrateV10(database);
+      migrateV11(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
@@ -1546,17 +1610,25 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV8(database);
       migrateV9(database);
       migrateV10(database);
+      migrateV11(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
     if (version === 9) {
       migrateV9(database);
       migrateV10(database);
+      migrateV11(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
     if (version === 10) {
       migrateV10(database);
+      migrateV11(database);
+      database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
+      return;
+    }
+    if (version === 11) {
+      migrateV11(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
     }
   });
@@ -2457,6 +2529,25 @@ function applyTypedObservation(
   }
   if (observation.entityKind === 'activitySpan') {
     const revision = nextProjectionRevision(database, statements);
+    // Resolve the span state and its trusted-subject ownership first: a
+    // conflicting subject or conflicting measured fact rejects the whole
+    // observation before any write lands in this transaction.
+    const incomingSpan: ActivityProjectionSpanState = {
+      generationId: observation.generationId,
+      spanId: observation.entityKey,
+      captureSubjectKind: observation.captureSubject.kind,
+      captureSubjectKey: subjectKey(observation),
+      rootSessionId: observation.scope.rootSessionId ?? null,
+      kind: optionalString(fields.kind),
+      clockDomain: optionalString(fields.clockDomain),
+      startedAtMs: optionalTimestamp(fields.startedAtMs, 'fields.startedAtMs'),
+      endedAtMs: optionalTimestamp(fields.endedAtMs, 'fields.endedAtMs'),
+      durationMs: optionalNonNegativeFloat(fields.durationMs),
+      coverage: optionalString(fields.coverage),
+    };
+    const { merged } = applyActivityProjection(
+      database as unknown as ActivityProjectionDatabase, incomingSpan, revision,
+    );
     prepareWriterStatement(database, statements, 'typed.activity.observation.insert', `
       INSERT INTO analytics_activity_observations (
         observation_registry_key, generation_id, span_id, observation_kind,
@@ -2474,6 +2565,9 @@ function applyTypedObservation(
       serialize(observation),
       revision,
     );
+    // The state row mirrors the merged span, so a late begin after a terminal
+    // end cannot overwrite terminal measured evidence, and a bound pending
+    // subject cannot silently re-own another session's span.
     prepareWriterStatement(database, statements, 'typed.activity.state.upsert', `
       INSERT INTO analytics_activity_states (
         generation_id, span_id, capture_subject_kind, capture_subject_key,
@@ -2481,18 +2575,20 @@ function applyTypedObservation(
         coverage, projection_revision
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(generation_id, span_id) DO UPDATE SET
-        activity_kind = COALESCE(excluded.activity_kind, activity_kind),
-        started_at_ms = COALESCE(excluded.started_at_ms, started_at_ms),
-        ended_at_ms = COALESCE(excluded.ended_at_ms, ended_at_ms),
-        duration_ms = COALESCE(excluded.duration_ms, duration_ms),
-        coverage = COALESCE(excluded.coverage, coverage),
+        capture_subject_kind = excluded.capture_subject_kind,
+        capture_subject_key = excluded.capture_subject_key,
+        root_session_id = excluded.root_session_id,
+        activity_kind = excluded.activity_kind,
+        started_at_ms = excluded.started_at_ms,
+        ended_at_ms = excluded.ended_at_ms,
+        duration_ms = excluded.duration_ms,
+        coverage = excluded.coverage,
         projection_revision = excluded.projection_revision
     `).run(
-      observation.generationId, observation.entityKey, observation.captureSubject.kind,
-      subjectKey(observation), observation.scope.rootSessionId ?? null,
-      optionalString(fields.kind), optionalTimestamp(fields.startedAtMs, 'fields.startedAtMs'),
-      optionalTimestamp(fields.endedAtMs, 'fields.endedAtMs'), optionalNonNegativeFloat(fields.durationMs),
-      optionalString(fields.coverage), revision,
+      merged.generationId, merged.spanId, merged.captureSubjectKind,
+      merged.captureSubjectKey, merged.rootSessionId,
+      merged.kind, merged.startedAtMs, merged.endedAtMs, merged.durationMs,
+      merged.coverage, revision,
     );
     return true;
   }
@@ -2830,6 +2926,29 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
         allowTimeZoneChange,
       );
     });
+  }
+
+  /** Bounded maintained activity summary for the global or one session scope.
+   * Counts keep known/unknown isolated and `measuredTotalMs` is additive
+   * measured work, not a wall union; wall-union queries over member anchors
+   * remain explicit raw SQL. No daily buckets are maintained. */
+  readActivityProjection(request: ActivityProjectionReadRequest = {}): ActivityProjectionReadModel & AnalyticsQuerySnapshotMetadata {
+    this.assertOpen();
+    const rootSessionId = request.rootSessionId;
+    if (rootSessionId !== undefined && (!rootSessionId.trim() || rootSessionId.includes('\0'))) {
+      throw new Error('Canonical analytics rootSessionId must be a non-empty string without NUL.');
+    }
+    const maxKinds = boundedPositiveInteger(
+      request.maxKinds ?? 64, 64, MAX_QUERY_ROWS, 'activity maxKinds',
+    );
+    return this.snapshot(() => ({
+      ...this.readQuerySnapshotMetadata(),
+      ...readActivityProjection(
+        this.database as unknown as ActivityProjectionDatabase,
+        { rootSessionId, maxKinds },
+        this.getProjectionRevision(),
+      ),
+    }));
   }
 
   submitBatch<Fields extends object>(observations: readonly SequencedAnalyticsObservation<Fields>[]): void {
@@ -3246,6 +3365,16 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
       if (row.ended_at_ms !== null) removedEndedAtCount += 1;
     }
     const tableDeletesStarted = performance.now();
+    // Activity projection members and their scoped summary contributions are
+    // removed together in one short transaction, so the removal is either
+    // fully published or left for the fence's idempotent retry.
+    const activityProjectionStarted = performance.now();
+    this.transactionOrInline(() => removeActivityProjectionForRoot(
+      this.database as unknown as ActivityProjectionDatabase,
+      rootSessionId,
+      revision,
+    ));
+    mark('remove:activityProjection', activityProjectionStarted);
     for (const table of [
       'analytics_provider_settlements',
       'analytics_execution_observations',
@@ -3472,6 +3601,15 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
           WHERE capture_subject_kind = 'pendingCreate' AND capture_subject_key = ?
         `).run(rootSessionId, rootSessionId, pendingOperationId);
       }
+      // The projection's member rows move with the same ownership change, and
+      // their session-scope contributions are added here; spans already
+      // promoted by a bind that committed first are absent and stay untouched.
+      movePendingActivityProjection(
+        this.database as unknown as ActivityProjectionDatabase,
+        pendingOperationId,
+        rootSessionId,
+        revision,
+      );
       const pendingExecutionCount = toNumber(pendingExecutionCounts.execution_count);
       const pendingSettledCount = toNumber(pendingExecutionCounts.settled_count);
       if (pendingExecutionCount > 0) {
@@ -3942,7 +4080,7 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
       `).all() as Array<{ name: string }>;
       return {
         ...metadata,
-        projectionVersion: 2,
+        projectionVersion: 3,
         logicalCommands: ['schema', 'query', 'detail', 'storage'],
         views: views.map((row) => row.name),
         detail: { defaultRangeBytes: 64 * 1024, representationEncoding: 'node-v8' },

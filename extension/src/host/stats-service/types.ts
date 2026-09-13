@@ -34,7 +34,7 @@ export interface SessionRunState {
   finishedToolCallIdsInCurrentRun: Set<string>;
   /** Start-time attribution by call id, used to reconcile a name first learned at terminal time. */
   toolNamesByCallIdInCurrentRun: Map<string, string>;
-  /** Merged, non-overlapping completed tool intervals for critical-path union. */
+  /** Merged, non-overlapping wall-clock tool intervals for critical-path union. */
   toolExecutionIntervalsInCurrentRun: Array<{ startedAt: number; endedAt: number }>;
   busyStartedAt: string | null;
 }
@@ -111,7 +111,7 @@ export interface RunObserver {
     sourceId: string,
     measuredDelayMs: number | undefined,
     durationMs: number,
-    evidence?: Pick<import('../../shared/protocol').RetryMeasuredPayload, 'operationId' | 'startedAt' | 'providerAttemptStartedAt' | 'endedAt'>,
+    evidence?: Pick<import('../../shared/protocol').RetryMeasuredPayload, 'operationId' | 'startedAt' | 'providerAttemptStartedAt' | 'endedAt' | 'durationClockDomain'>,
   ): void;
   onMessageEdited(sessionPath: string, messageId: string): void;
   onTruncatedAfter(sessionPath: string, messageId: string): void;

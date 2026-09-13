@@ -373,6 +373,8 @@ export function applyLiveSemanticEnvelope(
           executionEnd: {
             status: event.status,
             durationMs: event.durationMs,
+            durationClockDomain: event.durationClockDomain,
+            endedAt: event.endedAt,
           },
         },
       },
@@ -393,7 +395,9 @@ export function applyLiveSemanticEnvelope(
     if (tool.terminal) return { classification: 'invalid', state: current, reason: 'duplicate terminal tool' };
     if (tool.executionEnd
       && (tool.executionEnd.status !== event.status
-        || tool.executionEnd.durationMs !== event.durationMs)) {
+        || tool.executionEnd.durationMs !== event.durationMs
+        || tool.executionEnd.durationClockDomain !== event.durationClockDomain
+        || tool.executionEnd.endedAt !== event.endedAt)) {
       return { classification: 'invalid', state: current, reason: 'durable terminal does not match execution end' };
     }
     const resultBytes = event.resultBytes ?? jsonByteLength(event.result);
@@ -414,6 +418,8 @@ export function applyLiveSemanticEnvelope(
             result: event.result,
             resultBytes,
             durationMs: event.durationMs,
+            durationClockDomain: event.durationClockDomain,
+            endedAt: event.endedAt,
             durableEntryId: event.durableEntryId,
           },
         },

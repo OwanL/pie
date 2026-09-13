@@ -9,6 +9,7 @@ import {
   type TurnSemanticEnvelope,
 } from '../shared/live-pipeline-protocol.js';
 import type { ChatMessage } from '../shared/protocol/messages.js';
+import type { DurationClockDomain } from '../shared/timing.js';
 import type { ThinkingLevel } from '../shared/protocol/models.js';
 import {
   diffJsonValues,
@@ -62,8 +63,8 @@ export type BackendSemanticCandidate =
   | { kind: 'turn.extensionUi'; uiRequestId: string; action: 'opened' | 'closed' }
   | { kind: 'tool.started'; executionId: string; parentExecutionId: string | null; rootExecutionId: string; toolCallId: string; name: string; input: unknown; startedAt: number; parallelGroupId?: string }
   | { kind: 'tool.progress'; executionId: string; preview: ToolPreview; recursiveCounters?: ToolProgressRecursiveCounters }
-  | { kind: 'tool.executionEnded'; executionId: string; status: 'completed' | 'failed'; durationMs?: number }
-  | { kind: 'tool.terminal'; executionId: string; status: 'completed' | 'failed'; result: unknown; durationMs?: number; durableEntryId: string }
+  | { kind: 'tool.executionEnded'; executionId: string; status: 'completed' | 'failed'; durationMs?: number; durationClockDomain?: DurationClockDomain; endedAt?: number }
+  | { kind: 'tool.terminal'; executionId: string; status: 'completed' | 'failed'; result: unknown; durationMs?: number; durationClockDomain?: DurationClockDomain; endedAt?: number; durableEntryId: string }
   | { kind: 'turn.terminal'; terminalKind: 'completed' | 'interrupted' | 'error'; userInitiated?: boolean; reason?: string; durableMessage: ChatMessage; durableEntryId: string };
 
 const MAX_LIVE_TOOL_INPUT_BYTES = LIVE_PIPELINE_LIMITS.toolInputBytes;
@@ -81,6 +82,8 @@ const CHECKPOINT_SEQUENCE_PLACEHOLDER = Number.MAX_SAFE_INTEGER;
 const EXECUTION_END_CHECKPOINT_PLACEHOLDER = {
   status: 'completed' as const,
   durationMs: Number.MAX_VALUE,
+  durationClockDomain: 'monotonic-same-process' as const,
+  endedAt: Number.MAX_VALUE,
 };
 const JSON_NULL_BYTES = 4;
 const JSON_ARRAY_EMPTY_BYTES = 2;
@@ -175,7 +178,9 @@ export class BackendLiveTurnAccumulator {
       }
       if (tool?.executionEnd) {
         if (tool.executionEnd.status === candidate.status
-          && tool.executionEnd.durationMs === candidate.durationMs) return undefined;
+          && tool.executionEnd.durationMs === candidate.durationMs
+          && tool.executionEnd.durationClockDomain === candidate.durationClockDomain
+          && tool.executionEnd.endedAt === candidate.endedAt) return undefined;
         const seq = ++this.seq;
         return this.replaceWithRejected(seq, occurredAt, 'malformed_observation');
       }
@@ -410,6 +415,8 @@ export class BackendLiveTurnAccumulator {
           executionEnd: {
             status: candidate.status,
             durationMs: candidate.durationMs,
+            durationClockDomain: candidate.durationClockDomain,
+            endedAt: candidate.endedAt,
           },
         });
         this.turn = {
@@ -427,7 +434,9 @@ export class BackendLiveTurnAccumulator {
         if (tool.terminal) return this.replaceWithRejected(seq, occurredAt, 'malformed_observation');
         if (tool.executionEnd
           && (tool.executionEnd.status !== candidate.status
-            || tool.executionEnd.durationMs !== candidate.durationMs)) {
+            || tool.executionEnd.durationMs !== candidate.durationMs
+            || tool.executionEnd.durationClockDomain !== candidate.durationClockDomain
+            || tool.executionEnd.endedAt !== candidate.endedAt)) {
           return this.replaceWithRejected(seq, occurredAt, 'malformed_payload');
         }
         const boundedResult = normalizeLiveToolTerminalResult(tool.name, candidate.result);
@@ -451,6 +460,8 @@ export class BackendLiveTurnAccumulator {
             result: boundedResult,
             resultBytes,
             durationMs: candidate.durationMs,
+            durationClockDomain: candidate.durationClockDomain,
+            endedAt: candidate.endedAt,
             durableEntryId: candidate.durableEntryId,
           },
         });

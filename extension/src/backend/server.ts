@@ -2609,6 +2609,26 @@ export class BackendServer {
       );
       return { ...result, operationId: params.operationId, operationAttempt: params.operationAttempt };
     }
+    if (request.method === 'analytics.writerFence') {
+      onRequestValidated?.();
+      if (!router) {
+        throw new BackendError(
+          'WRITER_FENCE_ROUTING_UNAVAILABLE',
+          'Authenticated writer fencing requires isolated-runtime routing.',
+        );
+      }
+      const params = request.params && typeof request.params === 'object' && !Array.isArray(request.params)
+        ? request.params as { timeoutMs?: unknown }
+        : {};
+      const timeoutMs = params.timeoutMs === undefined
+        ? 2_000
+        : typeof params.timeoutMs === 'number' ? params.timeoutMs : Number.NaN;
+      if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 10_000) {
+        throw new BackendError('WRITER_FENCE_INVALID', 'Authenticated writer-fence timeout is invalid.');
+      }
+      await router.fenceSessionManagers(timeoutMs);
+      return { admissionRevoked: true, writersDrained: true, activeWriterCount: 0 };
+    }
     if (request.method === 'operation.status') {
       const params = validateOperationStatus(request.params);
       const interruptStatus = this.interruptOperationStatus(params.sessionPath, params.operationId);

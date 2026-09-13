@@ -61,6 +61,12 @@ import type {
 import { loadSdk, loadSdkInternalModule } from './sdk';
 import type { SdkPatchIdentity } from './sdk-patch-barrier';
 import type { SessionContext, SessionContextCreationReason, SessionPromptState } from './server-types';
+import {
+  createSessionManagerFence,
+  createSessionManagerFenceRegistry,
+  type MutableSdkSessionManager,
+  type SessionManagerFence,
+} from './session-manager-fence';
 import { ProviderGate } from './provider-gate';
 import { readSystemPromptTogglesForSession, writeSystemPromptTogglesForSession } from './session-settings-store';
 import {
@@ -148,6 +154,12 @@ const WORKER_IPC_LIFECYCLE_MESSAGE_BUDGET =
  * BackendServer: one host owns exactly one SDK runtime, SessionContext,
  * subscription, ExtensionUIBridge, live accumulator state, and command FIFO.
  */
+type SessionManagerFenceRecord = {
+  manager: MutableSdkSessionManager;
+  fence: SessionManagerFence;
+  unregister: () => void;
+};
+
 export class WorkerRuntimeHost {
   private sdk?: SdkModule;
   private context?: SessionContext;
@@ -191,6 +203,11 @@ export class WorkerRuntimeHost {
   private lifecycleSessionsRoot?: string;
   private analyticsTransport?: AnalyticsWorkerTransport;
   private disposalPromise?: Promise<AnalyticsTransportDisposalReport | undefined>;
+  /** Every SDK manager in this worker is admitted through this registry. It is
+   * revoked before runtime disposal so replacement/retired managers fail
+   * closed even if a late SDK callback still holds their object. */
+  private readonly sessionManagerFenceRegistry = createSessionManagerFenceRegistry();
+  private readonly sessionManagerFenceRecords = new WeakMap<object, SessionManagerFenceRecord>();
 
   constructor(private readonly options: WorkerRuntimeHostOptions) {
     this.detailStore = new WorkerLiveDetailStore({
@@ -246,6 +263,20 @@ export class WorkerRuntimeHost {
   }
 
   command(operation: WorkerRuntimeOperation, payload: WorkerJsonObject, publicRequestId: string): Promise<WorkerJsonValue> {
+    if (operation === 'session.managerFence') {
+      // This is a control-plane fence, not a session command. Revoke before
+      // joining the ordinary FIFO so a long provider command cannot keep new
+      // persistence mutations admissible while the authenticated host waits.
+      this.sessionManagerFenceRegistry.revoke();
+      const params = (payload.params && typeof payload.params === 'object' && !Array.isArray(payload.params))
+        ? payload.params
+        : payload;
+      const timeoutMs = typeof params.timeoutMs === 'number' ? params.timeoutMs : undefined;
+      return this.sessionManagerFenceRegistry.waitForIdle(timeoutMs).then((activeWriterCount) => {
+        if (activeWriterCount !== 0) throw new Error(`Session manager writers did not drain (${activeWriterCount} remain).`);
+        return asWorkerJson({ admissionRevoked: true, writersDrained: true, activeWriterCount: 0 });
+      });
+    }
     const owned = this.commandTail.then(async () => {
       if (!this.context || !this.sdk) throw new Error('Worker runtime is not promoted.');
       const params = (payload.params && typeof payload.params === 'object' && !Array.isArray(payload.params))
@@ -461,6 +492,10 @@ export class WorkerRuntimeHost {
 
   private async disposeOnce(): Promise<AnalyticsTransportDisposalReport | undefined> {
     this.disposed = true;
+    // Revoke every manager before any async shutdown work. The SDK lease
+    // revocation below remains the cross-process ownership boundary; this
+    // registry closes the in-process persistence boundary first.
+    this.sessionManagerFenceRegistry.revoke();
     this.gate.dispose();
     // Fence the process-global producer bridge before disposing the SDK. The
     // transport waits for already-admitted fact/detail writer callbacks and
@@ -588,12 +623,15 @@ export class WorkerRuntimeHost {
     // spellings before it delegates to the adapter (important on Windows 8.3
     // temp paths), so reopening the non-canonical grant alias would fail.
     const manager = this.sdk.SessionManager.open(this.currentLease.canonicalSessionPath);
+    const guardedManager = this.fenceSessionManager(manager);
     const runtime = await this.sdk.createAgentSessionRuntime(
-      createRuntimeFactory(this.sdk, authStorage, this.startupCwd, this.gate),
+      createRuntimeFactory(this.sdk, authStorage, this.startupCwd, this.gate, {
+        wrapSessionManager: (candidate) => this.fenceSessionManager(candidate),
+      }),
       {
-        cwd: manager.getCwd() || this.startupCwd,
+        cwd: guardedManager.getCwd() || this.startupCwd,
         agentDir: this.agentDir,
-        sessionManager: manager,
+        sessionManager: guardedManager,
         ownershipAdapter: this.createOwnershipAdapter(),
         writeLease: this.currentLease,
         sessionStartEvent: { type: 'session_start', reason: payload.creationReason },
@@ -640,7 +678,22 @@ export class WorkerRuntimeHost {
     const pendingExtensionCommandOwned = pendingExtensionCommand?.session === previousSession
       && pendingExtensionCommand.sessionPath === previousSessionPath
       && pendingExtensionCommand.sessionOwnershipEpoch === previousSessionOwnershipEpoch;
-    const sessionPath = session.sessionFile ?? session.sessionManager.getSessionFile();
+    const nextManager = this.fenceSessionManager(session.sessionManager);
+    const nextFence = this.sessionManagerFenceRecords.get(nextManager as object)?.fence;
+    if (!nextFence) throw new Error('Replacement session manager fence was not installed.');
+    const previousManager = previousSession.sessionManager;
+    const previousFence = context.sessionManagerFence;
+    if (previousFence && previousFence !== nextFence) {
+      // Revoke before changing the context binding. Late callbacks may retain
+      // the source manager even after the SDK has handed us its replacement.
+      previousFence.invalidate();
+      const unsettled = await previousFence.waitForIdle();
+      if (unsettled > 0) throw new Error('Retired session manager mutations did not drain.');
+      this.releaseSessionManagerFence(previousManager);
+    }
+    session.sessionManager = nextManager;
+    context.sessionManagerFence = nextFence;
+    const sessionPath = session.sessionFile ?? nextManager.getSessionFile();
     if (!sessionPath) throw new Error('Replacement session did not expose a path.');
     // A replacement can be initiated by an extension command before the SDK
     // emits agent_end/message_start. Close the source's busy window while its
@@ -974,7 +1027,10 @@ export class WorkerRuntimeHost {
         && active.retryTiming?.retryId === owner.retryId
         && active.retryTiming.providerAttemptStartedAt === undefined
         && (observation.kind === 'gate_queue' || observation.kind === 'gate_acquired')) {
+        // Stamp the wall anchor and its paired same-process monotonic sample
+        // together so the retry wait can be measured jump-safe.
         active.retryTiming.providerAttemptStartedAt = observation.occurredAt;
+        active.retryTiming.providerAttemptStartedMonotonicMs = performance.now();
       }
       if (observation.kind === 'gate_acquired'
         && typeof observation.queueDurationMs === 'number'
@@ -1275,22 +1331,48 @@ export class WorkerRuntimeHost {
     return { sessionPath: context.sessionPath, key: ref.key, status: 'loaded', value: found.value, sizeBytes: found.sizeBytes };
   }
 
+  private fenceSessionManager(manager: import('./sdk').SdkSessionManager): MutableSdkSessionManager {
+    const existing = this.sessionManagerFenceRecords.get(manager as object);
+    if (existing) return existing.manager;
+    const guarded = createSessionManagerFence(manager);
+    const record: SessionManagerFenceRecord = {
+      manager: guarded.manager,
+      fence: guarded.fence,
+      unregister: () => undefined,
+    };
+    record.unregister = this.sessionManagerFenceRegistry.register(record.fence);
+    this.sessionManagerFenceRecords.set(manager as object, record);
+    this.sessionManagerFenceRecords.set(record.manager as object, record);
+    return record.manager;
+  }
+
+  private releaseSessionManagerFence(manager: import('./sdk').SdkSessionManager): void {
+    const record = this.sessionManagerFenceRecords.get(manager as object);
+    if (!record) return;
+    record.unregister();
+    this.sessionManagerFenceRecords.delete(manager as object);
+    this.sessionManagerFenceRecords.delete(record.manager as object);
+  }
+
   private async createSessionContext(
     manager: import('./sdk').SdkSessionManager,
     reason: SessionContextCreationReason,
   ): Promise<SessionContext> {
     if (!this.sdk || !this.currentLease) throw new Error('Worker runtime is not promoted.');
-    const managerPath = manager.getSessionFile();
+    const guardedManager = this.fenceSessionManager(manager);
+    const managerPath = guardedManager.getSessionFile();
     if (!managerPath || !sameSessionPath(managerPath, this.currentLease.canonicalSessionPath)) {
       throw new Error('Runtime context manager does not match the current write lease.');
     }
     const authStorage = this.sdk.AuthStorage.create(this.syncedAuthPath ?? resolveAuthPath(this.agentDir));
     const runtime = await this.sdk.createAgentSessionRuntime(
-      createRuntimeFactory(this.sdk, authStorage, this.startupCwd, this.gate),
+      createRuntimeFactory(this.sdk, authStorage, this.startupCwd, this.gate, {
+        wrapSessionManager: (candidate) => this.fenceSessionManager(candidate),
+      }),
       {
-        cwd: manager.getCwd() || this.startupCwd,
+        cwd: guardedManager.getCwd() || this.startupCwd,
         agentDir: this.agentDir,
-        sessionManager: manager,
+        sessionManager: guardedManager,
         ownershipAdapter: this.createOwnershipAdapter(),
         writeLease: this.currentLease,
         sessionStartEvent: { type: 'session_start', reason },

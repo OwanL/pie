@@ -95,10 +95,20 @@ export interface SessionCrashReconciliation {
   fingerprints?: Readonly<Record<string, SdkSessionOwnershipFingerprint>>;
 }
 
+export interface SessionOwnershipAdmission {
+  /** Throw unless this owner may begin or continue a writer transition. */
+  assertAdmitted(): void;
+  /** Optional lease held across the complete filesystem mutation. */
+  acquire?(): () => void;
+}
+
 export interface SessionOwnershipAuthorityOptions {
   /** Shared coordinator cold authority. Replacement reservations fence the
    * exact same canonical paths used by cold browse/write commits. */
   coldLeaseAuthority?: ColdSessionLeaseAuthority;
+  /** Optional durable all-host admission gate. Recovery methods intentionally
+   * bypass it so an ambiguous worker can still be failed closed. */
+  writerAdmission?: SessionOwnershipAdmission;
 }
 
 interface ReservationFence {
@@ -169,10 +179,12 @@ export class SessionOwnershipAuthority {
   private readonly reservationFences = new Map<string, ReservationFence>();
   private readonly hotFences = new Map<string, HotFence>();
   private readonly coldLeaseAuthority?: ColdSessionLeaseAuthority;
+  private readonly writerAdmission?: SessionOwnershipAdmission;
   private transitionTail = Promise.resolve();
 
   constructor(options: SessionOwnershipAuthorityOptions = {}) {
     this.coldLeaseAuthority = options.coldLeaseAuthority;
+    this.writerAdmission = options.writerAdmission;
   }
 
   async canonicalize(sessionPath: string): Promise<{ canonicalPath: string; key: string }> {
@@ -231,6 +243,7 @@ export class SessionOwnershipAuthority {
     const canonical = await this.canonicalize(sessionPath);
     const fingerprint = await this.fingerprint(canonical.canonicalPath);
     return await this.exclusive(async () => {
+      this.assertWriterAdmitted();
       const existing = this.states.get(canonical.key);
       if (existing && existing.state !== 'cold') {
         throw new SessionOwnershipConflictError(`Session is not cold: ${canonical.canonicalPath}`);
@@ -265,6 +278,36 @@ export class SessionOwnershipAuthority {
         this.consumeTransfer(owner, authorization, canonicalDestinationPath)
       ),
       assertWriteLease: (lease, canonicalPath, seam) => this.assertWrite(owner, lease, canonicalPath, seam),
+      runWriteMutation: <T>(
+        lease: SdkSessionWriteLease,
+        canonicalPath: string,
+        seam: string,
+        _sessionId: string,
+        mutation: () => T,
+      ): T => {
+        const release = this.writerAdmission?.acquire?.();
+        if (release !== undefined && typeof release !== 'function') {
+          throw new Error('Session ownership admission did not return a release function.');
+        }
+        let released = false;
+        const finish = (): void => {
+          if (released) return;
+          released = true;
+          release?.();
+        };
+        try {
+          this.assertWrite(owner, lease, canonicalPath, seam);
+          const result = mutation();
+          if (result && typeof (result as { then?: unknown }).then === 'function') {
+            return Promise.resolve(result).finally(finish) as T;
+          }
+          finish();
+          return result;
+        } catch (error) {
+          finish();
+          throw error;
+        }
+      },
       runtimeReady: async (lease, canonicalPath) => {
         await this.completeRuntimeReady(owner, lease, canonicalPath);
       },
@@ -279,6 +322,7 @@ export class SessionOwnershipAuthority {
     const sourceCanonical = await this.canonicalize(intent.source.canonicalSessionPath);
     const destinationCanonical = await this.canonicalize(intent.destinationPath);
     return await this.exclusive(async () => {
+      this.assertWriterAdmitted();
       const destinationFingerprint = await this.fingerprint(destinationCanonical.canonicalPath);
       this.assertHotLease(owner, intent.source, sourceCanonical.key, 'reserveReplacement');
       const destinationState = this.states.get(destinationCanonical.key);
@@ -362,6 +406,7 @@ export class SessionOwnershipAuthority {
     sourceLease: SdkSessionWriteLease,
   ): Promise<SdkSessionTransferAuthorization> {
     return await this.exclusive(async () => {
+      this.assertWriterAdmitted();
       const destinationKey = this.reservations.get(reservation.reservationId);
       const destinationState = this.reservationRecords.get(reservation.reservationId);
       if (!destinationKey || !destinationState
@@ -436,6 +481,7 @@ export class SessionOwnershipAuthority {
     canonicalDestinationPath: string,
   ): Promise<SdkSessionWriteLease> {
     return await this.exclusive(async () => {
+      this.assertWriterAdmitted();
       const key = this.transferPaths.get(authorization.nonce);
       const state = key ? this.states.get(key) : undefined;
       if (!key || !state || state.state !== 'hot'
@@ -460,6 +506,7 @@ export class SessionOwnershipAuthority {
     canonicalPath: string,
     seam: string,
   ): void {
+    this.assertWriterAdmitted();
     const normalized = path.normalize(path.resolve(canonicalPath));
     const key = pathIdentity(normalized);
     const state = this.states.get(key);
@@ -477,6 +524,7 @@ export class SessionOwnershipAuthority {
     canonicalPath: string,
   ): Promise<void> {
     await this.exclusive(async () => {
+      this.assertWriterAdmitted();
       const normalized = path.normalize(path.resolve(canonicalPath));
       const key = pathIdentity(normalized);
       const destination = this.states.get(key);
@@ -620,6 +668,10 @@ export class SessionOwnershipAuthority {
     const canonical = await this.canonicalize(sessionPath);
     const state = this.states.get(canonical.key);
     return state ? cloneState(state) : undefined;
+  }
+
+  private assertWriterAdmitted(): void {
+    this.writerAdmission?.assertAdmitted();
   }
 
   private assertHotLease(

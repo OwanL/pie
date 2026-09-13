@@ -288,8 +288,21 @@ test('dispatchSessionBackendEvent routes correlated retry timing', () => {
     measuredDelayMs: 4_025,
     durationMs: 5_100,
   };
+  // Protocol guard: absent marker is the legacy wall-derived form, the explicit
+  // monotonic domain is accepted, and unknown domains are rejected.
   dispatchSessionBackendEvent({ event: 'retry.measured', payload }, handlers);
-  assert.deepEqual(calls, [{ name: 'retry.measured', payload }]);
+  dispatchSessionBackendEvent({
+    event: 'retry.measured',
+    payload: { ...payload, durationClockDomain: 'monotonic-same-process' },
+  }, handlers);
+  dispatchSessionBackendEvent({
+    event: 'retry.measured',
+    payload: { ...payload, durationClockDomain: 'wall-clock-utc' },
+  }, handlers);
+  assert.deepEqual(calls, [
+    { name: 'retry.measured', payload },
+    { name: 'retry.measured', payload: { ...payload, durationClockDomain: 'monotonic-same-process' } },
+  ]);
 });
 
 test('dispatchSessionBackendEvent routes operational-error payloads', () => {

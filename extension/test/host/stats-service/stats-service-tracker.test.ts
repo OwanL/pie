@@ -677,6 +677,36 @@ test('tool critical path is the union of execution intervals and missing timing 
   assert.equal(usage?.durationMsByName['(unknown)'], 20);
 });
 
+test('tool wall coverage unions staggered mixed-provenance intervals while additive work stays cumulative', () => {
+  const harness = createHarness();
+  harness.tracker.prepareForSend(harness.sessionPath, []);
+
+  const calls: ToolCall[] = [
+    {
+      id: 'parallel-a', name: 'mcp', input: {}, status: 'completed',
+      startedAt: 1_000, endedAt: 3_000, durationMs: 2_000,
+      durationClockDomain: 'monotonic-same-process', parallelGroupId: 'parallel',
+    },
+    {
+      id: 'parallel-b', name: 'bash', input: {}, status: 'completed',
+      startedAt: 1_500, endedAt: 4_500, durationMs: 3_000,
+      parallelGroupId: 'parallel',
+    },
+  ];
+  for (const call of calls) {
+    harness.tracker.onToolStarted(harness.sessionPath, { ...call, status: 'running' });
+    harness.tracker.onToolFinished(harness.sessionPath, call);
+  }
+
+  const usage = harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun?.toolUsage;
+  assert.equal(usage?.criticalPathDurationMs, 3_500,
+    'wall coverage uses the exact staggered interval union');
+  assert.equal(usage?.totalDurationMs, 5_000,
+    'valid measured durations remain additive per-call detail');
+  assert.equal(usage?.durationMsByName.mcp, 2_000);
+  assert.equal(usage?.durationMsByName.bash, 3_000);
+});
+
 test('assistant turn usage with NaN or negative values does not corrupt counters', () => {
   const harness = createHarness();
   harness.tracker.prepareForSend(harness.sessionPath, []);

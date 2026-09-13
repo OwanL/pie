@@ -15,7 +15,10 @@ import type {
   AnalyticsLifecycleDeletionAdapter,
   SessionLifecycleCleaner,
 } from './session-filesystem-lifecycle.js';
-import type { SessionLifecycleRecord, SessionLifecycleStore } from './session-lifecycle-store.js';
+import type {
+  SessionLifecycleRecord,
+  SessionLifecycleStore,
+} from './session-lifecycle-store.js';
 
 /** Authorization value that must be present for a cutoff to run.
  *
@@ -31,6 +34,7 @@ const MAX_DURABLE_RECORD_BYTES = 8 * 1024 * 1024;
 const STORAGE_CUTOFF_LOCK_FILENAME = '.storage-cutoff-operation-v1.lock';
 const STORAGE_CUTOFF_LOCK_TIMEOUT_MS = 5_000;
 const STORAGE_CUTOFF_LOCK_RETRY_MS = 25;
+const MAX_WRITER_FENCE_HOSTS = 512;
 
 interface StorageCutoffOperationLockOwner {
   readonly schemaVersion: 1;
@@ -52,6 +56,23 @@ export type StorageCutoffOutcome =
 
 type CutoffJournalStatus = 'in-progress' | 'partial' | 'complete';
 
+/** Evidence returned by the authenticated all-host handoff. Storage cutoff
+ * accepts this structural seam without importing host transport code. */
+export interface StorageCutoffWriterFenceReceipt {
+  readonly schemaVersion: 1;
+  readonly workspaceId: string;
+  readonly operationId: string;
+  readonly purpose: 'storage-cutoff';
+  readonly fenceEpoch: number;
+  readonly status: 'fenced';
+  readonly hostInstanceIds: readonly string[];
+  readonly acknowledgedHostInstanceIds: readonly string[];
+}
+
+export interface StorageCutoffWriterFence {
+  ensureFenced(operationId: string): Promise<StorageCutoffWriterFenceReceipt>;
+}
+
 /** The write-ahead record is owned by the lifecycle state directory. It is
  * deliberately one operation journal, rather than a second session registry. */
 export interface StorageCutoffJournal {
@@ -64,6 +85,7 @@ export interface StorageCutoffJournal {
   readonly updatedAt: string;
   readonly status: CutoffJournalStatus;
   readonly outcomes: Readonly<Record<string, StorageCutoffOutcome>>;
+  readonly writerFence?: StorageCutoffWriterFenceReceipt;
   readonly receiptSha256?: string;
 }
 
@@ -79,6 +101,7 @@ export interface StorageCutoffReceipt {
   /** Sessions whose private close deleted their data immediately. */
   readonly deletedSessionIds: readonly string[];
   readonly failures: ReadonlyArray<{ sessionId: string; error: string }>;
+  readonly writerFence?: StorageCutoffWriterFenceReceipt;
 }
 
 export interface StorageCutoffOptions {
@@ -97,6 +120,10 @@ export interface StorageCutoffOptions {
   /** The canonical analytics deletion adapter. Without it, private sessions
    * are rejected before any session is closed. */
   analytics?: AnalyticsLifecycleDeletionAdapter;
+  /** Required by the P7 storage-cutoff caller: admission must be revoked and
+   * every authenticated host must acknowledge before the first close. Kept
+   * optional for legacy unit callers that exercise only lifecycle mechanics. */
+  writerFence?: StorageCutoffWriterFence;
   now?: () => number;
   /** Test/recovery seam: called after each durable per-session outcome. */
   afterSession?: (sessionId: string, outcome: StorageCutoffOutcome) => void | Promise<void>;
@@ -269,6 +296,10 @@ function canonicalInventory(inventory: readonly string[]): string[] {
   return result;
 }
 
+function compareHostIds(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 function inventoryDigest(inventory: readonly string[]): string {
   return sha256(`${JSON.stringify(inventory)}\n`);
 }
@@ -284,6 +315,75 @@ function validateOutcome(value: unknown): StorageCutoffOutcome {
     return { status: 'failed', error: value.error };
   }
   throw new Error('Storage cutoff journal contains an invalid failed outcome.');
+}
+
+function validateWriterFenceReceipt(value: unknown): StorageCutoffWriterFenceReceipt {
+  if (!isRecord(value)
+    || value.schemaVersion !== 1
+    || typeof value.workspaceId !== 'string'
+    || typeof value.operationId !== 'string'
+    || value.purpose !== 'storage-cutoff'
+    || typeof value.fenceEpoch !== 'number'
+    || !Number.isSafeInteger(value.fenceEpoch)
+    || value.fenceEpoch <= 0
+    || value.status !== 'fenced'
+    || !Array.isArray(value.hostInstanceIds)
+    || !Array.isArray(value.acknowledgedHostInstanceIds)) {
+    throw new Error('Storage cutoff writer-fence evidence is malformed.');
+  }
+  assertSessionId(value.workspaceId, 'Storage cutoff writer-fence workspaceId');
+  assertSessionId(value.operationId, 'Storage cutoff writer-fence operationId');
+  const validateHostIds = (ids: unknown[], label: string): string[] => ids.map((id, index) => {
+    assertSessionId(id, `Storage cutoff writer-fence ${label}[${index}]`);
+    return id;
+  });
+  const hostInstanceIds = validateHostIds(value.hostInstanceIds, 'hostInstanceIds');
+  const acknowledgedHostInstanceIds = validateHostIds(value.acknowledgedHostInstanceIds, 'acknowledgedHostInstanceIds');
+  if (hostInstanceIds.length === 0
+    || hostInstanceIds.length > MAX_WRITER_FENCE_HOSTS
+    || acknowledgedHostInstanceIds.length > MAX_WRITER_FENCE_HOSTS
+    || new Set(hostInstanceIds).size !== hostInstanceIds.length
+    || new Set(acknowledgedHostInstanceIds).size !== acknowledgedHostInstanceIds.length
+    || JSON.stringify(hostInstanceIds) !== JSON.stringify([...hostInstanceIds].sort(compareHostIds))
+    || JSON.stringify(acknowledgedHostInstanceIds) !== JSON.stringify([...acknowledgedHostInstanceIds].sort(compareHostIds))
+    || JSON.stringify(hostInstanceIds) !== JSON.stringify(acknowledgedHostInstanceIds)) {
+    throw new Error('Storage cutoff writer-fence host evidence is incomplete or ambiguous.');
+  }
+  return {
+    schemaVersion: 1,
+    workspaceId: value.workspaceId,
+    operationId: value.operationId,
+    purpose: 'storage-cutoff',
+    fenceEpoch: value.fenceEpoch,
+    status: 'fenced',
+    hostInstanceIds,
+    acknowledgedHostInstanceIds,
+  };
+}
+
+function sameWriterFenceReceipt(
+  left: StorageCutoffWriterFenceReceipt | undefined,
+  right: StorageCutoffWriterFenceReceipt | undefined,
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function assertDurableWriterFenceReceipt(
+  store: SessionLifecycleStore,
+  receipt: StorageCutoffWriterFenceReceipt,
+): void {
+  const fence = store.getAnalyticsWriterFence(receipt.workspaceId);
+  if (!fence
+    || fence.state !== 'fenced'
+    || fence.operationId !== receipt.operationId
+    || fence.purpose !== 'storage-cutoff'
+    || fence.fenceEpoch !== receipt.fenceEpoch
+    || JSON.stringify(fence.expectedHosts.map((host) => host.hostInstanceId).sort(compareHostIds))
+      !== JSON.stringify(receipt.hostInstanceIds)
+    || JSON.stringify([...fence.acknowledgedHostInstanceIds].sort(compareHostIds))
+      !== JSON.stringify(receipt.acknowledgedHostInstanceIds)) {
+    throw new Error('Storage cutoff writer-fence evidence is not bound to a completed durable fence.');
+  }
 }
 
 function validateJournal(value: unknown): StorageCutoffJournal {
@@ -312,6 +412,7 @@ function validateJournal(value: unknown): StorageCutoffJournal {
   if (value.receiptSha256 !== undefined && typeof value.receiptSha256 !== 'string') {
     throw new Error('Storage cutoff journal receipt digest is malformed.');
   }
+  const writerFence = value.writerFence === undefined ? undefined : validateWriterFenceReceipt(value.writerFence);
   return {
     schemaVersion: 1,
     operationId: value.operationId,
@@ -322,6 +423,7 @@ function validateJournal(value: unknown): StorageCutoffJournal {
     updatedAt: value.updatedAt,
     status: value.status,
     outcomes,
+    ...(writerFence === undefined ? {} : { writerFence }),
     ...(value.receiptSha256 === undefined ? {} : { receiptSha256: value.receiptSha256 }),
   };
 }
@@ -348,6 +450,7 @@ function validateReceipt(value: unknown): StorageCutoffReceipt {
     if (typeof failure.error !== 'string') throw new Error(`Storage cutoff receipt failure ${index} error is malformed.`);
     return { sessionId: failure.sessionId, error: failure.error };
   });
+  const writerFence = value.writerFence === undefined ? undefined : validateWriterFenceReceipt(value.writerFence);
   return {
     schemaVersion: 1,
     operationId: value.operationId,
@@ -357,6 +460,7 @@ function validateReceipt(value: unknown): StorageCutoffReceipt {
     alreadyClosedSessionIds: validateIds(value.alreadyClosedSessionIds, 'Storage cutoff receipt alreadyClosedSessionIds'),
     deletedSessionIds: validateIds(value.deletedSessionIds, 'Storage cutoff receipt deletedSessionIds'),
     failures,
+    ...(writerFence === undefined ? {} : { writerFence }),
   };
 }
 
@@ -384,6 +488,7 @@ function buildReceipt(journal: StorageCutoffJournal, completedAt: string): Stora
     alreadyClosedSessionIds,
     deletedSessionIds,
     failures,
+    ...(journal.writerFence === undefined ? {} : { writerFence: journal.writerFence }),
   };
 }
 
@@ -402,6 +507,19 @@ function assertJournalBinding(
   if (journal.inventorySha256 !== inventoryDigest(inventory)
     || JSON.stringify(journal.inventory) !== JSON.stringify(inventory)) {
     throw new Error('Storage cutoff inventory does not match the frozen write-ahead journal.');
+  }
+}
+
+function assertWriterFenceBinding(
+  journal: StorageCutoffJournal,
+  writerFence: StorageCutoffWriterFenceReceipt | undefined,
+): void {
+  if (writerFence !== undefined
+    && (writerFence.operationId !== journal.operationId || writerFence.purpose !== 'storage-cutoff')) {
+    throw new Error('Storage cutoff writer-fence evidence does not match the cutoff operation.');
+  }
+  if (!sameWriterFenceReceipt(journal.writerFence, writerFence)) {
+    throw new Error('Storage cutoff writer-fence evidence does not match the frozen journal.');
   }
 }
 
@@ -489,6 +607,7 @@ function validateStorageCutoffOptions(options: StorageCutoffOptions): string[] {
 async function performStorageCutoffUnlocked(
   options: StorageCutoffOptions,
   inventory: readonly string[],
+  writerFence: StorageCutoffWriterFenceReceipt | undefined,
 ): Promise<StorageCutoffReceipt> {
   if (options.analytics !== undefined && options.cleaner.analyticsDeletionAdapter !== options.analytics) {
     throw new Error('Storage cutoff analytics deletion adapter is not bound to the cleaner; refusing cutoff.');
@@ -506,6 +625,7 @@ async function performStorageCutoffUnlocked(
   if (existingJournalValue !== undefined) {
     journal = validateJournal(existingJournalValue);
     assertJournalBinding(journal, options.operationId, inventory);
+    assertWriterFenceBinding(journal, writerFence);
     if (journal.status === 'complete') {
       if (!existingReceipt) throw new Error('Completed storage cutoff journal has no matching receipt.');
       const expected = buildReceipt(journal, existingReceipt.completedAt);
@@ -546,6 +666,7 @@ async function performStorageCutoffUnlocked(
       updatedAt: startedAt,
       status: 'in-progress',
       outcomes: {},
+      ...(writerFence === undefined ? {} : { writerFence }),
     };
     // This is the write-ahead boundary. No cleaner call occurs before it.
     await writeJournal(options.stateDir, journal);
@@ -672,7 +793,19 @@ export async function performStorageCutoff(options: StorageCutoffOptions): Promi
   const inventory = validateStorageCutoffOptions(options);
   const operationLock = await acquireStorageCutoffOperationLock(options.stateDir, options.operationId);
   try {
-    return await performStorageCutoffUnlocked(options, inventory);
+    // This is deliberately before the write-ahead journal and every cleaner
+    // call: a cutoff may only close sessions after authenticated all-host
+    // admission has been revoked and acknowledged.
+    const writerFence = options.writerFence === undefined
+      ? undefined
+      : validateWriterFenceReceipt(await options.writerFence.ensureFenced(options.operationId));
+    if (writerFence) {
+      if (writerFence.operationId !== options.operationId) {
+        throw new Error('Storage cutoff writer-fence operation does not match the cutoff operation.');
+      }
+      assertDurableWriterFenceReceipt(options.store, writerFence);
+    }
+    return await performStorageCutoffUnlocked(options, inventory, writerFence);
   } finally {
     operationLock.release();
   }

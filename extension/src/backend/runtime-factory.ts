@@ -16,6 +16,11 @@ interface RuntimeFactoryArgs {
   sessionStartEvent?: SdkSessionEvent;
 }
 
+export interface RuntimeFactoryOptions {
+  /** Wrap every manager received from the SDK, including replacements. */
+  wrapSessionManager?: (manager: SdkSessionManager) => SdkSessionManager;
+}
+
 /** Thrown by `ServiceLoadingGate` for work queued after (or refused during)
  *  server disposal. Distinct class so tests and callers can identify the
  *  shutdown path without string-matching. */
@@ -108,10 +113,12 @@ export function createRuntimeFactory(
   authStorage: unknown,
   _startupCwd: string,
   gate: ServiceLoadingGate,
+  options: RuntimeFactoryOptions = {},
 ) {
   return async ({ cwd, agentDir, sessionManager, sessionStartEvent }: RuntimeFactoryArgs) => {
+    const guardedSessionManager = options.wrapSessionManager?.(sessionManager) ?? sessionManager;
     const startedAt = performance.now();
-    const session = sessionManager.getSessionFile?.();
+    const session = guardedSessionManager.getSessionFile?.();
     // Inclusive aggregate span: covers the FIFO gate wait plus the opaque
     // `createAgentSessionServices` call. The SDK exposes no seam that separates
     // extension loading from service loading, so no finer extension phase is
@@ -205,7 +212,7 @@ export function createRuntimeFactory(
       kind: 'success',
       phase: 'service_loading',
       durationMs: Math.max(0, servicesReadyAt - startedAt),
-      identifiers: { session: sessionManager.getSessionFile?.() },
+      identifiers: { session: guardedSessionManager.getSessionFile?.() },
       processRole: 'coordinator',
       pid: process.pid,
     });
@@ -226,7 +233,7 @@ export function createRuntimeFactory(
     try {
       created = (await sdk.createAgentSessionFromServices({
         services,
-        sessionManager,
+        sessionManager: guardedSessionManager,
         sessionStartEvent,
       })) as Record<string, unknown>;
     } catch (error) {

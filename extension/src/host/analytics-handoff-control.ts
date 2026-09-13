@@ -20,6 +20,15 @@ import {
   SessionLifecycleStore,
   type AnalyticsHostRecord,
 } from '../backend/session-lifecycle-store.js';
+import {
+  assertFreshAnalyticsWriterFenceRequest,
+  createSignedAnalyticsWriterFenceAcknowledgement,
+  createSignedAnalyticsWriterFenceError,
+  isAnalyticsWriterFenceRequest,
+  verifyAnalyticsWriterFenceRequest,
+  type AnalyticsHostWriterFenceHandler,
+  type AnalyticsWriterFenceResponse,
+} from './analytics-all-host-handoff.js';
 
 export interface AnalyticsHandoffControlOptions {
   registry: SessionLifecycleStore;
@@ -33,6 +42,9 @@ export interface AnalyticsHandoffControlOptions {
   readInventory?: () => Promise<AnalyticsHandoffInventoryProof>;
   /** Test/diagnostic bound; production remains below the socket idle bound. */
   inventoryReadTimeoutMs?: number;
+  /** Optional authenticated all-host writer-fence handler. Registration alone
+   * never advertises this capability. */
+  writerFence?: AnalyticsHostWriterFenceHandler;
   onError?: (error: Error, stage: string) => void;
 }
 
@@ -128,7 +140,11 @@ export class AnalyticsHandoffControl {
       if (this.stopping) return;
       this.options.registry.registerAnalyticsHost({
         ...this.options.identity,
-        capabilities: [...this.options.identity.capabilities, 'authenticated-control'],
+        capabilities: [
+          ...this.options.identity.capabilities.filter((capability) => capability !== 'writer-fence'),
+          'authenticated-control',
+          ...(this.options.writerFence ? ['writer-fence'] : []),
+        ],
         endpointName: this.pipeName,
         state: 'registered',
         registeredAtMs: this.now().toString(),
@@ -208,7 +224,9 @@ export class AnalyticsHandoffControl {
     try {
       this.options.registry.registerAnalyticsHost({
         ...this.options.identity,
-        capabilities: [...this.options.identity.capabilities],
+        capabilities: this.options.identity.capabilities.filter(
+          (capability) => capability !== 'authenticated-control' && capability !== 'writer-fence',
+        ),
         state: 'unsupported',
         registeredAtMs: this.now().toString(),
         unsupportedReason: reason,
@@ -290,32 +308,54 @@ export class AnalyticsHandoffControl {
     socket.on('error', () => undefined);
   }
 
+  private claimNonce(nonce: string, expiresAtMs: number, now: number): void {
+    for (const [oldNonce, oldExpiresAtMs] of this.seenNonces) {
+      if (oldExpiresAtMs < now) this.seenNonces.delete(oldNonce);
+    }
+    if (this.seenNonces.has(nonce)) throw new Error('handoff request nonce was replayed.');
+    if (this.seenNonces.size >= ANALYTICS_HANDOFF_MAX_NONCE_COUNT) {
+      throw new Error('handoff nonce capacity is exhausted; retry after expiry.');
+    }
+    this.seenNonces.set(nonce, expiresAtMs);
+  }
+
   private async handleFrame(frame: string, socket: Socket): Promise<void> {
     let requestId = 'invalid';
-    let response: AnalyticsHandoffControlResponse;
+    let allHostFrame = false;
+    let response: AnalyticsHandoffControlResponse | AnalyticsWriterFenceResponse;
     try {
       const raw = JSON.parse(frame) as unknown;
       if (isRecord(raw)) requestId = safeRequestId(raw.requestId);
+      allHostFrame = isAnalyticsWriterFenceRequest(raw);
       if (!this.key) throw new Error('handoff endpoint is unavailable');
-      const request = verifyAnalyticsHandoffRequest(raw, this.key);
       const now = this.now();
-      assertFreshAnalyticsHandoffRequest(request, now);
-      for (const [nonce, expiresAtMs] of this.seenNonces) {
-        if (expiresAtMs < now) this.seenNonces.delete(nonce);
+      if (allHostFrame) {
+        const request = verifyAnalyticsWriterFenceRequest(raw, this.key);
+        assertFreshAnalyticsWriterFenceRequest(request, now);
+        this.claimNonce(request.nonce, request.expiresAtMs, now);
+        if (!this.options.writerFence) throw new Error('authenticated writer-fence handler is unavailable.');
+        const acknowledgement = await this.options.writerFence.freeze(request);
+        response = createSignedAnalyticsWriterFenceAcknowledgement(
+          request,
+          this.options.identity,
+          acknowledgement,
+          this.key,
+        );
+      } else {
+        const request = verifyAnalyticsHandoffRequest(raw, this.key);
+        assertFreshAnalyticsHandoffRequest(request, now);
+        this.claimNonce(request.nonce, request.expiresAtMs, now);
+        const result = await this.handleRequest(request);
+        response = createSignedAnalyticsHandoffResponse(request.requestId, this.key, { ok: true, result });
       }
-      if (this.seenNonces.has(request.nonce)) throw new Error('handoff request nonce was replayed.');
-      if (this.seenNonces.size >= ANALYTICS_HANDOFF_MAX_NONCE_COUNT) {
-        throw new Error('handoff nonce capacity is exhausted; retry after expiry.');
-      }
-      this.seenNonces.set(request.nonce, request.expiresAtMs);
-      const result = await this.handleRequest(request);
-      response = createSignedAnalyticsHandoffResponse(request.requestId, this.key, { ok: true, result });
     } catch (error) {
       try {
-        response = createSignedAnalyticsHandoffResponse(safeRequestId(requestId), this.key ?? 'unavailable', {
-          ok: false,
-          error: safeError(error),
-        });
+        response = allHostFrame
+          ? createSignedAnalyticsWriterFenceError(safeRequestId(requestId), safeError(error), this.key ?? 'unavailable')
+          : createSignedAnalyticsHandoffResponse(safeRequestId(requestId), this.key ?? 'unavailable', {
+            ok: false,
+            error: safeError(error),
+          });
       } catch (responseError) {
         this.options.onError?.(normalizeError(responseError), 'response');
         return;

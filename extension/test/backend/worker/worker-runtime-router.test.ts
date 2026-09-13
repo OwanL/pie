@@ -40,6 +40,12 @@ test('worker router promotion is single-flight and runtime.ready precedes the in
           error: { code: 'OPERATION_INTENT_MISMATCH', message: 'operation intent changed', retryable: false },
         };
       }
+      if (body.operation === 'session.managerFence') {
+        assert.deepEqual(body.payload, { publicRequestId: 'writer-fence', params: { timeoutMs: 2_000 } });
+        return { kind: 'response', requestId: 'x', ok: true, result: {
+          kind: 'runtime.command', payload: { admissionRevoked: true, writersDrained: true, activeWriterCount: 0 },
+        } };
+      }
       if (body.operation === 'session.duplicateHot') {
         assert.equal(body.payload.publicRequestId, 'duplicate-public-request');
         return { kind: 'response', requestId: 'x', ok: true, result: {
@@ -133,6 +139,11 @@ test('worker router promotion is single-flight and runtime.ready precedes the in
     (error: unknown) => error instanceof BackendError && error.code === 'SESSION_OPERATION_CANCELLED',
   );
   assert.equal(router.getRoute(sessionPath).state, 'cold');
+  await router.fenceSessionManagers();
+  await assert.rejects(
+    router.promote(sessionPath),
+    (error: unknown) => error instanceof BackendError && error.code === 'WRITER_FENCE_REVOKED',
+  );
 });
 
 test('failed promotion preserves the exact durable path and new-session reason for retry', async () => {

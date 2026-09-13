@@ -76,6 +76,7 @@ import {
 import { HostAnalyticsTransport } from './analytics-transport.js';
 import type { AnalyticsDetailCapture, AnalyticsObservation } from '../../../shared/analytics/contracts.js';
 import { AnalyticsHandoffControl } from './analytics-handoff-control.js';
+import { createAnalyticsHostWriterFence } from './analytics-all-host-handoff.js';
 import {
   discoverAnalyticsHostWriters,
   type RuntimeGenerationIdentity,
@@ -207,6 +208,9 @@ export class PieExtension implements vscode.Disposable {
     const analyticsProcessGeneration = crypto.randomUUID();
     let analyticsRuntime: AnalyticsRuntimePort;
     let analyticsTransport: HostAnalyticsTransport | undefined;
+    let backendWriterFenceStarted = false;
+    let backendWriterFenceComplete = false;
+    let backendWriterFencePromise: Promise<void> | undefined;
     let analyticsHandoffRegistry: SessionLifecycleStore | undefined;
     let analyticsHandoffControl: AnalyticsHandoffControl | undefined;
     let statsService: StatsServicePort;
@@ -237,16 +241,46 @@ export class PieExtension implements vscode.Disposable {
       const activeAnalyticsGenerationId = activation.authority === 'canonical'
         ? activation.manifest?.activeGeneration?.identity.generationId
         : undefined;
+      const analyticsHostIdentity = {
+        hostInstanceId: analyticsProcessGeneration,
+        workspaceId: analyticsWorkspaceId,
+        generationId: analyticsProcessGeneration,
+        buildId: PIE_BUILD_ID,
+        processId: process.pid,
+        capabilities: ['host-discovery', 'host-status'] as const,
+      };
+      const analyticsWriterFence = createAnalyticsHostWriterFence({
+        identity: analyticsHostIdentity,
+        activeWriterCount: () => (backendWriterFenceStarted && !backendWriterFenceComplete ? 1 : 0),
+        revokeAdmission: (request) => {
+          if (backendWriterFenceStarted) return;
+          backendWriterFenceStarted = true;
+          backendWriterFencePromise = backend.request('analytics.writerFence', {
+            workspaceId: request.workspaceId,
+            operationId: request.operationId,
+            purpose: request.purpose,
+            fenceEpoch: request.fenceEpoch,
+            timeoutMs: 9_000,
+          }, { timeoutMs: 9_000 }).then((result: unknown) => {
+            if (!result || typeof result !== 'object' || Array.isArray(result)
+              || (result as { admissionRevoked?: unknown }).admissionRevoked !== true
+              || (result as { writersDrained?: unknown }).writersDrained !== true
+              || (result as { activeWriterCount?: unknown }).activeWriterCount !== 0) {
+              throw new Error('Backend returned an invalid authenticated writer-fence acknowledgement.');
+            }
+            backendWriterFenceComplete = true;
+          });
+        },
+        isAdmissionRevoked: () => backendWriterFenceStarted && backendWriterFenceComplete,
+        waitForIdle: async () => {
+          if (backendWriterFencePromise) await backendWriterFencePromise;
+          return 0;
+        },
+      });
       analyticsHandoffControl = new AnalyticsHandoffControl({
         registry: analyticsHandoffRegistry,
-        identity: {
-          hostInstanceId: analyticsProcessGeneration,
-          workspaceId: analyticsWorkspaceId,
-          generationId: analyticsProcessGeneration,
-          buildId: PIE_BUILD_ID,
-          processId: process.pid,
-          capabilities: ['host-discovery', 'host-status'],
-        },
+        identity: analyticsHostIdentity,
+        writerFence: analyticsWriterFence,
         key: analyticsHandoffKey,
         readInventory: async () => {
           if (!runtimeIdentity) {

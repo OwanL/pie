@@ -28,6 +28,15 @@ test('activity capture retains missing and reversed source bounds without fabric
       { startedAt: '1970-01-01T00:00:02Z', endedAt: '1970-01-01T00:00:01Z' },
       { startedAt: '1970-01-01T00:00:00Z', endedAt: '1970-01-01T00:00:00Z' },
       { startedAt: '1970-01-01T00:00:00Z' },
+      { startedAt: '1970-01-01T00:00:01Z', durationMs: 7 },
+      {
+        startedAt: '1970-01-01T00:00:02Z', endedAt: '1970-01-01T00:00:01Z',
+        durationMs: 7, durationClockDomain: 'monotonic-same-process' as const,
+      },
+      {
+        startedAt: '1970-01-01T00:00:02Z', durationMs: 7,
+        durationClockDomain: 'monotonic-same-process' as const,
+      },
     ];
     for (const [index, times] of cases.entries()) {
       const interval = {
@@ -50,6 +59,9 @@ test('activity capture retains missing and reversed source bounds without fabric
       ['2000', '1000', null, 'unknown'],
       ['0', '0', 0, 'observed'],
       ['0', null, null, 'observed'],
+      ['1000', '1007', 7, 'observed'],
+      ['2000', '1000', 7, 'observed'],
+      ['2000', null, 7, 'observed'],
     ]);
   } finally {
     recorder.close();
@@ -90,6 +102,123 @@ test('provider capture keeps unavailable source dates undated and preserves a re
     assert.equal(settlements.length, 3, 'undated usage remains in durable accounting');
     assert.deepEqual(settlements.map((row) => row.settledAtMs), [null, null, 0]);
     assert.equal(settlements.reduce((sum, row) => sum + (row.effectiveCostUsd ?? 0), 0), 0.75);
+  } finally {
+    recorder.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('retry timing separates monotonic measured durations from wall-derived evidence', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'pie-retry-timing-'));
+  const recorder = new SqliteAnalyticsRecorder(path.join(root, 'analytics.sqlite'));
+  const observations: AnalyticsObservation<object>[] = [];
+  const errors: Error[] = [];
+  const capture = new CanonicalAnalyticsCapture({
+    authority: 'canonical', generationId: 'retry-timing-generation',
+    workspaceId: 'workspace', buildId: 'build', processGeneration: 'process',
+    sink: { submit: (observation) => { observations.push(observation); recorder.submit(observation); } },
+    detailSink: { submitDetail: () => undefined },
+    lifecycleSink: { bindPendingCreate: async () => undefined, deleteSession: async () => undefined },
+    onCaptureError: (error) => errors.push(error),
+  });
+  const spanByKind = (pair: number, kind: 'retry_wait' | 'retry_episode') => {
+    const spans = observations.filter((entry) => entry.entityKind === 'activitySpan'
+      && (entry.fields as { kind?: string }).kind === kind);
+    return spans[pair]!.fields as {
+      startedAtMs: unknown; endedAtMs: unknown; durationMs: unknown;
+      clockDomain: unknown; coverage: unknown;
+    };
+  };
+  try {
+    const context = { sessionId: 'session', sessionPath: '/session', operationId: 'operation' };
+    // Monotonic-measured durations stay observed even when their wall bounds
+    // reversed across a clock jump; the span names the measured duration's
+    // domain while the bounds remain wall-clock-utc correlation anchors.
+    assert.equal(capture.captureRetryTiming(context, 'request-1:1', {
+      startedAt: 3_000, providerAttemptStartedAt: 2_000, endedAt: 1_000,
+      measuredDelayMs: 500, durationMs: 2_500,
+      durationClockDomain: 'monotonic-same-process',
+    }), 'submitted');
+    // Missing wall bounds entirely; the measured durations are the evidence.
+    assert.equal(capture.captureRetryTiming(context, 'request-1:2', {
+      measuredDelayMs: 120, durationMs: 800,
+      durationClockDomain: 'monotonic-same-process',
+    }), 'submitted');
+    // A genuine monotonic zero is a real sub-millisecond measurement.
+    assert.equal(capture.captureRetryTiming(context, 'request-1:3', {
+      measuredDelayMs: 0, durationMs: 0,
+      durationClockDomain: 'monotonic-same-process',
+    }), 'submitted');
+    // Nonfinite or negative measured values stay unknown even when marked.
+    assert.equal(capture.captureRetryTiming(context, 'request-1:4', {
+      startedAt: 1_000, endedAt: 1_500, measuredDelayMs: Number.NaN, durationMs: -5,
+      durationClockDomain: 'monotonic-same-process',
+    }), 'submitted');
+    // Unmarked wall-derived durations inherit the wall bounds' failure modes:
+    // a producer clamp of reversed wall endpoints is never promoted, and a
+    // finite duration against reversed bounds is unknown, not observed.
+    assert.equal(capture.captureRetryTiming(context, 'request-2:1', {
+      startedAt: 3_000, providerAttemptStartedAt: 2_000, endedAt: 1_000,
+      measuredDelayMs: 0, durationMs: 0,
+    }), 'submitted');
+    // Valid preexisting wall payloads remain truthful with ordered bounds.
+    assert.equal(capture.captureRetryTiming(context, 'request-2:2', {
+      startedAt: 1_000, providerAttemptStartedAt: 1_200, endedAt: 1_500,
+      measuredDelayMs: 200, durationMs: 500,
+    }), 'submitted');
+    // A wait stays absent until dispatch; an episode duration never fills it.
+    assert.equal(capture.captureRetryTiming(context, 'request-2:3', {
+      startedAt: 1_000, endedAt: 1_500, durationMs: 500,
+    }), 'submitted');
+    // Exact redelivery stays idempotent.
+    assert.equal(capture.captureRetryTiming(context, 'request-1:1', {
+      startedAt: 3_000, providerAttemptStartedAt: 2_000, endedAt: 1_000,
+      measuredDelayMs: 500, durationMs: 2_500,
+      durationClockDomain: 'monotonic-same-process',
+    }), 'submitted');
+    assert.deepEqual(errors, []);
+    assert.deepEqual([
+      spanByKind(0, 'retry_wait'), spanByKind(0, 'retry_episode'),
+    ].map(({ startedAtMs, endedAtMs, durationMs, clockDomain, coverage }) => (
+      { startedAtMs, endedAtMs, durationMs, clockDomain, coverage }
+    )), [
+      { startedAtMs: 3_000, endedAtMs: 2_000, durationMs: 500, clockDomain: 'monotonic-same-process', coverage: 'observed' },
+      { startedAtMs: 3_000, endedAtMs: 1_000, durationMs: 2_500, clockDomain: 'monotonic-same-process', coverage: 'observed' },
+    ]);
+    assert.deepEqual([
+      spanByKind(1, 'retry_wait'), spanByKind(1, 'retry_episode'),
+    ].map(({ startedAtMs, endedAtMs, durationMs, clockDomain, coverage }) => (
+      { startedAtMs, endedAtMs, durationMs, clockDomain, coverage }
+    )), [
+      { startedAtMs: null, endedAtMs: null, durationMs: 120, clockDomain: 'monotonic-same-process', coverage: 'observed' },
+      { startedAtMs: null, endedAtMs: null, durationMs: 800, clockDomain: 'monotonic-same-process', coverage: 'observed' },
+    ]);
+    assert.deepEqual([spanByKind(2, 'retry_wait'), spanByKind(2, 'retry_episode')].map((span) => [
+      span.durationMs, span.clockDomain, span.coverage,
+    ]), [[0, 'monotonic-same-process', 'observed'], [0, 'monotonic-same-process', 'observed']]);
+    assert.deepEqual([spanByKind(3, 'retry_wait'), spanByKind(3, 'retry_episode')].map((span) => [
+      span.durationMs, span.clockDomain, span.coverage,
+    ]), [[null, 'wall-clock-utc', 'unknown'], [null, 'wall-clock-utc', 'unknown']]);
+    assert.deepEqual([spanByKind(4, 'retry_wait'), spanByKind(4, 'retry_episode')].map((span) => [
+      span.durationMs, span.clockDomain, span.coverage,
+    ]), [[null, 'wall-clock-utc', 'unknown'], [null, 'wall-clock-utc', 'unknown']]);
+    const preservedWait = spanByKind(5, 'retry_wait');
+    assert.deepEqual([preservedWait.startedAtMs, preservedWait.endedAtMs, preservedWait.durationMs,
+      preservedWait.clockDomain, preservedWait.coverage], [1_000, 1_200, 200, 'wall-clock-utc', 'observed']);
+    const preservedEpisode = spanByKind(5, 'retry_episode');
+    assert.deepEqual([preservedEpisode.startedAtMs, preservedEpisode.endedAtMs, preservedEpisode.durationMs,
+      preservedEpisode.clockDomain, preservedEpisode.coverage], [1_000, 1_500, 500, 'wall-clock-utc', 'observed']);
+    const dispatchWait = spanByKind(6, 'retry_wait');
+    assert.deepEqual([dispatchWait.durationMs, dispatchWait.endedAtMs, dispatchWait.clockDomain,
+      dispatchWait.coverage], [null, null, 'wall-clock-utc', 'unknown']);
+    const dispatchEpisode = spanByKind(6, 'retry_episode');
+    assert.deepEqual([dispatchEpisode.startedAtMs, dispatchEpisode.endedAtMs, dispatchEpisode.durationMs,
+      dispatchEpisode.coverage], [1_000, 1_500, 500, 'observed']);
+    const spans = observations.filter((entry) => entry.entityKind === 'activitySpan');
+    assert.equal(new Set(spans.map((span) => span.entityKey)).size, 14,
+      'each measured pair stays a distinct wait/episode identity');
+    assert.equal(spans.length, 16, 'redelivery re-emits into the sink while identities stay stable');
+    assert.equal(recorder.getStats().duplicates, 2, 'exact redelivery is a no-op, not a conflict');
   } finally {
     recorder.close();
     rmSync(root, { recursive: true, force: true });

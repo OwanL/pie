@@ -178,8 +178,16 @@ export function upsertAssistantToolCall(message: ChatMessage, toolCall: ToolCall
       mergedToolCall.startedAt = nextToolCall.startedAt;
     }
 
+    if (nextToolCall.endedAt !== undefined) {
+      mergedToolCall.endedAt = nextToolCall.endedAt;
+    }
+
     if (nextToolCall.durationMs !== undefined) {
       mergedToolCall.durationMs = nextToolCall.durationMs;
+    }
+
+    if (nextToolCall.durationClockDomain !== undefined) {
+      mergedToolCall.durationClockDomain = nextToolCall.durationClockDomain;
     }
 
     if (nextToolCall.parallelGroupId !== undefined) {
@@ -273,6 +281,15 @@ export function mergeAssistantToolCallsPreservingResolvedState(
     const mergedDurationMs = currentToolCall.durationMs ?? previousToolCall.durationMs;
     if (mergedDurationMs !== undefined) {
       mergedToolCall.durationMs = mergedDurationMs;
+    }
+    const mergedEndedAt = currentToolCall.endedAt ?? previousToolCall.endedAt;
+    if (mergedEndedAt !== undefined) {
+      mergedToolCall.endedAt = mergedEndedAt;
+    }
+    const mergedDurationClockDomain = currentToolCall.durationClockDomain
+      ?? previousToolCall.durationClockDomain;
+    if (mergedDurationClockDomain !== undefined) {
+      mergedToolCall.durationClockDomain = mergedDurationClockDomain;
     }
     // The backend-built replacement (currentToolCall) doesn't carry the
     // host-assigned parallelGroupId, so carry it forward from the previous

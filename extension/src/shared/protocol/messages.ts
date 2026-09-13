@@ -1,5 +1,6 @@
 import type { ThinkingLevel, AssistantUsage } from './models.js';
 import type { PruningDetails } from './settings.js';
+import type { DurationClockDomain } from '../timing.js';
 
 export type LazyDetailKind = 'tool-result' | 'reasoning';
 
@@ -57,8 +58,12 @@ export interface ToolCall {
   status: ToolCallStatus;
   /** Epoch milliseconds when the backend began executing this tool call. */
   startedAt?: number;
-  /** Wall-clock execution time in milliseconds, set when the call resolves. */
+  /** Epoch milliseconds sampled at the authoritative execution terminal. */
+  endedAt?: number;
+  /** Execution duration measured by the producer. */
   durationMs?: number;
+  /** Clock provenance of durationMs; absent retains legacy wall-clock timing. */
+  durationClockDomain?: DurationClockDomain;
   /**
    * Identifier of the parallel batch this tool call belongs to. Every tool
    * call is stamped with a batch id when it starts: it either joins the batch

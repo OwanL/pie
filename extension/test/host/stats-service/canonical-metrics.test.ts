@@ -238,3 +238,322 @@ test('StatsService gives repeated busy cycles distinct canonical spans and keeps
     }
   });
 });
+
+test('StatsService forwards tool timing provenance and keeps missing terminal time unknown', async () => {
+  await withTempDir(async (root) => {
+    const sessionPath = '/workspace/tool-metrics-session.jsonl';
+    const state = createInitialArchState();
+    state.sessions.sessions = [{
+      path: sessionPath,
+      sessionId: 'session-tool-metrics',
+      name: 'Tool metrics',
+      cwd: '/workspace',
+      modifiedAt: '2026-09-13T00:00:00.000Z',
+      messageCount: 0,
+      modelId: 'fixture-model',
+      provider: 'fixture-provider',
+    }];
+    const observations: AnalyticsObservation<object>[] = [];
+    const capture = createCapture(observations);
+    const stats = new StatsService({
+      dataOutcomesRootPath: path.join(root, 'outcomes'),
+      legacyUsageDataRootPath: root,
+      workspaceId: 'workspace-metrics',
+      getArchState: () => state,
+      now: () => new Date('2026-09-13T00:00:10.000Z'),
+      createId: (() => {
+        let id = 0;
+        return () => `tool-id-${++id}`;
+      })(),
+      analyticsCapture: capture,
+    });
+    try {
+      stats.prepareForSend(sessionPath, []);
+      stats.onToolStarted(sessionPath, {
+        id: 'tool-monotonic', name: 'fixture', input: {}, status: 'running', startedAt: 2_000,
+      });
+      stats.onToolFinished(sessionPath, {
+        id: 'tool-monotonic', name: 'fixture', input: {}, status: 'completed',
+        startedAt: 2_000, endedAt: 1_000, durationMs: 45,
+        durationClockDomain: 'monotonic-same-process',
+      });
+
+      const monotonicActivity = observations.find((entry) => (
+        entry.entityKind === 'activitySpan'
+        && entry.observationKind === 'end'
+        && (entry.fields as { durationMs?: unknown }).durationMs === 45
+      ));
+      assert.ok(monotonicActivity);
+      const monotonicFields = monotonicActivity.fields as {
+        startedAtMs: unknown; endedAtMs: unknown; durationMs: unknown;
+        clockDomain: unknown; coverage: unknown;
+      };
+      assert.deepEqual([
+        monotonicFields.startedAtMs,
+        monotonicFields.endedAtMs,
+        monotonicFields.durationMs,
+        monotonicFields.clockDomain,
+        monotonicFields.coverage,
+      ], [2_000, 1_000, 45, 'monotonic-same-process', 'observed']);
+      const monotonicTool = observations.find((entry) => (
+        entry.entityKind === 'toolCall'
+        && entry.observationKind === 'end'
+        && (entry.fields as { startedAtMs?: unknown }).startedAtMs === 2_000
+      ));
+      assert.ok(monotonicTool);
+      assert.equal((monotonicTool.fields as { executionEndedAtMs: unknown }).executionEndedAtMs, 1_000,
+        'the tool fact retains the producer wall endpoint as a correlation anchor');
+
+      stats.onToolStarted(sessionPath, {
+        id: 'tool-unknown', name: 'fixture', input: {}, status: 'running', startedAt: 3_000,
+      });
+      stats.onToolFinished(sessionPath, {
+        id: 'tool-unknown', name: 'fixture', input: {}, status: 'completed',
+      });
+      const unknownActivity = observations.find((entry) => (
+        entry.entityKind === 'activitySpan'
+        && entry.observationKind === 'end'
+        && (entry.fields as { spanId?: string }).spanId?.includes('tool-unknown')
+      ));
+      assert.ok(unknownActivity);
+      const unknownFields = unknownActivity.fields as {
+        startedAtMs: unknown; endedAtMs: unknown; durationMs: unknown; coverage: unknown;
+      };
+      assert.deepEqual([
+        unknownFields.startedAtMs,
+        unknownFields.endedAtMs,
+        unknownFields.durationMs,
+        unknownFields.coverage,
+      ], [3_000, null, null, 'unknown']);
+
+      stats.onToolStarted(sessionPath, {
+        id: 'tool-wall-reversed', name: 'fixture', input: {}, status: 'running', startedAt: 5_000,
+      });
+      stats.onToolFinished(sessionPath, {
+        id: 'tool-wall-reversed', name: 'fixture', input: {}, status: 'completed',
+        startedAt: 5_000, endedAt: 4_000, durationMs: 1_000,
+      });
+      const reversedActivity = observations.find((entry) => (
+        entry.entityKind === 'activitySpan'
+        && entry.observationKind === 'end'
+        && (entry.fields as { spanId?: string }).spanId?.includes('tool-wall-reversed')
+      ));
+      assert.ok(reversedActivity);
+      const reversedFields = reversedActivity.fields as {
+        startedAtMs: unknown; endedAtMs: unknown; durationMs: unknown; coverage: unknown;
+      };
+      assert.deepEqual([
+        reversedFields.startedAtMs, reversedFields.endedAtMs,
+        reversedFields.durationMs, reversedFields.coverage,
+      ], [5_000, 4_000, null, 'unknown']);
+
+      stats.onToolFinished(sessionPath, {
+        id: 'tool-no-source-time', name: 'fixture', input: {}, status: 'completed',
+      });
+      const noSourceTool = observations.find((entry) => (
+        entry.entityKind === 'toolCall'
+        && entry.observationKind === 'end'
+        && (entry.fields as { toolDefinitionId?: string }).toolDefinitionId === 'fixture'
+        && (entry.fields as { startedAtMs?: unknown }).startedAtMs === null
+      ));
+      assert.ok(noSourceTool);
+      assert.equal(noSourceTool.observedAtMs, 0,
+        'missing source timing uses the stable zero sentinel, not host receipt time');
+    } finally {
+      await stats.shutdown();
+    }
+  });
+});
+
+test('StatsService sanitizes reversed unmarked tool timing before legacy timeline settlement', async () => {
+  await withTempDir(async (root) => {
+    const sessionPath = '/workspace/legacy-tool-timing.jsonl';
+    const state = createInitialArchState();
+    state.sessions.sessions = [{
+      path: sessionPath,
+      sessionId: 'session-legacy-tool-timing',
+      name: 'Legacy tool timing',
+      cwd: '/workspace',
+      modifiedAt: '2026-09-13T00:00:00.000Z',
+      messageCount: 0,
+      modelId: 'fixture-model',
+      provider: 'fixture-provider',
+    }];
+    const stats = new StatsService({
+      dataOutcomesRootPath: path.join(root, 'outcomes'),
+      legacyUsageDataRootPath: root,
+      workspaceId: 'workspace-metrics',
+      getArchState: () => state,
+      now: () => new Date('2026-09-13T00:00:10.000Z'),
+    });
+    try {
+      stats.prepareForSend(sessionPath, []);
+      stats.onToolStarted(sessionPath, {
+        id: 'tool-reversed-wall', name: 'fixture', input: {}, status: 'running', startedAt: 5_000,
+      });
+      stats.onToolFinished(sessionPath, {
+        id: 'tool-reversed-wall', name: 'fixture', input: {}, status: 'completed',
+        startedAt: 5_000, endedAt: 4_000, durationMs: 1_000,
+      });
+      // A duplicate outcome-only terminal is a no-op after the first settle.
+      stats.onToolFinished(sessionPath, {
+        id: 'tool-reversed-wall', name: 'fixture', input: {}, status: 'completed',
+      });
+      const accounting = stats as unknown as {
+        accounting: { activityTimeline: { projectAll: () => readonly {
+          intervalId: string; startedAt: string; endedAt?: string; durationMs?: number;
+          outcome?: string;
+        }[] } };
+      };
+      const intervals = accounting.accounting.activityTimeline.projectAll();
+      assert.equal(intervals.length, 1);
+      const [interval] = intervals;
+      assert.ok(interval?.intervalId.endsWith(':tool-reversed-wall'));
+      assert.deepEqual([
+        interval?.startedAt, interval?.endedAt, interval?.durationMs, interval?.outcome,
+      ], ['1970-01-01T00:00:05.000Z', undefined, undefined, 'succeeded']);
+    } finally {
+      await stats.shutdown();
+    }
+  });
+});
+
+test('StatsService settles outcome-only tool terminals once without waiting on an unresolved sink', async () => {
+  await withTempDir(async (root) => {
+    const sessionPath = '/workspace/outcome-only-tool.jsonl';
+    const state = createInitialArchState();
+    state.sessions.sessions = [{
+      path: sessionPath,
+      sessionId: 'session-outcome-only-tool',
+      name: 'Outcome-only tool',
+      cwd: '/workspace',
+      modifiedAt: '2026-09-13T00:00:00.000Z',
+      messageCount: 0,
+      modelId: 'fixture-model',
+      provider: 'fixture-provider',
+    }];
+    let activityEndCount = 0;
+    const unresolved = new Promise<void>(() => {});
+    const capture = new CanonicalAnalyticsCapture({
+      authority: 'canonical', generationId: 'generation-outcome-only-tool',
+      workspaceId: 'workspace-metrics', buildId: 'build', processGeneration: 'process',
+      sink: {
+        submit: (observation) => {
+          if (observation.entityKind === 'activitySpan' && observation.observationKind === 'end') {
+            activityEndCount += 1;
+          }
+          return unresolved;
+        },
+      },
+      detailSink: { submitDetail: () => undefined },
+      lifecycleSink: { bindPendingCreate: async () => undefined, deleteSession: async () => undefined },
+    });
+    const stats = new StatsService({
+      dataOutcomesRootPath: path.join(root, 'outcomes'),
+      legacyUsageDataRootPath: root,
+      workspaceId: 'workspace-metrics',
+      getArchState: () => state,
+      now: () => new Date('2026-09-13T00:00:10.000Z'),
+      createId: () => 'outcome-only-tool-id',
+      analyticsCapture: capture,
+    });
+    try {
+      stats.prepareForSend(sessionPath, []);
+      stats.onToolStarted(sessionPath, {
+        id: 'tool-outcome-only', name: 'fixture', input: {}, status: 'running', startedAt: 2_000,
+      });
+      stats.onToolFinished(sessionPath, {
+        id: 'tool-outcome-only', name: 'fixture', input: {}, status: 'completed',
+      });
+      stats.onToolFinished(sessionPath, {
+        id: 'tool-outcome-only', name: 'fixture', input: {}, status: 'completed',
+      });
+      assert.equal(activityEndCount, 1,
+        'the second outcome-only terminal must not settle the activity span again');
+    } finally {
+      await stats.shutdown();
+    }
+  });
+});
+
+test('StatsService forwards producer retry timing provenance to canonical capture', async () => {
+  await withTempDir(async (root) => {
+    const sessionPath = '/workspace/retry-timing-session.jsonl';
+    const state = createInitialArchState();
+    state.sessions.sessions = [{
+      path: sessionPath,
+      sessionId: 'session-retry-timing',
+      name: 'Retry timing',
+      cwd: '/workspace',
+      modifiedAt: '2026-09-13T00:00:00.000Z',
+      messageCount: 0,
+      modelId: 'fixture-model',
+      provider: 'fixture-provider',
+    }];
+    const observations: AnalyticsObservation<object>[] = [];
+    const capture = createCapture(observations);
+    const nowMs = Date.parse('2026-09-13T00:00:00.000Z');
+    let id = 0;
+    const stats = new StatsService({
+      dataOutcomesRootPath: path.join(root, 'outcomes'),
+      legacyUsageDataRootPath: root,
+      workspaceId: 'workspace-metrics',
+      getArchState: () => state,
+      now: () => new Date(nowMs),
+      createId: () => `id-${++id}`,
+      analyticsCapture: capture,
+    });
+    try {
+      stats.prepareForSend(sessionPath, []);
+      // The real backend measured these durations from same-process monotonic
+      // samples and marked that provenance; the facade forwards it verbatim.
+      stats.onAutoRetryMeasured(sessionPath, 'request-9:2', 250, 1_000, {
+        operationId: 'retry-operation',
+        startedAt: 3_000, providerAttemptStartedAt: 2_000, endedAt: 1_000,
+        durationClockDomain: 'monotonic-same-process',
+      });
+      const retrySpans = observations.filter((observation) => (
+        observation.entityKind === 'activitySpan'
+        && observation.observationKind === 'end'
+        && ((observation.fields as { kind?: string }).kind === 'retry_wait'
+          || (observation.fields as { kind?: string }).kind === 'retry_episode')
+      ));
+      assert.equal(retrySpans.length, 2);
+      const wait = retrySpans.find((span) => (span.fields as { kind: string }).kind === 'retry_wait')!;
+      const waitFields = wait.fields as { startedAtMs: unknown; endedAtMs: unknown;
+        durationMs: unknown; clockDomain: unknown; coverage: unknown };
+      assert.deepEqual([waitFields.startedAtMs, waitFields.endedAtMs, waitFields.durationMs,
+        waitFields.clockDomain, waitFields.coverage],
+        [3_000, 2_000, 250, 'monotonic-same-process', 'observed']);
+      const episode = retrySpans.find((span) => (span.fields as { kind: string }).kind === 'retry_episode')!;
+      const episodeFields = episode.fields as { startedAtMs: unknown; endedAtMs: unknown;
+        durationMs: unknown; clockDomain: unknown; coverage: unknown };
+      assert.deepEqual([episodeFields.startedAtMs, episodeFields.endedAtMs, episodeFields.durationMs,
+        episodeFields.clockDomain, episodeFields.coverage],
+        [3_000, 1_000, 1_000, 'monotonic-same-process', 'observed']);
+      assert.equal(waitFields.durationMs !== episodeFields.durationMs, true,
+        'wait and episode remain independently measured intervals');
+      assert.equal(episode.observedAtMs, 1_000);
+      // An unmarked wall-derived payload keeps its wall-clock domain: reversed
+      // bounds make its durations unknown, never observed clamped evidence.
+      stats.onAutoRetryMeasured(sessionPath, 'request-9:3', 0, 0, {
+        operationId: 'retry-operation',
+        startedAt: 3_000, providerAttemptStartedAt: 2_000, endedAt: 1_000,
+      });
+      const wallSpans = observations.filter((observation) => (
+        observation.entityKind === 'activitySpan'
+        && observation.observationKind === 'end'
+        && ((observation.fields as { kind?: string }).kind === 'retry_wait'
+          || (observation.fields as { kind?: string }).kind === 'retry_episode')
+      ));
+      assert.equal(wallSpans.length, 4);
+      for (const span of wallSpans.slice(2)) {
+        const fields = span.fields as { durationMs: unknown; clockDomain: unknown; coverage: unknown };
+        assert.deepEqual([fields.durationMs, fields.clockDomain, fields.coverage],
+          [null, 'wall-clock-utc', 'unknown']);
+      }
+    } finally {
+      await stats.shutdown();
+    }
+  });
+});

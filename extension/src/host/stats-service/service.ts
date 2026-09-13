@@ -97,6 +97,18 @@ function stableEvidenceTime(value: string | undefined): number | null {
   return Number.isFinite(parsed) && parsed >= 0 ? Math.trunc(parsed) : null;
 }
 
+function finiteToolTimestamp(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? Math.trunc(value)
+    : null;
+}
+
+function finiteToolDuration(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? value
+    : null;
+}
+
 /**
  * RunObserver/query façade for session accounting. Run observation is split by
  * ownership: run/token/working-time tracking stays in {@link SessionRunTracker}
@@ -116,6 +128,9 @@ export class StatsService implements RunObserver {
   private readonly activeBusyIntervalsBySession: Record<string, Set<string> | undefined> = {};
   private readonly activeBusyStartedAtByInterval: Record<string, string | undefined> = {};
   private readonly activeToolIntervalBySessionAndTool: Record<string, string | undefined> = {};
+  /** Actual producer start samples for open tool intervals. A missing sample
+   * must never be replaced with the terminal receipt time. */
+  private readonly activeToolStartedAtBySessionAndTool: Record<string, number | undefined> = {};
   private readonly now: () => Date;
   private readonly createId: () => string;
   private readonly canonicalCapture: CanonicalAnalyticsCapture | undefined;
@@ -358,10 +373,13 @@ export class StatsService implements RunObserver {
         openBusyIntervals.filter((interval) => !timelineCoveredBusyPaths.has(interval.sessionPath)),
       );
       for (const interval of activityIntervals) {
-        if (!interval.endedAt && interval.kind === 'busy') {
+        if (!interval.endedAt && !interval.outcome && interval.kind === 'busy') {
           (this.activeBusyIntervalsBySession[interval.sessionPath] ??= new Set()).add(interval.intervalId);
-        } else if (!interval.endedAt && interval.kind === 'tool' && interval.toolId) {
-          this.activeToolIntervalBySessionAndTool[this.toolIntervalKey(interval.sessionPath, interval.toolId)] = interval.intervalId;
+        } else if (!interval.endedAt && !interval.outcome && interval.kind === 'tool' && interval.toolId) {
+          const toolKey = this.toolIntervalKey(interval.sessionPath, interval.toolId);
+          this.activeToolIntervalBySessionAndTool[toolKey] = interval.intervalId;
+          const startedAt = finiteToolTimestamp(Date.parse(interval.startedAt));
+          if (startedAt !== null) this.activeToolStartedAtBySessionAndTool[toolKey] = startedAt;
         }
       }
       this.recordStage('timeline-restore', restoreStartAt, {
@@ -1007,81 +1025,126 @@ export class StatsService implements RunObserver {
       toolCall,
       'begin',
       `tool:${toolCall.id}:begin`,
-      toolCall.startedAt ?? this.now().getTime(),
+      finiteToolTimestamp(toolCall.startedAt) ?? 0,
     );
     if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
     if (this.isCanonicalCloseActive(sessionPath)) return;
     this.tracker.onToolStarted(sessionPath, toolCall);
     this.workingTime.onToolStarted(sessionPath, toolCall);
-    const runId = this.currentRunId(sessionPath);
-    const intervalId = `activity:tool:${runId ?? sessionPath}:${toolCall.id}`;
-    this.activeToolIntervalBySessionAndTool[this.toolIntervalKey(sessionPath, toolCall.id)] = intervalId;
-    const startedAt = new Date(toolCall.startedAt ?? this.now().getTime()).toISOString();
-    const interval: ActivityIntervalRecord = {
-      schemaVersion: 1,
-      intervalId,
-      sessionId: this.sessionIdentity(sessionPath).sessionId,
-      sessionPath,
-      parentRunId: runId,
-      parentOperationId: this.activeOperationId(sessionPath),
-      invocationId: null,
-      toolId: toolCall.id,
-      kind: 'tool',
-      startedAt,
-    };
-    if (this.canonicalCapture) this.canonicalCapture.captureActivity(this.analyticsContext(sessionPath), interval);
-    else {
-      this.accounting.activityTimeline.start(interval);
-      this.storage.markDerivedExportDirty();
+    const observedStartedAt = finiteToolTimestamp(toolCall.startedAt);
+    // Activity intervals require a real producer start. A malformed/legacy
+    // start can still appear in the live tool projection, but its host receipt
+    // time must never become canonical timing evidence.
+    if (observedStartedAt !== null) {
+      const runId = this.currentRunId(sessionPath);
+      const intervalId = `activity:tool:${runId ?? sessionPath}:${toolCall.id}`;
+      const toolKey = this.toolIntervalKey(sessionPath, toolCall.id);
+      this.activeToolIntervalBySessionAndTool[toolKey] = intervalId;
+      this.activeToolStartedAtBySessionAndTool[toolKey] = observedStartedAt;
+      const interval: ActivityIntervalRecord = {
+        schemaVersion: 1,
+        intervalId,
+        sessionId: this.sessionIdentity(sessionPath).sessionId,
+        sessionPath,
+        parentRunId: runId,
+        parentOperationId: this.activeOperationId(sessionPath),
+        invocationId: null,
+        toolId: toolCall.id,
+        ...(toolCall.parallelGroupId === undefined ? {} : { parallelGroupId: toolCall.parallelGroupId }),
+        kind: 'tool',
+        startedAt: new Date(observedStartedAt).toISOString(),
+      };
+      if (this.canonicalCapture) this.canonicalCapture.captureActivity(this.analyticsContext(sessionPath), interval);
+      else {
+        this.accounting.activityTimeline.start(interval);
+        this.storage.markDerivedExportDirty();
+      }
     }
   }
 
   onToolFinished(sessionPath: string, toolCall: ToolCall): void {
     const closing = this.isCanonicalCloseActive(sessionPath);
     if (!closing) this.accounting.observeSubagentToolResult(sessionPath, toolCall);
+    const endedAtMs = finiteToolTimestamp(toolCall.endedAt);
+    const startedAtMs = finiteToolTimestamp(toolCall.startedAt);
+    const durationMs = finiteToolDuration(toolCall.durationMs);
+    const monotonic = toolCall.durationClockDomain === 'monotonic-same-process';
     this.canonicalCapture?.captureTool(
       this.analyticsContext(sessionPath),
       toolCall,
       'end',
       `tool:${toolCall.id}:end`,
-      toolCall.startedAt !== undefined && toolCall.durationMs !== undefined
-        ? toolCall.startedAt + toolCall.durationMs : this.now().getTime(),
+      endedAtMs ?? startedAtMs ?? 0,
     );
     if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
     if (closing) return;
-    // Close the live wall-time interval before durable telemetry catches up;
-    // the service reconciles the two sources without double-counting.
+    // Producer timing is authoritative. In particular, no terminal receipt
+    // timestamp is substituted for a missing tool endpoint or duration.
     this.workingTime.onToolFinished(sessionPath, toolCall);
     const toolKey = this.toolIntervalKey(sessionPath, toolCall.id);
     const intervalId = this.activeToolIntervalBySessionAndTool[toolKey];
-    if (intervalId) {
-      const endedAt = new Date(toolCall.startedAt !== undefined && toolCall.durationMs !== undefined
-        ? toolCall.startedAt + toolCall.durationMs : this.now().getTime()).toISOString();
+    const intervalStartedAtMs = this.activeToolStartedAtBySessionAndTool[toolKey] ?? startedAtMs ?? undefined;
+    const activityEndedAtMs = endedAtMs ?? (
+      toolCall.endedAt === undefined
+      && !monotonic && intervalStartedAtMs !== undefined && durationMs !== null
+        ? intervalStartedAtMs + durationMs
+        : null
+    );
+    const orderedWallBounds = intervalStartedAtMs !== undefined
+      && activityEndedAtMs !== null
+      && activityEndedAtMs >= intervalStartedAtMs;
+    const hasMeasuredMonotonicDuration = monotonic && durationMs !== null;
+    // Keep wall endpoints only when they are an ordered producer interval, or
+    // when a valid monotonic duration independently permits a reversed wall
+    // correlation anchor. Never pass a reversed unmarked interval to timeline
+    // normalization, and never turn missing timing into a receipt-time end.
+    const settledEndedAtMs = activityEndedAtMs !== null
+      && (orderedWallBounds || hasMeasuredMonotonicDuration)
+      ? activityEndedAtMs
+      : null;
+    const settledDurationMs = durationMs !== null
+      && (hasMeasuredMonotonicDuration || orderedWallBounds)
+      ? durationMs
+      : null;
+    if (intervalId && intervalStartedAtMs !== undefined) {
+      const outcome = toolCall.status === 'failed' ? 'failed' as const : 'succeeded' as const;
+      const interval: ActivityIntervalRecord = {
+        schemaVersion: 1,
+        intervalId,
+        sessionId: this.sessionIdentity(sessionPath).sessionId,
+        sessionPath,
+        parentRunId: this.currentRunId(sessionPath),
+        parentOperationId: this.activeOperationId(sessionPath),
+        invocationId: null,
+        toolId: toolCall.id,
+        ...(toolCall.parallelGroupId === undefined ? {} : { parallelGroupId: toolCall.parallelGroupId }),
+        kind: 'tool',
+        startedAt: new Date(intervalStartedAtMs).toISOString(),
+        ...(activityEndedAtMs === null ? {} : { endedAt: new Date(activityEndedAtMs).toISOString() }),
+        ...(durationMs === null ? {} : { durationMs }),
+        ...(hasMeasuredMonotonicDuration ? { durationClockDomain: 'monotonic-same-process' as const } : {}),
+        outcome,
+      };
       if (this.canonicalCapture) {
-        this.canonicalCapture.captureActivity(this.analyticsContext(sessionPath), {
-          schemaVersion: 1,
-          intervalId,
-          sessionId: this.sessionIdentity(sessionPath).sessionId,
-          sessionPath,
-          parentRunId: this.currentRunId(sessionPath),
-          parentOperationId: this.activeOperationId(sessionPath),
-          invocationId: null,
-          toolId: toolCall.id,
-          kind: 'tool',
-          startedAt: new Date(toolCall.startedAt ?? Date.parse(endedAt)).toISOString(),
-          endedAt,
-          outcome: toolCall.status === 'failed' ? 'failed' : 'succeeded',
-        });
+        this.canonicalCapture.captureActivity(this.analyticsContext(sessionPath), interval);
       } else {
+        // Timeline normalization accepts a terminal monotonic duration without
+        // a fabricated wall endpoint, and accepts reversed wall anchors only
+        // when an independent monotonic duration accompanies them.
         this.accounting.activityTimeline.settle(
           intervalId,
-          endedAt,
-          toolCall.status === 'failed' ? 'failed' : 'succeeded',
+          settledEndedAtMs === null ? undefined : new Date(settledEndedAtMs).toISOString(),
+          outcome,
+          {
+            ...(settledDurationMs === null ? {} : { durationMs: settledDurationMs }),
+            ...(hasMeasuredMonotonicDuration ? { durationClockDomain: 'monotonic-same-process' as const } : {}),
+          },
         );
         this.storage.markDerivedExportDirty();
       }
-      delete this.activeToolIntervalBySessionAndTool[toolKey];
     }
+    delete this.activeToolIntervalBySessionAndTool[toolKey];
+    delete this.activeToolStartedAtBySessionAndTool[toolKey];
     this.tracker.onToolFinished(sessionPath, toolCall);
     this.syncWorkingTimeBreakdown(sessionPath);
   }
@@ -1127,7 +1190,7 @@ export class StatsService implements RunObserver {
     sourceId: string,
     measuredDelayMs: number | undefined,
     durationMs: number,
-    evidence?: Pick<import('../../shared/protocol').RetryMeasuredPayload, 'operationId' | 'startedAt' | 'providerAttemptStartedAt' | 'endedAt'>,
+    evidence?: Pick<import('../../shared/protocol').RetryMeasuredPayload, 'operationId' | 'startedAt' | 'providerAttemptStartedAt' | 'endedAt' | 'durationClockDomain'>,
   ): void {
     if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
     if (this.isCanonicalCloseActive(sessionPath)) return;
@@ -1305,6 +1368,9 @@ export class StatsService implements RunObserver {
     for (const key of Object.keys(this.activeToolIntervalBySessionAndTool)) {
       if (key.startsWith(`${sessionPath}\0`)) delete this.activeToolIntervalBySessionAndTool[key];
     }
+    for (const key of Object.keys(this.activeToolStartedAtBySessionAndTool)) {
+      if (key.startsWith(`${sessionPath}\0`)) delete this.activeToolStartedAtBySessionAndTool[key];
+    }
   }
 
   onSessionClosed(sessionPath: string): void {
@@ -1338,6 +1404,9 @@ export class StatsService implements RunObserver {
       for (const key of Object.keys(this.activeToolIntervalBySessionAndTool)) {
         if (key.startsWith(`${sessionPath}\0`)) delete this.activeToolIntervalBySessionAndTool[key];
       }
+      for (const key of Object.keys(this.activeToolStartedAtBySessionAndTool)) {
+        if (key.startsWith(`${sessionPath}\0`)) delete this.activeToolStartedAtBySessionAndTool[key];
+      }
       return;
     }
     this.syncWorkingTimeBreakdown(sessionPath);
@@ -1360,6 +1429,20 @@ export class StatsService implements RunObserver {
       this.canonicalBranchEntriesBySession.set(newPath, capturedBranchEntries);
     }
     if (this.canonicalCapture) this.invalidateCanonicalSessionCache();
+    for (const key of Object.keys(this.activeToolIntervalBySessionAndTool)) {
+      if (!key.startsWith(`${oldPath}\0`)) continue;
+      const toolId = key.slice(oldPath.length + 1);
+      this.activeToolIntervalBySessionAndTool[this.toolIntervalKey(newPath, toolId)] =
+        this.activeToolIntervalBySessionAndTool[key];
+      delete this.activeToolIntervalBySessionAndTool[key];
+    }
+    for (const key of Object.keys(this.activeToolStartedAtBySessionAndTool)) {
+      if (!key.startsWith(`${oldPath}\0`)) continue;
+      const toolId = key.slice(oldPath.length + 1);
+      this.activeToolStartedAtBySessionAndTool[this.toolIntervalKey(newPath, toolId)] =
+        this.activeToolStartedAtBySessionAndTool[key];
+      delete this.activeToolStartedAtBySessionAndTool[key];
+    }
     const pendingOrigin = pendingCreateOperationId
       ?? this.pendingCreateOperationBySessionPath.get(oldPath);
     if (!pendingOrigin) return;

@@ -1,5 +1,6 @@
 import type { WorkingTimeBreakdown, WorkingTimeState } from '../shared/protocol';
 import type { ActivityIntervalRecord } from '../shared/activity-interval';
+import type { DurationClockDomain } from '../shared/timing';
 import { normalizeToolCallName } from '../shared/tool-call-analysis/summary';
 import type { RunSnapshot } from './run-analytics';
 
@@ -39,9 +40,17 @@ export class WorkingTimeService {
   private readonly restoredBusyRunIds: Record<string, true> = {};
   private readonly restoredActivityIds: Record<string, true> = {};
   private readonly timelineCoveredRunIds: Record<string, true> = {};
-  private readonly activeToolsBySession: Record<string, Record<string, { name: string; startedAt: number }>> = {};
+  private readonly activeToolsBySession: Record<string, Record<string, {
+    name: string;
+    startedAt: number;
+    producerStartedAt?: number;
+  }>> = {};
   private readonly activeToolSinceBySession: Record<string, number> = {};
   private readonly toolExecutionFloorMsBySession: Record<string, number> = {};
+  /** Settled producer wall intervals used to union staggered/out-of-order
+   * tool terminals. Monotonic durations never enter this collection without
+   * an independent ordered wall endpoint. */
+  private readonly toolExecutionIntervalsBySession: Record<string, Array<{ startedAt: number; endedAt: number }> | undefined> = {};
   private cached: Record<string, WorkingTimeState> = {};
 
   constructor(options: { now: () => Date; onChanged: () => void }) {
@@ -60,27 +69,43 @@ export class WorkingTimeService {
       this.restoredActivityIds[interval.intervalId] = true;
       if (interval.kind === 'busy' && interval.parentRunId) this.timelineCoveredRunIds[interval.parentRunId] = true;
       const startedAt = Math.min(Date.parse(interval.startedAt), nowMs);
-      const endedAt = interval.endedAt ? Math.min(Date.parse(interval.endedAt), nowMs) : undefined;
+      const endedAt = interval.endedAt !== undefined ? Math.min(Date.parse(interval.endedAt), nowMs) : undefined;
+      const terminal = endedAt !== undefined || interval.outcome !== undefined;
       if (!Number.isFinite(startedAt) || (endedAt !== undefined && !Number.isFinite(endedAt))) continue;
       if (interval.kind === 'busy') {
-        if (endedAt === undefined) {
+        if (!terminal) {
           const existing = this.activeSinceBySession[interval.sessionPath];
           this.activeSinceBySession[interval.sessionPath] = existing === undefined
             ? startedAt : Math.min(existing, startedAt);
-        } else {
+        } else if (endedAt !== undefined) {
           this.totalMsBySession[interval.sessionPath] = (this.totalMsBySession[interval.sessionPath] ?? 0)
             + Math.max(0, endedAt - startedAt);
         }
         changed = true;
-      } else if (interval.kind === 'tool' && endedAt === undefined && interval.toolId) {
-        const tools = this.activeToolsBySession[interval.sessionPath] ?? {};
-        tools[interval.toolId] = { name: '(recovered)', startedAt };
-        this.activeToolsBySession[interval.sessionPath] = tools;
-        this.activeToolSinceBySession[interval.sessionPath] = Math.min(
-          this.activeToolSinceBySession[interval.sessionPath] ?? startedAt,
-          startedAt,
-        );
-        changed = true;
+      } else if (interval.kind === 'tool' && interval.toolId) {
+        if (terminal) {
+          const durationMs = finiteOptionalDuration(interval.durationMs);
+          const endedAtForLegacy = interval.endedAt === undefined
+            && interval.durationClockDomain === undefined
+            && durationMs !== null
+            ? startedAt + durationMs
+            : endedAt;
+          if (endedAtForLegacy !== undefined && Number.isFinite(endedAtForLegacy)
+            && endedAtForLegacy >= startedAt) {
+            this.settleActiveToolInterval(interval.sessionPath, startedAt, endedAtForLegacy);
+            changed = true;
+          }
+        } else {
+          const tools = this.activeToolsBySession[interval.sessionPath] ?? {};
+          tools[interval.toolId] = {
+            name: '(recovered)',
+            startedAt,
+            producerStartedAt: startedAt,
+          };
+          this.activeToolsBySession[interval.sessionPath] = tools;
+          this.recomputeActiveToolSince(interval.sessionPath);
+          changed = true;
+        }
       }
     }
     if (changed) this.publish();
@@ -138,7 +163,8 @@ export class WorkingTimeService {
     const startedAt = this.activeSinceBySession[sessionPath];
     if (startedAt === undefined) return;
     const endedAt = this.now().getTime();
-    this.settleActiveToolInterval(sessionPath, endedAt);
+    // A busy boundary is not a tool terminal. Leave unfinished tool work
+    // unknown rather than assigning it the host receipt time.
     delete this.activeToolsBySession[sessionPath];
     delete this.activeToolSinceBySession[sessionPath];
     this.totalMsBySession[sessionPath] = (this.totalMsBySession[sessionPath] ?? 0)
@@ -156,7 +182,8 @@ export class WorkingTimeService {
     const tools = this.activeToolsBySession[sessionPath] ?? {};
     if (tools[tool.id]) return;
     const observedAt = this.now().getTime();
-    const startedAt = finiteTimestamp(tool.startedAt) ?? observedAt;
+    const producerStartedAt = finiteTimestamp(tool.startedAt);
+    const startedAt = producerStartedAt ?? observedAt;
     if (Object.keys(tools).length === 0) {
       this.toolExecutionFloorMsBySession[sessionPath] = Math.max(
         this.toolExecutionFloorMsBySession[sessionPath] ?? 0,
@@ -165,30 +192,45 @@ export class WorkingTimeService {
       this.activeToolSinceBySession[sessionPath] = startedAt;
     }
     const normalizedName = normalizeToolCallName(tool.name) || tool.name.trim() || '(unknown)';
-    tools[tool.id] = { name: normalizedName, startedAt };
+    tools[tool.id] = {
+      name: normalizedName,
+      startedAt,
+      ...(producerStartedAt === null ? {} : { producerStartedAt }),
+    };
     this.activeToolsBySession[sessionPath] = tools;
+    this.recomputeActiveToolSince(sessionPath);
     this.publish();
   }
 
   onToolFinished(
     sessionPath: string,
-    tool: { id: string; startedAt?: number; durationMs?: number },
+    tool: { id: string; startedAt?: number; endedAt?: number; durationMs?: number;
+      durationClockDomain?: DurationClockDomain },
   ): void {
     const tools = this.activeToolsBySession[sessionPath];
-    if (!tools?.[tool.id]) return;
-    const measuredStartedAt = finiteTimestamp(tool.startedAt);
+    const activeTool = tools?.[tool.id];
+    if (!activeTool) return;
+    const measuredStartedAt = finiteTimestamp(tool.startedAt) ?? activeTool.producerStartedAt ?? null;
     const measuredDurationMs = finiteOptionalDuration(tool.durationMs);
-    const measuredEndedAt = measuredStartedAt !== null && measuredDurationMs !== null
-      ? measuredStartedAt + measuredDurationMs
-      : null;
-    const endedAt = Math.max(
-      this.activeToolSinceBySession[sessionPath] ?? 0,
-      measuredEndedAt ?? this.now().getTime(),
-    );
-    this.settleActiveToolInterval(sessionPath, endedAt);
+    const monotonic = tool.durationClockDomain === 'monotonic-same-process';
+    const hasProducerEndedAt = typeof tool.endedAt === 'number' && Number.isFinite(tool.endedAt);
+    // A producer wall endpoint is valid evidence for either clock domain when
+    // ordered. Only an unmarked legacy call may derive its wall end from its
+    // start and additive duration; a marked monotonic duration has no such
+    // compatible wall endpoint.
+    const measuredEndedAt = hasProducerEndedAt
+      ? finiteTimestamp(tool.endedAt)
+      : tool.endedAt === undefined && !monotonic && measuredDurationMs !== null && measuredStartedAt !== null
+        ? measuredStartedAt + measuredDurationMs
+        : null;
+    if (measuredStartedAt !== null && measuredEndedAt !== null
+      && measuredEndedAt >= measuredStartedAt) {
+      this.settleActiveToolInterval(sessionPath, measuredStartedAt, measuredEndedAt);
+    }
+
     delete tools[tool.id];
     if (Object.keys(tools).length > 0) {
-      this.activeToolSinceBySession[sessionPath] = endedAt;
+      this.recomputeActiveToolSince(sessionPath);
     } else {
       delete this.activeToolsBySession[sessionPath];
       delete this.activeToolSinceBySession[sessionPath];
@@ -206,6 +248,7 @@ export class WorkingTimeService {
     delete this.activeToolsBySession[sessionPath];
     delete this.activeToolSinceBySession[sessionPath];
     delete this.toolExecutionFloorMsBySession[sessionPath];
+    delete this.toolExecutionIntervalsBySession[sessionPath];
     for (const [runId, observed] of Object.entries(this.observedRunsById)) {
       if (observed.sessionPath === sessionPath) delete this.observedRunsById[runId];
     }
@@ -223,8 +266,9 @@ export class WorkingTimeService {
     const oldActiveTools = this.activeToolsBySession[oldPath];
     const oldActiveToolSince = this.activeToolSinceBySession[oldPath];
     const oldToolFloor = this.toolExecutionFloorMsBySession[oldPath];
+    const oldToolIntervals = this.toolExecutionIntervalsBySession[oldPath];
     if (oldTotal === undefined && oldExtra === undefined && oldActiveSince === undefined && oldBreakdown === undefined
-      && oldActiveTools === undefined && oldToolFloor === undefined) return;
+      && oldActiveTools === undefined && oldToolFloor === undefined && oldToolIntervals === undefined) return;
 
     if (oldTotal !== undefined) {
       this.totalMsBySession[newPath] = (this.totalMsBySession[newPath] ?? 0) + oldTotal;
@@ -273,6 +317,14 @@ export class WorkingTimeService {
       this.toolExecutionFloorMsBySession[newPath] = mergedBaseToolMs + oldLiveOnlyMs + newLiveOnlyMs;
       delete this.toolExecutionFloorMsBySession[oldPath];
     }
+    if (oldToolIntervals) {
+      const merged = mergeToolIntervals([
+        ...(this.toolExecutionIntervalsBySession[newPath] ?? []),
+        ...oldToolIntervals,
+      ]);
+      this.toolExecutionIntervalsBySession[newPath] = merged;
+      delete this.toolExecutionIntervalsBySession[oldPath];
+    }
     this.publish();
   }
 
@@ -306,12 +358,14 @@ export class WorkingTimeService {
       ...Object.keys(this.breakdownBySession),
       ...Object.keys(this.activeToolsBySession),
       ...Object.keys(this.toolExecutionFloorMsBySession),
+      ...Object.keys(this.toolExecutionIntervalsBySession),
     ]);
     for (const sessionPath of sessionPaths) {
       const base = this.breakdownBySession[sessionPath];
       const activeTools = Object.entries(this.activeToolsBySession[sessionPath] ?? {}).map(([id, tool]) => ({
         id,
-        ...tool,
+        name: tool.name,
+        startedAt: tool.startedAt,
       }));
       const toolFloor = this.toolExecutionFloorMsBySession[sessionPath] ?? 0;
       const breakdown = base || toolFloor > 0 || activeTools.length > 0
@@ -332,15 +386,61 @@ export class WorkingTimeService {
     this.onChanged();
   }
 
-  private settleActiveToolInterval(sessionPath: string, endedAt: number): void {
-    const startedAt = this.activeToolSinceBySession[sessionPath];
-    if (startedAt === undefined) return;
-    const settled = Math.max(
-      this.toolExecutionFloorMsBySession[sessionPath] ?? 0,
-      this.breakdownBySession[sessionPath]?.toolExecutionMs ?? 0,
+  private recomputeActiveToolSince(sessionPath: string): void {
+    const tools = this.activeToolsBySession[sessionPath];
+    const intervals = this.toolExecutionIntervalsBySession[sessionPath] ?? [];
+    const startedAt = Object.values(tools ?? {}).reduce<number | undefined>(
+      (earliest, tool) => {
+        const uncovered = firstUncoveredToolStart(tool.startedAt, intervals);
+        return earliest === undefined ? uncovered : Math.min(earliest, uncovered);
+      },
+      undefined,
     );
-    this.toolExecutionFloorMsBySession[sessionPath] = settled + Math.max(0, endedAt - startedAt);
+    if (startedAt === undefined) delete this.activeToolSinceBySession[sessionPath];
+    else this.activeToolSinceBySession[sessionPath] = startedAt;
   }
+
+  private settleActiveToolInterval(sessionPath: string, startedAt: number, endedAt: number): void {
+    if (!Number.isFinite(startedAt) || !Number.isFinite(endedAt) || endedAt < startedAt) return;
+    const existing = this.toolExecutionIntervalsBySession[sessionPath] ?? [];
+    let newlyCoveredMs = Math.max(0, endedAt - startedAt);
+    for (const interval of existing) {
+      newlyCoveredMs -= Math.max(0, Math.min(endedAt, interval.endedAt) - Math.max(startedAt, interval.startedAt));
+    }
+    const merged = mergeToolIntervals([...existing, { startedAt, endedAt }]);
+    this.toolExecutionIntervalsBySession[sessionPath] = merged;
+    if (newlyCoveredMs > 0) {
+      const settled = Math.max(
+        this.toolExecutionFloorMsBySession[sessionPath] ?? 0,
+        this.breakdownBySession[sessionPath]?.toolExecutionMs ?? 0,
+      );
+      this.toolExecutionFloorMsBySession[sessionPath] = settled + newlyCoveredMs;
+    }
+  }
+}
+
+function mergeToolIntervals(
+  intervals: Array<{ startedAt: number; endedAt: number }>,
+): Array<{ startedAt: number; endedAt: number }> {
+  const merged: Array<{ startedAt: number; endedAt: number }> = [];
+  for (const interval of intervals.sort((left, right) => left.startedAt - right.startedAt)) {
+    const previous = merged[merged.length - 1];
+    if (!previous || interval.startedAt > previous.endedAt) merged.push({ ...interval });
+    else previous.endedAt = Math.max(previous.endedAt, interval.endedAt);
+  }
+  return merged;
+}
+
+function firstUncoveredToolStart(
+  startedAt: number,
+  intervals: readonly { startedAt: number; endedAt: number }[],
+): number {
+  let candidate = startedAt;
+  for (const interval of intervals) {
+    if (interval.startedAt > candidate) break;
+    if (candidate < interval.endedAt) candidate = interval.endedAt;
+  }
+  return candidate;
 }
 
 function emptyBreakdown(): WorkingTimeBreakdown {

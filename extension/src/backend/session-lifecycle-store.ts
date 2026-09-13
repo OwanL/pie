@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
@@ -68,6 +69,8 @@ type SessionCloseDisposition = AnalyticsCloseDisposition;
 // database while this feature is still discovery-only.
 const SCHEMA_VERSION = 3;
 const ADDITIVE_HOST_REGISTRY_VERSION = 4;
+const MAX_ANALYTICS_WRITER_HOSTS = 512;
+const MAX_ANALYTICS_WRITER_LEASES = 4_096;
 
 export type SessionCleanupState = 'open' | 'retained' | 'deleting' | 'deleted' | 'blocked';
 export type SessionCloseCause = 'user_close' | 'private_close' | 'forget' | 'expiry';
@@ -103,6 +106,76 @@ export interface AnalyticsHostPage {
   nextCursor?: string;
 }
 
+export type AnalyticsWriterFencePurpose = 'analytics-activation' | 'storage-cutoff';
+export type AnalyticsWriterFenceState = 'open' | 'fencing' | 'fenced';
+
+/** Stable process/host identity used by the durable writer admission gate.
+ * Per-boot keys and endpoint names intentionally stay outside this record. */
+export interface AnalyticsWriterIdentity {
+  hostInstanceId: string;
+  workspaceId: string;
+  generationId: string;
+  buildId: string;
+  processId: number;
+}
+
+export interface AnalyticsWriterFenceRecord {
+  workspaceId: string;
+  operationId: string;
+  purpose: AnalyticsWriterFencePurpose;
+  fenceEpoch: number;
+  state: AnalyticsWriterFenceState;
+  expectedHosts: AnalyticsWriterIdentity[];
+  acknowledgedHostInstanceIds: string[];
+  startedAtMs: string;
+  updatedAtMs: string;
+}
+
+export interface AnalyticsWriterFenceAcknowledgement {
+  workspaceId: string;
+  operationId: string;
+  fenceEpoch: number;
+  identity: AnalyticsWriterIdentity;
+  activeWriterCount: number;
+  acknowledgedAtMs: string;
+}
+
+export interface AnalyticsWriterLeaseRecord extends AnalyticsWriterIdentity {
+  leaseId: string;
+  fenceEpoch: number;
+  acquiredAtMs: string;
+}
+
+export interface AnalyticsWriterAdmissionState {
+  workspaceId: string;
+  state: AnalyticsWriterFenceState;
+  fenceEpoch: number;
+}
+
+export interface BeginAnalyticsWriterFenceOptions {
+  workspaceId: string;
+  operationId: string;
+  purpose: AnalyticsWriterFencePurpose;
+  expectedHosts: readonly AnalyticsWriterIdentity[];
+  nowMs: Int64Value;
+}
+
+export interface AcknowledgeAnalyticsWriterFenceOptions {
+  workspaceId: string;
+  operationId: string;
+  fenceEpoch: number;
+  identity: AnalyticsWriterIdentity;
+  activeWriterCount: number;
+  nowMs: Int64Value;
+}
+
+export interface ReopenAnalyticsWriterAdmissionOptions {
+  workspaceId: string;
+  operationId: string;
+  purpose: 'analytics-activation';
+  nowMs: Int64Value;
+}
+
 interface AnalyticsHostRow {
   host_instance_id: string;
   workspace_id: string;
@@ -117,6 +190,41 @@ interface AnalyticsHostRow {
   stopped_at_ms: string | null;
   unsupported_reason: string | null;
   updated_at_ms: string;
+}
+
+interface AnalyticsWriterFenceRow {
+  workspace_id: string;
+  operation_id: string;
+  purpose: AnalyticsWriterFencePurpose;
+  fence_epoch: number | bigint;
+  state: AnalyticsWriterFenceState;
+  expected_hosts_json: string;
+  expected_hosts_sha256: string;
+  started_at_ms: string;
+  updated_at_ms: string;
+}
+
+interface AnalyticsWriterFenceAckRow {
+  workspace_id: string;
+  operation_id: string;
+  host_instance_id: string;
+  generation_id: string;
+  build_id: string;
+  process_id: number | bigint;
+  fence_epoch: number | bigint;
+  active_writer_count: number | bigint;
+  acknowledged_at_ms: string;
+}
+
+interface AnalyticsWriterLeaseRow {
+  lease_id: string;
+  workspace_id: string;
+  host_instance_id: string;
+  generation_id: string;
+  build_id: string;
+  process_id: number | bigint;
+  fence_epoch: number | bigint;
+  acquired_at_ms: string;
 }
 
 export interface SessionLifecycleRecord {
@@ -210,6 +318,84 @@ function requireHostField(value: string, name: string, maxLength = 512): string 
   return value;
 }
 
+function requireWriterIdentity(value: AnalyticsWriterIdentity, name: string): AnalyticsWriterIdentity {
+  if (!value || typeof value !== 'object') throw new Error(`${name} is invalid.`);
+  return {
+    hostInstanceId: requireHostField(value.hostInstanceId, `${name}.hostInstanceId`),
+    workspaceId: requireHostField(value.workspaceId, `${name}.workspaceId`),
+    generationId: requireHostField(value.generationId, `${name}.generationId`),
+    buildId: requireHostField(value.buildId, `${name}.buildId`),
+    processId: (() => {
+      if (!Number.isSafeInteger(value.processId) || value.processId <= 0) {
+        throw new Error(`${name}.processId must be a positive safe integer.`);
+      }
+      return value.processId;
+    })(),
+  };
+}
+
+function writerIdentityFromHost(host: AnalyticsHostRecord): AnalyticsWriterIdentity {
+  return requireWriterIdentity({
+    hostInstanceId: host.hostInstanceId,
+    workspaceId: host.workspaceId,
+    generationId: host.generationId,
+    buildId: host.buildId,
+    processId: host.processId,
+  }, 'Analytics host identity');
+}
+
+function sameWriterIdentity(left: AnalyticsWriterIdentity, right: AnalyticsWriterIdentity): boolean {
+  return left.hostInstanceId === right.hostInstanceId
+    && left.workspaceId === right.workspaceId
+    && left.generationId === right.generationId
+    && left.buildId === right.buildId
+    && left.processId === right.processId;
+}
+
+function compareWriterHostIds(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function writerHostsSerialization(hosts: readonly AnalyticsWriterIdentity[]): string {
+  return `${JSON.stringify(hosts)}\n`;
+}
+
+function writerHostsDigest(hosts: readonly AnalyticsWriterIdentity[]): string {
+  return createHash('sha256').update(writerHostsSerialization(hosts), 'utf8').digest('hex');
+}
+
+function canonicalWriterHosts(hosts: readonly AnalyticsWriterIdentity[]): AnalyticsWriterIdentity[] {
+  if (!Array.isArray(hosts) || hosts.length === 0 || hosts.length > MAX_ANALYTICS_WRITER_HOSTS) {
+    throw new Error('Analytics writer census must contain a bounded, non-empty host set.');
+  }
+  const normalized = hosts.map((host, index) => requireWriterIdentity(host, `Analytics writer census[${index}]`));
+  normalized.sort((left, right) => compareWriterHostIds(left.hostInstanceId, right.hostInstanceId));
+  const hostIds = new Set<string>();
+  const processIds = new Set<number>();
+  for (const host of normalized) {
+    if (hostIds.has(host.hostInstanceId)) throw new SessionLifecycleConflictError(`Analytics writer census duplicates host ${host.hostInstanceId}.`);
+    if (processIds.has(host.processId)) throw new SessionLifecycleConflictError(`Analytics writer census has ambiguous process ${host.processId}.`);
+    hostIds.add(host.hostInstanceId);
+    processIds.add(host.processId);
+  }
+  return normalized;
+}
+
+function parseWriterHosts(value: string, expectedDigest: string): AnalyticsWriterIdentity[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value) as unknown;
+  } catch {
+    throw new SessionLifecycleConflictError('Analytics writer fence has corrupt expected-host evidence.');
+  }
+  if (!Array.isArray(parsed)) throw new SessionLifecycleConflictError('Analytics writer fence expected-host evidence is invalid.');
+  const hosts = canonicalWriterHosts(parsed as AnalyticsWriterIdentity[]);
+  if (writerHostsDigest(hosts) !== expectedDigest) {
+    throw new SessionLifecycleConflictError('Analytics writer fence expected-host digest is invalid.');
+  }
+  return hosts;
+}
+
 function encodeHostCapabilities(capabilities: readonly string[]): string {
   if (!Array.isArray(capabilities) || capabilities.length > 32) {
     throw new Error('Analytics host capabilities exceed the bounded count.');
@@ -285,6 +471,38 @@ function toAnalyticsHost(row: AnalyticsHostRow): AnalyticsHostRecord {
     ...(row.stopped_at_ms ? { stoppedAtMs: row.stopped_at_ms } : {}),
     ...(row.unsupported_reason ? { unsupportedReason: row.unsupported_reason } : {}),
     updatedAtMs: row.updated_at_ms,
+  };
+}
+
+function toWriterAcknowledgement(row: AnalyticsWriterFenceAckRow): AnalyticsWriterFenceAcknowledgement {
+  return {
+    workspaceId: row.workspace_id,
+    operationId: row.operation_id,
+    fenceEpoch: Number(row.fence_epoch),
+    identity: requireWriterIdentity({
+      hostInstanceId: row.host_instance_id,
+      workspaceId: row.workspace_id,
+      generationId: row.generation_id,
+      buildId: row.build_id,
+      processId: Number(row.process_id),
+    }, 'Analytics writer acknowledgement identity'),
+    activeWriterCount: Number(row.active_writer_count),
+    acknowledgedAtMs: row.acknowledged_at_ms,
+  };
+}
+
+function toWriterLease(row: AnalyticsWriterLeaseRow): AnalyticsWriterLeaseRecord {
+  return {
+    leaseId: row.lease_id,
+    ...requireWriterIdentity({
+      hostInstanceId: row.host_instance_id,
+      workspaceId: row.workspace_id,
+      generationId: row.generation_id,
+      buildId: row.build_id,
+      processId: Number(row.process_id),
+    }, 'Analytics writer lease identity'),
+    fenceEpoch: Number(row.fence_epoch),
+    acquiredAtMs: row.acquired_at_ms,
   };
 }
 
@@ -459,6 +677,47 @@ export class SessionLifecycleStore {
       );
       CREATE INDEX IF NOT EXISTS analytics_hosts_workspace ON analytics_hosts(workspace_id, state, host_instance_id);
       CREATE INDEX IF NOT EXISTS analytics_hosts_workspace_host ON analytics_hosts(workspace_id, host_instance_id);
+      /* This is handoff operation state beside the existing host registry, not
+       * a second registry. A fence row is the durable admission-revocation
+       * point; acknowledgements and short-lived writer leases are evidence for
+       * that row. */
+      CREATE TABLE IF NOT EXISTS analytics_writer_fences (
+        workspace_id TEXT PRIMARY KEY,
+        operation_id TEXT NOT NULL UNIQUE,
+        purpose TEXT NOT NULL CHECK (purpose IN ('analytics-activation', 'storage-cutoff')),
+        fence_epoch INTEGER NOT NULL CHECK (fence_epoch > 0),
+        state TEXT NOT NULL CHECK (state IN ('open', 'fencing', 'fenced')),
+        expected_hosts_json TEXT NOT NULL,
+        expected_hosts_sha256 TEXT NOT NULL,
+        started_at_ms TEXT NOT NULL,
+        updated_at_ms TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS analytics_writer_fence_acks (
+        workspace_id TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        host_instance_id TEXT NOT NULL,
+        generation_id TEXT NOT NULL,
+        build_id TEXT NOT NULL,
+        process_id INTEGER NOT NULL CHECK (process_id > 0),
+        fence_epoch INTEGER NOT NULL CHECK (fence_epoch > 0),
+        active_writer_count INTEGER NOT NULL CHECK (active_writer_count >= 0),
+        acknowledged_at_ms TEXT NOT NULL,
+        PRIMARY KEY (workspace_id, operation_id, host_instance_id)
+      );
+      CREATE INDEX IF NOT EXISTS analytics_writer_fence_acks_operation
+        ON analytics_writer_fence_acks(workspace_id, operation_id, host_instance_id);
+      CREATE TABLE IF NOT EXISTS analytics_writer_leases (
+        lease_id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        host_instance_id TEXT NOT NULL,
+        generation_id TEXT NOT NULL,
+        build_id TEXT NOT NULL,
+        process_id INTEGER NOT NULL CHECK (process_id > 0),
+        fence_epoch INTEGER NOT NULL CHECK (fence_epoch >= 0),
+        acquired_at_ms TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS analytics_writer_leases_workspace
+        ON analytics_writer_leases(workspace_id, fence_epoch, host_instance_id);
       PRAGMA user_version = ${SCHEMA_VERSION};
     `);
   }
@@ -507,6 +766,12 @@ export class SessionLifecycleStore {
       }
       if (existing?.state === 'stopped') {
         throw new SessionLifecycleConflictError(`Analytics host ${hostInstanceId} is terminal and cannot be re-registered.`);
+      }
+      const activeFence = this.database.prepare(`
+        SELECT state FROM analytics_writer_fences WHERE workspace_id = ?
+      `).get(workspaceId) as { state: AnalyticsWriterFenceState } | undefined;
+      if (activeFence && activeFence.state !== 'open') {
+        throw new SessionLifecycleConflictError('Analytics host registration is closed while a writer fence is active.');
       }
       this.database.prepare(`
         INSERT INTO analytics_hosts (
@@ -607,6 +872,420 @@ export class SessionLifecycleStore {
       hosts,
       truncated,
       ...(truncated && hosts.length > 0 ? { nextCursor: hosts[hosts.length - 1]!.hostInstanceId } : {}),
+    };
+  }
+
+  /** Return the current durable writer-admission epoch. No fence row means
+   * the initial admission generation is open at epoch zero. */
+  getAnalyticsWriterAdmissionState(workspaceId: string): AnalyticsWriterAdmissionState {
+    const normalizedWorkspaceId = requireHostField(workspaceId, 'workspaceId');
+    const row = this.database.prepare(`
+      SELECT workspace_id, fence_epoch, state FROM analytics_writer_fences WHERE workspace_id = ?
+    `).get(normalizedWorkspaceId) as Pick<AnalyticsWriterFenceRow, 'workspace_id' | 'fence_epoch' | 'state'> | undefined;
+    return row
+      ? { workspaceId: row.workspace_id, fenceEpoch: Number(row.fence_epoch), state: row.state }
+      : { workspaceId: normalizedWorkspaceId, fenceEpoch: 0, state: 'open' };
+  }
+
+  /** Begin or resume one durable all-host writer fence. The registry snapshot
+   * is checked in the same transaction as admission revocation, so a census
+   * cannot authorize a fence for a host identity that changed underneath it. */
+  beginAnalyticsWriterFence(options: BeginAnalyticsWriterFenceOptions): AnalyticsWriterFenceRecord {
+    const workspaceId = requireHostField(options.workspaceId, 'workspaceId');
+    const operationId = requireHostField(options.operationId, 'operationId');
+    if (options.purpose !== 'analytics-activation' && options.purpose !== 'storage-cutoff') {
+      throw new Error('Analytics writer fence purpose is invalid.');
+    }
+    const expectedHosts = canonicalWriterHosts(options.expectedHosts);
+    if (expectedHosts.some((host) => host.workspaceId !== workspaceId)) {
+      throw new SessionLifecycleConflictError('Analytics writer census contains another workspace.');
+    }
+    const expectedHostsJson = writerHostsSerialization(expectedHosts);
+    const expectedHostsSha256 = writerHostsDigest(expectedHosts);
+    const nowMs = encodeTimestamp(options.nowMs, 'nowMs');
+    return this.database.transaction(() => {
+      this.assertWriterRegistrySnapshot(workspaceId, expectedHosts);
+      const existing = this.database.prepare(`
+        SELECT * FROM analytics_writer_fences WHERE workspace_id = ?
+      `).get(workspaceId) as AnalyticsWriterFenceRow | undefined;
+      if (existing) {
+        if (existing.state !== 'open') {
+          if (existing.operation_id !== operationId
+            || existing.purpose !== options.purpose
+            || existing.expected_hosts_sha256 !== expectedHostsSha256) {
+            throw new SessionLifecycleConflictError(
+              `Analytics writer fence ${existing.operation_id} is already ${existing.state}; refusing a competing fence.`,
+            );
+          }
+          return this.toWriterFenceRecord(existing);
+        }
+        const fenceEpoch = existing.operation_id === operationId ? Number(existing.fence_epoch) : Number(existing.fence_epoch) + 1;
+        if (!Number.isSafeInteger(fenceEpoch) || fenceEpoch <= 0) {
+          throw new SessionLifecycleConflictError('Analytics writer fence epoch is exhausted.');
+        }
+        this.database.prepare(`
+          DELETE FROM analytics_writer_fence_acks WHERE workspace_id = ? AND operation_id = ?
+        `).run(workspaceId, operationId);
+        this.database.prepare(`
+          UPDATE analytics_writer_fences
+          SET operation_id = ?, purpose = ?, fence_epoch = ?, state = 'fencing',
+              expected_hosts_json = ?, expected_hosts_sha256 = ?, updated_at_ms = ?
+          WHERE workspace_id = ?
+        `).run(
+          operationId, options.purpose, fenceEpoch, expectedHostsJson, expectedHostsSha256, nowMs, workspaceId,
+        );
+      } else {
+        const operationOwner = this.database.prepare(`
+          SELECT workspace_id FROM analytics_writer_fences WHERE operation_id = ?
+        `).get(operationId) as { workspace_id: string } | undefined;
+        if (operationOwner) {
+          throw new SessionLifecycleConflictError(`Analytics writer operation ${operationId} is already bound to another workspace.`);
+        }
+        this.database.prepare(`
+          INSERT INTO analytics_writer_fences (
+            workspace_id, operation_id, purpose, fence_epoch, state,
+            expected_hosts_json, expected_hosts_sha256, started_at_ms, updated_at_ms
+          ) VALUES (?, ?, ?, 1, 'fencing', ?, ?, ?, ?)
+        `).run(
+          workspaceId, operationId, options.purpose, expectedHostsJson, expectedHostsSha256, nowMs, nowMs,
+        );
+      }
+      return this.toWriterFenceRecord(this.database.prepare(`
+        SELECT * FROM analytics_writer_fences WHERE workspace_id = ?
+      `).get(workspaceId) as AnalyticsWriterFenceRow);
+    })();
+  }
+
+  getAnalyticsWriterFence(workspaceId: string): AnalyticsWriterFenceRecord | undefined {
+    const normalizedWorkspaceId = requireHostField(workspaceId, 'workspaceId');
+    const row = this.database.prepare('SELECT * FROM analytics_writer_fences WHERE workspace_id = ?')
+      .get(normalizedWorkspaceId) as AnalyticsWriterFenceRow | undefined;
+    return row ? this.toWriterFenceRecord(row) : undefined;
+  }
+
+  listAnalyticsWriterFenceAcknowledgements(
+    workspaceId: string,
+    operationId: string,
+  ): AnalyticsWriterFenceAcknowledgement[] {
+    const normalizedWorkspaceId = requireHostField(workspaceId, 'workspaceId');
+    const normalizedOperationId = requireHostField(operationId, 'operationId');
+    const rows = this.database.prepare(`
+      SELECT * FROM analytics_writer_fence_acks
+      WHERE workspace_id = ? AND operation_id = ? ORDER BY host_instance_id
+    `).all(normalizedWorkspaceId, normalizedOperationId) as AnalyticsWriterFenceAckRow[];
+    return rows.map(toWriterAcknowledgement);
+  }
+
+  /** Record one authenticated host acknowledgement. Repeating the exact ack
+   * is idempotent; a conflicting ack for the same identity is not. */
+  acknowledgeAnalyticsWriterFence(
+    options: AcknowledgeAnalyticsWriterFenceOptions,
+  ): AnalyticsWriterFenceAcknowledgement {
+    const workspaceId = requireHostField(options.workspaceId, 'workspaceId');
+    const operationId = requireHostField(options.operationId, 'operationId');
+    const identity = requireWriterIdentity(options.identity, 'Analytics writer acknowledgement identity');
+    if (identity.workspaceId !== workspaceId) throw new SessionLifecycleConflictError('Writer acknowledgement workspace does not match the fence.');
+    if (!Number.isSafeInteger(options.fenceEpoch) || options.fenceEpoch <= 0) {
+      throw new Error('Analytics writer acknowledgement epoch is invalid.');
+    }
+    if (!Number.isSafeInteger(options.activeWriterCount) || options.activeWriterCount < 0) {
+      throw new Error('Analytics writer acknowledgement active count is invalid.');
+    }
+    const acknowledgedAtMs = encodeTimestamp(options.nowMs, 'nowMs');
+    return this.database.transaction(() => {
+      const fence = this.database.prepare('SELECT * FROM analytics_writer_fences WHERE workspace_id = ?')
+        .get(workspaceId) as AnalyticsWriterFenceRow | undefined;
+      if (!fence || fence.operation_id !== operationId || (fence.state !== 'fencing' && fence.state !== 'fenced')) {
+        throw new SessionLifecycleConflictError('Analytics writer fence is missing, open, or owned by another operation.');
+      }
+      if (Number(fence.fence_epoch) !== options.fenceEpoch) {
+        throw new SessionLifecycleConflictError('Analytics writer acknowledgement epoch is stale.');
+      }
+      const expectedHosts = parseWriterHosts(fence.expected_hosts_json, fence.expected_hosts_sha256);
+      const expected = expectedHosts.find((host) => host.hostInstanceId === identity.hostInstanceId);
+      if (!expected || !sameWriterIdentity(expected, identity)) {
+        throw new SessionLifecycleConflictError('Analytics writer acknowledgement identity is not in the frozen census.');
+      }
+      this.assertRegisteredWriterIdentity(identity);
+      const existing = this.database.prepare(`
+        SELECT * FROM analytics_writer_fence_acks
+        WHERE workspace_id = ? AND operation_id = ? AND host_instance_id = ?
+      `).get(workspaceId, operationId, identity.hostInstanceId) as AnalyticsWriterFenceAckRow | undefined;
+      if (existing) {
+        const prior = toWriterAcknowledgement(existing);
+        if (prior.fenceEpoch !== options.fenceEpoch
+          || !sameWriterIdentity(prior.identity, identity)
+          || prior.activeWriterCount !== options.activeWriterCount) {
+          throw new SessionLifecycleConflictError('Analytics writer acknowledgement conflicts with durable evidence.');
+        }
+        return prior;
+      }
+      this.database.prepare(`
+        INSERT INTO analytics_writer_fence_acks (
+          workspace_id, operation_id, host_instance_id, generation_id, build_id,
+          process_id, fence_epoch, active_writer_count, acknowledged_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        workspaceId, operationId, identity.hostInstanceId, identity.generationId, identity.buildId,
+        identity.processId, options.fenceEpoch, options.activeWriterCount, acknowledgedAtMs,
+      );
+      return toWriterAcknowledgement(this.database.prepare(`
+        SELECT * FROM analytics_writer_fence_acks
+        WHERE workspace_id = ? AND operation_id = ? AND host_instance_id = ?
+      `).get(workspaceId, operationId, identity.hostInstanceId) as AnalyticsWriterFenceAckRow);
+    })();
+  }
+
+  /** Complete a fence only after every frozen host has acknowledged zero local
+   * writers and every durable writer lease has been released. */
+  completeAnalyticsWriterFence(
+    workspaceId: string,
+    operationId: string,
+    nowMs: Int64Value = Date.now(),
+  ): AnalyticsWriterFenceRecord {
+    const normalizedWorkspaceId = requireHostField(workspaceId, 'workspaceId');
+    const normalizedOperationId = requireHostField(operationId, 'operationId');
+    const encodedNow = encodeTimestamp(nowMs, 'nowMs');
+    return this.database.transaction(() => {
+      const fence = this.database.prepare('SELECT * FROM analytics_writer_fences WHERE workspace_id = ?')
+        .get(normalizedWorkspaceId) as AnalyticsWriterFenceRow | undefined;
+      if (!fence || fence.operation_id !== normalizedOperationId || (fence.state !== 'fencing' && fence.state !== 'fenced')) {
+        throw new SessionLifecycleConflictError('Analytics writer fence is missing, open, or owned by another operation.');
+      }
+      const expectedHosts = parseWriterHosts(fence.expected_hosts_json, fence.expected_hosts_sha256);
+      const acknowledgements = this.database.prepare(`
+        SELECT * FROM analytics_writer_fence_acks
+        WHERE workspace_id = ? AND operation_id = ? ORDER BY host_instance_id
+      `).all(normalizedWorkspaceId, normalizedOperationId) as AnalyticsWriterFenceAckRow[];
+      const acknowledgementsByHost = new Map(acknowledgements.map((ack) => [ack.host_instance_id, ack] as const));
+      if (acknowledgements.length !== expectedHosts.length
+        || expectedHosts.some((host) => !acknowledgementsByHost.has(host.hostInstanceId))) {
+        throw new SessionLifecycleConflictError('Analytics writer fence acknowledgements are incomplete.');
+      }
+      const expectedByHost = new Map(expectedHosts.map((host) => [host.hostInstanceId, host] as const));
+      for (const row of acknowledgements) {
+        const acknowledgement = toWriterAcknowledgement(row);
+        const expected = expectedByHost.get(acknowledgement.identity.hostInstanceId);
+        if (!expected || !sameWriterIdentity(expected, acknowledgement.identity)) {
+          throw new SessionLifecycleConflictError('Analytics writer fence acknowledgement identity is invalid.');
+        }
+      }
+      if (acknowledgements.some((ack) => Number(ack.fence_epoch) !== Number(fence.fence_epoch)
+        || Number(ack.active_writer_count) !== 0)) {
+        throw new SessionLifecycleConflictError('Analytics writer fence still has an active host writer.');
+      }
+      if (this.countActiveWriterLeases(normalizedWorkspaceId) !== 0) {
+        throw new SessionLifecycleConflictError('Analytics writer durable leases are still active.');
+      }
+      if (fence.state === 'fencing') {
+        this.database.prepare(`
+          UPDATE analytics_writer_fences SET state = 'fenced', updated_at_ms = ? WHERE workspace_id = ?
+        `).run(encodedNow, normalizedWorkspaceId);
+      }
+      return this.toWriterFenceRecord(this.database.prepare('SELECT * FROM analytics_writer_fences WHERE workspace_id = ?')
+        .get(normalizedWorkspaceId) as AnalyticsWriterFenceRow);
+    })();
+  }
+
+  /** Re-open admission only as an explicit analytics-activation routing step.
+   * Advance the fence epoch so writers from the old admission generation
+   * remain stale; storage-cutoff fences are never re-opened by this method. */
+  reopenAnalyticsWriterAdmission(options: ReopenAnalyticsWriterAdmissionOptions): AnalyticsWriterAdmissionState {
+    const workspaceId = requireHostField(options.workspaceId, 'workspaceId');
+    const operationId = requireHostField(options.operationId, 'operationId');
+    const nowMs = encodeTimestamp(options.nowMs, 'nowMs');
+    return this.database.transaction(() => {
+      const fence = this.database.prepare('SELECT * FROM analytics_writer_fences WHERE workspace_id = ?')
+        .get(workspaceId) as AnalyticsWriterFenceRow | undefined;
+      if (!fence || fence.operation_id !== operationId || fence.purpose !== options.purpose || fence.state !== 'fenced') {
+        throw new SessionLifecycleConflictError('Only a completed analytics-activation fence can reopen admission.');
+      }
+      if (this.countActiveWriterLeases(workspaceId) !== 0) {
+        throw new SessionLifecycleConflictError('Cannot reopen analytics writer admission while a writer lease is active.');
+      }
+      const nextFenceEpoch = Number(fence.fence_epoch) + 1;
+      if (!Number.isSafeInteger(nextFenceEpoch) || nextFenceEpoch <= 0) {
+        throw new SessionLifecycleConflictError('Analytics writer fence epoch is exhausted.');
+      }
+      this.database.prepare(`
+        DELETE FROM analytics_writer_fence_acks WHERE workspace_id = ? AND operation_id = ?
+      `).run(workspaceId, operationId);
+      this.database.prepare(`UPDATE analytics_writer_fences SET fence_epoch = ?, state = 'open', updated_at_ms = ? WHERE workspace_id = ?`)
+        .run(nextFenceEpoch, nowMs, workspaceId);
+      return { workspaceId, state: 'open' as const, fenceEpoch: nextFenceEpoch };
+    })();
+  }
+
+  /** Acquire a short-lived durable admission lease. The caller must supply
+   * the epoch it observed before entering its mutation, so an old writer
+   * cannot become admissible again after an explicit analytics reopen. */
+  acquireAnalyticsWriterLease(
+    identity: AnalyticsWriterIdentity,
+    expectedFenceEpoch: number,
+    nowMs: Int64Value,
+  ): AnalyticsWriterLeaseRecord {
+    const normalizedIdentity = requireWriterIdentity(identity, 'Analytics writer identity');
+    if (!Number.isSafeInteger(expectedFenceEpoch) || expectedFenceEpoch < 0) {
+      throw new Error('Analytics writer admission epoch is invalid.');
+    }
+    const acquiredAtMs = encodeTimestamp(nowMs, 'nowMs');
+    return this.database.transaction(() => {
+      this.assertRegisteredWriterIdentity(normalizedIdentity);
+      const admission = this.getAnalyticsWriterAdmissionState(normalizedIdentity.workspaceId);
+      if (admission.state !== 'open' || admission.fenceEpoch !== expectedFenceEpoch) {
+        throw new SessionLifecycleConflictError(
+          `Analytics writer admission is ${admission.state} at epoch ${admission.fenceEpoch}; expected open epoch ${expectedFenceEpoch}.`,
+        );
+      }
+      const fence = this.database.prepare('SELECT * FROM analytics_writer_fences WHERE workspace_id = ?')
+        .get(normalizedIdentity.workspaceId) as AnalyticsWriterFenceRow | undefined;
+      if (fence) {
+        const expectedHosts = parseWriterHosts(fence.expected_hosts_json, fence.expected_hosts_sha256);
+        if (!expectedHosts.some((host) => sameWriterIdentity(host, normalizedIdentity))) {
+          throw new SessionLifecycleConflictError('Analytics writer identity is outside the current admission census.');
+        }
+      }
+      if (this.countActiveWriterLeases(normalizedIdentity.workspaceId) >= MAX_ANALYTICS_WRITER_LEASES) {
+        throw new SessionLifecycleConflictError('Analytics writer admission lease capacity is exhausted.');
+      }
+      const leaseId = randomUUID();
+      this.database.prepare(`
+        INSERT INTO analytics_writer_leases (
+          lease_id, workspace_id, host_instance_id, generation_id, build_id,
+          process_id, fence_epoch, acquired_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        leaseId, normalizedIdentity.workspaceId, normalizedIdentity.hostInstanceId,
+        normalizedIdentity.generationId, normalizedIdentity.buildId, normalizedIdentity.processId,
+        expectedFenceEpoch, acquiredAtMs,
+      );
+      return toWriterLease(this.database.prepare('SELECT * FROM analytics_writer_leases WHERE lease_id = ?')
+        .get(leaseId) as AnalyticsWriterLeaseRow);
+    })();
+  }
+
+  /** Synchronous admission assertion for ownership/session-manager mutation
+   * seams. It never authorizes a writer by registry presence alone. */
+  assertAnalyticsWriterAdmitted(identity: AnalyticsWriterIdentity, expectedFenceEpoch: number): void {
+    const normalizedIdentity = requireWriterIdentity(identity, 'Analytics writer identity');
+    if (!Number.isSafeInteger(expectedFenceEpoch) || expectedFenceEpoch < 0) {
+      throw new Error('Analytics writer admission epoch is invalid.');
+    }
+    this.database.transaction(() => {
+      this.assertRegisteredWriterIdentity(normalizedIdentity);
+      const admission = this.getAnalyticsWriterAdmissionState(normalizedIdentity.workspaceId);
+      if (admission.state !== 'open' || admission.fenceEpoch !== expectedFenceEpoch) {
+        throw new SessionLifecycleConflictError(
+          `Analytics writer admission is ${admission.state} at epoch ${admission.fenceEpoch}; expected open epoch ${expectedFenceEpoch}.`,
+        );
+      }
+      const fence = this.database.prepare('SELECT * FROM analytics_writer_fences WHERE workspace_id = ?')
+        .get(normalizedIdentity.workspaceId) as AnalyticsWriterFenceRow | undefined;
+      if (fence) {
+        const expectedHosts = parseWriterHosts(fence.expected_hosts_json, fence.expected_hosts_sha256);
+        if (!expectedHosts.some((host) => sameWriterIdentity(host, normalizedIdentity))) {
+          throw new SessionLifecycleConflictError('Analytics writer identity is outside the current admission census.');
+        }
+      }
+    })();
+  }
+
+  releaseAnalyticsWriterLease(lease: AnalyticsWriterLeaseRecord): void {
+    const leaseId = requireHostField(lease.leaseId, 'Analytics writer leaseId');
+    const identity = requireWriterIdentity(lease, 'Analytics writer lease identity');
+    this.database.transaction(() => {
+      const existing = this.database.prepare('SELECT * FROM analytics_writer_leases WHERE lease_id = ?')
+        .get(leaseId) as AnalyticsWriterLeaseRow | undefined;
+      if (!existing) return;
+      const prior = toWriterLease(existing);
+      if (!sameWriterIdentity(prior, identity) || prior.fenceEpoch !== lease.fenceEpoch) {
+        throw new SessionLifecycleConflictError('Analytics writer lease identity is stale.');
+      }
+      this.database.prepare('DELETE FROM analytics_writer_leases WHERE lease_id = ?').run(leaseId);
+    })();
+  }
+
+  listAnalyticsWriterLeases(workspaceId: string): AnalyticsWriterLeaseRecord[] {
+    const normalizedWorkspaceId = requireHostField(workspaceId, 'workspaceId');
+    const rows = this.database.prepare(`
+      SELECT * FROM analytics_writer_leases WHERE workspace_id = ? ORDER BY lease_id LIMIT ?
+    `).all(normalizedWorkspaceId, MAX_ANALYTICS_WRITER_LEASES + 1) as AnalyticsWriterLeaseRow[];
+    if (rows.length > MAX_ANALYTICS_WRITER_LEASES) {
+      throw new SessionLifecycleConflictError('Analytics writer lease census is truncated.');
+    }
+    return rows.map(toWriterLease);
+  }
+
+  private countActiveWriterLeases(workspaceId: string): number {
+    const row = this.database.prepare(`
+      SELECT COUNT(*) AS count FROM analytics_writer_leases WHERE workspace_id = ?
+    `).get(workspaceId) as { count: number | bigint };
+    const count = Number(row.count);
+    if (!Number.isSafeInteger(count) || count < 0 || count > MAX_ANALYTICS_WRITER_LEASES) {
+      throw new SessionLifecycleConflictError('Analytics writer lease count is invalid or exceeds the bound.');
+    }
+    return count;
+  }
+
+  private assertRegisteredWriterIdentity(identity: AnalyticsWriterIdentity): void {
+    const row = this.database.prepare('SELECT * FROM analytics_hosts WHERE host_instance_id = ?')
+      .get(identity.hostInstanceId) as AnalyticsHostRow | undefined;
+    if (!row) throw new SessionLifecycleConflictError(`Analytics writer host ${identity.hostInstanceId} is not registered.`);
+    const host = toAnalyticsHost(row);
+    if (!sameWriterIdentity(writerIdentityFromHost(host), identity) || host.state !== 'registered') {
+      throw new SessionLifecycleConflictError(`Analytics writer host ${identity.hostInstanceId} is not currently admissible.`);
+    }
+  }
+
+  private assertWriterRegistrySnapshot(
+    workspaceId: string,
+    expectedHosts: readonly AnalyticsWriterIdentity[],
+  ): void {
+    const rows = this.database.prepare(`
+      SELECT * FROM analytics_hosts WHERE workspace_id = ? ORDER BY host_instance_id
+    `).all(workspaceId) as AnalyticsHostRow[];
+    if (rows.length !== expectedHosts.length) {
+      throw new SessionLifecycleConflictError('Analytics writer census does not cover the complete host registry.');
+    }
+    const expectedByHost = new Map(expectedHosts.map((host) => [host.hostInstanceId, host] as const));
+    for (const row of rows) {
+      const host = toAnalyticsHost(row);
+      const expected = expectedByHost.get(host.hostInstanceId);
+      if (!expected
+        || host.state !== 'registered'
+        || !host.capabilities.includes('authenticated-control')
+        || !host.capabilities.includes('writer-fence')
+        || !sameWriterIdentity(writerIdentityFromHost(host), expected)) {
+        throw new SessionLifecycleConflictError('Analytics writer census does not match the complete host registry.');
+      }
+    }
+  }
+
+  private toWriterFenceRecord(row: AnalyticsWriterFenceRow): AnalyticsWriterFenceRecord {
+    const expectedHosts = parseWriterHosts(row.expected_hosts_json, row.expected_hosts_sha256);
+    const acknowledgedHostInstanceIds = (this.database.prepare(`
+      SELECT host_instance_id FROM analytics_writer_fence_acks
+      WHERE workspace_id = ? AND operation_id = ? ORDER BY host_instance_id
+    `).all(row.workspace_id, row.operation_id) as Array<{ host_instance_id: string }>).map((ack) => {
+      const hostInstanceId = requireHostField(ack.host_instance_id, 'Analytics writer acknowledgement hostInstanceId');
+      if (!expectedHosts.some((host) => host.hostInstanceId === hostInstanceId)) {
+        throw new SessionLifecycleConflictError('Analytics writer fence contains an out-of-census acknowledgement.');
+      }
+      return hostInstanceId;
+    });
+    if (new Set(acknowledgedHostInstanceIds).size !== acknowledgedHostInstanceIds.length) {
+      throw new SessionLifecycleConflictError('Analytics writer fence contains duplicate acknowledgements.');
+    }
+    return {
+      workspaceId: row.workspace_id,
+      operationId: row.operation_id,
+      purpose: row.purpose,
+      fenceEpoch: Number(row.fence_epoch),
+      state: row.state,
+      expectedHosts,
+      acknowledgedHostInstanceIds,
+      startedAtMs: row.started_at_ms,
+      updatedAtMs: row.updated_at_ms,
     };
   }
 

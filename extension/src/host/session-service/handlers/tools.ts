@@ -156,7 +156,9 @@ export function onToolFinished(
     result: payload.result,
     status: payload.status,
     startedAt: payload.startedAt ?? existing?.startedAt,
+    endedAt: payload.endedAt,
     durationMs: payload.durationMs,
+    durationClockDomain: payload.durationClockDomain,
     parallelGroupId: payload.parallelGroupId ?? existing?.parallelGroupId,
     durableEntryId: payload.durableEntryId,
   };

@@ -345,7 +345,9 @@ export function isToolFinishedPayload(value: unknown): value is ToolFinishedPayl
     && (value.name === undefined || isString(value.name))
     && (value.status === 'completed' || value.status === 'failed')
     && isOptionalFiniteNumber(value.startedAt)
+    && isOptionalFiniteNumber(value.endedAt)
     && isOptionalFiniteNumber(value.durationMs)
+    && (value.durationClockDomain === undefined || value.durationClockDomain === 'monotonic-same-process')
     && (value.parallelGroupId === undefined || isString(value.parallelGroupId))
     && (value.durableEntryId === undefined || isString(value.durableEntryId))
     && (value.canonicalLive === undefined || typeof value.canonicalLive === 'boolean')
@@ -538,6 +540,8 @@ export function isRetryMeasuredPayload(value: unknown): value is RetryMeasuredPa
     && isOptionalFiniteNumber(value.endedAt)
     && isOptionalFiniteNumber(value.measuredDelayMs)
     && isFiniteNumber(value.durationMs)
+    && (value.durationClockDomain === undefined
+      || value.durationClockDomain === 'monotonic-same-process')
   );
 }
 

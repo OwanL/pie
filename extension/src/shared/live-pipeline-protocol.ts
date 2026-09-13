@@ -1,5 +1,6 @@
 import type { ChatMessage, ToolCall } from './protocol/messages.js';
 import type { ThinkingLevel } from './protocol/models.js';
+import type { DurationClockDomain } from './timing.js';
 import type { LiveSubagentDetailAddress, SubagentChildIdentity } from './protocol/subagent-detail.js';
 import { isThinkingLevel } from './thinking-level.js';
 import { isFiniteNumber, isRecord } from './type-guards.js';
@@ -271,6 +272,8 @@ export interface LiveToolRecord {
   executionEnd?: {
     status: 'completed' | 'failed';
     durationMs?: number;
+    durationClockDomain?: DurationClockDomain;
+    endedAt?: number;
   };
   /** Present only after the SDK durable toolResult append is confirmed. */
   terminal?: {
@@ -278,6 +281,8 @@ export interface LiveToolRecord {
     result: unknown;
     resultBytes: number;
     durationMs?: number;
+    durationClockDomain?: DurationClockDomain;
+    endedAt?: number;
     durableEntryId: string;
   };
 }
@@ -360,6 +365,8 @@ export type TurnSemanticEnvelope =
       executionId: string;
       status: 'completed' | 'failed';
       durationMs?: number;
+      durationClockDomain?: DurationClockDomain;
+      endedAt?: number;
     })
   | (SemanticEnvelopeBase & {
       kind: 'tool.terminal';
@@ -368,6 +375,8 @@ export type TurnSemanticEnvelope =
       result: unknown;
       resultBytes?: number;
       durationMs?: number;
+      durationClockDomain?: DurationClockDomain;
+      endedAt?: number;
       durableEntryId: string;
     })
   | (SemanticEnvelopeBase & { kind: 'observation.rejected'; reason: RejectedObservationReason })
@@ -467,12 +476,16 @@ export function isTurnSemanticEnvelope(value: unknown): value is TurnSemanticEnv
       && isToolProgressUpdate(value.update);
     case 'tool.executionEnded': return typeof value.executionId === 'string'
       && (value.status === 'completed' || value.status === 'failed')
-      && optionalFiniteNumber(value.durationMs);
+      && optionalFiniteNumber(value.durationMs)
+      && optionalFiniteNumber(value.endedAt)
+      && optionalDurationClockDomain(value.durationClockDomain);
     case 'tool.terminal': return typeof value.executionId === 'string'
       && (value.status === 'completed' || value.status === 'failed')
       && typeof value.durableEntryId === 'string' && value.durableEntryId.length > 0
       && optionalNonNegativeSafeInteger(value.resultBytes)
-      && optionalFiniteNumber(value.durationMs);
+      && optionalFiniteNumber(value.durationMs)
+      && optionalFiniteNumber(value.endedAt)
+      && optionalDurationClockDomain(value.durationClockDomain);
     case 'observation.rejected': return ['unsupported_observation', 'malformed_observation', 'malformed_payload', 'owner_missing', 'payload_oversize'].includes(String(value.reason));
     case 'turn.terminal': return ['completed', 'interrupted', 'error'].includes(String(value.terminalKind))
       && (value.userInitiated === undefined || typeof value.userInitiated === 'boolean')
@@ -572,6 +585,9 @@ function isLiveTurnPhase(value: unknown): value is LiveTurnPhase {
   return ['queued', 'preparing', 'waiting_provider', 'streaming', 'running_tool', 'waiting_input', 'retry_wait', 'aborting', 'reconciling_gap'].includes(String(value));
 }
 function optionalFiniteNumber(value: unknown): boolean { return value === undefined || isFiniteNumber(value); }
+function optionalDurationClockDomain(value: unknown): boolean {
+  return value === undefined || value === 'monotonic-same-process';
+}
 function isNonNegativeSafeInteger(value: unknown): boolean {
   return Number.isSafeInteger(value) && (value as number) >= 0;
 }

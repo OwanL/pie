@@ -1,5 +1,6 @@
 import type { ThinkingLevel, ModelSettings, ModelInfo, ContextWindowUsage, InitialContextEstimate } from './models.js';
 import type { ChatMessage, ToolCall } from './messages.js';
+import type { DurationClockDomain } from '../timing.js';
 import type { LiveTurnCheckpoint, ToolPreview } from '../live-pipeline-protocol.js';
 import type { SessionUsageSnapshot } from '../session-usage.js';
 import type { OperationalIncident } from '../incidents.js';
@@ -324,8 +325,12 @@ export interface ToolFinishedPayload {
   /** Backend execution start, repeated so interval analytics do not depend on
    * an in-memory/transcript tool.started record surviving until terminal. */
   startedAt?: number;
-  /** Wall-clock execution time in milliseconds for this tool call. */
+  /** Execution duration measured by the backend producer. */
   durationMs?: number;
+  /** Clock provenance of durationMs; absent retains legacy wall-clock timing. */
+  durationClockDomain?: DurationClockDomain;
+  /** Epoch milliseconds sampled at the authoritative execution terminal. */
+  endedAt?: number;
   /** Stable grouping for concurrently-running sibling calls. */
   parallelGroupId?: string;
   /** Stable SDK toolResult session entry; present only after persistence. */
@@ -522,6 +527,12 @@ export interface RetryEndedPayload {
   finalError?: string;
 }
 
+/** Clock provenance of RetryMeasuredPayload measured durations. Absent means
+ * the durations were derived from wall-clock-utc Date.now() samples, whose
+ * subtraction can straddle a wall-clock jump and reverse. Only explicitly
+ * marked payloads carry jump-safe monotonic evidence. */
+export type RetryDurationClockDomain = DurationClockDomain;
+
 /** Analytics-only terminal timing for one retry attempt. Emitted when another
  * attempt supersedes it or the retry episode ends. */
 export interface RetryMeasuredPayload {
@@ -529,13 +540,25 @@ export interface RetryMeasuredPayload {
   requestId: string;
   retryId: string;
   operationId?: string;
+  /** Wall-clock epoch ms when the retry backoff started. */
   startedAt?: number;
+  /** Wall-clock epoch ms of the first observed provider-attempt/gate
+   *  boundary (queue entry or gate acquisition, whichever the provider
+   *  transport observes first). */
   providerAttemptStartedAt?: number;
+  /** Wall-clock epoch ms at the terminal/superseding boundary. */
   endedAt?: number;
-  /** Observed scheduling→provider-attempt delay; absent for ungated providers. */
+  /** Observed scheduling→first provider-attempt/gate boundary wait; absent
+   * for ungated providers and until dispatch. Does NOT include provider queue
+   * occupancy — the anchor is stamped at queue entry when the attempt queues.
+   * Clock domain follows durationClockDomain. */
   measuredDelayMs?: number;
-  /** Observed scheduling→attempt terminal/superseding boundary. */
+  /** Observed scheduling→attempt terminal/superseding boundary. Clock domain
+   * follows durationClockDomain. */
   durationMs: number;
+  /** Explicit provenance for measuredDelayMs/durationMs; absent means
+   * wall-clock-utc Date.now() deltas, never monotonic measurements. */
+  durationClockDomain?: RetryDurationClockDomain;
 }
 
 /** Emitted by the backend when a history-compaction (`/compact`) LLM call

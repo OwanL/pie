@@ -17,6 +17,7 @@ import type {
 import { createOperationalIncident } from '../shared/incidents.js';
 import { compactSubagentResultPreview } from '../shared/lazy-details';
 import { LIVE_PIPELINE_LIMITS, LIVE_PIPELINE_PROTOCOL_VERSION } from '../shared/live-pipeline-protocol';
+import type { DurationClockDomain } from '../shared/timing.js';
 import type { SdkSessionEvent } from './sdk';
 import { BackendLiveTurnAccumulator } from './live-turn-accumulator';
 import {
@@ -716,6 +717,7 @@ function startQueuedFollowUpSegment(
   active.pendingErrorTerminal = undefined;
   active.pendingDurableToolTerminals?.clear();
   active.toolStartTimes?.clear();
+  active.toolStartMonotonicTimes?.clear();
   active.toolStartMetadata?.clear();
   active.toolParallelGroupByCallId?.clear();
   active.providerQueueByTurn?.clear();
@@ -732,12 +734,42 @@ function startQueuedFollowUpSegment(
 function resolveToolTiming(
   context: SessionContext,
   toolCallId: string,
-): { startedAt: number; durationMs: number } | undefined {
-  const startedAt = context.activeRequest?.toolStartTimes?.get(toolCallId);
-  context.activeRequest?.toolStartTimes?.delete(toolCallId);
-  context.activeRequest?.toolParallelGroupByCallId?.delete(toolCallId);
+): {
+  startedAt: number;
+  endedAt: number;
+  durationMs?: number;
+  durationClockDomain?: DurationClockDomain;
+  parallelGroupId?: string;
+} | undefined {
+  const active = context.activeRequest;
+  const startedAt = active?.toolStartTimes?.get(toolCallId);
+  const startedMonotonicMs = active?.toolStartMonotonicTimes?.get(toolCallId);
+  const parallelGroupId = active?.toolParallelGroupByCallId?.get(toolCallId);
+  active?.toolStartTimes?.delete(toolCallId);
+  active?.toolStartMonotonicTimes?.delete(toolCallId);
+  active?.toolParallelGroupByCallId?.delete(toolCallId);
   if (startedAt === undefined) return undefined;
-  return { startedAt, durationMs: Math.max(0, Date.now() - startedAt) };
+
+  // Keep the epoch endpoint as a correlation anchor, but use the paired
+  // same-process sample for elapsed time. A reversed wall-clock pair is valid
+  // correlation evidence but cannot be used as a duration fallback.
+  const endedAt = Date.now();
+  const endedMonotonicMs = performance.now();
+  const monotonicDurationMs = startedMonotonicMs === undefined
+    ? undefined
+    : endedMonotonicMs - startedMonotonicMs;
+  const wallDurationMs = endedAt - startedAt;
+  const measuredMonotonic = Number.isFinite(monotonicDurationMs)
+    && monotonicDurationMs! >= 0;
+  const measuredWall = Number.isFinite(wallDurationMs) && wallDurationMs >= 0;
+  return {
+    startedAt,
+    endedAt,
+    ...(measuredMonotonic
+      ? { durationMs: monotonicDurationMs!, durationClockDomain: 'monotonic-same-process' as const }
+      : measuredWall ? { durationMs: wallDurationMs } : {}),
+    ...(parallelGroupId === undefined ? {} : { parallelGroupId }),
+  };
 }
 
 function handleContentToolSessionEvent(
@@ -977,6 +1009,7 @@ function handleContentToolSessionEvent(
         return;
       }
       const startedAt = Date.now();
+      const startedMonotonicMs = performance.now();
       const toolStartTimes = context.activeRequest.toolStartTimes ?? new Map<string, number>();
       const parallelGroups = context.activeRequest.toolParallelGroupByCallId ?? new Map<string, string>();
       const runningSiblingId = toolStartTimes.keys().next().value as string | undefined;
@@ -987,8 +1020,12 @@ function handleContentToolSessionEvent(
         ? undefined
         : boundToolProgress(event.args, TOOL_PROGRESS_MAX_BYTES);
       toolStartTimes.set(toolCallId, startedAt);
+      const toolStartMonotonicTimes = context.activeRequest.toolStartMonotonicTimes
+        ?? new Map<string, number>();
+      toolStartMonotonicTimes.set(toolCallId, startedMonotonicMs);
       parallelGroups.set(toolCallId, parallelGroupId);
       context.activeRequest.toolStartTimes = toolStartTimes;
+      context.activeRequest.toolStartMonotonicTimes = toolStartMonotonicTimes;
       context.activeRequest.toolParallelGroupByCallId = parallelGroups;
       const toolStartMetadata = context.activeRequest.toolStartMetadata
         ?? new Map<string, { name: string; input: unknown }>();
@@ -1086,11 +1123,6 @@ function handleContentToolSessionEvent(
         return;
       }
 
-      // Advance the turn-latency window origin to this tool's finish time. The
-      // most recent distinct `tool_execution_end` wins, so parallel/sequential
-      // batches anchor on the last tool to finish.
-      context.activeRequest.turnBoundaryAt = Date.now();
-
       const startMetadata = context.activeRequest.toolStartMetadata?.get(toolCallId);
       context.activeRequest.toolStartMetadata?.delete(toolCallId);
       const toolName = event.toolName?.trim() || startMetadata?.name || '';
@@ -1106,6 +1138,11 @@ function handleContentToolSessionEvent(
       }
 
       const timing = resolveToolTiming(context, toolCallId);
+      // Advance the turn-latency window origin to this tool's finish time. The
+      // most recent distinct `tool_execution_end` wins, so parallel/sequential
+      // batches anchor on the last tool to finish. Missing timing falls back
+      // only for this unrelated turn-latency boundary, never tool duration.
+      context.activeRequest.turnBoundaryAt = timing?.endedAt ?? Date.now();
       const runningTools = context.activeRequest.toolStartTimes?.size ?? 0;
 
       const terminal: ToolFinishedPayload = {
@@ -1118,7 +1155,10 @@ function handleContentToolSessionEvent(
         result: event.result,
         status: executionStatus,
         startedAt: timing?.startedAt,
+        endedAt: timing?.endedAt,
         durationMs: timing?.durationMs,
+        durationClockDomain: timing?.durationClockDomain,
+        parallelGroupId: timing?.parallelGroupId,
       };
       pending.set(toolCallId, terminal);
       context.activeRequest.pendingDurableToolTerminals = pending;
@@ -1129,7 +1169,9 @@ function handleContentToolSessionEvent(
         kind: 'tool.executionEnded',
         executionId: liveExecutionId(context, toolCallId),
         status: terminal.status,
+        endedAt: terminal.endedAt,
         durationMs: terminal.durationMs,
+        durationClockDomain: terminal.durationClockDomain,
       });
       // Parallel siblings still executing keep the turn in running_tool; only
       // the last execution enters the inter-turn preparation phase.
@@ -1244,7 +1286,9 @@ function handleContentToolSessionEvent(
           executionId: liveExecutionId(context, toolCallId),
           status: terminal.status,
           result: transportTerminal.result,
+          endedAt: terminal.endedAt,
           durationMs: terminal.durationMs,
+          durationClockDomain: terminal.durationClockDomain,
           durableEntryId: event.sessionEntryId,
         });
         deps.emit('tool.finished', transportTerminal);

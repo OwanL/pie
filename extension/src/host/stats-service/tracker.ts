@@ -482,27 +482,43 @@ export class SessionRunTracker {
     );
   }
 
-  /** Roll up a tool call's execution duration (when reported and finite). */
+  /** Roll up a tool call's additive duration and, when wall bounds are
+   * available, its non-overlapping wall interval. */
   private recordToolDuration(
     run: RunSnapshot,
-    state: { toolExecutionIntervalsInCurrentRun: Array<{ startedAt: number; endedAt: number }> },
+    state: {
+      toolExecutionIntervalsInCurrentRun: Array<{ startedAt: number; endedAt: number }>;
+    },
     normalizedName: string,
     toolCall: ToolCall,
   ): void {
-    if (typeof toolCall.durationMs !== 'number' || !Number.isFinite(toolCall.durationMs) || toolCall.durationMs < 0) {
-      return;
+    const durationMs = typeof toolCall.durationMs === 'number'
+      && Number.isFinite(toolCall.durationMs) && toolCall.durationMs >= 0
+      ? toolCall.durationMs
+      : undefined;
+    if (durationMs !== undefined) {
+      run.toolUsage.totalDurationMs += durationMs;
+      run.toolUsage.timedCallCount += 1;
+      run.toolUsage.durationMsByName[normalizedName] =
+        (run.toolUsage.durationMsByName[normalizedName] ?? 0) + durationMs;
+      run.toolUsage.timedCallCountsByName[normalizedName] =
+        (run.toolUsage.timedCallCountsByName[normalizedName] ?? 0) + 1;
     }
-    const durationMs = Math.trunc(toolCall.durationMs);
-    run.toolUsage.totalDurationMs += durationMs;
-    run.toolUsage.timedCallCount += 1;
-    run.toolUsage.durationMsByName[normalizedName] =
-      (run.toolUsage.durationMsByName[normalizedName] ?? 0) + durationMs;
-    run.toolUsage.timedCallCountsByName[normalizedName] =
-      (run.toolUsage.timedCallCountsByName[normalizedName] ?? 0) + 1;
 
     if (typeof toolCall.startedAt !== 'number' || !Number.isFinite(toolCall.startedAt)) return;
     const startedAt = toolCall.startedAt;
-    const endedAt = startedAt + durationMs;
+    const monotonic = toolCall.durationClockDomain === 'monotonic-same-process';
+    const hasProducerEndedAt = typeof toolCall.endedAt === 'number' && Number.isFinite(toolCall.endedAt);
+    // A marked duration has no wall-clock endpoint of its own. An endpoint
+    // supplied by the producer is still usable as wall evidence; only the
+    // unmarked legacy shape may derive an endpoint from start + duration.
+    const endedAt = hasProducerEndedAt
+      ? toolCall.endedAt
+      : toolCall.endedAt === undefined && !monotonic && durationMs !== undefined
+        ? startedAt + durationMs
+        : undefined;
+    if (endedAt === undefined || !Number.isFinite(endedAt) || endedAt < startedAt) return;
+
     let newlyCoveredMs = Math.max(0, endedAt - startedAt);
     for (const interval of state.toolExecutionIntervalsInCurrentRun) {
       newlyCoveredMs -= Math.max(0, Math.min(endedAt, interval.endedAt) - Math.max(startedAt, interval.startedAt));

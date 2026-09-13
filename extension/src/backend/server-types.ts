@@ -33,13 +33,25 @@ export interface ActiveRequest {
   /** Exact attempt currently between admission and its first body chunk. */
   providerNetworkPendingAttemptId?: string;
   providerNetworkPending?: boolean;
-  /** Auto-retry attempt currently being measured. */
+  /** Auto-retry attempt currently being measured. Wall bounds and monotonic
+   *  samples are stamped together at each observation seam so durations can be
+   *  measured jump-safe while the epoch anchors stay correlatable. */
   retryTiming?: {
     retryId: string;
     attempt: number;
+    /** Wall-clock epoch ms (Date.now()) when the retry backoff started. */
     startedAt: number;
+    /** Same-process monotonic sample (performance.now()) paired with
+     *  `startedAt`; deltas from it never reverse across wall-clock jumps. */
+    startedMonotonicMs: number;
     scheduledDelayMs: number;
+    /** Wall-clock epoch ms (Date.now()) of the first observed
+     *  provider-attempt/gate boundary (queue entry or gate acquisition,
+     *  whichever the transport observes first), from the observation's
+     *  occurredAt. */
     providerAttemptStartedAt?: number;
+    /** Same-process monotonic sample paired with `providerAttemptStartedAt`. */
+    providerAttemptStartedMonotonicMs?: number;
   };
   currentMessageId?: string;
   lastAssistantMessageId?: string;
@@ -49,6 +61,8 @@ export interface ActiveRequest {
   emittedPruningResultEntryId?: string;
   /** Epoch ms when each in-flight tool call began, keyed by toolCallId. */
   toolStartTimes?: Map<string, number>;
+  /** Same-process monotonic samples paired with toolStartTimes. */
+  toolStartMonotonicTimes?: Map<string, number>;
   /** Host-render grouping assigned before semantic tool publication. */
   toolParallelGroupByCallId?: Map<string, string>;
   /** Tool name/input captured at execution start. Repeated on tool.finished so

@@ -933,13 +933,66 @@ test('tool execution events emit progress only when an active assistant message 
     result: { ok: true },
     status: 'failed',
     startedAt: (emitted[2]?.payload as { startedAt: number }).startedAt,
+    endedAt: (emitted[2]?.payload as { endedAt: number }).endedAt,
     durationMs: (emitted[2]?.payload as { durationMs: number }).durationMs,
+    durationClockDomain: 'monotonic-same-process',
+    parallelGroupId: (emitted[2]?.payload as { parallelGroupId: string }).parallelGroupId,
     durableEntryId: (emitted[2]?.payload as { durableEntryId: string }).durableEntryId,
   });
   assert.equal(typeof (emitted[2]?.payload as { durationMs: number }).durationMs, 'number');
+  assert.equal(typeof (emitted[2]?.payload as { endedAt: number }).endedAt, 'number');
+  assert.equal((emitted[2]?.payload as { parallelGroupId: string }).parallelGroupId,
+    (emitted[0]?.payload as { parallelGroupId: string }).parallelGroupId);
   // Context usage is the latest assistant prompt footprint. Tool boundaries do
   // not change it, so they must not resolve the full SDK branch.
   assert.equal(getContextUsageChangedCount(), 0);
+});
+
+test('tool execution timing uses monotonic elapsed samples across wall-clock reversal', () => {
+  const { deps, emitted } = createDeps();
+  const originalWall = Date.now;
+  const originalMonotonic = performance.now;
+  let wall = 2_000;
+  let monotonic = 10;
+  Date.now = () => wall;
+  performance.now = () => monotonic;
+  try {
+    const context = createContext({
+      activeRequest: {
+        id: 'req-tool-timing',
+        messageIndex: 1,
+        lastAssistantMessageId: 'req-tool-timing:1',
+        aborted: false,
+      },
+    });
+    handleSdkSessionEvent(deps, context, {
+      type: 'tool_execution_start',
+      toolCallId: 'tool-timing',
+      toolName: 'bash',
+      args: { command: 'true' },
+    });
+    wall = 1_000;
+    monotonic = 55;
+    handleSdkSessionEvent(deps, context, {
+      type: 'tool_execution_end',
+      toolCallId: 'tool-timing',
+      result: { ok: true },
+      isError: false,
+    });
+    const terminal = emitted.find((entry) => entry.event === 'tool.finished')?.payload as {
+      startedAt?: number;
+      endedAt?: number;
+      durationMs?: number;
+      durationClockDomain?: string;
+    };
+    assert.equal(terminal.startedAt, 2_000);
+    assert.equal(terminal.endedAt, 1_000);
+    assert.equal(terminal.durationMs, 45);
+    assert.equal(terminal.durationClockDomain, 'monotonic-same-process');
+  } finally {
+    Date.now = originalWall;
+    performance.now = originalMonotonic;
+  }
 });
 
 test('live semantic tool starts bound oversized input before worker transport', () => {
@@ -1519,7 +1572,11 @@ test('retry timing correlates scheduled delay with measured provider delay and d
   const started = context.activeRequest?.retryTiming?.startedAt;
   assert.equal(typeof started, 'number');
   assert.equal(context.activeRequest?.lastProviderErrorForDiagnostics, '429');
+  // Stamp the gate-observation seam exactly as the worker host does: paired
+  // wall anchor plus same-process monotonic sample.
   context.activeRequest!.retryTiming!.providerAttemptStartedAt = started!;
+  context.activeRequest!.retryTiming!.providerAttemptStartedMonotonicMs =
+    context.activeRequest!.retryTiming!.startedMonotonicMs;
   handleSdkSessionEvent(deps, context, {
     type: 'auto_retry_end', success: true, attempt: 2,
   });
@@ -1536,7 +1593,66 @@ test('retry timing correlates scheduled delay with measured provider delay and d
   assert.equal(measured.operationId, 'source-operation');
   assert.equal(measured.startedAt, started);
   assert.equal(measured.providerAttemptStartedAt, started);
-  assert.equal(measured.endedAt! - measured.startedAt!, measured.durationMs);
+  assert.equal(measured.endedAt! >= measured.startedAt!, true);
+  assert.equal(measured.durationMs >= 0, true);
+  assert.equal(measured.durationClockDomain, 'monotonic-same-process');
+});
+
+/** Real producer timing: the lifecycle handler measures both durations from
+ *  same-process monotonic samples at the existing seams while the wall clock
+ *  runs backwards, keeping the Date.now() bounds separately unclamped. */
+test('retry timing measures monotonic durations across backwards wall-clock samples', () => {
+  const { deps, emitted } = createDeps();
+  const context = createContext({
+    activeRequest: { id: 'req-retry-jump', messageIndex: 1, aborted: false },
+  });
+  const originalWall = Date.now;
+  const originalMonotonic = performance.now.bind(performance);
+  let wall = originalWall();
+  let mono = originalMonotonic();
+  try {
+    Date.now = () => wall;
+    performance.now = () => mono;
+    handleSdkSessionEvent(deps, context, {
+      type: 'auto_retry_start',
+      attempt: 1,
+      maxAttempts: 3,
+      delayMs: 1_000,
+      errorMessage: '429',
+    });
+    const timing = context.activeRequest?.retryTiming;
+    assert.equal(typeof timing?.startedMonotonicMs, 'number');
+    const startedMono = timing!.startedMonotonicMs;
+    // A wall-clock jump backwards 30s must not touch the monotonic duration
+    // clock, which advances through the scheduled backoff wait.
+    wall -= 30_000;
+    mono += 1_500;
+    const gateMono = mono;
+    timing!.providerAttemptStartedAt = Date.now();
+    timing!.providerAttemptStartedMonotonicMs = performance.now();
+    // The attempt runs on; the wall clock jumps backwards once more while the
+    // monotonic clock advances to the terminal boundary.
+    wall -= 5_000;
+    mono += 700;
+    handleSdkSessionEvent(deps, context, {
+      type: 'auto_retry_end', success: true, attempt: 1,
+    });
+
+    const measured = emitted.find((entry) => entry.event === 'retry.measured')
+      ?.payload as import('../../../src/shared/protocol').RetryMeasuredPayload;
+    assert.equal(measured.retryId, 'req-retry-jump:1');
+    assert.equal(measured.measuredDelayMs, gateMono - startedMono,
+      'wait is the monotonic delta at the gate seam');
+    assert.equal(measured.durationMs, mono - startedMono,
+      'episode is the monotonic delta, not the wall subtraction');
+    assert.equal(measured.durationClockDomain, 'monotonic-same-process');
+    assert.equal(measured.startedAt! > measured.endedAt!, true,
+      'wall bounds stay unclamped Date.now() samples even when they reversed');
+    assert.equal(measured.providerAttemptStartedAt! > measured.endedAt!, true);
+  } finally {
+    Date.now = originalWall;
+    performance.now = originalMonotonic;
+  }
 });
 
 test('auto_retry_end emits retry.ended with success/finalError', () => {
@@ -2204,6 +2320,9 @@ test('tool_execution_end emits transient execution end before phase and durable 
   assert.ok(executionEndIndex >= 0);
   assert.ok(followingPhaseIndex > executionEndIndex, 'execution end is published before the turn phase update');
   assert.equal(semantic[executionEndIndex]?.status, 'completed');
+  assert.equal(typeof semantic[executionEndIndex]?.endedAt, 'number');
+  assert.equal(typeof semantic[executionEndIndex]?.durationMs, 'number');
+  assert.equal(semantic[executionEndIndex]?.durationClockDomain, 'monotonic-same-process');
   assert.equal(semantic[followingPhaseIndex]?.phase, 'running_tool', 'the sibling remains active');
   assert.deepEqual(accumulator.checkpoint().tools.find((tool) => tool.transcriptToolCallId === 'tool-a')?.executionEnd?.status, 'completed');
   assert.equal(accumulator.checkpoint().tools.find((tool) => tool.transcriptToolCallId === 'tool-a')?.terminal, undefined);
@@ -2223,6 +2342,9 @@ test('tool_execution_end emits transient execution end before phase and durable 
   const durable = emitted.find((entry) => entry.event === 'live.semantic'
     && (entry.payload as any).kind === 'tool.terminal')?.payload as any;
   assert.equal(durable?.status, 'completed');
+  assert.equal(durable?.endedAt, semantic[executionEndIndex]?.endedAt);
+  assert.equal(durable?.durationMs, semantic[executionEndIndex]?.durationMs);
+  assert.equal(durable?.durationClockDomain, 'monotonic-same-process');
   assert.equal(durable?.durableEntryId, 'tool-a-entry');
   assert.equal(accumulator.checkpoint().tools.find((tool) => tool.transcriptToolCallId === 'tool-a')?.terminal?.durableEntryId, 'tool-a-entry');
 });

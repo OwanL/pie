@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { WorkingTimeService } from '../../../src/host/working-time-service';
 import type { RunSnapshot } from '../../../src/host/run-analytics';
+import type { ActivityIntervalRecord } from '../../../src/shared/activity-interval';
 import type { SubagentAttemptSample } from '../../../../shared/run-analytics-contracts';
 
 function run(runId: string, sessionPath: string, busyDurationMs: number): RunSnapshot {
@@ -231,6 +232,81 @@ test('working time exposes mocked live parallel tools as one wall-time interval'
   assert.equal(state?.breakdown?.toolExecutionMs, 8_000, 'parallel calls contribute their union, not their cumulative 11 seconds');
   assert.equal(state?.activeToolSince, undefined);
   assert.equal(state?.activeTools, undefined);
+});
+
+test('working time unions staggered parallel wall intervals across mixed timing provenance', () => {
+  const service = new WorkingTimeService({
+    now: () => new Date(10_000),
+    onChanged: () => {},
+  });
+  service.onToolStarted('/session/a.jsonl', {
+    id: 'parallel-a', name: 'mcp', startedAt: 1_000,
+  });
+  service.onToolStarted('/session/a.jsonl', {
+    id: 'parallel-b', name: 'bash', startedAt: 1_500,
+  });
+  service.onToolFinished('/session/a.jsonl', {
+    id: 'parallel-a', startedAt: 1_000, endedAt: 3_000, durationMs: 2_000,
+    durationClockDomain: 'monotonic-same-process',
+  });
+  service.onToolFinished('/session/a.jsonl', {
+    id: 'parallel-b', startedAt: 1_500, endedAt: 4_500, durationMs: 3_000,
+  });
+
+  assert.equal(service.getStates()['/session/a.jsonl']?.breakdown?.toolExecutionMs, 3_500,
+    'wall coverage uses the exact staggered interval union, not a parallel-group maximum');
+});
+
+test('working time restores only ordered producer wall intervals and ignores monotonic-only terminals', () => {
+  const service = new WorkingTimeService({
+    now: () => new Date(10_000),
+    onChanged: () => {},
+  });
+  const sessionPath = '/session/restored-tools.jsonl';
+  const interval = (
+    intervalId: string,
+    startedAt: number,
+    endedAt: number | undefined,
+    durationMs: number,
+    durationClockDomain?: 'monotonic-same-process',
+  ): ActivityIntervalRecord => ({
+    schemaVersion: 1,
+    intervalId,
+    sessionId: 'session-restored-tools',
+    sessionPath,
+    parentRunId: null,
+    parentOperationId: null,
+    invocationId: null,
+    toolId: intervalId,
+    kind: 'tool',
+    startedAt: new Date(startedAt).toISOString(),
+    ...(endedAt === undefined ? {} : { endedAt: new Date(endedAt).toISOString() }),
+    durationMs,
+    ...(durationClockDomain === undefined ? {} : { durationClockDomain }),
+    outcome: 'succeeded',
+  });
+
+  const intervals = [
+    interval('ordered', 1_000, 2_000, 9_000, 'monotonic-same-process'),
+    interval('reversed-mono', 4_000, 3_000, 1_000, 'monotonic-same-process'),
+    interval('reversed-wall', 6_000, 5_000, 1_000),
+    interval('missing-mono', 7_000, undefined, 1_000, 'monotonic-same-process'),
+  ];
+  service.restoreActivityIntervals(intervals);
+  service.restoreActivityIntervals(intervals);
+
+  assert.equal(service.getStates()[sessionPath]?.breakdown?.toolExecutionMs, 1_000,
+    'only the ordered producer wall interval contributes to wall union');
+});
+
+test('working time leaves a terminal with missing timing duration unknown', () => {
+  const service = new WorkingTimeService({
+    now: () => new Date(100_000),
+    onChanged: () => {},
+  });
+  service.onToolStarted('/session/a.jsonl', { id: 'unknown', name: 'mcp', startedAt: 1_000 });
+  service.onToolFinished('/session/a.jsonl', { id: 'unknown' });
+  assert.equal(service.getStates()['/session/a.jsonl']?.breakdown, undefined);
 });
 
 test('working time sums parallel, nested, and retry subagent attempts as cumulative agent time', () => {

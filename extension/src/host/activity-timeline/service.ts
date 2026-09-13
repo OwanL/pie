@@ -79,7 +79,14 @@ export type ActivityTimelineDiagnostics = {
  *  full diff over a very large history. */
 type TimelineMutation =
   | { readonly kind: 'start'; readonly records: readonly ActivityIntervalRecord[] }
-  | { readonly kind: 'settle'; readonly intervalId: string; readonly endedAt: string; readonly outcome: NonNullable<ActivityIntervalRecord['outcome']> }
+  | {
+      readonly kind: 'settle';
+      readonly intervalId: string;
+      readonly endedAt?: string;
+      readonly outcome: NonNullable<ActivityIntervalRecord['outcome']>;
+      readonly durationMs?: number;
+      readonly durationClockDomain?: ActivityIntervalRecord['durationClockDomain'];
+    }
   | { readonly kind: 'forget'; readonly sessionPath: string; readonly sessionId?: string };
 
 /** Durable, cross-process-safe activity timeline. A canonical compact
@@ -173,10 +180,11 @@ export class ActivityTimeline {
 
   settle(
     intervalId: string,
-    endedAt: string,
+    endedAt: string | undefined,
     outcome: NonNullable<ActivityIntervalRecord['outcome']>,
+    timing: Pick<ActivityIntervalRecord, 'durationMs' | 'durationClockDomain'> = {},
   ): void {
-    this.mutate({ kind: 'settle', intervalId, endedAt, outcome });
+    this.mutate({ kind: 'settle', intervalId, endedAt, outcome, ...timing });
   }
 
   record(record: ActivityIntervalRecord, options: { durableRequired?: boolean } = {}): void {
@@ -511,8 +519,14 @@ export class ActivityTimeline {
           } else if (mutation.kind === 'settle') {
             const index = this.indexById.get(mutation.intervalId);
             const existing = index === undefined ? undefined : this.records[index];
-            if (index === undefined || !existing || existing.endedAt) continue;
-            const nextRecord = normalize({ ...existing, endedAt: mutation.endedAt, outcome: mutation.outcome });
+            if (index === undefined || !existing || existing.endedAt || existing.outcome) continue;
+            const nextRecord = normalize({
+              ...existing,
+              ...(mutation.endedAt === undefined ? {} : { endedAt: mutation.endedAt }),
+              outcome: mutation.outcome,
+              ...(mutation.durationMs === undefined ? {} : { durationMs: mutation.durationMs }),
+              ...(mutation.durationClockDomain === undefined ? {} : { durationClockDomain: mutation.durationClockDomain }),
+            });
             const previousRecord = this.records[index];
             this.records[index] = nextRecord;
             this.publishedRecords = null;
@@ -1518,7 +1532,17 @@ function normalize(value: unknown): ActivityIntervalRecord {
   if (!ACTIVITY_INTERVAL_KINDS.includes(kind as ActivityIntervalRecord['kind'])) throw new Error('Invalid activity kind.');
   const startedAt = timestamp(raw.startedAt, 'startedAt');
   const endedAt = raw.endedAt === undefined ? undefined : timestamp(raw.endedAt, 'endedAt');
-  if (endedAt && Date.parse(endedAt) < Date.parse(startedAt)) throw new Error('Activity interval ends before it starts.');
+  const durationMs = raw.durationMs === undefined ? undefined : nonNegativeDuration(raw.durationMs, 'durationMs');
+  const durationClockDomain = raw.durationClockDomain === undefined
+    ? undefined
+    : raw.durationClockDomain === 'monotonic-same-process'
+      ? raw.durationClockDomain
+      : (() => { throw new Error('Invalid duration clock domain.'); })();
+  const parallelGroupId = raw.parallelGroupId === undefined ? undefined : text(raw.parallelGroupId, 'parallelGroupId');
+  if (endedAt !== undefined && Date.parse(endedAt) < Date.parse(startedAt)
+    && !(durationClockDomain === 'monotonic-same-process' && durationMs !== undefined)) {
+    throw new Error('Activity interval ends before it starts.');
+  }
   const outcome = raw.outcome;
   if (outcome !== undefined && !['succeeded', 'failed', 'cancelled', 'unknown'].includes(String(outcome))) {
     throw new Error('Invalid activity outcome.');
@@ -1534,8 +1558,11 @@ function normalize(value: unknown): ActivityIntervalRecord {
     toolId: nullableText(raw.toolId, 'toolId'),
     kind: kind as ActivityIntervalRecord['kind'],
     startedAt,
-    ...(endedAt ? { endedAt: endedAt } : {}),
-    ...(outcome ? { outcome: outcome as NonNullable<ActivityIntervalRecord['outcome']> } : {}),
+    ...(endedAt !== undefined ? { endedAt } : {}),
+    ...(durationMs !== undefined ? { durationMs } : {}),
+    ...(durationClockDomain !== undefined ? { durationClockDomain } : {}),
+    ...(parallelGroupId !== undefined ? { parallelGroupId } : {}),
+    ...(outcome !== undefined ? { outcome: outcome as NonNullable<ActivityIntervalRecord['outcome']> } : {}),
   });
 }
 
@@ -1552,4 +1579,11 @@ function timestamp(value: unknown, name: string): string {
   const result = text(value, name);
   if (!Number.isFinite(Date.parse(result))) throw new Error(`${name} must be an ISO timestamp.`);
   return new Date(Date.parse(result)).toISOString();
+}
+
+function nonNegativeDuration(value: unknown, name: string): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    throw new Error(`${name} must be a finite non-negative number.`);
+  }
+  return value;
 }

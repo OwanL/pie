@@ -6,6 +6,7 @@ import test from 'node:test';
 
 import type { SdkSessionEvent } from '../../../src/backend/sdk';
 import type { SessionContext } from '../../../src/backend/server-types';
+import type { MutableSdkSessionManager, SessionManagerFence } from '../../../src/backend/session-manager-fence';
 import type { ProviderIncident } from '../../../src/backend/provider-incident';
 import type { ProviderTransportObservation } from '../../../src/backend/provider-progress-bus';
 import { BackendLiveTurnAccumulator } from '../../../src/backend/live-turn-accumulator';
@@ -30,6 +31,12 @@ interface WorkerRuntimeHostInternals {
   handleProviderProgress: (observation: ProviderTransportObservation) => void;
   emitContextUsageChanged: (context: SessionContext, estimated?: number) => void;
   resolveNetworkProvider: (url: string, fallbackProvider?: string) => string | undefined;
+  fenceSessionManager: (manager: MutableSdkSessionManager) => MutableSdkSessionManager;
+  sessionManagerFenceRecords: WeakMap<object, { fence: SessionManagerFence }>;
+  bindSession: (context: SessionContext, session: SessionContext['session']) => Promise<void>;
+  getSystemPromptModule: () => Promise<{ buildSystemPrompt: (...args: unknown[]) => unknown }>;
+  autonomousMode: boolean;
+  mcpEnabled: boolean;
   suppressNextReplacementOpened: boolean;
 }
 
@@ -103,6 +110,115 @@ function makeSessionEventContext(sessionPath: string): SessionContext {
 function waitForAsyncEvent(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
+
+function makeFenceManager(sessionPath: string, persist: (entry: unknown) => unknown = () => undefined): MutableSdkSessionManager {
+  return {
+    getCwd: () => '/',
+    getSessionFile: () => sessionPath,
+    getSessionName: () => 'test',
+    getBranch: () => [],
+    getEntries: () => [],
+    appendMessage: () => 'entry',
+    appendCustomMessageEntry: () => 'entry',
+    appendCustomEntry: () => 'entry',
+    branch: () => undefined,
+    resetLeaf: () => undefined,
+    createBranchedSession: () => undefined,
+    _persist: persist,
+  } as unknown as MutableSdkSessionManager;
+}
+
+function makeReplacementSession(
+  manager: MutableSdkSessionManager,
+  sessionPath: string,
+): SessionContext['session'] {
+  return {
+    sessionManager: manager,
+    sessionFile: sessionPath,
+    bindExtensions: async () => undefined,
+    subscribe: () => () => undefined,
+    waitForIdle: async () => undefined,
+    runtime: {},
+  } as unknown as SessionContext['session'];
+}
+
+test('worker manager-fence command drains admitted persistence and rejects retired writes', async () => {
+  const { host } = makeHost();
+  const internals = getInternals(host);
+  internals.sdk = {};
+  let releasePersist!: () => void;
+  const fencedPath = path.join(os.tmpdir(), `pie-worker-fence-${process.pid}`, 'fenced.jsonl');
+  const manager = makeFenceManager(fencedPath, async () => await new Promise<void>((resolve) => {
+    releasePersist = resolve;
+  }));
+  const guarded = internals.fenceSessionManager(manager);
+  const record = internals.sessionManagerFenceRecords.get(manager as object);
+  assert.ok(record);
+  internals.context = {
+    runtime: {} as SessionContext['runtime'],
+    session: makeReplacementSession(guarded, fencedPath),
+    sessionPath: fencedPath,
+    sessionManagerFence: record.fence,
+    unsubscribe: () => undefined,
+    busySeq: 0,
+  };
+
+  const pending = guarded._persist({ kind: 'message' });
+  const fence = host.command('session.managerFence', { params: { timeoutMs: 1_000 } }, 'writer-fence');
+  await waitForAsyncEvent();
+  assert.equal(guarded.appendMessage({ role: 'user' }), '__pie:fenced__');
+  releasePersist();
+  assert.deepEqual(await fence, { admissionRevoked: true, writersDrained: true, activeWriterCount: 0 });
+  await pending;
+});
+
+test('replacement and disposal retain manager fences at both retirement boundaries', async () => {
+  const { host } = makeHost();
+  const internals = getInternals(host);
+  internals.sdk = {};
+  internals.getSystemPromptModule = async () => ({ buildSystemPrompt: () => '' });
+  internals.autonomousMode = false;
+  internals.mcpEnabled = true;
+
+  let releasePersist!: () => void;
+  const sessionRoot = path.join(os.tmpdir(), `pie-worker-rebind-${process.pid}`);
+  const oldPath = path.join(sessionRoot, 'old.jsonl');
+  const newPath = path.join(sessionRoot, 'new.jsonl');
+  const oldManager = makeFenceManager(oldPath, async () => await new Promise<void>((resolve) => {
+    releasePersist = resolve;
+  }));
+  const oldGuarded = internals.fenceSessionManager(oldManager);
+  const oldRecord = internals.sessionManagerFenceRecords.get(oldManager as object);
+  assert.ok(oldRecord);
+  const context = {
+    runtime: {
+      newSession: async () => undefined,
+      fork: async () => ({ cancelled: false }),
+      switchSession: async () => undefined,
+      dispose: async () => undefined,
+    } as unknown as SessionContext['runtime'],
+    session: makeReplacementSession(oldGuarded, oldPath),
+    sessionPath: oldPath,
+    sessionManagerFence: oldRecord.fence,
+    unsubscribe: () => undefined,
+    busySeq: 0,
+  } as SessionContext;
+  internals.context = context;
+
+  const pending = oldGuarded._persist({ kind: 'message' });
+  const nextManager = makeFenceManager(newPath);
+  const replacement = makeReplacementSession(nextManager, newPath);
+  const rebinding = internals.bindSession(context, replacement);
+  await waitForAsyncEvent();
+  assert.equal(oldGuarded.appendMessage({ role: 'late' }), '__pie:fenced__');
+  releasePersist();
+  await pending;
+  await rebinding;
+  assert.notEqual(context.session.sessionManager, oldGuarded);
+
+  await host.dispose();
+  assert.equal((context.session.sessionManager as MutableSdkSessionManager).appendMessage({ role: 'retired' }), '__pie:fenced__');
+});
 
 test('context source observations qualify prompt footprints separately from display fallbacks', () => {
   const { host, sent } = makeHost();
@@ -574,6 +690,158 @@ test('worker-owned provider progress restores queue phase and latency ownership'
     'the exact request correlation clears at its first upstream body chunk');
   internals.handleProviderProgress({ ...base, sessionId: 'other-session', kind: 'gate_acquired', queueDurationMs: 99 });
   assert.deepEqual(context.activeRequest.providerQueueByTurn?.get(4), { durationMs: 25, attemptCount: 1 });
+});
+
+/** Real same-process retry producer: auto_retry_start, the provider-gate
+ *  observation seam, and auto_retry_end run through the actual worker host
+ *  with a backwards wall clock while the monotonic clock advances. */
+test('worker retry timing stamps paired wall and monotonic samples across wall-clock jumps', () => {
+  const { host, sent } = makeHost();
+  const internals = getInternals(host);
+  const context = makeSessionEventContext('/sessions/retry-clock.jsonl');
+  context.session = {
+    sessionManager: { getSessionId: () => 'sdk-session-1' },
+  } as SessionContext['session'];
+  const semantic: Array<{ kind: string; phase?: string }> = [];
+  context.activeRequest = {
+    id: 'request-9', messageIndex: 0, aborted: false, providerTurnSequence: 2,
+    liveTurnAccumulator: {
+      currentSeq: 1,
+      observe: (event: { kind: string; phase?: string }) => {
+        semantic.push(event);
+        return { ...event, protocolVersion: 1, sessionPath: context.sessionPath, requestId: 'request-9', turnId: 'turn', attemptId: 'attempt', seq: semantic.length + 1, occurredAt: 1, checkpointBytes: 1 };
+      },
+    } as never,
+  };
+  internals.context = context;
+  const originalWall = Date.now;
+  const originalMonotonic = performance.now.bind(performance);
+  let wall = originalWall();
+  let mono = originalMonotonic();
+  try {
+    Date.now = () => wall;
+    performance.now = () => mono;
+    internals.handleSessionEvent(context, {
+      type: 'auto_retry_start', attempt: 1, maxAttempts: 3, delayMs: 2_000,
+      errorMessage: '429',
+    } as never);
+    assert.equal(context.activeRequest.retryTiming?.retryId, 'request-9:1');
+    const startedMono = context.activeRequest.retryTiming!.startedMonotonicMs;
+    // Wall clock jumps backwards between the retry start and the provider
+    // gate observation; the monotonic clock advances through the backoff.
+    wall -= 45_000;
+    mono += 1_200;
+    const gateMono = mono;
+    internals.handleProviderProgress({
+      sessionId: 'sdk-session-1', provider: 'provider', attemptId: 'network-attempt',
+      occurredAt: Date.now(), kind: 'gate_queue',
+    });
+    assert.equal(context.activeRequest.retryTiming?.providerAttemptStartedAt,
+      Date.now(), 'the wall anchor is the observation occurredAt, unclamped');
+    assert.equal(context.activeRequest.retryTiming?.providerAttemptStartedMonotonicMs, gateMono,
+      'the paired monotonic sample is stamped at the same seam');
+    mono += 650;
+    internals.handleSessionEvent(context, {
+      type: 'auto_retry_end', success: true, attempt: 1,
+    } as never);
+
+    const measured = sent.find((frame) => frame.kind === 'runtime.event' && frame.event === 'retry.measured')
+      ?.payload as import('../../../src/shared/protocol').RetryMeasuredPayload;
+    assert.equal(measured.retryId, 'request-9:1');
+    assert.equal(measured.measuredDelayMs, gateMono - startedMono,
+      'the wait is measured from the same-process monotonic gate sample');
+    assert.equal(measured.durationMs, mono - startedMono,
+      'the episode is the monotonic delta, not the reversed wall subtraction');
+    assert.equal(measured.durationClockDomain, 'monotonic-same-process');
+    assert.equal(measured.startedAt! > measured.endedAt!, true,
+      'wall bounds stay separate Date.now() samples even when reversed');
+    assert.equal(measured.startedAt! > measured.providerAttemptStartedAt!, true);
+  } finally {
+    Date.now = originalWall;
+    performance.now = originalMonotonic;
+  }
+});
+
+/** Corrupt/legacy state regression: the normal producer stamps every wall
+ *  anchor together with its monotonic pair, but partial or invalid monotonic
+ *  samples must degrade coherently — every present duration truthfully
+ *  wall-derived and the monotonic marker absent, never a payload that mixes
+ *  clock domains or leaves a monotonic value unmarked. */
+test('worker retry timing falls back coherently to all-wall values without the marker on partial or invalid monotonic samples', () => {
+  const { host, sent } = makeHost();
+  const internals = getInternals(host);
+  const context = makeSessionEventContext('/sessions/retry-clock-corrupt.jsonl');
+  context.session = {
+    sessionManager: { getSessionId: () => 'sdk-session-1' },
+  } as SessionContext['session'];
+  context.activeRequest = {
+    id: 'request-9', messageIndex: 0, aborted: false, providerTurnSequence: 2,
+  };
+  internals.context = context;
+  const originalWall = Date.now;
+  const originalMonotonic = performance.now.bind(performance);
+  let wall = originalWall();
+  let mono = originalMonotonic();
+  try {
+    Date.now = () => wall;
+    performance.now = () => mono;
+
+    // Episode monotonic sample valid but the provider-attempt monotonic
+    // sample is missing (partial state): the wait cannot be measured
+    // jump-safe, so BOTH durations must fall back to wall together and the
+    // marker must stay absent.
+    internals.handleSessionEvent(context, {
+      type: 'auto_retry_start', attempt: 1, maxAttempts: 3, delayMs: 2_000,
+      errorMessage: '429',
+    } as never);
+    wall -= 45_000;
+    mono += 1_200;
+    internals.handleProviderProgress({
+      sessionId: 'sdk-session-1', provider: 'provider', attemptId: 'network-attempt',
+      occurredAt: Date.now(), kind: 'gate_queue',
+    });
+    context.activeRequest.retryTiming!.providerAttemptStartedMonotonicMs = undefined;
+    mono += 650;
+    internals.handleSessionEvent(context, {
+      type: 'auto_retry_end', success: true, attempt: 1,
+    } as never);
+
+    let measured = sent.find((frame) => frame.kind === 'runtime.event' && frame.event === 'retry.measured')
+      ?.payload as import('../../../src/shared/protocol').RetryMeasuredPayload;
+    assert.equal(measured.durationClockDomain, undefined,
+      'a missing wait sample suspends monotonic provenance for the whole payload');
+    assert.equal(measured.durationMs, 0,
+      'the episode is the truthful clamped wall subtraction, not a monotonic value');
+    assert.equal(measured.measuredDelayMs, 0,
+      'the wait is the truthful clamped wall subtraction across the backwards jump');
+    assert.equal(measured.providerAttemptStartedAt !== undefined, true,
+      'the wall anchor survives the fallback');
+
+    // Episode monotonic sample invalid (corrupt state, delta reversed): the
+    // same coherent all-wall fallback, with the wall value intact.
+    sent.length = 0;
+    internals.handleSessionEvent(context, {
+      type: 'auto_retry_start', attempt: 2, maxAttempts: 3, delayMs: 2_000,
+      errorMessage: '429',
+    } as never);
+    context.activeRequest.retryTiming!.startedMonotonicMs = mono + 60_000;
+    wall += 500;
+    internals.handleSessionEvent(context, {
+      type: 'auto_retry_end', success: true, attempt: 2,
+    } as never);
+
+    measured = sent.find((frame) => frame.kind === 'runtime.event' && frame.event === 'retry.measured')
+      ?.payload as import('../../../src/shared/protocol').RetryMeasuredPayload;
+    assert.equal(measured.durationClockDomain, undefined,
+      'an invalid episode sample suspends monotonic provenance for the whole payload');
+    assert.equal(measured.durationMs, 500,
+      'the episode is the truthful wall subtraction, not a monotonic value');
+    assert.equal(measured.measuredDelayMs, undefined,
+      'no provider-attempt anchor means no wait duration');
+  } finally {
+    Date.now = originalWall;
+    performance.now = originalMonotonic;
+  }
 });
 
 test('worker network admission uses runtime-discovered provider URLs before the root fallback', () => {

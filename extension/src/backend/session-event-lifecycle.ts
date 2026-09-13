@@ -130,6 +130,14 @@ function appendCompactionMetricsSidecar(context: SessionContext, event: SdkSessi
     });
   }
 }
+/** Same-process monotonic duration between two paired samples, or undefined
+ *  when either sample is missing or the delta is not usable evidence. */
+function monotonicDeltaMs(start: number | undefined, end: number | undefined): number | undefined {
+  if (start === undefined || end === undefined) return undefined;
+  const delta = end - start;
+  return Number.isFinite(delta) && delta >= 0 ? delta : undefined;
+}
+
 function finishRetryTiming(
   deps: BackendSessionEventHandlerDeps,
   context: SessionContext,
@@ -138,6 +146,25 @@ function finishRetryTiming(
   const active = context.activeRequest;
   const timing = active?.retryTiming;
   if (!active || !timing) return;
+  // Wait and episode durations are measured on this process's monotonic clock
+  // at the same seams that stamp the wall bounds, so a wall-clock jump between
+  // samples cannot reverse or distort them. Corrupt or legacy state can carry
+  // only part of each wall/monotonic sample pair (the normal producer stamps
+  // both samples together at every seam); the fallback must then stay
+  // coherent — either every present duration is measured from validated
+  // monotonic samples and carries the marker, or every present duration falls
+  // back to the wall-clock subtraction without the marker. A per-duration
+  // fallback would mislabel one clock domain as the other.
+  const monoDurationMs = monotonicDeltaMs(timing.startedMonotonicMs, performance.now());
+  const monoDelayMs = monotonicDeltaMs(timing.startedMonotonicMs, timing.providerAttemptStartedMonotonicMs);
+  const measured = monoDurationMs !== undefined
+    && (timing.providerAttemptStartedAt === undefined || monoDelayMs !== undefined);
+  const durationMs = measured ? monoDurationMs! : Math.max(0, endedAt - timing.startedAt);
+  const measuredDelayMs = timing.providerAttemptStartedAt === undefined
+    ? undefined
+    : measured
+      ? monoDelayMs!
+      : Math.max(0, timing.providerAttemptStartedAt - timing.startedAt);
   deps.emit('retry.measured', {
     sessionPath: context.sessionPath,
     requestId: active.id,
@@ -146,10 +173,9 @@ function finishRetryTiming(
     startedAt: timing.startedAt,
     endedAt,
     ...(timing.providerAttemptStartedAt === undefined ? {} : { providerAttemptStartedAt: timing.providerAttemptStartedAt }),
-    ...(timing.providerAttemptStartedAt === undefined
-      ? {}
-      : { measuredDelayMs: Math.max(0, timing.providerAttemptStartedAt - timing.startedAt) }),
-    durationMs: Math.max(0, endedAt - timing.startedAt),
+    ...(measuredDelayMs === undefined ? {} : { measuredDelayMs }),
+    durationMs,
+    ...(measured ? { durationClockDomain: 'monotonic-same-process' as const } : {}),
   } satisfies RetryMeasuredPayload);
   active.retryTiming = undefined;
 }
@@ -182,6 +208,7 @@ function rearmPostAgentCompactionRequest(
   active.mayNeedOverflowRecovery = false;
   active.pendingDurableToolTerminals?.clear();
   active.toolStartTimes?.clear();
+  active.toolStartMonotonicTimes?.clear();
   active.toolStartMetadata?.clear();
   active.toolParallelGroupByCallId?.clear();
   active.providerQueueByTurn?.clear();
@@ -547,6 +574,7 @@ function handleLifecycleSessionEvent(
           retryId,
           attempt,
           startedAt,
+          startedMonotonicMs: performance.now(),
           scheduledDelayMs: Math.max(0, event.delayMs ?? 0),
         };
       }

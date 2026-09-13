@@ -14,6 +14,51 @@ Owning specifications: runbook; `docs/ANALYTICS_REWORK_PLAN.md` §§1, 11.6, 17;
 
 ---
 
+## Integration milestone - 2026-09-13, timing, activity projection, writer fencing
+
+The user reported successful restart and normal/tool/cancel/private-close smoke checks;
+backend startup logs identify loaded runtime `8ff7365a67f86d8a937ce6067c533752fbb9fd6a2776ca207b73e33699143914`.
+Subsequent source includes reviewed retry/tool monotonic timing, schema-12 activity
+projection with all six quarantined findings covered, and authenticated all-host
+writer fencing wired through host/backend/worker SessionManager admission and drainage.
+The final storage-cutoff orchestrator remains disabled/incomplete, not implied by
+these primitives. Tool/file facets, activity consumers, richer handoff coverage,
+P0 qualification and actual-host P2c proof remain. See the updated handoff.
+
+Integration validation: root affected test run passed three selected packages;
+extension 4,854 passed, 19 skipped, zero failures/cancellations. Root typecheck and
+lint passed. Logs: OS-temp `pie-milestone-integrate-QC1K3u/{test,typecheck,lint,build}.log`.
+Build `cf01d750ee2494f7465a` staged runtime
+`9ffc3226b477e6b260ccc436a2cec5683858ee959d9e347b94b681fc774c2d81`
+and published its renderer. This later generation is selected, not behavior-verified
+or claimed loaded. No restart/activation/cutoff was performed by the agent.
+The user requested ongoing milestone commits/pushes; unrelated model/settings and
+pricing-document changes are excluded from this integration barrier.
+
+## Continuation - 2026-09-13, bounded P4 retry-clock unit
+
+At base `77b05268`, a working-tree-only repair measures retry wait/episode durations
+with same-process monotonic samples and explicitly forwards clock provenance to
+canonical capture. Wall-clock anchors remain separate; reversed anchors no longer
+discard valid monotonic duration. Partial sample fallback uses consistently wall-derived
+values without a monotonic marker. Existing provider queue boundary semantics are
+unchanged. Schema 11 remains; the quarantined activity projection was not restored.
+
+Real backend wall-jump/fallback tests, capture and protocol regressions, typecheck,
+lint and root affected testing passed (three packages; extension 4,830 passed,
+19 skipped, zero failures). Review identified mixed-clock fallback and inaccurate
+admission wording; both were corrected. Preexisting coordinator clock behavior is
+outside this unit, not a resolved defect. Detailed continuation and temporary log
+locations: [handoff](PIE_REWORK_HANDOFF.md#continuation-checkpoint-retry-clock-repair-2026-09-13).
+
+Build `fcea2f669722da9b52a6` staged immutable runtime
+`8ff7365a67f86d8a937ce6067c533752fbb9fd6a2776ca207b73e33699143914`
+for the next normal startup and published its renderer. Loaded identity/manual UI
+behavior remain unverified. No restart, activation, cutoff, commit or push was
+performed. P0 qualification and P7 gates remain closed; unrelated configuration
+and concurrent pricing-document edits are preserved. Next: user-run runtime sanity
+check and another bounded producer/metric unit.
+
 ## Checkpoint 54 - 2026-09-12T20:08Z, corrected three-unit integration barrier
 
 The frozen three-unit candidate was reviewed at checkout `f9853478ef4ffa2024557f1e7ad0f1f3e77212d3`.
