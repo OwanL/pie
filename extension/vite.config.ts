@@ -100,6 +100,16 @@ export default defineConfig(({ mode }) => {
             // extension.js is tree-shaken into it and has no exports to import.
             'analytics-activation-store': path.join(srcDir, 'analytics', 'activation-store.ts'),
             'analytics-activation-sequence': path.join(srcDir, 'analytics', 'activation-sequence.ts'),
+            // Production cutover/preflight adapters are emitted as explicit
+            // entries so the detached helper imports the real OS census,
+            // authenticated host probes, and all-host coordinator rather than
+            // an injectable-only test wrapper.
+            'analytics-production-adapters': path.join(srcDir, 'host', 'analytics-production-adapters.ts'),
+            'analytics-cutover-orchestrator': path.join(srcDir, 'host', 'analytics-cutover-orchestrator.ts'),
+            // Emitted so focused host-discovery tooling can use the same
+            // bounded process census without importing the extension entry.
+            'analytics-handoff-discovery': path.join(srcDir, 'host', 'analytics-handoff-discovery.ts'),
+            'analytics-process-census': path.join(srcDir, 'host', 'analytics-process-census.ts'),
             // Emitted so the activation helper can perform and verify the storage
             // cutoff through the same code the backend uses, rather than a
             // reimplementation that could drift from the real close barriers.

@@ -406,6 +406,34 @@ export function validateActivationEvidenceStructure(options) {
   return readAndValidateActivationEvidence(options, { requireQualification: false, recompute: false });
 }
 
+/** Read-only admission inspection for DRY-RUN/PREFLIGHT callers. It returns
+ * every blocker that can be established without changing the activation
+ * manifest, lifecycle registry, runtime leases, or host processes. */
+export function inspectActivationEvidence(options) {
+  const blockers = [];
+  let structure;
+  try {
+    structure = validateActivationEvidenceStructure(options);
+    if (structure.qualificationState !== 'qualified') {
+      blockers.push(`P0 qualification is ${structure.qualificationState ?? 'missing'}; overallP0 must be qualified`);
+    }
+  } catch (error) {
+    blockers.push(error instanceof Error ? error.message : String(error));
+  }
+  try {
+    admitActivationEvidence(options);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!blockers.includes(message)) blockers.push(message);
+  }
+  return {
+    ready: blockers.length === 0,
+    blockers,
+    evidence: structure ?? null,
+    candidateTrialValidatorAvailable: CANDIDATE_TRIAL_VALIDATOR_AVAILABLE,
+  };
+}
+
 /**
  * Read, hash, and validate both activation inputs.  This function has no
  * manifest/store dependency and must complete before the helper calls any

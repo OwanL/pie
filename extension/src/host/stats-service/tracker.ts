@@ -322,7 +322,10 @@ export class SessionRunTracker {
     this.runState.persist();
   }
 
-  onToolFinished(sessionPath: string, toolCall: ToolCall): void {
+  /** `analysis` accepts the terminal analysis the caller already computed for
+   *  this tool (shared with canonical facet capture) so the terminal is never
+   *  reanalyzed; omitted callers keep the previous per-call analysis. */
+  onToolFinished(sessionPath: string, toolCall: ToolCall, analysis?: ToolCallAnalysis): void {
     const state = this.runState.sessions.get(sessionPath);
     const run = state?.currentRun;
     if (!run || !state) {
@@ -344,24 +347,24 @@ export class SessionRunTracker {
       incrementNamedCount(run.toolUsage.countsByName, normalizedName);
       state.toolNamesByCallIdInCurrentRun.set(toolCall.id, normalizedName);
     }
-    const analysis = analyzeToolCall(toolCall);
+    const resolvedAnalysis = analysis ?? analyzeToolCall(toolCall);
 
     this.recordToolDuration(run, state, normalizedName, toolCall);
 
     if (toolCall.status === 'failed') {
-      if (analysis.failure) {
+      if (resolvedAnalysis.failure) {
         // Execution failure: the tool could not complete its job.
-        this.recordExecutionFailure(run, normalizedName, analysis);
-      } else if (analysis.resultIssue) {
+        this.recordExecutionFailure(run, normalizedName, resolvedAnalysis);
+      } else if (resolvedAnalysis.resultIssue) {
         // Non-success result: the tool ran fine but reported a non-success outcome
         // (a failing test/build/lint, a pending check, or an empty probe/search).
         // Measured, not an execution failure.
-        this.recordResultIssue(run, normalizedName, analysis);
+        this.recordResultIssue(run, normalizedName, resolvedAnalysis);
       }
     }
 
-    if (analysis.subagentCallCount > 0) {
-      this.recordSubagentUsage(run, analysis, toolCall);
+    if (resolvedAnalysis.subagentCallCount > 0) {
+      this.recordSubagentUsage(run, resolvedAnalysis, toolCall);
       this.recordSubagentThroughput(run, toolCall);
       this.recordSubagentLifecycle(run, toolCall);
     }
@@ -370,12 +373,12 @@ export class SessionRunTracker {
       this.recordAskUserOutcome(run, toolCall);
     }
 
-    if (analysis.verificationKinds.length > 0) {
-      this.recordVerification(run, toolCall, analysis);
+    if (resolvedAnalysis.verificationKinds.length > 0) {
+      this.recordVerification(run, toolCall, resolvedAnalysis);
     }
 
     if (toolCall.status !== 'failed') {
-      this.recordFileMutationAndExtensions(run, analysis);
+      this.recordFileMutationAndExtensions(run, resolvedAnalysis);
     }
 
     run.updatedAt = this.runState.isoNow();

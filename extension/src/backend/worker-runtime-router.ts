@@ -20,6 +20,7 @@ import {
   StaleSessionWriteLeaseError,
 } from './session-ownership-authority';
 import type { SdkSessionWriteLease, SdkWorkerOwnershipIdentity } from './sdk';
+import type { AnalyticsWriterIdentity } from './session-lifecycle-store';
 import type { SupervisedWorker, WorkerSupervisor } from './worker-supervisor';
 import {
   WorkerRequestEnqueueError,
@@ -191,6 +192,13 @@ export interface WorkerRuntimeRouterOptions {
     generationId: string;
     workspaceId?: string;
     buildId: string;
+  };
+  /** Durable host identity/path supplied to each isolated worker so its SDK
+   * manager and ownership adapter acquire the same lifecycle admission lease
+   * as coordinator-side session writers. */
+  analyticsWriterAdmission?: {
+    stateDir: string;
+    identity: AnalyticsWriterIdentity;
   };
   /** Closed imperative stream; detail pages never enter ViewState. */
   emitDetail?(message: CoordinatorToHostDetailMessage): void;
@@ -1580,6 +1588,9 @@ export class WorkerRuntimeRouter {
                 analytics: {
                   ...this.options.analyticsActivation,
                   captureSubject: route.analyticsCaptureSubject,
+                  ...(this.options.analyticsWriterAdmission
+                    ? { writerAdmission: this.options.analyticsWriterAdmission }
+                    : {}),
                 },
               }
               : {}),

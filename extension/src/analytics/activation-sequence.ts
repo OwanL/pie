@@ -206,6 +206,58 @@ export async function activateGeneration(
   return { manifest: result.manifest!, alreadyActive: false, revision: result.manifest!.revision };
 }
 
+/** Link the verified P7b cutoff receipt to the already-active generation.
+ *
+ * P7a activation intentionally runs before storage cutoff, so the activation
+ * request normally has no receipt hash. This separate, revision-CAS'd step is
+ * the only way to add that later evidence; it is idempotent for the exact same
+ * receipt and refuses to replace a different link. */
+export async function linkStorageCutoffReceipt(
+  store: ActivationStore,
+  receiptSha256: string,
+  expectedGenerationId?: string,
+): Promise<ActivationOutcome> {
+  if (!/^[0-9a-f]{64}$/u.test(receiptSha256)) {
+    throw new ActivationManifestError('cutoffReceiptSha256 must be a lowercase sha256.');
+  }
+  if (expectedGenerationId !== undefined && !/^[0-9a-f-]{36}$/iu.test(expectedGenerationId)) {
+    throw new ActivationManifestError('expectedGenerationId must be a UUID.');
+  }
+  const current = store.read();
+  const active = current.manifest?.activeGeneration;
+  if (!active || !current.sha256) {
+    throw new ActivationManifestError('A cutoff receipt can only be linked to an active analytics generation.');
+  }
+  if (expectedGenerationId !== undefined && active.identity.generationId !== expectedGenerationId) {
+    throw new ActivationManifestError('The active analytics generation does not match the requested cutoff link.');
+  }
+  if (active.cutoffReceiptSha256 !== null && active.cutoffReceiptSha256 !== receiptSha256) {
+    throw new ActivationManifestError('The active analytics generation is already linked to another cutoff receipt.');
+  }
+  if (active.cutoffReceiptSha256 === receiptSha256) {
+    return { manifest: current.manifest!, alreadyActive: true, revision: current.manifest!.revision };
+  }
+  const result = await store.update((previous, previousSha256) => {
+    if (!previous?.activeGeneration) {
+      throw new ActivationManifestError('The active analytics generation disappeared before the cutoff link.');
+    }
+    if (previous.activeGeneration.identity.generationId !== active.identity.generationId
+      || previous.activeGeneration.cutoffReceiptSha256 !== null) {
+      throw new ActivationManifestError('The active analytics generation changed before the cutoff link.');
+    }
+    return {
+      ...previous,
+      revision: previous.revision + 1,
+      previousSha256,
+      activeGeneration: {
+        ...previous.activeGeneration,
+        cutoffReceiptSha256: receiptSha256,
+      },
+    };
+  }, { expectedSha256: current.sha256 });
+  return { manifest: result.manifest!, alreadyActive: false, revision: result.manifest!.revision };
+}
+
 function candidateEvidence(identity: ActivationGenerationIdentity): ActivationEvidence {
   return {
     identity,

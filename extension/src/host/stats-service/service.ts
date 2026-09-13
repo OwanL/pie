@@ -11,6 +11,8 @@ import type {
   WorkingTimeState,
 } from '../../shared/protocol';
 import type { BillableInvocationRecord } from '../../shared/billable-invocation';
+import { analyzeToolCall, type ToolCallAnalysis } from '../../shared/tool-call-analysis/index.js';
+import { resolveSessionCwd } from '../core/file-change-derivation.js';
 import { RunAnalyticsStorage } from './storage';
 import { SessionRunTracker } from './tracker';
 import type { AssistantTurnIdentity, RunObserver, StatsServiceOptions } from './types';
@@ -1076,6 +1078,24 @@ export class StatsService implements RunObserver {
       `tool:${toolCall.id}:end`,
       endedAtMs ?? startedAtMs ?? 0,
     );
+    // The terminal facet derives from the same per-tool analysis the run
+    // tracker consumes, so the execution path never reanalyzes the call or
+    // re-serializes a result body. This is a synchronous handoff: the
+    // observation is enqueued without awaiting the recorder sink, and an
+    // absent canonical authority short-circuits before any analysis runs.
+    let facetAnalysis: ToolCallAnalysis | undefined;
+    const terminalAnalysis = (): ToolCallAnalysis => (facetAnalysis ??= analyzeToolCall(toolCall));
+    this.canonicalCapture?.captureToolFacet(
+      this.analyticsContext(sessionPath),
+      toolCall,
+      terminalAnalysis(),
+      resolveSessionCwd(
+        this.getArchState().sessions.sessions,
+        this.getArchState().sessions.workspaceCwd,
+        sessionPath,
+      ),
+      endedAtMs ?? startedAtMs ?? 0,
+    );
     if (this.isPrivateSession(sessionPath) && !this.canonicalCapture) return;
     if (closing) return;
     // Producer timing is authoritative. In particular, no terminal receipt
@@ -1145,7 +1165,7 @@ export class StatsService implements RunObserver {
     }
     delete this.activeToolIntervalBySessionAndTool[toolKey];
     delete this.activeToolStartedAtBySessionAndTool[toolKey];
-    this.tracker.onToolFinished(sessionPath, toolCall);
+    this.tracker.onToolFinished(sessionPath, toolCall, terminalAnalysis());
     this.syncWorkingTimeBreakdown(sessionPath);
   }
 

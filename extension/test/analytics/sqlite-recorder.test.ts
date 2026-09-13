@@ -477,7 +477,7 @@ test('schema v10 to current adds source-time and exact execution indexes', () =>
   let upgraded: SqliteAnalyticsRecorder | undefined;
   try {
     upgraded = new SqliteAnalyticsRecorder(temp.databasePath);
-    assert.equal(upgraded.getDatabaseSchemaVersion(), 12);
+    assert.equal(upgraded.getDatabaseSchemaVersion(), 13);
     const indexNames = new Set(
       upgraded.executeReadOnlyQuery(
         "SELECT name FROM sqlite_master WHERE type = 'index' AND name IN ('analytics_execution_state_source_end_global_idx', 'analytics_execution_state_source_end_session_idx', 'analytics_provider_settlement_execution_idx')",
@@ -894,7 +894,7 @@ test('v1 upgrade retains facts, detail, deletion fences, accounting, and source 
     }
 
     recorder = new SqliteAnalyticsRecorder(temp.databasePath);
-    assert.equal(recorder.getDatabaseSchemaVersion(), 12);
+    assert.equal(recorder.getDatabaseSchemaVersion(), 13);
     assert.equal(recorder.readDeliveryAccounting().deliveryHistoryCoverage, 'retained_only');
     assert.equal(recorder.countObservations('root-retained'), 1);
     assert.deepEqual(recorder.reconstructDetail('legacy-detail'), { retained: true });
@@ -1081,14 +1081,14 @@ test('recorder rejects unsupported newer database schema versions', () => {
   try {
     // One beyond the current schema: an unversioned future database must fail
     // closed rather than be read with today's assumptions.
-    raw.exec('PRAGMA user_version = 13');
+    raw.exec('PRAGMA user_version = 14');
   } finally {
     raw.close();
   }
   try {
     assert.throws(
       () => new SqliteAnalyticsRecorder(temp.databasePath),
-      /Unsupported newer analytics database schema version 13/,
+      /Unsupported newer analytics database schema version 14/,
     );
   } finally {
     rmSync(temp.root, { recursive: true, force: true });
@@ -1711,7 +1711,7 @@ test('logical query surface is native read-only, bounded, and reports snapshot/d
       ['query-a'],
       { maxRows: 2, maxCellBytes: 32 },
     );
-    assert.equal(result.databaseSchemaVersion, 12);
+    assert.equal(result.databaseSchemaVersion, 13);
     assert.equal(result.snapshotWatermark, 3);
     assert.deepEqual(result.generationIds, ['generation-1']);
     assert.equal(result.returnedRows, 2);
@@ -1996,7 +1996,7 @@ test('schema v5 adds the projection-order index without changing stored settleme
 
     const upgraded = new SqliteAnalyticsRecorder(temp.databasePath);
     try {
-      assert.equal(upgraded.getDatabaseSchemaVersion(), 12);
+      assert.equal(upgraded.getDatabaseSchemaVersion(), 13);
       const after = upgraded.readProviderSettlements();
       assert.deepEqual(after.settlements, before.settlements);
       assert.equal(upgraded.readProviderAccountingSummary().inputTokens.knownTotal, knownTotalBefore);

@@ -96,7 +96,11 @@ import {
 } from './provider-incident';
 import { observeProviderTransport, type ProviderTransportObservation } from './provider-progress-bus';
 import { resolvePieDataPaths } from '../../../shared/pie-data-root.js';
-import { SessionLifecycleStore } from './session-lifecycle-store.js';
+import {
+  createSessionLifecycleWriterAdmission,
+  SessionLifecycleStore,
+  type SessionLifecycleWriterAdmission,
+} from './session-lifecycle-store.js';
 import { SessionFilesystemMutationBarrier } from './session-filesystem-lifecycle.js';
 import {
   AnalyticsWorkerTransport,
@@ -199,6 +203,7 @@ export class WorkerRuntimeHost {
   private mcpEnabled = true;
   private readonly detailStore: WorkerLiveDetailStore;
   private lifecycleStore?: SessionLifecycleStore;
+  private analyticsWriterAdmission?: SessionLifecycleWriterAdmission;
   private lifecycleBarrier?: SessionFilesystemMutationBarrier;
   private lifecycleSessionsRoot?: string;
   private analyticsTransport?: AnalyticsWorkerTransport;
@@ -317,7 +322,7 @@ export class WorkerRuntimeHost {
         const sourceSessionId = sourceContext.session.sessionManager.getSessionId?.();
         return this.lifecycleBarrier && typeof sourceSessionId === 'string' && sourceSessionId
           ? await this.lifecycleBarrier.runWriteMutationAsync(sourceSessionId, 'session.duplicateHot', duplicate)
-          : await duplicate();
+          : await this.withAnalyticsWriterAdmission(duplicate);
       }
       if (operation === 'session.snapshot') {
         const sessionPath = typeof params.sessionPath === 'string' ? params.sessionPath : undefined;
@@ -527,6 +532,7 @@ export class WorkerRuntimeHost {
     this.uninstallNetworkLease = undefined;
     this.lifecycleStore?.close();
     this.lifecycleStore = undefined;
+    this.analyticsWriterAdmission = undefined;
     this.lifecycleBarrier = undefined;
     return analyticsDisposalReport;
   }
@@ -543,24 +549,43 @@ export class WorkerRuntimeHost {
     this.openedPayload = payload.openedPayload as unknown as SessionOpenedPayload;
     this.currentLease = payload.writeLease as unknown as SdkSessionWriteLease;
 
+    const dataPaths = resolvePieDataPaths({ agentDir: this.agentDir });
+    const writerAdmission = payload.analytics?.writerAdmission;
+    if (writerAdmission) {
+      if (path.resolve(writerAdmission.stateDir) !== path.resolve(dataPaths.stateDir)) {
+        throw new Error('Worker analytics writer admission state directory does not match the runtime data root.');
+      }
+      this.lifecycleStore = new SessionLifecycleStore(
+        path.join(writerAdmission.stateDir, 'session-lifecycle.sqlite'),
+      );
+      this.analyticsWriterAdmission = createSessionLifecycleWriterAdmission(
+        this.lifecycleStore,
+        writerAdmission.identity,
+      );
+    } else if (process.env[PIE_STORAGE_CUTOFF_AUTHORIZATION_ENV] === PIE_STORAGE_CUTOFF_AUTHORIZATION_VALUE) {
+      this.lifecycleStore = new SessionLifecycleStore(path.join(dataPaths.stateDir, 'session-lifecycle.sqlite'));
+    }
+    if (process.env[PIE_STORAGE_CUTOFF_AUTHORIZATION_ENV] === PIE_STORAGE_CUTOFF_AUTHORIZATION_VALUE) {
+      if (!this.lifecycleStore) {
+        this.lifecycleStore = new SessionLifecycleStore(path.join(dataPaths.stateDir, 'session-lifecycle.sqlite'));
+      }
+      this.lifecycleBarrier = new SessionFilesystemMutationBarrier({
+        store: this.lifecycleStore,
+        lockRoot: path.join(dataPaths.stateDir, 'session-mutation-locks'),
+        writerAdmission: this.analyticsWriterAdmission,
+      });
+      this.lifecycleSessionsRoot = dataPaths.sessionsDir;
+    }
+
     if (payload.analytics) {
       const activation = payload.analytics;
       this.analyticsTransport = new AnalyticsWorkerTransport(
         this.options.server,
         activation,
         `${this.options.owner.workerId}:${this.options.owner.workerGeneration}`,
+        this.analyticsWriterAdmission,
       );
       this.analyticsTransport.install();
-    }
-
-    if (process.env[PIE_STORAGE_CUTOFF_AUTHORIZATION_ENV] === PIE_STORAGE_CUTOFF_AUTHORIZATION_VALUE) {
-      const dataPaths = resolvePieDataPaths({ agentDir: this.agentDir });
-      this.lifecycleStore = new SessionLifecycleStore(path.join(dataPaths.stateDir, 'session-lifecycle.sqlite'));
-      this.lifecycleBarrier = new SessionFilesystemMutationBarrier({
-        store: this.lifecycleStore,
-        lockRoot: path.join(dataPaths.stateDir, 'session-mutation-locks'),
-      });
-      this.lifecycleSessionsRoot = dataPaths.sessionsDir;
     }
 
     this.uninstallNetworkLease = installWorkerProviderNetworkLease({
@@ -913,7 +938,9 @@ export class WorkerRuntimeHost {
           || !sameSessionPath(canonicalPath, this.currentLease.canonicalSessionPath)) {
           throw new Error(`Stale worker session write lease for ${canonicalPath}.`);
         }
-        if (!this.lifecycleStore || !this.lifecycleBarrier || !this.lifecycleSessionsRoot) return mutation();
+        if (!this.lifecycleStore || !this.lifecycleBarrier || !this.lifecycleSessionsRoot) {
+          return this.withAnalyticsWriterAdmission(mutation);
+        }
         const relativePath = path.relative(this.lifecycleSessionsRoot, canonicalPath);
         if (!relativePath || relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
           throw new Error(`Storage-cutoff worker path is outside the canonical sessions root: ${canonicalPath}`);
@@ -1334,7 +1361,9 @@ export class WorkerRuntimeHost {
   private fenceSessionManager(manager: import('./sdk').SdkSessionManager): MutableSdkSessionManager {
     const existing = this.sessionManagerFenceRecords.get(manager as object);
     if (existing) return existing.manager;
-    const guarded = createSessionManagerFence(manager);
+    const guarded = createSessionManagerFence(manager, {
+      admission: this.analyticsWriterAdmission,
+    });
     const record: SessionManagerFenceRecord = {
       manager: guarded.manager,
       fence: guarded.fence,
@@ -1574,6 +1603,27 @@ export class WorkerRuntimeHost {
     context.session.setActiveToolsByName?.(active.filter((name) => !(MCP_TOOL_NAMES as readonly string[]).includes(name)));
   }
 
+  private withAnalyticsWriterAdmission<T>(operation: () => T): T {
+    const releaseAdmission = this.analyticsWriterAdmission?.acquire();
+    let released = false;
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      releaseAdmission?.();
+    };
+    try {
+      const result = operation();
+      if (result && typeof (result as { then?: unknown }).then === 'function') {
+        return Promise.resolve(result).finally(release) as T;
+      }
+      release();
+      return result;
+    } catch (error) {
+      release();
+      throw error;
+    }
+  }
+
   private async applySystemPromptToggles(context: SessionContext, disabledEntries: readonly string[]): Promise<void> {
     const next = [...new Set(disabledEntries)];
     const promptState = context.session as typeof context.session & SessionPromptState;
@@ -1607,7 +1657,7 @@ export class WorkerRuntimeHost {
         )
       ));
     } else {
-      await persistPromptToggles();
+      await this.withAnalyticsWriterAdmission(persistPromptToggles);
     }
     if (this.openedPayload?.systemPrompts) {
       this.openedPayload = {
@@ -1753,6 +1803,26 @@ export class WorkerRuntimeHost {
       }
       if (subject.kind !== 'session' && subject.kind !== 'pendingCreate' && subject.kind !== 'host') {
         throw new Error('Invalid runtime promotion analytics subject kind.');
+      }
+      const writerAdmission = analytics.writerAdmission;
+      if (writerAdmission !== undefined) {
+        if (!writerAdmission || typeof writerAdmission !== 'object' || Array.isArray(writerAdmission)
+          || typeof writerAdmission.stateDir !== 'string' || writerAdmission.stateDir.length === 0
+          || writerAdmission.stateDir.length > 4_096 || writerAdmission.stateDir.includes('\u0000')
+          || !writerAdmission.identity || typeof writerAdmission.identity !== 'object'
+          || Array.isArray(writerAdmission.identity)) {
+          throw new Error('Invalid runtime promotion analytics writer admission.');
+        }
+        const identity = writerAdmission.identity;
+        for (const key of ['hostInstanceId', 'workspaceId', 'generationId', 'buildId'] as const) {
+          const value = identity[key];
+          if (typeof value !== 'string' || value.length === 0 || value.length > 512 || value.includes('\u0000')) {
+            throw new Error(`Invalid runtime promotion analytics writer identity ${key}.`);
+          }
+        }
+        if (!Number.isSafeInteger(identity.processId) || identity.processId <= 0) {
+          throw new Error('Invalid runtime promotion analytics writer identity processId.');
+        }
       }
     }
   }

@@ -14,6 +14,25 @@ Owning specifications: runbook; `docs/ANALYTICS_REWORK_PLAN.md` §§1, 11.6, 17;
 
 ---
 
+## Overnight checkpoint - 2026-09-13 23:50 Pacific/Auckland
+
+Schema-13 tool/file facets and bounded activity/facet query APIs are integrated with
+reviewed guarded cutover orchestration, process census and authenticated production
+adapters/helper preflight. Three production-helper review blockers (wrong prefence
+generation, stale restart keys, changing recovery timestamp) were fixed; legacy restart
+nonce/path compatibility was repaired. A recorder test double was corrected to model
+the distinct startup admission path. Candidate-trial validation remains unavailable and
+real activation stays fail-closed; P7b production entry remains incomplete. Nothing was
+activated, cut over or restarted. Earlier milestone `e2929ad3` was pushed to origin/master.
+
+Root affected integration passed three packages (extension 4,884 passed, 19 skipped,
+zero failures); typecheck/lint passed. Build `8b06e0475cacde8cc45f` staged runtime
+`d4db74edde73906e068f632d7e411c54e3004f437b702c6bb038b9d9e2b54570`.
+Logs: OS-temp `pie-overnight-milestone-XxwO95/{test,build}.log`. This is staged, not claimed
+loaded/behavior-verified. User priority: stop feature expansion by 03:00 and stabilize
+for 07:00 Sep14 Auckland; preserving everyday usability outranks plan completion.
+Remaining scope and explicit gates are maintained in PIE_REWORK_HANDOFF.md.
+
 ## Integration milestone - 2026-09-13, timing, activity projection, writer fencing
 
 The user reported successful restart and normal/tool/cancel/private-close smoke checks;

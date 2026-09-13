@@ -119,7 +119,7 @@ test('production query worker includes terminal telemetry on a bounded schema re
   });
   try {
     const schema = await client.query<{ databaseSchemaVersion: number }>({ type: 'schema' });
-    assert.equal(schema.databaseSchemaVersion, 12);
+    assert.equal(schema.databaseSchemaVersion, 13);
     const terminal = lifecycle.find((event) => event.phase === 'terminal');
     assert.ok(terminal);
     assert.equal(terminal.telemetryStatus, 'available');

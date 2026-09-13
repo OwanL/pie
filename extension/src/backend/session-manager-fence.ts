@@ -100,6 +100,7 @@ const PERSISTENCE_MUTATION_METHODS = new Set([
   'appendCustomEntry',
   'appendSessionInfo',
   'appendCustomMessageEntry',
+  'appendPieModelSettingsChange',
   'appendLabelChange',
   // branching / leaf manipulation
   'branch',

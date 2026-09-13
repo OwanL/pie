@@ -101,6 +101,59 @@ const createSyntheticFingerprintIndexStore = (
   reconciliationSourceMatches: () => true,
 });
 
+test('persistent session index holds writer admission across every durable sidecar mutation', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-session-index-admission-'));
+  let accepting = true;
+  let active = 0;
+  let acquired = 0;
+  let released = 0;
+  const writerAdmission = {
+    acquire: (): (() => void) => {
+      if (!accepting) throw new Error('writer admission is fenced');
+      active += 1;
+      acquired += 1;
+      let done = false;
+      return () => {
+        if (done) return;
+        done = true;
+        active -= 1;
+        released += 1;
+      };
+    },
+  };
+  try {
+    const sessionDir = path.join(root, 'sessions');
+    await fs.mkdir(sessionDir);
+    const filePath = path.join(sessionDir, 'session.jsonl');
+    await writeJsonl(filePath, [header(root, 'admission'), message(
+      'user-1', 'user', 'Admission must cover the catalog sidecar', '2026-01-01T00:00:01.000Z',
+    )]);
+    const metadata = await readMetadata(filePath);
+    const indexPath = resolveSessionIndexPath(root, sessionDir);
+    const store = new SessionIndexStore(indexPath, path.resolve(sessionDir), { writerAdmission });
+
+    assert.equal(store.upsertBatch([metadata]), true);
+    assert.equal(active, 0);
+    assert.equal(store.readAll().length, 1);
+    assert.equal(store.readMutationGeneration() >= 0, true);
+    assert.equal(active, 0);
+
+    accepting = false;
+    assert.throws(() => store.deletePaths([metadata.fingerprint.pathKey]), /writer admission is fenced/);
+    assert.equal(active, 0);
+    assert.equal(new SessionIndexStore(indexPath, path.resolve(sessionDir)).readAll().length, 1);
+
+    accepting = true;
+    assert.equal(store.deletePaths([metadata.fingerprint.pathKey]), true);
+    assert.equal(active, 0);
+    assert.equal(acquired, released);
+    assert.ok(acquired >= 4, `expected read and mutation boundaries to acquire admission (got ${acquired})`);
+  } finally {
+    assert.equal(active, 0);
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test('indexed metadata resumes ordinary appends and reparses a detected rewrite of only that file', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-session-index-parser-'));
   try {

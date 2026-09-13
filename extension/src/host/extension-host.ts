@@ -82,7 +82,11 @@ import {
   type RuntimeGenerationIdentity,
 } from './analytics-handoff-discovery.js';
 import { createPerBootAnalyticsHandoffKey } from '../../../shared/analytics/handoff.js';
-import { SessionLifecycleStore } from '../backend/session-lifecycle-store.js';
+import {
+  createSessionLifecycleWriterAdmission,
+  SessionLifecycleStore,
+  type SessionLifecycleWriterAdmission,
+} from '../backend/session-lifecycle-store.js';
 import { isFreshLegacyActivationState, resolveAnalyticsPolicy } from './analytics-policy.js';
 
 
@@ -211,7 +215,12 @@ export class PieExtension implements vscode.Disposable {
     let backendWriterFenceStarted = false;
     let backendWriterFenceComplete = false;
     let backendWriterFencePromise: Promise<void> | undefined;
+    let analyticsWriterFenceStarted = false;
+    let analyticsWriterFenceComplete = false;
+    let analyticsWriterFencePromise: Promise<void> | undefined;
+    let fenceAnalyticsWriters: ((timeoutMs: number) => Promise<number>) | undefined;
     let analyticsHandoffRegistry: SessionLifecycleStore | undefined;
+    let analyticsWriterAdmission: SessionLifecycleWriterAdmission | undefined;
     let analyticsHandoffControl: AnalyticsHandoffControl | undefined;
     let statsService: StatsServicePort;
 
@@ -249,12 +258,18 @@ export class PieExtension implements vscode.Disposable {
         processId: process.pid,
         capabilities: ['host-discovery', 'host-status'] as const,
       };
+      analyticsWriterAdmission = createSessionLifecycleWriterAdmission(
+        analyticsHandoffRegistry,
+        analyticsHostIdentity,
+      );
       const analyticsWriterFence = createAnalyticsHostWriterFence({
         identity: analyticsHostIdentity,
-        activeWriterCount: () => (backendWriterFenceStarted && !backendWriterFenceComplete ? 1 : 0),
+        activeWriterCount: () => (backendWriterFenceStarted && !backendWriterFenceComplete ? 1 : 0)
+          + (analyticsWriterFenceStarted && !analyticsWriterFenceComplete ? 1 : 0),
         revokeAdmission: (request) => {
-          if (backendWriterFenceStarted) return;
+          if (backendWriterFenceStarted || analyticsWriterFenceStarted) return;
           backendWriterFenceStarted = true;
+          analyticsWriterFenceStarted = true;
           backendWriterFencePromise = backend.request('analytics.writerFence', {
             workspaceId: request.workspaceId,
             operationId: request.operationId,
@@ -270,10 +285,20 @@ export class PieExtension implements vscode.Disposable {
             }
             backendWriterFenceComplete = true;
           });
+          analyticsWriterFencePromise = fenceAnalyticsWriters
+            ? fenceAnalyticsWriters(9_000).then((activeWriterCount) => {
+              if (activeWriterCount !== 0) {
+                throw new Error('Canonical recorder returned a nonzero active writer count after fencing.');
+              }
+              analyticsWriterFenceComplete = true;
+            })
+            : Promise.reject(new Error('Canonical analytics writer fence is not wired.'));
         },
-        isAdmissionRevoked: () => backendWriterFenceStarted && backendWriterFenceComplete,
+        isAdmissionRevoked: () => backendWriterFenceStarted && backendWriterFenceComplete
+          && analyticsWriterFenceStarted && analyticsWriterFenceComplete,
         waitForIdle: async () => {
           if (backendWriterFencePromise) await backendWriterFencePromise;
+          if (analyticsWriterFencePromise) await analyticsWriterFencePromise;
           return 0;
         },
       });
@@ -347,6 +372,8 @@ export class PieExtension implements vscode.Disposable {
         processGeneration: analyticsProcessGeneration,
         activationSnapshot: activation,
         restartNonce: process.env.PIE_ANALYTICS_RESTART_NONCE?.trim() || null,
+        terminalRestartReceiptPath: process.env.PIE_ANALYTICS_TERMINAL_RESTART_RECEIPT_PATH?.trim(),
+        writerAdmission: analyticsWriterAdmission,
         onError: (error, stage) => {
           appendPieLog('error', 'analytics', `canonical analytics ${stage} failed`, {
             error: error instanceof Error ? error.message : String(error),
@@ -354,6 +381,7 @@ export class PieExtension implements vscode.Disposable {
         },
       });
       analyticsRuntime = analyticsRuntimeImpl;
+      fenceAnalyticsWriters = (timeoutMs) => analyticsRuntimeImpl.fenceWriters(timeoutMs);
       // Under canonical authority the capture requires fact, detail and lifecycle
       // sinks, and throws without them. Those sinks are the canonical recorder,
       // which only exists after AnalyticsRuntime.start() succeeds. This holder is
@@ -763,6 +791,10 @@ export class PieExtension implements vscode.Disposable {
     // valid initial `ViewState`. Backend readiness is a field in that state;
     // the HTTP shell does not wait for provider/backend startup.
     await this.browserServer.start();
+    // A helper-issued nonce requests terminal cutover evidence. Write it only
+    // after the complete host readiness sequence, including the browser
+    // endpoint, has succeeded; ordinary boots remain marker-only.
+    this.analyticsRuntime.recordTerminalRestartReceipt();
   }
 
   async restart(source: SessionOperationSource = { kind: 'host' }): Promise<void> {
@@ -1393,6 +1425,7 @@ export class PieExtension implements vscode.Disposable {
       }
       this.backend.dispose();
       await this.analyticsRuntime.stop();
+      await this.analyticsHandoffControl?.markStopped();
       this.analyticsTransport?.dispose();
       this.analyticsHandoffRegistry?.close();
       this.service.dispose();

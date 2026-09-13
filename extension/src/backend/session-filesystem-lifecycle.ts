@@ -23,6 +23,7 @@ import {
   type SessionCloseResolution,
   type SessionLifecycleRecord,
 } from './session-lifecycle-store.js';
+import type { SessionManagerFenceAdmission } from './session-manager-fence.js';
 
 interface MutationLockOwner {
   schema: 1;
@@ -75,6 +76,9 @@ export interface SessionMutationBarrierOptions {
   processAlive?: (pid: number) => boolean;
   waitTimeoutMs?: number;
   retryDelayMs?: number;
+  /** Optional durable analytics admission for direct filesystem writes that
+   * are not routed through a SessionManager. */
+  writerAdmission?: SessionManagerFenceAdmission;
 }
 
 export interface SessionWriteMutationOptions {
@@ -153,25 +157,49 @@ export class SessionFilesystemMutationBarrier {
     mutation: () => T,
     options: SessionWriteMutationOptions = {},
   ): T {
-    return this.runExclusive(sessionId, seam, () => {
+    return this.runExclusive(sessionId, seam, () => this.withWriterAdmission(() => {
       this.options.store.assertWritable(sessionId, options.expectedWriteEpoch);
       return mutation();
-    });
+    }));
   }
 
   runAdministrative<T>(sessionId: string, seam: string, operation: () => T): T {
-    return this.runExclusive(sessionId, seam, operation);
+    return this.runExclusive(sessionId, seam, () => this.withWriterAdmission(operation));
   }
 
   async runWriteMutationAsync<T>(sessionId: string, seam: string, operation: () => Promise<T>): Promise<T> {
-    return await this.runExclusiveAsync(sessionId, seam, () => {
+    return await this.runExclusiveAsync(sessionId, seam, () => this.withWriterAdmission(() => {
       this.options.store.assertWritable(sessionId);
       return operation();
-    });
+    }));
   }
 
   async runAdministrativeAsync<T>(sessionId: string, seam: string, operation: () => Promise<T>): Promise<T> {
-    return await this.runExclusiveAsync(sessionId, seam, operation);
+    return await this.runExclusiveAsync(sessionId, seam, () => this.withWriterAdmission(operation));
+  }
+
+  private withWriterAdmission<T>(operation: () => T): T {
+    const releaseAdmission = this.options.writerAdmission?.acquire();
+    if (releaseAdmission !== undefined && typeof releaseAdmission !== 'function') {
+      throw new Error('Session filesystem writer admission did not return a release function.');
+    }
+    let released = false;
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      releaseAdmission?.();
+    };
+    try {
+      const result = operation();
+      if (result && typeof (result as { then?: unknown }).then === 'function') {
+        return Promise.resolve(result).finally(release) as T;
+      }
+      release();
+      return result;
+    } catch (error) {
+      release();
+      throw error;
+    }
   }
 
   private runExclusive<T>(sessionId: string, seam: string, operation: () => T): T {

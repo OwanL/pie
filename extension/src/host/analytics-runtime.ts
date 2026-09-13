@@ -23,7 +23,10 @@ import {
   canonicalAnalyticsDatabasePath,
   type CanonicalAggregateRequest,
 } from '../analytics/query-entry.js';
-import { AnalyticsRecorderSupervisor } from '../analytics/recorder-supervisor.js';
+import {
+  AnalyticsRecorderSupervisor,
+  type AnalyticsRecorderWriterAdmission,
+} from '../analytics/recorder-supervisor.js';
 import { AnalyticsQueryClient } from '../analytics/query-client.js';
 import { ActivationStore, type ActivationReadResult } from '../analytics/activation-store.js';
 
@@ -31,6 +34,20 @@ import { ActivationStore, type ActivationReadResult } from '../analytics/activat
  * evidence can show which generation is loaded rather than only which one the
  * manifest records. */
 export const LOADED_GENERATION_FILENAME = 'analytics-loaded-generation-v1.json';
+export const TERMINAL_RESTART_RECEIPT_KIND = 'pie-p7-terminal-restart-v1' as const;
+
+export interface AnalyticsTerminalRestartReceipt {
+  readonly schemaVersion: 1;
+  readonly kind: typeof TERMINAL_RESTART_RECEIPT_KIND;
+  readonly status: 'ready';
+  readonly generationId: string;
+  readonly buildId: string;
+  readonly restartNonce: string;
+  readonly hostInstanceId: string;
+  readonly processId: number;
+  readonly loadedAt: string;
+  readonly verifiedAt: string;
+}
 
 export function writeLoadedGenerationReceiptAtomically(stateDir: string, payload: AnalyticsLoadedGenerationReceipt): void {
   const destination = path.join(stateDir, LOADED_GENERATION_FILENAME);
@@ -38,6 +55,34 @@ export function writeLoadedGenerationReceiptAtomically(stateDir: string, payload
   const bytes = `${JSON.stringify(payload, null, 2)}\n`;
   let descriptor: number | undefined;
   try {
+    writeFileSync(temporary, bytes, { encoding: 'utf8', flag: 'wx' });
+    descriptor = openSync(temporary, 'r+');
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = undefined;
+    renameSync(temporary, destination);
+  } catch (error) {
+    if (descriptor !== undefined) {
+      try { closeSync(descriptor); } catch { /* preserve the original failure */ }
+    }
+    try { unlinkSync(temporary); } catch { /* best-effort cleanup */ }
+    throw error;
+  }
+}
+
+/** Write the terminal receipt at the exact helper-provided destination. The
+ * caller supplies a path rather than the runtime searching for one, and the
+ * rename keeps readers from observing partial JSON. */
+export function writeTerminalRestartReceiptAtomically(
+  destination: string,
+  payload: AnalyticsTerminalRestartReceipt,
+): void {
+  const directory = path.dirname(destination);
+  const temporary = path.join(directory, `.${path.basename(destination)}.${process.pid}-${randomUUID()}.tmp`);
+  const bytes = `${JSON.stringify(payload, null, 2)}\n`;
+  let descriptor: number | undefined;
+  try {
+    mkdirSync(directory, { recursive: true });
     writeFileSync(temporary, bytes, { encoding: 'utf8', flag: 'wx' });
     descriptor = openSync(temporary, 'r+');
     fsyncSync(descriptor);
@@ -73,9 +118,14 @@ export interface AnalyticsRuntimeOptions {
   activationSnapshot?: Pick<ActivationReadResult, 'manifest' | 'sha256' | 'authority'>;
   /** Optional helper-issued restart correlation nonce for loaded evidence. */
   restartNonce?: string | null;
+  /** Exact helper-issued destination for terminal restart evidence. It is
+   * required whenever restartNonce is present. */
+  terminalRestartReceiptPath?: string;
   /** Stable active IANA calendar zone for the canonical projection. It is
    * captured once per host and never selected from competing read requests. */
   timeZone?: string;
+  /** Durable lifecycle admission for recorder persistence. */
+  writerAdmission?: AnalyticsRecorderWriterAdmission;
   onError?: (error: unknown, stage: string) => void;
 }
 
@@ -103,6 +153,11 @@ export interface AnalyticsRuntimePort {
   start(): Promise<AnalyticsRuntimeReadiness>;
   recordLoadedGeneration(): void;
   backendDescriptor(): AnalyticsBackendDescriptor | undefined;
+  /** Revoke producer admission and drain already accepted recorder writes. */
+  fenceWriters(timeoutMs?: number): Promise<number>;
+  /** Record terminal restart evidence only after the complete host readiness
+   * sequence has succeeded. */
+  recordTerminalRestartReceipt(): void;
   stop(): Promise<void>;
 }
 
@@ -126,7 +181,11 @@ export class DisabledAnalyticsRuntime implements AnalyticsRuntimePort {
 
   recordLoadedGeneration(): void { /* no activation receipt in this mode */ }
 
+  recordTerminalRestartReceipt(): void { /* no terminal receipt in this mode */ }
+
   backendDescriptor(): undefined { return undefined; }
+
+  async fenceWriters(): Promise<number> { return 0; }
 
   async stop(): Promise<void> { /* no helper to stop */ }
 }
@@ -151,6 +210,7 @@ export class AnalyticsRuntime implements AnalyticsRuntimePort {
    * fail the next backend spawn instead of silently changing this host's
    * worker authority mid-process. */
   private activationDescriptor: AnalyticsBackendDescriptor | undefined;
+  private loadedGeneration: AnalyticsLoadedGenerationReceipt | undefined;
   private readonly timeZone: string;
   private preparedDailyProjectionKey: string | undefined;
   private preparingDailyProjection: Promise<void> | undefined;
@@ -307,6 +367,7 @@ export class AnalyticsRuntime implements AnalyticsRuntimePort {
       enabled: true,
       workerScript: this.options.recorderWorkerScript,
       databasePath: this.databasePath,
+      writerAdmission: this.options.writerAdmission,
     });
     try {
       await recorder.start();
@@ -416,9 +477,48 @@ export class AnalyticsRuntime implements AnalyticsRuntimePort {
       });
       mkdirSync(this.options.stateDir, { recursive: true });
       writeLoadedGenerationReceiptAtomically(this.options.stateDir, payload);
+      this.loadedGeneration = payload;
     } catch {
       // Diagnostic only. Never fail a working activation over this record.
     }
+  }
+
+  /** Publish terminal evidence only for a helper-issued restart. Unlike the
+   * diagnostic loaded marker, failure here is fatal: the cutover must not
+   * reopen admission or claim readiness without durable terminal evidence. */
+  recordTerminalRestartReceipt(): void {
+    if (this.readiness?.authority !== 'canonical' || this.options.restartNonce === null
+      || this.options.restartNonce === undefined) return;
+    const destination = this.options.terminalRestartReceiptPath;
+    if (!destination || !path.isAbsolute(destination) || destination.length > 4_096) {
+      throw new ActivationManifestError('Terminal restart receipt path is missing or invalid.');
+    }
+    const loaded = this.loadedGeneration;
+    const descriptor = this.activationDescriptor;
+    if (!loaded || !descriptor || loaded.restartNonce !== this.options.restartNonce) {
+      throw new ActivationManifestError('Loaded-generation evidence is missing for the terminal restart receipt.');
+    }
+    const current = this.readActivation();
+    this.assertStartupActivationUnchanged(current);
+    if (current.authority !== 'canonical'
+      || current.sha256 !== descriptor.manifestSha256
+      || current.manifest?.revision !== descriptor.manifestRevision
+      || current.manifest.activeGeneration?.identity.generationId !== descriptor.generationId) {
+      throw new ActivationManifestError('Analytics activation changed before terminal restart evidence could be recorded.');
+    }
+    const payload: AnalyticsTerminalRestartReceipt = {
+      schemaVersion: 1,
+      kind: TERMINAL_RESTART_RECEIPT_KIND,
+      status: 'ready',
+      generationId: descriptor.generationId,
+      buildId: descriptor.buildId,
+      restartNonce: this.options.restartNonce,
+      hostInstanceId: descriptor.hostInstanceId,
+      processId: process.pid,
+      loadedAt: loaded.loadedAt,
+      verifiedAt: new Date().toISOString(),
+    };
+    writeTerminalRestartReceiptAtomically(destination, payload);
   }
 
   /** The started recorder, usable as the capture's fact/detail/lifecycle sink.
@@ -459,6 +559,16 @@ export class AnalyticsRuntime implements AnalyticsRuntimePort {
       `--analyticsWorkspaceId=${descriptor.workspaceId}`,
       `--analyticsHostInstanceId=${descriptor.hostInstanceId}`,
     ];
+  }
+
+  /** Revoke recorder producer admission and wait until every accepted capture
+   * and lifecycle control write has been acknowledged by the recorder. */
+  async fenceWriters(timeoutMs = 10_000): Promise<number> {
+    const recorder = this.recorder;
+    if (!recorder) return 0;
+    await recorder.fence(timeoutMs);
+    const backlog = recorder.backlog;
+    return backlog.queuedRecords + backlog.inFlightRecords;
   }
 
   /** Stop every helper. Terminal and idempotent: never restarts workers.

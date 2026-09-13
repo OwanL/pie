@@ -7,6 +7,7 @@ import type {
 } from './query-client.js';
 import type {
   AnalyticsDetailRangeResult,
+  AnalyticsQuerySnapshotMetadata,
   AnalyticsReadOnlyQueryResult,
   AnalyticsSchemaDescription,
   AnalyticsStorageReadModel,
@@ -18,6 +19,8 @@ import type {
   ScopedProviderSettlementReadModel,
 } from './sqlite-recorder.js';
 import type { CanonicalExecutionSummary } from './execution-summary.js';
+import type { ActivityProjectionReadModel } from './activity-projection.js';
+import type { ToolFacetProjectionReadModel } from './tool-facet.js';
 
 /**
  * Canonical analytics filename inside the canonical `analytics/` data root.
@@ -103,6 +106,22 @@ export interface CanonicalAggregateRequest {
   dailyWindowStartMs?: number;
   dailyWindowEndMs?: number;
   maxGroups?: number;
+  maxResultBytes?: number;
+}
+
+export interface CanonicalActivityProjectionRequest {
+  /** Session scope; omitted selects the global scope. */
+  rootSessionId?: string;
+  /** Bounded per-kind rows (helper default 64, cap 10 000). */
+  maxKinds?: number;
+  maxResultBytes?: number;
+}
+
+export interface CanonicalToolFacetProjectionRequest {
+  /** Session scope; omitted selects the global scope. */
+  rootSessionId?: string;
+  /** Bounded facet rows (helper default 200, cap 10 000). */
+  limit?: number;
   maxResultBytes?: number;
 }
 
@@ -390,6 +409,52 @@ export class CanonicalAnalyticsReadModel {
       type: 'historicalDimensions',
       maxRowsPerDimension: this.maxRows,
       maxResultBytes: this.maxResultBytes,
+    }, signal);
+  }
+
+  /** Bounded maintained activity summary for the global or one session scope.
+   * `totals.measuredTotalMs` is additive measured work — parallel or nested
+   * spans may exceed elapsed wall time — and known/unknown counts stay
+   * isolated. Wall-union queries remain explicit raw SQL over the member
+   * anchors. */
+  readActivityProjection(
+    request: CanonicalActivityProjectionRequest = {},
+    signal?: AbortSignal,
+  ): Promise<ActivityProjectionReadModel & AnalyticsQuerySnapshotMetadata> {
+    if (request.rootSessionId !== undefined
+        && (!request.rootSessionId.trim() || request.rootSessionId.includes('\0'))) {
+      throw new Error('Canonical analytics rootSessionId must be a non-empty string without NUL.');
+    }
+    const maxKinds = request.maxKinds === undefined
+      ? undefined
+      : boundedPositiveInteger(request.maxKinds, this.maxRows, MAX_ROWS, 'activity maxKinds');
+    return this.client.query<ActivityProjectionReadModel & AnalyticsQuerySnapshotMetadata>({
+      type: 'activityProjection',
+      rootSessionId: request.rootSessionId,
+      maxKinds,
+      maxResultBytes: request.maxResultBytes ?? this.maxResultBytes,
+    }, signal);
+  }
+
+  /** Bounded maintained tool/file facet rows with explicit attempted
+   * (unverified-proxy) line counts; `null`/absent line counts mean the tool
+   * has no line-activity evidence, never an invented empty change. */
+  readToolFacetProjection(
+    request: CanonicalToolFacetProjectionRequest = {},
+    signal?: AbortSignal,
+  ): Promise<ToolFacetProjectionReadModel & AnalyticsQuerySnapshotMetadata> {
+    if (request.rootSessionId !== undefined
+        && (!request.rootSessionId.trim() || request.rootSessionId.includes('\0'))) {
+      throw new Error('Canonical analytics rootSessionId must be a non-empty string without NUL.');
+    }
+    const limit = request.limit === undefined
+      ? undefined
+      : boundedPositiveInteger(request.limit, this.maxRows, MAX_ROWS, 'facet limit');
+    return this.client.query<ToolFacetProjectionReadModel & AnalyticsQuerySnapshotMetadata>({
+      type: 'toolFacetProjection',
+      rootSessionId: request.rootSessionId,
+      limit,
+      maxResultBytes: request.maxResultBytes ?? this.maxResultBytes,
     }, signal);
   }
 

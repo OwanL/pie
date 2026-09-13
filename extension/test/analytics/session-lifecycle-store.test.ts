@@ -7,6 +7,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import {
+  createSessionLifecycleWriterAdmission,
   SessionLifecycleStore,
   sessionRetentionDeadline,
 } from '../../src/backend/session-lifecycle-store.js';
@@ -120,6 +121,97 @@ test('additive analytics host registry keeps the lifecycle schema version compat
   store = new SessionLifecycleStore(temp.databasePath);
   try {
     assert.equal(store.getAnalyticsHost('host-additive')?.state, 'registered');
+  } finally {
+    store.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('read-only lifecycle handles support non-mutating production discovery', () => {
+  const temp = tempDatabase();
+  const writable = new SessionLifecycleStore(temp.databasePath);
+  writable.registerAnalyticsHost({
+    hostInstanceId: 'host-read-only', workspaceId: 'workspace-read-only',
+    generationId: 'generation-read-only', buildId: 'build-read-only', processId: 301,
+    capabilities: ['authenticated-control'], registeredAtMs: '1',
+  });
+  writable.close();
+  const readonly = new SessionLifecycleStore(temp.databasePath, { readOnly: true });
+  try {
+    assert.equal(readonly.listAnalyticsHosts('workspace-read-only').hosts[0]?.hostInstanceId, 'host-read-only');
+    assert.throws(() => readonly.registerAnalyticsHost({
+      hostInstanceId: 'host-read-only-new', workspaceId: 'workspace-read-only',
+      generationId: 'generation-read-only-new', buildId: 'build-read-only', processId: 302,
+      capabilities: ['authenticated-control'], registeredAtMs: '2',
+    }), /read-only/);
+    assert.equal(readonly.listAnalyticsHosts('workspace-read-only').hosts.length, 1);
+  } finally {
+    readonly.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('durable writer admission holds leases through writes and rejects a fenced epoch', () => {
+  const temp = tempDatabase();
+  const store = new SessionLifecycleStore(temp.databasePath);
+  const identity = {
+    hostInstanceId: 'writer-admission-host',
+    workspaceId: 'writer-admission-workspace',
+    generationId: 'writer-admission-generation',
+    buildId: 'writer-admission-build',
+    processId: 401,
+  };
+  try {
+    store.registerAnalyticsHost({
+      ...identity,
+      capabilities: ['authenticated-control', 'writer-fence'],
+      registeredAtMs: '1',
+    });
+    const admission = createSessionLifecycleWriterAdmission(store, identity, () => 2);
+    const release = admission.acquire();
+    assert.equal(store.listAnalyticsWriterLeases(identity.workspaceId).length, 1);
+    release();
+    assert.equal(store.listAnalyticsWriterLeases(identity.workspaceId).length, 0);
+
+    const fence = store.beginAnalyticsWriterFence({
+      workspaceId: identity.workspaceId,
+      operationId: 'writer-admission-fence',
+      purpose: 'analytics-activation',
+      expectedHosts: [identity],
+      nowMs: 3,
+    });
+    assert.throws(() => admission.assertAdmitted(), /admission is fencing/);
+    assert.throws(() => admission.acquire(), /admission is fencing/);
+    store.acknowledgeAnalyticsWriterFence({
+      workspaceId: identity.workspaceId,
+      operationId: fence.operationId,
+      fenceEpoch: fence.fenceEpoch,
+      identity,
+      activeWriterCount: 0,
+      nowMs: 4,
+    });
+    store.markAnalyticsHostState(identity.hostInstanceId, identity.processId, identity.generationId, 'stopped', 5);
+    assert.equal(store.completeAnalyticsWriterFence(identity.workspaceId, fence.operationId, 6).state, 'fenced');
+
+    const successor = {
+      hostInstanceId: 'writer-admission-successor',
+      workspaceId: identity.workspaceId,
+      generationId: 'writer-admission-successor-generation',
+      buildId: identity.buildId,
+      processId: 402,
+    };
+    store.registerAnalyticsHost({
+      ...successor,
+      capabilities: ['authenticated-control', 'writer-fence'],
+      registeredAtMs: '7',
+    });
+    const successorAdmission = createSessionLifecycleWriterAdmission(store, successor, () => 8);
+    assert.throws(() => successorAdmission.acquire(), /admission is fenced/);
+    const startupRelease = successorAdmission.acquireStartup?.();
+    assert.equal(typeof startupRelease, 'function');
+    assert.equal(store.listAnalyticsWriterLeases(identity.workspaceId).length, 1);
+    startupRelease?.();
+    assert.equal(store.listAnalyticsWriterLeases(identity.workspaceId).length, 0);
   } finally {
     store.close();
     rmSync(temp.root, { recursive: true, force: true });

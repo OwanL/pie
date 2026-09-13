@@ -26,9 +26,30 @@ Completed source units since recovery:
   still incomplete and disabled: authoritative census, deletion adapter, durable receipt
   orchestration and production authorization remain explicit next work.
 
-Remaining main work: tool/file facet metrics and query/live activity consumers; remaining
-rich producer/handoff coverage; P0 resource/scale and matched UI evidence; actual-host P2c
-cache-use evidence; final P7 ordered activation/cutoff orchestration. No activation or
+Further integrated units: schema-13 typed tool/file facets with explicitly unverified
+attempted-change proxies, subject deletion and migration; bounded activity/facet query
+worker APIs; guarded resumable analytics cutover orchestration, actual process-birth
+census and authenticated production adapters, read-only helper preflight, dynamic
+restart-host key lookup and crash-resume timestamp binding. Legacy restart environment
+now includes the receipt path required by the new runtime. Production activation still
+fails closed: the authoritative candidate-trial validator is unavailable. Storage-cutoff
+production entry and actual terminal restart proof remain unfinished. G1-to-G2 replacement
+is explicitly refused, not silently performed.
+
+Latest integration (before midnight Auckland, 2026-09-14): all three affected test
+packages passed; extension 4,884 passed, 19 skipped, no failures. Typecheck/lint passed.
+Build `8b06e0475cacde8cc45f` staged runtime
+`d4db74edde73906e068f632d7e411c54e3004f437b702c6bb038b9d9e2b54570`.
+Loaded host behavior is still only verified for the earlier user-tested generation.
+Logs: OS-temp `pie-overnight-milestone-XxwO95/{test,build}.log`.
+
+The user requested sustained overnight work, feature work stopping by 03:00 and stability
+by 07:00 on 2026-09-14 Pacific/Auckland. Morning usability takes priority: defer incomplete
+features, preserve live sessions, and do not activate/cut over without proven gates.
+
+Remaining main work: live activity consumers; remaining rich producer/handoff coverage;
+P0 resource/scale and matched UI evidence; actual-host P2c cache-use evidence; final P7
+qualification authority and ordered activation/cutoff execution. No activation or
 storage cutoff has occurred. Cosmetic cleanup is deferred per user priority. Commit and
 push verified milestones as work proceeds; exclude unrelated model/settings/pricing edits.
 

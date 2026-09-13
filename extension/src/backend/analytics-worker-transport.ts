@@ -3,6 +3,10 @@ import type {
   AnalyticsDetailCapture,
   AnalyticsObservation,
 } from '../../../shared/analytics/contracts.js';
+import type {
+  AnalyticsWriterIdentity,
+  SessionLifecycleWriterAdmission,
+} from './session-lifecycle-store.js';
 import {
   ANALYTICS_RUNTIME_BRIDGE_KEY,
   analyticsProducerIdentity,
@@ -23,6 +27,11 @@ export interface WorkerAnalyticsActivation {
   captureSubject: AnalyticsCaptureSubject;
   workspaceId?: string;
   buildId: string;
+  /** Host-owned durable admission authority shared with the coordinator. */
+  writerAdmission?: {
+    stateDir: string;
+    identity: AnalyticsWriterIdentity;
+  };
 }
 
 export interface AnalyticsWorkerTransportSender {
@@ -132,6 +141,7 @@ export class AnalyticsWorkerTransport {
     private readonly sender: AnalyticsWorkerTransportSender,
     readonly activation: WorkerAnalyticsActivation,
     processGeneration: string,
+    private readonly writerAdmission?: Pick<SessionLifecycleWriterAdmission, 'assertAdmitted'>,
   ) {
     this.captureSubject = activation.captureSubject;
     this.bridge = {
@@ -295,6 +305,7 @@ export class AnalyticsWorkerTransport {
   }
 
   private submitObservation(observation: AnalyticsObservation<object>): void {
+    this.writerAdmission?.assertAdmitted();
     this.assertCaptureEnvelope(observation.generationId, observation.captureSubject);
     this.assertProducerIdentity(observation.producer.buildId, observation.scope.workspaceCoverage === 'known'
       ? observation.scope.workspaceId : undefined);
@@ -325,6 +336,7 @@ export class AnalyticsWorkerTransport {
   }
 
   private submitDetail(capture: AnalyticsDetailCapture): void {
+    this.writerAdmission?.assertAdmitted();
     this.assertCaptureEnvelope(capture.generationId, capture.captureSubject);
     this.assertProducerIdentity(capture.producer?.buildId, undefined, false);
     this.assertAcknowledgementCapacity();
@@ -425,6 +437,14 @@ export class AnalyticsWorkerTransport {
       return;
     }
     const packet = next.value;
+    try {
+      this.writerAdmission?.assertAdmitted();
+    } catch (error) {
+      this.activeDetailFrame = undefined;
+      this.pumpingDetail = false;
+      this.abortDetailSend(job, error instanceof Error ? error.message : String(error));
+      return;
+    }
     const activeFrame = { job };
     this.activeDetailFrame = activeFrame;
     let accepted: boolean;

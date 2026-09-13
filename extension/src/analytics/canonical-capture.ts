@@ -22,9 +22,11 @@ import {
 import type { ActivityIntervalRecord } from '../shared/activity-interval.js';
 import type { BillableInvocationRecord } from '../shared/billable-invocation.js';
 import type { ToolCall } from '../shared/protocol.js';
+import type { ToolCallAnalysis } from '../shared/tool-call-analysis/index.js';
 import type { DurationClockDomain } from '../shared/timing.js';
 import { sanitizeAnalyticsDetail } from '../shared/sensitive-redaction.js';
 import { canonicalAnalyticsToolEntityId } from '../../../shared/analytics/transport.js';
+import { buildToolFacetFields } from './tool-facet.js';
 
 export type AnalyticsAuthority = 'legacy' | 'canonical';
 export type AnalyticsCaptureStatus = 'disabled' | 'submitted' | 'rejected';
@@ -411,6 +413,13 @@ export class CanonicalAnalyticsCapture {
     );
   }
 
+  /** Stable scoped tool-call identity shared by tool facts and their facets. */
+  private scopedToolCallIdentity(context: AnalyticsSessionContext, rawToolCallId: string): string {
+    const sessionIdentity = context.sessionId?.trim()
+      || analyticsPendingOperationId(context.operationId, context.sessionPath);
+    return canonicalAnalyticsToolEntityId(sessionIdentity, rawToolCallId);
+  }
+
   captureTool(
     context: AnalyticsSessionContext,
     toolCall: ToolCall,
@@ -418,9 +427,7 @@ export class CanonicalAnalyticsCapture {
     sourceKey: string,
     observedAtMs: number,
   ): AnalyticsCaptureStatus {
-    const sessionIdentity = context.sessionId?.trim()
-      || analyticsPendingOperationId(context.operationId, context.sessionPath);
-    const scopedToolCallId = canonicalAnalyticsToolEntityId(sessionIdentity, toolCall.id);
+    const scopedToolCallId = this.scopedToolCallIdentity(context, toolCall.id);
     const payloadId = `${scopedToolCallId}:${phase}`;
     const startedAtMs = optionalTimestamp(toolCall.startedAt);
     const endedAtMs = optionalTimestamp(toolCall.endedAt);
@@ -496,6 +503,36 @@ export class CanonicalAnalyticsCapture {
       );
       return 'rejected';
     }
+  }
+
+  /** Emit the terminal tool's typed file-activity facet from evidence the
+   * caller already analyzed for that tool: commands/cwd, observed paths and
+   * attempted patch/input line counts. The counts are an explicitly unverified
+   * proxy — never a final worktree diff — and the observation is a synchronous
+   * handoff that never awaits the recorder sink or re-serializes a result body.
+   * Exact redelivery (a duplicate terminal event) stays idempotent at the
+   * recorder through the stable scoped facet source key. */
+  captureToolFacet(
+    context: AnalyticsSessionContext,
+    toolCall: ToolCall,
+    analysis: ToolCallAnalysis,
+    cwd: string | null | undefined,
+    observedAtMs: number,
+  ): AnalyticsCaptureStatus {
+    const rawToolCallId = typeof toolCall.id === 'string' ? toolCall.id.trim() : '';
+    if (!rawToolCallId) return 'rejected';
+    const scopedToolCallId = this.scopedToolCallIdentity(context, rawToolCallId);
+    const fields = buildToolFacetFields(toolCall, analysis, scopedToolCallId, cwd);
+    return this.submit(
+      context,
+      'toolFacet',
+      fields.facetId,
+      'observation',
+      `tool-facet:${scopedToolCallId}`,
+      observedAtMs,
+      fields,
+      { toolCallId: scopedToolCallId },
+    );
   }
 
   captureActivity(context: AnalyticsSessionContext, interval: ActivityIntervalRecord): AnalyticsCaptureStatus {

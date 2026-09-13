@@ -97,8 +97,79 @@ function tempRoot(): string {
   return mkdtempSync(path.join(tmpdir(), 'pie-analytics-read-model-'));
 }
 
+interface ActivityObservationOptions {
+  generationId?: string;
+  sourceKey: string;
+  spanId: string;
+  rootSessionId?: string;
+  kind?: string;
+  coverage?: 'observed' | 'estimated' | 'unknown';
+  durationMs?: number | null;
+}
+
+function activityObservation(options: ActivityObservationOptions): AnalyticsObservation {
+  const rootSessionId = options.rootSessionId ?? 'root-a';
+  const base: Omit<AnalyticsObservation, 'idempotencyKey'> = {
+    schemaVersion: ANALYTICS_SCHEMA_VERSION,
+    generationId: options.generationId ?? 'generation-act',
+    producerKind: 'test',
+    sourceKey: options.sourceKey,
+    entityKind: 'activitySpan',
+    entityKey: options.spanId,
+    observationKind: 'observation',
+    observedAtMs: 1_750_000_000_000,
+    scope: {
+      workspaceCoverage: 'known',
+      workspaceId: 'workspace-a',
+      rootSessionId,
+    },
+    captureSubject: { kind: 'session', rootSessionId },
+    producer: { buildId: 'test-build', processGeneration: 'test-process-1' },
+    fields: {
+      spanId: options.spanId,
+      kind: options.kind ?? 'tool',
+      startedAtMs: null,
+      endedAtMs: null,
+      durationMs: options.durationMs ?? null,
+      clockDomain: 'wall-clock-utc',
+      coverage: options.coverage ?? 'unknown',
+    },
+  };
+  return { ...base, idempotencyKey: deriveAnalyticsIdempotencyKey(base) };
+}
+
+function facetObservation(
+  rootSessionId: string,
+  scopedToolCallId: string,
+  extraFields: Record<string, unknown> = {},
+): AnalyticsObservation {
+  const base: Omit<AnalyticsObservation, 'idempotencyKey'> = {
+    schemaVersion: ANALYTICS_SCHEMA_VERSION,
+    generationId: 'generation-act',
+    producerKind: 'test',
+    sourceKey: `tool-facet:${scopedToolCallId}`,
+    entityKind: 'toolFacet',
+    entityKey: `${scopedToolCallId}:file-activity`,
+    observationKind: 'observation',
+    observedAtMs: 1_750_000_000_000,
+    scope: {
+      workspaceCoverage: 'known',
+      workspaceId: 'workspace-a',
+      rootSessionId,
+    },
+    captureSubject: { kind: 'session', rootSessionId },
+    producer: { buildId: 'test-build', processGeneration: 'test-process-1' },
+    fields: {
+      toolCallId: scopedToolCallId,
+      facetId: `${scopedToolCallId}:file-activity`,
+      ...extraFields,
+    },
+  };
+  return { ...base, idempotencyKey: deriveAnalyticsIdempotencyKey(base) };
+}
+
 function assertSnapshotMetadata(result: AnalyticsQuerySnapshotMetadata): void {
-  assert.equal(result.databaseSchemaVersion, 12);
+  assert.equal(result.databaseSchemaVersion, 13);
   assert.equal(typeof result.projectionRevision === 'number' || typeof result.projectionRevision === 'string', true);
   assert.equal(typeof result.snapshotWatermark === 'number' || typeof result.snapshotWatermark === 'string', true);
   assert.equal(result.generationIds.length > 0, true);
@@ -218,7 +289,7 @@ test('canonical read model serves schema, bounded queries, settlements, accounti
   const query = await readModel.executeQuery({
     sql: 'SELECT invocation_id, provider, effective_cost_usd FROM analytics_provider_usage_v1 ORDER BY invocation_id',
   });
-  assert.equal(query.databaseSchemaVersion, 12);
+  assert.equal(query.databaseSchemaVersion, 13);
   assertSnapshotMetadata(query);
   assert.equal(query.returnedRows, 4);
   assert.deepEqual(query.truncation, { rowLimit: false, byteLimit: false, cellLimit: false });
@@ -357,6 +428,193 @@ test('canonical read model serves schema, bounded queries, settlements, accounti
   await assert.rejects(
     readModel.readRevision(aborted.signal),
   );
+});
+
+test('canonical read model serves activity and tool-facet projections through the helper', async () => {
+  const root = tempRoot();
+  const databasePath = canonicalAnalyticsDatabasePath(path.join(root, 'analytics'));
+  const writer = new SqliteAnalyticsRecorder(databasePath);
+  try {
+    writer.submitBatch([
+      activityObservation({
+        generationId: 'generation-act',
+        sourceKey: 'span-a1',
+        spanId: 'span-a1',
+        rootSessionId: 'root-a',
+        kind: 'tool',
+        coverage: 'observed',
+        durationMs: 1_000,
+      }),
+      activityObservation({
+        generationId: 'generation-act',
+        sourceKey: 'span-a2',
+        spanId: 'span-a2',
+        rootSessionId: 'root-a',
+        kind: 'agent',
+        coverage: 'estimated',
+        durationMs: 500,
+      }),
+      activityObservation({
+        generationId: 'generation-act',
+        sourceKey: 'span-a3',
+        spanId: 'span-a3',
+        rootSessionId: 'root-a',
+        kind: 'agent',
+        coverage: 'unknown',
+        durationMs: null,
+      }),
+      activityObservation({
+        generationId: 'generation-act',
+        sourceKey: 'span-b1',
+        spanId: 'span-b1',
+        rootSessionId: 'root-b',
+        kind: 'tool',
+        coverage: 'observed',
+        durationMs: 250,
+      }),
+      facetObservation('root-a', 'tool-call-1', {
+        commands: ['edit src/a.ts'],
+        observedPaths: ['src/a.ts'],
+        attemptedAddedLines: 5,
+        attemptedRemovedLines: 2,
+        verification: 'unverified',
+      }),
+      facetObservation('root-a', 'tool-call-2', {
+        verification: 'not_applicable',
+      }),
+      facetObservation('root-b', 'tool-call-3', {
+        attemptedAddedLines: 1,
+        verification: 'unverified',
+      }),
+    ]);
+  } finally {
+    writer.close();
+  }
+
+  const readModel = new CanonicalAnalyticsReadModel({
+    databasePath,
+    workerScript,
+    execArgv,
+    timeoutMs: 20_000,
+  });
+
+  // Schema discovery includes the versioned facet view over the projection.
+  const schema = await readModel.describeSchema();
+  assert.equal(schema.projectionVersion, 4);
+  assert.ok(schema.views.includes('analytics_tool_facet_v1'));
+
+  // Global activity totals: additive measured work (1_750 ms over 4 spans),
+  // known/unknown measured counts isolated, no wall union.
+  const activity = await readModel.readActivityProjection();
+  assertSnapshotMetadata(activity);
+  assert.equal(activity.scope.kind, 'global');
+  assert.deepEqual(activity.totals, {
+    spanCount: 4,
+    observedCount: 2,
+    estimatedCount: 1,
+    unknownCount: 1,
+    measuredKnownCount: 3,
+    measuredUnknownCount: 1,
+    measuredTotalMs: 1_750,
+  });
+  assert.deepEqual(activity.kinds.map((row) => [row.activityKind, row.spanCount]), [
+    ['agent', 2],
+    ['tool', 2],
+  ]);
+  assert.equal(activity.truncated, false);
+
+  // Session scope reads only that root's contribution.
+  const rootAActivity = await readModel.readActivityProjection({ rootSessionId: 'root-a' });
+  assert.deepEqual(rootAActivity.scope, { kind: 'session', rootSessionId: 'root-a' });
+  assert.equal(rootAActivity.totals.spanCount, 3);
+  assert.equal(rootAActivity.totals.measuredTotalMs, 1_500);
+
+  // All-unknown kind rows keep isolated unknown counts and zero measured work;
+  // an unobserved session stays zero totals with an empty kind set, not error.
+  const emptySession = await readModel.readActivityProjection({ rootSessionId: 'root-never-seen' });
+  assert.deepEqual(emptySession.totals, {
+    spanCount: 0,
+    observedCount: 0,
+    estimatedCount: 0,
+    unknownCount: 0,
+    measuredKnownCount: 0,
+    measuredUnknownCount: 0,
+    measuredTotalMs: 0,
+  });
+  assert.deepEqual(emptySession.kinds, []);
+  assert.equal(emptySession.truncated, false);
+  const kindCapped = await readModel.readActivityProjection({ maxKinds: 1 });
+  assert.equal(kindCapped.truncated, true);
+  assert.equal(kindCapped.kinds.length, 1);
+  assert.throws(() => readModel.readActivityProjection({ rootSessionId: 'a\0b' }));
+  assert.throws(() => readModel.readActivityProjection({ rootSessionId: '' }));
+  assert.throws(() => readModel.readActivityProjection({ maxKinds: 0 }));
+
+  // Tool facets carry explicit attempted/unverified proxies; absence of line
+  // evidence stays null, never an invented empty change.
+  const facets = await readModel.readToolFacetProjection();
+  assertSnapshotMetadata(facets);
+  assert.equal(facets.scope.kind, 'global');
+  assert.equal(facets.facets.length, 3);
+  const verifiedProxy = facets.facets.find((row) => row.toolCallId === 'tool-call-1');
+  assert.equal(verifiedProxy?.verification, 'unverified');
+  assert.equal(verifiedProxy?.attemptedAddedLines, 5);
+  assert.equal(verifiedProxy?.attemptedRemovedLines, 2);
+  assert.deepEqual(verifiedProxy?.commands, ['edit src/a.ts']);
+  const noLineEvidence = facets.facets.find((row) => row.toolCallId === 'tool-call-2');
+  assert.equal(noLineEvidence?.attemptedAddedLines, null);
+  assert.equal(noLineEvidence?.attemptedRemovedLines, null);
+  assert.equal(noLineEvidence?.verification, 'not_applicable');
+  const scopedFacets = await readModel.readToolFacetProjection({ rootSessionId: 'root-b' });
+  assert.deepEqual(scopedFacets.scope, { kind: 'session', rootSessionId: 'root-b' });
+  assert.deepEqual(scopedFacets.facets.map((row) => row.toolCallId), ['tool-call-3']);
+  const limitedFacets = await readModel.readToolFacetProjection({ limit: 1 });
+  assert.equal(limitedFacets.truncated, true);
+  assert.equal(limitedFacets.facets.length, 1);
+  assert.throws(() => readModel.readToolFacetProjection({ rootSessionId: 'a\0b' }));
+  assert.throws(() => readModel.readToolFacetProjection({ limit: -1 }));
+
+  // After close-time deletion the retained rows and their global/session
+  // contributions are removed and the revision moves; unknown sessions are
+  // unaffected.
+  const revisionBefore = BigInt(facets.projectionRevision);
+  const closer = new SqliteAnalyticsRecorder(databasePath);
+  try {
+    closer.deleteSession('root-a', 'delete-act-1', 1_750_000_500_000);
+  } finally {
+    closer.close();
+  }
+  const afterDeletion = await readModel.readActivityProjection();
+  assert.ok(BigInt(afterDeletion.projectionRevision) > revisionBefore);
+  assert.deepEqual(afterDeletion.totals, {
+    spanCount: 1,
+    observedCount: 1,
+    estimatedCount: 0,
+    unknownCount: 0,
+    measuredKnownCount: 1,
+    measuredUnknownCount: 0,
+    measuredTotalMs: 250,
+  });
+  const deletedScope = await readModel.readActivityProjection({ rootSessionId: 'root-a' });
+  assert.equal(deletedScope.totals.spanCount, 0);
+  assert.deepEqual(deletedScope.kinds, []);
+  const deletedFacets = await readModel.readToolFacetProjection({ rootSessionId: 'root-a' });
+  assert.deepEqual(deletedFacets.facets, []);
+  const survivingFacets = await readModel.readToolFacetProjection();
+  assert.deepEqual(survivingFacets.facets.map((row) => row.toolCallId), ['tool-call-3']);
+
+  const aborted = new AbortController();
+  aborted.abort();
+  await assert.rejects(
+    readModel.readActivityProjection({}, aborted.signal),
+    /cancelled|aborted/u,
+  );
+  await assert.rejects(
+    readModel.readToolFacetProjection({}, aborted.signal),
+    /cancelled|aborted/u,
+  );
+
+  rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 test('canonical read model fails explicitly without a database and never falls back', async () => {

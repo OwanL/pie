@@ -44,6 +44,8 @@ export type AnalyticsQueryRequest =
       maxResultBytes?: number;
     }
   | { type: 'historicalDimensions'; maxRowsPerDimension?: number; maxCellBytes?: number; maxResultBytes?: number }
+  | { type: 'activityProjection'; rootSessionId?: string; maxKinds?: number; maxResultBytes?: number }
+  | { type: 'toolFacetProjection'; rootSessionId?: string; limit?: number; maxResultBytes?: number }
   | { type: 'qualificationSpin'; iterations?: number; maxResultBytes?: number };
 
 export type AnalyticsQueryLifecyclePhase =

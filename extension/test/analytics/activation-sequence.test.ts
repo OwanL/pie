@@ -9,7 +9,7 @@ import {
   ActivationManifestError,
 } from '../../../shared/analytics/activation.js';
 import { ActivationStore } from '../../src/analytics/activation-store.js';
-import { activateGeneration } from '../../src/analytics/activation-sequence.js';
+import { activateGeneration, linkStorageCutoffReceipt } from '../../src/analytics/activation-sequence.js';
 
 const GENERATION_ID = '2f6e2b1c-9d4a-4e7b-8c3f-1a2b3c4d5e6f';
 const OTHER_GENERATION_ID = '3a7f3c2d-0e5b-4f8c-9d4a-2b3c4d5e6f70';
@@ -284,6 +284,28 @@ test('a supplied cutoff receipt is recorded and a malformed or missing one is re
     const outcome = await activateGeneration(store, request({ cutoffReceiptSha256: receiptSha }));
     assert.equal(outcome.alreadyActive, false);
     assert.equal(store.read().manifest?.activeGeneration?.cutoffReceiptSha256, receiptSha);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the storage cutoff receipt link is idempotent and cannot be replaced', async () => {
+  const { root, store } = tempStore();
+  const receiptSha = 'd'.repeat(64);
+  try {
+    await activateGeneration(store, request({ cutoffReceiptSha256: null }));
+    const linked = await linkStorageCutoffReceipt(store, receiptSha, GENERATION_ID);
+    assert.equal(linked.alreadyActive, false);
+    const linkedRevision = linked.revision;
+    assert.equal(store.read().manifest?.activeGeneration?.cutoffReceiptSha256, receiptSha);
+
+    const repeated = await linkStorageCutoffReceipt(store, receiptSha, GENERATION_ID);
+    assert.equal(repeated.alreadyActive, true);
+    assert.equal(repeated.revision, linkedRevision);
+    await assert.rejects(
+      () => linkStorageCutoffReceipt(store, 'e'.repeat(64), GENERATION_ID),
+      /already linked to another cutoff receipt/u,
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

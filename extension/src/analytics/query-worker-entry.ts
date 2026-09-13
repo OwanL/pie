@@ -137,6 +137,19 @@ process.on('message', (raw: unknown) => {
         maxCellBytes: message.maxCellBytes,
         maxBytes: Math.max(1, maximum - 8 * 1024),
       });
+    } else if (message.type === 'activityProjection') {
+      result = recorder.readActivityProjection({
+        rootSessionId: message.rootSessionId,
+        maxKinds: message.maxKinds,
+      });
+    } else if (message.type === 'toolFacetProjection') {
+      const limit = message.limit === undefined
+        ? undefined
+        : boundedInteger(message.limit, DEFAULT_ROW_LIMIT, MAX_ROW_LIMIT);
+      result = recorder.readToolFacetProjection({
+        rootSessionId: message.rootSessionId,
+        limit,
+      });
     } else if (message.type === 'qualificationSpin') {
       // Disposable cancellation seam. Production callers never issue this
       // request; it proves a CPU-bound query can be terminated independently.

@@ -50,10 +50,23 @@ export type AnalyticsWorkerLifecycleEvent =
   | { state: 'spawned' | 'ready'; identity: AnalyticsWorkerIdentity }
   | { state: 'terminal'; identity: AnalyticsWorkerIdentity; code: number | null; signal: NodeJS.Signals | null };
 
+export interface AnalyticsRecorderWriterAdmission {
+  /** Acquire a durable lease that remains held until the queued write is
+   * acknowledged or definitively discarded. */
+  acquire(): () => void;
+  /** Optional narrow startup lease for a successor recorder initializing its
+   * storage after an analytics-activation fence. It is never used for capture
+   * or control admission. */
+  acquireStartup?(): () => void;
+}
+
 export interface AnalyticsRecorderSupervisorOptions {
   enabled: boolean;
   workerScript: string;
   databasePath: string;
+  /** Optional durable lifecycle admission for every recorder persistence
+   * operation. */
+  writerAdmission?: AnalyticsRecorderWriterAdmission;
   startupTimeoutMs?: number;
   shutdownTimeoutMs?: number;
   /** Bound on a single IPC control request before the supervisor treats the
@@ -131,6 +144,12 @@ interface CaptureQueueItem {
   enqueuedAtMs: number;
   producerIdentity?: string;
   onDisposition?: (disposition: AnalyticsRecorderCaptureDisposition) => void;
+  /** Held until the recorder has acknowledged or permanently rejected this
+   * owned snapshot. */
+  releaseAdmission?: () => void;
+  /** A terminal helper failure may release this lease before a later owner
+   * explicitly replays the retained snapshot. */
+  requiresAdmission?: boolean;
 }
 
 interface ControlQueueItem {
@@ -285,6 +304,8 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
   private shutdownAcknowledged = false;
   private accepting = false;
   private failure: Error | undefined;
+  private writerFencePromise: Promise<void> | undefined;
+  private admittedControlCount = 0;
   private queuedRecords = 0;
   private queuedBytes = 0;
   private inFlightRecords = 0;
@@ -437,6 +458,28 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
     await this.enqueueControl({ type: 'flush' });
   }
 
+  /** Synchronously close producer admission, then wait for every already
+   * accepted capture to receive a recorder acknowledgement. This is the
+   * process-local half of the authenticated all-host writer fence. */
+  async fence(timeoutMs = 10_000): Promise<void> {
+    if (!this.options.enabled) return;
+    if (this.writerFencePromise) return await this.writerFencePromise;
+    this.accepting = false;
+    if (this.queuedRecords === 0 && this.inFlightRecords === 0 && this.admittedControlCount === 0) return;
+    this.writerFencePromise = (async () => {
+      if (this.failure) throw this.failure;
+      if (!this.running) {
+        throw new AnalyticsRecorderTransportError('Analytics recorder worker is not running while writers remain queued.');
+      }
+      await this.enqueueControl({ type: 'flush' }, timeoutMs, true);
+    })();
+    try {
+      await this.writerFencePromise;
+    } finally {
+      this.writerFencePromise = undefined;
+    }
+  }
+
   /** Prepare the single active IANA calendar zone in the recorder. This is a
    * control operation, intentionally separate from read-only aggregate reads. */
   async prepareProviderDailyProjection(
@@ -446,7 +489,7 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
     allowTimeZoneChange = false,
   ): Promise<void> {
     if (!this.options.enabled) return;
-    await this.enqueueControl({
+    await this.enqueueAdmittedControl({
       type: 'prepareProviderDailyProjection', timeZone, windowStartMs, windowEndMs, allowTimeZoneChange,
     });
   }
@@ -458,7 +501,7 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
     timestampMs: number | string | bigint,
   ): Promise<AnalyticsSubjectBindingReceipt | undefined> {
     if (!this.options.enabled) return undefined;
-    return this.enqueueControl({
+    return this.enqueueAdmittedControl({
       type: 'bindPendingCreate', pendingOperationId, rootSessionId, sourceKey, timestampMs,
     }) as Promise<AnalyticsSubjectBindingReceipt>;
   }
@@ -470,7 +513,7 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
     pendingOperationId?: string,
   ): Promise<AnalyticsDeleteReceipt | undefined> {
     if (!this.options.enabled) return undefined;
-    return this.enqueueControl({
+    return this.enqueueAdmittedControl({
       type: 'deleteSession', rootSessionId, sourceKey, timestampMs, pendingOperationId,
     }) as Promise<AnalyticsDeleteReceipt>;
   }
@@ -559,6 +602,7 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
         this.failure ?? new AnalyticsRecorderTransportError('Analytics recorder worker stopped before a queued command completed.'),
       );
       const terminal = !this.child || this.child.exitCode !== null || this.child.signalCode !== null;
+      if (terminal) this.releaseQueuedCaptureAdmissions();
       if (this.child && terminal) {
         this.child = undefined;
         this.workerReady = false;
@@ -626,22 +670,54 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
       this.rejectedRecords += 1;
       throw new AnalyticsCaptureCapacityError(records, totalBytes);
     }
-    this.queue.push({
-      type: 'capture',
-      kind,
-      subject,
-      encoded,
-      bytes,
-      enqueuedAtMs: performance.now(),
-      ...(kind === 'observation' && value.producerKind && value.stableOriginId
-        ? { producerIdentity: analyticsProducerIdentity(value.generationId, value.producerKind, value.stableOriginId) }
-        : {}),
-      ...(onDisposition ? { onDisposition } : {}),
-    });
+    let releaseAdmission: (() => void) | undefined;
+    try {
+      releaseAdmission = this.options.writerAdmission?.acquire();
+      if (releaseAdmission !== undefined && typeof releaseAdmission !== 'function') {
+        throw new Error('Analytics recorder admission did not return a release function.');
+      }
+      this.queue.push({
+        type: 'capture',
+        kind,
+        subject,
+        encoded,
+        bytes,
+        enqueuedAtMs: performance.now(),
+        ...(kind === 'observation' && value.producerKind && value.stableOriginId
+          ? { producerIdentity: analyticsProducerIdentity(value.generationId, value.producerKind, value.stableOriginId) }
+          : {}),
+        ...(onDisposition ? { onDisposition } : {}),
+        ...(releaseAdmission ? { releaseAdmission } : {}),
+        ...(this.options.writerAdmission ? { requiresAdmission: true } : {}),
+      });
+    } catch (error) {
+      releaseAdmission?.();
+      throw error;
+    }
     this.queuedRecords += 1;
     this.queuedBytes += bytes;
     this.observePeak();
     this.schedulePump();
+  }
+
+  private enqueueAdmittedControl(command: Record<string, unknown>): Promise<unknown> {
+    if (!this.accepting || this.failure) {
+      return Promise.reject(this.failure ?? new Error('Analytics recorder worker is not accepting commands.'));
+    }
+    let releaseAdmission: (() => void) | undefined;
+    try {
+      releaseAdmission = this.options.writerAdmission?.acquire();
+      if (releaseAdmission !== undefined && typeof releaseAdmission !== 'function') {
+        throw new Error('Analytics recorder admission did not return a release function.');
+      }
+    } catch (error) {
+      return Promise.reject(error instanceof Error ? error : new Error(String(error)));
+    }
+    this.admittedControlCount += 1;
+    return this.enqueueControl(command).finally(() => {
+      this.admittedControlCount = Math.max(0, this.admittedControlCount - 1);
+      releaseAdmission?.();
+    });
   }
 
   private enqueueControl(
@@ -715,6 +791,15 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
       const candidate = this.queue[items.length];
       if (candidate?.type !== 'capture' || candidate.kind !== first.kind) break;
       items.push(candidate);
+    }
+    try {
+      this.reacquireRetainedCaptureAdmissions(items);
+    } catch (error) {
+      const failure = error instanceof Error ? error : new Error(String(error));
+      this.lastRejectedDelivery = failure;
+      this.failure = failure;
+      this.rejectQueuedControls(failure);
+      return;
     }
     this.queue.splice(0, items.length);
     const bytes = items.reduce((sum, item) => sum + item.bytes, 0);
@@ -808,10 +893,33 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
       item.onDisposition?.(disposition);
     } catch {
       // A transport ACK observer cannot change recorder durability or replay.
+    } finally {
+      item.releaseAdmission?.();
+      item.releaseAdmission = undefined;
     }
   }
 
   private async startWorker(): Promise<void> {
+    const releaseAdmission = this.options.writerAdmission
+      ? (this.options.writerAdmission.acquireStartup?.() ?? this.options.writerAdmission.acquire())
+      : undefined;
+    if (releaseAdmission !== undefined && typeof releaseAdmission !== 'function') {
+      throw new Error('Analytics recorder admission did not return a release function.');
+    }
+    try {
+      await this.startWorkerWithoutAdmission();
+    } catch (error) {
+      const child = this.child;
+      if (child && !this.workerReady) {
+        await this.terminateChild(child, this.options.shutdownTimeoutMs ?? 10_000).catch(() => { /* preserve startup error */ });
+      }
+      throw error;
+    } finally {
+      releaseAdmission?.();
+    }
+  }
+
+  private async startWorkerWithoutAdmission(): Promise<void> {
     const spawnedAtMs = Date.now();
     const instanceId = randomUUID();
     // Only add a memory flag when an operator explicitly asked for a ceiling.
@@ -1069,6 +1177,36 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
       else retained.push(item);
     }
     this.queue = retained;
+  }
+
+  private releaseQueuedCaptureAdmissions(): void {
+    for (const item of this.queue) {
+      if (item.type !== 'capture') continue;
+      item.releaseAdmission?.();
+      item.releaseAdmission = undefined;
+    }
+  }
+
+  private reacquireRetainedCaptureAdmissions(items: readonly CaptureQueueItem[]): void {
+    if (!this.options.writerAdmission) return;
+    const reacquired: Array<() => void> = [];
+    try {
+      for (const item of items) {
+        if (!item.requiresAdmission || item.releaseAdmission) continue;
+        const release = this.options.writerAdmission.acquire();
+        if (typeof release !== 'function') {
+          throw new Error('Analytics recorder admission did not return a release function.');
+        }
+        item.releaseAdmission = release;
+        reacquired.push(release);
+      }
+    } catch (error) {
+      for (const release of reacquired) release();
+      for (const item of items) {
+        if (item.releaseAdmission && reacquired.includes(item.releaseAdmission)) item.releaseAdmission = undefined;
+      }
+      throw error;
+    }
   }
 
   private subjectKey(subject: AnalyticsObservation['captureSubject']): string {

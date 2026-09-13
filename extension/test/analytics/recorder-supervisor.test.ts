@@ -147,6 +147,59 @@ test('supervisor owns immutable serialized capture, accounts retained bytes, and
   }
 });
 
+test('supervisor holds durable admission until capture and lifecycle writes settle', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'pie-recorder-admission-'));
+  let activeLeases = 0;
+  let acquiredLeases = 0;
+  let acquiredStartupLeases = 0;
+  const supervisor = new AnalyticsRecorderSupervisor({
+    enabled: true,
+    workerScript,
+    databasePath: path.join(root, 'capture.log'),
+    writerAdmission: {
+      acquire: () => {
+        activeLeases += 1;
+        acquiredLeases += 1;
+        let released = false;
+        return () => {
+          if (released) return;
+          released = true;
+          activeLeases -= 1;
+        };
+      },
+      acquireStartup: () => {
+        activeLeases += 1;
+        acquiredStartupLeases += 1;
+        let released = false;
+        return () => {
+          if (released) return;
+          released = true;
+          activeLeases -= 1;
+        };
+      },
+    },
+  });
+  try {
+    await supervisor.start();
+    const bind = supervisor.bindPendingCreate('pending-a', 'root-a', 'bind-a', 1_780_000_000_002);
+    assert.equal(activeLeases, 1);
+    await bind;
+    assert.equal(activeLeases, 0);
+
+    supervisor.submit(observation('admitted-observation'));
+    assert.equal(activeLeases, 1);
+    const fence = supervisor.fence();
+    assert.throws(() => supervisor.submit(observation('rejected-after-fence')), /not accepting/);
+    await fence;
+    assert.equal(activeLeases, 0);
+    assert.equal(acquiredLeases, 2);
+    assert.equal(acquiredStartupLeases, 1);
+    await supervisor.shutdown();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('supervisor reports immutable worker instance identity through authoritative terminal exit', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'pie-recorder-worker-lifecycle-'));
   const events: AnalyticsWorkerLifecycleEvent[] = [];

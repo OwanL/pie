@@ -30,6 +30,10 @@ function createMockManager(): MutableSdkSessionManager & Record<string, unknown>
       calls.push({ method: 'appendCustomEntry', args: [customType, data] });
       return 'entry-1';
     },
+    appendPieModelSettingsChange: (...args: unknown[]) => {
+      calls.push({ method: 'appendPieModelSettingsChange', args });
+      return { modelChangeId: 'model-1' };
+    },
     branch: (branchFromId: unknown) => {
       calls.push({ method: 'branch', args: [branchFromId] });
     },
@@ -65,6 +69,7 @@ test('mutation methods delegate before invalidation', () => {
   assert.equal(wrapped.appendMessage({ role: 'user' }), 'msg-1');
   assert.equal(wrapped.appendCustomMessageEntry('type', 'content', true, {}), 'custom-1');
   assert.equal(wrapped.appendCustomEntry('type', {}), 'entry-1');
+  assert.deepEqual(wrapped.appendPieModelSettingsChange?.('provider', 'model', 'high'), { modelChangeId: 'model-1' });
   wrapped.branch('root');
   wrapped.resetLeaf();
   assert.equal(wrapped.createBranchedSession('leaf-1'), '/repo/branched.jsonl');
@@ -74,6 +79,7 @@ test('mutation methods delegate before invalidation', () => {
     { method: 'appendMessage', args: [{ role: 'user' }] },
     { method: 'appendCustomMessageEntry', args: ['type', 'content', true, {}] },
     { method: 'appendCustomEntry', args: ['type', {}] },
+    { method: 'appendPieModelSettingsChange', args: ['provider', 'model', 'high'] },
     { method: 'branch', args: ['root'] },
     { method: 'resetLeaf', args: [] },
     { method: 'createBranchedSession', args: ['leaf-1'] },
@@ -90,6 +96,7 @@ test('mutation methods are no-ops after invalidation', () => {
   assert.equal(wrapped.appendMessage({ role: 'user' }), FENCED_ENTRY_ID);
   assert.equal(wrapped.appendCustomMessageEntry('type', 'content', true, {}), FENCED_ENTRY_ID);
   assert.equal(wrapped.appendCustomEntry('type', {}), FENCED_ENTRY_ID);
+  assert.equal(wrapped.appendPieModelSettingsChange?.('provider', 'model', 'high'), undefined);
   assert.equal(wrapped.branch('root'), undefined);
   assert.equal(wrapped.resetLeaf(), undefined);
   assert.equal(wrapped.createBranchedSession('leaf-1'), undefined);

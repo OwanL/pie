@@ -220,6 +220,28 @@ export class AnalyticsHandoffControl {
 
   dispose(): void { void this.stop(); }
 
+  /** Complete the lifecycle identity transition after the host's backend and
+   * analytics writers have drained. Endpoint closure alone remains only
+   * `stopping` evidence; terminal restart ownership may rely on this marker. */
+  async markStopped(): Promise<void> {
+    await this.stop();
+    try {
+      const current = this.options.registry.getAnalyticsHost(this.options.identity.hostInstanceId);
+      if (current && current.state !== 'stopped') {
+        this.options.registry.markAnalyticsHostState(
+          this.options.identity.hostInstanceId,
+          this.options.identity.processId,
+          this.options.identity.generationId,
+          'stopped',
+          this.now(),
+        );
+      }
+    } catch (error) {
+      this.options.onError?.(normalizeError(error), 'stop.mark-stopped');
+      throw error;
+    }
+  }
+
   private registerUnsupported(reason: string): void {
     try {
       this.options.registry.registerAnalyticsHost({

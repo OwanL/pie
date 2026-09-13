@@ -12,7 +12,9 @@ import {
   resolveSessionIndexPath,
   isSessionIndexBusyError,
   SessionIndexStore,
+  type SessionIndexStoreOptions,
 } from './session-index-store';
+import type { SessionManagerFenceAdmission } from './session-manager-fence';
 import {
   discoverSessionSummaries,
   readIndexedSessionMetadata,
@@ -22,7 +24,11 @@ import {
 import { backendTrace } from './log';
 import type { SdkModule } from './sdk';
 
-type SessionIndexStoreFactory = (indexPath: string, authorityKey: string) => SessionIndexStore;
+type SessionIndexStoreFactory = (
+  indexPath: string,
+  authorityKey: string,
+  options?: SessionIndexStoreOptions,
+) => SessionIndexStore;
 type IndexedMetadataReader = (
   file: BackendSessionFileFingerprint,
   previous?: IndexedSessionMetadata,
@@ -70,6 +76,8 @@ export interface SessionCatalogOptions {
   onCatalogChanged?: () => void;
   /** Defaults true when `onCatalogChanged` is present, false otherwise. */
   backgroundReconciliation?: boolean;
+  /** Durable analytics writer admission for the persistent sidecar. */
+  writerAdmission?: SessionManagerFenceAdmission;
   /** Deterministic clock seam for bounded index-open retry tests. */
   nowMs?: () => number;
 }
@@ -117,6 +125,7 @@ export class SessionCatalog {
   private readonly readInventory: typeof readBackendSessionInventory;
   private readonly readIndexedMetadata: IndexedMetadataReader;
   private readonly createIndexStore: SessionIndexStoreFactory;
+  private writerAdmission?: SessionManagerFenceAdmission;
   private readonly onCatalogChanged?: () => void;
   private readonly backgroundReconciliation: boolean;
   private readonly nowMs: () => number;
@@ -149,8 +158,9 @@ export class SessionCatalog {
     this.readInventorySignature = options.readInventorySignature ?? readBackendSessionInventorySignature;
     this.readInventory = options.readInventory ?? readBackendSessionInventory;
     this.readIndexedMetadata = options.readIndexedMetadata ?? readIndexedSessionMetadata;
+    this.writerAdmission = options.writerAdmission;
     this.createIndexStore = options.createIndexStore
-      ?? ((indexPath, authorityKey) => new SessionIndexStore(indexPath, authorityKey));
+      ?? ((indexPath, authorityKey, storeOptions) => new SessionIndexStore(indexPath, authorityKey, storeOptions));
     // Existing signature-injection tests intentionally exercise the legacy
     // cache unless they explicitly opt into the persistent index.
     this.usePersistentIndex = options.usePersistentIndex
@@ -159,6 +169,15 @@ export class SessionCatalog {
     this.backgroundReconciliation = options.backgroundReconciliation
       ?? options.onCatalogChanged !== undefined;
     this.nowMs = options.nowMs ?? Date.now;
+  }
+
+  /** Install the production writer admission after SDK bootstrap has created
+   * the shared lifecycle authority. Persistent contexts are updated too so a
+   * test or embedder that listed before bootstrap cannot retain an unfenced
+   * sidecar store. */
+  setWriterAdmission(writerAdmission?: SessionManagerFenceAdmission): void {
+    this.writerAdmission = writerAdmission;
+    this.indexContext?.store.setWriterAdmission(writerAdmission);
   }
 
   /** Progress for the latest successfully-read canonical inventory. Event
@@ -416,7 +435,11 @@ export class SessionCatalog {
     this.filenameSnapshotSignature = undefined;
     this.filenameSnapshotAuthority = undefined;
     try {
-      const store = this.createIndexStore(resolveSessionIndexPath(agentDir, sessionDir), authorityKey);
+      const store = this.createIndexStore(
+        resolveSessionIndexPath(agentDir, sessionDir),
+        authorityKey,
+        { writerAdmission: this.writerAdmission },
+      );
       const storedRecords = store.readAll();
       const records = new Map(storedRecords
         .filter((record) => !this.removedPathKeys.has(record.fingerprint.pathKey))

@@ -14,11 +14,7 @@ import {
   type AnalyticsWriterFenceRecord,
   type AnalyticsWriterIdentity,
 } from '../backend/session-lifecycle-store.js';
-import type {
-  SessionManagerFenceAdmission,
-  SessionManagerFenceRegistry,
-} from '../backend/session-manager-fence.js';
-import type { SessionOwnershipAdmission } from '../backend/session-ownership-authority.js';
+import type { SessionManagerFenceRegistry } from '../backend/session-manager-fence.js';
 import type { AnalyticsHostDiscoveryResult } from './analytics-handoff-discovery.js';
 
 export const ANALYTICS_WRITER_FENCE_PROTOCOL = 'pie-analytics-writer-fence-v1' as const;
@@ -110,6 +106,9 @@ export interface AnalyticsAllHostHandoffOptions {
   discover: () => Promise<AnalyticsHostDiscoveryResult>;
   participants: readonly AnalyticsAllHostFenceParticipant[];
   purpose: AnalyticsWriterFencePurpose;
+  /** Production coordinators require signed status evidence in addition to
+   * registry/runtime/process reconciliation. Test seams may omit this flag. */
+  requireAuthenticatedHostStatus?: boolean;
   now?: () => number;
   requestTimeoutMs?: number;
 }
@@ -476,39 +475,19 @@ export function createAnalyticsHostWriterFence(
   };
 }
 
-export type SessionLifecycleWriterAdmission = SessionManagerFenceAdmission & SessionOwnershipAdmission;
-
-/** Bind manager and ownership seams to one durable lifecycle admission epoch. A
- * caller keeps this object for one host/process generation; after a fence or an
- * explicit reopen, its captured epoch is stale by construction. */
-export function createSessionLifecycleWriterAdmission(
-  store: SessionLifecycleStore,
-  identity: AnalyticsWriterFenceHostIdentity,
-  now: () => number = Date.now,
-): SessionLifecycleWriterAdmission {
-  const normalizedIdentity = boundedIdentity(identity, 'writer identity');
-  const expectedFenceEpoch = store.getAnalyticsWriterAdmissionState(normalizedIdentity.workspaceId).fenceEpoch;
-  return {
-    assertAdmitted: () => {
-      store.assertAnalyticsWriterAdmitted(normalizedIdentity, expectedFenceEpoch);
-    },
-    acquire: () => {
-      const lease = store.acquireAnalyticsWriterLease(normalizedIdentity, expectedFenceEpoch, now());
-      let released = false;
-      return () => {
-        if (released) return;
-        released = true;
-        store.releaseAnalyticsWriterLease(lease);
-      };
-    },
-  };
-}
+export { createSessionLifecycleWriterAdmission } from '../backend/session-lifecycle-store.js';
+export type { SessionLifecycleWriterAdmission } from '../backend/session-lifecycle-store.js';
 
 function assertOperationId(operationId: string): string {
   return boundedString(operationId, 'operationId');
 }
 
-function assertCompleteCensus(result: AnalyticsHostDiscoveryResult, workspaceId: string, nowMs: number): void {
+function assertCompleteCensus(
+  result: AnalyticsHostDiscoveryResult,
+  workspaceId: string,
+  nowMs: number,
+  requireAuthenticatedHostStatus = false,
+): void {
   if (!Number.isSafeInteger(nowMs) || nowMs < 0
     || !isRecord(result)
     || result.workspaceId !== workspaceId
@@ -520,6 +499,9 @@ function assertCompleteCensus(result: AnalyticsHostDiscoveryResult, workspaceId:
     || result.registryComplete !== true
     || result.runtimeLeasesComplete !== true
     || result.processOwnersComplete !== true
+    || (requireAuthenticatedHostStatus && result.authenticatedHostsComplete !== true)
+    || (requireAuthenticatedHostStatus && (!Array.isArray(result.authenticatedHosts)
+      || result.authenticatedHosts.length !== result.hosts?.length))
     || !Array.isArray(result.hosts)
     || result.hosts.length === 0
     || result.hosts.length > ANALYTICS_WRITER_FENCE_MAX_HOSTS
@@ -550,6 +532,29 @@ function assertCompleteCensus(result: AnalyticsHostDiscoveryResult, workspaceId:
     hostIds.add(record.hostInstanceId);
     processIds.add(record.processId);
   }
+  if (requireAuthenticatedHostStatus) {
+    const authenticatedIds = new Set<string>();
+    const authenticatedProcessIds = new Set<number>();
+    for (const evidence of result.authenticatedHosts ?? []) {
+      if (!isRecord(evidence)
+        || typeof evidence.hostInstanceId !== 'string'
+        || typeof evidence.processId !== 'number'
+        || !Number.isSafeInteger(evidence.processId)
+        || !isRecord(evidence.observedHost)
+        || evidence.observedHost.hostInstanceId !== evidence.hostInstanceId
+        || evidence.observedHost.processId !== evidence.processId
+        || authenticatedIds.has(evidence.hostInstanceId)
+        || authenticatedProcessIds.has(evidence.processId)) {
+        throw new SessionLifecycleConflictError('Authenticated host status evidence contains missing or duplicate identity fields.');
+      }
+      authenticatedIds.add(evidence.hostInstanceId);
+      authenticatedProcessIds.add(evidence.processId);
+    }
+    if (authenticatedIds.size !== hostIds.size
+      || [...hostIds].some((hostId) => !authenticatedIds.has(hostId))) {
+      throw new SessionLifecycleConflictError('Authenticated host status evidence does not cover the complete host census.');
+    }
+  }
 }
 
 async function readCompleteRegistry(
@@ -565,7 +570,7 @@ async function readCompleteRegistry(
     if (hosts.length > ANALYTICS_WRITER_FENCE_MAX_HOSTS) {
       throw new SessionLifecycleConflictError('Analytics host registry exceeds the bounded all-host census.');
     }
-    if (!page.truncated) return hosts;
+    if (!page.truncated) return hosts.filter((host) => host.state !== 'stopped');
     if (!page.nextCursor || page.nextCursor === previousCursor) {
       throw new SessionLifecycleConflictError('Analytics host registry pagination is incomplete or ambiguous.');
     }
@@ -697,7 +702,12 @@ export class AnalyticsAllHostHandoffCoordinator {
     }
     const discovery = await this.options.discover();
     const nowMs = this.now();
-    assertCompleteCensus(discovery, this.options.workspaceId, nowMs);
+    assertCompleteCensus(
+      discovery,
+      this.options.workspaceId,
+      nowMs,
+      this.options.requireAuthenticatedHostStatus === true,
+    );
     const registryHosts = await readCompleteRegistry(this.options.registry, this.options.workspaceId);
     const expected = assertRegistryMatchesCensus(registryHosts, discovery, this.options.workspaceId);
     const participants = assertParticipants(this.options.participants, expected);

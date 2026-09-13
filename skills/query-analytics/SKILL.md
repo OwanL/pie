@@ -130,6 +130,44 @@ Detail completeness / pending-coverage state via the `storage` command
 `retained_only` value means pre-v3 history has no replay/deletion outcome —
 say so instead of implying complete history coverage.
 
+## Maintained activity and tool-facet projections
+
+Two maintained projection reads answer activity and file-facet questions
+without history scans (host adapter `readActivityProjection` /
+`readToolFacetProjection`, or equivalent raw SQL below):
+
+- `analytics_activity_summary` — one additive row per `(scope_kind,
+  scope_key, activity_kind)`; scope key `*` is the global scope, a root
+  session ID is the session scope. Columns are decimal-string counts
+  (`span_count`, `observed_count`, `estimated_count`, `unknown_count`,
+  `measured_known_count`, `measured_unknown_count`) plus `measured_total_ms`
+  REAL. `measured_total_ms` is the sum of delivered span durations — additive
+  measured work. Parallel or nested spans can exceed elapsed wall time; it is
+  never a wall-clock union. Wall-union questions must query the member anchors
+  in `analytics_activity_projection_members` (real `started_at_ms`/`ended_at_ms`
+  anchors and owning clock domain) with explicit SQL. Unmeasured spans stay in
+  `measured_unknown_count` with zero contribution, never a zero duration.
+- `analytics_tool_facet_v1` — one row per terminal tool's `file-activity`
+  facet state (view over `analytics_tool_facet_states`), revision-ordered:
+  `generation_id`, `facet_id`, `tool_call_id`, `root_session_id`, `commands_json`,
+  `cwd`, `observed_paths_json`, `attempted_added_lines`,
+  `attempted_removed_lines`, `verification`. Line counts are patch/input-
+  derived attempted proxies: `verification` is `unverified` whenever line
+  activity evidence exists, and `NULL` counts mean the tool has no line-
+  activity concept — never an invented empty change. Commands are literal
+  shell-text evidence, not a process census. The schema description
+  (`schema` command) discovers this view by name.
+
+Example — additive activity work per kind for one root session:
+
+```sql
+SELECT activity_kind, span_count, observed_count, estimated_count, unknown_count,
+       measured_known_count, measured_unknown_count, measured_total_ms
+FROM analytics_activity_summary
+WHERE scope_kind = 'session' AND scope_key = ?
+ORDER BY activity_kind;
+```
+
 ## Reading results
 
 - Trust truncation metadata: when `rowLimit`/`byteLimit`/`truncated` is set,

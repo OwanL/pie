@@ -431,7 +431,7 @@ test('schema 11 activity facts migrate with preserved anchors, recovered clock d
 
   const reopened = new SqliteAnalyticsRecorder(temp.databasePath);
   try {
-    assert.equal(reopened.getDatabaseSchemaVersion(), 12);
+    assert.equal(reopened.getDatabaseSchemaVersion(), 13);
     assert.deepEqual(reopened.readActivityProjection().totals, totalsBeforeMigration);
     assert.deepEqual(
       reopened.readActivityProjection({ rootSessionId: 'root-a' }).totals,
@@ -461,7 +461,7 @@ test('schema 11 activity facts migrate with preserved anchors, recovered clock d
     reopened.close();
     const again = new SqliteAnalyticsRecorder(temp.databasePath);
     try {
-      assert.equal(again.getDatabaseSchemaVersion(), 12);
+      assert.equal(again.getDatabaseSchemaVersion(), 13);
       assert.deepEqual(again.readActivityProjection().totals, totalsBeforeMigration);
     } finally {
       again.close();

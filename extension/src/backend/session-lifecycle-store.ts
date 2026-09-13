@@ -6,10 +6,13 @@ import path from 'node:path';
 import {
   closeDispositionForPrivacy,
   parseInt64,
+  parseNonNegativeInt64,
   type AnalyticsCloseDisposition,
   type AnalyticsPrivacyMode,
   type Int64Value,
 } from '../../../shared/analytics/contracts.js';
+import type { SessionOwnershipAdmission } from './session-ownership-authority.js';
+import type { SessionManagerFenceAdmission } from './session-manager-fence.js';
 import { ANALYTICS_HANDOFF_MAX_STATUS_HOSTS } from '../../../shared/analytics/handoff.js';
 
 interface SqliteRunResult { changes: number | bigint }
@@ -24,29 +27,52 @@ interface SqliteDatabase {
   prepare(sql: string): SqliteStatement;
 }
 interface SqliteModule {
-  DatabaseSync: new (location: string, options?: { timeout?: number; readBigInts?: boolean }) => SqliteDatabase;
+  DatabaseSync: new (location: string, options?: {
+    timeout?: number;
+    readBigInts?: boolean;
+    readOnly?: boolean;
+  }) => SqliteDatabase;
 }
 const sqlite = createRequire(process.execPath)('node:sqlite') as SqliteModule;
 
 class DatabaseCompat {
   private readonly database: SqliteDatabase;
+  private readonly readOnly: boolean;
 
-  constructor(location: string) {
-    this.database = new sqlite.DatabaseSync(location, { timeout: 5_000, readBigInts: true });
+  constructor(location: string, options: { readOnly?: boolean } = {}) {
+    this.readOnly = options.readOnly === true;
+    this.database = new sqlite.DatabaseSync(location, {
+      timeout: 5_000,
+      readBigInts: true,
+      ...(this.readOnly ? { readOnly: true } : {}),
+    });
   }
 
   close(): void { this.database.close(); }
-  exec(sql: string): void { this.database.exec(sql); }
-  prepare(sql: string): SqliteStatement { return this.database.prepare(sql); }
+  exec(sql: string): void {
+    if (this.readOnly) throw new Error('Session lifecycle store is read-only.');
+    this.database.exec(sql);
+  }
+  prepare(sql: string): SqliteStatement {
+    const statement = this.database.prepare(sql);
+    if (!this.readOnly) return statement;
+    return {
+      all: (...params) => statement.all(...params),
+      get: (...params) => statement.get(...params),
+      run: () => { throw new Error('Session lifecycle store is read-only.'); },
+    };
+  }
   pragma(statement: string, options?: { simple?: boolean }): unknown {
     if (statement === 'user_version' && options?.simple) {
       return (this.database.prepare('PRAGMA user_version').get() as { user_version: number | bigint }).user_version;
     }
+    if (this.readOnly) throw new Error('Session lifecycle store is read-only.');
     this.database.exec(`PRAGMA ${statement}`);
     return undefined;
   }
   transaction<T>(operation: () => T): () => T {
     return () => {
+      if (this.readOnly) throw new Error('Session lifecycle store is read-only.');
       this.database.exec('BEGIN IMMEDIATE');
       try {
         const result = operation();
@@ -151,6 +177,14 @@ export interface AnalyticsWriterAdmissionState {
   state: AnalyticsWriterFenceState;
   fenceEpoch: number;
 }
+
+/** The shared admission surface used by both manager and ownership seams. */
+export type SessionLifecycleWriterAdmission = SessionManagerFenceAdmission & SessionOwnershipAdmission & {
+  /** A narrowly-scoped lease for canonical recorder initialization while an
+   * analytics-activation fence is already fenced. It is never valid for a
+   * producer write and is released before successor admission reopens. */
+  acquireStartup?(): () => void;
+};
 
 export interface BeginAnalyticsWriterFenceOptions {
   workspaceId: string;
@@ -304,7 +338,7 @@ interface ArtifactRow {
 }
 
 function encodeTimestamp(value: Int64Value, name: string): string {
-  return parseInt64(value, name).toString();
+  return parseNonNegativeInt64(value, name).toString();
 }
 
 function requireId(value: string, name: string): string {
@@ -350,6 +384,58 @@ function sameWriterIdentity(left: AnalyticsWriterIdentity, right: AnalyticsWrite
     && left.generationId === right.generationId
     && left.buildId === right.buildId
     && left.processId === right.processId;
+}
+
+/** Bind all persistence seams in one process to the durable admission epoch
+ * observed at construction. A fence or later activation reopen makes this
+ * captured epoch stale, so an old manager cannot write through a new epoch. */
+export function createSessionLifecycleWriterAdmission(
+  store: SessionLifecycleStore,
+  identity: AnalyticsWriterIdentity,
+  now: () => number = Date.now,
+): SessionLifecycleWriterAdmission {
+  const normalizedIdentity = requireWriterIdentity(identity, 'writer identity');
+  const expectedFenceEpoch = store.getAnalyticsWriterAdmissionState(normalizedIdentity.workspaceId).fenceEpoch;
+  // A successor host is constructed while the completed analytics fence is
+  // still closed. Its startup lease proves that it is the only new identity
+  // allowed to cross that boundary; after the orchestrator re-opens admission,
+  // this one admission object follows the new epoch. Ordinary writers never
+  // set this flag, so old fenced managers remain stale by construction.
+  let successorStartupAdmitted = false;
+  const currentEpoch = (): number => successorStartupAdmitted
+    ? store.getAnalyticsWriterAdmissionState(normalizedIdentity.workspaceId).fenceEpoch
+    : expectedFenceEpoch;
+  return {
+    assertAdmitted: () => {
+      store.assertAnalyticsWriterAdmitted(normalizedIdentity, currentEpoch());
+    },
+    acquire: () => {
+      const lease = store.acquireAnalyticsWriterLease(normalizedIdentity, currentEpoch(), now());
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        store.releaseAnalyticsWriterLease(lease);
+      };
+    },
+    acquireStartup: () => {
+      const state = store.getAnalyticsWriterAdmissionState(normalizedIdentity.workspaceId);
+      let successor = false;
+      const lease = state.state === 'open'
+        ? store.acquireAnalyticsWriterLease(normalizedIdentity, currentEpoch(), now())
+        : (() => {
+          successor = true;
+          return store.acquireAnalyticsWriterStartupLease(normalizedIdentity, now());
+        })();
+      if (successor) successorStartupAdmitted = true;
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        store.releaseAnalyticsWriterLease(lease);
+      };
+    },
+  };
 }
 
 function compareWriterHostIds(left: string, right: string): number {
@@ -550,13 +636,15 @@ export class SessionWriteRevokedError extends Error {
 export class SessionLifecycleStore {
   private readonly database: DatabaseCompat;
 
-  constructor(databasePath: string) {
-    mkdirSync(path.dirname(databasePath), { recursive: true, mode: 0o700 });
-    this.database = new DatabaseCompat(databasePath);
-    this.database.pragma('journal_mode = WAL');
-    this.database.pragma('synchronous = FULL');
-    this.database.pragma('busy_timeout = 5000');
-    this.migrate();
+  constructor(databasePath: string, options: { readOnly?: boolean } = {}) {
+    if (options.readOnly !== true) mkdirSync(path.dirname(databasePath), { recursive: true, mode: 0o700 });
+    this.database = new DatabaseCompat(databasePath, options);
+    if (options.readOnly !== true) {
+      this.database.pragma('journal_mode = WAL');
+      this.database.pragma('synchronous = FULL');
+      this.database.pragma('busy_timeout = 5000');
+      this.migrate();
+    }
   }
 
   private migrate(): void {
@@ -768,10 +856,40 @@ export class SessionLifecycleStore {
         throw new SessionLifecycleConflictError(`Analytics host ${hostInstanceId} is terminal and cannot be re-registered.`);
       }
       const activeFence = this.database.prepare(`
-        SELECT state FROM analytics_writer_fences WHERE workspace_id = ?
-      `).get(workspaceId) as { state: AnalyticsWriterFenceState } | undefined;
+        SELECT state, purpose, expected_hosts_json, expected_hosts_sha256
+        FROM analytics_writer_fences WHERE workspace_id = ?
+      `).get(workspaceId) as {
+        state: AnalyticsWriterFenceState;
+        purpose: AnalyticsWriterFencePurpose;
+        expected_hosts_json: string;
+        expected_hosts_sha256: string;
+      } | undefined;
       if (activeFence && activeFence.state !== 'open') {
-        throw new SessionLifecycleConflictError('Analytics host registration is closed while a writer fence is active.');
+        // A successor host may register only after an analytics-activation
+        // fence is durably fenced and every fenced host is terminal. Storage
+        // cutoff has no successor-registration exception: it keeps the entire
+        // writer population closed until its receipt is complete.
+        if (activeFence.state !== 'fenced' || activeFence.purpose !== 'analytics-activation') {
+          throw new SessionLifecycleConflictError('Analytics host registration is closed while a writer fence is active.');
+        }
+        const expectedHosts = parseWriterHosts(activeFence.expected_hosts_json, activeFence.expected_hosts_sha256);
+        if (expectedHosts.some((expected) => expected.hostInstanceId === hostInstanceId)
+          || this.countActiveWriterLeases(workspaceId) !== 0) {
+          throw new SessionLifecycleConflictError('Analytics host registration is not a successor to the completed writer fence.');
+        }
+        const expectedIds = new Set(expectedHosts.map((expected) => expected.hostInstanceId));
+        const registered = this.database.prepare(`
+          SELECT host_instance_id, state FROM analytics_hosts WHERE workspace_id = ?
+        `).all(workspaceId) as Array<{ host_instance_id: string; state: AnalyticsHostState }>;
+        for (const row of registered) {
+          if (expectedIds.has(row.host_instance_id)) {
+            if (row.state !== 'stopped' && row.state !== 'stopping') {
+              throw new SessionLifecycleConflictError('Analytics host registration requires every fenced host to be stopping or stopped.');
+            }
+          } else if (row.state !== 'stopped') {
+            throw new SessionLifecycleConflictError('Analytics host registration found another non-terminal writer.');
+          }
+        }
       }
       this.database.prepare(`
         INSERT INTO analytics_hosts (
@@ -1158,6 +1276,56 @@ export class SessionLifecycleStore {
         leaseId, normalizedIdentity.workspaceId, normalizedIdentity.hostInstanceId,
         normalizedIdentity.generationId, normalizedIdentity.buildId, normalizedIdentity.processId,
         expectedFenceEpoch, acquiredAtMs,
+      );
+      return toWriterLease(this.database.prepare('SELECT * FROM analytics_writer_leases WHERE lease_id = ?')
+        .get(leaseId) as AnalyticsWriterLeaseRow);
+    })();
+  }
+
+  /** Acquire the one startup lease a successor host may need to initialize its
+   * already-qualified recorder while an analytics-activation fence remains
+   * closed. This is intentionally narrower than normal admission: the fence
+   * must be complete, every expected old host must be terminal, no lease may
+   * remain, and the identity must not belong to the fenced population. */
+  acquireAnalyticsWriterStartupLease(
+    identity: AnalyticsWriterIdentity,
+    nowMs: Int64Value,
+  ): AnalyticsWriterLeaseRecord {
+    const normalizedIdentity = requireWriterIdentity(identity, 'Analytics startup writer identity');
+    const acquiredAtMs = encodeTimestamp(nowMs, 'nowMs');
+    return this.database.transaction(() => {
+      this.assertRegisteredWriterIdentity(normalizedIdentity);
+      const admission = this.getAnalyticsWriterAdmissionState(normalizedIdentity.workspaceId);
+      const fence = this.database.prepare('SELECT * FROM analytics_writer_fences WHERE workspace_id = ?')
+        .get(normalizedIdentity.workspaceId) as AnalyticsWriterFenceRow | undefined;
+      if (admission.state !== 'fenced' || !fence || fence.purpose !== 'analytics-activation') {
+        throw new SessionLifecycleConflictError('Analytics startup admission requires a completed analytics-activation fence.');
+      }
+      const expectedHosts = parseWriterHosts(fence.expected_hosts_json, fence.expected_hosts_sha256);
+      if (expectedHosts.some((host) => host.hostInstanceId === normalizedIdentity.hostInstanceId)) {
+        throw new SessionLifecycleConflictError('A fenced writer cannot acquire successor startup admission.');
+      }
+      for (const host of expectedHosts) {
+        const row = this.database.prepare(`
+          SELECT state FROM analytics_hosts WHERE host_instance_id = ? AND workspace_id = ?
+        `).get(host.hostInstanceId, normalizedIdentity.workspaceId) as { state: AnalyticsHostState } | undefined;
+        if (!row || (row.state !== 'stopped' && row.state !== 'stopping')) {
+          throw new SessionLifecycleConflictError('Successor startup requires every fenced host to be stopping or stopped.');
+        }
+      }
+      if (this.countActiveWriterLeases(normalizedIdentity.workspaceId) !== 0) {
+        throw new SessionLifecycleConflictError('Successor startup requires zero active writer leases.');
+      }
+      const leaseId = randomUUID();
+      this.database.prepare(`
+        INSERT INTO analytics_writer_leases (
+          lease_id, workspace_id, host_instance_id, generation_id, build_id,
+          process_id, fence_epoch, acquired_at_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        leaseId, normalizedIdentity.workspaceId, normalizedIdentity.hostInstanceId,
+        normalizedIdentity.generationId, normalizedIdentity.buildId, normalizedIdentity.processId,
+        admission.fenceEpoch, acquiredAtMs,
       );
       return toWriterLease(this.database.prepare('SELECT * FROM analytics_writer_leases WHERE lease_id = ?')
         .get(leaseId) as AnalyticsWriterLeaseRow);

@@ -50,6 +50,7 @@ import { SessionCatalog } from './session-catalog';
 import { backendSessionPathKey } from './session-directory';
 import { recordWriteOwnership } from './write-ownership-trace';
 import { BackendError } from './server-io';
+import type { SessionOwnershipAdmission } from './session-ownership-authority';
 import type { SdkModule, SdkSessionManager } from './sdk';
 import { normalizeDanglingTranscript } from './session-opened';
 import { buildPagedTranscriptWindow } from './transcript-window';
@@ -450,6 +451,9 @@ export interface ColdSessionStoreOptions {
   browseCacheMaxSourceBytes?: number;
   browseCacheMaxEntries?: number;
   browseHelper?: ColdBrowseHelper;
+  /** Durable analytics writer admission for every coordinator-side session
+   * mutation. Omitted for legacy/coordinator-only callers. */
+  writerAdmission?: SessionOwnershipAdmission;
 }
 
 const defaultFileSystem: ColdSessionStoreFileSystem = {
@@ -489,6 +493,7 @@ export class ColdSessionStore {
   private readonly catalog: SessionCatalog;
   private readonly fileSystem: ColdSessionStoreFileSystem;
   private readonly forgetArtifactsDeps: Omit<ForgetPrivateSessionArtifactsDeps, 'deleteTranscript'>;
+  private readonly writerAdmission?: SessionOwnershipAdmission;
   private readonly readAttempts: number;
   private readonly browseHelper?: ColdBrowseHelper;
   private catalogMutationRevision = 0;
@@ -513,6 +518,7 @@ export class ColdSessionStore {
     this.catalog = options.sessionCatalog ?? new SessionCatalog();
     this.fileSystem = { ...defaultFileSystem, ...options.fileSystem };
     this.forgetArtifactsDeps = options.forgetArtifactsDeps ?? {};
+    this.writerAdmission = options.writerAdmission;
     this.readAttempts = options.readAttempts ?? DEFAULT_READ_ATTEMPTS;
     this.browseHelper = options.browseHelper;
     this.browseCache = new ColdBrowseProjectionCache(
@@ -520,6 +526,34 @@ export class ColdSessionStore {
       options.browseCacheMaxEntries,
     );
     this.browseCacheGeneration = this.leases.coordinatorGeneration;
+  }
+
+  /** Hold the durable admission lease across the complete coordinator-side
+   * mutation, including asynchronous filesystem work. The admission itself is
+   * optional so legacy coordinator-only tests and deployments retain their
+   * existing behavior. */
+  private withWriterAdmission<T>(mutation: () => T): T {
+    const releaseAdmission = this.writerAdmission?.acquire?.();
+    if (releaseAdmission !== undefined && typeof releaseAdmission !== 'function') {
+      throw new Error('Session ownership admission did not return a release function.');
+    }
+    let released = false;
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      releaseAdmission?.();
+    };
+    try {
+      const result = mutation();
+      if (result && typeof (result as { then?: unknown }).then === 'function') {
+        return Promise.resolve(result).finally(release) as T;
+      }
+      release();
+      return result;
+    } catch (error) {
+      release();
+      throw error;
+    }
   }
 
   /** Process-local cache counters for tests and perf attribution. They are not
@@ -705,12 +739,14 @@ export class ColdSessionStore {
    * atomic durable-header boundary. Do not fabricate or reopen the file here:
    * the returned manager is the exact one-use handoff manager. */
   create(options: { cwd?: string; sessionDir?: string } = {}): ColdSessionManagerHandle {
-    const manager = this.sdk.SessionManager.create(
-      options.cwd || this.startupCwd,
-      options.sessionDir ?? this.sessionDir,
-    );
-    this.refreshCatalog();
-    return this.createHandle(manager);
+    return this.withWriterAdmission(() => {
+      const manager = this.sdk.SessionManager.create(
+        options.cwd || this.startupCwd,
+        options.sessionDir ?? this.sessionDir,
+      );
+      this.refreshCatalog();
+      return this.createHandle(manager);
+    });
   }
 
   /** Project a newly created/forked/truncated manager without reopening its
@@ -748,8 +784,10 @@ export class ColdSessionStore {
     sessionPath: string,
     updates: ColdSessionModelSettingsUpdate,
   ): ColdSessionModelSettingsResult {
-    const opened = this.openManagerWithMigrationLease(sessionPath);
-    return this.applyModelSettings(opened.manager, opened.stamp, updates).result;
+    return this.withWriterAdmission(() => {
+      const opened = this.openManagerWithMigrationLease(sessionPath);
+      return this.applyModelSettings(opened.manager, opened.stamp, updates).result;
+    });
   }
 
   /** Apply the same durable mutation to a newly-created/forked/truncated
@@ -761,18 +799,20 @@ export class ColdSessionStore {
     handle: ColdSessionManagerHandle,
     updates: ColdSessionModelSettingsUpdate,
   ): ColdSessionModelSettingsResult {
-    const state = this.handleStates.get(handle);
-    if (!state || state.status !== 'available' || state.stamp.sessionPathKey !== handle.stamp.sessionPathKey) {
-      throw new Error(`Cold session manager handle is no longer available: ${handle.sessionPath}`);
-    }
-    const applied = this.applyModelSettings(
-      handle.manager,
-      state.stamp,
-      updates,
-      (stamp) => { state.stamp = stamp; },
-    );
-    state.stamp = applied.stamp;
-    return applied.result;
+    return this.withWriterAdmission(() => {
+      const state = this.handleStates.get(handle);
+      if (!state || state.status !== 'available' || state.stamp.sessionPathKey !== handle.stamp.sessionPathKey) {
+        throw new Error(`Cold session manager handle is no longer available: ${handle.sessionPath}`);
+      }
+      const applied = this.applyModelSettings(
+        handle.manager,
+        state.stamp,
+        updates,
+        (stamp) => { state.stamp = stamp; },
+      );
+      state.stamp = applied.stamp;
+      return applied.result;
+    });
   }
 
   /** Opening the source first is required: SessionManager.open performs the
@@ -782,16 +822,18 @@ export class ColdSessionStore {
     sourcePath: string,
     options: { targetCwd?: string; sessionDir?: string } = {},
   ): ColdSessionManagerHandle {
-    const opened = this.openManagerWithMigrationLease(sourcePath);
-    const sourceManager = opened.manager as ColdSdkSessionManager;
-    const targetCwd = options.targetCwd || sourceManager.getCwd() || this.startupCwd;
-    const forked = this.leases.commitSync(opened.stamp, () => this.sdk.SessionManager.forkFrom(
-      sourcePath,
-      targetCwd,
-      options.sessionDir ?? this.sessionDir,
-    ));
-    this.refreshCatalog();
-    return this.createHandle(forked);
+    return this.withWriterAdmission(() => {
+      const opened = this.openManagerWithMigrationLease(sourcePath);
+      const sourceManager = opened.manager as ColdSdkSessionManager;
+      const targetCwd = options.targetCwd || sourceManager.getCwd() || this.startupCwd;
+      const forked = this.leases.commitSync(opened.stamp, () => this.sdk.SessionManager.forkFrom(
+        sourcePath,
+        targetCwd,
+        options.sessionDir ?? this.sessionDir,
+      ));
+      this.refreshCatalog();
+      return this.createHandle(forked);
+    });
   }
 
   /** Fence cold ownership and mint a JSON-serializable, one-use promotion
@@ -880,6 +922,14 @@ export class ColdSessionStore {
   }
 
   async truncateAfter(
+    sessionPath: string,
+    entryId: string,
+    options?: { requireCurrentBranchTarget?: boolean; onCommit?: () => void },
+  ): Promise<ColdSessionTruncateResult> {
+    return await this.withWriterAdmission(() => this.truncateAfterUnlocked(sessionPath, entryId, options));
+  }
+
+  private async truncateAfterUnlocked(
     sessionPath: string,
     entryId: string,
     options?: { requireCurrentBranchTarget?: boolean; onCommit?: () => void },
@@ -979,6 +1029,12 @@ export class ColdSessionStore {
   }
 
   async forget(sessionPath: string): Promise<void> {
+    await this.withWriterAdmission(async () => {
+      await this.forgetUnlocked(sessionPath);
+    });
+  }
+
+  private async forgetUnlocked(sessionPath: string): Promise<void> {
     const stamp = this.leases.capture(sessionPath);
     await forgetPrivateSessionArtifacts(sessionPath, {
       ...this.forgetArtifactsDeps,
@@ -1253,6 +1309,10 @@ export class ColdSessionStore {
   }
 
   private openManagerWithMigrationLease(sessionPath: string): ColdSessionManagerHandle {
+    return this.withWriterAdmission(() => this.openManagerWithMigrationLeaseUnlocked(sessionPath));
+  }
+
+  private openManagerWithMigrationLeaseUnlocked(sessionPath: string): ColdSessionManagerHandle {
     const before = this.leases.capture(sessionPath);
     if (before.fingerprint === MISSING_FINGERPRINT) throw missingSessionError(sessionPath);
     const originalHeader = readColdSessionHeaderSync(sessionPath);

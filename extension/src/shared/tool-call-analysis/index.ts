@@ -91,7 +91,7 @@ function incrementCount(record: Record<string, number>, key: string): void {
   record[key] = (record[key] ?? 0) + 1;
 }
 
-function extractCommandText(input: unknown): string {
+export function extractCommandText(input: unknown): string {
   if (typeof input === 'string') {
     return input;
   }

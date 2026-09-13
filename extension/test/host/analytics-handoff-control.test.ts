@@ -117,6 +117,32 @@ test('authenticated host status is registered in lifecycle storage and rejects r
   }
 });
 
+test('completed host shutdown records terminal stopped identity after endpoint drain', async () => {
+  const temporary = temporaryStore();
+  const identity = {
+    hostInstanceId: 'host-unit-stopped',
+    workspaceId: 'workspace-unit-stopped',
+    generationId: 'generation-unit-stopped',
+    buildId: 'build-unit-1',
+    processId: process.pid,
+    capabilities: ['host-discovery'],
+  } as const;
+  const control = new AnalyticsHandoffControl({
+    registry: temporary.store,
+    identity,
+    key: 'unit-test-handoff-key',
+    pipeName: createAnalyticsHandoffPipeName(identity.workspaceId, identity.hostInstanceId),
+  });
+  try {
+    await control.start();
+    await control.markStopped();
+    assert.equal(temporary.store.getAnalyticsHost(identity.hostInstanceId)?.state, 'stopped');
+  } finally {
+    temporary.store.close();
+    rmSync(temporary.root, { recursive: true, force: true });
+  }
+});
+
 test('per-boot handoff keys are fresh, bounded capabilities', () => {
   const first = createPerBootAnalyticsHandoffKey();
   const second = createPerBootAnalyticsHandoffKey();

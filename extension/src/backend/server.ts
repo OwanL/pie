@@ -56,7 +56,12 @@ import {
 } from './session-metadata';
 import { SessionCatalog } from './session-catalog';
 import { forgetLegacyReviewArtifacts } from './legacy-review-artifact-cleanup';
-import { SessionLifecycleStore } from './session-lifecycle-store';
+import {
+  createSessionLifecycleWriterAdmission,
+  SessionLifecycleStore,
+  type AnalyticsWriterIdentity,
+  type SessionLifecycleWriterAdmission,
+} from './session-lifecycle-store';
 import {
   SessionExpiryScheduler,
   SessionFilesystemMutationBarrier,
@@ -328,6 +333,13 @@ export class BackendServer {
   private readonly forgottenSessionPaths = new Set<string>();
   /** P7b lifecycle authority is instantiated only under the explicit inactive-source authorization gate. */
   private lifecycleStore?: SessionLifecycleStore;
+  /** Canonical analytics persistence admission shared by coordinator and worker
+   * session writers. It is opened only when the host supplied an active
+   * analytics descriptor; legacy backends remain unchanged. */
+  private analyticsWriterStore?: SessionLifecycleStore;
+  private analyticsWriterAdmission?: SessionLifecycleWriterAdmission;
+  private analyticsWriterIdentity?: AnalyticsWriterIdentity;
+  private analyticsWriterStateDir?: string;
   private lifecycleBarrier?: SessionFilesystemMutationBarrier;
   private lifecycleScheduler?: SessionExpiryScheduler;
   private sessionCatalogPollTimer?: ReturnType<typeof setInterval>;
@@ -468,6 +480,7 @@ export class BackendServer {
       sessionDir: this.getSessionDir(),
       sessionCatalog: this.sessionCatalog,
       browseHelper: this.coldBrowseHelper,
+      writerAdmission: this.analyticsWriterAdmission,
     });
     return this.coldSessionStore;
   }
@@ -657,6 +670,38 @@ export class BackendServer {
         );
         this.agentDir = this.sdk.getAgentDir();
         this.validateAnalyticsActivation();
+        const activationDescriptor = this.analyticsActivation;
+        if (activationDescriptor) {
+          const hostPid = this.hostPid;
+          if (typeof hostPid !== 'number' || !Number.isSafeInteger(hostPid) || hostPid <= 0) {
+            throw new Error('Canonical analytics activation requires a positive host process identity.');
+          }
+          const dataPaths = resolvePieDataPaths({
+            dataDir: process.env.PIE_DATA_DIR,
+            agentDir: this.agentDir,
+          });
+          this.analyticsWriterStateDir = dataPaths.stateDir;
+          const writerStore = new SessionLifecycleStore(
+            path.join(dataPaths.stateDir, 'session-lifecycle.sqlite'),
+          );
+          this.analyticsWriterStore = writerStore;
+          const writerIdentity: AnalyticsWriterIdentity = {
+            hostInstanceId: activationDescriptor.hostInstanceId,
+            workspaceId: activationDescriptor.workspaceId,
+            // The lifecycle registry identifies the extension-host boot. The
+            // analytics generation is a separate authority identity, so use
+            // the host instance as the writer-generation field here.
+            generationId: activationDescriptor.hostInstanceId,
+            buildId: activationDescriptor.buildId,
+            processId: hostPid,
+          };
+          this.analyticsWriterIdentity = writerIdentity;
+          this.analyticsWriterAdmission = createSessionLifecycleWriterAdmission(
+            writerStore,
+            writerIdentity,
+          );
+        }
+        this.sessionCatalog.setWriterAdmission(this.analyticsWriterAdmission);
         this.getSessionDir();
         this.initializeColdSessionStore();
         if (process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION === 'p7b-authorized-v1') {
@@ -751,6 +796,7 @@ export class BackendServer {
     const coldStore = this.initializeColdSessionStore();
     this.sessionOwnershipAuthority = new SessionOwnershipAuthority({
       coldLeaseAuthority: coldStore.leases,
+      writerAdmission: this.analyticsWriterAdmission,
     });
     this.durableDetailStore = new DurableDetailStore({
       resolve: (sessionPath, address, durableRef) => this.resolveDurableDetail(sessionPath, address, durableRef),
@@ -769,6 +815,14 @@ export class BackendServer {
                 buildId: this.analyticsActivation.buildId,
                 workspaceId: this.analyticsActivation.workspaceId,
               },
+              ...(this.analyticsWriterAdmission && this.analyticsWriterIdentity && this.analyticsWriterStateDir
+                ? {
+                    analyticsWriterAdmission: {
+                      stateDir: this.analyticsWriterStateDir,
+                      identity: this.analyticsWriterIdentity,
+                    },
+                  }
+                : {}),
             }
           : {}),
         coldStore,
@@ -2104,6 +2158,7 @@ export class BackendServer {
       this.lifecycleBarrier = new SessionFilesystemMutationBarrier({
         store: this.lifecycleStore,
         lockRoot: path.join(dataPaths.stateDir, 'session-mutation-locks'),
+        writerAdmission: this.analyticsWriterAdmission,
       });
       const cleaner = new SessionLifecycleCleaner({
         store: this.lifecycleStore,
@@ -2233,15 +2288,41 @@ export class BackendServer {
     });
   }
 
+  private async withAnalyticsWriterAdmission<T>(operation: () => T): Promise<T> {
+    const releaseAdmission = this.analyticsWriterAdmission?.acquire();
+    let released = false;
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      releaseAdmission?.();
+    };
+    try {
+      const result = operation();
+      if (result && typeof (result as { then?: unknown }).then === 'function') {
+        return await Promise.resolve(result).finally(release) as T;
+      }
+      release();
+      return result;
+    } catch (error) {
+      release();
+      throw error;
+    }
+  }
+
   private async runSessionFilesystemMutation<T>(
     sessionPath: string,
     seam: string,
     operation: () => Promise<T>,
   ): Promise<T> {
-    if (process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION !== 'p7b-authorized-v1') return await operation();
-    const { barrier } = this.initializeFilesystemLifecycle();
-    const sessionId = resolveSessionIdentity(sessionPath).sessionId;
-    return await barrier.runWriteMutationAsync(sessionId, seam, operation);
+    if (process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION === 'p7b-authorized-v1') {
+      const { barrier } = this.initializeFilesystemLifecycle();
+      const sessionId = resolveSessionIdentity(sessionPath).sessionId;
+      return await barrier.runWriteMutationAsync(sessionId, seam, operation);
+    }
+    // Analytics activation can fence writers before storage-cutoff lifecycle
+    // mode is authorized. Direct sidecar/filesystem mutations still need a
+    // durable lease in that ordinary production mode.
+    return await this.withAnalyticsWriterAdmission(operation);
   }
 
   private async setSessionLifecyclePrivacy(sessionPath: string, enabled: boolean): Promise<void> {
@@ -2282,6 +2363,12 @@ export class BackendServer {
    *  artifact. Called only after the host has chosen privacy mode; ordinary
    *  tab closes intentionally keep sessions reopenable. */
   private async forgetSession(sessionPath: string, operationId?: string): Promise<void> {
+    await this.withAnalyticsWriterAdmission(
+      () => this.forgetSessionAdmitted(sessionPath, operationId),
+    );
+  }
+
+  private async forgetSessionAdmitted(sessionPath: string, operationId?: string): Promise<void> {
     let lifecycle: { store: SessionLifecycleStore; sessionId: string; cleanupOperationId: string } | undefined;
     if (process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION === 'p7b-authorized-v1') {
       const requestedOperationId = operationId?.trim() || `private-close:${resolveSessionIdentity(sessionPath).sessionId}`;
@@ -2627,6 +2714,13 @@ export class BackendServer {
         throw new BackendError('WRITER_FENCE_INVALID', 'Authenticated writer-fence timeout is invalid.');
       }
       await router.fenceSessionManagers(timeoutMs);
+      const activeWriterCount = await this.waitForAnalyticsWriterLeases(timeoutMs);
+      if (activeWriterCount !== 0) {
+        throw new BackendError(
+          'WRITER_FENCE_INCOMPLETE',
+          `Durable analytics writer leases did not drain (${activeWriterCount} remain).`,
+        );
+      }
       return { admissionRevoked: true, writersDrained: true, activeWriterCount: 0 };
     }
     if (request.method === 'operation.status') {
@@ -2887,7 +2981,9 @@ export class BackendServer {
               () => writeSystemPromptTogglesForSession(sessionPath, disabledEntries, true),
             );
           } else {
-            await writeSystemPromptTogglesForSession(sessionPath, disabledEntries, true);
+            await this.withAnalyticsWriterAdmission(
+              () => writeSystemPromptTogglesForSession(sessionPath, disabledEntries, true),
+            );
           }
         });
       },
@@ -3002,6 +3098,28 @@ export class BackendServer {
   }
 
 
+  /** Wait for every process sharing this host's durable lifecycle authority to
+   * release its writer lease. Manager fences cover the SDK call boundary, but
+   * the durable census also includes coordinator, recorder, and worker leases.
+   * A live lease never expires here: timeout is an explicit fail-closed result,
+   * not permission to assume the writer stopped. */
+  private async waitForAnalyticsWriterLeases(timeoutMs: number): Promise<number> {
+    const store = this.analyticsWriterStore;
+    const workspaceId = this.analyticsWriterIdentity?.workspaceId;
+    if (!store || !workspaceId) return 0;
+    const startedAt = Date.now();
+    for (;;) {
+      const active = store.listAnalyticsWriterLeases(workspaceId).length;
+      if (active === 0) return 0;
+      const remaining = timeoutMs - (Date.now() - startedAt);
+      if (remaining <= 0) return active;
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, Math.min(25, remaining));
+        timer.unref?.();
+      });
+    }
+  }
+
   /**
    * Locally terminalize a stuck runtime immediately, then replace it without
    * waiting for provider teardown. The old runtime is fenced before any async
@@ -3073,6 +3191,11 @@ export class BackendServer {
     this.lifecycleStore?.close();
     this.lifecycleStore = undefined;
     this.lifecycleBarrier = undefined;
+    this.analyticsWriterStore?.close();
+    this.analyticsWriterStore = undefined;
+    this.analyticsWriterAdmission = undefined;
+    this.analyticsWriterIdentity = undefined;
+    this.analyticsWriterStateDir = undefined;
     if (this.coldSessionStore) {
       // Keep coordinator-local reservations intact until every hot worker has
       // confirmed exit and runtime ownership reconciliation has released its

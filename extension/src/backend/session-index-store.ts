@@ -5,6 +5,7 @@ import * as path from 'node:path';
 
 import type { SessionSummary } from '../shared/protocol';
 import { backendSessionPathKey, type BackendSessionFileFingerprint } from './session-directory';
+import type { SessionManagerFenceAdmission } from './session-manager-fence';
 import type { IndexedSessionMetadata, SessionMetadataCheckpoint } from './session-metadata';
 
 const SESSION_INDEX_SCHEMA_VERSION = 1;
@@ -60,6 +61,10 @@ interface ExistingSessionIndexSnapshot {
 }
 
 export interface SessionIndexStoreOptions {
+  /** Durable analytics writer admission for sidecar mutations. The catalog is
+   * derived, but it is still session persistence and must drain before a host
+   * fence is acknowledged. */
+  writerAdmission?: SessionManagerFenceAdmission;
   /** Focused synthetic-fingerprint test seam. Production uses an exact bigint
    * stat comparison at the reconciliation transaction boundary. */
   reconciliationSourceMatches?: (fingerprint: BackendSessionFileFingerprint) => boolean;
@@ -301,59 +306,63 @@ export class SessionIndexStore {
   ) {}
 
   readAll(): IndexedSessionMetadata[] {
-    try {
-      const snapshot = this.readExistingSnapshot();
-      if (snapshot) {
-        // A logical delete can commit while an older WAL reader prevents the
-        // physical scrub checkpoint. The read-only handle is closed by now, so
-        // make one bounded cleanup attempt without sacrificing a valid catalog.
-        if (snapshot.privacyCheckpointPending) this.tryFinalizePrivacyCheckpointAfterRead();
-        return snapshot.records;
+    return this.withWriterAdmission(() => {
+      try {
+        const snapshot = this.readExistingSnapshot();
+        if (snapshot) {
+          // A logical delete can commit while an older WAL reader prevents the
+          // physical scrub checkpoint. The read-only handle is closed by now, so
+          // make one bounded cleanup attempt without sacrificing a valid catalog.
+          if (snapshot.privacyCheckpointPending) this.tryFinalizePrivacyCheckpointAfterRead();
+          return snapshot.records;
+        }
+        return this.withDatabase(() => this.withContentRecovery(() => {
+            const rows = this.database.prepare(`
+              SELECT path_key, fingerprint_json, summary_json, checkpoint_json
+              FROM sessions
+              ORDER BY modified_at DESC
+            `).all() as StoredSessionRow[];
+            return rows.map(parseStoredRow);
+          }));
+      } catch (error) {
+        // SQL integrity can be sound while an individual JSON projection was
+        // externally damaged. It is still derived data, so rebuild instead of
+        // trusting a partial/malformed checkpoint on an append path.
+        if (!isSqliteContentFailure(error)
+          && !(error instanceof SyntaxError)
+          && !(error instanceof Error && error.message.startsWith('Invalid session index row:'))) {
+          throw error;
+        }
+        this.rebuildDatabase();
+        return [];
       }
-      return this.withDatabase(() => this.withContentRecovery(() => {
-          const rows = this.database.prepare(`
-            SELECT path_key, fingerprint_json, summary_json, checkpoint_json
-            FROM sessions
-            ORDER BY modified_at DESC
-          `).all() as StoredSessionRow[];
-          return rows.map(parseStoredRow);
-        }));
-    } catch (error) {
-      // SQL integrity can be sound while an individual JSON projection was
-      // externally damaged. It is still derived data, so rebuild instead of
-      // trusting a partial/malformed checkpoint on an append path.
-      if (!isSqliteContentFailure(error)
-        && !(error instanceof SyntaxError)
-        && !(error instanceof Error && error.message.startsWith('Invalid session index row:'))) {
-        throw error;
-      }
-      this.rebuildDatabase();
-      return [];
-    }
+    });
   }
 
   /** Capture the shared delete ordering fence without entering the writer
    * path. Background reconciliation holds this value while it parses JSONL;
    * its later upsert validates the same value inside BEGIN IMMEDIATE. */
   readMutationGeneration(): number {
-    try {
-      const existing = this.readExistingMutationGeneration();
-      if (existing !== undefined) return existing;
-      return this.withDatabase(() => this.withContentRecovery(
-        () => this.readMutationGenerationValue(this.database),
-      ));
-    } catch (error) {
-      if (!isSqliteContentFailure(error)) throw error;
-      this.rebuildDatabase();
-      return 0;
-    }
+    return this.withWriterAdmission(() => {
+      try {
+        const existing = this.readExistingMutationGeneration();
+        if (existing !== undefined) return existing;
+        return this.withDatabase(() => this.withContentRecovery(
+          () => this.readMutationGenerationValue(this.database),
+        ));
+      } catch (error) {
+        if (!isSqliteContentFailure(error)) throw error;
+        this.rebuildDatabase();
+        return 0;
+      }
+    });
   }
 
   /** Delete rows whose transcripts are no longer in the successfully-read
    * canonical inventory. This runs before background parsing, so forgotten or
    * externally removed sessions cannot reappear from a stale snapshot. */
   deleteAbsent(retainedPathKeys: ReadonlySet<string>): boolean {
-    return this.withDatabase(() => this.withContentRecovery(() => {
+    return this.withWriterAdmission(() => this.withDatabase(() => this.withContentRecovery(() => {
       const changed = this.transaction(() => {
         const rows = this.database.prepare('SELECT path_key FROM sessions').all() as Array<{ path_key: string }>;
         const remove = this.database.prepare('DELETE FROM sessions WHERE path_key = ?');
@@ -370,7 +379,7 @@ export class SessionIndexStore {
       });
       this.finalizePrivacyCheckpoint(this.database);
       return changed;
-    }));
+    })));
   }
 
   deletePaths(pathKeys: readonly string[]): boolean {
@@ -397,7 +406,7 @@ export class SessionIndexStore {
         mutationGeneration: generation,
       };
     }
-    return this.withDatabase(() => this.withContentRecovery(() => {
+    return this.withWriterAdmission(() => this.withDatabase(() => this.withContentRecovery(() => {
       const result = this.transaction(() => {
         const previousMutationGeneration = this.assertMutationGeneration(
           this.database,
@@ -425,7 +434,7 @@ export class SessionIndexStore {
       // the next connection (including after process restart).
       this.finalizePrivacyCheckpoint(this.database);
       return result;
-    }));
+    })));
   }
 
   upsertBatch(
@@ -433,10 +442,10 @@ export class SessionIndexStore {
     expectedMutationGeneration?: number,
   ): boolean {
     if (records.length === 0 && expectedMutationGeneration === undefined) return false;
-    return this.withDatabase(() => this.withContentRecovery(() => this.transaction(() => {
+    return this.withWriterAdmission(() => this.withDatabase(() => this.withContentRecovery(() => this.transaction(() => {
       this.assertMutationGeneration(this.database, expectedMutationGeneration);
       return this.upsertRecords(this.database, records);
-    })));
+    }))));
   }
 
   /** Atomically validate, upsert, and retire invalid rows for one progressive
@@ -448,7 +457,7 @@ export class SessionIndexStore {
     invalidPathKeys: readonly string[],
     expectedMutationGeneration: number,
   ): SessionIndexMutationResult {
-    return this.withDatabase(() => this.withContentRecovery(() => {
+    return this.withWriterAdmission(() => this.withDatabase(() => this.withContentRecovery(() => {
       const result = this.transaction(() => {
         const previousMutationGeneration = this.assertMutationGeneration(
           this.database,
@@ -470,13 +479,26 @@ export class SessionIndexStore {
       });
       this.finalizePrivacyCheckpoint(this.database);
       return result;
-    }));
+    })));
   }
 
   close(): void {
     this.closed = true;
     this.clearPrivacyCheckpointRetry();
     this.releaseDatabase();
+  }
+
+  setWriterAdmission(writerAdmission?: SessionManagerFenceAdmission): void {
+    this.options.writerAdmission = writerAdmission;
+  }
+
+  private withWriterAdmission<T>(operation: () => T): T {
+    const release = this.options.writerAdmission?.acquire();
+    try {
+      return operation();
+    } finally {
+      release?.();
+    }
   }
 
   private get database(): SqliteDatabase {
@@ -594,28 +616,36 @@ export class SessionIndexStore {
 
   private attemptPrivacyCheckpointFinalize(): void {
     if (this.closed) return;
-    let database: SqliteDatabase | undefined;
-    let complete = false;
-    let retryable = false;
+    const run = (): void => {
+      let database: SqliteDatabase | undefined;
+      let complete = false;
+      let retryable = false;
+      try {
+        database = new sqlite.DatabaseSync(this.indexPath, {
+          timeout: SESSION_INDEX_BUSY_TIMEOUT_MS,
+        });
+        database.exec(`PRAGMA busy_timeout = ${SESSION_INDEX_BUSY_TIMEOUT_MS}`);
+        this.finalizePrivacyCheckpoint(database);
+        complete = true;
+      } catch (error) {
+        retryable = isSessionIndexBusyError(error);
+        // Best effort and durably retryable via PRIVACY_CHECKPOINT_KEY. Only
+        // lock contention receives autonomous retries; other failures remain
+        // eligible on the next normal read without spinning in the background.
+      } finally {
+        try { database?.close(); } catch { /* next read retries */ }
+      }
+      if (complete) {
+        this.clearPrivacyCheckpointRetry();
+      } else if (retryable) {
+        this.schedulePrivacyCheckpointRetry();
+      }
+    };
     try {
-      database = new sqlite.DatabaseSync(this.indexPath, {
-        timeout: SESSION_INDEX_BUSY_TIMEOUT_MS,
-      });
-      database.exec(`PRAGMA busy_timeout = ${SESSION_INDEX_BUSY_TIMEOUT_MS}`);
-      this.finalizePrivacyCheckpoint(database);
-      complete = true;
-    } catch (error) {
-      retryable = isSessionIndexBusyError(error);
-      // Best effort and durably retryable via PRIVACY_CHECKPOINT_KEY. Only
-      // lock contention receives autonomous retries; other failures remain
-      // eligible on the next normal read without spinning in the background.
-    } finally {
-      try { database?.close(); } catch { /* next read retries */ }
-    }
-    if (complete) {
-      this.clearPrivacyCheckpointRetry();
-    } else if (retryable) {
-      this.schedulePrivacyCheckpointRetry();
+      this.withWriterAdmission(run);
+    } catch {
+      // A closed writer fence is not a cleanup failure. The durable marker
+      // remains set and the next post-fence read retries the checkpoint.
     }
   }
 

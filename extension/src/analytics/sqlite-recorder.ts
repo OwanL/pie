@@ -64,6 +64,13 @@ import {
   type ActivityProjectionReadRequest,
   type ActivityProjectionSpanState,
 } from './activity-projection.js';
+import {
+  createToolFacetProjectionSchema,
+  toolFacetProjectionRowFromStateRow,
+  toolFacetStateColumns,
+  type ToolFacetDatabase,
+  type ToolFacetProjectionReadModel,
+} from './tool-facet.js';
 
 interface SqliteRunResult {
   changes: number | bigint;
@@ -114,6 +121,7 @@ const FIXED_WRITER_STATEMENT_KEYS = [
   'typed.execution.state.upsert', 'typed.execution.summary.lookup',
   'typed.execution.summary.upsert', 'typed.execution.summary.delete',
   'typed.tool.observation.insert', 'typed.tool.state.upsert',
+  'typed.toolfacet.observation.insert', 'typed.toolfacet.state.upsert',
   'typed.activity.observation.insert', 'typed.activity.state.lookup', 'typed.activity.state.upsert',
   'typed.feature.observation.insert',
   'typed.branch.selection.insert', 'typed.branch.selection-current.upsert',
@@ -132,8 +140,8 @@ for (const kind of ['observations', 'details']) {
     WRITER_STATEMENT_KEYS.add(`delivery.${kind}.${outcome}.update`);
   }
 }
-// 47 fixed keys plus 12 delivery kind/outcome read/update combinations.
-if (WRITER_STATEMENT_KEYS.size !== 59) throw new Error('Analytics writer statement key inventory changed.');
+// 49 fixed keys plus 12 delivery kind/outcome read/update combinations.
+if (WRITER_STATEMENT_KEYS.size !== 61) throw new Error('Analytics writer statement key inventory changed.');
 const MAX_CACHED_WRITER_STATEMENTS = 64;
 const INSERT_GENERATION_SQL = `
   INSERT OR IGNORE INTO analytics_generations (generation_id, first_observed_at_ms) VALUES (?, ?)
@@ -177,7 +185,7 @@ function prepareWriterStatement(
 }
 
 const sqlite = createRequire(process.execPath)('node:sqlite') as SqliteModule;
-const DATABASE_SCHEMA_VERSION = 12;
+const DATABASE_SCHEMA_VERSION = 13;
 const BUSY_TIMEOUT_MS = 5_000;
 const MAX_PENDING_SEQUENCES_PER_PRODUCER = 4_096;
 const DEFAULT_QUERY_ROWS = 200;
@@ -1471,6 +1479,18 @@ function migrateV11(database: SqliteDatabase): void {
   }
 }
 
+/** Schema v12 -> v13: typed tool/file facet observations, states, and the
+ * facet query view.
+ *
+ * Schema12 capture produced no tool facets, so there is nothing to backfill:
+ * the migration creates only the new storage. Reconstructing facet evidence
+ * from transcripts or today's defaults is prohibited; new facets accumulate
+ * from post-upgrade capture, and every retained row, deletion marker,
+ * projection and detail reference is preserved untouched. */
+function migrateV12(database: SqliteDatabase): void {
+  createToolFacetProjectionSchema(database as unknown as ToolFacetDatabase);
+}
+
 function databaseTransaction<T>(database: SqliteDatabase, operation: () => T): T {
   database.exec('BEGIN IMMEDIATE');
   try {
@@ -1522,6 +1542,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV9(database);
       migrateV10(database);
       migrateV11(database);
+      migrateV12(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
@@ -1536,6 +1557,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV9(database);
       migrateV10(database);
       migrateV11(database);
+      migrateV12(database);
       backfillV2(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
@@ -1550,6 +1572,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV9(database);
       migrateV10(database);
       migrateV11(database);
+      migrateV12(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
@@ -1562,6 +1585,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV9(database);
       migrateV10(database);
       migrateV11(database);
+      migrateV12(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
@@ -1573,6 +1597,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV9(database);
       migrateV10(database);
       migrateV11(database);
+      migrateV12(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
@@ -1584,6 +1609,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV9(database);
       migrateV10(database);
       migrateV11(database);
+      migrateV12(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
@@ -1594,6 +1620,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV9(database);
       migrateV10(database);
       migrateV11(database);
+      migrateV12(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
@@ -1603,6 +1630,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV9(database);
       migrateV10(database);
       migrateV11(database);
+      migrateV12(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
@@ -1611,6 +1639,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV9(database);
       migrateV10(database);
       migrateV11(database);
+      migrateV12(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
@@ -1618,17 +1647,25 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV9(database);
       migrateV10(database);
       migrateV11(database);
+      migrateV12(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
     if (version === 10) {
       migrateV10(database);
       migrateV11(database);
+      migrateV12(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
     if (version === 11) {
       migrateV11(database);
+      migrateV12(database);
+      database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
+      return;
+    }
+    if (version === 12) {
+      migrateV12(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
     }
   });
@@ -2527,6 +2564,57 @@ function applyTypedObservation(
     );
     return true;
   }
+  if (observation.entityKind === 'toolFacet') {
+    const revision = nextProjectionRevision(database, statements);
+    const facetColumns = toolFacetStateColumns(fields);
+    const facetToolCallId = optionalString(fields.toolCallId);
+    prepareWriterStatement(database, statements, 'typed.toolfacet.observation.insert', `
+      INSERT INTO analytics_tool_facet_observations (
+        observation_registry_key, generation_id, facet_id, tool_call_id, observation_kind,
+        capture_subject_kind, capture_subject_key, root_session_id,
+        cwd, payload_json, projection_revision
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      registryKey,
+      observation.generationId,
+      observation.entityKey,
+      facetToolCallId,
+      observation.observationKind,
+      observation.captureSubject.kind,
+      subjectKey(observation),
+      observation.scope.rootSessionId ?? null,
+      facetColumns.cwd,
+      serialize(observation),
+      revision,
+    );
+    prepareWriterStatement(database, statements, 'typed.toolfacet.state.upsert', `
+      INSERT INTO analytics_tool_facet_states (
+        generation_id, facet_id, tool_call_id, capture_subject_kind, capture_subject_key,
+        root_session_id, commands_json, cwd, observed_paths_json,
+        attempted_added_lines, attempted_removed_lines, verification, projection_revision
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(generation_id, facet_id) DO UPDATE SET
+        tool_call_id = COALESCE(excluded.tool_call_id, tool_call_id),
+        capture_subject_kind = excluded.capture_subject_kind,
+        capture_subject_key = excluded.capture_subject_key,
+        root_session_id = COALESCE(excluded.root_session_id, root_session_id),
+        commands_json = COALESCE(excluded.commands_json, commands_json),
+        cwd = COALESCE(excluded.cwd, cwd),
+        observed_paths_json = COALESCE(excluded.observed_paths_json, observed_paths_json),
+        attempted_added_lines = COALESCE(excluded.attempted_added_lines, attempted_added_lines),
+        attempted_removed_lines = COALESCE(excluded.attempted_removed_lines, attempted_removed_lines),
+        verification = COALESCE(excluded.verification, verification),
+        projection_revision = excluded.projection_revision
+    `).run(
+      observation.generationId, observation.entityKey, facetToolCallId,
+      observation.captureSubject.kind, subjectKey(observation),
+      observation.scope.rootSessionId ?? null,
+      facetColumns.commandsJson, facetColumns.cwd, facetColumns.observedPathsJson,
+      facetColumns.attemptedAddedLines, facetColumns.attemptedRemovedLines,
+      facetColumns.verification, revision,
+    );
+    return true;
+  }
   if (observation.entityKind === 'activitySpan') {
     const revision = nextProjectionRevision(database, statements);
     // Resolve the span state and its trusted-subject ownership first: a
@@ -2949,6 +3037,45 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
         this.getProjectionRevision(),
       ),
     }));
+  }
+
+  /** Bounded, revision-ordered tool-facet projection read model. Rows come
+   * from the maintained facet states through the declared expression index, so
+   * a bounded page never scans retained history; raw facet SQL remains
+   * available through the versioned `analytics_tool_facet_v1` view. */
+  readToolFacetProjection(request: { rootSessionId?: string; limit?: number } = {}): ToolFacetProjectionReadModel & AnalyticsQuerySnapshotMetadata {
+    this.assertOpen();
+    const rootSessionId = request.rootSessionId;
+    if (rootSessionId !== undefined && (!rootSessionId.trim() || rootSessionId.includes('\0'))) {
+      throw new Error('Canonical analytics rootSessionId must be a non-empty string without NUL.');
+    }
+    const limit = boundedPositiveInteger(
+      request.limit ?? DEFAULT_QUERY_ROWS, DEFAULT_QUERY_ROWS, MAX_QUERY_ROWS, 'facet limit',
+    );
+    return this.snapshot(() => {
+      const metadata = this.readQuerySnapshotMetadata();
+      const scoped = rootSessionId !== undefined;
+      const rows = this.database.prepare(`
+        SELECT generation_id, facet_id, tool_call_id, capture_subject_kind, capture_subject_key,
+          root_session_id, commands_json, cwd, observed_paths_json,
+          attempted_added_lines, attempted_removed_lines, verification
+        FROM analytics_tool_facet_states
+        ${scoped ? 'WHERE root_session_id = ?' : ''}
+        ORDER BY CAST(projection_revision AS INTEGER), generation_id, facet_id
+        LIMIT ?
+      `).all(...(scoped ? [rootSessionId] : []), limit + 1) as Array<Record<string, unknown>>;
+      const truncated = rows.length > limit;
+      const selected = truncated ? rows.slice(0, limit) : rows;
+      return {
+        ...metadata,
+        revision: metadata.projectionRevision,
+        scope: scoped
+          ? { kind: 'session' as const, rootSessionId }
+          : { kind: 'global' as const },
+        facets: selected.map((row) => toolFacetProjectionRowFromStateRow(row)),
+        truncated,
+      };
+    });
   }
 
   submitBatch<Fields extends object>(observations: readonly SequencedAnalyticsObservation<Fields>[]): void {
@@ -3380,6 +3507,8 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
       'analytics_execution_observations',
       'analytics_tool_observations',
       'analytics_tool_states',
+      'analytics_tool_facet_observations',
+      'analytics_tool_facet_states',
       'analytics_activity_observations',
       'analytics_activity_states',
       'analytics_feature_observations',
@@ -3588,6 +3717,8 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
         'analytics_execution_states',
         'analytics_tool_observations',
         'analytics_tool_states',
+        'analytics_tool_facet_observations',
+        'analytics_tool_facet_states',
         'analytics_activity_observations',
         'analytics_activity_states',
         'analytics_feature_observations',
@@ -3883,13 +4014,14 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
   }
 
   countTypedEntityObservations(
-    entityKind: 'execution' | 'toolCall' | 'activitySpan' | 'featureObservation' | 'branch' | 'copy',
+    entityKind: 'execution' | 'toolCall' | 'toolFacet' | 'activitySpan' | 'featureObservation' | 'branch' | 'copy',
     rootSessionId?: string,
   ): number {
     this.assertOpen();
     const table = {
       execution: 'analytics_execution_observations',
       toolCall: 'analytics_tool_observations',
+      toolFacet: 'analytics_tool_facet_observations',
       activitySpan: 'analytics_activity_observations',
       featureObservation: 'analytics_feature_observations',
       branch: 'analytics_branch_selections',
@@ -4080,7 +4212,7 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
       `).all() as Array<{ name: string }>;
       return {
         ...metadata,
-        projectionVersion: 3,
+        projectionVersion: 4,
         logicalCommands: ['schema', 'query', 'detail', 'storage'],
         views: views.map((row) => row.name),
         detail: { defaultRangeBytes: 64 * 1024, representationEncoding: 'node-v8' },
