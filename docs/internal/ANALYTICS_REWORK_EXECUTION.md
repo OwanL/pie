@@ -14,15 +14,15 @@ Owning specifications: runbook; `docs/ANALYTICS_REWORK_PLAN.md` §§1, 11.6, 17;
 
 ---
 
-## Sole integration checkpoint - 2026-09-15, 08:56 Pacific/Auckland
+## Sole integration checkpoint - 2026-09-15, 08:59 Pacific/Auckland
 
 The sole integrator has integrated the existing uncommitted analytics scope in commit
-`8186d86bebe350ae65d013a5328efcbf858a80d5`, based on `ea2bab9c`, without touching the five
+`1dc5e64b55cd34f4b088e77dd82f31309e97937f`, based on `ea2bab9c`, without touching the five
 unrelated dirty model/settings/pricing files or the existing stash. The task-owned allowlist is the
-candidate-trial authority/runtime and shared contract,
-provider projection/recorder statement-reuse sources and tests, the analytics implementation
-contract, and this execution checkpoint. No restart, activation, storage cutoff, process signal,
-qualification probe, or expensive workload has run.
+candidate-trial authority/runtime and shared contract, provider projection/recorder statement-reuse
+sources and tests, the analytics implementation contract, and this execution checkpoint. No
+restart, activation, storage cutoff, process signal, qualification probe, or expensive workload
+has run.
 
 The two reviewed small gaps are closed in source/tests: `CandidateTrialRuntime` now validates its
 trimmed timezone through the same `Intl.DateTimeFormat` IANA authority as production before
@@ -31,14 +31,22 @@ failed cleanup receipt preserved and reported. Focused analytics/host coverage p
 candidate-trial file passed 13/13 separately. Full `npm run verify` passed all 7/7 package groups
 (7,089 passed, 0 failed, 30 skipped), with one extension file passing on the runner's built-in
 flaky rerun (`canonical-query-entry.test.ts`); typecheck, lint, model-drift check, and the
-no-sync validation build also passed. The normal publishing build, staged-integrity inspection,
-and remote push confirmation remain pending against this frozen committed HEAD.
+no-sync validation build also passed.
 
-The P0 candidate remains unqualified and production authority remains unchanged. Next action is
-`npm run extension:build` against this frozen committed HEAD, independent staged
-manifest/content/build-ID verification, and a normal push. After that, preserve the closed gates
-and report the exact fresh paired mixed-probe preparation command; do not start, activate, cut off,
-or run that probe in this task.
+The frozen-HEAD publishing build passed with coordinated host/renderer build ID
+`6a2b5aebf25295bdba7f` and staged runtime generation
+`ca57c28c30a9d8ac726edc0fa9ec26dedd3e3c180f3915f9d00fc4586d1a55d4`. Independent verification
+matched the generation directory and manifest, host/renderer IDs, and all 50 file size/SHA-256
+entries with no extras (`STAGED_FILE_INTEGRITY=true`); the newest selection record names that
+generation. Commit `1dc5e64b55cd34f4b088e77dd82f31309e97937f` is pushed and
+`git ls-remote --heads origin master` matches it. Running sessions keep their existing runtime;
+no restart was forced.
+
+The P0 candidate remains unqualified and production authority remains unchanged. The next exact
+operation is the fresh paired mixed-probe preparation recorded below: validate the script's mixed
+CLI/`--stats-poll-mode` contract and resource bounds, freeze/hash the five built outputs/build ID,
+then run matched `full-stats` and `memory-only` arms on the same source/artifact/seed/window. No
+heap/RSS override is allowed, and this task does not start, activate, cut off, or run that probe.
 
 ---
 
