@@ -14,6 +14,14 @@ Owning specifications: runbook; `docs/ANALYTICS_REWORK_PLAN.md` §§1, 11.6, 17;
 
 ---
 
+## Late TEST-only checkpoint - 2026-09-14, 16:00 Pacific/Auckland
+
+This is a test/docs-only follow-up after pushed `dbd9ccd60ac1d51c54f112007ccbd315d5e317aa`; it does not revise the preceding build or full-verification evidence. The sole reviewed repository change is the existing +254-line cancellation regression in `extensions/subagent/test/p4-production-bridge-sqlite.test.ts`. No application source, runtime/build/staged artifact, publication/install/config/data/UI/restart or dynamic production path changed. The five unrelated user files remain dirty, excluded, and hash-preserved.
+
+The supervised root affected-test runner (`npm test`'s `run-affected-tests.mjs`, 180 s cap) selected three files in two packages and passed 24/24 (0 failed, 0 cancelled) in 6.1 s; no full suite, build, or typecheck was run. The focused late receipt `C:/dev/scratch/pie-daytime-20260914-r01/late-rich-cancel.md` reports 3/3 for this test file. This is test-only evidence: the injected `_internal.runAttempt`/AbortSignal seam is not real SDK/network/provider coverage. The earlier full verify's 7/7 package result and `77cfc0031589f15d1760`/`d7afd53dd4a5d8978af279f4544341f27af20d63ac98d805fa948bc129c7bb36` identities belong to the prior artifact and do not prove this late test is compiled, loaded, or behavior-verified. The release subagent typecheck receipt excluded tests; no all-tests-compiled/typecheck or coverage claim is made. Reviewer reports and the baseline diagnostic are unchanged; the retained line-74 gap remains open.
+
+The corrected late-memory note is a proposed read-only next experiment, not a measurement or qualification. Full-branch SDK nested/cancel/failover coverage, producer branch attribution, P0 qualification, and P7 activation/storage gates remain closed. No source publication or runtime mutation occurred; the staged selection and loaded generation remain the prior read-only state.
+
 ## Final integration checkpoint - 2026-09-14, 15:13 Pacific/Auckland (final sole integrator)
 
 Actual integrator clock: session start 15:02 NZST, verification work 15:06–15:13 NZST. Feature
