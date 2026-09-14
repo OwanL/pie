@@ -37,7 +37,24 @@ confirmed the selected staged manifest/content and matching host/renderer IDs ac
 (`integration/extension-build.log`, `integration/staged-integrity.log`). The staged generation is
 for the next normal startup; PID 15424's separately rechecked backend commandline still loads
 `3335b51944ac1a55b7740dab97c05d8e532a865e535d70453fa7850fda7c0308`. No manual or Playwright
-verification is claimed. Full post-commit `npm run verify` remains next.
+verification is claimed. Milestone commit `8731645343b73ba901ea1722eba75d6163899c6f` was pushed
+to `origin/master`; `git ls-remote --heads origin master` matched it. Post-commit final
+`npm run verify` was attempted twice, at 13:33:44 and 13:50:51 NZST. Both timed out after the
+runner's 600-second `npm run test:all` phase, before a test summary and before the verify no-sync
+build; logs are `C:/dev/scratch/pie-daytime-20260914-r01/integration/npm-verify-full.log` and
+`C:/dev/scratch/pie-daytime-20260914-r01/integration/npm-verify-full-retry.log`. The sync-models
+check, all 17 typecheck projects, and lint completed successfully in both attempts. A bounded
+full-extension diagnostic returned exit 1 with 4,922 passed, 24 failed, and 19 skipped; exact
+failures are in `C:/dev/scratch/pie-daytime-20260914-r01/integration/verify-diag-extension.log`
+(Windows worker Job/readiness and process-tree cases, StatsService timing/convergence, handoff
+census/control, P0 helper startup, collector readiness, and deferred-trigger child timeout).
+Other package-isolated diagnostics passed, but this does not replace required full verify. No
+source repair was attempted. Next owner action is to resolve or reproduce the Windows
+process-test/readiness and aggregate-concurrency failures, then rerun full `npm run verify` and
+its no-sync build. Final process audit at 14:03:33 still found only protected backend/worker PIDs
+15424/22812, with PID 15424 loading the separately observed
+`3335b51944ac1a55b7740dab97c05d8e532a865e535d70453fa7850fda7c0308`; staged generation integrity
+was rechecked at 14:03:47 and remains true.
 
 Do not qualify or transfer the latest mixed result: `C:/dev/scratch/pie-p0-mixed-20260914-r02/production-default.json`
 reports functional mixed/query coverage 16/16, but overall P0 is unqualified because sampled
@@ -49,10 +66,11 @@ activity is blocked by missing full producer branch attribution, UI evidence is 
 only, and real SDK nested/cancel/failover coverage is absent. P7 activation/storage gates remain
 closed.
 
-Continuation: complete post-commit verification, then at a normal future restart manually check the
-staged runtime; separately obtain qualified P0 resource/scale and actual-host P2c evidence, full
-producer branch attribution, real SDK nested/cancel/failover coverage, and ordered P7 admission.
-This handoff never claims full rework completion.
+Continuation: resolve the supported verification blocker and complete post-commit verification,
+then at a normal future restart manually check the staged runtime; separately obtain qualified P0
+resource/scale and actual-host P2c evidence, full producer branch attribution, real SDK
+nested/cancel/failover coverage, and ordered P7 admission. This handoff never claims full rework
+completion.
 
 ---
 

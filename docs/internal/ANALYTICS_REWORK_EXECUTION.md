@@ -44,7 +44,23 @@ passes independent manifest/content/build-ID verification (`integration/extensio
 `integration/staged-integrity.log`). It is selected for the next normal startup; the loaded
 backend remains the separately observed PID 15424 commandline generation
 `3335b51944ac1a55b7740dab97c05d8e532a865e535d70453fa7850fda7c0308`, not the staged generation.
-No manual or Playwright verification is claimed. Full post-commit `npm run verify` remains next.
+No manual or Playwright verification is claimed. Milestone commit `8731645343b73ba901ea1722eba75d6163899c6f`
+was pushed to `origin/master`; `git ls-remote --heads origin master` matched it. Post-commit final
+`npm run verify` was attempted twice, at 13:33:44 and 13:50:51 NZST. Both timed out after the
+runner's 600-second `npm run test:all` phase, before a test summary and before the verify
+no-sync build; logs are `integration/npm-verify-full.log` and
+`integration/npm-verify-full-retry.log`. The sync-models check, all 17 typecheck projects, and
+lint completed successfully in both attempts. A bounded full-extension diagnostic then returned
+exit 1 with 4,922 passed, 24 failed, and 19 skipped; the failed files are recorded exactly in
+`integration/verify-diag-extension.log` (Windows worker Job/readiness and process-tree cases,
+StatsService timing/convergence, handoff census/control, P0 helper startup, collector readiness,
+and deferred-trigger child timeout). Other package-isolated diagnostics passed, but this does not
+replace the required full verify. No source repair was attempted: the next owner must resolve or
+reproduce the Windows process-test/readiness and aggregate-concurrency failures, then rerun the
+full `npm run verify` and its no-sync build. Final process audit at 14:03:33 still found only the
+protected backend/worker PIDs 15424/22812, with PID 15424 loading the separately observed
+`3335b51944ac1a55b7740dab97c05d8e532a865e535d70453fa7850fda7c0308`; staged generation integrity
+was rechecked at 14:03:47 and remains true.
 
 Qualification remains explicitly open: the latest mixed production-default report is functional
 and its query coverage is 16/16, but P0 is unqualified because recorder sampled high-water RSS is
@@ -55,8 +71,9 @@ mtime/event correlation (not writer-PID/read-use proof), the web cache is empty,
 gate remains unverified. The candidate validator is unavailable; selected-branch activity is blocked
 by missing full producer branch attribution; UI evidence is honestly root/all-branches only; and
 real SDK nested/cancel/failover coverage remains absent. P7 activation/storage gates remain closed.
-Continuation is the next normal restart's manual load check, then fresh qualified P0/P2c evidence,
-producer/branch/SDK coverage, and ordered P7 admission—not a full-rework completion claim.
+Continuation is to resolve the supported verification blocker and rerun full verification, then at
+a normal future restart manually check the staged runtime; separately obtain fresh qualified P0/P2c
+evidence, producer/branch/SDK coverage, and ordered P7 admission—not a full-rework completion claim.
 
 ---
 
