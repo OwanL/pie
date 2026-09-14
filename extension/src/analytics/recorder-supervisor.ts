@@ -211,6 +211,60 @@ export interface AnalyticsRecorderWorkerStats {
   };
 }
 
+/** Reply shape of the distinct read-only `memorySample` diagnostic request.
+ * Deliberately only the `process` half of the general stats reply: no
+ * recorder, detailStorage, or delivery fields, so a diagnostic poll can never
+ * carry — or be confused with — the general stats contract. */
+export interface AnalyticsRecorderWorkerMemorySample {
+  process: NodeJS.MemoryUsage & { cpuUsage: NodeJS.CpuUsage; workerIdentity: AnalyticsWorkerIdentity };
+}
+
+function isSafeNonNegativeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+/** Strict reply validation for {@link AnalyticsRecorderSupervisor.workerMemorySample}.
+ * A malformed or mis-attributed response is an error, never a zero-filled
+ * sample: a diagnostic that silently reports zeros would corrupt exactly the
+ * memory evidence this seam exists to collect. */
+function validateWorkerMemorySample(
+  receipt: unknown,
+  expectedIdentity: AnalyticsWorkerIdentity | undefined,
+): AnalyticsRecorderWorkerMemorySample {
+  const malformed = (detail: string): AnalyticsRecorderWorkerRequestError => new AnalyticsRecorderWorkerRequestError(
+    `Analytics recorder memory sample is malformed: ${detail}`,
+    'memory_sample_malformed',
+  );
+  const sample = receipt as AnalyticsRecorderWorkerMemorySample | undefined;
+  const processStats = sample?.process;
+  if (!processStats || typeof processStats !== 'object' || Array.isArray(processStats)) {
+    throw malformed('process telemetry is missing');
+  }
+  for (const field of ['rss', 'heapTotal', 'heapUsed', 'external', 'arrayBuffers'] as const) {
+    if (!isSafeNonNegativeInteger(processStats[field])) {
+      throw malformed(`worker ${field} memory telemetry is missing or invalid`);
+    }
+  }
+  if (!isSafeNonNegativeInteger(processStats.cpuUsage?.user) || !isSafeNonNegativeInteger(processStats.cpuUsage?.system)) {
+    throw malformed('worker cpuUsage telemetry is missing or invalid');
+  }
+  const identity = processStats.workerIdentity;
+  if (!identity || typeof identity.instanceId !== 'string' || identity.instanceId.length === 0
+    || !Number.isSafeInteger(identity.pid) || !Number.isSafeInteger(identity.spawnedAtMs) || identity.spawnedAtMs <= 0) {
+    throw malformed('worker identity telemetry is missing or invalid');
+  }
+  if (!expectedIdentity
+    || identity.instanceId !== expectedIdentity.instanceId
+    || identity.pid !== expectedIdentity.pid
+    || identity.spawnedAtMs !== expectedIdentity.spawnedAtMs) {
+    throw new AnalyticsRecorderWorkerRequestError(
+      `Analytics recorder memory sample identity does not match the owned worker (reported pid ${identity.pid}).`,
+      'memory_sample_identity_mismatch',
+    );
+  }
+  return { process: processStats };
+}
+
 export interface AnalyticsRecorderDeliveryWatermarks {
   producerReconciliation: ProducerReconciliation[];
   completeDetailWatermark: number | string;
@@ -521,6 +575,18 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
   async workerStats(): Promise<AnalyticsRecorderWorkerStats | undefined> {
     if (!this.options.enabled) return undefined;
     return this.enqueueControl({ type: 'stats' }) as Promise<AnalyticsRecorderWorkerStats>;
+  }
+
+  /** Read-only diagnostic memory sample from the recorder worker. Distinct
+   * from {@link workerStats}: the worker replies with process-level telemetry
+   * only and performs no recorder or SQL work, so periodic diagnostics
+   * polling can observe the worker without the general stats reply's
+   * whole-table detail aggregates. The reply is validated strictly; a
+   * malformed or mis-attributed response is an error, never a zero sample. */
+  async workerMemorySample(): Promise<AnalyticsRecorderWorkerMemorySample | undefined> {
+    if (!this.options.enabled) return undefined;
+    const receipt = await this.enqueueControl({ type: 'memorySample' });
+    return validateWorkerMemorySample(receipt, this.child ? this.workerIdentities.get(this.child) : undefined);
   }
 
   /** Rehearses a clean helper replacement only; it does not restart VS Code or

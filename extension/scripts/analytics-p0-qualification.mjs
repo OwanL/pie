@@ -31,6 +31,9 @@ import {
 import {
   MIXED_FULL_PLAN,
   MIXED_SMOKE_PLAN,
+  MIXED_TOPOLOGY_SAMPLE_INTERVAL_MS,
+  requiredWorkerMemorySample,
+  startWorkerMemorySampler,
   summarizeMixedTimingSamples,
   validateMixedEvidence,
   validateQueryLifecycleReceipts,
@@ -75,6 +78,15 @@ function parseRecorderHeapProbe(value) {
   return mb;
 }
 
+const STATS_POLL_MODES = new Set(['full-stats', 'memory-only']);
+
+function parseStatsPollMode(value) {
+  if (!STATS_POLL_MODES.has(value)) {
+    throw new Error(`--stats-poll-mode must be one of: ${[...STATS_POLL_MODES].join(', ')}`);
+  }
+  return value;
+}
+
 function parseMixedUtcDay(value) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
     throw new Error('--mixed-utc-day must be an ISO UTC calendar day (YYYY-MM-DD)');
@@ -92,7 +104,7 @@ function parseMixedUtcDay(value) {
 }
 
 function parseArguments(argv) {
-  const options = { scenario: 'baseline', rows: undefined, seed: undefined, report: undefined, baselineReport: undefined, recorderHeapProbeMb: undefined, mixedUtcDay: undefined, validate: false, smoke: false };
+  const options = { scenario: 'baseline', rows: undefined, seed: undefined, report: undefined, baselineReport: undefined, recorderHeapProbeMb: undefined, mixedUtcDay: undefined, statsPollMode: undefined, validate: false, smoke: false };
   const allowedScenarios = new Set(['baseline', 'scale', 'endurance', 'mixed']);
   const seen = new Set();
   for (let index = 0; index < argv.length; index++) {
@@ -109,7 +121,7 @@ function parseArguments(argv) {
       options.smoke = true;
       continue;
     }
-    if (argument === '--scenario' || argument === '--rows' || argument === '--seed' || argument === '--report' || argument === '--baseline-report' || argument === '--recorder-heap-probe-mb' || argument === '--mixed-utc-day') {
+    if (argument === '--scenario' || argument === '--rows' || argument === '--seed' || argument === '--report' || argument === '--baseline-report' || argument === '--recorder-heap-probe-mb' || argument === '--mixed-utc-day' || argument === '--stats-poll-mode') {
       if (seen.has(argument)) throw new Error(`Duplicate option: ${argument}`);
       seen.add(argument);
       const value = argv[++index];
@@ -121,6 +133,7 @@ function parseArguments(argv) {
       if (argument === '--baseline-report') options.baselineReport = value;
       if (argument === '--recorder-heap-probe-mb') options.recorderHeapProbeMb = parseRecorderHeapProbe(value);
       if (argument === '--mixed-utc-day') options.mixedUtcDay = parseMixedUtcDay(value);
+      if (argument === '--stats-poll-mode') options.statsPollMode = parseStatsPollMode(value);
       continue;
     }
     throw new Error(`Unsupported or ambiguous option: ${argument}`);
@@ -128,6 +141,7 @@ function parseArguments(argv) {
   if (!allowedScenarios.has(options.scenario)) throw new Error(`Unsupported P0 scenario: ${options.scenario}; use baseline, scale, endurance, or mixed`);
   if (options.smoke && options.scenario !== 'endurance' && options.scenario !== 'mixed') throw new Error('--smoke is valid only for the endurance or mixed scenario');
   if (options.mixedUtcDay !== undefined && options.scenario !== 'mixed') throw new Error('--mixed-utc-day is valid only for the mixed scenario');
+  if (options.statsPollMode !== undefined && options.scenario !== 'mixed') throw new Error('--stats-poll-mode is valid only for the mixed scenario');
   if (options.scenario === 'mixed' && options.mixedUtcDay === undefined) throw new Error('mixed requires --mixed-utc-day so paired runs share an explicit UTC fixture window');
   if (options.scenario === 'endurance' && options.rows !== undefined) throw new Error('--rows is not valid for the endurance scenario');
   const environmentRows = process.env.PIE_ANALYTICS_P0_ROWS;
@@ -177,6 +191,7 @@ function parseArguments(argv) {
     baselineReport: options.baselineReport,
     ...(options.mixedUtcDay === undefined ? {} : { mixedUtcDay: options.mixedUtcDay }),
     ...(options.recorderHeapProbeMb === undefined ? {} : { recorderHeapProbeMb: options.recorderHeapProbeMb }),
+    statsPollMode: options.statsPollMode ?? 'full-stats',
     validate: options.validate,
     smoke: options.smoke,
   };
@@ -407,152 +422,38 @@ function summarizeLight(values) {
   return { samples: summary.samples, p50Ms: summary.p50Ms, p95Ms: summary.p95Ms, maxMs: summary.maxMs };
 }
 
-function requiredWorkerMemorySample(stats, label) {
-  const processStats = stats?.process;
-  const identity = processStats?.workerIdentity;
-  if (!identity || typeof identity.instanceId !== 'string' || !Number.isSafeInteger(identity.pid)
-    || !Number.isSafeInteger(identity.spawnedAtMs)) {
-    throw new Error(`${label}: worker identity telemetry is missing`);
+/** Observer request used for periodic worker telemetry. 'full-stats' (the
+ * unchanged default) polls the general stats IPC; 'memory-only' diagnostics
+ * poll the distinct read-only memorySample seam so the observer itself cannot
+ * add the general stats reply's whole-table detail aggregates. Workload,
+ * gates, thresholds, and teardown are identical in both modes; the mode is
+ * recorded in the report configuration and the memory receipt. */
+const statsPollMode = configuration.statsPollMode;
+const pollWorkerTelemetry = (host) => statsPollMode === 'memory-only' ? host.workerMemorySample() : host.workerStats();
+
+/** CPU counters are process micros; any component or aggregate sum that
+ * leaves the safe integer range must reject the run instead of silently
+ * emitting NaN, null or a rounded finite value. */
+function addSafeCpuMicros(total, delta, label) {
+  if (!Number.isSafeInteger(total) || !Number.isSafeInteger(delta) || delta < 0) {
+    throw new Error(`${label}: CPU micros must be non-negative safe integers`);
   }
-  const fields = ['rss', 'heapTotal', 'heapUsed', 'external', 'arrayBuffers'];
-  for (const field of fields) {
-    if (!Number.isSafeInteger(processStats[field]) || processStats[field] < 0) {
-      throw new Error(`${label}: worker ${field} memory telemetry is missing or invalid`);
-    }
-  }
-  return {
-    identity: { instanceId: identity.instanceId, pid: identity.pid, spawnedAtMs: identity.spawnedAtMs },
-    rssBytes: processStats.rss,
-    heapTotalBytes: processStats.heapTotal,
-    heapUsedBytes: processStats.heapUsed,
-    externalBytes: processStats.external,
-    arrayBuffersBytes: processStats.arrayBuffers,
-  };
+  const sum = total + delta;
+  if (!Number.isSafeInteger(sum)) throw new Error(`${label}: CPU micros sum overflowed the safe integer range`);
+  return sum;
 }
 
-/** Poll the existing stats IPC during a rate condition. Boundary samples are
- * insufficient for a sustained-load memory result because a worker can peak
- * between flushes. The sampler is deliberately kept in the harness so this
- * follow-on does not change production recorder behavior. Phases are labels
- * attached to each sample at collection time so the report can attribute the
- * high-water to the workload phase that produced it. */
-function startWorkerMemorySampler(hosts, label, intervalMs = 1_000, { initialPhase = 'unmarked' } = {}) {
-  const samples = [];
-  let inFlight;
-  let failure;
-  let stopped = false;
-  let currentPhase = initialPhase;
-  const collect = async () => {
-    if (failure) throw failure;
-    if (inFlight) return inFlight;
-    inFlight = (async () => {
-      const stats = await Promise.all(hosts.map((host) => host.workerStats()));
-      const workers = stats.map((entry, index) => requiredWorkerMemorySample(entry, `${label} sample ${samples.length} host ${index + 1}`));
-      samples.push({ observedAt: new Date().toISOString(), phase: currentPhase, workers });
-    })().catch((error) => {
-      failure = error instanceof Error ? error : new Error(String(error));
-      throw failure;
-    }).finally(() => {
-      inFlight = undefined;
-    });
-    return inFlight;
-  };
-  const markPhase = (phaseLabel) => {
-    if (stopped) throw new Error(`${label}: sampler phase cannot be marked after stop`);
-    if (typeof phaseLabel !== 'string' || phaseLabel.length === 0 || phaseLabel.length > 64) {
-      throw new Error(`${label}: sampler phase label must be a non-empty string of at most 64 characters`);
-    }
-    currentPhase = phaseLabel;
-  };
-  const summarizeSamples = () => {
-    const byWorker = new Map();
-    let maxWorkerRssBytes = 0;
-    let maxWorkerHeapTotalBytes = 0;
-    let maxWorkerHeapUsedBytes = 0;
-    for (const sample of samples) {
-      for (const worker of sample.workers) {
-        const key = worker.identity.instanceId;
-        const summary = byWorker.get(key) ?? {
-          identity: worker.identity,
-          sampleCount: 0,
-          maxRssBytes: 0,
-          maxHeapTotalBytes: 0,
-          maxHeapUsedBytes: 0,
-          maxExternalBytes: 0,
-          maxArrayBuffersBytes: 0,
-        };
-        summary.sampleCount += 1;
-        summary.maxRssBytes = Math.max(summary.maxRssBytes, worker.rssBytes);
-        summary.maxHeapTotalBytes = Math.max(summary.maxHeapTotalBytes, worker.heapTotalBytes);
-        summary.maxHeapUsedBytes = Math.max(summary.maxHeapUsedBytes, worker.heapUsedBytes);
-        summary.maxExternalBytes = Math.max(summary.maxExternalBytes, worker.externalBytes);
-        summary.maxArrayBuffersBytes = Math.max(summary.maxArrayBuffersBytes, worker.arrayBuffersBytes);
-        byWorker.set(key, summary);
-        maxWorkerRssBytes = Math.max(maxWorkerRssBytes, worker.rssBytes);
-        maxWorkerHeapTotalBytes = Math.max(maxWorkerHeapTotalBytes, worker.heapTotalBytes);
-        maxWorkerHeapUsedBytes = Math.max(maxWorkerHeapUsedBytes, worker.heapUsedBytes);
-      }
-    }
-    const phases = [];
-    for (const sample of samples) {
-      const last = phases.at(-1);
-      if (last && last.label === sample.phase) {
-        last.sampleCount += 1;
-        for (const worker of sample.workers) {
-          last.maxWorkerRssBytes = Math.max(last.maxWorkerRssBytes, worker.rssBytes);
-          last.maxWorkerHeapTotalBytes = Math.max(last.maxWorkerHeapTotalBytes, worker.heapTotalBytes);
-          last.maxWorkerHeapUsedBytes = Math.max(last.maxWorkerHeapUsedBytes, worker.heapUsedBytes);
-        }
-      } else {
-        phases.push({
-          label: sample.phase,
-          sampleCount: 1,
-          maxWorkerRssBytes: Math.max(...sample.workers.map((worker) => worker.rssBytes)),
-          maxWorkerHeapTotalBytes: Math.max(...sample.workers.map((worker) => worker.heapTotalBytes)),
-          maxWorkerHeapUsedBytes: Math.max(...sample.workers.map((worker) => worker.heapUsedBytes)),
-        });
-      }
-    }
-    return {
-      intervalMs,
-      sampleCount: samples.length,
-      firstObservedAt: samples[0]?.observedAt ?? null,
-      lastObservedAt: samples.at(-1)?.observedAt ?? null,
-      maxWorkerRssBytes,
-      maxWorkerHeapTotalBytes,
-      maxWorkerHeapUsedBytes,
-      phases,
-      workers: [...byWorker.values()],
-    };
-  };
-  const timer = setInterval(() => {
-    if (stopped) return;
-    void collect().catch(() => void 0);
-  }, intervalMs);
-  void collect().catch(() => void 0);
-  return {
-    mark: markPhase,
-    snapshot() {
-      const summary = summarizeSamples();
-      return {
-        ...summary,
-        complete: !failure && summary.sampleCount > 0 && summary.workers.length === hosts.length,
-        ...(failure ? { error: failure.message } : {}),
-      };
-    },
-    async stop() {
-      stopped = true;
-      clearInterval(timer);
-      if (inFlight) await inFlight;
-      await collect();
-      if (failure) throw failure;
-      const summary = summarizeSamples();
-      if (summary.sampleCount === 0 || summary.workers.length !== hosts.length) {
-        throw new Error(`${label}: continuous worker memory telemetry is incomplete`);
-      }
-      return summary;
-    },
-  };
+function sumCpuMicros(user, system, label) {
+  return addSafeCpuMicros(addSafeCpuMicros(0, user, label), system, label);
+}
+
+function addSafeRssBytes(total, value, label) {
+  if (!Number.isSafeInteger(total) || total < 0 || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${label}: RSS bytes must be non-negative safe integers`);
+  }
+  const sum = total + value;
+  if (!Number.isSafeInteger(sum)) throw new Error(`${label}: RSS bytes sum overflowed the safe integer range`);
+  return sum;
 }
 
 async function runRateCondition(parentRoot, label, ratePerSecond, sampleCount, hostCount) {
@@ -564,7 +465,7 @@ async function runRateCondition(parentRoot, label, ratePerSecond, sampleCount, h
   }));
   await Promise.all(hosts.map((host) => host.start()));
   const workerBefore = await Promise.all(hosts.map((host) => host.workerStats()));
-  const memorySampler = startWorkerMemorySampler(hosts, label);
+  const memorySampler = startWorkerMemorySampler(hosts, label, 1_000, { poll: pollWorkerTelemetry });
   let samplerStopped = false;
   try {
     const cpuBefore = process.cpuUsage();
@@ -593,7 +494,12 @@ async function runRateCondition(parentRoot, label, ratePerSecond, sampleCount, h
     const workerAfter = await Promise.all(hosts.map((host) => host.workerStats()));
     const workerCpuMicros = workerAfter.reduce((total, entry, index) => {
       const before = workerBefore[index].process.cpuUsage;
-      return total + entry.process.cpuUsage.user + entry.process.cpuUsage.system - before.user - before.system;
+      const delta = sumCpuMicros(
+        entry.process.cpuUsage.user - before.user,
+        entry.process.cpuUsage.system - before.system,
+        `rate condition ${label} worker ${index} CPU`,
+      );
+      return addSafeCpuMicros(total, delta, `rate condition ${label} worker ${index} CPU delta`);
     }, 0);
     const workerMemory = await memorySampler.stop();
     samplerStopped = true;
@@ -616,7 +522,7 @@ async function runRateCondition(parentRoot, label, ratePerSecond, sampleCount, h
       peakBacklogBytes,
       endingBacklogRecords,
       endingBacklogBytes,
-      producerCpuOneCorePercent: ((cpu.user + cpu.system) / (elapsedMs * 1_000)) * 100,
+      producerCpuOneCorePercent: (sumCpuMicros(cpu.user, cpu.system, `${label} producer CPU`) / (elapsedMs * 1_000)) * 100,
       workerCpuOneCorePercent: (workerCpuMicros / (elapsedMs * 1_000)) * 100,
       workerMemory,
     };
@@ -854,8 +760,12 @@ function queryWorkerIdentityKey(identity) {
  * runtime telemetry explicitly null, so whole-topology memory becomes
  * qualified only when every spawned worker is covered by at least one valid
  * source; the claimed RSS/CPU must equal the recomputed union, and the
- * validator rechecks both against the persisted evidence. */
-function buildQueryWorkerTopology({ hostRssPeak, hostProcessCpu, recorderWorkerCpuDeltaMicros, topologySamples, lifecycleReceipts, workerIdentities, nativeEvidence, queryWorkerTelemetry }) {
+ * validator rechecks both against the persisted evidence. The late refresh
+ * recorder is never folded into these query-worker or main-cohort recorder
+ * gates: it is reported separately (buildRecorderRefreshWorkerEvidence). The
+ * only additive recorder RSS evidence is a safe sum from workers sampled in
+ * the same topology sample. */
+function buildQueryWorkerTopology({ hostRssPeak, hostProcessCpu, recorderWorkerCpuDeltaMicros, recorderMemoryMaxWorkerRssBytes, recorderRefreshWorkerEvidence, topologySamples, lifecycleReceipts, workerIdentities, nativeEvidence, queryWorkerTelemetry }) {
   const runtimeCovered = new Map();
   for (const receipt of lifecycleReceipts) {
     const terminal = receipt?.events?.find((event) => event.phase === 'terminal');
@@ -866,7 +776,7 @@ function buildQueryWorkerTopology({ hostRssPeak, hostProcessCpu, recorderWorkerC
       runtimeCovered.set(queryWorkerIdentityKey(terminal.identity), {
         source: 'runtime-terminal',
         rssBytes: telemetry.maxRssBytes,
-        cpuDeltaMicros: telemetry.userCpuTimeMicros + telemetry.systemCpuTimeMicros,
+        cpuDeltaMicros: sumCpuMicros(telemetry.userCpuTimeMicros, telemetry.systemCpuTimeMicros, `query worker ${terminal.identity.instanceId} runtime CPU`),
       });
     }
   }
@@ -879,7 +789,7 @@ function buildQueryWorkerTopology({ hostRssPeak, hostProcessCpu, recorderWorkerC
       nativeCovered.set(queryWorkerIdentityKey(receipt.identity), {
         source: 'native-os-final',
         rssBytes: receipt.memory.peakWorkingSetBytes,
-        cpuDeltaMicros: receipt.cpu.userCpuTimeMicros + receipt.cpu.systemCpuTimeMicros,
+        cpuDeltaMicros: sumCpuMicros(receipt.cpu.userCpuTimeMicros, receipt.cpu.systemCpuTimeMicros, `query worker ${receipt.identity.instanceId} native CPU`),
       });
     }
   }
@@ -889,6 +799,32 @@ function buildQueryWorkerTopology({ hostRssPeak, hostProcessCpu, recorderWorkerC
   const inTopology = (key) => workerKeys.has(key);
   const unionComplete = workerKeys.size > 0 && [...workerKeys].every((key) => union.has(key));
   const coveredValues = [...union.entries()].filter(([key]) => inTopology(key)).map(([, value]) => value);
+  const refreshCpuDeltaMicros = recorderRefreshWorkerEvidence?.cpu?.deltaMicros;
+  const recorderWorkerCpuDeltaTotalMicros = Number.isSafeInteger(refreshCpuDeltaMicros) && refreshCpuDeltaMicros >= 0
+    ? addSafeCpuMicros(recorderWorkerCpuDeltaMicros, refreshCpuDeltaMicros, 'recorder worker CPU total across the main cohort and the late refresh writer')
+    : null;
+  const normalizedTopologySamples = topologySamples.map((sample, sampleIndex) => {
+    let totalCohortRssBytes = 0;
+    for (const worker of sample.workers) {
+      totalCohortRssBytes = addSafeRssBytes(totalCohortRssBytes, worker.rssBytes, `recorder topology sample ${sampleIndex} cohort`);
+    }
+    const maxWorkerRssBytes = Math.max(...sample.workers.map((worker) => worker.rssBytes));
+    assert.equal(sample.totalWorkerRssBytes, totalCohortRssBytes, `recorder topology sample ${sampleIndex} worker RSS total must be recomputed from workers`);
+    assert.equal(sample.totalCohortRssBytes, totalCohortRssBytes, `recorder topology sample ${sampleIndex} cohort RSS total must be recomputed from workers`);
+    assert.equal(sample.maxWorkerRssBytes, maxWorkerRssBytes, `recorder topology sample ${sampleIndex} worker RSS maximum must be recomputed from workers`);
+    return { ...sample, totalWorkerRssBytes: totalCohortRssBytes, totalCohortRssBytes, maxWorkerRssBytes };
+  });
+  const coexistingSamples = normalizedTopologySamples
+    .filter((sample) => sample.workers.some((worker) => worker.role === 'recorder-refresh'))
+    .map((sample) => ({ label: sample.label, observedAt: sample.observedAt, totalCohortRssBytes: sample.totalCohortRssBytes }));
+  assert.ok(coexistingSamples.length > 0, 'recorder topology must include a coexisting late refresh cohort sample');
+  const recorderSampledMaxTotalCohortRssBytes = Math.max(...coexistingSamples.map((sample) => sample.totalCohortRssBytes));
+  const recorderMaxWorkerRssBytes = Math.max(
+    recorderMemoryMaxWorkerRssBytes,
+    recorderRefreshWorkerEvidence.runtimeMemory.maxRssBytes,
+    ...normalizedTopologySamples.map((sample) => sample.maxWorkerRssBytes),
+  );
+  assert.ok(Number.isSafeInteger(recorderMaxWorkerRssBytes), 'recorder per-worker RSS maximum must remain a safe integer');
   const coverage = {
     workerCount: workerKeys.size,
     runtimeCoveredCount: [...runtimeCovered.keys()].filter(inTopology).length,
@@ -902,20 +838,75 @@ function buildQueryWorkerTopology({ hostRssPeak, hostProcessCpu, recorderWorkerC
   };
   return {
     hostPeakRssBytes: hostRssPeak,
-    hostCpuDeltaMicros: hostProcessCpu.user + hostProcessCpu.system,
+    hostCpuDeltaMicros: sumCpuMicros(hostProcessCpu.user, hostProcessCpu.system, 'host process CPU'),
     recorderWorkerCpuDeltaMicros,
-    hostProcessCpuDeltaMicros: hostProcessCpu.user + hostProcessCpu.system,
+    recorderRefreshWorkerCpuDeltaMicros: Number.isSafeInteger(refreshCpuDeltaMicros) && refreshCpuDeltaMicros >= 0 ? refreshCpuDeltaMicros : null,
+    recorderWorkerCpuDeltaTotalMicros,
+    hostProcessCpuDeltaMicros: sumCpuMicros(hostProcessCpu.user, hostProcessCpu.system, 'host process CPU'),
     queryWorkerRssBytes: unionComplete && coveredValues.length > 0
       ? Math.max(...coveredValues.map((value) => value.rssBytes))
       : null,
     queryWorkerCpuDeltaMicros: unionComplete && coveredValues.length > 0
-      ? coveredValues.reduce((total, value) => total + value.cpuDeltaMicros, 0)
+      ? coveredValues.reduce((total, value) => addSafeCpuMicros(total, value.cpuDeltaMicros, 'query worker CPU total'), 0)
       : null,
+    recorderMaxWorkerRssBytes,
+    recorderTotalCohortRssSamples: coexistingSamples,
+    recorderSampledMaxTotalCohortRssBytes,
     queryWorkerTelemetryAvailable: unionComplete,
     queryWorkerTelemetryCoverage: coverage,
     queryWorkerTelemetry,
-    topologySamples,
-    note: 'Query-worker memory coverage unions runtime terminal samples with native OS final-counter receipts. Forced cancellation keeps runtime evidence explicitly null; native receipts cover those workers only when the collector bound them, so any worker covered by neither source keeps whole-topology memory unqualified.',
+    topologySampleIntervalMs: MIXED_TOPOLOGY_SAMPLE_INTERVAL_MS,
+    topologySampleWindow: {
+      startAt: normalizedTopologySamples[0]?.observedAt ?? null,
+      endAt: normalizedTopologySamples.at(-1)?.observedAt ?? null,
+    },
+    topologySamples: normalizedTopologySamples,
+    note: 'Query-worker memory coverage unions runtime terminal samples with native OS final-counter receipts. Forced cancellation keeps runtime evidence explicitly null; native receipts cover those workers only when the collector bound them, so any worker covered by neither source keeps whole-topology memory unqualified. Host RSS remains a separate producer observation; recorder cohort totals are safe sums only from workers sampled together, and recorderMaxWorkerRssBytes is a per-worker maximum. The late refresh recorder worker is included only in its explicitly coexisting topology sample and is reported separately with its own CPU/RSS endpoints.',
+  };
+}
+
+/** Explicit evidence for the late refresh recorder worker. The refresh writer
+ * is created after the main writer cohort's workload and is sampled once in
+ * an explicitly coexisting topology cohort. It is still reported separately
+ * with its own runtime CPU/RSS endpoints instead of being folded into the
+ * plan.hostCount periodic sampler evidence. The native collector binds query workers
+ * only, so no native receipt applies here; runtime stats endpoints are the
+ * applicable coverage source. */
+function buildRecorderRefreshWorkerEvidence({ lifecycleEvents, startStats, finalStats, label }) {
+  const validation = validateTerminalWorkerEvidence(lifecycleEvents);
+  assert.equal(validation.valid, true, `${label} worker lifecycle is invalid: ${validation.errors.join('; ')}`);
+  assert.equal(validation.workers.length, 1, `${label} worker lifecycle must describe exactly one late refresh writer`);
+  const worker = validation.workers[0];
+  const start = requiredWorkerMemorySample({ process: startStats }, `${label} start endpoint`);
+  const final = requiredWorkerMemorySample({ process: finalStats }, `${label} final endpoint`);
+  const toEndpoint = (sample) => ({
+    rssBytes: sample.rssBytes,
+    heapTotalBytes: sample.heapTotalBytes,
+    heapUsedBytes: sample.heapUsedBytes,
+    externalBytes: sample.externalBytes,
+    arrayBuffersBytes: sample.arrayBuffersBytes,
+  });
+  const startCpu = start.cpuUsage;
+  const endCpu = final.cpuUsage;
+  const deltaMicros = sumCpuMicros(endCpu.user - startCpu.user, endCpu.system - startCpu.system, `${label} CPU delta`);
+  assert.ok(deltaMicros >= 0, `${label} CPU counters must not regress between its start and final endpoints`);
+  return {
+    role: 'recorder-refresh',
+    identity: worker.identity,
+    states: worker.states,
+    expectedPhases: ['spawned', 'ready', 'terminal'],
+    lateCohort: true,
+    nativeCollectorBound: false,
+    runtimeMemory: {
+      start: toEndpoint(start),
+      final: toEndpoint(final),
+      maxRssBytes: Math.max(start.rssBytes, final.rssBytes),
+    },
+    cpu: {
+      start: { user: startCpu.user, system: startCpu.system },
+      end: { user: endCpu.user, system: endCpu.system },
+      deltaMicros,
+    },
   };
 }
 
@@ -976,11 +967,12 @@ async function runMixedScenario() {
       delivery.bytes += measurement.bytes;
     },
   }));
-  sampleTopology = async (label) => {
+  sampleTopology = async (label, cohortEntries = hosts.map((host) => ({ host, role: 'recorder' }))) => {
     hostRssPeak = Math.max(hostRssPeak, process.memoryUsage().rss);
-    const stats = await Promise.all(hosts.map((host) => host.workerStats()));
+    const stats = await Promise.all(cohortEntries.map((entry) => pollWorkerTelemetry(entry.host)));
     hostRssPeak = Math.max(hostRssPeak, process.memoryUsage().rss);
-    const workers = stats.map((entry) => ({
+    const workers = stats.map((entry, index) => ({
+      role: cohortEntries[index].role,
       identity: {
         pid: entry.process.workerIdentity.pid,
         spawnedAtMs: entry.process.workerIdentity.spawnedAtMs,
@@ -993,12 +985,18 @@ async function runMixedScenario() {
       arrayBuffersBytes: entry.process.arrayBuffers,
       cpuUsage: entry.process.cpuUsage,
     }));
+    let totalCohortRssBytes = 0;
+    for (const worker of workers) {
+      totalCohortRssBytes = addSafeRssBytes(totalCohortRssBytes, worker.rssBytes, `mixed topology sample ${label} cohort`);
+    }
+    const observedAt = new Date().toISOString();
     topologySamples.push({
       label,
-      observedAt: new Date().toISOString(),
+      observedAt,
       hostProcessRssBytes: hostRssPeak,
       workers,
-      totalWorkerRssBytes: workers.reduce((sum, worker) => sum + worker.rssBytes, 0),
+      totalWorkerRssBytes: totalCohortRssBytes,
+      totalCohortRssBytes,
       maxWorkerRssBytes: Math.max(...workers.map((worker) => worker.rssBytes)),
     });
     return stats;
@@ -1006,7 +1004,7 @@ async function runMixedScenario() {
   await Promise.all(hosts.map((host) => host.start()));
   const initialStats = await sampleTopology('started');
   workerStatsBefore.push(...initialStats);
-  memorySampler = startWorkerMemorySampler(hosts, 'mixed', 1_000, { initialPhase: 'startup' });
+  memorySampler = startWorkerMemorySampler(hosts, 'mixed', MIXED_TOPOLOGY_SAMPLE_INTERVAL_MS, { initialPhase: 'startup', poll: pollWorkerTelemetry });
   scenarioAbortController = new AbortController();
   scenarioAbortController.signal.addEventListener('abort', () => {
     for (const controller of activeSaturationControllers) {
@@ -1232,8 +1230,12 @@ async function runMixedScenario() {
       maxResultBytes: 96 * 1024,
     });
 
-    const refreshWriter = supervisor(database);
+    const refreshRecorderLifecycle = [];
+    const refreshWriter = supervisor(database, {
+      onWorkerLifecycle: (event) => refreshRecorderLifecycle.push(structuredClone(event)),
+    });
     await refreshWriter.start();
+    const refreshWriterStartStats = await pollWorkerTelemetry(refreshWriter);
     const refreshRoot = scopedId('mixed-refresh-root');
     const refreshFactIndex = plan.fixtureRows + 3_000_000;
     const refreshObservationIndex = refreshFactIndex + ((4 - (refreshFactIndex % 4)) % 4);
@@ -1243,13 +1245,27 @@ async function runMixedScenario() {
     refreshWriter.submit(refreshObservation);
     await refreshWriter.flush();
     const afterCommit = await timedQuery('refreshAfterCommit', { type: 'providerSettlements', rootSessionId: refreshRoot });
+    await sampleTopology('late-refresh', [
+      ...hosts.map((host) => ({ host, role: 'recorder' })),
+      { host: refreshWriter, role: 'recorder-refresh' },
+    ]);
     await refreshWriter.deleteSession(refreshRoot, scopedId('mixed-refresh-delete'), 1_780_300_000_000);
     const afterDelete = await timedQuery('refreshAfterDelete', { type: 'providerSettlements', rootSessionId: refreshRoot });
+    const refreshWriterFinalStats = await pollWorkerTelemetry(refreshWriter);
     await shutdownHelper(refreshWriter);
+    const recorderRefreshWorkerEvidence = buildRecorderRefreshWorkerEvidence({
+      lifecycleEvents: refreshRecorderLifecycle,
+      startStats: refreshWriterStartStats?.process,
+      finalStats: refreshWriterFinalStats?.process,
+      label: 'mixed late refresh recorder',
+    });
     const finalStats = await sampleTopology('before-shutdown');
     const recorderWorkerCpuDeltaMicros = finalStats.reduce((total, entry, index) => {
       const before = workerStatsBefore[index].process.cpuUsage;
-      return total + entry.process.cpuUsage.user + entry.process.cpuUsage.system - before.user - before.system;
+      const userDelta = entry.process.cpuUsage.user - before.user;
+      const systemDelta = entry.process.cpuUsage.system - before.system;
+      const delta = sumCpuMicros(userDelta, systemDelta, `mixed recorder worker ${index} CPU`);
+      return addSafeCpuMicros(total, delta, `mixed recorder worker ${index} CPU delta`);
     }, 0);
     const hostProcessCpu = process.cpuUsage(hostProcessCpuBefore);
     try {
@@ -1267,7 +1283,8 @@ async function runMixedScenario() {
     const endingBacklogBytes = hosts.reduce((sum, host) => sum + host.backlog.queuedBytes + host.backlog.inFlightBytes, 0);
     const recorderTerminalEvidencePromise = shutdownHelpers(hosts);
     await recorderTerminalEvidencePromise;
-    const recorderTerminalEvidence = requireTerminalWorkerEvidence(recorderWorkerLifecycle, 'mixed recorder');
+    const recorderTerminalEvidence = requireTerminalWorkerEvidence(recorderWorkerLifecycle, 'mixed recorder')
+      .map((worker) => ({ ...worker, role: 'recorder' }));
     const allQueryWorkerLifecycle = [...queryWorkerLifecycle, ...saturationWorkerLifecycle];
     const queryWorkerLifecycleValidation = validateTerminalWorkerEvidence(allQueryWorkerLifecycle);
     if (!queryWorkerLifecycleValidation.valid) {
@@ -1313,6 +1330,8 @@ async function runMixedScenario() {
       hostRssPeak,
       hostProcessCpu,
       recorderWorkerCpuDeltaMicros,
+      recorderMemoryMaxWorkerRssBytes: recorderMemory?.maxWorkerRssBytes ?? null,
+      recorderRefreshWorkerEvidence,
       topologySamples,
       lifecycleReceipts: queryLifecycleReceipts,
       workerIdentities: queryWorkerIdentities,
@@ -1321,6 +1340,7 @@ async function runMixedScenario() {
     });
     report.results.mixed = {
       mode: smoke ? 'smoke' : 'full',
+      statsPollMode,
       fixtureRows: plan.fixtureRows,
       hostCount: plan.hostCount,
       productionDefaultRecorderHeap: effectiveRecorderHeapCeilingMb === null,
@@ -1382,18 +1402,36 @@ async function runMixedScenario() {
       },
       recorderMemory: {
         ...recorderMemory,
+        statsPollMode,
+        observerRequest: statsPollMode === 'memory-only' ? 'memorySample' : 'stats',
         // The sampler observes a 1-second high-water, so it cannot prove an
         // exact process peak between samples or at process exit.
         peakProven: false,
         sampledHighWaterProven: recorderMemory.peakProven !== false,
         peakMeasurementKind: 'periodic-sampler-high-water',
         qualification: recorderMemory.peakProven === false ? 'unqualified' : 'measured-recorder-sampled-high-water-only',
+        expectedWorkerCount: plan.hostCount,
+        samplingCoverage: {
+          valid: recorderMemory.sampleCount > 0
+            && recorderMemory.workers?.length === plan.hostCount
+            && recorderMemory.workers.every((worker) => worker.sampleCount === recorderMemory.sampleCount),
+          workerCount: plan.hostCount,
+          sampleCount: recorderMemory.sampleCount,
+        },
+        peakQualification: {
+          qualified: false,
+          measurementKind: 'periodic-sampler-high-water',
+          reason: 'A 1-second sampler cannot prove an absolute process peak.',
+        },
       },
       queryHostTopology: queryTopology,
+      recorderRefreshWorker: recorderRefreshWorkerEvidence,
       nativeProcessTelemetry,
       candidateArtifacts: {
         provenanceValid: report.provenance.valid,
         gitHead: report.provenance.gitHead,
+        hostBuildId: report.provenance.hostBuildId,
+        rendererBuildId: report.provenance.rendererBuildId,
         coordinatedBuildId: report.provenance.coordinatedBuildId,
         fingerprint: report.provenance.fingerprint,
         files: report.provenance.files,
@@ -1413,6 +1451,9 @@ async function runMixedScenario() {
     const validation = validateMixedEvidence(report.results.mixed, {
       mode: smoke ? 'smoke' : 'full',
       recorderHeapProbeMb: configuration.recorderHeapProbeMb,
+      statsPollMode,
+      reportConfiguration: report.configuration,
+      expectedProvenance: provenance,
     });
     report.results.mixed.validation = validation;
     if (!validation.valid) throw new Error(`mixed evidence validation failed: ${validation.errors.join('; ')}`);
@@ -1438,17 +1479,27 @@ async function runMixedScenario() {
       recordGate('mixedQueryCancellation', report.results.mixed.querySaturation.completed && report.results.mixed.querySaturation.rejected === plan.saturationQueryCount, 'all saturation queries must reject and settle', (value) => value === true);
       recordGate('mixedCrossHostRefresh', report.results.mixed.nonWritingRefresh.afterCommitVisible && !report.results.mixed.nonWritingRefresh.afterDeleteVisible, 'read-only helper observes commit then delete', (value) => value === true);
       recordGate('mixedDetailReconstruction', report.results.mixed.fullReconstruction.verified, 'full detail payload must reconstruct', (value) => value === true);
-      if (validation.memoryValid) recordGate('mixedWorkerMemory', true, 'continuous recorder and query-worker high-water RSS/CPU telemetry', (value) => value === true);
-      else recordUnqualified('mixedWorkerMemory', validation.memoryErrors.join('; '));
+      if (statsPollMode === 'memory-only') {
+        // A memory-only diagnostic observer changes how telemetry is collected,
+        // not the gate; its receipts must never silently count as production
+        // memory qualification.
+        recordUnqualified('mixedWorkerMemory', `memory-only diagnostic observer mode: sampler high-water is diagnostic evidence and cannot qualify the production memory gate${validation.memoryErrors.length > 0 ? `; memory validation errors: ${validation.memoryErrors.join('; ')}` : ''}`);
+      } else if (validation.memoryValid) {
+        recordGate('mixedWorkerMemory', true, 'continuous recorder and query-worker high-water RSS/CPU telemetry', (value) => value === true);
+      } else {
+        recordUnqualified('mixedWorkerMemory', validation.memoryErrors.join('; '));
+      }
       if (!functional) throw new Error('mixed functional qualification gate failed');
       report.qualification = {
         scenario: 'mixed',
         decision: 'scenario-passed',
         failedGates: [],
         overallP0: 'unqualified',
-        reason: configuration.recorderHeapProbeMb === undefined
-          ? 'Mixed workload evidence is separate from the remaining P0, agent/UI and whole-topology memory gates.'
-          : 'Mixed heap probe passed its workload gates, but probe evidence is qualification-only and overall P0 remains unqualified.',
+        reason: statsPollMode === 'memory-only'
+          ? 'Mixed workload evidence was collected with the memory-only diagnostic observer mode; its memory telemetry is diagnostic-only and does not qualify production memory gates.'
+          : configuration.recorderHeapProbeMb === undefined
+            ? 'Mixed workload evidence is separate from the remaining P0, agent/UI and whole-topology memory gates.'
+            : 'Mixed heap probe passed its workload gates, but probe evidence is qualification-only and overall P0 remains unqualified.',
       };
     }
     report.status = 'passed';
@@ -2050,6 +2101,7 @@ const report = {
       mixedProjectionWindowEndMs: configuration.mixedUtcDay.endMs,
     }),
     ...((configuration.scenario === 'endurance' || configuration.scenario === 'mixed') ? { mode: configuration.smoke ? 'smoke' : 'full' } : {}),
+    ...(configuration.scenario === 'mixed' ? { statsPollMode: configuration.statsPollMode } : {}),
     ...(configuration.recorderHeapProbeMb === undefined ? {} : {
       recorderHeapProbeMb: configuration.recorderHeapProbeMb,
       recorderHeapMode: 'qualification-only-probe',
@@ -2591,7 +2643,10 @@ try {
       externalBytes: entry.process.external,
       arrayBuffersBytes: entry.process.arrayBuffers,
     }));
-    const totalWorkerRssBytes = workers.reduce((sum, worker) => sum + worker.rssBytes, 0);
+    const totalWorkerRssBytes = workers.reduce(
+      (sum, worker) => addSafeRssBytes(sum, worker.rssBytes, `baseline topology sample ${label} worker cohort`),
+      0,
+    );
     const maxWorkerRssBytes = Math.max(...workers.map((worker) => worker.rssBytes));
     topologySamples.push({
       label,
@@ -2601,7 +2656,7 @@ try {
       workers,
       totalWorkerRssBytes,
       maxWorkerRssBytes,
-      totalTopologyRssBytes: producerRssPeak + totalWorkerRssBytes,
+      totalTopologyRssBytes: addSafeRssBytes(producerRssPeak, totalWorkerRssBytes, `baseline topology sample ${label} producer plus worker topology`),
     });
     return stats;
   };
@@ -2643,14 +2698,17 @@ try {
     label: 'standalone Node event-loop delay; not a live VS Code UI claim',
     intervalMs: 10,
     lag: summarize(eventLoopLagMs),
-    producerCpuOneCorePercent: ((producerCpu.user + producerCpu.system) / (activeElapsedMs * 1_000)) * 100,
+    producerCpuOneCorePercent: (sumCpuMicros(producerCpu.user, producerCpu.system, 'baseline producer CPU') / (activeElapsedMs * 1_000)) * 100,
   };
   report.results.memory = {
     producerRssBefore,
     producerRssPeak,
     producerRssGrowthBytes: producerRssPeak - producerRssBefore,
     workerRssBytes: workerStats.map((entry) => entry.process.rss),
-    totalWorkerRssBytes: workerStats.reduce((sum, entry) => sum + entry.process.rss, 0),
+    totalWorkerRssBytes: workerStats.reduce(
+      (sum, entry) => addSafeRssBytes(sum, entry.process.rss, 'baseline final worker RSS'),
+      0,
+    ),
     maxWorkerRssBytes: Math.max(...topologySamples.flatMap((sample) => sample.workers.map((worker) => worker.rssBytes))),
     totalTopologyRssBytes: Math.max(...topologySamples.map((sample) => sample.totalTopologyRssBytes)),
     topologySamples,

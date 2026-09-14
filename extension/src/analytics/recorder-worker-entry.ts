@@ -42,6 +42,9 @@ type RecorderWorkerRequest = {
 } | {
   type: 'flush' | 'stats' | 'shutdown';
   requestId: number;
+} | {
+  type: 'memorySample';
+  requestId: number;
 };
 
 interface SerializedObservationEnvelope {
@@ -257,6 +260,19 @@ async function handle(raw: unknown): Promise<void> {
           detailStorage: recorder.detailStorageStats(),
           delivery: recorder.readDeliveryAccounting(),
           startupPrivacyRecovery,
+        });
+        return;
+      case 'memorySample':
+        // Distinct read-only diagnostic seam: process-level memory/CPU and the
+        // already-owned worker identity, with no recorder access, no SQL
+        // aggregate, and no GC/heap interference. The general 'stats' reply
+        // above is unchanged for every existing caller.
+        await acknowledge(request.requestId, {
+          process: {
+            ...process.memoryUsage(),
+            cpuUsage: process.cpuUsage(),
+            workerIdentity,
+          },
         });
         return;
       case 'shutdown':

@@ -28,6 +28,7 @@ const workerScript = fileURLToPath(new URL('./fixtures/recorder-supervisor-worke
 const lifecycleWorkerScript = fileURLToPath(new URL('./fixtures/recorder-supervisor-lifecycle-worker.cjs', import.meta.url));
 const sqliteWorkerScript = fileURLToPath(new URL('./fixtures/production-recorder-worker.mjs', import.meta.url));
 const sqliteWorkerExecArgv = [`--import=${new URL('../../node_modules/tsx/dist/loader.mjs', import.meta.url).href}`];
+const memorySpyWorkerScript = fileURLToPath(new URL('./fixtures/recorder-memory-spy-worker.mjs', import.meta.url));
 const { DatabaseSync } = createRequire(process.execPath)('node:sqlite') as {
   DatabaseSync: new (location: string, options?: { timeout?: number }) => {
     exec(sql: string): void;
@@ -851,6 +852,89 @@ test('a control timeout reports why the worker was killed, not a bare SIGTERM', 
   } finally {
     await supervisor.shutdown().catch(() => {});
     if (supervisor.workerPid) process.kill(supervisor.workerPid, 'SIGKILL');
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('memorySample is a read-only diagnostic seam and leaves the general stats reply unchanged', { timeout: 60_000 }, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'pie-recorder-memory-spy-'));
+  const databasePath = path.join(root, 'analytics.sqlite');
+  const spyPath = `${databasePath}.memory-spy-counts.json`;
+  const supervisor = new AnalyticsRecorderSupervisor({
+    enabled: true,
+    workerScript: memorySpyWorkerScript,
+    databasePath,
+    startupTimeoutMs: 10_000,
+    shutdownTimeoutMs: 10_000,
+    execArgv: sqliteWorkerExecArgv,
+    maxAutomaticRestarts: 0,
+  });
+  try {
+    await supervisor.start();
+    const before = JSON.parse(readFileSync(spyPath, 'utf8')) as Record<string, number>;
+    const sample = await supervisor.workerMemorySample();
+    assert.ok(sample, 'memorySample must return a validated sample');
+    for (const field of ['rss', 'heapTotal', 'heapUsed', 'external', 'arrayBuffers'] as const) {
+      assert.ok(Number.isSafeInteger(sample.process[field]) && sample.process[field] >= 0, `${field} must be a non-negative integer`);
+    }
+    const afterSample = JSON.parse(readFileSync(spyPath, 'utf8')) as Record<string, number>;
+    assert.equal(afterSample.detailStorageStats, before.detailStorageStats, 'memorySample must not call detailStorageStats');
+    assert.equal(afterSample.readDeliveryAccounting, before.readDeliveryAccounting, 'memorySample must not call readDeliveryAccounting');
+    assert.equal(afterSample.getStats, before.getStats, 'memorySample must not call getStats');
+
+    const stats = await supervisor.workerStats();
+    assert.ok(stats, 'the general stats reply must be unchanged');
+    assert.ok(stats.recorder && stats.detailStorage && stats.delivery && stats.startupPrivacyRecovery, 'general stats still carries recorder, detailStorage, delivery and recovery fields');
+    assert.deepEqual(sample.process.workerIdentity, stats.process.workerIdentity, 'both requests must attribute to the same owned worker identity');
+    const afterStats = JSON.parse(readFileSync(spyPath, 'utf8')) as Record<string, number>;
+    assert.equal(afterStats.getStats, afterSample.getStats + 1, 'general stats still reads recorder stats');
+    assert.equal(afterStats.detailStorageStats, afterSample.detailStorageStats + 2, 'general stats still performs the doubled detailStorage aggregates (direct + delivery accounting)');
+    assert.equal(afterStats.readDeliveryAccounting, afterSample.readDeliveryAccounting + 1);
+  } finally {
+    await supervisor.shutdown().catch(() => {});
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('workerMemorySample rejects malformed and mis-attributed replies instead of zeros', { timeout: 20_000 }, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'pie-recorder-memory-sample-invalid-'));
+  const runSupervisor = (databaseFile: string) => new AnalyticsRecorderSupervisor({
+    enabled: true,
+    workerScript,
+    databasePath: path.join(root, databaseFile),
+    startupTimeoutMs: 10_000,
+    shutdownTimeoutMs: 10_000,
+    maxAutomaticRestarts: 0,
+  });
+  try {
+    process.env.PIE_TEST_MEMORY_SAMPLE_RECEIPT = 'valid';
+    const validSupervisor = runSupervisor('valid.log');
+    try {
+      await validSupervisor.start();
+      const sample = await validSupervisor.workerMemorySample();
+      assert.equal(sample?.process.rss, 1, 'a well-formed receipt must pass through as-is, never zero-filled');
+      assert.ok(Number.isSafeInteger(sample?.process.workerIdentity.pid));
+    } finally {
+      await validSupervisor.shutdown().catch(() => {});
+    }
+    process.env.PIE_TEST_MEMORY_SAMPLE_RECEIPT = 'malformed';
+    const malformedSupervisor = runSupervisor('malformed.log');
+    try {
+      await malformedSupervisor.start();
+      await assert.rejects(() => malformedSupervisor.workerMemorySample(), /memory sample is malformed/u);
+    } finally {
+      await malformedSupervisor.shutdown().catch(() => {});
+    }
+    process.env.PIE_TEST_MEMORY_SAMPLE_RECEIPT = 'identity-mismatch';
+    const forgedSupervisor = runSupervisor('forged.log');
+    try {
+      await forgedSupervisor.start();
+      await assert.rejects(() => forgedSupervisor.workerMemorySample(), /identity does not match the owned worker/u);
+    } finally {
+      await forgedSupervisor.shutdown().catch(() => {});
+    }
+  } finally {
+    delete process.env.PIE_TEST_MEMORY_SAMPLE_RECEIPT;
     rmSync(root, { recursive: true, force: true });
   }
 });

@@ -8,9 +8,12 @@ const COLLECTOR_VERSION = 'windows-process-handle-collector-r02';
 const IDENTITY_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const DEFAULT_MAX_REQUESTS = 256;
 const DEFAULT_MAX_ACTIVE_HANDLES = 64;
+const MAX_ACTIVE_HANDLES = 256;
 const DEFAULT_MAX_DURATION_MS = 900_000;
 const DEFAULT_READY_TIMEOUT_MS = 5_000;
 const DEFAULT_STOP_TIMEOUT_MS = 5_000;
+const MAX_IMAGE_PATH_LENGTH = 32 * 1024;
+const MAX_UINT64 = 18_446_744_073_709_551_615n;
 const scriptPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'windows-process-handle-collector.ps1');
 
 function isSafePositiveInteger(value) {
@@ -48,11 +51,28 @@ function clone(value) {
   return value === undefined ? undefined : structuredClone(value);
 }
 
+function positiveDecimalString(value) {
+  if (typeof value !== 'string' || !/^[1-9][0-9]*$/u.test(value)) return false;
+  try {
+    return BigInt(value) <= MAX_UINT64;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeImagePath(value) {
+  if (typeof value !== 'string' || value.length === 0 || value.length > MAX_IMAGE_PATH_LENGTH) return null;
+  const normalized = path.win32.normalize(value.replace(/\//gu, '\\'));
+  return normalized.length > 0 && normalized.length <= MAX_IMAGE_PATH_LENGTH
+    ? normalized.toLocaleLowerCase('en-US')
+    : null;
+}
+
 /** Validate one collector receipt against the query worker identity that
  * produced its lifecycle terminal event. This is deliberately independent of
  * the collector process so reports cannot turn malformed native output into a
  * memory qualification. */
-export function validateWindowsProcessReceipt(receipt, expectedIdentity) {
+export function validateWindowsProcessReceipt(receipt, expectedIdentity, expectedImagePath) {
   const errors = [];
   if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) {
     return { valid: false, errors: ['collector receipt is missing or not an object'] };
@@ -75,8 +95,8 @@ export function validateWindowsProcessReceipt(receipt, expectedIdentity) {
       || receipt.cpu.units !== 'microseconds') {
       errors.push('collector final CPU counters are invalid');
     }
-    if (!receipt.final || typeof receipt.final.exitTime100ns !== 'string' || !/^\d+$/u.test(receipt.final.exitTime100ns)) {
-      errors.push('collector final exit identity is missing');
+    if (!receipt.final || !positiveDecimalString(receipt.final.exitTime100ns)) {
+      errors.push('collector final exit identity is missing or non-positive');
     }
     if (receipt.handleClosed !== true) errors.push('collector did not prove handle closure');
     // One-shot query workers can terminate between fork and registration. A
@@ -92,22 +112,43 @@ export function validateWindowsProcessReceipt(receipt, expectedIdentity) {
       if (receipt.final.handleRetainedThroughExit !== true || receipt.handleRetainedThroughExit !== true) {
         errors.push('collector did not retain the handle through exit');
       }
-      if (typeof receipt.registration?.imagePath !== 'string' || receipt.registration.imagePath.length === 0) {
-        errors.push('collector registration identity binding is incomplete');
-      }
     } else if (receipt.final?.observationKind === 'post-exit-object') {
       if (receipt.final.handleRetainedThroughExit !== false || receipt.handleRetainedThroughExit !== false) {
         errors.push('post-exit collector receipts cannot claim handle retention through exit');
       }
-      const imagePath = receipt.registration?.imagePath;
-      if (imagePath !== null && (typeof imagePath !== 'string' || imagePath.length === 0)) {
-        errors.push('collector post-exit registration image must be null or a resolved image path');
-      }
     }
-    if (!receipt.registration || receipt.registration.creationWindowMatch !== true
-      || typeof receipt.registration.creationTime100ns !== 'string'
-      || !/^\d+$/u.test(receipt.registration.creationTime100ns)) {
+    const registration = receipt.registration;
+    if (!registration || registration.creationWindowMatch !== true
+      || !positiveDecimalString(registration.creationTime100ns)) {
       errors.push('collector registration identity binding is incomplete');
+    }
+    const imagePath = registration?.imagePath;
+    const imagePathNormalized = registration?.imagePathNormalized;
+    if (normalizeImagePath(imagePath) === null
+      || normalizeImagePath(imagePathNormalized) === null
+      || normalizeImagePath(imagePath) !== normalizeImagePath(imagePathNormalized)
+      || registration?.imagePathSource !== 'owned-handle'
+      || registration?.imagePathMatch !== true
+      || registration?.imagePathProof !== 'owned-handle-normalized-match') {
+      errors.push('collector registration image proof is missing or not an owned-handle normalized match');
+    }
+    const expectedNormalizedImagePath = normalizeImagePath(expectedImagePath);
+    if (expectedImagePath !== undefined && expectedNormalizedImagePath === null) {
+      errors.push('collector expected image path is invalid');
+    } else if (expectedNormalizedImagePath !== null
+      && normalizeImagePath(imagePath) !== expectedNormalizedImagePath) {
+      errors.push('collector registration image proof does not match the configured image');
+    }
+    const concurrency = receipt.concurrency;
+    if (!concurrency || !isSafeNonNegativeInteger(concurrency.activeHandlesAtReceipt)
+      || !isSafeNonNegativeInteger(concurrency.peakActiveHandles)
+      || !isSafePositiveInteger(concurrency.configuredMinActiveHandles)
+      || concurrency.activeHandlesAtReceipt > MAX_ACTIVE_HANDLES
+      || concurrency.peakActiveHandles > MAX_ACTIVE_HANDLES
+      || concurrency.configuredMinActiveHandles > MAX_ACTIVE_HANDLES
+      || concurrency.activeHandlesAtReceipt > concurrency.peakActiveHandles
+      || concurrency.peakActiveHandles < concurrency.configuredMinActiveHandles) {
+      errors.push('collector terminal concurrency evidence is missing, inconsistent, or below its configured minimum');
     }
   } else {
     if (typeof receipt.reason !== 'string' || receipt.reason.length === 0) errors.push('unavailable collector receipt has no reason');
@@ -136,6 +177,28 @@ export function validateWindowsProcessEvidence(evidence, expectedIdentities) {
     || !isSafeNonNegativeInteger(evidence.overhead?.protocolWrites)) {
     errors.push('native collector overhead disclosure is incomplete');
   }
+  if (!Array.isArray(evidence.protocolErrors)) {
+    errors.push('native collector protocol errors are missing');
+  } else {
+    for (const [index, protocolError] of evidence.protocolErrors.entries()) {
+      if (typeof protocolError !== 'string' || protocolError.length === 0 || protocolError.length > 256) {
+        errors.push(`native collector protocol error[${index}] is malformed`);
+      }
+    }
+    if (evidence.protocolErrors.length > 0) errors.push('native collector reported protocol errors');
+  }
+  if (evidence.enabled === true && normalizeImagePath(evidence.expectedImagePath) === null) {
+    errors.push('enabled native collector expected image path is missing or invalid');
+  }
+  if (evidence.enabled === true && (!isSafePositiveInteger(evidence.configuredMinActiveHandles)
+    || !isSafeNonNegativeInteger(evidence.actualActiveHandles)
+    || !isSafeNonNegativeInteger(evidence.actualPeakActiveHandles)
+    || evidence.actualActiveHandles > MAX_ACTIVE_HANDLES
+    || evidence.actualPeakActiveHandles > MAX_ACTIVE_HANDLES
+    || evidence.configuredMinActiveHandles > MAX_ACTIVE_HANDLES
+    || evidence.actualActiveHandles > evidence.actualPeakActiveHandles)) {
+    errors.push('enabled native collector concurrency evidence is missing or inconsistent');
+  }
   if (!Array.isArray(evidence.rejections)) errors.push('native collector rejection records are missing');
   else {
     for (const [index, rejection] of evidence.rejections.entries()) {
@@ -162,7 +225,11 @@ export function validateWindowsProcessEvidence(evidence, expectedIdentities) {
     const key = validIdentity(identity) ? identityKey(identity) : `invalid:${index}`;
     if (seen.has(key)) errors.push(`native process receipt is duplicated: ${key}`);
     seen.add(key);
-    const validation = validateWindowsProcessReceipt(receipt, expected.get(key));
+    const validation = validateWindowsProcessReceipt(
+      receipt,
+      expected.get(key),
+      evidence.enabled === true ? evidence.expectedImagePath : undefined,
+    );
     if (!validation.valid) errors.push(...validation.errors.map((error) => `receipt[${index}]: ${error}`));
   }
   for (const key of expected.keys()) {
@@ -262,12 +329,14 @@ function boundedOption(value, fallback, minimum, maximum, name) {
  * returned callbacks only enqueue bounded NDJSON writes and never participate
  * in query completion or admission. */
 export async function startWindowsProcessHandleCollector(options = {}) {
-  if (process.platform !== 'win32') return createDisabledCollector('unsupported-platform');
-  if (!existsSync(scriptPath)) return createDisabledCollector('collector-script-missing');
   const maxRequests = boundedOption(options.maxRequests, DEFAULT_MAX_REQUESTS, 1, 10_000, 'maxRequests');
-  const maxActiveHandles = boundedOption(options.maxActiveHandles, DEFAULT_MAX_ACTIVE_HANDLES, 1, 256, 'maxActiveHandles');
+  const maxActiveHandles = boundedOption(options.maxActiveHandles, DEFAULT_MAX_ACTIVE_HANDLES, 1, MAX_ACTIVE_HANDLES, 'maxActiveHandles');
+  const minActiveHandles = boundedOption(options.minActiveHandles, 1, 1, MAX_ACTIVE_HANDLES, 'minActiveHandles');
+  if (minActiveHandles > maxActiveHandles) throw new Error('minActiveHandles must be no greater than maxActiveHandles');
   const maxDurationMs = boundedOption(options.maxDurationMs, DEFAULT_MAX_DURATION_MS, 1_000, 1_800_000, 'maxDurationMs');
   const readyTimeoutMs = boundedOption(options.readyTimeoutMs, DEFAULT_READY_TIMEOUT_MS, 500, 30_000, 'readyTimeoutMs');
+  if (process.platform !== 'win32') return createDisabledCollector('unsupported-platform');
+  if (!existsSync(scriptPath)) return createDisabledCollector('collector-script-missing');
   const stopTimeoutMs = boundedOption(options.stopTimeoutMs, DEFAULT_STOP_TIMEOUT_MS, 500, 30_000, 'stopTimeoutMs');
   const expectedImagePath = path.resolve(options.expectedImagePath ?? process.execPath);
   const child = spawn('powershell.exe', [
@@ -277,6 +346,7 @@ export async function startWindowsProcessHandleCollector(options = {}) {
     '-ExpectedImagePath', expectedImagePath,
     '-MaxRequests', String(maxRequests),
     '-MaxActiveHandles', String(maxActiveHandles),
+    '-MinActiveHandles', String(minActiveHandles),
     '-MaxDurationMs', String(maxDurationMs),
   ], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
   const receipts = [];
@@ -291,6 +361,20 @@ export async function startWindowsProcessHandleCollector(options = {}) {
   let inputWrites = 0;
   let inputBackpressure = false;
   let childClosed = false;
+  let actualActiveHandles = 0;
+  let actualPeakActiveHandles = 0;
+  const observeConcurrency = (message) => {
+    const concurrency = message?.concurrency ?? message;
+    const active = concurrency?.activeHandlesAtReceipt ?? concurrency?.activeHandles;
+    const peak = concurrency?.peakActiveHandles;
+    if (active === undefined && peak === undefined) return;
+    if (!isSafeNonNegativeInteger(active) || !isSafeNonNegativeInteger(peak) || active > peak) {
+      protocolErrors.push('collector concurrency evidence is malformed');
+      return;
+    }
+    actualActiveHandles = active;
+    actualPeakActiveHandles = Math.max(actualPeakActiveHandles, peak);
+  };
   const reader = createInterface({ input: child.stdout });
   let readyResolve;
   const readyPromise = new Promise((resolve) => { readyResolve = resolve; });
@@ -313,11 +397,18 @@ export async function startWindowsProcessHandleCollector(options = {}) {
       return;
     }
     if (message?.type === 'ready') {
+      observeConcurrency(message);
       status = 'ready';
       readyResolve(true);
       return;
     }
+    if (message?.type === 'registered') {
+      observeConcurrency(message);
+      return;
+    }
     if (message?.type === 'receipt') {
+      observeConcurrency(message);
+
       const key = typeof message.requestKey === 'string' ? message.requestKey : '';
       const existing = key ? receipts.find((entry) => entry.requestKey === key) : undefined;
       if (existing) {
@@ -334,6 +425,7 @@ export async function startWindowsProcessHandleCollector(options = {}) {
       return;
     }
     if (message?.type === 'closed') {
+      observeConcurrency(message);
       closed.add(message.requestKey);
       const receipt = receipts.find((entry) => entry.requestKey === message.requestKey);
       if (receipt) receipt.handleClosed = message.handleCloseOk === true;
@@ -348,6 +440,7 @@ export async function startWindowsProcessHandleCollector(options = {}) {
       return;
     }
     if (message?.type === 'stopped') {
+      observeConcurrency(message);
       status = typeof message.reason === 'string' ? `stopped-${message.reason}` : 'stopped';
     }
   });
@@ -451,7 +544,11 @@ export async function startWindowsProcessHandleCollector(options = {}) {
     expectedImagePath,
     maxRequests,
     maxActiveHandles,
+    minActiveHandles,
+    configuredMinActiveHandles: minActiveHandles,
     maxDurationMs,
+    actualActiveHandles,
+    actualPeakActiveHandles,
     inputWrites,
     inputBytes,
     inputBackpressure,
@@ -488,7 +585,19 @@ export async function startWindowsProcessHandleCollector(options = {}) {
     reader.close();
     return snapshot();
   };
-  return { enabled: ready === true, platform: process.platform, status, receipts, protocolErrors, registerWorker, recordTerminal, snapshot, stop };
+  return {
+    enabled: ready === true,
+    platform: process.platform,
+    status,
+    receipts,
+    protocolErrors,
+    minActiveHandles,
+    maxActiveHandles,
+    registerWorker,
+    recordTerminal,
+    snapshot,
+    stop,
+  };
 }
 
 export { COLLECTOR_VERSION };

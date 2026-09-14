@@ -3,6 +3,7 @@ param(
     [string]$ExpectedImagePath,
     [int]$MaxRequests = 256,
     [int]$MaxActiveHandles = 64,
+    [int]$MinActiveHandles = 1,
     [int]$MaxDurationMs = 900000
 )
 
@@ -180,6 +181,15 @@ function Write-UnavailableReceipt {
             creationTimeUnixMs = $Registration.creationTimeUnixMs
             creationWindowMatch = $Registration.creationWindowMatch
             imagePath = $Registration.imagePath
+            imagePathNormalized = $Registration.imagePathNormalized
+            imagePathSource = $Registration.imagePathSource
+            imagePathMatch = $Registration.imagePathMatch
+            imagePathProof = if ($Registration.imagePathMatch) { 'owned-handle-normalized-match' } else { $null }
+        }
+        concurrency = [ordered]@{
+            activeHandlesAtReceipt = if ($Registration.activeHandlesAtReceipt -gt 0) { [int]$Registration.activeHandlesAtReceipt } elseif ($null -ne $registrations) { [int]$registrations.Count } else { 0 }
+            peakActiveHandles = [int]$peakActiveHandles
+            configuredMinActiveHandles = [int]$MinActiveHandles
         }
         handleRetainedThroughExit = $HandleRetainedThroughExit
         handleClosed = $false
@@ -192,6 +202,19 @@ function Write-UnavailableReceipt {
 function Convert-FileTimeToUnixMilliseconds {
     param([Parameter(Mandatory = $true)][UInt64]$FileTime100ns)
     return ([double]$FileTime100ns / 10000.0) - 11644473600000.0
+}
+
+function Normalize-ImagePath {
+    param([string]$Value)
+    if ($null -eq $Value -or $Value.Length -eq 0 -or $Value.Length -gt 32768) { return $null }
+    try {
+        $normalized = [IO.Path]::GetFullPath($Value).Replace('/', '\')
+    } catch {
+        return $null
+    }
+    if ($normalized.Length -gt 32768) { return $null }
+    if ($normalized.Length -gt 3) { $normalized = $normalized.TrimEnd('\') }
+    return $normalized
 }
 
 function Test-StringBounded {
@@ -244,6 +267,10 @@ function New-Registration {
         creationTimeUnixMs = $null
         creationWindowMatch = $false
         imagePath = $null
+        imagePathNormalized = $null
+        imagePathSource = $null
+        imagePathMatch = $false
+        activeHandlesAtReceipt = 0
         handle = [IntPtr]::Zero
     }
 }
@@ -263,19 +290,28 @@ function Complete-Registration {
         $snapshot = $null
         for ($attempt = 0; $attempt -lt 6; $attempt += 1) {
             $snapshot = [PieWindowsProcessHandleCollectorR01]::Read($handle)
-            if ($snapshot.TimesOk -and $snapshot.ExitTime100ns -ne [UInt64]0) { break }
+            if ($snapshot.TimesOk -and $snapshot.ExitTime100ns -gt [UInt64]0) { break }
             Start-Sleep -Milliseconds 50
         }
         if (-not $snapshot.TimesOk) {
             Write-UnavailableReceipt $Registration 'final-process-times-unavailable' 0 $snapshot.TimesError $false
             return
         }
-        if ($snapshot.ExitTime100ns -eq [UInt64]0) {
-            Write-UnavailableReceipt $Registration 'terminal-process-not-exited' 0 0 $false
+        if ($snapshot.ExitTime100ns -le [UInt64]0) {
+            Write-UnavailableReceipt $Registration 'terminal-process-not-exited-or-zero-exit-time' 0 0 $false
             return
         }
-        if (-not $snapshot.MemoryOk) {
-            Write-UnavailableReceipt $Registration 'final-memory-unavailable' $snapshot.MemoryError 0 $false
+        if (-not $Registration.imagePathMatch) {
+            Write-UnavailableReceipt $Registration 'terminal-image-proof-unavailable' 0 0 $false
+            return
+        }
+        if ($peakActiveHandles -lt $MinActiveHandles) {
+            Write-UnavailableReceipt $Registration 'minimum-active-handle-concurrency-not-reached' 0 0 $false
+            return
+        }
+        if (-not $snapshot.MemoryOk -or [UInt64]$snapshot.PeakWorkingSetBytes -le [UInt64]0) {
+            $memoryReason = if ($snapshot.MemoryOk) { 'final-memory-zeroed' } else { 'final-memory-unavailable' }
+            Write-UnavailableReceipt $Registration $memoryReason $snapshot.MemoryError 0 $false
             return
         }
         $receipt = [ordered]@{
@@ -307,6 +343,15 @@ function Complete-Registration {
                 creationTimeUnixMs = $Registration.creationTimeUnixMs
                 creationWindowMatch = $Registration.creationWindowMatch
                 imagePath = $Registration.imagePath
+                imagePathNormalized = $Registration.imagePathNormalized
+                imagePathSource = $Registration.imagePathSource
+                imagePathMatch = $Registration.imagePathMatch
+                imagePathProof = 'owned-handle-normalized-match'
+            }
+            concurrency = [ordered]@{
+                activeHandlesAtReceipt = [int]$Registration.activeHandlesAtReceipt
+                peakActiveHandles = [int]$peakActiveHandles
+                configuredMinActiveHandles = [int]$MinActiveHandles
             }
             final = [ordered]@{
                 exitTime100ns = ([string]$snapshot.ExitTime100ns)
@@ -330,18 +375,25 @@ function Complete-Registration {
             type = 'closed'
             requestKey = $Registration.requestKey
             handleCloseOk = [bool]$closed
+            activeHandles = if ($null -ne $Registrations) { [int]$Registrations.Count } else { 0 }
+            peakActiveHandles = [int]$peakActiveHandles
+            configuredMinActiveHandles = [int]$MinActiveHandles
         })
     }
 }
 
 if ($MaxRequests -lt 1 -or $MaxRequests -gt 10000) { throw 'MaxRequests must be between 1 and 10000' }
 if ($MaxActiveHandles -lt 1 -or $MaxActiveHandles -gt 256) { throw 'MaxActiveHandles must be between 1 and 256' }
+if ($MinActiveHandles -lt 1 -or $MinActiveHandles -gt 256 -or $MinActiveHandles -gt $MaxActiveHandles) { throw 'MinActiveHandles must be between 1 and MaxActiveHandles' }
 if ($MaxDurationMs -lt 1000 -or $MaxDurationMs -gt 1800000) { throw 'MaxDurationMs must be between 1000 and 1800000' }
 $ExpectedImagePath = [IO.Path]::GetFullPath($ExpectedImagePath)
+$ExpectedImagePathNormalized = Normalize-ImagePath $ExpectedImagePath
+if ($null -eq $ExpectedImagePathNormalized) { throw 'ExpectedImagePath is invalid' }
 Add-Type -TypeDefinition $collectorType -ErrorAction Stop
 
 $registrations = @{}
 $requestCount = 0
+$peakActiveHandles = 0
 $finalizedKeys = @{}
 $startedAt = [DateTime]::UtcNow
 $deadline = $startedAt.AddMilliseconds($MaxDurationMs)
@@ -352,6 +404,9 @@ Write-CollectorEvent ([ordered]@{
     expectedImagePath = $ExpectedImagePath
     maxRequests = $MaxRequests
     maxActiveHandles = $MaxActiveHandles
+    configuredMinActiveHandles = $MinActiveHandles
+    activeHandles = 0
+    peakActiveHandles = $peakActiveHandles
     maxDurationMs = $MaxDurationMs
     startedAtMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 })
@@ -365,7 +420,7 @@ try {
                 $registration.handle = [IntPtr]::Zero
             }
             $registrations.Clear()
-            Write-CollectorEvent ([ordered]@{ type = 'stopped'; reason = 'duration-expired'; requestCount = $requestCount; activeHandles = 0 })
+            Write-CollectorEvent ([ordered]@{ type = 'stopped'; reason = 'duration-expired'; requestCount = $requestCount; activeHandles = 0; peakActiveHandles = $peakActiveHandles; configuredMinActiveHandles = $MinActiveHandles })
             break
         }
         $readTask = [Console]::In.ReadLineAsync()
@@ -379,7 +434,7 @@ try {
                 $registration.handle = [IntPtr]::Zero
             }
             $registrations.Clear()
-            Write-CollectorEvent ([ordered]@{ type = 'stopped'; reason = 'duration-expired'; requestCount = $requestCount; activeHandles = 0 })
+            Write-CollectorEvent ([ordered]@{ type = 'stopped'; reason = 'duration-expired'; requestCount = $requestCount; activeHandles = 0; peakActiveHandles = $peakActiveHandles; configuredMinActiveHandles = $MinActiveHandles })
             break
         }
         $line = $readTask.Result
@@ -390,7 +445,7 @@ try {
                 $registration.handle = [IntPtr]::Zero
             }
             $registrations.Clear()
-            Write-CollectorEvent ([ordered]@{ type = 'stopped'; reason = 'input-closed'; requestCount = $requestCount; activeHandles = 0 })
+            Write-CollectorEvent ([ordered]@{ type = 'stopped'; reason = 'input-closed'; requestCount = $requestCount; activeHandles = 0; peakActiveHandles = $peakActiveHandles; configuredMinActiveHandles = $MinActiveHandles })
             break
         }
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
@@ -408,7 +463,7 @@ try {
             }
             $registrations.Clear()
             $shutdown = $true
-            Write-CollectorEvent ([ordered]@{ type = 'stopped'; reason = 'requested'; requestCount = $requestCount; activeHandles = 0 })
+            Write-CollectorEvent ([ordered]@{ type = 'stopped'; reason = 'requested'; requestCount = $requestCount; activeHandles = 0; peakActiveHandles = $peakActiveHandles; configuredMinActiveHandles = $MinActiveHandles })
             continue
         }
         if ($message.type -eq 'register') {
@@ -440,6 +495,8 @@ try {
                 continue
             }
             $registration.handle = $handle
+            $registration.activeHandlesAtReceipt = [int]$registrations.Count + 1
+            $peakActiveHandles = [math]::Max($peakActiveHandles, $registration.activeHandlesAtReceipt)
             $handlePid = [PieWindowsProcessHandleCollectorR01]::ProcessId($handle)
             if ($handlePid -ne [uint32]$registration.identity.pid) {
                 Write-UnavailableReceipt $registration 'identity-pid-mismatch' 0 0 $false
@@ -469,15 +526,24 @@ try {
                 continue
             }
             $imagePath = [PieWindowsProcessHandleCollectorR01]::ImagePath($handle)
-            if ($snapshot.ExitTime100ns -ne [UInt64]0) {
-                # The worker terminated before this registration could bind a
-                # live handle. With the creation window matched and the handle
-                # open on the still-referenced process object, the kernel's
-                # final CPU counters remain readable, but this Windows build
-                # zeroes the working-set counters once the address space is
-                # torn down. Only a non-zero final peak is real memory
-                # evidence; a zeroed counter stays honestly unavailable.
-                if ($snapshot.MemoryOk -and [UInt64]$snapshot.PeakWorkingSetSize -gt [UInt64]0) {
+            $registration.imagePath = if ($imagePath.Length -gt 0) { $imagePath } else { $null }
+            $registration.imagePathNormalized = Normalize-ImagePath $registration.imagePath
+            $registration.imagePathSource = if ($null -ne $registration.imagePathNormalized) { 'owned-handle' } else { $null }
+            $registration.imagePathMatch = $null -ne $registration.imagePathNormalized -and [StringComparer]::OrdinalIgnoreCase.Equals($registration.imagePathNormalized, $ExpectedImagePathNormalized)
+            if ($snapshot.ExitTime100ns -gt [UInt64]0) {
+                # A post-exit receipt is valid only when this still-open,
+                # harness-owned handle supplies both a positive final exit time
+                # and a normalized image path matching the configured worker.
+                # Never copy the caller's expected path into missing proof.
+                if (-not $registration.imagePathMatch) {
+                    $imageReason = if ($null -eq $registration.imagePathNormalized) { 'post-exit-image-proof-unavailable' } else { 'post-exit-image-mismatch' }
+                    Write-UnavailableReceipt $registration $imageReason 0 0 $false
+                } elseif ($peakActiveHandles -lt $MinActiveHandles) {
+                    Write-UnavailableReceipt $registration 'minimum-active-handle-concurrency-not-reached' 0 0 $false
+                } elseif (-not $snapshot.MemoryOk -or [UInt64]$snapshot.PeakWorkingSetBytes -le [UInt64]0) {
+                    $zeroedReason = if ($snapshot.MemoryOk) { 'post-exit-final-memory-zeroed' } else { 'final-memory-unavailable' }
+                    Write-UnavailableReceipt $registration $zeroedReason $snapshot.MemoryError 0 $false
+                } else {
                     Write-CollectorEvent ([ordered]@{
                         type = 'receipt'
                         requestKey = $registration.requestKey
@@ -491,7 +557,7 @@ try {
                         status = 'available'
                         reason = $null
                         memory = [ordered]@{
-                            peakWorkingSetBytes = [UInt64]$snapshot.PeakWorkingSetSize
+                            peakWorkingSetBytes = [UInt64]$snapshot.PeakWorkingSetBytes
                             units = 'bytes'
                         }
                         cpu = [ordered]@{
@@ -506,7 +572,16 @@ try {
                             creationTime100ns = ([string]$registration.creationTime100ns)
                             creationTimeUnixMs = $registration.creationTimeUnixMs
                             creationWindowMatch = $registration.creationWindowMatch
-                            imagePath = if ($imagePath.Length -gt 0) { $imagePath } else { $null }
+                            imagePath = $registration.imagePath
+                            imagePathNormalized = $registration.imagePathNormalized
+                            imagePathSource = $registration.imagePathSource
+                            imagePathMatch = $registration.imagePathMatch
+                            imagePathProof = 'owned-handle-normalized-match'
+                        }
+                        concurrency = [ordered]@{
+                            activeHandlesAtReceipt = [int]$registration.activeHandlesAtReceipt
+                            peakActiveHandles = [int]$peakActiveHandles
+                            configuredMinActiveHandles = [int]$MinActiveHandles
                         }
                         final = [ordered]@{
                             exitTime100ns = ([string]$snapshot.ExitTime100ns)
@@ -518,9 +593,6 @@ try {
                         memoryError = $null
                         timesError = $null
                     })
-                } else {
-                    $zeroedReason = if ($snapshot.MemoryOk) { 'post-exit-final-memory-zeroed' } else { 'final-memory-unavailable' }
-                    Write-UnavailableReceipt $registration $zeroedReason $snapshot.MemoryError 0 $false
                 }
                 $finalizedKeys[$registration.requestKey] = $true
                 $closed = [PieWindowsProcessHandleCollectorR01]::CloseExact($handle)
@@ -529,20 +601,22 @@ try {
                     type = 'closed'
                     requestKey = $registration.requestKey
                     handleCloseOk = [bool]$closed
+                    activeHandles = [int]$registrations.Count
+                    peakActiveHandles = [int]$peakActiveHandles
+                    configuredMinActiveHandles = [int]$MinActiveHandles
                 })
                 continue
             }
-            if ([StringComparer]::OrdinalIgnoreCase.Equals($imagePath, $ExpectedImagePath) -eq $false) {
+            if (-not $registration.imagePathMatch) {
                 # The process is live, so an unreadable or unexpected image is a
                 # genuine identity failure, not an exit race.
-                $registration.imagePath = if ($imagePath.Length -gt 0) { $imagePath } else { $null }
                 Write-UnavailableReceipt $registration 'identity-image-mismatch' 0 0 $false
                 [PieWindowsProcessHandleCollectorR01]::CloseExact($handle) | Out-Null
                 $registration.handle = [IntPtr]::Zero
                 continue
             }
-            $registration.imagePath = $imagePath
             $registrations[$registration.requestKey] = $registration
+            $peakActiveHandles = [math]::Max($peakActiveHandles, $registrations.Count)
             Write-CollectorEvent ([ordered]@{
                 type = 'registered'
                 requestKey = $registration.requestKey
@@ -551,7 +625,13 @@ try {
                 creationTimeUnixMs = $registration.creationTimeUnixMs
                 creationWindowMatch = $registration.creationWindowMatch
                 imagePath = $registration.imagePath
+                imagePathNormalized = $registration.imagePathNormalized
+                imagePathSource = $registration.imagePathSource
+                imagePathMatch = $registration.imagePathMatch
+                imagePathProof = 'owned-handle-normalized-match'
                 activeHandles = $registrations.Count
+                peakActiveHandles = $peakActiveHandles
+                configuredMinActiveHandles = $MinActiveHandles
             })
             continue
         }

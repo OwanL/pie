@@ -52,10 +52,19 @@ test('native collector accepts a post-exit final-counter receipt bound by creati
     registration: {
       creationWindowMatch: true,
       creationTime100ns: '13400989999000000',
-      imagePath: null,
+      imagePath: 'C:\\worker.exe',
+      imagePathNormalized: 'C:\\worker.exe',
+      imagePathSource: 'owned-handle',
+      imagePathMatch: true,
+      imagePathProof: 'owned-handle-normalized-match',
+    },
+    concurrency: {
+      activeHandlesAtReceipt: 0,
+      peakActiveHandles: 1,
+      configuredMinActiveHandles: 1,
     },
   };
-  const result = validateWindowsProcessReceipt(receipt, expected);
+  const result = validateWindowsProcessReceipt(receipt, expected, 'C:\\worker.exe');
   assert.equal(result.valid, true, result.errors.join('; '));
 
   const retentionForged = { ...receipt, handleRetainedThroughExit: true };
@@ -64,8 +73,22 @@ test('native collector accepts a post-exit final-counter receipt bound by creati
   assert.equal(validateWindowsProcessReceipt(zeroPeak, expected).valid, false);
   const unknownKind = { ...receipt, final: { ...receipt.final, observationKind: 'post-exit' } };
   assert.equal(validateWindowsProcessReceipt(unknownKind, expected).valid, false);
-  const resolvedImage = { ...receipt, registration: { ...receipt.registration, imagePath: 'node.exe' } };
-  assert.equal(validateWindowsProcessReceipt(resolvedImage, expected).valid, true);
+  const resolvedImage = {
+    ...receipt,
+    registration: {
+      ...receipt.registration,
+      imagePath: 'C:\\forged.exe',
+      imagePathNormalized: 'C:\\forged.exe',
+    },
+  };
+  assert.equal(validateWindowsProcessReceipt(resolvedImage, expected, 'C:\\worker.exe').valid, false);
+  const zeroExit = { ...receipt, final: { ...receipt.final, exitTime100ns: '0' } };
+  assert.equal(validateWindowsProcessReceipt(zeroExit, expected).valid, false);
+  const unusedMinimum = {
+    ...receipt,
+    concurrency: { ...receipt.concurrency, peakActiveHandles: 1, configuredMinActiveHandles: 2 },
+  };
+  assert.equal(validateWindowsProcessReceipt(unusedMinimum, expected).valid, false);
 });
 
 test('native collector evidence accepts an explicit unavailable race for the bound worker', () => {
@@ -81,6 +104,11 @@ test('native collector evidence accepts an explicit unavailable race for the bou
       protocolWrites: 1,
     },
     rejections: [],
+    protocolErrors: [],
+    expectedImagePath: process.execPath,
+    configuredMinActiveHandles: 1,
+    actualActiveHandles: 0,
+    actualPeakActiveHandles: 1,
     receipts: [{
       requestKey: 'client:1',
       identity: expected,
@@ -94,14 +122,25 @@ test('native collector evidence accepts an explicit unavailable race for the bou
   };
   const result = validateWindowsProcessEvidence(evidence, [expected]);
   assert.equal(result.valid, true, result.errors.join('; '));
+  const protocolFailure = { ...evidence, protocolErrors: ['malformed-json'] };
+  assert.equal(validateWindowsProcessEvidence(protocolFailure, [expected]).valid, false);
+  const malformedProtocol = { ...evidence, protocolErrors: [42] };
+  assert.equal(validateWindowsProcessEvidence(malformedProtocol, [expected]).valid, false);
   evidence.receipts[0].handleRetainedThroughExit = true;
   const forged = validateWindowsProcessEvidence(evidence, [expected]);
   assert.equal(forged.valid, false);
   assert.match(forged.errors.join('; '), /retention through exit/u);
 });
 
+test('collector validates minActiveHandles before platform startup', async () => {
+  await assert.rejects(
+    startWindowsProcessHandleCollector({ maxRequests: 4, maxActiveHandles: 1, minActiveHandles: 2 }),
+    /minActiveHandles/u,
+  );
+});
+
 test('Windows collector reports an honest unavailable receipt when the worker was reaped before binding', { skip: process.platform !== 'win32', timeout: 20_000 }, async () => {
-  const collector = await startWindowsProcessHandleCollector({ maxRequests: 4, maxActiveHandles: 1, maxDurationMs: 10_000 });
+  const collector = await startWindowsProcessHandleCollector({ maxRequests: 4, maxActiveHandles: 1, minActiveHandles: 1, maxDurationMs: 10_000 });
   assert.equal(collector.enabled, true, JSON.stringify(collector.snapshot()));
   const child = spawn(process.execPath, [toy, 'natural'], { stdio: 'ignore', windowsHide: true });
   const identityValue = { ...identity(1238), pid: child.pid };
@@ -117,7 +156,13 @@ test('Windows collector reports an honest unavailable receipt when the worker wa
     const evidence = await collector.stop();
     assert.equal(evidence.receipts.length, 1, JSON.stringify(evidence));
     assert.equal(evidence.receipts[0].status, 'unavailable', JSON.stringify(evidence));
-    assert.equal(['open-process-failed', 'post-exit-final-memory-zeroed'].includes(evidence.receipts[0].reason), true, JSON.stringify(evidence));
+    assert.equal([
+      'open-process-failed',
+      'post-exit-final-memory-zeroed',
+      'post-exit-image-proof-unavailable',
+      'post-exit-image-mismatch',
+      'minimum-active-handle-concurrency-not-reached',
+    ].includes(evidence.receipts[0].reason), true, JSON.stringify(evidence));
     const validation = validateWindowsProcessEvidence(evidence, [identityValue]);
     assert.equal(validation.valid, true, validation.errors.join('; '));
   } finally {
@@ -127,7 +172,7 @@ test('Windows collector reports an honest unavailable receipt when the worker wa
 });
 
 test('Windows collector records a forged terminal separately and preserves the valid handle', { skip: process.platform !== 'win32', timeout: 20_000 }, async () => {
-  const collector = await startWindowsProcessHandleCollector({ maxRequests: 4, maxActiveHandles: 1, maxDurationMs: 10_000 });
+  const collector = await startWindowsProcessHandleCollector({ maxRequests: 4, maxActiveHandles: 1, minActiveHandles: 1, maxDurationMs: 10_000 });
   assert.equal(collector.enabled, true, JSON.stringify(collector.snapshot()));
   const spawnedAtMs = Date.now();
   const child = spawn(process.execPath, [toy, 'natural'], { stdio: 'ignore', windowsHide: true });
@@ -157,6 +202,7 @@ test('Windows collector binds owned natural and forced toy exits to final counte
   const collector = await startWindowsProcessHandleCollector({
     maxRequests: 4,
     maxActiveHandles: 2,
+    minActiveHandles: 1,
     maxDurationMs: 10_000,
   });
   assert.equal(collector.enabled, true, JSON.stringify(collector.snapshot()));

@@ -81,6 +81,25 @@ async function handle(request) {
     await send({ type: 'ack', requestId: request.requestId, receipt: { process: {}, recorder: {}, detailStorage: {} } });
     return;
   }
+  if (request.type === 'memorySample') {
+    const mode = process.env.PIE_TEST_MEMORY_SAMPLE_RECEIPT ?? 'valid';
+    const processTelemetry = {
+      rss: 1,
+      heapTotal: 2,
+      heapUsed: 3,
+      external: 4,
+      arrayBuffers: 5,
+      cpuUsage: { user: 6, system: 7 },
+      workerIdentity,
+    };
+    const receipt = mode === 'malformed'
+      ? { process: {} }
+      : mode === 'identity-mismatch'
+        ? { process: { ...processTelemetry, workerIdentity: { ...workerIdentity, instanceId: 'forged-worker-instance' } } }
+        : { process: processTelemetry };
+    await send({ type: 'ack', requestId: request.requestId, receipt });
+    return;
+  }
   if (request.type === 'flush') {
     await send({ type: 'ack', requestId: request.requestId });
     return;
