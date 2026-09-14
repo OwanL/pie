@@ -79,6 +79,114 @@ export interface LastCompactionSummary {
   estimatedTokensAfter?: number;
 }
 
+/** JSON-safe root-session/global scope of a bounded canonical analytics read.
+ * A session scope is root-session scoped; it does not claim ownership of the
+ * currently selected transcript branch. */
+export type CanonicalAnalyticsScope =
+  | { kind: 'global' }
+  | { kind: 'session'; rootSessionId: string };
+
+export interface CanonicalAnalyticsTruncation {
+  rowLimit: boolean;
+  byteLimit: boolean;
+  cellLimit: boolean;
+}
+
+export interface CanonicalAnalyticsPendingDetailCoverage {
+  deliveryHistoryCoverage: 'complete' | 'retained_only';
+  completeDetailWatermark: number | string;
+  retainedDetailLogicalBytes: number | string;
+  retainedDetailStoredBytes: number | string;
+}
+
+/** Coverage metadata returned in the same durable snapshot as a projection.
+ * A null value on an unknown read is intentional: no durable coverage claim
+ * was made. */
+export interface CanonicalAnalyticsCoverage {
+  databaseSchemaVersion: number;
+  projectionRevision: number | string;
+  snapshotWatermark: number | string;
+  generationIds: string[];
+  generationIdsTruncated: boolean;
+  pendingDetailCoverage: CanonicalAnalyticsPendingDetailCoverage;
+  truncation: CanonicalAnalyticsTruncation;
+}
+
+export interface CanonicalActivityCounts {
+  spanCount: number;
+  observedCount: number;
+  estimatedCount: number;
+  unknownCount: number;
+  measuredKnownCount: number;
+  measuredUnknownCount: number;
+  /** Additive measured work; this is not a wall-time union. */
+  measuredTotalMs: number;
+}
+
+export interface CanonicalActivityKindRow extends CanonicalActivityCounts {
+  activityKind: string | null;
+}
+
+export interface CanonicalActivityProjectionView {
+  revision: number | string;
+  scope: CanonicalAnalyticsScope;
+  kinds: CanonicalActivityKindRow[];
+  totals: CanonicalActivityCounts;
+  truncated: boolean;
+  coverage: CanonicalAnalyticsCoverage;
+}
+
+export type CanonicalToolFacetVerification =
+  | 'verified'
+  | 'unverified'
+  | 'not_applicable'
+  | 'unknown';
+
+export interface CanonicalToolFacetRow {
+  generationId: string;
+  facetId: string;
+  toolCallId: string | null;
+  rootSessionId: string | null;
+  commands: string[] | null;
+  cwd: string | null;
+  observedPaths: string[] | null;
+  attemptedAddedLines: number | string | null;
+  attemptedRemovedLines: number | string | null;
+  verification: CanonicalToolFacetVerification | null;
+}
+
+export interface CanonicalToolFacetProjectionView {
+  revision: number | string;
+  scope: CanonicalAnalyticsScope;
+  facets: CanonicalToolFacetRow[];
+  truncated: boolean;
+  coverage: CanonicalAnalyticsCoverage;
+}
+
+/** One independently qualified canonical projection as exposed at the
+ * host→webview boundary. Unknown/suppressed reads retain their scope but have
+ * null projection, revision, coverage, and truncation rather than looking like
+ * an empty complete result. */
+export interface CanonicalAnalyticsProjectionView<TProjection> {
+  authority: 'canonical' | 'unknown';
+  scope: CanonicalAnalyticsScope;
+  revision: number | string | null;
+  coverage: CanonicalAnalyticsCoverage | null;
+  truncated: boolean | null;
+  projection: TProjection | null;
+}
+
+/** Combined activity and tool-facet view for one explicit session address. The
+ * global entry uses `sessionPath: null`; session entries are keyed by the same
+ * visible path in `ViewState.canonicalActivityBySession`. */
+export interface CanonicalActivityView {
+  sessionPath: string | null;
+  revision: number | string | null;
+  scope: CanonicalAnalyticsScope;
+  activity: CanonicalAnalyticsProjectionView<CanonicalActivityProjectionView>;
+  toolFacets: CanonicalAnalyticsProjectionView<CanonicalToolFacetProjectionView>;
+}
+
 // ─── Multi-renderer identity (browser server) ───────────────────────────────
 //
 // The host may serve the same UI to several renderer surfaces (the VS Code
@@ -282,6 +390,14 @@ export interface ViewState {
   transcriptWindow: TranscriptWindow;
   /** Whole-branch billable usage; unlike `transcript`, this is never windowed. */
   sessionUsage?: import('./sessions.js').SessionUsageSnapshot | null;
+  /** Bounded canonical activity/facet cache reads. Omitted under legacy
+   * authority. The global entry is always explicitly global; session entries
+   * are keyed by visible session path and never inferred from transcript rows.
+   * The root-session scope intentionally makes no selected-branch claim. */
+  canonicalActivityGlobal?: CanonicalActivityView;
+  canonicalActivityBySession?: Record<string, CanonicalActivityView>;
+  /** True when the bounded visible-session address set omitted paths. */
+  canonicalActivityBySessionTruncated?: boolean;
   /** True once the active session's initial transcript snapshot has been received. */
   transcriptLoaded: boolean;
   /** Host-owned pending inputs for the active session. */

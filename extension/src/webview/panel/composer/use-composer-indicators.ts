@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 
 import type {
   ChatMessage,
+  CanonicalActivityView,
   ContextWindowUsage,
   InitialContextEstimate,
   ModelInfo,
@@ -23,12 +24,14 @@ import type {
 import { buildContextWindowIndicatorState } from '../context-window/indicator';
 import { buildInitialContextBreakdown } from '../context-window/initial-breakdown';
 import {
+  buildCanonicalSessionActivitySummary,
   buildCompletedCostSummaryFromSnapshot,
   extractSubagentCostSummaryFromSnapshot,
   buildLiveSessionCostEstimate,
   buildSessionCostIndicator,
   buildSessionTokenIndicator,
   buildSessionTokenUsageFromSnapshot,
+  canonicalActivitySignature,
   type TokenPricing,
 } from '../session-tabs/token-usage';
 import {
@@ -100,6 +103,9 @@ export function useComposerIndicators({
   sessionPath,
   tokenRateBySession,
   workingTimeBySession,
+  canonicalActivityBySession,
+  canonicalActivityBySessionTruncated,
+  canonicalRootSessionId,
 }: {
   activeModelId?: string;
   activeProvider?: string;
@@ -117,6 +123,15 @@ export function useComposerIndicators({
   sessionPath: string | null;
   tokenRateBySession: Record<string, TokenRateIndicatorState>;
   workingTimeBySession: Record<string, WorkingTimeState>;
+  /** Optional host canonical activity/facet cache read for visible sessions.
+   *  Absent under legacy analytics authority — nothing canonical renders. */
+  canonicalActivityBySession?: Record<string, CanonicalActivityView>;
+  canonicalActivityBySessionTruncated?: boolean;
+  /** The active session's stable root identity from current view session
+   *  metadata (host-owned `SessionSummary.sessionId`, null when unavailable or
+   *  an identity fallback). Canonical entries bind to it; without it nothing
+   *  canonical renders — identity is never inferred from the pathname. */
+  canonicalRootSessionId?: string | null;
 }) {
   const {
     selectedModel,
@@ -357,6 +372,32 @@ export function useComposerIndicators({
   const tokenRateIndicator = useTokenRateIndicator({ sessionPath, tokenRateBySession });
   const workingTimeIndicator = useWorkingTimeIndicator({ sessionPath, workingTimeBySession });
 
+  // The canonical activity/facet read is a host-bounded optional snapshot field;
+  // sign it so equal-content structured clones keep the memoized summary and the
+  // tooltip props stay reference-stable across streaming snapshots. The active
+  // session's stable root identity is part of the signature: address/root changes
+  // can never reuse a valid memo.
+  const canonicalActivitySig = useMemo(
+    () => canonicalActivitySignature(
+      sessionPath,
+      canonicalRootSessionId ?? null,
+      canonicalActivityBySession,
+      canonicalActivityBySessionTruncated,
+    ),
+    [sessionPath, canonicalRootSessionId, canonicalActivityBySession, canonicalActivityBySessionTruncated],
+  );
+  const canonicalActivitySummary = useMemo(
+    () => buildCanonicalSessionActivitySummary(
+      sessionPath,
+      canonicalRootSessionId ?? null,
+      canonicalActivityBySession,
+      canonicalActivityBySessionTruncated,
+    ),
+    // Signature-gated like `durableUsageSig`: recompute only when a displayed
+    // canonical input changes (live ViewState updates and session switches).
+    [canonicalActivitySig],
+  );
+
   return {
     selectedModel,
     selectedProvider,
@@ -368,6 +409,7 @@ export function useComposerIndicators({
     contextIndicator,
     sessionTokenIndicator,
     sessionCostIndicator,
+    canonicalActivitySummary,
     tokenRateIndicator,
     workingTimeIndicator,
   };

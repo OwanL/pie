@@ -6,6 +6,7 @@ import { useCallback, useMemo, useRef } from 'preact/hooks';
 
 import type {
   ActiveRunSummary,
+  CanonicalActivityView,
   ChatMessage,
   ChatPrefs,
   ComposerInput,
@@ -85,6 +86,15 @@ interface ComposerProps {
   transcript: ChatMessage[];
   transcriptWindow: TranscriptWindow;
   sessionUsage?: SessionUsageSnapshot | null;
+  /** Optional host canonical activity/facet read keyed by visible session path.
+   *  Absent under legacy analytics authority; rendered only inside the session
+   *  cost chip's existing rich tooltip. */
+  canonicalActivityBySession?: Record<string, CanonicalActivityView>;
+  canonicalActivityBySessionTruncated?: boolean;
+  /** The active session's stable root identity from current view session
+   *  metadata (null when unavailable/identity-fallback). Canonical entries
+   *  bind to it; never inferred from the pathname. */
+  canonicalRootSessionId?: string | null;
   pendingComposerInputs: ComposerInput[];
   activeRunSummary?: ActiveRunSummary | null;
   tokenRateBySession: Record<string, TokenRateIndicatorState>;
@@ -159,6 +169,9 @@ function ComposerView({
   transcript,
   transcriptWindow,
   sessionUsage,
+  canonicalActivityBySession,
+  canonicalActivityBySessionTruncated,
+  canonicalRootSessionId,
   pendingComposerInputs,
   activeRunSummary,
   tokenRateBySession,
@@ -200,6 +213,7 @@ function ComposerView({
     contextBreakdown,
     contextIndicator,
     sessionCostIndicator,
+    canonicalActivitySummary,
     tokenRateIndicator,
     workingTimeIndicator,
   } = useComposerIndicators({
@@ -219,6 +233,9 @@ function ComposerView({
     sessionPath,
     tokenRateBySession,
     workingTimeBySession,
+    canonicalActivityBySession,
+    canonicalActivityBySessionTruncated,
+    canonicalRootSessionId,
   });
 
   // The backend classifies the complete SDK context. A bounded renderer
@@ -444,6 +461,7 @@ function ComposerView({
             contextIndicator={contextIndicatorProp}
             contextBreakdown={contextBreakdown}
             sessionCostIndicator={sessionCostIndicator}
+            canonicalActivitySummary={canonicalActivitySummary}
             tokenRateIndicator={tokenRateIndicator}
             workingTimeIndicator={workingTimeIndicator}
             runStatus={operationRunStatus ?? runControls.status}

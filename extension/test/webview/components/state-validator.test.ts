@@ -240,3 +240,269 @@ test('violation strings include the dotted ViewState. path and the expected type
     `violation string shape drifted: ${violations[0]}`,
   );
 });
+
+// ── Optional canonical activity/facet fields ───────────────────────────────
+//
+// The host omits these fields entirely under legacy analytics authority, so
+// absence must stay violation-free; presence is structurally validated.
+
+function canonicalCoverage(): Record<string, unknown> {
+  return {
+    databaseSchemaVersion: 12,
+    projectionRevision: '41',
+    snapshotWatermark: '39',
+    generationIds: ['generation-a'],
+    generationIdsTruncated: false,
+    pendingDetailCoverage: {
+      deliveryHistoryCoverage: 'complete',
+      completeDetailWatermark: '38',
+      retainedDetailLogicalBytes: '100',
+      retainedDetailStoredBytes: '80',
+    },
+    truncation: { rowLimit: false, byteLimit: false, cellLimit: false },
+  };
+}
+
+function canonicalActivityCounts(): Record<string, number> {
+  return {
+    spanCount: 10,
+    observedCount: 8,
+    estimatedCount: 1,
+    unknownCount: 1,
+    measuredKnownCount: 9,
+    measuredUnknownCount: 1,
+    measuredTotalMs: 186_120,
+  };
+}
+
+function canonicalActivityProjection(scope: Record<string, unknown> = { kind: 'session', rootSessionId: 'root-a' }): Record<string, unknown> {
+  return {
+    revision: '41',
+    scope,
+    kinds: [{ activityKind: 'tool', ...canonicalActivityCounts() }],
+    totals: canonicalActivityCounts(),
+    truncated: false,
+    coverage: canonicalCoverage(),
+  };
+}
+
+function canonicalToolFacetProjection(scope: Record<string, unknown> = { kind: 'session', rootSessionId: 'root-a' }): Record<string, unknown> {
+  return {
+    revision: '41',
+    scope,
+    facets: [{
+      generationId: 'generation-a',
+      facetId: 'facet-a',
+      toolCallId: 'tool-a',
+      rootSessionId: 'root-a',
+      commands: ['git status'],
+      cwd: '/workspace',
+      observedPaths: ['src/a.ts'],
+      attemptedAddedLines: 3,
+      attemptedRemovedLines: 0,
+      verification: 'unverified',
+    }],
+    truncated: false,
+    coverage: canonicalCoverage(),
+  };
+}
+
+function canonicalSessionEntry(sessionPath: string): Record<string, unknown> {
+  return {
+    sessionPath,
+    revision: '41',
+    scope: { kind: 'session', rootSessionId: 'root-a' },
+    activity: {
+      authority: 'canonical',
+      scope: { kind: 'session', rootSessionId: 'root-a' },
+      revision: '41',
+      coverage: canonicalCoverage(),
+      truncated: false,
+      projection: canonicalActivityProjection(),
+    },
+    toolFacets: {
+      authority: 'canonical',
+      scope: { kind: 'session', rootSessionId: 'root-a' },
+      revision: '41',
+      coverage: canonicalCoverage(),
+      truncated: false,
+      projection: canonicalToolFacetProjection(),
+    },
+  };
+}
+
+function withCanonicalFields(state: ViewState, mutate: (canonical: Record<string, unknown>) => void): ViewState {
+  const canonical: Record<string, unknown> = {
+    canonicalActivityGlobal: {
+      sessionPath: null,
+      revision: '41',
+      scope: { kind: 'global' },
+      activity: {
+        authority: 'canonical',
+        scope: { kind: 'global' },
+        revision: '41',
+        coverage: canonicalCoverage(),
+        truncated: false,
+        projection: canonicalActivityProjection({ kind: 'global' }),
+      },
+      toolFacets: {
+        authority: 'canonical',
+        scope: { kind: 'global' },
+        revision: '41',
+        coverage: canonicalCoverage(),
+        truncated: false,
+        projection: canonicalToolFacetProjection({ kind: 'global' }),
+      },
+    },
+    canonicalActivityBySession: { '/sessions/a.jsonl': canonicalSessionEntry('/sessions/a.jsonl') },
+    canonicalActivityBySessionTruncated: false,
+  };
+  mutate(canonical);
+  return { ...state, ...canonical } as unknown as ViewState;
+}
+
+test('legacy ViewState without canonical fields stays violation-free', () => {
+  assert.deepEqual(validateViewState(validState()), []);
+});
+
+test('well-formed canonical activity fields pass validation', () => {
+  assert.deepEqual(validateViewState(withCanonicalFields(validState(), () => { /* valid */ })), []);
+});
+
+test('unknown-authority canonical reads must keep null projection/revision/coverage/truncation', () => {
+  const state = withCanonicalFields(validState(), (canonical) => {
+    const entry = (canonical.canonicalActivityBySession as Record<string, Record<string, unknown>>)['/sessions/a.jsonl'];
+    entry.activity = {
+      authority: 'unknown',
+      scope: { kind: 'session', rootSessionId: 'root-a' },
+      projection: canonicalActivityProjection(),
+      revision: null,
+      coverage: null,
+      truncated: null,
+    };
+  });
+  const violations = validateViewState(state);
+  assert.ok(violations.some((v) => v.includes("ViewState.canonicalActivityBySession[/sessions/a.jsonl].activity.projection must be null when authority is 'unknown'")), violations.join(' | '));
+});
+
+test('session entries must match their address key and carry root-session scope', () => {
+  const state = withCanonicalFields(validState(), (canonical) => {
+    const bySession = canonical.canonicalActivityBySession as Record<string, unknown>;
+    bySession['/sessions/other.jsonl'] = canonicalSessionEntry('/sessions/a.jsonl');
+  });
+  const violations = validateViewState(state);
+  assert.ok(violations.some((v) => v.includes('ViewState.canonicalActivityBySession[/sessions/other.jsonl].sessionPath does not match its address key')), violations.join(' | '));
+});
+
+test('global entry must be explicitly global with a null session path', () => {
+  const state = withCanonicalFields(validState(), (canonical) => {
+    (canonical.canonicalActivityGlobal as Record<string, unknown>).scope = { kind: 'session', rootSessionId: 'root-a' };
+  });
+  const violations = validateViewState(state);
+  assert.ok(violations.some((v) => v.includes('ViewState.canonicalActivityGlobal.scope must be explicitly global')), violations.join(' | '));
+});
+
+test('non-finite projection totals are violations', () => {
+  const state = withCanonicalFields(validState(), (canonical) => {
+    const entry = (canonical.canonicalActivityBySession as Record<string, Record<string, unknown>>)['/sessions/a.jsonl'];
+    ((entry.activity as Record<string, unknown>).projection as Record<string, unknown>).totals = {
+      ...canonicalActivityCounts(),
+      measuredTotalMs: Number.POSITIVE_INFINITY,
+    };
+  });
+  const violations = validateViewState(state);
+  assert.ok(violations.some((v) => v.includes('.totals.measuredTotalMs is not a nonnegative finite duration')), violations.join(' | '));
+});
+
+test('fractional measured work (a REAL duration) is not a violation; negative is', () => {
+  const fractionalState = withCanonicalFields(validState(), (canonical) => {
+    const entry = (canonical.canonicalActivityBySession as Record<string, Record<string, unknown>>)['/sessions/a.jsonl'];
+    ((entry.activity as Record<string, unknown>).projection as Record<string, unknown>).totals = {
+      ...canonicalActivityCounts(),
+      measuredTotalMs: 186_120.5,
+    };
+  });
+  assert.deepEqual(validateViewState(fractionalState), []);
+
+  const negativeState = withCanonicalFields(validState(), (canonical) => {
+    const entry = (canonical.canonicalActivityBySession as Record<string, Record<string, unknown>>)['/sessions/a.jsonl'];
+    ((entry.activity as Record<string, unknown>).projection as Record<string, unknown>).totals = {
+      ...canonicalActivityCounts(),
+      measuredTotalMs: -1,
+    };
+  });
+  const violations = validateViewState(negativeState);
+  assert.ok(violations.some((v) => v.includes('.totals.measuredTotalMs is not a nonnegative finite duration')), violations.join(' | '));
+});
+
+test('negative, fractional, and non-integer canonical counts are violations', () => {
+  const state = withCanonicalFields(validState(), (canonical) => {
+    const entry = (canonical.canonicalActivityBySession as Record<string, Record<string, unknown>>)['/sessions/a.jsonl'];
+    ((entry.activity as Record<string, unknown>).projection as Record<string, unknown>).totals = {
+      ...canonicalActivityCounts(),
+      spanCount: -2,
+      observedCount: 1.5,
+    };
+  });
+  const violations = validateViewState(state);
+  assert.ok(violations.some((v) => v.includes('.totals.spanCount is not a nonnegative safe-integer count')), violations.join(' | '));
+  assert.ok(violations.some((v) => v.includes('.totals.observedCount is not a nonnegative safe-integer count')), violations.join(' | '));
+});
+
+test('negative and fractional attempted line counts are violations', () => {
+  const state = withCanonicalFields(validState(), (canonical) => {
+    const entry = (canonical.canonicalActivityBySession as Record<string, Record<string, unknown>>)['/sessions/a.jsonl'];
+    const facets = ((entry.toolFacets as Record<string, unknown>).projection as Record<string, unknown>).facets as Array<Record<string, unknown>>;
+    facets[0].attemptedAddedLines = -3;
+    facets[0].attemptedRemovedLines = 2.5;
+  });
+  const violations = validateViewState(state);
+  assert.ok(violations.some((v) => v.includes('.facets[0].attemptedAddedLines is not a nonnegative integer line count or null')), violations.join(' | '));
+  assert.ok(violations.some((v) => v.includes('.facets[0].attemptedRemovedLines is not a nonnegative integer line count or null')), violations.join(' | '));
+});
+
+test('oversized int64 decimal line counts are valid — no arbitrary digit cap', () => {
+  const state = withCanonicalFields(validState(), (canonical) => {
+    const entry = (canonical.canonicalActivityBySession as Record<string, Record<string, unknown>>)['/sessions/a.jsonl'];
+    const facets = ((entry.toolFacets as Record<string, unknown>).projection as Record<string, unknown>).facets as Array<Record<string, unknown>>;
+    facets[0].attemptedAddedLines = '120000000000000000000';
+    facets[0].attemptedRemovedLines = '9007199254740993';
+  });
+  assert.deepEqual(validateViewState(state), []);
+});
+
+test('a session entry cannot host a global-labelled nested projection', () => {
+  const state = withCanonicalFields(validState(), (canonical) => {
+    const entry = (canonical.canonicalActivityBySession as Record<string, Record<string, unknown>>)['/sessions/a.jsonl'];
+    (entry.activity as Record<string, unknown>).scope = { kind: 'global' };
+    ((entry.toolFacets as Record<string, unknown>).projection as Record<string, unknown>).scope = { kind: 'session', rootSessionId: 'root-other' };
+  });
+  const violations = validateViewState(state);
+  assert.ok(violations.some((v) => v.includes('.activity.scope does not match the entry scope')), violations.join(' | '));
+  assert.ok(violations.some((v) => v.includes('.toolFacets.projection scope does not match the entry scope')), violations.join(' | '));
+});
+
+test('kind rows that are not objects are violations, not crashes', () => {
+  const state = withCanonicalFields(validState(), (canonical) => {
+    const entry = (canonical.canonicalActivityBySession as Record<string, Record<string, unknown>>)['/sessions/a.jsonl'];
+    ((entry.activity as Record<string, unknown>).projection as Record<string, unknown>).kinds = [null];
+  });
+  const violations = validateViewState(state);
+  assert.ok(violations.some((v) => v.includes('.projection.kinds[0] is not an object')), violations.join(' | '));
+});
+
+test('canonicalActivityBySessionTruncated must be a boolean when present', () => {
+  const state = withCanonicalFields(validState(), (canonical) => {
+    canonical.canonicalActivityBySessionTruncated = 'yes';
+  });
+  const violations = validateViewState(state);
+  assert.deepEqual(violations, ['ViewState.canonicalActivityBySessionTruncated is not a boolean']);
+});
+
+test('completely malformed canonical entries are violations, not crashes', () => {
+  const state = withCanonicalFields(validState(), (canonical) => {
+    (canonical.canonicalActivityBySession as Record<string, unknown>)['/sessions/broken.jsonl'] = null;
+  });
+  const violations = validateViewState(state);
+  assert.ok(violations.some((v) => v.includes('ViewState.canonicalActivityBySession[/sessions/broken.jsonl] is not an object')), violations.join(' | '));
+});

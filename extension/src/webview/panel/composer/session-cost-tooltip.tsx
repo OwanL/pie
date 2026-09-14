@@ -4,9 +4,11 @@
 import type { JSX } from 'preact';
 
 import type {
+  CanonicalSessionActivitySummary,
   SessionCostIndicatorState,
   SessionCostSourceBreakdown,
 } from '../session-tabs/token-usage';
+import { formatMeasuredDuration } from '../session-tabs/token-usage';
 import { colorsFor } from '../components/chart-colors';
 import { ProviderLegend } from '../aggregate-stats-strip';
 import { formatCompactTokens } from '../utils/format-tokens';
@@ -24,7 +26,16 @@ const SOURCE_COLORS: Record<SessionCostSourceBreakdown['key'], string> = {
 };
 
 /** Rich whole-branch provider/model and source breakdown for the session cost chip. */
-export function SessionCostTooltip({ indicator }: { indicator: SessionCostIndicatorState }): JSX.Element {
+export function SessionCostTooltip({
+  indicator,
+  canonicalActivity,
+}: {
+  indicator: SessionCostIndicatorState;
+  /** Optional canonical root-session activity/facet read for the active
+   *  session; null when the host omitted the canonical fields (legacy
+   *  analytics authority) — nothing canonical is rendered. */
+  canonicalActivity?: CanonicalSessionActivitySummary | null;
+}): JSX.Element {
   const { breakdown } = indicator;
   const providerColors = colorsFor(breakdown.providers.map((provider) => provider.provider));
   const pricedProviders = breakdown.providers.filter((provider) => provider.cost > 0);
@@ -100,8 +111,106 @@ export function SessionCostTooltip({ indicator }: { indicator: SessionCostIndica
           * Excludes {formatCostTokens(breakdown.unpricedTokens)} pending billing details or pricing.
         </div>
       )}
+
+      {canonicalActivity && <CanonicalActivitySection summary={canonicalActivity} />}
     </div>
   );
+}
+
+/** Host-qualified canonical activity/facet read for the ACTIVE session. The
+ *  scope is explicitly root-session (all branches) — selected-branch totals are
+ *  unsupported and are never represented as current-branch values. Unknown,
+ *  suppressed, and truncated states are shown explicitly rather than as zeros. */
+function CanonicalActivitySection({ summary }: { summary: CanonicalSessionActivitySummary }): JSX.Element {
+  return (
+    <div class="session-cost-sources">
+      <div class="session-cost-section-head">Canonical activity</div>
+      <div class="rich-tooltip-sub">{summary.scopeNote}</div>
+      {summary.missing ? (
+        <div class="rich-tooltip-sub">
+          Unavailable for this session{summary.omitted
+            ? ' · omitted from the bounded visible-session address set'
+            : ''}.
+        </div>
+      ) : (
+        <>
+          {summary.activity ? <ActivityLines activity={summary.activity} /> : (
+            <div class="rich-tooltip-sub">
+              Activity read unknown (suppressed, invalidated, or not yet hydrated).
+            </div>
+          )}
+          {summary.toolFacets ? <ToolFacetLines facets={summary.toolFacets} /> : (
+            <div class="rich-tooltip-sub">
+              Tool-facet read unknown (suppressed, invalidated, or not yet hydrated).
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function ActivityLines({ activity }: { activity: CanonicalSessionActivitySummary['activity'] }): JSX.Element {
+  if (!activity) return <></>;
+  const lines = [
+    `${activity.totalSpans} span${activity.totalSpans === 1 ? '' : 's'} · measured work `
+      + `${formatMeasuredDuration(activity.measuredTotalMs)} (additive measured durations, not wall time)`
+      + (activity.measuredUnknownCount > 0
+        ? ` · ${activity.measuredUnknownCount} span${activity.measuredUnknownCount === 1 ? '' : 's'} without measured duration`
+        : ''),
+    `observed ${activity.observedCount} · estimated ${activity.estimatedCount} · unknown ${activity.unknownCount}`,
+    ...activity.kinds.map((kind) =>
+      `  ${kind.kind}: ${kind.spanCount} span${kind.spanCount === 1 ? '' : 's'} · ${formatMeasuredDuration(kind.measuredTotalMs)}`),
+    ...activity.notes.map((note) => `  ${note}`),
+  ];
+  return <div class="rich-tooltip-sub">{lines.join('\n')}</div>;
+}
+
+/** Exact grouped rendering for one exact known attempted-line value.
+ *  Safe-integer sums arrive as numbers; larger exact bigint sums arrive as
+ *  decimal strings. Neither is ever rounded, wrapped, or zero-filled. */
+const exactCountFormatter = new Intl.NumberFormat('en-US');
+
+function formatExactCount(value: number | string): string {
+  return exactCountFormatter.format(typeof value === 'string' ? BigInt(value) : value);
+}
+
+function ToolFacetLines({ facets }: { facets: NonNullable<CanonicalSessionActivitySummary['toolFacets']> }): JSX.Element {
+  const lines: string[] = [];
+  if (facets.facetCount === 0) {
+    lines.push('No tool-facet entries in this bounded read');
+  } else if (facets.attemptedChangeCount > 0) {
+    // Per-channel coverage: a channel without known values renders as '?'
+    // (unavailable), never as a zero-filled subtotal.
+    const added = facets.attemptedAddedLines === null ? '?' : formatExactCount(facets.attemptedAddedLines);
+    const removed = facets.attemptedRemovedLines === null ? '?' : formatExactCount(facets.attemptedRemovedLines);
+    lines.push(
+      `${facets.attemptedChangeCount} attempted-change entr${facets.attemptedChangeCount === 1 ? 'y' : 'ies'}: `
+        + `+${added}/−${removed} lines`
+        + ' (unverified proxy, not an exact diff)',
+    );
+  } else {
+    lines.push(`No attempted-change line counts recorded across ${facets.facetCount} entr${facets.facetCount === 1 ? 'y' : 'ies'}`);
+  }
+  if (facets.withoutLineCounts > 0) {
+    lines.push(`  ${facets.withoutLineCounts} entr${facets.withoutLineCounts === 1 ? 'y has' : 'ies have'} no summed line counts`);
+  }
+  if (facets.facetCount > 0) {
+    lines.push(
+      `  verified ${facets.verifiedCount} · unverified ${facets.unverifiedCount}`
+      + (facets.otherVerificationCount > 0 ? ` · other/unknown ${facets.otherVerificationCount}` : ''),
+    );
+  }
+  lines.push(...facets.notes.map((note) => `  ${note}`));
+  return <div class="rich-tooltip-sub">{lines.join('\n')}</div>;
+}
+
+/** Activity-only rich tooltip for the fallback toolbar trigger: shown when
+ *  canonical activity exists but the session cost chip does not (no usage of
+ *  any kind is known). Renders ONLY the canonical activity section — no cost,
+ *  provider, or usage content is fabricated to host it. */
+export function CanonicalActivityTooltip({ summary }: { summary: CanonicalSessionActivitySummary }): JSX.Element {
+  return <CanonicalActivitySection summary={summary} />;
 }
 
 interface CostBarSegment {

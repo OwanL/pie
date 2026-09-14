@@ -18,8 +18,11 @@ import { ContextWindowBreakdownChart } from '../context-window/breakdown-chart';
 import type { ContextWindowBreakdown } from '../context-window/breakdown';
 import type { TokenRateIndicatorState } from './use-token-rate';
 import type { WorkingTimeIndicatorState } from './use-working-time';
-import type { SessionCostIndicatorState } from '../session-tabs/token-usage';
-import { SessionCostTooltip } from './session-cost-tooltip';
+import type {
+  CanonicalSessionActivitySummary,
+  SessionCostIndicatorState,
+} from '../session-tabs/token-usage';
+import { CanonicalActivityTooltip, SessionCostTooltip } from './session-cost-tooltip';
 import { ComposerSettingsMenu } from './settings-menu';
 import { SubagentProviderMenu } from './subagent-provider-menu';
 import { CompactionButton } from './compaction-button';
@@ -98,6 +101,9 @@ interface ComposerToolbarProps {
   contextIndicator: { label: string | null; ariaLabel: string; severity: string | null } | null;
   contextBreakdown: ContextWindowBreakdown | null;
   sessionCostIndicator: SessionCostIndicatorState | null;
+  /** Canonical root-session activity/facet summary for the active session;
+   *  null when absent (legacy authority) — renders nothing. */
+  canonicalActivitySummary?: CanonicalSessionActivitySummary | null;
   tokenRateIndicator: TokenRateIndicatorState;
   workingTimeIndicator: WorkingTimeIndicatorState;
   runStatus: ComposerToolbarStatus | null;
@@ -145,6 +151,7 @@ export const ComposerToolbar = memo(function ComposerToolbar({
   contextIndicator,
   contextBreakdown,
   sessionCostIndicator,
+  canonicalActivitySummary,
   tokenRateIndicator,
   workingTimeIndicator,
   runStatus,
@@ -278,9 +285,32 @@ export const ComposerToolbar = memo(function ComposerToolbar({
             kind="cost"
             ariaLabel={sessionCostIndicator.ariaLabel}
             tooltip={sessionCostIndicator.tooltip}
-            tooltipNode={<SessionCostTooltip indicator={sessionCostIndicator} />}
+            tooltipNode={
+              <SessionCostTooltip
+                indicator={sessionCostIndicator}
+                canonicalActivity={canonicalActivitySummary ?? null}
+              />
+            }
             richRole="region"
             label={sessionCostIndicator.label}
+            freezeWhileVisible
+          />
+        )}
+
+        {/* Accessible activity fallback: when canonical activity exists for the
+            active session but no cost indicator does (no usage of any kind is
+            known), the cost chip — and with it the canonical section — would be
+            unreachable. Reuse the same toolbar chip/tooltip affordance with an
+            activity-only tooltip; no cost, provider, or usage value is shown or
+            fabricated. Legacy snapshots (no canonical fields) still render
+            nothing. */}
+        {!sessionCostIndicator && canonicalActivitySummary && !canonicalActivitySummary.missing && !prefs.hideSessionCost && (
+          <ToolbarIndicatorChip
+            kind="cost"
+            ariaLabel="Canonical session activity (root session, all branches) — no session cost usage is reported for this session"
+            tooltipNode={<CanonicalActivityTooltip summary={canonicalActivitySummary} />}
+            richRole="region"
+            label="Activity"
             freezeWhileVisible
           />
         )}

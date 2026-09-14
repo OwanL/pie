@@ -11,6 +11,7 @@ import type {
 import { ExtensionUIPrompt } from './extension-ui-prompt';
 import { Composer } from './ui';
 import type { AppHandlers } from './use-app-handlers';
+import { activeCanonicalRootSessionId } from './session-tabs/token-usage';
 
 export interface BottomSectionProps {
   hasActiveTabs: boolean;
@@ -50,6 +51,10 @@ export interface BottomSectionProps {
   transcript: ChatMessage[];
   transcriptWindow: ViewState['transcriptWindow'];
   sessionUsage: ViewState['sessionUsage'];
+  /** Optional host canonical activity/facet read (absent under legacy
+   *  analytics authority). Rendered only in the session cost chip tooltip. */
+  canonicalActivityBySession?: ViewState['canonicalActivityBySession'];
+  canonicalActivityBySessionTruncated?: ViewState['canonicalActivityBySessionTruncated'];
   draftRestore: { text: string; nonce: number } | null;
   draftText: string;
   /** AppBody registers the composer's `sendAsRetry` here so the
@@ -101,6 +106,8 @@ export const BottomSection = memo(function BottomSection({
   transcript,
   transcriptWindow,
   sessionUsage,
+  canonicalActivityBySession,
+  canonicalActivityBySessionTruncated,
   draftRestore,
   draftText,
   sendRetryDraftRef,
@@ -154,6 +161,9 @@ export const BottomSection = memo(function BottomSection({
         transcript={transcript}
         transcriptWindow={transcriptWindow}
         sessionUsage={sessionUsage}
+        canonicalActivityBySession={canonicalActivityBySession}
+        canonicalActivityBySessionTruncated={canonicalActivityBySessionTruncated}
+        canonicalRootSessionId={activeCanonicalRootSessionId(activeSession)}
         draftRestore={draftRestore}
         sendRetryDraftRef={sendRetryDraftRef}
         pendingComposerInputs={pendingComposerInputs}

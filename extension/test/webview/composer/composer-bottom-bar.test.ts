@@ -20,6 +20,7 @@ import { ComposerToolbar } from '../../../src/webview/panel/composer/toolbar';
 import { Composer } from '../../../src/webview/panel/ui';
 import { formatWorkingTime } from '../../../src/webview/panel/composer/use-working-time';
 import { WorkingTimeTooltip } from '../../../src/webview/panel/composer/working-time-tooltip';
+import type { CanonicalSessionActivitySummary } from '../../../src/webview/panel/session-tabs/token-usage';
 
 const model: ModelInfo = {
   id: 'test-model',
@@ -140,6 +141,112 @@ test('composer controls render in the agreed bottom-bar order', () => {
   assert.match(html, /aria-pressed="false"/);
   assert.match(html, /autonomous-mode-trigger/);
   assertOrdered(html, ['12 tok/s', '1m 23s', 'LIVE']);
+});
+
+/** Toolbar props for the activity-only fallback chip tests: no cost indicator
+ *  is known (no usage of any kind), so only the canonical activity chip can
+ *  render. */
+function toolbarProps(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    sessionPath: '/session/test.jsonl',
+    canCompact: true,
+    prefs: {
+      ...DEFAULT_CHAT_PREFS,
+      subagentBuckets: { small: [], medium: [], frontier: [] },
+    },
+    pruningSettings: DEFAULT_PRUNING_SETTINGS,
+    pruningCatalog: { skills: [], tools: [] },
+    pruningResult: null,
+    toolResultPruningSettings: DEFAULT_TOOL_RESULT_PRUNING_SETTINGS,
+    sessionTitlesSettings: DEFAULT_SESSION_TITLES_SETTINGS,
+    providerGateStats: EMPTY_PROVIDER_GATE_STATS,
+    onSetPrefs: () => {},
+    mcpServers: [],
+    mcpPendingApply: false,
+    onMcpListRequested: () => {},
+    onMcpSetServerEnabled: () => {},
+    mcpSessionServers: [],
+    mcpSessionPendingApply: false,
+    onMcpSetServerEnabledForSession: () => {},
+    onSetSystemPromptToggles: () => {},
+    onSetPruningSettings: () => {},
+    onSetToolResultPruningSettings: () => {},
+    onSetSessionTitlesSettings: () => {},
+    availableExtensions: [],
+    availableModels: [model],
+    systemPrompts: [prompt],
+    selectedModel: model.id,
+    selectedProvider: model.provider,
+    selectedLevel: 'high' as const,
+    supportsReasoning: true,
+    contextIndicator: null,
+    contextBreakdown: null,
+    sessionCostIndicator: null,
+    canonicalActivitySummary: null,
+    tokenRateIndicator: { label: '', ariaLabel: 'Token rate', tooltip: '', state: 'idle' as const, paused: false },
+    workingTimeIndicator: { label: null, ariaLabel: 'Working time', tooltip: '' },
+    runStatus: null,
+    compacting: false,
+    lastCompaction: null,
+    onModelChange: () => {},
+    onCompact: () => {},
+    ...overrides,
+  };
+}
+
+function canonicalActivityFixture(): CanonicalSessionActivitySummary {
+  return {
+    scopeNote: 'Root session (all branches) · selected-branch totals not shown',
+    omitted: false,
+    missing: false,
+    activity: {
+      totalSpans: 10,
+      measuredTotalMs: 186_120,
+      observedCount: 8,
+      estimatedCount: 1,
+      unknownCount: 1,
+      measuredKnownCount: 9,
+      measuredUnknownCount: 1,
+      kinds: [{ kind: 'conversation', spanCount: 8, measuredTotalMs: 186_000 }],
+      notes: [],
+    },
+    toolFacets: null,
+  };
+}
+
+test('toolbar renders the activity-only fallback chip when canonical activity exists without a cost indicator', () => {
+  const html = renderToString(h(ComposerToolbar, toolbarProps({
+    canonicalActivitySummary: canonicalActivityFixture(),
+  }) as never));
+
+  assert.match(html, /aria-label="Canonical session activity \(root session, all branches\) — no session cost usage is reported for this session"/);
+  assert.match(html, /Activity/);
+  // No cost value is fabricated to host the activity affordance.
+  assert.doesNotMatch(html, /aria-label="Known estimated session cost/);
+  assert.doesNotMatch(html, /\$0\.01/);
+});
+
+test('the activity-only fallback chip stays hidden when it would mislead or is disabled', () => {
+  // No canonical summary (legacy authority or unknown root identity): nothing.
+  assert.doesNotMatch(
+    renderToString(h(ComposerToolbar, toolbarProps() as never)),
+    /Canonical session activity/,
+  );
+  // A missing (unbound) summary renders nothing — no fabricated affordance.
+  assert.doesNotMatch(
+    renderToString(h(ComposerToolbar, toolbarProps({
+      canonicalActivitySummary: { ...canonicalActivityFixture(), missing: true, activity: null },
+    }) as never)),
+    /Canonical session activity/,
+  );
+  // hideSessionCost suppresses canonical activity alongside cost.
+  assert.doesNotMatch(
+    renderToString(h(ComposerToolbar, toolbarProps({
+      canonicalActivitySummary: canonicalActivityFixture(),
+      prefs: { ...DEFAULT_CHAT_PREFS, subagentBuckets: { small: [], medium: [], frontier: [] }, hideSessionCost: true },
+    }) as never)),
+    /Canonical session activity/,
+  );
 });
 
 test('working-time indicator formats session totals compactly', () => {

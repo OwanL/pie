@@ -339,6 +339,8 @@ export function AppBody({ adapter }: AppBodyProps) {
         transcript={viewState.transcript}
         transcriptWindow={viewState.transcriptWindow}
         sessionUsage={viewState.sessionUsage}
+        canonicalActivityBySession={viewState.canonicalActivityBySession}
+        canonicalActivityBySessionTruncated={viewState.canonicalActivityBySessionTruncated}
         draftRestore={draftRestore}
         draftText={viewState.draftText}
         sendRetryDraftRef={sendRetryDraftRef}

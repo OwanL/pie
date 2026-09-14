@@ -44,7 +44,7 @@ import { initialArchState, type ArchState } from './core/reducer';
 import type { Event } from './core/events';
 import type { SessionOperationSource } from './core/operation-types.js';
 import { operationAndIncidentTraceEvents } from './core/operation-incident-tracing.js';
-import { selectViewState } from './core/projection';
+import { projectCanonicalActivityViews, selectViewState } from './core/projection';
 import { auditLog, bootLog } from './util/audit';
 import { getDiagPath, isStreamDiagEnabled, setStreamDiagEnabled } from './util/stream-telemetry';
 import {
@@ -93,6 +93,10 @@ import { isFreshLegacyActivationState, resolveAnalyticsPolicy } from './analytic
 export const SIDEBAR_VIEW_TYPE = 'pie.sessionsView';
 
 const NO_WORKSPACE_ANALYTICS_ID_KEY = 'pie.analytics.noWorkspaceId';
+/** Keep the renderer surface aligned with the StatsService eager displayed
+ * session bound; omitted session paths remain lazy/unknown rather than making
+ * a full session catalogue part of every ViewState snapshot. */
+const MAX_CANONICAL_ACTIVITY_VIEW_SESSIONS = 32;
 
 function getWorkspaceAnalyticsId(context: vscode.ExtensionContext): string {
   const workspaceFolders = vscode.workspace.workspaceFolders;
@@ -1145,8 +1149,24 @@ export class PieExtension implements vscode.Disposable {
       && cachedAggregateStats.openTabCount === openTabCount
       ? cachedAggregateStats
       : { ...cachedAggregateStats, runningSessionCount, openTabCount };
+    // Canonical analytics are optional at the protocol boundary. The host seam
+    // gates legacy authority and reads only the existing bounded cache
+    // accessors; invalidated/private entries therefore stay explicit
+    // unknown/null snapshots.
+    const canonicalSessionPaths = [
+      projected.activeSession?.path,
+      ...projected.runningSessionPaths,
+      ...projected.openTabPaths,
+    ].filter((sessionPath): sessionPath is string => Boolean(sessionPath))
+      .filter((sessionPath) => !isPendingTabPath(sessionPath));
+    const canonicalActivityViews = projectCanonicalActivityViews(
+      this.statsService,
+      canonicalSessionPaths,
+      MAX_CANONICAL_ACTIVITY_VIEW_SESSIONS,
+    );
     const viewState: ViewState = {
       ...projected,
+      ...canonicalActivityViews,
       // Transcript-derived usage is migration-only. The live and recovered UI
       // always receives the host-owned immutable invocation-ledger projection.
       sessionUsage: projected.activeSession

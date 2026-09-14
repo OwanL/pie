@@ -4,6 +4,81 @@ Date: 2026-09-13. This is a stocktake for the next owner, not a completion
 claim. The full rework remains incomplete and the P7 analytics/storage
 activation gates remain closed.
 
+## P4 integration checkpoint - 2026-09-14, 13:30 Pacific/Auckland
+
+The current task authority supersedes the 09:23 provisional schedule: feature freeze is hard at
+15:00, this integration deadline is 15:15, children/jobs settle by 16:15, and no task operations
+continue after 16:30. Actual startup clock was 13:25:03 NZST; no branch switch, stash, reset,
+worktree, force-push, restart, activation, or cutoff was performed.
+
+Baseline remains HEAD `8c76ddc9f584424f364669060c94c0037149dfdb`. This milestone integrates the
+reviewed P4 root-session host/protocol/UI activity-and-facet exposure plus the rich handoff test.
+The exact source/test/report scope is: `docs/STATE_CONTRACT.md`; `extension/src/host/core/projection.ts`,
+`extension/src/host/extension-host.ts`, `extension/src/shared/protocol/webview.ts`; the eight
+webview files `extension/src/webview/panel/app-body.tsx`, `bottom-section.tsx`,
+`composer/session-cost-tooltip.tsx`, `composer/toolbar.tsx`,
+`composer/use-composer-indicators.ts`, `session-tabs/token-usage.ts`, `state-validator.ts`,
+`ui.tsx`; the five extension tests `extension/test/host/core/state/projection-draft.test.ts`,
+`extension/test/webview/components/state-validator.test.ts`,
+`extension/test/webview/composer/composer-bottom-bar.test.ts`,
+`extension/test/webview/composer/session-cost-tooltip.test.ts`,
+`extension/test/webview/session-tabs/canonical-activity-summary.test.ts`; and
+`extensions/subagent/test/p4-production-bridge-sqlite.test.ts`. The durable reports are this file
+and `docs/internal/ANALYTICS_REWORK_EXECUTION.md`. The unrelated pending files
+`models.yaml`, `models.json`, `model-profiles.yaml`, `settings.json`, and
+`docs/internal/model-token-pricing-sources.md` remain excluded and untouched.
+
+Before-commit validation: `npm test` passed 4,204/4,219 tests, 15 skipped, zero failed, four of
+four package groups (`C:/dev/scratch/pie-daytime-20260914-r01/integration/npm-test-beforecommit.log`).
+`npm run extension:build` passed, publishing renderer/build ID `77cfc0031589f15d1760` and staging
+immutable runtime generation
+`d7afd53dd4a5d8978af279f4544341f27af20d63ac98d805fa948bc129c7bb36`. Independent verification
+confirmed the selected staged manifest/content and matching host/renderer IDs across 50 files
+(`integration/extension-build.log`, `integration/staged-integrity.log`). The staged generation is
+for the next normal startup; PID 15424's separately rechecked backend commandline still loads
+`3335b51944ac1a55b7740dab97c05d8e532a865e535d70453fa7850fda7c0308`. No manual or Playwright
+verification is claimed. Full post-commit `npm run verify` remains next.
+
+Do not qualify or transfer the latest mixed result: `C:/dev/scratch/pie-p0-mixed-20260914-r02/production-default.json`
+reports functional mixed/query coverage 16/16, but overall P0 is unqualified because sampled
+recorder high-water RSS is `286224384` bytes versus the `268435456`-byte gate. The actual peak was
+already after the burst; `detail-refresh` is a label only, not a causal allocation claim. P2c has
+only existing MCP cache mtime/event correlation, not writer-PID/read-use proof; the web cache is
+empty and the actual-host gate is unverified. Candidate validation is unavailable, selected-branch
+activity is blocked by missing full producer branch attribution, UI evidence is root/all-branches
+only, and real SDK nested/cancel/failover coverage is absent. P7 activation/storage gates remain
+closed.
+
+Continuation: complete post-commit verification, then at a normal future restart manually check the
+staged runtime; separately obtain qualified P0 resource/scale and actual-host P2c evidence, full
+producer branch attribution, real SDK nested/cancel/failover coverage, and ordered P7 admission.
+This handoff never claims full rework completion.
+
+---
+
+## Preflight checkpoint - 2026-09-14, 09:23 Pacific/Auckland
+
+That preflight recorded a provisional 16:30 hard deadline; the current authority above supersedes
+it with feature freeze 15:00, integration deadline 15:15, children/jobs settle 16:15, and no task
+operations after 16:30.
+Ownership: fresh parent worker PID 22812 with backend PID 15424 (Win32_Process commandline
+evidence, both from runtime generation
+`3335b51944ac1a55b7740dab97c05d8e532a865e535d70453fa7850fda7c0308`); prior editing session
+`01a09c95` last wrote 09:03:57, before the fresh parent `01a09c98` opened 09:07:32 — no overlap.
+Loaded backend runtime `3335b51944ac…` confirmed from the backend process commandline only;
+loaded/manual behavior remains unverified. No activation, restart or cutoff performed.
+Baseline HEAD `8c76ddc9` with exactly five pending user files (`models.yaml`, `models.json`,
+`model-profiles.yaml`, `settings.json`, `docs/internal/model-token-pricing-sources.md`) preserved
+and excluded from all child tasks. Pending gates: P0 qualification incomplete (recorder RSS
+exceeds 256 MiB; P2c actual-host cache use unproven), production candidate-trial validator
+unavailable, P7 analytics/storage activation gates closed. Delegation evidence: last subagent
+return (parent session, 21:20:32Z) was scout on `ollama/glm-5.3-flash:cloud`, medium, thinking
+`max`; routing: Astra orchestration only, no Astra children; next safe child route is
+openai-codex `gpt-5.6-luna` (`eligible: true`, xhigh/max, `model-profiles.yaml` lines 218-232);
+Copilot `gpt-5.6-luna` stays subagent-ineligible.
+
+---
+
 ## Current implementation milestone (2026-09-13)
 
 The user restarted VS Code and reported the normal reply, tool call, cancellation,

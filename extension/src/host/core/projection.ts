@@ -12,6 +12,15 @@
 
 import type {
   ActiveRunSummary,
+  CanonicalActivityCounts,
+  CanonicalActivityKindRow,
+  CanonicalActivityProjectionView,
+  CanonicalActivityView,
+  CanonicalAnalyticsCoverage,
+  CanonicalAnalyticsProjectionView,
+  CanonicalAnalyticsScope,
+  CanonicalToolFacetProjectionView,
+  CanonicalToolFacetRow,
   ChatMessage,
   ComposerInput,
   ContextWindowUsage,
@@ -37,6 +46,12 @@ import { stripReqIds } from '../../shared/error-mapping.js';
 import { redactRendererErrorText } from '../../shared/renderer-error-redaction.js';
 import { incidentRecoveryActions } from '../../shared/incidents.js';
 import { projectTranscriptView } from './live-pipeline/projection.js';
+import type {
+  CanonicalActivityProjection,
+  CanonicalActivityStats,
+  CanonicalToolFacetProjection,
+  StatsServicePort,
+} from '../stats-service/types';
 import type {
   ArchState,
   ComposerState,
@@ -374,6 +389,184 @@ function signaturesEqual(a: ProjectionSignature, b: ProjectionSignature): boolea
 
 let cachedSignature: ProjectionSignature | null = null;
 let cachedViewState: ViewState | null = null;
+
+function projectCanonicalScope(
+  scope: CanonicalActivityStats['activity']['scope'],
+): CanonicalAnalyticsScope {
+  return scope.kind === 'global'
+    ? { kind: 'global' }
+    : { kind: 'session', rootSessionId: scope.rootSessionId };
+}
+
+function projectCanonicalCoverage(
+  projection: CanonicalActivityProjection | CanonicalToolFacetProjection,
+): CanonicalAnalyticsCoverage {
+  return {
+    databaseSchemaVersion: projection.databaseSchemaVersion,
+    projectionRevision: projection.projectionRevision,
+    snapshotWatermark: projection.snapshotWatermark,
+    generationIds: [...projection.generationIds],
+    generationIdsTruncated: projection.generationIdsTruncated,
+    pendingDetailCoverage: {
+      deliveryHistoryCoverage: projection.pendingDetailCoverage.deliveryHistoryCoverage,
+      completeDetailWatermark: projection.pendingDetailCoverage.completeDetailWatermark,
+      retainedDetailLogicalBytes: projection.pendingDetailCoverage.retainedDetailLogicalBytes,
+      retainedDetailStoredBytes: projection.pendingDetailCoverage.retainedDetailStoredBytes,
+    },
+    truncation: {
+      rowLimit: projection.truncation.rowLimit,
+      byteLimit: projection.truncation.byteLimit,
+      cellLimit: projection.truncation.cellLimit,
+    },
+  };
+}
+
+function projectCanonicalActivityCounts(
+  counts: CanonicalActivityProjection['totals'],
+): CanonicalActivityCounts {
+  return {
+    spanCount: counts.spanCount,
+    observedCount: counts.observedCount,
+    estimatedCount: counts.estimatedCount,
+    unknownCount: counts.unknownCount,
+    measuredKnownCount: counts.measuredKnownCount,
+    measuredUnknownCount: counts.measuredUnknownCount,
+    measuredTotalMs: counts.measuredTotalMs,
+  };
+}
+
+function projectCanonicalActivityProjection(
+  projection: CanonicalActivityProjection,
+): CanonicalActivityProjectionView {
+  const kinds: CanonicalActivityKindRow[] = projection.kinds.map((row) => ({
+    activityKind: row.activityKind,
+    ...projectCanonicalActivityCounts(row),
+  }));
+  return {
+    revision: projection.revision,
+    scope: projectCanonicalScope(projection.scope),
+    kinds,
+    totals: projectCanonicalActivityCounts(projection.totals),
+    truncated: projection.truncated,
+    coverage: projectCanonicalCoverage(projection),
+  };
+}
+
+function projectCanonicalToolFacetProjection(
+  projection: CanonicalToolFacetProjection,
+): CanonicalToolFacetProjectionView {
+  const facets: CanonicalToolFacetRow[] = projection.facets.map((facet) => ({
+    generationId: facet.generationId,
+    facetId: facet.facetId,
+    toolCallId: facet.toolCallId,
+    rootSessionId: facet.rootSessionId,
+    commands: facet.commands ? [...facet.commands] : null,
+    cwd: facet.cwd,
+    observedPaths: facet.observedPaths ? [...facet.observedPaths] : null,
+    attemptedAddedLines: facet.attemptedAddedLines,
+    attemptedRemovedLines: facet.attemptedRemovedLines,
+    verification: facet.verification,
+  }));
+  return {
+    revision: projection.revision,
+    scope: projectCanonicalScope(projection.scope),
+    facets,
+    truncated: projection.truncated,
+    coverage: projectCanonicalCoverage(projection),
+  };
+}
+
+function projectCanonicalActivityRead(
+  snapshot: CanonicalActivityStats['activity'],
+): CanonicalAnalyticsProjectionView<CanonicalActivityProjectionView> {
+  const projection = snapshot.projection;
+  return {
+    authority: snapshot.authority,
+    scope: projectCanonicalScope(snapshot.scope),
+    revision: projection?.revision ?? null,
+    coverage: projection ? projectCanonicalCoverage(projection) : null,
+    truncated: projection?.truncated ?? null,
+    projection: projection ? projectCanonicalActivityProjection(projection) : null,
+  };
+}
+
+function projectCanonicalToolFacetRead(
+  snapshot: CanonicalActivityStats['toolFacets'],
+): CanonicalAnalyticsProjectionView<CanonicalToolFacetProjectionView> {
+  const projection = snapshot.projection;
+  return {
+    authority: snapshot.authority,
+    scope: projectCanonicalScope(snapshot.scope),
+    revision: projection?.revision ?? null,
+    coverage: projection ? projectCanonicalCoverage(projection) : null,
+    truncated: projection?.truncated ?? null,
+    projection: projection ? projectCanonicalToolFacetProjection(projection) : null,
+  };
+}
+
+/** Convert the host-owned bounded canonical reads into plain JSON-safe
+ * ViewState data. Activity and facets remain independently qualified. */
+export function projectCanonicalActivityView(
+  sessionPath: string | null,
+  stats: CanonicalActivityStats,
+): CanonicalActivityView {
+  const activity = projectCanonicalActivityRead(stats.activity);
+  const toolFacets = projectCanonicalToolFacetRead(stats.toolFacets);
+  const revisions = [activity.revision, toolFacets.revision].filter(
+    (revision): revision is number | string => revision !== null,
+  );
+  const revision = revisions.length === 0
+    ? null
+    : revisions.every((candidate) => String(candidate) === String(revisions[0]))
+      ? revisions[0]!
+      : null;
+  return {
+    sessionPath,
+    revision,
+    scope: activity.scope,
+    activity,
+    toolFacets,
+  };
+}
+
+type CanonicalActivityViewStatsService = Pick<
+  StatsServicePort,
+  'getAnalyticsReadModel' | 'getAnalyticsRevisionRefreshStats' | 'getCanonicalActivityStats'
+>;
+
+/** Host seam for reading the optional canonical cache into ViewState fields.
+ * Legacy services return no fields; canonical services expose only the bounded
+ * global read and the explicitly supplied visible session paths. */
+export function projectCanonicalActivityViews(
+  statsService: CanonicalActivityViewStatsService,
+  sessionPaths: readonly string[],
+  maxSessionPaths: number,
+): Pick<
+  ViewState,
+  'canonicalActivityGlobal' | 'canonicalActivityBySession' | 'canonicalActivityBySessionTruncated'
+> {
+  const canonicalAvailable = statsService.getAnalyticsReadModel?.() !== undefined
+    || statsService.getAnalyticsRevisionRefreshStats?.() !== undefined;
+  if (!canonicalAvailable) return {};
+
+  const uniqueSessionPaths = [...new Set(sessionPaths)];
+  const visibleSessionPaths = uniqueSessionPaths.slice(0, maxSessionPaths);
+  const canonicalActivityBySession: Record<string, CanonicalActivityView> = {};
+  for (const sessionPath of visibleSessionPaths) {
+    canonicalActivityBySession[sessionPath] = projectCanonicalActivityView(
+      sessionPath,
+      statsService.getCanonicalActivityStats(sessionPath),
+    );
+  }
+  return {
+    canonicalActivityGlobal: projectCanonicalActivityView(
+      null,
+      statsService.getCanonicalActivityStats(),
+    ),
+    canonicalActivityBySession,
+    canonicalActivityBySessionTruncated: visibleSessionPaths.length < uniqueSessionPaths.length,
+  };
+}
 
 // ─── Main projection ──────────────────────────────────────────────────────────
 
