@@ -49,6 +49,7 @@ const npmNodeModules = path.join(repoRoot, 'npm', 'node_modules');
 const UNSAFE_SOURCE = /node:child_process|node:worker_threads|__dirname|\binstallDom\s*\(|(?:\bfrom\s*|\bimport\s*)['"]preact(?:\/|['"])/u;
 const UNSAFE_BUNDLE_ENTRIES = new Set([
   'test/backend/runtime/extension-ui-bridge.test.ts',
+  'test/backend/worker/worker-client-transport.test.ts',
   'test/host/core/lifecycle/pinned-tab-groups.test.ts',
   'test/shared/utilities/tab-behavior.test.ts',
   'test/webview/components/ui-loading-states.test.ts',

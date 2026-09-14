@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import path from 'node:path';
@@ -16,6 +17,15 @@ test('classifyExtensionTest keeps child-process, Preact, DOM, and explicit isola
     classifyExtensionTest('test/backend/runtime/extension-ui-bridge.test.ts', "import test from 'node:test';"),
     'tsx',
   );
+});
+
+test('classifyExtensionTest isolates the transitive process-owning worker fixture test', () => {
+  const repoRoot = path.resolve(import.meta.dirname, '../..');
+  const relativePath = 'test/backend/worker/worker-client-transport.test.ts';
+  const source = readFileSync(path.join(repoRoot, 'extension', relativePath), 'utf8');
+  assert.match(source, /WorkerClient/u);
+  assert.doesNotMatch(source, /node:child_process/u);
+  assert.equal(classifyExtensionTest(relativePath, source), 'tsx');
 });
 
 test('classifyExtensionTest batches ordinary bundles and approved type-import fixtures', () => {

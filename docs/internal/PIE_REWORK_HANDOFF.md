@@ -4,6 +4,68 @@ Date: 2026-09-13. This is a stocktake for the next owner, not a completion
 claim. The full rework remains incomplete and the P7 analytics/storage
 activation gates remain closed.
 
+## Final integration checkpoint - 2026-09-14, 15:13 Pacific/Auckland (final sole integrator)
+
+Actual integrator clock: session start 15:02 NZST, verification work 15:06–15:13 NZST. Feature
+freeze is hard; only the reviewed two-file test-runner stabilization was integrated, exactly as
+review-approved in the scratch receipt
+`C:/dev/scratch/pie-daytime-20260914-r01/integration/wave-hang-repair.md`:
+`scripts/run-fast-extension-tests.mjs` (+1 line, `worker-client-transport.test.ts` added to
+`UNSAFE_BUNDLE_ENTRIES`, routing the transitive process-owning worker-fixture test to the
+conservative existing `tsx` isolated lane) and `scripts/test/fast-extension-runner.test.mjs`
+(+10 lines, regression asserting the real source still has no direct `node:child_process` import
+yet classifies `tsx`). No other repository file changed.
+
+ONE nonconcurrent full `npm run verify` was run under the existing identity-bound scratch wrapper
+`stability-run-supervised.mjs` (repo helper `scripts/lib/process-watchdog.mjs`; Win32
+CreationDate identity capture; deadline 1740 s ≤ 1800 s, covering the extension child's native
+1,200,000 ms watchdog plus cleanup reserve; tool backstop 1800 s): child cmd PID 3608, launched
+15:08:04, natural exit 0 at 15:11:07 NZST (183,341 ms), `SUPERVISED_CLEANUP gone=true
+survivors=[]` — zero owned survivors. Chain: sync-models check OK; all 17 typecheck projects
+30.6 s; lint clean; `test:all` 7/7 packages, 7,049 passed, 0 failed, 30 skipped (extension
+4,945 passed, 0 failed, 19 skipped, 1 cancelled, 94.2 s); verify's own no-sync build completed
+with coordinated host/webview identity `77cfc0031589f15d1760`. This is the first green extension
+wave in four full-verify attempts (prior 3 attempts red: no summary, 20-minute watchdog, phase2
+worker children alive; those logs are preserved unchanged in
+`C:/dev/scratch/pie-daytime-20260914-r01/integration/npm-verify-full.log`,
+`npm-verify-full-retry.log`, `stability-verify-full-stdout2.log`). Full log:
+`C:/dev/scratch/pie-daytime-20260914-r01/integration/final-verify-full.log`.
+
+Accuracy notes, reported exactly: four extension files failed in-wave and passed on the
+runner's flaky rerun (`p0-endurance-harness` candidate-unqualified message,
+`windows-process-handle-collector` ready-timeout ×2, `worker-client-transport` guardian
+ready-timeout ×3 with a CLIXML `#<` stream artifact and one LF-delimiter case,
+`host/webview/bootstrap` one 15,000 ms timeout) — recorded verbatim in the log. Root-cause
+uncertainty remains: the bundled-wave hang is empirically resolved (wave completed with summary,
+zero survivors, no cancellation), but the precise wave-concurrency interaction that killed the
+previously bundled phase2 children is not fully characterized; the isolated `tsx` lane itself
+showed a one-time guardian readiness flake under wave load, consistent with the known
+intermittent ready-timeout pattern, and passed on rerun.
+
+After the green verify, the required normal `npm run extension:build` ran supervised (child cmd
+PID 31260, 15:11:57–15:12:08 NZST, natural exit 0, cleanup zero survivors): staged complete
+runtime generation `d7afd53dd4a5d8978af279f4544341f27af20d63ac98d805fa948bc129c7bb36`
+(content-addressed; same generation as the 13:30 build — sources unchanged by the runner-only
+fix) with build/renderer ID `77cfc0031589f15d1760`, selected for the next VS Code startup; no
+restart was forced. Independent inspection (`integration/final-staged-integrity.log`):
+manifest generation matches its directory, host/renderer build IDs match, 50/50 files
+sha256+size verified, no extra/missing files (`STAGED_FILE_INTEGRITY=TRUE`); newest selection
+record `1789355528378-…-d7afd53d….json` names the staged generation. Separately observed: PID
+15424 (born 09:07:20) command line still loads generation
+`3335b51944ac1a55b7740dab97c05d8e532a865e535d70453fa7850fda7c0308/out/backend.js`; child 22812
+and all worker-entry children untouched; no restart, activation, or cutoff performed.
+
+The five unrelated pending files (`models.yaml`, `models.json`, `model-profiles.yaml`,
+`settings.json`, `docs/internal/model-token-pricing-sources.md`) remain modified in the working
+tree, excluded from the commit, hashes preserved. Gates that stay closed: P0 unqualified
+(recorder sampled high-water RSS `286224384` > `268435456`; the previous artifact does not
+qualify the new one), rich-SDK nested/cancel/failover coverage, full producer branch
+attribution, cache use proof, candidate validation, and ordered P7 admission. Manual UI and
+Playwright verification remain unperformed. Commit/push of the runner fix plus these two records
+happens immediately after this checkpoint, with the exact pushed commit confirmed by
+`git ls-remote --heads origin master` and recorded in the scratch final receipt
+`integration/final-integration-receipt.md`.
+
 ## P4 integration checkpoint - 2026-09-14, 13:30 Pacific/Auckland
 
 The current task authority supersedes the 09:23 provisional schedule: feature freeze is hard at
