@@ -42,10 +42,16 @@ to `origin/master`; `git ls-remote --heads origin master` matched it. Post-commi
 `npm run verify` was attempted twice, at 13:33:44 and 13:50:51 NZST. Attempt one reached the
 full `npm run test:all` summary but failed infrastructure-wise when the extension child watchdog
 expired after 1,200,000 ms; six of seven package runners passed (2,103 passed, 11 skipped, zero
-reported test failures) and the extension had no summary. Attempt two was terminated by the
-outer 600-second tool timeout during `test:all`, with no summary. Neither attempt reached the
-verify no-sync build; logs are `C:/dev/scratch/pie-daytime-20260914-r01/integration/npm-verify-full.log`
-and `C:/dev/scratch/pie-daytime-20260914-r01/integration/npm-verify-full-retry.log`. The sync-models
+reported test failures) and the extension had no summary. Attempt two's outer 600-second tool watcher expired at 14:00:51 during `test:all`, but its process
+tree was never cancelled and kept running: the extension child watchdog then expired at ~14:12:14
+after its full 1,200,000 ms, the runner's whole-package flaky rerun also failed, and the chain
+self-terminated at 14:16:27 NZST with inner exit 1 — the same 6/7-green shape as attempt one
+(2,103 passed, 0 failed, 11 skipped), with the extension again left without a summary. The terminal
+receipt `VERIFY_FULL_RETRY_END 2026-09-14T14:16:27+1200` / `VERIFY_FULL_RETRY_INNER_EXIT=1` is
+appended in `C:/dev/scratch/pie-daytime-20260914-r01/integration/npm-verify-full-retry.log`. Neither
+attempt reached the verify no-sync build; logs are
+`C:/dev/scratch/pie-daytime-20260914-r01/integration/npm-verify-full.log` and
+`C:/dev/scratch/pie-daytime-20260914-r01/integration/npm-verify-full-retry.log`. The sync-models
 check, all 17 typecheck projects, and lint completed successfully in both attempts. A bounded
 full-extension diagnostic returned exit 1 with 4,922 passed, 24 failed, and 19 skipped; exact
 failures are in `C:/dev/scratch/pie-daytime-20260914-r01/integration/verify-diag-extension.log`
@@ -58,6 +64,41 @@ its no-sync build. Final process audit at 14:03:33 still found only protected ba
 15424/22812, with PID 15424 loading the separately observed
 `3335b51944ac1a55b7740dab97c05d8e532a865e535d70453fa7850fda7c0308`; staged generation integrity
 was rechecked at 14:03:47 and remains true.
+
+Stability settlement (14:14–14:49 NZST): the attempt-two verify tree (PID 38948) was confirmed
+alive and progressing at 14:15–14:16 and settled itself at 14:16:27 with the terminal receipt above;
+no cancellation was needed. All eleven of its inspected PIDs (38948, 35076, 37924, 8124, 33472,
+39776, 35740, 12800, 34268, 248, 27504) are absent from the process table as of 14:23–14:27;
+identity snapshot in
+`C:/dev/scratch/pie-daytime-20260914-r01/integration/stability-process-census-postverify.md`
+(protected 15424/22812 and worker-entry children never signalled; unrelated captures 30664/27748
+left running). The 24 diagnostic failures are overlap-contaminated, not automatically
+regression-free: a clean isolated serial re-check of the eight affected files (root `test:file`
+wrapper, one file at a time, scratch-supervised with native 330-second deadlines) returned 7/8
+clean — worker-client-transport 24.0s, run-analytics-performance-regression 6.2s,
+canonical-historical 46.5s, analytics-handoff-discovery 6.3s, analytics-handoff-control 4.5s,
+deferred-triggers-process-race 5.4s, p0-mixed-harness 6.5s all PASS; windows-process-handle-collector
+failed once (`recordTerminal` returned `false` at
+`extension/test/analytics/windows-process-handle-collector.test.ts:142`/`:178`) and then PASSED an
+identical isolated rerun (12.7s) — intermittent, not a reproducible regression. Logs:
+`C:/dev/scratch/pie-daytime-20260914-r01/integration/stability-file-1..8-*.log` and
+`stability-file-7-rerun1.log`. Attempt three of full `npm run verify` (isolated, uncontended,
+launched 14:25:40 under the scratch supervised wrapper `stability-run-supervised.mjs`, child cmd
+PID 27212, 3,900-second native backstop deadline) failed with the identical infrastructure
+signature at 14:48:45 (exit 1, 23.1 min): the extension bundled wave never completed — its
+phase2-worker-fixture children, whose only spawner is
+`extension/test/backend/worker/worker-client-transport.test.ts` (bundled because it does not
+directly import `node:child_process`), stayed alive 18+ minutes until the runner's 1,200,000 ms
+child watchdog killed the tree at ~14:47:22; 6/7 packages green again (2,103 passed, 0 failed,
+11 skipped); the extension had no summary. That file passes isolated in 24s. Full verify therefore
+reproducibly fails at the extension bundled wave on this machine even when isolated (3/3 attempts);
+this is not overlap contamination. No source repair was attempted. Required next action: an
+owner-approved investigation/repair of the wave-context fixture/child hang (or an explicitly
+decided runner watchdog change), then one full `npm run verify` with its no-sync build. Manual UI
+verification remains unperformed; the staged `d7afd53d…`/`77cfc003…` build is still only selected
+for the next normal restart, while loaded backend PID 15424 remains generation `3335b519…`. Full
+settlement details:
+`C:/dev/scratch/pie-daytime-20260914-r01/integration/stability-settlement-summary.md`.
 
 Do not qualify or transfer the latest mixed result: `C:/dev/scratch/pie-p0-mixed-20260914-r02/production-default.json`
 reports functional mixed/query coverage 16/16, but overall P0 is unqualified because sampled
