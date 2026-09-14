@@ -347,6 +347,119 @@ function validateCandidateTrialReport(report, expected, reportPath, reportHash) 
   return { reportHash, trialId: bindings.trialId };
 }
 
+/** The bounded per-check evidence schemas for the required candidate-trial
+ * checks whose criteria are computable purely from the supplied receipts.
+ * Every key set is exact: a missing or extra evidence key fails closed.  A
+ * required check that is not listed here has no authoritative producer or
+ * receipt criteria in the current repository and can never be qualified by
+ * recomputation; it only ever yields an explicit unqualified reason. */
+export const CANDIDATE_TRIAL_EVIDENCE_SCHEMAS = Object.freeze({
+  matchedSourceBuildConfig: Object.freeze([
+    'generationId',
+    'buildId',
+    'sourceHead',
+    'sourceFingerprint',
+    'qualificationSha256',
+  ]),
+  cleanup: Object.freeze(['completed', 'rootRemoved']),
+});
+
+function evidenceKeysMatchSchema(evidence, schemaKeys) {
+  const keys = Object.keys(evidence).sort();
+  const wanted = [...schemaKeys].sort();
+  return keys.length === wanted.length && keys.every((key, index) => key === wanted[index]);
+}
+
+function recomputeMatchedSourceBuildConfigEvidence(evidence, report, expected) {
+  if (!evidenceKeysMatchSchema(evidence, CANDIDATE_TRIAL_EVIDENCE_SCHEMAS.matchedSourceBuildConfig)) {
+    return 'matchedSourceBuildConfig evidence keys do not match its bounded schema';
+  }
+  if (!isBoundedString(evidence.generationId) || evidence.generationId !== expected.generationId) {
+    return 'matchedSourceBuildConfig evidence.generationId does not match the plan generation';
+  }
+  if (!isBoundedString(evidence.buildId) || evidence.buildId !== expected.buildId) {
+    return 'matchedSourceBuildConfig evidence.buildId does not match the plan build';
+  }
+  if (!isGitHead(evidence.sourceHead)
+    || evidence.sourceHead.toLowerCase() !== expected.sourceHead.toLowerCase()) {
+    return 'matchedSourceBuildConfig evidence.sourceHead does not match the plan source head';
+  }
+  if (!isSha256(evidence.sourceFingerprint) || evidence.sourceFingerprint !== expected.sourceFingerprint) {
+    return 'matchedSourceBuildConfig evidence.sourceFingerprint does not match the plan source fingerprint';
+  }
+  if (!isSha256(evidence.qualificationSha256)
+    || evidence.qualificationSha256 !== expected.qualificationSha256) {
+    return 'matchedSourceBuildConfig evidence.qualificationSha256 does not match the recomputed qualification bytes hash';
+  }
+  return null;
+}
+
+function recomputeCleanupEvidence(evidence, report, expected) {
+  if (!evidenceKeysMatchSchema(evidence, CANDIDATE_TRIAL_EVIDENCE_SCHEMAS.cleanup)) {
+    return 'cleanup evidence keys do not match its bounded schema';
+  }
+  const cleanup = report.cleanup;
+  if (!isObject(cleanup) || cleanup.completed !== true || cleanup.rootRemoved !== true
+    || evidence.completed !== true || evidence.rootRemoved !== true) {
+    return 'cleanup evidence does not match the report cleanup receipt';
+  }
+  return null;
+}
+
+/** Checks with a pure recomputation over the supplied receipts, keyed by the
+ * required check name.  Absence is the explicit marker that no authoritative
+ * producer criteria exist for that check yet. */
+const RECOMPUTABLE_CANDIDATE_TRIAL_CHECKS = new Map([
+  ['matchedSourceBuildConfig', recomputeMatchedSourceBuildConfigEvidence],
+  ['cleanup', recomputeCleanupEvidence],
+]);
+
+/** Deterministically recompute the required candidate-trial checks from the
+ * exact supplied report and receipts.  Returns one explicit error string per
+ * failed, missing, unknown, or not-yet-authoritative check; it never
+ * substitutes a boolean pass for a check that lacks an authoritative producer
+ * or receipt criteria in this repository, and it performs no I/O, manifest
+ * access, or runtime effects. */
+export function recomputeCandidateTrialChecks(report, expected) {
+  if (!isObject(report) || !isObject(report.checks)) {
+    return ['candidate trial report checks are missing'];
+  }
+  if (!isObject(expected) || !isBoundedString(expected.generationId) || !isBoundedString(expected.buildId)
+    || !isGitHead(expected.sourceHead) || !isSha256(expected.sourceFingerprint)
+    || !isSha256(expected.qualificationSha256)) {
+    return ['candidate trial recompute bindings are incomplete'];
+  }
+  const errors = [];
+  for (const checkName of REQUIRED_CANDIDATE_TRIAL_CHECKS) {
+    const check = report.checks[checkName];
+    if (!isObject(check)) {
+      errors.push(`required candidate trial check ${checkName} is missing from the report`);
+      continue;
+    }
+    if (check.decision !== 'passed') {
+      errors.push(`required candidate trial check ${checkName} is not passed`);
+      continue;
+    }
+    const recompute = RECOMPUTABLE_CANDIDATE_TRIAL_CHECKS.get(checkName);
+    if (!recompute) {
+      errors.push(`${checkName} has no authoritative producer criteria in the current repository`);
+      continue;
+    }
+    if (!isObject(check.evidence)) {
+      errors.push(`${checkName} evidence is missing`);
+      continue;
+    }
+    const error = recompute(check.evidence, report, expected);
+    if (error) errors.push(error);
+  }
+  for (const checkName of Object.keys(report.checks)) {
+    if (!REQUIRED_CANDIDATE_TRIAL_CHECKS.includes(checkName)) {
+      errors.push(`unknown candidate trial check ${checkName} is not in the required set`);
+    }
+  }
+  return errors;
+}
+
 function readAndValidateActivationEvidence(options, { requireQualification, recompute }) {
   const {
     qualificationPath,
@@ -376,18 +489,27 @@ function readAndValidateActivationEvidence(options, { requireQualification, reco
     if (recomputationErrors.length > 0) invalid('qualification report', recomputationErrors.join('; '));
   }
   const trial = readBoundedJsonFile(trialPath, 'candidate trial report');
+  const expectedBindings = {
+    generationId,
+    buildId,
+    sourceHead,
+    sourceFingerprint,
+    qualificationSha256: qualification.sha256,
+  };
   const trialEvidence = validateCandidateTrialReport(
     trial.value,
-    {
-      generationId,
-      buildId,
-      sourceHead,
-      sourceFingerprint,
-      qualificationSha256: qualification.sha256,
-    },
+    expectedBindings,
     trialReportPath,
     trial.sha256,
   );
+  if (recompute) {
+    // Strictly after the P0 gate recomputation: the candidate-trial checks
+    // are verified only against the exact receipts already read and hashed.
+    const trialRecomputationErrors = recomputeCandidateTrialChecks(trial.value, expectedBindings);
+    if (trialRecomputationErrors.length > 0) {
+      invalid('candidate trial report', trialRecomputationErrors.join('; '));
+    }
+  }
   return {
     qualificationSha256: qualificationEvidence.reportHash,
     trialSha256: trialEvidence.reportHash,
