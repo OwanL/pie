@@ -39,10 +39,13 @@ for the next normal startup; PID 15424's separately rechecked backend commandlin
 `3335b51944ac1a55b7740dab97c05d8e532a865e535d70453fa7850fda7c0308`. No manual or Playwright
 verification is claimed. Milestone commit `8731645343b73ba901ea1722eba75d6163899c6f` was pushed
 to `origin/master`; `git ls-remote --heads origin master` matched it. Post-commit final
-`npm run verify` was attempted twice, at 13:33:44 and 13:50:51 NZST. Both timed out after the
-runner's 600-second `npm run test:all` phase, before a test summary and before the verify no-sync
-build; logs are `C:/dev/scratch/pie-daytime-20260914-r01/integration/npm-verify-full.log` and
-`C:/dev/scratch/pie-daytime-20260914-r01/integration/npm-verify-full-retry.log`. The sync-models
+`npm run verify` was attempted twice, at 13:33:44 and 13:50:51 NZST. Attempt one reached the
+full `npm run test:all` summary but failed infrastructure-wise when the extension child watchdog
+expired after 1,200,000 ms; six of seven package runners passed (2,103 passed, 11 skipped, zero
+reported test failures) and the extension had no summary. Attempt two was terminated by the
+outer 600-second tool timeout during `test:all`, with no summary. Neither attempt reached the
+verify no-sync build; logs are `C:/dev/scratch/pie-daytime-20260914-r01/integration/npm-verify-full.log`
+and `C:/dev/scratch/pie-daytime-20260914-r01/integration/npm-verify-full-retry.log`. The sync-models
 check, all 17 typecheck projects, and lint completed successfully in both attempts. A bounded
 full-extension diagnostic returned exit 1 with 4,922 passed, 24 failed, and 19 skipped; exact
 failures are in `C:/dev/scratch/pie-daytime-20260914-r01/integration/verify-diag-extension.log`
