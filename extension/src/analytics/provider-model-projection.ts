@@ -3,7 +3,13 @@ import { localCalendarDayKey } from '../../../shared/analytics/metrics.js';
 /** The projection deliberately depends on the small subset of node:sqlite
  * needed by both the migration writer and the recorder. Keeping this module
  * independent from SqliteAnalyticsRecorder also makes the read path easy to
- * audit: readProviderModelGroups only prepares SELECTs. */
+ * audit: readProviderModelGroups only prepares SELECTs.
+ *
+ * The steady-state write path can additionally receive a structural statement
+ * source — the recorder's connection-scoped writer statement cache, declared
+ * here as a structural interface so this module never imports the recorder.
+ * When `statements` is absent (schema migration/rebuild), every statement is
+ * prepared from the raw database, so the migration path stays uncached. */
 export interface ProviderProjectionDatabase {
   exec(sql: string): void;
   prepare(sql: string): ProviderProjectionStatement;
@@ -14,6 +20,60 @@ export interface ProviderProjectionStatement {
   get(...params: unknown[]): unknown;
   run(...params: unknown[]): { changes: number | bigint; lastInsertRowid: number | bigint };
   iterate(...params: unknown[]): Iterable<unknown>;
+}
+
+export interface ProviderProjectionStatementSource {
+  prepare(key: string, sql: string): ProviderProjectionStatement;
+}
+
+/** The fixed writer-statement keys owned by this module. They are allowlisted
+ * verbatim by the recorder's writer statement cache, so this record is the
+ * single key source for both sides. */
+export const PROVIDER_PROJECTION_STATEMENT_KEYS = {
+  totalsSummaryRead: 'projection.totals.summary.read',
+  totalsSummaryDelete: 'projection.totals.summary.delete',
+  totalsSummaryUpsert: 'projection.totals.summary.upsert',
+  dailySummaryRead: 'projection.daily.summary.read',
+  dailySummaryDelete: 'projection.daily.summary.delete',
+  dailySummaryUpsert: 'projection.daily.summary.upsert',
+  dailyStateRead: 'projection.daily.state.read',
+} as const;
+
+/** The seven fixed projection SQL texts. Interpolation varies only by the two
+ * table names, so each statement is one static string owned here and allowlisted
+ * verbatim by the recorder's writer statement cache. */
+const TOTALS_WHERE = 'provider_key = ? AND model_key = ? AND purpose_key = ? AND workspace_coverage = ? AND workspace_key = ?';
+const DAILY_WHERE = 'time_zone = ? AND local_day = ? AND provider_key = ? AND model_key = ? AND purpose_key = ? AND workspace_coverage = ? AND workspace_key = ?';
+
+export const PROVIDER_PROJECTION_TOTALS_SUMMARY_READ_SQL = `SELECT summary_json FROM analytics_provider_model_totals WHERE ${TOTALS_WHERE}`;
+export const PROVIDER_PROJECTION_TOTALS_SUMMARY_DELETE_SQL = `DELETE FROM analytics_provider_model_totals WHERE ${TOTALS_WHERE}`;
+export const PROVIDER_PROJECTION_TOTALS_SUMMARY_UPSERT_SQL = `
+  INSERT INTO analytics_provider_model_totals (
+    scope_kind, scope_key, provider_key, model_key, purpose_key, workspace_coverage, workspace_key,
+    summary_json, projection_revision
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT DO UPDATE SET summary_json = excluded.summary_json,
+    projection_revision = excluded.projection_revision
+`;
+export const PROVIDER_PROJECTION_DAILY_SUMMARY_READ_SQL = `SELECT summary_json FROM analytics_provider_model_daily WHERE ${DAILY_WHERE}`;
+export const PROVIDER_PROJECTION_DAILY_SUMMARY_DELETE_SQL = `DELETE FROM analytics_provider_model_daily WHERE ${DAILY_WHERE}`;
+export const PROVIDER_PROJECTION_DAILY_SUMMARY_UPSERT_SQL = `
+  INSERT INTO analytics_provider_model_daily (
+    time_zone, local_day, scope_kind, scope_key, provider_key, model_key, purpose_key, workspace_coverage, workspace_key,
+    summary_json, projection_revision
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT DO UPDATE SET summary_json = excluded.summary_json,
+    projection_revision = excluded.projection_revision
+`;
+export const PROVIDER_PROJECTION_DAILY_STATE_READ_SQL = 'SELECT time_zone, window_start_ms, window_end_ms, state FROM analytics_provider_daily_state WHERE singleton = 1';
+
+function projectionStatement(
+  database: ProviderProjectionDatabase,
+  statements: ProviderProjectionStatementSource | undefined,
+  key: string,
+  sql: string,
+): ProviderProjectionStatement {
+  return statements ? statements.prepare(key, sql) : database.prepare(sql);
 }
 
 export type ProviderProjectionCoverage = 'known' | 'unknown' | 'not_applicable';
@@ -192,36 +252,40 @@ function updateSummary(summary: ProjectionSummary, settlement: ProviderProjectio
 
 function rollupRow(
   database: ProviderProjectionDatabase,
+  statements: ProviderProjectionStatementSource | undefined,
   table: 'analytics_provider_model_totals' | 'analytics_provider_model_daily',
   keys: readonly string[],
   settlement: ProviderProjectionSettlement,
   revision: string,
   direction: 1 | -1,
 ): void {
-  const where = table === 'analytics_provider_model_totals'
-    ? 'provider_key = ? AND model_key = ? AND purpose_key = ? AND workspace_coverage = ? AND workspace_key = ?'
-    : 'time_zone = ? AND local_day = ? AND provider_key = ? AND model_key = ? AND purpose_key = ? AND workspace_coverage = ? AND workspace_key = ?';
-  const row = database.prepare(`SELECT summary_json FROM ${table} WHERE ${where}`).get(...keys) as { summary_json: string } | undefined;
+  const totals = table === 'analytics_provider_model_totals';
+  const row = projectionStatement(
+    database,
+    statements,
+    totals ? PROVIDER_PROJECTION_STATEMENT_KEYS.totalsSummaryRead : PROVIDER_PROJECTION_STATEMENT_KEYS.dailySummaryRead,
+    totals ? PROVIDER_PROJECTION_TOTALS_SUMMARY_READ_SQL : PROVIDER_PROJECTION_DAILY_SUMMARY_READ_SQL,
+  ).get(...keys) as { summary_json: string } | undefined;
   const summary = row ? parseSummary(row.summary_json) : emptySummary();
   updateSummary(summary, settlement, direction);
-  const allKeys = table === 'analytics_provider_model_totals'
+  const allKeys = totals
     ? ['global', '*', ...keys]
     : [keys[0], keys[1], 'global', '*', ...keys.slice(2)];
-  const placeholders = allKeys.map(() => '?').join(', ');
   if (summary.occurrenceCount === '0') {
-    database.prepare(`DELETE FROM ${table} WHERE ${where}`).run(...keys);
+    projectionStatement(
+      database,
+      statements,
+      totals ? PROVIDER_PROJECTION_STATEMENT_KEYS.totalsSummaryDelete : PROVIDER_PROJECTION_STATEMENT_KEYS.dailySummaryDelete,
+      totals ? PROVIDER_PROJECTION_TOTALS_SUMMARY_DELETE_SQL : PROVIDER_PROJECTION_DAILY_SUMMARY_DELETE_SQL,
+    ).run(...keys);
     return;
   }
-  database.prepare(`
-    INSERT INTO ${table} (
-      ${table === 'analytics_provider_model_totals'
-        ? 'scope_kind, scope_key, provider_key, model_key, purpose_key, workspace_coverage, workspace_key'
-        : 'time_zone, local_day, scope_kind, scope_key, provider_key, model_key, purpose_key, workspace_coverage, workspace_key'},
-      summary_json, projection_revision
-    ) VALUES (${placeholders}, ?, ?)
-    ON CONFLICT DO UPDATE SET summary_json = excluded.summary_json,
-      projection_revision = excluded.projection_revision
-  `).run(...allKeys, JSON.stringify(summary), revision);
+  projectionStatement(
+    database,
+    statements,
+    totals ? PROVIDER_PROJECTION_STATEMENT_KEYS.totalsSummaryUpsert : PROVIDER_PROJECTION_STATEMENT_KEYS.dailySummaryUpsert,
+    totals ? PROVIDER_PROJECTION_TOTALS_SUMMARY_UPSERT_SQL : PROVIDER_PROJECTION_DAILY_SUMMARY_UPSERT_SQL,
+  ).run(...allKeys, JSON.stringify(summary), revision);
 }
 
 function isWithinWindow(settledAtMs: string, startMs: string, endMs: string): boolean {
@@ -354,23 +418,29 @@ export function applyProviderProjection(
   revision: string,
   direction: 1 | -1,
   includeTotals = true,
+  statements?: ProviderProjectionStatementSource,
 ): void {
   const keys = dimensionKey(settlement);
-  if (includeTotals) rollupRow(database, 'analytics_provider_model_totals', keys, settlement, revision, direction);
-  const state = database.prepare(`SELECT time_zone, window_start_ms, window_end_ms, state FROM analytics_provider_daily_state WHERE singleton = 1`).get() as {
+  if (includeTotals) rollupRow(database, statements, 'analytics_provider_model_totals', keys, settlement, revision, direction);
+  const state = projectionStatement(
+    database,
+    statements,
+    PROVIDER_PROJECTION_STATEMENT_KEYS.dailyStateRead,
+    PROVIDER_PROJECTION_DAILY_STATE_READ_SQL,
+  ).get() as {
     time_zone: string | null; window_start_ms: string | null; window_end_ms: string | null; state: string;
   };
   if (settlement.settledAtMs === null) {
     // Undated is retained independently of any active calendar window.
     if ((state.state === 'ready' || state.state === 'rebuilding') && state.time_zone) {
-      rollupRow(database, 'analytics_provider_model_daily', [
+      rollupRow(database, statements, 'analytics_provider_model_daily', [
         state.time_zone, 'undated', ...keys,
       ], settlement, revision, direction);
     }
   } else if ((state.state === 'ready' || state.state === 'rebuilding') && state.time_zone && state.window_start_ms && state.window_end_ms
     && isWithinWindow(settlement.settledAtMs, state.window_start_ms, state.window_end_ms)) {
     const day = localCalendarDayKey(settlement.settledAtMs, state.time_zone);
-    rollupRow(database, 'analytics_provider_model_daily', [state.time_zone, day, ...keys], settlement, revision, direction);
+    rollupRow(database, statements, 'analytics_provider_model_daily', [state.time_zone, day, ...keys], settlement, revision, direction);
   }
 }
 
@@ -482,6 +552,7 @@ export function prepareProviderDailyProjection(
   windowEndMs: string,
   revision: string,
   allowTimeZoneChange = false,
+  statements?: ProviderProjectionStatementSource,
 ): void {
   // Validate the IANA identifier before changing state. The formatter is also
   // the canonical DST/calendar implementation used for each settlement.
@@ -522,7 +593,7 @@ export function prepareProviderDailyProjection(
       WHERE settled_at_ms IS NULL
     `).iterate() as Iterable<Record<string, unknown>>;
     for (const row of undatedRows) {
-      applyProviderProjection(database, settlementFromRow(row), revision, 1, false);
+      applyProviderProjection(database, settlementFromRow(row), revision, 1, false, statements);
     }
   }
   // Keep the dated statement independent of the NULL branch so SQLite can use
@@ -538,7 +609,7 @@ export function prepareProviderDailyProjection(
   `).iterate(windowStartMs, windowEndMs) as Iterable<Record<string, unknown>>;
   for (const row of rows) {
     const settlement = settlementFromRow(row);
-    applyProviderProjection(database, settlement, revision, 1, false);
+    applyProviderProjection(database, settlement, revision, 1, false, statements);
   }
   database.prepare(`UPDATE analytics_provider_daily_state SET state = 'ready', projection_revision = ? WHERE singleton = 1`).run(revision);
 }

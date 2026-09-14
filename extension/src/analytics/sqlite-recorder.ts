@@ -37,6 +37,7 @@ import {
   decrementProviderSessionPresence,
   incrementProviderSessionPresence,
   prepareProviderDailyProjection,
+  PROVIDER_PROJECTION_STATEMENT_KEYS,
   readProviderModelGroups,
   rebuildProviderProjection,
   settlementFromDatabaseRow,
@@ -115,6 +116,7 @@ const FIXED_WRITER_STATEMENT_KEYS = [
   'reconciliation.delete-next', 'reconciliation.pending-count', 'reconciliation.insert-pending',
   'reconciliation.pending-rows', 'reconciliation.upsert',
   'projection.revision.read', 'projection.revision.update',
+  ...Object.values(PROVIDER_PROJECTION_STATEMENT_KEYS),
   'provider.accounting.lookup', 'provider.accounting.upsert',
   'provider.settlement.lookup', 'provider.settlement.insert',
   'typed.execution.observation.insert', 'typed.execution.state.lookup',
@@ -140,9 +142,11 @@ for (const kind of ['observations', 'details']) {
     WRITER_STATEMENT_KEYS.add(`delivery.${kind}.${outcome}.update`);
   }
 }
-// 49 fixed keys plus 12 delivery kind/outcome read/update combinations.
-if (WRITER_STATEMENT_KEYS.size !== 61) throw new Error('Analytics writer statement key inventory changed.');
-const MAX_CACHED_WRITER_STATEMENTS = 64;
+// 49 fixed keys plus 12 delivery kind/outcome read/update combinations plus the
+// 7 fixed provider projection statements (totals/daily summary read/delete/upsert
+// and the daily-state read).
+if (WRITER_STATEMENT_KEYS.size !== 68) throw new Error('Analytics writer statement key inventory changed.');
+const MAX_CACHED_WRITER_STATEMENTS = 68;
 const INSERT_GENERATION_SQL = `
   INSERT OR IGNORE INTO analytics_generations (generation_id, first_observed_at_ms) VALUES (?, ?)
 `;
@@ -172,6 +176,14 @@ class WriterStatementCache {
 
   clear(): void {
     this.statements.clear();
+  }
+
+  /** Read-only population view used by diagnostics and owning tests. Counts
+   * every entry of this one connection-scoped cache — including the provider
+   * projection statements — so no parallel statement cache can hide outside
+   * this fixed budget. */
+  getStats(): { entries: number; keys: readonly string[] } {
+    return { entries: this.statements.size, keys: [...this.statements.keys()] };
   }
 }
 
@@ -2358,7 +2370,7 @@ function applyProviderSettlement(
     effectiveCostSource: costs.effectiveSource,
     effectiveCostCoverage: costs.effectiveCoverage,
   };
-  applyProviderProjection(database as unknown as ProviderProjectionDatabase, projectionSettlement, revision, 1);
+  applyProviderProjection(database as unknown as ProviderProjectionDatabase, projectionSettlement, revision, 1, true, statements);
   if (observation.scope.rootSessionId) {
     incrementProviderSessionPresence(database as unknown as ProviderProjectionDatabase, observation.scope.rootSessionId, revision);
   }
@@ -3013,6 +3025,7 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
         end,
         revision,
         allowTimeZoneChange,
+        this.writerStatements,
       );
     });
   }
@@ -3428,7 +3441,7 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
           ? null
           : row.effective_cost_source as 'reported' | 'calculated',
         }, -1);
-      applyProviderProjection(this.database as unknown as ProviderProjectionDatabase, settlementFromDatabaseRow(row), revision, -1);
+      applyProviderProjection(this.database as unknown as ProviderProjectionDatabase, settlementFromDatabaseRow(row), revision, -1, true, this.writerStatements);
       if (row.root_session_id !== null && row.root_session_id !== undefined) {
         decrementProviderSessionPresence(
           this.database as unknown as ProviderProjectionDatabase,
@@ -4248,8 +4261,32 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
 
   readDeliveryAccounting(): AnalyticsDeliveryAccounting {
     this.assertOpen();
+    return this.deliveryAccountingFromSnapshot(this.detailStorageStats());
+  }
+
+  /** Read the paired accounting snapshot for one `stats` request: the full
+   * detail-storage aggregate plus the delivery accounting derived from that
+   * same snapshot.
+   *
+   * {@link readDeliveryAccounting} recomputes {@link detailStorageStats}
+   * internally, so the worker `stats` reply — which reports both fields —
+   * previously ran the identical unbounded `COUNT(*)`/`SUM(logical_bytes)`
+   * aggregates over `analytics_detail_payloads` and `analytics_detail_content`
+   * twice per request. This reader owns the aggregate: the detail snapshot is
+   * computed exactly once, within the request, and both reply fields derive
+   * from it. Nothing is cached across requests and the snapshot hand-off is
+   * private, so no caller can supply a stale precomputed value through the
+   * public API. */
+  readStatsReplyAccounting(): { detailStorage: AnalyticsDetailStorageStats; delivery: AnalyticsDeliveryAccounting } {
+    this.assertOpen();
+    const detailStorage = this.detailStorageStats();
+    return { detailStorage, delivery: this.deliveryAccountingFromSnapshot(detailStorage) };
+  }
+
+  /** Build delivery accounting from one already-read detail-storage snapshot.
+   * Private: the snapshot must be produced by this request, never supplied. */
+  private deliveryAccountingFromSnapshot(details: AnalyticsDetailStorageStats): AnalyticsDeliveryAccounting {
     const row = this.database.prepare(`SELECT * FROM analytics_delivery_accounting WHERE singleton = 1`).get() as Record<string, string>;
-    const details = this.detailStorageStats();
     const count = (name: string): number | string => encodeInt64(row[name]!);
     return {
       deliveryHistoryCoverage: row.delivery_history_coverage === 'retained_only' ? 'retained_only' : 'complete',

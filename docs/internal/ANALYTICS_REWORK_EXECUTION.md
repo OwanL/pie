@@ -14,6 +14,34 @@ Owning specifications: runbook; `docs/ANALYTICS_REWORK_PLAN.md` §§1, 11.6, 17;
 
 ---
 
+## Sole integration checkpoint - 2026-09-15, 08:56 Pacific/Auckland
+
+The sole integrator has integrated the existing uncommitted analytics scope in commit
+`8186d86bebe350ae65d013a5328efcbf858a80d5`, based on `ea2bab9c`, without touching the five
+unrelated dirty model/settings/pricing files or the existing stash. The task-owned allowlist is the
+candidate-trial authority/runtime and shared contract,
+provider projection/recorder statement-reuse sources and tests, the analytics implementation
+contract, and this execution checkpoint. No restart, activation, storage cutoff, process signal,
+qualification probe, or expensive workload has run.
+
+The two reviewed small gaps are closed in source/tests: `CandidateTrialRuntime` now validates its
+trimmed timezone through the same `Intl.DateTimeFormat` IANA authority as production before
+consuming a single-use grant; `runtime.stop()` failure propagation is acceptance-tested with a
+failed cleanup receipt preserved and reported. Focused analytics/host coverage passed 61/61; the
+candidate-trial file passed 13/13 separately. Full `npm run verify` passed all 7/7 package groups
+(7,089 passed, 0 failed, 30 skipped), with one extension file passing on the runner's built-in
+flaky rerun (`canonical-query-entry.test.ts`); typecheck, lint, model-drift check, and the
+no-sync validation build also passed. The normal publishing build, staged-integrity inspection,
+and remote push confirmation remain pending against this frozen committed HEAD.
+
+The P0 candidate remains unqualified and production authority remains unchanged. Next action is
+`npm run extension:build` against this frozen committed HEAD, independent staged
+manifest/content/build-ID verification, and a normal push. After that, preserve the closed gates
+and report the exact fresh paired mixed-probe preparation command; do not start, activate, cut off,
+or run that probe in this task.
+
+---
+
 ## Resumed sole-integrator checkpoint - 2026-09-14, 21:54 Pacific/Auckland
 
 This checkpoint supersedes earlier PID, artifact, and blanket branch-gap statements. The reviewed source scope is now split into three commits: `9e82b0bff88e841bd7abd17540ea1c1268448348` (P0 instrumentation/evidence), `2c4b3967e2e93bca89911f26bbddb785af642a31` (P4 rich failover), and `9d71022c5b7c456dbca7ac7e7c5951a6e4f74268` (P7 pure verifier). The two handoff records are the remaining reviewed documentation checkpoint; no unrelated source is included. Baseline before this integration was `30d7db950ff5cd17fb286929d03bd84a93f5c991`.

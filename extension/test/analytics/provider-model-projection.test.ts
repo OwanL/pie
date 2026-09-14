@@ -11,12 +11,100 @@ import {
   type AnalyticsObservation,
 } from '../../../shared/analytics/contracts.js';
 import { localCalendarDayKey, localCalendarWeekDateKeys } from '../../../shared/analytics/metrics.js';
-import { readProviderModelGroups } from '../../src/analytics/provider-model-projection.js';
+import {
+  readProviderModelGroups,
+  applyProviderProjection,
+  createProviderProjectionSchema,
+  prepareProviderDailyProjection,
+  rebuildProviderProjection,
+  PROVIDER_PROJECTION_STATEMENT_KEYS,
+  PROVIDER_PROJECTION_DAILY_STATE_READ_SQL,
+  PROVIDER_PROJECTION_DAILY_SUMMARY_DELETE_SQL,
+  PROVIDER_PROJECTION_DAILY_SUMMARY_READ_SQL,
+  PROVIDER_PROJECTION_DAILY_SUMMARY_UPSERT_SQL,
+  PROVIDER_PROJECTION_TOTALS_SUMMARY_DELETE_SQL,
+  PROVIDER_PROJECTION_TOTALS_SUMMARY_READ_SQL,
+  PROVIDER_PROJECTION_TOTALS_SUMMARY_UPSERT_SQL,
+  type ProviderProjectionDatabase,
+  type ProviderProjectionSettlement,
+} from '../../src/analytics/provider-model-projection.js';
 import { SqliteAnalyticsRecorder } from '../../src/analytics/sqlite-recorder.js';
 
 interface RawDatabase {
   close(): void;
   prepare(sql: string): { all(...params: unknown[]): unknown[]; get(...params: unknown[]): unknown };
+}
+
+interface ProjectionHandleStatement {
+  all(...params: unknown[]): unknown[];
+  get(...params: unknown[]): unknown;
+  run(...params: unknown[]): { changes: number | bigint; lastInsertRowid: number | bigint };
+  iterate(...params: unknown[]): Iterable<unknown>;
+}
+
+interface ProjectionHandleDatabase {
+  close(): void;
+  exec(sql: string): void;
+  prepare(sql: string): ProjectionHandleStatement;
+}
+
+const projectionSqlite = createRequire(process.execPath)('node:sqlite') as {
+  DatabaseSync: new (location: string, options?: { readOnly?: boolean }) => ProjectionHandleDatabase;
+};
+
+/** Records every raw prepare while delegating to a real in-memory database. */
+class RecordingProjectionDatabase {
+  readonly rawPreparedSql: string[] = [];
+  constructor(private readonly inner: ProjectionHandleDatabase) {}
+  exec(sql: string): void { this.inner.exec(sql); }
+  prepare(sql: string) {
+    this.rawPreparedSql.push(sql);
+    return this.inner.prepare(sql);
+  }
+}
+
+/** Structural stand-in for the recorder's writer statement cache: records the
+ * exact (key, sql) requests and executes them against the real database. */
+function recordingStatementSource(inner: ProjectionHandleDatabase) {
+  const requested: Array<{ key: string; sql: string }> = [];
+  return {
+    requested,
+    prepare(key: string, sql: string) {
+      requested.push({ key, sql });
+      return inner.prepare(sql);
+    },
+  };
+}
+
+const PROJECTION_SQL_TEXTS = [
+  PROVIDER_PROJECTION_TOTALS_SUMMARY_READ_SQL,
+  PROVIDER_PROJECTION_TOTALS_SUMMARY_DELETE_SQL,
+  PROVIDER_PROJECTION_TOTALS_SUMMARY_UPSERT_SQL,
+  PROVIDER_PROJECTION_DAILY_SUMMARY_READ_SQL,
+  PROVIDER_PROJECTION_DAILY_SUMMARY_DELETE_SQL,
+  PROVIDER_PROJECTION_DAILY_SUMMARY_UPSERT_SQL,
+  PROVIDER_PROJECTION_DAILY_STATE_READ_SQL,
+];
+
+function projectionSettlement(overrides: Partial<ProviderProjectionSettlement> = {}): ProviderProjectionSettlement {
+  return {
+    provider: 'provider-a',
+    model: 'model-a',
+    purpose: 'conversation',
+    settledAtMs: String(Date.UTC(2024, 2, 11, 6)),
+    workspaceKey: 'workspace-a',
+    workspaceCoverage: 'known',
+    inputTokens: '10',
+    outputTokens: '5',
+    cacheReadTokens: '1',
+    cacheWriteTokens: '1',
+    reasoningTokens: null,
+    providerTotalTokens: '17',
+    effectiveCostUsd: 0.25,
+    effectiveCostSource: 'reported',
+    effectiveCostCoverage: 'known',
+    ...overrides,
+  };
 }
 
 const { DatabaseSync } = createRequire(process.execPath)('node:sqlite') as {
@@ -208,6 +296,135 @@ test('undated projection rows survive an explicit timezone migration and reverse
   } finally {
     raw.close();
     rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('projection write path uses the structural statement source with fixed keys while migration and read paths stay raw', () => {
+  const inner = new projectionSqlite.DatabaseSync(':memory:');
+  const recording = new RecordingProjectionDatabase(inner);
+  const source = recordingStatementSource(inner);
+  const rawOnlyContainsNoneOf = (sqlTexts: string[], rawSql: string[]) => {
+    for (const sql of sqlTexts) assert.equal(rawSql.includes(sql), false, `unexpected raw prepare of projection SQL`);
+  };
+  try {
+    // Minimal source table: createProviderProjectionSchema alters and indexes
+    // analytics_provider_settlements, so the standalone fixture provides the
+    // settlement columns the projection scans.
+    inner.exec(`
+      CREATE TABLE analytics_provider_settlements (
+        root_session_id TEXT,
+        observation_registry_key TEXT,
+        provider TEXT,
+        effective_model TEXT,
+        purpose TEXT,
+        settled_at_ms TEXT,
+        workspace_key TEXT NOT NULL DEFAULT '',
+        workspace_coverage TEXT NOT NULL DEFAULT 'unknown',
+        normalized_base_input_tokens TEXT,
+        normalized_output_tokens TEXT,
+        normalized_cache_read_tokens TEXT,
+        normalized_cache_write_tokens TEXT,
+        reasoning_tokens TEXT,
+        normalized_total_tokens TEXT,
+        effective_cost_usd REAL,
+        effective_cost_source TEXT,
+        effective_cost_coverage TEXT
+      )
+    `);
+    createProviderProjectionSchema(recording);
+
+    // Steady-state write path with a statement source: every projection statement
+    // is requested through the source under its fixed key with its exact SQL.
+    applyProviderProjection(recording, projectionSettlement(), '1', 1, true, source);
+    const expectedFirstRequests: Array<{ key: string; sql: string }> = [
+      { key: PROVIDER_PROJECTION_STATEMENT_KEYS.totalsSummaryRead, sql: PROVIDER_PROJECTION_TOTALS_SUMMARY_READ_SQL },
+      { key: PROVIDER_PROJECTION_STATEMENT_KEYS.totalsSummaryUpsert, sql: PROVIDER_PROJECTION_TOTALS_SUMMARY_UPSERT_SQL },
+      { key: PROVIDER_PROJECTION_STATEMENT_KEYS.dailyStateRead, sql: PROVIDER_PROJECTION_DAILY_STATE_READ_SQL },
+    ];
+    assert.deepEqual(source.requested, expectedFirstRequests);
+    rawOnlyContainsNoneOf(PROJECTION_SQL_TEXTS, recording.rawPreparedSql);
+
+    // Seed the source table with one undated and one dated settlement so the
+    // rebuild replays them through the statement source.
+    inner.exec(`
+      INSERT INTO analytics_provider_settlements (
+        provider, effective_model, purpose, settled_at_ms, workspace_key, workspace_coverage,
+        normalized_base_input_tokens, normalized_output_tokens, normalized_cache_read_tokens,
+        normalized_cache_write_tokens, reasoning_tokens, normalized_total_tokens,
+        effective_cost_usd, effective_cost_source, effective_cost_coverage
+      ) VALUES
+        ('provider-a', 'model-a', 'conversation', NULL, 'workspace-a', 'known',
+         '10', '5', '1', '1', NULL, '17', 0.25, 'reported', 'known'),
+        ('provider-a', 'model-a', 'conversation', '${Date.UTC(2024, 2, 11, 6)}', 'workspace-a', 'known',
+         '10', '5', '1', '1', NULL, '17', 0.25, 'reported', 'known')
+    `);
+    prepareProviderDailyProjection(
+      recording,
+      'UTC',
+      String(Date.UTC(2024, 2, 9)),
+      String(Date.UTC(2024, 2, 18)),
+      '2',
+      false,
+      source,
+    );
+    rawOnlyContainsNoneOf(PROJECTION_SQL_TEXTS, recording.rawPreparedSql);
+
+    // The daily summary read/upsert pair is first requested while seeding the
+    // undated bucket during the rebuild.
+    assert.ok(source.requested.some((request) => request.key === PROVIDER_PROJECTION_STATEMENT_KEYS.dailySummaryRead));
+    assert.ok(source.requested.some((request) => request.key === PROVIDER_PROJECTION_STATEMENT_KEYS.dailySummaryUpsert));
+
+    // Repeat a separate dimension and reverse it to zero so the delete
+    // statements are requested once each, still only through the source.
+    const requestedBeforeReverse = source.requested.length;
+    applyProviderProjection(recording, projectionSettlement({ provider: 'provider-b', model: 'model-b' }), '2', 1, true, source);
+    applyProviderProjection(recording, projectionSettlement({ provider: 'provider-b', model: 'model-b' }), '3', 1, true, source);
+    applyProviderProjection(recording, projectionSettlement({ provider: 'provider-b', model: 'model-b' }), '4', -1, true, source);
+    applyProviderProjection(recording, projectionSettlement({ provider: 'provider-b', model: 'model-b' }), '5', -1, true, source);
+    const newRequests: Array<{ key: string; sql: string }> = source.requested.slice(requestedBeforeReverse);
+    assert.deepEqual(
+      newRequests.filter((request) => request.key === PROVIDER_PROJECTION_STATEMENT_KEYS.totalsSummaryDelete).map((request) => request.sql),
+      [PROVIDER_PROJECTION_TOTALS_SUMMARY_DELETE_SQL],
+    );
+    assert.deepEqual(
+      newRequests.filter((request) => request.key === PROVIDER_PROJECTION_STATEMENT_KEYS.dailySummaryDelete).map((request) => request.sql),
+      [PROVIDER_PROJECTION_DAILY_SUMMARY_DELETE_SQL],
+    );
+    rawOnlyContainsNoneOf(PROJECTION_SQL_TEXTS, recording.rawPreparedSql);
+    // Reversing to zero removed the maintained rows for the reversed dimension.
+    const remaining = inner.prepare(`SELECT COUNT(*) AS count FROM analytics_provider_model_totals WHERE provider_key = 'provider-b'`).get() as { count: number };
+    assert.equal(Number(remaining.count), 0);
+
+    // Without a statement source (migration/rebuild path) the same fixed texts
+    // are prepared raw, exactly as owned by the constants.
+    applyProviderProjection(recording, projectionSettlement(), '5', 1);
+    for (const sql of [
+      PROVIDER_PROJECTION_DAILY_STATE_READ_SQL,
+      PROVIDER_PROJECTION_TOTALS_SUMMARY_READ_SQL,
+      PROVIDER_PROJECTION_TOTALS_SUMMARY_UPSERT_SQL,
+    ]) {
+      assert.equal(recording.rawPreparedSql.includes(sql), true, `expected raw prepare of ${sql}`);
+    }
+    rebuildProviderProjection(recording);
+    assert.equal(recording.rawPreparedSql.includes(PROVIDER_PROJECTION_TOTALS_SUMMARY_READ_SQL), true);
+
+    // The read path keeps preparing its dynamic SQL raw even on the same
+    // database; the source never sees it.
+    const requestedBeforeRead = source.requested.length;
+    const rawCountBeforeRead = recording.rawPreparedSql.length;
+    readProviderModelGroups(recording as unknown as Parameters<typeof readProviderModelGroups>[0], {
+      timeZone: 'UTC',
+      todayDay: localCalendarDayKey(Date.UTC(2024, 2, 11), 'UTC'),
+      weekDays: localCalendarWeekDateKeys(Date.UTC(2024, 2, 11), 'UTC'),
+      maxGroups: 10,
+      windowStartMs: String(Date.UTC(2024, 2, 9)),
+      windowEndMs: String(Date.UTC(2024, 2, 18)),
+    });
+    assert.equal(source.requested.length, requestedBeforeRead);
+    assert.equal(recording.rawPreparedSql.length > rawCountBeforeRead, true);
+    assert.equal(recording.rawPreparedSql.includes(PROVIDER_PROJECTION_DAILY_STATE_READ_SQL), true);
+  } finally {
+    inner.close();
   }
 });
 

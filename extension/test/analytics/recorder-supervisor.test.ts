@@ -881,6 +881,7 @@ test('memorySample is a read-only diagnostic seam and leaves the general stats r
     assert.equal(afterSample.detailStorageStats, before.detailStorageStats, 'memorySample must not call detailStorageStats');
     assert.equal(afterSample.readDeliveryAccounting, before.readDeliveryAccounting, 'memorySample must not call readDeliveryAccounting');
     assert.equal(afterSample.getStats, before.getStats, 'memorySample must not call getStats');
+    assert.equal(afterSample.readStatsReplyAccounting, before.readStatsReplyAccounting, 'memorySample must not call the stats reply accounting seam');
 
     const stats = await supervisor.workerStats();
     assert.ok(stats, 'the general stats reply must be unchanged');
@@ -888,8 +889,9 @@ test('memorySample is a read-only diagnostic seam and leaves the general stats r
     assert.deepEqual(sample.process.workerIdentity, stats.process.workerIdentity, 'both requests must attribute to the same owned worker identity');
     const afterStats = JSON.parse(readFileSync(spyPath, 'utf8')) as Record<string, number>;
     assert.equal(afterStats.getStats, afterSample.getStats + 1, 'general stats still reads recorder stats');
-    assert.equal(afterStats.detailStorageStats, afterSample.detailStorageStats + 2, 'general stats still performs the doubled detailStorage aggregates (direct + delivery accounting)');
-    assert.equal(afterStats.readDeliveryAccounting, afterSample.readDeliveryAccounting + 1);
+    assert.equal(afterStats.readStatsReplyAccounting, afterSample.readStatsReplyAccounting + 1, 'general stats goes through the single-snapshot accounting seam exactly once');
+    assert.equal(afterStats.detailStorageStats, afterSample.detailStorageStats + 1, 'one exact detailStorage aggregate per stats request (was 2: delivery accounting recomputed it)');
+    assert.equal(afterStats.readDeliveryAccounting, afterSample.readDeliveryAccounting, 'delivery accounting is derived from the one snapshot; the public reader is no longer re-entered');
   } finally {
     await supervisor.shutdown().catch(() => {});
     rmSync(root, { recursive: true, force: true });

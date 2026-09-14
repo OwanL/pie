@@ -636,6 +636,20 @@ closed-session non-resumption, interrupted idempotent activation, and all-host o
 post-restart smoke exercises real new-root session creation, capture/live/query parity and private
 close; disposable clock-controlled fixtures prove 24-hour expiry without changing the real deadline.
 
+**Candidate-trial authority clarification (P7a):** the disposable candidate trial is a DISTINCT
+in-memory trial authority, never an activation state: it must not create any activation manifest or
+tombstone, its plan/grant hash must never be written into `trialSha256` or `manifestSha256`, and its
+identity is not assignable to `AnalyticsBackendDescriptor` or `ActivationGenerationIdentity`. In trial
+mode `backendDescriptor()` stays undefined (real backend/host transport binding is a later unit);
+only an explicitly named `candidateTrialDescriptor` with kind `candidate-trial`, `trialPlanSha256` and
+`trialAuthorityRevision` may be exposed. The production runtime constructor has no trial option and its
+legacy/canonical behavior is unchanged; the trial starts the same production recorder/query/capture
+helpers only against one factory-owned, realpath-verified OS-temp root that overlaps no caller-resolved
+live root and not the canonical data owner, under a single-use, expiry-bounded pre-run grant bound to
+the source/build/plan identity. Cleanup removes only the owned root after the helpers stop, and a
+cleanup failure is preserved and reported, never reported as success. Trial proof alone never admits
+production.
+
 **Recovery after activation:** distinguish code rollback from data rollback. Before irreversible
 activation, leave the old authority unchanged if a gate fails. After an analytics generation switch or
 storage closure, prefer an in-scope forward repair; never restore stale analytics, resurrect deleted

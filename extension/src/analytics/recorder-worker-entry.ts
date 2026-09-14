@@ -246,7 +246,12 @@ async function handle(raw: unknown): Promise<void> {
         recorder.checkpoint();
         await acknowledge(request.requestId);
         return;
-      case 'stats':
+      case 'stats': {
+        // One exact detail aggregate per request: the paired accounting seam
+        // computes the detailStorage snapshot once and derives delivery from
+        // that same snapshot, instead of readDeliveryAccounting re-running the
+        // identical unbounded COUNT(*)/SUM aggregates a second time.
+        const accounting = recorder.readStatsReplyAccounting();
         await acknowledge(request.requestId, {
           process: {
             ...process.memoryUsage(),
@@ -257,11 +262,12 @@ async function handle(raw: unknown): Promise<void> {
             ...recorder.getStats(),
             databaseSchemaVersion: recorder.getDatabaseSchemaVersion(),
           },
-          detailStorage: recorder.detailStorageStats(),
-          delivery: recorder.readDeliveryAccounting(),
+          detailStorage: accounting.detailStorage,
+          delivery: accounting.delivery,
           startupPrivacyRecovery,
         });
         return;
+      }
       case 'memorySample':
         // Distinct read-only diagnostic seam: process-level memory/CPU and the
         // already-owned worker identity, with no recorder access, no SQL
