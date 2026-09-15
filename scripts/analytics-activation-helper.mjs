@@ -464,6 +464,23 @@ let activateGeneration;
 let admitActivationEvidence;
 let inspectActivationEvidence;
 
+/** Admission evidence options derived from the activation plan. A plan that
+ * explicitly records `qualificationMode: "provisional"` admits the overall
+ * report under the exact approved provisional envelope (never full
+ * qualification); any other value uses the unchanged fully-qualified gate. */
+function admissionEvidenceOptions(plan) {
+  return {
+    qualificationPath: plan.qualificationReport,
+    trialPath: plan.trialReport,
+    generationId: plan.generationId,
+    buildId: plan.buildId,
+    sourceHead: plan.sourceHead,
+    sourceFingerprint: plan.sourceFingerprint,
+    workspaceId: plan.workspaceId,
+    provisional: plan.qualificationMode === 'provisional',
+  };
+}
+
 async function loadAdmissionModule() {
   if (inspectActivationEvidence) return;
   try {
@@ -740,15 +757,7 @@ function formatDiscoveryEvidence(discovery) {
 async function runPreflight(plan) {
   await loadAdmissionModule();
   const blockers = [];
-  const admission = inspectActivationEvidence({
-    qualificationPath: plan.qualificationReport,
-    trialPath: plan.trialReport,
-    generationId: plan.generationId,
-    buildId: plan.buildId,
-    sourceHead: plan.sourceHead,
-    sourceFingerprint: plan.sourceFingerprint,
-    workspaceId: plan.workspaceId,
-  });
+  const admission = inspectActivationEvidence(admissionEvidenceOptions(plan));
   blockers.push(...admission.blockers);
 
   let loadedGeneration = null;
@@ -976,15 +985,7 @@ export async function runProductionCutover(plan, dependencies) {
   // This is a real caller for the tested orchestrator. It intentionally
   // performs all admission/terminal checks before constructing a writable
   // lifecycle handle, so an unqualified plan cannot fence or activate hosts.
-  const admitted = deps.admitActivationEvidence({
-    qualificationPath: plan.qualificationReport,
-    trialPath: plan.trialReport,
-    generationId: plan.generationId,
-    buildId: plan.buildId,
-    sourceHead: plan.sourceHead,
-    sourceFingerprint: plan.sourceFingerprint,
-    workspaceId: plan.workspaceId,
-  });
+  const admitted = deps.admitActivationEvidence(admissionEvidenceOptions(plan));
   const terminal = readTerminalRestartReceipt(plan);
   const terminalPrerequisite = plan.prerequisites?.terminalHandoff;
   const terminalIsAuthorized = terminalPrerequisite?.status === 'ready'
@@ -1218,15 +1219,7 @@ async function runLegacyActivationSequence(plan) {
   // activation authorization.
   let admitted;
   try {
-    admitted = admitActivationEvidence({
-      qualificationPath: plan.qualificationReport,
-      trialPath: plan.trialReport,
-      generationId: plan.generationId,
-      buildId: plan.buildId,
-      sourceHead: plan.sourceHead,
-      sourceFingerprint: plan.sourceFingerprint,
-      workspaceId: plan.workspaceId,
-    });
+    admitted = admitActivationEvidence(admissionEvidenceOptions(plan));
   } catch (error) {
     recordError(plan.stateDir, 'prepare', error);
     throw error;

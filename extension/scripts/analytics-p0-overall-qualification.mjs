@@ -80,6 +80,42 @@ export const OVERALL_QUALIFICATION_GATE_NAMES = Object.freeze([
   ...DEFERRED_OVERALL_QUALIFICATION_GATES,
 ]);
 
+/** Approved provisional-cutover measurement exceptions (user decision,
+ * 2026-09-16): exactly these measurement gates may stay honestly failed or
+ * unqualified in a PROVISIONALLY qualified overall report. Their measured
+ * outcomes are never rewritten to 'passed', and any other failed or
+ * unqualified required gate still blocks provisional qualification.
+ * realProducerBoundary is NOT in this list: only its latency predicates
+ * (handoffMs, rejectionHandoffMs) are excepted, while its privacy,
+ * non-waiting, mutation-retention, failover and nested-depth correctness
+ * fields remain mandatory. */
+export const PROVISIONAL_OVERALL_MEASUREMENT_EXCEPTIONS = Object.freeze([
+  'recorderWorkerRss',
+  'mixedWorkerMemory',
+  'queryPeakMemory',
+  'matchedAgentUi',
+  'incrementalHostMemory',
+]);
+
+/** The exact, frozen provisional envelope. An overall report claiming a
+ * provisional decision must carry this object byte-identically (sameJson), so
+ * an edited exception set fails recomputation and admission. */
+export const PROVISIONAL_QUALIFICATION_ENVELOPE = Object.freeze({
+  schemaVersion: 1,
+  kind: 'pie-p0-provisional-envelope-v1',
+  measurementExceptions: PROVISIONAL_OVERALL_MEASUREMENT_EXCEPTIONS,
+  realProducerBoundary: 'latency-only',
+  deferredHistoryTiers: DEFERRED_OVERALL_QUALIFICATION_GATES,
+});
+
+const PROVISIONAL_REAL_PRODUCER_BOUNDARY_CORRECTNESS = (value) =>
+  value?.status === 'submitted' && value?.nestedDepth >= 2
+  && value?.failoverAttemptsRetained >= 2 && value?.cancellationOrCapacityStatus === 'rejected'
+  && value?.delayedAcknowledgementDidNotGate === true
+  && value?.mutationAfterHandoffDidNotAlterCapture === true
+  && value?.credentialFilteredBeforeSerialization === true
+  && Number.isFinite(value?.handoffMs) && Number.isFinite(value?.rejectionHandoffMs);
+
 const ROLE_SCENARIOS = Object.freeze({
   baseline: ['baseline'],
   scale: ['scale'],
@@ -244,21 +280,36 @@ function reportGate(threshold, roles, loaded, evaluate) {
   }
 }
 
-function validateComponentEnvelope(role, report, descriptor, expected) {
+function validateComponentEnvelope(role, report, descriptor, expected, provisionalExceptions) {
   const errors = [];
   if (!isObject(report)) return [`${role}: top level must be an object`];
   if (report.schemaVersion !== OVERALL_QUALIFICATION_SCHEMA_VERSION) errors.push(`${role}: schemaVersion must be 5`);
-  if (report.status !== 'passed') errors.push(`${role}: status must be passed`);
+  const qualification = report.qualification;
+  const failedGates = Array.isArray(qualification?.failedGates) ? qualification.failedGates : null;
+  if (Array.isArray(provisionalExceptions) && failedGates && failedGates.length > 0
+    && failedGates.every((name) => provisionalExceptions.includes(name))) {
+    // Provisional envelope: a component report whose ONLY failed gates are
+    // approved measurement exceptions still binds as evidence. Its failed
+    // status stays honest; the raw results behind the OTHER gates remain the
+    // recomputation source. Any failed correctness, privacy, deletion,
+    // identity, cleanup or non-exception gate still rejects the binding.
+    if (report.status !== 'failed') errors.push(`${role}: provisionally bound scenario report must record status failed`);
+    if (qualification?.decision !== 'scenario-failed' || qualification?.overallP0 !== 'unqualified') {
+      errors.push(`${role}: provisionally bound scenario report must record an honest scenario-failed, unqualified decision`);
+    }
+  } else {
+    if (report.status !== 'passed') errors.push(`${role}: status must be passed`);
+    if (qualification?.decision !== 'scenario-passed' || qualification?.overallP0 !== 'unqualified'
+      || !failedGates || failedGates.length !== 0) {
+      errors.push(`${role}: scenario qualification is not a clean scenario-passed result`);
+    }
+  }
   if (!isObject(report.configuration) || !ROLE_SCENARIOS[role]?.includes(report.configuration.scenario)) {
     errors.push(`${role}: configuration.scenario is invalid`);
   }
   if (!samePath(report.configuration?.reportPath, descriptor.path)) errors.push(`${role}: configuration.reportPath mismatches the evidence path`);
   if (report.measurement?.completed !== true) errors.push(`${role}: measurement is incomplete`);
   if (report.cleanup?.completed !== true || report.cleanup?.rootRemoved !== true) errors.push(`${role}: cleanup is incomplete`);
-  if (report.qualification?.decision !== 'scenario-passed' || report.qualification?.overallP0 !== 'unqualified'
-    || !Array.isArray(report.qualification?.failedGates) || report.qualification.failedGates.length !== 0) {
-    errors.push(`${role}: scenario qualification is not a clean scenario-passed result`);
-  }
   const provenance = report.provenance;
   if (provenance?.valid !== true) errors.push(`${role}: provenance is not valid`);
   if (!isGitHead(provenance?.gitHead) || provenance.gitHead.toLowerCase() !== expected.sourceHead.toLowerCase()) {
@@ -324,7 +375,11 @@ function loadEvidence(report, expected) {
         errors.push(`${role}: evidence bytes do not match the overall manifest`);
         continue;
       }
-      const envelopeErrors = validateComponentEnvelope(role, read.value, descriptor, expected);
+      // The provisional component-binding relaxation is only active when the
+      // aggregate itself declares the exact approved provisional envelope.
+      const provisionalClaim = sameJson(report.qualification?.provisionalEnvelope, PROVISIONAL_QUALIFICATION_ENVELOPE)
+        ? PROVISIONAL_QUALIFICATION_ENVELOPE.measurementExceptions : null;
+      const envelopeErrors = validateComponentEnvelope(role, read.value, descriptor, expected, provisionalClaim);
       if (envelopeErrors.length > 0) {
         errors.push(...envelopeErrors);
         continue;
@@ -484,7 +539,10 @@ export function recomputeOverallQualification(report, expected) {
   if (!isObject(report) || report.kind !== OVERALL_QUALIFICATION_KIND
     || report.schemaVersion !== OVERALL_QUALIFICATION_SCHEMA_VERSION
     || report.configuration?.scenario !== 'overall') {
-    return { qualified: false, gates: {}, errors: ['not a schema-5 overall P0 qualification report'] };
+    return {
+      qualified: false, gates: {}, errors: ['not a schema-5 overall P0 qualification report'],
+      provisional: { qualified: false, exceptions: [], otherOpenGates: [...REQUIRED_OVERALL_QUALIFICATION_GATES], realProducerBoundaryLatencyOnly: false },
+    };
   }
   const bindings = {
     sourceHead: expected?.sourceHead ?? report.provenance?.gitHead,
@@ -492,7 +550,10 @@ export function recomputeOverallQualification(report, expected) {
     sourceFingerprint: expected?.sourceFingerprint ?? report.provenance?.fingerprint,
   };
   if (!isGitHead(bindings.sourceHead) || !boundedString(bindings.buildId) || !isSha256(bindings.sourceFingerprint)) {
-    return { qualified: false, gates: {}, errors: ['overall qualification bindings are incomplete'] };
+    return {
+      qualified: false, gates: {}, errors: ['overall qualification bindings are incomplete'],
+      provisional: { qualified: false, exceptions: [], otherOpenGates: [...REQUIRED_OVERALL_QUALIFICATION_GATES], realProducerBoundaryLatencyOnly: false },
+    };
   }
   const evidence = loadEvidence(report, bindings);
   errors.push(...evidence.errors);
@@ -623,7 +684,42 @@ export function recomputeOverallQualification(report, expected) {
   const qualified = errors.length === 0
     && !failedDeferred
     && REQUIRED_OVERALL_QUALIFICATION_GATES.every((name) => gates[name]?.decision === 'passed');
-  return { qualified, gates, errors };
+  return {
+    qualified,
+    gates,
+    errors,
+    provisional: evaluateProvisionalOverallQualification(gates, errors, failedDeferred),
+  };
+}
+
+/** Recompute the provisional (cutover-envelope) qualification from the same
+ * gate table. This never rewrites a measured outcome: an exception gate stays
+ * 'failed' or 'unqualified' with its measured actual value, the overall report
+ * keeps overallP0 'unqualified', and provisional qualification is recorded as
+ * a separate, distinct state. Fail closed unless: no evidence errors, no
+ * failed deferred gate, every non-exception required gate passed, each
+ * exception gate honestly measured-or-missing, and realProducerBoundary
+ * correct in every non-latency field (latency only is excepted). */
+export function evaluateProvisionalOverallQualification(gates, errors, failedDeferred) {
+  const exceptionGates = PROVISIONAL_OVERALL_MEASUREMENT_EXCEPTIONS.filter(
+    (name) => gates[name]?.decision === 'failed' || gates[name]?.decision === 'unqualified');
+  const realProducerBoundary = gates.realProducerBoundary;
+  const producerCorrectWithoutLatency = realProducerBoundary?.decision === 'passed'
+    || (realProducerBoundary?.decision === 'failed'
+      && PROVISIONAL_REAL_PRODUCER_BOUNDARY_CORRECTNESS(realProducerBoundary.actual));
+  const otherOpenGates = REQUIRED_OVERALL_QUALIFICATION_GATES.filter(
+    (name) => gates[name]?.decision !== 'passed'
+      && !PROVISIONAL_OVERALL_MEASUREMENT_EXCEPTIONS.includes(name)
+      && !(name === 'realProducerBoundary' && producerCorrectWithoutLatency));
+  const provisionalQualified = errors.length === 0
+    && !failedDeferred
+    && otherOpenGates.length === 0;
+  return {
+    qualified: provisionalQualified && producerCorrectWithoutLatency,
+    exceptions: exceptionGates,
+    otherOpenGates,
+    realProducerBoundaryLatencyOnly: producerCorrectWithoutLatency,
+  };
 }
 
 function stableJson(value) {
@@ -659,10 +755,28 @@ export function validateOverallQualificationRecomputation(report, expected) {
   if (report.qualification?.overallP0 !== expectedOverall || report.qualification?.decision !== expectedDecision) {
     errors.push('qualification decision does not match recomputation');
   }
-  return { ...recomputed, errors, valid: errors.length === 0 };
+  if (report.qualification?.provisionalP0 !== undefined) {
+    if (!sameJson(report.qualification?.provisionalEnvelope, PROVISIONAL_QUALIFICATION_ENVELOPE)) {
+      errors.push('provisionalEnvelope does not match the approved provisional exception envelope');
+    }
+    const expectedExceptions = [...recomputed.provisional.exceptions].sort();
+    const claimedExceptions = [...(report.qualification?.provisionalExceptions ?? [])].sort();
+    if (!sameJson(claimedExceptions, expectedExceptions)) {
+      errors.push('provisionalExceptions do not match recomputed approved-exception gates');
+    }
+    const expectedProvisionalState = recomputed.provisional.qualified ? 'provisional-qualified' : 'provisional-unqualified';
+    if (report.qualification?.provisionalP0 !== expectedProvisionalState) {
+      errors.push('qualification.provisionalP0 does not match recomputation');
+    }
+  }
+  return {
+    ...recomputed,
+    errors,
+    valid: errors.length === 0,
+  };
 }
 
-export function buildOverallQualificationReport({ reportPath, seed, sourceHead, buildId, sourceFingerprint, evidenceReports }) {
+export function buildOverallQualificationReport({ reportPath, seed, sourceHead, buildId, sourceFingerprint, evidenceReports, provisional = false }) {
   if (!path.isAbsolute(reportPath) || !boundedString(seed) || !isGitHead(sourceHead)
     || !boundedString(buildId) || !isSha256(sourceFingerprint)) {
     throw new Error('overall qualification output bindings are incomplete');
@@ -692,7 +806,12 @@ export function buildOverallQualificationReport({ reportPath, seed, sourceHead, 
     gates: {},
     measurement: { completed: true, evidenceReportCount: Object.keys(descriptors).length },
     cleanup: { completed: true, rootCreated: false, rootRemoved: true },
-    qualification: { scenario: 'overall', decision: 'overall-unqualified', failedGates: [], unqualifiedGates: [...OVERALL_QUALIFICATION_GATE_NAMES], overallP0: 'unqualified' },
+    qualification: {
+      scenario: 'overall', decision: 'overall-unqualified', failedGates: [], unqualifiedGates: [...OVERALL_QUALIFICATION_GATE_NAMES], overallP0: 'unqualified',
+      // Declared before recomputation so component evidence binding sees the
+      // provisional relaxation; recomputation re-validates it byte-exactly.
+      ...(provisional ? { provisionalEnvelope: PROVISIONAL_QUALIFICATION_ENVELOPE } : {}),
+    },
   };
   const recomputed = recomputeOverallQualification(report, { sourceHead, buildId, sourceFingerprint });
   report.gates = recomputed.gates;
@@ -705,6 +824,21 @@ export function buildOverallQualificationReport({ reportPath, seed, sourceHead, 
     evidenceErrors: recomputed.errors,
   };
   report.finishedAt = new Date().toISOString();
+  if (provisional) {
+    if (report.qualification.overallP0 === 'qualified') {
+      throw new Error('provisional flag is redundant for a fully qualified overall report; re-emit without it');
+    }
+    if (!recomputed.provisional.qualified) {
+      throw new Error(`provisional envelope is not satisfied: ${[
+        ...recomputed.errors,
+        ...recomputed.provisional.otherOpenGates.map((name) => `${name} is not passed and is not an approved exception`),
+        ...(recomputed.provisional.realProducerBoundaryLatencyOnly ? [] : ['realProducerBoundary failed beyond its latency-only exception']),
+      ].join('; ')}`);
+    }
+    report.qualification.provisionalEnvelope = PROVISIONAL_QUALIFICATION_ENVELOPE;
+    report.qualification.provisionalExceptions = [...recomputed.provisional.exceptions].sort();
+    report.qualification.provisionalP0 = 'provisional-qualified';
+  }
   return report;
 }
 
@@ -721,6 +855,7 @@ function parseArguments(argv) {
     const name = argv[index];
     if (seen.has(name)) throw new Error(`Duplicate option: ${name}`);
     seen.add(name);
+    if (name === '--provisional') { options.provisional = true; continue; }
     const value = argv[++index];
     if (!value || value.startsWith('--')) throw new Error(`${name} requires a value`);
     if (names.has(name)) options.evidenceReports[names.get(name)] = path.resolve(value);
@@ -752,8 +887,8 @@ async function main() {
   const options = parseArguments(process.argv.slice(2));
   const report = buildOverallQualificationReport(options);
   writeAtomically(options.reportPath, report);
-  console.log(JSON.stringify({ reportPath: options.reportPath, overallP0: report.qualification.overallP0, failedGates: report.qualification.failedGates, unqualifiedGates: report.qualification.unqualifiedGates, evidenceErrors: report.qualification.evidenceErrors }, null, 2));
-  if (report.qualification.overallP0 !== 'qualified') process.exitCode = 2;
+  console.log(JSON.stringify({ reportPath: options.reportPath, overallP0: report.qualification.overallP0, provisionalP0: report.qualification.provisionalP0 ?? null, provisionalExceptions: report.qualification.provisionalExceptions ?? null, failedGates: report.qualification.failedGates, unqualifiedGates: report.qualification.unqualifiedGates, evidenceErrors: report.qualification.evidenceErrors }, null, 2));
+  if (report.qualification.overallP0 !== 'qualified' && report.qualification.provisionalP0 !== 'provisional-qualified') process.exitCode = 2;
 }
 
 if (path.basename(process.argv[1] ?? '') === 'analytics-p0-overall-qualification.mjs'

@@ -5,6 +5,7 @@ import { validateCapacityCalibration } from '../extension/scripts/analytics-p0-c
 import {
   DEFERRED_OVERALL_QUALIFICATION_GATES,
   OVERALL_QUALIFICATION_KIND,
+  PROVISIONAL_QUALIFICATION_ENVELOPE,
   REQUIRED_OVERALL_QUALIFICATION_GATES,
   validateOverallQualificationRecomputation,
 } from '../extension/scripts/analytics-p0-overall-qualification.mjs';
@@ -134,7 +135,7 @@ function validateQualificationReport(
   expected,
   reportPath,
   reportHash,
-  { requireQualification = true } = {},
+  { requireQualification = true, provisional = false } = {},
 ) {
   const label = 'qualification report';
   if (!isObject(report)) invalid(label, 'top level must be an object');
@@ -202,8 +203,15 @@ function validateQualificationReport(
     ? (qualification.overallP0 === 'qualified' ? 'overall-qualified' : 'overall-unqualified')
     : 'scenario-passed';
   if (qualification.decision !== expectedDecision) invalid(label, 'qualification decision is invalid');
-  if (requireQualification && qualification.overallP0 !== 'qualified') {
-    invalid(label, 'overallP0 is not qualified');
+  if (requireQualification && provisional && !overall) {
+    invalid(label, 'provisional admission requires the overall qualification report');
+  }
+  if (requireQualification && qualification.overallP0 !== 'qualified'
+    && !(provisional && overall && qualification.provisionalP0 === 'provisional-qualified'
+      && JSON.stringify(qualification.provisionalEnvelope) === JSON.stringify(PROVISIONAL_QUALIFICATION_ENVELOPE))) {
+    invalid(label, provisional
+      ? 'overallP0 is not qualified and no valid provisional-qualified envelope is recorded'
+      : 'overallP0 is not qualified');
   }
   if (!Array.isArray(qualification.failedGates)
     || (!overall && qualification.failedGates.length !== 0)) {
@@ -224,10 +232,18 @@ function validateQualificationReport(
     }
   }
   if (requireQualification) {
+    // Under the provisional envelope, exactly the approved exception gates may
+    // stay honestly failed or unqualified; every other gate must still be
+    // passed (or a deferred-unqualified deferred gate).
+    const exceptionGates = provisional && overall
+      ? new Set([...PROVISIONAL_QUALIFICATION_ENVELOPE.measurementExceptions, 'realProducerBoundary'])
+      : new Set();
     for (const [gateName, gate] of Object.entries(report.gates)) {
       const deferredUnqualified = gate.decision === 'unqualified'
         && DEFERRED_QUALIFICATION_GATES.includes(gateName);
-      if (!isObject(gate) || (gate.decision !== 'passed' && !deferredUnqualified)) {
+      const exceptionOutcome = exceptionGates.has(gateName)
+        && (gate.decision === 'failed' || gate.decision === 'unqualified');
+      if (!isObject(gate) || (gate.decision !== 'passed' && !deferredUnqualified && !exceptionOutcome)) {
         invalid(label, `gate ${gateName} is not passed`);
       }
     }
@@ -728,7 +744,7 @@ export function recomputeCandidateTrialChecks(report, expected) {
   return errors;
 }
 
-function readAndValidateActivationEvidence(options, { requireQualification, recompute }) {
+function readAndValidateActivationEvidence(options, { requireQualification, recompute, provisional = false }) {
   const {
     qualificationPath,
     trialPath,
@@ -752,7 +768,7 @@ function readAndValidateActivationEvidence(options, { requireQualification, reco
     { buildId, sourceHead, sourceFingerprint },
     qualificationReportPath,
     qualification.sha256,
-    { requireQualification },
+    { requireQualification, provisional },
   );
   if (recompute) {
     if (qualification.value.kind === OVERALL_QUALIFICATION_KIND) {
@@ -761,10 +777,15 @@ function readAndValidateActivationEvidence(options, { requireQualification, reco
         sourceHead,
         sourceFingerprint,
       });
-      if (!validation.valid || !validation.qualified) {
+      const accepted = provisional
+        ? validation.valid && (validation.qualified || validation.provisional?.qualified === true)
+        : validation.valid && validation.qualified;
+      if (!accepted) {
         invalid('qualification report', validation.errors.length > 0
           ? validation.errors.join('; ')
-          : 'overall evidence does not qualify');
+          : provisional
+            ? 'overall evidence does not qualify, fully or under the approved provisional envelope'
+            : 'overall evidence does not qualify');
       }
     } else {
       const recomputationErrors = recomputeQualificationGates(qualification.value);
@@ -804,13 +825,17 @@ function readAndValidateActivationEvidence(options, { requireQualification, reco
     scenario: qualificationEvidence.scenario,
     trialId: trialEvidence.trialId,
     qualificationState: qualification.value.qualification.overallP0,
+    provisionalP0: qualification.value.qualification.provisionalP0 ?? null,
+    qualificationMode: qualification.value.qualification.overallP0 === 'qualified'
+      ? 'qualified'
+      : qualification.value.qualification.provisionalP0 === 'provisional-qualified' ? 'provisional' : null,
   };
 }
 
 /** Validate the exact bounded shapes without opening the live qualification
  * gate.  This is the only path intended for synthetic unit fixtures. */
 export function validateActivationEvidenceStructure(options) {
-  return readAndValidateActivationEvidence(options, { requireQualification: false, recompute: false });
+  return readAndValidateActivationEvidence(options, { requireQualification: false, recompute: false, provisional: options.provisional === true });
 }
 
 /** Read-only admission inspection for DRY-RUN/PREFLIGHT callers. It returns
@@ -821,7 +846,9 @@ export function inspectActivationEvidence(options) {
   let structure;
   try {
     structure = validateActivationEvidenceStructure(options);
-    if (structure.qualificationState !== 'qualified') {
+    const provisionalAccepted = options.provisional === true
+      && (structure.qualificationState === 'qualified' || structure.provisionalP0 === 'provisional-qualified');
+    if (structure.qualificationState !== 'qualified' && !provisionalAccepted) {
       blockers.push(`P0 qualification is ${structure.qualificationState ?? 'missing'}; overallP0 must be qualified`);
     }
   } catch (error) {
@@ -855,6 +882,7 @@ export function admitActivationEvidence({
   sourceHead,
   sourceFingerprint,
   workspaceId,
+  provisional = false,
 }) {
   const evidence = readAndValidateActivationEvidence({
     qualificationPath,
@@ -866,7 +894,7 @@ export function admitActivationEvidence({
     sourceHead,
     sourceFingerprint,
     workspaceId,
-  }, { requireQualification: true, recompute: true });
+  }, { requireQualification: true, recompute: true, provisional: provisional === true });
   if (!CANDIDATE_TRIAL_VALIDATOR_AVAILABLE) {
     invalid('candidate trial report', 'no authoritative candidate-trial producer/validator exists yet');
   }
