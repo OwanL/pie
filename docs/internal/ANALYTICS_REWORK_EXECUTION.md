@@ -14,6 +14,51 @@ Owning specifications: runbook; `docs/ANALYTICS_REWORK_PLAN.md` §§1, 11.6, 17;
 
 ---
 
+## Checkpoint 57 - 2026-09-15T04:25Z, frozen-HEAD publishing build verified; 10M capacity conclusion
+
+Commit `88eb7be253451887bf1ef5946332b91768b71030` (checkpoint 56 reconciliation; Git tree
+`bddcc1330ddfec4ebc27cd5710cd615ad4997a66`) is pushed and `git ls-remote --heads origin master`
+matches it. The required coordinated frozen-HEAD publishing build (`npm run extension:build`)
+passed at that exact commit: coordinated host/renderer build ID `84d09cb7b9daa44155d0`, staged
+complete runtime generation `ca7803b29003e5befac77d9178e8792083c5231c73e7ce046b6c4c45229591ed`,
+newest selection record
+`1789448572454-0000000440-000000002-ca7803b2…-06a29a4f74cc69f7.json` naming that generation.
+Independent integrity verification: `STAGED_FILE_INTEGRITY=true`, zero errors — manifest
+generation equals its directory, build IDs match host and renderer, and all **53** staged output
+files match size+SHA-256 against the freshly built `extension/out` with no extras or missing
+required files (including the required `analytics-candidate-trial.js`). Frozen per-file manifest:
+`C:/dev/scratch/pie-reconcile-20260915-r01/output-manifest-reconcile-r01.json`, SHA-256
+`faa3fd15035ed6df88734e187fe60649e9f6907bafa24da44d9a8502754d687a` (7,516 bytes formatted),
+53 files. No activation, cutoff, publication of live state, or restart occurred; running sessions
+keep their existing loaded build. No analytics qualification jobs were running at receipt time.
+
+Bounded 10M capacity review (no cap raised, no threshold or evidence standard lowered): the
+executed 1M scale tier measured **5,723,574,272 bytes of main database for 1,000,000 primary facts
+(~5,724 B/fact)** plus 960,327,168 bytes for 100,003 detail payloads (~9,603 B stored vs 5,648 B
+logical average), so the harness's own linear formula projects ~**62.3 GiB** (and the component
+snapshots project ~66–67 GiB with the detail mixture) for an executed 10,000,000-fact workload.
+Wall time is not the blocker (~234 s per 1M at 4,273 rows/s → roughly 40–60 minutes per 10M run)
+and prior 1M topology RSS (~1.36 GiB) scales within 16 GiB RAM; free disk (~774 GiB) is ample. The
+binding constraint is the harness's predeclared 16 GiB temporary-data bound. The dominant cost is
+the reviewed production observation ledger — `analytics_observations` stores the full serialized
+observation plus four indexes per fact (~5.7 KiB/fact) — so the only bounded, contract-permitted
+reuse that shrinks stored bytes (detail-content deduplication across repeated payloads) saves at
+most ~0.9 GiB at 10M and cannot fit the tier. Fitting 10,000,000 facts under 16 GiB would require a
+≥3.6× per-fact production storage redesign (schema/DDL), which is not bounded reuse, would reopen
+schema-13 production storage, invalidate all prior tier evidence and require full requalification.
+**Conclusion: the temporary-bound cap exception remains necessary for the executed 10M tier**; the
+cap was not raised, `tenMillionHistory` stays honestly unqualified with the harness's own skip
+reason naming the bound, and overall P0 remains unqualified. If the user separately approves the
+exception (or a separately qualified storage change), the tier is executable in a later wave.
+
+Next qualification wave (all against staged generation `ca7803b2…` / build `84d09cb7…` / source
+`88eb7be2…`): baseline → scale (1M) → endurance → `schema-faults` → `matched-host` real VS Code
+run → overall aggregate → admission recomputation; the `ten-million` tier stays blocked per the
+capacity conclusion above unless its separately approved exception is granted. No activation,
+cutoff, or restart in this task.
+
+---
+
 ## Checkpoint 56 - 2026-09-15T04:05Z, 13:45 rewrite reconciled to reviewed HEAD plus the day's reviewed work
 
 An unexplained concurrent rewrite at 13:45:06 NZ (01:45Z) overwrote 15 reviewed files with regressed
