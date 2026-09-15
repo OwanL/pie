@@ -3,6 +3,7 @@ import { closeSync, fstatSync, lstatSync, openSync, readSync, realpathSync } fro
 import path from 'node:path';
 import { validateCapacityCalibration } from '../extension/scripts/analytics-p0-capacity.mjs';
 import {
+  DEFERRED_OVERALL_QUALIFICATION_GATES,
   OVERALL_QUALIFICATION_KIND,
   REQUIRED_OVERALL_QUALIFICATION_GATES,
   validateOverallQualificationRecomputation,
@@ -25,9 +26,15 @@ export const CANDIDATE_TRIAL_VALIDATOR_AVAILABLE = true;
 /** Reports contain timing samples, but must remain a bounded handoff input. */
 export const MAX_ACTIVATION_EVIDENCE_BYTES = 8 * 1024 * 1024;
 
-/** These are the current P0 gate names, including gates the bounded harness
- * records as explicitly unqualified.  A complete qualification must pass all. */
+/** These are the required P0 gate names, including gates the bounded harness
+ * records as explicitly unqualified. A complete qualification must pass all
+ * of them. DEFERRED_QUALIFICATION_GATES names the one gate whose tier the
+ * recorded envelope defers: it may stay explicitly unqualified in an otherwise
+ * qualified overall report (with its measured capacity reason recomputed from
+ * evidence), never 'passed' by a skip, and a failed deferred gate still
+ * blocks admission. */
 export const REQUIRED_QUALIFICATION_GATES = REQUIRED_OVERALL_QUALIFICATION_GATES;
+export const DEFERRED_QUALIFICATION_GATES = DEFERRED_OVERALL_QUALIFICATION_GATES;
 
 /** The matched candidate trial in the scratch design requires these bounded
  * source/runtime/cleanup proofs before it can be used as activation evidence. */
@@ -218,7 +225,11 @@ function validateQualificationReport(
   }
   if (requireQualification) {
     for (const [gateName, gate] of Object.entries(report.gates)) {
-      if (!isObject(gate) || gate.decision !== 'passed') invalid(label, `gate ${gateName} is not passed`);
+      const deferredUnqualified = gate.decision === 'unqualified'
+        && DEFERRED_QUALIFICATION_GATES.includes(gateName);
+      if (!isObject(gate) || (gate.decision !== 'passed' && !deferredUnqualified)) {
+        invalid(label, `gate ${gateName} is not passed`);
+      }
     }
   }
 

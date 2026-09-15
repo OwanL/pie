@@ -219,6 +219,9 @@ completion just because a time estimate elapsed.
   (whichever is smaller). If those bounds cannot support the planned tier, first reduce duplicate
   temporary copies or use a justified smaller required envelope; name the unqualified larger tier.
   Never fill the disk, shrink rich payload coverage, or label a skipped/failed tier passed.
+  Recorded decision (2026-09-15): the selected required envelope is the executed 10k baseline + 1M
+  scale tiers; the 10M tier stays named-unqualified per the measured capacity conclusion
+  (execution checkpoint 57), with no temporary-bound exception granted.
 - The bounded P0 harness accepts only explicit `baseline` (exactly 10,000 rows) and `scale` (exactly
   1,000,000 rows) scenarios. Every invocation must provide a seed and an absolute JSON report path.
   Run its validation-only preflight first; it creates no database or helper and writes `validated` or

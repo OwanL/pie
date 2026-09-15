@@ -680,6 +680,16 @@ Choose and record representative conditions and required scale before running; e
 specific scaling or contention risk warrants it. Large rich-payload histories, correctness, no-wait
 behavior and resource bounds remain requirements, not optional shortcuts.
 
+Recorded envelope decision (2026-09-15, user-approved): the selected required history envelope is
+the executed 10,000-row baseline and 1,000,000-row scale tiers. The 10,000,000-row tier is deferred,
+not dropped: the executed 1M tier measured ~5.7 KiB per primary fact (5,723,574,272 bytes of main
+database for 1,000,000 facts plus detail payloads), projecting ~62.3 GiB for an executed 10M
+workload — above the predeclared 16 GiB temporary-data cap — so the tier stays explicitly
+unqualified, named with that measured capacity reason, until it is separately executed or the
+storage cost is requalified. A skipped tier is never passed; every other required gate remains
+enforced, and the deferral is recomputed from the bound scale report's measured projection, not
+asserted.
+
 | Dimension | Proposed probe envelope |
 |---|---|
 | History | 10k, 1M, then 10M primary fact rows; report actual rows per table and physical bytes, not just invocation count. Generate incrementally without holding the history in RAM |

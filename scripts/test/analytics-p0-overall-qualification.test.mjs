@@ -32,7 +32,7 @@ const bindings = Object.freeze({
   sourceFingerprint: computeQualificationSourceFingerprint(sourceIdentity),
 });
 
-function componentReport(filePath, scenario, results) {
+function componentReport(filePath, scenario, results, overrides = {}) {
   return {
     schemaVersion: 5,
     ...(scenario === 'schema-faults' ? { kind: 'pie-p0-schema-faults-v1' } : {}),
@@ -58,7 +58,33 @@ function componentReport(filePath, scenario, results) {
       failedGates: [],
       overallP0: 'unqualified',
     },
+    ...overrides,
   };
+}
+
+const TEMPORARY_BOUND_BYTES = 16 * 1024 ** 3;
+
+/** A scale component report whose measured ten-million projection matches the
+ * recorded capacity conclusion: ~5.7 KiB per fact at 1M projects ~62.3 GiB,
+ * above the predeclared 16 GiB temporary-data cap. */
+function scaleReport(filePath, { estimatedTenMillionBytes = Math.ceil(62.3 * 1024 ** 3), withLargeTierDecision = true } = {}) {
+  return componentReport(filePath, 'scale', {
+    tableRows: { primaryFacts: 1_000_000, detailPayloads: 100_003 },
+    ...(withLargeTierDecision ? {
+      largeTierDecision: {
+        measuredRows: 1_000_000,
+        measuredBytesPerPrimaryFact: 5_724,
+        estimatedTenMillionBytes,
+        tenMillionExecuted: false,
+        tenMillionSkipReason: 'Estimated footprint exceeds the predeclared 16 GiB temporary-data bound.',
+      },
+    } : {}),
+  }, {
+    configuration: { scenario: 'scale', rows: 1_000_000, seed: 'overall-test', reportPath: filePath },
+    matrix: {
+      bounds: { maxTemporaryBytes: TEMPORARY_BOUND_BYTES, effectiveTemporaryLimitBytes: TEMPORARY_BOUND_BYTES, minUnusedDiskBytes: 20 * 1024 ** 3 },
+    },
+  });
 }
 
 function withRoot(run) {
@@ -82,7 +108,121 @@ test('missing scenario reports remain explicitly unqualified', () => withRoot((r
   assert.equal(report.qualification.overallP0, 'unqualified');
   assert.equal(report.qualification.failedGates.length, 0);
   assert.ok(report.qualification.unqualifiedGates.includes('tenMillionHistory'));
-  assert.match(report.gates.tenMillionHistory.reason, /missing required evidence: tenMillion/);
+  assert.match(report.gates.tenMillionHistory.reason, /missing required evidence: scale/);
+  assert.equal(report.gates.tenMillionHistory.decision, 'unqualified');
+  assert.equal(report.selectedEnvelope.requiredHistoryTiers.join(','), 'baseline-10000,scale-1000000');
+  assert.equal(report.selectedEnvelope.deferredHistoryTiers.join(','), 'tenMillion-10000000');
+  assert.equal(validateOverallQualificationRecomputation(report, bindings).valid, true);
+}));
+
+test('an unbound ten-million tier with a verified measured projection stays explicitly unqualified', () => withRoot((root) => {
+  const scalePath = path.join(root, 'scale.json');
+  writeFileSync(scalePath, JSON.stringify(scaleReport(scalePath)));
+  const report = buildOverallQualificationReport({
+    reportPath: path.join(root, 'overall.json'),
+    seed: 'overall-test',
+    ...bindings,
+    evidenceReports: { scale: scalePath },
+  });
+
+  assert.equal(report.gates.tenMillionHistory.decision, 'unqualified');
+  assert.match(report.gates.tenMillionHistory.reason, /deferred unqualified: measured 5724 bytes per primary fact at 1000000 rows projects/);
+  assert.match(report.gates.tenMillionHistory.reason, /stays unqualified/);
+  assert.equal(report.gates.tenMillionHistory.actual, null, 'an unexecuted tier never reports measured rows as a passing actual');
+  assert.ok(report.qualification.unqualifiedGates.includes('tenMillionHistory'));
+  assert.ok(!report.qualification.failedGates.includes('tenMillionHistory'));
+  assert.equal(report.qualification.overallP0, 'unqualified', 'other required tiers are still missing');
+  assert.equal(validateOverallQualificationRecomputation(report, bindings).valid, true);
+}));
+
+test('a ten-million deferral without a measured capacity reason fails closed', () => withRoot((root) => {
+  const cases = [
+    { name: 'projection below the bound', estimatedTenMillionBytes: 10 * 1024 ** 3 },
+    { name: 'missing measured projection', withLargeTierDecision: false },
+  ];
+  for (const entry of cases) {
+    const slug = entry.name.replace(/\s+/u, '-');
+    const scalePath = path.join(root, `scale-${slug}.json`);
+    writeFileSync(scalePath, JSON.stringify(scaleReport(scalePath, entry)));
+    const report = buildOverallQualificationReport({
+      reportPath: path.join(root, `overall-${slug}.json`),
+      seed: 'overall-test',
+      ...bindings,
+      evidenceReports: { scale: scalePath },
+    });
+    assert.equal(report.gates.tenMillionHistory.decision, 'failed', entry.name);
+    assert.match(report.gates.tenMillionHistory.reason, /deferral is unjustified/u, entry.name);
+    assert.ok(report.qualification.failedGates.includes('tenMillionHistory'), entry.name);
+    assert.equal(report.qualification.overallP0, 'unqualified', entry.name);
+    assert.equal(validateOverallQualificationRecomputation(report, bindings).valid, true, entry.name);
+  }
+}));
+
+test('a bound ten-million report that is not an exact executed 10M workload fails closed', () => withRoot((root) => {
+  const baselinePath = path.join(root, 'baseline.json');
+  writeFileSync(baselinePath, JSON.stringify(componentReport(baselinePath, 'baseline', {
+    tableRows: { primaryFacts: 10_000, detailPayloads: 1_003 },
+  }, {
+    configuration: { scenario: 'baseline', rows: 10_000, seed: 'overall-test', reportPath: baselinePath },
+  })));
+  const scalePath = path.join(root, 'scale.json');
+  writeFileSync(scalePath, JSON.stringify(scaleReport(scalePath)));
+  const tenMillionPath = path.join(root, 'ten-million.json');
+  const tenMillion = componentReport(tenMillionPath, 'ten-million', {
+    tableRows: { primaryFacts: 9_999_999, detailPayloads: 1_000_003 },
+    largeTierDecision: { tenMillionExecuted: true, exactRows: 9_999_999 },
+  }, {
+    configuration: { scenario: 'ten-million', rows: 10_000_000, seed: 'overall-test', reportPath: tenMillionPath },
+  });
+  writeFileSync(tenMillionPath, JSON.stringify(tenMillion));
+  const report = buildOverallQualificationReport({
+    reportPath: path.join(root, 'overall.json'),
+    seed: 'overall-test',
+    ...bindings,
+    evidenceReports: { baseline: baselinePath, scale: scalePath, tenMillion: tenMillionPath },
+  });
+
+  assert.equal(report.gates.tenMillionHistory.decision, 'failed');
+  assert.equal(report.gates.exactPrimaryRows.decision, 'failed', 'a bound ten-million report joins the exact-row tier gate');
+  assert.ok(report.qualification.failedGates.includes('tenMillionHistory'));
+  assert.equal(report.qualification.overallP0, 'unqualified');
+  assert.equal(validateOverallQualificationRecomputation(report, bindings).valid, true);
+
+  const executedPath = path.join(root, 'ten-million-executed.json');
+  const executed = componentReport(executedPath, 'ten-million', {
+    tableRows: { primaryFacts: 10_000_000, detailPayloads: 1_000_003 },
+    largeTierDecision: { tenMillionExecuted: true, exactRows: 10_000_000 },
+  }, {
+    configuration: { scenario: 'ten-million', rows: 10_000_000, seed: 'overall-test', reportPath: executedPath },
+  });
+  writeFileSync(executedPath, JSON.stringify(executed));
+  const executedReport = buildOverallQualificationReport({
+    reportPath: path.join(root, 'overall-executed.json'),
+    seed: 'overall-test',
+    ...bindings,
+    evidenceReports: { baseline: baselinePath, scale: scalePath, tenMillion: executedPath },
+  });
+  assert.equal(executedReport.gates.tenMillionHistory.decision, 'passed', 'an executed exact 10M workload is the only pass');
+  assert.equal(executedReport.gates.exactPrimaryRows.decision, 'passed');
+  assert.ok(!executedReport.qualification.unqualifiedGates.includes('tenMillionHistory'));
+  assert.equal(validateOverallQualificationRecomputation(executedReport, bindings).valid, true);
+}));
+
+test('missing required scale tier keeps overall unqualified and the deferred gate honest', () => withRoot((root) => {
+  const baselinePath = path.join(root, 'baseline.json');
+  writeFileSync(baselinePath, JSON.stringify(componentReport(baselinePath, 'baseline', {}, {
+    configuration: { scenario: 'baseline', rows: 10_000, seed: 'overall-test', reportPath: baselinePath },
+  })));
+  const report = buildOverallQualificationReport({
+    reportPath: path.join(root, 'overall.json'),
+    seed: 'overall-test',
+    ...bindings,
+    evidenceReports: { baseline: baselinePath },
+  });
+
+  assert.equal(report.gates.scaleHistoryRows.decision, 'unqualified');
+  assert.match(report.gates.scaleHistoryRows.reason, /missing required evidence: scale/u);
+  assert.equal(report.qualification.overallP0, 'unqualified');
   assert.equal(validateOverallQualificationRecomputation(report, bindings).valid, true);
 }));
 
@@ -260,4 +400,29 @@ test('reported gate edits do not survive admission recomputation', () => withRoo
   const validation = validateOverallQualificationRecomputation(report, bindings);
   assert.equal(validation.valid, false);
   assert.ok(validation.errors.some((error) => /tenMillionHistory: reported gate/.test(error)));
+}));
+
+test('an edited qualification envelope fails recomputation', () => withRoot((root) => {
+  const scalePath = path.join(root, 'scale.json');
+  writeFileSync(scalePath, JSON.stringify(scaleReport(scalePath)));
+  const report = buildOverallQualificationReport({
+    reportPath: path.join(root, 'overall.json'),
+    seed: 'overall-test',
+    ...bindings,
+    evidenceReports: { scale: scalePath },
+  });
+  assert.equal(validateOverallQualificationRecomputation(report, bindings).valid, true);
+
+  const edited = structuredClone(report);
+  edited.selectedEnvelope = { requiredHistoryTiers: ['baseline-10000'], deferredHistoryTiers: [] };
+  const editedValidation = validateOverallQualificationRecomputation(edited, bindings);
+  assert.equal(editedValidation.valid, false);
+  assert.ok(editedValidation.errors.some((error) => /selectedEnvelope does not match/u.test(error)));
+  assert.equal(editedValidation.qualified, false);
+
+  const dropped = structuredClone(report);
+  dropped.selectedEnvelope = { requiredHistoryTiers: ['baseline-10000', 'scale-1000000'], deferredHistoryTiers: [] };
+  const droppedValidation = validateOverallQualificationRecomputation(dropped, bindings);
+  assert.equal(droppedValidation.valid, false);
+  assert.ok(droppedValidation.errors.some((error) => /selectedEnvelope does not match/u.test(error)));
 }));

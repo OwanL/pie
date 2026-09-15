@@ -14,6 +14,68 @@ Owning specifications: runbook; `docs/ANALYTICS_REWORK_PLAN.md` §§1, 11.6, 17;
 
 ---
 
+## Checkpoint 58 - 2026-09-15T07:00Z, recorded 10k/1M selected envelope; tenMillion gate deferred in aggregator/admission
+
+User scope decision (recorded): the selected representative qualification envelope is the executed
+**10,000-row baseline + 1,000,000-row scale** history tiers; the 10,000,000-row tier is **deferred
+unqualified** with the measured capacity reason from checkpoint 57 (executed 1M measured
+5,723,574,272 bytes of main database for 1,000,000 primary facts, ~5,724 B/fact, projecting ~62.3
+GiB at 10M — above the predeclared 16 GiB temporary-data cap). No temporary-bound exception (no
+96 GiB) was granted and none is assumed; the cap was not raised and no threshold or evidence
+standard was lowered. The ten-million tier is named unqualified, never passed-by-skip, and remains
+executable later if separately approved or requalified.
+
+Code change (task-owned; five unrelated user-owned files untouched):
+`extension/scripts/analytics-p0-overall-qualification.mjs` removes the agent-imposed unconditional
+`tenMillionHistory` requirement: `tenMillion` stays a bindable evidence role, the required tier
+aggregation is baseline+scale (a bound ten-million report still joins every tier gate), and
+`tenMillionHistory` becomes a deferred gate — recomputed as `unqualified` with the measured capacity
+reason derived from the bound scale report's `results.largeTierDecision`, `failed` when the measured
+projection does not exceed both predeclared temporary bounds (unjustified deferral), and `passed`
+only for an executed exactly-10,000,000-row workload. The overall report now records
+`selectedEnvelope` (`baseline-10000`,`scale-1000000` required; `tenMillion-10000000` deferred) and
+recomputation rejects any edit to it. All 23 other required gates remain enforced and a failed
+deferred gate still blocks overall qualification.
+`scripts/analytics-activation-admission.mjs` allows exactly that named deferred gate to stay
+explicitly unqualified in an otherwise qualified overall report; every other unqualified or failed
+gate, forged gate, edited envelope, missing required tier, and tampered evidence byte is still
+rejected. `extension/scripts/analytics-p0-qualification.mjs` changes are wording-only: the
+non-ten-million scenarios record the deferred-unqualified reason referencing
+`results.largeTierDecision`; the ten-million scenario itself remains executable and fail-closed.
+
+Tests updated fail-closed in `scripts/test/analytics-p0-overall-qualification.test.mjs` (verified
+measured-projection deferral stays unqualified; unjustified/missing-projection deferral fails;
+non-exact executed 10M fails and an executed exact 10M passes; missing required scale tier keeps
+overall unqualified; envelope edits and forged passed gates fail recomputation; 10/10 passed) and
+`scripts/test/analytics-activation-admission.test.mjs` (deferred gate may stay unqualified only in
+a qualified overall report; any other unqualified gate or a failed deferred gate is rejected;
+16 passed + 1 known host symlink skip). Adjacent suites re-ran green: matched-host,
+schema-faults, capacity, activation helper/production/recovery, candidate-trial runtime 14/14,
+mixed harness 37/37, activation sequence 11/11, endurance harness 10/10. Root checks: all 17
+typecheck projects, lint, model drift check, and `npm run test:changed` (58 tests, 2/2 packages).
+The combined candidate-trial + endurance batch intermittently fails its endurance-CLI spawn with
+`blocked-capacity` when the parallel candidate-trial runtime test temporarily depresses free RAM
+(~1.46 GiB observed at preflight) — the recorded intermittent resource-timing flake class, passing
+in isolation and on rerun; no code defect implicated. The reviewer subagent delegation was refused
+as not permitted in this session, so a direct self-review of the full diff was used instead.
+
+Completed evidence referenced: code integration per checkpoints 56-57 (source `f3cab600`, pushed);
+P4 rich provider failover per commit `2c4b3967` with its production-bridge tests; cache file-io
+collector 5/5 (standalone, checkpoint 56; its live Restart Manager binding remains
+timing-sensitive); paired mixed full-stats/memory-only UI/agent-path evidence at artifact
+`6a2b5aeb` (checkpoint 56). P7a activation, storage cutoff, publication, and restart remain
+closed; `overallP0` remains unqualified until the remaining tier evidence (scale, endurance,
+schema-faults, and the matched-host real VS Code run) is executed against one frozen artifact and
+the overall aggregate plus admission recomputation are run.
+
+Next exact operations of this task, in order: (1) commit and push this checkpoint with the envelope
+fix; (2) coordinated frozen-HEAD publishing build at that exact commit, staged integrity
+verification, and a scratch freeze manifest with the exact source/build fingerprint; (3) serialized
+actual baseline 10k qualification and matched-host real VS Code evidence on that artifact with the
+predeclared memory/disk guards; no activation, cutoff, publication of live state, or restart.
+
+---
+
 ## Checkpoint 57 - 2026-09-15T04:25Z, frozen-HEAD publishing build verified; 10M capacity conclusion
 
 Commit `88eb7be253451887bf1ef5946332b91768b71030` (checkpoint 56 reconciliation; Git tree

@@ -25,7 +25,12 @@ export const OVERALL_EVIDENCE_ROLES = Object.freeze([
 ]);
 
 /** These are admission gates, not scenario-success labels. Every gate below
- * has a recomputation from raw, hash-bound report evidence. */
+ * has a recomputation from raw, hash-bound report evidence.
+ *
+ * The required history envelope is the recorded user decision (2026-09-15):
+ * the executed 10,000-row baseline and 1,000,000-row scale tiers. The
+ * ten-million history tier is deferred, not removed: see
+ * DEFERRED_OVERALL_QUALIFICATION_GATES. */
 export const REQUIRED_OVERALL_QUALIFICATION_GATES = Object.freeze([
   'exactPrimaryRows',
   'exactDetailRows',
@@ -39,7 +44,6 @@ export const REQUIRED_OVERALL_QUALIFICATION_GATES = Object.freeze([
   'reservedFreeDisk',
   'recorderWorkerRss',
   'scaleHistoryRows',
-  'tenMillionHistory',
   'enduranceLightLoad',
   'enduranceSustainedLoad',
   'enduranceWorkerMemory',
@@ -51,6 +55,29 @@ export const REQUIRED_OVERALL_QUALIFICATION_GATES = Object.freeze([
   'queryPeakMemory',
   'rateConditions',
   'realProducerBoundary',
+]);
+
+/** The recorded selected qualification envelope: executed baseline (10k) and
+ * scale (1M) history tiers are required; the ten-million tier is deferred.
+ * Overall reports must carry this object unchanged, so an edited envelope
+ * fails recomputation. */
+export const SELECTED_P0_HISTORY_ENVELOPE = Object.freeze({
+  requiredHistoryTiers: Object.freeze(['baseline-10000', 'scale-1000000']),
+  deferredHistoryTiers: Object.freeze(['tenMillion-10000000']),
+});
+
+/** Deferred gates stay recomputable and honest. A deferred gate may remain
+ * explicitly unqualified when its tier was not executed and the bound scale
+ * evidence shows the measured capacity reason, but it is never 'passed' by a
+ * skip, and a 'failed' deferred gate blocks overall qualification like any
+ * other gate. */
+export const DEFERRED_OVERALL_QUALIFICATION_GATES = Object.freeze(['tenMillionHistory']);
+
+/** Every recomputed overall gate: the required admission gates plus the
+ * deferred ones. */
+export const OVERALL_QUALIFICATION_GATE_NAMES = Object.freeze([
+  ...REQUIRED_OVERALL_QUALIFICATION_GATES,
+  ...DEFERRED_OVERALL_QUALIFICATION_GATES,
 ]);
 
 const ROLE_SCENARIOS = Object.freeze({
@@ -313,8 +340,52 @@ function loadEvidence(report, expected) {
   return { loaded, errors };
 }
 
-function tierReports(reports) {
-  return [reports.baseline, reports.scale, reports.tenMillion];
+const TEN_MILLION_HISTORY_THRESHOLD = 'exactly 10,000,000 primary rows; a projection or skip is not a pass';
+
+/** Recompute the deferred ten-million history gate. When the ten-million role
+ * is bound, the gate passes only for an executed, exactly-10,000,000-row
+ * workload. When it is not bound, the deferral is accepted only if the bound
+ * scale report's own measured projection exceeds both predeclared temporary
+ * bounds; otherwise the deferral is unjustified and the gate fails. An
+ * unexecuted tier is never marked passed. */
+function tenMillionHistoryGate(loaded) {
+  if (loaded.has('tenMillion')) {
+    return reportGate(TEN_MILLION_HISTORY_THRESHOLD, ['tenMillion'], loaded, ({ tenMillion }) => ({
+      actual: tenMillion.results?.tableRows?.primaryFacts,
+      passed: tenMillion.results?.tableRows?.primaryFacts === 10_000_000
+        && tenMillion.results?.largeTierDecision?.tenMillionExecuted === true,
+    }));
+  }
+  const scale = loaded.get('scale')?.report;
+  if (!scale) {
+    return gate(null, TEN_MILLION_HISTORY_THRESHOLD, null, ['scale'], loaded,
+      'missing required evidence: scale; the measured capacity deferral of the ten-million tier cannot be justified');
+  }
+  const decision = scale.results?.largeTierDecision;
+  const measuredRows = decision?.measuredRows;
+  const bytesPerFact = decision?.measuredBytesPerPrimaryFact;
+  const estimated = decision?.estimatedTenMillionBytes;
+  const limitBytes = scale.matrix?.bounds?.effectiveTemporaryLimitBytes;
+  const capBytes = scale.matrix?.bounds?.maxTemporaryBytes;
+  const justified = decision?.tenMillionExecuted === false
+    && measuredRows === 1_000_000
+    && finiteNonNegative(bytesPerFact) && bytesPerFact > 0
+    && finiteNonNegative(estimated) && finiteNonNegative(limitBytes) && finiteNonNegative(capBytes)
+    && estimated > limitBytes && estimated > capBytes;
+  const actual = {
+    measuredRows: measuredRows === 1_000_000 ? measuredRows : null,
+    measuredBytesPerPrimaryFact: finiteNonNegative(bytesPerFact) ? bytesPerFact : null,
+    estimatedTenMillionBytes: finiteNonNegative(estimated) ? estimated : null,
+    temporaryLimitBytes: finiteNonNegative(limitBytes) ? limitBytes : null,
+    temporaryCapBytes: finiteNonNegative(capBytes) ? capBytes : null,
+    tenMillionExecuted: decision?.tenMillionExecuted === false ? false : null,
+  };
+  if (!justified) {
+    return gate(actual, TEN_MILLION_HISTORY_THRESHOLD, false, ['scale'], loaded,
+      'the bound scale report does not show a measured ten-million projection above both predeclared temporary bounds; the deferral is unjustified and the ten-million tier is required');
+  }
+  return gate(actual, TEN_MILLION_HISTORY_THRESHOLD, null, ['scale'], loaded,
+    `deferred unqualified: measured ${bytesPerFact} bytes per primary fact at ${measuredRows} rows projects ${estimated} bytes for 10,000,000 facts, above the predeclared ${capBytes}-byte temporary-data cap (effective limit ${limitBytes} bytes); the tier was not executed and stays unqualified`);
 }
 
 function maxOf(values) {
@@ -426,41 +497,51 @@ export function recomputeOverallQualification(report, expected) {
   const evidence = loadEvidence(report, bindings);
   errors.push(...evidence.errors);
   const loaded = evidence.loaded;
+  if (!sameJson(report.selectedEnvelope, SELECTED_P0_HISTORY_ENVELOPE)) {
+    errors.push('selectedEnvelope does not match the recorded 10k/1M qualification envelope');
+  }
   const gates = {};
-  const tiers = ['baseline', 'scale', 'tenMillion'];
+  // The selected required history envelope is the executed baseline (10k) and
+  // scale (1M) tiers. The deferred ten-million role joins the tier gates only
+  // when its report is actually bound; an unexecuted tier is never silently
+  // required and never silently passed.
+  const boundTiers = Object.freeze(['baseline', 'scale', ...(loaded.has('tenMillion') ? ['tenMillion'] : [])]);
+  const expectedTierRows = { baseline: 10_000, scale: 1_000_000, tenMillion: 10_000_000 };
+  const expectedTierDetails = { baseline: 1_003, scale: 100_003, tenMillion: 1_000_003 };
+  const tierReports = (r) => boundTiers.map((role) => r[role]);
 
-  gates.exactPrimaryRows = reportGate('exact primary rows at 10k, 1M, and 10M', tiers, loaded, (r) => {
-    const actual = { baseline: r.baseline.results?.tableRows?.primaryFacts, scale: r.scale.results?.tableRows?.primaryFacts, tenMillion: r.tenMillion.results?.tableRows?.primaryFacts };
-    return { actual, passed: actual.baseline === 10_000 && actual.scale === 1_000_000 && actual.tenMillion === 10_000_000 };
+  gates.exactPrimaryRows = reportGate('exact primary rows at every bound history tier', boundTiers, loaded, (r) => {
+    const actual = Object.fromEntries(boundTiers.map((role) => [role, r[role].results?.tableRows?.primaryFacts]));
+    return { actual, passed: boundTiers.every((role) => actual[role] === expectedTierRows[role]) };
   });
-  gates.exactDetailRows = reportGate('10% linked detail plus three lifecycle fixtures at every history tier', tiers, loaded, (r) => {
-    const actual = { baseline: r.baseline.results?.tableRows?.detailPayloads, scale: r.scale.results?.tableRows?.detailPayloads, tenMillion: r.tenMillion.results?.tableRows?.detailPayloads };
-    return { actual, passed: actual.baseline === 1_003 && actual.scale === 100_003 && actual.tenMillion === 1_000_003 };
+  gates.exactDetailRows = reportGate('10% linked detail plus three lifecycle fixtures at every bound history tier', boundTiers, loaded, (r) => {
+    const actual = Object.fromEntries(boundTiers.map((role) => [role, r[role].results?.tableRows?.detailPayloads]));
+    return { actual, passed: boundTiers.every((role) => actual[role] === expectedTierDetails[role]) };
   });
-  gates.handoffP99 = reportGate('maximum p99 <= 9 ms across all history tiers', tiers, loaded, (r) => {
+  gates.handoffP99 = reportGate('maximum p99 <= 9 ms across every bound history tier', boundTiers, loaded, (r) => {
     const actual = maxOf(tierReports(r).map((entry) => entry.results?.factHandoff?.p99Ms));
     return { actual, passed: actual <= 9 };
   });
-  gates.responsivenessProxyP95 = reportGate('standalone proxy p95 <= 25 ms at every history tier; not a matched UI claim', tiers, loaded, (r) => {
+  gates.responsivenessProxyP95 = reportGate('standalone proxy p95 <= 25 ms at every bound history tier; not a matched UI claim', boundTiers, loaded, (r) => {
     const actual = maxOf(tierReports(r).map((entry) => entry.results?.responsivenessProxy?.lag?.p95Ms));
     return { actual, passed: actual <= 25 };
   });
-  gates.indexedQuery = reportGate('indexed drill-down <= 250 ms at every history tier', tiers, loaded, (r) => {
+  gates.indexedQuery = reportGate('indexed drill-down <= 250 ms at every bound history tier', boundTiers, loaded, (r) => {
     const actual = maxOf(tierReports(r).map((entry) => entry.results?.queries?.indexedSessionMs));
     return { actual, passed: actual <= 250 };
   });
-  gates.largeDetailQuery = reportGate('2 MiB detail reconstruction <= 9000 ms at every history tier', tiers, loaded, (r) => {
+  gates.largeDetailQuery = reportGate('2 MiB detail reconstruction <= 9000 ms at every bound history tier', boundTiers, loaded, (r) => {
     const actual = maxOf(tierReports(r).map((entry) => entry.results?.queries?.twoMiBDetailMs));
     return { actual, passed: actual <= 9_000 };
   });
-  gates.temporaryFootprint = reportGate('each tier stays within its predeclared effective temporary-data limit', tiers, loaded, (r) => {
-    const actual = Object.fromEntries(tiers.map((role) => [role, resourceValue(r[role], 'physicalBytes', Math.max)]));
-    const passed = tiers.every((role) => finiteNonNegative(actual[role]) && actual[role] <= r[role].matrix?.bounds?.effectiveTemporaryLimitBytes);
+  gates.temporaryFootprint = reportGate('each bound tier stays within its predeclared effective temporary-data limit', boundTiers, loaded, (r) => {
+    const actual = Object.fromEntries(boundTiers.map((role) => [role, resourceValue(r[role], 'physicalBytes', Math.max)]));
+    const passed = boundTiers.every((role) => finiteNonNegative(actual[role]) && actual[role] <= r[role].matrix?.bounds?.effectiveTemporaryLimitBytes);
     return { actual, passed };
   });
-  gates.reservedFreeDisk = reportGate('each tier preserves its predeclared free-disk reserve', tiers, loaded, (r) => {
-    const actual = Object.fromEntries(tiers.map((role) => [role, resourceValue(r[role], 'freeBytes', Math.min)]));
-    const passed = tiers.every((role) => finiteNonNegative(actual[role]) && actual[role] >= r[role].matrix?.bounds?.minUnusedDiskBytes);
+  gates.reservedFreeDisk = reportGate('each bound tier preserves its predeclared free-disk reserve', boundTiers, loaded, (r) => {
+    const actual = Object.fromEntries(boundTiers.map((role) => [role, resourceValue(r[role], 'freeBytes', Math.min)]));
+    const passed = boundTiers.every((role) => finiteNonNegative(actual[role]) && actual[role] >= r[role].matrix?.bounds?.minUnusedDiskBytes);
     return { actual, passed };
   });
   gates.inPlaceCorruption = reportGate('contained corruption completes with a terminal fresh reader', ['baseline'], loaded, ({ baseline }) => {
@@ -472,7 +553,7 @@ export function recomputeOverallQualification(report, expected) {
     return { actual: { eligible: baseline.results?.capacityCalibration?.eligible, errors: validation.errors }, passed: validation.valid };
   });
   gates.scaleHistoryRows = reportGate('exactly 1,000,000 primary rows', ['scale'], loaded, ({ scale }) => ({ actual: scale.results?.tableRows?.primaryFacts, passed: scale.results?.tableRows?.primaryFacts === 1_000_000 }));
-  gates.tenMillionHistory = reportGate('exactly 10,000,000 primary rows; a projection or skip is not a pass', ['tenMillion'], loaded, ({ tenMillion }) => ({ actual: tenMillion.results?.tableRows?.primaryFacts, passed: tenMillion.results?.tableRows?.primaryFacts === 10_000_000 && tenMillion.results?.largeTierDecision?.tenMillionExecuted === true }));
+  gates.tenMillionHistory = tenMillionHistoryGate(loaded);
   gates.realProducerBoundary = reportGate('real nested producer handoff <= 9 ms, detached, redacted, non-waiting, failover and rejection retained', ['baseline'], loaded, ({ baseline }) => {
     const value = baseline.results?.realProducerBoundary;
     const passed = value?.status === 'submitted' && value?.handoffMs <= 9 && value?.nestedDepth >= 2
@@ -518,7 +599,7 @@ export function recomputeOverallQualification(report, expected) {
       ? topology.queryWorkerRssBytes * active : Number.NaN;
     return { actual, passed: topology?.queryWorkerTelemetryAvailable === true && actual <= 512 * 1024 ** 2 };
   });
-  gates.recorderWorkerRss = reportGate('production-default recorder worker high-water <= 256 MiB in history, endurance, and mixed workloads', [...tiers, 'endurance', 'mixedFullStats'], loaded, (r) => {
+  gates.recorderWorkerRss = reportGate('production-default recorder worker high-water <= 256 MiB in history, endurance, and mixed workloads', [...boundTiers, 'endurance', 'mixedFullStats'], loaded, (r) => {
     const history = tierReports(r).map((entry) => entry.results?.memory?.maxWorkerRssBytes);
     const enduranceWorkers = r.endurance.results?.endurance?.trials?.flatMap((trial) => trial.workerMemory?.workers ?? []).map((worker) => worker.maxRssBytes) ?? [];
     const mixed = r.mixedFullStats.results?.mixed?.queryHostTopology?.recorderMaxWorkerRssBytes;
@@ -535,10 +616,13 @@ export function recomputeOverallQualification(report, expected) {
     return { actual, passed: finiteNonNegative(actual) && actual <= 16 * 1024 ** 2 };
   });
 
-  for (const gateName of REQUIRED_OVERALL_QUALIFICATION_GATES) {
+  for (const gateName of OVERALL_QUALIFICATION_GATE_NAMES) {
     if (!gates[gateName]) errors.push(`${gateName}: no recomputation rule`);
   }
-  const qualified = errors.length === 0 && REQUIRED_OVERALL_QUALIFICATION_GATES.every((name) => gates[name]?.decision === 'passed');
+  const failedDeferred = DEFERRED_OVERALL_QUALIFICATION_GATES.some((name) => gates[name]?.decision === 'failed');
+  const qualified = errors.length === 0
+    && !failedDeferred
+    && REQUIRED_OVERALL_QUALIFICATION_GATES.every((name) => gates[name]?.decision === 'passed');
   return { qualified, gates, errors };
 }
 
@@ -558,16 +642,16 @@ function sameJson(left, right) {
 export function validateOverallQualificationRecomputation(report, expected) {
   const recomputed = recomputeOverallQualification(report, expected);
   const errors = [...recomputed.errors];
-  for (const gateName of REQUIRED_OVERALL_QUALIFICATION_GATES) {
+  for (const gateName of OVERALL_QUALIFICATION_GATE_NAMES) {
     if (!sameJson(report.gates?.[gateName], recomputed.gates[gateName])) {
       errors.push(`${gateName}: reported gate does not match recomputed evidence`);
     }
   }
   for (const gateName of Object.keys(report.gates ?? {})) {
-    if (!REQUIRED_OVERALL_QUALIFICATION_GATES.includes(gateName)) errors.push(`unknown overall gate ${gateName}`);
+    if (!OVERALL_QUALIFICATION_GATE_NAMES.includes(gateName)) errors.push(`unknown overall gate ${gateName}`);
   }
-  const failed = REQUIRED_OVERALL_QUALIFICATION_GATES.filter((name) => recomputed.gates[name]?.decision === 'failed');
-  const unqualified = REQUIRED_OVERALL_QUALIFICATION_GATES.filter((name) => recomputed.gates[name]?.decision !== 'passed' && !failed.includes(name));
+  const failed = OVERALL_QUALIFICATION_GATE_NAMES.filter((name) => recomputed.gates[name]?.decision === 'failed');
+  const unqualified = OVERALL_QUALIFICATION_GATE_NAMES.filter((name) => recomputed.gates[name]?.decision !== 'passed' && !failed.includes(name));
   if (!sameJson(report.qualification?.failedGates, failed)) errors.push('qualification.failedGates does not match recomputation');
   if (!sameJson(report.qualification?.unqualifiedGates, unqualified)) errors.push('qualification.unqualifiedGates does not match recomputation');
   const expectedOverall = recomputed.qualified ? 'qualified' : 'unqualified';
@@ -603,19 +687,20 @@ export function buildOverallQualificationReport({ reportPath, seed, sourceHead, 
     // binds that common source identity and each component's exact bytes.
     provenance: { valid: true, gitHead: sourceHead, coordinatedBuildId: buildId, fingerprint: sourceFingerprint },
     evidence: { reports: descriptors },
+    selectedEnvelope: SELECTED_P0_HISTORY_ENVELOPE,
     results: { evidenceReportCount: Object.keys(descriptors).length },
     gates: {},
     measurement: { completed: true, evidenceReportCount: Object.keys(descriptors).length },
     cleanup: { completed: true, rootCreated: false, rootRemoved: true },
-    qualification: { scenario: 'overall', decision: 'overall-unqualified', failedGates: [], unqualifiedGates: [...REQUIRED_OVERALL_QUALIFICATION_GATES], overallP0: 'unqualified' },
+    qualification: { scenario: 'overall', decision: 'overall-unqualified', failedGates: [], unqualifiedGates: [...OVERALL_QUALIFICATION_GATE_NAMES], overallP0: 'unqualified' },
   };
   const recomputed = recomputeOverallQualification(report, { sourceHead, buildId, sourceFingerprint });
   report.gates = recomputed.gates;
   report.qualification = {
     scenario: 'overall',
     decision: recomputed.qualified ? 'overall-qualified' : 'overall-unqualified',
-    failedGates: REQUIRED_OVERALL_QUALIFICATION_GATES.filter((name) => recomputed.gates[name]?.decision === 'failed'),
-    unqualifiedGates: REQUIRED_OVERALL_QUALIFICATION_GATES.filter((name) => recomputed.gates[name]?.decision !== 'passed' && recomputed.gates[name]?.decision !== 'failed'),
+    failedGates: OVERALL_QUALIFICATION_GATE_NAMES.filter((name) => recomputed.gates[name]?.decision === 'failed'),
+    unqualifiedGates: OVERALL_QUALIFICATION_GATE_NAMES.filter((name) => recomputed.gates[name]?.decision !== 'passed' && recomputed.gates[name]?.decision !== 'failed'),
     overallP0: recomputed.qualified ? 'qualified' : 'unqualified',
     evidenceErrors: recomputed.errors,
   };

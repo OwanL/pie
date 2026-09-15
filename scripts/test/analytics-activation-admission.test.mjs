@@ -247,6 +247,57 @@ test('live admission rejects the current scenario-passed but overall-unqualified
   }
 });
 
+test('the deferred ten-million gate may stay unqualified in a qualified overall report', () => {
+  const { root, options, qualification } = fixture();
+  try {
+    validateActivationEvidenceStructure(options);
+    const report = structuredClone(qualification.report);
+    report.kind = 'pie-p0-overall-qualification-v1';
+    report.configuration = {
+      scenario: 'overall', rows: null, seed: 'activation-test', reportPath: qualification.path,
+    };
+    report.qualification = {
+      scenario: 'overall', decision: 'overall-qualified', failedGates: [],
+      unqualifiedGates: ['tenMillionHistory'], overallP0: 'qualified',
+    };
+    report.gates.tenMillionHistory = {
+      actual: null, threshold: 'exactly 10,000,000 primary rows; a projection or skip is not a pass',
+      decision: 'unqualified', reason: 'deferred unqualified with the measured capacity reason', evidence: {},
+    };
+    writeJson(qualification.path, report);
+
+    // The deferred-unqualified gate passes the strict per-gate admission loop;
+    // the failure must come from the overall recomputation of the missing
+    // evidence, not from the deferred gate itself.
+    assert.throws(() => admitActivationEvidence(options), (error) => {
+      if (!(error instanceof ActivationEvidenceError)) return false;
+      return !/gate tenMillionHistory is not passed/u.test(error.message);
+    });
+
+    // Any other unqualified gate still fails the strict loop.
+    const narrowed = structuredClone(report);
+    narrowed.gates.mixedLoad = { actual: null, threshold: 'test-bound', decision: 'unqualified', evidence: {} };
+    narrowed.qualification.unqualifiedGates = ['tenMillionHistory', 'mixedLoad'];
+    writeJson(qualification.path, narrowed);
+    assert.throws(
+      () => admitActivationEvidence(options),
+      (error) => error instanceof ActivationEvidenceError && /gate mixedLoad is not passed/u.test(error.message),
+    );
+
+    // A failed deferred gate is never an accepted skip either.
+    const failed = structuredClone(report);
+    failed.gates.tenMillionHistory.decision = 'failed';
+    failed.qualification.unqualifiedGates = [];
+    writeJson(qualification.path, failed);
+    assert.throws(
+      () => admitActivationEvidence(options),
+      (error) => error instanceof ActivationEvidenceError && /gate tenMillionHistory is not passed/u.test(error.message),
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('live admission does not trust an overall-qualified flag over recomputed results', () => {
   const { root, options } = fixture({
     qualification: {

@@ -2397,7 +2397,7 @@ function ensureGateEvidence() {
   if (!report.gates.tenMillionHistory) {
     configuration.scenario === 'ten-million'
       ? recordGate('tenMillionHistory', tableRows?.primaryFacts, 'exactly 10000000 rows from an executed workload', (value) => value === 10_000_000)
-      : recordUnqualified('tenMillionHistory', 'The ten-million scenario was not selected.');
+      : recordUnqualified('tenMillionHistory', 'Deferred unqualified by the recorded 10k/1M qualification envelope; see results.largeTierDecision for the measured ten-million projection.');
   }
   for (const [name, reason] of [
     ['enduranceLightLoad', 'Not executed by this bounded baseline/scale harness.'],
@@ -3329,7 +3329,7 @@ try {
     report.results.largeTierDecision = { tenMillionExecuted: true, exactRows: finalTableRows?.primaryFacts };
     if (!recordGate('tenMillionHistory', finalTableRows?.primaryFacts, 'exactly 10000000 rows from an executed workload', (value) => value === 10_000_000)) failedGates.push('tenMillionHistory');
   } else {
-    recordUnqualified('tenMillionHistory', 'The ten-million scenario was not selected.');
+    recordUnqualified('tenMillionHistory', 'Deferred unqualified by the recorded 10k/1M qualification envelope; see results.largeTierDecision for the measured ten-million projection.');
   }
   for (const [name, reason] of [
     ['enduranceLightLoad', 'Not executed by this bounded baseline/scale harness.'],
