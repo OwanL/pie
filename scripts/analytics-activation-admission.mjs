@@ -221,13 +221,17 @@ function validateQualificationReport(
     invalid(label, 'qualification.unqualifiedGates is invalid');
   }
   if (!isObject(report.gates)) invalid(label, 'gates are missing');
+  const strictExceptionGates = requireQualification && provisional && overall
+    ? new Set([...PROVISIONAL_QUALIFICATION_ENVELOPE.measurementExceptions, 'realProducerBoundary'])
+    : new Set();
   for (const gateName of REQUIRED_QUALIFICATION_GATES) {
     const gate = report.gates[gateName];
     if (!isObject(gate)) {
       invalid(label, `required gate ${gateName} is not passed with evidence`);
     }
     if (requireQualification && (gate.decision !== 'passed' || gate.actual === null || gate.actual === undefined
-      || gate.threshold === null || gate.threshold === undefined)) {
+      || gate.threshold === null || gate.threshold === undefined)
+      && !strictExceptionGates.has(gateName)) {
       invalid(label, `required gate ${gateName} is not passed with evidence`);
     }
   }
