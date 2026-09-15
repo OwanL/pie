@@ -14,6 +14,58 @@ Owning specifications: runbook; `docs/ANALYTICS_REWORK_PLAN.md` §§1, 11.6, 17;
 
 ---
 
+## Checkpoint 59 - 2026-09-16, provisional P0 qualification envelope implemented and pushed
+
+User decision (recorded): provisional cutover now; the named performance/measurement gaps are
+deferred while the isolated activation trial and data-safety/authority checks remain mandatory.
+
+Code change (task-owned; committed `3cfd5ff9`, pushed):
+- `extension/scripts/analytics-p0-overall-qualification.mjs`: adds the frozen
+  `PROVISIONAL_QUALIFICATION_ENVELOPE` with exactly the approved measurement exceptions
+  (`recorderWorkerRss`, `mixedWorkerMemory`, `queryPeakMemory`, `matchedAgentUi`,
+  `incrementalHostMemory`) plus the latency-only `realProducerBoundary` exception (its
+  privacy/non-waiting/mutation/failover/nested correctness fields stay mandatory, recomputed).
+  A component scenario report whose failed gates are an exact subset of the approved exceptions
+  binds as evidence with its honest `failed`/`scenario-failed` status kept; cleanup, measurement,
+  provenance, build and source-fingerprint bindings still fail closed. `overallP0` never claims
+  qualified under the envelope; `buildOverallQualificationReport --provisional` records
+  `provisionalP0: provisional-qualified` + the recomputed `provisionalExceptions` list, and fails
+  closed when the envelope is not satisfied or a non-exception gate is open.
+- `scripts/analytics-activation-admission.mjs`: explicit `provisional` admission mode. Without it,
+  behavior is unchanged (`overallP0` must be `qualified`). With it, the overall report must record
+  the byte-exact approved envelope, every non-exception gate must still be passed (or a
+  deferred-unqualified deferred gate), and the recomputation must be valid; exception gates may
+  stay honestly failed/unqualified. Evidence returns now carry `provisionalP0`/`qualificationMode`.
+- `scripts/analytics-activation-helper.mjs`: an activation plan field
+  `qualificationMode: "provisional"` threads the mode through all three admission call sites
+  (preflight inspect, production cutover, legacy sequence); the admitted evidence record carries
+  the mode into the prepare phase record.
+- `scripts/test/analytics-provisional-qualification.test.mjs`: focused tests — exact approved
+  envelope admission; refusal of failed non-exception gates; refusal of realProducerBoundary
+  correctness (privacy/non-waiting/mutation) failures outside the latency exception; refusal on
+  evidence errors or a failed deferred gate; fail-closed recomputation of an edited envelope or
+  exception list; no fabricated passed statuses. 6/6 pass; existing overall-qualification (0 fail)
+  and activation-admission (1 known host symlink skip) suites unchanged.
+
+Verified aggregation (evidence-bound, no rewrites): `overall-provisional-r03.json` regenerated from
+the wave-r02 reports (`baseline-r02`, `scale-r03`, `endurance-r01`, `mixed-full-stats-r01`,
+`mixed-memory-only-r01`, `schema-faults-r01`, source `fbbca0eb`, build `84d09cb7`) with
+`--provisional`: evidenceErrors empty; `overallP0` honestly `unqualified`; `provisionalP0:
+provisional-qualified`; provisionalExceptions exactly the five approved names; failed gates
+recorded as measured (`recorderWorkerRss` 307,400,704 B; `mixedWorkerMemory` incomplete query
+worker coverage + 311,300,096 B recorder high-water; `queryPeakMemory` unmeasured;
+`realProducerBoundary` latency-only at handoffMs 9.546 > 9 with every correctness field true);
+unqualified gates `matchedAgentUi`, `incrementalHostMemory` (matchedHost evidence not executed),
+`tenMillionHistory` (deferred with the measured capacity reason).
+
+Still open for this task (in order): frozen-HEAD coordinated publishing build + staged integrity
+verification at `3cfd5ff9`; bounded (≤10 min) real candidate trial with production helpers on an
+isolated owned root + candidate-trial report; production helper plan + read-only preflight +
+bounded disposable rehearsal; actual activation/cutoff/restart stays with the separately
+authorized terminal handoff (not this session).
+
+---
+
 ## Checkpoint 58 - 2026-09-15T07:00Z, recorded 10k/1M selected envelope; tenMillion gate deferred in aggregator/admission
 
 User scope decision (recorded): the selected representative qualification envelope is the executed
