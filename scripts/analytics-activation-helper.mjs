@@ -478,6 +478,10 @@ function admissionEvidenceOptions(plan) {
     sourceFingerprint: plan.sourceFingerprint,
     workspaceId: plan.workspaceId,
     provisional: plan.qualificationMode === 'provisional',
+    ...(plan.candidateBuildId !== undefined || plan.sourceEquivalenceReceipt !== undefined ? {
+      candidateBuildId: plan.candidateBuildId,
+      sourceEquivalenceReceipt: plan.sourceEquivalenceReceipt,
+    } : {}),
   };
 }
 

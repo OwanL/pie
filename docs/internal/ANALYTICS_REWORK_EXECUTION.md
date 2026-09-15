@@ -52,7 +52,7 @@ the wave-r02 reports (`baseline-r02`, `scale-r03`, `endurance-r01`, `mixed-full-
 `mixed-memory-only-r01`, `schema-faults-r01`, source `fbbca0eb`, build `84d09cb7`) with
 `--provisional`: evidenceErrors empty; `overallP0` honestly `unqualified`; `provisionalP0:
 provisional-qualified`; provisionalExceptions exactly the five approved names; failed gates
-recorded as measured (`recorderWorkerRss` 307,400,704 B; `mixedWorkerMemory` incomplete query
+recorded as measured (`recorderWorkerRss` 343,044,096 B; `mixedWorkerMemory` incomplete query
 worker coverage + 311,300,096 B recorder high-water; `queryPeakMemory` unmeasured;
 `realProducerBoundary` latency-only at handoffMs 9.546 > 9 with every correctness field true);
 unqualified gates `matchedAgentUi`, `incrementalHostMemory` (matchedHost evidence not executed),
@@ -4824,3 +4824,29 @@ binary diff are preserved at
 P7 activation and all-host handoff gates remain closed. No canonical activation,
 live Code/Codex restart, storage cutoff, or authority cutover is implied by this
 recovery build.
+
+---
+
+## Checkpoint - 2026-09-16, measured-implementation restoration, exact source-equivalence binding, candidate trial passed
+
+The interrupted experimental redaction/collector edits were archived (not shipped) to
+`C:\dev\scratch\pie-analytics-cutover-20260916-r01\` (patches + archived untracked test) and the
+measured production files restored; the five user-owned model/settings files remain untouched.
+The candidate provisional producer fix (report-runner only) is kept with its 6-test suite green.
+
+Because the coordinated build id hashes all of `extension/src`, the report-runner fix yields a new
+candidate build id (`7a2dab4f62b70d9b2a1f`) without touching production runtime. The historical
+provisional evidence keeps its ORIGINAL provenance (head `fbbca0eb`, build `84d09cb7`, fingerprint
+`2ac9d199...`); the current candidate is bound separately by
+`scripts/analytics-source-equivalence.mjs`, which verified byte-identity of all 20 measured
+production runtime files and unchanged dependency identity inputs, failing closed on anything
+else. Admission (`candidateBuildId` + `sourceEquivalenceReceipt` plan binding) validates the
+receipt, re-verifies every recorded hash against disk, binds build markers to the candidate id and
+report provenance to the measured id, and rejects mismatches (7 focused tests). The real
+candidate trial passed on the exact current candidate with guaranteed disposable-root cleanup
+(`candidate-trial-r01.json`, `status: passed`, cleanup completed, root removed).
+
+Read-only preflight: P0 evidence admission READY; remaining blockers are exactly the sanctioned
+production-handoff artifacts (first activation manifest, lifecycle registry, host handoff key
+file, terminal restart receipt). Activation/cutoff/restart remain with the authorized terminal
+handoff; no alternate data root or substitute receipts were created.

@@ -64,6 +64,13 @@ export interface CandidateTrialReportOptions {
   recorderWorkerScript: string;
   queryWorkerScript: string;
   producerPath: string;
+  /** Current candidate coordinated build id when it intentionally differs
+   * from the measured qualification identity; requires the equivalence
+   * receipt. */
+  candidateBuildId?: string;
+  /** Exact artifact/source equivalence receipt binding the measured evidence
+   * identity to the current candidate build. */
+  equivalenceReceiptPath?: string;
 }
 
 type JsonObject = Record<string, unknown>;
@@ -138,7 +145,133 @@ function containsPath(parent: string, child: string): boolean {
   return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
 }
 
-async function assertIdentityInputs(options: CandidateTrialReportOptions, qualification: JsonObject): Promise<void> {
+/** How a schema-valid overall qualification report may bind a candidate
+ * trial: either fully qualified, or — only when the report itself explicitly
+ * declares the approved provisional state alongside an honest unqualified
+ * overall decision — provisionally qualified. Declaring a provisional state
+ * that is not provisionally qualified, or claiming a provisional state on a
+ * faked fully qualified overall decision, is refused. The measured gate
+ * outcomes are never rewritten; the provisional binding still recomputes
+ * through the authoritative validator, which enforces the byte-exact approved
+ * envelope and the recomputed exception set. */
+export type CandidateTrialQualificationMode = 'full-qualified' | 'provisional-qualified';
+
+export function candidateTrialQualificationMode(qualification: JsonObject): CandidateTrialQualificationMode {
+  const decision = qualification.qualification as JsonObject | undefined;
+  if (decision?.provisionalP0 === 'provisional-qualified') {
+    if (decision.overallP0 !== 'unqualified' || decision.decision !== 'overall-unqualified') {
+      throw new Error('Candidate-trial qualification must keep an honest unqualified overall decision while provisionally qualified.');
+    }
+    return 'provisional-qualified';
+  }
+  if (decision?.provisionalP0 !== undefined) {
+    throw new Error('Candidate-trial qualification declares a provisionalP0 that is not provisional-qualified.');
+  }
+  if (decision?.overallP0 === 'qualified' && decision.decision === 'overall-qualified') {
+    return 'full-qualified';
+  }
+  throw new Error('Candidate-trial qualification report is not a qualified overall report with the exact requested identity.');
+}
+
+/** Verify the exact artifact/source equivalence receipt binding the measured
+ * qualification identity to the current candidate build. Recomputes every
+ * recorded hash from the current tree; any unverifiable or changed production
+ * entry fails closed. Only the receipt's own sha256 binding is trusted; every
+ * file claim is re-verified here. */
+function verifySourceEquivalenceReceipt(
+  options: CandidateTrialReportOptions,
+  context: { artifactRoot: string; candidateBuildId: string },
+): { candidateBuildId: string; equivalenceReceiptSha256: string } {
+  const repositoryRoot = path.resolve(context.artifactRoot, '..', '..');
+  const receipt = readBoundedJson(options.equivalenceReceiptPath!, 'Candidate-trial equivalence receipt');
+  const value = receipt.value;
+  if (value.schemaVersion !== 1 || value.kind !== 'pie-analytics-source-equivalence-v1') {
+    throw new Error('Candidate-trial equivalence receipt kind/schema is not the authoritative receipt.');
+  }
+  const measured = value.measured as JsonObject | undefined;
+  if (!measured || measured.buildId !== options.buildId
+    || measured.sourceHead !== options.sourceHead || measured.sourceFingerprint !== options.sourceFingerprint) {
+    throw new Error('Candidate-trial equivalence receipt does not bind the measured qualification identity.');
+  }
+  const candidate = value.candidate as JsonObject | undefined;
+  if (!candidate || candidate.buildId !== context.candidateBuildId) {
+    throw new Error('Candidate-trial equivalence receipt does not bind the current candidate build identity.');
+  }
+  const currentFileSha256 = (relative: string): string => {
+    if (!relative || path.isAbsolute(relative) || relative.split(/[\\/]/u).includes('..')) {
+      throw new Error('Candidate-trial equivalence receipt contains an invalid file path.');
+    }
+    const filePath = path.join(repositoryRoot, relative);
+    let descriptor: number | undefined;
+    try {
+      descriptor = openSync(filePath, 'r');
+      const bytes = Buffer.alloc(8 * 1024 * 1024);
+      const count = readSync(descriptor, bytes, 0, bytes.length, 0);
+      if (count <= 0 || fstatSync(descriptor).size > bytes.length) {
+        throw new Error(`Candidate-trial equivalence receipt file exceeds the bounded size: ${relative}`);
+      }
+      return sha256(bytes.subarray(0, count));
+    } finally {
+      if (descriptor !== undefined) closeSync(descriptor);
+    }
+  };
+  const productionRuntime = value.productionRuntime as JsonObject | undefined;
+  if (!productionRuntime || Object.keys(productionRuntime).length === 0) {
+    throw new Error('Candidate-trial equivalence receipt carries no verified production runtime manifest.');
+  }
+  for (const [file, entry] of Object.entries(productionRuntime)) {
+    const record = entry as JsonObject | undefined;
+    if (!record || record.verified !== 'identical' || !isHash(record.measuredSha256) || !isHash(record.candidateSha256)
+      || record.measuredSha256 !== record.candidateSha256) {
+      throw new Error(`Candidate-trial equivalence receipt production entry is not verified identical: ${file}`);
+    }
+    if (currentFileSha256(file) !== record.measuredSha256) {
+      throw new Error(`Candidate-trial equivalence receipt production entry does not match the current tree: ${file}`);
+    }
+  }
+  const dependencies = value.dependencies as JsonObject | undefined;
+  if (!dependencies || Object.keys(dependencies).length === 0) {
+    throw new Error('Candidate-trial equivalence receipt carries no dependency identity manifest.');
+  }
+  for (const [file, entry] of Object.entries(dependencies)) {
+    const record = entry as JsonObject | undefined;
+    if (!record || record.verified !== 'identical' || !isHash(record.measuredSha256)
+      || currentFileSha256(file) !== record.measuredSha256) {
+      throw new Error(`Candidate-trial equivalence receipt dependency identity does not match the current tree: ${file}`);
+    }
+  }
+  const toolingState = value.toolingState as JsonObject | undefined;
+  if (!toolingState || Object.keys(toolingState).length === 0) {
+    throw new Error('Candidate-trial equivalence receipt carries no allowlisted tooling delta manifest.');
+  }
+  for (const [file, entry] of Object.entries(toolingState)) {
+    const record = entry as JsonObject | undefined;
+    if (!record || typeof record.basis !== 'string' || record.basis.length === 0
+      || !isHash(record.candidateSha256) || currentFileSha256(file) !== record.candidateSha256) {
+      throw new Error(`Candidate-trial equivalence receipt tooling delta does not match the current tree: ${file}`);
+    }
+  }
+  const outputInventory = value.outputInventory as JsonObject | undefined;
+  const artifacts = outputInventory?.artifacts as JsonObject | undefined;
+  if (!artifacts || Object.keys(artifacts).length === 0) {
+    throw new Error('Candidate-trial equivalence receipt carries no output inventory.');
+  }
+  for (const artifact of [options.producerPath, options.recorderWorkerScript, options.queryWorkerScript]) {
+    const name = path.basename(artifact);
+    const entries = Object.entries(artifacts).filter(([relative]) => path.basename(relative) === name);
+    if (entries.length !== 1 || !isHash(entries[0]![1])
+      || currentFileSha256(entries[0]![0]) !== entries[0]![1]) {
+      throw new Error(`Candidate-trial equivalence receipt does not verify the trial artifact ${name}.`);
+    }
+  }
+  return { candidateBuildId: context.candidateBuildId, equivalenceReceiptSha256: receipt.sha256 };
+}
+
+function isHash(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{64}$/u.test(value);
+}
+
+async function assertIdentityInputs(options: CandidateTrialReportOptions, qualification: JsonObject): Promise<{ candidateBuildId: string; equivalenceReceiptSha256: string } | undefined> {
   if (!path.isAbsolute(options.reportPath) || !options.reportPath.toLowerCase().endsWith('.json')) {
     throw new Error('Candidate-trial --report must be an absolute new .json path.');
   }
@@ -162,14 +295,14 @@ async function assertIdentityInputs(options: CandidateTrialReportOptions, qualif
     throw new Error('Candidate-trial generation/build/workspace identity is invalid.');
   }
   const provenance = qualification.provenance as JsonObject | undefined;
-  const qualificationDecision = qualification.qualification as JsonObject | undefined;
+  let candidateBinding: { candidateBuildId: string; equivalenceReceiptSha256: string } | undefined;
   if (qualification.kind !== 'pie-p0-overall-qualification-v1' || qualification.schemaVersion !== 5
-    || qualification.status !== 'passed' || qualificationDecision?.overallP0 !== 'qualified'
-    || qualificationDecision.decision !== 'overall-qualified' || provenance?.valid !== true
+    || qualification.status !== 'passed' || provenance?.valid !== true
     || provenance.gitHead !== options.sourceHead || provenance.coordinatedBuildId !== options.buildId
     || provenance.fingerprint !== options.sourceFingerprint) {
     throw new Error('Candidate-trial qualification report is not a qualified overall report with the exact requested identity.');
   }
+  const mode = candidateTrialQualificationMode(qualification);
   const configured = qualification.configuration as JsonObject | undefined;
   if (configured?.scenario !== 'overall'
     || typeof configured.reportPath !== 'string'
@@ -214,17 +347,26 @@ async function assertIdentityInputs(options: CandidateTrialReportOptions, qualif
     1_024,
   ).toString('utf8').trim();
   if (hostBuildId !== options.buildId || rendererBuildId !== options.buildId) {
-    throw new Error('Candidate-trial built host/renderer identity does not match the requested build.');
+    if (!options.candidateBuildId || !options.equivalenceReceiptPath) {
+      throw new Error('Candidate-trial built identity differs from the measured qualification identity; --candidate-build-id and --equivalence-receipt are required.');
+    }
+    if (options.candidateBuildId !== hostBuildId || hostBuildId !== rendererBuildId) {
+      throw new Error('Candidate-trial --candidate-build-id does not match the coordinated current build identity.');
+    }
+    candidateBinding = verifySourceEquivalenceReceipt(options, { artifactRoot, candidateBuildId: options.candidateBuildId });
   }
+  return candidateBinding;
   const recomputed = validateOverallQualificationRecomputation(qualification, {
     buildId: options.buildId,
     sourceHead: options.sourceHead,
     sourceFingerprint: options.sourceFingerprint,
   });
-  if (!recomputed.valid || !recomputed.qualified) {
-    throw new Error(`Candidate-trial qualification evidence does not recompute as qualified: ${
-      recomputed.errors.join('; ') || 'required gates are not all passed'
-    }`);
+  const recomputationSatisfied = recomputed.valid
+    && (mode === 'full-qualified' ? recomputed.qualified === true : recomputed.provisional?.qualified === true);
+  if (!recomputationSatisfied) {
+    throw new Error(`Candidate-trial qualification evidence does not recompute as ${
+      mode === 'full-qualified' ? 'qualified' : 'provisionally qualified under the approved provisional envelope'
+    }: ${recomputed.errors.join('; ') || 'required gates are not all passed'}`);
   }
 }
 
@@ -320,7 +462,7 @@ function pathFacts(rootDir: string, stateDir: string, analyticsDir: string, prot
 export async function produceCandidateTrialReport(options: CandidateTrialReportOptions): Promise<JsonObject> {
   const generatedAt = new Date().toISOString();
   const qualification = readBoundedJson(options.qualificationReportPath, 'Candidate-trial qualification report');
-  await assertIdentityInputs(options, qualification.value);
+  const candidateBinding = await assertIdentityInputs(options, qualification.value);
   const trialId = `trial-${randomUUID()}`;
   const plan: CandidateTrialPlan = {
     schemaVersion: CANDIDATE_TRIAL_SCHEMA_VERSION,
@@ -599,6 +741,7 @@ export async function produceCandidateTrialReport(options: CandidateTrialReportO
     generatedAt,
     finishedAt: new Date().toISOString(),
     bindings: plan.identity as unknown as JsonObject,
+    candidateBinding: candidateBinding ?? null,
     checks,
     cleanup: cleanupReceipt ?? null,
     errors: [workloadError, cleanupError].filter((value): value is string => Boolean(value)),
@@ -617,6 +760,14 @@ function parseArguments(argv: readonly string[]): CandidateTrialReportOptions {
     if (name === '--live-root') {
       if (liveRoots.length >= 63) throw new Error('Candidate-trial accepts at most 63 --live-root values.');
       liveRoots.push(path.resolve(value));
+    }
+    else if (name === '--candidate-build-id') {
+      if (values.has('candidateBuildId')) throw new Error(`Duplicate candidate-trial option: ${name}`);
+      values.set('candidateBuildId', value);
+    }
+    else if (name === '--equivalence-receipt') {
+      if (values.has('equivalenceReceiptPath')) throw new Error(`Duplicate candidate-trial option: ${name}`);
+      values.set('equivalenceReceiptPath', path.resolve(value));
     }
     else if (values.has(name)) throw new Error(`Duplicate candidate-trial option: ${name}`);
     else values.set(name, value);
@@ -645,6 +796,8 @@ function parseArguments(argv: readonly string[]): CandidateTrialReportOptions {
     recorderWorkerScript: path.resolve(values.get('--recorder-worker') ?? path.join(outRoot, 'analytics-recorder-worker.js')),
     queryWorkerScript: path.resolve(values.get('--query-worker') ?? path.join(outRoot, 'analytics-query-worker.js')),
     producerPath: path.resolve(process.argv[1] ?? path.join(outRoot, 'analytics-candidate-trial.js')),
+    ...(values.has('candidateBuildId') ? { candidateBuildId: values.get('candidateBuildId') } : {}),
+    ...(values.has('equivalenceReceiptPath') ? { equivalenceReceiptPath: values.get('equivalenceReceiptPath') } : {}),
   };
 }
 

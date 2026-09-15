@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
-import { closeSync, fstatSync, lstatSync, openSync, readSync, realpathSync } from 'node:fs';
+import { closeSync, existsSync, fstatSync, lstatSync, openSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { validateCapacityCalibration } from '../extension/scripts/analytics-p0-capacity.mjs';
 import {
   DEFERRED_OVERALL_QUALIFICATION_GATES,
@@ -23,6 +24,9 @@ export const QUALIFICATION_REPORT_SCHEMA_VERSION = 5;
 export const CANDIDATE_TRIAL_REPORT_SCHEMA_VERSION = 1;
 export const CANDIDATE_TRIAL_REPORT_KIND = 'pie-p7a-candidate-trial-v1';
 export const CANDIDATE_TRIAL_VALIDATOR_AVAILABLE = true;
+export const SOURCE_EQUIVALENCE_RECEIPT_KIND = 'pie-analytics-source-equivalence-v1';
+
+const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 /** Reports contain timing samples, but must remain a bounded handoff input. */
 export const MAX_ACTIVATION_EVIDENCE_BYTES = 8 * 1024 * 1024;
@@ -440,9 +444,96 @@ export function validateCandidateTrialArtifactFiles(report, expected) {
     }
   };
   const buildRoot = artifactRoots[0];
-  if (readBuildMarker(path.join(buildRoot, 'pie-build-id.txt'), 'host build marker') !== expected.buildId
-    || readBuildMarker(path.join(buildRoot, 'webview', 'panel', 'pie-build-id.txt'), 'renderer build marker') !== expected.buildId) {
+  const markerBuildId = expected.candidateBindings ? expected.candidateBindings.candidateBuildId : expected.buildId;
+  if (readBuildMarker(path.join(buildRoot, 'pie-build-id.txt'), 'host build marker') !== markerBuildId
+    || readBuildMarker(path.join(buildRoot, 'webview', 'panel', 'pie-build-id.txt'), 'renderer build marker') !== markerBuildId) {
     invalid('candidate trial report', 'artifact build markers do not match the activation build');
+  }
+}
+
+/** Validate the trial's candidate binding against the plan's approved
+ * source-equivalence receipt. The receipt bytes are re-read and re-verified:
+ * the exact plan-recorded sha256, the measured identity binding, the current
+ * candidate build binding, and a recomputation of every recorded production
+ * runtime, dependency, and allowlisted tooling hash against the current tree.
+ * Any unverifiable identity or changed production entry fails closed. */
+function validateCandidateBinding(binding, expected, label) {
+  if (!candidateKeysMatch(binding, ['candidateBuildId', 'equivalenceReceiptSha256'])) {
+    invalid(label, 'candidateBinding does not match the bounded schema');
+  }
+  if (binding.candidateBuildId !== expected.candidateBindings.candidateBuildId
+    || binding.equivalenceReceiptSha256 !== expected.candidateBindings.receiptSha256) {
+    invalid(label, 'candidateBinding does not match the plan receipt binding');
+  }
+  const receiptPath = expected.candidateBindings.sourceEquivalenceReceipt.path;
+  if (!existsSync(receiptPath) || !statSync(receiptPath).isFile()
+    || statSync(receiptPath).size > MAX_ACTIVATION_EVIDENCE_BYTES) {
+    invalid(label, 'source equivalence receipt is missing or unbounded');
+  }
+  const raw = readFileSync(receiptPath);
+  if (createHash('sha256').update(raw).digest('hex') !== expected.candidateBindings.receiptSha256) {
+    invalid(label, 'source equivalence receipt bytes do not match the plan-recorded hash');
+  }
+  let receipt;
+  try {
+    receipt = JSON.parse(raw.toString('utf8'));
+  } catch {
+    invalid(label, 'source equivalence receipt is not valid JSON');
+  }
+  if (!receipt || typeof receipt !== 'object' || receipt.schemaVersion !== 1
+    || receipt.kind !== SOURCE_EQUIVALENCE_RECEIPT_KIND) {
+    invalid(label, 'source equivalence receipt kind/schema is not the authoritative receipt');
+  }
+  const measured = receipt.measured;
+  const candidate = receipt.candidate;
+  if (!measured || measured.buildId !== expected.buildId
+    || measured.sourceHead !== expected.sourceHead.toLowerCase()
+    || measured.sourceFingerprint !== expected.sourceFingerprint) {
+    invalid(label, 'source equivalence receipt does not bind the measured evidence identity');
+  }
+  if (!candidate || candidate.buildId !== expected.candidateBindings.candidateBuildId) {
+    invalid(label, 'source equivalence receipt does not bind the current candidate build');
+  }
+  const verify = (section, name) => {
+    const entries = receipt[section];
+    if (!entries || typeof entries !== 'object' || Array.isArray(entries) || Object.keys(entries).length === 0) {
+      invalid(label, `source equivalence receipt ${name} is missing`);
+    }
+    for (const [file, record] of Object.entries(entries)) {
+      if (!file || path.isAbsolute(file) || file.split(/[\\/]/u).includes('..')) {
+        invalid(label, `source equivalence receipt path is invalid: ${file}`);
+      }
+      if (!record || record.verified !== 'identical' || !isSha256(record.measuredSha256)
+        || record.measuredSha256 !== record.candidateSha256) {
+        invalid(label, `source equivalence receipt entry is not verified identical: ${file}`);
+      }
+      const filePath = path.join(repositoryRoot, file);
+      if (!existsSync(filePath) || !statSync(filePath).isFile()
+        || createHash('sha256').update(readFileSync(filePath)).digest('hex') !== record.measuredSha256) {
+        invalid(label, `source equivalence receipt entry does not match the current tree: ${file}`);
+      }
+    }
+  };
+  verify('productionRuntime', 'production runtime manifest');
+  verify('dependencies', 'dependency identity manifest');
+  const tooling = receipt.toolingState;
+  if (!tooling || typeof tooling !== 'object' || Object.keys(tooling).length === 0) {
+    invalid(label, 'source equivalence receipt allowlisted tooling delta is missing');
+  }
+  for (const [file, record] of Object.entries(tooling)) {
+    if (!record || typeof record.basis !== 'string' || record.basis.length === 0
+      || !isSha256(record.candidateSha256)) {
+      invalid(label, `source equivalence receipt tooling entry is incomplete: ${file}`);
+    }
+    const filePath = path.join(repositoryRoot, file);
+    if (!existsSync(filePath) || !statSync(filePath).isFile()
+      || createHash('sha256').update(readFileSync(filePath)).digest('hex') !== record.candidateSha256) {
+      invalid(label, `source equivalence receipt tooling entry does not match the current tree: ${file}`);
+    }
+  }
+  const artifacts = receipt.outputInventory?.artifacts;
+  if (!artifacts || Object.keys(artifacts).length === 0) {
+    invalid(label, 'source equivalence receipt output inventory is missing');
   }
 }
 
@@ -458,10 +549,6 @@ function isCandidateCleanupReceipt(value, trialId) {
 
 function validateCandidateTrialReport(report, expected, reportPath, reportHash) {
   const label = 'candidate trial report';
-  if (!candidateKeysMatch(report, [
-    'schemaVersion', 'kind', 'producerVersion', 'status', 'reportPath', 'generatedAt', 'finishedAt',
-    'bindings', 'checks', 'cleanup', 'errors',
-  ])) invalid(label, 'top-level keys do not match the bounded authoritative schema');
   if (report.schemaVersion !== CANDIDATE_TRIAL_REPORT_SCHEMA_VERSION) {
     invalid(label, `schemaVersion must be ${CANDIDATE_TRIAL_REPORT_SCHEMA_VERSION}`);
   }
@@ -491,6 +578,25 @@ function validateCandidateTrialReport(report, expected, reportPath, reportHash) 
   if (bindings.sourceFingerprint !== expected.sourceFingerprint) invalid(label, 'sourceFingerprint binding mismatches the plan');
   if (bindings.qualificationSha256 !== expected.qualificationSha256) {
     invalid(label, 'qualificationSha256 binding mismatches the qualification bytes');
+  }
+  const baseTrialKeys = [
+    'schemaVersion', 'kind', 'producerVersion', 'status', 'reportPath', 'generatedAt', 'finishedAt',
+    'bindings', 'checks', 'cleanup', 'errors',
+  ];
+  if (expected.candidateBindings) {
+    if (!candidateKeysMatch(report, [...baseTrialKeys, 'candidateBinding'])) {
+      invalid(label, 'top-level keys do not match the bounded authoritative schema');
+    }
+    validateCandidateBinding(report.candidateBinding, expected, label);
+  } else {
+    const withoutBinding = report.candidateBinding === undefined
+      ? candidateKeysMatch(report, baseTrialKeys)
+      : candidateKeysMatch(report, [...baseTrialKeys, 'candidateBinding']) && report.candidateBinding === null;
+    if (!withoutBinding) {
+      invalid(label, report.candidateBinding === undefined || report.candidateBinding === null
+        ? 'top-level keys do not match the bounded authoritative schema'
+        : 'candidateBinding is present without an approved source-equivalence receipt binding');
+    }
   }
   if (!candidateKeysMatch(report.checks, REQUIRED_CANDIDATE_TRIAL_CHECKS)) {
     invalid(label, 'checks do not match the exact required candidate-trial set');
@@ -759,12 +865,34 @@ function readAndValidateActivationEvidence(options, { requireQualification, reco
     sourceHead,
     sourceFingerprint,
     workspaceId,
+    candidateBuildId,
+    sourceEquivalenceReceipt,
   } = options;
   if (!isBoundedString(generationId)) invalid('activation plan', 'generationId is missing');
   if (!isBoundedString(buildId)) invalid('activation plan', 'buildId is missing');
   if (!isBoundedString(workspaceId)) invalid('activation plan', 'workspaceId is missing');
   if (!isGitHead(sourceHead)) invalid('activation plan', 'sourceHead must be a 40-character Git hash');
   if (!isSha256(sourceFingerprint)) invalid('activation plan', 'sourceFingerprint must be a lowercase sha256');
+  let candidateBindings;
+  if (sourceEquivalenceReceipt !== undefined) {
+    if (sourceEquivalenceReceipt === null || typeof sourceEquivalenceReceipt !== 'object'
+      || !isBoundedString(sourceEquivalenceReceipt.path) || !path.isAbsolute(sourceEquivalenceReceipt.path)
+      || !sourceEquivalenceReceipt.path.toLowerCase().endsWith('.json')
+      || !isSha256(sourceEquivalenceReceipt.sha256)) {
+      invalid('activation plan', 'sourceEquivalenceReceipt must be an absolute .json path with a sha256 binding');
+    }
+    if (candidateBuildId === undefined || !isBoundedString(candidateBuildId) || !/^[0-9a-f]{20}$/u.test(candidateBuildId)
+      || candidateBuildId === buildId) {
+      invalid('activation plan', 'candidateBuildId must be a distinct 20-hex coordinated build id when a source-equivalence receipt is bound');
+    }
+    candidateBindings = {
+      candidateBuildId,
+      receiptSha256: sourceEquivalenceReceipt.sha256,
+      sourceEquivalenceReceipt,
+    };
+  } else if (candidateBuildId !== undefined) {
+    invalid('activation plan', 'candidateBuildId requires a sourceEquivalenceReceipt binding');
+  }
 
   const qualification = readBoundedJsonFile(qualificationPath, 'qualification report');
   const qualificationEvidence = validateQualificationReport(
@@ -804,6 +932,7 @@ function readAndValidateActivationEvidence(options, { requireQualification, reco
     sourceFingerprint,
     workspaceId,
     qualificationSha256: qualification.sha256,
+    ...(candidateBindings ? { candidateBindings } : {}),
   };
   const trialEvidence = validateCandidateTrialReport(
     trial.value,
@@ -886,6 +1015,8 @@ export function admitActivationEvidence({
   sourceHead,
   sourceFingerprint,
   workspaceId,
+  candidateBuildId,
+  sourceEquivalenceReceipt,
   provisional = false,
 }) {
   const evidence = readAndValidateActivationEvidence({
@@ -898,6 +1029,8 @@ export function admitActivationEvidence({
     sourceHead,
     sourceFingerprint,
     workspaceId,
+    candidateBuildId,
+    sourceEquivalenceReceipt,
   }, { requireQualification: true, recompute: true, provisional: provisional === true });
   if (!CANDIDATE_TRIAL_VALIDATOR_AVAILABLE) {
     invalid('candidate trial report', 'no authoritative candidate-trial producer/validator exists yet');
