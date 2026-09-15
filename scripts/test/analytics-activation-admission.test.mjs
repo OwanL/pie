@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -16,12 +16,14 @@ import {
   inspectActivationEvidence,
   recomputeCandidateTrialChecks,
   validateActivationEvidenceStructure,
+  validateCandidateTrialArtifactFiles,
 } from '../analytics-activation-admission.mjs';
 
 const generationId = '11111111-1111-4111-8111-111111111111';
 const buildId = 'build-candidate-1';
 const sourceHead = 'a'.repeat(40);
 const sourceFingerprint = 'b'.repeat(64);
+const workspaceId = 'workspace-activation-test';
 
 function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
@@ -63,28 +65,140 @@ function qualificationReport(root, overrides = {}) {
   return { path: qualificationPath, bytes, report };
 }
 
+function candidatePlanSha256(identity, workspaceId) {
+  return sha256(JSON.stringify([1, 'pie-p7a-candidate-trial-authority-v1', identity, workspaceId]));
+}
+
+function candidateChecks(root, qualificationBytes) {
+  const trialId = 'trial-activation-test';
+  mkdirSync(path.join(root, 'live'), { recursive: true });
+  mkdirSync(path.join(root, 'webview', 'panel'), { recursive: true });
+  writeFileSync(path.join(root, 'pie-build-id.txt'), `${buildId}\n`);
+  writeFileSync(path.join(root, 'webview', 'panel', 'pie-build-id.txt'), `${buildId}\n`);
+  const identity = {
+    trialId,
+    generationId,
+    buildId,
+    sourceHead,
+    sourceFingerprint,
+    qualificationSha256: sha256(qualificationBytes),
+  };
+  const receipt = (name) => {
+    const filePath = path.join(root, name);
+    const bytes = Buffer.from(`fixture artifact: ${name}\n`);
+    writeFileSync(filePath, bytes);
+    return { path: filePath, sha256: sha256(bytes), bytes: bytes.byteLength };
+  };
+  const trialRoot = path.join(root, 'trial-owned');
+  const cleanupReceipt = {
+    trialId,
+    completed: true,
+    rootRemoved: true,
+    stoppedAt: '2026-09-12T00:00:59.000Z',
+    failureReasons: [],
+  };
+  return {
+    cleanupReceipt,
+    checks: {
+      matchedSourceBuildConfig: {
+        decision: 'passed',
+        evidence: {
+          qualification: { path: path.join(root, 'qualification.json'), sha256: identity.qualificationSha256, bytes: qualificationBytes.byteLength },
+          trialId,
+          generationId,
+          buildId,
+          sourceHead,
+          sourceFingerprint,
+          workspaceId,
+          trialPlanSha256: candidatePlanSha256(identity, workspaceId),
+          producer: receipt('analytics-candidate-trial.js'),
+          recorderWorker: receipt('analytics-recorder-worker.js'),
+          queryWorker: receipt('analytics-query-worker.js'),
+        },
+      },
+      isolatedRoots: {
+        decision: 'passed',
+        evidence: {
+          rootDir: trialRoot,
+          stateDir: path.join(trialRoot, 'state'),
+          analyticsDir: path.join(trialRoot, 'analytics'),
+          osTempRoot: tmpdir(),
+          protectedRoots: [path.join(root, 'live')],
+          rootUnderOsTemp: true,
+          childrenContained: true,
+          protectedRootsDisjoint: true,
+        },
+      },
+      hostBackendRecorderQueryLifecycle: {
+        decision: 'passed',
+        evidence: {
+          readiness: {
+            authority: 'candidate-trial', manifestRevision: null, manifestSha256: null,
+            generationId, recorderSchemaVersion: 13, projectionRevision: '0', recorderReady: true, queryReady: true,
+          },
+          descriptor: {
+            kind: 'candidate-trial', trialId, generationId, buildId, workspaceId,
+            hostInstanceId: 'candidate-host-test', trialPlanSha256: candidatePlanSha256(identity, workspaceId),
+            trialAuthorityRevision: 1,
+          },
+          runtimeStartRepublished: true,
+          backendDescriptorAbsent: true,
+          loadedReceiptSuppressed: true,
+          recorderWorker: { pid: 1234 },
+          captureStatuses: { begin: 'submitted', end: 'submitted', phase: 'submitted' },
+        },
+      },
+      canonicalConsumers: {
+        decision: 'passed',
+        evidence: {
+          executionRevision: '2', executionCount: 1, begunCount: 1, settledCount: 1,
+          lifecycleCoverage: 'known', storageRevision: '2', queryWorkers: { spawned: 5, terminal: 5 },
+        },
+      },
+      crossHostRevision: {
+        decision: 'passed',
+        evidence: {
+          firstHostRevision: '2', secondHostInitialRevision: '2', secondHostObservedRevision: '3',
+          changed: true, revisionPollIntervalMs: 25, maxWaitMs: 3_000,
+        },
+      },
+      durableAndRejectedAcknowledgements: {
+        decision: 'passed',
+        evidence: {
+          durableStatus: 'durable', durableReconciliationCount: 1,
+          rejectedStatus: 'rejected', rejectedCode: 'subject_deleted',
+        },
+      },
+      cleanup: {
+        decision: 'passed',
+        evidence: {
+          pendingAfterFence: 0, postFenceSubmissionRejected: true,
+          manifestCreatedBeforeCleanup: false, tombstoneCreatedBeforeCleanup: false,
+          cleanupReceipt, rootRemovedObserved: true, cleanupError: null,
+        },
+      },
+    },
+  };
+}
+
 function trialReport(root, qualificationBytes, overrides = {}) {
   const trialPath = path.join(root, 'candidate-trial.json');
+  const candidate = candidateChecks(root, qualificationBytes);
   const report = {
     schemaVersion: 1,
     kind: 'pie-p7a-candidate-trial-v1',
+    producerVersion: 'p7a-candidate-trial-v1',
     status: 'passed',
     reportPath: trialPath,
     generatedAt: '2026-09-12T00:00:00.000Z',
     finishedAt: '2026-09-12T00:01:00.000Z',
     bindings: {
-      trialId: 'trial-activation-test',
-      generationId,
-      buildId,
-      sourceHead,
-      sourceFingerprint,
+      trialId: 'trial-activation-test', generationId, buildId, sourceHead, sourceFingerprint,
       qualificationSha256: sha256(qualificationBytes),
     },
-    checks: Object.fromEntries(REQUIRED_CANDIDATE_TRIAL_CHECKS.map((name) => [name, {
-      decision: 'passed',
-      evidence: { observed: true },
-    }])),
-    cleanup: { completed: true, rootRemoved: true },
+    checks: candidate.checks,
+    cleanup: candidate.cleanupReceipt,
+    errors: [],
     ...overrides,
   };
   const bytes = writeJson(trialPath, report);
@@ -102,6 +216,7 @@ function fixture(overrides = {}) {
     buildId,
     sourceHead,
     sourceFingerprint,
+    workspaceId,
   };
   return { root, qualification, trial, options };
 }
@@ -156,7 +271,7 @@ test('malformed and partial rehearsal reports are rejected', () => {
     writeFileSync(qualification.path, qualification.bytes);
     validateActivationEvidenceStructure(options);
     writeFileSync(trial.path, '{"t":1}\n');
-    assert.throws(() => validateActivationEvidenceStructure(options), /candidate trial report: schemaVersion/u);
+    assert.throws(() => validateActivationEvidenceStructure(options), /candidate trial report:/u);
     assert.equal(existsSync(path.join(root, 'analytics-activation-v1.json')), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -189,18 +304,32 @@ test('stale and mismatched bindings fail closed at the intended validation bound
   const cases = [
     { name: 'stale source', options: { sourceHead: 'c'.repeat(40) }, expected: /provenance.gitHead does not match/u },
     { name: 'stale build', options: { buildId: 'old-build' }, expected: /provenance.coordinatedBuildId does not match/u },
+    { name: 'wrong workspace', options: { workspaceId: 'other-workspace' }, expected: /workspaceId evidence mismatches/u },
     { name: 'wrong generation', mutate: (report) => { report.bindings.generationId = '22222222-2222-4222-8222-222222222222'; }, expected: /generationId binding mismatches/u },
     { name: 'incomplete trial check', mutate: (report) => { report.checks.isolatedRoots.decision = 'unqualified'; }, expected: /required check isolatedRoots is incomplete/u },
+    {
+      name: 'reserved report identity',
+      mutate: (report, root) => { report.reportPath = path.join(root, 'analytics-activation-v1.json'); },
+      options: (root) => ({ trialReportPath: path.join(root, 'analytics-activation-v1.json') }),
+      expected: /reserved activation filename/u,
+    },
+    {
+      name: 'report inside protected root',
+      mutate: (report, root) => { report.reportPath = path.join(root, 'live', 'trial.json'); },
+      options: (root) => ({ trialReportPath: path.join(root, 'live', 'trial.json') }),
+      expected: /overlaps a protected/u,
+    },
   ];
   for (const entry of cases) {
     const { root, options, trial } = fixture();
     try {
       validateActivationEvidenceStructure(options);
       if (entry.mutate) {
-        entry.mutate(trial.report);
+        entry.mutate(trial.report, root);
         writeJson(trial.path, trial.report);
       }
-      const combinedOptions = { ...options, ...(entry.options ?? {}) };
+      const optionOverrides = typeof entry.options === 'function' ? entry.options(root) : (entry.options ?? {});
+      const combinedOptions = { ...options, ...optionOverrides };
       assert.throws(() => validateActivationEvidenceStructure(combinedOptions), entry.expected, entry.name);
       assert.equal(existsSync(path.join(root, 'analytics-activation-v1.json')), false, entry.name);
     } finally {
@@ -220,40 +349,11 @@ test('oversized evidence is rejected before JSON parsing', () => {
   }
 });
 
-// The pure candidate-trial verifier recomputes only the checks whose criteria
-// are grounded in owning contracts and existing receipts; every other required
-// check yields an explicit unqualified reason, never a boolean pass.
-const UNRECOMPUTABLE_CHECKS = REQUIRED_CANDIDATE_TRIAL_CHECKS.filter(
-  (name) => !Object.hasOwn(CANDIDATE_TRIAL_EVIDENCE_SCHEMAS, name),
-);
-
-function computableTrialChecks(qualificationBytes) {
-  const checks = Object.fromEntries(REQUIRED_CANDIDATE_TRIAL_CHECKS.map((name) => [name, {
-    decision: 'passed',
-    evidence: { observed: true },
-  }]));
-  checks.matchedSourceBuildConfig = {
-    decision: 'passed',
-    evidence: {
-      generationId,
-      buildId,
-      sourceHead,
-      sourceFingerprint,
-      qualificationSha256: sha256(qualificationBytes),
-    },
-  };
-  checks.cleanup = { decision: 'passed', evidence: { completed: true, rootRemoved: true } };
-  return checks;
-}
-
 function recomputableTrialFixture(overrides = {}) {
   const root = mkdtempSync(path.join(tmpdir(), 'pie-activation-trial-verifier-'));
   try {
     const qualification = qualificationReport(root);
-    const trial = trialReport(root, qualification.bytes, {
-      checks: computableTrialChecks(qualification.bytes),
-      ...overrides,
-    });
+    const trial = trialReport(root, qualification.bytes, overrides);
     return {
       root,
       qualification,
@@ -263,6 +363,7 @@ function recomputableTrialFixture(overrides = {}) {
         buildId,
         sourceHead,
         sourceFingerprint,
+        workspaceId,
         qualificationSha256: sha256(qualification.bytes),
       },
     };
@@ -272,111 +373,148 @@ function recomputableTrialFixture(overrides = {}) {
   }
 }
 
-test('candidate-trial verifier qualifies only checks with computable receipt criteria', () => {
+test('candidate-trial verifier authoritatively recomputes all seven checks', () => {
   const { root, trial, expected } = recomputableTrialFixture();
   try {
-    const errors = recomputeCandidateTrialChecks(trial.report, expected);
-    assert.deepEqual(errors, UNRECOMPUTABLE_CHECKS.map(
-      (name) => `${name} has no authoritative producer criteria in the current repository`,
-    ));
-    assert.equal(errors.length, 5);
-    assert.deepEqual(recomputeCandidateTrialChecks(trial.report, expected), errors, 'recomputation is deterministic');
+    assert.deepEqual(Object.keys(CANDIDATE_TRIAL_EVIDENCE_SCHEMAS), REQUIRED_CANDIDATE_TRIAL_CHECKS);
+    assert.deepEqual(recomputeCandidateTrialChecks(trial.report, expected), []);
+    assert.deepEqual(recomputeCandidateTrialChecks(trial.report, expected), [], 'recomputation is deterministic');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test('matchedSourceBuildConfig evidence must restate the exact recomputed bindings', () => {
+test('each runtime receipt predicate fails closed independently', () => {
   const cases = [
-    { name: 'missing key', mutate: (evidence) => { delete evidence.sourceFingerprint; }, expected: /matchedSourceBuildConfig evidence keys do not match its bounded schema/u },
-    { name: 'extra key', mutate: (evidence) => { evidence.harnessVersion = 'extra'; }, expected: /matchedSourceBuildConfig evidence keys do not match its bounded schema/u },
-    { name: 'wrong generation', mutate: (evidence) => { evidence.generationId = '22222222-2222-4222-8222-222222222222'; }, expected: /evidence\.generationId does not match the plan generation/u },
-    { name: 'wrong build', mutate: (evidence) => { evidence.buildId = 'old-build'; }, expected: /evidence\.buildId does not match the plan build/u },
-    { name: 'wrong source head', mutate: (evidence) => { evidence.sourceHead = 'c'.repeat(40); }, expected: /evidence\.sourceHead does not match the plan source head/u },
-    { name: 'wrong fingerprint', mutate: (evidence) => { evidence.sourceFingerprint = 'd'.repeat(64); }, expected: /evidence\.sourceFingerprint does not match the plan source fingerprint/u },
-    { name: 'wrong qualification hash', mutate: (evidence) => { evidence.qualificationSha256 = 'e'.repeat(64); }, expected: /evidence\.qualificationSha256 does not match the recomputed qualification bytes hash/u },
-    { name: 'empty evidence', mutate: (evidence) => { for (const key of Object.keys(evidence)) delete evidence[key]; }, expected: /matchedSourceBuildConfig evidence keys do not match its bounded schema/u },
-    { name: 'evidence removed', mutate: (evidence, check) => { check.evidence = undefined; }, expected: /matchedSourceBuildConfig evidence is missing/u },
+    ['isolatedRoots', (evidence) => { evidence.childrenContained = false; }],
+    ['hostBackendRecorderQueryLifecycle', (evidence) => { evidence.backendDescriptorAbsent = false; }],
+    ['hostBackendRecorderQueryLifecycle', (evidence) => { evidence.descriptor.workspaceId = 'mixed-trial'; }],
+    ['canonicalConsumers', (evidence) => { evidence.queryWorkers.terminal = 4; }],
+    ['crossHostRevision', (evidence) => { evidence.changed = false; }],
+    ['crossHostRevision', (evidence) => { evidence.secondHostObservedRevision = '1'; }],
+    ['crossHostRevision', (evidence) => { evidence.secondHostObservedRevision = '9223372036854775808'; }],
+    ['crossHostRevision', (_evidence, report) => { report.checks.canonicalConsumers.evidence.storageRevision = '1'; }],
+    ['durableAndRejectedAcknowledgements', (evidence) => { evidence.rejectedCode = 'accepted'; }],
   ];
-  for (const entry of cases) {
+  for (const [name, mutate] of cases) {
     const { root, trial, expected } = recomputableTrialFixture();
     try {
-      entry.mutate(trial.report.checks.matchedSourceBuildConfig.evidence, trial.report.checks.matchedSourceBuildConfig);
+      mutate(trial.report.checks[name].evidence, trial.report);
       const errors = recomputeCandidateTrialChecks(trial.report, expected);
-      assert.equal(errors.length, 6, entry.name);
-      assert.match(errors.join('; '), entry.expected, entry.name);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  }
-  const { root, trial, expected } = recomputableTrialFixture();
-  try {
-    trial.report.checks.matchedSourceBuildConfig.evidence.sourceHead = sourceHead.toUpperCase();
-    const errors = recomputeCandidateTrialChecks(trial.report, expected);
-    assert.match(errors.join('; '), /no authoritative producer criteria/u);
-    assert.doesNotMatch(errors.join('; '), /matchedSourceBuildConfig/u, 'source head binding is case-insensitive like the envelope');
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test('cleanup evidence must mirror the report cleanup receipt exactly', () => {
-  const cases = [
-    { name: 'extra key', mutate: (evidence) => { evidence.rootPath = 'C:/tmp/trial'; }, expected: /cleanup evidence keys do not match its bounded schema/u },
-    { name: 'completed false', mutate: (evidence) => { evidence.completed = false; }, expected: /cleanup evidence does not match the report cleanup receipt/u },
-    { name: 'rootRemoved false', mutate: (evidence) => { evidence.rootRemoved = false; }, expected: /cleanup evidence does not match the report cleanup receipt/u },
-    { name: 'report cleanup contradicted', mutate: (evidence, report) => { report.cleanup.completed = false; }, expected: /cleanup evidence does not match the report cleanup receipt/u },
-  ];
-  for (const entry of cases) {
-    const { root, trial, expected } = recomputableTrialFixture();
-    try {
-      entry.mutate(trial.report.checks.cleanup.evidence, trial.report);
-      const errors = recomputeCandidateTrialChecks(trial.report, expected);
-      assert.equal(errors.length, 6, entry.name);
-      assert.match(errors.join('; '), entry.expected, entry.name);
+      assert.equal(errors.length, 1, name);
+      assert.match(errors[0], new RegExp(name), name);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   }
 });
 
-test('unknown extra and missing trial checks fail closed without assumed qualification', () => {
+test('matchedSourceBuildConfig binds the exact qualification, source, build, plan, and artifacts', () => {
+  const cases = [
+    { name: 'missing key', mutate: (evidence) => { delete evidence.sourceFingerprint; }, expected: /evidence keys are invalid/u },
+    { name: 'wrong generation', mutate: (evidence) => { evidence.generationId = '22222222-2222-4222-8222-222222222222'; }, expected: /identity or artifact receipts/u },
+    { name: 'wrong qualification hash', mutate: (evidence) => { evidence.qualification.sha256 = 'e'.repeat(64); }, expected: /qualification receipt/u },
+    { name: 'wrong plan hash', mutate: (evidence) => { evidence.trialPlanSha256 = 'e'.repeat(64); }, expected: /plan hash/u },
+    { name: 'unbounded artifact', mutate: (evidence) => { evidence.producer.bytes = MAX_ACTIVATION_EVIDENCE_BYTES + 1; }, expected: /identity or artifact receipts/u },
+  ];
+  for (const entry of cases) {
+    const { root, trial, expected } = recomputableTrialFixture();
+    try {
+      entry.mutate(trial.report.checks.matchedSourceBuildConfig.evidence);
+      assert.match(recomputeCandidateTrialChecks(trial.report, expected).join('; '), entry.expected, entry.name);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test('authoritative admission reopens and hashes exact runner and worker artifacts', () => {
+  const { root, trial, expected } = recomputableTrialFixture();
+  try {
+    assert.doesNotThrow(() => validateCandidateTrialArtifactFiles(trial.report, expected));
+    writeFileSync(path.join(root, 'pie-build-id.txt'), 'stale-build\n');
+    assert.throws(() => validateCandidateTrialArtifactFiles(trial.report, expected), /build markers/u);
+    writeFileSync(path.join(root, 'pie-build-id.txt'), `${buildId}\n`);
+    writeFileSync(trial.report.checks.matchedSourceBuildConfig.evidence.producer.path, 'tampered\n');
+    assert.throws(
+      () => validateCandidateTrialArtifactFiles(trial.report, expected),
+      /producer receipt size|producer artifact hash/u,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('authoritative admission rejects an expected-name artifact symlink', (t) => {
+  const { root, trial, expected } = recomputableTrialFixture();
+  try {
+    const queryPath = trial.report.checks.matchedSourceBuildConfig.evidence.queryWorker.path;
+    const target = path.join(root, 'outside-query-worker.js');
+    writeFileSync(target, 'outside artifact\n');
+    unlinkSync(queryPath);
+    try {
+      symlinkSync(target, queryPath, 'file');
+    } catch (error) {
+      if (['EPERM', 'EACCES'].includes(error?.code)) {
+        t.skip('file symlinks are not available on this host');
+        return;
+      }
+      throw error;
+    }
+    assert.throws(
+      () => validateCandidateTrialArtifactFiles(trial.report, expected),
+      /not the real coordinated-build artifact/u,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('cleanup preserves fencing, manifest suppression, root removal, and failure receipts', () => {
+  const cases = [
+    (report) => { report.checks.cleanup.evidence.postFenceSubmissionRejected = false; },
+    (report) => { report.checks.cleanup.evidence.manifestCreatedBeforeCleanup = true; },
+    (report) => { report.checks.cleanup.evidence.cleanupReceipt.failureReasons.push('helper-stop failed'); },
+    (report) => { report.cleanup.completed = false; },
+  ];
+  for (const mutate of cases) {
+    const { root, trial, expected } = recomputableTrialFixture();
+    try {
+      mutate(trial.report);
+      assert.match(recomputeCandidateTrialChecks(trial.report, expected).join('; '), /cleanup evidence/u);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test('unknown, missing, and unpassed trial checks fail closed', () => {
   const { root, trial, expected } = recomputableTrialFixture();
   try {
     const pristine = structuredClone(trial.report);
     trial.report.checks.extraObservation = { decision: 'passed', evidence: { observed: true } };
-    const errors = recomputeCandidateTrialChecks(trial.report, expected);
-    assert.match(errors.join('; '), /unknown candidate trial check extraObservation is not in the required set/u);
+    assert.match(recomputeCandidateTrialChecks(trial.report, expected).join('; '), /unknown candidate trial check/u);
 
     const missing = structuredClone(pristine);
     delete missing.checks.cleanup;
-    assert.deepEqual(
-      recomputeCandidateTrialChecks(missing, expected),
-      UNRECOMPUTABLE_CHECKS.map((name) => `${name} has no authoritative producer criteria in the current repository`)
-        .concat(['required candidate trial check cleanup is missing from the report']),
-    );
+    assert.deepEqual(recomputeCandidateTrialChecks(missing, expected), [
+      'required candidate trial check cleanup is missing from the report',
+    ]);
 
     const unqualified = structuredClone(pristine);
     unqualified.checks.cleanup.decision = 'unqualified';
-    assert.match(
-      recomputeCandidateTrialChecks(unqualified, expected).join('; '),
-      /required candidate trial check cleanup is not passed/u,
-    );
-
-    assert.deepEqual(
-      recomputeCandidateTrialChecks(pristine, {}),
-      ['candidate trial recompute bindings are incomplete'],
-    );
+    assert.match(recomputeCandidateTrialChecks(unqualified, expected).join('; '), /cleanup is not passed/u);
+    assert.deepEqual(recomputeCandidateTrialChecks(pristine, {}), ['candidate trial recompute bindings are incomplete']);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test('production admission still rejects recomputable trial evidence and writes no manifest', () => {
+test('production admission exposes the validator but rejects an unqualified P0 report without a manifest', () => {
   const root = mkdtempSync(path.join(tmpdir(), 'pie-activation-admission-recompute-'));
   try {
     const qualification = qualificationReport(root);
-    const trial = trialReport(root, qualification.bytes, { checks: computableTrialChecks(qualification.bytes) });
+    const trial = trialReport(root, qualification.bytes);
     const options = {
       qualificationPath: qualification.path,
       trialPath: trial.path,
@@ -384,6 +522,7 @@ test('production admission still rejects recomputable trial evidence and writes 
       buildId,
       sourceHead,
       sourceFingerprint,
+      workspaceId,
     };
     // The structural fixture boundary is unchanged: recomputable evidence is
     // still only a shape check and never live qualification.
@@ -395,7 +534,7 @@ test('production admission still rejects recomputable trial evidence and writes 
     );
     const inspection = inspectActivationEvidence(options);
     assert.equal(inspection.ready, false);
-    assert.equal(inspection.candidateTrialValidatorAvailable, false);
+    assert.equal(inspection.candidateTrialValidatorAvailable, true);
     assert.equal(existsSync(path.join(root, 'analytics-activation-v1.json')), false);
     assert.equal(existsSync(path.join(root, 'analytics-ever-active-v1.json')), false);
   } finally {
@@ -420,6 +559,7 @@ test('helper records no manifest when raw rehearsal evidence is supplied', () =>
       buildId,
       sourceHead,
       sourceFingerprint,
+      workspaceId,
       reportPath,
     });
     const result = spawnSync(process.execPath, [

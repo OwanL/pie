@@ -14,6 +14,88 @@ Owning specifications: runbook; `docs/ANALYTICS_REWORK_PLAN.md` §§1, 11.6, 17;
 
 ---
 
+## Checkpoint 56 - 2026-09-15T04:05Z, 13:45 rewrite reconciled to reviewed HEAD plus the day's reviewed work
+
+An unexplained concurrent rewrite at 13:45:06 NZ (01:45Z) overwrote 15 reviewed files with regressed
+content and deleted 333 lines (the four most recent checkpoint sections) from this record: the
+qualification producer's source manifest reverted 21→16 entries with the pre-aggregation fingerprint
+formula, the `ten-million` scenario was removed while the overall aggregator and admission still
+require it, the candidate runtime's reviewed exports were removed while the authoritative report
+runner and its tests still import them, the `analytics-candidate-trial` vite entry was removed while
+the build requires the emitted file, the activation helper stopped threading `workspaceId` into
+admission, and the reviewed recorder/stats/runtime/test files were overwritten with older-era mixed
+content. No worker transcript records these writes. The user confirmed there is no other running
+session and directed reconciliation against the approved plan without blind restoration.
+
+Reconciliation method: for the 15 burst-written files the pre-burst state is the reviewed HEAD
+(`3a772d2e`) plus that day's reviewed uncommitted additions. The orchestrator session's child
+transcripts record every successful edit with exact old/new text and its result, so the repair
+reapplied only transcript-recorded successful edits, in order, and verified every oldText matched
+exactly once: `analytics-p0-qualification.mjs` (14-block `ten-million` admission scenario,
+mixed-rows note, `endurance-validation` manifest entry plus the scenario-independent
+`schemaVersion: 1` `localeCompare` fingerprint formula, `schema-faults` entry, recorder-source and
+overall-producer entries, `matched-host` entry, provenance comment); `analytics-runtime.ts`
+(root-integrity revalidation inside `startCandidateTrialRuntime`'s try, after grant consume);
+`extension/vite.config.ts` (`analytics-candidate-trial` entry for `candidate-trial-report.ts`);
+`scripts/analytics-activation-helper.mjs` (`workspaceId` threaded into all three admission/inspection
+calls). The remaining 13 burst files had no post-HEAD worker edits and were restored verbatim from
+HEAD: `recorder-supervisor.ts`, `recorder-worker-entry.ts`, `sqlite-recorder.ts`,
+`extension-host.ts`, `stats-service/service.ts`, `activation-sequence.test.ts`,
+`recorder-supervisor.test.ts`, `sqlite-recorder-branch-migration.test.ts`,
+`sqlite-recorder-statement-reuse.test.ts`, `sqlite-recorder.test.ts`, and this document's deleted
+checkpoint sections. The failed tracked-seam edit in the candidate-trial transcript was correctly
+NOT reapplied (its consumer never landed). Raw burst content is preserved at
+`C:/dev/scratch/pie-reconcile-20260915-r01/burst-backup/` with the reconstruction script.
+
+Reconciliation evidence: the post-reconciliation working-tree diff against HEAD is exactly
+**835 insertions(+), 316 deletions(−) across the 14 reviewed modified paths**, matching the final
+reviewer's recorded pre-burst snapshot (14 files, 835+/316−); the execution record is byte-identical
+to HEAD again. All three P0 producer manifests are byte-identical 21-entry lists (qualification
+`artifactProvenance`, `schema-faults` and `matched-host` `COMMON_SOURCE_FILES`).
+`--scenario ten-million --validate --seed …` again produces the admitted fail-closed no-workload
+report. Focused suites re-ran green after reconciliation: matched-host 12/12, overall-qualification
+5/5, activation admission 15 passed + 1 skipped (file-symlink unavailable on this host), cache
+collector 5/5 (standalone; its live Restart Manager binding is timing-sensitive under parallel
+load), schema-faults 2/2, candidate-trial runtime 14/14, endurance harness 10/10, mixed harness
+37/37, recorder supervisor + sqlite-recorder 64/64, runtime + statement-reuse + branch-migration
+22/22. All 17 TypeScript projects, lint, and the model drift check pass. Full `npm run verify`:
+**7/7 package groups, 7,115 passed, 0 failed, 34 skipped** with the known intermittent timing
+flakes passing on rerun (`cache-file-io-collector`, `p0-mixed-harness`, `webview/bootstrap` 15 s
+timeout — same pattern as previously recorded; no code defect implicated). Verify's validation
+build staged coordinated identity `84d09cb7b9daa44155d0` and emitted
+`extension/out/analytics-candidate-trial.js`, so the required-build list and vite entries agree.
+
+Completed paired mixed result (executed 09:02–09:14 NZ against the frozen
+`6a2b5aebf25295bdba7f` artifact at HEAD `3a772d2e`, seed `p0-mixed-paired-20260915-r01`, UTC day
+2026-09-15): both `full-stats` and `memory-only` arms finished `passed` with
+`scenario-passed`, zero failed mixed gates, 25,001 accepted rows / 59,291,736 bytes; 10,000
+paced 50 fact/s samples with handoff median 0.103 ms / max 0.449 ms, peak backlog 2 records /
+5,628 bytes, ending backlog 0; 5,000-fact burst peaked ~1,200 records and drained ~11.4 s;
+writer-prepared dated daily projection (2,500 dated occurrences, exact today/week oracle);
+5 recorder + 16 query workers all terminal with complete lifecycle evidence; owned cleanup removed
+the fixture root. The `full-stats` arm sampled recorder worker RSS high-water
+**260,571,136 bytes (~248.6 MiB) at the production-default heap — below the 268,435,456-byte
+(256 MiB) gate** for the first time in a full mixed run (prior uncapped runs sampled 285–300 MiB);
+the `memory-only` arm's 252,272,640-byte reading is diagnostic-only. `overallP0` remains
+**unqualified**; mixed evidence alone does not claim the remaining P0, agent/UI or whole-topology
+memory gates.
+
+Remaining gates (all still open): the paired arms bind artifact `6a2b5aeb`/HEAD `3a772d2e`, not the
+reconciled source, so the overall-P0 qualification wave must rerun every scenario against the new
+frozen build: baseline, 1M scale, `ten-million` (capacity decision pending — see the bounded
+capacity review in the wave report; no threshold or evidence standard is lowered), endurance,
+`schema-faults`, `matched-host` real VS Code run, then the overall aggregate plus admission
+recomputation. P7a activation, storage cutoff, publication and restart remain closed. The five
+unrelated user-owned files stay excluded and hash-preserved: `models.yaml`
+`98f7115ef673b9ec…`, `models.json` `a9a23aa8dabb…`, `model-profiles.yaml` `da5de5b6a4f3…`,
+`settings.json` `fadcaab0def0…` (user-owned chat/pruning selections, 13:18 NZ), and
+`docs/internal/model-token-pricing-sources.md` `73949c4b3388…`. Next exact operation: commit and
+push the reconciled implementation and this checkpoint, then the coordinated frozen-HEAD publishing
+build with staged integrity verification and artifact manifest for the next qualification wave; no
+activation, cutoff, or restart.
+
+---
+
 ## Sole integration checkpoint - 2026-09-15, 08:59 Pacific/Auckland
 
 The sole integrator has integrated the existing uncommitted analytics scope in commit

@@ -94,6 +94,7 @@ export default defineConfig(({ mode }) => {
             'analytics-query-worker': path.join(srcDir, 'analytics', 'query-worker-entry.ts'),
             'analytics-query-client': path.join(srcDir, 'analytics', 'query-client.ts'),
             'analytics-sqlite-recorder': path.join(srcDir, 'analytics', 'sqlite-recorder.ts'),
+            'analytics-candidate-trial': path.join(srcDir, 'analytics', 'candidate-trial-report.ts'),
             // Emitted as entries, not only bundled into extension.js, so the
             // detached one-shot activation helper can import the activation
             // store and sequence directly. A module reachable only from

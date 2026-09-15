@@ -117,6 +117,7 @@ export class CandidateTrialAuthority {
   private constructor(
     public readonly grant: CandidateTrialAuthorityGrant,
     private readonly rootReal: string,
+    private readonly protectedRoots: ReadonlyArray<{ real: string; label: string }>,
   ) {}
 
   get authorizedAtMs(): number {
@@ -145,6 +146,30 @@ export class CandidateTrialAuthority {
     this.consumed = true;
   }
 
+  /** Revalidate the exact factory-owned root and both helper directories at
+   * helper start/stop so a substituted junction cannot redirect trial I/O. */
+  assertRuntimeRootIntegrity(): void {
+    const rootStats = lstatSync(this.grant.resolvedPaths.rootDir);
+    if (rootStats.isSymbolicLink() || !rootStats.isDirectory()) {
+      throw new ActivationManifestError('Candidate-trial owned root is no longer a real directory.');
+    }
+    const currentRootReal = path.normalize(realpathSync(this.grant.resolvedPaths.rootDir));
+    if (currentRootReal !== this.rootReal) {
+      throw new ActivationManifestError('Candidate-trial owned root realpath changed before helper access.');
+    }
+    const children = [this.grant.resolvedPaths.stateDir, this.grant.resolvedPaths.analyticsDir];
+    assertTrialRootIsolated(currentRootReal, this.protectedRoots, children);
+    for (const child of children) {
+      const childReal = path.normalize(realpathSync(child));
+      const childExpected = path.normalize(child);
+      if (process.platform === 'win32'
+        ? childReal.toLowerCase() !== childExpected.toLowerCase()
+        : childReal !== childExpected) {
+        throw new ActivationManifestError('Candidate-trial helper directory realpath changed before helper access.');
+      }
+    }
+  }
+
   /** Stop helpers first (caller-provided so this module owns no runtime), then
    * remove ONLY the factory-owned root, only after re-verifying it is still the
    * exact realpath'd directory this factory created. */
@@ -156,6 +181,11 @@ export class CandidateTrialAuthority {
       } catch (error) {
         failureReasons.push(`helper-stop: ${String(error)}`);
       }
+    }
+    try {
+      this.assertRuntimeRootIntegrity();
+    } catch (error) {
+      failureReasons.push(`root-integrity: ${String(error)}`);
     }
     const trialId = this.grant.identity.trialId;
     const stoppedAt = new Date().toISOString();
@@ -212,8 +242,12 @@ export class CandidateTrialAuthority {
     return { trialId, completed: true, rootRemoved: true, stoppedAt, failureReasons: [] };
   }
 
-  static create(grant: CandidateTrialAuthorityGrant, rootReal: string): CandidateTrialAuthority {
-    return new CandidateTrialAuthority(grant, rootReal);
+  static create(
+    grant: CandidateTrialAuthorityGrant,
+    rootReal: string,
+    protectedRoots: ReadonlyArray<{ real: string; label: string }>,
+  ): CandidateTrialAuthority {
+    return new CandidateTrialAuthority(grant, rootReal, protectedRoots);
   }
 }
 
@@ -273,7 +307,7 @@ export function authorizeCandidateTrialRoot(
       maxLifetimeMs,
       resolvedPaths: { rootDir: root, stateDir, analyticsDir },
     });
-    return CandidateTrialAuthority.create(grant, rootReal);
+    return CandidateTrialAuthority.create(grant, rootReal, protectedRoots);
   } catch (error) {
     // A failed authorization must not leak a half-owned root.
     try { rmSync(root, { recursive: true, force: true }); } catch { /* preserve original error */ }

@@ -1,7 +1,12 @@
 import { createHash } from 'node:crypto';
-import { closeSync, fstatSync, openSync, readSync } from 'node:fs';
+import { closeSync, fstatSync, lstatSync, openSync, readSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { validateCapacityCalibration } from '../extension/scripts/analytics-p0-capacity.mjs';
+import {
+  OVERALL_QUALIFICATION_KIND,
+  REQUIRED_OVERALL_QUALIFICATION_GATES,
+  validateOverallQualificationRecomputation,
+} from '../extension/scripts/analytics-p0-overall-qualification.mjs';
 
 /**
  * The P0 producer currently emits schema 5.  A scenario-passed report is only
@@ -11,44 +16,18 @@ import { validateCapacityCalibration } from '../extension/scripts/analytics-p0-c
  */
 export const QUALIFICATION_REPORT_SCHEMA_VERSION = 5;
 
-/** Candidate-trial handoff envelope.  There is no producer in-tree yet; keep
- * this boundary strict so a scratch rehearsal cannot be mistaken for one. */
+/** Authoritative P7a candidate-trial envelope emitted only after the distinct
+ * trial authority has stopped its production helpers and removed its root. */
 export const CANDIDATE_TRIAL_REPORT_SCHEMA_VERSION = 1;
 export const CANDIDATE_TRIAL_REPORT_KIND = 'pie-p7a-candidate-trial-v1';
-/** The repository has no candidate-trial producer/owning validator yet.  Keep
- * structural rehearsal validation available for tests, but never treat a
- * hand-written envelope as live activation evidence. */
-export const CANDIDATE_TRIAL_VALIDATOR_AVAILABLE = false;
+export const CANDIDATE_TRIAL_VALIDATOR_AVAILABLE = true;
 
 /** Reports contain timing samples, but must remain a bounded handoff input. */
 export const MAX_ACTIVATION_EVIDENCE_BYTES = 8 * 1024 * 1024;
 
 /** These are the current P0 gate names, including gates the bounded harness
  * records as explicitly unqualified.  A complete qualification must pass all. */
-export const REQUIRED_QUALIFICATION_GATES = Object.freeze([
-  'exactPrimaryRows',
-  'exactDetailRows',
-  'handoffP99',
-  'responsivenessProxyP95',
-  'indexedQuery',
-  'largeDetailQuery',
-  'temporaryFootprint',
-  'inPlaceCorruption',
-  'capacityCalibration',
-  'reservedFreeDisk',
-  'recorderWorkerRss',
-  'scaleHistoryRows',
-  'tenMillionHistory',
-  'enduranceLightLoad',
-  'enduranceSustainedLoad',
-  'enduranceWorkerMemory',
-  'mixedLoad',
-  'schemaV2AndFaults',
-  'matchedAgentUi',
-  'incrementalHostMemory',
-  'queryPeakMemory',
-  'rateConditions',
-]);
+export const REQUIRED_QUALIFICATION_GATES = REQUIRED_OVERALL_QUALIFICATION_GATES;
 
 /** The matched candidate trial in the scratch design requires these bounded
  * source/runtime/cleanup proofs before it can be used as activation evidence. */
@@ -160,8 +139,11 @@ function validateQualificationReport(
 
   const configuration = report.configuration;
   if (!isObject(configuration)) invalid(label, 'configuration is missing');
-  if (!['baseline', 'scale'].includes(configuration.scenario)) invalid(label, 'configuration.scenario is invalid');
-  const expectedRows = configuration.scenario === 'baseline' ? 10_000 : 1_000_000;
+  const overall = report.kind === OVERALL_QUALIFICATION_KIND;
+  if (!['baseline', 'scale', 'overall'].includes(configuration.scenario)) invalid(label, 'configuration.scenario is invalid');
+  if (overall !== (configuration.scenario === 'overall')) invalid(label, 'overall report kind/scenario is mismatched');
+  const expectedRows = configuration.scenario === 'baseline' ? 10_000
+    : configuration.scenario === 'scale' ? 1_000_000 : null;
   if (configuration.rows !== expectedRows) invalid(label, `configuration.rows must be ${expectedRows}`);
   if (!isBoundedString(configuration.seed)) invalid(label, 'configuration.seed is missing');
   if (!isBoundedString(configuration.reportPath) || !samePath(configuration.reportPath, reportPath)) {
@@ -179,13 +161,17 @@ function validateQualificationReport(
   if (!isSha256(provenance.fingerprint) || provenance.fingerprint !== expected.sourceFingerprint) {
     invalid(label, 'provenance.fingerprint does not match the candidate source fingerprint');
   }
-  if (!isObject(provenance.files) || Object.keys(provenance.files).length === 0) {
-    invalid(label, 'provenance.files is missing');
-  }
-  for (const [file, evidence] of Object.entries(provenance.files)) {
-    if (!isObject(evidence) || !isSha256(evidence.sha256)
-      || !Number.isSafeInteger(evidence.bytes) || evidence.bytes <= 0) {
-      invalid(label, `provenance.files[${file}] is incomplete`);
+  // Scenario reports bind the measured source files directly. An overall
+  // report instead binds and re-opens hash-addressed scenario reports below.
+  if (!overall) {
+    if (!isObject(provenance.files) || Object.keys(provenance.files).length === 0) {
+      invalid(label, 'provenance.files is missing');
+    }
+    for (const [file, evidence] of Object.entries(provenance.files)) {
+      if (!isObject(evidence) || !isSha256(evidence.sha256)
+        || !Number.isSafeInteger(evidence.bytes) || evidence.bytes <= 0) {
+        invalid(label, `provenance.files[${file}] is incomplete`);
+      }
     }
   }
 
@@ -203,14 +189,21 @@ function validateQualificationReport(
   if (!isObject(qualification) || qualification.scenario !== configuration.scenario) {
     invalid(label, 'qualification scenario is missing or mismatched');
   }
-  // This distinction is the critical fail-closed rule: a successful bounded
-  // scenario remains unqualified until every P0 follow-on has passed.
-  if (qualification.decision !== 'scenario-passed') invalid(label, 'qualification decision is not scenario-passed');
+  // This distinction is the critical fail-closed rule: successful component
+  // scenarios are inputs; only the recomputed aggregate can be overall-qualified.
+  const expectedDecision = overall
+    ? (qualification.overallP0 === 'qualified' ? 'overall-qualified' : 'overall-unqualified')
+    : 'scenario-passed';
+  if (qualification.decision !== expectedDecision) invalid(label, 'qualification decision is invalid');
   if (requireQualification && qualification.overallP0 !== 'qualified') {
     invalid(label, 'overallP0 is not qualified');
   }
-  if (!Array.isArray(qualification.failedGates) || qualification.failedGates.length !== 0) {
-    invalid(label, 'qualification.failedGates is not empty');
+  if (!Array.isArray(qualification.failedGates)
+    || (!overall && qualification.failedGates.length !== 0)) {
+    invalid(label, 'qualification.failedGates is invalid');
+  }
+  if (overall && !Array.isArray(qualification.unqualifiedGates)) {
+    invalid(label, 'qualification.unqualifiedGates is invalid');
   }
   if (!isObject(report.gates)) invalid(label, 'gates are missing');
   for (const gateName of REQUIRED_QUALIFICATION_GATES) {
@@ -300,117 +293,381 @@ function recomputeQualificationGates(report) {
   return errors;
 }
 
+function candidateKeysMatch(value, expectedKeys) {
+  if (!isObject(value)) return false;
+  const actual = Object.keys(value).sort();
+  const expected = [...expectedKeys].sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+function candidateContainsPath(parent, child) {
+  const relative = path.relative(path.resolve(parent), path.resolve(child));
+  return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
+}
+
+function isCandidateArtifactReceipt(value) {
+  return candidateKeysMatch(value, ['path', 'sha256', 'bytes'])
+    && isBoundedString(value.path) && path.isAbsolute(value.path)
+    && isSha256(value.sha256) && Number.isSafeInteger(value.bytes)
+    && value.bytes > 0 && value.bytes <= MAX_ACTIVATION_EVIDENCE_BYTES;
+}
+
+export function validateCandidateTrialArtifactFiles(report, expected) {
+  const isolated = report.checks.isolatedRoots.evidence;
+  try {
+    const reportReal = path.normalize(realpathSync(report.reportPath));
+    for (const protectedRoot of isolated.protectedRoots) {
+      const protectedReal = path.normalize(realpathSync(protectedRoot));
+      if (candidateContainsPath(protectedReal, reportReal)) {
+        invalid('candidate trial report', 'reportPath physically overlaps a protected live or canonical root');
+      }
+    }
+  } catch (error) {
+    if (error instanceof ActivationEvidenceError) throw error;
+    invalid('candidate trial report', `report or protected-root realpath is unavailable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const matched = report.checks.matchedSourceBuildConfig.evidence;
+  const artifacts = [
+    ['producer', matched.producer, 'analytics-candidate-trial.js'],
+    ['recorder worker', matched.recorderWorker, 'analytics-recorder-worker.js'],
+    ['query worker', matched.queryWorker, 'analytics-query-worker.js'],
+  ];
+  let artifactRoots;
+  try {
+    artifactRoots = artifacts.map(([, receipt]) => path.normalize(realpathSync(path.dirname(receipt.path))));
+  } catch (error) {
+    invalid('candidate trial report', `artifact build directory is unavailable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (artifactRoots.some((artifactRoot) => !samePath(artifactRoot, artifactRoots[0]))) {
+    invalid('candidate trial report', 'producer and worker receipts are not from one coordinated build directory');
+  }
+  for (const [label, receipt, expectedName] of artifacts) {
+    if (path.basename(receipt.path).toLowerCase() !== expectedName) {
+      invalid('candidate trial report', `${label} receipt does not identify ${expectedName}`);
+    }
+    try {
+      const stats = lstatSync(receipt.path);
+      const expectedPath = path.join(artifactRoots[0], expectedName);
+      if (stats.isSymbolicLink() || !stats.isFile()
+        || !samePath(path.normalize(realpathSync(receipt.path)), expectedPath)) {
+        invalid('candidate trial report', `${label} receipt is not the real coordinated-build artifact`);
+      }
+    } catch (error) {
+      if (error instanceof ActivationEvidenceError) throw error;
+      invalid('candidate trial report', `${label} artifact identity is unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    let fd;
+    try {
+      fd = openSync(receipt.path, 'r');
+      const initial = fstatSync(fd);
+      if (!initial.isFile() || initial.size !== receipt.bytes
+        || initial.size <= 0 || initial.size > MAX_ACTIVATION_EVIDENCE_BYTES) {
+        invalid('candidate trial report', `${label} receipt size does not match a bounded regular file`);
+      }
+      const bytes = Buffer.alloc(initial.size);
+      let offset = 0;
+      while (offset < bytes.length) {
+        const count = readSync(fd, bytes, offset, bytes.length - offset, offset);
+        if (count <= 0) invalid('candidate trial report', `${label} artifact ended before its declared size`);
+        offset += count;
+      }
+      if (fstatSync(fd).size !== initial.size) {
+        invalid('candidate trial report', `${label} artifact changed while it was being read`);
+      }
+      if (createHash('sha256').update(bytes).digest('hex') !== receipt.sha256) {
+        invalid('candidate trial report', `${label} artifact hash does not match its receipt`);
+      }
+    } catch (error) {
+      if (error instanceof ActivationEvidenceError) throw error;
+      invalid('candidate trial report', `${label} artifact is unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+  }
+  const readBuildMarker = (markerPath, label) => {
+    let fd;
+    try {
+      fd = openSync(markerPath, 'r');
+      const stats = fstatSync(fd);
+      if (!stats.isFile() || stats.size <= 0 || stats.size > 1_024) {
+        invalid('candidate trial report', `${label} is not a bounded build marker`);
+      }
+      const bytes = Buffer.alloc(stats.size);
+      let offset = 0;
+      while (offset < bytes.length) {
+        const count = readSync(fd, bytes, offset, bytes.length - offset, offset);
+        if (count <= 0) invalid('candidate trial report', `${label} ended before its declared size`);
+        offset += count;
+      }
+      if (fstatSync(fd).size !== stats.size) invalid('candidate trial report', `${label} changed while being read`);
+      return bytes.toString('utf8').trim();
+    } catch (error) {
+      if (error instanceof ActivationEvidenceError) throw error;
+      invalid('candidate trial report', `${label} is unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+  };
+  const buildRoot = artifactRoots[0];
+  if (readBuildMarker(path.join(buildRoot, 'pie-build-id.txt'), 'host build marker') !== expected.buildId
+    || readBuildMarker(path.join(buildRoot, 'webview', 'panel', 'pie-build-id.txt'), 'renderer build marker') !== expected.buildId) {
+    invalid('candidate trial report', 'artifact build markers do not match the activation build');
+  }
+}
+
+function isCandidateWorkerIdentity(value) {
+  return candidateKeysMatch(value, ['pid']) && Number.isSafeInteger(value.pid) && value.pid > 0;
+}
+
+function isCandidateCleanupReceipt(value, trialId) {
+  return candidateKeysMatch(value, ['trialId', 'completed', 'rootRemoved', 'stoppedAt', 'failureReasons'])
+    && value.trialId === trialId && value.completed === true && value.rootRemoved === true
+    && isIsoInstant(value.stoppedAt) && Array.isArray(value.failureReasons) && value.failureReasons.length === 0;
+}
+
 function validateCandidateTrialReport(report, expected, reportPath, reportHash) {
   const label = 'candidate trial report';
-  if (!isObject(report)) invalid(label, 'top level must be an object');
+  if (!candidateKeysMatch(report, [
+    'schemaVersion', 'kind', 'producerVersion', 'status', 'reportPath', 'generatedAt', 'finishedAt',
+    'bindings', 'checks', 'cleanup', 'errors',
+  ])) invalid(label, 'top-level keys do not match the bounded authoritative schema');
   if (report.schemaVersion !== CANDIDATE_TRIAL_REPORT_SCHEMA_VERSION) {
     invalid(label, `schemaVersion must be ${CANDIDATE_TRIAL_REPORT_SCHEMA_VERSION}`);
   }
-  if (report.kind !== CANDIDATE_TRIAL_REPORT_KIND) invalid(label, 'kind is not the activation trial envelope');
-  if (report.status !== 'passed') invalid(label, 'status must be passed');
+  if (report.kind !== CANDIDATE_TRIAL_REPORT_KIND || report.producerVersion !== 'p7a-candidate-trial-v1') {
+    invalid(label, 'producer identity is not the authoritative candidate-trial producer');
+  }
+  if (report.status !== 'passed' || !Array.isArray(report.errors) || report.errors.length !== 0) {
+    invalid(label, 'status or errors do not describe a clean passed run');
+  }
   if (!isBoundedString(report.reportPath) || !samePath(report.reportPath, reportPath)) {
     invalid(label, 'reportPath does not identify the supplied bytes');
   }
-  if (!isIsoInstant(report.generatedAt) || !isIsoInstant(report.finishedAt)) {
-    invalid(label, 'generatedAt/finishedAt must be canonical ISO instants');
+  if (!isIsoInstant(report.generatedAt) || !isIsoInstant(report.finishedAt)
+    || Date.parse(report.finishedAt) < Date.parse(report.generatedAt)) {
+    invalid(label, 'generatedAt/finishedAt must be ordered canonical ISO instants');
   }
 
   const bindings = report.bindings;
-  if (!isObject(bindings) || !isBoundedString(bindings.trialId)) invalid(label, 'bindings.trialId is missing');
+  if (!candidateKeysMatch(bindings, [
+    'trialId', 'generationId', 'buildId', 'sourceHead', 'sourceFingerprint', 'qualificationSha256',
+  ]) || !isBoundedString(bindings.trialId)) invalid(label, 'bindings do not match the bounded schema');
   if (bindings.generationId !== expected.generationId) invalid(label, 'generationId binding mismatches the plan');
   if (bindings.buildId !== expected.buildId) invalid(label, 'buildId binding mismatches the plan');
   if (!isGitHead(bindings.sourceHead) || bindings.sourceHead.toLowerCase() !== expected.sourceHead.toLowerCase()) {
     invalid(label, 'sourceHead binding mismatches the plan');
   }
-  if (bindings.sourceFingerprint !== expected.sourceFingerprint) {
-    invalid(label, 'sourceFingerprint binding mismatches the plan');
-  }
+  if (bindings.sourceFingerprint !== expected.sourceFingerprint) invalid(label, 'sourceFingerprint binding mismatches the plan');
   if (bindings.qualificationSha256 !== expected.qualificationSha256) {
     invalid(label, 'qualificationSha256 binding mismatches the qualification bytes');
   }
-
-  if (!isObject(report.checks)) invalid(label, 'checks are missing');
+  if (!candidateKeysMatch(report.checks, REQUIRED_CANDIDATE_TRIAL_CHECKS)) {
+    invalid(label, 'checks do not match the exact required candidate-trial set');
+  }
   for (const checkName of REQUIRED_CANDIDATE_TRIAL_CHECKS) {
     const check = report.checks[checkName];
-    if (!isObject(check) || check.decision !== 'passed' || !isObject(check.evidence)
-      || Object.keys(check.evidence).length === 0) {
+    if (!candidateKeysMatch(check, ['decision', 'evidence']) || check.decision !== 'passed'
+      || !isObject(check.evidence) || Object.keys(check.evidence).length === 0) {
       invalid(label, `required check ${checkName} is incomplete`);
     }
   }
-  for (const [checkName, check] of Object.entries(report.checks)) {
-    if (!isObject(check) || check.decision !== 'passed') invalid(label, `check ${checkName} is not passed`);
+  if (report.checks.matchedSourceBuildConfig.evidence.workspaceId !== expected.workspaceId) {
+    invalid(label, 'workspaceId evidence mismatches the activation plan');
   }
-  if (!isObject(report.cleanup) || report.cleanup.completed !== true || report.cleanup.rootRemoved !== true) {
-    invalid(label, 'cleanup is incomplete');
+  const reportName = path.basename(report.reportPath).toLowerCase();
+  if (reportName === 'analytics-activation-v1.json' || reportName === 'analytics-ever-active-v1.json') {
+    invalid(label, 'reportPath uses a reserved activation filename');
   }
-
+  const protectedRoots = report.checks.isolatedRoots.evidence.protectedRoots;
+  if (Array.isArray(protectedRoots)
+    && protectedRoots.some((protectedRoot) => typeof protectedRoot === 'string'
+      && candidateContainsPath(protectedRoot, report.reportPath))) {
+    invalid(label, 'reportPath overlaps a protected live or canonical root');
+  }
+  if (!isCandidateCleanupReceipt(report.cleanup, bindings.trialId)) invalid(label, 'cleanup is incomplete');
   return { reportHash, trialId: bindings.trialId };
 }
 
-/** The bounded per-check evidence schemas for the required candidate-trial
- * checks whose criteria are computable purely from the supplied receipts.
- * Every key set is exact: a missing or extra evidence key fails closed.  A
- * required check that is not listed here has no authoritative producer or
- * receipt criteria in the current repository and can never be qualified by
- * recomputation; it only ever yields an explicit unqualified reason. */
 export const CANDIDATE_TRIAL_EVIDENCE_SCHEMAS = Object.freeze({
   matchedSourceBuildConfig: Object.freeze([
-    'generationId',
-    'buildId',
-    'sourceHead',
-    'sourceFingerprint',
-    'qualificationSha256',
+    'qualification', 'trialId', 'generationId', 'buildId', 'sourceHead', 'sourceFingerprint',
+    'workspaceId', 'trialPlanSha256', 'producer', 'recorderWorker', 'queryWorker',
   ]),
-  cleanup: Object.freeze(['completed', 'rootRemoved']),
+  isolatedRoots: Object.freeze([
+    'rootDir', 'stateDir', 'analyticsDir', 'osTempRoot', 'protectedRoots',
+    'rootUnderOsTemp', 'childrenContained', 'protectedRootsDisjoint',
+  ]),
+  hostBackendRecorderQueryLifecycle: Object.freeze([
+    'readiness', 'descriptor', 'runtimeStartRepublished', 'backendDescriptorAbsent',
+    'loadedReceiptSuppressed', 'recorderWorker', 'captureStatuses',
+  ]),
+  canonicalConsumers: Object.freeze([
+    'executionRevision', 'executionCount', 'begunCount', 'settledCount', 'lifecycleCoverage',
+    'storageRevision', 'queryWorkers',
+  ]),
+  crossHostRevision: Object.freeze([
+    'firstHostRevision', 'secondHostInitialRevision', 'secondHostObservedRevision',
+    'changed', 'revisionPollIntervalMs', 'maxWaitMs',
+  ]),
+  durableAndRejectedAcknowledgements: Object.freeze([
+    'durableStatus', 'durableReconciliationCount', 'rejectedStatus', 'rejectedCode',
+  ]),
+  cleanup: Object.freeze([
+    'pendingAfterFence', 'postFenceSubmissionRejected', 'manifestCreatedBeforeCleanup',
+    'tombstoneCreatedBeforeCleanup', 'cleanupReceipt', 'rootRemovedObserved', 'cleanupError',
+  ]),
 });
 
-function evidenceKeysMatchSchema(evidence, schemaKeys) {
-  const keys = Object.keys(evidence).sort();
-  const wanted = [...schemaKeys].sort();
-  return keys.length === wanted.length && keys.every((key, index) => key === wanted[index]);
+function evidenceKeysMatchSchema(evidence, name) {
+  return candidateKeysMatch(evidence, CANDIDATE_TRIAL_EVIDENCE_SCHEMAS[name]);
 }
 
 function recomputeMatchedSourceBuildConfigEvidence(evidence, report, expected) {
-  if (!evidenceKeysMatchSchema(evidence, CANDIDATE_TRIAL_EVIDENCE_SCHEMAS.matchedSourceBuildConfig)) {
-    return 'matchedSourceBuildConfig evidence keys do not match its bounded schema';
+  if (!evidenceKeysMatchSchema(evidence, 'matchedSourceBuildConfig')) return 'matchedSourceBuildConfig evidence keys are invalid';
+  const qualification = evidence.qualification;
+  if (!candidateKeysMatch(qualification, ['path', 'sha256', 'bytes']) || !path.isAbsolute(qualification.path)
+    || qualification.sha256 !== expected.qualificationSha256 || !Number.isSafeInteger(qualification.bytes)
+    || qualification.bytes <= 0 || qualification.bytes > MAX_ACTIVATION_EVIDENCE_BYTES) {
+    return 'matchedSourceBuildConfig qualification receipt does not match the exact qualification bytes';
   }
-  if (!isBoundedString(evidence.generationId) || evidence.generationId !== expected.generationId) {
-    return 'matchedSourceBuildConfig evidence.generationId does not match the plan generation';
+  if (evidence.trialId !== report.bindings.trialId || evidence.generationId !== expected.generationId
+    || evidence.buildId !== expected.buildId || evidence.sourceHead !== expected.sourceHead.toLowerCase()
+    || evidence.sourceFingerprint !== expected.sourceFingerprint || evidence.workspaceId !== expected.workspaceId
+    || !isSha256(evidence.trialPlanSha256) || !isCandidateArtifactReceipt(evidence.producer)
+    || !isCandidateArtifactReceipt(evidence.recorderWorker) || !isCandidateArtifactReceipt(evidence.queryWorker)) {
+    return 'matchedSourceBuildConfig identity or artifact receipts do not match the activation bindings';
   }
-  if (!isBoundedString(evidence.buildId) || evidence.buildId !== expected.buildId) {
-    return 'matchedSourceBuildConfig evidence.buildId does not match the plan build';
+  const planIdentity = {
+    trialId: evidence.trialId,
+    generationId: evidence.generationId,
+    buildId: evidence.buildId,
+    sourceHead: evidence.sourceHead,
+    sourceFingerprint: evidence.sourceFingerprint,
+    qualificationSha256: expected.qualificationSha256,
+  };
+  const recomputedPlan = createHash('sha256').update(JSON.stringify([
+    1, 'pie-p7a-candidate-trial-authority-v1', planIdentity, evidence.workspaceId,
+  ])).digest('hex');
+  if (recomputedPlan !== evidence.trialPlanSha256) return 'matchedSourceBuildConfig trial plan hash does not recompute';
+  return null;
+}
+
+function recomputeIsolatedRootsEvidence(evidence) {
+  if (!evidenceKeysMatchSchema(evidence, 'isolatedRoots')) return 'isolatedRoots evidence keys are invalid';
+  const paths = ['rootDir', 'stateDir', 'analyticsDir', 'osTempRoot'];
+  if (paths.some((name) => !isBoundedString(evidence[name]) || !path.isAbsolute(evidence[name]))
+    || !Array.isArray(evidence.protectedRoots) || evidence.protectedRoots.length < 1
+    || evidence.protectedRoots.length > 64 || evidence.protectedRoots.some((value) => !isBoundedString(value) || !path.isAbsolute(value))) {
+    return 'isolatedRoots path receipts are invalid or unbounded';
   }
-  if (!isGitHead(evidence.sourceHead)
-    || evidence.sourceHead.toLowerCase() !== expected.sourceHead.toLowerCase()) {
-    return 'matchedSourceBuildConfig evidence.sourceHead does not match the plan source head';
+  const root = path.resolve(evidence.rootDir);
+  const isolated = candidateContainsPath(evidence.osTempRoot, root) && !samePath(evidence.osTempRoot, root)
+    && samePath(evidence.stateDir, path.join(root, 'state'))
+    && samePath(evidence.analyticsDir, path.join(root, 'analytics'))
+    && evidence.protectedRoots.every((protectedRoot) =>
+      !candidateContainsPath(protectedRoot, root) && !candidateContainsPath(root, protectedRoot));
+  if (!isolated || evidence.rootUnderOsTemp !== true || evidence.childrenContained !== true
+    || evidence.protectedRootsDisjoint !== true) return 'isolatedRoots containment receipts do not recompute';
+  return null;
+}
+
+function recomputeHostLifecycleEvidence(evidence, report, expected) {
+  if (!evidenceKeysMatchSchema(evidence, 'hostBackendRecorderQueryLifecycle')) return 'hostBackendRecorderQueryLifecycle evidence keys are invalid';
+  const readiness = evidence.readiness;
+  const descriptor = evidence.descriptor;
+  if (!candidateKeysMatch(readiness, [
+    'authority', 'manifestRevision', 'manifestSha256', 'generationId', 'recorderSchemaVersion',
+    'projectionRevision', 'recorderReady', 'queryReady',
+  ]) || readiness.authority !== 'candidate-trial' || readiness.manifestRevision !== null
+    || readiness.manifestSha256 !== null || readiness.generationId !== expected.generationId
+    || !Number.isSafeInteger(readiness.recorderSchemaVersion) || readiness.recorderSchemaVersion <= 0
+    || !isBoundedString(readiness.projectionRevision) || readiness.recorderReady !== true || readiness.queryReady !== true) {
+    return 'hostBackendRecorderQueryLifecycle readiness does not prove the distinct trial authority';
   }
-  if (!isSha256(evidence.sourceFingerprint) || evidence.sourceFingerprint !== expected.sourceFingerprint) {
-    return 'matchedSourceBuildConfig evidence.sourceFingerprint does not match the plan source fingerprint';
-  }
-  if (!isSha256(evidence.qualificationSha256)
-    || evidence.qualificationSha256 !== expected.qualificationSha256) {
-    return 'matchedSourceBuildConfig evidence.qualificationSha256 does not match the recomputed qualification bytes hash';
+  const matched = report.checks.matchedSourceBuildConfig.evidence;
+  if (!candidateKeysMatch(descriptor, [
+    'kind', 'trialId', 'generationId', 'buildId', 'workspaceId', 'hostInstanceId',
+    'trialPlanSha256', 'trialAuthorityRevision',
+  ]) || descriptor.kind !== 'candidate-trial' || descriptor.trialId !== report.bindings.trialId
+    || descriptor.generationId !== expected.generationId || descriptor.buildId !== expected.buildId
+    || descriptor.workspaceId !== matched.workspaceId || !isBoundedString(descriptor.hostInstanceId)
+    || descriptor.trialPlanSha256 !== matched.trialPlanSha256 || descriptor.trialAuthorityRevision !== 1
+    || evidence.runtimeStartRepublished !== true || evidence.backendDescriptorAbsent !== true
+    || evidence.loadedReceiptSuppressed !== true || !isCandidateWorkerIdentity(evidence.recorderWorker)
+    || !candidateKeysMatch(evidence.captureStatuses, ['begin', 'end', 'phase'])
+    || Object.values(evidence.captureStatuses).some((status) => status !== 'submitted')) {
+    return 'hostBackendRecorderQueryLifecycle runtime, descriptor, recorder, or capture evidence is invalid';
   }
   return null;
 }
 
-function recomputeCleanupEvidence(evidence, report, expected) {
-  if (!evidenceKeysMatchSchema(evidence, CANDIDATE_TRIAL_EVIDENCE_SCHEMAS.cleanup)) {
-    return 'cleanup evidence keys do not match its bounded schema';
-  }
-  const cleanup = report.cleanup;
-  if (!isObject(cleanup) || cleanup.completed !== true || cleanup.rootRemoved !== true
-    || evidence.completed !== true || evidence.rootRemoved !== true) {
-    return 'cleanup evidence does not match the report cleanup receipt';
+function recomputeCanonicalConsumersEvidence(evidence) {
+  if (!evidenceKeysMatchSchema(evidence, 'canonicalConsumers')) return 'canonicalConsumers evidence keys are invalid';
+  const revisions = [evidence.executionRevision, evidence.storageRevision];
+  if (revisions.some((value) => typeof value !== 'string' || !/^\d{1,20}$/u.test(value)
+    || BigInt(value) > 9_223_372_036_854_775_807n)
+    || !Number.isSafeInteger(evidence.executionCount) || evidence.executionCount < 1
+    || !Number.isSafeInteger(evidence.begunCount) || evidence.begunCount < 1
+    || !Number.isSafeInteger(evidence.settledCount) || evidence.settledCount < 1
+    || evidence.lifecycleCoverage !== 'known'
+    || !candidateKeysMatch(evidence.queryWorkers, ['spawned', 'terminal'])
+    || !Number.isSafeInteger(evidence.queryWorkers.spawned) || evidence.queryWorkers.spawned < 1
+    || evidence.queryWorkers.terminal !== evidence.queryWorkers.spawned) {
+    return 'canonicalConsumers bounded read models or query-worker lifecycle are incomplete';
   }
   return null;
 }
 
-/** Checks with a pure recomputation over the supplied receipts, keyed by the
- * required check name.  Absence is the explicit marker that no authoritative
- * producer criteria exist for that check yet. */
+function recomputeCrossHostRevisionEvidence(evidence, report) {
+  if (!evidenceKeysMatchSchema(evidence, 'crossHostRevision')) return 'crossHostRevision evidence keys are invalid';
+  for (const key of ['firstHostRevision', 'secondHostInitialRevision', 'secondHostObservedRevision']) {
+    if (typeof evidence[key] !== 'string' || !/^\d{1,20}$/u.test(evidence[key])
+      || BigInt(evidence[key]) > 9_223_372_036_854_775_807n) return 'crossHostRevision revision receipt is invalid';
+  }
+  const firstRevision = BigInt(evidence.firstHostRevision);
+  const initialRevision = BigInt(evidence.secondHostInitialRevision);
+  const observedRevision = BigInt(evidence.secondHostObservedRevision);
+  const canonical = report.checks.canonicalConsumers.evidence;
+  if (evidence.changed !== true || firstRevision !== initialRevision || observedRevision <= initialRevision
+    || canonical?.executionRevision !== evidence.firstHostRevision
+    || canonical?.storageRevision !== evidence.firstHostRevision
+    || evidence.revisionPollIntervalMs !== 25 || evidence.maxWaitMs !== 3_000) {
+    return 'crossHostRevision did not observe a bounded second-host revision change';
+  }
+  return null;
+}
+
+function recomputeAcknowledgementEvidence(evidence) {
+  if (!evidenceKeysMatchSchema(evidence, 'durableAndRejectedAcknowledgements')) {
+    return 'durableAndRejectedAcknowledgements evidence keys are invalid';
+  }
+  if (evidence.durableStatus !== 'durable' || !Number.isSafeInteger(evidence.durableReconciliationCount)
+    || evidence.durableReconciliationCount < 1 || evidence.rejectedStatus !== 'rejected'
+    || evidence.rejectedCode !== 'subject_deleted') {
+    return 'durableAndRejectedAcknowledgements does not contain both authoritative recorder dispositions';
+  }
+  return null;
+}
+
+function recomputeCleanupEvidence(evidence, report) {
+  if (!evidenceKeysMatchSchema(evidence, 'cleanup')) return 'cleanup evidence keys are invalid';
+  if (evidence.pendingAfterFence !== 0 || evidence.postFenceSubmissionRejected !== true
+    || evidence.manifestCreatedBeforeCleanup !== false || evidence.tombstoneCreatedBeforeCleanup !== false
+    || evidence.rootRemovedObserved !== true || evidence.cleanupError !== null
+    || !isCandidateCleanupReceipt(evidence.cleanupReceipt, report.bindings.trialId)
+    || JSON.stringify(evidence.cleanupReceipt) !== JSON.stringify(report.cleanup)) {
+    return 'cleanup evidence does not prove fencing, manifest suppression, terminal helper stop, and root removal';
+  }
+  return null;
+}
+
 const RECOMPUTABLE_CANDIDATE_TRIAL_CHECKS = new Map([
   ['matchedSourceBuildConfig', recomputeMatchedSourceBuildConfigEvidence],
+  ['isolatedRoots', recomputeIsolatedRootsEvidence],
+  ['hostBackendRecorderQueryLifecycle', recomputeHostLifecycleEvidence],
+  ['canonicalConsumers', recomputeCanonicalConsumersEvidence],
+  ['crossHostRevision', recomputeCrossHostRevisionEvidence],
+  ['durableAndRejectedAcknowledgements', recomputeAcknowledgementEvidence],
   ['cleanup', recomputeCleanupEvidence],
 ]);
 
@@ -425,7 +682,7 @@ export function recomputeCandidateTrialChecks(report, expected) {
     return ['candidate trial report checks are missing'];
   }
   if (!isObject(expected) || !isBoundedString(expected.generationId) || !isBoundedString(expected.buildId)
-    || !isGitHead(expected.sourceHead) || !isSha256(expected.sourceFingerprint)
+    || !isBoundedString(expected.workspaceId) || !isGitHead(expected.sourceHead) || !isSha256(expected.sourceFingerprint)
     || !isSha256(expected.qualificationSha256)) {
     return ['candidate trial recompute bindings are incomplete'];
   }
@@ -470,9 +727,11 @@ function readAndValidateActivationEvidence(options, { requireQualification, reco
     buildId,
     sourceHead,
     sourceFingerprint,
+    workspaceId,
   } = options;
   if (!isBoundedString(generationId)) invalid('activation plan', 'generationId is missing');
   if (!isBoundedString(buildId)) invalid('activation plan', 'buildId is missing');
+  if (!isBoundedString(workspaceId)) invalid('activation plan', 'workspaceId is missing');
   if (!isGitHead(sourceHead)) invalid('activation plan', 'sourceHead must be a 40-character Git hash');
   if (!isSha256(sourceFingerprint)) invalid('activation plan', 'sourceFingerprint must be a lowercase sha256');
 
@@ -485,8 +744,21 @@ function readAndValidateActivationEvidence(options, { requireQualification, reco
     { requireQualification },
   );
   if (recompute) {
-    const recomputationErrors = recomputeQualificationGates(qualification.value);
-    if (recomputationErrors.length > 0) invalid('qualification report', recomputationErrors.join('; '));
+    if (qualification.value.kind === OVERALL_QUALIFICATION_KIND) {
+      const validation = validateOverallQualificationRecomputation(qualification.value, {
+        buildId,
+        sourceHead,
+        sourceFingerprint,
+      });
+      if (!validation.valid || !validation.qualified) {
+        invalid('qualification report', validation.errors.length > 0
+          ? validation.errors.join('; ')
+          : 'overall evidence does not qualify');
+      }
+    } else {
+      const recomputationErrors = recomputeQualificationGates(qualification.value);
+      if (recomputationErrors.length > 0) invalid('qualification report', recomputationErrors.join('; '));
+    }
   }
   const trial = readBoundedJsonFile(trialPath, 'candidate trial report');
   const expectedBindings = {
@@ -494,6 +766,7 @@ function readAndValidateActivationEvidence(options, { requireQualification, reco
     buildId,
     sourceHead,
     sourceFingerprint,
+    workspaceId,
     qualificationSha256: qualification.sha256,
   };
   const trialEvidence = validateCandidateTrialReport(
@@ -503,8 +776,9 @@ function readAndValidateActivationEvidence(options, { requireQualification, reco
     trial.sha256,
   );
   if (recompute) {
-    // Strictly after the P0 gate recomputation: the candidate-trial checks
-    // are verified only against the exact receipts already read and hashed.
+    // Strictly after the P0 gate recomputation: re-open the exact emitted
+    // runner/worker artifacts before deterministically checking their receipts.
+    validateCandidateTrialArtifactFiles(trial.value, expectedBindings);
     const trialRecomputationErrors = recomputeCandidateTrialChecks(trial.value, expectedBindings);
     if (trialRecomputationErrors.length > 0) {
       invalid('candidate trial report', trialRecomputationErrors.join('; '));
@@ -569,6 +843,7 @@ export function admitActivationEvidence({
   buildId,
   sourceHead,
   sourceFingerprint,
+  workspaceId,
 }) {
   const evidence = readAndValidateActivationEvidence({
     qualificationPath,
@@ -579,6 +854,7 @@ export function admitActivationEvidence({
     buildId,
     sourceHead,
     sourceFingerprint,
+    workspaceId,
   }, { requireQualification: true, recompute: true });
   if (!CANDIDATE_TRIAL_VALIDATOR_AVAILABLE) {
     invalid('candidate trial report', 'no authoritative candidate-trial producer/validator exists yet');

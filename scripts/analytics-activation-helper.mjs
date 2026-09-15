@@ -747,6 +747,7 @@ async function runPreflight(plan) {
     buildId: plan.buildId,
     sourceHead: plan.sourceHead,
     sourceFingerprint: plan.sourceFingerprint,
+    workspaceId: plan.workspaceId,
   });
   blockers.push(...admission.blockers);
 
@@ -982,6 +983,7 @@ export async function runProductionCutover(plan, dependencies) {
     buildId: plan.buildId,
     sourceHead: plan.sourceHead,
     sourceFingerprint: plan.sourceFingerprint,
+    workspaceId: plan.workspaceId,
   });
   const terminal = readTerminalRestartReceipt(plan);
   const terminalPrerequisite = plan.prerequisites?.terminalHandoff;
@@ -1223,6 +1225,7 @@ async function runLegacyActivationSequence(plan) {
       buildId: plan.buildId,
       sourceHead: plan.sourceHead,
       sourceFingerprint: plan.sourceFingerprint,
+      workspaceId: plan.workspaceId,
     });
   } catch (error) {
     recordError(plan.stateDir, 'prepare', error);

@@ -821,6 +821,10 @@ export async function startCandidateTrialRuntime(
   authority.consume();
   let startedRecorder: AnalyticsRecorderSupervisor | undefined;
   try {
+    // Revalidate the real helper directories before any worker can open the
+    // database; a junction substituted after authorization must never redirect
+    // trial I/O into a protected root.
+    authority.assertRuntimeRootIntegrity();
     const helpers = await startAnalyticsHelpers({
       label: 'Candidate-trial',
       recorderWorkerScript: options.recorderWorkerScript,

@@ -317,6 +317,25 @@ test('containment math rejects symlink aliases and escaped children', () => {
   }
 });
 
+test('a substituted analytics junction is rejected before any helper opens the protected root', async () => {
+  const fixture = trialFixture();
+  const { authority, workers } = fixture;
+  try {
+    rmSync(authority.grant.resolvedPaths.analyticsDir, { recursive: true, force: true });
+    symlinkSync(fixture.liveDir, authority.grant.resolvedPaths.analyticsDir, 'junction');
+    await assert.rejects(
+      () => startTrial(authority, workers),
+      /resolved child must be a real directory|helper directory realpath changed/u,
+    );
+    assert.equal(existsSync(path.join(fixture.liveDir, 'analytics.sqlite')), false);
+    const receipt = await authority.dispose();
+    assert.equal(receipt.completed, false, 'integrity substitution remains visible in cleanup');
+    assert.equal(receipt.rootRemoved, true);
+  } finally {
+    cleanupTrialFixture(fixture);
+  }
+});
+
 test('an invalid hostInstanceId is refused before consuming the grant, which stays reusable', { timeout: 60_000 }, async () => {
   const fixture = trialFixture();
   const { authority, liveDir, liveFile, liveBytes, workers } = fixture;

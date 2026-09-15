@@ -105,7 +105,7 @@ function parseMixedUtcDay(value) {
 
 function parseArguments(argv) {
   const options = { scenario: 'baseline', rows: undefined, seed: undefined, report: undefined, baselineReport: undefined, recorderHeapProbeMb: undefined, mixedUtcDay: undefined, statsPollMode: undefined, validate: false, smoke: false };
-  const allowedScenarios = new Set(['baseline', 'scale', 'endurance', 'mixed']);
+  const allowedScenarios = new Set(['baseline', 'scale', 'ten-million', 'endurance', 'mixed']);
   const seen = new Set();
   for (let index = 0; index < argv.length; index++) {
     const argument = argv[index];
@@ -138,19 +138,21 @@ function parseArguments(argv) {
     }
     throw new Error(`Unsupported or ambiguous option: ${argument}`);
   }
-  if (!allowedScenarios.has(options.scenario)) throw new Error(`Unsupported P0 scenario: ${options.scenario}; use baseline, scale, endurance, or mixed`);
+  if (!allowedScenarios.has(options.scenario)) throw new Error(`Unsupported P0 scenario: ${options.scenario}; use baseline, scale, ten-million, endurance, or mixed`);
   if (options.smoke && options.scenario !== 'endurance' && options.scenario !== 'mixed') throw new Error('--smoke is valid only for the endurance or mixed scenario');
   if (options.mixedUtcDay !== undefined && options.scenario !== 'mixed') throw new Error('--mixed-utc-day is valid only for the mixed scenario');
   if (options.statsPollMode !== undefined && options.scenario !== 'mixed') throw new Error('--stats-poll-mode is valid only for the mixed scenario');
   if (options.scenario === 'mixed' && options.mixedUtcDay === undefined) throw new Error('mixed requires --mixed-utc-day so paired runs share an explicit UTC fixture window');
   if (options.scenario === 'endurance' && options.rows !== undefined) throw new Error('--rows is not valid for the endurance scenario');
   const environmentRows = process.env.PIE_ANALYTICS_P0_ROWS;
-  const rowText = options.scenario === 'endurance' ? '10000' : options.rows ?? environmentRows ?? (options.scenario === 'scale' ? '1000000' : '10000');
+  const rowText = options.scenario === 'endurance' ? '10000'
+    : options.rows ?? environmentRows ?? (options.scenario === 'scale' ? '1000000' : options.scenario === 'ten-million' ? '10000000' : '10000');
   if (!/^\d+$/.test(rowText)) throw new Error('--rows must be a decimal integer');
   const rows = Number(rowText);
   if (!Number.isSafeInteger(rows) || rows < 10_000) throw new Error('--rows must be a safe integer >= 10000');
-  const expectedRows = options.scenario === 'scale' ? 1_000_000 : 10_000;
-  if (options.scenario !== 'endurance' && rows !== expectedRows) throw new Error(`${options.scenario} requires exactly ${expectedRows} rows; larger tiers need a separately reviewed harness`);
+  const expectedRows = options.scenario === 'scale' ? 1_000_000
+    : options.scenario === 'ten-million' ? 10_000_000 : 10_000;
+  if (options.scenario !== 'endurance' && rows !== expectedRows) throw new Error(`${options.scenario} requires exactly ${expectedRows} rows`);
   if (options.seed === undefined) throw new Error('--seed is required for reproducible qualification evidence');
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(options.seed)) {
     throw new Error('--seed must be 1-128 characters using letters, digits, dot, underscore or hyphen, starting with a letter or digit');
@@ -164,11 +166,11 @@ function parseArguments(argv) {
     }
     options.baselineReport = path.resolve(options.baselineReport);
   }
-  if (options.scenario === 'scale' && !options.baselineReport && !options.validate) {
-    throw new Error('scale requires --baseline-report from a fresh accepted baseline run');
+  if ((options.scenario === 'scale' || options.scenario === 'ten-million') && !options.baselineReport && !options.validate) {
+    throw new Error(`${options.scenario} requires --baseline-report from a fresh accepted baseline run`);
   }
-  if (options.scenario === 'baseline' && options.baselineReport) {
-    throw new Error('--baseline-report is valid only for the scale scenario');
+  if (!['scale', 'ten-million'].includes(options.scenario) && options.baselineReport) {
+    throw new Error('--baseline-report is valid only for the scale or ten-million scenario');
   }
   if (process.env.PIE_ANALYTICS_P0_ENDURANCE === '1') {
     throw new Error('PIE_ANALYTICS_P0_ENDURANCE is no longer an execution switch; use --scenario endurance [--smoke]');
@@ -211,6 +213,7 @@ const activeHarnessVersion = configuration.scenario === 'endurance'
   ? ENDURANCE_HARNESS_VERSION
   : configuration.scenario === 'mixed' ? MIXED_HARNESS_VERSION : HARNESS_VERSION;
 const requestedRows = configuration.rows;
+const isLargeHistoryScenario = configuration.scenario === 'scale' || configuration.scenario === 'ten-million';
 const mixedProjectionWindow = configuration.mixedUtcDay;
 const mixedObservationBaseMs = mixedProjectionWindow === undefined
   ? 1_780_000_000_000
@@ -259,8 +262,8 @@ const matrix = {
     : ['clean helper restart x3', 'private delete racing late detail from another helper'],
   bounds: { minUnusedDiskBytes: 20 * 1024 ** 3, maxTemporaryBytes: 16 * 1024 ** 3, maxQueueBytes: 64 * 1024 ** 2 },
   intentionallyNotClaimed: [
-    ...(configuration.scenario !== 'scale' ? ['1M rows'] : []),
-    '10M rows; this bounded harness rejects that input',
+    ...(!['scale', 'ten-million'].includes(configuration.scenario) ? ['1M rows'] : []),
+    ...(configuration.scenario !== 'ten-million' ? ['10M rows'] : []),
     ...(configuration.scenario === 'endurance' && configuration.smoke
       ? ['five-minute light load and repeated sustained-load processes']
       : []),
@@ -1732,15 +1735,24 @@ function fixtureCapacityEstimate() {
 }
 
 function artifactProvenance() {
+  // This list intentionally matches COMMON_SOURCE_FILES in
+  // analytics-p0-schema-faults.mjs and analytics-p0-matched-host.mjs (including
+  // the matched-host harness's authoritative-producer entry) so every producer's
+  // report binds one candidate with the same scenario-independent fingerprint.
   const ownedFiles = [
     ['extension/out/analytics-recorder-supervisor.js', path.join(outRoot, 'analytics-recorder-supervisor.js')],
     ['extension/out/analytics-sqlite-recorder.js', path.join(outRoot, 'analytics-sqlite-recorder.js')],
     ['extension/out/analytics-query-client.js', path.join(outRoot, 'analytics-query-client.js')],
     ['extension/out/analytics-recorder-worker.js', workerScript],
     ['extension/out/analytics-query-worker.js', queryWorkerScript],
+    ['extension/src/analytics/sqlite-recorder.ts', path.join(extensionRoot, 'src', 'analytics', 'sqlite-recorder.ts')],
     ['extension/scripts/analytics-p0-qualification.mjs', path.join(extensionRoot, 'scripts', 'analytics-p0-qualification.mjs')],
+    ['extension/scripts/analytics-p0-matched-host.mjs', path.join(extensionRoot, 'scripts', 'analytics-p0-matched-host.mjs')],
+    ['extension/scripts/analytics-p0-overall-qualification.mjs', path.join(extensionRoot, 'scripts', 'analytics-p0-overall-qualification.mjs')],
     ['extension/scripts/analytics-p0-capacity.mjs', path.join(extensionRoot, 'scripts', 'analytics-p0-capacity.mjs')],
+    ['extension/scripts/analytics-p0-endurance-validation.mjs', path.join(extensionRoot, 'scripts', 'analytics-p0-endurance-validation.mjs')],
     ['extension/scripts/analytics-p0-mixed-validation.mjs', path.join(extensionRoot, 'scripts', 'analytics-p0-mixed-validation.mjs')],
+    ['extension/scripts/analytics-p0-schema-faults.mjs', path.join(extensionRoot, 'scripts', 'analytics-p0-schema-faults.mjs')],
     ['extension/scripts/windows-process-handle-collector.mjs', path.join(extensionRoot, 'scripts', 'windows-process-handle-collector.mjs')],
     ['extension/scripts/windows-process-handle-collector.ps1', path.join(extensionRoot, 'scripts', 'windows-process-handle-collector.ps1')],
     ['extension/scripts/analytics-real-producer-probe.ts', path.join(extensionRoot, 'scripts', 'analytics-real-producer-probe.ts')],
@@ -1777,15 +1789,19 @@ function artifactProvenance() {
       ? [`host/renderer build identity mismatch (${hostBuildId} != ${rendererBuildId})`]
       : []),
   ];
+  // This source identity is deliberately scenario-independent: baseline,
+  // scale, ten-million, endurance, and mixed reports from the same candidate
+  // must be aggregatable. Their scenario-specific harnessVersion remains in
+  // each report envelope, while every source file used by any scenario is
+  // bound here in stable path order.
   const fingerprintInput = {
-    harnessVersion: activeHarnessVersion,
-    // The source candidate is part of the admission fingerprint. Artifact
-    // hashes bind the packaged files, while this prevents a report from being
-    // accepted after the same files are moved to a different source revision.
+    schemaVersion: 1,
     gitHead,
     hostBuildId,
     rendererBuildId,
-    files: Object.fromEntries(Object.entries(files).map(([name, value]) => [name, value.sha256 ?? null])),
+    files: Object.fromEntries(Object.entries(files)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([name, value]) => [name, value.sha256 ?? null])),
   };
   return {
     gitHead,
@@ -2195,7 +2211,7 @@ try {
   baselineRowScale = baselineEvidence?.accepted
     ? requestedRows / 10_000
     : undefined;
-  calibratedCapacityProjection = configuration.scenario === 'scale' && baselineRowScale !== undefined
+  calibratedCapacityProjection = isLargeHistoryScenario && baselineRowScale !== undefined
     ? projectCapacityFromCalibration(baselineEvidence.capacityCalibration, {
       targetRows: requestedRows,
       safetyFactor: 1.25,
@@ -2216,7 +2232,7 @@ try {
     : configuration.scenario === 'endurance' && configuration.smoke
       ? ENDURANCE_SMOKE_MEMORY_RESERVATION_BYTES
       : ENDURANCE_FULL_MEMORY_RESERVATION_BYTES;
-  projectedPeakMemoryBytes = configuration.scenario === 'scale' && baselineEvidence?.accepted
+  projectedPeakMemoryBytes = isLargeHistoryScenario && baselineEvidence?.accepted
     ? Math.ceil(Math.max(baselineEvidence.topologyPeakBytes * 1.25, process.memoryUsage().rss + 512 * 1024 ** 2))
     : Math.ceil(process.memoryUsage().rss + workloadMemoryReservationBytes);
   effectiveMemoryLimitBytes = Math.floor(initialAvailableMemoryBytes * 0.75);
@@ -2259,7 +2275,7 @@ try {
     decision: projectedPeakBytes <= matrix.bounds.effectiveTemporaryLimitBytes
       && projectedPeakMemoryBytes <= effectiveMemoryLimitBytes
       && provenance.valid
-      && (configuration.scenario !== 'scale' || baselineEvidence?.accepted)
+      && (!isLargeHistoryScenario || baselineEvidence?.accepted)
       ? 'within-envelope'
       : 'blocked-capacity',
   };
@@ -2374,12 +2390,16 @@ function ensureGateEvidence() {
     );
   }
   if (!report.gates.scaleHistoryRows) {
-    configuration.scenario === 'scale'
+    isLargeHistoryScenario
       ? recordGate('scaleHistoryRows', tableRows?.primaryFacts, '>= 1000000 exact rows', (value) => value >= 1_000_000)
-      : recordUnqualified('scaleHistoryRows', 'Scale scenario was not selected.');
+      : recordUnqualified('scaleHistoryRows', 'A scale scenario was not selected.');
+  }
+  if (!report.gates.tenMillionHistory) {
+    configuration.scenario === 'ten-million'
+      ? recordGate('tenMillionHistory', tableRows?.primaryFacts, 'exactly 10000000 rows from an executed workload', (value) => value === 10_000_000)
+      : recordUnqualified('tenMillionHistory', 'The ten-million scenario was not selected.');
   }
   for (const [name, reason] of [
-    ['tenMillionHistory', 'Not executed; capacity tier remains unqualified.'],
     ['enduranceLightLoad', 'Not executed by this bounded baseline/scale harness.'],
     ['mixedLoad', 'Not executed by this bounded baseline/scale harness.'],
     ['schemaV2AndFaults', 'Not executed by this bounded baseline/scale harness.'],
@@ -2441,7 +2461,7 @@ function ensureAdditionalCapacity(label, additionalBytes) {
 }
 
 if (configuration.validate) {
-  const blocked = (configuration.scenario === 'scale' && !baselineEvidence?.accepted)
+  const blocked = (isLargeHistoryScenario && !baselineEvidence?.accepted)
     || !provenance.valid
     || matrix.bounds.effectiveTemporaryLimitBytes <= 0
     || projectedPeakBytes > matrix.bounds.effectiveTemporaryLimitBytes
@@ -2456,7 +2476,7 @@ if (configuration.validate) {
   report.validation = {
     decision: blocked ? 'blocked' : 'validated',
     reasons: [
-      ...(configuration.scenario === 'scale' && !baselineEvidence?.accepted ? [baselineEvidence?.reason ?? 'Scale requires a completed matching baseline measurement.'] : []),
+      ...(isLargeHistoryScenario && !baselineEvidence?.accepted ? [baselineEvidence?.reason ?? 'Large history qualification requires a completed matching baseline measurement.'] : []),
       ...(!provenance.valid ? provenance.errors : []),
       ...(matrix.bounds.effectiveTemporaryLimitBytes <= 0 ? ['Free-space reserve leaves no temporary capacity.'] : []),
       ...(projectedPeakBytes > matrix.bounds.effectiveTemporaryLimitBytes ? ['Projected proof tree exceeds the effective temporary-data/free-reserve limit.'] : []),
@@ -2468,7 +2488,7 @@ if (configuration.validate) {
   recordGate('projectedCapacity', projectedPeakBytes, `<= ${matrix.bounds.effectiveTemporaryLimitBytes} bytes`, (value) => value <= matrix.bounds.effectiveTemporaryLimitBytes, {
     fixtureDerived: !calibratedCapacityProjection,
     componentCalibrationDerived: Boolean(calibratedCapacityProjection),
-    baselineRequiredForScale: configuration.scenario === 'scale',
+    baselineRequiredForLargeHistory: isLargeHistoryScenario,
   });
   recordGate('projectedPeakMemory', projectedPeakMemoryBytes, `<= ${effectiveMemoryLimitBytes} bytes (75% of currently available memory)`, (value) => value <= effectiveMemoryLimitBytes);
   recordGate('reservedFreeDisk', initialFreeBytes, `>= ${matrix.bounds.minUnusedDiskBytes} bytes`, (value) => value >= matrix.bounds.minUnusedDiskBytes);
@@ -2499,7 +2519,7 @@ try {
     throw new Error(`insufficient free disk for reserved ${matrix.bounds.minUnusedDiskBytes} bytes`);
   }
   if (!provenance.valid) throw new Error(`artifact provenance is incomplete: ${provenance.errors.join('; ')}`);
-  if (!baselineEvidence?.accepted && configuration.scenario === 'scale') throw new Error(baselineEvidence?.reason ?? 'Scale requires a completed matching baseline measurement.');
+  if (!baselineEvidence?.accepted && isLargeHistoryScenario) throw new Error(baselineEvidence?.reason ?? 'Large history qualification requires a completed matching baseline measurement.');
   if (projectedPeakBytes > matrix.bounds.effectiveTemporaryLimitBytes) throw new Error(`projected proof tree ${projectedPeakBytes} exceeds effective temporary limit ${matrix.bounds.effectiveTemporaryLimitBytes}`);
   if (projectedPeakMemoryBytes > effectiveMemoryLimitBytes) throw new Error(`projected peak memory ${projectedPeakMemoryBytes} exceeds safe available-memory limit ${effectiveMemoryLimitBytes}`);
   checkResourceEnvelope('preflight');
@@ -3300,13 +3320,18 @@ try {
   })) failedGates.push('capacityCalibration');
   if (!recordGate('reservedFreeDisk', minimumFreeBytes, `>= ${matrix.bounds.minUnusedDiskBytes} bytes`, (value) => value >= matrix.bounds.minUnusedDiskBytes, { finalSampleBytes: envelope?.freeBytes })) failedGates.push('reservedFreeDisk');
   if (!recordGate('recorderWorkerRss', report.results.memory?.maxWorkerRssBytes, '<= 268435456 bytes per recorder/helper during ordinary ingestion', (value) => value <= 256 * 1024 ** 2)) failedGates.push('recorderWorkerRss');
-  if (configuration.scenario === 'scale') {
+  if (isLargeHistoryScenario) {
     if (!recordGate('scaleHistoryRows', finalTableRows?.primaryFacts, '>= 1000000 exact rows', (value) => value >= 1_000_000)) failedGates.push('scaleHistoryRows');
   } else {
-    recordUnqualified('scaleHistoryRows', 'Scale scenario was not selected.');
+    recordUnqualified('scaleHistoryRows', 'A scale scenario was not selected.');
+  }
+  if (configuration.scenario === 'ten-million') {
+    report.results.largeTierDecision = { tenMillionExecuted: true, exactRows: finalTableRows?.primaryFacts };
+    if (!recordGate('tenMillionHistory', finalTableRows?.primaryFacts, 'exactly 10000000 rows from an executed workload', (value) => value === 10_000_000)) failedGates.push('tenMillionHistory');
+  } else {
+    recordUnqualified('tenMillionHistory', 'The ten-million scenario was not selected.');
   }
   for (const [name, reason] of [
-    ['tenMillionHistory', 'Not executed; capacity tier remains unqualified.'],
     ['enduranceLightLoad', 'Not executed by this bounded baseline/scale harness.'],
     ['mixedLoad', 'Not executed by this bounded baseline/scale harness.'],
     ['schemaV2AndFaults', 'Not executed by this bounded baseline/scale harness.'],
