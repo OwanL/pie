@@ -2963,7 +2963,11 @@ try {
   const explicitLargeDetail = deserialize(Buffer.concat(detailParts));
   assert.equal(explicitLargeDetail.messages[0].content[0].text.length, 2 * 1024 ** 2);
   const schemaDescription = await timedWorkerQuery('schema', { type: 'schema' });
-  assert.equal(schemaDescription.databaseSchemaVersion, 8);
+  // The fresh fixture database is created by the production recorder, so this
+  // pin must track the production constant in extension/src/analytics/
+  // sqlite-recorder.ts (DATABASE_SCHEMA_VERSION, currently 13); a schema bump
+  // must consciously update this pin with the wave evidence.
+  assert.equal(schemaDescription.databaseSchemaVersion, 13);
   const logicalQuery = await timedWorkerQuery('logicalCount', {
     type: 'query',
     sql: 'SELECT COUNT(*) AS count FROM analytics_provider_usage_v1',

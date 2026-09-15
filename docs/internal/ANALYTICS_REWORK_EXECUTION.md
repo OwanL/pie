@@ -74,6 +74,20 @@ verification, and a scratch freeze manifest with the exact source/build fingerpr
 actual baseline 10k qualification and matched-host real VS Code evidence on that artifact with the
 predeclared memory/disk guards; no activation, cutoff, publication of live state, or restart.
 
+Blocker addendum (same checkpoint, pre-build): the serialized baseline preflight validated cleanly,
+but the actual baseline run failed its `inPlaceCorruption` gate with `AssertionError: 13 !== 8`.
+Root cause (bounded diagnosis, not an envelope or threshold change): the harness's stale literal
+`assert.equal(schemaDescription.databaseSchemaVersion, 8)` predates the production recorder schema
+bump to `DATABASE_SCHEMA_VERSION = 13` (commit `4177608b`, 2026-09-13, after the last executed
+baseline runs of 09-12), so no baseline had exercised it against a v13 recorder. The
+schema-faults harness already validates upgrades to `>= 13` and the candidate-trial readiness
+records recorder schema 13, so production schema 13 is the consistent current value. Fix: the pin
+now asserts 13 with a comment naming the owning constant, and the baseline binding is rerun after a
+fresh commit/build/freeze. The failed run is retained unmodified as evidence at
+`C:/dev/scratch/pie-final-wave-20260915-r01/baseline.json` (its deferred `tenMillionHistory` gate
+recorded honestly unqualified with the envelope reason; 9 gates passed, exact rows 10000/1003,
+cleanup complete).
+
 ---
 
 ## Checkpoint 57 - 2026-09-15T04:25Z, frozen-HEAD publishing build verified; 10M capacity conclusion
