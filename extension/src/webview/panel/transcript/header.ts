@@ -31,7 +31,7 @@ export function formatRequestTime(createdAt: string | undefined): RequestTimeMet
 }
 
 export function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
+  if (ms < 1000) return `${Math.round(ms)}ms`;
   const s = ms / 1000;
   if (s < 60) return `${s.toFixed(1)}s`;
   return `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
