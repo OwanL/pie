@@ -78,13 +78,58 @@ function parseArguments(argv) {
 }
 
 function readBoundedJson(filePath, label, maxBytes = 64 * 1024 * 1024) {
-  if (!existsSync(filePath)) fail(`${label} is missing: ${filePath}`);
-  if (!statSync(filePath).isFile() || statSync(filePath).size > maxBytes) fail(`${label} is not a bounded file`);
-  return JSON.parse(readFileSync(filePath, 'utf8'));
+  if (!existsSync(filePath)) throw new Error(`${label} is missing: ${filePath}`);
+  const stats = statSync(filePath);
+  if (!stats.isFile() || stats.size > maxBytes) throw new Error(`${label} is not a bounded file`);
+  try {
+    return JSON.parse(readFileSync(filePath, 'utf8'));
+  } catch (error) {
+    throw new Error(`${label} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function readBoundedJsonEvidence(filePath, label, maxBytes = 64 * 1024 * 1024) {
+  if (!existsSync(filePath)) throw new Error(`${label} is missing: ${filePath}`);
+  const stats = statSync(filePath);
+  if (!stats.isFile() || stats.size > maxBytes) throw new Error(`${label} is not a bounded file`);
+  const bytes = readFileSync(filePath);
+  if (bytes.length !== stats.size) throw new Error(`${label} changed while it was being read`);
+  try {
+    return {
+      value: JSON.parse(bytes.toString('utf8')),
+      bytes: bytes.length,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+    };
+  } catch (error) {
+    throw new Error(`${label} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function isObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function exactKeys(value, expected) {
+  if (!isObject(value)) return false;
+  const actual = Object.keys(value).sort();
+  const wanted = [...expected].sort();
+  return actual.length === wanted.length && actual.every((key, index) => key === wanted[index]);
+}
+
+function samePath(left, right) {
+  const resolvedLeft = path.resolve(left);
+  const resolvedRight = path.resolve(right);
+  return process.platform === 'win32'
+    ? resolvedLeft.toLowerCase() === resolvedRight.toLowerCase()
+    : resolvedLeft === resolvedRight;
 }
 
 function isSha256(value) {
   return typeof value === 'string' && /^[0-9a-f]{64}$/u.test(value);
+}
+
+function isAbsoluteSafePath(value) {
+  return typeof value === 'string' && path.isAbsolute(value);
 }
 
 function readdirSyncSafe(directory, suffix = '.json') {
@@ -127,6 +172,167 @@ const ALLOWED_TOOLING_DELTA = new Map(Object.entries({
   'docs/internal/ANALYTICS_REWORK_EXECUTION.md': 'committed documentation change since the measured head',
 }));
 
+/** A source-equivalence receipt is only meaningful when it binds the exact
+ * role descriptors selected by the aggregate qualification report. The
+ * optional roles are allowed for a later fuller wave; the six roles below are
+ * the minimum evidence envelope used by the approved provisional report. */
+export const SOURCE_EQUIVALENCE_QUALIFICATION_ROLES = Object.freeze([
+  'baseline',
+  'scale',
+  'tenMillion',
+  'endurance',
+  'mixedFullStats',
+  'mixedMemoryOnly',
+  'schemaFaults',
+  'matchedHost',
+]);
+export const SOURCE_EQUIVALENCE_REQUIRED_ROLES = Object.freeze([
+  'baseline',
+  'scale',
+  'endurance',
+  'mixedFullStats',
+  'mixedMemoryOnly',
+  'schemaFaults',
+]);
+
+/** Every approved component report carries this common source manifest. Keep
+ * the required paths explicit: a union fingerprint alone would let a partial
+ * wave omit a recorder/query artifact and still produce a receipt. */
+export const SOURCE_EQUIVALENCE_REQUIRED_MANIFEST_PATHS = Object.freeze([
+  'extension/out/analytics-recorder-supervisor.js',
+  'extension/out/analytics-sqlite-recorder.js',
+  'extension/out/analytics-query-client.js',
+  'extension/out/analytics-recorder-worker.js',
+  'extension/out/analytics-query-worker.js',
+  'extension/src/analytics/sqlite-recorder.ts',
+  'extension/scripts/analytics-p0-qualification.mjs',
+  'extension/scripts/analytics-p0-matched-host.mjs',
+  'extension/scripts/analytics-p0-overall-qualification.mjs',
+  'extension/scripts/analytics-p0-capacity.mjs',
+  'extension/scripts/analytics-p0-endurance-validation.mjs',
+  'extension/scripts/analytics-p0-mixed-validation.mjs',
+  'extension/scripts/analytics-p0-schema-faults.mjs',
+  'extension/scripts/windows-process-handle-collector.mjs',
+  'extension/scripts/windows-process-handle-collector.ps1',
+  'extension/scripts/analytics-real-producer-probe.ts',
+  'extensions/subagent/src/analytics-capture.ts',
+  'extensions/subagent/src/runtime-trace.ts',
+  'extensions/subagent/types.ts',
+  'shared/analytics/contracts.ts',
+  'shared/sensitive-redaction.ts',
+]);
+
+function manifestFingerprint({ sourceHead, buildId, files }) {
+  const hashes = Object.fromEntries(Object.keys(files).sort().map((file) => [file, files[file].sha256]));
+  return createHash('sha256').update(Buffer.from(JSON.stringify({
+    schemaVersion: 1,
+    gitHead: sourceHead,
+    hostBuildId: buildId,
+    rendererBuildId: buildId,
+    files: hashes,
+  }))).digest('hex');
+}
+
+function normalizeManifest(files, label) {
+  if (!isObject(files) || Object.keys(files).length === 0) throw new Error(`${label} is missing`);
+  const normalized = {};
+  for (const file of Object.keys(files).sort()) {
+    const receipt = files[file];
+    if (!file || path.isAbsolute(file) || file.split(/[\\\\/]/u).includes('..')
+      || !exactKeys(receipt, ['sha256', 'bytes']) || !isSha256(receipt.sha256)
+      || !Number.isSafeInteger(receipt.bytes) || receipt.bytes <= 0) {
+      throw new Error(`${label} entry is invalid: ${file}`);
+    }
+    normalized[file] = { sha256: receipt.sha256, bytes: receipt.bytes };
+  }
+  return normalized;
+}
+
+function manifestsEqual(left, right) {
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  if (leftKeys.length !== rightKeys.length || !leftKeys.every((key, index) => key === rightKeys[index])) return false;
+  return leftKeys.every((file) => left[file].sha256 === right[file].sha256 && left[file].bytes === right[file].bytes);
+}
+
+function validateRoleShape(role, report, descriptorPath, expected) {
+  const configuration = report?.configuration;
+  const provenance = report?.provenance;
+  if (!isObject(report) || !isObject(configuration) || !isObject(provenance)) {
+    throw new Error(`${role} bound report is missing configuration or provenance`);
+  }
+  if (!samePath(configuration.reportPath, descriptorPath)) {
+    throw new Error(`${role} bound report path does not match its qualification descriptor`);
+  }
+  if (provenance.valid !== true || provenance.gitHead !== expected.sourceHead
+    || provenance.hostBuildId !== expected.buildId || provenance.rendererBuildId !== expected.buildId
+    || provenance.coordinatedBuildId !== expected.buildId || provenance.fingerprint !== expected.sourceFingerprint) {
+    throw new Error(`${role} bound report identity does not match measured qualification identity`);
+  }
+  const scenario = configuration.scenario;
+  const valid = role === 'baseline' ? scenario === 'baseline' && configuration.rows === 10_000
+    : role === 'scale' ? scenario === 'scale' && configuration.rows === 1_000_000
+      : role === 'tenMillion' ? scenario === 'ten-million' && configuration.rows === 10_000_000
+        : role === 'endurance' ? scenario === 'endurance' && configuration.mode === 'full'
+          : role === 'mixedFullStats' ? scenario === 'mixed' && configuration.mode === 'full' && configuration.statsPollMode === 'full-stats'
+            : role === 'mixedMemoryOnly' ? scenario === 'mixed' && configuration.mode === 'full' && configuration.statsPollMode === 'memory-only'
+              : role === 'schemaFaults' ? scenario === 'schema-faults' && report.kind === 'pie-p0-schema-faults-v1'
+                : role === 'matchedHost' ? scenario === 'matched-host' && report.kind === 'pie-p0-matched-host-v1'
+                  : false;
+  if (!valid) throw new Error(`${role} bound report descriptor resolves to the wrong qualified role`);
+}
+
+/** Resolve the qualification report's exact bound role descriptors and their
+ * common source manifest. This is deliberately independent of --wave-dir:
+ * only paths hash-bound by the qualification report are admissible. */
+export function buildQualificationEvidence(qualification, expected) {
+  if (!isObject(qualification?.evidence?.reports)) {
+    throw new Error('qualification evidence.reports is missing; refusing to proceed');
+  }
+  const descriptors = qualification.evidence.reports;
+  const roles = Object.keys(descriptors);
+  const unknown = roles.filter((role) => !SOURCE_EQUIVALENCE_QUALIFICATION_ROLES.includes(role));
+  const missing = SOURCE_EQUIVALENCE_REQUIRED_ROLES.filter((role) => !roles.includes(role));
+  if (unknown.length > 0) throw new Error(`qualification evidence contains unknown role descriptors: ${unknown.join(', ')}`);
+  if (missing.length > 0) throw new Error(`qualification evidence is missing required role descriptors: ${missing.join(', ')}`);
+
+  const roleEvidence = {};
+  let commonManifest;
+  const seenPaths = new Set();
+  for (const role of roles.sort()) {
+    const descriptor = descriptors[role];
+    if (!exactKeys(descriptor, ['path', 'sha256', 'bytes'])
+      || !isAbsoluteSafePath(descriptor.path) || !isSha256(descriptor.sha256)
+      || !Number.isSafeInteger(descriptor.bytes) || descriptor.bytes <= 0) {
+      throw new Error(`${role} qualification descriptor is incomplete`);
+    }
+    const descriptorPath = path.resolve(descriptor.path);
+    const pathKey = process.platform === 'win32' ? descriptorPath.toLowerCase() : descriptorPath;
+    if (seenPaths.has(pathKey)) throw new Error(`qualification role descriptors reuse one report path: ${role}`);
+    seenPaths.add(pathKey);
+    const read = readBoundedJsonEvidence(descriptorPath, `${role} qualification report`);
+    if (read.sha256 !== descriptor.sha256 || read.bytes !== descriptor.bytes) {
+      throw new Error(`${role} qualification descriptor does not match its report bytes`);
+    }
+    validateRoleShape(role, read.value, descriptorPath, expected);
+    const manifest = normalizeManifest(read.value.provenance.files, `${role} source manifest`);
+    if (commonManifest === undefined) commonManifest = manifest;
+    else if (!manifestsEqual(commonManifest, manifest)) {
+      throw new Error(`qualified role manifests are not the same complete common manifest (${role})`);
+    }
+    roleEvidence[role] = { path: descriptorPath, sha256: descriptor.sha256, bytes: descriptor.bytes };
+  }
+  for (const file of SOURCE_EQUIVALENCE_REQUIRED_MANIFEST_PATHS) {
+    if (!commonManifest[file]) throw new Error(`required common manifest path is missing: ${file}`);
+  }
+  const fingerprint = manifestFingerprint({ sourceHead: expected.sourceHead, buildId: expected.buildId, files: commonManifest });
+  if (fingerprint !== expected.sourceFingerprint
+    || qualification.provenance?.fingerprint !== expected.sourceFingerprint) {
+    throw new Error('qualified common manifest fingerprint does not match the measured source fingerprint');
+  }
+  return { roles: roleEvidence, commonManifest, manifestFingerprint: fingerprint };
+}
+
 function main() {
   const options = parseArguments(process.argv.slice(2));
   if (!/^[0-9a-f]{40}$/.test(options.measuredSourceHead)) fail('measured source head must be a 40-character sha');
@@ -134,6 +340,11 @@ function main() {
   if (!isSha256(options.measuredFingerprint)) fail('measured fingerprint must be a sha256');
 
   const qualification = readBoundedJson(options.qualificationPath, 'qualification report');
+  if (qualification.kind !== 'pie-p0-overall-qualification-v1'
+    || qualification.status !== 'passed'
+    || qualification.configuration?.scenario !== 'overall') {
+    fail('qualification report is not the authoritative overall qualification envelope');
+  }
   const provenance = qualification.provenance;
   if (!provenance || provenance.valid !== true
     || provenance.gitHead !== options.measuredSourceHead
@@ -143,32 +354,14 @@ function main() {
   }
   const qualificationSha256 = createHash('sha256').update(readFileSync(options.qualificationPath)).digest('hex');
 
-  // Union of the measured per-role source manifests.
-  const measured = new Map();
   const waveDir = path.resolve(options.waveDir);
-  const roleNames = readdirSyncSafe(waveDir);
-  for (const roleName of roleNames) {
-    const roleFile = path.join(waveDir, roleName);
-    let report;
-    try {
-      report = readBoundedJson(roleFile, 'role report');
-    } catch {
-      continue;
-    }
-    const files = report?.provenance?.files;
-    if (files && report.provenance.gitHead === options.measuredSourceHead
-      && report.provenance.hostBuildId === options.measuredBuildId
-      && report.provenance.rendererBuildId === options.measuredBuildId) {
-      for (const [file, receipt] of Object.entries(files)) {
-        if (!isSha256(receipt?.sha256)) fail(`measured manifest entry is invalid: ${file}`);
-        if (measured.has(file) && measured.get(file) !== receipt.sha256) {
-          fail(`measured manifest disagrees across roles for ${file}`);
-        }
-        measured.set(file, receipt.sha256);
-      }
-    }
-  }
-  if (measured.size === 0) fail('no measured role provenance manifests were found; refusing to proceed');
+  const qualificationEvidence = buildQualificationEvidence(qualification, {
+    sourceHead: options.measuredSourceHead,
+    buildId: options.measuredBuildId,
+    sourceFingerprint: options.measuredFingerprint,
+  });
+  const measured = new Map(Object.entries(qualificationEvidence.commonManifest)
+    .map(([file, receipt]) => [file, receipt.sha256]));
 
   // Classify and verify every measured production file against the current tree.
   const productionRuntime = {};
@@ -295,6 +488,7 @@ function main() {
         coordinatedBuildId: provenance.coordinatedBuildId,
         fingerprint: provenance.fingerprint,
       },
+      qualificationEvidence,
     },
     candidate: {
       sourceHead: candidateSourceHead,
@@ -311,8 +505,10 @@ function main() {
   process.stdout.write(`${JSON.stringify({ receiptPath: options.outPath, receiptSha256, candidateBuildId }, null, 2)}\n`);
 }
 
-try {
-  main();
-} catch (error) {
-  fail(error instanceof Error ? error.message : String(error));
+if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {
+  try {
+    main();
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error));
+  }
 }

@@ -10,6 +10,11 @@ import {
   REQUIRED_OVERALL_QUALIFICATION_GATES,
   validateOverallQualificationRecomputation,
 } from '../extension/scripts/analytics-p0-overall-qualification.mjs';
+import {
+  SOURCE_EQUIVALENCE_QUALIFICATION_ROLES,
+  SOURCE_EQUIVALENCE_REQUIRED_MANIFEST_PATHS,
+  SOURCE_EQUIVALENCE_REQUIRED_ROLES,
+} from './analytics-source-equivalence.mjs';
 
 /**
  * The P0 producer currently emits schema 5.  A scenario-passed report is only
@@ -451,6 +456,149 @@ export function validateCandidateTrialArtifactFiles(report, expected) {
   }
 }
 
+function sourceManifestFingerprint(sourceHead, buildId, files) {
+  const hashes = Object.fromEntries(Object.keys(files).sort().map((file) => [file, files[file].sha256]));
+  return createHash('sha256').update(Buffer.from(JSON.stringify({
+    schemaVersion: 1,
+    gitHead: sourceHead,
+    hostBuildId: buildId,
+    rendererBuildId: buildId,
+    files: hashes,
+  }))).digest('hex');
+}
+
+function normalizedSourceManifest(files, label) {
+  if (!isObject(files) || Object.keys(files).length === 0) invalid(label, 'common source manifest is missing');
+  const normalized = {};
+  for (const file of Object.keys(files).sort()) {
+    const record = files[file];
+    if (!file || path.isAbsolute(file) || file.split(/[\\\\/]/u).includes('..')
+      || !candidateKeysMatch(record, ['sha256', 'bytes']) || !isSha256(record.sha256)
+      || !Number.isSafeInteger(record.bytes) || record.bytes <= 0) {
+      invalid(label, `common source manifest entry is invalid: ${file}`);
+    }
+    normalized[file] = { sha256: record.sha256, bytes: record.bytes };
+  }
+  return normalized;
+}
+
+function sourceManifestsEqual(left, right) {
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every((file, index) => file === rightKeys[index]
+      && left[file].sha256 === right[file].sha256
+      && left[file].bytes === right[file].bytes);
+}
+
+function validateBoundQualificationRole(role, report, descriptorPath, expected, label) {
+  if (!isObject(report) || !isObject(report.configuration) || !isObject(report.provenance)) {
+    invalid(label, `${role} bound report is missing configuration or provenance`);
+  }
+  if (!samePath(report.configuration.reportPath, descriptorPath)) {
+    invalid(label, `${role} bound report path does not match its qualification descriptor`);
+  }
+  const provenance = report.provenance;
+  if (provenance.valid !== true || provenance.gitHead?.toLowerCase() !== expected.sourceHead.toLowerCase()
+    || provenance.hostBuildId !== expected.buildId || provenance.rendererBuildId !== expected.buildId
+    || provenance.coordinatedBuildId !== expected.buildId || provenance.fingerprint !== expected.sourceFingerprint) {
+    invalid(label, `${role} bound report identity does not match measured qualification identity`);
+  }
+  const configuration = report.configuration;
+  const validRole = role === 'baseline' ? configuration.scenario === 'baseline' && configuration.rows === 10_000
+    : role === 'scale' ? configuration.scenario === 'scale' && configuration.rows === 1_000_000
+      : role === 'tenMillion' ? configuration.scenario === 'ten-million' && configuration.rows === 10_000_000
+        : role === 'endurance' ? configuration.scenario === 'endurance' && configuration.mode === 'full'
+          : role === 'mixedFullStats' ? configuration.scenario === 'mixed' && configuration.mode === 'full' && configuration.statsPollMode === 'full-stats'
+            : role === 'mixedMemoryOnly' ? configuration.scenario === 'mixed' && configuration.mode === 'full' && configuration.statsPollMode === 'memory-only'
+              : role === 'schemaFaults' ? configuration.scenario === 'schema-faults' && report.kind === 'pie-p0-schema-faults-v1'
+                : role === 'matchedHost' ? configuration.scenario === 'matched-host' && report.kind === 'pie-p0-matched-host-v1'
+                  : false;
+  if (!validRole) invalid(label, `${role} bound report descriptor resolves to the wrong qualified role`);
+}
+
+/** Re-open the exact role descriptors selected by the overall qualification
+ * and compare every role's complete common source manifest with the receipt.
+ * This acceptance-side check is intentionally independent of the producer's
+ * directory scan: omitted recorder/query entries, swapped descriptors, and
+ * receipt-only additions all fail closed. */
+function validateSourceEquivalenceQualificationEvidence(receipt, expected, label) {
+  const measured = receipt.measured;
+  if (!samePath(measured.qualificationReport, expected.qualificationPath)
+    || measured.qualificationReportSha256 !== expected.qualificationSha256) {
+    invalid(label, 'source equivalence receipt is not bound to the plan qualification bytes');
+  }
+  const qualification = readBoundedJsonFile(expected.qualificationPath, 'qualification report for source equivalence');
+  if (qualification.sha256 !== expected.qualificationSha256) {
+    invalid(label, 'qualification report bytes changed while checking source equivalence');
+  }
+  if (qualification.value.kind !== OVERALL_QUALIFICATION_KIND
+    || qualification.value.configuration?.scenario !== 'overall') {
+    invalid(label, 'source equivalence receipt requires the authoritative overall qualification report');
+  }
+  const descriptors = qualification.value.evidence?.reports;
+  if (!isObject(descriptors)) invalid(label, 'qualification evidence.reports is missing');
+  const descriptorRoles = Object.keys(descriptors);
+  const unknownRoles = descriptorRoles.filter((role) => !SOURCE_EQUIVALENCE_QUALIFICATION_ROLES.includes(role));
+  const missingRoles = SOURCE_EQUIVALENCE_REQUIRED_ROLES.filter((role) => !descriptorRoles.includes(role));
+  if (unknownRoles.length > 0) invalid(label, `qualification evidence contains unknown role descriptors: ${unknownRoles.join(', ')}`);
+  if (missingRoles.length > 0) invalid(label, `qualification evidence is missing required role descriptors: ${missingRoles.join(', ')}`);
+
+  const evidence = measured.qualificationEvidence;
+  if (!candidateKeysMatch(evidence, ['roles', 'commonManifest', 'manifestFingerprint'])) {
+    invalid(label, 'source equivalence receipt qualification evidence is incomplete');
+  }
+  if (!candidateKeysMatch(evidence.roles, descriptorRoles)) {
+    invalid(label, 'source equivalence receipt role descriptors are not the exact qualified set');
+  }
+  const commonManifest = normalizedSourceManifest(evidence.commonManifest, label);
+  for (const file of SOURCE_EQUIVALENCE_REQUIRED_MANIFEST_PATHS) {
+    if (!commonManifest[file]) invalid(label, `required common manifest path is missing: ${file}`);
+  }
+  if (!isSha256(evidence.manifestFingerprint)) {
+    invalid(label, 'source equivalence receipt common manifest fingerprint is invalid');
+  }
+  const seenPaths = new Set();
+  let boundManifest;
+  for (const role of descriptorRoles.sort()) {
+    const descriptor = descriptors[role];
+    const bound = evidence.roles[role];
+    if (!candidateKeysMatch(descriptor, ['path', 'sha256', 'bytes'])
+      || !isBoundedString(descriptor.path) || !path.isAbsolute(descriptor.path)
+      || !isSha256(descriptor.sha256) || !Number.isSafeInteger(descriptor.bytes) || descriptor.bytes <= 0) {
+      invalid(label, `${role} qualification descriptor is incomplete`);
+    }
+    if (!candidateKeysMatch(bound, ['path', 'sha256', 'bytes'])
+      || !isBoundedString(bound.path) || !path.isAbsolute(bound.path)
+      || !isSha256(bound.sha256) || !Number.isSafeInteger(bound.bytes) || bound.bytes <= 0
+      || !samePath(bound.path, descriptor.path) || bound.sha256 !== descriptor.sha256 || bound.bytes !== descriptor.bytes) {
+      invalid(label, `${role} source equivalence descriptor does not match the qualified descriptor`);
+    }
+    const descriptorPath = path.resolve(descriptor.path);
+    const pathKey = process.platform === 'win32' ? descriptorPath.toLowerCase() : descriptorPath;
+    if (seenPaths.has(pathKey)) invalid(label, `qualification role descriptors reuse one report path: ${role}`);
+    seenPaths.add(pathKey);
+    const roleRead = readBoundedJsonFile(descriptorPath, `${role} qualification report`);
+    if (roleRead.sha256 !== descriptor.sha256 || roleRead.bytes.length !== descriptor.bytes) {
+      invalid(label, `${role} qualification descriptor does not match its report bytes`);
+    }
+    validateBoundQualificationRole(role, roleRead.value, descriptorPath, expected, label);
+    const roleManifest = normalizedSourceManifest(roleRead.value.provenance.files, `${label} ${role}`);
+    if (boundManifest === undefined) boundManifest = roleManifest;
+    else if (!sourceManifestsEqual(boundManifest, roleManifest)) {
+      invalid(label, `qualified role manifests are not the same complete common manifest (${role})`);
+    }
+    if (!sourceManifestsEqual(commonManifest, roleManifest)) {
+      invalid(label, `${role} bound manifest does not exactly match the receipt common manifest`);
+    }
+  }
+  const fingerprint = sourceManifestFingerprint(expected.sourceHead, expected.buildId, commonManifest);
+  if (fingerprint !== expected.sourceFingerprint || evidence.manifestFingerprint !== fingerprint
+    || qualification.value.provenance?.fingerprint !== expected.sourceFingerprint) {
+    invalid(label, 'qualified common manifest fingerprint does not match the measured source fingerprint');
+  }
+}
+
 /** Validate the trial's candidate binding against the plan's approved
  * source-equivalence receipt. The receipt bytes are re-read and re-verified:
  * the exact plan-recorded sha256, the measured identity binding, the current
@@ -488,12 +636,19 @@ function validateCandidateBinding(binding, expected, label) {
   const candidate = receipt.candidate;
   if (!measured || measured.buildId !== expected.buildId
     || measured.sourceHead !== expected.sourceHead.toLowerCase()
-    || measured.sourceFingerprint !== expected.sourceFingerprint) {
+    || measured.sourceFingerprint !== expected.sourceFingerprint
+    || !candidateKeysMatch(measured.provenance, ['gitHead', 'coordinatedBuildId', 'fingerprint'])
+    || measured.provenance.gitHead !== expected.sourceHead.toLowerCase()
+    || measured.provenance.coordinatedBuildId !== expected.buildId
+    || measured.provenance.fingerprint !== expected.sourceFingerprint) {
     invalid(label, 'source equivalence receipt does not bind the measured evidence identity');
   }
-  if (!candidate || candidate.buildId !== expected.candidateBindings.candidateBuildId) {
+  if (!candidate || !isGitHead(candidate.sourceHead)
+    || candidate.buildId !== expected.candidateBindings.candidateBuildId
+    || candidate.rendererBuildId !== candidate.buildId) {
     invalid(label, 'source equivalence receipt does not bind the current candidate build');
   }
+  validateSourceEquivalenceQualificationEvidence(receipt, expected, label);
   const verify = (section, name) => {
     const entries = receipt[section];
     if (!entries || typeof entries !== 'object' || Array.isArray(entries) || Object.keys(entries).length === 0) {
@@ -931,6 +1086,7 @@ function readAndValidateActivationEvidence(options, { requireQualification, reco
     sourceHead,
     sourceFingerprint,
     workspaceId,
+    qualificationPath,
     qualificationSha256: qualification.sha256,
     ...(candidateBindings ? { candidateBindings } : {}),
   };
