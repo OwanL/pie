@@ -75,6 +75,21 @@ prints that path, so a failed detached run is diagnosable instead of silent; reg
 `detached helper captures child stdout/stderr in a durable log` added. Full scripts package:
 329 passed, 0 failed, 4 skipped.
 
+**Second launch incident root cause and repair:** the second `--detach` launch (child pid 21364,
+2026-09-16T06:02:07Z) died at the fence census with `All-host writer census is incomplete or
+ambiguous; refusing handoff.` — its error became visible thanks to the detach log. A read-only
+single-attempt census probe reproduced the refusal on every fresh process while a second census in
+the same process completed: the documented first-connection pipe stall (first connection after an
+idle period is accepted but never delivers its frame) hits the coordinator's single-attempt census,
+which the preflight masks behind its fresh-signed retry. Repair: the helper now wraps the
+analytics-activation handoff coordinator so only the pre-mutation census refusal is retried with
+fresh-signed requests (4 attempts, 100 ms spacing; the census completes before any fence write, so
+a refused attempt leaves no durable state); regression test stalls the coordinator census's first
+probe and requires the cutover to complete. Committed and pushed as `9f977f2b`. Full scripts
+package reruns: 330 passed, 0 failed, 4 skipped (one load-dependent failure was observed once in
+an intermediate full run and did not reproduce; it matches the known staggered-restart flake
+recorded in checkpoint 66).
+
 **Recovery instructions after a reload:** never relaunch blindly — read the detached-child log,
 the cutover journal (if present), and the report first. The helper is idempotent per phase; a
 phase entered without completing is observable in the journal/log. If the detached run is absent
