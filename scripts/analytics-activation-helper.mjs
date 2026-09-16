@@ -90,6 +90,7 @@ const LEGACY_TERMINAL_RESTART_RECEIPT_FILENAME = 'analytics-terminal-restart-rec
 // returned its durable fenced receipt. A plan-provided JSON file is never
 // accepted as a substitute for that producer.
 const PRODUCTION_HANDOFF_RECEIPT_KIND = 'pie-analytics-all-host-handoff-v1';
+const PROVISIONAL_P0_AUTHORIZATION = 'approved-provisional-p0-envelope-v1';
 
 function fail(message) {
   process.stderr.write(`analytics-activation-helper: ${message}\n`);
@@ -483,6 +484,39 @@ function admissionEvidenceOptions(plan) {
       sourceEquivalenceReceipt: plan.sourceEquivalenceReceipt,
     } : {}),
   };
+}
+
+/** Bind the orchestrator's P0 prerequisite to the evidence just admitted by
+ * the authoritative validator. Plan-supplied hashes/status cannot relabel an
+ * honestly provisional report as fully qualified or substitute other bytes. */
+export function productionCutoverPrerequisites(plan, admitted) {
+  const prerequisites = plan.prerequisites;
+  if (!prerequisites || typeof prerequisites !== 'object'
+    || !prerequisites.p0 || typeof prerequisites.p0 !== 'object') {
+    throw new Error('Production cutover P0 prerequisites are missing.');
+  }
+  const common = {
+    commitSha: prerequisites.p0.commitSha,
+    qualificationSha256: admitted.qualificationSha256,
+    trialSha256: admitted.trialSha256,
+  };
+  if (admitted.qualificationMode === 'provisional') {
+    if (plan.qualificationMode !== 'provisional') {
+      throw new Error('Provisionally qualified P0 evidence requires explicit provisional activation mode.');
+    }
+    return {
+      ...prerequisites,
+      p0: {
+        status: 'provisional-qualified',
+        provisionalAuthorization: PROVISIONAL_P0_AUTHORIZATION,
+        ...common,
+      },
+    };
+  }
+  if (admitted.qualificationMode !== 'qualified') {
+    throw new Error('Admitted P0 evidence has no authorized qualification mode.');
+  }
+  return { ...prerequisites, p0: { status: 'qualified', ...common } };
 }
 
 async function loadAdmissionModule() {
@@ -1142,7 +1176,7 @@ export async function runProductionCutover(plan, dependencies) {
       workspaceId: plan.workspaceId,
       stateDir: plan.stateDir,
       authorization: plan.authorization,
-      prerequisites: plan.prerequisites,
+      prerequisites: productionCutoverPrerequisites(plan, admitted),
       activationStore,
       registry,
       analyticsHandoff: adapters.coordinator('analytics-activation'),

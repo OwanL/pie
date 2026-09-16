@@ -35,6 +35,7 @@ import { withFileUpdateLock } from '../shared/settings-json-update.js';
  * recorded with the operation and must be accompanied by the full commit and
  * evidence gates below. */
 export const ANALYTICS_CUTOVER_PLAN_REFERENCE = 'analytics-rework-plan-17' as const;
+export const ANALYTICS_PROVISIONAL_P0_AUTHORIZATION = 'approved-provisional-p0-envelope-v1' as const;
 export const ANALYTICS_CUTOVER_JOURNAL_FILENAME = 'analytics-cutover-operation-v1.json' as const;
 export const ANALYTICS_CUTOVER_JOURNAL_SCHEMA_VERSION = 1 as const;
 export const ANALYTICS_CUTOVER_MAX_HOSTS = 512;
@@ -60,7 +61,11 @@ export interface AnalyticsCutoverAuthorization {
  * approval commit; it does not reinterpret or regenerate those reports. */
 export interface AnalyticsCutoverPrerequisites {
   readonly p0: {
-    readonly status: 'qualified';
+    /** `provisional-qualified` is an honest, separately authorized state
+     * derived by the production helper from independently recomputed evidence;
+     * it never means overall P0 was fully qualified. */
+    readonly status: 'qualified' | 'provisional-qualified';
+    readonly provisionalAuthorization?: typeof ANALYTICS_PROVISIONAL_P0_AUTHORIZATION;
     readonly commitSha: string;
     readonly qualificationSha256: HexSha256;
     readonly trialSha256: HexSha256;
@@ -442,8 +447,16 @@ function assertAuthorization(
     throw new Error('Production analytics cutover is not explicitly authorized.');
   }
   assertCommitSha(authorization.commitSha, 'cutover authorization commitSha');
-  if (!isRecord(prerequisites) || !isRecord(prerequisites.p0) || prerequisites.p0.status !== 'qualified') {
+  if (!isRecord(prerequisites) || !isRecord(prerequisites.p0)
+    || (prerequisites.p0.status !== 'qualified' && prerequisites.p0.status !== 'provisional-qualified')) {
     throw new Error('P0 qualification evidence is missing.');
+  }
+  if (prerequisites.p0.status === 'provisional-qualified') {
+    if (prerequisites.p0.provisionalAuthorization !== ANALYTICS_PROVISIONAL_P0_AUTHORIZATION) {
+      throw new Error('Provisional P0 qualification is not explicitly authorized by the approved envelope.');
+    }
+  } else if (prerequisites.p0.provisionalAuthorization !== undefined) {
+    throw new Error('Fully qualified P0 evidence must not carry provisional authorization.');
   }
   assertCommitSha(prerequisites.p0.commitSha, 'P0 qualification commitSha');
   if (prerequisites.p0.commitSha.toLowerCase() !== authorization.commitSha.toLowerCase()) {

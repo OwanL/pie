@@ -15,6 +15,7 @@ import { SessionFilesystemMutationBarrier, SessionLifecycleCleaner } from '../..
 import { SessionLifecycleStore, type AnalyticsWriterIdentity } from '../../src/backend/session-lifecycle-store.js';
 import {
   ANALYTICS_CUTOVER_JOURNAL_FILENAME,
+  ANALYTICS_PROVISIONAL_P0_AUTHORIZATION,
   AnalyticsCutoverOrchestrator,
   analyticsCutoverInventorySha256,
   type AnalyticsCutoverAuthorization,
@@ -83,6 +84,19 @@ function prerequisites() {
     terminalHandoff: {
       status: 'ready' as const,
       evidenceSha256: TERMINAL_EVIDENCE_SHA,
+    },
+  };
+}
+
+function provisionalPrerequisites() {
+  return {
+    ...prerequisites(),
+    p0: {
+      status: 'provisional-qualified' as const,
+      provisionalAuthorization: ANALYTICS_PROVISIONAL_P0_AUTHORIZATION,
+      commitSha: COMMIT_SHA,
+      qualificationSha256: QUALIFICATION_SHA,
+      trialSha256: TRIAL_SHA,
     },
   };
 }
@@ -352,6 +366,49 @@ test('cutover is disabled by default and does not create authority', async () =>
     assert.deepEqual(calls, []);
     assert.equal(resources.activationStore.read().authority, 'legacy');
     assert.equal(existsSync(path.join(resources.stateDir, ANALYTICS_CUTOVER_JOURNAL_FILENAME)), false);
+  } finally {
+    closeResources(resources);
+  }
+});
+
+test('provisional P0 activation requires the explicit approved-envelope authorization', async () => {
+  const resources = temporaryResources();
+  const calls: string[] = [];
+  try {
+    const options = baseOptions(resources, 'analytics-activation', calls);
+    await assert.rejects(
+      () => new AnalyticsCutoverOrchestrator({
+        ...options,
+        prerequisites: {
+          ...prerequisites(),
+          p0: {
+            status: 'provisional-qualified',
+            commitSha: COMMIT_SHA,
+            qualificationSha256: QUALIFICATION_SHA,
+            trialSha256: TRIAL_SHA,
+          },
+        },
+      } as AnalyticsCutoverOptions).run(),
+      /not explicitly authorized by the approved envelope/u,
+    );
+    assert.deepEqual(calls, []);
+    assert.equal(resources.activationStore.read().authority, 'legacy');
+  } finally {
+    closeResources(resources);
+  }
+});
+
+test('explicitly authorized provisional P0 activation remains labeled provisional and may proceed', async () => {
+  const resources = temporaryResources();
+  const calls: string[] = [];
+  try {
+    const options = baseOptions(resources, 'analytics-activation', calls);
+    const result = await new AnalyticsCutoverOrchestrator({
+      ...options,
+      prerequisites: provisionalPrerequisites(),
+    }).run();
+    assert.equal(result.status, 'complete');
+    assert.equal(resources.activationStore.read().authority, 'canonical');
   } finally {
     closeResources(resources);
   }

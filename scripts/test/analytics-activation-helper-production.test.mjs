@@ -21,7 +21,11 @@ import {
   verifyAnalyticsHandoffRequest,
 } from '../../shared/analytics/handoff.ts';
 
-import { loadPlan, runProductionCutover } from '../analytics-activation-helper.mjs';
+import {
+  loadPlan,
+  productionCutoverPrerequisites,
+  runProductionCutover,
+} from '../analytics-activation-helper.mjs';
 
 // The helper refuses to run unless it owns the detached terminal context.
 process.env.PIE_ANALYTICS_HELPER_DETACHED = '1';
@@ -75,8 +79,64 @@ function injectedActivationAdmission(options) {
     sourceHead: options.sourceHead,
     sourceFingerprint: options.sourceFingerprint,
     buildId: options.buildId,
+    qualificationMode: 'qualified',
   };
 }
+
+test('production prerequisites derive an honest provisional status and exact hashes from admitted evidence', () => {
+  const admitted = {
+    qualificationMode: 'provisional',
+    qualificationSha256: '1'.repeat(64),
+    trialSha256: '2'.repeat(64),
+  };
+  const result = productionCutoverPrerequisites({
+    qualificationMode: 'provisional',
+    prerequisites: {
+      p0: {
+        status: 'qualified',
+        commitSha,
+        qualificationSha256: '3'.repeat(64),
+        trialSha256: '4'.repeat(64),
+      },
+      p7a: { analyticsReady: true },
+      terminalHandoff: { status: 'pending' },
+    },
+  }, admitted);
+  assert.deepEqual(result.p0, {
+    status: 'provisional-qualified',
+    provisionalAuthorization: 'approved-provisional-p0-envelope-v1',
+    commitSha,
+    qualificationSha256: admitted.qualificationSha256,
+    trialSha256: admitted.trialSha256,
+  });
+  assert.equal(result.p7a.analyticsReady, true);
+});
+
+test('production prerequisites refuse provisional evidence without explicit provisional activation mode', () => {
+  assert.throws(() => productionCutoverPrerequisites({
+    prerequisites: { p0: { commitSha } },
+  }, {
+    qualificationMode: 'provisional',
+    qualificationSha256: '1'.repeat(64),
+    trialSha256: '2'.repeat(64),
+  }), /requires explicit provisional activation mode/u);
+});
+
+test('production prerequisites preserve the fully qualified path without provisional authorization', () => {
+  const result = productionCutoverPrerequisites({
+    prerequisites: { p0: { commitSha } },
+  }, {
+    qualificationMode: 'qualified',
+    qualificationSha256: '1'.repeat(64),
+    trialSha256: '2'.repeat(64),
+  });
+  assert.deepEqual(result.p0, {
+    status: 'qualified',
+    commitSha,
+    qualificationSha256: '1'.repeat(64),
+    trialSha256: '2'.repeat(64),
+  });
+});
 
 function toStatusHost(record) {
   return {

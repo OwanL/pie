@@ -173,6 +173,22 @@ export function candidateTrialQualificationMode(qualification: JsonObject): Cand
   throw new Error('Candidate-trial qualification report is not a qualified overall report with the exact requested identity.');
 }
 
+export function assertCandidateTrialQualificationRecomputation(
+  qualification: JsonObject,
+  expected: { buildId: string; sourceHead: string; sourceFingerprint: string },
+): CandidateTrialQualificationMode {
+  const mode = candidateTrialQualificationMode(qualification);
+  const recomputed = validateOverallQualificationRecomputation(qualification, expected);
+  const recomputationSatisfied = recomputed.valid
+    && (mode === 'full-qualified' ? recomputed.qualified === true : recomputed.provisional?.qualified === true);
+  if (!recomputationSatisfied) {
+    throw new Error(`Candidate-trial qualification evidence does not recompute as ${
+      mode === 'full-qualified' ? 'qualified' : 'provisionally qualified under the approved provisional envelope'
+    }: ${recomputed.errors.join('; ') || 'required gates are not all passed'}`);
+  }
+  return mode;
+}
+
 /** Verify the exact artifact/source equivalence receipt binding the measured
  * qualification identity to the current candidate build. Recomputes every
  * recorded hash from the current tree; any unverifiable or changed production
@@ -302,7 +318,7 @@ async function assertIdentityInputs(options: CandidateTrialReportOptions, qualif
     || provenance.fingerprint !== options.sourceFingerprint) {
     throw new Error('Candidate-trial qualification report is not a qualified overall report with the exact requested identity.');
   }
-  const mode = candidateTrialQualificationMode(qualification);
+  candidateTrialQualificationMode(qualification);
   const configured = qualification.configuration as JsonObject | undefined;
   if (configured?.scenario !== 'overall'
     || typeof configured.reportPath !== 'string'
@@ -355,19 +371,12 @@ async function assertIdentityInputs(options: CandidateTrialReportOptions, qualif
     }
     candidateBinding = verifySourceEquivalenceReceipt(options, { artifactRoot, candidateBuildId: options.candidateBuildId });
   }
-  return candidateBinding;
-  const recomputed = validateOverallQualificationRecomputation(qualification, {
+  assertCandidateTrialQualificationRecomputation(qualification, {
     buildId: options.buildId,
     sourceHead: options.sourceHead,
     sourceFingerprint: options.sourceFingerprint,
   });
-  const recomputationSatisfied = recomputed.valid
-    && (mode === 'full-qualified' ? recomputed.qualified === true : recomputed.provisional?.qualified === true);
-  if (!recomputationSatisfied) {
-    throw new Error(`Candidate-trial qualification evidence does not recompute as ${
-      mode === 'full-qualified' ? 'qualified' : 'provisionally qualified under the approved provisional envelope'
-    }: ${recomputed.errors.join('; ') || 'required gates are not all passed'}`);
-  }
+  return candidateBinding;
 }
 
 function trialObservation(options: {

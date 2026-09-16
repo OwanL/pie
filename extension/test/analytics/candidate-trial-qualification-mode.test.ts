@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { candidateTrialQualificationMode } from '../../src/analytics/candidate-trial-report.js';
+import {
+  assertCandidateTrialQualificationRecomputation,
+  candidateTrialQualificationMode,
+} from '../../src/analytics/candidate-trial-report.js';
 
 /** Reference overall qualification summary objects, shaped exactly as the
  * authoritative aggregator emits them. */
@@ -57,4 +60,27 @@ test('a mismatched qualified decision pair is refused', () => {
     decision: 'overall-unqualified',
     overallP0: 'qualified',
   })), /not a qualified overall report/u);
+});
+
+test('a claimed fully qualified report cannot bypass authoritative recomputation', () => {
+  assert.throws(() => assertCandidateTrialQualificationRecomputation(qualificationWith({
+    decision: 'overall-qualified',
+    overallP0: 'qualified',
+  }), {
+    buildId: 'candidate-build',
+    sourceHead: 'a'.repeat(40),
+    sourceFingerprint: 'b'.repeat(64),
+  }), /does not recompute as qualified/u);
+});
+
+test('a claimed provisional report cannot bypass authoritative recomputation', () => {
+  assert.throws(() => assertCandidateTrialQualificationRecomputation(qualificationWith({
+    decision: 'overall-unqualified',
+    overallP0: 'unqualified',
+    provisionalP0: 'provisional-qualified',
+  }), {
+    buildId: 'candidate-build',
+    sourceHead: 'a'.repeat(40),
+    sourceFingerprint: 'b'.repeat(64),
+  }), /does not recompute as provisionally qualified/u);
 });

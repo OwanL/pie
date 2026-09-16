@@ -14,6 +14,32 @@ Owning specifications: runbook; `docs/ANALYTICS_REWORK_PLAN.md` §§1, 11.6, 17;
 
 ---
 
+## Checkpoint 60 - 2026-09-16, candidate-trial and provisional production authorization blockers repaired
+
+The candidate-trial identity gate now runs authoritative overall-qualification recomputation before
+returning its candidate build binding. Both full and approved provisional claims fail closed when the
+reported qualification does not recompute; provisional evidence remains honestly `overallP0:
+unqualified`. The production cutover prerequisite now has a distinct `provisional-qualified` status
+and exact approved-envelope authorization marker. The activation helper derives that status and the
+two evidence hashes only from independently admitted evidence, requires explicit
+`qualificationMode: "provisional"`, and preserves the unchanged fully qualified path. Orchestrator
+commit/hash, P7a readiness, terminal handoff, host census, authority, and data-safety gates remain
+mandatory.
+
+Focused sanity/regression checks passed: candidate qualification-mode and recomputation tests,
+cutover-orchestrator tests, production-helper tests, and activation-admission tests (2/2 packages;
+extension 16/16, scripts 27 passed + 1 host symlink skip). Normal `npm run extension:build` passed;
+coordinated build `7f1dea0e022262367b89`, staged runtime
+`0c8999df4ee36dcf4cbf73ebc67f0f2d1cc5cfde535ce15943f2df4ac8e92acd` is selected for the next normal
+VS Code startup; the loaded runtime was not restarted or changed.
+
+No activation, storage cutoff, restart, deletion, candidate run, or source-equivalence claim occurred.
+Overall P0 remains unqualified. Next: run the bounded isolated candidate trial against the approved
+provisional report and this coordinated build, validate its exact report through admission, then
+prepare and run the production helper's read-only preflight. P7b terminal/cache audit remains separate.
+
+---
+
 ## Checkpoint 59 - 2026-09-16, provisional P0 qualification envelope implemented and pushed
 
 User decision (recorded): provisional cutover now; the named performance/measurement gaps are
