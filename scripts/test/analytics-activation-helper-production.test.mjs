@@ -684,6 +684,38 @@ test('PRODUCTION first activation keeps a present descriptor unreconcilable befo
   });
 });
 
+test('PRODUCTION fence census retries the first-connection pipe stall before fencing', async () => {
+  const generationId = randomUUID();
+  const world = buildCutoverWorld({
+    generationId,
+    boots: { '1': makeBoot(1), '2': makeBoot(2, { descriptorGeneration: generationId }) },
+    keyChannel: 'plan',
+  });
+  return withCutoverWorld(world, async ({ seams, dependencies }) => {
+    // The live-host pipe stall: the census's first connection after an idle
+    // period is accepted but never delivers its frame, closing without a
+    // response (observed live 2026-09-16). The construction census sends
+    // first and succeeds; the coordinator census's first probe (send #2)
+    // stalls and must be retried with fresh-signed requests by the helper.
+    let sendCount = 0;
+    const seamSend = seams.send;
+    seams.send = async (endpointName, request, timeoutMs) => {
+      sendCount += 1;
+      if (sendCount === 2) {
+        throw new Error('authenticated handoff endpoint closed without a response.');
+      }
+      return seamSend(endpointName, request, timeoutMs);
+    };
+    const result = await runProductionCutover(world.plan, dependencies);
+
+    assert.equal(result.status, 'complete');
+    assert.ok(sendCount >= 3, `the fence census retried after the stall (${sendCount} sends)`);
+    const fence = seams.registry.getAnalyticsWriterFence(world.workspaceId);
+    assert.equal(fence.state, 'open', 'the fence completed after the retried census');
+    assert.equal(readJournal(world).phase, 'complete');
+  });
+});
+
 test('PRODUCTION post-restart census explicitly requires the new generation descriptor', async () => {
   const generationId = randomUUID();
   const world = buildCutoverWorld({

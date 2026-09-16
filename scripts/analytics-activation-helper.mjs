@@ -1144,6 +1144,37 @@ function createHostHandoffKeyResolver(plan) {
   };
 }
 
+/** The all-host writer fence census probes every registered host over the
+ * extension host's pipe runtime, whose FIRST connection after an idle period
+ * can be accepted but never delivers its frame (observed live 2026-09-16 and
+ * reproducible on every fresh process against the bound host). The compiled
+ * coordinator runs the census once and fails closed on incompleteness, while
+ * the preflight runs the identical census behind a fresh-signed retry — so
+ * first-activation readiness is otherwise not reproducible by the production
+ * path. Retry only the pre-mutation census refusal: the census completes
+ * before `beginAnalyticsWriterFence` writes anything, so a refused attempt
+ * leaves no durable state, every retry signs fresh requests, and any other
+ * conflict fails loudly on the first attempt. */
+const WRITER_FENCE_CENSUS_STALL_ATTEMPTS = 4;
+const WRITER_FENCE_CENSUS_STALL_SPACING_MS = 100;
+
+function withWriterFenceCensusStallRetry(coordinator) {
+  return {
+    run: async (operationId) => {
+      for (let attempt = 1; attempt <= WRITER_FENCE_CENSUS_STALL_ATTEMPTS; attempt += 1) {
+        try {
+          return await coordinator.run(operationId);
+        } catch (error) {
+          const isCensusRefusal = error instanceof Error
+            && error.message.includes('All-host writer census is incomplete or ambiguous');
+          if (!isCensusRefusal || attempt === WRITER_FENCE_CENSUS_STALL_ATTEMPTS) throw error;
+          await new Promise((resolve) => setTimeout(resolve, WRITER_FENCE_CENSUS_STALL_SPACING_MS));
+        }
+      }
+    },
+  };
+}
+
 function validateProductionStorageInventory(plan, registry, dependencies) {
   if (process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV] !== STORAGE_CUTOFF_AUTHORIZATION_VALUE) {
     throw new Error(`Storage cutoff requires ${STORAGE_CUTOFF_AUTHORIZATION_ENV}=${STORAGE_CUTOFF_AUTHORIZATION_VALUE}.`);
@@ -1466,7 +1497,7 @@ export async function runProductionCutover(plan, dependencies) {
       activationStore,
       registry,
       ...(mode === 'analytics-activation' ? {
-        analyticsHandoff: adapters.coordinator('analytics-activation'),
+        analyticsHandoff: withWriterFenceCensusStallRetry(adapters.coordinator('analytics-activation')),
         activationRequest,
       } : {
         storageHandoff: adapters.coordinator('storage-cutoff'),
