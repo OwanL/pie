@@ -94,6 +94,18 @@ export interface AnalyticsCutoverPrerequisites {
     };
 }
 
+/** Immutable canonical storage request for a storage-cutoff run. The durable
+ * operation journal binds it before the first private cleanup, and every
+ * recovery must present the exact same request, so a changed resumed plan can
+ * never point the cleaner at a different database or root while the journal
+ * still owns the original canonical inventory facts. */
+export interface AnalyticsCutoverStorageRequest {
+  /** Digest of the explicitly validated inventory this request would close. */
+  readonly inventorySha256: HexSha256;
+  readonly cutoffRoots: { readonly sessions: string; readonly artifacts: string };
+  readonly analyticsDatabasePath: string;
+}
+
 export interface AnalyticsCutoverInventoryEvidence {
   /** The source must identify an owner, rather than being an unqualified
    * directory walk. The source is persisted for later operational review. */
@@ -185,6 +197,10 @@ export interface AnalyticsCutoverOptions {
   readonly collectInventory?: (
     fence: StorageCutoffWriterFenceReceipt,
   ) => Promise<AnalyticsCutoverInventoryEvidence>;
+  /** The immutable canonical storage request this run is authorized to
+   * execute. It is journaled before the first private cleanup and every
+   * recovery must present it unchanged. */
+  readonly storageRequest?: AnalyticsCutoverStorageRequest;
   readonly runtime: AnalyticsCutoverRuntime;
   readonly now?: () => number;
 }
@@ -231,6 +247,16 @@ interface AnalyticsCutoverJournal {
     readonly fenceOperationId: string;
     readonly fenceEpoch: number;
     readonly inventorySha256: HexSha256;
+  };
+  /** Immutable canonical storage request bound before the first private
+   * cleanup. Recovery must present the exact same inventory, cleanup roots,
+   * and canonical analytics database, or the run is refused instead of
+   * silently scrubbing a different database. */
+  readonly storageRequest?: {
+    readonly inventorySha256: HexSha256;
+    readonly cutoffRoots: { readonly sessions: string; readonly artifacts: string };
+    readonly analyticsDatabasePath: string;
+    readonly requestSha256: HexSha256;
   };
   readonly activation?: {
     readonly generationId: string;
@@ -311,6 +337,29 @@ function canonicalInventory(sessionIds: readonly string[]): string[] {
 
 export function analyticsCutoverInventorySha256(sessionIds: readonly string[]): HexSha256 {
   return sha256(`${JSON.stringify(canonicalInventory(sessionIds))}\n`);
+}
+
+export function analyticsCutoverStorageRequestSha256(request: AnalyticsCutoverStorageRequest): HexSha256 {
+  return sha256(`${JSON.stringify({
+    inventorySha256: request.inventorySha256,
+    cutoffRoots: { sessions: request.cutoffRoots.sessions, artifacts: request.cutoffRoots.artifacts },
+    analyticsDatabasePath: request.analyticsDatabasePath,
+  })}\n`);
+}
+
+function assertStorageRequest(request: AnalyticsCutoverStorageRequest): void {
+  assertSha256(request.inventorySha256, 'storage request inventorySha256');
+  if (!isRecord(request.cutoffRoots)) throw new Error('Storage cutoff request cutoffRoots is malformed.');
+  for (const rootName of ['sessions', 'artifacts'] as const) {
+    assertBoundedString(request.cutoffRoots[rootName], `storage request cutoffRoots.${rootName}`, 4_096);
+    if (!path.isAbsolute(request.cutoffRoots[rootName])) {
+      throw new Error(`Storage cutoff request cutoffRoots.${rootName} must be an absolute path.`);
+    }
+  }
+  assertBoundedString(request.analyticsDatabasePath, 'storage request analyticsDatabasePath', 4_096);
+  if (!path.isAbsolute(request.analyticsDatabasePath)) {
+    throw new Error('Storage cutoff request analyticsDatabasePath must be an absolute path.');
+  }
 }
 
 function assertHostVerificationShape(value: AnalyticsCutoverHostVerification): void {
@@ -516,6 +565,9 @@ function validateOptions(options: AnalyticsCutoverOptions): void {
   if (options.mode === 'storage-cutoff' && options.activationRequest !== undefined) {
     throw new Error('Storage-only cutoff must not include an analytics activation request.');
   }
+  if (options.mode === 'analytics-activation' && options.storageRequest !== undefined) {
+    throw new Error('Analytics-only cutover must not include a storage cutoff request.');
+  }
   if (options.mode !== 'storage-cutoff') {
     if (!options.activationRequest) throw new Error('Analytics activation request is required for this mode.');
     assertActivationRequest(options.activationRequest);
@@ -528,6 +580,10 @@ function validateOptions(options: AnalyticsCutoverOptions): void {
   if (options.mode !== 'analytics-activation') {
     if (!options.storageHandoff) throw new Error('Storage cutoff requires an all-host handoff coordinator.');
     if (!options.collectInventory) throw new Error('Storage cutoff requires an authoritative inventory collector.');
+    if (!options.storageRequest) {
+      throw new Error('Storage cutoff requires an immutable canonical storage request.');
+    }
+    assertStorageRequest(options.storageRequest);
     if (!options.prerequisites.p7b
       || options.prerequisites.p7b.lifecycleOwnerReady !== true
       || options.prerequisites.p7b.legacyScrubBoundaryReady !== true
@@ -619,6 +675,35 @@ function readJournal(stateDir: string): AnalyticsCutoverJournal | undefined {
       throw new Error('Cutover journal inventory digest is invalid; refusing recovery.');
     }
   }
+  if (journal.storageRequest !== undefined) {
+    if (!isRecord(journal.storageRequest)
+      || !isRecord(journal.storageRequest.cutoffRoots)
+      || journal.inventory === undefined) {
+      throw new Error('Cutover journal storage request is malformed; refusing recovery.');
+    }
+    assertSha256(journal.storageRequest.inventorySha256, 'cutover journal storage request inventorySha256');
+    if (journal.storageRequest.inventorySha256 !== journal.inventory.inventorySha256) {
+      throw new Error('Cutover journal storage request does not match its canonical inventory; refusing recovery.');
+    }
+    for (const rootName of ['sessions', 'artifacts'] as const) {
+      assertBoundedString(
+        journal.storageRequest.cutoffRoots[rootName],
+        `cutover journal storage request cutoffRoots.${rootName}`,
+        4_096,
+      );
+      if (!path.isAbsolute(journal.storageRequest.cutoffRoots[rootName])) {
+        throw new Error('Cutover journal storage request cutoffRoots must be absolute paths; refusing recovery.');
+      }
+    }
+    assertBoundedString(journal.storageRequest.analyticsDatabasePath, 'cutover journal storage request analyticsDatabasePath', 4_096);
+    if (!path.isAbsolute(journal.storageRequest.analyticsDatabasePath)) {
+      throw new Error('Cutover journal storage request analyticsDatabasePath must be absolute; refusing recovery.');
+    }
+    assertSha256(journal.storageRequest.requestSha256, 'cutover journal storage request requestSha256');
+    if (journal.storageRequest.requestSha256 !== analyticsCutoverStorageRequestSha256(journal.storageRequest)) {
+      throw new Error('Cutover journal storage request digest is invalid; refusing recovery.');
+    }
+  }
   if (journal.activation !== undefined) {
     if (!isRecord(journal.activation)) throw new Error('Cutover journal activation evidence is malformed.');
     assertUuid(journal.activation.generationId, 'cutover journal generationId');
@@ -672,6 +757,9 @@ function assertJournalPhaseConsistency(journal: AnalyticsCutoverJournal): void {
   }
   if (journal.storageFence !== undefined && journal.inventory === undefined) {
     throw new Error('Storage fence evidence is missing its authoritative inventory; refusing recovery.');
+  }
+  if (storageMode && journal.inventory !== undefined && journal.storageRequest === undefined) {
+    throw new Error('Storage cutover journal is missing its immutable storage request; refusing recovery.');
   }
   if (storageEvidencePhase && (!journal.storageFence || !journal.inventory)) {
     throw new Error('Analytics cutover journal has inconsistent storage fence phases; refusing recovery.');
@@ -743,6 +831,18 @@ function assertJournalMatchesOptions(
       || requested.activatedAt !== recorded.activatedAt
       || (requested.cutoffReceiptSha256 ?? null) !== (recorded.cutoffReceiptSha256 ?? null)) {
       throw new Error('Analytics cutover activation evidence changed during recovery.');
+    }
+  }
+  if (journal.inventory !== undefined) {
+    const request = options.storageRequest;
+    const recorded = journal.storageRequest;
+    if (!request || !recorded
+      || recorded.inventorySha256 !== request.inventorySha256
+      || recorded.cutoffRoots.sessions !== request.cutoffRoots.sessions
+      || recorded.cutoffRoots.artifacts !== request.cutoffRoots.artifacts
+      || recorded.analyticsDatabasePath !== request.analyticsDatabasePath
+      || recorded.requestSha256 !== analyticsCutoverStorageRequestSha256(request)) {
+      throw new Error('Analytics cutover storage request changed during recovery.');
     }
   }
 }
@@ -970,6 +1070,11 @@ export class AnalyticsCutoverOrchestrator {
       }
 
       if (!inventory) throw new Error('Storage cutoff inventory could not be initialized.');
+      const storageRequest = this.options.storageRequest;
+      if (!storageRequest) throw new Error('Storage cutoff requires an immutable canonical storage request.');
+      if (storageRequest.inventorySha256 !== inventory.inventorySha256) {
+        throw new Error('Storage cutoff request does not match the authoritative inventory collected under its fence.');
+      }
       journal = {
         ...(journal ?? {
           schemaVersion: ANALYTICS_CUTOVER_JOURNAL_SCHEMA_VERSION,
@@ -986,6 +1091,12 @@ export class AnalyticsCutoverOrchestrator {
         updatedAt: timestamp(this.now),
         storageFence,
         inventory,
+        storageRequest: {
+          inventorySha256: storageRequest.inventorySha256,
+          cutoffRoots: { sessions: storageRequest.cutoffRoots.sessions, artifacts: storageRequest.cutoffRoots.artifacts },
+          analyticsDatabasePath: storageRequest.analyticsDatabasePath,
+          requestSha256: analyticsCutoverStorageRequestSha256(storageRequest),
+        },
         storage: undefined,
         lastError: undefined,
       };

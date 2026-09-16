@@ -9,6 +9,7 @@ import {
   AnalyticsCutoverOrchestrator,
   ANALYTICS_CUTOVER_JOURNAL_FILENAME,
   analyticsCutoverInventorySha256,
+  analyticsCutoverStorageRequestSha256,
 } from '../../extension/src/host/analytics-cutover-orchestrator.ts';
 import {
   assertFreshAnalyticsWriterFenceRequest,
@@ -992,4 +993,296 @@ test('PRODUCTION P7b closes the explicit inventory and admits only a new-root su
     if (priorAuthorization === undefined) delete process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION;
     else process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION = priorAuthorization;
   }
+});
+
+/** Shared P7b interrupted-resume world: explicit deduplicated inventory, a
+ * canonical analytics database, and the already-active generation the cutoff
+ * binds to. Returns the exact digests the orchestrator must journal. */
+async function prepareStorageCutoffWorld(world, generationId) {
+  const sessionsDir = path.join(world.root, 'new-sessions');
+  const artifactsDir = path.join(world.root, 'new-artifacts');
+  const transcriptPath = path.join(world.root, 'legacy-sessions', 'session-cutoff.jsonl');
+  const privateTranscriptPath = path.join(world.root, 'legacy-sessions', 'session-private.jsonl');
+  const analyticsDatabasePath = path.join(world.root, 'analytics', 'analytics.sqlite');
+  mkdirSync(path.dirname(transcriptPath), { recursive: true });
+  writeFileSync(transcriptPath, `${JSON.stringify({ type: 'session', id: 'session-cutoff' })}\n`);
+  writeFileSync(privateTranscriptPath, `${JSON.stringify({ type: 'session', id: 'session-private' })}\n`);
+  const analytics = new SqliteAnalyticsRecorder(analyticsDatabasePath);
+  analytics.close();
+  const registry = new SessionLifecycleStore(world.lifecycleStorePath);
+  try {
+    registry.registerArtifact({
+      sessionId: 'session-cutoff', artifactId: 'transcript', kind: 'transcript',
+      locationKind: 'fixed_absolute', location: transcriptPath,
+      identityJson: filesystemArtifactIdentity(transcriptPath),
+    }, Date.now());
+    registry.registerArtifact({
+      sessionId: 'session-private', artifactId: 'transcript', kind: 'transcript',
+      locationKind: 'fixed_absolute', location: privateTranscriptPath,
+      identityJson: filesystemArtifactIdentity(privateTranscriptPath),
+    }, Date.now());
+    registry.setPrivacyMode('session-private', 'on', Date.now());
+  } finally {
+    registry.close();
+  }
+  const capability = storageCutoffRootCapability(sessionsDir);
+  const configPath = path.join(world.root, 'restart-config.json');
+  const config = JSON.parse(readFileSync(configPath, 'utf8'));
+  writeFileSync(configPath, JSON.stringify({ ...config, storageRootCapability: capability }, null, 2));
+  await activateGeneration(new ActivationStore({ stateDir: world.stateDir }), {
+    generationId,
+    buildId: world.plan.buildId,
+    qualificationSha256: world.qualificationSha256,
+    trialSha256: world.trialSha256,
+    activatedAt: new Date().toISOString(),
+  });
+  const storagePlan = {
+    ...world.plan,
+    cutoverMode: 'storage-cutoff',
+    operationId: randomUUID(),
+    expectedActiveGenerationId: generationId,
+    cutoffInventory: ['session-cutoff', 'session-private'],
+    cutoffInventoryValidated: true,
+    cutoffRoots: { sessions: sessionsDir, artifacts: artifactsDir },
+    analyticsDatabasePath,
+    prerequisites: {
+      ...world.plan.prerequisites,
+      p7b: {
+        lifecycleOwnerReady: true,
+        legacyScrubBoundaryReady: true,
+        rootSwitchReady: true,
+        expiryInPlaceReady: true,
+      },
+    },
+  };
+  const expectedInventorySha256 = analyticsCutoverInventorySha256(['session-cutoff', 'session-private']);
+  const expectedRequestSha256 = analyticsCutoverStorageRequestSha256({
+    inventorySha256: expectedInventorySha256,
+    cutoffRoots: { sessions: sessionsDir, artifacts: artifactsDir },
+    analyticsDatabasePath,
+  });
+  return {
+    storagePlan, sessionsDir, artifactsDir, transcriptPath, privateTranscriptPath,
+    analyticsDatabasePath, expectedInventorySha256, expectedRequestSha256,
+  };
+}
+
+/** Freeze the durable interrupted state exactly as the orchestrator leaves it
+ * before its first private cleanup: a completed durable storage fence plus the
+ * storage-fenced journal carrying the canonical inventory and the immutable
+ * storage request. */
+function freezeInterruptedStorageCutover(world, storagePlan) {
+  const registry = new SessionLifecycleStore(world.lifecycleStorePath);
+  try {
+    const identity = {
+      hostInstanceId: world.boots['1'].hostInstanceId,
+      workspaceId: world.workspaceId,
+      generationId: world.boots['1'].hostGenerationId,
+      buildId: world.plan.buildId,
+      processId: world.boots['1'].hostPid,
+    };
+    const begun = registry.beginAnalyticsWriterFence({
+      workspaceId: world.workspaceId,
+      operationId: storagePlan.operationId,
+      purpose: 'storage-cutoff',
+      expectedHosts: [identity],
+      nowMs: Date.now(),
+    });
+    registry.acknowledgeAnalyticsWriterFence({
+      workspaceId: world.workspaceId,
+      operationId: storagePlan.operationId,
+      fenceEpoch: begun.fenceEpoch,
+      identity,
+      activeWriterCount: 0,
+      nowMs: Date.now(),
+    });
+    const completed = registry.completeAnalyticsWriterFence(world.workspaceId, storagePlan.operationId, Date.now());
+    const inventorySha256 = analyticsCutoverInventorySha256(['session-cutoff', 'session-private']);
+    const cutoffRoots = {
+      sessions: storagePlan.cutoffRoots.sessions,
+      artifacts: storagePlan.cutoffRoots.artifacts,
+    };
+    const journal = {
+      schemaVersion: 1,
+      operationId: storagePlan.operationId,
+      workspaceId: world.workspaceId,
+      mode: 'storage-cutoff',
+      plan: 'analytics-rework-plan-17',
+      authorizationCommitSha: commitSha,
+      phase: 'storage-fenced',
+      startedAt: new Date(Date.now() - 2_000).toISOString(),
+      updatedAt: new Date(Date.now() - 1_000).toISOString(),
+      storageFence: {
+        schemaVersion: 1,
+        workspaceId: world.workspaceId,
+        operationId: storagePlan.operationId,
+        purpose: 'storage-cutoff',
+        fenceEpoch: completed.fenceEpoch,
+        status: 'fenced',
+        hostInstanceIds: [identity.hostInstanceId],
+        acknowledgedHostInstanceIds: [identity.hostInstanceId],
+      },
+      inventory: {
+        source: 'explicit-lifecycle-registry-v1',
+        sessionIds: ['session-cutoff', 'session-private'],
+        fenceOperationId: storagePlan.operationId,
+        fenceEpoch: completed.fenceEpoch,
+        inventorySha256,
+      },
+      storageRequest: {
+        inventorySha256,
+        cutoffRoots,
+        analyticsDatabasePath: storagePlan.analyticsDatabasePath,
+        requestSha256: analyticsCutoverStorageRequestSha256({
+          inventorySha256,
+          cutoffRoots,
+          analyticsDatabasePath: storagePlan.analyticsDatabasePath,
+        }),
+      },
+    };
+    writeFileSync(path.join(world.stateDir, ANALYTICS_CUTOVER_JOURNAL_FILENAME), `${JSON.stringify(journal, null, 2)}\n`);
+  } finally {
+    registry.close();
+  }
+}
+
+async function runWithStorageCutoffAuthorization(world, generationId, testBody) {
+  const priorAuthorization = process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION;
+  process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION = 'p7b-authorized-v1';
+  try {
+    const setup = await prepareStorageCutoffWorld(world, generationId);
+    return await withCutoverWorld({ ...world, plan: setup.storagePlan }, (context) => testBody(context, setup));
+  } finally {
+    if (priorAuthorization === undefined) delete process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION;
+    else process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION = priorAuthorization;
+  }
+}
+
+test('PRODUCTION interrupted storage-fenced resume reuses the journaled inventory and immutable request', async () => {
+  const generationId = randomUUID();
+  const world = buildCutoverWorld({
+    generationId,
+    boots: {
+      '1': makeBoot(1, { descriptorGeneration: generationId }),
+      '2': makeBoot(2, { descriptorGeneration: generationId }),
+    },
+    keyChannel: 'file',
+  });
+  return runWithStorageCutoffAuthorization(world, generationId, async ({ seams, dependencies }, setup) => {
+    freezeInterruptedStorageCutover(world, setup.storagePlan);
+    const result = await runProductionCutover(setup.storagePlan, dependencies);
+    assert.equal(result.status, 'complete');
+    assert.deepEqual(result.storage.closedSessionIds, ['session-cutoff', 'session-private']);
+    assert.deepEqual(result.storage.deletedSessionIds, ['session-private']);
+    assert.equal(result.storageVerification.admissionReopened, true);
+
+    // Genuine resumability: the journaled canonical inventory and storage
+    // request are adopted unchanged; the private cleanup ran exactly once,
+    // against the plan's canonical database.
+    const journal = readJournal(world);
+    assert.equal(journal.phase, 'complete');
+    assert.deepEqual(journal.inventory.sessionIds, ['session-cutoff', 'session-private']);
+    assert.equal(journal.inventory.inventorySha256, setup.expectedInventorySha256);
+    assert.equal(journal.storageRequest.requestSha256, setup.expectedRequestSha256);
+    assert.equal(existsSync(setup.privateTranscriptPath), false);
+    assert.equal(seams.registry.get('session-private').cleanupState, 'deleted');
+    assert.equal(JSON.parse(readFileSync(path.join(world.root, 'boot-counter.json'), 'utf8')).boot, 2);
+  });
+});
+
+test('PRODUCTION interrupted resume with a changed analytics database is refused before any cleanup', async () => {
+  const generationId = randomUUID();
+  const world = buildCutoverWorld({
+    generationId,
+    boots: {
+      '1': makeBoot(1, { descriptorGeneration: generationId }),
+      '2': makeBoot(2, { descriptorGeneration: generationId }),
+    },
+    keyChannel: 'file',
+  });
+  return runWithStorageCutoffAuthorization(world, generationId, async ({ seams, dependencies }, setup) => {
+    freezeInterruptedStorageCutover(world, setup.storagePlan);
+    const changedDatabasePath = path.join(world.root, 'analytics', 'decoy-analytics.sqlite');
+    const decoy = new SqliteAnalyticsRecorder(changedDatabasePath);
+    decoy.close();
+    const canonicalBytes = readFileSync(setup.analyticsDatabasePath);
+    const decoyBytes = readFileSync(changedDatabasePath);
+    const changedPlan = {
+      ...setup.storagePlan,
+      analyticsDatabasePath: changedDatabasePath,
+    };
+    await assert.rejects(
+      () => runProductionCutover(changedPlan, dependencies),
+      /Analytics cutover storage request changed during recovery/,
+    );
+
+    // The canonical private fact and both databases are untouched; no storage
+    // cutoff receipt exists, so the resumed run never reached private cleanup.
+    assert.equal(existsSync(setup.privateTranscriptPath), true);
+    assert.equal(seams.registry.get('session-private').cleanupState, 'open');
+    assert.equal((seams.registry.get('session-cutoff')?.closedAtMs ?? null), null);
+    assert.ok(readFileSync(setup.analyticsDatabasePath).equals(canonicalBytes));
+    assert.ok(readFileSync(changedDatabasePath).equals(decoyBytes));
+    assert.equal(existsSync(path.join(world.stateDir, 'storage-cutoff-receipt-v1.json')), false);
+    assert.equal(readJournal(world).phase, 'storage-fenced');
+  });
+});
+
+test('PRODUCTION interrupted resume with changed cutoff roots is refused before any cleanup', async () => {
+  const generationId = randomUUID();
+  const world = buildCutoverWorld({
+    generationId,
+    boots: {
+      '1': makeBoot(1, { descriptorGeneration: generationId }),
+      '2': makeBoot(2, { descriptorGeneration: generationId }),
+    },
+    keyChannel: 'file',
+  });
+  return runWithStorageCutoffAuthorization(world, generationId, async ({ seams, dependencies }, setup) => {
+    freezeInterruptedStorageCutover(world, setup.storagePlan);
+    const changedPlan = {
+      ...setup.storagePlan,
+      cutoffRoots: {
+        sessions: path.join(world.root, 'other-sessions'),
+        artifacts: path.join(world.root, 'other-artifacts'),
+      },
+    };
+    await assert.rejects(
+      () => runProductionCutover(changedPlan, dependencies),
+      /Analytics cutover storage request changed during recovery/,
+    );
+    assert.equal(existsSync(setup.transcriptPath), true);
+    assert.equal(existsSync(setup.privateTranscriptPath), true);
+    assert.equal(existsSync(path.join(world.stateDir, 'storage-cutoff-receipt-v1.json')), false);
+    assert.equal(readJournal(world).phase, 'storage-fenced');
+  });
+});
+
+test('PRODUCTION interrupted resume with a changed explicit inventory is refused before any cleanup', async () => {
+  const generationId = randomUUID();
+  const world = buildCutoverWorld({
+    generationId,
+    boots: {
+      '1': makeBoot(1, { descriptorGeneration: generationId }),
+      '2': makeBoot(2, { descriptorGeneration: generationId }),
+    },
+    keyChannel: 'file',
+  });
+  return runWithStorageCutoffAuthorization(world, generationId, async ({ seams, dependencies }, setup) => {
+    freezeInterruptedStorageCutover(world, setup.storagePlan);
+    const changedPlan = {
+      ...setup.storagePlan,
+      cutoffInventory: ['session-cutoff'],
+    };
+    await assert.rejects(
+      () => runProductionCutover(changedPlan, dependencies),
+      /Analytics cutover storage request changed during recovery/,
+    );
+    // Dropping the private session from the resumed inventory must not scrub
+    // it: the journaled canonical inventory remains the only authority.
+    assert.equal(existsSync(setup.privateTranscriptPath), true);
+    assert.equal(seams.registry.get('session-private').cleanupState, 'open');
+    assert.equal(existsSync(path.join(world.stateDir, 'storage-cutoff-receipt-v1.json')), false);
+    assert.equal(readJournal(world).phase, 'storage-fenced');
+  });
 });

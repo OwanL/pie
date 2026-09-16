@@ -14,6 +14,52 @@ Owning specifications: runbook; `docs/ANALYTICS_REWORK_PLAN.md` §§1, 11.6, 17;
 
 ---
 
+## Checkpoint 63 - 2026-09-16, two P1 P7b review findings repaired: unified cutover plan marker and immutable storage request recovery binding
+
+Both fixes target the committed P7b production storage-cutoff route (`02681d3c`, based on new
+restart-owner HEAD `c18a58a1`); the restart owner itself is unchanged.
+
+Finding 1 (authorization marker): the helper's mandatory storage-cutoff preflight demanded plan
+authorization `docs/ANALYTICS_REWORK_PLAN.md#116-final-cutover` while the production orchestrator's
+`assertAuthorization` requires exactly `ANALYTICS_CUTOVER_PLAN_REFERENCE` (`analytics-rework-plan-17`),
+so valid execution plans failed preflight and preflight-valid plans failed execution.
+`scripts/analytics-activation-helper.mjs` preflight now imports the orchestrator's constant from the
+same built `analytics-cutover-orchestrator.js` module that execution uses — one authoritative runtime
+marker; a missing built module pushes an explicit build blocker. The required `approved: true` + full
+commit-sha authorization envelope is unchanged.
+
+Finding 2 (recovery binding): `assertJournalMatchesOptions` bound operation/workspace/mode/commit and
+activation evidence but not the immutable storage request, and recovery reused `journal.inventory`
+without the current collector, so a resumed plan with changed `cutoffRoots`/`analyticsDatabasePath`
+could point the helper's cleaner at a different database while the journal still owned the original
+canonical private facts. The orchestrator now takes an immutable `storageRequest` (explicitly
+validated inventory digest + final cutoff roots + canonical `analyticsDatabasePath`), requires it for
+every storage mode, rejects it for analytics-only runs, journals it (structured fields plus a compact
+`requestSha256` over inventory digest/roots/database path) at the storage-fenced write before the
+first private cleanup, verifies it against the fence-collected inventory at bind time, and refuses
+recovery on any mismatch. `readJournal` additionally validates request shape/paths/digest, ties its
+inventory digest to the canonical journal inventory, and journals with storage evidence but no
+recorded request fail closed (no production journals exist). Unchanged resumed plans keep adopting
+the journaled fence/inventory exactly as before.
+
+Focused tests (disposable worlds, no live state): cutover-orchestrator **8/8** (storage/both options
+extended with the required request; unchanged recovery call sequences intact), production helper
+**16/16** including four new P7b tests — interrupted storage-fenced resume completes reusing the
+journaled inventory and immutable request, and interrupted resumes with a changed analytics database,
+changed cutoff roots, or a changed explicit inventory are each refused before any cleanup (canonical
+private transcript, both database files, and the storage-fenced journal verified untouched; no cutoff
+receipt produced). Preflight **3/3** including the new marker sanity regression: the orchestrator
+constant passes while the divergent docs marker fails the mandatory preflight. Required
+`npm run extension:build` passed; coordinated identity `e168f925b3f87c7d4463`, staged immutable
+runtime `6dfcc6103d424d6810ba85bcebcd3b99fcf1430b6a6032848be543c1985c11f5` is selected for the next
+normal VS Code startup and is not claimed loaded. No live activation, storage cutoff, restart,
+deletion, closure, or data scan occurred; the five unrelated model/settings/pricing edits remain
+untouched and unstaged. Bootstrap and live gate unchanged from checkpoint 62: one normal VS Code
+restart arms the controlled-restart ingress; then the runbook preflight → detached production plan
+flow applies with plans authorized by the orchestrator marker.
+
+---
+
 ## Checkpoint 62 - 2026-09-16, real one-shot controlled VS Code restart owner implemented; bootstrap restart still required
 
 The live restart ingress from checkpoint 61 is now implemented and rehearsed, not performed. A new

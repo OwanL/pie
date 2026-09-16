@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 
 import { createLegacyRestartEnvironment } from '../analytics-activation-helper.mjs';
+import { ANALYTICS_CUTOVER_PLAN_REFERENCE } from '../../extension/src/host/analytics-cutover-orchestrator.ts';
 
 const repositoryRoot = path.resolve(import.meta.dirname, '../..');
 const helperPath = path.join(repositoryRoot, 'scripts', 'analytics-activation-helper.mjs');
@@ -53,4 +54,51 @@ test('PREFLIGHT reports blockers and cannot create or mutate activation state', 
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('PREFLIGHT storage-cutoff authorization binds the production orchestrator plan marker', () => {
+  const runPreflight = (plan) => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'pie-preflight-cutoff-'));
+    const planPath = path.join(root, 'plan.json');
+    writeFileSync(planPath, JSON.stringify({
+      stateDir: path.join(root, 'state'),
+      cutoverMode: 'storage-cutoff',
+      workspaceId: 'preflight-workspace',
+      ...plan,
+    }));
+    try {
+      return spawnSync(process.execPath, [helperPath, '--preflight', '--plan', planPath], {
+        cwd: repositoryRoot,
+        encoding: 'utf8',
+        windowsHide: true,
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+  const authorization = {
+    schemaVersion: 1,
+    approved: true,
+    commitSha: 'a'.repeat(40),
+  };
+
+  // The authoritative marker is exactly the production orchestrator constant;
+  // the preflight must not demand a different authorization envelope.
+  const accepted = runPreflight({
+    authorization: { ...authorization, plan: ANALYTICS_CUTOVER_PLAN_REFERENCE },
+  });
+  assert.equal(accepted.status, 2);
+  const acceptedReport = JSON.parse(accepted.stdout);
+  assert.equal(acceptedReport.status, 'blocked');
+  assert.equal(acceptedReport.readiness.storageCutoff, false);
+  assert.ok(!acceptedReport.blockers.includes('production analytics cutover is not explicitly authorized'));
+
+  // A divergent plan marker (the old preflight-only docs reference) fails the
+  // mandatory preflight closed.
+  const divergent = runPreflight({
+    authorization: { ...authorization, plan: 'docs/ANALYTICS_REWORK_PLAN.md#116-final-cutover' },
+  });
+  assert.equal(divergent.status, 2);
+  const divergentReport = JSON.parse(divergent.stdout);
+  assert.ok(divergentReport.blockers.includes('production analytics cutover is not explicitly authorized'));
 });

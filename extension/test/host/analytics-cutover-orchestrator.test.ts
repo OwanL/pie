@@ -319,6 +319,16 @@ function baseOptions(
     cleaner: resources.cleaner,
     ...(mode !== 'storage-cutoff' ? { activationRequest: activationRequest() } : {}),
     expectedActiveGenerationId: GENERATION_ID,
+    ...(mode !== 'analytics-activation' ? {
+      storageRequest: {
+        inventorySha256: analyticsCutoverInventorySha256(['session-a', 'session-b']),
+        cutoffRoots: {
+          sessions: path.join(resources.root, 'sessions'),
+          artifacts: path.join(resources.root, 'artifacts'),
+        },
+        analyticsDatabasePath: path.join(resources.root, 'analytics.sqlite'),
+      },
+    } : {}),
     analyticsHandoff: {
       run: async (operationId) => {
         calls.push(`analytics-fence:${operationId}`);

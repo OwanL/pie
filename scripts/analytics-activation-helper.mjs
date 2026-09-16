@@ -918,8 +918,22 @@ async function runPreflight(plan) {
     const prerequisites = plan.prerequisites;
     const p7a = prerequisites?.p7a;
     const p7b = prerequisites?.p7b;
-    if (!authorization || authorization.schemaVersion !== 1
-      || authorization.plan !== 'docs/ANALYTICS_REWORK_PLAN.md#116-final-cutover'
+    // The authoritative plan marker is the production orchestrator's own
+    // constant from the same built module execution uses, so preflight and
+    // execution can never disagree about which authorization envelope is
+    // mandatory.
+    let planReference = null;
+    try {
+      ({ ANALYTICS_CUTOVER_PLAN_REFERENCE: planReference } = await import(
+        pathToFileURL(path.join(outRoot, 'analytics-cutover-orchestrator.js')).href
+      ));
+    } catch {
+      planReference = null;
+    }
+    if (planReference === null) {
+      storageBlockers.push('production analytics cutover authority module is missing; run the extension build first');
+    } else if (!authorization || authorization.schemaVersion !== 1
+      || authorization.plan !== planReference
       || authorization.approved !== true || !/^[0-9a-f]{40}$/iu.test(authorization.commitSha ?? '')) {
       storageBlockers.push('production analytics cutover is not explicitly authorized');
     }
@@ -1433,6 +1447,15 @@ export async function runProductionCutover(plan, dependencies) {
         activationRequest,
       } : {
         storageHandoff: adapters.coordinator('storage-cutoff'),
+        // The immutable canonical storage request is journaled by the
+        // orchestrator before the first private cleanup; a resumed plan that
+        // changed the inventory, roots, or analytics database is then refused
+        // instead of silently scrubbing a different database.
+        storageRequest: {
+          inventorySha256: deps.analyticsCutoverInventorySha256(storageInventory.sessionIds),
+          cutoffRoots: storageInventory.roots,
+          analyticsDatabasePath: plan.analyticsDatabasePath,
+        },
         collectInventory: async (fence) => {
           if (fence.operationId !== operationId || fence.purpose !== 'storage-cutoff') {
             throw new Error('Storage inventory cannot be collected outside its durable writer fence.');
