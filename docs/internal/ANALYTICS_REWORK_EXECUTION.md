@@ -150,6 +150,44 @@ the live registered host `7053bef0…` (pid 7740); the durable fence for
 freeze acknowledged; admission stays revoked until the terminal handoff completes. VS Code was NOT
 restarted by that run (main process and host pid unchanged since 04:51Z).
 
+**Fifth incident — exact gate reached, preserved, and reported:** relaunch (spawner 40332,
+2026-09-16T06:43:31Z, after the build-id repair) PASSED every gate the earlier incidents hit: the
+restart owner found the host carrying the candidate build marker, acknowledged the freeze (already
+`fenced`), and commanded the controlled restart — the host acknowledged and durably armed its
+pending restart slot
+(`C:/Users/OwanLazic/AppData/Local/pie/data/state/analytics-pending-controlled-restart-v1.json.f34c508f….json`,
+5-minute expiry, re-armable). The scheduled quiet restart then DID NOT restart the extension host,
+and the owner timed out: `controlled restart did not reach complete replacement census before
+timeout (7053bef0…: loaded-generation evidence is missing)`. VS Code's renderer log names the exact
+gate (`window1/renderer.log`, 2026-09-16 18:43:32.553 NZST): `Extension host was not stopped
+because of veto (stop reason: An explicit request, veto reason: A session is in progress.)` —
+VS Code 1.137's chat lifecycle handler (`chatLifecycleHandler`) vetoes extension-host stop via
+`onWillStop` with reason `A session is in progress.` for ANY open, non-archived chat session whose
+provider is not a `agent-host-*` built-in — i.e., this orchestrating Pi conversation itself. The
+fallback window reload is subject to the same chat vetoes. Closing or archiving the session is the
+only release, which an in-session orchestration cannot perform, and no `extension/src` byte may be
+changed for a bypass. Per the overnight runbook the exact gate is reported rather than pretending
+staged code is loaded, and no destructive bypass (closing windows, killing processes, archiving the
+session from inside itself) was performed.
+
+**Durable state at this gate (all preserved; no rollback):** cutover journal phase
+`analytics-committed` (the analytics generation activation IS committed durably); durable writer
+fence epoch 1 state `fenced` (old-generation writers stay fenced, admission revoked) until the
+terminal handoff completes; the successor pending slot is armed but expired (5-minute expiry) and is
+re-armed by a new owner request; restart-owner records preserved:
+`analytics-restart-owner-v1-r01-failed-build-id-refusal.json` (refused before any request; cleared
+to allow the repaired rerun) and `analytics-restart-owner-v1.json` (issued restart, vetoed,
+`assignments` retained). VS Code processes are unchanged (main 37152, extension host 7740, booted
+04:51Z); no successor registered; no loaded marker or terminal receipt exists.
+
+**Recovery shape after this gate (for the next bounded run, outside this session):** the terminal
+handoff is resumable across a plain extension-host boot — on the next quiet boot (e.g. after this
+conversation is closed/archived or the window is reloaded by the user), the pie extension claims the
+re-armed pending slot, binds its successor key, registers with the staged build marker, and writes
+the loaded marker and terminal receipt; a relaunched helper then resumes from the committed journal,
+validates the post-restart census against the committed generation, reopens writer admission, and
+finishes the sanitized report. Relaunching from inside this conversation cannot pass the chat veto.
+
 **Recovery instructions after a reload:** never relaunch blindly — read the detached-child log,
 the cutover journal (if present), and the report first. The helper is idempotent per phase; a
 phase entered without completing is observable in the journal/log. If the detached run is absent
