@@ -871,7 +871,7 @@ export class SessionLifecycleStore {
         throw new SessionLifecycleConflictError(`Analytics host ${hostInstanceId} is terminal and cannot be re-registered.`);
       }
       const activeFence = this.database.prepare(`
-        SELECT state, purpose, expected_hosts_json, expected_hosts_sha256, successor_capability
+        SELECT state, purpose, expected_hosts_json, expected_hosts_sha256, successor_capability, updated_at_ms
         FROM analytics_writer_fences WHERE workspace_id = ?
       `).get(workspaceId) as {
         state: AnalyticsWriterFenceState;
@@ -879,6 +879,7 @@ export class SessionLifecycleStore {
         expected_hosts_json: string;
         expected_hosts_sha256: string;
         successor_capability: string | null;
+        updated_at_ms: string;
       } | undefined;
       if (activeFence && activeFence.state !== 'open') {
         // A successor host may register only after the fence is durable and
@@ -899,15 +900,44 @@ export class SessionLifecycleStore {
         }
         const expectedIds = new Set(expectedHosts.map((expected) => expected.hostInstanceId));
         const registered = this.database.prepare(`
-          SELECT host_instance_id, state FROM analytics_hosts WHERE workspace_id = ?
-        `).all(workspaceId) as Array<{ host_instance_id: string; state: AnalyticsHostState }>;
+          SELECT host_instance_id, state, endpoint_name, capabilities_json, registered_at_ms
+          FROM analytics_hosts WHERE workspace_id = ?
+        `).all(workspaceId) as Array<{
+          host_instance_id: string;
+          state: AnalyticsHostState;
+          endpoint_name: string | null;
+          capabilities_json: string;
+          registered_at_ms: string;
+        }>;
         for (const row of registered) {
           if (expectedIds.has(row.host_instance_id)) {
             if (row.state !== 'stopped' && row.state !== 'stopping') {
               throw new SessionLifecycleConflictError('Analytics host registration requires every fenced host to be stopping or stopped.');
             }
           } else if (row.state !== 'stopped') {
-            throw new SessionLifecycleConflictError('Analytics host registration found another non-terminal writer.');
+            let capabilities: unknown;
+            try {
+              capabilities = JSON.parse(row.capabilities_json);
+            } catch {
+              capabilities = undefined;
+            }
+            const successorControl = row.state === 'registered'
+              && row.endpoint_name !== null
+              && Array.isArray(capabilities)
+              && capabilities.includes('authenticated-control')
+              && capabilities.includes('controlled-restart')
+              && (activeFence.purpose === 'analytics-activation'
+                || (activeFence.successor_capability !== null
+                  && capabilities.includes(activeFence.successor_capability)));
+            let registeredAfterFence = false;
+            try {
+              registeredAfterFence = BigInt(row.registered_at_ms) >= BigInt(activeFence.updated_at_ms);
+            } catch {
+              registeredAfterFence = false;
+            }
+            if (!successorControl || !registeredAfterFence) {
+              throw new SessionLifecycleConflictError('Analytics host registration found another non-terminal writer.');
+            }
           }
         }
       }

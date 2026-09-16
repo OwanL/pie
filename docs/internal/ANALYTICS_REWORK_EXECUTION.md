@@ -14,6 +14,48 @@ Owning specifications: runbook; `docs/ANALYTICS_REWORK_PLAN.md` §§1, 11.6, 17;
 
 ---
 
+## Checkpoint 64 - 2026-09-16, multi-host controlled restart settlement and successor identity binding repaired
+
+The three restart-owner blockers from the read-only review are now repaired without performing a live
+restart or mutating production data. Controlled-restart requests carry a signed target predecessor,
+fresh successor handoff key, exact loaded-generation evidence destination, successor capabilities, and
+an evidence-owner bit. Each predecessor writes an independently named, bounded pending record keyed by
+its identity digest; successor boots atomically claim one record, use its fresh key/capabilities, write
+the claimed loaded-generation path, and preserve the normal shared loaded marker for ordinary boots.
+
+The restart owner now assigns distinct successor keys and host-scoped terminal/loaded evidence paths,
+removes stale evidence before requesting a restart, parses both evidence schemas strictly, correlates
+loaded and terminal evidence to the same actual successor identity/process, authenticates that successor
+with its fresh key, and requires a complete replacement census before success. Conflicting durable key
+entries, mixed builds, incomplete capabilities, stale identities, unauthenticated endpoints, malformed
+evidence, timeout, or noncompletion fail closed. A prior owner record for the same operation also blocks
+a duplicate destructive request. The lifecycle registry admits multiple staggered successor rows only
+when each is a fresh authenticated controlled-restart endpoint (and storage-cutoff successors carry
+the authorized final-root capability), so the registry cannot mistake an old non-terminal writer for a
+replacement.
+
+Focused disposable validation passed: controlled-restart tests **8/8**, analytics-runtime tests
+**13/13**, lifecycle-store tests **21/21**, and restart-owner tests **6/6**. The owner tests include a
+real built-control one-host handoff, a staggered two-host handoff with distinct predecessor keys,
+successor identities, authenticated successor keys, and host-specific evidence paths, plus a timeout
+that exits non-zero and refuses a repeated destructive request. `npm run extension:build` passed;
+coordinated host/webview identity is `67dc8288f6a19b1b65e8`, and immutable staged runtime
+`4280844eaf180adb10a6ebd921e2f81a43a4d07d71ff5f2c4bd379e031eee7b9` is selected for the next normal
+VS Code startup and is **not claimed loaded**. No live VS Code restart, analytics activation, storage
+cutoff, deletion, closure, or production-data scan occurred. The five unrelated model/settings/pricing
+edits remain untouched and unstaged.
+
+**Bootstrap and subsequent invocation remain explicit:** perform one normal VS Code restart (close and
+relaunch the windows running Pie, or run Developer: Reload Window) to load the staged ingress; this is
+not a production writer restart. Then the runbook preflight → detached production-plan flow uses the
+exact plan field
+`"restartCommand": "node C:\\dev\\repos\\pie\\scripts\\analytics-restart-owner.mjs --plan <absolute-p7b-plan.json>"`,
+with the helper-supplied `PIE_ANALYTICS_RESTART_NONCE` and
+`PIE_ANALYTICS_TERMINAL_RESTART_RECEIPT_PATH` environment pair. No live cutover is authorized by this
+checkpoint.
+
+---
+
 ## Checkpoint 63 - 2026-09-16, two P1 P7b review findings repaired: unified cutover plan marker and immutable storage request recovery binding
 
 Both fixes target the committed P7b production storage-cutoff route (`02681d3c`, based on new

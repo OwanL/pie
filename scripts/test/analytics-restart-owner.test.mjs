@@ -112,7 +112,7 @@ const [configJson] = process.argv.slice(2);
 const config = JSON.parse(configJson);
 const { AnalyticsHandoffControl } = await import(pathToFileURL(config.controlEntry).href);
 const { SessionLifecycleStore, storageCutoffRootCapability } = await import(pathToFileURL(config.lifecycleStoreEntry).href);
-const { createAnalyticsHostControlledRestart } = await import(pathToFileURL(config.restartEntry).href);
+const { createAnalyticsHostControlledRestart, claimPendingControlledRestart } = await import(pathToFileURL(config.restartEntry).href);
 const { createAnalyticsHostWriterFence } = await import(pathToFileURL(config.allHostEntry).href);
 function pipeName(workspaceId, hostInstanceId) {
   const digest = createHash('sha256').update(workspaceId + String.fromCharCode(0) + hostInstanceId).digest('hex').slice(0, 40);
@@ -123,13 +123,78 @@ const identity = {
   hostInstanceId: config.hostInstanceId,
   workspaceId: config.workspaceId,
   generationId: config.generationId,
-  buildId: 'build-owner-test',
+  buildId: config.buildId,
   processId: process.pid,
   capabilities: config.cutoffRoot
     ? ['host-discovery', 'host-status', storageCutoffRootCapability(config.cutoffRoot)]
     : ['host-discovery', 'host-status'],
 };
 const store = new SessionLifecycleStore(config.lifecycleStorePath);
+let successorControl;
+async function simulateSuccessor() {
+  const pending = claimPendingControlledRestart(config.stateDir);
+  if (!pending) throw new Error('fixture successor could not claim its pending restart');
+  for (const predecessorHostInstanceId of config.predecessorHostInstanceIds ?? [identity.hostInstanceId]) {
+    const predecessor = store.getAnalyticsHost(predecessorHostInstanceId);
+    if (predecessor && predecessor.state !== 'stopped') {
+      store.markAnalyticsHostState(
+        predecessor.hostInstanceId,
+        predecessor.processId,
+        predecessor.generationId,
+        'stopped',
+        Date.now(),
+      );
+    }
+  }
+  if (config.successorDelayMs) {
+    await new Promise((resolve) => setTimeout(resolve, config.successorDelayMs));
+  }
+  const successorIdentity = {
+    hostInstanceId: config.successorHostInstanceId,
+    workspaceId: config.workspaceId,
+    generationId: config.successorHostInstanceId,
+    buildId: config.buildId,
+    processId: process.pid,
+    capabilities: ['host-discovery', 'host-status', ...pending.successorCapabilities],
+  };
+  successorControl = new AnalyticsHandoffControl({
+    registry: store,
+    identity: successorIdentity,
+    key: pending.successorHandoffKey,
+    pipeName: pipeName(config.workspaceId, config.successorHostInstanceId),
+    restart: createAnalyticsHostControlledRestart({
+      stateDir: config.stateDir,
+      identity: successorIdentity,
+      performRestart: () => undefined,
+      schedule: () => () => undefined,
+    }),
+  });
+  await successorControl.start();
+  const loadedAt = new Date().toISOString();
+  writeFileSync(pending.loadedGenerationPath, JSON.stringify({
+    schemaVersion: 1,
+    generationId: config.analyticsGenerationId,
+    buildId: config.buildId,
+    manifestRevision: 1,
+    manifestSha256: 'a'.repeat(64),
+    workspaceId: config.workspaceId,
+    hostInstanceId: config.successorHostInstanceId,
+    restartNonce: pending.restartNonce,
+    loadedAt,
+  }) + String.fromCharCode(10));
+  writeFileSync(pending.terminalRestartReceiptPath, JSON.stringify({
+    schemaVersion: 1,
+    kind: 'pie-p7-terminal-restart-v1',
+    status: 'ready',
+    generationId: config.analyticsGenerationId,
+    buildId: config.buildId,
+    restartNonce: pending.restartNonce,
+    hostInstanceId: config.successorHostInstanceId,
+    processId: process.pid,
+    loadedAt,
+    verifiedAt: new Date().toISOString(),
+  }) + String.fromCharCode(10));
+}
 const control = new AnalyticsHandoffControl({
   registry: store,
   identity,
@@ -146,7 +211,16 @@ const control = new AnalyticsHandoffControl({
   restart: createAnalyticsHostControlledRestart({
     stateDir: config.stateDir,
     identity,
-    performRestart: () => writeFileSync(config.restartMarkerPath, 'restarted' + String.fromCharCode(10)),
+    performRestart: () => {
+      writeFileSync(config.restartMarkerPath, 'restarted' + String.fromCharCode(10));
+      if (config.simulateSuccessor !== false) {
+        void simulateSuccessor().catch((error) => writeFileSync(
+          config.errorMarkerPath,
+          'successor: ' + String(error && error.message ? error.message : error) + String.fromCharCode(10),
+          { flag: 'a' },
+        ));
+      }
+    },
   }),
 });
 await control.start();
@@ -166,6 +240,11 @@ async function waitForMarker(markerPath, timeoutMs = 10_000, capturedError = '')
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error(`fixture marker ${markerPath} never appeared${capturedError ? `: ${capturedError.slice(0, 2_000)}` : ''}`);
+}
+
+function waitForChildExit(child) {
+  if (child.exitCode !== null) return Promise.resolve(child.exitCode);
+  return new Promise((resolve) => child.once('exit', resolve));
 }
 
 const PENDING_FILENAME = 'analytics-pending-controlled-restart-v1.json';
@@ -198,7 +277,10 @@ test('the one-shot owner coordinates the fenced census, records the nonce, and r
         lifecycleStorePath: path.join(stateDir, 'session-lifecycle.sqlite'),
         workspaceId,
         hostInstanceId: preRestartHostInstanceId,
+        successorHostInstanceId: restartedHostInstanceId,
         generationId: preRestartHostInstanceId,
+        analyticsGenerationId: 'generation-owner-e2e',
+        buildId: 'build-owner-test',
         stateDir,
         key,
         cutoffRoot,
@@ -269,6 +351,8 @@ test('the one-shot owner coordinates the fenced census, records the nonce, and r
           terminalRestartReceiptPath: receiptPath,
           lifecycleStorePath: path.join(stateDir, 'session-lifecycle.sqlite'),
           cutoffRoots: { sessions: cutoffRoot, artifacts: 'C:\\final\\artifacts' },
+          generationId: 'generation-owner-e2e',
+          buildId: 'build-owner-test',
           hostHandoffKeysPath: keysPath,
           hostProbeTimeoutMs: 5_000,
         }, 8 * 1024 * 1024);
@@ -287,44 +371,21 @@ test('the one-shot owner coordinates the fenced census, records the nonce, and r
         });
         owner.stderr?.on('data', (chunk) => { ownerError += String(chunk); });
 
-        // Simulate the restarted successor boot registering while the owner
-        // watches the census. The pre-restart host quits as part of its quiet
-        // restart, so it marks itself terminal before the successor registers.
-        await new Promise((resolve) => setTimeout(resolve, 400));
-        store.markAnalyticsHostState(preRestartHostInstanceId, fixturePid, preRestartHostInstanceId, 'stopped', Date.now());
-        store.registerAnalyticsHost({
-          hostInstanceId: restartedHostInstanceId,
-          workspaceId,
-          generationId: restartedHostInstanceId,
-          buildId: 'build-owner-test',
-          processId: process.pid,
-          endpointName: null,
-          capabilities: [
-            'host-discovery',
-            'host-status',
-            'authenticated-control',
-            storageCutoffRootCapability(cutoffRoot),
-          ],
-          registeredAtMs: `${Date.now()}`,
-        });
-        // The host handler's quiet restart fires after its bounded delay; the
-        // receipt may then appear so the owner can complete.
+        // The fixture's controlled-restart handler claims its scoped pending
+        // record, starts a fresh authenticated endpoint, and writes complete
+        // loaded/terminal evidence for the actual successor identity.
         await waitForMarker(restartMarker, 10_000, fixtureError);
-        writeFileSync(receiptPath, `${JSON.stringify({ kind: 'pie-p7-terminal-restart-v1' })}\n`);
         const exitCode = await new Promise((resolve) => owner.on('exit', resolve));
         assert.equal(exitCode, 0, `owner failed: ${ownerError}`);
 
-        const pending = readJson(path.join(stateDir, PENDING_FILENAME));
-        assert.equal(pending.restartNonce, 'nonce-owner-e2e-1');
-        assert.equal(pending.terminalRestartReceiptPath, receiptPath);
-        assert.equal(pending.purpose, 'storage-cutoff');
-        assert.equal(pending.operationId, 'op-owner-e2e');
+        assert.equal(existsSync(path.join(stateDir, PENDING_FILENAME)), false, 'the successor must consume its scoped pending record');
         const ownerRecord = readJson(ownerRecordPath(stateDir));
         assert.equal(ownerRecord.outcome, 'completed');
         assert.deepEqual(ownerRecord.ackedHostInstanceIds, [preRestartHostInstanceId]);
         assert.equal(ownerRecord.receiptObserved, true);
         assert.deepEqual(ownerRecord.refreshedKeyHostInstanceIds, [restartedHostInstanceId]);
-        assert.equal(readJson(keysPath)[restartedHostInstanceId], key);
+        assert.equal(ownerRecord.authenticatedSuccessorHostInstanceIds[0], restartedHostInstanceId);
+        assert.notEqual(readJson(keysPath)[restartedHostInstanceId], key);
         assert.equal(readFileSync(restartMarker, 'utf8'), 'restarted\n');
       } finally {
         fixture.kill();
@@ -332,6 +393,272 @@ test('the one-shot owner coordinates the fenced census, records the nonce, and r
       }
     } finally {
       store.close();
+    }
+  } finally {
+    await removeTemporaryRoot(root);
+  }
+});
+
+test('the owner settles staggered two-host replacements with distinct successor keys and evidence paths', async () => {
+  const root = temporaryRoot('two-host');
+  const stateDir = path.join(root, 'state');
+  const workspaceId = `workspace-owner-two-host-${randomBytes(6).toString('hex')}`;
+  const predecessors = ['host-owner-pre-a', 'host-owner-pre-b'];
+  const successors = ['host-owner-post-a', 'host-owner-post-b'];
+  const oldKeys = {
+    [predecessors[0]]: 'old-owner-key-a-000000000000000000000001',
+    [predecessors[1]]: 'old-owner-key-b-000000000000000000000002',
+  };
+  const operationId = 'op-owner-two-host';
+  let store;
+  try {
+    const storeModule = await import(pathToFileURL(lifecycleStoreEntryPath).href);
+    const { SessionLifecycleStore } = storeModule;
+    store = new SessionLifecycleStore(path.join(stateDir, 'session-lifecycle.sqlite'));
+    const fixtures = [];
+    let owner;
+    try {
+      const fixturePath = path.join(root, 'two-host-fixture.mjs');
+      writeFileSync(fixturePath, fixtureSource);
+      const configs = predecessors.map((hostInstanceId, index) => ({
+        controlEntry: controlEntryPath,
+        lifecycleStoreEntry: lifecycleStoreEntryPath,
+        restartEntry: restartEntryPath,
+        allHostEntry: allHostEntryPath,
+        lifecycleStorePath: path.join(stateDir, 'session-lifecycle.sqlite'),
+        workspaceId,
+        hostInstanceId,
+        predecessorHostInstanceIds: predecessors,
+        generationId: hostInstanceId,
+        analyticsGenerationId: 'generation-owner-two-host',
+        buildId: 'build-owner-test',
+        successorHostInstanceId: successors[index],
+        successorDelayMs: index === 0 ? 0 : 150,
+        stateDir,
+        key: oldKeys[hostInstanceId],
+        readyMarkerPath: path.join(root, `fixture-${index}-ready.txt`),
+        restartMarkerPath: path.join(root, `fixture-${index}-restarted.txt`),
+        errorMarkerPath: path.join(root, `fixture-${index}-errors.txt`),
+      }));
+      const fixtureErrors = configs.map(() => '');
+      for (const [index, config] of configs.entries()) {
+        const child = spawn(process.execPath, [fixturePath, JSON.stringify(config)], {
+          stdio: ['ignore', 'ignore', 'pipe'],
+        });
+        child.stderr?.on('data', (chunk) => { fixtureErrors[index] += String(chunk); });
+        fixtures.push(child);
+      }
+      await Promise.all(configs.map((config, index) => waitForMarker(
+        config.readyMarkerPath,
+        10_000,
+        fixtureErrors[index],
+      )));
+      const identities = configs.map((config) => ({
+        hostInstanceId: config.hostInstanceId,
+        workspaceId,
+        generationId: config.generationId,
+        buildId: config.buildId,
+        processId: Number(readFileSync(config.readyMarkerPath, 'utf8').trim()),
+      }));
+      const fence = store.beginAnalyticsWriterFence({
+        workspaceId,
+        operationId: `${operationId}:analytics-activation`,
+        purpose: 'analytics-activation',
+        expectedHosts: identities,
+        nowMs: Date.now(),
+      });
+      for (const identity of identities) {
+        store.acknowledgeAnalyticsWriterFence({
+          workspaceId,
+          operationId: `${operationId}:analytics-activation`,
+          fenceEpoch: fence.fenceEpoch,
+          identity,
+          activeWriterCount: 0,
+          nowMs: Date.now(),
+        });
+      }
+      store.completeAnalyticsWriterFence(workspaceId, `${operationId}:analytics-activation`, Date.now());
+      const keysPath = path.join(root, 'two-host-keys.json');
+      writeBoundedJsonAtomically(keysPath, oldKeys, 64 * 1024);
+      const receiptPath = path.join(root, 'two-host-terminal-receipt.json');
+      const planPath = path.join(root, 'two-host-plan.json');
+      writeBoundedJsonAtomically(planPath, {
+        stateDir,
+        workspaceId,
+        cutoverMode: 'analytics-activation',
+        operationId,
+        terminalRestartReceiptPath: receiptPath,
+        lifecycleStorePath: path.join(stateDir, 'session-lifecycle.sqlite'),
+        generationId: 'generation-owner-two-host',
+        buildId: 'build-owner-test',
+        hostHandoffKeysPath: keysPath,
+        hostProbeTimeoutMs: 5_000,
+        restartSettleTimeoutMs: 10_000,
+      }, 8 * 1024 * 1024);
+      owner = spawn(process.execPath, [
+        path.join(repositoryRoot, 'scripts', 'analytics-restart-owner.mjs'),
+        '--plan', planPath,
+      ], {
+        cwd: repositoryRoot,
+        env: {
+          ...process.env,
+          PIE_ANALYTICS_RESTART_NONCE: 'nonce-owner-two-host-1',
+          PIE_ANALYTICS_TERMINAL_RESTART_RECEIPT_PATH: receiptPath,
+        },
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
+      const ownerExit = waitForChildExit(owner);
+      let ownerError = '';
+      owner.stderr?.on('data', (chunk) => { ownerError += String(chunk); });
+      await Promise.all(configs.map((config, index) => waitForMarker(
+        config.restartMarkerPath,
+        10_000,
+        fixtureErrors[index],
+      )));
+      const exitCode = await ownerExit;
+      assert.equal(exitCode, 0, `owner failed: ${ownerError}`);
+      assert.equal(configs.some((config) => existsSync(config.errorMarkerPath)), false);
+      assert.equal(existsSync(path.join(stateDir, PENDING_FILENAME)), false);
+      const ownerRecord = readJson(ownerRecordPath(stateDir));
+      assert.equal(ownerRecord.outcome, 'completed');
+      assert.deepEqual(ownerRecord.ackedHostInstanceIds, predecessors);
+      assert.deepEqual(ownerRecord.replacementHostInstanceIds, successors);
+      assert.deepEqual(ownerRecord.authenticatedSuccessorHostInstanceIds, successors);
+      assert.equal(ownerRecord.receiptObserved, true);
+      const keyChannel = readJson(keysPath);
+      assert.notEqual(keyChannel[successors[0]], oldKeys[predecessors[0]]);
+      assert.notEqual(keyChannel[successors[1]], oldKeys[predecessors[1]]);
+      assert.notEqual(keyChannel[successors[0]], keyChannel[successors[1]]);
+      assert.equal(existsSync(path.join(stateDir, 'analytics-loaded-generation-v1.json')), true);
+      const secondLoadedSuffix = createHash('sha256').update(predecessors[1], 'utf8').digest('hex').slice(0, 32);
+      assert.equal(existsSync(path.join(stateDir, `analytics-loaded-generation-v1.json.${secondLoadedSuffix}.json`)), true);
+      assert.equal(existsSync(receiptPath), true);
+      const secondReceiptSuffix = createHash('sha256').update(predecessors[1], 'utf8').digest('hex').slice(0, 32);
+      assert.equal(existsSync(`${receiptPath}.${secondReceiptSuffix}.json`), true);
+    } finally {
+      owner?.kill();
+      for (const fixture of fixtures) fixture.kill();
+    }
+  } finally {
+    store?.close();
+    await removeTemporaryRoot(root);
+  }
+});
+
+test('the owner times out nonzero and refuses a duplicate destructive request', async () => {
+  const root = temporaryRoot('timeout');
+  const stateDir = path.join(root, 'state');
+  const workspaceId = `workspace-owner-timeout-${randomBytes(6).toString('hex')}`;
+  const hostInstanceId = 'host-owner-timeout-pre';
+  const key = 'timeout-owner-key-000000000000000000000001';
+  try {
+    const storeModule = await import(pathToFileURL(lifecycleStoreEntryPath).href);
+    const { SessionLifecycleStore } = storeModule;
+    const store = new SessionLifecycleStore(path.join(stateDir, 'session-lifecycle.sqlite'));
+    let fixture;
+    try {
+      const fixturePath = path.join(root, 'timeout-host-fixture.mjs');
+      const readyMarker = path.join(root, 'fixture-ready.txt');
+      const restartMarker = path.join(root, 'fixture-restarted.txt');
+      const errorMarker = path.join(root, 'fixture-errors.txt');
+      writeFileSync(fixturePath, fixtureSource);
+      fixture = spawn(process.execPath, [fixturePath, JSON.stringify({
+        controlEntry: controlEntryPath,
+        lifecycleStoreEntry: lifecycleStoreEntryPath,
+        restartEntry: restartEntryPath,
+        allHostEntry: allHostEntryPath,
+        lifecycleStorePath: path.join(stateDir, 'session-lifecycle.sqlite'),
+        workspaceId,
+        hostInstanceId,
+        generationId: hostInstanceId,
+        analyticsGenerationId: 'generation-owner-timeout',
+        buildId: 'build-owner-test',
+        successorHostInstanceId: 'unused-successor',
+        stateDir,
+        key,
+        simulateSuccessor: false,
+        readyMarkerPath: readyMarker,
+        restartMarkerPath: restartMarker,
+        errorMarkerPath: errorMarker,
+      })], { stdio: ['ignore', 'ignore', 'pipe'] });
+      let fixtureError = '';
+      fixture.stderr?.on('data', (chunk) => { fixtureError += String(chunk); });
+      await waitForMarker(readyMarker, 10_000, fixtureError);
+      const fixturePid = Number(readFileSync(readyMarker, 'utf8').trim());
+      const identity = {
+        hostInstanceId,
+        workspaceId,
+        generationId: hostInstanceId,
+        buildId: 'build-owner-test',
+        processId: fixturePid,
+      };
+      const fence = store.beginAnalyticsWriterFence({
+        workspaceId,
+        operationId: 'op-owner-timeout:analytics-activation',
+        purpose: 'analytics-activation',
+        expectedHosts: [identity],
+        nowMs: Date.now(),
+      });
+      store.acknowledgeAnalyticsWriterFence({
+        workspaceId,
+        operationId: 'op-owner-timeout:analytics-activation',
+        fenceEpoch: fence.fenceEpoch,
+        identity,
+        activeWriterCount: 0,
+        nowMs: Date.now(),
+      });
+      store.completeAnalyticsWriterFence(workspaceId, 'op-owner-timeout:analytics-activation', Date.now());
+      const keysPath = path.join(root, 'timeout-keys.json');
+      writeBoundedJsonAtomically(keysPath, { [hostInstanceId]: key }, 64 * 1024);
+      const receiptPath = path.join(root, 'timeout-receipt.json');
+      const planPath = path.join(root, 'timeout-plan.json');
+      writeBoundedJsonAtomically(planPath, {
+        stateDir,
+        workspaceId,
+        cutoverMode: 'analytics-activation',
+        operationId: 'op-owner-timeout',
+        terminalRestartReceiptPath: receiptPath,
+        lifecycleStorePath: path.join(stateDir, 'session-lifecycle.sqlite'),
+        generationId: 'generation-owner-timeout',
+        buildId: 'build-owner-test',
+        hostHandoffKeysPath: keysPath,
+        hostProbeTimeoutMs: 500,
+        restartSettleTimeoutMs: 100,
+      }, 8 * 1024 * 1024);
+      const ownerArgs = [path.join(repositoryRoot, 'scripts', 'analytics-restart-owner.mjs'), '--plan', planPath];
+      const ownerEnvironment = {
+        ...process.env,
+        PIE_ANALYTICS_RESTART_NONCE: 'nonce-owner-timeout-1',
+        PIE_ANALYTICS_TERMINAL_RESTART_RECEIPT_PATH: receiptPath,
+      };
+      const runOwner = () => spawn(process.execPath, ownerArgs, {
+        cwd: repositoryRoot,
+        env: ownerEnvironment,
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
+      const owner = runOwner();
+      const firstExit = waitForChildExit(owner);
+      let ownerError = '';
+      owner.stderr?.on('data', (chunk) => { ownerError += String(chunk); });
+      await waitForMarker(restartMarker, 10_000, fixtureError);
+      const firstCode = await firstExit;
+      assert.equal(firstCode, 1);
+      assert.match(ownerError, /complete replacement census before timeout/);
+      const firstRecord = readJson(ownerRecordPath(stateDir));
+      assert.equal(firstRecord.outcome, 'failed');
+      assert.deepEqual(firstRecord.ackedHostInstanceIds, [hostInstanceId]);
+      assert.deepEqual(firstRecord.replacementHostInstanceIds, []);
+      assert.equal(readFileSync(restartMarker, 'utf8').trim().split('\\n').length, 1);
+
+      const retry = runOwner();
+      let retryError = '';
+      retry.stderr?.on('data', (chunk) => { retryError += String(chunk); });
+      const retryCode = await waitForChildExit(retry);
+      assert.equal(retryCode, 1);
+      assert.match(retryError, /refusing to issue another destructive restart request/);
+      assert.equal(readFileSync(restartMarker, 'utf8').trim().split('\\n').length, 1);
+    } finally {
+      fixture?.kill();
     }
   } finally {
     await removeTemporaryRoot(root);
@@ -428,6 +755,8 @@ test('the owner fails closed before restarting when the fence or the ingress is 
         operationId: 'op-stale-host',
         terminalRestartReceiptPath: receiptPath2,
         lifecycleStorePath: path.join(stateDir, 'session-lifecycle.sqlite'),
+        generationId: 'generation-stale-host',
+        buildId: 'build-owner-test',
         hostHandoffKeysPath: keysPath2,
         cutoffRoots: { sessions: 'C:\\final\\sessions', artifacts: 'C:\\final\\artifacts' },
       }, 8 * 1024 * 1024);

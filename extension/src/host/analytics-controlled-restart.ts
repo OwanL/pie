@@ -1,10 +1,11 @@
-import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   closeSync,
   existsSync,
   fsyncSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -47,6 +48,18 @@ export interface ControlledRestartRequest {
   readonly operationId: string;
   readonly restartNonce: string;
   readonly terminalRestartReceiptPath: string;
+  /** Identity of the pre-restart host whose endpoint accepted this request.
+   * Successor boots are deliberately not required to reuse this identity. */
+  readonly targetHostInstanceId: string;
+  /** Fresh per-boot key supplied through the authenticated pending protocol. */
+  readonly successorHandoffKey: string;
+  /** Exact loaded-generation evidence destination for the successor boot. */
+  readonly loadedGenerationPath: string;
+  /** Root/storage capabilities that must be carried by the successor boot. */
+  readonly successorCapabilities: readonly string[];
+  /** True only for the designated host whose terminal evidence uses the helper's
+   * common receipt path. Other hosts receive owner-derived evidence paths. */
+  readonly evidenceOwner: boolean;
   readonly issuedAtMs: number;
   readonly expiresAtMs: number;
   readonly mac: string;
@@ -93,6 +106,13 @@ export interface PendingControlledRestartRecord {
   readonly purpose: ControlledRestartPurpose;
   readonly workspaceId: string;
   readonly operationId: string;
+  /** Pre-restart identity used to scope the durable request. The successor
+   * boot is correlated by this record's evidence paths, not by identity reuse. */
+  readonly predecessorHostInstanceId: string;
+  readonly successorHandoffKey: string;
+  readonly loadedGenerationPath: string;
+  readonly successorCapabilities: readonly string[];
+  readonly evidenceOwner: boolean;
   readonly restartNonce: string;
   readonly terminalRestartReceiptPath: string;
   readonly issuedAtMs: number;
@@ -159,6 +179,33 @@ function validateReceiptPath(value: unknown): string {
   return receiptPath;
 }
 
+function validateLoadedGenerationPath(value: unknown): string {
+  const loadedGenerationPath = boundedString(
+    value,
+    'loaded-generation evidence path',
+    CONTROLLED_RESTART_MAX_RECEIPT_PATH_BYTES,
+  );
+  if (!path.isAbsolute(loadedGenerationPath)) {
+    throw new Error('loaded-generation evidence path must be absolute.');
+  }
+  return loadedGenerationPath;
+}
+
+function validateSuccessorCapabilities(value: unknown): readonly string[] {
+  if (!Array.isArray(value) || value.length > 32) {
+    throw new Error('successor capabilities are invalid.');
+  }
+  const capabilities = value.map((capability, index) => boundedString(
+    capability,
+    `successor capability ${index}`,
+    1_024,
+  ));
+  if (new Set(capabilities).size !== capabilities.length) {
+    throw new Error('successor capabilities must be unique.');
+  }
+  return capabilities;
+}
+
 function validatePurpose(value: unknown): ControlledRestartPurpose {
   if (value !== 'analytics-activation' && value !== 'storage-cutoff') {
     throw new Error('controlled restart purpose is invalid.');
@@ -201,6 +248,11 @@ function requestSigningBytes(request: Omit<ControlledRestartRequest, 'mac'>): st
     operationId: request.operationId,
     restartNonce: request.restartNonce,
     terminalRestartReceiptPath: request.terminalRestartReceiptPath,
+    targetHostInstanceId: request.targetHostInstanceId,
+    successorHandoffKey: request.successorHandoffKey,
+    loadedGenerationPath: request.loadedGenerationPath,
+    successorCapabilities: request.successorCapabilities,
+    evidenceOwner: request.evidenceOwner,
     issuedAtMs: request.issuedAtMs,
     expiresAtMs: request.expiresAtMs,
   });
@@ -242,6 +294,8 @@ export function createControlledRestartRequest(
   input: Pick<
     ControlledRestartRequest,
     'workspaceId' | 'purpose' | 'operationId' | 'restartNonce' | 'terminalRestartReceiptPath'
+    | 'targetHostInstanceId' | 'successorHandoffKey' | 'loadedGenerationPath'
+    | 'successorCapabilities' | 'evidenceOwner'
   >,
   key: string,
   ids: { requestId?: string; nonce?: string; issuedAtMs?: number; expiresAtMs?: number } = {},
@@ -268,6 +322,11 @@ export function createControlledRestartRequest(
     operationId: boundedString(input.operationId, 'operationId', CONTROLLED_RESTART_MAX_OPERATION_ID_BYTES),
     restartNonce,
     terminalRestartReceiptPath: validateReceiptPath(input.terminalRestartReceiptPath),
+    targetHostInstanceId: boundedString(input.targetHostInstanceId, 'targetHostInstanceId', 512),
+    successorHandoffKey: boundedString(input.successorHandoffKey, 'successor handoff key', 4_096),
+    loadedGenerationPath: validateLoadedGenerationPath(input.loadedGenerationPath),
+    successorCapabilities: validateSuccessorCapabilities(input.successorCapabilities),
+    evidenceOwner: input.evidenceOwner === true,
     issuedAtMs,
     expiresAtMs,
   };
@@ -276,8 +335,10 @@ export function createControlledRestartRequest(
 
 export function verifyControlledRestartRequest(value: unknown, key: string): ControlledRestartRequest {
   if (!isRecord(value) || !exactKeys(value, [
-    'expiresAtMs', 'issuedAtMs', 'mac', 'nonce', 'operation', 'operationId', 'protocol',
-    'purpose', 'requestId', 'restartNonce', 'schema', 'terminalRestartReceiptPath', 'workspaceId',
+    'evidenceOwner', 'expiresAtMs', 'issuedAtMs', 'loadedGenerationPath', 'mac', 'nonce',
+    'operation', 'operationId', 'protocol', 'purpose', 'requestId', 'restartNonce', 'schema',
+    'successorCapabilities', 'successorHandoffKey', 'targetHostInstanceId',
+    'terminalRestartReceiptPath', 'workspaceId',
   ])) throw new Error('controlled restart request fields are invalid.');
   if (value.protocol !== ANALYTICS_CONTROLLED_RESTART_PROTOCOL
     || value.schema !== ANALYTICS_CONTROLLED_RESTART_SCHEMA
@@ -292,6 +353,13 @@ export function verifyControlledRestartRequest(value: unknown, key: string): Con
     throw new Error('restartNonce has an invalid format or exceeds 128 bytes.');
   }
   const terminalRestartReceiptPath = validateReceiptPath(value.terminalRestartReceiptPath);
+  const targetHostInstanceId = boundedString(value.targetHostInstanceId, 'targetHostInstanceId', 512);
+  const successorHandoffKey = boundedString(value.successorHandoffKey, 'successor handoff key', 4_096);
+  const loadedGenerationPath = validateLoadedGenerationPath(value.loadedGenerationPath);
+  const successorCapabilities = validateSuccessorCapabilities(value.successorCapabilities);
+  if (typeof value.evidenceOwner !== 'boolean') {
+    throw new Error('evidenceOwner is invalid.');
+  }
   const issuedAtMs = boundedInteger(value.issuedAtMs, 'issuedAtMs');
   const expiresAtMs = boundedInteger(value.expiresAtMs, 'expiresAtMs');
   if (expiresAtMs < issuedAtMs || expiresAtMs - issuedAtMs > ANALYTICS_HANDOFF_NONCE_WINDOW_MS) {
@@ -309,6 +377,11 @@ export function verifyControlledRestartRequest(value: unknown, key: string): Con
     operationId,
     restartNonce,
     terminalRestartReceiptPath,
+    targetHostInstanceId,
+    successorHandoffKey,
+    loadedGenerationPath,
+    successorCapabilities,
+    evidenceOwner: value.evidenceOwner,
     issuedAtMs,
     expiresAtMs,
   };
@@ -424,6 +497,11 @@ function pendingRestartRecordFromRequest(request: ControlledRestartRequest): Pen
     purpose: request.purpose,
     workspaceId: request.workspaceId,
     operationId: request.operationId,
+    predecessorHostInstanceId: request.targetHostInstanceId,
+    successorHandoffKey: request.successorHandoffKey,
+    loadedGenerationPath: request.loadedGenerationPath,
+    successorCapabilities: [...request.successorCapabilities],
+    evidenceOwner: request.evidenceOwner,
     restartNonce: request.restartNonce,
     terminalRestartReceiptPath: request.terminalRestartReceiptPath,
     issuedAtMs: request.issuedAtMs,
@@ -431,16 +509,39 @@ function pendingRestartRecordFromRequest(request: ControlledRestartRequest): Pen
   };
 }
 
-/** Write the single-slot durable pending restart for this data root. All
- * affected hosts receive the same signed request, so the shared state file
- * carries identical content and the atomic rename keeps the slot unambiguous. */
+const PENDING_CONTROLLED_RESTART_MAX_BYTES = 8 * 1024;
+const PENDING_CONTROLLED_RESTART_PREFIX = `${PENDING_CONTROLLED_RESTART_FILENAME}.`;
+
+function scopedPendingControlledRestartFilename(predecessorHostInstanceId: string): string {
+  const digest = createHash('sha256').update(predecessorHostInstanceId, 'utf8').digest('hex');
+  return `${PENDING_CONTROLLED_RESTART_PREFIX}${digest}.json`;
+}
+
+/** Return the host-scoped pending path. The no-identity form remains the
+ * legacy filename solely so malformed legacy files are not mistaken for a new
+ * authenticated request. */
+export function pendingControlledRestartPath(
+  stateDir: string,
+  predecessorHostInstanceId?: string,
+): string {
+  return predecessorHostInstanceId === undefined
+    ? path.join(stateDir, PENDING_CONTROLLED_RESTART_FILENAME)
+    : path.join(stateDir, scopedPendingControlledRestartFilename(predecessorHostInstanceId));
+}
+
+/** Write one host-scoped durable pending restart. A restart of several hosts
+ * therefore creates several independently claimable records; a successor boot
+ * atomically claims one record and carries its own key/capabilities forward. */
 export function writePendingControlledRestartAtomically(
   stateDir: string,
   record: PendingControlledRestartRecord,
 ): void {
-  const destination = path.join(stateDir, PENDING_CONTROLLED_RESTART_FILENAME);
-  const temporary = path.join(stateDir, `.${PENDING_CONTROLLED_RESTART_FILENAME}.${process.pid}-${randomUUID()}.tmp`);
+  const destination = pendingControlledRestartPath(stateDir, record.predecessorHostInstanceId);
+  const temporary = path.join(stateDir, `.${path.basename(destination)}.${process.pid}-${randomUUID()}.tmp`);
   const bytes = `${JSON.stringify(record, null, 2)}\n`;
+  if (Buffer.byteLength(bytes, 'utf8') > PENDING_CONTROLLED_RESTART_MAX_BYTES) {
+    throw new Error('pending controlled restart record is too large.');
+  }
   mkdirSync(stateDir, { recursive: true });
   let descriptor: number | undefined;
   try {
@@ -459,17 +560,16 @@ export function writePendingControlledRestartAtomically(
   }
 }
 
-/** Bounded read of the single-slot pending restart. Structural or size
- * problems are treated as absent rather than as an authorization. */
-export function readPendingControlledRestart(stateDir: string): PendingControlledRestartRecord | undefined {
-  const destination = path.join(stateDir, PENDING_CONTROLLED_RESTART_FILENAME);
+function readPendingControlledRestartAtPath(
+  destination: string,
+): PendingControlledRestartRecord | undefined {
   let size: number;
   try {
     size = statSync(destination).size;
   } catch {
     return undefined;
   }
-  if (!Number.isSafeInteger(size) || size <= 0 || size > 8 * 1024) return undefined;
+  if (!Number.isSafeInteger(size) || size <= 0 || size > PENDING_CONTROLLED_RESTART_MAX_BYTES) return undefined;
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(destination, 'utf8'));
@@ -479,16 +579,36 @@ export function readPendingControlledRestart(stateDir: string): PendingControlle
   return validatePendingControlledRestart(parsed);
 }
 
+/** Bounded read of one host-scoped pending restart. Structural or size
+ * problems are treated as absent rather than as an authorization. */
+export function readPendingControlledRestart(
+  stateDir: string,
+  predecessorHostInstanceId?: string,
+): PendingControlledRestartRecord | undefined {
+  const record = readPendingControlledRestartAtPath(pendingControlledRestartPath(stateDir, predecessorHostInstanceId));
+  if (record && predecessorHostInstanceId !== undefined
+    && record.predecessorHostInstanceId !== predecessorHostInstanceId) {
+    return undefined;
+  }
+  return record;
+}
+
 export function validatePendingControlledRestart(value: unknown): PendingControlledRestartRecord | undefined {
   if (!isRecord(value) || !exactKeys(value, [
-    'expiresAtMs', 'issuedAtMs', 'operationId', 'purpose', 'restartNonce',
-    'schemaVersion', 'terminalRestartReceiptPath', 'workspaceId',
+    'evidenceOwner', 'expiresAtMs', 'issuedAtMs', 'loadedGenerationPath', 'operationId',
+    'predecessorHostInstanceId', 'purpose', 'restartNonce', 'schemaVersion',
+    'successorCapabilities', 'successorHandoffKey', 'terminalRestartReceiptPath', 'workspaceId',
   ])) return undefined;
   try {
     if (value.schemaVersion !== 1) return undefined;
     const purpose = validatePurpose(value.purpose);
     const workspaceId = boundedString(value.workspaceId, 'workspaceId', 512);
     const operationId = boundedString(value.operationId, 'operationId', CONTROLLED_RESTART_MAX_OPERATION_ID_BYTES);
+    const predecessorHostInstanceId = boundedString(value.predecessorHostInstanceId, 'predecessorHostInstanceId', 512);
+    const successorHandoffKey = boundedString(value.successorHandoffKey, 'successor handoff key', 4_096);
+    const loadedGenerationPath = validateLoadedGenerationPath(value.loadedGenerationPath);
+    const successorCapabilities = validateSuccessorCapabilities(value.successorCapabilities);
+    if (typeof value.evidenceOwner !== 'boolean') return undefined;
     const restartNonce = boundedString(value.restartNonce, 'restartNonce', 256);
     if (!isAnalyticsRestartNonce(restartNonce)) return undefined;
     const terminalRestartReceiptPath = validateReceiptPath(value.terminalRestartReceiptPath);
@@ -500,6 +620,11 @@ export function validatePendingControlledRestart(value: unknown): PendingControl
       purpose,
       workspaceId,
       operationId,
+      predecessorHostInstanceId,
+      successorHandoffKey,
+      loadedGenerationPath,
+      successorCapabilities,
+      evidenceOwner: value.evidenceOwner,
       restartNonce,
       terminalRestartReceiptPath,
       issuedAtMs,
@@ -519,14 +644,56 @@ export function isPendingControlledRestartConsumable(
     && record.issuedAtMs <= nowMs && nowMs <= record.expiresAtMs;
 }
 
-/** Remove the single-slot pending restart once the restarted boot has produced
- * its nonce-bound terminal receipt (or the record expired). */
-export function consumePendingControlledRestart(stateDir: string): void {
+function pendingControlledRestartCandidates(stateDir: string): string[] {
+  let names: string[];
   try {
-    rmSync(path.join(stateDir, PENDING_CONTROLLED_RESTART_FILENAME), { force: true });
+    names = readdirSync(stateDir);
   } catch {
-    // Consumption is best-effort hygiene; the helper's nonce correlation owns
-    // the evidence semantics, so a stuck file cannot fake a fresh restart.
+    return [];
+  }
+  return names
+    .filter((name) => name.startsWith(PENDING_CONTROLLED_RESTART_PREFIX) && name.endsWith('.json'))
+    .sort()
+    .slice(0, 128)
+    .map((name) => path.join(stateDir, name));
+}
+
+/** Atomically claim one pending record for a successor boot. The successor's
+ * new identity is intentionally not assumed in advance: the owner correlates
+ * the claimed record's exact evidence path with the actual boot identity. */
+export function claimPendingControlledRestart(
+  stateDir: string,
+  nowMs = Date.now(),
+): PendingControlledRestartRecord | undefined {
+  for (const source of pendingControlledRestartCandidates(stateDir)) {
+    const claim = `${source}.claim-${process.pid}-${randomUUID()}`;
+    try {
+      renameSync(source, claim);
+    } catch {
+      continue;
+    }
+    try {
+      const record = readPendingControlledRestartAtPath(claim);
+      if (record && isPendingControlledRestartConsumable(record, nowMs)) return record;
+    } finally {
+      try { rmSync(claim, { force: true }); } catch { /* best-effort single-use cleanup */ }
+    }
+  }
+  return undefined;
+}
+
+/** Remove one host-scoped pending restart (or all scoped records when no
+ * predecessor is supplied). Consumption is best-effort hygiene; the signed
+ * nonce and exact evidence paths own the completion semantics. */
+export function consumePendingControlledRestart(
+  stateDir: string,
+  predecessorHostInstanceId?: string,
+): void {
+  const destinations = predecessorHostInstanceId === undefined
+    ? [pendingControlledRestartPath(stateDir), ...pendingControlledRestartCandidates(stateDir)]
+    : [pendingControlledRestartPath(stateDir, predecessorHostInstanceId)];
+  for (const destination of destinations) {
+    try { rmSync(destination, { force: true }); } catch { /* best-effort cleanup */ }
   }
 }
 
@@ -547,15 +714,19 @@ export function createAnalyticsHostControlledRestart(
       if (request.workspaceId !== identity.workspaceId) {
         throw new Error('controlled restart workspace identity does not match.');
       }
-      // A newer signed request supersedes a pending restart: replace the slot
-      // first, then re-arm so only the latest helper request fires.
+      if (request.targetHostInstanceId !== identity.hostInstanceId) {
+        throw new Error('controlled restart target identity does not match.');
+      }
+      // A newer signed request for this predecessor supersedes its pending
+      // record; requests for other hosts have independent durable slots.
       writePendingControlledRestartAtomically(options.stateDir, pendingRestartRecordFromRequest(request));
       cancelScheduled?.();
       cancelScheduled = undefined;
       cancelScheduled = (options.schedule ?? defaultSchedule)(options.performRestart, CONTROLLED_RESTART_DELAY_MS);
-      const recorded = readPendingControlledRestart(options.stateDir);
+      const recorded = readPendingControlledRestart(options.stateDir, identity.hostInstanceId);
       if (!recorded || recorded.restartNonce !== request.restartNonce
-        || recorded.terminalRestartReceiptPath !== request.terminalRestartReceiptPath) {
+        || recorded.terminalRestartReceiptPath !== request.terminalRestartReceiptPath
+        || recorded.successorHandoffKey !== request.successorHandoffKey) {
         throw new Error('controlled restart pending record was not durable.');
       }
       return { pendingRestartRecorded: true, restartScheduled: true };
@@ -563,12 +734,9 @@ export function createAnalyticsHostControlledRestart(
   };
 }
 
-/** Exists so callers can force a synchronous reload of the pending slot after
- * an out-of-band write (used by focused tests). */
-export function pendingControlledRestartPath(stateDir: string): string {
-  return path.join(stateDir, PENDING_CONTROLLED_RESTART_FILENAME);
-}
-
-export function pendingControlledRestartExists(stateDir: string): boolean {
-  return existsSync(path.join(stateDir, PENDING_CONTROLLED_RESTART_FILENAME));
+export function pendingControlledRestartExists(
+  stateDir: string,
+  predecessorHostInstanceId?: string,
+): boolean {
+  return existsSync(pendingControlledRestartPath(stateDir, predecessorHostInstanceId));
 }

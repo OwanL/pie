@@ -14,17 +14,17 @@
 //      storage cutoff, the bound final-root capability). Nothing restarts
 //      unless the whole fenced census can be coordinated.
 //   3. Sends one signed controlled-restart request to every such host. Each
-//      host durably records the nonce/receipt pair, acknowledges, and then
-//      performs its own supported quiet restart
-//      (`workbench.action.restartExtensionHost`, falling back to a window
-//      reload; both preserve unsaved editor work; no process is killed).
-//   4. Watches the lifecycle registry for the restarted host boots and
-//      refreshes the owner-controlled per-host key channel so the helper's
-//      post-restart census can authenticate the new boots with the same
-//      launch-channel key.
+//      host durably records its host-scoped nonce/evidence paths and fresh
+//      successor key, acknowledges, and then performs its own supported quiet
+//      restart (`workbench.action.restartExtensionHost`, falling back to a
+//      window reload; both preserve unsaved editor work; no process is killed).
+//   4. Watches the lifecycle registry for the actual restarted host boots,
+//      authenticates each with its distinct successor key, and refreshes the
+//      owner-controlled per-host key channel so the helper's post-restart
+//      census can authenticate the complete replacement set.
 //   5. Writes a sanitized durable owner record in the plan's state dir and
-//      exits. It never fabricates evidence: the terminal restart receipt, the
-//      loaded-generation marker and the authenticated census stay owned by the
+//      exits. It never fabricates evidence: the terminal restart receipts,
+//      loaded-generation markers and authenticated census stay owned by the
 //      restarted hosts and the helper.
 //
 // It deliberately does NOT force-kill anything, restart VS Code's main
@@ -32,10 +32,9 @@
 // loaded hosts lack the controlled-restart ingress, it reports the exact
 // bootstrap blocker and exits non-zero instead of pretending.
 
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   closeSync,
-  existsSync,
   fsyncSync,
   openSync,
   readFileSync,
@@ -147,9 +146,9 @@ export function expectedFenceForMode(plan) {
   };
 }
 
-/** Every restarted boot uses the same launch-channel key as the fenced hosts,
- * so the common pre-restart key is the only honest value available for new
- * host ids. Ambiguous channels fail closed before any restart is requested. */
+/** Legacy helper retained for focused contract tests. The restart owner no
+ * longer calls this function: every successor receives a fresh key through its
+ * signed, host-scoped pending record. */
 export function commonHostKey(hostKeys) {
   if (hostKeys.length === 0) {
     throw new Error('no registered host carries an authenticated handoff key.');
@@ -192,10 +191,18 @@ function keyChannelValue(channel, hostInstanceId) {
   return typeof key === 'string' && key.trim().length > 0 && key.length <= 4_096 ? key : undefined;
 }
 
-/** Add entries for newly observed host ids without disturbing existing ones. */
+/** Add entries for newly observed host ids without disturbing existing ones.
+ * A conflicting existing value is a stale/ambiguous handoff and fails closed;
+ * successor keys are never silently replaced or copied from another host. */
 export function mergeKeyChannelEntries(channel, entries, maxBytes = MAX_KEY_FILE_BYTES) {
   const merged = { ...Object.fromEntries(channel.keys.entries()) };
   for (const [hostInstanceId, key] of Object.entries(entries)) {
+    if (typeof key !== 'string' || key.length === 0 || key.length > 4_096) {
+      throw new Error(`successor handoff key for ${hostInstanceId} is invalid.`);
+    }
+    if (merged[hostInstanceId] !== undefined && merged[hostInstanceId] !== key) {
+      throw new Error(`successor handoff key for ${hostInstanceId} conflicts with the durable channel.`);
+    }
     if (merged[hostInstanceId] === undefined) merged[hostInstanceId] = key;
   }
   const next = { keys: new Map(Object.entries(merged)), file: channel.file, planPath: channel.planPath };
@@ -227,6 +234,7 @@ export async function loadOwnerDependencies() {
     SessionLifecycleStore: lifecycle.SessionLifecycleStore,
     storageCutoffRootCapability: lifecycle.storageCutoffRootCapability,
     sendBoundedAnalyticsFrame: discovery.sendBoundedAnalyticsFrame,
+    createAuthenticatedAnalyticsHostStatusProbe: discovery.createAuthenticatedAnalyticsHostStatusProbe,
     createControlledRestartRequest: restart.createControlledRestartRequest,
     verifyControlledRestartResponse: restart.verifyControlledRestartResponse,
     readCompleteProductionAnalyticsHosts: adapters.readCompleteProductionAnalyticsHosts,
@@ -253,6 +261,100 @@ function writeOwnerRecord(stateDir, record) {
       }
     } catch { /* best-effort */ }
   }
+}
+
+const LOADED_GENERATION_FILENAME = 'analytics-loaded-generation-v1.json';
+const TERMINAL_RESTART_RECEIPT_KIND = 'pie-p7-terminal-restart-v1';
+const MAX_EVIDENCE_BYTES = 64 * 1024;
+const MAX_HOST_CENSUS = 64;
+
+function hostEvidenceSuffix(hostInstanceId) {
+  return createHash('sha256').update(hostInstanceId, 'utf8').digest('hex').slice(0, 32);
+}
+
+export function derivedSuccessorEvidencePath(basePath, hostInstanceId, suffix) {
+  if (typeof basePath !== 'string' || !path.isAbsolute(basePath)) {
+    throw new Error('successor evidence base path must be absolute.');
+  }
+  return `${basePath}.${hostEvidenceSuffix(hostInstanceId)}${suffix}`;
+}
+
+export function successorLoadedGenerationPath(stateDir, hostInstanceId, evidenceOwner) {
+  const base = path.join(stateDir, LOADED_GENERATION_FILENAME);
+  return evidenceOwner ? base : derivedSuccessorEvidencePath(base, hostInstanceId, '.json');
+}
+
+export function successorTerminalReceiptPath(basePath, hostInstanceId, evidenceOwner) {
+  return evidenceOwner ? basePath : derivedSuccessorEvidencePath(basePath, hostInstanceId, '.json');
+}
+
+function isCanonicalInstant(value) {
+  return typeof value === 'string'
+    && Number.isFinite(Date.parse(value))
+    && new Date(Date.parse(value)).toISOString() === value;
+}
+
+function exactObjectKeys(value, expected) {
+  if (!isRecord(value)) return false;
+  const actual = Object.keys(value).sort();
+  const wanted = [...expected].sort();
+  return actual.length === wanted.length && actual.every((key, index) => key === wanted[index]);
+}
+
+function readLoadedGenerationEvidence(filePath, expected) {
+  const file = readBoundedJson(filePath, 'loaded-generation evidence', MAX_EVIDENCE_BYTES);
+  if (file.error !== undefined) return { error: file.error };
+  const value = file.value;
+  if (!exactObjectKeys(value, [
+    'buildId', 'generationId', 'hostInstanceId', 'loadedAt', 'manifestRevision',
+    'manifestSha256', 'restartNonce', 'schemaVersion', 'workspaceId',
+  ])) return { error: 'loaded-generation evidence fields are invalid' };
+  if (value.schemaVersion !== 1 || value.generationId !== expected.generationId
+    || value.buildId !== expected.buildId || value.workspaceId !== expected.workspaceId
+    || value.restartNonce !== expected.restartNonce || typeof value.hostInstanceId !== 'string'
+    || value.hostInstanceId.length === 0 || !isCanonicalInstant(value.loadedAt)
+    || !Number.isSafeInteger(value.manifestRevision) || value.manifestRevision < 1
+    || typeof value.manifestSha256 !== 'string' || !/^[0-9a-f]{64}$/u.test(value.manifestSha256)) {
+    return { error: 'loaded-generation evidence does not match the requested restart' };
+  }
+  return { value };
+}
+
+function readTerminalRestartEvidence(filePath, expected) {
+  const file = readBoundedJson(filePath, 'terminal restart evidence', MAX_EVIDENCE_BYTES);
+  if (file.error !== undefined) return { error: file.error };
+  const value = file.value;
+  if (!exactObjectKeys(value, [
+    'buildId', 'generationId', 'hostInstanceId', 'kind', 'loadedAt', 'processId',
+    'restartNonce', 'schemaVersion', 'status', 'verifiedAt',
+  ])) return { error: 'terminal restart evidence fields are invalid' };
+  if (value.schemaVersion !== 1 || value.kind !== TERMINAL_RESTART_RECEIPT_KIND
+    || value.status !== 'ready' || value.generationId !== expected.generationId
+    || value.buildId !== expected.buildId || value.restartNonce !== expected.restartNonce
+    || typeof value.hostInstanceId !== 'string' || value.hostInstanceId.length === 0
+    || !Number.isSafeInteger(value.processId) || value.processId < 1
+    || !isCanonicalInstant(value.loadedAt) || !isCanonicalInstant(value.verifiedAt)) {
+    return { error: 'terminal restart evidence does not match the requested restart' };
+  }
+  return { value };
+}
+
+function boundedSettleTimeout(plan) {
+  if (typeof plan.restartSettleTimeoutMs !== 'number' || !Number.isFinite(plan.restartSettleTimeoutMs)) {
+    return DEFAULT_SETTLE_TIMEOUT_MS;
+  }
+  return Math.min(120_000, Math.max(100, Math.floor(plan.restartSettleTimeoutMs)));
+}
+
+function boundedHostProbeTimeout(plan) {
+  if (typeof plan.hostProbeTimeoutMs !== 'number' || !Number.isFinite(plan.hostProbeTimeoutMs)) {
+    return DEFAULT_SEND_TIMEOUT_MS;
+  }
+  return Math.min(DEFAULT_SEND_TIMEOUT_MS, Math.max(1, Math.floor(plan.hostProbeTimeoutMs)));
+}
+
+function removeEvidencePath(filePath) {
+  try { rmSync(filePath, { force: true }); } catch { /* best-effort stale evidence cleanup */ }
 }
 
 async function runRestartOwner(argv, environment = process.env) {
@@ -286,20 +388,44 @@ async function runRestartOwner(argv, environment = process.env) {
     path.resolve(lifecycleStorePath),
     { readOnly: true },
   );
+  const priorOwnerFile = readBoundedJson(ownerRecordPath(stateDir), 'previous restart owner record', 256 * 1024);
+  const priorOwnerRecord = priorOwnerFile.error === undefined && isRecord(priorOwnerFile.value)
+    ? priorOwnerFile.value
+    : undefined;
   const record = {
     schemaVersion: 1,
     startedAt: new Date().toISOString(),
     mode: fence.mode,
+    operationId: fence.operationId,
     restartNonce: requested.restartNonce,
     terminalRestartReceiptPath: requested.terminalRestartReceiptPath,
     preRestartHostInstanceIds: [],
     ackedHostInstanceIds: [],
     refreshedKeyHostInstanceIds: [],
+    loadedGenerationHostInstanceIds: [],
+    terminalEvidenceHostInstanceIds: [],
+    authenticatedSuccessorHostInstanceIds: [],
+    replacementHostInstanceIds: [],
+    assignments: [],
     receiptObserved: false,
     outcome: 'started',
   };
   let exitCode = 0;
   try {
+    if (priorOwnerRecord?.operationId === fence.operationId) {
+      throw new Error(
+        `a prior restart owner record for ${fence.operationId} exists with outcome ${String(priorOwnerRecord.outcome)}; `
+        + 'refusing to issue another destructive restart request.',
+      );
+    }
+    const expectedGenerationId = typeof plan.generationId === 'string' && plan.generationId.trim().length > 0
+      ? plan.generationId
+      : typeof plan.activeAnalyticsGenerationId === 'string' && plan.activeAnalyticsGenerationId.trim().length > 0
+        ? plan.activeAnalyticsGenerationId
+        : undefined;
+    const expectedBuildId = typeof plan.buildId === 'string' && plan.buildId.trim().length > 0
+      ? plan.buildId
+      : undefined;
     const fenceRecord = registry.getAnalyticsWriterFence(plan.workspaceId);
     if (!fenceRecord || fenceRecord.state !== 'fenced'
       || fenceRecord.operationId !== fence.operationId || fenceRecord.purpose !== fence.purpose) {
@@ -307,10 +433,18 @@ async function runRestartOwner(argv, environment = process.env) {
         `the all-host writer fence for ${fence.mode} is not durable and fenced; refusing to restart hosts.`,
       );
     }
+    if (!expectedGenerationId || !expectedBuildId) {
+      throw new Error('restart owner requires plan generationId and buildId to validate successor evidence.');
+    }
     const hosts = dependencies.readCompleteProductionAnalyticsHosts(registry, plan.workspaceId)
-      .filter((host) => host.state === 'registered');
+      .filter((host) => host.state === 'registered')
+      .sort((left, right) => left.hostInstanceId.localeCompare(right.hostInstanceId));
     if (hosts.length === 0) throw new Error('no registered analytics hosts were found to restart.');
+    if (hosts.length > MAX_HOST_CENSUS) throw new Error('registered analytics host census exceeds the bounded restart limit.');
     let channel = readKeyChannel(plan, planPath);
+    if (channel.file === undefined && channel.planPath === undefined) {
+      throw new Error('successor key handoff requires a durable owner-controlled key channel; refusing to restart hosts.');
+    }
     const unsupported = hosts.filter((host) => !host.endpointName
       || !host.capabilities.includes('authenticated-control')
       || !host.capabilities.includes('controlled-restart'));
@@ -325,7 +459,10 @@ async function runRestartOwner(argv, environment = process.env) {
     if (hostKeys.some((key) => key === undefined)) {
       throw new Error('a registered host has no authenticated handoff key in the owner-controlled channel.');
     }
-    const sharedKey = commonHostKey(hostKeys);
+    if (hosts.some((host) => host.buildId !== expectedBuildId)) {
+      throw new Error('registered hosts do not all carry the plan build; refusing to restart a mixed-build census.');
+    }
+    let requiredCapabilities = [];
     if (fence.mode === 'storage-cutoff') {
       const roots = plan.cutoffRoots;
       const sessionsRoot = isRecord(roots) ? roots.sessions : undefined;
@@ -340,73 +477,187 @@ async function runRestartOwner(argv, environment = process.env) {
           + 'restarting them could not satisfy successor admission.',
         );
       }
+      requiredCapabilities = [requiredCapability];
     }
-    record.preRestartHostInstanceIds = hosts.map((host) => host.hostInstanceId).sort();
-    for (const host of hosts) {
-      const key = keyChannelValue(channel, host.hostInstanceId);
+
+    const evidenceOwnerHostInstanceId = hosts[0].hostInstanceId;
+    const assignments = hosts.map((host) => {
+      const evidenceOwner = host.hostInstanceId === evidenceOwnerHostInstanceId;
+      const terminalRestartReceiptPath = successorTerminalReceiptPath(
+        requested.terminalRestartReceiptPath,
+        host.hostInstanceId,
+        evidenceOwner,
+      );
+      const loadedGenerationPath = successorLoadedGenerationPath(stateDir, host.hostInstanceId, evidenceOwner);
+      const successorHandoffKey = randomBytes(32).toString('base64url');
+      removeEvidencePath(terminalRestartReceiptPath);
+      removeEvidencePath(loadedGenerationPath);
+      return {
+        predecessorHostInstanceId: host.hostInstanceId,
+        predecessorEndpointName: host.endpointName,
+        predecessorKey: keyChannelValue(channel, host.hostInstanceId),
+        successorHandoffKey,
+        successorCapabilities: requiredCapabilities,
+        terminalRestartReceiptPath,
+        loadedGenerationPath,
+        evidenceOwner,
+      };
+    });
+    record.preRestartHostInstanceIds = hosts.map((host) => host.hostInstanceId);
+    record.assignments = assignments.map((assignment) => ({
+      predecessorHostInstanceId: assignment.predecessorHostInstanceId,
+      terminalRestartReceiptPath: assignment.terminalRestartReceiptPath,
+      loadedGenerationPath: assignment.loadedGenerationPath,
+      evidenceOwner: assignment.evidenceOwner,
+    }));
+
+    const sendTimeoutMs = boundedHostProbeTimeout(plan);
+    for (const assignment of assignments) {
       const request = dependencies.createControlledRestartRequest({
         workspaceId: plan.workspaceId,
         purpose: fence.purpose,
         operationId: fence.operationId,
         restartNonce: requested.restartNonce,
-        terminalRestartReceiptPath: requested.terminalRestartReceiptPath,
-      }, key);
+        terminalRestartReceiptPath: assignment.terminalRestartReceiptPath,
+        targetHostInstanceId: assignment.predecessorHostInstanceId,
+        successorHandoffKey: assignment.successorHandoffKey,
+        loadedGenerationPath: assignment.loadedGenerationPath,
+        successorCapabilities: assignment.successorCapabilities,
+        evidenceOwner: assignment.evidenceOwner,
+      }, assignment.predecessorKey);
       let response;
       try {
         response = await dependencies.sendBoundedAnalyticsFrame(
-          host.endpointName,
+          assignment.predecessorEndpointName,
           request,
-          typeof plan.hostProbeTimeoutMs === 'number' && Number.isFinite(plan.hostProbeTimeoutMs)
-            ? Math.max(1, Math.floor(plan.hostProbeTimeoutMs))
-            : DEFAULT_SEND_TIMEOUT_MS,
+          sendTimeoutMs,
         );
       } catch (error) {
         throw new Error(
-          `host ${host.hostInstanceId} did not answer the controlled restart: `
+          `host ${assignment.predecessorHostInstanceId} did not answer the controlled restart: `
           + `${error instanceof Error ? error.message : String(error)}`,
         );
       }
-      const acknowledgement = dependencies.verifyControlledRestartResponse(response, key);
+      const acknowledgement = dependencies.verifyControlledRestartResponse(response, assignment.predecessorKey);
       if (acknowledgement.ok !== true
         || acknowledgement.requestId !== request.requestId
         || acknowledgement.nonce !== request.nonce
-        || acknowledgement.host.hostInstanceId !== host.hostInstanceId) {
-        throw new Error(`host ${host.hostInstanceId} returned a stale or mismatched restart acknowledgement.`);
+        || acknowledgement.host.hostInstanceId !== assignment.predecessorHostInstanceId) {
+        throw new Error(`host ${assignment.predecessorHostInstanceId} returned a stale or mismatched restart acknowledgement.`);
       }
-      record.ackedHostInstanceIds.push(host.hostInstanceId);
+      record.ackedHostInstanceIds.push(assignment.predecessorHostInstanceId);
     }
     record.outcome = 'restarts-acked';
-    // Watch the restarted boots and keep the key channel complete so the
-    // helper's post-restart census can authenticate every new host boot. The
-    // receipt is observed first so the last pass still refreshes the channel
-    // for hosts that registered at the same moment the receipt appeared.
-    const receiptPath = requested.terminalRestartReceiptPath;
-    const settleDeadline = Date.now() + DEFAULT_SETTLE_TIMEOUT_MS;
+
+    // Each assignment has its own evidence paths and successor key. The
+    // terminal receipt is the correlation token: its actual successor identity
+    // is never guessed from the predecessor identity or registry order.
+    const successorKeys = new Map();
+    const statusProbe = dependencies.createAuthenticatedAnalyticsHostStatusProbe({
+      keyForHost: (host) => successorKeys.get(host.hostInstanceId),
+      timeoutMs: sendTimeoutMs,
+      send: dependencies.sendBoundedAnalyticsFrame,
+    });
+    const settleDeadline = Date.now() + boundedSettleTimeout(plan);
+    let lastBlockers = [];
     while (Date.now() < settleDeadline) {
-      const receiptObserved = existsSync(receiptPath);
       const currentHosts = dependencies.readCompleteProductionAnalyticsHosts(registry, plan.workspaceId)
-        .filter((host) => host.state === 'registered'
-          && !record.preRestartHostInstanceIds.includes(host.hostInstanceId));
-      if (currentHosts.length > 0) {
-        const refreshEntries = {};
-        for (const host of currentHosts) {
-          if (keyChannelValue(channel, host.hostInstanceId) === undefined) {
-            refreshEntries[host.hostInstanceId] = sharedKey;
-          }
+        .filter((host) => host.state === 'registered');
+      const currentById = new Map(currentHosts.map((host) => [host.hostInstanceId, host]));
+      const evidenceByPredecessor = new Map();
+      const blockers = [];
+      for (const assignment of assignments) {
+        const expected = {
+          generationId: expectedGenerationId,
+          buildId: expectedBuildId,
+          workspaceId: plan.workspaceId,
+          restartNonce: requested.restartNonce,
+        };
+        const loaded = readLoadedGenerationEvidence(assignment.loadedGenerationPath, expected);
+        const terminal = readTerminalRestartEvidence(assignment.terminalRestartReceiptPath, expected);
+        if (loaded.error !== undefined || terminal.error !== undefined) {
+          blockers.push(`${assignment.predecessorHostInstanceId}: ${loaded.error ?? terminal.error}`);
+          continue;
         }
-        if (Object.keys(refreshEntries).length > 0) {
-          channel = mergeKeyChannelEntries(channel, refreshEntries);
-          record.refreshedKeyHostInstanceIds.push(...Object.keys(refreshEntries));
+        if (loaded.value.hostInstanceId !== terminal.value.hostInstanceId
+          || loaded.value.loadedAt !== terminal.value.loadedAt) {
+          blockers.push(`${assignment.predecessorHostInstanceId}: loaded and terminal evidence identify different boots`);
+          continue;
+        }
+        const successor = currentById.get(terminal.value.hostInstanceId);
+        if (!successor || assignment.predecessorHostInstanceId === successor.hostInstanceId) {
+          blockers.push(`${assignment.predecessorHostInstanceId}: successor boot is not registered yet`);
+          continue;
+        }
+        if (successor.processId !== terminal.value.processId
+          || successor.workspaceId !== plan.workspaceId
+          || successor.buildId !== expectedBuildId
+          || !successor.endpointName
+          || !successor.capabilities.includes('authenticated-control')
+          || !successor.capabilities.includes('controlled-restart')) {
+          blockers.push(`${assignment.predecessorHostInstanceId}: successor registry identity is incomplete`);
+          continue;
+        }
+        successorKeys.set(successor.hostInstanceId, assignment.successorHandoffKey);
+        let status;
+        try {
+          status = await statusProbe(successor);
+        } catch (error) {
+          blockers.push(`${assignment.predecessorHostInstanceId}: successor authentication is incomplete`);
+          continue;
+        }
+        if (status.observedHost.hostInstanceId !== successor.hostInstanceId
+          || status.observedHost.processId !== successor.processId
+          || status.observedHost.workspaceId !== plan.workspaceId
+          || status.observedHost.buildId !== expectedBuildId) {
+          blockers.push(`${assignment.predecessorHostInstanceId}: successor status identity mismatched`);
+          continue;
+        }
+        evidenceByPredecessor.set(assignment.predecessorHostInstanceId, {
+          assignment,
+          successor,
+          loaded: loaded.value,
+          terminal: terminal.value,
+        });
+        if (!record.refreshedKeyHostInstanceIds.includes(successor.hostInstanceId)) {
+          channel = mergeKeyChannelEntries(channel, { [successor.hostInstanceId]: assignment.successorHandoffKey });
+          record.refreshedKeyHostInstanceIds.push(successor.hostInstanceId);
         }
       }
-      if (receiptObserved) {
-        record.receiptObserved = true;
+      const replacementHostInstanceIds = [...evidenceByPredecessor.values()]
+        .map(({ successor }) => successor.hostInstanceId)
+        .sort();
+      const registeredHostInstanceIds = currentHosts.map((host) => host.hostInstanceId).sort();
+      const expectedHostInstanceIds = [...new Set(replacementHostInstanceIds)].sort();
+      record.loadedGenerationHostInstanceIds = [...evidenceByPredecessor.values()]
+        .map(({ terminal }) => terminal.hostInstanceId)
+        .sort();
+      record.terminalEvidenceHostInstanceIds = [...evidenceByPredecessor.values()]
+        .map(({ terminal }) => terminal.hostInstanceId)
+        .sort();
+      record.authenticatedSuccessorHostInstanceIds = [...evidenceByPredecessor.values()]
+        .map(({ successor }) => successor.hostInstanceId)
+        .sort();
+      record.replacementHostInstanceIds = expectedHostInstanceIds;
+      record.receiptObserved = assignments.some((assignment) => assignment.evidenceOwner
+        && evidenceByPredecessor.has(assignment.predecessorHostInstanceId));
+      lastBlockers = blockers.slice(0, 16);
+      const complete = evidenceByPredecessor.size === assignments.length
+        && replacementHostInstanceIds.length === assignments.length
+        && expectedHostInstanceIds.length === assignments.length
+        && registeredHostInstanceIds.length === assignments.length
+        && registeredHostInstanceIds.every((hostInstanceId, index) => hostInstanceId === expectedHostInstanceIds[index]);
+      if (complete) {
+        record.completedAt = new Date().toISOString();
+        record.outcome = 'completed';
         break;
       }
       await new Promise((resolve) => setTimeout(resolve, SETTLE_POLL_MS));
     }
-    record.completedAt = new Date().toISOString();
-    record.outcome = 'completed';
+    if (record.outcome !== 'completed') {
+      const detail = lastBlockers.length > 0 ? ` (${lastBlockers.join('; ')})` : '';
+      throw new Error(`controlled restart did not reach complete replacement census before timeout${detail}`);
+    }
   } catch (error) {
     exitCode = 1;
     record.completedAt = new Date().toISOString();

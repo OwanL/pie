@@ -347,6 +347,10 @@ test('loaded-generation receipts use the shared bounded schema and atomic replac
       () => validateAnalyticsLoadedGenerationReceipt({ ...payload, loadedAt: '2026-09-12' }),
       /loadedAt is not a canonical/u,
     );
+    const scopedPath = path.join(root, 'scoped', 'loaded-generation.json');
+    writeLoadedGenerationReceiptAtomically(root, payload, scopedPath);
+    assert.deepEqual(JSON.parse(readFileSync(scopedPath, 'utf8')), payload);
+    assert.equal(existsSync(path.join(root, LOADED_GENERATION_FILENAME)), true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

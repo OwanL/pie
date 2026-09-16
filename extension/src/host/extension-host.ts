@@ -78,10 +78,8 @@ import type { AnalyticsDetailCapture, AnalyticsObservation } from '../../../shar
 import { AnalyticsHandoffControl } from './analytics-handoff-control.js';
 import { createAnalyticsHostWriterFence } from './analytics-all-host-handoff.js';
 import {
-  consumePendingControlledRestart,
+  claimPendingControlledRestart,
   createAnalyticsHostControlledRestart,
-  isPendingControlledRestartConsumable,
-  readPendingControlledRestart,
 } from './analytics-controlled-restart.js';
 import {
   discoverAnalyticsHostWriters,
@@ -249,6 +247,15 @@ export class PieExtension implements vscode.Disposable {
         path.join(dataPaths.stateDir, 'session-lifecycle.sqlite'),
       );
       const activation = new ActivationStore({ stateDir: dataPaths.stateDir }).read();
+      // Each controlled request has its own durable slot and fresh successor
+      // key. A successor boot claims exactly one slot before registering its
+      // new identity; the owner later correlates that slot's evidence path to
+      // the actual host identity rather than assuming identity reuse.
+      const pendingControlledRestart = claimPendingControlledRestart(dataPaths.stateDir);
+      const envRestartNonce = process.env.PIE_ANALYTICS_RESTART_NONCE?.trim() || null;
+      const envRestartReceiptPath = process.env.PIE_ANALYTICS_TERMINAL_RESTART_RECEIPT_PATH?.trim();
+      const usesEnvironmentRestartEvidence = pendingControlledRestart === undefined
+        && (envRestartNonce !== null || envRestartReceiptPath !== undefined);
       const runtimeIdentity = getPieRuntimeIdentity(context);
       // The environment override is an explicit launch-channel capability. A
       // normal host boot creates a fresh in-memory key so an old boot's signed
@@ -256,11 +263,16 @@ export class PieExtension implements vscode.Disposable {
       // the status endpoint. Until a trusted controller receives that key from
       // the launch channel, this endpoint is host-local evidence only and does
       // not constitute an all-host handoff capability.
-      const analyticsHandoffKey = process.env.PIE_ANALYTICS_HANDOFF_KEY?.trim()
+      const analyticsHandoffKey = pendingControlledRestart?.successorHandoffKey
+        || process.env.PIE_ANALYTICS_HANDOFF_KEY?.trim()
         || createPerBootAnalyticsHandoffKey();
       const activeAnalyticsGenerationId = activation.authority === 'canonical'
         ? activation.manifest?.activeGeneration?.identity.generationId
         : undefined;
+      const successorCapabilities = pendingControlledRestart?.successorCapabilities
+        ?? (process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION === 'p7b-authorized-v1'
+          ? [storageCutoffRootCapability(dataPaths.sessionsDir)]
+          : []);
       const analyticsHostIdentity = {
         hostInstanceId: analyticsProcessGeneration,
         workspaceId: analyticsWorkspaceId,
@@ -270,9 +282,7 @@ export class PieExtension implements vscode.Disposable {
         capabilities: [
           'host-discovery',
           'host-status',
-          ...(process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION === 'p7b-authorized-v1'
-            ? [storageCutoffRootCapability(dataPaths.sessionsDir)]
-            : []),
+          ...successorCapabilities,
         ],
       };
       analyticsWriterAdmission = createSessionLifecycleWriterAdmission(
@@ -393,28 +403,6 @@ export class PieExtension implements vscode.Disposable {
             hostInstanceId: analyticsProcessGeneration,
           })
         : undefined;
-      // A helper-issued controlled restart records its nonce and receipt
-      // destination durably in this state root before the fenced host
-      // acknowledged, so the restarted boot obtains the nonce without an
-      // inherited process environment. An explicit launch-channel environment
-      // pair keeps precedence over the durable slot; an expired slot is
-      // dropped instead of replaying stale evidence.
-      const pendingControlledRestart = readPendingControlledRestart(dataPaths.stateDir);
-      const consumablePendingRestart = pendingControlledRestart
-        && isPendingControlledRestartConsumable(pendingControlledRestart, Date.now())
-        ? pendingControlledRestart
-        : undefined;
-      if (pendingControlledRestart && !consumablePendingRestart) {
-        consumePendingControlledRestart(dataPaths.stateDir);
-      }
-      const envRestartNonce = process.env.PIE_ANALYTICS_RESTART_NONCE?.trim() || null;
-      const envRestartReceiptPath = process.env.PIE_ANALYTICS_TERMINAL_RESTART_RECEIPT_PATH?.trim();
-      const usesEnvironmentRestartEvidence = envRestartNonce !== null || envRestartReceiptPath !== undefined;
-      // The slot is single-use: exactly one boot may claim the nonce. Consume
-      // it here so later boots cannot replay the same restart evidence.
-      if (!usesEnvironmentRestartEvidence && consumablePendingRestart) {
-        consumePendingControlledRestart(dataPaths.stateDir);
-      }
       // Under canonical authority the capture requires a generation id and fact,
       // detail and lifecycle sinks, and throws without them. Those sinks come from
       // the canonical helpers, which only exist once AnalyticsRuntime.start() has
@@ -428,10 +416,11 @@ export class PieExtension implements vscode.Disposable {
         workspaceId: analyticsWorkspaceId,
         processGeneration: analyticsProcessGeneration,
         activationSnapshot: activation,
-        restartNonce: usesEnvironmentRestartEvidence ? envRestartNonce : consumablePendingRestart?.restartNonce ?? null,
-        terminalRestartReceiptPath: usesEnvironmentRestartEvidence
-          ? envRestartReceiptPath
-          : consumablePendingRestart?.terminalRestartReceiptPath,
+        restartNonce: pendingControlledRestart?.restartNonce
+          ?? (usesEnvironmentRestartEvidence ? envRestartNonce : null),
+        terminalRestartReceiptPath: pendingControlledRestart?.terminalRestartReceiptPath
+          ?? (usesEnvironmentRestartEvidence ? envRestartReceiptPath : undefined),
+        loadedGenerationPath: pendingControlledRestart?.loadedGenerationPath,
         writerAdmission: analyticsWriterAdmission,
         onError: (error, stage) => {
           appendPieLog('error', 'analytics', `canonical analytics ${stage} failed`, {

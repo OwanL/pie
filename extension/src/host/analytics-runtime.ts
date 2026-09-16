@@ -59,10 +59,18 @@ export interface AnalyticsTerminalRestartReceipt {
   readonly verifiedAt: string;
 }
 
-export function writeLoadedGenerationReceiptAtomically(stateDir: string, payload: AnalyticsLoadedGenerationReceipt): void {
-  const destination = path.join(stateDir, LOADED_GENERATION_FILENAME);
+export function writeLoadedGenerationReceiptAtomically(
+  stateDir: string,
+  payload: AnalyticsLoadedGenerationReceipt,
+  destination = path.join(stateDir, LOADED_GENERATION_FILENAME),
+): void {
+  if (!path.isAbsolute(destination) || destination.length > 4_096) {
+    throw new ActivationManifestError('Loaded-generation receipt path is missing or invalid.');
+  }
   const temporary = path.join(stateDir, `.${LOADED_GENERATION_FILENAME}.${process.pid}-${randomUUID()}.tmp`);
   const bytes = `${JSON.stringify(payload, null, 2)}\n`;
+  mkdirSync(stateDir, { recursive: true });
+  mkdirSync(path.dirname(destination), { recursive: true });
   let descriptor: number | undefined;
   try {
     writeFileSync(temporary, bytes, { encoding: 'utf8', flag: 'wx' });
@@ -142,6 +150,9 @@ export interface AnalyticsRuntimeOptions {
   /** Exact helper-issued destination for terminal restart evidence. It is
    * required whenever restartNonce is present. */
   terminalRestartReceiptPath?: string;
+  /** Optional host-scoped destination for controlled-restart loaded evidence.
+   * Ordinary boots retain the canonical shared diagnostic filename. */
+  loadedGenerationPath?: string;
   /** Stable active IANA calendar zone for the canonical projection. It is
    * captured once per host and never selected from competing read requests. */
   timeZone?: string;
@@ -531,7 +542,11 @@ export class AnalyticsRuntime implements AnalyticsRuntimePort {
         loadedAt: new Date().toISOString(),
       });
       mkdirSync(this.options.stateDir, { recursive: true });
-      writeLoadedGenerationReceiptAtomically(this.options.stateDir, payload);
+      writeLoadedGenerationReceiptAtomically(
+        this.options.stateDir,
+        payload,
+        this.options.loadedGenerationPath,
+      );
       this.loadedGeneration = payload;
     } catch {
       // Diagnostic only. Never fail a working activation over this record.

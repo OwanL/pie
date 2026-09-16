@@ -10,6 +10,7 @@ import {
 } from '../../../shared/analytics/handoff.js';
 import {
   ANALYTICS_CONTROLLED_RESTART_PROTOCOL,
+  claimPendingControlledRestart,
   consumePendingControlledRestart,
   createAnalyticsHostControlledRestart,
   createControlledRestartError,
@@ -20,6 +21,7 @@ import {
   readPendingControlledRestart,
   verifyControlledRestartRequest,
   verifyControlledRestartResponse,
+  writePendingControlledRestartAtomically,
 } from '../../src/host/analytics-controlled-restart.js';
 import { AnalyticsHandoffControl } from '../../src/host/analytics-handoff-control.js';
 import { SessionLifecycleStore } from '../../src/backend/session-lifecycle-store.js';
@@ -61,6 +63,16 @@ const identity = {
 } as const;
 const KEY = 'unit-test-controlled-restart-key';
 
+function restartFields(hostInstanceId: string = identity.hostInstanceId) {
+  return {
+    targetHostInstanceId: hostInstanceId,
+    successorHandoffKey: KEY,
+    loadedGenerationPath: path.join(tmpdir(), 'loaded-generation.json'),
+    successorCapabilities: [],
+    evidenceOwner: true,
+  } as const;
+}
+
 function distinctIdentity(suffix: string) {
   return {
     hostInstanceId: `host-restart-${suffix}`,
@@ -78,6 +90,7 @@ test('controlled restart requests round-trip, bind to auth, and reject tampering
     operationId: 'operation-1',
     restartNonce: 'nonce-1234-abc',
     terminalRestartReceiptPath: path.join(tmpdir(), 'receipt.json'),
+    ...restartFields(),
   }, KEY, { requestId: 'req-1', nonce: 'frame-1', issuedAtMs: 100, expiresAtMs: 5_000 });
   assert.equal(request.protocol, ANALYTICS_CONTROLLED_RESTART_PROTOCOL);
   const verified = verifyControlledRestartRequest(JSON.parse(JSON.stringify(request)), KEY);
@@ -100,6 +113,7 @@ test('controlled restart request bounds fail closed', () => {
     operationId: 'operation-1',
     restartNonce: 'nonce-1234-abc',
     terminalRestartReceiptPath: path.join(tmpdir(), 'receipt.json'),
+    ...restartFields(),
   };
   assert.throws(() => createControlledRestartRequest(base, KEY, { issuedAtMs: 100, expiresAtMs: 100 + 5 * 60 * 1_000 + 1 }), /expiry is invalid/);
   assert.throws(() => createControlledRestartRequest({ ...base, terminalRestartReceiptPath: 'relative/receipt.json' }, KEY), /must be absolute/);
@@ -123,9 +137,10 @@ test('the host restart handler records a durable pending slot and schedules the 
       operationId: 'operation-2',
       restartNonce: 'restart-nonce-1',
       terminalRestartReceiptPath: path.join(root, 'receipt.json'),
+      ...restartFields(),
     }, KEY);
     await handler.restart(verifyControlledRestartRequest(JSON.parse(JSON.stringify(request)), KEY));
-    const record = readPendingControlledRestart(stateDir);
+    const record = readPendingControlledRestart(stateDir, identity.hostInstanceId);
     assert.ok(record, 'pending restart must be durable before the acknowledgement returns');
     assert.equal(record.restartNonce, 'restart-nonce-1');
     assert.equal(record.terminalRestartReceiptPath, path.join(root, 'receipt.json'));
@@ -136,8 +151,46 @@ test('the host restart handler records a durable pending slot and schedules the 
     assert.deepEqual(performed, ['restart'], 'the quiet restart fires after the bounded delay');
     assert.ok(isPendingControlledRestartConsumable(record, record.issuedAtMs + 1));
     assert.equal(isPendingControlledRestartConsumable(record, record.expiresAtMs + 1), false);
-    consumePendingControlledRestart(stateDir);
-    assert.equal(pendingControlledRestartExists(stateDir), false);
+    consumePendingControlledRestart(stateDir, identity.hostInstanceId);
+    assert.equal(pendingControlledRestartExists(stateDir, identity.hostInstanceId), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('successor boots claim distinct host-scoped pending records without sharing keys or evidence paths', () => {
+  const root = temporaryRoot('claims');
+  try {
+    const stateDir = path.join(root, 'state');
+    const first = {
+      schemaVersion: 1 as const,
+      purpose: 'analytics-activation' as const,
+      workspaceId: identity.workspaceId,
+      operationId: 'operation-claims',
+      predecessorHostInstanceId: 'host-predecessor-a',
+      successorHandoffKey: 'successor-key-a',
+      loadedGenerationPath: path.join(root, 'loaded-a.json'),
+      successorCapabilities: [],
+      evidenceOwner: true,
+      restartNonce: 'restart-claims',
+      terminalRestartReceiptPath: path.join(root, 'receipt-a.json'),
+      issuedAtMs: 0,
+      expiresAtMs: 5_000,
+    };
+    const second = {
+      ...first,
+      predecessorHostInstanceId: 'host-predecessor-b',
+      successorHandoffKey: 'successor-key-b',
+      loadedGenerationPath: path.join(root, 'loaded-b.json'),
+      terminalRestartReceiptPath: path.join(root, 'receipt-b.json'),
+      evidenceOwner: false,
+    };
+    writePendingControlledRestartAtomically(stateDir, first);
+    writePendingControlledRestartAtomically(stateDir, second);
+    const claimed = [claimPendingControlledRestart(stateDir, 1), claimPendingControlledRestart(stateDir, 1)];
+    assert.equal(claimed[0]?.successorHandoffKey === claimed[1]?.successorHandoffKey, false);
+    assert.notEqual(claimed[0]?.loadedGenerationPath, claimed[1]?.loadedGenerationPath);
+    assert.equal(claimPendingControlledRestart(stateDir, 1), undefined);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -159,6 +212,7 @@ test('a newer signed request supersedes the pending slot and re-arms the restart
       operationId: 'operation-3',
       restartNonce: 'restart-nonce-a',
       terminalRestartReceiptPath: path.join(root, 'receipt-a.json'),
+      ...restartFields(),
     }, KEY);
     const second = createControlledRestartRequest({
       workspaceId: identity.workspaceId,
@@ -166,10 +220,11 @@ test('a newer signed request supersedes the pending slot and re-arms the restart
       operationId: 'operation-4',
       restartNonce: 'restart-nonce-b',
       terminalRestartReceiptPath: path.join(root, 'receipt-b.json'),
+      ...restartFields(),
     }, KEY);
     await handler.restart(verifyControlledRestartRequest(JSON.parse(JSON.stringify(first)), KEY));
     await handler.restart(verifyControlledRestartRequest(JSON.parse(JSON.stringify(second)), KEY));
-    const record = readPendingControlledRestart(stateDir);
+    const record = readPendingControlledRestart(stateDir, identity.hostInstanceId);
     assert.ok(record);
     assert.equal(record.restartNonce, 'restart-nonce-b');
     assert.equal(record.terminalRestartReceiptPath, path.join(root, 'receipt-b.json'));
@@ -210,13 +265,14 @@ test('the authenticated control endpoint serves signed restart requests and adve
       operationId: 'operation-5',
       restartNonce: 'restart-nonce-endpoint',
       terminalRestartReceiptPath: path.join(root, 'receipt.json'),
+      ...restartFields(),
     }, KEY, { requestId: 'req-endpoint', nonce: 'frame-endpoint', issuedAtMs: 100, expiresAtMs: 5_000 });
     const response = verifyControlledRestartResponse(await sendFrame(control.endpointName!, request), KEY);
     assert.equal(response.ok, true);
     assert.equal(response.host.hostInstanceId, identity.hostInstanceId);
     assert.equal(response.pendingRestartRecorded, true);
     assert.equal(response.restartScheduled, true);
-    assert.equal(readPendingControlledRestart(stateDir)?.restartNonce, 'restart-nonce-endpoint');
+    assert.equal(readPendingControlledRestart(stateDir, identity.hostInstanceId)?.restartNonce, 'restart-nonce-endpoint');
     assert.deepEqual(performed, []);
 
     // A replayed frame is refused with a signed error, not a replayed ack.
@@ -236,6 +292,7 @@ test('the authenticated control endpoint serves signed restart requests and adve
       operationId: 'operation-5',
       restartNonce: 'restart-nonce-foreign',
       terminalRestartReceiptPath: path.join(root, 'receipt.json'),
+      ...restartFields(),
     }, KEY, { issuedAtMs: 100, expiresAtMs: 5_000 });
     const foreignResponse = await sendFrame(control.endpointName!, foreign);
     const verifiedForeign = verifyControlledRestartResponse(foreignResponse, KEY);
@@ -271,12 +328,13 @@ test('the control endpoint without a restart handler rejects restart frames and 
       operationId: 'operation-6',
       restartNonce: 'restart-nonce-absent',
       terminalRestartReceiptPath: path.join(root, 'receipt.json'),
+      ...restartFields(absentIdentity.hostInstanceId),
     }, KEY, { issuedAtMs: 100, expiresAtMs: 5_000 });
     const rejected = await sendFrame(control.endpointName!, request);
     const verified = verifyControlledRestartResponse(rejected, KEY);
     assert.equal(verified.ok, false);
     assert.match(verified.error ?? '', /controlled-restart handler is unavailable/);
-    assert.equal(existsSync(path.join(stateDir, PENDING_CONTROLLED_RESTART_FILENAME)), false);
+    assert.equal(pendingControlledRestartExists(stateDir, absentIdentity.hostInstanceId), false);
     await control.stop();
   } finally {
     store.close();
@@ -294,6 +352,11 @@ test('the pending slot reader treats malformed slots as absent', () => {
       purpose: 'analytics-activation',
       workspaceId: identity.workspaceId,
       operationId: 'operation-6',
+      predecessorHostInstanceId: identity.hostInstanceId,
+      successorHandoffKey: KEY,
+      loadedGenerationPath: path.join(root, 'loaded.json'),
+      successorCapabilities: [],
+      evidenceOwner: true,
       restartNonce: 'restart-nonce-malformed',
       terminalRestartReceiptPath: path.join(root, 'receipt.json'),
       issuedAtMs: 0,
