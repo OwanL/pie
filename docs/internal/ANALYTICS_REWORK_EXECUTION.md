@@ -90,6 +90,37 @@ package reruns: 330 passed, 0 failed, 4 skipped (one load-dependent failure was 
 an intermediate full run and did not reproduce; it matches the known staggered-restart flake
 recorded in checkpoint 66).
 
+**Third launch incident root cause and repair:** detached launches (child pids 42700 and 23516)
+passed the census-stall retry but failed at the fence with `Analytics writer census does not cover
+the complete host registry.` — a DIFFERENT message from the earlier stall: the durable fence
+snapshot in the loaded build (`SessionLifecycleStore.assertWriterRegistrySnapshot`, called inside
+`beginAnalyticsWriterFence`'s transaction) compares EVERY `analytics_hosts` row for the workspace
+against the coordinator's census, which by design covers only live registered hosts. The production
+registry had accumulated 11 terminal (`stopped`) rows from ordinary host lifecycles over previous
+days, so the fence could never begin. The bootstrap launcher's settlement (step 5) marks stale rows
+`stopped` with census proof but cannot remove them, and the loaded build offers no supported removal
+(`registerAnalyticsHost` refuses re-registration of terminal rows; no delete API exists), so the
+loaded build's fence invariant implicitly requires a registry with no terminal rows at fence time.
+Repair (scripts-only, no `extension/src` byte): the helper now wraps the analytics-activation
+coordinator so each fence attempt first settles terminal rows whose writer is confirmed dead — the
+same census-proof standard as the launcher's settlement (pid absent from the complete process census
+and owning no live backend): `stopping` rows of dead writers are settled through the store API, then
+already-terminal rows are removed through an identity-guarded delete on the store's own connection.
+A row whose pid is still alive is never touched, and the fence then fails loudly on the
+complete-registry snapshot. The wrapper runs exactly when the orchestrator is about to fence:
+committed or fenced journals resume from their receipts without calling the coordinator, and
+refusals happen before it, so neither mutates the registry. The settlement's process census is
+injectable for tests and fail-closed when the census is incomplete. Regressions: `PRODUCTION settles
+terminal rows of confirmed-dead writers before the writer fence` and `PRODUCTION settlement leaves a
+terminal row with a live pid and the fence fails loudly`. Committed and pushed as `83575d9e`.
+Production suite 19 passed, 0 failed; full root-packages rerun 1238 passed, 0 failed (scripts), with
+the P7b production test passing on rerun (matches the known load-dependent flake). The extension
+package reported 6 failures in this environment (coordinator-operations pending-create,
+storage-cutoff authorization rejection, session-service-prefs private-close, cache-file-io-collector
+runner identity, webview bootstrap timeout); no extension file is modified by this work and no
+extension test imports these scripts, so they are pre-existing and out of P7a scope — recorded
+honestly rather than fixed here.
+
 **Recovery instructions after a reload:** never relaunch blindly — read the detached-child log,
 the cutover journal (if present), and the report first. The helper is idempotent per phase; a
 phase entered without completing is observable in the journal/log. If the detached run is absent
