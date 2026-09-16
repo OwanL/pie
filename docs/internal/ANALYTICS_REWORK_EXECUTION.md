@@ -35,7 +35,7 @@ with SHA-256
 `f56366ea2e989e3536a7f4309686d402f768ef30e4007a0601c56802a93faaf5`; the refreshed executable
 provisional plan is
 `C:/Users/OWANLA~1/AppData/Local/Temp/pie-p7a-final-20260916-bkv7Mr/p7a-preflight-plan-r03.json`,
-whose approved authorization envelope records source commit `386e7fa2` and whose refreshed trial
+whose approved authorization envelope records source commit `386e7fa27abaf89dfce378d60abade1e68963956` and whose refreshed trial
 hash is `878805ec5ede42292a61db0075a8fa753e3314b461b027910deced69c9df5f49`. Read-only current
 admission against that plan passed with `overallP0: provisional-qualified`; the measured overall
 state remains `unqualified` as required. No build was rerun because this fix is scripts/tests-only;
