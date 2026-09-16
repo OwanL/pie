@@ -74,6 +74,7 @@ import {
   readLoadedGeneration,
   waitForFreshLoadedGeneration,
 } from './analytics-activation-recovery.mjs';
+import { sendBoundedAnalyticsFrame, retryStalledAnalyticsDiscovery } from './analytics-handoff-transport.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(here, '..');
@@ -455,6 +456,7 @@ async function produceAuthoritativeCutoffHandoff(plan) {
         analyticsGenerationId: active.manifest.activeGeneration.identity.generationId,
         keyForHost: (host) => keys.get(host.hostInstanceId),
         probeTimeoutMs: plan.hostProbeTimeoutMs,
+        send: sendBoundedAnalyticsFrame,
       });
       const receipt = await adapters.coordinator('storage-cutoff').ensureFenced(`${plan.generationId}:cutoff`);
       mkdirSync(path.dirname(receiptPath), { recursive: true });
@@ -896,11 +898,12 @@ async function runPreflight(plan) {
           ...(firstActivation ? { allowAbsentAnalyticsDescriptor: true } : {}),
           keyForHost: (host) => keys.get(host.hostInstanceId),
           probeTimeoutMs: plan.hostProbeTimeoutMs,
+          send: sendBoundedAnalyticsFrame,
         });
         // Mirror the fence census semantics: the production all-host handoff
         // ignores durably stopped hosts, so the read-only preflight must judge
         // readiness by the same census and not by a stricter superseded one.
-        discovery = await adapters.discover({ ignoreStoppedHosts: true });
+        discovery = await retryStalledAnalyticsDiscovery(() => adapters.discover({ ignoreStoppedHosts: true }));
         if (discovery.complete === true && discovery.hosts.length === 0) {
           blockers.push('host census contains no registered hosts');
         }
@@ -1289,6 +1292,7 @@ export async function runProductionCutover(plan, dependencies) {
         : { allowAbsentAnalyticsDescriptor: true }),
       keyForHost: hostKeyResolver.keyForHost,
       probeTimeoutMs: plan.hostProbeTimeoutMs,
+      send: sendBoundedAnalyticsFrame,
     });
     let activationRequest;
     if (mode === 'analytics-activation') {
@@ -1346,11 +1350,11 @@ export async function runProductionCutover(plan, dependencies) {
         // The post-restart census explicitly names the committed generation
         // and re-proves the descriptor: restarted hosts must show the NEW
         // generation, not merely lack the old one.
-        const discovery = await adapters.discover({
+        const discovery = await retryStalledAnalyticsDiscovery(() => adapters.discover({
           ignoreStoppedHosts: true,
           analyticsGenerationId: committedGenerationId,
           allowAbsentAnalyticsDescriptor: false,
-        });
+        }));
         if (!discovery.complete || discovery.hosts.length === 0) {
           throw new Error(`Post-restart authenticated host census is incomplete: ${discovery.reasons.map((entry) => entry.code).join(', ') || 'unknown blocker'}`);
         }
@@ -1413,11 +1417,11 @@ export async function runProductionCutover(plan, dependencies) {
           || loaded.loadedAt !== currentTerminal.evidence.loadedAt) {
           throw new Error('Storage-cutoff restart did not preserve the active analytics generation.');
         }
-        const discovery = await adapters.discover({
+        const discovery = await retryStalledAnalyticsDiscovery(() => adapters.discover({
           ignoreStoppedHosts: true,
           analyticsGenerationId: active.identity.generationId,
           allowAbsentAnalyticsDescriptor: false,
-        });
+        }));
         if (!discovery.complete || discovery.hosts.length === 0) {
           throw new Error(`Post-storage-restart authenticated host census is incomplete: ${discovery.reasons.map((entry) => entry.code).join(', ') || 'unknown blocker'}`);
         }

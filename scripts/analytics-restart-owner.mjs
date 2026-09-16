@@ -33,6 +33,7 @@
 // bootstrap blocker and exits non-zero instead of pretending.
 
 import { createHash, randomBytes } from 'node:crypto';
+import { sendBoundedAnalyticsFrameWithStallRetry } from './analytics-handoff-transport.mjs';
 import {
   closeSync,
   fsyncSync,
@@ -233,7 +234,12 @@ export async function loadOwnerDependencies() {
   return {
     SessionLifecycleStore: lifecycle.SessionLifecycleStore,
     storageCutoffRootCapability: lifecycle.storageCutoffRootCapability,
-    sendBoundedAnalyticsFrame: discovery.sendBoundedAnalyticsFrame,
+    // The script-owned transport replaces the compiled sender: the combined
+    // `socket.end(frame)` write+half-close races the extension host's
+    // end-without-frame guard (see analytics-handoff-transport.mjs). The
+    // stall-retry variant is nonce-safe for restart commands: an already
+    // processed request replays loudly instead of restarting twice.
+    sendBoundedAnalyticsFrame: sendBoundedAnalyticsFrameWithStallRetry,
     createAuthenticatedAnalyticsHostStatusProbe: discovery.createAuthenticatedAnalyticsHostStatusProbe,
     createControlledRestartRequest: restart.createControlledRestartRequest,
     verifyControlledRestartResponse: restart.verifyControlledRestartResponse,

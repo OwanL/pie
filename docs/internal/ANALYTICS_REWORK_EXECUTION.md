@@ -14,6 +14,156 @@ Owning specifications: runbook; `docs/ANALYTICS_REWORK_PLAN.md` §§1, 11.6, 17;
 
 ---
 
+## Checkpoint 67 - 2026-09-16, review findings repaired; pre-launch record for the sanctioned r03 activation run
+
+This checkpoint records the exact P7a activation invocation and recovery instructions **before** the
+one-shot helper is launched, so a session reload cannot lose progress. The four reviewer findings are
+repaired, the refreshed authenticated preflight must pass before launch, and the detached helper owns
+the authorized analytics activation (controlled extension-host restart with successor key ingress,
+post-cutover census, and report). No P7b storage cutoff is requested or permitted here.
+
+**Review findings repaired (all scripts/tests-owned; no `extension/src` byte changed, so the r06
+source-equivalence receipt, candidate build `67dc8288f6a19b1b65e8`, and staged runtime
+`4280844eaf180adb10a6ebd921e2f81a43a4d07d71ff5f2c4bd379e031eee7b9` remain valid):**
+
+1. `docs/internal/ANALYTICS_REWORK_EXECUTION.md`: restored the missing
+   `## Checkpoint 65 - 2026-09-16, source-equivalence P1 completeness boundary repaired` heading
+   between checkpoint 66 and the former 65 body (before checkpoint 64).
+2. `scripts/analytics-handoff-transport.mjs`: `retryStalledAnalyticsDiscovery` now honors its
+   existing `spacingMs` parameter (it previously hardcoded 75 ms); new regression test pins that
+   passed spacing is honored and bounded.
+3. `scripts/analytics-bootstrap-launcher.mjs`: removed the unused `dependencies` parameter from
+   `runKeyBindingRecovery` and its single call site (the function already receives loaded
+   `modules`; no other caller exists).
+4. `scripts/analytics-bootstrap-launcher.mjs`: trailing newline restored at end of file.
+
+**Verification evidence:** transport 8/8 and bootstrap-launcher 8/8 via `npm run test:file`; full
+scripts package 328 passed, 0 failed, 4 skipped (previous 327 + the new spacing test).
+
+**Sanctioned invocation (r03, `cutoverMode: analytics-activation`, NOT storage-cutoff; plan
+`C:/Users/OWANLA~1/AppData/Local/Temp/pie-p7a-final-20260916-bkv7Mr/p7a-preflight-plan-r03.json`,
+SHA-256 `193c1afcafa160de174ac2e10ed3caca4b4a4e63ad1ca57161cc4957431861ae`, `status:
+ready-for-bootstrap`, authorization envelope approved under scope-plan §17):**
+
+1. Refresh authenticated preflight (must print `"status": "ready"` with `"blockers": []`; a
+   non-ready result blocks launch):
+   `node scripts/analytics-activation-helper.mjs --preflight --plan C:/Users/OWANLA~1/AppData/Local/Temp/pie-p7a-final-20260916-bkv7Mr/p7a-preflight-plan-r03.json`
+2. Launch the one-shot helper detached (performs activation, terminal controlled restart with
+   successor key ingress, and post-cutover census in one bounded, resumable run; spawns a detached
+   child and returns immediately):
+   `node scripts/analytics-activation-helper.mjs --detach --plan C:/Users/OWANLA~1/AppData/Local/Temp/pie-p7a-final-20260916-bkv7Mr/p7a-preflight-plan-r03.json`
+3. Monitor boundedly via the durable phase record
+   (`C:/Users/OwanLazic/AppData/Local/pie/data/state/analytics-activation-phases.json`, also
+   readable with `node scripts/analytics-activation-helper.mjs --status --state C:/Users/OwanLazic/AppData/Local/pie/data/state`),
+   the sanitized report `C:/Users/OWANLA~1/AppData/Local/Temp/pie-p7a-final-20260916-bkv7Mr/activation-report-r01.json`,
+   and the terminal restart receipt `C:/Users/OWANLA~1/AppData/Local/Temp/pie-p7a-final-20260916-bkv7Mr/terminal-restart-receipt-r01.json`.
+
+**Recovery instructions after a reload:** never relaunch blindly — read the phase record and report
+first. The helper is idempotent per phase (phases already completed without error are skipped; a
+phase entered without completing is marked with its error). If the detached run is absent from the
+process census and the phase record shows an interrupted phase, re-run step 2 (the same r03 plan)
+only after the refreshed preflight (step 1) still reports ready. Failure handling: preserve all
+evidence, diagnose only within P7a scope, do not loop destructive actions, do not shorten or bypass
+gates, and record the exact unmet gate honestly. Bound live host: `7053bef0-f66b-4203-8713-bea6a5bc8297`
+(pid 7740) against runtime `4280844e…` and candidate `67dc8288…`; verify actually **loaded** and
+**active** terminology in post-cutover evidence, not merely staged state. The five unrelated
+model/settings/pricing working-tree edits remain untouched and unstaged throughout.
+
+Authorization basis: scope-plan §17 (approved 2026-09-09, full implementation and live cutover),
+confirmed independently; checkpoint 66 records the completed bootstrap recovery and that the owner
+key is bound and preflight is ready. No repeat user permission is required for this activation.
+
+---
+
+## Checkpoint 66 - 2026-09-16, bootstrap recovery completed: owner key bound, authenticated preflight fully ready
+
+This checkpoint completes the bounded bootstrap recovery. One live host is now bound to the owner
+key map, the authenticated preflight passes with zero blockers, and activation readiness is
+established. No live cutover, restart, detach run, storage cutoff, or production-data change was
+performed; the five unrelated model/settings/pricing edits remain untouched.
+
+**State achieved (all verified live, read-only):** the executable plan remains
+`C:/Users/OWANLA~1/AppData/Local/Temp/pie-p7a-final-20260916-bkv7Mr/p7a-preflight-plan-r03.json`
+(SHA-256 `193c1afcafa160de174ac2e10ed3caca4b4a4e63ad1ca57161cc4957431861ae`, corrected earlier in
+this session so its `restartCommand` references r03 instead of superseded r02). Candidate build
+`67dc8288f6a19b1b65e8`, staged/loaded runtime
+`4280844eaf180adb10a6ebd921e2f81a43a4d07d71ff5f2c4bd379e031eee7b9`, source-equivalence r06, and
+the r03 authorization envelope are unchanged. `--recover-key-binding` ran against r03 (no close,
+no restart, no re-mint): it rebound the existing minted bootstrap key to the confirmed live host
+(host `7053bef0-f66b-4203-8713-bea6a5bc8297`, pid 7740, registered after the mint, provenance gate
+enforced) and printed `bootstrap key binding verified: the authenticated host census is complete
+for first activation.` The read-only helper preflight against r03 then reported `status: ready`,
+`blockers: []`, with `p0Qualification`, `analyticsEvidenceStructure`, `hostProcessCensus`,
+`authenticatedHostProbes`, `allHostDiscovery`, `terminalRestartIngress`, and `analyticsActivation`
+all true; `admission.ready: true`; the single host is `registered`/`reconciled` with empty reason
+codes; registry, runtime-lease, process-owner, and authenticated-host reads all complete;
+`unregisteredRuntimeLeaseCount: 0`; `unregisteredBackendOwnerCount: 0`; `terminalRestartReceipt`
+null as expected before the activation-time controlled restart; `destructiveActions` all false.
+Witness output:
+`C:/Users/OWANLA~1/AppData/Local/Temp/pie-p7a-final-20260916-bkv7Mr/preflight-rerun-r01.json`
+(SHA-256 `60dc81977e5a7ccd69b741273db5fdfde61c958704ad48644a13732d97caaf85`).
+
+**Transport root cause found and fixed (script-owned; the staged runtime is untouched).** The
+compiled client sender in `extension/src/host/analytics-handoff-discovery.ts` sends its request
+with `socket.end(frame)`, coalescing the frame write and the write-side half-close. Against the
+extension host's named-pipe runtime the peer can observe the half-close before the buffered frame
+is delivered, and the host's end-without-frame guard destroys the connection silently; the same
+frame with a separate write and a deferred half-close was answered in ~1 ms. A second, independent
+defect was isolated live: the FIRST connection to a host endpoint after an idle period can be
+accepted but never deliver its frame, closing without a response ~60 ms in, while a later
+connection succeeds. A same-nonce retry returning `handoff request nonce was replayed.` proved
+that a stall can also consume the frame and lose only the response, so same-nonce retries cannot
+generally repair a stall; fresh-nonce retries must be signed one layer up. The fix is script-owned
+and unmeasured by design: `scripts/analytics-handoff-transport.mjs` implements the deferred
+half-close transport (`sendBoundedAnalyticsFrame`, one honest attempt per signed request),
+`sendBoundedAnalyticsFrameWithStallRetry` (same-nonce stall retry used only for controlled-restart
+sends, where the host's nonce replay guard turns an already-processed frame into a loud rejection
+rather than a silent second restart), and `retryStalledAnalyticsDiscovery` (fresh-signed census
+retries while the only discovery reasons are `host-authentication-failed`). It is wired through
+the existing injection seams only: launcher verification, helper preflight/cutoff-fence/cutover
+and post-restart census adapters, and the restart-owner send/probe dependency. No `extension/src`
+or staged-runtime byte changed, so the r06 source-equivalence receipt and all plan bindings remain
+valid.
+
+**Second latent launcher bug found via the retry:** `performDiscoveryVerification` returned the
+discovery promise from a synchronous function whose `finally { store.close(); }` therefore ran
+before the promise resolved. The original single-attempt flow was latently safe only because
+discovery reads the registry once, synchronously; a stall-retry attempt then hit `database is not
+open` and cascaded into `registry-unavailable` census reasons. Fixed by making the function async
+and awaiting inside the try. The launcher race fix and recovery path from earlier this session
+(registration/binding waits require live registered pids; the key map is never emptied on bounded
+failure; `--recover-key-binding` with a mint-provenance gate; testability exports) are unchanged
+and re-verified here.
+
+**Regression evidence:** new `scripts/test/analytics-handoff-transport.test.mjs` 7/7 (contract
+pin: `end()` only from the write flush callback; end-to-end response; the guard host still
+answers; timeout, frame bounds, malformed/multi-frame rejection; discovery-retry semantics that
+stop on any non-probe reason and return the last honest result). Launcher suite 8/8. Restart-owner
+suite 6/6 twice; one load-dependent flake was observed once under the full package run (staggered
+two-host test: missing loaded-generation evidence at timeout — the same first-connection stall
+mechanism hitting the then-single-attempt restart send) and is now mitigated by the nonce-safe
+stall retry. Full scripts package: 327 passed, 0 failed, 4 skipped on rerun.
+
+**Remaining root-cause work (deferred, requires the standard evidence chain):** the owning sender
+in `extension/src/host/analytics-handoff-discovery.ts` and the control endpoint's
+end-without-frame guard in `extension/src/host/analytics-handoff-control.ts` still carry the
+combined-form behavior. Fixing them changes the coordinated build id, so the change must ride the
+established chain (extension build → new staged-integrity receipt → source-equivalence receipt
+binding the new candidate to the historical provisional evidence → candidate trial → admission →
+plan revision). Until then, hosts themselves use the compiled sender only for cross-host probing
+irrelevant to single-host activation.
+
+**Exact next action:** with the preflight now ready and the owner key bound, the remaining
+bootstrap step authorized by the plan contracts (scope-plan §17; r03 `ready-for-bootstrap`) is the
+owner-run one-shot activation:
+`node scripts/analytics-activation-helper.mjs --detach --plan C:/Users/OWANLA~1/AppData/Local/Temp/pie-p7a-final-20260916-bkv7Mr/p7a-preflight-plan-r03.json`
+— analytics-activation only (r03 requests no storage cutoff), performing the activation, the
+terminal controlled restart with successor key ingress, and the post-cutover census in one
+bounded, detached, resumable run. This checkpoint authorizes no live cutover by itself; the run
+must be started explicitly by the owner.
+
+---
+
 ## Checkpoint 65 - 2026-09-16, source-equivalence P1 completeness boundary repaired
 
 The source-equivalence producer and admission validator now bind the exact complete qualified-role
