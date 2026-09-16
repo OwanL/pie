@@ -5,14 +5,25 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { AnalyticsCutoverOrchestrator, ANALYTICS_CUTOVER_JOURNAL_FILENAME } from '../../extension/src/host/analytics-cutover-orchestrator.ts';
+import {
+  AnalyticsCutoverOrchestrator,
+  ANALYTICS_CUTOVER_JOURNAL_FILENAME,
+  analyticsCutoverInventorySha256,
+} from '../../extension/src/host/analytics-cutover-orchestrator.ts';
 import {
   assertFreshAnalyticsWriterFenceRequest,
   createSignedAnalyticsWriterFenceAcknowledgement,
   verifyAnalyticsWriterFenceRequest,
 } from '../../extension/src/host/analytics-all-host-handoff.ts';
 import { createProductionAnalyticsHostAdapters } from '../../extension/src/host/analytics-production-adapters.ts';
-import { SessionLifecycleStore } from '../../extension/src/backend/session-lifecycle-store.ts';
+import {
+  createSessionLifecycleWriterAdmission,
+  SessionLifecycleStore,
+  storageCutoffRootCapability,
+} from '../../extension/src/backend/session-lifecycle-store.ts';
+import { filesystemArtifactIdentity, verifyFilesystemArtifactIdentity } from '../../extension/src/backend/session-filesystem-lifecycle.ts';
+import { createProductionStorageCutoffLifecycle } from '../../extension/src/backend/storage-cutoff-production.ts';
+import { SqliteAnalyticsRecorder } from '../../extension/src/analytics/sqlite-recorder.ts';
 import { ActivationStore } from '../../extension/src/analytics/activation-store.ts';
 import { activateGeneration } from '../../extension/src/analytics/activation-sequence.ts';
 import {
@@ -188,7 +199,11 @@ try {
     buildId: config.buildId,
     processId: boot.hostPid,
     endpointName: boot.endpoint,
-    capabilities: ['authenticated-control', 'writer-fence'],
+    capabilities: [
+      'authenticated-control',
+      'writer-fence',
+      ...(config.storageRootCapability ? [config.storageRootCapability] : []),
+    ],
     registeredAtMs: now,
   });
 } finally {
@@ -252,7 +267,7 @@ function makeBoot(index, overrides = {}) {
  * terminal receipt). Census evidence is served for the boot named by the
  * fixture's boot counter, so each restart genuinely changes the world.
  */
-function buildCutoverWorld({ generationId, boots, keyChannel = 'plan', refreshKeyChannel = true }) {
+function buildCutoverWorld({ generationId, boots, keyChannel = 'plan', refreshKeyChannel = true, storageRootCapability }) {
   const root = mkdtempSync(path.join(os.tmpdir(), 'pie-analytics-cutover-'));
   const stateDir = path.join(root, 'state');
   mkdirSync(path.join(root, 'runtime'), { recursive: true });
@@ -317,6 +332,7 @@ function buildCutoverWorld({ generationId, boots, keyChannel = 'plan', refreshKe
     planPath,
     keyChannel,
     refreshKeyChannel,
+    storageRootCapability,
     boots,
   }, null, 2));
   const plan = {
@@ -380,6 +396,7 @@ function createCutoverDependencies(world, censusSeams) {
     ActivationStore,
     activateGeneration,
     AnalyticsCutoverOrchestrator,
+    analyticsCutoverInventorySha256,
     analyticsCutoverJournalFilename: ANALYTICS_CUTOVER_JOURNAL_FILENAME,
     createProductionAnalyticsHostAdapters: (options) => {
       createdAdapterOptions.push(options);
@@ -402,6 +419,10 @@ function createCutoverDependencies(world, censusSeams) {
       };
     },
     SessionLifecycleStore,
+    storageCutoffRootCapability,
+    verifyFilesystemArtifactIdentity,
+    createProductionStorageCutoffLifecycle,
+    SqliteAnalyticsRecorder,
   };
   return { dependencies, createdAdapterOptions, preFenceDiscoveries, discoveries };
 }
@@ -872,4 +893,103 @@ test('PRODUCTION interrupted analytics-fenced resume completes with the journale
     assert.equal(readJournal(world).activationRequest.activatedAt, fixedActivatedAt);
     assert.equal(seams.registry.getAnalyticsWriterAdmissionState(world.workspaceId).state, 'open');
   });
+});
+
+test('PRODUCTION P7b closes the explicit inventory and admits only a new-root successor', async () => {
+  const generationId = randomUUID();
+  const world = buildCutoverWorld({
+    generationId,
+    boots: {
+      '1': makeBoot(1, { descriptorGeneration: generationId }),
+      '2': makeBoot(2, { descriptorGeneration: generationId }),
+    },
+    keyChannel: 'file',
+  });
+  const priorAuthorization = process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION;
+  process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION = 'p7b-authorized-v1';
+  const sessionsDir = path.join(world.root, 'new-sessions');
+  const artifactsDir = path.join(world.root, 'new-artifacts');
+  const transcriptPath = path.join(world.root, 'legacy-sessions', 'session-cutoff.jsonl');
+  const privateTranscriptPath = path.join(world.root, 'legacy-sessions', 'session-private.jsonl');
+  const analyticsDatabasePath = path.join(world.root, 'analytics', 'analytics.sqlite');
+  mkdirSync(path.dirname(transcriptPath), { recursive: true });
+  writeFileSync(transcriptPath, `${JSON.stringify({ type: 'session', id: 'session-cutoff' })}\n`);
+  writeFileSync(privateTranscriptPath, `${JSON.stringify({ type: 'session', id: 'session-private' })}\n`);
+  const analytics = new SqliteAnalyticsRecorder(analyticsDatabasePath);
+  analytics.close();
+  const registry = new SessionLifecycleStore(world.lifecycleStorePath);
+  try {
+    registry.registerArtifact({
+      sessionId: 'session-cutoff', artifactId: 'transcript', kind: 'transcript',
+      locationKind: 'fixed_absolute', location: transcriptPath,
+      identityJson: filesystemArtifactIdentity(transcriptPath),
+    }, Date.now());
+    registry.registerArtifact({
+      sessionId: 'session-private', artifactId: 'transcript', kind: 'transcript',
+      locationKind: 'fixed_absolute', location: privateTranscriptPath,
+      identityJson: filesystemArtifactIdentity(privateTranscriptPath),
+    }, Date.now());
+    registry.setPrivacyMode('session-private', 'on', Date.now());
+  } finally {
+    registry.close();
+  }
+  const capability = storageCutoffRootCapability(sessionsDir);
+  const configPath = path.join(world.root, 'restart-config.json');
+  const config = JSON.parse(readFileSync(configPath, 'utf8'));
+  writeFileSync(configPath, JSON.stringify({ ...config, storageRootCapability: capability }, null, 2));
+  const activationStore = new ActivationStore({ stateDir: world.stateDir });
+  await activateGeneration(activationStore, {
+    generationId,
+    buildId: world.plan.buildId,
+    qualificationSha256: world.qualificationSha256,
+    trialSha256: world.trialSha256,
+    activatedAt: new Date().toISOString(),
+  });
+  const storagePlan = {
+    ...world.plan,
+    cutoverMode: 'storage-cutoff',
+    operationId: randomUUID(),
+    expectedActiveGenerationId: generationId,
+    cutoffInventory: ['session-cutoff', 'session-private'],
+    cutoffInventoryValidated: true,
+    cutoffRoots: { sessions: sessionsDir, artifacts: artifactsDir },
+    analyticsDatabasePath,
+    prerequisites: {
+      ...world.plan.prerequisites,
+      p7b: {
+        lifecycleOwnerReady: true,
+        legacyScrubBoundaryReady: true,
+        rootSwitchReady: true,
+        expiryInPlaceReady: true,
+      },
+    },
+  };
+  try {
+    return await withCutoverWorld({ ...world, plan: storagePlan }, async ({ seams, dependencies }) => {
+      const result = await runProductionCutover(storagePlan, dependencies);
+      assert.equal(result.status, 'complete');
+      assert.deepEqual(result.storage.closedSessionIds, ['session-cutoff', 'session-private']);
+      assert.deepEqual(result.storage.deletedSessionIds, ['session-private']);
+      assert.equal(result.storageVerification.admissionReopened, true);
+      assert.deepEqual(result.storageVerification.hosts.map((host) => host.hostInstanceId), ['boot-2']);
+      const closed = seams.registry.get('session-cutoff');
+      assert.equal(closed.cleanupState, 'retained');
+      assert.equal(BigInt(closed.expiresAtMs) - BigInt(closed.closedAtMs), 24n * 60n * 60n * 1_000n);
+      assert.equal(existsSync(transcriptPath), true);
+      assert.equal(existsSync(privateTranscriptPath), false);
+      assert.equal(seams.registry.get('session-private').cleanupState, 'deleted');
+      assert.equal(seams.registry.getAnalyticsWriterAdmissionState(world.workspaceId).state, 'fenced');
+      const successor = seams.registry.getAnalyticsHost('boot-2');
+      assert.ok(successor);
+      const admission = createSessionLifecycleWriterAdmission(seams.registry, successor, Date.now);
+      admission.assertAdmitted();
+      admission.acquire()();
+      const rerun = await runProductionCutover(storagePlan, dependencies);
+      assert.equal(rerun.status, 'complete');
+      assert.equal(JSON.parse(readFileSync(path.join(world.root, 'boot-counter.json'), 'utf8')).boot, 2);
+    });
+  } finally {
+    if (priorAuthorization === undefined) delete process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION;
+    else process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION = priorAuthorization;
+  }
 });

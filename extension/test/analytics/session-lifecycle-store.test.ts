@@ -10,6 +10,7 @@ import {
   createSessionLifecycleWriterAdmission,
   SessionLifecycleStore,
   sessionRetentionDeadline,
+  storageCutoffRootCapability,
 } from '../../src/backend/session-lifecycle-store.js';
 import {
   SessionExpiryScheduler,
@@ -212,6 +213,60 @@ test('durable writer admission holds leases through writes and rejects a fenced 
     assert.equal(store.listAnalyticsWriterLeases(identity.workspaceId).length, 1);
     startupRelease?.();
     assert.equal(store.listAnalyticsWriterLeases(identity.workspaceId).length, 0);
+  } finally {
+    store.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('storage cutoff admits only a fresh host bound to the final sessions root without reopening the fence', () => {
+  const temp = tempDatabase();
+  const store = new SessionLifecycleStore(temp.databasePath);
+  const workspaceId = 'storage-successor-workspace';
+  const oldHost = {
+    hostInstanceId: 'storage-old-host', workspaceId,
+    generationId: 'storage-old-generation', buildId: 'storage-build', processId: 501,
+  };
+  const operationId = 'storage-cutoff-operation';
+  try {
+    store.registerAnalyticsHost({
+      ...oldHost, capabilities: ['authenticated-control', 'writer-fence'], registeredAtMs: '1',
+    });
+    const fence = store.beginAnalyticsWriterFence({
+      workspaceId, operationId, purpose: 'storage-cutoff', expectedHosts: [oldHost], nowMs: 2,
+    });
+    store.acknowledgeAnalyticsWriterFence({
+      workspaceId, operationId, fenceEpoch: fence.fenceEpoch,
+      identity: oldHost, activeWriterCount: 0, nowMs: 3,
+    });
+    store.markAnalyticsHostState(oldHost.hostInstanceId, oldHost.processId, oldHost.generationId, 'stopped', 4);
+    store.completeAnalyticsWriterFence(workspaceId, operationId, 5);
+
+    const sessionsDir = path.join(temp.root, 'sessions');
+    const capability = storageCutoffRootCapability(sessionsDir);
+    store.authorizeStorageCutoffSuccessorCapability({
+      workspaceId, operationId, requiredCapability: capability, nowMs: 6,
+    });
+    const successor = {
+      hostInstanceId: 'storage-new-host', workspaceId,
+      generationId: 'storage-new-generation', buildId: oldHost.buildId, processId: 502,
+    };
+    store.registerAnalyticsHost({
+      ...successor, capabilities: ['authenticated-control', 'writer-fence', capability], registeredAtMs: '7',
+    });
+    const admittedFence = store.assertStorageCutoffSuccessorAdmission({
+      workspaceId, operationId, identity: successor, requiredCapability: capability,
+    });
+    assert.equal(admittedFence.state, 'fenced');
+    assert.equal(store.getAnalyticsWriterAdmissionState(workspaceId).state, 'fenced');
+    const successorAdmission = createSessionLifecycleWriterAdmission(store, successor, () => 8);
+    successorAdmission.assertAdmitted();
+    const release = successorAdmission.acquire();
+    release();
+    assert.throws(() => store.assertStorageCutoffSuccessorAdmission({
+      workspaceId, operationId, identity: successor,
+      requiredCapability: storageCutoffRootCapability(path.join(temp.root, 'wrong-root')),
+    }), /not authorized before restart/);
   } finally {
     store.close();
     rmSync(temp.root, { recursive: true, force: true });

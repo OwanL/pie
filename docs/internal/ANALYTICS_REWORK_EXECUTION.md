@@ -14,6 +14,50 @@ Owning specifications: runbook; `docs/ANALYTICS_REWORK_PLAN.md` §§1, 11.6, 17;
 
 ---
 
+## Checkpoint 61 - 2026-09-16, P7b production storage-cutoff route rehearsed; live restart ingress still closed
+
+The production activation helper now has a distinct, resumable `storage-cutoff` route. It binds to
+an already-active canonical analytics generation/build, requires the exact
+`PIE_STORAGE_CUTOFF_AUTHORIZATION=p7b-authorized-v1` marker, validates an explicit deduplicated
+lifecycle-registry inventory and every pending filesystem identity, and accepts only the two existing
+external lifecycle owners. Inventory is hashed and collected only under the completed all-host
+writer fence. The helper uses `SessionFilesystemMutationBarrier` and `SessionLifecycleCleaner`, with
+canonical private-session analytics deletion, legacy-review cleanup, and prompt-setting cleanup; it
+does not introduce a second deletion path. Ordinary sessions retain their registered transcripts for
+exactly 24 hours, while private sessions use the existing immediate coupled deletion semantics.
+
+The final sessions root is represented only by a SHA-256 capability. After cleanup, the helper
+immutably binds that exact capability to the fenced storage operation before requesting restart. A
+fresh host may register/start/acquire writer admission only with the bound capability; every old
+fenced identity remains rejected and the fence is not globally reopened. Completion additionally
+requires a terminal receipt whose nonce/host/time/build match the loaded-generation marker, a fresh
+authenticated census, and successor admission evidence. The operation continues to use the existing
+cutover/storage journals, so reruns adopt matching durable evidence and reject changed requests.
+
+Focused disposable-root rehearsal passed: lifecycle/store tests **21/21**, production helper tests
+**12/12**, and helper/preflight tests **2/2**, including public +24-hour retention, private transcript
+deletion, exact-root successor admission, authenticated post-restart census, idempotent completed
+rerun without a second restart, and unchanged canonical generation/build. The required
+`npm run extension:build` passed TypeScript plus both Vite targets and emitted
+`storage-cutoff-production.js`; coordinated build identity is `34df63aa8a0a2a8ef9a4`. Immutable
+runtime `ef74952b76b8c09ca34c02ac17fa6248c3da86d45646825f0175265ab963cfe4` is staged/selected for
+the next normal VS Code startup; it is not claimed loaded. No production inventory, transcript,
+analytics database, loaded generation, or current host was mutated. No live
+activation, cutoff, deletion, closure, or restart occurred. Checkout baseline for this source unit was
+`master`/`origin/master` at `6d8108eb435d`; the five unrelated model/settings edits remain excluded.
+
+**Live gate remains closed:** this checkout still has no verified real command/ingress that can
+restart every fenced VS Code host while preserving unsaved work and forwarding the helper-owned
+nonce/terminal-receipt environment. The repository test uses an owned disposable restart fixture and
+is rehearsal evidence, not proof of that current-host ingress. Consequently no production plan or
+report path is being published as executable yet. After a supported restart owner is implemented or
+identified, create the reviewed plan outside the repository, run read-only preflight first with
+`PIE_STORAGE_CUTOFF_AUTHORIZATION=p7b-authorized-v1 node scripts/analytics-activation-helper.mjs --preflight --plan <absolute-p7b-plan.json>`, and only then use the detached production invocation and
+report path named by that approved plan. Do not substitute `code --reuse-window`: the installed CLI
+has no reload command and that option does not establish terminal restart evidence.
+
+---
+
 ## Checkpoint 60 - 2026-09-16, candidate-trial and provisional production authorization blockers repaired
 
 The candidate-trial identity gate now runs authoritative overall-qualification recomputation before

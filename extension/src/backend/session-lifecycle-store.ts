@@ -98,6 +98,15 @@ const ADDITIVE_HOST_REGISTRY_VERSION = 4;
 const MAX_ANALYTICS_WRITER_HOSTS = 512;
 const MAX_ANALYTICS_WRITER_LEASES = 4_096;
 
+/** Capability asserted by a host only when storage-cutoff routing is enabled.
+ * Hashing the normalized root keeps absolute machine paths out of census and
+ * receipt evidence while still binding admission to the selected root. */
+export function storageCutoffRootCapability(sessionsDir: string): string {
+  const normalized = path.resolve(sessionsDir);
+  const canonical = process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+  return `storage-root-sha256:${createHash('sha256').update(canonical, 'utf8').digest('hex')}`;
+}
+
 export type SessionCleanupState = 'open' | 'retained' | 'deleting' | 'deleted' | 'blocked';
 export type SessionCloseCause = 'user_close' | 'private_close' | 'forget' | 'expiry';
 export type LifecycleArtifactKind = 'transcript' | 'session_sidecar' | 'managed_cache' | 'external_reference';
@@ -234,6 +243,7 @@ interface AnalyticsWriterFenceRow {
   state: AnalyticsWriterFenceState;
   expected_hosts_json: string;
   expected_hosts_sha256: string;
+  successor_capability: string | null;
   started_at_ms: string;
   updated_at_ms: string;
 }
@@ -777,6 +787,7 @@ export class SessionLifecycleStore {
         state TEXT NOT NULL CHECK (state IN ('open', 'fencing', 'fenced')),
         expected_hosts_json TEXT NOT NULL,
         expected_hosts_sha256 TEXT NOT NULL,
+        successor_capability TEXT,
         started_at_ms TEXT NOT NULL,
         updated_at_ms TEXT NOT NULL
       );
@@ -808,6 +819,10 @@ export class SessionLifecycleStore {
         ON analytics_writer_leases(workspace_id, fence_epoch, host_instance_id);
       PRAGMA user_version = ${SCHEMA_VERSION};
     `);
+    const fenceColumns = this.database.prepare('PRAGMA table_info(analytics_writer_fences)').all() as Array<{ name: string }>;
+    if (!fenceColumns.some((column) => column.name === 'successor_capability')) {
+      this.database.exec('ALTER TABLE analytics_writer_fences ADD COLUMN successor_capability TEXT');
+    }
   }
 
   close(): void {
@@ -856,20 +871,25 @@ export class SessionLifecycleStore {
         throw new SessionLifecycleConflictError(`Analytics host ${hostInstanceId} is terminal and cannot be re-registered.`);
       }
       const activeFence = this.database.prepare(`
-        SELECT state, purpose, expected_hosts_json, expected_hosts_sha256
+        SELECT state, purpose, expected_hosts_json, expected_hosts_sha256, successor_capability
         FROM analytics_writer_fences WHERE workspace_id = ?
       `).get(workspaceId) as {
         state: AnalyticsWriterFenceState;
         purpose: AnalyticsWriterFencePurpose;
         expected_hosts_json: string;
         expected_hosts_sha256: string;
+        successor_capability: string | null;
       } | undefined;
       if (activeFence && activeFence.state !== 'open') {
-        // A successor host may register only after an analytics-activation
-        // fence is durably fenced and every fenced host is terminal. Storage
-        // cutoff has no successor-registration exception: it keeps the entire
-        // writer population closed until its receipt is complete.
-        if (activeFence.state !== 'fenced' || activeFence.purpose !== 'analytics-activation') {
+        // A successor host may register only after the fence is durable and
+        // every fenced host is terminal. A storage-cutoff successor must also
+        // attest the final sessions root selected by its launch environment;
+        // ordinary pre-cutoff hosts never carry that capability.
+        const storageSuccessor = activeFence.purpose === 'storage-cutoff'
+          && activeFence.successor_capability !== null
+          && host.capabilities.includes(activeFence.successor_capability);
+        if (activeFence.state !== 'fenced'
+          || (activeFence.purpose !== 'analytics-activation' && !storageSuccessor)) {
           throw new SessionLifecycleConflictError('Analytics host registration is closed while a writer fence is active.');
         }
         const expectedHosts = parseWriterHosts(activeFence.expected_hosts_json, activeFence.expected_hosts_sha256);
@@ -1234,6 +1254,82 @@ export class SessionLifecycleStore {
     })();
   }
 
+  /** Bind a completed P7b fence to the exact final-root capability before
+   * requesting restart. The binding is immutable and idempotent. */
+  authorizeStorageCutoffSuccessorCapability(options: {
+    workspaceId: string;
+    operationId: string;
+    requiredCapability: string;
+    nowMs: Int64Value;
+  }): AnalyticsWriterFenceRecord {
+    const workspaceId = requireHostField(options.workspaceId, 'workspaceId');
+    const operationId = requireHostField(options.operationId, 'operationId');
+    const requiredCapability = requireHostField(options.requiredCapability, 'requiredCapability');
+    if (!requiredCapability.startsWith('storage-root-sha256:')) {
+      throw new Error('Storage-cutoff successor capability is invalid.');
+    }
+    const nowMs = encodeTimestamp(options.nowMs, 'nowMs');
+    return this.database.transaction(() => {
+      const fence = this.database.prepare('SELECT * FROM analytics_writer_fences WHERE workspace_id = ?')
+        .get(workspaceId) as AnalyticsWriterFenceRow | undefined;
+      if (!fence || fence.operation_id !== operationId || fence.purpose !== 'storage-cutoff' || fence.state !== 'fenced') {
+        throw new SessionLifecycleConflictError('Storage-cutoff successor authorization requires the matching durable fenced epoch.');
+      }
+      if (fence.successor_capability !== null && fence.successor_capability !== requiredCapability) {
+        throw new SessionLifecycleConflictError('Storage-cutoff successor capability is already bound to another root.');
+      }
+      if (this.countActiveWriterLeases(workspaceId) !== 0) {
+        throw new SessionLifecycleConflictError('Storage-cutoff successor authorization requires zero active writer leases.');
+      }
+      this.database.prepare(`
+        UPDATE analytics_writer_fences SET successor_capability = ?, updated_at_ms = ?
+        WHERE workspace_id = ? AND operation_id = ? AND purpose = 'storage-cutoff' AND state = 'fenced'
+      `).run(requiredCapability, nowMs, workspaceId, operationId);
+      return this.getAnalyticsWriterFence(workspaceId)!;
+    })();
+  }
+
+  /** Admit one post-P7b host without reopening the storage-cutoff epoch.
+   * Old host identities remain fenced; only a fresh registered host carrying
+   * the exact final-root capability selected by the cutoff may proceed. */
+  assertStorageCutoffSuccessorAdmission(options: {
+    workspaceId: string;
+    operationId: string;
+    identity: AnalyticsWriterIdentity;
+    requiredCapability: string;
+  }): AnalyticsWriterFenceRecord {
+    const workspaceId = requireHostField(options.workspaceId, 'workspaceId');
+    const operationId = requireHostField(options.operationId, 'operationId');
+    const requiredCapability = requireHostField(options.requiredCapability, 'requiredCapability');
+    const identity = requireWriterIdentity(options.identity, 'Storage-cutoff successor identity');
+    if (identity.workspaceId !== workspaceId) {
+      throw new SessionLifecycleConflictError('Storage-cutoff successor belongs to another workspace.');
+    }
+    const fence = this.getAnalyticsWriterFence(workspaceId);
+    if (!fence
+      || fence.operationId !== operationId
+      || fence.purpose !== 'storage-cutoff'
+      || fence.state !== 'fenced') {
+      throw new SessionLifecycleConflictError('Storage-cutoff successor admission requires the matching durable fenced epoch.');
+    }
+    const fenceRow = this.database.prepare('SELECT successor_capability FROM analytics_writer_fences WHERE workspace_id = ?')
+      .get(workspaceId) as { successor_capability: string | null } | undefined;
+    if (fenceRow?.successor_capability !== requiredCapability) {
+      throw new SessionLifecycleConflictError('Storage-cutoff successor root was not authorized before restart.');
+    }
+    const host = this.getAnalyticsHost(identity.hostInstanceId);
+    if (!host
+      || !sameWriterIdentity(host, identity)
+      || host.state !== 'registered'
+      || !host.capabilities.includes(requiredCapability)) {
+      throw new SessionLifecycleConflictError('Storage-cutoff successor is not registered with the required final-root capability.');
+    }
+    if (fence.expectedHosts.some((candidate) => candidate.hostInstanceId === identity.hostInstanceId)) {
+      throw new SessionLifecycleConflictError('A fenced storage-cutoff host cannot be admitted as its own successor.');
+    }
+    return fence;
+  }
+
   /** Acquire a short-lived durable admission lease. The caller must supply
    * the epoch it observed before entering its mutation, so an old writer
    * cannot become admissible again after an explicit analytics reopen. */
@@ -1250,18 +1346,23 @@ export class SessionLifecycleStore {
     return this.database.transaction(() => {
       this.assertRegisteredWriterIdentity(normalizedIdentity);
       const admission = this.getAnalyticsWriterAdmissionState(normalizedIdentity.workspaceId);
-      if (admission.state !== 'open' || admission.fenceEpoch !== expectedFenceEpoch) {
-        throw new SessionLifecycleConflictError(
-          `Analytics writer admission is ${admission.state} at epoch ${admission.fenceEpoch}; expected open epoch ${expectedFenceEpoch}.`,
-        );
-      }
       const fence = this.database.prepare('SELECT * FROM analytics_writer_fences WHERE workspace_id = ?')
         .get(normalizedIdentity.workspaceId) as AnalyticsWriterFenceRow | undefined;
-      if (fence) {
-        const expectedHosts = parseWriterHosts(fence.expected_hosts_json, fence.expected_hosts_sha256);
-        if (!expectedHosts.some((host) => sameWriterIdentity(host, normalizedIdentity))) {
-          throw new SessionLifecycleConflictError('Analytics writer identity is outside the current admission census.');
-        }
+      const expectedHosts = fence ? parseWriterHosts(fence.expected_hosts_json, fence.expected_hosts_sha256) : [];
+      const registered = this.getAnalyticsHost(normalizedIdentity.hostInstanceId);
+      const storageSuccessor = admission.state === 'fenced'
+        && fence?.purpose === 'storage-cutoff'
+        && fence.successor_capability !== null
+        && !expectedHosts.some((host) => host.hostInstanceId === normalizedIdentity.hostInstanceId)
+        && registered?.capabilities.includes(fence.successor_capability) === true;
+      if (admission.fenceEpoch !== expectedFenceEpoch || (admission.state !== 'open' && !storageSuccessor)) {
+        throw new SessionLifecycleConflictError(
+          `Analytics writer admission is ${admission.state} at epoch ${admission.fenceEpoch}; expected admitted epoch ${expectedFenceEpoch}.`,
+        );
+      }
+      if (fence && admission.state === 'open'
+        && !expectedHosts.some((host) => sameWriterIdentity(host, normalizedIdentity))) {
+        throw new SessionLifecycleConflictError('Analytics writer identity is outside the current admission census.');
       }
       if (this.countActiveWriterLeases(normalizedIdentity.workspaceId) >= MAX_ANALYTICS_WRITER_LEASES) {
         throw new SessionLifecycleConflictError('Analytics writer admission lease capacity is exhausted.');
@@ -1298,8 +1399,15 @@ export class SessionLifecycleStore {
       const admission = this.getAnalyticsWriterAdmissionState(normalizedIdentity.workspaceId);
       const fence = this.database.prepare('SELECT * FROM analytics_writer_fences WHERE workspace_id = ?')
         .get(normalizedIdentity.workspaceId) as AnalyticsWriterFenceRow | undefined;
-      if (admission.state !== 'fenced' || !fence || fence.purpose !== 'analytics-activation') {
-        throw new SessionLifecycleConflictError('Analytics startup admission requires a completed analytics-activation fence.');
+      if (admission.state !== 'fenced' || !fence
+        || (fence.purpose !== 'analytics-activation' && fence.purpose !== 'storage-cutoff')) {
+        throw new SessionLifecycleConflictError('Analytics startup admission requires a completed activation or storage-cutoff fence.');
+      }
+      const registered = this.getAnalyticsHost(normalizedIdentity.hostInstanceId);
+      if (fence.purpose === 'storage-cutoff'
+        && (fence.successor_capability === null
+          || registered?.capabilities.includes(fence.successor_capability) !== true)) {
+        throw new SessionLifecycleConflictError('Storage-cutoff startup requires a final-root capability.');
       }
       const expectedHosts = parseWriterHosts(fence.expected_hosts_json, fence.expected_hosts_sha256);
       if (expectedHosts.some((host) => host.hostInstanceId === normalizedIdentity.hostInstanceId)) {
@@ -1342,18 +1450,23 @@ export class SessionLifecycleStore {
     this.database.transaction(() => {
       this.assertRegisteredWriterIdentity(normalizedIdentity);
       const admission = this.getAnalyticsWriterAdmissionState(normalizedIdentity.workspaceId);
-      if (admission.state !== 'open' || admission.fenceEpoch !== expectedFenceEpoch) {
-        throw new SessionLifecycleConflictError(
-          `Analytics writer admission is ${admission.state} at epoch ${admission.fenceEpoch}; expected open epoch ${expectedFenceEpoch}.`,
-        );
-      }
       const fence = this.database.prepare('SELECT * FROM analytics_writer_fences WHERE workspace_id = ?')
         .get(normalizedIdentity.workspaceId) as AnalyticsWriterFenceRow | undefined;
-      if (fence) {
-        const expectedHosts = parseWriterHosts(fence.expected_hosts_json, fence.expected_hosts_sha256);
-        if (!expectedHosts.some((host) => sameWriterIdentity(host, normalizedIdentity))) {
-          throw new SessionLifecycleConflictError('Analytics writer identity is outside the current admission census.');
-        }
+      const expectedHosts = fence ? parseWriterHosts(fence.expected_hosts_json, fence.expected_hosts_sha256) : [];
+      const registered = this.getAnalyticsHost(normalizedIdentity.hostInstanceId);
+      const storageSuccessor = admission.state === 'fenced'
+        && fence?.purpose === 'storage-cutoff'
+        && fence.successor_capability !== null
+        && !expectedHosts.some((host) => host.hostInstanceId === normalizedIdentity.hostInstanceId)
+        && registered?.capabilities.includes(fence.successor_capability) === true;
+      if (admission.fenceEpoch !== expectedFenceEpoch || (admission.state !== 'open' && !storageSuccessor)) {
+        throw new SessionLifecycleConflictError(
+          `Analytics writer admission is ${admission.state} at epoch ${admission.fenceEpoch}; expected admitted epoch ${expectedFenceEpoch}.`,
+        );
+      }
+      if (fence && admission.state === 'open'
+        && !expectedHosts.some((host) => sameWriterIdentity(host, normalizedIdentity))) {
+        throw new SessionLifecycleConflictError('Analytics writer identity is outside the current admission census.');
       }
     })();
   }

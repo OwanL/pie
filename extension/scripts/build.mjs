@@ -34,6 +34,7 @@ const requiredBuildFiles = Object.freeze([
   'analytics-query-worker.js',
   'analytics-query-client.js',
   'analytics-candidate-trial.js',
+  'storage-cutoff-production.js',
   path.join(webviewRelativeDir, '.vite', 'manifest.json'),
 ]);
 

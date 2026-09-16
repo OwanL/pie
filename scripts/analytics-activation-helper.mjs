@@ -27,10 +27,11 @@
 //   node scripts/analytics-activation-helper.mjs --preflight --plan <plan.json>
 //   node scripts/analytics-activation-helper.mjs --status --state <stateDir>
 //
-// `--preflight`/`--dry-run` is always read-only. A plan with
-// `cutoverMode: "analytics-activation"` and the explicit authorization and
-// prerequisite envelopes selects the production all-host orchestrator; it must
-// be launched detached and never falls back to the legacy helper path.
+// `--preflight`/`--dry-run` is always read-only. A plan with a distinct
+// `cutoverMode: "analytics-activation"` or `cutoverMode: "storage-cutoff"`
+// and the explicit authorization/prerequisite envelope selects the production
+// all-host orchestrator; it must be launched detached and never falls back to
+// the legacy helper path.
 //
 // The plan file is JSON:
 // {
@@ -43,9 +44,11 @@
 //   "sourceFingerprint":"<qualification provenance fingerprint>",
 //   "reportPath":      "<absolute path for the sanitized activation report>",
 //   "restartCommand":  "<optional; omit to activate without requesting a restart>",
+//   "cutoverMode":     "analytics-activation | storage-cutoff",
 //   "cutoffInventory": ["<validated lifecycle session id>"],
 //   "cutoffInventoryValidated": true,
-//   "cutoffHandoffReceiptPath": "<authoritative all-host handoff receipt>",
+//   "cutoffRoots":     { "sessions": "<absolute final root>", "artifacts": "<absolute final root>" },
+//   "analyticsDatabasePath": "<absolute canonical analytics.sqlite path>",
 //   "workspaceId":     "<analytics workspace identity>",
 //   "runtimeRootPath": "<extension>/pie-runtime",
 //   "runtimeIdentity": { "publisher": "...", "name": "...", "version": "..." },
@@ -220,9 +223,12 @@ function loadPlan(planPath, { preflight = false } = {}) {
   } catch (error) {
     fail(`plan file is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
   }
+  const storageOnly = parsed.cutoverMode === 'storage-cutoff';
   const requiredFields = preflight
     ? ['stateDir']
-    : ['stateDir', 'qualificationReport', 'trialReport', 'generationId', 'buildId', 'sourceHead', 'sourceFingerprint', 'reportPath'];
+    : storageOnly
+      ? ['stateDir', 'generationId', 'buildId']
+      : ['stateDir', 'qualificationReport', 'trialReport', 'generationId', 'buildId', 'sourceHead', 'sourceFingerprint', 'reportPath'];
   for (const field of requiredFields) {
     if (typeof parsed[field] !== 'string' || parsed[field].trim().length === 0) {
       fail(`plan.${field} must be a non-empty string`);
@@ -230,7 +236,9 @@ function loadPlan(planPath, { preflight = false } = {}) {
   }
   const absoluteFields = preflight
     ? ['stateDir']
-    : ['stateDir', 'qualificationReport', 'trialReport', 'reportPath'];
+    : storageOnly
+      ? ['stateDir']
+      : ['stateDir', 'qualificationReport', 'trialReport', 'reportPath'];
   for (const field of absoluteFields) {
     if (!path.isAbsolute(parsed[field])) fail(`plan.${field} must be an absolute path`);
   }
@@ -715,6 +723,21 @@ function readTerminalRestartReceipt(plan) {
   };
 }
 
+function isTerminalReceiptAfterStorageCutoff(plan, terminal) {
+  if (!terminal.ready) return false;
+  const receiptPath = path.join(plan.stateDir, 'storage-cutoff-receipt-v1.json');
+  if (!existsSync(receiptPath)) return false;
+  try {
+    const receipt = JSON.parse(readFileSync(receiptPath, 'utf8'));
+    return receipt?.operationId === (plan.operationId ?? plan.generationId)
+      && typeof receipt.completedAt === 'string'
+      && Number.isFinite(Date.parse(receipt.completedAt))
+      && Date.parse(terminal.evidence.loadedAt) >= Date.parse(receipt.completedAt);
+  } catch {
+    return false;
+  }
+}
+
 async function requestAndAwaitTerminalRestart(plan, previousLoaded) {
   const receiptPath = plan.terminalRestartReceiptPath;
   if (typeof receiptPath !== 'string' || !path.isAbsolute(receiptPath)) {
@@ -793,10 +816,15 @@ function formatDiscoveryEvidence(discovery) {
  * acquires the phase lock, opens a writable SQLite handle, runs an activation
  * sequence, sends a freeze request, requests a restart, or writes a report. */
 async function runPreflight(plan) {
-  await loadAdmissionModule();
+  const storageCutoffRequested = plan.cutoverMode === 'storage-cutoff'
+    || plan.storageCutoff === true || plan.cutoffInventory !== undefined;
   const blockers = [];
-  const admission = inspectActivationEvidence(admissionEvidenceOptions(plan));
-  blockers.push(...admission.blockers);
+  let admission = { ready: null, evidence: null, blockers: [] };
+  if (!storageCutoffRequested) {
+    await loadAdmissionModule();
+    admission = inspectActivationEvidence(admissionEvidenceOptions(plan));
+    blockers.push(...admission.blockers);
+  }
 
   let loadedGeneration = null;
   try {
@@ -878,30 +906,97 @@ async function runPreflight(plan) {
   }
 
   const terminalRestartReceipt = readTerminalRestartReceipt(plan);
-  blockers.push(...terminalRestartReceipt.blockers);
-  const storageCutoffRequested = plan.storageCutoff === true || plan.cutoffInventory !== undefined;
-  const storageCutoff = storageCutoffRequested
-    ? {
-      requested: true,
-      ready: false,
-      blockers: ['storage cutoff is a separate later operation and is not authorized by analytics activation preflight'],
+  const terminalWillBeProduced = plan.prerequisites?.terminalHandoff?.status === 'pending'
+    && typeof plan.restartCommand === 'string' && plan.restartCommand.trim().length > 0
+    && typeof plan.terminalRestartReceiptPath === 'string' && path.isAbsolute(plan.terminalRestartReceiptPath);
+  if (!terminalWillBeProduced) blockers.push(...terminalRestartReceipt.blockers);
+  let storageCutoff = { requested: false, ready: null, blockers: [] };
+  if (storageCutoffRequested) {
+    const storageBlockers = [];
+    if (plan.cutoverMode !== 'storage-cutoff') storageBlockers.push('storage cutoff requires cutoverMode storage-cutoff');
+    const authorization = plan.authorization;
+    const prerequisites = plan.prerequisites;
+    const p7a = prerequisites?.p7a;
+    const p7b = prerequisites?.p7b;
+    if (!authorization || authorization.schemaVersion !== 1
+      || authorization.plan !== 'docs/ANALYTICS_REWORK_PLAN.md#116-final-cutover'
+      || authorization.approved !== true || !/^[0-9a-f]{40}$/iu.test(authorization.commitSha ?? '')) {
+      storageBlockers.push('production analytics cutover is not explicitly authorized');
     }
-    : { requested: false, ready: null, blockers: [] };
-  if (storageCutoffRequested) blockers.push(...storageCutoff.blockers);
+    if (!prerequisites?.p0
+      || (prerequisites.p0.status !== 'qualified' && prerequisites.p0.status !== 'provisional-qualified')
+      || prerequisites.p0.commitSha?.toLowerCase() !== authorization?.commitSha?.toLowerCase()
+      || !/^[0-9a-f]{64}$/iu.test(prerequisites.p0.qualificationSha256 ?? '')
+      || !/^[0-9a-f]{64}$/iu.test(prerequisites.p0.trialSha256 ?? '')
+      || (prerequisites.p0.status === 'provisional-qualified'
+        && prerequisites.p0.provisionalAuthorization !== PROVISIONAL_P0_AUTHORIZATION)
+      || (prerequisites.p0.status === 'qualified'
+        && prerequisites.p0.provisionalAuthorization !== undefined)) {
+      storageBlockers.push('P0 qualification evidence is missing or does not match the authorization commit');
+    }
+    if (!p7a || p7a.analyticsReady !== true || p7a.privacyDeleteReady !== true
+      || p7a.queryReady !== true || p7a.selectedDesignQualified !== true) {
+      storageBlockers.push('P7a prerequisites are incomplete');
+    }
+    if (!p7b || p7b.lifecycleOwnerReady !== true || p7b.legacyScrubBoundaryReady !== true
+      || p7b.rootSwitchReady !== true || p7b.expiryInPlaceReady !== true) {
+      storageBlockers.push('P7b prerequisites are incomplete');
+    }
+    if (prerequisites?.terminalHandoff?.status === 'ready') {
+      if (!/^[0-9a-f]{64}$/iu.test(prerequisites.terminalHandoff.evidenceSha256 ?? '')) {
+        storageBlockers.push('terminal handoff evidence hash is invalid');
+      }
+    } else if (!terminalWillBeProduced) {
+      storageBlockers.push('storage cutoff requires authorized terminal evidence or a complete pending restart ingress');
+    }
+    if (activeManifest?.authority !== 'canonical' || !activeManifest.manifest?.activeGeneration) {
+      storageBlockers.push('storage cutoff requires an already-active canonical analytics generation');
+    } else if (plan.expectedActiveGenerationId !== activeManifest.manifest.activeGeneration.identity.generationId
+      || plan.generationId !== activeManifest.manifest.activeGeneration.identity.generationId
+      || plan.buildId !== activeManifest.manifest.activeGeneration.identity.buildId) {
+      storageBlockers.push('storage cutoff plan is not bound to the exact active analytics generation and build');
+    }
+    if (process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV] !== STORAGE_CUTOFF_AUTHORIZATION_VALUE) {
+      storageBlockers.push(`storage cutoff requires ${STORAGE_CUTOFF_AUTHORIZATION_ENV}=${STORAGE_CUTOFF_AUTHORIZATION_VALUE}`);
+    }
+    if (typeof lifecycleStorePath === 'string' && path.isAbsolute(lifecycleStorePath) && existsSync(lifecycleStorePath)) {
+      let storageStore;
+      try {
+        const [lifecycle, filesystem, analyticsRecorder] = await Promise.all([
+          import(pathToFileURL(path.join(outRoot, 'session-lifecycle-store.js')).href),
+          import(pathToFileURL(path.join(outRoot, 'session-filesystem-lifecycle.js')).href),
+          import(pathToFileURL(path.join(outRoot, 'analytics-sqlite-recorder.js')).href),
+        ]);
+        storageStore = new lifecycle.SessionLifecycleStore(lifecycleStorePath, { readOnly: true });
+        validateProductionStorageInventory(plan, storageStore, {
+          storageCutoffRootCapability: lifecycle.storageCutoffRootCapability,
+          verifyFilesystemArtifactIdentity: filesystem.verifyFilesystemArtifactIdentity,
+          SqliteAnalyticsRecorder: analyticsRecorder.SqliteAnalyticsRecorder,
+        });
+      } catch (error) {
+        storageBlockers.push(error instanceof Error ? error.message : String(error));
+      } finally {
+        storageStore?.close();
+      }
+    }
+    storageCutoff = { requested: true, ready: storageBlockers.length === 0, blockers: storageBlockers };
+    blockers.push(...storageBlockers);
+  }
 
   const unique = uniqueBlockers(blockers);
   const storageBlockers = new Set(storageCutoff.blockers);
   const analyticsBlockers = unique.filter((blocker) => !storageBlockers.has(blocker));
   const discoveryEvidence = formatDiscoveryEvidence(discovery);
   const readiness = {
-    p0Qualification: admission.ready,
-    analyticsEvidenceStructure: admission.evidence !== null,
+    p0Qualification: storageCutoffRequested ? null : admission.ready,
+    analyticsEvidenceStructure: storageCutoffRequested ? null : admission.evidence !== null,
     hostProcessCensus: discovery?.processOwnersComplete === true,
     authenticatedHostProbes: discovery?.authenticatedHostsComplete === true,
     allHostDiscovery: discovery?.complete === true && discovery.hosts.length > 0,
     terminalRestartReceipt: terminalRestartReceipt.ready,
+    terminalRestartIngress: terminalWillBeProduced,
     storageCutoff: storageCutoff.ready,
-    analyticsActivation: analyticsBlockers.length === 0,
+    analyticsActivation: storageCutoffRequested ? null : analyticsBlockers.length === 0,
   };
   return {
     schemaVersion: 1,
@@ -933,19 +1028,27 @@ async function runPreflight(plan) {
 
 async function loadProductionCutoverDependencies() {
   await loadActivationModules();
-  const [orchestrator, adapters, lifecycle] = await Promise.all([
+  const [orchestrator, adapters, lifecycle, filesystemLifecycle, storageLifecycle, analyticsRecorder] = await Promise.all([
     import(pathToFileURL(path.join(outRoot, 'analytics-cutover-orchestrator.js')).href),
     import(pathToFileURL(path.join(outRoot, 'analytics-production-adapters.js')).href),
     import(pathToFileURL(path.join(outRoot, 'session-lifecycle-store.js')).href),
+    import(pathToFileURL(path.join(outRoot, 'session-filesystem-lifecycle.js')).href),
+    import(pathToFileURL(path.join(outRoot, 'storage-cutoff-production.js')).href),
+    import(pathToFileURL(path.join(outRoot, 'analytics-sqlite-recorder.js')).href),
   ]);
   return {
     admitActivationEvidence,
     ActivationStore,
     activateGeneration,
     AnalyticsCutoverOrchestrator: orchestrator.AnalyticsCutoverOrchestrator,
+    analyticsCutoverInventorySha256: orchestrator.analyticsCutoverInventorySha256,
     analyticsCutoverJournalFilename: orchestrator.ANALYTICS_CUTOVER_JOURNAL_FILENAME,
     createProductionAnalyticsHostAdapters: adapters.createProductionAnalyticsHostAdapters,
     SessionLifecycleStore: lifecycle.SessionLifecycleStore,
+    storageCutoffRootCapability: lifecycle.storageCutoffRootCapability,
+    verifyFilesystemArtifactIdentity: filesystemLifecycle.verifyFilesystemArtifactIdentity,
+    createProductionStorageCutoffLifecycle: storageLifecycle.createProductionStorageCutoffLifecycle,
+    SqliteAnalyticsRecorder: analyticsRecorder.SqliteAnalyticsRecorder,
   };
 }
 
@@ -1005,6 +1108,67 @@ function createHostHandoffKeyResolver(plan) {
   };
 }
 
+function validateProductionStorageInventory(plan, registry, dependencies) {
+  if (process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV] !== STORAGE_CUTOFF_AUTHORIZATION_VALUE) {
+    throw new Error(`Storage cutoff requires ${STORAGE_CUTOFF_AUTHORIZATION_ENV}=${STORAGE_CUTOFF_AUTHORIZATION_VALUE}.`);
+  }
+  if (!Array.isArray(plan.cutoffInventory) || plan.cutoffInventoryValidated !== true) {
+    throw new Error('Storage cutoff requires an explicitly validated cutoffInventory.');
+  }
+  const sessionIds = [...new Set(plan.cutoffInventory)];
+  if (sessionIds.length !== plan.cutoffInventory.length
+    || sessionIds.some((sessionId) => typeof sessionId !== 'string'
+      || sessionId.length === 0 || sessionId.length > 512 || sessionId.includes('\u0000'))) {
+    throw new Error('Storage cutoff inventory contains a duplicate or invalid session id.');
+  }
+  const roots = plan.cutoffRoots;
+  if (!roots || typeof roots !== 'object'
+    || typeof roots.sessions !== 'string' || !path.isAbsolute(roots.sessions)
+    || typeof roots.artifacts !== 'string' || !path.isAbsolute(roots.artifacts)) {
+    throw new Error('Storage cutoff requires absolute cutoffRoots.sessions and cutoffRoots.artifacts paths.');
+  }
+  if (typeof plan.analyticsDatabasePath !== 'string' || !path.isAbsolute(plan.analyticsDatabasePath)
+    || !existsSync(plan.analyticsDatabasePath)) {
+    throw new Error('Storage cutoff requires the existing canonical analyticsDatabasePath.');
+  }
+  if (dependencies.SqliteAnalyticsRecorder) {
+    const analytics = new dependencies.SqliteAnalyticsRecorder(plan.analyticsDatabasePath, { readOnly: true });
+    analytics.close();
+  }
+  for (const sessionId of sessionIds) {
+    const record = registry.get(sessionId);
+    if (!record) throw new Error(`Storage cutoff inventory session ${sessionId} is absent from the lifecycle registry.`);
+    if (record.cleanupState === 'deleted') continue;
+    const artifacts = registry.listArtifacts(sessionId);
+    const transcript = artifacts.find((artifact) => artifact.artifactId === 'transcript');
+    if (!transcript || transcript.kind !== 'transcript') {
+      throw new Error(`Storage cutoff inventory session ${sessionId} has no registered transcript target.`);
+    }
+    for (const artifact of artifacts) {
+      if (artifact.locationKind === 'external') {
+        if (artifact.artifactId !== 'review-sidecar-entry' && artifact.artifactId !== 'prompt-setting-entry') {
+          throw new Error(`Storage cutoff inventory session ${sessionId} has unsupported external artifact ${artifact.artifactId}.`);
+        }
+        continue;
+      }
+      const absolutePath = artifact.locationKind === 'fixed_absolute'
+        ? path.resolve(artifact.location)
+        : path.resolve(roots[artifact.rootName], ...artifact.location.split('/'));
+      if (artifact.state === 'present') {
+        if (!existsSync(absolutePath)) {
+          throw new Error(`Storage cutoff inventory artifact ${sessionId}/${artifact.artifactId} is missing.`);
+        }
+        dependencies.verifyFilesystemArtifactIdentity(artifact, absolutePath);
+      }
+    }
+  }
+  return {
+    sessionIds,
+    roots,
+    rootCapability: dependencies.storageCutoffRootCapability(roots.sessions),
+  };
+}
+
 /**
  * Run the real production all-host cutover for a fully authorized plan.
  *
@@ -1020,24 +1184,26 @@ export async function runProductionCutover(plan, dependencies) {
     throw new Error('Production cutover requires terminal ownership to be transferred to a detached helper first.');
   }
   const deps = dependencies ?? await loadProductionCutoverDependencies();
-  // This is a real caller for the tested orchestrator. It intentionally
-  // performs all admission/terminal checks before constructing a writable
-  // lifecycle handle, so an unqualified plan cannot fence or activate hosts.
-  const admitted = deps.admitActivationEvidence(admissionEvidenceOptions(plan));
+  const mode = plan.cutoverMode ?? 'analytics-activation';
+  if (mode !== 'analytics-activation' && mode !== 'storage-cutoff') {
+    throw new Error('Production cutover requires one distinct analytics-activation or storage-cutoff operation.');
+  }
+  // P7a owns qualification admission. A distinct P7b run instead binds to the
+  // already-active canonical generation and must not re-admit candidate bytes.
+  const admitted = mode === 'analytics-activation'
+    ? deps.admitActivationEvidence(admissionEvidenceOptions(plan))
+    : null;
   const terminal = readTerminalRestartReceipt(plan);
   const terminalPrerequisite = plan.prerequisites?.terminalHandoff;
   const terminalIsAuthorized = terminalPrerequisite?.status === 'ready'
     && terminal.ready
     && terminalPrerequisite.evidenceSha256 === terminal.evidence.evidenceSha256;
   const terminalWillBeProduced = terminalPrerequisite?.status === 'pending'
-    && typeof plan.restartCommand === 'string' && plan.restartCommand.trim().length > 0;
+    && typeof plan.restartCommand === 'string' && plan.restartCommand.trim().length > 0
+    && typeof plan.terminalRestartReceiptPath === 'string' && path.isAbsolute(plan.terminalRestartReceiptPath);
   if (!terminalIsAuthorized && !terminalWillBeProduced) {
     if (!terminal.ready) throw new Error(terminal.blockers.join('; '));
     throw new Error('Terminal restart receipt bytes do not match the authorized terminal-handoff evidence hash.');
-  }
-  const mode = plan.cutoverMode ?? 'analytics-activation';
-  if (mode !== 'analytics-activation') {
-    throw new Error('Production storage cutoff remains a separate later operation; its lifecycle ownership runtime is not configured in this caller.');
   }
   if (typeof plan.workspaceId !== 'string' || plan.workspaceId.trim().length === 0) {
     throw new Error('Production cutover workspaceId is required.');
@@ -1067,8 +1233,21 @@ export async function runProductionCutover(plan, dependencies) {
   const preCutoverGenerationId = preCutoverActivation.authority === 'canonical'
     ? preCutoverActivation.manifest?.activeGeneration?.identity.generationId
     : undefined;
+  if (mode === 'storage-cutoff') {
+    const activeIdentity = preCutoverActivation.manifest?.activeGeneration?.identity;
+    if (preCutoverActivation.authority !== 'canonical' || !activeIdentity) {
+      throw new Error('Storage cutoff requires an already-active canonical analytics generation.');
+    }
+    if (typeof plan.expectedActiveGenerationId !== 'string'
+      || plan.expectedActiveGenerationId !== activeIdentity.generationId
+      || plan.generationId !== activeIdentity.generationId
+      || plan.buildId !== activeIdentity.buildId) {
+      throw new Error('Storage cutoff plan is not bound to the exact active analytics generation and build.');
+    }
+  }
   const hostKeyResolver = createHostHandoffKeyResolver(plan);
   const registry = new deps.SessionLifecycleStore(lifecycleStorePath);
+  let storageLifecycle;
   try {
     const adapters = deps.createProductionAnalyticsHostAdapters({
       workspaceId: plan.workspaceId,
@@ -1081,23 +1260,37 @@ export async function runProductionCutover(plan, dependencies) {
       keyForHost: hostKeyResolver.keyForHost,
       probeTimeoutMs: plan.hostProbeTimeoutMs,
     });
-    const recoveredActivatedAt = readCutoverJournalActivatedAt({
-      stateDir: plan.stateDir,
-      journalFilename: deps.analyticsCutoverJournalFilename,
-      request: {
+    let activationRequest;
+    if (mode === 'analytics-activation') {
+      const recoveredActivatedAt = readCutoverJournalActivatedAt({
+        stateDir: plan.stateDir,
+        journalFilename: deps.analyticsCutoverJournalFilename,
+        request: {
+          generationId: plan.generationId,
+          buildId: plan.buildId,
+          qualificationSha256: admitted.qualificationSha256,
+          trialSha256: admitted.trialSha256,
+        },
+      });
+      activationRequest = plan.activationRequest ?? {
         generationId: plan.generationId,
         buildId: plan.buildId,
         qualificationSha256: admitted.qualificationSha256,
         trialSha256: admitted.trialSha256,
-      },
-    });
-    const activationRequest = plan.activationRequest ?? {
-      generationId: plan.generationId,
-      buildId: plan.buildId,
-      qualificationSha256: admitted.qualificationSha256,
-      trialSha256: admitted.trialSha256,
-      activatedAt: recoveredActivatedAt ?? new Date().toISOString(),
-    };
+        activatedAt: recoveredActivatedAt ?? new Date().toISOString(),
+      };
+    }
+    const storageInventory = mode === 'storage-cutoff'
+      ? validateProductionStorageInventory(plan, registry, deps)
+      : null;
+    if (storageInventory) {
+      storageLifecycle = deps.createProductionStorageCutoffLifecycle({
+        store: registry,
+        stateDir: plan.stateDir,
+        roots: storageInventory.roots,
+        analyticsDatabasePath: plan.analyticsDatabasePath,
+      });
+    }
     const runtime = {
       terminalHandoffProduction: true,
       completeAnalyticsActivation: async ({ operationId, manifest }) => {
@@ -1165,28 +1358,103 @@ export async function runProductionCutover(plan, dependencies) {
           terminalEvidenceSha256: currentTerminal.evidence.evidenceSha256,
         };
       },
-      completeStorageCutoff: async () => {
-        throw new Error('Storage cutoff is not part of analytics activation.');
+      completeStorageCutoff: async ({ operationId, manifest }) => {
+        if (!storageInventory) throw new Error('Storage cutoff lifecycle is not configured.');
+        registry.authorizeStorageCutoffSuccessorCapability({
+          workspaceId: plan.workspaceId,
+          operationId,
+          requiredCapability: storageInventory.rootCapability,
+          nowMs: Date.now(),
+        });
+        const previousLoaded = readLoadedGeneration(plan.stateDir);
+        let currentTerminal = readTerminalRestartReceipt(plan);
+        if (terminalPrerequisite?.status === 'pending'
+          && !isTerminalReceiptAfterStorageCutoff(plan, currentTerminal)) {
+          currentTerminal = await requestAndAwaitTerminalRestart(plan, previousLoaded);
+        }
+        if (!currentTerminal.ready) throw new Error(currentTerminal.blockers.join('; '));
+        const active = manifest.activeGeneration;
+        const loaded = readLoadedGeneration(plan.stateDir);
+        if (!active || !loaded
+          || loaded.generationId !== active.identity.generationId
+          || loaded.buildId !== active.identity.buildId
+          || loaded.hostInstanceId !== currentTerminal.evidence.hostInstanceId
+          || loaded.restartNonce !== currentTerminal.evidence.restartNonce
+          || loaded.loadedAt !== currentTerminal.evidence.loadedAt) {
+          throw new Error('Storage-cutoff restart did not preserve the active analytics generation.');
+        }
+        const discovery = await adapters.discover({
+          ignoreStoppedHosts: true,
+          analyticsGenerationId: active.identity.generationId,
+          allowAbsentAnalyticsDescriptor: false,
+        });
+        if (!discovery.complete || discovery.hosts.length === 0) {
+          throw new Error(`Post-storage-restart authenticated host census is incomplete: ${discovery.reasons.map((entry) => entry.code).join(', ') || 'unknown blocker'}`);
+        }
+        const hosts = discovery.hosts.map((host) => {
+          if (host.status !== 'reconciled' || host.backendGeneration === undefined) {
+            throw new Error(`Post-storage-restart host ${host.hostInstanceId} is not fully reconciled.`);
+          }
+          const registered = registry.getAnalyticsHost(host.hostInstanceId);
+          if (!registered) throw new Error(`Post-storage-restart host ${host.hostInstanceId} is absent from the lifecycle registry.`);
+          registry.assertStorageCutoffSuccessorAdmission({
+            workspaceId: plan.workspaceId,
+            operationId,
+            identity: registered,
+            requiredCapability: storageInventory.rootCapability,
+          });
+          return {
+            hostInstanceId: host.hostInstanceId,
+            processId: host.processId,
+            backendGeneration: host.backendGeneration,
+          };
+        });
+        if (!hosts.some((host) => host.hostInstanceId === currentTerminal.evidence.hostInstanceId)) {
+          throw new Error(`Post-storage-restart host census does not include the controlled terminal receipt host ${currentTerminal.evidence.hostInstanceId}.`);
+        }
+        return { verified: true, hosts, admissionReopened: true };
       },
     };
+    const operationId = plan.operationId ?? plan.generationId;
     const orchestrator = new deps.AnalyticsCutoverOrchestrator({
       enabled: true,
       mode,
-      operationId: plan.operationId ?? plan.generationId,
+      operationId,
       workspaceId: plan.workspaceId,
       stateDir: plan.stateDir,
       authorization: plan.authorization,
-      prerequisites: productionCutoverPrerequisites(plan, admitted),
+      prerequisites: mode === 'analytics-activation'
+        ? productionCutoverPrerequisites(plan, admitted)
+        : plan.prerequisites,
       activationStore,
       registry,
-      analyticsHandoff: adapters.coordinator('analytics-activation'),
-      activationRequest,
+      ...(mode === 'analytics-activation' ? {
+        analyticsHandoff: adapters.coordinator('analytics-activation'),
+        activationRequest,
+      } : {
+        storageHandoff: adapters.coordinator('storage-cutoff'),
+        collectInventory: async (fence) => {
+          if (fence.operationId !== operationId || fence.purpose !== 'storage-cutoff') {
+            throw new Error('Storage inventory cannot be collected outside its durable writer fence.');
+          }
+          const validated = validateProductionStorageInventory(plan, registry, deps);
+          return {
+            source: 'explicit-lifecycle-registry-v1',
+            complete: true,
+            sessionIds: validated.sessionIds,
+            fenceOperationId: fence.operationId,
+            fenceEpoch: fence.fenceEpoch,
+            inventorySha256: deps.analyticsCutoverInventorySha256(validated.sessionIds),
+          };
+        },
+      }),
       expectedActiveGenerationId: plan.expectedActiveGenerationId,
-      cleaner: undefined,
+      cleaner: storageLifecycle?.cleaner,
       runtime,
     });
     return await orchestrator.run();
   } finally {
+    storageLifecycle?.close();
     registry.close();
   }
 }

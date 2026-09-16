@@ -85,6 +85,7 @@ import { createPerBootAnalyticsHandoffKey } from '../../../shared/analytics/hand
 import {
   createSessionLifecycleWriterAdmission,
   SessionLifecycleStore,
+  storageCutoffRootCapability,
   type SessionLifecycleWriterAdmission,
 } from '../backend/session-lifecycle-store.js';
 import { isFreshLegacyActivationState, resolveAnalyticsPolicy } from './analytics-policy.js';
@@ -260,7 +261,13 @@ export class PieExtension implements vscode.Disposable {
         generationId: analyticsProcessGeneration,
         buildId: PIE_BUILD_ID,
         processId: process.pid,
-        capabilities: ['host-discovery', 'host-status'] as const,
+        capabilities: [
+          'host-discovery',
+          'host-status',
+          ...(process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION === 'p7b-authorized-v1'
+            ? [storageCutoffRootCapability(dataPaths.sessionsDir)]
+            : []),
+        ],
       };
       analyticsWriterAdmission = createSessionLifecycleWriterAdmission(
         analyticsHandoffRegistry,

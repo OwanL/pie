@@ -115,6 +115,7 @@ export default defineConfig(({ mode }) => {
             // cutoff through the same code the backend uses, rather than a
             // reimplementation that could drift from the real close barriers.
             'storage-cutoff': path.join(srcDir, 'backend', 'storage-cutoff.ts'),
+            'storage-cutoff-production': path.join(srcDir, 'backend', 'storage-cutoff-production.ts'),
             'session-lifecycle-store': path.join(srcDir, 'backend', 'session-lifecycle-store.ts'),
             'session-filesystem-lifecycle': path.join(srcDir, 'backend', 'session-filesystem-lifecycle.ts'),
             'cold-browse-helper-entry': path.join(srcDir, 'backend', 'cold-browse-helper-entry.ts'),
