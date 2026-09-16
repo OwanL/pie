@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
+import { sendBoundedAnalyticsFrameWithStallRetry } from '../analytics-handoff-transport.mjs';
 import {
   AnalyticsCutoverOrchestrator,
   ANALYTICS_CUTOVER_JOURNAL_FILENAME,
@@ -591,6 +592,12 @@ test('PRODUCTION cutover G1->G2 first activation: census proves the loaded world
     assert.equal(createdAdapterOptions.length, 1);
     assert.equal(createdAdapterOptions[0].analyticsGenerationId, undefined);
     assert.equal(createdAdapterOptions[0].allowAbsentAnalyticsDescriptor, true);
+    // Every cutover frame — including the nonce-guarded writer freeze
+    // acknowledgement — uses the same-nonce stall retry, so the documented
+    // first-connection pipe stall cannot fail the fence after the census
+    // warmed the endpoint (a replayed freeze that WAS processed is rejected
+    // loudly by the host's nonce replay guard).
+    assert.equal(createdAdapterOptions[0].send, sendBoundedAnalyticsFrameWithStallRetry);
     const preFenceCensus = await preFenceDiscoveries[0];
     assert.equal(preFenceCensus.complete, true);
     assert.equal(discoveries.length, 1);

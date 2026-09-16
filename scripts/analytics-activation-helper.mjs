@@ -77,7 +77,7 @@ import {
   readLoadedGeneration,
   waitForFreshLoadedGeneration,
 } from './analytics-activation-recovery.mjs';
-import { sendBoundedAnalyticsFrame, retryStalledAnalyticsDiscovery } from './analytics-handoff-transport.mjs';
+import { sendBoundedAnalyticsFrame, sendBoundedAnalyticsFrameWithStallRetry, retryStalledAnalyticsDiscovery } from './analytics-handoff-transport.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(here, '..');
@@ -1405,7 +1405,13 @@ export async function runProductionCutover(plan, dependencies) {
         : { allowAbsentAnalyticsDescriptor: true }),
       keyForHost: hostKeyResolver.keyForHost,
       probeTimeoutMs: plan.hostProbeTimeoutMs,
-      send: sendBoundedAnalyticsFrame,
+      // The cutover's authenticated requests include the nonce-guarded writer
+      // freeze acknowledgement: the documented first-connection pipe stall
+      // closes the endpoint without a response after the fence census warmed
+      // it, so every cutover frame uses the same-nonce stall retry (a replayed
+      // freeze that WAS processed is rejected loudly by the host's nonce
+      // replay guard, never silently double-processed).
+      send: sendBoundedAnalyticsFrameWithStallRetry,
     });
     let activationRequest;
     if (mode === 'analytics-activation') {
