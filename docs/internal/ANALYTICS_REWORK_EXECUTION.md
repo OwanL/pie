@@ -121,6 +121,35 @@ runner identity, webview bootstrap timeout); no extension file is modified by th
 extension test imports these scripts, so they are pre-existing and out of P7a scope — recorded
 honestly rather than fixed here.
 
+**Fourth launch incident root cause and repair:** the relaunch after the freeze-ack repair (spawner
+21892, 2026-09-16T06:30:27Z) passed the census, settlement (no-op), fence resume, and freeze
+acknowledgement, committed the analytics activation (journal phase `analytics-committed`), and then
+failed with `controlled restart did not produce fresh terminal readiness evidence before timeout`.
+The restart owner's durable record
+(`C:/Users/OwanLazic/AppData/Local/pie/data/state/analytics-restart-owner-v1.json`) shows it refused
+before restarting anything: `registered hosts do not all carry the plan build; refusing to restart a
+mixed-build census.` Root cause: the restart owner compared host registration rows against the
+plan's `buildId` (the qualification's coordinated build id, `84d09cb7b9daa44155d0`), while host rows
+and successor status identities carry the staged runtime's own coordinated build marker
+(`pie-build-id.txt` / runtime manifest, the plan's `candidateBuildId`, `67dc8288f6a19b1b65e8`) —
+the same two-space convention the admission module itself uses
+(`candidateBindings.candidateBuildId` for markers). The loaded/terminal evidence checks correctly
+keep `plan.buildId` because the activation manifest identity (written from the activation request)
+is what restarted hosts validate their descriptor against. Tests had never caught this because the
+hermetic worlds used one build id for rows, evidence, and plan. Repair (scripts-only, no
+`extension/src` byte): the restart owner now compares pre-restart rows, successor rows, and status
+identities against `plan.candidateBuildId ?? plan.buildId`, and loaded/terminal restart evidence
+against `plan.buildId`; new e2e regression pins the divergent-identifier production shape (the
+fixture now supports `hostBuildId`/`evidenceBuildId`). Committed and pushed as `7db28c35`.
+Production suite 19 passed; restart-owner suite 7 passed; full scripts package 1239 passed, 0 failed
+(extension package's pre-existing environment failures unchanged and out of P7a scope).
+
+**Durable state after the fourth incident (observed before relaunch):** registry contains exactly
+the live registered host `7053bef0…` (pid 7740); the durable fence for
+`p7a-analytics-activation-23f03457…:analytics-activation` is epoch 1, state `fenced`, with the
+freeze acknowledged; admission stays revoked until the terminal handoff completes. VS Code was NOT
+restarted by that run (main process and host pid unchanged since 04:51Z).
+
 **Recovery instructions after a reload:** never relaunch blindly — read the detached-child log,
 the cutover journal (if present), and the report first. The helper is idempotent per phase; a
 phase entered without completing is observable in the journal/log. If the detached run is absent
