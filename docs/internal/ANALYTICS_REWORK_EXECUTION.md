@@ -14,6 +14,41 @@ Owning specifications: runbook; `docs/ANALYTICS_REWORK_PLAN.md` §§1, 11.6, 17;
 
 ---
 
+## Checkpoint 65 - 2026-09-16, source-equivalence P1 completeness boundary repaired
+
+The source-equivalence producer and admission validator now bind the exact complete qualified-role
+manifest rather than collecting an arbitrary union of files from `--wave-dir`. The authoritative
+aggregate report must name the six approved provisional roles (`baseline`, `scale`, `endurance`,
+`mixedFullStats`, `mixedMemoryOnly`, and `schemaFaults`); only the explicitly deferred
+`tenMillion` and `matchedHost` roles may remain absent. Every bound descriptor is reopened and
+checked for exact path/hash/byte identity, role configuration identity, the same complete common
+manifest, all 21 required recorder/query/source paths, and the measured union fingerprint. The
+admission side repeats those checks from disk, including the exact plan-bound aggregate report, so
+receipt-only additions, omitted runtime entries, swapped role descriptors, and tampered bytes fail
+closed.
+
+Focused regression evidence: source-equivalence **9/9 passed** (including producer omission and
+admission omission rejection), and analytics-admission **16 passed, 0 failed, 1 skipped** (host
+symlink capability unavailable). The refreshed current receipt is
+`C:/Users/OWANLA~1/AppData/Local/Temp/pie-p7a-final-20260916-bkv7Mr/source-equivalence-r06.json`
+with SHA-256
+`f56366ea2e989e3536a7f4309686d402f768ef30e4007a0601c56802a93faaf5`; the refreshed executable
+provisional plan is
+`C:/Users/OWANLA~1/AppData/Local/Temp/pie-p7a-final-20260916-bkv7Mr/p7a-preflight-plan-r03.json`,
+whose approved authorization envelope records source commit `386e7fa2` and whose refreshed trial
+hash is `878805ec5ede42292a61db0075a8fa753e3314b461b027910deced69c9df5f49`. Read-only current
+admission against that plan passed with `overallP0: provisional-qualified`; the measured overall
+state remains `unqualified` as required. No build was rerun because this fix is scripts/tests-only;
+the existing candidate build `67dc8288f6a19b1b65e8` and staged runtime
+`4280844eaf180adb10a6ebd921e2f81a43a4d07d71ff5f2c4bd379e031eee7b9` remain the recorded evidence.
+No live VS Code restart, analytics activation, storage cutoff, deletion, closure, or production-data
+scan occurred. The five unrelated model/settings/pricing edits remain untouched and unstaged.
+Bootstrap remains unresolved: one normal VS Code restart is still required to load the staged ingress,
+followed by the authenticated runbook preflight/detached-plan flow; this checkpoint authorizes no
+live cutover.
+
+---
+
 ## Checkpoint 64 - 2026-09-16, multi-host controlled restart settlement and successor identity binding repaired
 
 The three restart-owner blockers from the read-only review are now repaired without performing a live
