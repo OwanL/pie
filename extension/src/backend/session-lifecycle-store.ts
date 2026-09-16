@@ -216,6 +216,12 @@ export interface ReopenAnalyticsWriterAdmissionOptions {
   workspaceId: string;
   operationId: string;
   purpose: 'analytics-activation';
+  admittedHosts: readonly AnalyticsWriterIdentity[];
+  nowMs: Int64Value;
+}
+
+export interface ReconcileOpenAnalyticsWriterAdmissionOptions {
+  identity: AnalyticsWriterIdentity;
   nowMs: Int64Value;
 }
 
@@ -431,13 +437,14 @@ export function createSessionLifecycleWriterAdmission(
     acquireStartup: () => {
       const state = store.getAnalyticsWriterAdmissionState(normalizedIdentity.workspaceId);
       let successor = false;
+      const followsReconciledOpenEpoch = state.state === 'open' && state.fenceEpoch !== expectedFenceEpoch;
       const lease = state.state === 'open'
-        ? store.acquireAnalyticsWriterLease(normalizedIdentity, currentEpoch(), now())
+        ? store.acquireAnalyticsWriterLease(normalizedIdentity, followsReconciledOpenEpoch ? state.fenceEpoch : currentEpoch(), now())
         : (() => {
           successor = true;
           return store.acquireAnalyticsWriterStartupLease(normalizedIdentity, now());
         })();
-      if (successor) successorStartupAdmitted = true;
+      if (successor || followsReconciledOpenEpoch) successorStartupAdmitted = true;
       let released = false;
       return () => {
         if (released) return;
@@ -1055,6 +1062,66 @@ export class SessionLifecycleStore {
       : { workspaceId: normalizedWorkspaceId, fenceEpoch: 0, state: 'open' };
   }
 
+  /** Reconcile a clean ordinary host restart against an already-open fence.
+   * Every displaced census host must be terminal and no writer lease may
+   * remain; advancing the epoch keeps every predecessor admission stale. */
+  reconcileOpenAnalyticsWriterAdmission(options: ReconcileOpenAnalyticsWriterAdmissionOptions): AnalyticsWriterAdmissionState {
+    const identity = requireWriterIdentity(options.identity, 'Analytics restart writer identity');
+    const nowMs = encodeTimestamp(options.nowMs, 'nowMs');
+    return this.database.transaction(() => {
+      this.assertRegisteredWriterIdentity(identity);
+      const fence = this.database.prepare('SELECT * FROM analytics_writer_fences WHERE workspace_id = ?')
+        .get(identity.workspaceId) as AnalyticsWriterFenceRow | undefined;
+      if (!fence || fence.state !== 'open' || fence.purpose !== 'analytics-activation') {
+        return this.getAnalyticsWriterAdmissionState(identity.workspaceId);
+      }
+      const expectedHosts = parseWriterHosts(fence.expected_hosts_json, fence.expected_hosts_sha256);
+      const registeredRecords = (this.database.prepare(`
+        SELECT * FROM analytics_hosts WHERE workspace_id = ? AND state = 'registered' ORDER BY host_instance_id
+      `).all(identity.workspaceId) as AnalyticsHostRow[]).map(toAnalyticsHost);
+      if (registeredRecords.some((host) => !host.capabilities.includes('authenticated-control')
+        || !host.capabilities.includes('writer-fence'))) {
+        throw new SessionLifecycleConflictError('Open writer admission census contains a host without writer capabilities.');
+      }
+      const registeredHosts = registeredRecords.map(writerIdentityFromHost);
+      if (registeredHosts.length === expectedHosts.length
+        && registeredHosts.every((host, index) => sameWriterIdentity(host, expectedHosts[index]!))) {
+        return { workspaceId: identity.workspaceId, state: 'open' as const, fenceEpoch: Number(fence.fence_epoch) };
+      }
+      if (!registeredHosts.some((host) => sameWriterIdentity(host, identity))) {
+        throw new SessionLifecycleConflictError('Restart writer identity is not in the complete registered host census.');
+      }
+      for (const expected of expectedHosts) {
+        if (registeredHosts.some((host) => sameWriterIdentity(host, expected))) continue;
+        const row = this.database.prepare(`
+          SELECT state FROM analytics_hosts WHERE host_instance_id = ? AND workspace_id = ?
+        `).get(expected.hostInstanceId, identity.workspaceId) as { state: AnalyticsHostState } | undefined;
+        if (!row || row.state !== 'stopped') {
+          throw new SessionLifecycleConflictError('Open writer admission can rotate only after every displaced host is stopped.');
+        }
+      }
+      if (this.countActiveWriterLeases(identity.workspaceId) !== 0) {
+        throw new SessionLifecycleConflictError('Open writer admission cannot rotate while a writer lease is active.');
+      }
+      const nextFenceEpoch = Number(fence.fence_epoch) + 1;
+      if (!Number.isSafeInteger(nextFenceEpoch) || nextFenceEpoch <= 0) {
+        throw new SessionLifecycleConflictError('Analytics writer fence epoch is exhausted.');
+      }
+      this.database.prepare(`
+        UPDATE analytics_writer_fences
+        SET fence_epoch = ?, expected_hosts_json = ?, expected_hosts_sha256 = ?, updated_at_ms = ?
+        WHERE workspace_id = ?
+      `).run(
+        nextFenceEpoch,
+        writerHostsSerialization(registeredHosts),
+        writerHostsDigest(registeredHosts),
+        nowMs,
+        identity.workspaceId,
+      );
+      return { workspaceId: identity.workspaceId, state: 'open' as const, fenceEpoch: nextFenceEpoch };
+    })();
+  }
+
   /** Begin or resume one durable all-host writer fence. The registry snapshot
    * is checked in the same transaction as admission revocation, so a census
    * cannot authorize a fence for a host identity that changed underneath it. */
@@ -1261,6 +1328,12 @@ export class SessionLifecycleStore {
   reopenAnalyticsWriterAdmission(options: ReopenAnalyticsWriterAdmissionOptions): AnalyticsWriterAdmissionState {
     const workspaceId = requireHostField(options.workspaceId, 'workspaceId');
     const operationId = requireHostField(options.operationId, 'operationId');
+    const admittedHosts = canonicalWriterHosts(options.admittedHosts);
+    if (admittedHosts.some((host) => host.workspaceId !== workspaceId)) {
+      throw new SessionLifecycleConflictError('Reopened analytics writer census belongs to another workspace.');
+    }
+    const admittedHostsJson = writerHostsSerialization(admittedHosts);
+    const admittedHostsSha256 = writerHostsDigest(admittedHosts);
     const nowMs = encodeTimestamp(options.nowMs, 'nowMs');
     return this.database.transaction(() => {
       const fence = this.database.prepare('SELECT * FROM analytics_writer_fences WHERE workspace_id = ?')
@@ -1271,6 +1344,13 @@ export class SessionLifecycleStore {
       if (this.countActiveWriterLeases(workspaceId) !== 0) {
         throw new SessionLifecycleConflictError('Cannot reopen analytics writer admission while a writer lease is active.');
       }
+      const registeredHosts = (this.database.prepare(`
+        SELECT * FROM analytics_hosts WHERE workspace_id = ? AND state = 'registered' ORDER BY host_instance_id
+      `).all(workspaceId) as AnalyticsHostRow[]).map((row) => writerIdentityFromHost(toAnalyticsHost(row)));
+      if (registeredHosts.length !== admittedHosts.length
+        || registeredHosts.some((host, index) => !sameWriterIdentity(host, admittedHosts[index]!))) {
+        throw new SessionLifecycleConflictError('Reopened analytics writer census does not match every registered host.');
+      }
       const nextFenceEpoch = Number(fence.fence_epoch) + 1;
       if (!Number.isSafeInteger(nextFenceEpoch) || nextFenceEpoch <= 0) {
         throw new SessionLifecycleConflictError('Analytics writer fence epoch is exhausted.');
@@ -1278,8 +1358,11 @@ export class SessionLifecycleStore {
       this.database.prepare(`
         DELETE FROM analytics_writer_fence_acks WHERE workspace_id = ? AND operation_id = ?
       `).run(workspaceId, operationId);
-      this.database.prepare(`UPDATE analytics_writer_fences SET fence_epoch = ?, state = 'open', updated_at_ms = ? WHERE workspace_id = ?`)
-        .run(nextFenceEpoch, nowMs, workspaceId);
+      this.database.prepare(`
+        UPDATE analytics_writer_fences
+        SET fence_epoch = ?, state = 'open', expected_hosts_json = ?, expected_hosts_sha256 = ?, updated_at_ms = ?
+        WHERE workspace_id = ?
+      `).run(nextFenceEpoch, admittedHostsJson, admittedHostsSha256, nowMs, workspaceId);
       return { workspaceId, state: 'open' as const, fenceEpoch: nextFenceEpoch };
     })();
   }

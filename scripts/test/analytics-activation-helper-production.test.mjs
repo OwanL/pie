@@ -36,7 +36,10 @@ import {
 
 import {
   loadPlan,
+  assertCommittedResumeMatchesPlan,
   productionCutoverPrerequisites,
+  resolveAnalyticsActivationCensusHost,
+  reusablePendingAnalyticsTerminalReceipt,
   runProductionCutover,
 } from '../analytics-activation-helper.mjs';
 
@@ -54,6 +57,66 @@ const sourceHead = 'b'.repeat(40);
 const sourceFingerprint = createHash('sha256').update('test-source-fingerprint').digest('hex');
 const runtimeGeneration = 'c'.repeat(64);
 const runtimeIdentity = { publisher: 'pie-test', name: 'pie', version: '1.0.0-test' };
+
+test('activation completion accepts a later loaded host only after the receipt host is durably stopped', () => {
+  const plan = { workspaceId: 'workspace-1', buildId: 'manifest-build', candidateBuildId: 'host-build' };
+  const manifest = { activeGeneration: { identity: { generationId: 'analytics-generation', buildId: 'manifest-build' } } };
+  const terminalEvidence = {
+    hostInstanceId: 'receipt-host',
+    processId: 101,
+    restartNonce: 'restart-nonce',
+    loadedAt: '2026-09-16T20:56:05.651Z',
+  };
+  const loaded = {
+    generationId: 'analytics-generation',
+    buildId: 'manifest-build',
+    hostInstanceId: 'current-host',
+    restartNonce: null,
+    loadedAt: '2026-09-16T21:09:49.885Z',
+  };
+  const terminalHost = {
+    hostInstanceId: 'receipt-host',
+    workspaceId: 'workspace-1',
+    processId: 101,
+    buildId: 'host-build',
+    state: 'stopped',
+  };
+
+  assert.equal(resolveAnalyticsActivationCensusHost({
+    plan, manifest, loaded, terminalEvidence, terminalHost,
+  }), 'current-host');
+  const terminal = { ready: true, evidence: terminalEvidence };
+  assert.equal(reusablePendingAnalyticsTerminalReceipt({
+    plan, manifest, loaded, terminal, terminalHost,
+  }), terminal);
+  assert.throws(() => resolveAnalyticsActivationCensusHost({
+    plan, manifest, loaded, terminalEvidence, terminalHost: { ...terminalHost, state: 'registered' },
+  }), /do not match/);
+  assert.equal(reusablePendingAnalyticsTerminalReceipt({
+    plan,
+    manifest,
+    loaded,
+    terminal,
+    terminalHost: { ...terminalHost, state: 'registered' },
+  }), null);
+  assert.throws(() => resolveAnalyticsActivationCensusHost({
+    plan, manifest, loaded, terminalEvidence, terminalHost: { ...terminalHost, processId: 102 },
+  }), /do not match/);
+  assert.equal(reusablePendingAnalyticsTerminalReceipt({
+    plan, manifest, loaded, terminal: { ready: false }, terminalHost,
+  }), null);
+  assert.equal(reusablePendingAnalyticsTerminalReceipt({
+    plan,
+    manifest,
+    loaded: {
+      ...loaded,
+      hostInstanceId: terminalEvidence.hostInstanceId,
+      restartNonce: terminalEvidence.restartNonce,
+    },
+    terminal,
+    terminalHost,
+  }), null);
+});
 
 /**
  * The authoritative candidate-trial validator does not exist yet (the real
@@ -899,6 +962,47 @@ test('PRODUCTION interrupted analytics-committed resume recovers the journaled a
     assert.equal(discoveries[0].complete, false);
     assert.equal(discoveries[1].complete, true);
   });
+});
+
+test('a committed resume binds the plan to the committed identity and refuses any other evidence', async () => {
+  // Regression for the resume deadlock: once activation is committed, its
+  // identity is frozen in the manifest. Re-admitting candidate bytes on resume
+  // can never reproduce that frozen identity (any reviewed source change
+  // recomputes the candidate build id and its evidence hashes), so a resume
+  // that insisted on fresh admission left the committed activation permanently
+  // unverifiable and the writer fence permanently closed. The plan must still
+  // declare the committed identity exactly, and anything else is refused.
+  const committed = {
+    generationId: 'generation-committed',
+    buildId: 'measured-build',
+    qualificationSha256: 'a'.repeat(64),
+    trialSha256: 'b'.repeat(64),
+    activatedAt: '2026-09-16T06:30:27.343Z',
+    manifestRevision: 3,
+    manifestSha256: 'c'.repeat(64),
+  };
+
+  // A plan declaring the committed identity resumes.
+  assertCommittedResumeMatchesPlan({
+    prerequisites: { p0: { qualificationSha256: committed.qualificationSha256, trialSha256: committed.trialSha256 } },
+  }, committed);
+
+  // Different trial evidence is refused exactly as the journal refuses it.
+  assert.throws(
+    () => assertCommittedResumeMatchesPlan({
+      prerequisites: { p0: { qualificationSha256: committed.qualificationSha256, trialSha256: 'd'.repeat(64) } },
+    }, committed),
+    /activation evidence changed during recovery/u,
+  );
+  assert.throws(
+    () => assertCommittedResumeMatchesPlan({
+      prerequisites: { p0: { qualificationSha256: 'e'.repeat(64), trialSha256: committed.trialSha256 } },
+    }, committed),
+    /activation evidence changed during recovery/u,
+  );
+
+  // Missing prerequisites stay a hard error rather than a silent pass.
+  assert.throws(() => assertCommittedResumeMatchesPlan({}, committed), /prerequisites are missing/u);
 });
 
 test('PRODUCTION rerun with changed activation evidence is rejected, never silently adopted', async () => {

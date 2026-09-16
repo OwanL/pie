@@ -137,7 +137,20 @@ export interface AnalyticsRuntimeOptions {
   recorderWorkerScript: string;
   /** Packaged `analytics-query-worker.js` in the loaded runtime generation. */
   queryWorkerScript: string;
+  /** Identity compiled into the bundle that is actually loaded (`PIE_BUILD_ID`).
+   * This is the *candidate marker* space: producer identity, lifecycle registry
+   * rows and authenticated host status all carry it. */
   buildId: string;
+  /** Identity the activation manifest commits, i.e. the qualification's
+   * coordinated build id. Admission binds the plan's `buildId` to the
+   * qualification report and to the candidate trial, and the restart owner
+   * validates loaded/terminal evidence against it, so when a source-equivalence
+   * receipt is bound it legitimately differs from the loaded marker above. The
+   * manifest is the authority this runtime is comparing against, so when the two
+   * spaces are distinguished the comparison below is made in the manifest's
+   * space; omitting it preserves the strict marker-equals-manifest check used by
+   * single-space callers. */
+  manifestBuildId?: string;
   workspaceId: string;
   /** Fresh per host process; distinct from workspaceId. */
   processGeneration: string;
@@ -446,11 +459,23 @@ export class AnalyticsRuntime implements AnalyticsRuntimePort {
       return this.readiness;
     }
     const descriptor = this.descriptorFromActivation(activation);
-    if (descriptor.buildId !== this.options.buildId) {
+    // The activation manifest carries the qualification's coordinated build id,
+    // while this bundle's compiled marker (`buildId`) is the candidate space that
+    // lifecycle rows and authenticated status identities use. Under the
+    // two-space convention those differ by design, and a source-equivalence
+    // receipt binds them; the host cannot re-verify that receipt because it is
+    // not host-owned, so the loaded-versus-committed correspondence is proven by
+    // the loaded-generation marker and terminal receipt together with the
+    // restart owner's authenticated replacement census. What this runtime can
+    // still check locally is that the descriptor it is about to publish names
+    // the manifest identity it was constructed for, in whichever space the
+    // caller distinguished. Fail closed on any divergence.
+    const expectedManifestBuildId = this.options.manifestBuildId ?? this.options.buildId;
+    if (descriptor.buildId !== expectedManifestBuildId) {
       // Running one build while the manifest names another is exactly the state
       // that makes "which code is loaded" unknowable; fail closed.
       throw new ActivationManifestError(
-        `Active analytics generation build ${descriptor.buildId} does not match the loaded build ${this.options.buildId}.`,
+        `Active analytics generation build ${descriptor.buildId} does not match the loaded build ${expectedManifestBuildId}.`,
       );
     }
     this.activationDescriptor = descriptor;

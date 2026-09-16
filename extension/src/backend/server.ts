@@ -17,6 +17,7 @@ import { updateSettingsJsonObject } from '../shared/settings-json-update';
 import { SESSION_SNAPSHOT_MAX_LINE_BYTES, sessionSnapshotLineBytes } from '../shared/transcript-window';
 import {
   PROTOCOL_VERSION,
+  PIE_BUILD_ID,
   type DetailResult,
   type LazyDetailRef,
   type ModelSettings,
@@ -148,6 +149,25 @@ function requestSessionPath(params: unknown): string | undefined {
 export function extractPreviewRequestId(preview: string): string | undefined {
   const match = /"id"\s*:\s*"([^"\\]{1,200})"/.exec(preview);
   return match?.[1];
+}
+
+/** Build id used by the durable analytics writer identity.
+ *
+ * Durable admission compares the backend's writer identity against the
+ * registered lifecycle host row byte-for-byte (`assertRegisteredWriterIdentity`
+ * via `sameWriterIdentity`), and that row carries the **loaded runtime's own
+ * coordinated marker** — the value the extension host registers and
+ * authenticates with. It is deliberately NOT the activation descriptor's
+ * `buildId`: that is the manifest / qualification identity, which the
+ * two-space convention (a plan bound to a source-equivalence receipt, where
+ * `plan.buildId` must be the qualification's coordinated build id and
+ * `candidateBuildId` the staged marker) makes a different value. Using the
+ * descriptor id here would make every writer inadmissible and stall startup.
+ *
+ * Both host and backend bundles of one runtime generation compile the same
+ * `PIE_BUILD_ID`, so this is exactly the marker the host registered. */
+export function analyticsWriterBuildId(): string {
+  return PIE_BUILD_ID;
 }
 
 /** Simple stopwatch for backend timing probes. */
@@ -692,7 +712,7 @@ export class BackendServer {
             // analytics generation is a separate authority identity, so use
             // the host instance as the writer-generation field here.
             generationId: activationDescriptor.hostInstanceId,
-            buildId: activationDescriptor.buildId,
+            buildId: analyticsWriterBuildId(),
             processId: hostPid,
           };
           this.analyticsWriterIdentity = writerIdentity;

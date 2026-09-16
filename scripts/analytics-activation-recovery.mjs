@@ -19,9 +19,10 @@ export function readLoadedGeneration(stateDir) {
       || value.schemaVersion !== 1
       || typeof value.generationId !== 'string'
       || typeof value.buildId !== 'string'
-      || typeof value.restartNonce !== 'string'
-      || value.restartNonce.length === 0
-      || value.restartNonce.length > 256
+      || (value.restartNonce !== null
+        && (typeof value.restartNonce !== 'string'
+          || value.restartNonce.length === 0
+          || value.restartNonce.length > 256))
       || typeof value.hostInstanceId !== 'string'
       || value.hostInstanceId.length === 0
       || !Number.isFinite(loadedAtMs)) return null;

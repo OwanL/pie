@@ -425,10 +425,20 @@ test('the durable admission epoch rejects stale managers and ownership leases', 
       nowMs: NOW,
     });
     temporary.store.completeAnalyticsWriterFence(workspaceId, 'admission-fence', NOW);
+    temporary.store.markAnalyticsHostState(
+      host.identity.hostInstanceId,
+      host.identity.processId,
+      host.identity.generationId,
+      'stopped',
+      NOW,
+    );
+    const successor = makeHost(2, workspaceId);
+    temporary.store.registerAnalyticsHost(successor.record);
     assert.equal(temporary.store.reopenAnalyticsWriterAdmission({
       workspaceId,
       operationId: 'admission-fence',
       purpose: 'analytics-activation',
+      admittedHosts: [successor.identity],
       nowMs: NOW,
     }).fenceEpoch, 2);
     assert.equal(fencedManager.appendMessage('after-reopen-with-stale-admission'), FENCED_ENTRY_ID);

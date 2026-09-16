@@ -143,6 +143,77 @@ test('completed host shutdown records terminal stopped identity after endpoint d
   }
 });
 
+test('ordinary restart registration rotates an open writer census before startup', async () => {
+  const temporary = temporaryStore();
+  const workspaceId = 'workspace-unit-ordinary-restart';
+  const predecessor = {
+    hostInstanceId: 'host-unit-ordinary-predecessor', workspaceId,
+    generationId: 'generation-unit-ordinary-predecessor', buildId: 'build-unit-ordinary',
+    processId: process.pid + 100, capabilities: ['host-discovery'],
+  } as const;
+  temporary.store.registerAnalyticsHost({
+    ...predecessor, capabilities: ['authenticated-control', 'writer-fence'], registeredAtMs: '100',
+  });
+  const fence = temporary.store.beginAnalyticsWriterFence({
+    workspaceId, operationId: 'ordinary-restart-fence', purpose: 'analytics-activation',
+    expectedHosts: [predecessor], nowMs: 101,
+  });
+  temporary.store.acknowledgeAnalyticsWriterFence({
+    workspaceId, operationId: fence.operationId, fenceEpoch: fence.fenceEpoch,
+    identity: predecessor, activeWriterCount: 0, nowMs: 102,
+  });
+  temporary.store.markAnalyticsHostState(
+    predecessor.hostInstanceId, predecessor.processId, predecessor.generationId, 'stopped', 103,
+  );
+  temporary.store.completeAnalyticsWriterFence(workspaceId, fence.operationId, 104);
+  const successorBeforeRestart = {
+    hostInstanceId: 'host-unit-ordinary-successor', workspaceId,
+    generationId: 'generation-unit-ordinary-successor', buildId: predecessor.buildId,
+    processId: process.pid + 101,
+  };
+  temporary.store.registerAnalyticsHost({
+    ...successorBeforeRestart, capabilities: ['authenticated-control', 'writer-fence'], registeredAtMs: '105',
+  });
+  temporary.store.reopenAnalyticsWriterAdmission({
+    workspaceId, operationId: fence.operationId, purpose: 'analytics-activation',
+    admittedHosts: [successorBeforeRestart], nowMs: 106,
+  });
+  temporary.store.markAnalyticsHostState(
+    successorBeforeRestart.hostInstanceId, successorBeforeRestart.processId,
+    successorBeforeRestart.generationId, 'stopped', 107,
+  );
+
+  const identity = {
+    hostInstanceId: 'host-unit-ordinary-latest', workspaceId,
+    generationId: 'generation-unit-ordinary-latest', buildId: predecessor.buildId,
+    processId: process.pid, capabilities: ['host-discovery'],
+  } as const;
+  const control = new AnalyticsHandoffControl({
+    registry: temporary.store,
+    identity,
+    key: 'unit-test-handoff-key',
+    pipeName: createAnalyticsHandoffPipeName(identity.workspaceId, identity.hostInstanceId),
+    now: () => 108,
+    writerFence: { freeze: async () => { throw new Error('not used'); } },
+  });
+  try {
+    await control.start();
+    const rotated = temporary.store.getAnalyticsWriterFence(workspaceId);
+    assert.equal(rotated?.fenceEpoch, 3);
+    assert.deepEqual(rotated?.expectedHosts, [{
+      hostInstanceId: identity.hostInstanceId,
+      workspaceId: identity.workspaceId,
+      generationId: identity.generationId,
+      buildId: identity.buildId,
+      processId: identity.processId,
+    }]);
+  } finally {
+    await control.markStopped();
+    temporary.store.close();
+    rmSync(temporary.root, { recursive: true, force: true });
+  }
+});
+
 test('per-boot handoff keys are fresh, bounded capabilities', () => {
   const first = createPerBootAnalyticsHandoffKey();
   const second = createPerBootAnalyticsHandoffKey();

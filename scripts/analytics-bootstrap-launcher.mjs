@@ -124,6 +124,7 @@ async function loadModules() {
     createProductionAnalyticsHostAdapters: adapters.createProductionAnalyticsHostAdapters,
     readProcessCensus: census.readProcessCensus,
     readRuntimeLeaseEvidence: discovery.readRuntimeLeaseEvidence,
+    createAuthenticatedAnalyticsHostStatusProbe: discovery.createAuthenticatedAnalyticsHostStatusProbe,
   };
 }
 
@@ -354,6 +355,33 @@ async function runKeyBindingRecovery(options, plan, keysPath, modules) {
       fail(`registered host ${host.hostInstanceId} [pid ${host.processId}] predates the bootstrap key mint; ` +
         'it cannot have been launched through the bootstrap key channel, so nothing was bound');
     }
+  }
+  // A post-mint registration time is necessary but not sufficient: an ordinary
+  // restart also registers after the mint while holding a fresh per-boot key,
+  // and the host endpoint answers such a frame with an unauthenticated
+  // response. Binding on timing alone therefore records a key the host does not
+  // hold, producing a false "bound" claim and a preflight that fails with
+  // host-authentication-failed. Prove the key before recording it, and fail
+  // closed when a host cannot authenticate, because a minted key that no live
+  // host accepts means the launch channel did not reach this boot and the
+  // owner must relaunch through the launcher.
+  const probe = modules.createAuthenticatedAnalyticsHostStatusProbe({
+    keyForHost: () => bootstrapRecord.bootstrapKey,
+    timeoutMs: 5_000,
+    send: sendBoundedAnalyticsFrame,
+  });
+  const unauthenticated = [];
+  for (const host of candidates) {
+    try {
+      await probe(host);
+    } catch (error) {
+      unauthenticated.push(`${host.hostInstanceId} [pid ${host.processId}]: ${error.message}`);
+    }
+  }
+  if (unauthenticated.length > 0) {
+    fail('the minted bootstrap key is not accepted by every live registered host, so nothing was bound; '
+      + 'the launch channel did not reach this boot — close VS Code and relaunch it through this launcher '
+      + `(${unauthenticated.join('; ')})`);
   }
   const keyMap = {};
   for (const host of candidates) keyMap[host.hostInstanceId] = bootstrapRecord.bootstrapKey;

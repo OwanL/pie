@@ -37,6 +37,10 @@ test('loaded-generation evidence rejects stale, same-host, and malformed markers
     assert.equal(loadedGenerationMatchesRestart(readLoadedGeneration(stateDir), plan, restart), false);
     writeLoaded(stateDir, { restartNonce: 'other-nonce' });
     assert.equal(loadedGenerationMatchesRestart(readLoadedGeneration(stateDir), plan, restart), false);
+    writeLoaded(stateDir, { restartNonce: null, hostInstanceId: 'host-new' });
+    const ordinaryBoot = readLoadedGeneration(stateDir);
+    assert.equal(ordinaryBoot?.restartNonce, null);
+    assert.equal(loadedGenerationMatchesRestart(ordinaryBoot, plan, restart), false);
     writeFileSync(path.join(stateDir, 'analytics-loaded-generation-v1.json'), '{"generationId":"generation-a"}\n');
     assert.equal(readLoadedGeneration(stateDir), null);
   } finally {

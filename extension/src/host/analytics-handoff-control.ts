@@ -163,6 +163,10 @@ export class AnalyticsHandoffControl {
         state: 'registered',
         registeredAtMs: this.now().toString(),
       });
+      this.options.registry.reconcileOpenAnalyticsWriterAdmission({
+        identity: this.options.identity,
+        nowMs: this.now(),
+      });
       this.available = true;
     } catch (error) {
       this.available = false;

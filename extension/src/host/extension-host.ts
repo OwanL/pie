@@ -337,15 +337,14 @@ export class PieExtension implements vscode.Disposable {
           stateDir: dataPaths.stateDir,
           identity: analyticsHostIdentity,
           performRestart: () => {
-            // Supported quiet restart ingress for the terminal handoff. Restart
-            // only the extension host so open editors are untouched; fall back
-            // to a window reload, where hot exit preserves unsaved work. No
-            // process is killed and the VS Code main process stays alive.
-            const quietRestart = vscode.commands.executeCommand('workbench.action.restartExtensionHost');
-            void Promise.resolve(quietRestart)
-              .catch(() => vscode.commands.executeCommand('workbench.action.reloadWindow'))
+            // Reload the window so the extension host is reconstructed and can
+            // consume the durable successor handoff record. Hot exit preserves
+            // unsaved work, and admission remains fenced until fresh evidence
+            // proves that the successor loaded and registered.
+            const reload = vscode.commands.executeCommand('workbench.action.reloadWindow');
+            void Promise.resolve(reload)
               .then(() => undefined, (error: unknown) => {
-                appendPieLog('error', 'controlled-restart', 'quiet VS Code restart command failed', {
+                appendPieLog('error', 'controlled-restart', 'VS Code window reload command failed', {
                   error: toErrorMessage(error),
                 });
               });
@@ -413,6 +412,11 @@ export class PieExtension implements vscode.Disposable {
         recorderWorkerScript: path.join(runtimeOutputDirectory(context), 'analytics-recorder-worker.js'),
         queryWorkerScript: path.join(runtimeOutputDirectory(context), 'analytics-query-worker.js'),
         buildId: PIE_BUILD_ID,
+        // The manifest identity is the qualification's coordinated build id; the
+        // loaded marker above is the candidate space. Binding a source-equivalence
+        // receipt makes those legitimately differ, so the startup check compares
+        // in the manifest's space whenever a canonical generation is active.
+        ...(canonicalActive ? { manifestBuildId: activationDescriptor!.buildId } : {}),
         workspaceId: analyticsWorkspaceId,
         processGeneration: analyticsProcessGeneration,
         activationSnapshot: activation,

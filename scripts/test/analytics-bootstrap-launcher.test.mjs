@@ -64,7 +64,7 @@ function leaseEntry(processId, runtimeRootPath) {
  * repeats), mutable registry rows/leases, and a discovery outcome driven by
  * `expectedKey`. Records every store settlement and adapter configuration. */
 function createFakeModules(options) {
-  const calls = { markAnalyticsHostState: [], adapterConfigs: [] };
+  const calls = { markAnalyticsHostState: [], adapterConfigs: [], probes: [] };
   class FakeSessionLifecycleStore {
     listAnalyticsHosts(workspaceId) {
       return {
@@ -127,6 +127,15 @@ function createFakeModules(options) {
         leases: options.leases.map((entry) => ({ ...entry })),
         reasons: [],
       }),
+      // Mirrors the real authenticated status probe: it succeeds only when the
+      // supplied key is the one the live host actually holds.
+      createAuthenticatedAnalyticsHostStatusProbe: (config) => async (host) => {
+        calls.probes.push({ hostInstanceId: host.hostInstanceId, key: config.keyForHost(host) });
+        if (config.keyForHost(host) !== options.expectedKey()) {
+          throw new Error(`host ${host.hostInstanceId} returned an unauthenticated status response`);
+        }
+        return { host: { ...host } };
+      },
     },
   };
 }
@@ -380,7 +389,7 @@ test('recover-key-binding fails closed when the bootstrap handoff key file is mi
   rmSync(root, { recursive: true, force: true });
 });
 
-test('recover-key-binding reports incomplete census without throwing when authentication fails', async () => {
+test('recover-key-binding refuses to record a key the live host does not hold', async () => {
   const root = temporaryRoot('recovery-unauthenticated');
   const { planPath, runtimeRootPath, keysPath } = planFixture(root);
   writeBootstrapKeyFile(keysPath);
@@ -394,13 +403,20 @@ test('recover-key-binding reports incomplete census without throwing when authen
   const { modules } = createFakeModules(options);
   const { dependencies } = fakeDependencies(modules, options);
 
-  const exitCode = await runLauncher(
-    ['--plan', planPath, '--keys-path', keysPath, '--recover-key-binding'],
-    dependencies,
+  // Registration after the mint is necessary but NOT sufficient: an ordinary
+  // restart also registers after the mint while holding a fresh per-boot key.
+  // Recording that key would be a false "bound" claim and would surface later
+  // as host-authentication-failed, so recovery must prove the key first and
+  // must not write the map when the host refuses it.
+  await assert.rejects(
+    () => runLauncher(
+      ['--plan', planPath, '--keys-path', keysPath, '--recover-key-binding'],
+      dependencies,
+    ),
+    /not accepted by every live registered host/u,
   );
-
-  assert.equal(exitCode, 2);
-  assert.deepEqual(readKeyMap(keysPath), { 'fresh-host': BOOTSTRAP_KEY });
+  // The map is never written at all, so no unverifiable binding is recorded.
+  assert.equal(existsSync(keysPath), false, 'the key map must not carry an unverifiable binding');
   rmSync(root, { recursive: true, force: true });
 });
 

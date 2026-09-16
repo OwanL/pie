@@ -165,6 +165,7 @@ const ALLOWED_TOOLING_DELTA = new Map(Object.entries({
   'extension/src/host/analytics-handoff-control.ts': 'unmeasured authenticated host-handoff/restart dispatch control plane; no P0 capture/recorder/query path; focused handoff-control and controlled-restart tests',
   'extension/src/host/analytics-runtime.ts': 'unmeasured host lifecycle/restart-evidence wiring; no P0 capture/recorder/query path; focused analytics-runtime and candidate-trial tests',
   'extension/src/host/extension-host.ts': 'unmeasured host startup wiring for authenticated restart/cutover control; no P0 capture/recorder/query path; focused analytics-runtime and restart-owner tests',
+  'extension/src/backend/server.ts': 'unmeasured durable writer-identity build space (lifecycle-registry control plane) repair; no P0 capture/recorder/query path; focused backend-analytics-activation and analytics-runtime tests',
   'extension/vite.config.ts': 'coordinated build entries for candidate-trial and authenticated activation/restart control modules; measured runtime artifacts remain byte-checked; extension build and focused control tests',
   'scripts/analytics-activation-admission.mjs': 'committed admission tooling change since the measured head',
   'scripts/analytics-activation-helper.mjs': 'committed admission tooling change since the measured head',

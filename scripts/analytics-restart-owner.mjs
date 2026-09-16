@@ -363,6 +363,24 @@ function removeEvidencePath(filePath) {
   try { rmSync(filePath, { force: true }); } catch { /* best-effort stale evidence cleanup */ }
 }
 
+/** True when a prior owner record proves a destructive request was actually
+ * issued, so a rerun must not issue a second one.
+ *
+ * The guard exists to stop a rerun after an attempt got far enough to touch
+ * live hosts. A record that refused before issuing any request — a missing key
+ * channel, a mixed-build census, a pre-existing record, or any other
+ * pre-flight rejection — performed no destructive action, so treating it as
+ * sticky wedges the operation permanently: the refusal overwrites the record,
+ * and every later attempt then refuses because that refusal exists. Gate on
+ * the evidence of a real attempt instead. */
+export function priorRecordBlocksRestart(priorOwnerRecord, operationId) {
+  if (!isRecord(priorOwnerRecord) || priorOwnerRecord.operationId !== operationId) return false;
+  const acked = priorOwnerRecord.ackedHostInstanceIds;
+  const assignments = priorOwnerRecord.assignments;
+  return (Array.isArray(acked) && acked.length > 0)
+    || (Array.isArray(assignments) && assignments.length > 0);
+}
+
 async function runRestartOwner(argv, environment = process.env) {
   const planPathIndex = argv.indexOf('--plan');
   const planPath = planPathIndex >= 0 ? argv[planPathIndex + 1] : undefined;
@@ -418,7 +436,9 @@ async function runRestartOwner(argv, environment = process.env) {
   };
   let exitCode = 0;
   try {
-    if (priorOwnerRecord?.operationId === fence.operationId) {
+    // A prior record for this same operation blocks another destructive request
+    // only when it actually ISSUED one; see priorRecordBlocksRestart.
+    if (priorRecordBlocksRestart(priorOwnerRecord, fence.operationId)) {
       throw new Error(
         `a prior restart owner record for ${fence.operationId} exists with outcome ${String(priorOwnerRecord.outcome)}; `
         + 'refusing to issue another destructive restart request.',

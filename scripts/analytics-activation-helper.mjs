@@ -532,6 +532,26 @@ export function productionCutoverPrerequisites(plan, admitted) {
   return { ...prerequisites, p0: { status: 'qualified', ...common } };
 }
 
+/** P0 prerequisites for a resumed activation that is already committed.
+ *
+ * The committed manifest identity is the authority, but the plan must still
+ * declare it exactly: a plan whose declared P0 evidence disagrees with the
+ * committed generation is a changed-evidence rerun and is refused with the
+ * same error the orchestrator uses for journal mismatches. This keeps the
+ * "never silently adopt changed activation evidence" guarantee intact while
+ * removing the impossible requirement that a changed candidate re-adjudicate
+ * its way back to the frozen committed identity. */
+export function assertCommittedResumeMatchesPlan(plan, committed) {
+  const p0 = plan.prerequisites?.p0;
+  if (!p0 || typeof p0 !== 'object') {
+    throw new Error('Production cutover P0 prerequisites are missing.');
+  }
+  if (p0.qualificationSha256 !== committed.qualificationSha256
+    || p0.trialSha256 !== committed.trialSha256) {
+    throw new Error('Analytics cutover activation evidence changed during recovery.');
+  }
+}
+
 async function loadAdmissionModule() {
   if (inspectActivationEvidence) return;
   try {
@@ -728,6 +748,57 @@ function readTerminalRestartReceipt(plan) {
   };
 }
 
+/** Resolve the host that the post-restart authenticated census must contain.
+ * A slow successor may publish valid terminal evidence after the restart owner
+ * times out, then be replaced by a later normal boot which overwrites the
+ * shared loaded marker. Accept that later marker only when the receipt host is
+ * durably stopped with the exact identity carried by the receipt. */
+export function resolveAnalyticsActivationCensusHost({ plan, manifest, loaded, terminalEvidence, terminalHost }) {
+  const active = manifest.activeGeneration;
+  if (!active || !loaded
+    || loaded.generationId !== active.identity.generationId
+    || loaded.buildId !== active.identity.buildId) {
+    throw new Error('Terminal restart receipt and actually-loaded generation evidence do not match.');
+  }
+  if (loaded.hostInstanceId === terminalEvidence.hostInstanceId
+    && loaded.restartNonce === terminalEvidence.restartNonce
+    && loaded.loadedAt === terminalEvidence.loadedAt) {
+    return loaded.hostInstanceId;
+  }
+  const expectedHostBuildId = plan.candidateBuildId ?? plan.buildId;
+  if (loaded.restartNonce !== null
+    || loaded.hostInstanceId === terminalEvidence.hostInstanceId
+    || Date.parse(loaded.loadedAt) <= Date.parse(terminalEvidence.loadedAt)
+    || !terminalHost
+    || terminalHost.hostInstanceId !== terminalEvidence.hostInstanceId
+    || terminalHost.workspaceId !== plan.workspaceId
+    || terminalHost.processId !== terminalEvidence.processId
+    || terminalHost.buildId !== expectedHostBuildId
+    || terminalHost.state !== 'stopped') {
+    throw new Error('Terminal restart receipt and actually-loaded generation evidence do not match.');
+  }
+  return loaded.hostInstanceId;
+}
+
+export function reusablePendingAnalyticsTerminalReceipt({ plan, manifest, loaded, terminal, terminalHost }) {
+  if (terminal?.ready !== true
+    || !loaded
+    || loaded.hostInstanceId === terminal.evidence.hostInstanceId
+    || loaded.restartNonce !== null) return null;
+  try {
+    resolveAnalyticsActivationCensusHost({
+      plan,
+      manifest,
+      loaded,
+      terminalEvidence: terminal.evidence,
+      terminalHost,
+    });
+    return terminal;
+  } catch {
+    return null;
+  }
+}
+
 function isTerminalReceiptAfterStorageCutoff(plan, terminal) {
   if (!terminal.ready) return false;
   const receiptPath = path.join(plan.stateDir, 'storage-cutoff-receipt-v1.json');
@@ -825,10 +896,27 @@ async function runPreflight(plan) {
     || plan.storageCutoff === true || plan.cutoffInventory !== undefined;
   const blockers = [];
   let admission = { ready: null, evidence: null, blockers: [] };
-  if (!storageCutoffRequested) {
+  // A committed activation resumes from the committed manifest identity rather
+  // than re-adjudicating candidate bytes; that identity is what execution will
+  // use, so preflight must judge the same thing it will run.
+  const committedActivation = plan.cutoverMode === 'analytics-activation' || plan.cutoverMode === undefined
+    ? await readCommittedActivationIdentity(plan)
+    : undefined;
+  if (!storageCutoffRequested && !committedActivation) {
     await loadAdmissionModule();
     admission = inspectActivationEvidence(admissionEvidenceOptions(plan));
     blockers.push(...admission.blockers);
+  } else if (committedActivation) {
+    admission = {
+      ready: true,
+      evidence: {
+        resumedFromCommittedGeneration: committedActivation.generationId,
+        qualificationSha256: committedActivation.qualificationSha256,
+        trialSha256: committedActivation.trialSha256,
+        manifestRevision: committedActivation.manifestRevision,
+      },
+      blockers: [],
+    };
   }
 
   let loadedGeneration = null;
@@ -1092,6 +1180,59 @@ async function loadProductionCutoverDependencies() {
 
 const CUTOVER_JOURNAL_MAX_BYTES = 8 * 1024 * 1024;
 
+/** Read the already-committed canonical active generation, when it is the one
+ * this plan names.
+ *
+ * Activation is a one-shot commitment: once a canonical active generation
+ * matches the plan's generation and build, the committed manifest — not a
+ * fresh adjudication of candidate bytes — is the authority for the resume.
+ * Re-admitting on resume is wrong for two independent reasons:
+ *
+ *  - The candidate evidence is a *candidate*, and the activation commit is
+ *    what made it authoritative. Re-deriving it demands that the candidate's
+ *    source-equivalence receipt still match the tree, which cannot hold after
+ *    any reviewed source change (every change recomputes the candidate build
+ *    id and hence the receipt), and
+ *  - the committed manifest identity is immutable, so its qualification and
+ *    trial hashes are frozen. A resumed run that presents freshly admitted
+ *    hashes would correctly be refused as "activation evidence changed during
+ *    recovery" — leaving the committed activation permanently unverifiable and
+ *    the writer fence permanently closed.
+ *
+ * Resuming from the committed identity keeps every fail-closed guarantee that
+ * matters here: the orchestrator still re-checks the manifest against these
+ * exact fields (`assertActiveGenerationMatchesRequest`) and refuses a
+ * mismatch, and the journal still refuses different evidence. This only
+ * applies to an already-committed activation; first-time activation and
+ * storage cutoff continue to admit their evidence in full. */
+async function readCommittedActivationIdentity(plan) {
+  if (typeof plan?.stateDir !== 'string' || plan.stateDir.length === 0) return undefined;
+  try {
+    const { ActivationStore } = await import(
+      pathToFileURL(path.join(outRoot, 'analytics-activation-store.js')).href
+    );
+    const read = new ActivationStore({ stateDir: plan.stateDir }).read();
+    const evidence = read.manifest?.activeGeneration;
+    const identity = evidence?.identity;
+    if (read.authority !== 'canonical' || !evidence || !identity) return undefined;
+    if (identity.generationId !== plan.generationId || identity.buildId !== plan.buildId) return undefined;
+    if (typeof evidence.activatedAt !== 'string' || evidence.activatedAt.length === 0) return undefined;
+    return {
+      generationId: identity.generationId,
+      buildId: identity.buildId,
+      qualificationSha256: identity.qualificationSha256,
+      trialSha256: identity.trialSha256,
+      activatedAt: evidence.activatedAt,
+      manifestRevision: read.manifest.revision,
+      manifestSha256: read.sha256,
+    };
+  } catch {
+    // An unreadable or ambiguous store is not a committed resume; the caller
+    // falls back to full admission, which fails closed on the same state.
+    return undefined;
+  }
+}
+
 /** Bounded, tolerant read of the durable cutover journal's activation
  * timestamp. A rerun may reuse a timestamp only when the recorded generation,
  * build, and evidence hashes exactly match the currently admitted evidence;
@@ -1336,7 +1477,18 @@ export async function runProductionCutover(plan, dependencies) {
   }
   // P7a owns qualification admission. A distinct P7b run instead binds to the
   // already-active canonical generation and must not re-admit candidate bytes.
-  const admitted = mode === 'analytics-activation'
+  // A resumed activation whose generation is already committed likewise binds
+  // to the committed identity rather than re-adjudicating candidate bytes: the
+  // commit froze that identity, so a fresh adjudication can never match it
+  // (see readCommittedActivationIdentity).
+  const committed = mode === 'analytics-activation'
+    ? await readCommittedActivationIdentity(plan)
+    : undefined;
+  // A committed resume still refuses changed evidence: the plan must declare
+  // the committed identity's exact hashes, so a rerun carrying different
+  // evidence fails with the same recovery error the journal would raise.
+  if (committed) assertCommittedResumeMatchesPlan(plan, committed);
+  const admitted = mode === 'analytics-activation' && !committed
     ? deps.admitActivationEvidence(admissionEvidenceOptions(plan))
     : null;
   const terminal = readTerminalRestartReceipt(plan);
@@ -1415,23 +1567,36 @@ export async function runProductionCutover(plan, dependencies) {
     });
     let activationRequest;
     if (mode === 'analytics-activation') {
-      const recoveredActivatedAt = readCutoverJournalActivatedAt({
-        stateDir: plan.stateDir,
-        journalFilename: deps.analyticsCutoverJournalFilename,
-        request: {
+      if (committed) {
+        // The committed manifest identity is the resume authority; it already
+        // carries the exact hashes the journal recorded, so recovery cannot
+        // present changed evidence.
+        activationRequest = plan.activationRequest ?? {
+          generationId: committed.generationId,
+          buildId: committed.buildId,
+          qualificationSha256: committed.qualificationSha256,
+          trialSha256: committed.trialSha256,
+          activatedAt: committed.activatedAt,
+        };
+      } else {
+        const recoveredActivatedAt = readCutoverJournalActivatedAt({
+          stateDir: plan.stateDir,
+          journalFilename: deps.analyticsCutoverJournalFilename,
+          request: {
+            generationId: plan.generationId,
+            buildId: plan.buildId,
+            qualificationSha256: admitted.qualificationSha256,
+            trialSha256: admitted.trialSha256,
+          },
+        });
+        activationRequest = plan.activationRequest ?? {
           generationId: plan.generationId,
           buildId: plan.buildId,
           qualificationSha256: admitted.qualificationSha256,
           trialSha256: admitted.trialSha256,
-        },
-      });
-      activationRequest = plan.activationRequest ?? {
-        generationId: plan.generationId,
-        buildId: plan.buildId,
-        qualificationSha256: admitted.qualificationSha256,
-        trialSha256: admitted.trialSha256,
-        activatedAt: recoveredActivatedAt ?? new Date().toISOString(),
-      };
+          activatedAt: recoveredActivatedAt ?? new Date().toISOString(),
+        };
+      }
     }
     const storageInventory = mode === 'storage-cutoff'
       ? validateProductionStorageInventory(plan, registry, deps)
@@ -1450,18 +1615,26 @@ export async function runProductionCutover(plan, dependencies) {
         let currentTerminal = readTerminalRestartReceipt(plan);
         const previousLoaded = readLoadedGeneration(plan.stateDir);
         if (terminalPrerequisite?.status === 'pending') {
-          currentTerminal = await requestAndAwaitTerminalRestart(plan, previousLoaded);
+          const reusableTerminal = reusablePendingAnalyticsTerminalReceipt({
+            plan,
+            manifest,
+            loaded: previousLoaded,
+            terminal: currentTerminal,
+            terminalHost: currentTerminal.ready
+              ? registry.getAnalyticsHost(currentTerminal.evidence.hostInstanceId)
+              : undefined,
+          });
+          currentTerminal = reusableTerminal ?? await requestAndAwaitTerminalRestart(plan, previousLoaded);
         }
         if (!currentTerminal.ready) throw new Error(currentTerminal.blockers.join('; '));
         const loaded = readLoadedGeneration(plan.stateDir);
-        if (!loaded
-          || loaded.generationId !== manifest.activeGeneration?.identity.generationId
-          || loaded.buildId !== manifest.activeGeneration?.identity.buildId
-          || loaded.hostInstanceId !== currentTerminal.evidence.hostInstanceId
-          || loaded.restartNonce !== currentTerminal.evidence.restartNonce
-          || loaded.loadedAt !== currentTerminal.evidence.loadedAt) {
-          throw new Error('Terminal restart receipt and actually-loaded generation evidence do not match.');
-        }
+        const censusHostInstanceId = resolveAnalyticsActivationCensusHost({
+          plan,
+          manifest,
+          loaded,
+          terminalEvidence: currentTerminal.evidence,
+          terminalHost: registry.getAnalyticsHost(currentTerminal.evidence.hostInstanceId),
+        });
         const committedGenerationId = manifest.activeGeneration?.identity.generationId;
         if (!committedGenerationId) {
           throw new Error('Post-restart census requires the committed analytics generation.');
@@ -1477,17 +1650,28 @@ export async function runProductionCutover(plan, dependencies) {
         if (!discovery.complete || discovery.hosts.length === 0) {
           throw new Error(`Post-restart authenticated host census is incomplete: ${discovery.reasons.map((entry) => entry.code).join(', ') || 'unknown blocker'}`);
         }
-        if (!discovery.hosts.some((host) => host.hostInstanceId === currentTerminal.evidence.hostInstanceId)) {
-          throw new Error(`Post-restart host census does not include the controlled terminal receipt host ${currentTerminal.evidence.hostInstanceId}.`);
+        if (!discovery.hosts.some((host) => host.hostInstanceId === censusHostInstanceId)) {
+          throw new Error(`Post-restart host census does not include the loaded activation host ${censusHostInstanceId}.`);
         }
         const hosts = discovery.hosts.map((host) => {
           if (host.status !== 'reconciled' || host.backendGeneration === undefined) {
             throw new Error(`Post-restart host ${host.hostInstanceId} is not fully reconciled.`);
           }
+          const registered = registry.getAnalyticsHost(host.hostInstanceId);
+          if (!registered || registered.state !== 'registered') {
+            throw new Error(`Post-restart host ${host.hostInstanceId} is not registered for writer admission.`);
+          }
           return {
             hostInstanceId: host.hostInstanceId,
             processId: host.processId,
             backendGeneration: host.backendGeneration,
+            writerIdentity: {
+              hostInstanceId: registered.hostInstanceId,
+              workspaceId: registered.workspaceId,
+              generationId: registered.generationId,
+              buildId: registered.buildId,
+              processId: registered.processId,
+            },
           };
         });
         const committed = activationStore.read();
@@ -1498,6 +1682,7 @@ export async function runProductionCutover(plan, dependencies) {
           workspaceId: plan.workspaceId,
           operationId,
           purpose: 'analytics-activation',
+          admittedHosts: hosts.map((host) => host.writerIdentity),
           nowMs: Date.now(),
         });
         return {
@@ -1506,7 +1691,7 @@ export async function runProductionCutover(plan, dependencies) {
           buildId: committed.manifest.activeGeneration.identity.buildId,
           manifestRevision: committed.manifest.revision,
           manifestSha256: committed.sha256,
-          hosts,
+          hosts: hosts.map(({ writerIdentity: _writerIdentity, ...host }) => host),
           admissionReopened: true,
           terminalEvidenceSha256: currentTerminal.evidence.evidenceSha256,
         };
@@ -1576,7 +1761,7 @@ export async function runProductionCutover(plan, dependencies) {
       workspaceId: plan.workspaceId,
       stateDir: plan.stateDir,
       authorization: plan.authorization,
-      prerequisites: mode === 'analytics-activation'
+      prerequisites: mode === 'analytics-activation' && !committed
         ? productionCutoverPrerequisites(plan, admitted)
         : plan.prerequisites,
       activationStore,

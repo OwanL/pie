@@ -993,7 +993,7 @@ function validateRuntimePromote(value: Record<string, unknown>, requireSeq: bool
   if (value.payload.analytics !== undefined) {
     const analytics = value.payload.analytics;
     if (!isRecord(analytics)) return 'runtime.promote.payload.analytics must be an object.';
-    const analyticsKeys = exactKeys(analytics, ['generationId', 'captureSubject', 'buildId'], ['workspaceId']);
+    const analyticsKeys = exactKeys(analytics, ['generationId', 'captureSubject', 'buildId'], ['workspaceId', 'writerAdmission']);
     if (analyticsKeys) return `runtime.promote.payload.analytics ${analyticsKeys}`;
     if (!boundedString(analytics.generationId, MAX_ID_BYTES)
         || !boundedString(analytics.buildId, MAX_ID_BYTES)
@@ -1010,6 +1010,28 @@ function validateRuntimePromote(value: Record<string, unknown>, requireSeq: bool
     }
     const subjectKeys = exactKeys(subject, ['kind', expectedSubjectKey]);
     if (subjectKeys) return `runtime.promote.payload.analytics.captureSubject ${subjectKeys}`;
+    if (analytics.writerAdmission !== undefined) {
+      const writerAdmission = analytics.writerAdmission;
+      if (!isRecord(writerAdmission)) return 'runtime.promote.payload.analytics.writerAdmission must be an object.';
+      const admissionKeys = exactKeys(writerAdmission, ['stateDir', 'identity']);
+      if (admissionKeys) return `runtime.promote.payload.analytics.writerAdmission ${admissionKeys}`;
+      if (!boundedString(writerAdmission.stateDir, 4_096)
+        || writerAdmission.stateDir.includes('\u0000')
+        || !isRecord(writerAdmission.identity)) {
+        return 'runtime.promote.payload.analytics.writerAdmission is invalid.';
+      }
+      const identity = writerAdmission.identity;
+      const identityKeys = exactKeys(identity, ['hostInstanceId', 'workspaceId', 'generationId', 'buildId', 'processId']);
+      if (identityKeys) return `runtime.promote.payload.analytics.writerAdmission.identity ${identityKeys}`;
+      for (const key of ['hostInstanceId', 'workspaceId', 'generationId', 'buildId'] as const) {
+        if (!boundedString(identity[key], MAX_ID_BYTES) || (identity[key] as string).includes('\u0000')) {
+          return `runtime.promote.payload.analytics.writerAdmission.identity.${key} must be a bounded non-empty string.`;
+        }
+      }
+      if (!Number.isSafeInteger(identity.processId) || Number(identity.processId) <= 0) {
+        return 'runtime.promote.payload.analytics.writerAdmission.identity.processId must be a positive safe integer.';
+      }
+    }
   }
   return validateJsonObject(value.payload, 'runtime.promote.payload');
 }

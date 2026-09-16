@@ -213,6 +213,72 @@ test('durable writer admission holds leases through writes and rejects a fenced 
     assert.equal(store.listAnalyticsWriterLeases(identity.workspaceId).length, 1);
     startupRelease?.();
     assert.equal(store.listAnalyticsWriterLeases(identity.workspaceId).length, 0);
+    assert.equal(store.reopenAnalyticsWriterAdmission({
+      workspaceId: identity.workspaceId,
+      operationId: fence.operationId,
+      purpose: 'analytics-activation',
+      admittedHosts: [successor],
+      nowMs: 9,
+    }).fenceEpoch, 2);
+    assert.throws(() => admission.assertAdmitted());
+    successorAdmission.assertAdmitted();
+    const postReopenAdmission = createSessionLifecycleWriterAdmission(store, successor, () => 10);
+    const postReopenRelease = postReopenAdmission.acquire();
+    postReopenRelease();
+  } finally {
+    store.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('ordinary restart atomically rotates an open writer census to the registered successor', () => {
+  const temp = tempDatabase();
+  const store = new SessionLifecycleStore(temp.databasePath);
+  const workspaceId = 'ordinary-restart-workspace';
+  const predecessor = {
+    hostInstanceId: 'ordinary-restart-old', workspaceId,
+    generationId: 'ordinary-restart-old-generation', buildId: 'ordinary-restart-build', processId: 451,
+  };
+  const successor = {
+    hostInstanceId: 'ordinary-restart-new', workspaceId,
+    generationId: 'ordinary-restart-new-generation', buildId: predecessor.buildId, processId: 452,
+  };
+  try {
+    store.registerAnalyticsHost({
+      ...predecessor, capabilities: ['authenticated-control', 'writer-fence'], registeredAtMs: '1',
+    });
+    const predecessorAdmission = createSessionLifecycleWriterAdmission(store, predecessor, () => 2);
+    const fence = store.beginAnalyticsWriterFence({
+      workspaceId, operationId: 'ordinary-restart-fence', purpose: 'analytics-activation',
+      expectedHosts: [predecessor], nowMs: 3,
+    });
+    store.acknowledgeAnalyticsWriterFence({
+      workspaceId, operationId: fence.operationId, fenceEpoch: fence.fenceEpoch,
+      identity: predecessor, activeWriterCount: 0, nowMs: 4,
+    });
+    store.markAnalyticsHostState(predecessor.hostInstanceId, predecessor.processId, predecessor.generationId, 'stopped', 5);
+    store.completeAnalyticsWriterFence(workspaceId, fence.operationId, 6);
+    store.registerAnalyticsHost({
+      ...successor, capabilities: ['authenticated-control', 'writer-fence'], registeredAtMs: '7',
+    });
+    const successorAdmission = createSessionLifecycleWriterAdmission(store, successor, () => 8);
+    store.reopenAnalyticsWriterAdmission({
+      workspaceId, operationId: fence.operationId, purpose: 'analytics-activation',
+      admittedHosts: [successor], nowMs: 9,
+    });
+
+    store.markAnalyticsHostState(successor.hostInstanceId, successor.processId, successor.generationId, 'stopped', 10);
+    const restarted = { ...successor, hostInstanceId: 'ordinary-restart-latest', generationId: 'ordinary-restart-latest-generation', processId: 453 };
+    const restartedAdmission = createSessionLifecycleWriterAdmission(store, restarted, () => 12);
+    store.registerAnalyticsHost({
+      ...restarted, capabilities: ['authenticated-control', 'writer-fence'], registeredAtMs: '11',
+    });
+    assert.equal(store.reconcileOpenAnalyticsWriterAdmission({ identity: restarted, nowMs: 12 }).fenceEpoch, 3);
+    assert.throws(() => predecessorAdmission.assertAdmitted());
+    assert.throws(() => successorAdmission.assertAdmitted());
+    const release = restartedAdmission.acquireStartup?.();
+    release?.();
+    restartedAdmission.assertAdmitted();
   } finally {
     store.close();
     rmSync(temp.root, { recursive: true, force: true });

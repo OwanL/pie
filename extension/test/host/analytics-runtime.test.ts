@@ -31,7 +31,11 @@ const SHA = 'a'.repeat(64);
 const SHA_B = 'b'.repeat(64);
 const ACTIVATED_AT = '2026-09-12T04:00:00.000Z';
 
-function tempRuntime(activationSnapshot?: ReturnType<ActivationStore['read']>, timeZone = 'UTC') {
+function tempRuntime(
+  activationSnapshot?: ReturnType<ActivationStore['read']>,
+  timeZone = 'UTC',
+  manifestBuildId?: string,
+) {
   const root = mkdtempSync(path.join(tmpdir(), 'pie-analytics-runtime-'));
   const stateDir = path.join(root, 'state');
   const analyticsDir = path.join(root, 'analytics');
@@ -43,6 +47,7 @@ function tempRuntime(activationSnapshot?: ReturnType<ActivationStore['read']>, t
     recorderWorkerScript: path.join(root, 'missing-recorder-worker.js'),
     queryWorkerScript: path.join(root, 'missing-query-worker.js'),
     buildId: 'build-1',
+    ...(manifestBuildId === undefined ? {} : { manifestBuildId }),
     workspaceId: 'workspace-1',
     processGeneration: 'process-1',
     activationSnapshot,
@@ -237,6 +242,82 @@ test('an active manifest naming a different build refuses to start capture', asy
       () => runtime.start(),
       /does not match the loaded build/u,
       'running code that differs from the recorded generation must fail closed',
+    );
+  } finally {
+    await runtime.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a distinguished manifest build id is compared in the manifest identity space', async () => {
+  // Production shape under the two-space convention: the compiled marker
+  // (candidate space) differs from the qualification's coordinated build id the
+  // manifest commits. Binding a source-equivalence receipt makes this the normal
+  // case, so the startup gate must compare against the manifest identity rather
+  // than the loaded marker. The worker scripts are deliberately absent, so the
+  // start still fails -- but it must get PAST the build gate to do so.
+  const { root, runtime, stateDir } = tempRuntime(undefined, 'UTC', 'qualification-build');
+  try {
+    await writeManifest(stateDir, {
+      schemaVersion: ACTIVATION_SCHEMA_VERSION,
+      revision: 1,
+      previousSha256: null,
+      everActive: true,
+      activeGeneration: {
+        identity: { generationId: GENERATION_ID, buildId: 'qualification-build', qualificationSha256: SHA, trialSha256: SHA_B },
+        state: 'active',
+        activatedAt: ACTIVATED_AT,
+        retiredAt: null,
+        predecessorGenerationId: null,
+        cutoffReceiptSha256: null,
+      },
+      successor: null,
+      retiredHistory: [],
+    });
+    await assert.rejects(
+      () => runtime.start(),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.doesNotMatch(
+          error.message,
+          /does not match the loaded build/u,
+          'the candidate marker must not be compared against the manifest identity',
+        );
+        return true;
+      },
+    );
+  } finally {
+    await runtime.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a distinguished manifest build id still fails closed when the manifest diverges from it', async () => {
+  // The two-space allowance must not weaken the gate: a manifest that names a
+  // build other than the one the host was told the manifest carries is exactly
+  // the unknowable state the gate exists to refuse.
+  const { root, runtime, stateDir } = tempRuntime(undefined, 'UTC', 'qualification-build');
+  try {
+    await writeManifest(stateDir, {
+      schemaVersion: ACTIVATION_SCHEMA_VERSION,
+      revision: 1,
+      previousSha256: null,
+      everActive: true,
+      activeGeneration: {
+        identity: { generationId: GENERATION_ID, buildId: 'an-unexpected-build', qualificationSha256: SHA, trialSha256: SHA_B },
+        state: 'active',
+        activatedAt: ACTIVATED_AT,
+        retiredAt: null,
+        predecessorGenerationId: null,
+        cutoffReceiptSha256: null,
+      },
+      successor: null,
+      retiredHistory: [],
+    });
+    await assert.rejects(
+      () => runtime.start(),
+      /does not match the loaded build/u,
+      'a diverging manifest identity must still fail closed',
     );
   } finally {
     await runtime.stop();

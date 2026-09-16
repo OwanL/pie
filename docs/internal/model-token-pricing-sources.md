@@ -3,7 +3,7 @@
 **Purpose:** Authoritative traceability record for every price written to `models.json`.
 Every non-zero cost field in `models.json` MUST have a corresponding row in this document.
 
-**Retrieval date:** 2026-09-05 (GPT-6 Astra); broader OpenAI, GitHub Copilot, and Ollama refresh completed 2026-08-24
+**Retrieval date:** 2026-09-13; broader OpenAI, GitHub Copilot, and Ollama refresh completed 2026-08-24
 **Format:** All prices in USD per 1M tokens unless otherwise noted.
 
 ---
@@ -13,7 +13,7 @@ Every non-zero cost field in `models.json` MUST have a corresponding row in this
 For each model in `model-profiles.yaml`:
 - **GitHub Copilot models**: Token pricing sourced from official GitHub Copilot billing documentation. 1 AI credit = $0.01 USD.
 - **OpenAI Codex models**: Opportunity-cost rates sourced from the official [OpenAI model pricing](https://developers.openai.com/api/docs/models) pages. Codex is subscription-billed here, but these rates make its token use comparable with the other providers. Long-context tiers use OpenAI's published 272K threshold and request-wide multipliers; cache writes use the published 1.25x uncached-input rate.
-- **Ollama Cloud models**: Availability, IDs, modalities, and served context windows come from Ollama's live cloud catalog and local `/api/show` manifests. Kimi K3 pricing is published directly by Ollama; other opportunity-cost rates come from the live [OpenRouter](https://openrouter.ai/api/v1/models) model API (`pricing.prompt` / `pricing.completion` / `pricing.input_cache_read`), converted from USD per token to USD per 1M tokens. These are comparison rates; Ollama bills individual plans through included usage and optional extra usage rather than charging every request at these rates.
+- **Ollama Cloud models**: Availability, IDs, modalities, and served context windows come from Ollama's live cloud catalog and local `/api/show` manifests. Kimi K3 and DeepSeek V4.1 Flash pricing is published directly by Ollama; other opportunity-cost rates come from the live [OpenRouter](https://openrouter.ai/api/v1/models) model API (`pricing.prompt` / `pricing.completion` / `pricing.input_cache_read`), converted from USD per token to USD per 1M tokens. These are comparison rates; Ollama bills individual plans through included usage and optional extra usage rather than charging every request at these rates.
 - **Umans models**: No longer active. Umans ended its coding subscriptions; the last configured metadata remains only in `historicalModels` for past-session attribution.
 - **Ollama Local models**: Free/local (no API cost).
 - **Grok models**: No official token pricing found; marked as unknown.
@@ -135,7 +135,7 @@ The configured `openai-codex` provider uses a ChatGPT subscription, so these are
 
 **Source:** [OpenRouter `/api/v1/models`](https://openrouter.ai/api/v1/models) — live aggregator of upstream provider per-token rates.
 **Retrieval date:** 2026-08-24 for the broader catalog; 2026-08-27 for GLM 5.3 Flash
-**Confidence:** `official` for Kimi K3; `openrouter` for the remaining comparison rates
+**Confidence:** `official` for Kimi K3 and DeepSeek V4.1 Flash; `openrouter` for the remaining comparison rates
 **Units:** USD per 1M tokens.
 
 `cacheRead` is populated where the source exposes a cached-input rate. `cacheWrite` is `0` unless a separate per-token cache-write price is published.
@@ -143,6 +143,7 @@ The configured `openai-codex` provider uses a ChatGPT subscription, so these are
 | Model ID | Pricing source/model | Input | Output | Cache Read | Confidence | Ollama-served metadata |
 |---|---|---:|---:|---:|---|---|
 | kimi-k3:cloud | Ollama Kimi K3 page | $3.00 | $15.00 | $0.30 | official | 1M context; vision/tools/thinking; Pro/Max + extra usage |
+| deepseek-v4.1-flash:cloud | Ollama DeepSeek V4.1 Flash page and pricing | $0.150 | $0.600 | $0.003 | official | 1M context; vision/tools/thinking; Pro/Max + extra usage |
 | deepseek-v4-flash:0731-cloud | deepseek/deepseek-v4-flash-0731 | $0.140 | $0.280 | $0.028 | openrouter | 1M served context; tools; none/high/max thinking |
 | deepseek-v4-pro:0813-cloud | deepseek/deepseek-v4-pro-0813 | $1.122 | $3.366 | $0.0374 | openrouter | 1M served context; tools; none/high/max thinking |
 | deepseek-v4-pro:cloud | deepseek/deepseek-v4-pro | $0.526176 | $1.052352 | $0.043848 | openrouter | 1M catalog context; tools/thinking |
@@ -230,7 +231,7 @@ Models in `model-profiles.yaml` without pricing in this evidence document:
 |---|---|
 | grok-code-fast-1 | No official token pricing published by GitHub Copilot; cost remains unavailable until a real token rate is published. |
 
-No active Ollama Cloud model remains unpriced as of 2026-08-27. Kimi K3 uses Ollama's official rate; the remaining Ollama entries use current OpenRouter comparison rates.
+No active Ollama Cloud model remains unpriced as of 2026-09-13. Kimi K3 and DeepSeek V4.1 Flash use Ollama's official rates; the remaining Ollama entries use current OpenRouter comparison rates.
 
 ---
 
@@ -239,16 +240,17 @@ No active Ollama Cloud model remains unpriced as of 2026-08-27. Kimi K3 uses Oll
 1. **GitHub Copilot models and pricing**: https://docs.github.com/copilot/reference/copilot-billing/models-and-pricing
 2. **GitHub Copilot model multipliers (annual plans)**: https://docs.github.com/en/copilot/reference/copilot-billing/model-multipliers-for-annual-plans
 3. **OpenRouter model pricing API** (Ollama Cloud source): https://openrouter.ai/api/v1/models
-4. **Ollama Cloud catalog**: https://ollama.com/search?c=cloud
-5. **Ollama Cloud plans and usage**: https://ollama.com/pricing
-6. **Ollama cloud/auth documentation**: https://docs.ollama.com/cloud and https://docs.ollama.com/api/authentication
-7. **Retired Umans service** (historical only): https://umans.ai
-8. Internal historical: `docs/internal/ollama-pro-cloud-models-ranked.md` (compute estimate methodology; superseded for live pricing by OpenRouter)
-9. **OpenAI GPT-5.6 Sol**: https://developers.openai.com/api/docs/models/gpt-5.6-sol
-10. **OpenAI GPT-5.6 Terra**: https://developers.openai.com/api/docs/models/gpt-5.6-terra
-11. **OpenAI GPT-5.6 Luna**: https://developers.openai.com/api/docs/models/gpt-5.6-luna
-12. **OpenAI ChatGPT/Codex rate card**: https://help.openai.com/en/articles/20001415-chatgpt-rate-card-enterprise-token-based-pricing
-13. **OpenAI GPT-6 Astra**: https://developers.openai.com/api/docs/models/gpt-6-astra
+4. **Ollama DeepSeek V4.1 Flash catalog page**: https://ollama.com/library/deepseek-v4.1-flash
+5. **Ollama Cloud catalog**: https://ollama.com/search?c=cloud
+6. **Ollama Cloud plans and usage**: https://ollama.com/pricing
+7. **Ollama cloud/auth documentation**: https://docs.ollama.com/cloud and https://docs.ollama.com/api/authentication
+8. **Retired Umans service** (historical only): https://umans.ai
+9. Internal historical: `docs/internal/ollama-pro-cloud-models-ranked.md` (compute estimate methodology; superseded for live pricing by OpenRouter)
+10. **OpenAI GPT-5.6 Sol**: https://developers.openai.com/api/docs/models/gpt-5.6-sol
+11. **OpenAI GPT-5.6 Terra**: https://developers.openai.com/api/docs/models/gpt-5.6-terra
+12. **OpenAI GPT-5.6 Luna**: https://developers.openai.com/api/docs/models/gpt-5.6-luna
+13. **OpenAI ChatGPT/Codex rate card**: https://help.openai.com/en/articles/20001415-chatgpt-rate-card-enterprise-token-based-pricing
+14. **OpenAI GPT-6 Astra**: https://developers.openai.com/api/docs/models/gpt-6-astra
 
 ---
 
@@ -266,3 +268,4 @@ No active Ollama Cloud model remains unpriced as of 2026-08-27. Kimi K3 uses Oll
 | 2026-08-24 | Refreshed official OpenAI and GitHub Copilot pricing. Applied the July 30 Terra/Luna reductions and August 21 Sol promotion to direct Codex comparison rates; corrected Copilot Sol, GPT-5 mini, and GPT-5.3-Codex rates; refreshed OpenRouter comparison prices for every active Ollama model and added missing DeepSeek V4 Pro 0813 evidence. Documented that persisted `usage.cost` is a catalog calculation, not an invoice amount, and changed Pie to reprice token-bearing records from the corrected catalog while retaining stored cost as the unpriced/cost-only fallback. |
 | 2026-08-27 | Added Ollama Cloud GLM 5.3 Flash availability and served metadata from Ollama's catalog plus local `/api/show`; added current `z-ai/glm-5.3-flash` OpenRouter comparison rates. |
 | 2026-09-05 | Added GPT-6 Astra using OpenAI's official token rates and pi.dev's live OpenAI Codex metadata. |
+| 2026-09-13 | Added Ollama Cloud DeepSeek V4.1 Flash using Ollama's official model metadata and cloud pricing. |

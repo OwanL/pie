@@ -89,15 +89,6 @@ profiles:
       - high
     disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
   - provider: github-copilot
-    id: mai-code-1-flash-picker
-    eligible: false
-    thinking:
-      - minimal
-      - low
-      - medium
-      - high
-    disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
-  - provider: github-copilot
     id: claude-haiku-4.5
     eligible: false
     thinking:
@@ -285,6 +276,15 @@ profiles:
       - medium
       - high
       - xhigh
+    disabled_reason: null
+  - provider: ollama
+    id: deepseek-v4.1-flash:cloud
+    eligible: true
+    thinking:
+      - off
+      - low
+      - high
+      - max
     disabled_reason: null
   - provider: ollama
     id: deepseek-v4-flash:0731-cloud

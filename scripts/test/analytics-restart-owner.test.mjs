@@ -12,6 +12,7 @@ import {
   commonHostKey,
   expectedFenceForMode,
   mergeKeyChannelEntries,
+  priorRecordBlocksRestart,
   readRestartEnvironment,
   ownerRecordPath,
 } from '../analytics-restart-owner.mjs';
@@ -664,6 +665,43 @@ test('the owner times out nonzero and refuses a duplicate destructive request', 
   } finally {
     await removeTemporaryRoot(root);
   }
+});
+
+test('priorRecordBlocksRestart gates on an issued request, not on the record existing', () => {
+  // Regression: the pre-existing-record guard must gate on evidence that a
+  // destructive request was actually issued. A record written by a refusal
+  // that acted on nothing (no acknowledged host, no assignment) must not
+  // block a later attempt — otherwise the refusal itself becomes the
+  // permanent wedge, because each rerun overwrites the record with another
+  // refusal while never issuing anything.
+  const operationId = 'op-guard:analytics-activation';
+  const zeroActionRefusal = {
+    operationId,
+    outcome: 'failed',
+    ackedHostInstanceIds: [],
+    assignments: [],
+    error: 'no registered analytics hosts were found to restart.',
+  };
+  assert.equal(
+    priorRecordBlocksRestart(zeroActionRefusal, operationId),
+    false,
+    'a refusal that issued nothing must not block a later attempt',
+  );
+
+  // A record that did issue a destructive request still blocks the rerun.
+  assert.equal(priorRecordBlocksRestart({
+    operationId, outcome: 'failed', ackedHostInstanceIds: ['host-1'], assignments: [],
+  }, operationId), true, 'an acknowledged host proves a restart was requested');
+  assert.equal(priorRecordBlocksRestart({
+    operationId, outcome: 'failed', ackedHostInstanceIds: [], assignments: [{ predecessorHostInstanceId: 'host-1' }],
+  }, operationId), true, 'an issued assignment proves a restart was requested');
+
+  // Another operation's record is irrelevant, and malformed records are inert.
+  assert.equal(priorRecordBlocksRestart({
+    operationId: 'op-other', ackedHostInstanceIds: ['host-1'], assignments: [],
+  }, operationId), false);
+  assert.equal(priorRecordBlocksRestart(undefined, operationId), false);
+  assert.equal(priorRecordBlocksRestart({}, operationId), false);
 });
 
 test('the owner fails closed before restarting when the fence or the ingress is missing', async () => {

@@ -140,6 +140,13 @@ test('Phase 4 protocol accepts every closed runtime, ownership, provider, and sy
           captureSubject: { kind: 'session', rootSessionId: 'root-1' },
           workspaceId: 'workspace-1',
           buildId: 'build-1',
+          writerAdmission: {
+            stateDir: 'C:/pie/state',
+            identity: {
+              hostInstanceId: 'host-1', workspaceId: 'workspace-1',
+              generationId: 'host-generation-1', buildId: 'worker-build-1', processId: 123,
+            },
+          },
         },
       },
     },

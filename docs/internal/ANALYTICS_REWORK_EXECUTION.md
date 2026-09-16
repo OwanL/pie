@@ -189,8 +189,8 @@ validates the post-restart census against the committed generation, reopens writ
 finishes the sanitized report. Relaunching from inside this conversation cannot pass the chat veto.
 
 **Recovery instructions after a reload:** never relaunch blindly — read the detached-child log,
-the cutover journal (if present), and the report first. The helper is idempotent per phase; a
-phase entered without completing is observable in the journal/log. If the detached run is absent
+the cutover journal (if present), and the report first. The helper is idempotent per phase;
+a phase entered without completing is observable in the journal/log. If the detached run is absent
 from the process census and the evidence shows an interrupted run, re-run step 2 (the same r03
 plan) only after the refreshed preflight (step 1) still reports ready. A stale phase lock whose
 recorded pid is dead is removed automatically by the next run; if that pid was reused by an
@@ -205,6 +205,221 @@ model/settings/pricing working-tree edits remain untouched and unstaged througho
 Authorization basis: scope-plan §17 (approved 2026-09-09, full implementation and live cutover),
 confirmed independently; checkpoint 66 records the completed bootstrap recovery and that the owner
 key is bound and preflight is ready. No repeat user permission is required for this activation.
+
+---
+
+**Sixth incident — the host's own startup build gate was the remaining cross-space check (owner-reported
+startup failure).** The user reported pie failing to start with
+`Active analytics generation build 84d09cb7b9daa44155d0 does not match the loaded build 67dc8288f6a19b1b65e8.`
+The throw site is the canonical startup gate in `extension/src/host/analytics-runtime.ts` (`start()`),
+which compared the **manifest** generation identity against the **loaded runtime marker**:
+`descriptor.buildId` comes from `manifest.activeGeneration.identity.buildId`, which the helper writes from
+`activationRequest.buildId = plan.buildId` (admission binds `plan.buildId` to the qualification report's
+`coordinatedBuildId`, `84d09cb7…`), while `options.buildId` is `PIE_BUILD_ID` (`67dc8288…`, the staged
+runtime's coordinated candidate marker also carried by lifecycle host rows and authenticated status
+identities). That is precisely the two-space convention the fourth incident diagnosed: the admission
+module and the restart owner were repaired for it, this gate was not, and because admission *requires*
+`plan.buildId` to be the qualification id, the gate was unsatisfiable whenever a source-equivalence
+receipt is bound. Blast radius: the throw precedes `statsService.start()`, `service.start()` and
+`browserServer.start()` in `ExtensionHost.start()`, and `extension.ts` only logs the rejection, so the
+whole extension UI was down rather than degraded. Verified live before repair: the staged generation
+`4280844e…` compiles `PIE_BUILD_ID = "67dc8288f6a19b1b65e8"` with a matching `pie-build-id.txt`, and
+`analytics-activation-v1.json` / `analytics-cutover-operation-v1.json` / `analytics-ever-active-v1.json`
+all record `buildId: 84d09cb7…`; the source-equivalence receipt binds `measured.buildId`
+`84d09cb7…` → `candidate.buildId` `67dc8288…`. Durable state surveyed and left untouched: journal phase
+`analytics-committed`, fence epoch 1 `fenced`, `successor: null`, `retiredHistory: []` — nothing
+half-written, so no state repair was required or performed.
+
+**Repair (extension-owned; the first `extension/src` byte change of this rework).** `AnalyticsRuntime`
+now takes an optional `manifestBuildId`: when the caller distinguishes the two spaces the gate compares
+in the *manifest's* space, and when it does not the original strict marker-equals-manifest check is
+preserved verbatim, so single-space hermetic callers and the disposable candidate-trial runtime are
+unchanged. `extension-host.ts` supplies it from the canonical descriptor (`activationDescriptor.buildId`).
+A comment records that the host cannot locally re-verify the receipt (it is not host-owned) — the
+loaded-versus-committed correspondence remains proven by the loaded-generation marker, terminal receipt,
+and the restart owner's authenticated replacement census. No gate was weakened: a manifest that diverges
+from the binding still fails closed (pinned by a new regression).
+
+**A second, independent instance of the same defect was found behind the first, on the durable writer
+path.** A bounded read-only probe (`C:/dev/scratch/pie-two-space-writer-probe-20260916-r01/`, throwaway
+database under the scratch root, production state never opened) showed that the backend derived its
+durable `AnalyticsWriterIdentity.buildId` from the *activation descriptor*, i.e. the manifest id, while
+`registerAnalyticsHost`/`assertRegisteredWriterIdentity` compare that identity against the lifecycle host
+row byte-for-byte — and that row carries the *loaded marker* the host registers with. Reproduced
+directly: `assertAnalyticsWriterAdmitted` and `acquireAnalyticsWriterLease` both threw
+`Analytics writer host … is not currently admissible.` for a manifest-derived identity while the
+marker-derived identity was admitted. Left unfixed, passing the startup gate would only have moved the
+failure into writer admission (recorder startup and every session-manager/ownership write seam), so both
+had to be repaired together. Fix: the writer identity now derives its build id from `PIE_BUILD_ID`
+(the host-boot space; both host and backend bundles of one generation compile the same constant, and the
+backend is spawned from the same `runtimeOutputDirectory`), exposed as the tested seam
+`analyticsWriterBuildId()`. Re-probed after the fix: marker-derived identity admitted, manifest-derived
+identity still refused — the gate is intact, not loosened.
+
+**Evidence.** Focused `analytics-runtime` suite **15/15** and `backend-analytics-activation` **3/3**
+(two new gate tests plus a new writer-identity regression that also registers a realistic lifecycle host
+row and asserts durable admission succeeds); `npm test` affected runner 156/156; `npm run typecheck`
+17/17 projects; lint clean except one **pre-existing** unused-symbol error in
+`extension/src/host/analytics-controlled-restart.ts` (`validateRequestTimestamps`), confirmed present at
+HEAD and in a file this change does not touch. `npm run extension:build:validate` passed with the new
+coordinated identity `855fb3133e351ed809c7` — expected, since `PIE_BUILD_ID` hashes all of `extension/src`.
+`npm run test:all` reported 7187 passed / 8 failed, all 8 in the extension package and all confirmed to
+**pass in isolation** when re-run by file (`stats-service/canonical-historical`, the `p0-endurance-harness`
+and `p0-mixed-harness` smoke tests, `windows-process-handle-collector` ready-timeouts, the deferred-trigger
+process race, and `webview/bootstrap` 15 s timeout) — the load-dependent flake class already recorded in
+checkpoint 66, not regressions from this change.
+
+**Consequence for the activation chain:** as predicted in the fourth-incident note, this source change
+changes the candidate build id, so staged runtime `4280844e…`, source-equivalence `r06`, candidate trial
+`r06` and the r03 plan bindings are **no longer valid**. The chain must be re-run (extension build →
+staged-integrity → source-equivalence binding the new candidate to the historical provisional evidence →
+candidate trial → admission → plan revision) before any relaunch. This change repairs both gates that
+would otherwise block every future attempt; it does **not** by itself complete the terminal handoff, which
+still needs the committed journal's post-restart census from a quiet boot outside this conversation
+(the VS Code chat veto recorded in the fifth incident is unaffected by this repair). No live restart,
+activation, storage cutoff, deletion, or production-data change was performed in this incident. The
+still-closed fence (epoch 1, `fenced`) continues to hold admission until that handoff completes, so
+ordinary session writes remain revoked for the duration — expected, and the reason the remaining work is
+the sanctioned resume rather than a fresh activation.
+
+**Seventh incident — the post-restart resume was unreachable, and is now repaired (owner reported
+"unable to create a session").** After the restart the reported startup failure was gone: `pie.log`
+contains **zero** `does not match the loaded build` records, and a loaded-generation marker was written
+at `2026-09-16T09:31:06.663Z` by live host `d34df064-…` (pid 11024) recording the committed generation
+`9ba84da9-…` / manifest build `84d09cb7…` — i.e. the sixth-incident repair did unblock host startup.
+The remaining symptom was that **every** `session.create` failed with
+`Analytics writer admission is fenced at epoch 1; expected admitted epoch 1.` (17 `index.unavailable`
+records, 176 writer-admission warnings): the durable analytics fence is still `fenced`, so session
+writes stay revoked exactly as the sixth incident predicted.
+
+**Root cause: the documented resume shape could never complete.** The journal is at phase
+`analytics-committed` with `activationRequest.trialSha256 = 878805ec…` (the bytes of
+`candidate-trial-r06.json`) and the committed manifest carries that same hash. Resume requires
+re-admission of the *same* evidence, but the only available candidate evidence had moved on: the sixth
+incident's `extension/src` change recomputes the candidate build id (`67dc8288…` → `855fb313…`) and
+therefore every evidence hash, so receipt `r06` could no longer be admitted (`source equivalence receipt
+tooling entry does not match the current tree: extension/src/host/analytics-runtime.ts`), while freshly
+admitted `r07` evidence carries a different `trialSha256` and is correctly refused by
+`assertJournalMatchesOptions` as `Analytics cutover activation evidence changed during recovery`. Both
+directions were reproduced read-only. With no retirement path in the codebase (`retiredHistory` is only
+ever written as `[]`), the committed activation was permanently unverifiable and the fence permanently
+closed — a genuine deadlock that made pie permanently unusable for sessions. This was latent in the
+sixth-incident prediction: it assumed a resume without any intervening source change.
+
+**Repair (scripts-only; no `extension/src` byte changed by this incident).** The helper now recognises
+an already-committed activation (`readCommittedActivationIdentity`): when the canonical active
+generation is the one the plan names, resume binds to the **committed manifest identity** — the
+authority the commit created — instead of re-adjudicating candidate bytes. Every guarantee that matters
+is preserved and one is added: `assertCommittedResumeMatchesPlan` requires the plan's declared P0
+hashes to equal the committed identity exactly and otherwise raises the *same* changed-evidence error,
+and the orchestrator still re-checks the manifest against those fields
+(`assertActiveGenerationMatchesRequest`) and refuses mismatched journal evidence. First-time activation
+and storage cutoff continue to admit their evidence in full; a divergent plan still fails closed.
+
+**Work completed toward the resume in this incident:** `extension/src/backend/server.ts` was added to
+the reviewed `ALLOWED_TOOLING_DELTA` allowlist in `scripts/analytics-source-equivalence.mjs` (it is not
+a measured production-manifest input, and its only change is the control-plane writer-identity space);
+receipt `source-equivalence-r07.json`
+(SHA-256 `06de47208a885a23348b87f3b477af33f76c18f4e29ec934f31b9a1eb583a48c`, candidate
+`855fb3133e351ed809c7`, 20 measured production files byte-identical, 3 dependency inputs unchanged,
+11 tooling entries) and candidate trial `candidate-trial-r07.json`
+(SHA-256 `a1ee54bcac5855426f20d7fdbccc1c1eb3a4385d0b0c0e10c6adcbbc23d80a45`, `status: passed`,
+cleanup completed, root removed); executable plan `p7a-preflight-plan-r04.json` bound to those bytes.
+Read-only preflight against r04 now reports `p0Qualification: true`, `analyticsEvidenceStructure: true`
+and `admission.ready: true` (resuming from committed generation `9ba84da9-…`).
+
+**Evidence.** Helper suites **25/25** including the new regression (committed resume accepted; changed
+trial or qualification hash refused with the recovery error; missing prerequisites a hard error); full
+scripts package **334 passed, 0 failed, 4 skipped**; `npm run typecheck` 17/17; lint clean apart from
+the same pre-existing unused-symbol error in `extension/src/host/analytics-controlled-restart.ts`.
+
+**Remaining blockers to a usable pie (both bootstrap/census, not defects).** (1) The live host
+`d34df064-…` is not bound in the owner key map, and a read-only authenticated probe proved it
+**refuses the minted bootstrap key** — a plain restart gives each host a fresh in-memory key, so the
+supported path is one owner-controlled close/relaunch through
+`scripts/analytics-bootstrap-launcher.mjs` (which mints the key, relaunches Code with it, settles
+dead-pid census evidence, and binds the registered host). (2) A stale runtime lease for the dead pid
+26420 (`runtime-lease-process-unregistered`), which that launcher settles with complete-census proof.
+A helper-issued controlled restart is still required to write the nonce'd loaded marker and terminal
+receipt before the helper reopens admission; the fifth incident's VS Code chat veto means that restart
+cannot complete from inside an open chat session, so the relaunch must be performed by the user.
+Separately observed and **not** a regression: 2,279 leaked writer leases (cap 4,096) in workspace
+`{"noWorkspaceId":…}` from the now-dead host `c3376f45-…`; their identities are internally consistent
+with that host's row and the production `c:/dev` workspace holds **zero** leases, so they block nothing
+today but deserve a separate bounded fix. No live restart, activation, storage cutoff, deletion, or
+production-data change was performed in this incident beyond staging plan r04 and its evidence.
+
+**Eighth incident — the restart-owner guard was itself the wedge; second repair (owner ran the two
+documented commands; sessions still refused).** The owner performed the sanctioned close/relaunch and the
+detached helper, and both genuinely advanced the state: the launcher minted a new bootstrap key
+(`2026-09-16T10:31:58Z`), relaunched Code with the launch channel, settled the stale dead-pid registry
+rows and the stale runtime lease (pid 26420), and bound a live host; the preflight's blocker list then
+collapsed from `p0Qualification: false` + two census blockers to **admission ready + exactly one**
+blocker. `session.create` still failed with the same fence error, because the controlled restart never
+reached the host.
+
+**Root cause: the guard refused on the mere existence of a prior record.** `analytics-restart-owner.mjs`
+refused whenever *any* prior owner record for the same operation existed
+(`priorOwnerRecord?.operationId === fence.operationId`). That is correct when the prior attempt actually
+issued a destructive request, but it is a permanent wedge for an attempt that refused *during
+pre-flight*: the refusal writes its own record, so every later run refuses because that refusal exists,
+no restart is ever issued, and the fence can never reopen. The owner's 10:32 run hit exactly that
+recursion: its record carries `outcome: failed`, `error: "a prior restart owner record … exists with
+outcome failed; refusing to issue another destructive restart request."`, and
+`preRestartHostInstanceIds: []`, `ackedHostInstanceIds: []`, `assignments: []` — proof it issued nothing
+destructive before refusing. (The same shape was already archived once by hand in the fifth incident as
+`-r01-failed-build-id-refusal.json`; that manual archiving was a workaround for this missing
+distinction.) This is the second half of the seventh incident's deadlock: even with admission fixed, the
+resume could not issue the restart it needed.
+
+**Repair (scripts-only; no `extension/src` byte changed).** The decision is now explicit and tested:
+`priorRecordBlocksRestart(record, operationId)` blocks only when a real attempt is proven — at least one
+acknowledged host or at least one issued assignment — and is inert for another operation's record, a
+zero-action refusal, or a malformed record. The guard's guarantee is unchanged where it matters, and the
+existing timeout regression (which *does* acknowledge a host, then asserts a rerun refuses) still passes
+and pins that direction. The wedge record was archived following the established convention as
+`analytics-restart-owner-v1-r02-zero-action-refusal-archived.json` (copy, then remove), so the next
+attempt can issue its request; nothing destructive was erased, since the archived bytes carry no request.
+
+**Remaining blocker (one, and it needs the user).** The live registered host `5ede4661-…` (pid 18972)
+does not hold the launch-channel key: a read-only authenticated probe confirmed the freshly bound
+owner-map key is **refused** (`returned an unauthenticated status response`), and its capability row
+lacks the `storage-root-sha256:` capability that a launch-env host carries — so it was started by an
+ordinary boot, not by the launcher's relaunch. The host that *did* carry the launch env (`a01d5f25-…`,
+registered 10:32:10Z) was marked stopped at 10:32:37Z, 27 seconds later, as VS Code finished booting;
+binding then raced that churn and bound the surviving ordinary-boot host.
+
+**Third repair in the same class: `--recover-key-binding` recorded an unverifiable claim.** That
+recovery bound the minted key to any host registered *after* the mint, treating registration time as
+proof of launch-channel provenance. It is not: an ordinary restart also registers after the mint while
+holding a fresh per-boot key, so the recovery wrote a "bound" claim that the census then reported as
+`host-authentication-failed`, and the failure looked like a census problem rather than a false claim. The
+recovery now proves the key with the real authenticated status probe before recording it and fails closed
+(`the minted bootstrap key is not accepted by every live registered host … nothing was bound`) when a host
+refuses it, with the remedy named in the message. The unverifiable binding was removed (archived as
+`host-handoff-keys-v1-unverifiable-r02-archived.json`) so no false claim remains in owner state, and its
+regression test now asserts the map is never written. Evidence for the three repairs together: helper
+25/25, restart-owner 8/8, bootstrap-launcher 8/8, full scripts package **335 passed, 0 failed, 4
+skipped**, typecheck 17/17, lint clean apart from the same pre-existing `validateRequestTimestamps`
+unused-symbol error.
+
+The supported way to make the live host hold the key is one more owner close/relaunch through the
+launcher (which re-mints and now verifies before binding), run from a standalone terminal rather than
+from inside a VS Code chat session, since the fifth incident's chat veto blocks the extension-host stop.
+No live restart, activation, storage cutoff, deletion, or production-data change was performed in this
+incident.
+
+**Load-flake note (investigated, not a regression).** While verifying, the restart-owner suite's
+staggered two-host test failed intermittently. An interleaved A/B comparison of the same file with and
+without these changes eventually failed on **both** sides (`HEAD: FAIL/MINE: FAIL` for three consecutive
+interleaved iterations), and the machine was measured at **91–99% CPU with 539–1037 MB free physical
+memory** (remoting_host, ms-teams, Docker, Chrome, Slack dominating) — so the failure is the
+already-recorded load-dependent flake class, not a regression from these repairs. It also passes 3/3 when
+run alone via `node --test --test-name-pattern=staggered` and passed 4/4 on the first HEAD sample before
+load rose. The one measurement that briefly looked causal (`HEAD 4/4 pass` vs `MINE 4/4 fail`) was taken
+across rising load and did not reproduce under the interleaved control. The full scripts package passed
+**335 passed, 0 failed, 4 skipped** on the final clean run. Worth re-running this suite on a quiet machine
+before treating any staggered-test failure as real.
 
 ---
 
