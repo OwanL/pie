@@ -52,17 +52,37 @@ ready-for-bootstrap`, authorization envelope approved under scope-plan §17):**
    successor key ingress, and post-cutover census in one bounded, resumable run; spawns a detached
    child and returns immediately):
    `node scripts/analytics-activation-helper.mjs --detach --plan C:/Users/OWANLA~1/AppData/Local/Temp/pie-p7a-final-20260916-bkv7Mr/p7a-preflight-plan-r03.json`
-3. Monitor boundedly via the durable phase record
-   (`C:/Users/OwanLazic/AppData/Local/pie/data/state/analytics-activation-phases.json`, also
-   readable with `node scripts/analytics-activation-helper.mjs --status --state C:/Users/OwanLazic/AppData/Local/pie/data/state`),
-   the sanitized report `C:/Users/OWANLA~1/AppData/Local/Temp/pie-p7a-final-20260916-bkv7Mr/activation-report-r01.json`,
-   and the terminal restart receipt `C:/Users/OWANLA~1/AppData/Local/Temp/pie-p7a-final-20260916-bkv7Mr/terminal-restart-receipt-r01.json`.
+3. Monitor boundedly via the production cutover journal
+   (`C:/Users/OwanLazic/AppData/Local/pie/data/state/analytics-cutover-operation-v1.json`; the
+   `analytics-activation-phases.json` phase record is the legacy path's record, not the production
+   orchestrator's), the sanitized report `C:/Users/OWANLA~1/AppData/Local/Temp/pie-p7a-final-20260916-bkv7Mr/activation-report-r01.json`,
+   the terminal restart receipt `C:/Users/OWANLA~1/AppData/Local/Temp/pie-p7a-final-20260916-bkv7Mr/terminal-restart-receipt-r01.json`,
+   and the detached-child output log `C:/Users/OWANLA~1/AppData/Local/Temp/pie-p7a-final-20260916-bkv7Mr/activation-helper-detach.log`.
 
-**Recovery instructions after a reload:** never relaunch blindly — read the phase record and report
-first. The helper is idempotent per phase (phases already completed without error are skipped; a
-phase entered without completing is marked with its error). If the detached run is absent from the
-process census and the phase record shows an interrupted phase, re-run step 2 (the same r03 plan)
-only after the refreshed preflight (step 1) still reports ready. Failure handling: preserve all
+**First launch incident (recovered before relaunch):** the first `--detach` launch (child pid
+42172, 2026-09-16T05:57:42Z) acquired the phase lock and died silently inside
+`orchestrator.run()` before any journal/report write — `fail()` exits without releasing the lock,
+and the then-`stdio: 'ignore'` child discarded the error, leaving an undiagnosable stale lock (the
+earlier preflight attempt had also hit a stale lock whose holder pid had been reused by an
+unrelated Edge renderer; evidence in
+`C:/Users/OWANLA~1/AppData/Local/Temp/pie-p7a-final-20260916-bkv7Mr/stale-lock-recovery-r01.json`).
+A read-only diagnostic copy of the helper (stop inserted before the orchestrator; no destructive
+action) proved every pre-orchestrator validation passes, so the failure was inside
+`orchestrator.run()` before its first journal write. The child left no durable state, so the rerun
+is clean. Repair (scripts-only, no `extension/src` byte): the detach branch now captures the
+child's stdout/stderr in an append-mode `activation-helper-detach.log` next to the plan/report and
+prints that path, so a failed detached run is diagnosable instead of silent; regression
+`detached helper captures child stdout/stderr in a durable log` added. Full scripts package:
+329 passed, 0 failed, 4 skipped.
+
+**Recovery instructions after a reload:** never relaunch blindly — read the detached-child log,
+the cutover journal (if present), and the report first. The helper is idempotent per phase; a
+phase entered without completing is observable in the journal/log. If the detached run is absent
+from the process census and the evidence shows an interrupted run, re-run step 2 (the same r03
+plan) only after the refreshed preflight (step 1) still reports ready. A stale phase lock whose
+recorded pid is dead is removed automatically by the next run; if that pid was reused by an
+unrelated process (observed once), verify with a process scan that no helper is running before
+removing the lock manually and record the evidence. Failure handling: preserve all
 evidence, diagnose only within P7a scope, do not loop destructive actions, do not shorten or bypass
 gates, and record the exact unmet gate honestly. Bound live host: `7053bef0-f66b-4203-8713-bea6a5bc8297`
 (pid 7740) against runtime `4280844e…` and candidate `67dc8288…`; verify actually **loaded** and

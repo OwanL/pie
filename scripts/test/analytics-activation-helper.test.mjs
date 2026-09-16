@@ -194,3 +194,54 @@ test('PREFLIGHT first activation census mirrors the fence census', () => {
     `first activation must waive the absent descriptor: ${JSON.stringify(discovery.reasonCodes)}`);
   assert.ok(discovery.reasonCodes.includes('host-backend-owner-missing'));
 });
+
+test('detached helper captures child stdout/stderr in a durable log', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'pie-activation-detach-'));
+  const stateDir = path.join(root, 'state');
+  mkdirSync(stateDir, { recursive: true });
+  const planPath = path.join(root, 'plan.json');
+  // The plan passes loadPlan but its evidence files do not exist, so the
+  // detached child deterministically fails closed at evidence admission —
+  // before any destructive action or state write — with its error on stderr.
+  writeFileSync(planPath, JSON.stringify({
+    stateDir,
+    qualificationReport: path.join(root, 'missing-qualification.json'),
+    trialReport: path.join(root, 'missing-trial.json'),
+    generationId: 'detach-log-generation',
+    buildId: 'detach-log-build',
+    sourceHead: 'a'.repeat(40),
+    sourceFingerprint: 'c'.repeat(64),
+    reportPath: path.join(root, 'activation-report.json'),
+    cutoverMode: 'analytics-activation',
+    authorization: { schemaVersion: 1, plan: 'analytics-rework-plan-17', approved: true, commitSha: 'b'.repeat(40) },
+    workspaceId: 'detach-log-workspace',
+    runtimeRootPath: path.join(root, 'runtime'),
+    runtimeIdentity: { publisher: 'pie', name: 'pie', version: '0.3.0' },
+  }));
+  const logPath = path.join(root, 'activation-helper-detach.log');
+  try {
+    const result = spawnSync(process.execPath, [helperPath, '--detach', '--plan', planPath], {
+      cwd: repositoryRoot,
+      encoding: 'utf8',
+      windowsHide: true,
+    });
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /detached as pid \d+/);
+    assert.match(result.stdout, /activation-helper-detach\.log/);
+    // The child runs asynchronously: poll bounded until its failure is logged.
+    const deadline = Date.now() + 30_000;
+    let log = '';
+    while (Date.now() < deadline) {
+      try { log = readFileSync(logPath, 'utf8'); } catch { /* not written yet */ }
+      const withoutHeader = log.replace(/^analytics-activation-helper: detached launch[^\n]*\n/m, '');
+      if (/analytics-activation-helper: /.test(withoutHeader)) break;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+    }
+    assert.match(log, /detached launch at /, 'the log records the detached launch');
+    assert.match(log, /qualification|unavailable|admission/i,
+      `the child's admission failure must be captured, not discarded: ${JSON.stringify(log)}`);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250); // let the child finish exiting
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

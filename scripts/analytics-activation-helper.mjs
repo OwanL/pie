@@ -59,13 +59,16 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import {
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
   renameSync,
   rmSync,
   statSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -1509,16 +1512,24 @@ async function main(plan, options) {
 
   if (options.detach) {
     // Re-exec detached so the helper outlives the terminal or agent session that
-    // started it. stdout/stderr are discarded rather than inherited so the parent
-    // exiting cannot break the child's streams.
+    // started it. The child outlives this process, so its stdout/stderr are the
+    // only durable record of a failed run: capture them in an append-mode log
+    // next to the plan/report instead of discarding them, so a silent child
+    // death (for example fail() exiting without releasing the phase lock) is
+    // diagnosable after the fact.
+    const detachLogPath = path.join(path.dirname(plan.reportPath ?? options.plan), 'activation-helper-detach.log');
+    mkdirSync(path.dirname(detachLogPath), { recursive: true });
+    const detachLog = openSync(detachLogPath, 'a');
+    writeSync(detachLog, `analytics-activation-helper: detached launch at ${new Date().toISOString()} (spawner pid ${process.pid})\n`);
     const child = spawn(process.execPath, process.argv.slice(1).filter((value) => value !== '--detach'), {
       detached: true,
-      stdio: 'ignore',
+      stdio: ['ignore', detachLog, detachLog],
       cwd: repositoryRoot,
       env: { ...process.env, PIE_ANALYTICS_HELPER_DETACHED: '1' },
     });
     child.unref();
-    process.stdout.write(`analytics-activation-helper: detached as pid ${child.pid}\n`);
+    closeSync(detachLog);
+    process.stdout.write(`analytics-activation-helper: detached as pid ${child.pid}; child output: ${detachLogPath}\n`);
     process.exit(0);
   }
 
