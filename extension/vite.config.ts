@@ -107,6 +107,16 @@ export default defineConfig(({ mode }) => {
             // an injectable-only test wrapper.
             'analytics-production-adapters': path.join(srcDir, 'host', 'analytics-production-adapters.ts'),
             'analytics-cutover-orchestrator': path.join(srcDir, 'host', 'analytics-cutover-orchestrator.ts'),
+            // Emitted so the one-shot controlled-restart owner signs and verifies
+            // the real terminal-handoff ingress protocol rather than a
+            // reimplementation that could drift from the host endpoint.
+            'analytics-controlled-restart': path.join(srcDir, 'host', 'analytics-controlled-restart.ts'),
+            // Emitted so the owner's focused test fixture serves the real
+            // authenticated host-control endpoint it must coordinate.
+            'analytics-handoff-control': path.join(srcDir, 'host', 'analytics-handoff-control.ts'),
+            // Emitted with the control endpoint so the fixture's host carries
+            // the real writer-fence capability the census requires.
+            'analytics-all-host-handoff': path.join(srcDir, 'host', 'analytics-all-host-handoff.ts'),
             // Emitted so focused host-discovery tooling can use the same
             // bounded process census without importing the extension entry.
             'analytics-handoff-discovery': path.join(srcDir, 'host', 'analytics-handoff-discovery.ts'),

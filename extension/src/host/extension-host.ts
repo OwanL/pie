@@ -78,6 +78,12 @@ import type { AnalyticsDetailCapture, AnalyticsObservation } from '../../../shar
 import { AnalyticsHandoffControl } from './analytics-handoff-control.js';
 import { createAnalyticsHostWriterFence } from './analytics-all-host-handoff.js';
 import {
+  consumePendingControlledRestart,
+  createAnalyticsHostControlledRestart,
+  isPendingControlledRestartConsumable,
+  readPendingControlledRestart,
+} from './analytics-controlled-restart.js';
+import {
   discoverAnalyticsHostWriters,
   type RuntimeGenerationIdentity,
 } from './analytics-handoff-discovery.js';
@@ -317,6 +323,24 @@ export class PieExtension implements vscode.Disposable {
         registry: analyticsHandoffRegistry,
         identity: analyticsHostIdentity,
         writerFence: analyticsWriterFence,
+        restart: createAnalyticsHostControlledRestart({
+          stateDir: dataPaths.stateDir,
+          identity: analyticsHostIdentity,
+          performRestart: () => {
+            // Supported quiet restart ingress for the terminal handoff. Restart
+            // only the extension host so open editors are untouched; fall back
+            // to a window reload, where hot exit preserves unsaved work. No
+            // process is killed and the VS Code main process stays alive.
+            const quietRestart = vscode.commands.executeCommand('workbench.action.restartExtensionHost');
+            void Promise.resolve(quietRestart)
+              .catch(() => vscode.commands.executeCommand('workbench.action.reloadWindow'))
+              .then(() => undefined, (error: unknown) => {
+                appendPieLog('error', 'controlled-restart', 'quiet VS Code restart command failed', {
+                  error: toErrorMessage(error),
+                });
+              });
+          },
+        }),
         key: analyticsHandoffKey,
         readInventory: async () => {
           if (!runtimeIdentity) {
@@ -369,6 +393,28 @@ export class PieExtension implements vscode.Disposable {
             hostInstanceId: analyticsProcessGeneration,
           })
         : undefined;
+      // A helper-issued controlled restart records its nonce and receipt
+      // destination durably in this state root before the fenced host
+      // acknowledged, so the restarted boot obtains the nonce without an
+      // inherited process environment. An explicit launch-channel environment
+      // pair keeps precedence over the durable slot; an expired slot is
+      // dropped instead of replaying stale evidence.
+      const pendingControlledRestart = readPendingControlledRestart(dataPaths.stateDir);
+      const consumablePendingRestart = pendingControlledRestart
+        && isPendingControlledRestartConsumable(pendingControlledRestart, Date.now())
+        ? pendingControlledRestart
+        : undefined;
+      if (pendingControlledRestart && !consumablePendingRestart) {
+        consumePendingControlledRestart(dataPaths.stateDir);
+      }
+      const envRestartNonce = process.env.PIE_ANALYTICS_RESTART_NONCE?.trim() || null;
+      const envRestartReceiptPath = process.env.PIE_ANALYTICS_TERMINAL_RESTART_RECEIPT_PATH?.trim();
+      const usesEnvironmentRestartEvidence = envRestartNonce !== null || envRestartReceiptPath !== undefined;
+      // The slot is single-use: exactly one boot may claim the nonce. Consume
+      // it here so later boots cannot replay the same restart evidence.
+      if (!usesEnvironmentRestartEvidence && consumablePendingRestart) {
+        consumePendingControlledRestart(dataPaths.stateDir);
+      }
       // Under canonical authority the capture requires a generation id and fact,
       // detail and lifecycle sinks, and throws without them. Those sinks come from
       // the canonical helpers, which only exist once AnalyticsRuntime.start() has
@@ -382,8 +428,10 @@ export class PieExtension implements vscode.Disposable {
         workspaceId: analyticsWorkspaceId,
         processGeneration: analyticsProcessGeneration,
         activationSnapshot: activation,
-        restartNonce: process.env.PIE_ANALYTICS_RESTART_NONCE?.trim() || null,
-        terminalRestartReceiptPath: process.env.PIE_ANALYTICS_TERMINAL_RESTART_RECEIPT_PATH?.trim(),
+        restartNonce: usesEnvironmentRestartEvidence ? envRestartNonce : consumablePendingRestart?.restartNonce ?? null,
+        terminalRestartReceiptPath: usesEnvironmentRestartEvidence
+          ? envRestartReceiptPath
+          : consumablePendingRestart?.terminalRestartReceiptPath,
         writerAdmission: analyticsWriterAdmission,
         onError: (error, stage) => {
           appendPieLog('error', 'analytics', `canonical analytics ${stage} failed`, {

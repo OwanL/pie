@@ -14,6 +14,63 @@ Owning specifications: runbook; `docs/ANALYTICS_REWORK_PLAN.md` §§1, 11.6, 17;
 
 ---
 
+## Checkpoint 62 - 2026-09-16, real one-shot controlled VS Code restart owner implemented; bootstrap restart still required
+
+The live restart ingress from checkpoint 61 is now implemented and rehearsed, not performed. A new
+`extension/src/host/analytics-controlled-restart.ts` adds a signed, bounded controlled-restart
+protocol to the existing authenticated host-control channel: an owner request carries the helper's
+`restartNonce` and `terminalRestartReceiptPath`, the host durably records a single-use pending
+restart slot (`analytics-pending-controlled-restart-v1.json`, bounded, validated, 5-minute expiry),
+acknowledges with a signed response bound to the request id/nonce/host identity, and only then
+schedules its quiet restart after a bounded 500 ms delay so the acknowledgement always flushes first.
+The restart is `workbench.action.restartExtensionHost` with fallback to
+`workbench.action.reloadWindow` — both supported VS Code ingress commands that preserve unsaved
+editor work; no process is killed and the VS Code main process is not touched. A newer signed
+request supersedes and re-arms the pending slot; replay, tampering, wrong keys, expired windows,
+relative receipt paths, malformed nonces, and foreign workspaces fail closed.
+
+`AnalyticsHandoffControl` gained the optional `restart` handler and now advertises
+`controlled-restart` on registration only when that handler is wired; without it, restart frames are
+refused with a signed error and the capability is not advertised. The loaded host boot resolves its
+restart nonce/receipt from the launch-channel environment first, otherwise from the pending slot,
+which is consumed exactly once (expired slots are dropped, never replayed).
+
+`scripts/analytics-restart-owner.mjs` is the one-shot restart owner the activation helper invokes as
+`plan.restartCommand`. In one finite pass it validates the helper-issued nonce/receipt pair against
+the plan, refuses to act unless the durable all-host writer fence for the plan's cutover mode is
+`fenced` (operation id derived exactly like the orchestrator's phase operation id), requires every
+registered host to expose an authenticated controlled-restart endpoint with a channel key and, for
+storage cutoff, the bound final-root capability, sends one signed restart request per host, watches
+the registry for restarted boots, and refreshes the owner-controlled per-host key channel so the
+helper's post-restart census can authenticate new boots. It writes a sanitized durable owner record
+(`analytics-restart-owner-v1.json`) and exits non-zero with the exact bootstrap blocker if the
+currently loaded hosts lack the ingress. It never kills processes, never touches VS Code global
+state, and never fabricates receipt or loaded-generation evidence.
+
+Focused disposable validation passed: host controlled-restart tests **7/7** (signature/replay/
+tamper bounds, pending slot durability and single-use, supersession re-arm, endpoint capability
+advertisement, absent-handler refusal, malformed-slot handling), existing control/all-host/arch
+suites **18/18**, owner tests **4/4** including a real end-to-end run of the owner subprocess against
+the real built control endpoint with the real lifecycle store, fence, successor admission, key
+channel refresh, and a signed restart request (no live VS Code host was restarted), and the scripts
+suite **301 passed, 0 failed, 4 skipped**. `npm run extension:build` passed; coordinated build id is
+`625b05e9e0944fab96ad`, immutable runtime
+`45df9b8506b7e994ed7c3d2cc7c1ba45a9fa1453167071a3a16995b7899e2a60` is staged and selected for the
+next normal VS Code startup; it is **not claimed loaded**. The five unrelated model/settings edits
+remain excluded and unstaged.
+
+**Bootstrap remains explicit:** the currently loaded hosts predate this ingress. To arm it, perform
+one normal VS Code restart (close/relaunch the windows running Pie, or run Developer: Reload Window);
+no production cutover or restart of analytics writers is implied by that bootstrap restart. Once the
+staged runtime is loaded, the production handoff uses the plan field
+`"restartCommand": "node C:\\dev\\repos\\pie\\scripts\\analytics-restart-owner.mjs --plan <absolute-p7b-plan.json>"`
+so the helper spawns this owner detached with `PIE_ANALYTICS_RESTART_NONCE` and
+`PIE_ANALYTICS_TERMINAL_RESTART_RECEIPT_PATH`. The preflight invocation from checkpoint 61 is
+unchanged. Live restart, activation, storage cutoff, and production closure remain intentionally
+unexecuted in this milestone.
+
+---
+
 ## Checkpoint 61 - 2026-09-16, P7b production storage-cutoff route rehearsed; live restart ingress still closed
 
 The production activation helper now has a distinct, resumable `storage-cutoff` route. It binds to

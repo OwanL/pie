@@ -29,6 +29,14 @@ import {
   type AnalyticsHostWriterFenceHandler,
   type AnalyticsWriterFenceResponse,
 } from './analytics-all-host-handoff.js';
+import {
+  createControlledRestartAcknowledgement,
+  createControlledRestartError,
+  isControlledRestartRequest,
+  verifyControlledRestartRequest,
+  type AnalyticsHostRestartHandler,
+  type ControlledRestartResponse,
+} from './analytics-controlled-restart.js';
 
 export interface AnalyticsHandoffControlOptions {
   registry: SessionLifecycleStore;
@@ -45,6 +53,9 @@ export interface AnalyticsHandoffControlOptions {
   /** Optional authenticated all-host writer-fence handler. Registration alone
    * never advertises this capability. */
   writerFence?: AnalyticsHostWriterFenceHandler;
+  /** Optional authenticated controlled-restart handler. Registration alone
+   * never advertises this capability. */
+  restart?: AnalyticsHostRestartHandler;
   onError?: (error: Error, stage: string) => void;
 }
 
@@ -141,9 +152,12 @@ export class AnalyticsHandoffControl {
       this.options.registry.registerAnalyticsHost({
         ...this.options.identity,
         capabilities: [
-          ...this.options.identity.capabilities.filter((capability) => capability !== 'writer-fence'),
+          ...this.options.identity.capabilities.filter(
+            (capability) => capability !== 'writer-fence' && capability !== 'controlled-restart',
+          ),
           'authenticated-control',
           ...(this.options.writerFence ? ['writer-fence'] : []),
+          ...(this.options.restart ? ['controlled-restart'] : []),
         ],
         endpointName: this.pipeName,
         state: 'registered',
@@ -247,7 +261,8 @@ export class AnalyticsHandoffControl {
       this.options.registry.registerAnalyticsHost({
         ...this.options.identity,
         capabilities: this.options.identity.capabilities.filter(
-          (capability) => capability !== 'authenticated-control' && capability !== 'writer-fence',
+          (capability) => capability !== 'authenticated-control' && capability !== 'writer-fence'
+            && capability !== 'controlled-restart',
         ),
         state: 'unsupported',
         registeredAtMs: this.now().toString(),
@@ -344,11 +359,13 @@ export class AnalyticsHandoffControl {
   private async handleFrame(frame: string, socket: Socket): Promise<void> {
     let requestId = 'invalid';
     let allHostFrame = false;
-    let response: AnalyticsHandoffControlResponse | AnalyticsWriterFenceResponse;
+    let restartFrame = false;
+    let response: AnalyticsHandoffControlResponse | AnalyticsWriterFenceResponse | ControlledRestartResponse;
     try {
       const raw = JSON.parse(frame) as unknown;
       if (isRecord(raw)) requestId = safeRequestId(raw.requestId);
       allHostFrame = isAnalyticsWriterFenceRequest(raw);
+      restartFrame = !allHostFrame && isControlledRestartRequest(raw);
       if (!this.key) throw new Error('handoff endpoint is unavailable');
       const now = this.now();
       if (allHostFrame) {
@@ -363,6 +380,13 @@ export class AnalyticsHandoffControl {
           acknowledgement,
           this.key,
         );
+      } else if (restartFrame) {
+        const request = verifyControlledRestartRequest(raw, this.key);
+        assertFreshAnalyticsHandoffRequest(request, now);
+        this.claimNonce(request.nonce, request.expiresAtMs, now);
+        if (!this.options.restart) throw new Error('authenticated controlled-restart handler is unavailable.');
+        await this.options.restart.restart(request);
+        response = createControlledRestartAcknowledgement(request, this.options.identity, this.key);
       } else {
         const request = verifyAnalyticsHandoffRequest(raw, this.key);
         assertFreshAnalyticsHandoffRequest(request, now);
@@ -374,10 +398,12 @@ export class AnalyticsHandoffControl {
       try {
         response = allHostFrame
           ? createSignedAnalyticsWriterFenceError(safeRequestId(requestId), safeError(error), this.key ?? 'unavailable')
-          : createSignedAnalyticsHandoffResponse(safeRequestId(requestId), this.key ?? 'unavailable', {
-            ok: false,
-            error: safeError(error),
-          });
+          : restartFrame
+            ? createControlledRestartError(safeRequestId(requestId), safeError(error), this.key ?? 'unavailable')
+            : createSignedAnalyticsHandoffResponse(safeRequestId(requestId), this.key ?? 'unavailable', {
+              ok: false,
+              error: safeError(error),
+            });
       } catch (responseError) {
         this.options.onError?.(normalizeError(responseError), 'response');
         return;
