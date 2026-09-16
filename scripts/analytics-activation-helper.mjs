@@ -1064,13 +1064,14 @@ async function runPreflight(plan) {
 
 async function loadProductionCutoverDependencies() {
   await loadActivationModules();
-  const [orchestrator, adapters, lifecycle, filesystemLifecycle, storageLifecycle, analyticsRecorder] = await Promise.all([
+  const [orchestrator, adapters, lifecycle, filesystemLifecycle, storageLifecycle, analyticsRecorder, analyticsProcessCensus] = await Promise.all([
     import(pathToFileURL(path.join(outRoot, 'analytics-cutover-orchestrator.js')).href),
     import(pathToFileURL(path.join(outRoot, 'analytics-production-adapters.js')).href),
     import(pathToFileURL(path.join(outRoot, 'session-lifecycle-store.js')).href),
     import(pathToFileURL(path.join(outRoot, 'session-filesystem-lifecycle.js')).href),
     import(pathToFileURL(path.join(outRoot, 'storage-cutoff-production.js')).href),
     import(pathToFileURL(path.join(outRoot, 'analytics-sqlite-recorder.js')).href),
+    import(pathToFileURL(path.join(outRoot, 'analytics-process-census.js')).href),
   ]);
   return {
     admitActivationEvidence,
@@ -1085,6 +1086,7 @@ async function loadProductionCutoverDependencies() {
     verifyFilesystemArtifactIdentity: filesystemLifecycle.verifyFilesystemArtifactIdentity,
     createProductionStorageCutoffLifecycle: storageLifecycle.createProductionStorageCutoffLifecycle,
     SqliteAnalyticsRecorder: analyticsRecorder.SqliteAnalyticsRecorder,
+    analyticsProcessCensus,
   };
 }
 
@@ -1134,6 +1136,68 @@ function readCutoverJournalActivatedAt({ stateDir, journalFilename, request }) {
  * the new hostInstanceId. Structural problems fail the probe closed; the
  * census then reports missing authenticated keys instead of silently using a
  * stale channel. Key values never reach logs or evidence. */
+/** Settle terminal analytics host rows whose writer is confirmed dead, with
+ * census proof (the same standard as the bootstrap launcher's settlement:
+ * a pid absent from the complete process census and owning no live backend).
+ * The durable all-host writer fence requires its census to cover the COMPLETE
+ * host registry (`assertWriterRegistrySnapshot` compares every analytics_hosts
+ * row), while the coordinator's census covers only live registered hosts, and
+ * the loaded build offers no supported removal for terminal rows — so a
+ * registry that accumulated `stopped` rows from ordinary host lifecycles
+ * cannot be fenced without this settlement. `stopping` rows of dead writers
+ * are settled through the store API first; only already-terminal rows are
+ * removed, through an identity-guarded delete on the store's own connection.
+ * Any row whose pid is still alive is left untouched, and the fence then
+ * fails loudly on the complete-registry snapshot. Runs only for a cutover
+ * that is about to fence: refused or already-committed reruns must not
+ * mutate the registry. */
+async function settleTerminalAnalyticsHostRows(registry, deps, plan) {
+  const rows = [];
+  let cursor;
+  for (;;) {
+    const page = registry.listAnalyticsHosts(plan.workspaceId, { limit: 64, ...(cursor ? { cursor } : {}) });
+    rows.push(...page.hosts);
+    if (rows.length > 512 || (page.truncated && (!page.nextCursor || page.nextCursor === cursor))) {
+      throw new Error('terminal-row settlement could not read the complete host registry.');
+    }
+    if (!page.truncated) break;
+    cursor = page.nextCursor;
+  }
+  const staleStoppingRows = rows.filter((host) => host.state === 'stopping');
+  const terminalRows = rows.filter((host) => host.state === 'stopped');
+  if (staleStoppingRows.length === 0 && terminalRows.length === 0) return;
+  const census = await deps.analyticsProcessCensus.readProcessCensus();
+  if (!census.complete) {
+    throw new Error(`Terminal-row settlement requires a complete process census: ${census.reasons.map((entry) => entry.code).join(', ') || 'unknown blocker'}`);
+  }
+  const livePids = new Set(census.processes.map((entry) => entry.processId));
+  const backendHostPids = new Set(census.backendOwners.map((entry) => entry.hostProcessId));
+  const isConfirmedDead = (host) => !livePids.has(host.processId) && !backendHostPids.has(host.processId);
+  let settledStopping = 0;
+  for (const host of staleStoppingRows) {
+    if (!isConfirmedDead(host)) continue;
+    registry.markAnalyticsHostState(host.hostInstanceId, host.processId, host.generationId, 'stopped', Date.now());
+    settledStopping += 1;
+  }
+  const purgeCandidates = terminalRows.filter(isConfirmedDead);
+  for (const host of purgeCandidates) {
+    // The loaded SessionLifecycleStore exposes no removal for terminal rows,
+    // so the settlement uses the store's own SQLite connection with an
+    // identity guard that can only match an already-terminal row.
+    const result = registry.database.prepare(
+      "DELETE FROM analytics_hosts WHERE host_instance_id = ? AND process_id = ? AND state = 'stopped'",
+    ).run(host.hostInstanceId, host.processId);
+    if (Number(result.changes) !== 1) {
+      throw new Error(`terminal-row settlement lost its identity guard for analytics host ${host.hostInstanceId} [pid ${host.processId}]; nothing was removed`);
+    }
+  }
+  if (settledStopping > 0 || purgeCandidates.length > 0) {
+    process.stderr.write(`settled ${settledStopping} stopping and removed ${purgeCandidates.length} terminal analytics host row(s) of confirmed-dead pids before the writer fence.` +
+      `${rows.length - purgeCandidates.length - settledStopping} row(s) remain in the registry census scope.` +
+      '\n');
+  }
+}
+
 function createHostHandoffKeyResolver(plan) {
   return {
     keyForHost: (host) => {
@@ -1157,6 +1221,21 @@ function createHostHandoffKeyResolver(plan) {
  * conflict fails loudly on the first attempt. */
 const WRITER_FENCE_CENSUS_STALL_ATTEMPTS = 4;
 const WRITER_FENCE_CENSUS_STALL_SPACING_MS = 100;
+
+/** Wrap the analytics-activation coordinator so each fence attempt first
+ * settles terminal rows of confirmed-dead writers (see
+ * settleTerminalAnalyticsHostRows). The wrapper runs exactly when the
+ * orchestrator is about to fence: committed or fenced journals resume from
+ * their receipts without calling the coordinator, and refusals happen before
+ * it, so neither mutates the registry. */
+function withTerminalRowSettlement(coordinator, { registry, deps, plan }) {
+  return {
+    run: async (operationId) => {
+      await settleTerminalAnalyticsHostRows(registry, deps, plan);
+      return coordinator.run(operationId);
+    },
+  };
+}
 
 function withWriterFenceCensusStallRetry(coordinator) {
   return {
@@ -1497,7 +1576,10 @@ export async function runProductionCutover(plan, dependencies) {
       activationStore,
       registry,
       ...(mode === 'analytics-activation' ? {
-        analyticsHandoff: withWriterFenceCensusStallRetry(adapters.coordinator('analytics-activation')),
+        analyticsHandoff: withWriterFenceCensusStallRetry(withTerminalRowSettlement(
+          adapters.coordinator('analytics-activation'),
+          { registry, deps, plan },
+        )),
         activationRequest,
       } : {
         storageHandoff: adapters.coordinator('storage-cutoff'),

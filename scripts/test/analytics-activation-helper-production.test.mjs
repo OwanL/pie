@@ -424,6 +424,7 @@ function createCutoverDependencies(world, censusSeams) {
     verifyFilesystemArtifactIdentity,
     createProductionStorageCutoffLifecycle,
     SqliteAnalyticsRecorder,
+    analyticsProcessCensus: { readProcessCensus: () => censusSeams.readProcessOwners() },
   };
   return { dependencies, createdAdapterOptions, preFenceDiscoveries, discoveries };
 }
@@ -713,6 +714,90 @@ test('PRODUCTION fence census retries the first-connection pipe stall before fen
     const fence = seams.registry.getAnalyticsWriterFence(world.workspaceId);
     assert.equal(fence.state, 'open', 'the fence completed after the retried census');
     assert.equal(readJournal(world).phase, 'complete');
+  });
+});
+
+test('PRODUCTION settles terminal rows of confirmed-dead writers before the writer fence', async () => {
+  const generationId = randomUUID();
+  const world = buildCutoverWorld({
+    generationId,
+    boots: { '1': makeBoot(1), '2': makeBoot(2, { descriptorGeneration: generationId }) },
+    keyChannel: 'plan',
+  });
+  return withCutoverWorld(world, async ({ seams, dependencies }) => {
+    // A registry that accumulated terminal rows from ordinary host lifecycles:
+    // the fence census covers only live hosts, but the durable fence snapshot
+    // must cover the complete registry, so the helper settles provably-dead
+    // terminal rows before fencing.
+    const setup = new SessionLifecycleStore(world.lifecycleStorePath);
+    try {
+      setup.registerAnalyticsHost({
+        hostInstanceId: 'dead-writer-row',
+        workspaceId: world.workspaceId,
+        generationId: 'dead-writer-generation',
+        buildId: 'dead-writer-build',
+        processId: 999_999,
+        capabilities: ['authenticated-control', 'writer-fence', 'host-discovery', 'host-status'],
+        endpointName: '\\\\.\\pipe\\dead-writer-endpoint',
+        registeredAtMs: 1_000,
+      });
+      setup.markAnalyticsHostState('dead-writer-row', 999_999, 'dead-writer-generation', 'stopped', 2_000);
+    } finally {
+      setup.close();
+    }
+    const result = await runProductionCutover(world.plan, dependencies);
+
+    assert.equal(result.status, 'complete');
+    const registry = new SessionLifecycleStore(world.lifecycleStorePath);
+    try {
+      const rows = registry.listAnalyticsHosts(world.workspaceId, { limit: 64 }).hosts;
+      assert.deepEqual(rows.map((host) => host.hostInstanceId).sort(), ['boot-1', 'boot-2'],
+        `confirmed-dead terminal rows must be settled, live rows untouched: ${JSON.stringify(rows.map((host) => ({ id: host.hostInstanceId, state: host.state })))}`);
+    } finally {
+      registry.close();
+    }
+  });
+});
+
+test('PRODUCTION settlement leaves a terminal row with a live pid and the fence fails loudly', async () => {
+  const generationId = randomUUID();
+  const world = buildCutoverWorld({
+    generationId,
+    boots: { '1': makeBoot(1), '2': makeBoot(2, { descriptorGeneration: generationId }) },
+    keyChannel: 'plan',
+  });
+  return withCutoverWorld(world, async ({ seams, dependencies }) => {
+    const liveBackendPid = world.boots['1'].backendPid;
+    const setup = new SessionLifecycleStore(world.lifecycleStorePath);
+    try {
+      setup.registerAnalyticsHost({
+        hostInstanceId: 'stale-live-pid-row',
+        workspaceId: world.workspaceId,
+        generationId: 'stale-live-generation',
+        buildId: 'stale-live-build',
+        processId: liveBackendPid,
+        capabilities: ['authenticated-control', 'writer-fence', 'host-discovery', 'host-status'],
+        endpointName: '\\\\.\\pipe\\stale-live-endpoint',
+        registeredAtMs: 1_000,
+      });
+      setup.markAnalyticsHostState('stale-live-pid-row', liveBackendPid, 'stale-live-generation', 'stopped', 2_000);
+    } finally {
+      setup.close();
+    }
+    await assert.rejects(
+      () => runProductionCutover(world.plan, dependencies),
+      /Analytics writer census does not cover the complete host registry/,
+      'a stopped row whose pid is still alive must not be purged; the fence fails closed',
+    );
+    const registry = new SessionLifecycleStore(world.lifecycleStorePath);
+    try {
+      const row = registry.listAnalyticsHosts(world.workspaceId, { limit: 64 }).hosts
+        .find((host) => host.hostInstanceId === 'stale-live-pid-row');
+      assert.ok(row, 'the unprovable terminal row must remain');
+      assert.equal(row.state, 'stopped');
+    } finally {
+      registry.close();
+    }
   });
 });
 
