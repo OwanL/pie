@@ -5065,3 +5065,119 @@ Read-only preflight: P0 evidence admission READY; remaining blockers are exactly
 production-handoff artifacts (first activation manifest, lifecycle registry, host handoff key
 file, terminal restart receipt). Activation/cutoff/restart remain with the authorized terminal
 handoff; no alternate data root or substitute receipts were created.
+
+---
+
+## Checkpoint - 2026-09-16, current-candidate evidence admission and production preflight prepared
+
+The current candidate build `67dc8288f6a19b1b65e8` is bound to the historical provisional P0
+qualification only through the source-equivalence receipt
+`C:\\Users\\OWANLA~1\\AppData\\Local\\Temp\\pie-p7a-final-20260916-bkv7Mr\\source-equivalence-r03.json`
+(SHA-256 `31f1a08eef05c8c944695758882c5fcd0e0c75dc9d1e326f97cf81d500a745f9`). The measured
+identity remains source head `fbbca0eb49513e41f8c8d75c11cbb8b8cdadc504`, build
+`84d09cb7b9daa44155d0`, and fingerprint
+`2ac9d1990756bd8bc76195a88a9aba6c820967a8e61e644036909ee34e796c18`; it has not been relabeled.
+Measured runtime artifacts remain byte-identical. The only newly reviewed deltas are the explicit
+unmeasured control-plane/tooling entries in the receipt.
+
+The isolated candidate-trial sanity check passed with fresh generation
+`9ba84da9-dbb5-4d16-8173-16db5c99ecfb`, candidate workspace
+`p7a-candidate-9ab1fe37-2ea9-4578-9e52-ef8543d1b19a`, and trial id
+`trial-d3e6656e-acef-464e-81eb-236f6893685f`. Its exact report is
+`C:\\Users\\OWANLA~1\\AppData\\Local\\Temp\\pie-p7a-final-20260916-bkv7Mr\\candidate-trial-r02.json`
+(SHA-256 `c0a25b4242a339240f83987ae3ba2e5ea5d6b7ac199b2f2a123467bac71d6540`). Independent
+admission and cleanup validation passed in
+`C:\\Users\\OWANLA~1\\AppData\\Local\\Temp\\pie-p7a-final-20260916-bkv7Mr\\trial-admission-r02.json`
+(SHA-256 `4205a70456ada4e1c5f867c8e2e4e73aceb7c983463ae6980fbfb643e9ce3739`); staged runtime
+integrity also passed in
+`C:\\Users\\OWANLA~1\\AppData\\Local\\Temp\\pie-p7a-final-20260916-bkv7Mr\\staged-integrity-r01.json`
+(SHA-256 `be6b900d68be1fcfc5c840e7a2cd84bab0d544bfc2e57dabf7059eb5a1df376e`, 60/60 files).
+
+The external-owner preflight input is
+`C:\\Users\\OWANLA~1\\AppData\\Local\\Temp\\pie-p7a-final-20260916-bkv7Mr\\p7a-preflight-plan-r01.json`
+(SHA-256 `f2daead3ee0b9d32c21f249a1c6b5d9997ab64fdaac8f80d21c4b852500a8b46`). It records the
+exact authorization commit, provisional marker, evidence hashes, canonical root, installed runtime
+identity, `node scripts/analytics-restart-owner.mjs --plan <plan>` command, and an owner-controlled
+handoff-key pointer. The supported bootstrap channel is `PIE_ANALYTICS_HANDOFF_KEY`; no key material
+was read or included. The plan is explicitly `prepared-not-live` and carries the isolated trial
+workspace binding; the external owner must confirm the production workspace binding before any live
+use.
+
+The read-only helper preflight was run against that plan and correctly exited 2 (`blocked`). Its
+sanitized command output is
+`C:\\Users\\OWANLA~1\\AppData\\Local\\Temp\\pie-p7a-final-20260916-bkv7Mr\\preflight-command-r02.json`
+(SHA-256 `b5e459b526ae3696e5a961694cff2707112375acdb9e3e590ce57458eb0b9e0c`); P0 admission and evidence
+structure are ready, but the canonical active generation is absent, the owner key file is absent, and current
+processes are not registered in the authenticated host census. The terminal restart receipt remains
+pending. No activation manifest, canonical analytics database, storage cutoff, deletion, live restart,
+or production-session mutation was performed. Focused source-equivalence, admission, helper,
+restart-owner, and candidate-trial tests passed (one platform symlink test skipped).
+
+## Checkpoint - 2026-09-16, production workspace bound, first-activation readiness fixed, bootstrap launcher ready
+
+The production workspace identity was resolved from its owning code path
+(`shared buildWorkspaceAnalyticsId` over the open `c:\dev` folder) and confirmed against the
+production lifecycle registry rows: `\{"folders":["file:c:/dev"]\}`. The prior plan r01
+incorrectly carried the isolated trial workspace id; that binding was replaced, and the candidate
+trial was re-run against the production workspace id (all other bindings unchanged, within the
+120-second cap; it completed in about one second): status `passed`, trial id
+`trial-4c2e1019-588b-4564-bf25-0d1f54f4ea6c`, report
+`C:\\Users\\OWANLA~1\\AppData\\Local\\Temp\\pie-p7a-final-20260916-bkv7Mr\\candidate-trial-r03.json`
+(SHA-256 `92e0ec63f6ad9536d6b14d53babec0b0c91c4287d7a75672c991231b6ab722b1`), independent
+admission re-validated in `trial-admission-r03.json`
+(SHA-256 `28318cdcae9a3ed23ccf2bcd0fce46ab6952e0e338190af48a1a6ede8082d446`, ready with no
+blockers). The source-equivalence receipt r03 remains valid: it binds `extension/src` and the
+measured runtime bytes, which did not change; script-only edits are unmeasured by design.
+
+A real readiness bug was found and minimally fixed in `scripts/analytics-activation-helper.mjs`:
+the read-only preflight reported `canonical active analytics generation is missing` even for a
+first-ever activation, which activation itself must create. The fix: the missing-generation
+blocker now applies only to storage-cutoff mode; analytics-activation discovery binds only the
+store-derived generation and passes `allowAbsentAnalyticsDescriptor: true` when the canonical
+store has no active generation, mirroring `runProductionCutover`'s pre-cutover generation
+handling; preflight discovery now uses `ignoreStoppedHosts: true` to mirror the production fence
+census (`AnalyticsAllHostHandoffCoordinator` and `readCompleteRegistry` treat `stopped` rows as
+excluded). Storage-cutoff mode still fails closed on a missing generation, and all other census
+requirements (process, lease, backend owner, authentication) remain fully enforced. Two focused
+preflight tests cover this in `scripts/test/analytics-activation-helper.test.mjs`; the scripts
+package (314 tests) passes. A read-only preflight with the final plan now reports exactly the
+honest pre-bootstrap blockers (owner key file missing; stale/dead lifecycle rows and
+unauthenticated hosts), with P0 qualification, evidence structure, and terminal-restart ingress
+already ready.
+
+The final executable plan is
+`C:\\Users\\OWANLA~1\\AppData\\Local\\Temp\\pie-p7a-final-20260916-bkv7Mr\\p7a-preflight-plan-r02.json`
+(SHA-256 `44922c67607c23342b4af43034bdc7c3162d2d8367835d213acc6c33f56e4ed1`, status
+`ready-for-bootstrap`): production workspace binding, canonical root
+`C:/Users/OwanLazic/AppData/Local/pie/data`, installed runtime identity, the same authorization
+commit and provisional P0 evidence hashes, the refreshed trial, and a durable owner-controlled
+key map at
+`C:/Users/OwanLazic/AppData/Roaming/pie-owner-keys/host-handoff-keys-v1.json` (no key material in
+the plan). The supported one-shot bootstrap launcher is
+`C:/dev/repos/pie/scripts/analytics-bootstrap-launcher.mjs` (committed): it loads/mints the
+bootstrap handoff key only in owner files, waits for a normal close of running pie hosts (never
+kills anything), relaunches VS Code once with `PIE_ANALYTICS_HANDOFF_KEY` and
+`PIE_STORAGE_CUTOFF_AUTHORIZATION=p7b-authorized-v1` and without any data-root override, settles
+only lifecycle evidence the complete process census proves dead (registry rows of dead pids and
+their stale lease files; it never settles a live writer), binds the registered hosts into the key
+map, and verifies the same census the preflight demands. It is finite, runs no daemon, never
+prints or commits key material, and never edits global environment or machine state.
+
+The exact owner sequence after this checkpoint (single user-visible close/relaunch, then two
+commands):
+1. `node C:/dev/repos/pie/scripts/analytics-bootstrap-launcher.mjs --plan C:/Users/OWANLA~1/AppData/Local/Temp/pie-p7a-final-20260916-bkv7Mr/p7a-preflight-plan-r02.json --preflight`
+   (close VS Code normally when prompted; the launcher relaunches it and prints the verified
+   census),
+2. `node C:/dev/repos/pie/scripts/analytics-activation-helper.mjs --detach --plan C:/Users/OWANLA~1/AppData/Local/Temp/pie-p7a-final-20260916-bkv7Mr/p7a-preflight-plan-r02.json`
+   (no mode flag means the one-shot activation; this performs the activation, the controlled
+   restart producing the terminal receipt, the storage cutoff, and the post-cutover verification
+   in one bounded, detached, resumable run).
+
+Remaining blocker categorization: unavoidable bootstrap (one normal VS Code close/relaunch to
+introduce the launch-channel environment; stale registered/stopping rows and dead-pid lease files
+settled by the launcher only with census proof) versus missing implementation (none — the
+first-activation circular generation requirement was a preflight bug and is fixed). The
+subagent-spawned read-only review could not run in this harness session (subagent spawning is
+disabled for this session), so the read-only review of the committed changes is left to the
+external owner as planned. No activation, restart, storage cutoff, deletion, or production-data
+change was performed.

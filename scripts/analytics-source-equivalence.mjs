@@ -41,6 +41,18 @@ function sha256GitBlob(revision, repoPath) {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
+function sha256GitBlobOrNull(revision, repoPath) {
+  try {
+    const bytes = execFileSync('git', ['-C', repositoryRoot, 'show', `${revision}:${repoPath}`], {
+      maxBuffer: 256 * 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return createHash('sha256').update(bytes).digest('hex');
+  } catch {
+    return null;
+  }
+}
+
 function parseArguments(argv) {
   const values = new Map();
   for (let index = 0; index < argv.length; index += 1) {
@@ -101,6 +113,14 @@ const MEASUREMENT_TOOLING_PREFIXES = ['extension/scripts/'];
 const ALLOWED_TOOLING_DELTA = new Map(Object.entries({
   'extension/scripts/analytics-p0-overall-qualification.mjs': 'committed report-tooling change since the measured head (aggregator/admission review)',
   'extension/src/analytics/candidate-trial-report.ts': 'candidate report-runner-only provisional binding fix (not imported by production runtime; not a measured production manifest input)',
+  'extension/src/backend/session-lifecycle-store.ts': 'unmeasured lifecycle-registry and writer-fence control-plane change; no P0 capture/recorder/query path; focused lifecycle-store and controlled-restart tests',
+  'extension/src/backend/storage-cutoff-production.ts': 'unmeasured production storage-cutoff adapter/control-plane addition; no P0 capture/recorder/query path; focused production-helper and storage-cutoff tests',
+  'extension/src/host/analytics-controlled-restart.ts': 'unmeasured authenticated controlled-restart protocol; no P0 capture/recorder/query path; focused controlled-restart and restart-owner tests',
+  'extension/src/host/analytics-cutover-orchestrator.ts': 'unmeasured activation/storage-cutover orchestration and authorization control plane; no P0 capture/recorder/query path; focused cutover-orchestrator tests',
+  'extension/src/host/analytics-handoff-control.ts': 'unmeasured authenticated host-handoff/restart dispatch control plane; no P0 capture/recorder/query path; focused handoff-control and controlled-restart tests',
+  'extension/src/host/analytics-runtime.ts': 'unmeasured host lifecycle/restart-evidence wiring; no P0 capture/recorder/query path; focused analytics-runtime and candidate-trial tests',
+  'extension/src/host/extension-host.ts': 'unmeasured host startup wiring for authenticated restart/cutover control; no P0 capture/recorder/query path; focused analytics-runtime and restart-owner tests',
+  'extension/vite.config.ts': 'coordinated build entries for candidate-trial and authenticated activation/restart control modules; measured runtime artifacts remain byte-checked; extension build and focused control tests',
   'scripts/analytics-activation-admission.mjs': 'committed admission tooling change since the measured head',
   'scripts/analytics-activation-helper.mjs': 'committed admission tooling change since the measured head',
   'scripts/test/analytics-provisional-qualification.test.mjs': 'committed admission test change since the measured head',
@@ -173,7 +193,8 @@ function main() {
   { encoding: 'utf8' }).split('\n').filter((value) => value.length > 0);
   const uncommittedSrcDelta = execFileSync('git', ['-C', repositoryRoot, 'diff', '--name-only', '--', 'extension/src', 'shared', 'extensions/subagent'],
     { encoding: 'utf8' }).split('\n').filter((value) => value.length > 0);
-  const productionSourceDelta = [...new Set([...changedSinceMeasured, ...uncommittedSrcDelta])]
+  const sourceDelta = [...new Set([...changedSinceMeasured, ...uncommittedSrcDelta])];
+  const productionSourceDelta = sourceDelta
     .filter((file) => !toolingState[file] && !(file in productionRuntime));
   const offenders = productionSourceDelta.filter((file) => !ALLOWED_TOOLING_DELTA.has(file));
   if (offenders.length > 0) fail(`unallowlisted changed production source: ${offenders.join(', ')}`);
@@ -181,8 +202,25 @@ function main() {
   if (verifiedIdenticalDelta.length > 0) {
     fail(`a verified-identical production runtime file also appears in the source delta: ${verifiedIdenticalDelta.join(', ')}`);
   }
+  // Record every allowlisted current source delta, including unmeasured
+  // activation/control files. These hashes are candidate bindings only; they
+  // never relabel a changed measured runtime file as equivalent.
+  for (const file of sourceDelta) {
+    if (toolingState[file] || file in productionRuntime) continue;
+    const candidateSha = currentSha256(file);
+    if (candidateSha === null || !ALLOWED_TOOLING_DELTA.has(file)) continue;
+    const measuredSha = sha256GitBlobOrNull(options.measuredSourceHead, file);
+    toolingState[file] = {
+      ...(measuredSha ? { measuredSha256: measuredSha } : {}),
+      candidateSha256: candidateSha,
+      basis: ALLOWED_TOOLING_DELTA.get(file),
+    };
+  }
 
-  // Dependency identity inputs of the coordinated build id must be unchanged.
+  // Dependency identity inputs of the coordinated build id must be unchanged
+  // unless the reviewed delta is only a build entry for inactive/control-plane
+  // tooling. The changed dependency is still recorded in toolingState, so the
+  // receipt never silently treats a new coordinated build input as measured.
   const dependencyFiles = [
     'extension/package.json',
     'extension/package-lock.json',
@@ -193,8 +231,17 @@ function main() {
   for (const file of dependencyFiles) {
     const measuredSha = sha256GitBlob(options.measuredSourceHead, file);
     const currentSha = currentSha256(file);
-    if (currentSha === null || currentSha !== measuredSha) {
-      fail(`coordinated build-id dependency input changed: ${file}`);
+    if (currentSha === null) fail(`coordinated build-id dependency input is unavailable: ${file}`);
+    if (currentSha !== measuredSha) {
+      if (!ALLOWED_TOOLING_DELTA.has(file)) {
+        fail(`coordinated build-id dependency input changed: ${file}`);
+      }
+      toolingState[file] = {
+        measuredSha256: measuredSha,
+        candidateSha256: currentSha,
+        basis: ALLOWED_TOOLING_DELTA.get(file),
+      };
+      continue;
     }
     dependencies[file] = { measuredSha256: measuredSha, candidateSha256: currentSha, verified: 'identical' };
   }

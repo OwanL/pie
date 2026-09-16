@@ -840,7 +840,16 @@ async function runPreflight(plan) {
       pathToFileURL(path.join(outRoot, 'analytics-activation-store.js')).href
     ));
     activeManifest = new ActivationStoreForRead({ stateDir: plan.stateDir }).read();
-    if (!activeManifest.manifest?.activeGeneration?.identity?.generationId) {
+    // A missing canonical active generation is the legitimate pre-activation
+    // state of a first-ever activation: the production cutover itself proves
+    // that absence by reading this same store and proceeds with the absent
+    // descriptor allowance. Only a storage cutoff (P7b) is bound to an
+    // already-active generation, and that mode states its own blocker below.
+    // Requiring the generation here would make every first activation
+    // unrunnable: the gate it demands can only be produced by the activation
+    // it gates.
+    if (!activeManifest.manifest?.activeGeneration?.identity?.generationId
+      && storageCutoffRequested) {
       blockers.push('canonical active analytics generation is missing; process descriptors cannot be bound');
     }
   } catch (error) {
@@ -873,18 +882,25 @@ async function runPreflight(plan) {
       try {
         const { createProductionAnalyticsHostAdapters, SessionLifecycleStore } = await loadProductionHostModules();
         lifecycleStore = new SessionLifecycleStore(lifecycleStorePath, { readOnly: true });
-        const activeGenerationId = plan.activeAnalyticsGenerationId
-          ?? activeManifest?.manifest?.activeGeneration?.identity?.generationId;
+        // Mirror the production cutover exactly: the pre-census binds to the
+        // store's canonical generation when one exists and waives the absent
+        // descriptor only when this same read proved a first-ever activation.
+        const storeGenerationId = activeManifest?.manifest?.activeGeneration?.identity?.generationId;
+        const firstActivation = !storageCutoffRequested && !storeGenerationId;
         const adapters = createProductionAnalyticsHostAdapters({
           workspaceId: plan.workspaceId,
           registry: lifecycleStore,
           runtimeRootPath,
           runtimeIdentity,
-          ...(activeGenerationId ? { analyticsGenerationId: activeGenerationId } : {}),
+          ...(storeGenerationId ? { analyticsGenerationId: storeGenerationId } : {}),
+          ...(firstActivation ? { allowAbsentAnalyticsDescriptor: true } : {}),
           keyForHost: (host) => keys.get(host.hostInstanceId),
           probeTimeoutMs: plan.hostProbeTimeoutMs,
         });
-        discovery = await adapters.discover();
+        // Mirror the fence census semantics: the production all-host handoff
+        // ignores durably stopped hosts, so the read-only preflight must judge
+        // readiness by the same census and not by a stricter superseded one.
+        discovery = await adapters.discover({ ignoreStoppedHosts: true });
         if (discovery.complete === true && discovery.hosts.length === 0) {
           blockers.push('host census contains no registered hosts');
         }
