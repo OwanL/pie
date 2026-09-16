@@ -304,9 +304,7 @@ export function createControlledRestartRequest(
   const expiresAtMs = ids.expiresAtMs ?? issuedAtMs + ANALYTICS_HANDOFF_NONCE_WINDOW_MS;
   boundedInteger(issuedAtMs, 'issuedAtMs');
   boundedInteger(expiresAtMs, 'expiresAtMs');
-  if (expiresAtMs < issuedAtMs || expiresAtMs - issuedAtMs > ANALYTICS_HANDOFF_NONCE_WINDOW_MS) {
-    throw new Error('controlled restart request expiry is invalid.');
-  }
+  validateRequestTimestamps(issuedAtMs, expiresAtMs);
   const restartNonce = boundedString(input.restartNonce, 'restartNonce', 256);
   if (!isAnalyticsRestartNonce(restartNonce)) {
     throw new Error('restartNonce has an invalid format or exceeds 128 bytes.');
@@ -362,9 +360,7 @@ export function verifyControlledRestartRequest(value: unknown, key: string): Con
   }
   const issuedAtMs = boundedInteger(value.issuedAtMs, 'issuedAtMs');
   const expiresAtMs = boundedInteger(value.expiresAtMs, 'expiresAtMs');
-  if (expiresAtMs < issuedAtMs || expiresAtMs - issuedAtMs > ANALYTICS_HANDOFF_NONCE_WINDOW_MS) {
-    throw new Error('controlled restart request expiry is invalid.');
-  }
+  validateRequestTimestamps(issuedAtMs, expiresAtMs);
   const mac = boundedString(value.mac, 'controlled restart mac', 256);
   const unsigned: Omit<ControlledRestartRequest, 'mac'> = {
     protocol: ANALYTICS_CONTROLLED_RESTART_PROTOCOL,
