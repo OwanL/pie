@@ -432,6 +432,16 @@ async function runRestartOwner(argv, environment = process.env) {
     const expectedBuildId = typeof plan.buildId === 'string' && plan.buildId.trim().length > 0
       ? plan.buildId
       : undefined;
+    // Host registration rows and authenticated status identities carry the
+    // staged runtime's own coordinated build marker (`pie-build-id.txt`, the
+    // plan's `candidateBuildId`), while the activation manifest identity and
+    // its loaded/terminal evidence carry the qualification's coordinated
+    // build id (`plan.buildId`). The admission uses the same two-space
+    // convention (candidateBindings.candidateBuildId for markers), so each
+    // check below must compare against the identifier space it observes.
+    const expectedHostBuildId = typeof plan.candidateBuildId === 'string' && plan.candidateBuildId.trim().length > 0
+      ? plan.candidateBuildId
+      : expectedBuildId;
     const fenceRecord = registry.getAnalyticsWriterFence(plan.workspaceId);
     if (!fenceRecord || fenceRecord.state !== 'fenced'
       || fenceRecord.operationId !== fence.operationId || fenceRecord.purpose !== fence.purpose) {
@@ -465,7 +475,7 @@ async function runRestartOwner(argv, environment = process.env) {
     if (hostKeys.some((key) => key === undefined)) {
       throw new Error('a registered host has no authenticated handoff key in the owner-controlled channel.');
     }
-    if (hosts.some((host) => host.buildId !== expectedBuildId)) {
+    if (hosts.some((host) => host.buildId !== expectedHostBuildId)) {
       throw new Error('registered hosts do not all carry the plan build; refusing to restart a mixed-build census.');
     }
     let requiredCapabilities = [];
@@ -597,7 +607,7 @@ async function runRestartOwner(argv, environment = process.env) {
         }
         if (successor.processId !== terminal.value.processId
           || successor.workspaceId !== plan.workspaceId
-          || successor.buildId !== expectedBuildId
+          || successor.buildId !== expectedHostBuildId
           || !successor.endpointName
           || !successor.capabilities.includes('authenticated-control')
           || !successor.capabilities.includes('controlled-restart')) {
@@ -615,7 +625,7 @@ async function runRestartOwner(argv, environment = process.env) {
         if (status.observedHost.hostInstanceId !== successor.hostInstanceId
           || status.observedHost.processId !== successor.processId
           || status.observedHost.workspaceId !== plan.workspaceId
-          || status.observedHost.buildId !== expectedBuildId) {
+          || status.observedHost.buildId !== expectedHostBuildId) {
           blockers.push(`${assignment.predecessorHostInstanceId}: successor status identity mismatched`);
           continue;
         }
