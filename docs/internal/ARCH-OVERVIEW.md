@@ -15,6 +15,15 @@
 | PI backend | Language model + tool execution | External; communicates via JSON-RPC stdio |
 | VS Code extension host | State, effects, projection, webview transport | `extension/src/host/extension-host.ts` |
 | Webview (Preact) | Render + user input | `extension/src/webview/panel/app.tsx` |
+| Analytics recorder / query helpers | Own the canonical SQLite store; spawned only under canonical analytics authority | `extension/src/analytics/{recorder-worker,query-worker}-entry.ts` via `extension/src/host/analytics-runtime.ts` |
+
+---
+
+## Analytics and the runtime-data root
+
+- **One authority at a time.** A validated active activation manifest in the resolved state directory enables *canonical* authority: the host starts the recorder (owning `<data-root>/analytics/analytics.sqlite`) and a disposable read probe, and capture becomes an exclusive switch — no legacy ledger row is appended. With no active generation (no manifest, or a validated candidate/ready manifest), *legacy* authority stays in effect: run analytics, the billable-invocation ledger, and the activity timeline remain authoritative and no helper starts. A malformed or inconsistent activation state raises instead of degrading to legacy. See [`docs/ANALYTICS_IMPLEMENTATION_CONTRACT.md`](../ANALYTICS_IMPLEMENTATION_CONTRACT.md).
+- **Root resolution.** `resolvePieDataPaths()` (`shared/pie-data-root.ts`) resolves one OS-local root from `PIE_DATA_DIR` (absolute, or relative to the agent directory) or the platform default, then derives `analytics/`, `sessions/`, `artifacts/`, `state/`, and `cache/`. Resolution failures raise; there is no search across competing roots. Transcripts use the `<data-root>/sessions` location only under the gated `PIE_STORAGE_CUTOFF_AUTHORIZATION=p7b-authorized-v1` cutoff.
+- **Privacy** is delete-on-close under canonical authority (capture continues while the session is open; an explicit private close deletes its captured analytics) and suppression/scrub under legacy authority.
 
 ---
 

@@ -4,26 +4,23 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import {
-  createSignedAnalyticsHandoffResponse,
-} from '../../../shared/analytics/handoff.js';
 import type {
   AnalyticsHostRecord,
 } from '../../src/backend/session-lifecycle-store.js';
 import {
-  createAuthenticatedAnalyticsHostStatusProbe,
   discoverAnalyticsHostWriters,
-  parseWindowsProcessCensus,
-  parseWindowsProcessCreationDate,
-  parseWindowsProcessOwnerRows,
-  readAuthenticatedHostStatuses,
   readRuntimeLeaseEvidence,
-  readWindowsProcessOwners,
-  type BackendProcessOwnerEvidence,
-  type ProcessOwnerReadResult,
   type RuntimeGenerationIdentity,
   type RuntimeLeaseEvidence,
 } from '../../src/host/analytics-handoff-discovery.js';
+import {
+  parseWindowsProcessCensus,
+  parseWindowsProcessCreationDate,
+  parseWindowsProcessOwnerRows,
+  readProcessCensus,
+  type BackendProcessOwnerEvidence,
+  type ProcessOwnerReadResult,
+} from '../../src/host/analytics-process-census.js';
 
 const IDENTITY: RuntimeGenerationIdentity = {
   publisher: 'pie-publisher', name: 'pie', version: '1.0.0',
@@ -106,35 +103,6 @@ function registryReader(records: readonly AnalyticsHostRecord[]) {
         ...(truncated ? { nextCursor: selected[selected.length - 1]!.hostInstanceId } : {}),
       };
     },
-  };
-}
-
-function statusFor(hostRecord: AnalyticsHostRecord, overrides: Record<string, unknown> = {}) {
-  const hostStatus = {
-    hostInstanceId: hostRecord.hostInstanceId,
-    workspaceId: hostRecord.workspaceId,
-    generationId: hostRecord.generationId,
-    buildId: hostRecord.buildId,
-    processId: hostRecord.processId,
-    endpointName: hostRecord.endpointName,
-    capabilities: hostRecord.capabilities,
-    state: hostRecord.state,
-    registeredAtMs: hostRecord.registeredAtMs,
-    heartbeatAtMs: hostRecord.heartbeatAtMs,
-    updatedAtMs: hostRecord.updatedAtMs,
-  };
-  const { host: hostOverride, ...rest } = overrides;
-  return {
-    host: { ...hostStatus, ...(hostOverride && typeof hostOverride === 'object' ? hostOverride : {}) },
-    hosts: [hostStatus],
-    truncated: false,
-    inventoryProof: {
-      kind: 'registered-hosts-only',
-      complete: false,
-      reason: 'runtime-generation-and-process-reconciliation-unwired',
-    },
-    allHostsHandoffAvailable: false,
-    ...rest,
   };
 }
 
@@ -380,85 +348,6 @@ test('discovery fails closed for missing birth, stale lease ordering, and missin
   ]));
 });
 
-test('authenticated status probes sign the request and verify the returned host identity', async () => {
-  const registered = host('host-authenticated', 701, 'process-generation-authenticated');
-  const key = 'auth-key-'.repeat(8);
-  let capturedRequest: Record<string, unknown> | undefined;
-  const probe = createAuthenticatedAnalyticsHostStatusProbe({
-    keyForHost: () => key,
-    now: () => 10_000,
-    send: async (_endpoint, request) => {
-      capturedRequest = request as unknown as Record<string, unknown>;
-      return createSignedAnalyticsHandoffResponse(request.requestId, key, {
-        ok: true,
-        result: statusFor(registered),
-      });
-    },
-  });
-  const evidence = await probe(registered);
-  assert.deepEqual(evidence, {
-    hostInstanceId: registered.hostInstanceId,
-    processId: registered.processId,
-    observedHost: statusFor(registered).host,
-  });
-  assert.equal(capturedRequest?.operation, 'status');
-  assert.equal((capturedRequest?.payload as Record<string, unknown>)?.workspaceId, registered.workspaceId);
-});
-
-test('authenticated discovery fails closed for missing keys, bad MACs, and mismatched process identity', async () => {
-  const registered = host('host-auth-failure', 702, 'process-generation-auth-failure');
-  const key = 'auth-key-'.repeat(8);
-  const missingKey = await readAuthenticatedHostStatuses(
-    [registered],
-    createAuthenticatedAnalyticsHostStatusProbe({ keyForHost: () => undefined, send: async () => undefined }),
-  );
-  assert.equal(missingKey.complete, false);
-  assert.deepEqual(missingKey.reasons.map(({ code }) => code), ['host-authentication-key-missing']);
-
-  const badMac = await readAuthenticatedHostStatuses(
-    [registered],
-    createAuthenticatedAnalyticsHostStatusProbe({
-      keyForHost: () => key,
-      send: async (_endpoint, request) => createSignedAnalyticsHandoffResponse(request.requestId, 'wrong-key', {
-        ok: true,
-        result: statusFor(registered),
-      }),
-    }),
-  );
-  assert.equal(badMac.complete, false);
-  assert.deepEqual(badMac.reasons.map(({ code }) => code), ['host-authentication-failed']);
-
-  const mismatchedIdentity = await readAuthenticatedHostStatuses(
-    [registered],
-    createAuthenticatedAnalyticsHostStatusProbe({
-      keyForHost: () => key,
-      send: async (_endpoint, request) => createSignedAnalyticsHandoffResponse(request.requestId, key, {
-        ok: true,
-        result: statusFor(registered, { host: { processId: 999 } }),
-      }),
-    }),
-  );
-  assert.equal(mismatchedIdentity.complete, false);
-  assert.deepEqual(mismatchedIdentity.reasons.map(({ code }) => code), ['host-authentication-identity-mismatch']);
-});
-
-test('authenticated discovery reports an unwired probe instead of trusting registry-only identity', async () => {
-  const registered = host('host-no-probe', 703, 'process-generation-no-probe');
-  const result = await discoverAnalyticsHostWriters({
-    workspaceId: registered.workspaceId,
-    registry: registryReader([registered]),
-    runtimeRootPath: 'unused-injected-root',
-    runtimeIdentity: IDENTITY,
-    requireAuthenticatedHostStatus: true,
-    readRuntimeLeases: async () => ({ leases: [], complete: true, reasons: [] }),
-    readProcessOwners: async () => processEvidence([]),
-  });
-  assert.equal(result.authenticatedHostsComplete, false);
-  assert.ok(result.reasons.some(({ code, hostInstanceId }) => (
-    code === 'host-authentication-probe-unwired' && hostInstanceId === registered.hostInstanceId
-  )));
-});
-
 test('bounded process census envelopes preserve truncation as an explicit blocker', () => {
   const result = parseWindowsProcessCensus({
     rows: [{ ProcessId: 801, ProcessCreatedAtMs: 1_000 }],
@@ -507,7 +396,7 @@ test('recognized backend with incomplete ownership is incomplete and never emitt
 });
 
 test('Windows process census reports a finite plausible birth for this process', { skip: process.platform !== 'win32' }, async () => {
-  const result = await readWindowsProcessOwners();
+  const result = await readProcessCensus();
   assert.equal(result.complete, true);
   const own = result.processes.find(({ processId }) => processId === process.pid);
   assert.ok(own, 'current process must appear in the read-only census');

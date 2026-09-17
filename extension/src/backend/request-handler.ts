@@ -17,6 +17,7 @@ import { readSessionMcpOverrides, writeSessionMcpOverrides, type SessionMcpOverr
 import { hasBillableSessionActivity } from './session-activity';
 import { BackendLiveTurnAccumulator } from './live-turn-accumulator';
 import { BackendError } from './server-io';
+import { backendLog } from './log';
 import {
   getBackendLivePipelineTraceHealth,
   recordBackendLivePipelineTrace,
@@ -419,6 +420,29 @@ async function handleSettingsSet(
           : {}),
       });
     }
+
+    // The only path that can change a session's chat model is fully silent on
+    // success; without this line an unintended picker commit (previously
+    // possible via an auto-highlighted first entry) left no attribution in
+    // any log. One structured line per applied change keeps every switch
+    // attributable in pie.log (forwarded backend stderr).
+    backendLog('info', 'backend-session', 'model.settings.set', {
+      sessionPath: sessionPath ?? null,
+      hasRuntime: Boolean(targetContext),
+      requested: {
+        model: requestedId,
+        provider: requestedProvider,
+        thinkingLevel: requestedThinkingLevel,
+      },
+      previous: {
+        model: previousSettings.defaultModel,
+        provider: previousSettings.defaultProvider,
+        thinkingLevel: previousSettings.defaultThinkingLevel,
+      },
+      changingModel: isChangingModel,
+      changingThinkingLevel: isChangingThinkingLevel,
+      persistedGlobally: hasPersistedChanges,
+    });
 
     return result;
   } catch (error) {

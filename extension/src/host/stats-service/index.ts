@@ -1,5 +1,4 @@
 export { StatsService } from './service';
-export { DisabledStatsService } from './disabled';
 export {
   NOOP_RUN_OBSERVER,
   type GetArchState,

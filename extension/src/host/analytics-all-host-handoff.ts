@@ -6,23 +6,15 @@ import {
   type AnalyticsHandoffHostIdentity,
 } from '../../../shared/analytics/handoff.js';
 import {
-  SessionLifecycleConflictError,
-  SessionLifecycleStore,
-  type AnalyticsHostRecord,
-  type AnalyticsWriterFenceAcknowledgement,
   type AnalyticsWriterFencePurpose,
-  type AnalyticsWriterFenceRecord,
   type AnalyticsWriterIdentity,
 } from '../backend/session-lifecycle-store.js';
 import type { SessionManagerFenceRegistry } from '../backend/session-manager-fence.js';
-import type { AnalyticsHostDiscoveryResult } from './analytics-handoff-discovery.js';
 
 export const ANALYTICS_WRITER_FENCE_PROTOCOL = 'pie-analytics-writer-fence-v1' as const;
 export const ANALYTICS_WRITER_FENCE_SCHEMA = 1 as const;
-export const ANALYTICS_WRITER_FENCE_MAX_HOSTS = 512;
 export const ANALYTICS_WRITER_FENCE_MAX_KEY_BYTES = 4_096;
 export const ANALYTICS_WRITER_FENCE_MAX_TIMEOUT_MS = 10_000;
-export const ANALYTICS_WRITER_FENCE_MAX_CENSUS_AGE_MS = 30_000;
 
 export type AnalyticsWriterFenceHostIdentity = AnalyticsWriterIdentity;
 
@@ -92,38 +84,6 @@ export interface AnalyticsHostWriterFenceOptions {
   waitTimeoutMs?: number;
 }
 
-export interface AnalyticsAllHostFenceParticipant {
-  identity: AnalyticsHandoffHostIdentity;
-  /** The per-boot capability distributed out of band with the control pipe. */
-  key: string;
-  /** Sends one signed freeze request to this host's authenticated endpoint. */
-  send(request: AnalyticsWriterFenceRequest): Promise<unknown>;
-}
-
-export interface AnalyticsAllHostHandoffOptions {
-  workspaceId: string;
-  registry: SessionLifecycleStore;
-  discover: () => Promise<AnalyticsHostDiscoveryResult>;
-  participants: readonly AnalyticsAllHostFenceParticipant[];
-  purpose: AnalyticsWriterFencePurpose;
-  /** Production coordinators require signed status evidence in addition to
-   * registry/runtime/process reconciliation. Test seams may omit this flag. */
-  requireAuthenticatedHostStatus?: boolean;
-  now?: () => number;
-  requestTimeoutMs?: number;
-}
-
-export interface AnalyticsAllHostHandoffReceipt {
-  readonly schemaVersion: 1;
-  readonly workspaceId: string;
-  readonly operationId: string;
-  readonly purpose: AnalyticsWriterFencePurpose;
-  readonly fenceEpoch: number;
-  readonly status: 'fenced';
-  readonly hostInstanceIds: readonly string[];
-  readonly acknowledgedHostInstanceIds: readonly string[];
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -166,30 +126,8 @@ function boundedIdentity(value: unknown, name: string): AnalyticsWriterFenceHost
   };
 }
 
-function identityFromHost(host: AnalyticsHostRecord): AnalyticsWriterFenceHostIdentity {
-  return {
-    hostInstanceId: host.hostInstanceId,
-    workspaceId: host.workspaceId,
-    generationId: host.generationId,
-    buildId: host.buildId,
-    processId: host.processId,
-  };
-}
-
 function identityFromHandoffHost(host: AnalyticsHandoffHostIdentity): AnalyticsWriterFenceHostIdentity {
   return boundedIdentity(host, 'host identity');
-}
-
-function sameIdentity(left: AnalyticsWriterFenceHostIdentity, right: AnalyticsWriterFenceHostIdentity): boolean {
-  return left.hostInstanceId === right.hostInstanceId
-    && left.workspaceId === right.workspaceId
-    && left.generationId === right.generationId
-    && left.buildId === right.buildId
-    && left.processId === right.processId;
-}
-
-function compareHostIds(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function sortedJson(value: unknown): string {
@@ -478,312 +416,6 @@ export function createAnalyticsHostWriterFence(
 export { createSessionLifecycleWriterAdmission } from '../backend/session-lifecycle-store.js';
 export type { SessionLifecycleWriterAdmission } from '../backend/session-lifecycle-store.js';
 
-function assertOperationId(operationId: string): string {
-  return boundedString(operationId, 'operationId');
-}
-
-function assertCompleteCensus(
-  result: AnalyticsHostDiscoveryResult,
-  workspaceId: string,
-  nowMs: number,
-  requireAuthenticatedHostStatus = false,
-): void {
-  if (!Number.isSafeInteger(nowMs) || nowMs < 0
-    || !isRecord(result)
-    || result.workspaceId !== workspaceId
-    || !Number.isSafeInteger(result.observedAtMs)
-    || result.observedAtMs < 0
-    || result.observedAtMs > nowMs + ANALYTICS_WRITER_FENCE_MAX_CENSUS_AGE_MS
-    || nowMs - result.observedAtMs > ANALYTICS_WRITER_FENCE_MAX_CENSUS_AGE_MS
-    || result.complete !== true
-    || result.registryComplete !== true
-    || result.runtimeLeasesComplete !== true
-    || result.processOwnersComplete !== true
-    || (requireAuthenticatedHostStatus && result.authenticatedHostsComplete !== true)
-    || (requireAuthenticatedHostStatus && (!Array.isArray(result.authenticatedHosts)
-      || result.authenticatedHosts.length !== result.hosts?.length))
-    || !Array.isArray(result.hosts)
-    || result.hosts.length === 0
-    || result.hosts.length > ANALYTICS_WRITER_FENCE_MAX_HOSTS
-    || !Array.isArray(result.unregisteredRuntimeLeases)
-    || result.unregisteredRuntimeLeases.length !== 0
-    || !Array.isArray(result.unregisteredBackendOwners)
-    || result.unregisteredBackendOwners.length !== 0
-    || !Array.isArray(result.reasons)
-    || result.reasons.length !== 0) {
-    throw new SessionLifecycleConflictError('All-host writer census is incomplete or ambiguous; refusing handoff.');
-  }
-  const hostIds = new Set<string>();
-  const processIds = new Set<number>();
-  for (const record of result.hosts) {
-    if (!isRecord(record)
-      || typeof record.hostInstanceId !== 'string'
-      || typeof record.processId !== 'number'
-      || !Number.isSafeInteger(record.processId)
-      || record.processId <= 0
-      || record.state !== 'registered'
-      || record.status !== 'reconciled'
-      || !Array.isArray(record.reasons)
-      || record.reasons.length !== 0
-      || hostIds.has(record.hostInstanceId)
-      || processIds.has(record.processId)) {
-      throw new SessionLifecycleConflictError('All-host writer census contains missing, duplicate, or non-reconciled identity evidence.');
-    }
-    hostIds.add(record.hostInstanceId);
-    processIds.add(record.processId);
-  }
-  if (requireAuthenticatedHostStatus) {
-    const authenticatedIds = new Set<string>();
-    const authenticatedProcessIds = new Set<number>();
-    for (const evidence of result.authenticatedHosts ?? []) {
-      if (!isRecord(evidence)
-        || typeof evidence.hostInstanceId !== 'string'
-        || typeof evidence.processId !== 'number'
-        || !Number.isSafeInteger(evidence.processId)
-        || !isRecord(evidence.observedHost)
-        || evidence.observedHost.hostInstanceId !== evidence.hostInstanceId
-        || evidence.observedHost.processId !== evidence.processId
-        || authenticatedIds.has(evidence.hostInstanceId)
-        || authenticatedProcessIds.has(evidence.processId)) {
-        throw new SessionLifecycleConflictError('Authenticated host status evidence contains missing or duplicate identity fields.');
-      }
-      authenticatedIds.add(evidence.hostInstanceId);
-      authenticatedProcessIds.add(evidence.processId);
-    }
-    if (authenticatedIds.size !== hostIds.size
-      || [...hostIds].some((hostId) => !authenticatedIds.has(hostId))) {
-      throw new SessionLifecycleConflictError('Authenticated host status evidence does not cover the complete host census.');
-    }
-  }
-}
-
-async function readCompleteRegistry(
-  store: SessionLifecycleStore,
-  workspaceId: string,
-): Promise<AnalyticsHostRecord[]> {
-  const hosts: AnalyticsHostRecord[] = [];
-  let cursor: string | undefined;
-  let previousCursor: string | undefined;
-  for (;;) {
-    const page = store.listAnalyticsHosts(workspaceId, { limit: 64, ...(cursor ? { cursor } : {}) });
-    hosts.push(...page.hosts);
-    if (hosts.length > ANALYTICS_WRITER_FENCE_MAX_HOSTS) {
-      throw new SessionLifecycleConflictError('Analytics host registry exceeds the bounded all-host census.');
-    }
-    if (!page.truncated) return hosts.filter((host) => host.state !== 'stopped');
-    if (!page.nextCursor || page.nextCursor === previousCursor) {
-      throw new SessionLifecycleConflictError('Analytics host registry pagination is incomplete or ambiguous.');
-    }
-    previousCursor = page.nextCursor;
-    cursor = page.nextCursor;
-  }
-}
-
-function assertRegistryMatchesCensus(
-  registryHosts: readonly AnalyticsHostRecord[],
-  discovery: AnalyticsHostDiscoveryResult,
-  workspaceId: string,
-): AnalyticsWriterFenceHostIdentity[] {
-  if (registryHosts.length !== discovery.hosts.length) {
-    throw new SessionLifecycleConflictError('All-host writer census does not cover the complete host registry.');
-  }
-  const discoveryById = new Map(discovery.hosts.map((host) => [host.hostInstanceId, host] as const));
-  const expected: AnalyticsWriterFenceHostIdentity[] = [];
-  for (const host of registryHosts) {
-    if (host.workspaceId !== workspaceId
-      || host.state !== 'registered'
-      || !host.endpointName
-      || !host.capabilities.includes('authenticated-control')
-      || !host.capabilities.includes('writer-fence')) {
-      throw new SessionLifecycleConflictError('All-host writer census contains a host without authenticated writer-fence capability.');
-    }
-    const observed = discoveryById.get(host.hostInstanceId);
-    if (!observed || observed.processId !== host.processId || observed.status !== 'reconciled') {
-      throw new SessionLifecycleConflictError('All-host writer census does not match the registered host identity.');
-    }
-    expected.push(identityFromHost(host));
-  }
-  expected.sort((left, right) => compareHostIds(left.hostInstanceId, right.hostInstanceId));
-  return expected;
-}
-
-function assertParticipants(
-  participants: readonly AnalyticsAllHostFenceParticipant[],
-  expected: readonly AnalyticsWriterFenceHostIdentity[],
-): Map<string, AnalyticsAllHostFenceParticipant> {
-  if (!Array.isArray(participants) || participants.length > expected.length) {
-    throw new SessionLifecycleConflictError('Authenticated all-host participant census is ambiguous.');
-  }
-  const byHost = new Map<string, AnalyticsAllHostFenceParticipant>();
-  for (const participant of participants) {
-    const identity = identityFromHandoffHost(participant.identity);
-    if (byHost.has(identity.hostInstanceId) || typeof participant.send !== 'function') {
-      throw new SessionLifecycleConflictError('Authenticated all-host participant census contains a duplicate or invalid endpoint.');
-    }
-    if (typeof participant.key !== 'string' || participant.key.length === 0) {
-      throw new SessionLifecycleConflictError(`Authenticated handoff key is missing for host ${identity.hostInstanceId}.`);
-    }
-    try {
-      boundedKey(participant.key);
-    } catch (error) {
-      throw new SessionLifecycleConflictError(`Authenticated handoff key for host ${identity.hostInstanceId} is invalid: ${error instanceof Error ? error.message : String(error)}`);
-    }
-    const registered = expected.find((host) => host.hostInstanceId === identity.hostInstanceId);
-    if (!registered || !sameIdentity(registered, identity)) {
-      throw new SessionLifecycleConflictError('Authenticated participant identity is not in the frozen host census.');
-    }
-    byHost.set(identity.hostInstanceId, participant);
-  }
-  return byHost;
-}
-
-function timeoutPromise<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('writer-fence endpoint timed out.')), timeoutMs);
-    timer.unref?.();
-    promise.then((value) => {
-      clearTimeout(timer);
-      resolve(value);
-    }, (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-  });
-}
-
-function receiptFromFence(fence: AnalyticsWriterFenceRecord): AnalyticsAllHostHandoffReceipt {
-  if (fence.state !== 'fenced') throw new SessionLifecycleConflictError('Analytics writer fence did not reach the fenced state.');
-  return {
-    schemaVersion: 1,
-    workspaceId: fence.workspaceId,
-    operationId: fence.operationId,
-    purpose: fence.purpose,
-    fenceEpoch: fence.fenceEpoch,
-    status: 'fenced',
-    hostInstanceIds: [...fence.expectedHosts]
-      .map((host) => host.hostInstanceId)
-      .sort(compareHostIds),
-    acknowledgedHostInstanceIds: [...fence.acknowledgedHostInstanceIds]
-      .sort(compareHostIds),
-  };
-}
-
-/** Durable all-host coordinator. It only establishes the authenticated fence;
- * activation routing and storage cutoff remain separate ordered callers. */
-export class AnalyticsAllHostHandoffCoordinator {
-  private readonly now: () => number;
-  private readonly requestTimeoutMs: number;
-
-  constructor(private readonly options: AnalyticsAllHostHandoffOptions) {
-    this.now = options.now ?? Date.now;
-    this.requestTimeoutMs = boundedWaitTimeout(options.requestTimeoutMs);
-  }
-
-  async run(operationId: string): Promise<AnalyticsAllHostHandoffReceipt> {
-    const normalizedOperationId = assertOperationId(operationId);
-    const existing = this.options.registry.getAnalyticsWriterFence(this.options.workspaceId);
-    if (existing && existing.state !== 'open'
-      && (existing.operationId !== normalizedOperationId || existing.purpose !== this.options.purpose)) {
-      throw new SessionLifecycleConflictError(
-        `Analytics writer fence ${existing.operationId} is already ${existing.state}; refusing a competing handoff.`,
-      );
-    }
-    if (existing?.state === 'fenced'
-      || (existing?.state === 'fencing'
-        && existing.acknowledgedHostInstanceIds.length === existing.expectedHosts.length)) {
-      // A completed fence remains valid even if an acknowledged host has since
-      // stopped. Durable admission is already closed, so retries need not
-      // require a fresh live-host census to repeat the proof.
-      return receiptFromFence(this.options.registry.completeAnalyticsWriterFence(
-        this.options.workspaceId,
-        normalizedOperationId,
-        this.now(),
-      ));
-    }
-    const discovery = await this.options.discover();
-    const nowMs = this.now();
-    assertCompleteCensus(
-      discovery,
-      this.options.workspaceId,
-      nowMs,
-      this.options.requireAuthenticatedHostStatus === true,
-    );
-    const registryHosts = await readCompleteRegistry(this.options.registry, this.options.workspaceId);
-    const expected = assertRegistryMatchesCensus(registryHosts, discovery, this.options.workspaceId);
-    const participants = assertParticipants(this.options.participants, expected);
-    const fence = this.options.registry.beginAnalyticsWriterFence({
-      workspaceId: this.options.workspaceId,
-      operationId: normalizedOperationId,
-      purpose: this.options.purpose,
-      expectedHosts: expected,
-      nowMs: this.now(),
-    });
-    const acknowledged = new Set(fence.acknowledgedHostInstanceIds);
-    for (const host of expected) {
-      if (acknowledged.has(host.hostInstanceId)) continue;
-      const participant = participants.get(host.hostInstanceId);
-      if (!participant) {
-        throw new SessionLifecycleConflictError(`Authenticated participant ${host.hostInstanceId} is missing from the handoff retry.`);
-      }
-      const request = createSignedAnalyticsWriterFenceRequest({
-        workspaceId: this.options.workspaceId,
-        operationId: normalizedOperationId,
-        purpose: this.options.purpose,
-        fenceEpoch: fence.fenceEpoch,
-      }, participant.key, { issuedAtMs: this.now() });
-      let response: AnalyticsWriterFenceResponse;
-      try {
-        response = verifyAnalyticsWriterFenceResponse(
-          await timeoutPromise(participant.send(request), this.requestTimeoutMs),
-          participant.key,
-        );
-      } catch (error) {
-        throw new SessionLifecycleConflictError(`Host ${host.hostInstanceId} did not authenticate a freeze acknowledgement: ${error instanceof Error ? error.message : String(error)}`);
-      }
-      if (response.ok === false) {
-        throw new SessionLifecycleConflictError(`Host ${host.hostInstanceId} rejected the writer fence: ${response.error}`);
-      }
-      const responseHost = boundedIdentity(response.host, 'writer-fence acknowledgement host');
-      if (response.requestId !== request.requestId
-        || response.nonce !== request.nonce
-        || response.workspaceId !== request.workspaceId
-        || response.operationId !== request.operationId
-        || response.fenceEpoch !== request.fenceEpoch
-        || !sameIdentity(responseHost, host)) {
-        throw new SessionLifecycleConflictError(`Host ${host.hostInstanceId} returned a stale or mismatched writer-fence acknowledgement.`);
-      }
-      this.options.registry.acknowledgeAnalyticsWriterFence({
-        workspaceId: this.options.workspaceId,
-        operationId: normalizedOperationId,
-        fenceEpoch: fence.fenceEpoch,
-        identity: responseHost,
-        activeWriterCount: response.activeWriterCount,
-        nowMs: this.now(),
-      });
-      acknowledged.add(host.hostInstanceId);
-    }
-    const completed = this.options.registry.completeAnalyticsWriterFence(
-      this.options.workspaceId,
-      normalizedOperationId,
-      this.now(),
-    );
-    return receiptFromFence(completed);
-  }
-
-  async ensureFenced(
-    operationId: string,
-  ): Promise<AnalyticsAllHostHandoffReceipt & { readonly purpose: 'storage-cutoff' }> {
-    if (this.options.purpose !== 'storage-cutoff') {
-      throw new SessionLifecycleConflictError('Only a storage-cutoff handoff can authorize storage cutoff.');
-    }
-    const receipt = await this.run(operationId);
-    if (receipt.purpose !== 'storage-cutoff') {
-      throw new SessionLifecycleConflictError('Storage cutoff handoff returned the wrong purpose.');
-    }
-    return receipt as AnalyticsAllHostHandoffReceipt & { readonly purpose: 'storage-cutoff' };
-  }
-}
-
 /** Shared freshness check used by the host control endpoint before it invokes
  * the local fence. Kept exported so alternate transports cannot skip it. */
 export function assertFreshAnalyticsWriterFenceRequest(
@@ -791,11 +423,4 @@ export function assertFreshAnalyticsWriterFenceRequest(
   nowMs: number,
 ): void {
   assertFreshAnalyticsHandoffRequest(request, nowMs);
-}
-
-export function analyticsWriterFenceAcknowledgementFromStore(
-  acknowledgement: AnalyticsWriterFenceAcknowledgement,
-): AnalyticsWriterFenceLocalAcknowledgement {
-  if (acknowledgement.activeWriterCount !== 0) throw new Error('Durable writer acknowledgement still has active writers.');
-  return { admissionRevoked: true, writersDrained: true, activeWriterCount: 0 };
 }

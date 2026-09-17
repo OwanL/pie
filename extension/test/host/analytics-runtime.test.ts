@@ -12,14 +12,6 @@ import {
 } from '../../../shared/analytics/activation.js';
 import { ActivationStore } from '../../src/analytics/activation-store.js';
 import {
-  authorizeCandidateTrialRoot,
-} from '../../src/analytics/candidate-trial-authority.js';
-import {
-  CANDIDATE_TRIAL_AUTHORITY_KIND,
-  validateCandidateTrialPlan,
-} from '../../../shared/analytics/candidate-trial.js';
-import { activateGeneration } from '../../src/analytics/activation-sequence.js';
-import {
   AnalyticsRuntime,
   analyticsWorkspaceId,
   LOADED_GENERATION_FILENAME,
@@ -84,13 +76,21 @@ test('canonical runtime reaches readiness with real recorder and query workers',
     timeZone: 'UTC',
   });
   try {
-    await activateGeneration(new ActivationStore({ stateDir }), {
-      generationId: GENERATION_ID,
-      buildId: 'build-1',
-      qualificationSha256: SHA,
-      trialSha256: SHA_B,
-      activatedAt: ACTIVATED_AT,
-      cutoffReceiptSha256: null,
+    await writeManifest(stateDir, {
+      schemaVersion: ACTIVATION_SCHEMA_VERSION,
+      revision: 1,
+      previousSha256: null,
+      everActive: true,
+      activeGeneration: {
+        identity: { generationId: GENERATION_ID, buildId: 'build-1', qualificationSha256: SHA, trialSha256: SHA_B },
+        state: 'active',
+        activatedAt: ACTIVATED_AT,
+        retiredAt: null,
+        predecessorGenerationId: null,
+        cutoffReceiptSha256: null,
+      },
+      successor: null,
+      retiredHistory: [],
     });
     const readiness = await runtime.start();
     assert.equal(readiness.authority, 'canonical');
@@ -343,54 +343,6 @@ test('stop is idempotent and terminal', async () => {
     assert.equal(runtime.isStopped, true);
   } finally {
     rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test('normal legacy dormancy is unchanged alongside an authorized candidate-trial authority', async () => {
-  const trialWorkspace = mkdtempSync(path.join(tmpdir(), 'pie-runtime-compat-trial-'));
-  const authority = authorizeCandidateTrialRoot(
-    validateCandidateTrialPlan({
-      schemaVersion: 1,
-      kind: CANDIDATE_TRIAL_AUTHORITY_KIND,
-      identity: {
-        trialId: 'compat-trial',
-        generationId: GENERATION_ID,
-        buildId: 'build-1',
-        sourceHead: 'a'.repeat(40),
-        sourceFingerprint: 'b'.repeat(64),
-        qualificationSha256: 'c'.repeat(64),
-      },
-      workspaceId: 'workspace-compat',
-    }),
-    {
-      buildId: 'build-1',
-      sourceHead: 'a'.repeat(40),
-      sourceFingerprint: 'b'.repeat(64),
-      liveRoots: [],
-      canonicalDataRoot: trialWorkspace,
-    },
-  );
-  const { root, runtime, analyticsDir } = tempRuntime();
-  try {
-    // The production constructor has no trial option; a trial grant elsewhere
-    // must not change legacy dormancy, the descriptor surface, or the paths.
-    const readiness = await runtime.start();
-    assert.equal(readiness.authority, 'legacy');
-    assert.equal(readiness.recorderReady, false);
-    assert.equal(runtime.backendDescriptor(), undefined);
-    assert.deepEqual(runtime.backendDescriptorArguments(), []);
-    assert.equal(existsSync(analyticsDir), false);
-    assert.equal(
-      new ActivationStore({ stateDir: authority.grant.resolvedPaths.stateDir }).read().manifest,
-      null,
-      'authorizing a trial creates no activation authority record',
-    );
-    assert.equal(existsSync(authority.grant.resolvedPaths.rootDir), true, 'the unconsumed grant root stays owned');
-  } finally {
-    await authority.dispose();
-    await runtime.stop();
-    rmSync(root, { recursive: true, force: true });
-    rmSync(trialWorkspace, { recursive: true, force: true });
   }
 });
 

@@ -170,6 +170,7 @@ See git history (commit `d581d83`) for historical context on the migration from 
   transcripts from being doubled by JSON serialization.
 - Backend events carry `sessionPath` — missing `sessionPath` is a protocol defect.
 - The host serializes all RPCs per session to prevent races.
+- The host resolves one OS-local runtime-data root (`PIE_DATA_DIR` or the platform default) and forwards it to the backend; the canonical analytics database is `<data-root>/analytics/analytics.sqlite` and is written only under canonical analytics authority (see §9). Transcript location is separate: the gated storage cutoff (`PIE_STORAGE_CUTOFF_AUTHORIZATION=p7b-authorized-v1`) is what points the backend session root at `<data-root>/sessions`, and without that value the legacy session root below stays in effect.
 - The host normalizes one absolute agent/session storage authority and supplies
   it through `PI_CODING_AGENT_DIR` / `PI_CODING_AGENT_SESSION_DIR`; with neither
   configured, the embedded SDK keeps its own defaults. The session root's parent
@@ -194,7 +195,8 @@ See git history (commit `d581d83`) for historical context on the migration from 
   boundary changes. The transcript JSONL remains the source of truth, and
   corrupt/incompatible index data is discarded and rebuilt. This
   SQLite database is an operational point-lookup/upsert cache on the request
-  path; DuckDB remains confined to the `analysis/` batch analytics workspace.
+  path; DuckDB remains confined to the `analysis/` batch analytics workspace,
+  which reads the legacy export/storage formats and never the canonical store.
   Before an existing sidecar snapshot is projected, a coalesced filename-only
   directory scan (no transcript reads or stats) removes absent rows durably;
   changed files then reconcile in the background. This publication fence runs
@@ -286,11 +288,15 @@ Effects are grouped into namespaces (e.g., `SessionRpc`, `SessionLifecycle`, `Fi
 
 ## 9. Conserved Accounting
 
-`StatsService` owns two correlated but separate persisted authorities. The append-only billable-invocation ledger records one immutable settlement for every observable provider call and supplies session usage/cost, aggregate usage/cost, and exports. The activity timeline persists correlated busy, provider, retry-wait, tool, history-compaction, and auxiliary intervals. `WorkingTimeService` restores its clock from those intervals; run analytics remain a compatibility dual-write and own productivity/outcome dimensions. Time is never inferred from tokens or cost.
+Analytics have exactly one authority at a time, selected by the activation manifest in the resolved state directory (see [`docs/ANALYTICS_IMPLEMENTATION_CONTRACT.md`](ANALYTICS_IMPLEMENTATION_CONTRACT.md)).
 
-Provider seams emit exact usage when available and explicit gap settlements otherwise. Subagents preserve exact provider-response evidence within the terminal budget, emit one explicit gap identity per overflow response, and retain dispatched-attempt fallback evidence; unexpected controller-free auxiliary stream calls are classified as `other`. Ledger rows preserve provider-qualified model identity, source kind, session/branch and parent operation/run/tool correlation, outcome/timing, provider totals/reported cost, and an immutable pricing-catalog snapshot. Every invocation activity interval carries the matching ledger identity, while busy/tool intervals retain operation/run/tool identity across restart.
+**Legacy authority (no active generation).** `StatsService` owns two correlated but separate persisted authorities. The append-only billable-invocation ledger records one immutable settlement for every observable provider call and supplies session usage/cost, aggregate usage/cost, and exports. The activity timeline persists correlated busy, provider, retry-wait, tool, history-compaction, and auxiliary intervals. `WorkingTimeService` restores its clock from those intervals; run analytics remain a compatibility dual-write and own productivity/outcome dimensions. Time is never inferred from tokens or cost.
 
-Ledger, activity, run-history, checkpoint, privacy/forget, and export mutations share a PID-owned workspace transaction lock. A durable privacy fence is committed before scrub, stale hosts reload canonical state inside the lock, and checkpoints merge per-session state rather than replacing a sibling host's snapshot. Transcript-derived usage is accepted only for idempotent migration/rebuild; the renderer never falls back to transcript accounting and displays explicit unknown if the ledger projection is absent. Private rows/intervals remain process-local or are omitted, and exports contain ordinary data only. See [`docs/STATE_CONTRACT.md`](STATE_CONTRACT.md#conserved-billable-accounting).
+**Canonical authority (a validated active generation).** The host starts the canonical recorder (a child process owning `<data-root>/analytics/analytics.sqlite`) and proves the read path with a disposable query before capture is ready; any failure fails startup closed. Capture is an exclusive authority switch, never a dual-write: settlements are submitted to the recorder and are **not** appended to the legacy JSONL ledger, and `queryRunAnalytics()` returns an explicit empty legacy run layer while canonical session usage and aggregates are served from the canonical read model. Nothing is imported from the legacy stores, and no transcript scan reconstructs aggregates.
+
+Provider seams emit exact usage when available and explicit gap settlements otherwise. Subagents preserve exact provider-response evidence within the terminal budget, emit one explicit gap identity per overflow response, and retain dispatched-attempt fallback evidence; unexpected controller-free auxiliary stream calls are classified as `other`. Under legacy authority, ledger rows preserve provider-qualified model identity, source kind, session/branch and parent operation/run/tool correlation, outcome/timing, provider totals/reported cost, and an immutable pricing-catalog snapshot; under canonical authority the recorder stores the same settlement evidence (provider/model identity, usage channels, reported cost, timing, outcome) as canonical facts. Every invocation activity interval carries the matching ledger identity, while busy/tool intervals retain operation/run/tool identity across restart.
+
+Under legacy authority, ledger, activity, run-history, checkpoint, privacy/forget, and export mutations share a PID-owned workspace transaction lock. A durable privacy fence is committed before scrub, stale hosts reload canonical state inside the lock, and checkpoints merge per-session state rather than replacing a sibling host's snapshot. Transcript-derived usage is accepted only for idempotent migration/rebuild; the renderer never falls back to transcript accounting and displays explicit unknown if the ledger projection is absent. Private rows/intervals remain process-local or are omitted, and exports contain ordinary data only. See [`docs/STATE_CONTRACT.md`](STATE_CONTRACT.md#conserved-billable-accounting).
 
 ## 10. Invariants
 
@@ -304,7 +310,7 @@ Ledger, activity, run-history, checkpoint, privacy/forget, and export mutations 
 8. **Background preservation** — snapshots to non-active sessions update their mirrors; they are never dropped.
 9. **Record-only state** — `Record<string, T>` for keyed collections (no Map/Set in host state).
 10. **Serialized execution** — session RPCs are FIFO-ordered through the lifecycle + session queues, but queues are execution aids rather than lifecycle authority.
-11. **Accounting conservation** — one billable provider invocation maps to at most one immutable ledger row; missing usage is an explicit gap, never an inferred zero.
+11. **Accounting conservation** — one billable provider invocation maps to at most one immutable settlement record: a legacy ledger row (legacy authority) or a canonical settlement fact (canonical authority), never both. Missing usage is an explicit gap, never an inferred zero.
 
 See [`docs/STATE_CONTRACT.md`](STATE_CONTRACT.md) for additional invariants (snapshot recovery, cleanup, selection ownership).
 
@@ -317,7 +323,8 @@ See [`docs/STATE_CONTRACT.md`](STATE_CONTRACT.md) for additional invariants (sna
 | `extension/src/host/core/` | Pure CQRS spine: reducer, effects, events, commands, projection, dispatch |
 | `extension/src/host/session-service/` | Backend client lifecycle, session startup, tab actions, message actions |
 | `extension/src/host/sidebar/` | Webview provider, sync state machine, hot reload |
-| `extension/src/host/stats-service/` | Run/activity analytics tracking, compatibility persistence, query |
+| `extension/src/host/stats-service/` | Run/activity analytics tracking, legacy-authority persistence, query |
+| `extension/src/analytics/` | Canonical analytics: recorder/query helper supervisors, activation store, capture, read model |
 | `extension/src/host/billable-invocation-ledger/` | Immutable provider-invocation persistence and session/aggregate/export projections |
 | `extension/src/backend/` | JSON-RPC server, SDK abstraction, request routing, session context |
 | `extension/src/webview/panel/` | Preact UI: transcript, composer, tabs, settings |
@@ -329,6 +336,7 @@ See [`docs/STATE_CONTRACT.md`](STATE_CONTRACT.md) for additional invariants (sna
 ## 11. Further Reading
 
 - [`docs/STATE_CONTRACT.md`](STATE_CONTRACT.md) — authoritative host ↔ webview invariants
+- [`docs/ANALYTICS_IMPLEMENTATION_CONTRACT.md`](ANALYTICS_IMPLEMENTATION_CONTRACT.md) — analytics authority, data root, privacy and the gated storage cutoff
 - [`docs/STATE_CONTRACT_IMPLEMENTATION.md`](STATE_CONTRACT_IMPLEMENTATION.md) — transport/protocol mechanics, byte budgets, and file mappings behind those invariants
 - [`docs/STATE_CONTRACT_HISTORY.md`](STATE_CONTRACT_HISTORY.md) — completed remediation chronology
 - [`docs/internal/ARCH-OVERVIEW.md`](internal/ARCH-OVERVIEW.md) — concise file map and glossary

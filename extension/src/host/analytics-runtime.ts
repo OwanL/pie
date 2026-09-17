@@ -29,16 +29,6 @@ import {
 } from '../analytics/recorder-supervisor.js';
 import { AnalyticsQueryClient } from '../analytics/query-client.js';
 import { ActivationStore, type ActivationReadResult } from '../analytics/activation-store.js';
-import {
-  CandidateTrialAuthority,
-  type CandidateTrialCleanupReceipt,
-} from '../analytics/candidate-trial-authority.js';
-import { CanonicalAnalyticsCapture } from '../analytics/canonical-capture.js';
-import {
-  CANDIDATE_TRIAL_DESCRIPTOR_KIND,
-  validateCandidateTrialDescriptor,
-  type CandidateTrialDescriptor,
-} from '../../../shared/analytics/candidate-trial.js';
 
 /** Written by a host that completed canonical readiness, so post-restart
  * evidence can show which generation is loaded rather than only which one the
@@ -180,9 +170,7 @@ export type AnalyticsRuntimeActivationSnapshot = Pick<
 >;
 
 export interface AnalyticsRuntimeReadiness {
-  /** `candidate-trial` is the disposable in-memory trial authority; it never
-   * carries manifest-derived evidence and never selects a canonical descriptor. */
-  authority: 'legacy' | 'canonical' | 'candidate-trial';
+  authority: 'legacy' | 'canonical';
   manifestRevision: number | null;
   manifestSha256: string | null;
   generationId: string | null;
@@ -193,8 +181,7 @@ export interface AnalyticsRuntimeReadiness {
   queryReady: boolean;
 }
 
-/** Narrow host seam shared by the normal canonical runtime and the
- * filesystem-free rehearsal runtime. */
+/** Narrow host seam implemented by the canonical runtime. */
 export interface AnalyticsRuntimePort {
   readonly analyticsTimeZone: string;
   start(): Promise<AnalyticsRuntimeReadiness>;
@@ -208,35 +195,6 @@ export interface AnalyticsRuntimePort {
   stop(): Promise<void>;
 }
 
-/** Runtime used by the total-disabled rehearsal. It has no activation store,
- * recorder, query worker, loaded receipt, or filesystem side effect. */
-export class DisabledAnalyticsRuntime implements AnalyticsRuntimePort {
-  readonly analyticsTimeZone = 'UTC';
-
-  async start(): Promise<AnalyticsRuntimeReadiness> {
-    return {
-      authority: 'legacy',
-      manifestRevision: null,
-      manifestSha256: null,
-      generationId: null,
-      recorderSchemaVersion: null,
-      projectionRevision: null,
-      recorderReady: false,
-      queryReady: false,
-    };
-  }
-
-  recordLoadedGeneration(): void { /* no activation receipt in this mode */ }
-
-  recordTerminalRestartReceipt(): void { /* no terminal receipt in this mode */ }
-
-  backendDescriptor(): undefined { return undefined; }
-
-  async fenceWriters(): Promise<number> { return 0; }
-
-  async stop(): Promise<void> { /* no helper to stop */ }
-}
-
 interface AnalyticsHelperStartup {
   recorder: AnalyticsRecorderSupervisor;
   queryClient: AnalyticsQueryClient;
@@ -245,8 +203,7 @@ interface AnalyticsHelperStartup {
 }
 
 /** Shared real-helper startup probe: the single production recorder/query
- * startup sequence, used by the canonical runtime and by the disposable
- * candidate-trial runtime against its own factory-owned root. Starts the same
+ * startup sequence, used by the canonical runtime. Starts the same
  * production helpers and proves the read path independently; a failure leaves
  * no half-started recorder behind. */
 async function startAnalyticsHelpers(options: {
@@ -687,238 +644,6 @@ export class AnalyticsRuntime implements AnalyticsRuntimePort {
 /** Stable workspace identity helper shared by capture and the descriptor. */
 export function analyticsWorkspaceId(seed: string): string {
   return createHash('sha256').update(seed).digest('hex').slice(0, 32);
-}
-
-export interface CandidateTrialRuntimeOptions {
-  recorderWorkerScript: string;
-  queryWorkerScript: string;
-  /** Fresh per host process identity, like the canonical runtime's. */
-  hostInstanceId: string;
-  timeZone?: string;
-  onError?: (error: unknown, stage: string) => void;
-}
-
-/** The disposable candidate-trial runtime seam. It shares the production port
- * so the same helper seams can be exercised, but its descriptor surface is
- * deliberately different: `backendDescriptor()` is always undefined because a
- * trial has no manifest-derived canonical routing, and the real backend/host
- * transport binding remains a later unit — it is never faked here. */
-export interface CandidateTrialRuntimePort extends AnalyticsRuntimePort {
-  readonly trialAuthority: CandidateTrialAuthority;
-  readonly capture: CanonicalAnalyticsCapture;
-  candidateTrialDescriptor(): CandidateTrialDescriptor | undefined;
-  getReadiness(): AnalyticsRuntimeReadiness | undefined;
-  get cleanupReceipt(): CandidateTrialCleanupReceipt | undefined;
-}
-
-/** Disposable candidate-trial runtime: the SAME production recorder/query/
- * capture helpers started against one factory-owned unique OS-temp root under
- * the distinct `candidate-trial` readiness authority. It never constructs an
- * activation store, so it can never create a manifest or tombstone, and it
- * holds no manifest-derived identity. */
-/** Module-private brand so only the module-level strict factory can construct
- * a trial runtime; ordinary construction is rejected at runtime. */
-const candidateTrialRuntimeToken = Symbol('pie.analytics.candidate-trial-runtime');
-
-export class CandidateTrialRuntime implements CandidateTrialRuntimePort {
-  readonly analyticsTimeZone: string;
-  private recorder: AnalyticsRecorderSupervisor | undefined;
-  private queryClient: AnalyticsQueryClient | undefined;
-  private readiness: AnalyticsRuntimeReadiness | undefined;
-  private cleanup: CandidateTrialCleanupReceipt | undefined;
-  private trialStopped = false;
-
-  constructor(
-    public readonly trialAuthority: CandidateTrialAuthority,
-    public readonly capture: CanonicalAnalyticsCapture,
-    private readonly descriptor: CandidateTrialDescriptor,
-    initialReadiness: AnalyticsRuntimeReadiness,
-    helpers: { recorder: AnalyticsRecorderSupervisor; queryClient: AnalyticsQueryClient },
-    options: { timeZone?: string },
-    brand: typeof candidateTrialRuntimeToken,
-  ) {
-    if (brand !== candidateTrialRuntimeToken) {
-      throw new ActivationManifestError('Candidate-trial runtime must be created by its strict factory.');
-    }
-    this.readiness = initialReadiness;
-    this.recorder = helpers.recorder;
-    this.queryClient = helpers.queryClient;
-    this.analyticsTimeZone = validateAnalyticsTimeZone(options.timeZone?.trim() || 'UTC');
-  }
-
-  /** Start is part of the shared port; the factory already performed the real
-   * startup, so this only republishes the single readiness snapshot. */
-  async start(): Promise<AnalyticsRuntimeReadiness> {
-    if (this.trialStopped || !this.readiness) {
-      throw new ActivationManifestError('Candidate-trial runtime has stopped; a grant is single use.');
-    }
-    return this.readiness;
-  }
-
-  getReadiness(): AnalyticsRuntimeReadiness | undefined {
-    return this.readiness;
-  }
-
-  /** No loaded-generation receipt exists for a trial: there is no manifest and
-   * no canonical generation loaded. */
-  recordLoadedGeneration(): void { /* no manifest evidence exists in trial mode */ }
-
-  recordTerminalRestartReceipt(): void { /* terminal restart evidence requires canonical authority */ }
-
-  /** Always undefined in trial mode: a candidate trial must never pretend to
-   * carry manifest-derived canonical routing to a backend. */
-  backendDescriptor(): undefined { return undefined; }
-
-  /** The separate, explicitly-named trial descriptor for the dedicated trial
-   * producer surface. It carries no manifest revision/hash and no trialSha256. */
-  candidateTrialDescriptor(): CandidateTrialDescriptor {
-    return this.descriptor;
-  }
-
-  /** Revoke trial producer admission and drain accepted capture writes. */
-  async fenceWriters(timeoutMs = 10_000): Promise<number> {
-    const recorder = this.recorder;
-    if (!recorder) return 0;
-    await recorder.fence(timeoutMs);
-    const backlog = recorder.backlog;
-    return backlog.queuedRecords + backlog.inFlightRecords;
-  }
-
-  /** The started trial recorder, for explicit trial producer wiring only. */
-  get sink(): AnalyticsRecorderSupervisor | undefined {
-    return this.recorder;
-  }
-
-  /** The started trial query client, for reads inside the disposable root. */
-  get reads(): AnalyticsQueryClient | undefined {
-    return this.queryClient;
-  }
-
-  get isStopped(): boolean {
-    return this.trialStopped;
-  }
-
-  get cleanupReceipt(): CandidateTrialCleanupReceipt | undefined {
-    return this.cleanup;
-  }
-
-  /** Stop helpers, then remove ONLY the factory-owned root. Cleanup failure
-   * preserves the receipt facts and is reported, never reported as success. */
-  async stop(): Promise<void> {
-    if (this.trialStopped) return;
-    this.trialStopped = true;
-    const receipt = await this.trialAuthority.dispose(async () => {
-      const recorder = this.recorder;
-      this.recorder = undefined;
-      this.queryClient = undefined;
-      if (recorder) await recorder.shutdown();
-    });
-    this.cleanup = receipt;
-    if (!receipt.completed) {
-      throw new ActivationManifestError(
-        `Candidate-trial cleanup failed: ${receipt.failureReasons.join('; ')}`,
-      );
-    }
-  }
-}
-
-/** Strict factory: the only way to obtain a running candidate-trial runtime.
- *
- * Ordering invariants: every caller-visible descriptor/option is validated
- * BEFORE the single-use grant is consumed, so an invalid input leaves the
- * grant unconsumed and its root caller-owned (an explicit `dispose()` removes
- * it; nothing is cleaned up automatically). `consume()` itself stays outside
- * the failure-dispose try: a rejected reuse while a first trial is still
- * active must never dispose that first active root or stop its helpers. A
- * post-consume failure stops every started helper BEFORE the owned root is
- * deleted, and the rethrown error preserves the primary reason plus the real
- * cleanup receipt instead of discarding it or faking a clean result. */
-export async function startCandidateTrialRuntime(
-  authority: CandidateTrialAuthority,
-  options: CandidateTrialRuntimeOptions,
-): Promise<CandidateTrialRuntime> {
-  const grant = authority.grant;
-  const descriptor = validateCandidateTrialDescriptor({
-    kind: CANDIDATE_TRIAL_DESCRIPTOR_KIND,
-    trialId: grant.identity.trialId,
-    generationId: grant.identity.generationId,
-    buildId: grant.identity.buildId,
-    workspaceId: grant.workspaceId,
-    hostInstanceId: options.hostInstanceId,
-    trialPlanSha256: grant.planSha256,
-    trialAuthorityRevision: grant.authorityRevision,
-  });
-  if (typeof options.recorderWorkerScript !== 'string' || options.recorderWorkerScript.trim().length === 0
-    || typeof options.queryWorkerScript !== 'string' || options.queryWorkerScript.trim().length === 0) {
-    throw new ActivationManifestError('Candidate-trial recorder/query worker scripts are required.');
-  }
-  // Validate before consuming the single-use grant, matching the production
-  // runtime's IANA validation and leaving invalid caller input reusable.
-  const timeZone = validateAnalyticsTimeZone(options.timeZone?.trim() || 'UTC');
-  // Outside the try on purpose: if consume() rejects (already consumed or
-  // expired) this caller never owned the trial, so disposing here could delete
-  // the first active trial's root or stop its helpers.
-  authority.consume();
-  let startedRecorder: AnalyticsRecorderSupervisor | undefined;
-  try {
-    // Revalidate the real helper directories before any worker can open the
-    // database; a junction substituted after authorization must never redirect
-    // trial I/O into a protected root.
-    authority.assertRuntimeRootIntegrity();
-    const helpers = await startAnalyticsHelpers({
-      label: 'Candidate-trial',
-      recorderWorkerScript: options.recorderWorkerScript,
-      queryWorkerScript: options.queryWorkerScript,
-      databasePath: canonicalAnalyticsDatabasePath(grant.resolvedPaths.analyticsDir),
-    });
-    startedRecorder = helpers.recorder;
-    const capture = new CanonicalAnalyticsCapture({
-      authority: 'canonical',
-      generationId: grant.identity.generationId,
-      workspaceId: grant.workspaceId,
-      buildId: grant.identity.buildId,
-      processGeneration: options.hostInstanceId,
-      sink: helpers.recorder,
-      detailSink: helpers.recorder,
-      lifecycleSink: helpers.recorder,
-    });
-    const runtime = new CandidateTrialRuntime(
-      authority,
-      capture,
-      descriptor,
-      {
-        authority: 'candidate-trial',
-        manifestRevision: null,
-        manifestSha256: null,
-        generationId: grant.identity.generationId,
-        recorderSchemaVersion: helpers.recorderSchemaVersion,
-        projectionRevision: helpers.projectionRevision,
-        recorderReady: true,
-        queryReady: true,
-      },
-      { recorder: helpers.recorder, queryClient: helpers.queryClient },
-      { ...options, timeZone },
-      candidateTrialRuntimeToken,
-    );
-    return runtime;
-  } catch (error) {
-    const primaryReason = error instanceof Error ? error.message : String(error);
-    // A failed trial must not leave helpers running or the root owned: stop
-    // every started helper before the owned root delete, then keep the real
-    // receipt facts instead of discarding them or faking a clean result.
-    const receipt = await authority.dispose(async () => {
-      if (startedRecorder) await startedRecorder.shutdown();
-    });
-    const failure = new ActivationManifestError(
-      `Candidate-trial startup failed: ${primaryReason}; owned-root cleanup ${
-        receipt.completed ? 'completed' : `failed: ${receipt.failureReasons.join('; ')}`
-      }.`,
-    );
-    const startupFailure = failure as Error & { candidateTrialCleanupReceipt?: CandidateTrialCleanupReceipt };
-    startupFailure.candidateTrialCleanupReceipt = receipt;
-    options.onError?.(failure, 'candidate-trial-startup');
-    throw failure;
-  }
 }
 
 export { ActivationManifestError };

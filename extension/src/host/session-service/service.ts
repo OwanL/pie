@@ -2,6 +2,10 @@ import * as vscode from 'vscode';
 
 import { BackendClient } from '../backend/client';
 import { resolveChatPrefs, buildRuntimePrefsPayload } from '../../shared/protocol';
+import {
+  STORAGE_CUTOFF_AUTHORIZATION_ENV,
+  STORAGE_CUTOFF_AUTHORIZATION_VALUE,
+} from '../../shared/storage-cutoff-authorization';
 import type { ChatPrefs, DetailResult, LazyDetailRef, PruningSettings, SessionTitlesSettings, ToolResultPruningSettings, ThinkingLevel, TranscriptMode, DeferredTriggerView, McpServerInfo, RendererCommandContext } from '../../shared/protocol';
 import {
   loadPersistedPruningSettings,
@@ -100,7 +104,7 @@ export class SessionService implements vscode.Disposable {
     this.state = new SessionServiceState(context, backend, scheduleRender, getArchState, dispatchArch);
     this.privateSessionCleanup = new PrivateSessionCleanup({
       prepareForget: async (sessionPath) => {
-        if (process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION !== 'p7b-authorized-v1') return;
+        if (process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV] !== STORAGE_CUTOFF_AUTHORIZATION_VALUE) return;
         return await this.backend.request<{
           rootSessionId: string;
           pendingCreateOperationId?: string;
@@ -488,7 +492,7 @@ export class SessionService implements vscode.Disposable {
     backendGeneration?: number,
   ): Promise<void> {
     this.clearDetailCacheForSession(sessionPath);
-    const filesystemLifecycleAuthorized = process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION === 'p7b-authorized-v1';
+    const filesystemLifecycleAuthorized = process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV] === STORAGE_CUTOFF_AUTHORIZATION_VALUE;
     if (filesystemLifecycleAuthorized && !privacyMode) {
       await this.backend.request('session.lifecycleClose', {
         sessionPath,
@@ -761,7 +765,7 @@ export class SessionService implements vscode.Disposable {
   }
 
   async setSessionLifecyclePrivacy(sessionPath: string, enabled: boolean): Promise<void> {
-    if (process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION !== 'p7b-authorized-v1') return;
+    if (process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV] !== STORAGE_CUTOFF_AUTHORIZATION_VALUE) return;
     await this.backend.request('session.lifecyclePrivacy', { sessionPath, enabled });
   }
 

@@ -5,12 +5,12 @@ import path from 'node:path';
 import test from 'node:test';
 
 import {
+  ACTIVATION_SCHEMA_VERSION,
   createCandidateManifest,
   type AnalyticsBackendDescriptor,
 } from '../../../../shared/analytics/activation.js';
 import { resolvePieDataPaths } from '../../../../shared/pie-data-root.js';
 import { ActivationStore } from '../../../src/analytics/activation-store.js';
-import { activateGeneration } from '../../../src/analytics/activation-sequence.js';
 import { BackendServer, analyticsWriterBuildId } from '../../../src/backend/server.js';
 import { SessionLifecycleStore, type AnalyticsWriterIdentity } from '../../../src/backend/session-lifecycle-store.js';
 import { PIE_BUILD_ID } from '../../../src/shared/build-identity.js';
@@ -36,6 +36,40 @@ function serverFor(root: string, analyticsActivation?: AnalyticsBackendDescripto
   return server;
 }
 
+/** Commit the active revision-1 manifest a completed production activation
+ * leaves behind: one active generation, a cleared successor, and the write-once
+ * tombstone the store writes as part of the ever-active transition. */
+async function activateFixtureGeneration(store: ActivationStore, options: {
+  generationId: string;
+  buildId: string;
+  qualificationSha256: string;
+  trialSha256: string;
+  activatedAt: string;
+  cutoffReceiptSha256: string | null;
+}): Promise<void> {
+  await store.update(() => ({
+    schemaVersion: ACTIVATION_SCHEMA_VERSION,
+    revision: 1,
+    previousSha256: null,
+    everActive: true,
+    activeGeneration: {
+      identity: {
+        generationId: options.generationId,
+        buildId: options.buildId,
+        qualificationSha256: options.qualificationSha256,
+        trialSha256: options.trialSha256,
+      },
+      state: 'active',
+      activatedAt: options.activatedAt,
+      retiredAt: null,
+      predecessorGenerationId: null,
+      cutoffReceiptSha256: options.cutoffReceiptSha256,
+    },
+    successor: null,
+    retiredHistory: [],
+  }), { expectedSha256: null });
+}
+
 test('backend analytics activation validates exact active generation and rejects stale authority', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'pie-backend-analytics-activation-'));
   const previousDataRoot = process.env.PIE_DATA_DIR;
@@ -44,7 +78,7 @@ test('backend analytics activation validates exact active generation and rejects
   try {
     const stateDir = resolvePieDataPaths({ dataDir: dataRoot, agentDir: root }).stateDir;
     const store = new ActivationStore({ stateDir });
-    await activateGeneration(store, {
+    await activateFixtureGeneration(store, {
       generationId: GENERATION_ID,
       buildId: 'build-1',
       qualificationSha256: SHA,
@@ -108,7 +142,7 @@ test('the backend writer identity uses the loaded host-boot marker, not the mani
       PIE_BUILD_ID,
       'the fixture must distinguish the two spaces for this test to mean anything',
     );
-    await activateGeneration(store, {
+    await activateFixtureGeneration(store, {
       generationId: GENERATION_ID,
       buildId: manifestBuildId,
       qualificationSha256: SHA,

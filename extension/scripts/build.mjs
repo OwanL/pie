@@ -29,12 +29,7 @@ const requiredBuildFiles = Object.freeze([
   'backend.js',
   'worker-entry.js',
   'analytics-recorder-worker.js',
-  'analytics-recorder-supervisor.js',
-  'analytics-sqlite-recorder.js',
   'analytics-query-worker.js',
-  'analytics-query-client.js',
-  'analytics-candidate-trial.js',
-  'storage-cutoff-production.js',
   path.join(webviewRelativeDir, '.vite', 'manifest.json'),
 ]);
 

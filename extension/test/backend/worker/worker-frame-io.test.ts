@@ -112,7 +112,8 @@ test('writer prioritizes lifecycle over progress and bounds detail independently
     baseRevision: 1, revision: 2, operations: [{ op: 'appendString' as const, path: ['text'], value: 'x'.repeat(80) }],
   };
   assert.equal(writer.enqueue(detail).accepted, true);
-  assert.equal(writer.enqueue({ ...detail, revision: 3, baseRevision: 2, operations: [{ op: 'appendString', path: ['text'], value: 'y'.repeat(400) }] }).accepted, false);
+  assert.equal(writer.enqueue({ ...detail, revision: 3, baseRevision: 2 }).accepted, false,
+    'two within-reservation detail frames must still respect the reservation');
   writer.enqueue({ ...frameBase, kind: 'runtime.event', event: 'message.finished', payload: { requestId: 'r' } });
   writer.enqueue(command('progress'));
   writer.enqueue(response('response'));
@@ -189,6 +190,37 @@ test('writer rejects a huge invalid field before invoking JSON.stringify or writ
   }
 });
 
+test('an oversized lifecycle frame arriving behind small records is admitted and later records stay bounded', () => {
+  const target = new FakeSendTarget();
+  const writer = new BoundedWorkerIpcWriter(target, { maxQueuedLifecycleBytes: 1024 });
+  writer.enqueue(command('active'));
+  const busy: WorkerIpcFrameDraft = {
+    ...frameBase,
+    kind: 'runtime.event',
+    event: 'busy.changed',
+    payload: { sessionPath: '/session.jsonl', busy: true, seq: 1 },
+  };
+  const opened: WorkerIpcFrameDraft = {
+    ...frameBase,
+    kind: 'runtime.event',
+    event: 'session.opened',
+    payload: { transcript: 'x'.repeat(32 * 1024) },
+  };
+
+  assert.equal(writer.enqueue(busy).accepted, true);
+  assert.equal(writer.enqueue(opened).accepted, true,
+    'a legal oversized frame must not be rejected because small records were queued first');
+  assert.equal(writer.enqueue(busy).accepted, true,
+    'small records must still fit behind the oversized frame within the reservation');
+  assert.equal(writer.enqueue(opened).accepted, false,
+    'a second oversized frame in the lane must still fail closed');
+
+  while (target.callbacks.length > 0) target.callbacks.shift()!(null);
+  assert.deepEqual(target.sent.map((frame) => frame.kind === 'runtime.event' ? frame.event : frame.kind), [
+    'command', 'busy.changed', 'session.opened', 'busy.changed',
+  ]);
+});
+
 test('writer rejects invalid, oversize, and over-capacity frames without assigning sequence numbers', () => {
   const target = new FakeSendTarget();
   const writer = new BoundedWorkerIpcWriter(target, { maxQueuedOrdinaryBytes: 300 });
@@ -220,7 +252,8 @@ test('analytics abort uses reserved response capacity when the ordinary lane is 
   const writer = new BoundedWorkerIpcWriter(target, { maxQueuedOrdinaryBytes: 300 });
   writer.enqueue(command('active'));
   assert.equal(writer.enqueue(command('queued-one')).accepted, true);
-  assert.equal(writer.enqueue(command('ordinary-capacity')).accepted, false);
+  assert.equal(writer.enqueue(command('queued-two')).accepted, false,
+    'two within-reservation ordinary frames must still exceed the reservation');
   const abort = writer.enqueue({
     ...frameBase,
     kind: 'analytics.capture',

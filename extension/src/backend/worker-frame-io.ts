@@ -243,16 +243,22 @@ export class BoundedWorkerIpcWriter {
     const retainedLaneBytes = activeLaneBytes + this.queuedBytes[lane];
     const nextLaneBytes = retainedLaneBytes + pending.bytes;
     // A single frame may exceed the lane's reserved capacity (it is bounded by
-    // the semantic frame limit above), but only when the lane is otherwise
-    // empty. This lets a large promotion snapshot or session.opened pass while
-    // still bounding the backlog of many queued frames under backpressure.
-    // That exceptional frame does not consume the lane's ordinary reservation:
-    // lifecycle records such as busy.changed must still fit behind a large
-    // session.opened instead of turning valid backpressure into worker death.
+    // the semantic frame limit above), so one frame per lane — the largest
+    // queued exception or the pending frame itself — does not consume the
+    // ordinary reservation. This lets a large promotion snapshot or
+    // session.opened pass whether it arrives first or behind small lifecycle
+    // records such as busy.changed, while still bounding the backlog of many
+    // queued frames under backpressure. Anything beyond that single exception
+    // (including a second oversized frame) must still fit the reservation
+    // instead of turning valid backpressure into worker death.
     const exceptionalQueuedFrameBytes = this.lanes[lane]
       .find((entry) => entry.bytes > this.capacities[lane])?.bytes ?? 0;
-    const reservedLaneBytes = retainedLaneBytes - exceptionalQueuedFrameBytes;
-    if (retainedLaneBytes > 0 && reservedLaneBytes + pending.bytes > this.capacities[lane]) {
+    const exceptionalPendingBytes = pending.bytes > this.capacities[lane]
+      ? pending.bytes
+      : 0;
+    const exceptionalBytes = Math.max(exceptionalQueuedFrameBytes, exceptionalPendingBytes);
+    const reservedLaneBytes = retainedLaneBytes + pending.bytes - exceptionalBytes;
+    if (retainedLaneBytes > 0 && reservedLaneBytes > this.capacities[lane]) {
       return this.reject(options.onSettled, 'capacity', capacityDetail(lane, nextLaneBytes, this.capacities[lane]));
     }
     this.lanes[lane].push(pending);

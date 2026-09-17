@@ -50,10 +50,13 @@ raising bounds. Queries are cancelled by aborting the caller; only that
 helper fork is terminated.
 
 The host-side adapter is `CanonicalAnalyticsReadModel`
-(`extension/src/analytics/query-entry.ts`). Until the P7a cutover, the
-production default stays on the legacy authority; use this skill against a
-store you know exists, and treat every explicit error (missing database,
-schema-version mismatch) as a hard stop — there is no legacy fallback.
+(`extension/src/analytics/query-entry.ts`). The store exists only under canonical
+analytics authority (a validated active activation manifest in the resolved
+state directory); with no active generation recorded, the runtime stays on legacy
+authority, starts no recorder, and captures nothing — and a corrupt activation
+state fails startup closed — so the database may simply not exist. Treat every
+explicit error (missing database, schema-version mismatch) as a hard stop —
+there is no legacy fallback.
 
 ## Primary usage view
 

@@ -243,3 +243,66 @@ test('clearing the query restores the full list', () => {
   type(input, '');
   assert.equal(rowLabels(dropdown).length, 4);
 });
+
+function renderPicker(value: string, onChange: (spec: string) => void): void {
+  act(() => {
+    render(
+      h(ModelPicker, {
+        value,
+        label: value,
+        ariaLabel: 'Model',
+        title: 'Select model',
+        entries: entries(),
+        onChange,
+      }),
+      container,
+    );
+  });
+}
+
+test('Enter on an untouched dropdown never commits a model', () => {
+  let commits = 0;
+  renderPicker('gpt-5', () => {
+    commits += 1;
+  });
+
+  const dropdown = openDropdown();
+  keydown(searchInput(dropdown), 'Enter');
+  assert.equal(commits, 0, 'Enter without navigation or a typed filter must not commit');
+  assert.equal(dropdown.isConnected, true, 'an uncommitted Enter leaves the dropdown open');
+});
+
+test('Enter commits after explicit keyboard navigation', () => {
+  let selected: string | undefined;
+  renderPicker('gpt-5', (spec) => {
+    selected = spec;
+  });
+
+  const dropdown = openDropdown();
+  const input = searchInput(dropdown);
+  // Entries are ordered by name; the second row is Claude Opus 4.
+  keydown(input, 'ArrowDown');
+  keydown(input, 'Enter');
+  assert.equal(selected, 'anthropic/claude-opus');
+  assert.equal(dropdown.isConnected, false);
+});
+
+test('when the current model is missing from the list, Enter does not commit the first entry', () => {
+  let selected: string | undefined;
+  renderPicker('not-in-list', (spec) => {
+    selected = spec;
+  });
+
+  const dropdown = openDropdown();
+  // Regression: opening used to auto-highlight the first entry, so a stray
+  // Enter silently switched the session to that model (the 2026-09-16 astra
+  // incident). With no highlighted row, Enter must do nothing.
+  keydown(searchInput(dropdown), 'Enter');
+  assert.equal(selected, undefined);
+  assert.equal(dropdown.isConnected, true);
+
+  // Explicit navigation still commits: ArrowDown highlights the first row.
+  keydown(searchInput(dropdown), 'ArrowDown');
+  keydown(searchInput(dropdown), 'Enter');
+  assert.equal(selected, 'openai/gpt-5');
+});

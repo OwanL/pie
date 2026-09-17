@@ -145,8 +145,8 @@ export interface RunObserver {
 
 /**
  * Host-facing StatsService surface.  SessionService only needs RunObserver;
- * this wider port is kept structural so a rehearsal can use a filesystem-free
- * implementation without inheriting the concrete storage/accounting state.
+ * this wider port is kept structural so an implementation does not inherit the
+ * concrete storage/accounting state.
  */
 export type CanonicalActivityProjection = ActivityProjectionReadModel & AnalyticsQuerySnapshotMetadata;
 export type CanonicalToolFacetProjection = ToolFacetProjectionReadModel & AnalyticsQuerySnapshotMetadata;

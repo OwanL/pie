@@ -29,8 +29,12 @@ import { SessionService } from './session-service';
 import { TokenRateService } from './token-rate-service';
 import { AggregateStatsService } from './aggregate-stats-service';
 import { EMPTY_PROVIDER_GATE_STATS, type ProviderGateStats } from '../shared/protocol/aggregate-stats';
+import {
+  STORAGE_CUTOFF_AUTHORIZATION_ENV,
+  STORAGE_CUTOFF_AUTHORIZATION_VALUE,
+} from '../shared/storage-cutoff-authorization';
 import { OPEN_TABS_STORAGE_KEY, ACTIVE_SESSION_STORAGE_KEY, PINNED_TABS_STORAGE_KEY, PINNED_TAB_GROUPS_STORAGE_KEY, PRIVATE_SESSION_PATHS_STORAGE_KEY } from './session-service/state';
-import { DisabledStatsService, StatsService, type StatsServicePort } from './stats-service';
+import { StatsService, type StatsServicePort } from './stats-service';
 import {
   CanonicalAnalyticsReadModel,
   canonicalAnalyticsDatabasePath,
@@ -70,7 +74,6 @@ import { CanonicalAnalyticsCapture } from '../analytics/canonical-capture.js';
 import { ActivationStore } from '../analytics/activation-store.js';
 import {
   AnalyticsRuntime,
-  DisabledAnalyticsRuntime,
   type AnalyticsRuntimePort,
 } from './analytics-runtime.js';
 import { HostAnalyticsTransport } from './analytics-transport.js';
@@ -90,10 +93,7 @@ import {
   createSessionLifecycleWriterAdmission,
   SessionLifecycleStore,
   storageCutoffRootCapability,
-  type SessionLifecycleWriterAdmission,
 } from '../backend/session-lifecycle-store.js';
-import { isFreshLegacyActivationState, resolveAnalyticsPolicy } from './analytics-policy.js';
-
 
 export const SIDEBAR_VIEW_TYPE = 'pie.sessionsView';
 
@@ -208,337 +208,314 @@ export class PieExtension implements vscode.Disposable {
     );
 
     // Normal boots construct the producer seams below and read authority from
-    // the validated activation manifest rather than hardcoding it. The
-    // process-local total-disabled rehearsal takes the separate branch below
-    // before any analytics storage/helper/control object is constructed.
+    // the validated activation manifest rather than hardcoding it.
     const dataPaths = resolvePieDataPaths({
       dataDir: process.env.PIE_DATA_DIR,
       agentDir: process.env.PI_CODING_AGENT_DIR,
     });
-    const analyticsPolicy = resolveAnalyticsPolicy();
-    const analyticsDisabled = analyticsPolicy === 'total-disabled';
-    const analyticsWorkspaceId = analyticsDisabled ? 'analytics-disabled' : getWorkspaceAnalyticsId(context);
+    const analyticsWorkspaceId = getWorkspaceAnalyticsId(context);
     const analyticsProcessGeneration = crypto.randomUUID();
-    let analyticsRuntime: AnalyticsRuntimePort;
-    let analyticsTransport: HostAnalyticsTransport | undefined;
     let backendWriterFenceStarted = false;
     let backendWriterFenceComplete = false;
     let backendWriterFencePromise: Promise<void> | undefined;
     let analyticsWriterFenceStarted = false;
     let analyticsWriterFenceComplete = false;
     let analyticsWriterFencePromise: Promise<void> | undefined;
-    let fenceAnalyticsWriters: ((timeoutMs: number) => Promise<number>) | undefined;
-    let analyticsHandoffRegistry: SessionLifecycleStore | undefined;
-    let analyticsWriterAdmission: SessionLifecycleWriterAdmission | undefined;
-    let analyticsHandoffControl: AnalyticsHandoffControl | undefined;
-    let statsService: StatsServicePort;
 
-    if (analyticsDisabled) {
-      // The rehearsal is valid only from a fresh legacy state. In particular,
-      // do not suppress an active/candidate authority and call that disabled.
-      const activation = new ActivationStore({ stateDir: dataPaths.stateDir }).read();
-      if (!isFreshLegacyActivationState(activation)) {
-        throw new Error('Total analytics-disabled rehearsal requires a fresh legacy activation state.');
-      }
-      analyticsRuntime = new DisabledAnalyticsRuntime();
-      statsService = new DisabledStatsService();
-    } else {
-      analyticsHandoffRegistry = new SessionLifecycleStore(
-        path.join(dataPaths.stateDir, 'session-lifecycle.sqlite'),
-      );
-      const activation = new ActivationStore({ stateDir: dataPaths.stateDir }).read();
-      // Each controlled request has its own durable slot and fresh successor
-      // key. A successor boot claims exactly one slot before registering its
-      // new identity; the owner later correlates that slot's evidence path to
-      // the actual host identity rather than assuming identity reuse.
-      const pendingControlledRestart = claimPendingControlledRestart(dataPaths.stateDir);
-      const envRestartNonce = process.env.PIE_ANALYTICS_RESTART_NONCE?.trim() || null;
-      const envRestartReceiptPath = process.env.PIE_ANALYTICS_TERMINAL_RESTART_RECEIPT_PATH?.trim();
-      const usesEnvironmentRestartEvidence = pendingControlledRestart === undefined
-        && (envRestartNonce !== null || envRestartReceiptPath !== undefined);
-      const runtimeIdentity = getPieRuntimeIdentity(context);
-      // The environment override is an explicit launch-channel capability. A
-      // normal host boot creates a fresh in-memory key so an old boot's signed
-      // requests cannot be replayed; the key is never persisted or returned by
-      // the status endpoint. Until a trusted controller receives that key from
-      // the launch channel, this endpoint is host-local evidence only and does
-      // not constitute an all-host handoff capability.
-      const analyticsHandoffKey = pendingControlledRestart?.successorHandoffKey
-        || process.env.PIE_ANALYTICS_HANDOFF_KEY?.trim()
-        || createPerBootAnalyticsHandoffKey();
-      const activeAnalyticsGenerationId = activation.authority === 'canonical'
-        ? activation.manifest?.activeGeneration?.identity.generationId
-        : undefined;
-      const successorCapabilities = pendingControlledRestart?.successorCapabilities
-        ?? (process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION === 'p7b-authorized-v1'
-          ? [storageCutoffRootCapability(dataPaths.sessionsDir)]
-          : []);
-      const analyticsHostIdentity = {
-        hostInstanceId: analyticsProcessGeneration,
-        workspaceId: analyticsWorkspaceId,
-        generationId: analyticsProcessGeneration,
-        buildId: PIE_BUILD_ID,
-        processId: process.pid,
-        capabilities: [
-          'host-discovery',
-          'host-status',
-          ...successorCapabilities,
-        ],
-      };
-      analyticsWriterAdmission = createSessionLifecycleWriterAdmission(
-        analyticsHandoffRegistry,
-        analyticsHostIdentity,
-      );
-      const analyticsWriterFence = createAnalyticsHostWriterFence({
-        identity: analyticsHostIdentity,
-        activeWriterCount: () => (backendWriterFenceStarted && !backendWriterFenceComplete ? 1 : 0)
-          + (analyticsWriterFenceStarted && !analyticsWriterFenceComplete ? 1 : 0),
-        revokeAdmission: (request) => {
-          if (backendWriterFenceStarted || analyticsWriterFenceStarted) return;
-          backendWriterFenceStarted = true;
-          analyticsWriterFenceStarted = true;
-          backendWriterFencePromise = backend.request('analytics.writerFence', {
-            workspaceId: request.workspaceId,
-            operationId: request.operationId,
-            purpose: request.purpose,
-            fenceEpoch: request.fenceEpoch,
-            timeoutMs: 9_000,
-          }, { timeoutMs: 9_000 }).then((result: unknown) => {
-            if (!result || typeof result !== 'object' || Array.isArray(result)
-              || (result as { admissionRevoked?: unknown }).admissionRevoked !== true
-              || (result as { writersDrained?: unknown }).writersDrained !== true
-              || (result as { activeWriterCount?: unknown }).activeWriterCount !== 0) {
-              throw new Error('Backend returned an invalid authenticated writer-fence acknowledgement.');
-            }
-            backendWriterFenceComplete = true;
-          });
-          analyticsWriterFencePromise = fenceAnalyticsWriters
-            ? fenceAnalyticsWriters(9_000).then((activeWriterCount) => {
-              if (activeWriterCount !== 0) {
-                throw new Error('Canonical recorder returned a nonzero active writer count after fencing.');
-              }
-              analyticsWriterFenceComplete = true;
-            })
-            : Promise.reject(new Error('Canonical analytics writer fence is not wired.'));
-        },
-        isAdmissionRevoked: () => backendWriterFenceStarted && backendWriterFenceComplete
-          && analyticsWriterFenceStarted && analyticsWriterFenceComplete,
-        waitForIdle: async () => {
-          if (backendWriterFencePromise) await backendWriterFencePromise;
-          if (analyticsWriterFencePromise) await analyticsWriterFencePromise;
-          return 0;
-        },
-      });
-      analyticsHandoffControl = new AnalyticsHandoffControl({
-        registry: analyticsHandoffRegistry,
-        identity: analyticsHostIdentity,
-        writerFence: analyticsWriterFence,
-        restart: createAnalyticsHostControlledRestart({
-          stateDir: dataPaths.stateDir,
-          identity: analyticsHostIdentity,
-          performRestart: () => {
-            // Reload the window so the extension host is reconstructed and can
-            // consume the durable successor handoff record. Hot exit preserves
-            // unsaved work, and admission remains fenced until fresh evidence
-            // proves that the successor loaded and registered.
-            const reload = vscode.commands.executeCommand('workbench.action.reloadWindow');
-            void Promise.resolve(reload)
-              .then(() => undefined, (error: unknown) => {
-                appendPieLog('error', 'controlled-restart', 'VS Code window reload command failed', {
-                  error: toErrorMessage(error),
-                });
-              });
-          },
-        }),
-        key: analyticsHandoffKey,
-        readInventory: async () => {
-          if (!runtimeIdentity) {
-            return {
-              kind: 'registered-hosts-only',
-              complete: false,
-              reason: 'runtime-generation-and-process-reconciliation-incomplete',
-              observedAtMs: Date.now(),
-              registeredHostCount: 0,
-              reconciledHostCount: 0,
-              reasonCodes: ['runtime-identity-unavailable'],
-            };
+    const analyticsHandoffRegistry = new SessionLifecycleStore(
+      path.join(dataPaths.stateDir, 'session-lifecycle.sqlite'),
+    );
+    const activation = new ActivationStore({ stateDir: dataPaths.stateDir }).read();
+    // Each controlled request has its own durable slot and fresh successor
+    // key. A successor boot claims exactly one slot before registering its
+    // new identity; the owner later correlates that slot's evidence path to
+    // the actual host identity rather than assuming identity reuse.
+    const pendingControlledRestart = claimPendingControlledRestart(dataPaths.stateDir);
+    const envRestartNonce = process.env.PIE_ANALYTICS_RESTART_NONCE?.trim() || null;
+    const envRestartReceiptPath = process.env.PIE_ANALYTICS_TERMINAL_RESTART_RECEIPT_PATH?.trim();
+    const usesEnvironmentRestartEvidence = pendingControlledRestart === undefined
+      && (envRestartNonce !== null || envRestartReceiptPath !== undefined);
+    const runtimeIdentity = getPieRuntimeIdentity(context);
+    // The environment override is an explicit launch-channel capability. A
+    // normal host boot creates a fresh in-memory key so an old boot's signed
+    // requests cannot be replayed; the key is never persisted or returned by
+    // the status endpoint. Until a trusted controller receives that key from
+    // the launch channel, this endpoint is host-local evidence only and does
+    // not constitute an all-host handoff capability.
+    const analyticsHandoffKey = pendingControlledRestart?.successorHandoffKey
+      || process.env.PIE_ANALYTICS_HANDOFF_KEY?.trim()
+      || createPerBootAnalyticsHandoffKey();
+    const activeAnalyticsGenerationId = activation.authority === 'canonical'
+      ? activation.manifest?.activeGeneration?.identity.generationId
+      : undefined;
+    const successorCapabilities = pendingControlledRestart?.successorCapabilities
+      ?? (process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV] === STORAGE_CUTOFF_AUTHORIZATION_VALUE
+        ? [storageCutoffRootCapability(dataPaths.sessionsDir)]
+        : []);
+    const analyticsHostIdentity = {
+      hostInstanceId: analyticsProcessGeneration,
+      workspaceId: analyticsWorkspaceId,
+      generationId: analyticsProcessGeneration,
+      buildId: PIE_BUILD_ID,
+      processId: process.pid,
+      capabilities: [
+        'host-discovery',
+        'host-status',
+        ...successorCapabilities,
+      ],
+    };
+    const analyticsWriterAdmission = createSessionLifecycleWriterAdmission(
+      analyticsHandoffRegistry,
+      analyticsHostIdentity,
+    );
+    const analyticsWriterFence = createAnalyticsHostWriterFence({
+      identity: analyticsHostIdentity,
+      activeWriterCount: () => (backendWriterFenceStarted && !backendWriterFenceComplete ? 1 : 0)
+        + (analyticsWriterFenceStarted && !analyticsWriterFenceComplete ? 1 : 0),
+      revokeAdmission: (request) => {
+        if (backendWriterFenceStarted || analyticsWriterFenceStarted) return;
+        backendWriterFenceStarted = true;
+        analyticsWriterFenceStarted = true;
+        backendWriterFencePromise = backend.request('analytics.writerFence', {
+          workspaceId: request.workspaceId,
+          operationId: request.operationId,
+          purpose: request.purpose,
+          fenceEpoch: request.fenceEpoch,
+          timeoutMs: 9_000,
+        }, { timeoutMs: 9_000 }).then((result: unknown) => {
+          if (!result || typeof result !== 'object' || Array.isArray(result)
+            || (result as { admissionRevoked?: unknown }).admissionRevoked !== true
+            || (result as { writersDrained?: unknown }).writersDrained !== true
+            || (result as { activeWriterCount?: unknown }).activeWriterCount !== 0) {
+            throw new Error('Backend returned an invalid authenticated writer-fence acknowledgement.');
           }
-          const discovery = await discoverAnalyticsHostWriters({
-            workspaceId: analyticsWorkspaceId,
-            registry: analyticsHandoffRegistry!,
-            runtimeRootPath: path.join(context.extensionPath, 'pie-runtime'),
-            runtimeIdentity,
-            ...(activeAnalyticsGenerationId ? { analyticsGenerationId: activeAnalyticsGenerationId } : {}),
-          });
+          backendWriterFenceComplete = true;
+        });
+        analyticsWriterFencePromise = fenceAnalyticsWriters
+          ? fenceAnalyticsWriters(9_000).then((activeWriterCount) => {
+            if (activeWriterCount !== 0) {
+              throw new Error('Canonical recorder returned a nonzero active writer count after fencing.');
+            }
+            analyticsWriterFenceComplete = true;
+          })
+          : Promise.reject(new Error('Canonical analytics writer fence is not wired.'));
+      },
+      isAdmissionRevoked: () => backendWriterFenceStarted && backendWriterFenceComplete
+        && analyticsWriterFenceStarted && analyticsWriterFenceComplete,
+      waitForIdle: async () => {
+        if (backendWriterFencePromise) await backendWriterFencePromise;
+        if (analyticsWriterFencePromise) await analyticsWriterFencePromise;
+        return 0;
+      },
+    });
+    const analyticsHandoffControl = new AnalyticsHandoffControl({
+      registry: analyticsHandoffRegistry,
+      identity: analyticsHostIdentity,
+      writerFence: analyticsWriterFence,
+      restart: createAnalyticsHostControlledRestart({
+        stateDir: dataPaths.stateDir,
+        identity: analyticsHostIdentity,
+        performRestart: () => {
+          // Reload the window so the extension host is reconstructed and can
+          // consume the durable successor handoff record. Hot exit preserves
+          // unsaved work, and admission remains fenced until fresh evidence
+          // proves that the successor loaded and registered.
+          const reload = vscode.commands.executeCommand('workbench.action.reloadWindow');
+          void Promise.resolve(reload)
+            .then(() => undefined, (error: unknown) => {
+              appendPieLog('error', 'controlled-restart', 'VS Code window reload command failed', {
+                error: toErrorMessage(error),
+              });
+            });
+        },
+      }),
+      key: analyticsHandoffKey,
+      readInventory: async () => {
+        if (!runtimeIdentity) {
           return {
             kind: 'registered-hosts-only',
             complete: false,
-            reason: discovery.complete
-              ? 'runtime-generation-and-process-reconciliation-unwired'
-              : 'runtime-generation-and-process-reconciliation-incomplete',
-            observedAtMs: discovery.observedAtMs,
-            registeredHostCount: discovery.hosts.length,
-            reconciledHostCount: discovery.hosts.filter(({ status }) => status === 'reconciled').length,
-            reasonCodes: [...new Set(discovery.reasons.map(({ code }) => code))].slice(0, 32),
+            reason: 'runtime-generation-and-process-reconciliation-incomplete',
+            observedAtMs: Date.now(),
+            registeredHostCount: 0,
+            reconciledHostCount: 0,
+            reasonCodes: ['runtime-identity-unavailable'],
           };
-        },
-        onError: (error, stage) => appendPieLog('warn', 'analytics-handoff', stage, { error: error.message }),
-      });
-      const canonicalActive = activation.authority === 'canonical'
-        && activation.manifest?.activeGeneration !== undefined
-        && activation.manifest?.activeGeneration !== null
-        && activation.sha256 !== null;
-      // This is the sole descriptor snapshot shared by host capture, helper
-      // startup, backend construction, and loaded-generation evidence. The
-      // runtime rechecks the on-disk snapshot before readiness and refuses a
-      // transition observed during startup.
-      const activationDescriptor = canonicalActive
-        ? Object.freeze({
-            generationId: activation.manifest!.activeGeneration!.identity.generationId,
-            buildId: activation.manifest!.activeGeneration!.identity.buildId,
-            manifestRevision: activation.manifest!.revision,
-            manifestSha256: activation.sha256!,
-            workspaceId: analyticsWorkspaceId,
-            hostInstanceId: analyticsProcessGeneration,
-          })
-        : undefined;
-      // Under canonical authority the capture requires a generation id and fact,
-      // detail and lifecycle sinks, and throws without them. Those sinks come from
-      // the canonical helpers, which only exist once AnalyticsRuntime.start() has
-      // succeeded, so the runtime is created here and started in start() below.
-      const analyticsRuntimeImpl = new AnalyticsRuntime({
-        stateDir: dataPaths.stateDir,
-        analyticsDir: dataPaths.analyticsDir,
-        recorderWorkerScript: path.join(runtimeOutputDirectory(context), 'analytics-recorder-worker.js'),
-        queryWorkerScript: path.join(runtimeOutputDirectory(context), 'analytics-query-worker.js'),
-        buildId: PIE_BUILD_ID,
-        // The manifest identity is the qualification's coordinated build id; the
-        // loaded marker above is the candidate space. Binding a source-equivalence
-        // receipt makes those legitimately differ, so the startup check compares
-        // in the manifest's space whenever a canonical generation is active.
-        ...(canonicalActive ? { manifestBuildId: activationDescriptor!.buildId } : {}),
-        workspaceId: analyticsWorkspaceId,
-        processGeneration: analyticsProcessGeneration,
-        activationSnapshot: activation,
-        restartNonce: pendingControlledRestart?.restartNonce
-          ?? (usesEnvironmentRestartEvidence ? envRestartNonce : null),
-        terminalRestartReceiptPath: pendingControlledRestart?.terminalRestartReceiptPath
-          ?? (usesEnvironmentRestartEvidence ? envRestartReceiptPath : undefined),
-        loadedGenerationPath: pendingControlledRestart?.loadedGenerationPath,
-        writerAdmission: analyticsWriterAdmission,
-        onError: (error, stage) => {
-          appendPieLog('error', 'analytics', `canonical analytics ${stage} failed`, {
-            error: error instanceof Error ? error.message : String(error),
-          });
-        },
-      });
-      analyticsRuntime = analyticsRuntimeImpl;
-      fenceAnalyticsWriters = (timeoutMs) => analyticsRuntimeImpl.fenceWriters(timeoutMs);
-      // Under canonical authority the capture requires fact, detail and lifecycle
-      // sinks, and throws without them. Those sinks are the canonical recorder,
-      // which only exists after AnalyticsRuntime.start() succeeds. This holder is
-      // therefore the sink now: it forwards once the runtime has attached the real
-      // recorder and throws before that, so a record can never be silently dropped
-      // if a producer runs before the helpers are ready.
-      const runtimeSinks = {
-        preflightDetail: (value: unknown) => {
-          const sink = analyticsRuntimeImpl.sink;
-          if (!sink) throw new Error('Canonical detail sink is not ready; activation has not completed.');
-          sink.preflightDetail(value);
-        },
-        submit: (observation: AnalyticsObservation<object>) => {
-          const sink = analyticsRuntimeImpl.sink;
-          if (!sink) throw new Error('Canonical capture sink is not ready; activation has not completed.');
-          return sink.submit(observation);
-        },
-        submitDetail: (capture: AnalyticsDetailCapture) => {
-          const sink = analyticsRuntimeImpl.sink;
-          if (!sink) throw new Error('Canonical detail sink is not ready; activation has not completed.');
-          return sink.submitDetail(capture);
-        },
-        bindPendingCreate: (
-          pendingOperationId: string,
-          rootSessionId: string,
-          sourceKey: string,
-          timestampMs: number | string | bigint,
-        ) => {
-          const sink = analyticsRuntimeImpl.sink;
-          if (!sink) throw new Error('Canonical lifecycle sink is not ready; activation has not completed.');
-          return sink.bindPendingCreate(pendingOperationId, rootSessionId, sourceKey, timestampMs);
-        },
-        deleteSession: (
-          rootSessionId: string,
-          sourceKey: string,
-          timestampMs: number | string | bigint,
-          pendingOperationId?: string,
-        ) => {
-          const sink = analyticsRuntimeImpl.sink;
-          if (!sink) throw new Error('Canonical lifecycle sink is not ready; activation has not completed.');
-          return sink.deleteSession(rootSessionId, sourceKey, timestampMs, pendingOperationId);
-        },
-      };
-      analyticsTransport = canonicalActive
-        ? new HostAnalyticsTransport({
-            generationId: activationDescriptor!.generationId,
-            buildId: activationDescriptor!.buildId,
-            workspaceId: activationDescriptor!.workspaceId,
-            backend,
-            recorder: {
-              submitTracked: (observation, onDisposition) => {
-                const sink = analyticsRuntimeImpl.sink;
-                if (!sink) throw new Error('Canonical capture sink is not ready; activation has not completed.');
-                sink.submitTracked(observation, onDisposition);
-              },
-              submitTrackedDetail: (capture, onDisposition) => {
-                const sink = analyticsRuntimeImpl.sink;
-                if (!sink) throw new Error('Canonical detail sink is not ready; activation has not completed.');
-                sink.submitTrackedDetail(capture, onDisposition);
-              },
+        }
+        const discovery = await discoverAnalyticsHostWriters({
+          workspaceId: analyticsWorkspaceId,
+          registry: analyticsHandoffRegistry!,
+          runtimeRootPath: path.join(context.extensionPath, 'pie-runtime'),
+          runtimeIdentity,
+          ...(activeAnalyticsGenerationId ? { analyticsGenerationId: activeAnalyticsGenerationId } : {}),
+        });
+        return {
+          kind: 'registered-hosts-only',
+          complete: false,
+          reason: discovery.complete
+            ? 'runtime-generation-and-process-reconciliation-unwired'
+            : 'runtime-generation-and-process-reconciliation-incomplete',
+          observedAtMs: discovery.observedAtMs,
+          registeredHostCount: discovery.hosts.length,
+          reconciledHostCount: discovery.hosts.filter(({ status }) => status === 'reconciled').length,
+          reasonCodes: [...new Set(discovery.reasons.map(({ code }) => code))].slice(0, 32),
+        };
+      },
+      onError: (error, stage) => appendPieLog('warn', 'analytics-handoff', stage, { error: error.message }),
+    });
+    const canonicalActive = activation.authority === 'canonical'
+      && activation.manifest?.activeGeneration !== undefined
+      && activation.manifest?.activeGeneration !== null
+      && activation.sha256 !== null;
+    // This is the sole descriptor snapshot shared by host capture, helper
+    // startup, backend construction, and loaded-generation evidence. The
+    // runtime rechecks the on-disk snapshot before readiness and refuses a
+    // transition observed during startup.
+    const activationDescriptor = canonicalActive
+      ? Object.freeze({
+          generationId: activation.manifest!.activeGeneration!.identity.generationId,
+          buildId: activation.manifest!.activeGeneration!.identity.buildId,
+          manifestRevision: activation.manifest!.revision,
+          manifestSha256: activation.sha256!,
+          workspaceId: analyticsWorkspaceId,
+          hostInstanceId: analyticsProcessGeneration,
+        })
+      : undefined;
+    // Under canonical authority the capture requires a generation id and fact,
+    // detail and lifecycle sinks, and throws without them. Those sinks come from
+    // the canonical helpers, which only exist once AnalyticsRuntime.start() has
+    // succeeded, so the runtime is created here and started in start() below.
+    const analyticsRuntime = new AnalyticsRuntime({
+      stateDir: dataPaths.stateDir,
+      analyticsDir: dataPaths.analyticsDir,
+      recorderWorkerScript: path.join(runtimeOutputDirectory(context), 'analytics-recorder-worker.js'),
+      queryWorkerScript: path.join(runtimeOutputDirectory(context), 'analytics-query-worker.js'),
+      buildId: PIE_BUILD_ID,
+      // The manifest identity is the qualification's coordinated build id; the
+      // loaded marker above is the candidate space. Binding a source-equivalence
+      // receipt makes those legitimately differ, so the startup check compares
+      // in the manifest's space whenever a canonical generation is active.
+      ...(canonicalActive ? { manifestBuildId: activationDescriptor!.buildId } : {}),
+      workspaceId: analyticsWorkspaceId,
+      processGeneration: analyticsProcessGeneration,
+      activationSnapshot: activation,
+      restartNonce: pendingControlledRestart?.restartNonce
+        ?? (usesEnvironmentRestartEvidence ? envRestartNonce : null),
+      terminalRestartReceiptPath: pendingControlledRestart?.terminalRestartReceiptPath
+        ?? (usesEnvironmentRestartEvidence ? envRestartReceiptPath : undefined),
+      loadedGenerationPath: pendingControlledRestart?.loadedGenerationPath,
+      writerAdmission: analyticsWriterAdmission,
+      onError: (error, stage) => {
+        appendPieLog('error', 'analytics', `canonical analytics ${stage} failed`, {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      },
+    });
+    const fenceAnalyticsWriters = (timeoutMs: number) => analyticsRuntime.fenceWriters(timeoutMs);
+    // Under canonical authority the capture requires fact, detail and lifecycle
+    // sinks, and throws without them. Those sinks are the canonical recorder,
+    // which only exists after AnalyticsRuntime.start() succeeds. This holder is
+    // therefore the sink now: it forwards once the runtime has attached the real
+    // recorder and throws before that, so a record can never be silently dropped
+    // if a producer runs before the helpers are ready.
+    const runtimeSinks = {
+      preflightDetail: (value: unknown) => {
+        const sink = analyticsRuntime.sink;
+        if (!sink) throw new Error('Canonical detail sink is not ready; activation has not completed.');
+        sink.preflightDetail(value);
+      },
+      submit: (observation: AnalyticsObservation<object>) => {
+        const sink = analyticsRuntime.sink;
+        if (!sink) throw new Error('Canonical capture sink is not ready; activation has not completed.');
+        return sink.submit(observation);
+      },
+      submitDetail: (capture: AnalyticsDetailCapture) => {
+        const sink = analyticsRuntime.sink;
+        if (!sink) throw new Error('Canonical detail sink is not ready; activation has not completed.');
+        return sink.submitDetail(capture);
+      },
+      bindPendingCreate: (
+        pendingOperationId: string,
+        rootSessionId: string,
+        sourceKey: string,
+        timestampMs: number | string | bigint,
+      ) => {
+        const sink = analyticsRuntime.sink;
+        if (!sink) throw new Error('Canonical lifecycle sink is not ready; activation has not completed.');
+        return sink.bindPendingCreate(pendingOperationId, rootSessionId, sourceKey, timestampMs);
+      },
+      deleteSession: (
+        rootSessionId: string,
+        sourceKey: string,
+        timestampMs: number | string | bigint,
+        pendingOperationId?: string,
+      ) => {
+        const sink = analyticsRuntime.sink;
+        if (!sink) throw new Error('Canonical lifecycle sink is not ready; activation has not completed.');
+        return sink.deleteSession(rootSessionId, sourceKey, timestampMs, pendingOperationId);
+      },
+    };
+    const analyticsTransport = canonicalActive
+      ? new HostAnalyticsTransport({
+          generationId: activationDescriptor!.generationId,
+          buildId: activationDescriptor!.buildId,
+          workspaceId: activationDescriptor!.workspaceId,
+          backend,
+          recorder: {
+            submitTracked: (observation, onDisposition) => {
+              const sink = analyticsRuntime.sink;
+              if (!sink) throw new Error('Canonical capture sink is not ready; activation has not completed.');
+              sink.submitTracked(observation, onDisposition);
             },
-            onError: (error) => appendPieLog('warn', 'analytics', 'worker analytics ingress rejected', {
-              error: error.message,
-            }),
-          })
-        : undefined;
-      const analyticsCapture = new CanonicalAnalyticsCapture({
-        authority: canonicalActive ? 'canonical' : 'legacy',
-        ...(canonicalActive
-          ? { generationId: activationDescriptor!.generationId }
-          : {}),
-        workspaceId: analyticsWorkspaceId,
-        buildId: PIE_BUILD_ID,
-        processGeneration: analyticsProcessGeneration,
-        ...(canonicalActive
-          ? { sink: runtimeSinks, detailSink: runtimeSinks, lifecycleSink: runtimeSinks }
-          : {}),
-      });
+            submitTrackedDetail: (capture, onDisposition) => {
+              const sink = analyticsRuntime.sink;
+              if (!sink) throw new Error('Canonical detail sink is not ready; activation has not completed.');
+              sink.submitTrackedDetail(capture, onDisposition);
+            },
+          },
+          onError: (error) => appendPieLog('warn', 'analytics', 'worker analytics ingress rejected', {
+            error: error.message,
+          }),
+        })
+      : undefined;
+    const analyticsCapture = new CanonicalAnalyticsCapture({
+      authority: canonicalActive ? 'canonical' : 'legacy',
+      ...(canonicalActive
+        ? { generationId: activationDescriptor!.generationId }
+        : {}),
+      workspaceId: analyticsWorkspaceId,
+      buildId: PIE_BUILD_ID,
+      processGeneration: analyticsProcessGeneration,
+      ...(canonicalActive
+        ? { sink: runtimeSinks, detailSink: runtimeSinks, lifecycleSink: runtimeSinks }
+        : {}),
+    });
 
-      // P5 durable read model: path-only resolution until a consumer queries it
-      // (one disposable helper fork per query). The canonical data root shares
-      // the backend's explicit-failure resolution; queries against an absent
-      // database fail explicitly instead of falling back to legacy stores.
-      // Construction is unconditional; StatsService withholds the model unless
-      // canonical authority is active, so no consumer can read it early.
-      const analyticsReadModel = new CanonicalAnalyticsReadModel({
-        databasePath: canonicalAnalyticsDatabasePath(dataPaths.analyticsDir),
-        workerScript: path.join(runtimeOutputDirectory(context), 'analytics-query-worker.js'),
-        beforeProviderAggregateRead: (request) => analyticsRuntimeImpl.prepareProviderDailyProjection(request),
-      });
+    // P5 durable read model: path-only resolution until a consumer queries it
+    // (one disposable helper fork per query). The canonical data root shares
+    // the backend's explicit-failure resolution; queries against an absent
+    // database fail explicitly instead of falling back to legacy stores.
+    // Construction is unconditional; StatsService withholds the model unless
+    // canonical authority is active, so no consumer can read it early.
+    const analyticsReadModel = new CanonicalAnalyticsReadModel({
+      databasePath: canonicalAnalyticsDatabasePath(dataPaths.analyticsDir),
+      workerScript: path.join(runtimeOutputDirectory(context), 'analytics-query-worker.js'),
+      beforeProviderAggregateRead: (request) => analyticsRuntime.prepareProviderDailyProjection(request),
+    });
 
-      statsService = new StatsService({
-        dataOutcomesRootPath,
-        legacyUsageDataRootPath: context.globalStorageUri.fsPath,
-        workspaceId: getWorkspaceAnalyticsId(context),
-        legacyWorkspaceIds: getLegacyWorkspaceAnalyticsIds(),
-        scheduleRender: () => this.scheduleRender(),
-        getExperimentAssignment: () => this.getExperimentAssignment(),
-        getArchState: () => this.archState,
-        dispatchArchEvent: (event) => this.dispatchArchEvent(event),
-        getAgentDir: () => process.env.PI_CODING_AGENT_DIR?.trim() || null,
-        analyticsCapture,
-        analyticsReadModel,
-      });
-    }
+    const statsService = new StatsService({
+      dataOutcomesRootPath,
+      legacyUsageDataRootPath: context.globalStorageUri.fsPath,
+      workspaceId: getWorkspaceAnalyticsId(context),
+      legacyWorkspaceIds: getLegacyWorkspaceAnalyticsIds(),
+      scheduleRender: () => this.scheduleRender(),
+      getExperimentAssignment: () => this.getExperimentAssignment(),
+      getArchState: () => this.archState,
+      dispatchArchEvent: (event) => this.dispatchArchEvent(event),
+      getAgentDir: () => process.env.PI_CODING_AGENT_DIR?.trim() || null,
+      analyticsCapture,
+      analyticsReadModel,
+    });
 
     this.analyticsRuntime = analyticsRuntime;
     this.analyticsTransport = analyticsTransport;
@@ -576,13 +553,12 @@ export class PieExtension implements vscode.Disposable {
     this.tokenRateService = new TokenRateService({
       getArchState: () => this.archState,
       onActiveRateChanged: () => this.sidebarProvider.scheduleState(),
-      onRatesTick: analyticsDisabled ? undefined : () => this.aggregateStatsService.refreshLive(),
+      onRatesTick: () => this.aggregateStatsService.refreshLive(),
     });
 
     this.aggregateStatsService = new AggregateStatsService({
       getArchState: () => this.archState,
       statsService: this.statsService,
-      enabled: !analyticsDisabled,
       tokenRateService: this.tokenRateService,
       getAgentDir: () => process.env.PI_CODING_AGENT_DIR?.trim() || null,
       fetchProviderGateStats: () => this.backend

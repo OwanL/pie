@@ -455,8 +455,8 @@ export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kin
     // Closing a running tab means hide, not teardown. Preserve transcript,
     // live-pipeline, pending ownership, composer inputs, file changes, and run
     // analytics while the backend continues. A later webview ready handshake
-    // restores only running tabs whose absence was accidental; users can also
-    // reopen an intentionally hidden session from the session list.
+    // restores only running tabs whose absence was accidental; an authoritative
+    // openSession request reopens an intentionally hidden session.
     const nextOpenTabPaths = state.sessions.openTabPaths.filter((path) => path !== sessionPath);
     const nextPinnedTabPaths = state.sessions.pinnedTabPaths.filter((path) => path !== sessionPath);
     const nextPinnedTabGroups = cleanPinnedTabGroups(state.sessions.pinnedTabGroups, nextPinnedTabPaths);

@@ -148,6 +148,73 @@ test('the canonical read model is withheld unless canonical authority is active'
   });
 });
 
+test('canonical authority neither reads nor extends the legacy run/ledger layer', async () => {
+  await withTempDir(async (tempDir) => {
+    const analyticsRoot = path.join(tempDir, 'data', 'outcomes');
+    const storageDir = path.join(analyticsRoot, workspaceHash('workspace-exclusive-authority'));
+    // A durable legacy run snapshot is present and must stay untouched: the
+    // exclusive authority switch never imports or migrates legacy analytics.
+    await seedLegacyRunSnapshots(storageDir, [
+      legacyCompletedRun('legacy-run-authority', { inputTokens: 100, outputTokens: 10 }),
+    ]);
+    const observations: AnalyticsObservation<object>[] = [];
+    const capture = new CanonicalAnalyticsCapture({
+      authority: 'canonical',
+      generationId: 'generation-exclusive-authority',
+      workspaceId: 'workspace-exclusive-authority',
+      buildId: 'build-exclusive-authority',
+      processGeneration: 'process-exclusive-authority',
+      sink: { submit: (observation) => { observations.push(observation); } },
+      detailSink: { submitDetail: () => undefined },
+      lifecycleSink: { bindPendingCreate: async () => undefined, deleteSession: async () => undefined },
+    });
+    const stats = new StatsService({
+      ...optionsFor(analyticsRoot, tempDir, createInitialArchState(), { renders: 0 }),
+      workspaceId: 'workspace-exclusive-authority',
+      analyticsCapture: capture,
+    });
+    const ledgerPath = path.join(stats.getStorageDir(), 'billable-invocations.jsonl');
+    const sessionPath = '/sessions/exclusive-authority.jsonl';
+    try {
+      await stats.start();
+      assert.deepEqual(
+        await stats.queryRunAnalytics(),
+        { completedRuns: [], openRuns: [] },
+        'canonical authority must return an explicit empty legacy run layer',
+      );
+      assert.equal(observations.length, 0, 'a durable legacy run snapshot is never imported into canonical capture');
+
+      // One settlement under canonical authority goes to the canonical sink and
+      // never falls through to the legacy JSONL ledger.
+      stats.prepareForSend(sessionPath, []);
+      stats.onAssistantTurnStarted(sessionPath, 'turn-exclusive-authority');
+      stats.onAssistantTurnEnded(sessionPath, 'turn-exclusive-authority', 1_000, {
+        inputTokens: 100,
+        outputTokens: 20,
+        cacheReadTokens: 3,
+        cacheWriteTokens: 2,
+        totalTokens: 125,
+        reportedCostUsd: 0.25,
+      }, 'completed', undefined, {
+        modelId: 'model-authority',
+        provider: 'provider-authority',
+        occurredAt: '2026-01-01T00:10:00.000Z',
+      });
+      assert.ok(
+        observations.some((observation) => observation.entityKind === 'providerCall'),
+        'the settlement is submitted to the canonical recorder',
+      );
+      await assert.rejects(
+        fs.access(ledgerPath),
+        { code: 'ENOENT' },
+        'canonical capture must never dual-write the legacy invocation ledger',
+      );
+    } finally {
+      await stats.shutdown();
+    }
+  });
+});
+
 test('durable terminal evidence replays with an immutable canonical fingerprint', async () => {
   await withTempDir(async (tempDir) => {
     const state = createInitialArchState();

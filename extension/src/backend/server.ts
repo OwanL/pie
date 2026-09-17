@@ -16,6 +16,10 @@ import { toErrorMessage, parseJsonOrThrow } from '../shared/error-message';
 import { updateSettingsJsonObject } from '../shared/settings-json-update';
 import { SESSION_SNAPSHOT_MAX_LINE_BYTES, sessionSnapshotLineBytes } from '../shared/transcript-window';
 import {
+  STORAGE_CUTOFF_AUTHORIZATION_ENV,
+  STORAGE_CUTOFF_AUTHORIZATION_VALUE,
+} from '../shared/storage-cutoff-authorization';
+import {
   PROTOCOL_VERSION,
   PIE_BUILD_ID,
   type DetailResult,
@@ -575,7 +579,7 @@ export class BackendServer {
       throw new BackendError('SESSION_OWNERSHIP_CONFLICT', `A cold mutation is already active for ${sessionPath}.`);
     }
     const pending = Promise.resolve().then(async () => {
-      if (process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION !== 'p7b-authorized-v1' || !fsSync.existsSync(sessionPath)) {
+      if (process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV] !== STORAGE_CUTOFF_AUTHORIZATION_VALUE || !fsSync.existsSync(sessionPath)) {
         return await operation();
       }
       const { barrier } = this.initializeFilesystemLifecycle();
@@ -724,7 +728,7 @@ export class BackendServer {
         this.sessionCatalog.setWriterAdmission(this.analyticsWriterAdmission);
         this.getSessionDir();
         this.initializeColdSessionStore();
-        if (process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION === 'p7b-authorized-v1') {
+        if (process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV] === STORAGE_CUTOFF_AUTHORIZATION_VALUE) {
           this.initializeFilesystemLifecycle();
         }
       });
@@ -2169,7 +2173,7 @@ export class BackendServer {
     store: SessionLifecycleStore;
     barrier: SessionFilesystemMutationBarrier;
   } {
-    if (process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION !== 'p7b-authorized-v1') {
+    if (process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV] !== STORAGE_CUTOFF_AUTHORIZATION_VALUE) {
       throw new BackendError('UNAVAILABLE', 'Filesystem lifecycle cutoff is not authorized.');
     }
     if (!this.lifecycleStore || !this.lifecycleBarrier) {
@@ -2271,7 +2275,7 @@ export class BackendServer {
    * second transcript for an already-owned operation after backend restart. */
   private resolvePendingCreateReplay(pendingCreateOperationId?: string): string | undefined {
     if (
-      process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION !== 'p7b-authorized-v1'
+      process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV] !== STORAGE_CUTOFF_AUTHORIZATION_VALUE
       || !pendingCreateOperationId
     ) return undefined;
     const operationId = pendingCreateOperationId;
@@ -2295,7 +2299,7 @@ export class BackendServer {
   }
 
   private registerNewSessionLifecycle(sessionPath: string, pendingCreateOperationId?: string): void {
-    if (process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION !== 'p7b-authorized-v1') return;
+    if (process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV] !== STORAGE_CUTOFF_AUTHORIZATION_VALUE) return;
     const { store, barrier } = this.initializeFilesystemLifecycle();
     const sessionId = resolveSessionIdentity(sessionPath).sessionId;
     barrier.runAdministrative(sessionId, 'coordinator-create-register', () => {
@@ -2334,7 +2338,7 @@ export class BackendServer {
     seam: string,
     operation: () => Promise<T>,
   ): Promise<T> {
-    if (process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION === 'p7b-authorized-v1') {
+    if (process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV] === STORAGE_CUTOFF_AUTHORIZATION_VALUE) {
       const { barrier } = this.initializeFilesystemLifecycle();
       const sessionId = resolveSessionIdentity(sessionPath).sessionId;
       return await barrier.runWriteMutationAsync(sessionId, seam, operation);
@@ -2390,7 +2394,7 @@ export class BackendServer {
 
   private async forgetSessionAdmitted(sessionPath: string, operationId?: string): Promise<void> {
     let lifecycle: { store: SessionLifecycleStore; sessionId: string; cleanupOperationId: string } | undefined;
-    if (process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION === 'p7b-authorized-v1') {
+    if (process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV] === STORAGE_CUTOFF_AUTHORIZATION_VALUE) {
       const requestedOperationId = operationId?.trim() || `private-close:${resolveSessionIdentity(sessionPath).sessionId}`;
       await this.closeSessionLifecycle(sessionPath, requestedOperationId, true);
       const store = this.initializeFilesystemLifecycle().store;
@@ -2994,7 +2998,7 @@ export class BackendServer {
           // A cold coordinator has no in-memory prompt state to fall back to,
           // so this write is strict: success means the choice will survive a
           // backend restart and be consumed when the worker is promoted.
-          if (process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION === 'p7b-authorized-v1') {
+          if (process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV] === STORAGE_CUTOFF_AUTHORIZATION_VALUE) {
             await this.initializeFilesystemLifecycle().barrier.runAdministrativeAsync(
               '__aggregate_session_prompt_settings__',
               'coordinator-prompt-toggles.aggregate',

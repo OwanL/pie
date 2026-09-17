@@ -92,13 +92,18 @@ function useFocusOnOpen(
   setActiveIndex: (index: number) => void,
   inputRef: { current: HTMLInputElement | null },
   setQuery: (value: string) => void,
+  resetNavigation: () => void,
 ) {
   useEffect(() => {
     if (!open) return;
-    // Start each open with a fresh filter and the current selection highlighted,
-    // so Enter on an untouched dropdown re-selects the active model (no-op).
+    // Start each open with a fresh filter and, when the current model is in
+    // the list, that row highlighted. When it is missing, highlight nothing:
+    // the first entry must never be pre-highlighted, because Enter could then
+    // silently commit a model the user never chose. A keyboard commit always
+    // requires an explicit action first (navigation or a typed filter).
     setQuery('');
-    setActiveIndex(selectedIndex >= 0 ? selectedIndex : 0);
+    resetNavigation();
+    setActiveIndex(selectedIndex >= 0 ? selectedIndex : -1);
     requestAnimationFrame(() => {
       inputRef.current?.focus();
     });
@@ -204,6 +209,10 @@ function useListKeyDown(
   setOpen: (value: boolean) => void,
   setActiveIndex: (updater: (prev: number) => number) => void,
   triggerRef: { current: HTMLButtonElement | null },
+  /** True once the user explicitly moved the highlight (arrows/Home/End or
+   *  pointer hover). Enter may also commit a typed-filter match. */
+  explicitHighlightRef: { current: boolean },
+  query: string,
 ) {
   return useCallback(
     (e: JSX.TargetedKeyboardEvent<HTMLInputElement>) => {
@@ -221,25 +230,34 @@ function useListKeyDown(
       e.preventDefault();
       switch (action) {
         case 'next':
+          explicitHighlightRef.current = true;
           setActiveIndex((i) => Math.min(entries.length - 1, i + 1));
           break;
         case 'prev':
+          explicitHighlightRef.current = true;
           setActiveIndex((i) => Math.max(0, i - 1));
           break;
         case 'first':
+          explicitHighlightRef.current = true;
           setActiveIndex(() => 0);
           break;
         case 'last':
+          explicitHighlightRef.current = true;
           setActiveIndex(() => entries.length - 1);
           break;
         case 'select': {
+          // Enter must be an explicit model choice: either the user moved the
+          // highlight (keys or pointer) or typed a filter query. Enter on an
+          // untouched dropdown — including one whose current model is missing
+          // from the list — must never silently commit an entry.
+          if (!explicitHighlightRef.current && query.trim() === '') break;
           const entry = entries[activeIndex];
           if (entry) handleSelect(formatModelSpec(entry.model));
           break;
         }
       }
     },
-    [entries, activeIndex, handleSelect],
+    [entries, activeIndex, handleSelect, explicitHighlightRef, query],
   );
 }
 
@@ -259,6 +277,13 @@ function useModelPicker({
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(-1);
   const [query, setQuery] = useState('');
+  // An explicit user action that moves the highlight (arrow keys, Home/End,
+  // pointer hover). Enter commits only after one of these, or after the user
+  // typed a filter query. Reset on every open.
+  const explicitHighlightRef = useRef(false);
+  const resetNavigation = useCallback(() => {
+    explicitHighlightRef.current = false;
+  }, []);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -280,7 +305,7 @@ function useModelPicker({
     );
   }, [entries, query]);
 
-  useFocusOnOpen(open, selectedIndex, setActiveIndex, inputRef, setQuery);
+  useFocusOnOpen(open, selectedIndex, setActiveIndex, inputRef, setQuery, resetNavigation);
   useClickOutside(open, setOpen, triggerRef, listRef);
   useDropdownPosition(open, dropdownDirection, listRef, triggerRef, compact);
   useScrollActiveItem(open, activeIndex, itemRefs);
@@ -296,10 +321,19 @@ function useModelPicker({
 
   const handleSelect = useHandleSelect(onChange, setOpen, triggerRef);
   const onTriggerKeyDown = useTriggerKeyDown(setOpen);
-  const onListKeyDown = useListKeyDown(filteredEntries, activeIndex, handleSelect, setOpen, setActiveIndex, triggerRef);
+  const onListKeyDown = useListKeyDown(filteredEntries, activeIndex, handleSelect, setOpen, setActiveIndex, triggerRef, explicitHighlightRef, query);
   const onSearchInput = useCallback((e: JSX.TargetedEvent<HTMLInputElement>) => {
     setQuery(e.currentTarget.value);
+    // Typeahead: the first filtered match becomes the commit candidate. This
+    // is itself an explicit user action (a typed query), so Enter may commit
+    // it even without arrow-key navigation.
     setActiveIndex(0);
+  }, []);
+  // Pointer hover is an explicit pointing action; hovering a row then pressing
+  // Enter commits the hovered row, mirroring focus-follows-mouse.
+  const onRowPointerEnter = useCallback((index: number) => {
+    explicitHighlightRef.current = true;
+    setActiveIndex(index);
   }, []);
 
   const activeDescendant =
@@ -321,6 +355,7 @@ function useModelPicker({
     onTriggerKeyDown,
     onListKeyDown,
     onSearchInput,
+    onRowPointerEnter,
     query,
     filteredEntries,
     activeDescendant,
@@ -442,7 +477,9 @@ interface ModelPickerDropdownProps {
   activeIndex: number;
   idBase: string;
   handleSelect: (modelId: string) => void;
-  setActiveIndex: (index: number) => void;
+  /** Explicit pointer highlight; also marks the highlight as user-chosen so
+   *  Enter can commit the hovered row. */
+  onRowPointerEnter: (index: number) => void;
   itemRefs: { current: (HTMLDivElement | null)[] };
   query: string;
   onSearchInput: (e: JSX.TargetedEvent<HTMLInputElement>) => void;
@@ -462,7 +499,7 @@ function ModelPickerDropdown({
   activeIndex,
   idBase,
   handleSelect,
-  setActiveIndex,
+  onRowPointerEnter,
   itemRefs,
   query,
   onSearchInput,
@@ -516,7 +553,7 @@ function ModelPickerDropdown({
                 isActive={isActive}
                 optionId={optionId}
                 setItemRef={(el) => { itemRefs.current[i] = el; }}
-                onMouseEnter={() => setActiveIndex(i)}
+                onMouseEnter={() => onRowPointerEnter(i)}
                 onMouseDown={(e) => {
                   // Keep the combobox focused until click commits the option.
                   e.preventDefault();
@@ -569,7 +606,7 @@ export function ModelPicker({
       activeIndex={state.activeIndex}
       idBase={state.idBase}
       handleSelect={state.handleSelect}
-      setActiveIndex={state.setActiveIndex}
+      onRowPointerEnter={state.onRowPointerEnter}
       itemRefs={state.itemRefs}
       query={state.query}
       onSearchInput={state.onSearchInput}

@@ -816,7 +816,6 @@ test('a control timeout reports why the worker was killed, not a bare SIGTERM', 
     // The fixture never acknowledges within this window, so the supervisor must
     // escalate exactly as it would in production after 30 seconds.
     controlRequestTimeoutMs: 200,
-    rehearsalAcknowledgementDelayMs: 5_000,
   });
   try {
     await supervisor.start();

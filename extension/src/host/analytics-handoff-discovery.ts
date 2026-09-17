@@ -1,40 +1,16 @@
-import { createConnection, type Socket } from 'node:net';
 import { open, opendir } from 'node:fs/promises';
 import path from 'node:path';
 
-import {
-  createSignedAnalyticsHandoffRequest,
-  verifyAnalyticsHandoffResponse,
-  ANALYTICS_HANDOFF_MAX_FRAME_BYTES,
-  ANALYTICS_HANDOFF_MAX_STATUS_HOSTS,
-  ANALYTICS_HANDOFF_MAX_STATUS_BYTES,
-  type AnalyticsHandoffControlRequest,
-  type AnalyticsHandoffHostIdentity,
-  type AnalyticsHandoffStatus,
-} from '../../../shared/analytics/handoff.js';
 import type {
   AnalyticsHostPage,
   AnalyticsHostRecord,
   SessionLifecycleStore,
 } from '../backend/session-lifecycle-store.js';
 import {
-  parseWindowsProcessCensus,
-  parseWindowsProcessCreationDate,
-  parseWindowsProcessOwnerRows,
   readProcessCensus,
-  readWindowsProcessOwners,
   type BackendProcessOwnerEvidence,
   type ProcessOwnerReadResult,
 } from './analytics-process-census.js';
-
-export {
-  parseWindowsProcessCensus,
-  parseWindowsProcessCreationDate,
-  parseWindowsProcessOwnerRows,
-  readProcessCensus,
-  readWindowsProcessOwners,
-};
-export type { BackendProcessOwnerEvidence, ProcessBirthEvidence, ProcessOwnerReadResult } from './analytics-process-census.js';
 
 const RUNTIME_SCHEMA = 1;
 const MAX_LEASE_FILES = 512;
@@ -91,13 +67,7 @@ export type AnalyticsDiscoveryReasonCode =
   | 'backend-analytics-generation-mismatch'
   | 'backend-owner-identity-invalid'
   | 'backend-process-ambiguous'
-  | 'process-pid-ambiguous'
-  | 'host-authentication-probe-unwired'
-  | 'host-authentication-endpoint-missing'
-  | 'host-authentication-key-missing'
-  | 'host-authentication-failed'
-  | 'host-authentication-identity-mismatch'
-  | 'host-authentication-status-invalid';
+  | 'process-pid-ambiguous';
 
 export interface AnalyticsDiscoveryReason {
   code: AnalyticsDiscoveryReasonCode;
@@ -108,19 +78,6 @@ export interface AnalyticsDiscoveryReason {
 
 export interface RuntimeLeaseReadResult {
   leases: readonly RuntimeLeaseEvidence[];
-  complete: boolean;
-  reasons: readonly AnalyticsDiscoveryReason[];
-}
-
-export interface AuthenticatedHostStatusEvidence {
-  hostInstanceId: string;
-  processId: number;
-  /** The identity returned by the host after its response MAC was verified. */
-  observedHost: AnalyticsHandoffStatus['host'];
-}
-
-export interface AuthenticatedHostStatusReadResult {
-  statuses: readonly AuthenticatedHostStatusEvidence[];
   complete: boolean;
   reasons: readonly AnalyticsDiscoveryReason[];
 }
@@ -155,11 +112,6 @@ export interface AnalyticsHostDiscoveryOptions {
   allowAbsentAnalyticsDescriptor?: boolean;
   readRuntimeLeases?: () => Promise<RuntimeLeaseReadResult>;
   readProcessOwners?: () => Promise<ProcessOwnerReadResult>;
-  /** Production callers set this so registry/process evidence is also
-   * corroborated by a signed, per-host status response. The default preserves
-   * the older read-only diagnostic seam used by host-local startup reporting. */
-  requireAuthenticatedHostStatus?: boolean;
-  readAuthenticatedHostStatus?: (host: AnalyticsHostRecord) => Promise<AuthenticatedHostStatusEvidence>;
   /** Terminal rows are retained as durable history. A post-restart or later
    * handoff may explicitly reconcile only current registered hosts, while any
    * live process/lease/backend belonging to a terminal row still remains an
@@ -173,8 +125,6 @@ export interface AnalyticsHostDiscoveryResult {
   registryComplete: boolean;
   runtimeLeasesComplete: boolean;
   processOwnersComplete: boolean;
-  authenticatedHostsComplete?: boolean;
-  authenticatedHosts?: readonly AuthenticatedHostStatusEvidence[];
   hosts: readonly AnalyticsHostDiscoveryRecord[];
   unregisteredRuntimeLeases: readonly RuntimeLeaseEvidence[];
   unregisteredBackendOwners: readonly BackendProcessOwnerEvidence[];
@@ -311,312 +261,6 @@ export async function readRuntimeLeaseEvidence(
   return { leases, complete: reasons.length === 0, reasons };
 }
 
-const MAX_AUTHENTICATED_PROBE_TIMEOUT_MS = 10_000;
-const DEFAULT_AUTHENTICATED_PROBE_TIMEOUT_MS = 5_000;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function boundedProbeTimeout(value: number | undefined): number {
-  if (value === undefined || !Number.isFinite(value)) return DEFAULT_AUTHENTICATED_PROBE_TIMEOUT_MS;
-  return Math.min(MAX_AUTHENTICATED_PROBE_TIMEOUT_MS, Math.max(1, Math.floor(value)));
-}
-
-function boundedProbeString(value: unknown, label: string, maximum = 512): string {
-  if (typeof value !== 'string' || value.length === 0 || value.length > maximum || value.includes('\u0000')) {
-    throw new Error(`${label} is invalid.`);
-  }
-  return value;
-}
-
-function boundedStatusHost(value: unknown): AnalyticsHandoffStatus['host'] {
-  if (!isRecord(value)) throw new Error('authenticated host status identity is invalid.');
-  const state = value.state;
-  if (state !== 'registered' && state !== 'stopping' && state !== 'stopped' && state !== 'unsupported') {
-    throw new Error('authenticated host status state is invalid.');
-  }
-  const processId = value.processId;
-  if (!isPositivePid(processId)) throw new Error('authenticated host status processId is invalid.');
-  if (!Array.isArray(value.capabilities) || value.capabilities.length > 64
-    || value.capabilities.some((capability) => typeof capability !== 'string' || capability.length === 0 || capability.length > 128)) {
-    throw new Error('authenticated host status capabilities are invalid.');
-  }
-  boundedProbeString(value.hostInstanceId, 'authenticated hostInstanceId');
-  boundedProbeString(value.workspaceId, 'authenticated workspaceId');
-  boundedProbeString(value.generationId, 'authenticated generationId');
-  boundedProbeString(value.buildId, 'authenticated buildId');
-  boundedProbeString(value.registeredAtMs, 'authenticated registeredAtMs');
-  boundedProbeString(value.heartbeatAtMs, 'authenticated heartbeatAtMs');
-  boundedProbeString(value.updatedAtMs, 'authenticated updatedAtMs');
-  if (value.endpointName !== undefined) boundedProbeString(value.endpointName, 'authenticated endpointName');
-  if (value.stoppedAtMs !== undefined) boundedProbeString(value.stoppedAtMs, 'authenticated stoppedAtMs');
-  if (value.unsupportedReason !== undefined) boundedProbeString(value.unsupportedReason, 'authenticated unsupportedReason', 1_024);
-  return value as unknown as AnalyticsHandoffStatus['host'];
-}
-
-function parseAuthenticatedStatus(value: unknown): AnalyticsHandoffStatus {
-  if (!isRecord(value)
-    || !Array.isArray(value.hosts)
-    || value.hosts.length > ANALYTICS_HANDOFF_MAX_STATUS_HOSTS
-    || typeof value.truncated !== 'boolean'
-    || value.allHostsHandoffAvailable !== false
-    || !isRecord(value.inventoryProof)) {
-    throw new Error('authenticated host status payload is invalid.');
-  }
-  const serialized = JSON.stringify(value);
-  if (typeof serialized !== 'string' || Buffer.byteLength(serialized, 'utf8') > ANALYTICS_HANDOFF_MAX_STATUS_BYTES) {
-    throw new Error('authenticated host status payload exceeds its bound.');
-  }
-  const host = boundedStatusHost(value.host);
-  const hosts = value.hosts.map((entry) => boundedStatusHost(entry));
-  if (value.nextCursor !== undefined) boundedProbeString(value.nextCursor, 'authenticated status cursor', 128);
-  return {
-    host,
-    hosts,
-    truncated: value.truncated,
-    ...(value.nextCursor === undefined ? {} : { nextCursor: value.nextCursor as string }),
-    inventoryProof: value.inventoryProof as unknown as AnalyticsHandoffStatus['inventoryProof'],
-    allHostsHandoffAvailable: false,
-  };
-}
-
-function sameAuthenticatedHostIdentity(
-  expected: AnalyticsHostRecord,
-  observed: AnalyticsHandoffHostIdentity & { state: AnalyticsHandoffStatus['host']['state'] },
-): boolean {
-  return observed.hostInstanceId === expected.hostInstanceId
-    && observed.workspaceId === expected.workspaceId
-    && observed.generationId === expected.generationId
-    && observed.buildId === expected.buildId
-    && observed.processId === expected.processId
-    && observed.endpointName === expected.endpointName
-    && observed.state === expected.state;
-}
-
-export class AnalyticsHostProbeError extends Error {
-  constructor(
-    readonly code: Extract<AnalyticsDiscoveryReasonCode,
-      | 'host-authentication-endpoint-missing'
-      | 'host-authentication-key-missing'
-      | 'host-authentication-failed'
-      | 'host-authentication-identity-mismatch'
-      | 'host-authentication-status-invalid'>,
-    message: string,
-  ) {
-    super(message);
-    this.name = 'AnalyticsHostProbeError';
-  }
-}
-
-export interface AnalyticsHandoffFrameSender {
-  (endpointName: string, request: AnalyticsHandoffControlRequest, timeoutMs: number): Promise<unknown>;
-}
-
-export interface AnalyticsBoundedFrameSender {
-  (endpointName: string, request: object, timeoutMs: number): Promise<unknown>;
-}
-
-/** Send one bounded request frame to a host-owned named pipe. The default is
- * the production transport; tests can inject a sender without opening a live
- * socket. */
-export function sendBoundedAnalyticsFrame(
-  endpointName: string,
-  request: object,
-  timeoutMs = DEFAULT_AUTHENTICATED_PROBE_TIMEOUT_MS,
-): Promise<unknown> {
-  const endpoint = boundedProbeString(endpointName, 'handoff endpoint', 1_024);
-  const timeout = boundedProbeTimeout(timeoutMs);
-  const frame = `${JSON.stringify(request)}\n`;
-  if (Buffer.byteLength(frame, 'utf8') > ANALYTICS_HANDOFF_MAX_FRAME_BYTES) {
-    return Promise.reject(new Error('handoff request exceeds its frame bound.'));
-  }
-  return new Promise((resolve, reject) => {
-    let buffer = '';
-    let settled = false;
-    const socket: Socket = createConnection(endpoint);
-    const finish = (error?: Error, value?: unknown): void => {
-      if (settled) return;
-      settled = true;
-      if (error) reject(error);
-      else resolve(value);
-      socket.destroy();
-    };
-    socket.setEncoding('utf8');
-    socket.setTimeout(timeout, () => finish(new Error('authenticated handoff probe timed out.')));
-    socket.once('error', (error) => finish(error instanceof Error ? error : new Error(String(error))));
-    socket.once('close', () => {
-      if (!settled) finish(new Error('authenticated handoff endpoint closed without a response.'));
-    });
-    socket.on('data', (chunk: string) => {
-      buffer += chunk;
-      if (Buffer.byteLength(buffer, 'utf8') > ANALYTICS_HANDOFF_MAX_FRAME_BYTES) {
-        finish(new Error('authenticated handoff response exceeds its frame bound.'));
-        return;
-      }
-      const newline = buffer.indexOf('\n');
-      if (newline < 0) return;
-      const line = buffer.slice(0, newline);
-      const trailing = buffer.slice(newline + 1);
-      if (trailing.length > 0) {
-        finish(new Error('authenticated handoff response contains more than one frame.'));
-        return;
-      }
-      try {
-        finish(undefined, JSON.parse(line) as unknown);
-      } catch (error) {
-        finish(error instanceof Error ? error : new Error(String(error)));
-      }
-    });
-    socket.once('connect', () => {
-      try {
-        socket.end(frame);
-      } catch (error) {
-        finish(error instanceof Error ? error : new Error(String(error)));
-      }
-    });
-  });
-}
-
-export function sendAuthenticatedAnalyticsHandoffFrame(
-  endpointName: string,
-  request: AnalyticsHandoffControlRequest,
-  timeoutMs = DEFAULT_AUTHENTICATED_PROBE_TIMEOUT_MS,
-): Promise<unknown> {
-  return sendBoundedAnalyticsFrame(endpointName, request, timeoutMs);
-}
-
-export interface AuthenticatedAnalyticsHostProbeOptions {
-  timeoutMs?: number;
-  now?: () => number;
-  send?: AnalyticsHandoffFrameSender;
-}
-
-/** Probe one registered host using its out-of-band per-boot key and verify the
- * returned host identity. A registry row or an open pipe without this MAC
- * check is never accepted as host evidence. */
-export async function probeAuthenticatedAnalyticsHostStatus(
-  host: AnalyticsHostRecord,
-  key: string | undefined,
-  options: AuthenticatedAnalyticsHostProbeOptions = {},
-): Promise<AuthenticatedHostStatusEvidence> {
-  if (!host.endpointName) {
-    throw new AnalyticsHostProbeError('host-authentication-endpoint-missing', `Host ${host.hostInstanceId} has no authenticated endpoint.`);
-  }
-  if (typeof key !== 'string' || key.trim().length === 0) {
-    throw new AnalyticsHostProbeError('host-authentication-key-missing', `Host ${host.hostInstanceId} has no authenticated handoff key.`);
-  }
-  const now = options.now ?? Date.now;
-  const issuedAtMs = now();
-  const request = createSignedAnalyticsHandoffRequest('status', {
-    workspaceId: host.workspaceId,
-    limit: 1,
-  }, key, { issuedAtMs });
-  let raw: unknown;
-  try {
-    raw = await (options.send ?? sendAuthenticatedAnalyticsHandoffFrame)(
-      host.endpointName,
-      request,
-      boundedProbeTimeout(options.timeoutMs),
-    );
-  } catch (error) {
-    if (error instanceof AnalyticsHostProbeError) throw error;
-    throw new AnalyticsHostProbeError(
-      'host-authentication-failed',
-      `Host ${host.hostInstanceId} did not answer its authenticated status probe: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-  let response;
-  try {
-    response = verifyAnalyticsHandoffResponse(raw, key);
-  } catch {
-    throw new AnalyticsHostProbeError(
-      'host-authentication-failed',
-      `Host ${host.hostInstanceId} returned an unauthenticated status response.`,
-    );
-  }
-  if (response.requestId !== request.requestId || response.ok !== true) {
-    throw new AnalyticsHostProbeError(
-      'host-authentication-failed',
-      `Host ${host.hostInstanceId} returned a rejected or stale status response.`,
-    );
-  }
-  let status: AnalyticsHandoffStatus;
-  try {
-    status = parseAuthenticatedStatus(response.result);
-  } catch (error) {
-    throw new AnalyticsHostProbeError(
-      'host-authentication-status-invalid',
-      `Host ${host.hostInstanceId} returned an invalid status payload: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-  if (!sameAuthenticatedHostIdentity(host, status.host)) {
-    throw new AnalyticsHostProbeError(
-      'host-authentication-identity-mismatch',
-      `Host ${host.hostInstanceId} returned a mismatched process or host identity.`,
-    );
-  }
-  return {
-    hostInstanceId: host.hostInstanceId,
-    processId: host.processId,
-    observedHost: status.host,
-  };
-}
-
-export function createAuthenticatedAnalyticsHostStatusProbe(options: {
-  keyForHost: (host: AnalyticsHostRecord) => string | undefined;
-  timeoutMs?: number;
-  now?: () => number;
-  send?: AnalyticsHandoffFrameSender;
-}): (host: AnalyticsHostRecord) => Promise<AuthenticatedHostStatusEvidence> {
-  return (host) => probeAuthenticatedAnalyticsHostStatus(
-    host,
-    options.keyForHost(host),
-    options,
-  );
-}
-
-/** Probe every registered host serially. The serial bound avoids opening an
- * unbounded socket fan-out while retaining exact per-host failure evidence. */
-export async function readAuthenticatedHostStatuses(
-  hosts: readonly AnalyticsHostRecord[],
-  probe: ((host: AnalyticsHostRecord) => Promise<AuthenticatedHostStatusEvidence>) | undefined,
-): Promise<AuthenticatedHostStatusReadResult> {
-  const statuses: AuthenticatedHostStatusEvidence[] = [];
-  const reasons: AnalyticsDiscoveryReason[] = [];
-  if (!probe) {
-    for (const host of hosts) {
-      reasons.push(reason('host-authentication-probe-unwired', {
-        hostInstanceId: host.hostInstanceId,
-        processId: host.processId,
-      }));
-    }
-    return { statuses, complete: hosts.length === 0, reasons };
-  }
-  for (const host of hosts) {
-    try {
-      const evidence = await probe(host);
-      if (!isRecord(evidence)
-        || evidence.hostInstanceId !== host.hostInstanceId
-        || evidence.processId !== host.processId
-        || !isRecord(evidence.observedHost)
-        || !sameAuthenticatedHostIdentity(host, evidence.observedHost as AuthenticatedHostStatusEvidence['observedHost'])) {
-        throw new AnalyticsHostProbeError(
-          'host-authentication-identity-mismatch',
-          `Host ${host.hostInstanceId} returned a mismatched process or host identity.`,
-        );
-      }
-      statuses.push(evidence);
-    } catch (error) {
-      const code = error instanceof AnalyticsHostProbeError
-        ? error.code
-        : 'host-authentication-status-invalid';
-      reasons.push(reason(code, { hostInstanceId: host.hostInstanceId, processId: host.processId }));
-    }
-  }
-  return { statuses, complete: reasons.length === 0 && statuses.length === hosts.length, reasons };
-}
-
 async function readHostRegistry(
   registry: Pick<SessionLifecycleStore, 'listAnalyticsHosts'>,
   workspaceId: string,
@@ -666,9 +310,7 @@ function dedupeReasons(reasons: readonly AnalyticsDiscoveryReason[]): AnalyticsD
 /**
  * Reconcile the existing host registry with runtime leases and the OS process
  * census. This is a read-only proof helper. It never changes registry state
- * or stops a process. Production callers may additionally opt into signed
- * per-host status probes; the result remains non-authorizing until the durable
- * all-host handoff coordinator consumes it.
+ * or stops a process, and its result is non-authorizing.
  */
 export async function discoverAnalyticsHostWriters(
   options: AnalyticsHostDiscoveryOptions,
@@ -677,31 +319,17 @@ export async function discoverAnalyticsHostWriters(
   const hosts = options.ignoreStoppedHosts
     ? registryResult.hosts.filter((host) => host.state !== 'stopped')
     : registryResult.hosts;
-  const [leaseResult, processResult, authenticatedResult] = await Promise.all([
+  const [leaseResult, processResult] = await Promise.all([
     options.readRuntimeLeases
       ? options.readRuntimeLeases()
       : readRuntimeLeaseEvidence(options.runtimeRootPath, options.runtimeIdentity),
     options.readProcessOwners ? options.readProcessOwners() : readProcessCensus(),
-    options.requireAuthenticatedHostStatus
-      ? readAuthenticatedHostStatuses(hosts, options.readAuthenticatedHostStatus)
-      : Promise.resolve({ statuses: [], complete: true, reasons: [] } satisfies AuthenticatedHostStatusReadResult),
   ]);
   const reasons: AnalyticsDiscoveryReason[] = [
     ...registryResult.reasons,
     ...leaseResult.reasons,
     ...processResult.reasons,
-    ...authenticatedResult.reasons,
   ];
-  const authenticatedByHostId = new Map(
-    authenticatedResult.statuses.map((status) => [status.hostInstanceId, status] as const),
-  );
-  const authenticatedReasonsByHostId = new Map<string, AnalyticsDiscoveryReason[]>();
-  for (const entry of authenticatedResult.reasons) {
-    if (!entry.hostInstanceId) continue;
-    const entries = authenticatedReasonsByHostId.get(entry.hostInstanceId) ?? [];
-    entries.push(entry);
-    authenticatedReasonsByHostId.set(entry.hostInstanceId, entries);
-  }
   const ambiguousHostPids = duplicateProcessIds(hosts, (entry) => entry.processId);
   for (const processId of ambiguousHostPids) {
     reasons.push(reason('host-process-ambiguous', { processId }));
@@ -772,17 +400,6 @@ export async function discoverAnalyticsHostWriters(
     if (host.state === 'stopping') addHostReason(reason('host-state-stopping'));
     if (host.state === 'unsupported') addHostReason(reason('host-state-unsupported'));
     if (host.state === 'stopped') addHostReason(reason('host-state-stopped'));
-    if (options.requireAuthenticatedHostStatus) {
-      const authenticated = authenticatedByHostId.get(host.hostInstanceId);
-      if (!authenticated) {
-        const authenticationReasons = authenticatedReasonsByHostId.get(host.hostInstanceId) ?? [
-          reason('host-authentication-status-invalid'),
-        ];
-        for (const entry of authenticationReasons) addHostReason(entry);
-      } else if (authenticated.processId !== host.processId) {
-        addHostReason(reason('host-authentication-identity-mismatch', { processId: host.processId }));
-      }
-    }
     if (ambiguousHostPids.has(host.processId)) {
       addHostReason(reason('host-process-ambiguous', { processId: host.processId }));
     }
@@ -823,8 +440,8 @@ export async function discoverAnalyticsHostWriters(
       if (!backend.analyticsHostInstanceId || !backend.analyticsGenerationId) {
         // First-ever activation: no canonical authority exists to reconcile a
         // descriptor against, so its absence is legitimate. This is the only
-        // waived check; process, lease, backend-owner, and authenticated
-        // identity evidence above are still fully required.
+        // waived check; process, lease, and backend-owner identity evidence
+        // above are still fully required.
         if (options.allowAbsentAnalyticsDescriptor !== true) {
           addHostReason(reason('backend-analytics-descriptor-missing', { processId: backend.backendProcessId }));
         }
@@ -867,13 +484,11 @@ export async function discoverAnalyticsHostWriters(
     registryComplete: registryResult.complete,
     runtimeLeasesComplete: leaseResult.complete,
     processOwnersComplete: processResult.complete,
-    authenticatedHostsComplete: authenticatedResult.complete,
-    authenticatedHosts: authenticatedResult.statuses,
     hosts: records,
     unregisteredRuntimeLeases,
     unregisteredBackendOwners,
     reasons: allReasons,
     complete: registryResult.complete && leaseResult.complete && processResult.complete
-      && authenticatedResult.complete && allReasons.length === 0,
+      && allReasons.length === 0,
   };
 }

@@ -8,7 +8,7 @@ A personal stack built around the [`pi` coding agent](https://www.npmjs.com/pack
 |---|---|---|
 | [`extension/`](extension) | *pie* — VS Code sidebar extension that surfaces a `pi` agent as chat | Built and packaged locally from source |
 | [`extensions/`](extensions) — e.g. [`subagent/`](extensions/subagent), [`cwd-skills/`](extensions/cwd-skills), [`skill-pruner/`](extensions/skill-pruner), [`safeguard/`](extensions/safeguard) | Reusable pi plugins (subagent delegation, cwd-scoped skill discovery, skill pruning, command safeguards, and more — see [`extensions/`](extensions) for the full set) | Loaded by `pi` via `settings.json` packages |
-| [`analysis/`](analysis) | Local DuckDB + static-site workspace for run analytics | Internal research tool |
+| [`analysis/`](analysis) | Local DuckDB query workspace over legacy run-analytics exports/stores | Internal research tool |
 | [`agents/`](agents), [`skills/`](skills), [`APPEND_SYSTEM.md`](APPEND_SYSTEM.md), [`settings.json`](settings.json) | Maintainer's personal pi config | Reference / example only |
 | [`data/`](data), [`auth.json`](#) | Local runtime/auth data | Local-only; excluded from the portable config |
 | [`docs/`](docs) | Design contracts and plans; start at [`docs/INDEX.md`](docs/INDEX.md) | Internal |
@@ -263,6 +263,8 @@ Keep **built**, **staged**, **loaded**, and **behavior verified** distinct. Stag
 
 ### Query local analytics
 
+Named batch queries run against the retained local DuckDB workspace, which reads privacy-safe legacy run-analytics exports and storage stores:
+
 ```bash
 # from repo root
 npm run analytics:build-db
@@ -271,10 +273,16 @@ npm run analytics:query -- --name core_runs
 
 Other analytics helpers from the repo root: `analytics:typecheck`, `analytics:test`, and `analytics:validate`.
 
+Runtime usage/cost questions are answered from the canonical SQLite store instead (see [Persistence and storage](#persistence-and-storage) and the [query-analytics skill](skills/query-analytics/SKILL.md)); the DuckDB workspace never reads or writes it.
+
 ## Persistence and storage
 
-- `data/outcomes/` is the machine-wide authority for this checkout, independent of cwd and VS Code workspace. It contains canonical session JSONL and workspace-sharded analytics stores.
-- Both installers pin `PI_CODING_AGENT_SESSION_DIR` to `data/outcomes/sessions/`.
+Pie has one OS-local runtime-data root, resolved from `PIE_DATA_DIR` or the platform default, holding `analytics/`, `sessions/`, `artifacts/`, `state/`, and `cache/`. See [docs/ANALYTICS_IMPLEMENTATION_CONTRACT.md](docs/ANALYTICS_IMPLEMENTATION_CONTRACT.md) for the layout and the authority rules.
+
+- Analytics have two authorities, and only one is active at a time: the legacy owners (`data/outcomes/<workspace-id>/` run analytics plus the workspace billable-invocation ledger and activity timeline) stay authoritative whenever the resolved state directory records no active canonical generation — no manifest, or a validated candidate/ready manifest. With a validated active generation, capture goes exclusively to `<data-root>/analytics/analytics.sqlite` and the legacy ledger is not written at all — never a dual-write, and no import of old analytics into the canonical store. A malformed or inconsistent activation state fails startup closed instead of falling back to legacy.
+- Privacy mode means delete on explicit session close: capture stays available while the session is open, and closing a private session deletes its captured analytics. Under legacy authority, privacy instead suppresses run analytics and scrubs existing records.
+- `data/outcomes/` is the machine-wide session authority for this checkout, independent of cwd and VS Code workspace. It contains canonical session JSONL and workspace-sharded analytics stores.
+- Both installers pin `PI_CODING_AGENT_SESSION_DIR` to `data/outcomes/sessions/`. The separate transcript-root switch that would move new sessions under `<data-root>/sessions/` is implemented behind the explicit `PIE_STORAGE_CUTOFF_AUTHORIZATION=p7b-authorized-v1` gate; nothing in this repository sets it, so do not assume it is in effect.
 - `data/` is git-ignored runtime data, not portable configuration. Do not cloud-sync it and never let two machines write to the same outcomes authority.
 - When an existing session environment points elsewhere, both installers merge its durable transcripts and completed run snapshots into the canonical authority. Retired review and closure files remain at their source; private close still scrubs the exact session from those legacy files before deleting its transcript.
 - Back up session data only to encrypted storage; transcripts can contain source code, prompts, paths, tool output, and secrets.
@@ -284,6 +292,8 @@ Other analytics helpers from the repo root: `analytics:typecheck`, `analytics:te
 | State | Default location | Override env var |
 |---|---|---|
 | Auth tokens | `%LOCALAPPDATA%\pie\auth.json` (Win) / `~/.config/pie/auth.json` (macOS/Linux) | `PI_CODING_AGENT_AUTH_DIR` |
+| Runtime data root | `%LOCALAPPDATA%\pie\data` (Win) / `~/Library/Application Support/pie/data` (macOS) / `${XDG_DATA_HOME:-~/.local/share}/pie/data` (Linux) | `PIE_DATA_DIR` |
+| Canonical analytics | `<data-root>/analytics/analytics.sqlite` (only under canonical activation) | `PIE_DATA_DIR` |
 | Sessions | `data/outcomes/sessions/` (in-tree, git-ignored) | `PI_CODING_AGENT_SESSION_DIR` |
 | Run analytics | `data/outcomes/<workspace-id>/` (globally aggregated) | `PIE_ANALYTICS_DIR` |
 
@@ -295,5 +305,7 @@ The backend logs resolved storage paths on startup via the `backend.ready` event
 - [develop-pie skill](skills/develop-pie/SKILL.md) — Pie-specific working conventions, commands, and architecture references
 - [docs/INDEX.md](docs/INDEX.md) — curated index of design docs and plans
 - [docs/STATE_CONTRACT.md](docs/STATE_CONTRACT.md) — authoritative host ↔ webview sync contract
+- [docs/ANALYTICS_IMPLEMENTATION_CONTRACT.md](docs/ANALYTICS_IMPLEMENTATION_CONTRACT.md) — analytics authority, data root, privacy and gated storage-cutoff contract
+- [query-analytics skill](skills/query-analytics/SKILL.md) — querying the canonical analytics store
 - [extension/README.md](extension/README.md) — extension design philosophy
-- [analysis/README.md](analysis/README.md) — analytics workspace details
+- [analysis/README.md](analysis/README.md) — local DuckDB analytics workspace

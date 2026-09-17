@@ -30,6 +30,10 @@ import {
 } from '../shared/protocol';
 import { deduplicateToolCallResultsForTransport } from '../shared/chat-message-parts';
 import { createOperationalIncident } from '../shared/incidents.js';
+import {
+  STORAGE_CUTOFF_AUTHORIZATION_ENV,
+  STORAGE_CUTOFF_AUTHORIZATION_VALUE,
+} from '../shared/storage-cutoff-authorization.js';
 import { compactDurableMessageForTransport, findDurableDetail } from '../shared/lazy-details';
 import { LIVE_PIPELINE_LIMITS } from '../shared/live-pipeline-protocol';
 import { deriveContextUsageEvidenceFromBranch } from './context-usage';
@@ -107,9 +111,6 @@ import {
   type AnalyticsTransportDisposalReport,
   type WorkerAnalyticsActivation,
 } from './analytics-worker-transport.js';
-
-export const PIE_STORAGE_CUTOFF_AUTHORIZATION_ENV = 'PIE_STORAGE_CUTOFF_AUTHORIZATION' as const;
-export const PIE_STORAGE_CUTOFF_AUTHORIZATION_VALUE = 'p7b-authorized-v1' as const;
 
 export interface WorkerRuntimePromotionPayload {
   sdkPath: string;
@@ -562,10 +563,10 @@ export class WorkerRuntimeHost {
         this.lifecycleStore,
         writerAdmission.identity,
       );
-    } else if (process.env[PIE_STORAGE_CUTOFF_AUTHORIZATION_ENV] === PIE_STORAGE_CUTOFF_AUTHORIZATION_VALUE) {
+    } else if (process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV] === STORAGE_CUTOFF_AUTHORIZATION_VALUE) {
       this.lifecycleStore = new SessionLifecycleStore(path.join(dataPaths.stateDir, 'session-lifecycle.sqlite'));
     }
-    if (process.env[PIE_STORAGE_CUTOFF_AUTHORIZATION_ENV] === PIE_STORAGE_CUTOFF_AUTHORIZATION_VALUE) {
+    if (process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV] === STORAGE_CUTOFF_AUTHORIZATION_VALUE) {
       if (!this.lifecycleStore) {
         this.lifecycleStore = new SessionLifecycleStore(path.join(dataPaths.stateDir, 'session-lifecycle.sqlite'));
       }

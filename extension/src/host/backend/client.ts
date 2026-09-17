@@ -7,6 +7,10 @@ import { resolvePieDataPaths } from '../../../../shared/pie-data-root';
 import { resolveHostSessionStoragePaths } from '../../shared/session-storage-paths';
 import { RequestTracker } from '../../shared/request-tracker';
 import { BACKEND_READY_TIMEOUT_MS } from '../../shared/backend-ready-timeout';
+import {
+  STORAGE_CUTOFF_AUTHORIZATION_ENV,
+  STORAGE_CUTOFF_AUTHORIZATION_VALUE,
+} from '../../shared/storage-cutoff-authorization';
 import { redactSensitiveText } from '../../shared/sensitive-redaction';
 import { bootTraceSync } from '../util/audit';
 import { toErrorMessage } from '../util/error-message';
@@ -366,7 +370,7 @@ export class BackendClient implements vscode.Disposable {
     delete backendEnv.PI_CODING_AGENT_DIR;
     delete backendEnv.PI_CODING_AGENT_SESSION_DIR;
     if (agentDirEnv) backendEnv.PI_CODING_AGENT_DIR = agentDirEnv;
-    if (process.env.PIE_STORAGE_CUTOFF_AUTHORIZATION === 'p7b-authorized-v1') {
+    if (process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV] === STORAGE_CUTOFF_AUTHORIZATION_VALUE) {
       backendEnv.PI_CODING_AGENT_SESSION_DIR = dataPaths.sessionsDir;
     } else if (sessionDirEnv) {
       backendEnv.PI_CODING_AGENT_SESSION_DIR = sessionDirEnv;

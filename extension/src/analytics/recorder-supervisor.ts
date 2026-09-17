@@ -96,8 +96,6 @@ export interface AnalyticsRecorderSupervisorOptions {
   /** One bounded helper replacement is the default normal failover policy.
    * Further outages stay visible and retain accepted capture for an owner. */
   maxAutomaticRestarts?: number;
-  /** Disposable qualification seam; production activation must omit it. */
-  rehearsalAcknowledgementDelayMs?: number;
   onDeliveryAcknowledged?: (measurement: {
     records: number;
     bytes: number;
@@ -1013,9 +1011,6 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
         PIE_ANALYTICS_DATABASE_PATH: this.options.databasePath,
         PIE_ANALYTICS_WORKER_INSTANCE_ID: instanceId,
         PIE_ANALYTICS_WORKER_SPAWNED_AT_MS: String(spawnedAtMs),
-        ...(this.options.rehearsalAcknowledgementDelayMs === undefined ? {} : {
-          PIE_ANALYTICS_REHEARSAL_ACK_DELAY_MS: String(this.options.rehearsalAcknowledgementDelayMs),
-        }),
       },
       serialization: 'advanced',
       stdio: ['ignore', 'ignore', 'pipe', 'ipc'],

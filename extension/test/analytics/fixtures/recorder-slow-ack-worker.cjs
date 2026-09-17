@@ -4,7 +4,9 @@
 // The test asserts the supervisor reports the *real* cause rather than a bare
 // "(SIGTERM)", which is what a Windows `child.kill()` otherwise looks like.
 
-const delayMs = Math.max(0, Number(process.env.PIE_ANALYTICS_REHEARSAL_ACK_DELAY_MS ?? 0) || 0);
+// Fixed 5s delay: a control request with a short timeout must observe this
+// worker miss its acknowledgement window without any production delay switch.
+const delayMs = 5_000;
 
 const workerIdentity = {
   pid: process.pid,

@@ -79,7 +79,6 @@ if (!workerInstanceId || !Number.isSafeInteger(workerSpawnedAtMs) || workerSpawn
   throw new Error('Analytics recorder worker identity is required.');
 }
 const workerIdentity = Object.freeze({ pid: process.pid, spawnedAtMs: workerSpawnedAtMs, instanceId: workerInstanceId });
-const acknowledgementDelayMs = Math.max(0, Number(process.env.PIE_ANALYTICS_REHEARSAL_ACK_DELAY_MS ?? 0) || 0);
 const STARTUP_LOCK_RETRY_MS = 8_000;
 const STARTUP_LOCK_RETRY_MAX_DELAY_MS = 200;
 
@@ -97,9 +96,6 @@ function send(message: Record<string, unknown>): Promise<void> {
 }
 
 async function acknowledge(requestId: number, receipt?: unknown): Promise<void> {
-  if (acknowledgementDelayMs > 0) {
-    await new Promise<void>((resolve) => setTimeout(resolve, acknowledgementDelayMs));
-  }
   await send({ type: 'ack', requestId, receipt });
 }
 

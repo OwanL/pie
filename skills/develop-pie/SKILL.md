@@ -18,12 +18,12 @@ Route to a specialized skill when the request matches one; this skill remains th
 | Path | Purpose |
 |---|---|
 | `extension/` | TypeScript VS Code extension: host, embedded Pi backend, Preact webview, and tests |
-| `extensions/` | Reusable Pi extensions/tools such as subagents, skill pruning, safeguards, session review, and computer-use |
+| `extensions/` | Reusable Pi extensions/tools such as subagents, skill pruning, safeguards, computer-use, and playwright |
 | `agents/` | Specialized subagent definitions |
 | `skills/` | On-demand workflows, including this one |
 | `models.yaml` | Source of truth for providers, models, pricing, eligibility, concurrency, retry policy, and seed selections |
 | `docs/` | Architecture contracts, active plans, operational references, and internal notes |
-| `analysis/` | Local DuckDB and static-site run analytics workspace |
+| `analysis/` | Retained local DuckDB query workspace over legacy run-analytics exports/stores |
 | `scripts/` | Repository build, test, model-sync, and install orchestration |
 | `settings.defaults.json` | Tracked portable defaults; model-owned fields are generated from `models.yaml` |
 | `settings.json` | Tracked, committed Pi runtime settings; model-owned fields are generated from `models.yaml`, chat and pruning selections are user-owned |
@@ -38,6 +38,7 @@ For setup, storage, and repository-wide workflows, see [`README.md`](../../READM
 - Older installations need `npm run extension:activate` once to install the startup loader. This command stages immutable loader files and updates the entrypoint for the next restart without replacing locked running bundles. Routine changes need only a successful build and a normal restart, not another installation command. SDK/dependency or extension manifest upgrades remain explicit package/install work.
 - For a user-reported bug, distinguish built, staged, loaded, and behavior verified. Check the staged generation and running build evidence, not just build success. A pending host update is not a live fix; tell the user it will load on their next normal restart. Do not mistake reopening the sidebar for restarting the extension host.
 - Treat [`docs/STATE_CONTRACT.md`](../../docs/STATE_CONTRACT.md) as authoritative for host↔webview synchronization. Contract changes require matching tests under `extension/test/`, including the sync-contract coverage.
+- Analytics have one active authority at a time, selected by the activation manifest: legacy (run analytics + billable ledger, the default) or canonical (the SQLite store under the resolved data root). Capture is never a dual-write between them. See [`docs/ANALYTICS_IMPLEMENTATION_CONTRACT.md`](../../docs/ANALYTICS_IMPLEMENTATION_CONTRACT.md) before changing capture, privacy, or storage paths; the `PIE_STORAGE_CUTOFF_AUTHORIZATION` cutoff and any activation must not be described as active without evidence.
 - Keep the host architecture CQRS/Elm-style MVI: pure reducer, one effect runner, passive webview, explicit session addressing, and `Record<string, T>` host collections rather than `Map`/`Set`.
 - Preserve unrelated working-tree changes. Generated or user-owned files may already be modified; inspect status and focused diffs before finishing.
 
@@ -76,7 +77,7 @@ npm run extension:build:validate            # compile/validate without publishin
 npm run extension:activate                  # one-time startup loader setup or explicit upgrade
 npm run extension:package                   # build a .vsix from the root
 npm run extension:test:browser              # extension Playwright browser suite
-npm run analytics:query -- --name core_runs # query the local analytics database
+npm run analytics:query -- --name core_runs # query the retained DuckDB workspace (legacy run-analytics sources)
 npm run doctor                              # non-destructive installation/config check
 ```
 
@@ -103,6 +104,7 @@ Choose focused tests while iterating, then run checks proportionate to the chang
 
 - [`docs/ARCHITECTURE.md`](../../docs/ARCHITECTURE.md) — primary system architecture, data flow, extension points, and invariants
 - [`docs/STATE_CONTRACT.md`](../../docs/STATE_CONTRACT.md) — authoritative host↔webview state contract
+- [`docs/ANALYTICS_IMPLEMENTATION_CONTRACT.md`](../../docs/ANALYTICS_IMPLEMENTATION_CONTRACT.md) — analytics authority, data root, privacy, and the gated storage cutoff
 - [`docs/internal/ARCH-OVERVIEW.md`](../../docs/internal/ARCH-OVERVIEW.md) — concise spine-file map and glossary
 - [`extension/README.md`](../../extension/README.md) — UI design philosophy and local GUI workflow
 

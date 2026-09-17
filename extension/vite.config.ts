@@ -89,45 +89,11 @@ export default defineConfig(({ mode }) => {
             extension: path.join(srcDir, 'extension.ts'),
             backend: path.join(srcDir, 'backend', 'index.ts'),
             'worker-entry': path.join(srcDir, 'backend', 'worker-entry.ts'),
+            // Spawned as separate worker scripts by the running host, so these
+            // must stay emitted files rather than modules bundled only into
+            // extension.js.
             'analytics-recorder-worker': path.join(srcDir, 'analytics', 'recorder-worker-entry.ts'),
-            'analytics-recorder-supervisor': path.join(srcDir, 'analytics', 'recorder-supervisor.ts'),
             'analytics-query-worker': path.join(srcDir, 'analytics', 'query-worker-entry.ts'),
-            'analytics-query-client': path.join(srcDir, 'analytics', 'query-client.ts'),
-            'analytics-sqlite-recorder': path.join(srcDir, 'analytics', 'sqlite-recorder.ts'),
-            'analytics-candidate-trial': path.join(srcDir, 'analytics', 'candidate-trial-report.ts'),
-            // Emitted as entries, not only bundled into extension.js, so the
-            // detached one-shot activation helper can import the activation
-            // store and sequence directly. A module reachable only from
-            // extension.js is tree-shaken into it and has no exports to import.
-            'analytics-activation-store': path.join(srcDir, 'analytics', 'activation-store.ts'),
-            'analytics-activation-sequence': path.join(srcDir, 'analytics', 'activation-sequence.ts'),
-            // Production cutover/preflight adapters are emitted as explicit
-            // entries so the detached helper imports the real OS census,
-            // authenticated host probes, and all-host coordinator rather than
-            // an injectable-only test wrapper.
-            'analytics-production-adapters': path.join(srcDir, 'host', 'analytics-production-adapters.ts'),
-            'analytics-cutover-orchestrator': path.join(srcDir, 'host', 'analytics-cutover-orchestrator.ts'),
-            // Emitted so the one-shot controlled-restart owner signs and verifies
-            // the real terminal-handoff ingress protocol rather than a
-            // reimplementation that could drift from the host endpoint.
-            'analytics-controlled-restart': path.join(srcDir, 'host', 'analytics-controlled-restart.ts'),
-            // Emitted so the owner's focused test fixture serves the real
-            // authenticated host-control endpoint it must coordinate.
-            'analytics-handoff-control': path.join(srcDir, 'host', 'analytics-handoff-control.ts'),
-            // Emitted with the control endpoint so the fixture's host carries
-            // the real writer-fence capability the census requires.
-            'analytics-all-host-handoff': path.join(srcDir, 'host', 'analytics-all-host-handoff.ts'),
-            // Emitted so focused host-discovery tooling can use the same
-            // bounded process census without importing the extension entry.
-            'analytics-handoff-discovery': path.join(srcDir, 'host', 'analytics-handoff-discovery.ts'),
-            'analytics-process-census': path.join(srcDir, 'host', 'analytics-process-census.ts'),
-            // Emitted so the activation helper can perform and verify the storage
-            // cutoff through the same code the backend uses, rather than a
-            // reimplementation that could drift from the real close barriers.
-            'storage-cutoff': path.join(srcDir, 'backend', 'storage-cutoff.ts'),
-            'storage-cutoff-production': path.join(srcDir, 'backend', 'storage-cutoff-production.ts'),
-            'session-lifecycle-store': path.join(srcDir, 'backend', 'session-lifecycle-store.ts'),
-            'session-filesystem-lifecycle': path.join(srcDir, 'backend', 'session-filesystem-lifecycle.ts'),
             'cold-browse-helper-entry': path.join(srcDir, 'backend', 'cold-browse-helper-entry.ts'),
             'initial-context-estimate-worker': path.join(srcDir, 'backend', 'initial-context-estimate-worker.ts'),
             'phase4-worker-command-extension': path.join(rootDir, 'test', 'fixtures', 'phase4-worker-command-extension.ts'),

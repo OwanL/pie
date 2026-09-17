@@ -68,7 +68,7 @@ import type { CanonicalExecutionLatestRun } from '../analytics/execution-summary
 export interface AggregateStatsServiceDeps {
   getArchState: () => ArchState;
   statsService: StatsServicePort;
-  /** Process-local rehearsal gate. Normal operation is enabled by default. */
+  /** Optional process-local disable gate; normal operation is enabled by default. */
   enabled?: boolean;
   tokenRateService: TokenRateService;
   /** Resolve the agent dir containing `models.json` and the generated

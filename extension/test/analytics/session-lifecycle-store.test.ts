@@ -803,6 +803,41 @@ test('cross-host lock recovery serializes one session without blocking an unrela
   }
 });
 
+test('mutation barrier rejects malformed, cross-session, and invalid-PID owner evidence', () => {
+  const now = { value: 30_000 };
+  const fixture = lifecycleFixture(now);
+  const cases = [
+    {
+      sessionId: 'malformed-owner',
+      owner: { schema: 1, pid: 999_999, token: 'owner-token', sessionId: 'malformed-owner' },
+    },
+    {
+      sessionId: 'unrelated-owner',
+      owner: { schema: 1, pid: 999_999, token: 'owner-token', sessionId: 'another-session', acquiredAtMs: 0 },
+    },
+    {
+      sessionId: 'invalid-pid-owner',
+      owner: { schema: 1, pid: 0, token: 'owner-token', sessionId: 'invalid-pid-owner', acquiredAtMs: 0 },
+    },
+  ] as const;
+  try {
+    for (const { sessionId, owner } of cases) {
+      const key = createHash('sha256').update(sessionId).digest('hex');
+      const lockPath = path.join(fixture.temp.root, 'locks', `${key}.lock`);
+      mkdirSync(lockPath, { recursive: true });
+      writeFileSync(path.join(lockPath, 'owner.json'), `${JSON.stringify(owner)}\n`);
+      assert.throws(
+        () => fixture.barrier.runAdministrative(sessionId, 'owner-evidence-test', () => undefined),
+        /owner evidence/,
+      );
+      assert.equal(existsSync(lockPath), true, `unsafe owner lock was reclaimed for ${sessionId}`);
+    }
+  } finally {
+    fixture.store.close();
+    rmSync(fixture.temp.root, { recursive: true, force: true });
+  }
+});
+
 test('a copied session gets independent open privacy/lifecycle state and a closed source cannot reopen', () => {
   const temp = tempDatabase();
   const store = new SessionLifecycleStore(temp.databasePath);

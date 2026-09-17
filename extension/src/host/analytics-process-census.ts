@@ -244,7 +244,3 @@ export async function readProcessCensus(): Promise<ProcessOwnerReadResult> {
   }
   return parseWindowsProcessCensus(parsed);
 }
-
-/** Compatibility name retained for the existing discovery seam. */
-export const readBoundedProcessCensus = readProcessCensus;
-export const readWindowsProcessOwners = readProcessCensus;

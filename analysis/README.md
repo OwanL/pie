@@ -25,7 +25,8 @@ explicit source is omitted in test and development flows. Prepared rows retain
 unknown values as null and preserve privacy safe hashes; raw prompts, paths,
 tool output, and review material are not part of this package output.
 
-The source reader supports the versioned export and storage formats documented
-in the analytics implementation contract. Storage discovery is explicit and
-does not search outside the selected outcomes root. DuckDB staging files remain
-in the selected exports directory so the build inputs can be inspected.
+The source reader supports the versioned export and storage formats defined by
+`shared/run-analytics-contracts.ts` (`RUN_ANALYTICS_SCHEMA_VERSION`). Storage
+discovery is explicit and does not search outside the selected outcomes root.
+DuckDB staging files remain in the selected exports directory so the build
+inputs can be inspected.
