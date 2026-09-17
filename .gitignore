@@ -116,5 +116,6 @@ NUL
 /settings.json.pie-lock
 .skylos/cache/grep_results.json
 
-# Temporary SDK test worktrees (may survive interrupted runs)
+# Temporary test dirs under extension/ (may survive interrupted runs)
 /extension/.pie-sdk-*/
+/extension/.pie-phase4-*/

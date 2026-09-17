@@ -188,7 +188,7 @@ npm run doctor
 
 Dependency updates arrive as monthly Dependabot pull requests for each tracked lockfile root. Review and test those changes; do not run unpinned global upgrades independently on each machine.
 
-See [SECURITY.md](SECURITY.md) before sharing a checkout or backing up local state.
+See [Persistence and storage](#persistence-and-storage) below before sharing a checkout or backing up local state.
 
 ## Quick start
 
