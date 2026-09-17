@@ -214,6 +214,62 @@ test('ordinary restart registration rotates an open writer census before startup
   }
 });
 
+test('transient writer census rotation conflict leaves a fresh host registered, not unsupported', async () => {
+  const temporary = temporaryStore();
+  const workspaceId = 'workspace-unit-transient-conflict';
+  // A displaced predecessor remains wedged in `stopping` (e.g. previous host
+  // was killed mid-shutdown). Rotation of the open census therefore refuses,
+  // independent of the freshly booted successor.
+  const wedged = {
+    hostInstanceId: 'host-unit-wedged', workspaceId,
+    generationId: 'generation-unit-wedged', buildId: 'build-unit-1',
+    processId: process.pid + 200,
+  } as const;
+  temporary.store.registerAnalyticsHost({
+    ...wedged,
+    capabilities: ['authenticated-control', 'writer-fence'],
+    registeredAtMs: '1',
+  });
+  const fence = temporary.store.beginAnalyticsWriterFence({
+    workspaceId, operationId: 'wedged-fence', purpose: 'analytics-activation',
+    expectedHosts: [wedged], nowMs: 2,
+  });
+  temporary.store.acknowledgeAnalyticsWriterFence({
+    workspaceId, operationId: fence.operationId, fenceEpoch: fence.fenceEpoch,
+    identity: wedged, activeWriterCount: 0, nowMs: 3,
+  });
+  // Leave wedged in `stopping` by marking it stopping but not stopped.
+  temporary.store.markAnalyticsHostState(wedged.hostInstanceId, wedged.processId, wedged.generationId, 'stopping', 4);
+  temporary.store.completeAnalyticsWriterFence(workspaceId, fence.operationId, 5);
+
+  const identity = {
+    hostInstanceId: 'host-unit-fresh-successor', workspaceId,
+    generationId: 'generation-unit-fresh-successor', buildId: 'build-unit-1',
+    processId: process.pid, capabilities: ['host-discovery'],
+  } as const;
+  const control = new AnalyticsHandoffControl({
+    registry: temporary.store,
+    identity,
+    key: 'unit-test-handoff-key',
+    pipeName: createAnalyticsHandoffPipeName(identity.workspaceId, identity.hostInstanceId),
+    now: () => 100,
+    writerFence: { freeze: async () => { throw new Error('not used'); } },
+  });
+  try {
+    await control.start();
+    // The endpoint is functional and the fresh host was registered validly;
+    // the admission-rotation conflict must NOT degrade it to `unsupported`.
+    assert.equal(control.isAvailable, true);
+    const host = temporary.store.getAnalyticsHost(identity.hostInstanceId);
+    assert.equal(host?.state, 'registered');
+    assert.equal(host?.unsupportedReason, undefined);
+  } finally {
+    await control.markStopped();
+    temporary.store.close();
+    rmSync(temporary.root, { recursive: true, force: true });
+  }
+});
+
 test('per-boot handoff keys are fresh, bounded capabilities', () => {
   const first = createPerBootAnalyticsHandoffKey();
   const second = createPerBootAnalyticsHandoffKey();

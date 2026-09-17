@@ -163,12 +163,30 @@ export class AnalyticsHandoffControl {
         state: 'registered',
         registeredAtMs: this.now().toString(),
       });
-      this.options.registry.reconcileOpenAnalyticsWriterAdmission({
-        identity: this.options.identity,
-        nowMs: this.now(),
-      });
+      // Rotating the durable writer census is an *optional* transition for a
+      // healthy host, not a precondition of this endpoint. It can transiently
+      // refuse while a previously displaced host is still terminalizing (e.g.
+      // wedged in `stopping` after a crash), independent of this process. Such
+      // a conflict must not poison a fresh, validly-registered host: leave it
+      // `registered` and surface the reason; a later boot retries admission
+      // once the displaced census is terminal. Only a genuine endpoint/key
+      // failure below is grounds for `unsupported`.
+      let reconciled = false;
+      try {
+        this.options.registry.reconcileOpenAnalyticsWriterAdmission({
+          identity: this.options.identity,
+          nowMs: this.now(),
+        });
+        reconciled = true;
+      } catch (error) {
+        this.options.onError?.(normalizeError(error), 'start.reconcile');
+      }
       this.available = true;
+      if (!reconciled) this.options.onError?.(new Error('Analytics writer census did not reconcile; admission retries on the next boot.'), 'start.reconcile-incomplete');
     } catch (error) {
+      // The endpoint itself failed to bind (or registration was genuinely
+      // refused on a conflicting identity). The pipe is unusable for this host,
+      // so it is terminal for this boot.
       this.available = false;
       this.options.onError?.(normalizeError(error), 'start');
       const failedServer = this.server;
