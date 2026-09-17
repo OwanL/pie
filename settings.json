@@ -1,7 +1,7 @@
 {
-  "defaultModel": "deepseek-v4-flash:0731-cloud",
-  "defaultThinkingLevel": "max",
-  "defaultProvider": "ollama",
+  "defaultModel": "gpt-5.6-luna",
+  "defaultThinkingLevel": "high",
+  "defaultProvider": "github-copilot",
   "retry": {
     "enabled": true,
     "maxRetries": 8,
