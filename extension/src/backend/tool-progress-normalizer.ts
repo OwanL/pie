@@ -1,12 +1,16 @@
 import { LIVE_PIPELINE_LIMITS, type SubagentChildPreview, type ToolPreview } from '../shared/live-pipeline-protocol.js';
 import { isLiveSubagentDetailAddress, type LiveSubagentDetailAddress, type SubagentChildIdentity } from '../shared/protocol/subagent-detail.js';
 import { estimateTextTokens } from '../shared/tokenize.js';
+import { hasNestedToolFailure } from '../shared/subagent-result.js';
+import { compactSubagentFileChanges } from '../shared/lazy-details.js';
 import { recordBackendLivePipelineTrace, isBackendLivePipelineTraceEnabled } from './live-pipeline-trace-runtime';
 
 const MAX_TAIL_CHARS = 8_192;
 const MAX_SUMMARY_CHARS = 1_024;
 const MAX_TASK_CHARS = 4_096;
 const MAX_PARENT_USER_CONTEXT_CHARS = 12_000;
+const MAX_CHILD_CWD_CHARS = 2_048;
+const MAX_THROUGHPUT_SAMPLES = 8;
 const SUBAGENT_NORMALIZATION_CACHE_MAX = 64;
 
 export interface ToolProgressRecursiveCounters {
@@ -162,11 +166,17 @@ function normalizeSubagent(value: unknown, counters?: ToolProgressRecursiveCount
       lineage,
       liveAddressable: validDetailAddress !== undefined,
       detailAddress: validDetailAddress,
+      cwd: boundedOptional(stringField(child, ['cwd']), MAX_CHILD_CWD_CHARS),
       phase,
       agent,
       task: boundedOptional(stringField(child, ['task']), MAX_TASK_CHARS),
       parentUserContextMode: normalizeParentUserContextMode(child.parentUserContextMode),
       parentUserContext: boundedOptional(stringField(child, ['parentUserContext']), MAX_PARENT_USER_CONTEXT_CHARS),
+      ...(hasNestedToolFailure({
+        messages: Array.isArray(child.messages) ? child.messages : undefined,
+        hasNestedToolFailure: child.hasNestedToolFailure,
+      }) ? { hasNestedToolFailure: true } : {}),
+      fileChanges: compactSubagentFileChanges(child.fileChanges),
       summary,
       exitCode: numberField(child, 'exitCode'),
       model: boundedOptional(stringField(child, ['model']), 256),
@@ -195,6 +205,10 @@ function normalizeSubagent(value: unknown, counters?: ToolProgressRecursiveCount
         ? child.selectionPool.filter((model): model is string => typeof model === 'string').slice(0, 20).map((model) => boundedHead(model, 256))
         : undefined,
       retryCount: numberField(child, 'retryCount'),
+      fallback: typeof child.fallback === 'boolean' ? child.fallback : undefined,
+      failedModel: boundedOptional(stringField(child, ['failedModel']), 256),
+      failureClass: boundedOptional(stringField(child, ['failureClass']), 256),
+      turnThroughputSamples: normalizeThroughputSamples(child.turnThroughputSamples),
       stopReason: boundedOptional(stringField(child, ['stopReason']), 256),
       errorMessage: boundedTailOptional(stringField(child, ['errorMessage']), MAX_TAIL_CHARS),
       stderr: boundedTailOptional(stringField(child, ['stderr']), MAX_TAIL_CHARS),
@@ -234,15 +248,43 @@ function normalizeLineage(value: unknown): SubagentChildIdentity[] | undefined {
 function normalizeUsage(value: unknown): SubagentChildPreview['usage'] {
   const usage = asRecord(value);
   if (!usage) return undefined;
-  return {
-    input: numberField(usage, 'input') ?? 0,
-    output: numberField(usage, 'output') ?? 0,
-    cacheRead: numberField(usage, 'cacheRead') ?? 0,
-    cacheWrite: numberField(usage, 'cacheWrite') ?? 0,
-    contextTokens: numberField(usage, 'contextTokens'),
-    cost: numberField(usage, 'cost'),
-    turns: numberField(usage, 'turns'),
-  };
+  const normalized: NonNullable<SubagentChildPreview['usage']> = {};
+  const input = numberField(usage, 'input');
+  const output = numberField(usage, 'output');
+  const cacheRead = numberField(usage, 'cacheRead');
+  const cacheWrite = numberField(usage, 'cacheWrite');
+  const contextTokens = numberField(usage, 'contextTokens');
+  const cost = numberField(usage, 'cost');
+  const turns = numberField(usage, 'turns');
+  if (input !== undefined) normalized.input = input;
+  if (output !== undefined) normalized.output = output;
+  if (cacheRead !== undefined) normalized.cacheRead = cacheRead;
+  if (cacheWrite !== undefined) normalized.cacheWrite = cacheWrite;
+  if (contextTokens !== undefined) normalized.contextTokens = contextTokens;
+  if (cost !== undefined) normalized.cost = cost;
+  if (turns !== undefined) normalized.turns = turns;
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
+function normalizeThroughputSamples(value: unknown): SubagentChildPreview['turnThroughputSamples'] {
+  if (!Array.isArray(value)) return undefined;
+  const samples: NonNullable<SubagentChildPreview['turnThroughputSamples']> = [];
+  for (const candidate of value.slice(-MAX_THROUGHPUT_SAMPLES)) {
+    const sample = asRecord(candidate);
+    if (!sample || typeof sample.endedAt !== 'string' || typeof sample.status !== 'string') continue;
+    const outputTokens = numberField(sample, 'outputTokens');
+    const generationDurationMs = numberField(sample, 'generationDurationMs');
+    if (outputTokens === undefined || generationDurationMs === undefined || outputTokens < 0 || generationDurationMs < 0) continue;
+    samples.push({
+      endedAt: boundedHead(sample.endedAt, 128),
+      outputTokens,
+      generationDurationMs,
+      status: boundedHead(sample.status, 64),
+      modelId: boundedOptional(stringField(sample, ['modelId']), 256),
+      provider: boundedOptional(stringField(sample, ['provider']), 256),
+    });
+  }
+  return samples.length > 0 ? samples : undefined;
 }
 
 /**

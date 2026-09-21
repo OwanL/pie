@@ -19,12 +19,23 @@ export interface ToolPruningResult {
 	tokensSaved: number;
 }
 
+export interface TokenChannelPresence {
+	input: boolean;
+	output: boolean;
+	cacheRead: boolean;
+	cacheWrite: boolean;
+}
+
 export interface PrepassUsage {
 	input: number;
 	output: number;
 	cacheRead: number;
 	cacheWrite: number;
+	/** False when one or more provider token channels were omitted. */
+	tokenChannelsKnown?: boolean;
+	tokenChannelPresence?: TokenChannelPresence;
 	reportedCostUsd?: number;
+	providerReportedCostUsd?: number;
 }
 
 export interface PrepassInvocation {

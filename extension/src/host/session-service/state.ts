@@ -434,8 +434,24 @@ export class SessionServiceState {
         continue;
       }
       if (operation.kind !== 'message.send') continue;
-      const pending = this.getArchState().pending.ops[operation.causal.selectionToken]
-        ?? this.getArchState().pending.promoted[operation.causal.selectionToken];
+      // A queue entry is proof that the Send Command never reached the backend
+      // transport. Capture it before terminalizing the operation: the reducer
+      // removes the entry as part of the generation-ended status, while the
+      // synthetic rejection below settles any deferred-trigger claim waiting on
+      // the ordinary SendResult boundary. Anything already drained from a host
+      // queue is deliberately absent here and remains fail-closed.
+      const archState = this.getArchState();
+      const queued = Object.entries(archState.pending.sendQueueBySession).flatMap(([queuedSessionPath, entries]) =>
+        entries.map((entry) => ({ ...entry, sessionPath: queuedSessionPath }))).find(
+          (entry) => entry.operationId === operation.operationId
+            && (entry.operationAttempt === undefined || entry.operationAttempt === operation.attempt),
+        )
+        ?? Object.values(archState.pending.backendReadyQueueBySession).flat().find(
+          (entry) => entry.operationId === operation.operationId
+            && (entry.operationAttempt === undefined || entry.operationAttempt === operation.attempt),
+        );
+      const pending = archState.pending.ops[operation.causal.selectionToken]
+        ?? archState.pending.promoted[operation.causal.selectionToken];
       this.dispatchArch({
         kind: 'SendOperationStatus', operationId: operation.operationId,
         sessionPath, backendGeneration: operation.backendGeneration,
@@ -446,6 +462,19 @@ export class SessionServiceState {
           kind: 'PreflightFailed', corrId: operation.causal.selectionToken,
           operationId: operation.operationId,
           sessionPath: pending.sessionPath, requestId: pending.requestId ?? '', error: notice,
+        });
+      }
+      if (queued) {
+        // `dispatchArch` runs the extension-host pre-reducer hooks first, so
+        // this is also the durable deferred-trigger release point. Do not emit
+        // it for an operation whose queue entry was already drained: that send
+        // may have crossed the backend boundary before the generation ended.
+        this.dispatchArch({
+          kind: 'SendResult', corrId: queued.corrId,
+          operationId: operation.operationId,
+          operationAttempt: queued.operationAttempt ?? operation.attempt,
+          backendGeneration: operation.backendGeneration,
+          sessionPath: queued.sessionPath, ok: false, error: notice,
         });
       }
     }

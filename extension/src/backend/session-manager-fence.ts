@@ -53,6 +53,18 @@ export interface SessionManagerFenceAdmission {
   acquire(): () => void;
 }
 
+/** Typed fail-closed signal emitted by an admission authority when a durable
+ * fence or epoch has intentionally revoked this writer. Capacity, SQLite, and
+ * other admission failures must continue through the unexpected-failure path. */
+export class SessionManagerFenceAdmissionRevokedError extends Error {
+  readonly code = 'SESSION_MANAGER_ADMISSION_REVOKED' as const;
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'SessionManagerFenceAdmissionRevokedError';
+  }
+}
+
 export interface SessionManagerFence {
   /** Permanently disable persistence mutations for the wrapped manager. */
   invalidate(): void;
@@ -67,6 +79,11 @@ export interface SessionManagerFence {
 
 export interface SessionManagerFenceOptions {
   admission?: SessionManagerFenceAdmission;
+  /** Surface an unexpected admission failure at the owning runtime boundary.
+   * When supplied, the caller owns fail-closed handling and the fenced method
+   * returns its fenced no-op value so an SDK callback cannot reject without an
+   * owner. */
+  onUnexpectedAdmissionFailure?: (error: unknown) => void;
 }
 
 export interface SessionManagerFenceRegistry {
@@ -211,10 +228,23 @@ export function createSessionManagerFence(
           if (releaseAdmission !== undefined && typeof releaseAdmission !== 'function') {
             throw new Error('Session manager admission did not return a release function.');
           }
-        } catch {
-          // Admission failures are deliberately indistinguishable from a
-          // revoked writer at this boundary: no persistence method is called.
-          return MUTATION_RETURN_VALUES[prop];
+        } catch (error) {
+          // A fence revoked while admission was in progress is still a
+          // deliberate fail-closed no-op. Any other admission failure is an
+          // unexpected persistence error and must reach its owning boundary;
+          // converting it into the sentinel would report a durable success
+          // for a write that never happened. The lifecycle seam uses the
+          // typed signal below for deliberate durable revocation; a generic
+          // SessionLifecycleConflictError is not sufficient because capacity
+          // failures use that class too.
+          if (invalidated || error instanceof SessionManagerFenceAdmissionRevokedError) {
+            return MUTATION_RETURN_VALUES[prop];
+          }
+          if (options.onUnexpectedAdmissionFailure) {
+            options.onUnexpectedAdmissionFailure(error);
+            return MUTATION_RETURN_VALUES[prop];
+          }
+          throw error;
         }
         if (invalidated) {
           releaseAdmission?.();

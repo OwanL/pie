@@ -1928,7 +1928,7 @@ test('reducer: SetPrefs normalizes malformed path parent depth before exposing p
     cmd: { kind: 'SetPrefs', corrId: 'c-path-depth', prefs: { uiPathParentDepth: 99 } },
   });
 
-  assert.equal(result.state.settings.prefs.uiPathParentDepth, 1);
+  assert.equal(result.state.settings.prefs.uiPathParentDepth, 0);
   assert.equal(result.effects[0]?.kind, 'SetPrefsRpc');
 });
 

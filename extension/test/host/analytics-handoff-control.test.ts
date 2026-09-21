@@ -10,9 +10,9 @@ import {
   createPerBootAnalyticsHandoffKey,
   createSignedAnalyticsHandoffRequest,
   verifyAnalyticsHandoffResponse,
-} from '../../../shared/analytics/handoff.js';
+} from '../../../shared/analytics/host-status-messages.js';
 import { AnalyticsHandoffControl } from '../../src/host/analytics-handoff-control.js';
-import { SessionLifecycleStore } from '../../src/backend/session-lifecycle-store.js';
+import { createSessionLifecycleWriterAdmission, SessionLifecycleStore } from '../../src/backend/session-lifecycle-store.js';
 
 function temporaryStore(): { root: string; store: SessionLifecycleStore } {
   const root = mkdtempSync(path.join(tmpdir(), 'pie-analytics-handoff-'));
@@ -263,6 +263,76 @@ test('transient writer census rotation conflict leaves a fresh host registered, 
     const host = temporary.store.getAnalyticsHost(identity.hostInstanceId);
     assert.equal(host?.state, 'registered');
     assert.equal(host?.unsupportedReason, undefined);
+  } finally {
+    await control.markStopped();
+    temporary.store.close();
+    rmSync(temporary.root, { recursive: true, force: true });
+  }
+});
+
+test('stale stopping host recovery admits canonical recorder startup on the next boot', async () => {
+  const temporary = temporaryStore();
+  const workspaceId = 'workspace-unit-stale-recovery';
+  const predecessor = {
+    hostInstanceId: 'host-unit-predecessor', workspaceId,
+    generationId: 'generation-unit-predecessor', buildId: 'build-unit-1',
+    processId: process.pid + 201,
+  } as const;
+  temporary.store.registerAnalyticsHost({
+    ...predecessor, capabilities: ['authenticated-control', 'writer-fence'], registeredAtMs: '1',
+  });
+  const fence = temporary.store.beginAnalyticsWriterFence({
+    workspaceId, operationId: 'stale-recovery-fence', purpose: 'analytics-activation',
+    expectedHosts: [predecessor], nowMs: 2,
+  });
+  temporary.store.acknowledgeAnalyticsWriterFence({
+    workspaceId, operationId: fence.operationId, fenceEpoch: fence.fenceEpoch,
+    identity: predecessor, activeWriterCount: 0, nowMs: 3,
+  });
+  temporary.store.markAnalyticsHostState(predecessor.hostInstanceId, predecessor.processId, predecessor.generationId, 'stopped', 4);
+  temporary.store.completeAnalyticsWriterFence(workspaceId, fence.operationId, 5);
+  const stale = {
+    hostInstanceId: 'host-unit-stale', workspaceId,
+    generationId: 'generation-unit-stale', buildId: 'build-unit-1',
+    processId: process.pid + 202,
+  } as const;
+  temporary.store.registerAnalyticsHost({
+    ...stale, capabilities: ['authenticated-control', 'writer-fence'], registeredAtMs: '6',
+  });
+  const successorAdmission = createSessionLifecycleWriterAdmission(temporary.store, stale, () => 7);
+  const startupRelease = successorAdmission.acquireStartup?.();
+  startupRelease?.();
+  temporary.store.reopenAnalyticsWriterAdmission({
+    workspaceId, operationId: fence.operationId, purpose: 'analytics-activation',
+    admittedHosts: [stale], nowMs: 8,
+  });
+  temporary.store.markAnalyticsHostState(stale.hostInstanceId, stale.processId, stale.generationId, 'stopping', 9);
+
+  const identity = {
+    hostInstanceId: 'host-unit-recovered', workspaceId,
+    generationId: 'generation-unit-recovered', buildId: 'build-unit-1',
+    processId: process.pid,
+    capabilities: ['host-discovery'],
+  } as const;
+  const control = new AnalyticsHandoffControl({
+    registry: temporary.store,
+    identity,
+    key: 'unit-test-handoff-key',
+    pipeName: createAnalyticsHandoffPipeName(identity.workspaceId, identity.hostInstanceId),
+    now: () => 100,
+    writerFence: { freeze: async () => { throw new Error('not used'); } },
+    recoverStaleHosts: async () => {
+      temporary.store.recoverAnalyticsHostAfterProcessExit(stale, 99);
+    },
+  });
+  try {
+    await control.start();
+    const admission = createSessionLifecycleWriterAdmission(temporary.store, identity, () => 101);
+    const release = admission.acquireStartup?.();
+    assert.equal(typeof release, 'function');
+    release?.();
+    assert.equal(temporary.store.getAnalyticsHost(stale.hostInstanceId)?.state, 'stopped');
+    assert.equal(temporary.store.getAnalyticsHost(identity.hostInstanceId)?.state, 'registered');
   } finally {
     await control.markStopped();
     temporary.store.close();

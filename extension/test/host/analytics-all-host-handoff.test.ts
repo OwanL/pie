@@ -8,7 +8,7 @@ import test from 'node:test';
 import {
   createAnalyticsHandoffPipeName,
   type AnalyticsHandoffHostIdentity,
-} from '../../../shared/analytics/handoff.js';
+} from '../../../shared/analytics/host-status-messages.js';
 import {
   createAnalyticsHostWriterFence,
   createSessionLifecycleWriterAdmission,
@@ -150,10 +150,14 @@ test('the durable admission epoch rejects stale managers and ownership leases', 
     processId: host.identity.processId,
   });
   const calls: string[] = [];
+  const unexpectedAdmissionFailures: unknown[] = [];
   const manager = {
     appendMessage: (message: unknown) => { calls.push(String(message)); return 'entry-1'; },
   } as never;
-  const { manager: fencedManager } = createSessionManagerFence(manager, { admission });
+  const { manager: fencedManager } = createSessionManagerFence(manager, {
+    admission,
+    onUnexpectedAdmissionFailure: (error) => unexpectedAdmissionFailures.push(error),
+  });
   const authority = new SessionOwnershipAuthority({ writerAdmission: admission });
   const sessionPath = path.join(temporary.root, 'sessions', 'admission.jsonl');
   const owner = {
@@ -183,6 +187,7 @@ test('the durable admission epoch rejects stale managers and ownership leases', 
     );
     assert.equal(fencedManager.appendMessage('after-fence'), FENCED_ENTRY_ID);
     assert.deepEqual(calls, ['before-fence']);
+    assert.deepEqual(unexpectedAdmissionFailures, [], 'durable fencing is an intentional fail-closed no-op');
     const adapter = authority.createAdapter(owner);
     assert.throws(
       () => adapter.assertWriteLease(lease, sessionPath, 'stale-after-fence'),
@@ -220,6 +225,7 @@ test('the durable admission epoch rejects stale managers and ownership leases', 
       nowMs: NOW,
     }).fenceEpoch, 2);
     assert.equal(fencedManager.appendMessage('after-reopen-with-stale-admission'), FENCED_ENTRY_ID);
+    assert.deepEqual(unexpectedAdmissionFailures, [], 'a stale durable epoch remains an intentional fail-closed no-op');
   } finally {
     temporary.store.close();
     rmSync(temporary.root, { recursive: true, force: true });

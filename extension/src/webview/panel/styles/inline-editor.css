@@ -44,7 +44,7 @@
   background: var(--vscode-input-background, var(--panel-surface));
   color: var(--vscode-input-foreground, var(--vscode-foreground));
   font: inherit;
-  font-size: var(--panel-font-size, 13px);
+  font-size: var(--panel-font-size, 11px);
   line-height: 1.6;
   outline: none;
   overflow-y: auto;

@@ -1,11 +1,8 @@
-// Shared `pi` CLI binary resolution for the pie installers.
+// Shared `pi` CLI binary resolution for the Windows installer.
 //
-// After `npm i -g @earendil-works/pi-coding-agent`, the `pi` executable is not
-// on PATH until a new shell opens. Both installers therefore resolve `pi` by
-// preferring PATH, then probing the npm global prefix. Previously duplicated
-// as:
-//   - install.ps1: Resolve-PiBinary (pi.cmd / pi.ps1 / pi under the prefix)
-//   - install.sh:  resolve_pi        ($prefix/bin/pi / $prefix/pi)
+// After `npm i -g @earendil-works/pi-coding-agent`, the `pi` executable may not
+// be on PATH until a new shell opens. Resolve it by preferring PATH, then
+// probing the npm global prefix.
 //
 // `resolvePiBinary` is pure given injected probes so it is unit-testable; the
 // CLI runner performs the real PATH/prefix discovery.

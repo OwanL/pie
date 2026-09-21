@@ -115,9 +115,9 @@ test('activity-tail preview-rows pref is wired to a CSS var with a :root default
   const transcriptCss = await readStyleSource('transcript.css');
   const prefsCss = await readWebviewSource('use-chat-prefs-css.ts');
 
-  // The :root default (2 content rows × 18px row height) lands the preview at
+  // The :root default (5 content rows × 18px row height) lands the preview at
   // its bundled height before the host effect runs.
-  assert.match(transcriptCss, /--activity-tail-content-min-height:\s*36px/);
+  assert.match(transcriptCss, /--activity-tail-content-min-height:\s*90px/);
   assert.match(
     transcriptCss,
     /\.turn-activity-tail-content\s*\{[^}]*(?<!min-)height:\s*var\(--activity-tail-content-min-height\)/,
@@ -147,8 +147,8 @@ test('per-place font sizes and link/muted color prefs are wired to CSS vars', as
   assert.match(appBody, /useChatPrefsCss/);
 
   // :root defaults reproduce the bundled sizes so an uncustomized panel is unchanged.
-  assert.match(indexCss, /--panel-font-size:\s*13px/);
-  assert.match(indexCss, /--panel-composer-font-size:\s*13px/);
+  assert.match(indexCss, /--panel-font-size:\s*11px/);
+  assert.match(indexCss, /--panel-composer-font-size:\s*11px/);
   // Link color defaults to the accent so links match the bundled appearance.
   assert.match(indexCss, /--panel-link:\s*var\(--panel-accent\)/);
 
@@ -173,6 +173,41 @@ test('per-place font sizes and link/muted color prefs are wired to CSS vars', as
   assert.match(prefsCss, /uiComposerFontSize,/);
   assert.match(prefsCss, /uiMutedColor,/);
   assert.match(prefsCss, /uiLinkColor,/);
+});
+
+test('font preferences reach normal prose and monospace UI surfaces', async () => {
+  const transcriptCss = await readStyleSource('transcript.css');
+  const highlightCss = await readStyleSource('highlight.css');
+  const prefsCss = await readWebviewSource('use-chat-prefs-css.ts');
+  const panelSource = await readWebviewSource('panel.tsx');
+  const monoSources = await Promise.all([
+    readStyleSource('extension-ui-prompt.css'),
+    readStyleSource('status-chip.css'),
+    readStyleSource('tabs.css'),
+    readStyleSource('tool-call.css'),
+    readStyleSource('transcript.css'),
+  ]);
+
+  const messageBodyRule = transcriptCss.match(/\.message-body\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(messageBodyRule, /font-size:\s*var\(--panel-font-size,\s*11px\)/);
+  assert.doesNotMatch(messageBodyRule, /font-size:\s*13px/);
+
+  // Code remains an intentionally distinct, explicit size while inheriting the
+  // user-selected monospace family rather than the VS Code editor setting.
+  const messagePreRule = transcriptCss.match(/\.message-body pre,\s*\n?\.tool-call-pre\s*\{([^}]*)\}/)?.[1] ?? '';
+  const messageCodeRule = transcriptCss.match(/\.message-body code\s*\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(messagePreRule, /font-family:\s*var\(--panel-font-mono\)/);
+  assert.match(messagePreRule, /font-size:\s*12px/);
+  assert.match(messageCodeRule, /font-family:\s*var\(--panel-font-mono\)/);
+  assert.match(messageCodeRule, /font-size:\s*12px/);
+  assert.match(highlightCss, /\.collapsible-body\s*\{[^}]*font-size:\s*var\(--expanded-font-size\)/);
+
+  for (const source of monoSources) {
+    assert.doesNotMatch(source, /--vscode-editor-font-family/);
+  }
+  assert.doesNotMatch(panelSource, /--vscode-editor-font-family/);
+  assert.match(prefsCss, /setProperty\(['"]--panel-font-mono['"],\s*uiFontMono\)/);
+  assert.match(prefsCss, /uiFontMono,/);
 });
 
 test('markdown prose restores markers, hierarchy, rich blocks, and separators in both scopes', async () => {
@@ -269,7 +304,12 @@ test('unified transcript refinement keeps operational rows quiet and user prompt
   assert.match(transcriptCss, /\[data-role="user"\]:not\(\[data-synthetic="true"\]\) \.message-body code\s*\{[^}]*color:\s*var\(--panel-user-foreground\)/);
   assert.match(transcriptCss, /\.message-user-image-caption\s*\{\s*color:\s*color-mix\(in srgb, var\(--panel-user-foreground\) 78%, var\(--panel-user-surface\)\)/);
   assert.match(inlineEditorCss, /\[data-role="user"\]\[data-editing="true"\] \.inline-editor-textarea\s*\{[^}]*color:\s*var\(--panel-user-foreground\)/);
-  assert.match(messageShell, /role === 'user' && '.*rounded-lg px-2 py-1\.5/);
+  assert.match(messageShell, /role === 'assistant' && 'self-start w-full max-w-full px-1 py-2'/);
+  assert.match(messageShell, /role === 'user' && 'w-fit max-w-\[88%\] self-end rounded-lg px-2 py-1\.5/);
+  assert.match(promptContextRule, /max-width:\s*88%/);
+  assert.doesNotMatch(messageShell, /message-assistant-width|uiMessageWidth/);
+  assert.doesNotMatch(transcriptCss, /message-assistant-width/);
+  assert.doesNotMatch(composerCss, /\.pref-toggle(?:-icon|-check)?\b/);
   assert.doesNotMatch(reasoningBlock, /bg-control|rounded-md/);
 
   const toolTitleRule = transcriptCss.match(/\.transcript-header-title-mono\s*\{([^}]*)\}/)?.[1] ?? '';

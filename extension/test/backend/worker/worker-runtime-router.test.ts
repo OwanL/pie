@@ -2,7 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { WorkerRuntimeRouter } from '../../../src/backend/worker-runtime-router';
-import { WORKER_IPC_VERSION } from '../../../src/backend/worker-protocol';
+import {
+  WORKER_IPC_MAX_FRAME_BYTES,
+  WORKER_IPC_VERSION,
+  measureWorkerIpcMessage,
+  validateWorkerIpcFrameDraft,
+} from '../../../src/backend/worker-protocol';
 import { BackendError } from '../../../src/backend/server-io';
 
 function opened(sessionPath: string) {
@@ -17,6 +22,139 @@ function opened(sessionPath: string) {
     modelSettings: { defaultModel: 'm', defaultThinkingLevel: 'off' },
   };
 }
+
+test('cold promotion omits an oversized transcript at the actual worker protocol seam', async () => {
+  const sessionPath = `${process.cwd()}/router-oversized.jsonl`;
+  const oversizedTranscript = Array.from({ length: 30_000 }, (_, index) => ({
+    id: `tool-${index}`,
+    role: 'assistant',
+    createdAt: '2026-09-22T00:00:00.000Z',
+    status: 'completed',
+    parts: [{
+      kind: 'toolCall',
+      toolCall: {
+        id: `subagent-${index}`,
+        name: 'subagent',
+        result: {
+          details: {
+            results: [{
+              messages: [{ role: 'toolResult', toolCallId: `nested-${index}`, details: { results: [] } }],
+            }],
+          },
+        },
+      },
+    }],
+  }));
+  const openedPayload = {
+    ...opened(sessionPath),
+    transcript: oversizedTranscript,
+    transcriptWindow: {
+      totalCount: oversizedTranscript.length,
+      loadedStart: 0,
+      loadedEnd: oversizedTranscript.length,
+      hasOlder: false,
+      hasNewer: false,
+      isPartial: false,
+      hasUserMessages: true,
+    },
+  } as any;
+  const frameBase = {
+    ipcVersion: WORKER_IPC_VERSION,
+    coordinatorGeneration: 1,
+    workerId: 'worker-oversized',
+    workerGeneration: 1,
+    workerPid: 123,
+    rootSessionPath: sessionPath,
+    leasePath: sessionPath,
+    leaseRevision: 1,
+    sessionPath,
+  };
+  const oversizedPromotionFrame = {
+    ...frameBase,
+    kind: 'runtime.promote' as const,
+    requestId: 'promote-request',
+    operationId: 'grant-oversized',
+    payload: {
+      sdkPath: '/sdk', agentDir: '/agent', startupCwd: '/', sessionDir: '/sessions',
+      sessionPath, creationReason: 'resume' as const,
+      writeLease: {
+        coordinatorGeneration: 1, workerId: 'worker-oversized', workerGeneration: 1,
+        canonicalSessionPath: sessionPath, ownershipRevision: 1, nonce: 'lease',
+      },
+      openedPayload,
+      modelSettings: { defaultModel: 'm', defaultThinkingLevel: 'off' },
+    },
+  };
+  const oversizedMeasurement = measureWorkerIpcMessage(oversizedPromotionFrame);
+  assert.equal(oversizedMeasurement.ok, true);
+  if (oversizedMeasurement.ok) {
+    assert.ok(oversizedMeasurement.bytes + 1 < WORKER_IPC_MAX_FRAME_BYTES,
+      'the reproduced promotion payload is structurally oversized, not byte oversized');
+  }
+  assert.match(
+    validateWorkerIpcFrameDraft(oversizedPromotionFrame) ?? '',
+    /too structurally complex/,
+    'the unbounded handoff reproduces the validator failure without raising its limit',
+  );
+  let promotedFrame: any;
+  const client = {
+    requestFrame: async (body: any) => {
+      const frame = { ...frameBase, ...body, requestId: body.requestId ?? `${body.kind}-request` };
+      const validation = validateWorkerIpcFrameDraft(frame);
+      assert.equal(validation, undefined, validation ?? 'worker protocol rejected the promotion frame');
+      const measured = measureWorkerIpcMessage(frame);
+      assert.equal(measured.ok, true);
+      if (body.kind === 'runtime.promote') {
+        promotedFrame = frame;
+        if (measured.ok) assert.ok(measured.bytes + 1 < WORKER_IPC_MAX_FRAME_BYTES);
+        return { kind: 'runtime.ready', runtimeMetadata: { mode: 'phase4', startedAt: 1 } };
+      }
+      return { kind: 'sync.ack', domain: body.domain, revision: body.revision };
+    },
+  };
+  const supervisor = {
+    startWorker: async (root: string, prepare: any) => {
+      await prepare({ workerId: 'worker-oversized', workerGeneration: 1, sessionPath: root });
+      return { workerId: 'worker-oversized', workerGeneration: 1, sessionPath: root, client };
+    },
+    stopWorker: async () => undefined,
+  };
+  const coldStore = {
+    serializePromotionGrant: (target: string) => ({
+      grantId: 'grant-oversized', coordinatorGeneration: 1, sessionPath: target,
+      sessionPathKey: target, fingerprint: 'f', creationReason: 'resume' as const,
+    }),
+    consumePromotionGrant: (grant: any) => grant,
+    abortPromotionGrant: () => undefined,
+  };
+  const ownership = {
+    registerHot: async (target: string, owner: any) => ({
+      ...owner, canonicalSessionPath: target, ownershipRevision: 1, nonce: 'lease',
+    }),
+    reconcileCrash: async () => undefined,
+  };
+  const router = new WorkerRuntimeRouter({
+    supervisor: supervisor as any,
+    coldStore: coldStore as any,
+    ownership: ownership as any,
+    emit: () => undefined,
+    buildPromotionSnapshot: async () => ({
+      sdkPath: '/sdk', agentDir: '/agent', startupCwd: '/', sessionDir: '/sessions',
+      openedPayload,
+      modelSettings: { defaultModel: 'm', defaultThinkingLevel: 'off' },
+    }),
+  });
+
+  await router.promote(sessionPath);
+  assert.strictEqual(openedPayload.transcript, oversizedTranscript, 'promotion must not rewrite the retained transcript projection');
+  assert.equal(oversizedTranscript.length, 30_000, 'the retained snapshot must not be mutated');
+  assert.deepEqual(promotedFrame.payload.openedPayload.transcript, []);
+  assert.equal(promotedFrame.payload.openedPayload.transcriptSkipped, true);
+  assert.equal(promotedFrame.payload.openedPayload.runtimeReady, false);
+  assert.equal(promotedFrame.payload.openedPayload.session.path, sessionPath);
+  assert.equal(promotedFrame.payload.openedPayload.modelSettings.defaultModel, 'm');
+  assert.equal(promotedFrame.payload.openedPayload.transcriptWindow.totalCount, oversizedTranscript.length);
+});
 
 test('worker router promotion is single-flight and runtime.ready precedes the initiating command', async () => {
   const sessionPath = `${process.cwd()}/router-a.jsonl`;

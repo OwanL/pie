@@ -74,6 +74,61 @@ const analyticsPacket = createAnalyticsFactPacket({
   idempotencyKey: deriveAnalyticsIdempotencyKey(analyticsObservationBase),
 });
 
+test('session-control frames are typed, bounded, and identity-fenced', () => {
+  const request = {
+    ...base,
+    kind: 'session.control' as const,
+    requestId: 'session-control-1',
+    action: 'read' as const,
+    payload: {
+      sessionPath: base.sessionPath,
+      direction: 'latest',
+      limit: 8,
+    },
+  };
+  const result = {
+    ...base,
+    kind: 'session.control.result' as const,
+    requestId: request.requestId,
+    ok: true as const,
+    result: { sessionPath: base.sessionPath, transcript: [], cursor: { start: 0, end: 0 } },
+  };
+  assert.equal(parseWorkerToCoordinatorFrame(request, expected).status, 'accepted');
+  assert.equal(parseCoordinatorToWorkerFrame(result, expected).status, 'accepted');
+  assert.equal(
+    parseWorkerToCoordinatorFrame({ ...result, workerGeneration: result.workerGeneration + 1 }, expected).status,
+    'invalid',
+    'a late result from another worker generation is rejected',
+  );
+  assert.equal(
+    parseWorkerToCoordinatorFrame({ ...request, payload: 'not-an-object' as never }, expected).status,
+    'invalid',
+    'the bounded bridge rejects a non-object payload',
+  );
+});
+
+test('settings conditional mutations require a complete typed expected identity', () => {
+  const valid = {
+    ...base,
+    kind: 'settings.mutate' as const,
+    requestId: 'settings-conditional',
+    updates: { defaultModel: 'new-model' },
+    expected: { defaultModel: 'old-model', defaultThinkingLevel: 'high', defaultProvider: null },
+  };
+  assert.equal(parseWorkerToCoordinatorFrame(valid, expected).status, 'accepted');
+  assert.equal(
+    parseWorkerToCoordinatorFrame({ ...valid, expected: { defaultModel: 'old-model' } }, expected).status,
+    'invalid',
+  );
+  assert.equal(
+    parseWorkerToCoordinatorFrame({
+      ...valid,
+      expected: { defaultModel: 'old-model', defaultThinkingLevel: 'high', defaultProvider: 7 },
+    }, expected).status,
+    'invalid',
+  );
+});
+
 test('Phase 2 protocol accepts only its closed coordinator and worker variants', () => {
   const coordinatorFrames = [
     { ...base, kind: 'bootstrap', heartbeatIntervalMs: 1_000, sdkPatchIdentity },
@@ -167,7 +222,7 @@ test('Phase 4 protocol accepts every closed runtime, ownership, provider, and sy
     },
     { ...base, kind: 'provider.cancelAck', requestId: 'cancel', targetRequestId: 'provider', status: 'granted', leaseId: 'lease-1' },
     { ...base, kind: 'provider.released', requestId: 'release', leaseId: 'lease-1' },
-    { ...base, kind: 'settings.authoritative', requestId: 'settings-write', revision: 2, values: { defaultModel: 'gpt' } },
+    { ...base, kind: 'settings.authoritative', requestId: 'settings-write', revision: 2, values: { defaultModel: 'gpt' }, applied: false },
     { ...base, kind: 'sync', requestId: 'settings', domain: 'settings', revision: 1, payload: { values: { theme: 'dark' } } },
     { ...base, kind: 'sync', requestId: 'catalog', domain: 'catalog', revision: 9, payload: { models: [{ id: 'gpt' }] } },
     { ...base, kind: 'sync', requestId: 'auth', domain: 'auth', revision: 2, payload: { authPath: 'C:/auth', fingerprint: 'fingerprint' } },
@@ -203,7 +258,11 @@ test('Phase 4 protocol accepts every closed runtime, ownership, provider, and sy
     { ...base, kind: 'provider.cancel', requestId: 'cancel', targetRequestId: 'provider', reason: 'aborted' },
     { ...base, kind: 'provider.observation', leaseId: 'lease-1', observation: { classification: 'http-error', status: 429, retryable: true } },
     { ...base, kind: 'provider.release', requestId: 'release', leaseId: 'lease-1', outcome: 'cancelled' },
-    { ...base, kind: 'settings.mutate', requestId: 'settings-write', updates: { defaultModel: 'gpt' } },
+    {
+      ...base, kind: 'settings.mutate', requestId: 'settings-write',
+      updates: { defaultModel: 'gpt' }, unset: ['defaultProvider'],
+      expected: { defaultModel: 'old-gpt', defaultProvider: 'old-provider', defaultThinkingLevel: 'high' },
+    },
     { ...base, kind: 'runtime.report', domain: 'catalog', payload: { models: [{ id: 'runtime-discovered', reasoning: false }] } },
   ];
   for (const frame of coordinatorFrames) assert.equal(parseCoordinatorToWorkerFrame(frame, expected).status, 'accepted', frame.kind);

@@ -83,6 +83,12 @@ async function readBody(response: Response): Promise<string> {
 	return text;
 }
 
+async function fetchAndConsume(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+	const response = await fetch(input, init);
+	await response.arrayBuffer();
+	return response;
+}
+
 // ── Setup / teardown ──────────────────────────────────────────────────────────
 
 let savedFetch: typeof globalThis.fetch;
@@ -210,12 +216,97 @@ describe('ProviderGate — concurrency limiting', () => {
 
 		// Fire 3 concurrent requests.
 		await Promise.all([
-			fetch(TEST_BASE + '/chat', makeInit('s1')),
-			fetch(TEST_BASE + '/chat', makeInit('s2')),
-			fetch(TEST_BASE + '/chat', makeInit('s3')),
+			fetchAndConsume(TEST_BASE + '/chat', makeInit('s1')),
+			fetchAndConsume(TEST_BASE + '/chat', makeInit('s2')),
+			fetchAndConsume(TEST_BASE + '/chat', makeInit('s3')),
 		]);
 
 		assert.equal(maxInFlight, 1, 'only 1 request should be in-flight at a time');
+	});
+
+	test('Unlimited bypasses capacity and afterburn while retaining live active metrics', async () => {
+		let calls = 0;
+		let releaseUpstream!: () => void;
+		const upstreamReleased = new Promise<void>((resolve) => { releaseUpstream = resolve; });
+		let allStarted!: () => void;
+		const allStartedPromise = new Promise<void>((resolve) => { allStarted = resolve; });
+		globalThis.fetch = async () => {
+			calls += 1;
+			if (calls === 3) allStarted();
+			await upstreamReleased;
+			return new Response('ok', { status: 200 });
+		};
+		const gate = ProviderGate.install([{
+			...BASE_CONFIG,
+			maxConcurrentRequests: 0,
+			afterburnSeconds: 60,
+			queueWaitSeconds: 1,
+		}], 0);
+
+		const requests = Promise.all([
+			fetchAndConsume(TEST_BASE + '/chat', makeInit('unlimited-1')),
+			fetchAndConsume(TEST_BASE + '/chat', makeInit('unlimited-2')),
+			fetchAndConsume(TEST_BASE + '/chat', makeInit('unlimited-3')),
+		]);
+		await allStartedPromise;
+		assert.equal(gate.getMetrics()[0]?.maxConcurrentRequests, 0);
+		assert.equal(gate.getMetrics()[0]?.activeRequests, 3);
+		assert.equal(gate.getMetrics()[0]?.queuedRequests, 0);
+		assert.equal(readProviderCapacitySnapshot()?.['test-provider']?.immediatelyClaimable, true);
+
+		releaseUpstream();
+		await requests;
+		while ((gate.getMetrics()[0]?.activeRequests ?? 0) > 0) {
+			await new Promise((resolve) => setImmediate(resolve));
+		}
+		assert.equal(gate.getMetrics()[0]?.activeRequests, 0);
+		assert.equal(gate.getMetrics()[0]?.queuedRequests, 0);
+		assert.equal(readProviderCapacitySnapshot()?.['test-provider']?.immediatelyClaimable, true);
+	});
+
+	test('Unlimited retains the account-pause circuit breaker', async () => {
+		const suspensionBody = JSON.stringify({
+			error: {
+				message: 'account_suspended: reactivates automatically at 2099-01-01T00:00 UTC',
+				type: 'upstream_account_paused',
+			},
+		});
+		let calls = 0;
+		globalThis.fetch = async () => {
+			calls += 1;
+			return new Response(suspensionBody, { status: 429, headers: { 'content-type': 'application/json' } });
+		};
+		ProviderGate.install([{ ...BASE_CONFIG, maxConcurrentRequests: 0 }], 0);
+
+		assert.equal((await fetch(TEST_BASE + '/chat', makeInit('unlimited-pause'))).status, 429);
+		await assert.rejects(
+			fetch(TEST_BASE + '/chat', makeInit('unlimited-pause-2')),
+			(error: unknown) => error instanceof ProviderGatePauseError,
+		);
+		assert.equal(calls, 1, 'the account-pause circuit must reject before another upstream request');
+	});
+
+	test('queued finite admissions drain when the policy changes to Unlimited', async () => {
+		let calls = 0;
+		let releaseFirst!: () => void;
+		const firstReleased = new Promise<void>((resolve) => { releaseFirst = resolve; });
+		globalThis.fetch = async () => {
+			calls += 1;
+			if (calls === 1) await firstReleased;
+			return new Response('ok', { status: 200 });
+		};
+		const gate = ProviderGate.install([{ ...BASE_CONFIG, maxConcurrentRequests: 1, queueWaitSeconds: 1 }], 0);
+		const first = fetchAndConsume(TEST_BASE + '/chat', makeInit('transition-1'));
+		while (calls < 1) await new Promise((resolve) => setImmediate(resolve));
+		const second = fetchAndConsume(TEST_BASE + '/chat', makeInit('transition-2'));
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.equal(gate.getMetrics()[0]?.queuedRequests, 1);
+
+		gate.applyUserOverrides({ 'test-provider': { maxConcurrentRequests: 0 } });
+		while (calls < 2) await new Promise((resolve) => setImmediate(resolve));
+		assert.equal(gate.getMetrics()[0]?.queuedRequests, 0);
+		releaseFirst();
+		await Promise.all([first, second]);
 	});
 
 	test('queued grants report measured duration under their own attempt identity', async () => {
@@ -231,9 +322,9 @@ describe('ProviderGate — concurrency limiting', () => {
 		};
 		try {
 			ProviderGate.install([{ ...BASE_CONFIG, maxConcurrentRequests: 1, queueWaitSeconds: 0 }], 0);
-			const first = fetch(TEST_BASE + '/chat', makeInit('queue-first'));
+			const first = fetchAndConsume(TEST_BASE + '/chat', makeInit('queue-first'));
 			while (calls < 1) await new Promise((resolve) => setImmediate(resolve));
-			const second = fetch(TEST_BASE + '/chat', makeInit('queue-second'));
+			const second = fetchAndConsume(TEST_BASE + '/chat', makeInit('queue-second'));
 			await new Promise((resolve) => setTimeout(resolve, 20));
 			releaseFirst();
 			await Promise.all([first, second]);
@@ -264,7 +355,7 @@ describe('ProviderGate — concurrency limiting', () => {
 		ProviderGate.install([config], 0);
 
 		// Start the first (holds the only slot).
-		const p1 = fetch(TEST_BASE + '/chat', makeInit('s1'));
+		const p1 = fetchAndConsume(TEST_BASE + '/chat', makeInit('s1'));
 		// Start the second (queued, will time out in 1s).
 		const p2 = fetch(TEST_BASE + '/chat', makeInit('s2'));
 
@@ -294,7 +385,7 @@ describe('ProviderGate — concurrency limiting', () => {
 		ProviderGate.install([config], 0);
 
 		const ac = new AbortController();
-		const p1 = fetch(TEST_BASE + '/chat', makeInit('s1'));
+		const p1 = fetchAndConsume(TEST_BASE + '/chat', makeInit('s1'));
 		const p2 = fetch(TEST_BASE + '/chat', makeInit('s2', ac.signal));
 
 		// Abort the queued request.
@@ -342,12 +433,12 @@ describe('ProviderGate — afterburn sticky slots', () => {
 		ProviderGate.install([config], 0);
 
 		// First request from session-A completes.
-		await fetch(TEST_BASE + '/chat', makeInit('session-A'));
+		await fetchAndConsume(TEST_BASE + '/chat', makeInit('session-A'));
 
 		// Second request from the SAME session should reuse the sticky slot
 		// without queueing, even though it's within the afterburn window.
 		const start = Date.now();
-		await fetch(TEST_BASE + '/chat', makeInit('session-A'));
+		await fetchAndConsume(TEST_BASE + '/chat', makeInit('session-A'));
 		const elapsed = Date.now() - start;
 
 		// Should be near-instant (no queue wait).
@@ -369,7 +460,7 @@ describe('ProviderGate — afterburn sticky slots', () => {
 		ProviderGate.install([config], 0);
 
 		// Session-A acquires the slot.
-		await fetch(TEST_BASE + '/chat', makeInit('session-A'));
+		await fetchAndConsume(TEST_BASE + '/chat', makeInit('session-A'));
 
 		// Session-B should NOT be able to use the sticky slot.
 		// The afterburn hold blocks session-B from claiming the slot, so it
@@ -430,13 +521,13 @@ describe('ProviderGate — request-class queue priority', () => {
 		ProviderGate.install([config], 0);
 
 		// R1 (main) acquires the only slot.
-		const p1 = fetch(TEST_BASE + '/chat', makeInit('r1'));
+		const p1 = fetchAndConsume(TEST_BASE + '/chat', makeInit('r1'));
 		// Let R1 reach the fetch impl and grab the slot.
 		await new Promise((r) => setTimeout(r, 20));
 
 		// Queue a main-session call, THEN a skill-pruner call (queued later).
-		const pMain = fetch(TEST_BASE + '/chat', makeInit('main-2'));
-		const pPruner = fetch(TEST_BASE + '/chat', makePrunerInit('pruner-1'));
+		const pMain = fetchAndConsume(TEST_BASE + '/chat', makeInit('main-2'));
+		const pPruner = fetchAndConsume(TEST_BASE + '/chat', makePrunerInit('pruner-1'));
 		// Give both a moment to enqueue.
 		await new Promise((r) => setTimeout(r, 20));
 
@@ -475,12 +566,12 @@ describe('ProviderGate — request-class queue priority', () => {
 		};
 		ProviderGate.install([config], 0);
 
-		const p1 = fetch(TEST_BASE + '/chat', makeInit('r1'));
+		const p1 = fetchAndConsume(TEST_BASE + '/chat', makeInit('r1'));
 		await new Promise((r) => setTimeout(r, 20));
 
 		// Queue two default (main) calls in order — no pruner.
-		const pA = fetch(TEST_BASE + '/chat', makeInit('a'));
-		const pB = fetch(TEST_BASE + '/chat', makeInit('b'));
+		const pA = fetchAndConsume(TEST_BASE + '/chat', makeInit('a'));
+		const pB = fetchAndConsume(TEST_BASE + '/chat', makeInit('b'));
 		await new Promise((r) => setTimeout(r, 20));
 
 		releaseFirst!();
@@ -492,6 +583,70 @@ describe('ProviderGate — request-class queue priority', () => {
 });
 
 describe('ProviderGate — stream liveness', () => {
+	test('Request.signal cancels a streaming response and releases its slot', async () => {
+		globalThis.fetch = async () => makeStallingResponse();
+		const gate = ProviderGate.install([{ ...BASE_CONFIG, maxConcurrentRequests: 1 }], 0);
+		const abort = new AbortController();
+		const request = new Request(TEST_BASE + '/chat', {
+			method: 'POST',
+			signal: abort.signal,
+		});
+		const response = await fetch(request);
+		const bodyRead = response.text();
+
+		abort.abort();
+		const outcome = await Promise.race([
+			bodyRead.then(
+				() => ({ kind: 'resolved' as const }),
+				(error: unknown) => ({ kind: 'rejected' as const, error }),
+			),
+			new Promise<{ kind: 'timeout' }>((resolve) => setTimeout(() => resolve({ kind: 'timeout' }), 250)),
+		]);
+		assert.equal(outcome.kind, 'rejected', 'Request.signal must settle the body read');
+		if (outcome.kind === 'rejected') {
+			assert.ok(outcome.error instanceof Error && outcome.error.name === 'AbortError');
+		}
+		assert.equal(gate.getMetrics()[0]?.activeRequests, 0);
+	});
+
+	test('init.signal overrides the signal on a Request', async () => {
+		globalThis.fetch = async () => makeStallingResponse();
+		const gate = ProviderGate.install([{ ...BASE_CONFIG, maxConcurrentRequests: 1 }], 0);
+		const requestAbort = new AbortController();
+		const initAbort = new AbortController();
+		const request = new Request(TEST_BASE + '/chat', {
+			method: 'POST',
+			signal: requestAbort.signal,
+		});
+		const response = await fetch(request, { signal: initAbort.signal });
+		const bodyRead = response.text();
+
+		requestAbort.abort();
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.equal(gate.getMetrics()[0]?.activeRequests, 1, 'the Request signal must not override init.signal');
+
+		initAbort.abort();
+		await assert.rejects(bodyRead, (error: unknown) => error instanceof Error && error.name === 'AbortError');
+		assert.equal(gate.getMetrics()[0]?.activeRequests, 0);
+	});
+
+	test('an explicit null init signal suppresses a Request signal', async () => {
+		globalThis.fetch = async () => makeStallingResponse();
+		const gate = ProviderGate.install([{ ...BASE_CONFIG, maxConcurrentRequests: 1 }], 0);
+		const requestAbort = new AbortController();
+		const request = new Request(TEST_BASE + '/chat', {
+			method: 'POST',
+			signal: requestAbort.signal,
+		});
+		const response = await fetch(request, { signal: null });
+
+		requestAbort.abort();
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.equal(gate.getMetrics()[0]?.activeRequests, 1, 'null init.signal must override the Request signal');
+		await response.body?.cancel();
+		assert.equal(gate.getMetrics()[0]?.activeRequests, 0);
+	});
+
 	test('caller cancellation releases a body-phase slot immediately', async () => {
 		let mode: 'stall' | 'success' = 'stall';
 		let calls = 0;
@@ -541,6 +696,46 @@ describe('ProviderGate — stream liveness', () => {
 		const res = await fetch(TEST_BASE + '/chat', makeInit('s1'));
 		const text = await readBody(res);
 		assert.equal(text, 'data: hello\n\n');
+	});
+
+	test('response bodies pull the upstream on demand and release at EOF', async () => {
+		const encoder = new TextEncoder();
+		const chunks = [encoder.encode('one'), encoder.encode('two')];
+		let upstreamPulls = 0;
+		globalThis.fetch = async () => {
+			const body = new ReadableStream<Uint8Array>({
+				pull(controller) {
+					upstreamPulls++;
+					const chunk = chunks.shift();
+					if (chunk) controller.enqueue(chunk);
+					else controller.close();
+				},
+			}, { highWaterMark: 0 });
+			return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+		};
+		const gate = ProviderGate.install([{ ...BASE_CONFIG, maxConcurrentRequests: 1 }], 0);
+
+		const response = await fetch(TEST_BASE + '/chat', makeInit('demand-driven'));
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.equal(upstreamPulls, 0, 'fetch must not read the upstream body before demand');
+
+		const reader = response.body!.getReader();
+		const first = await reader.read();
+		assert.equal(new TextDecoder().decode(first.value), 'one');
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.equal(upstreamPulls, 1, 'one downstream read should pull one upstream chunk');
+		assert.equal(gate.getMetrics()[0]?.activeRequests, 1);
+
+		const second = await reader.read();
+		assert.equal(new TextDecoder().decode(second.value), 'two');
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.equal(upstreamPulls, 2);
+		assert.equal(gate.getMetrics()[0]?.activeRequests, 1);
+
+		const eof = await reader.read();
+		assert.equal(eof.done, true);
+		assert.equal(upstreamPulls, 3, 'EOF should be observed by the next demand');
+		assert.equal(gate.getMetrics()[0]?.activeRequests, 0);
 	});
 });
 
@@ -637,6 +832,41 @@ describe('ProviderGate — header-phase timeout', () => {
 		const [metrics] = gate.getMetrics();
 		assert.equal(metrics.paused, true);
 		assert.equal(metrics.strikeCount, 2);
+	});
+
+	test('a stale success cannot close a transport circuit opened by a newer failure', async () => {
+		let releaseSuccess!: () => void;
+		const successHeld = new Promise<void>((resolve) => { releaseSuccess = resolve; });
+		let calls = 0;
+		globalThis.fetch = async () => {
+			calls += 1;
+			if (calls === 1) {
+				await successHeld;
+				return new Response(null, { status: 200 });
+			}
+			throw new TypeError('connection refused');
+		};
+		const gate = ProviderGate.install([{
+			...BASE_CONFIG,
+			maxConcurrentRequests: 2,
+			queueWaitSeconds: 0,
+		}], 0, {
+			transportFailureThreshold: 1,
+			transportCircuitCooldownSeconds: 1,
+		});
+
+		const staleSuccess = fetch(TEST_BASE + '/chat', makeInit('stale-success'));
+		while (calls < 1) await new Promise((resolve) => setImmediate(resolve));
+		await assert.rejects(fetch(TEST_BASE + '/chat', makeInit('trip')), TypeError);
+		assert.equal(gate.getMetrics()[0]?.paused, true);
+
+		releaseSuccess();
+		assert.equal((await staleSuccess).status, 200);
+		await assert.rejects(
+			fetch(TEST_BASE + '/chat', makeInit('blocked')),
+			ProviderGateTransportCircuitOpenError,
+		);
+		assert.equal(calls, 2, 'a stale success must not clear the open transport circuit');
 	});
 
 	test('one half-open probe closes the transport circuit after recovery', async () => {

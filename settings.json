@@ -1,7 +1,7 @@
 {
   "defaultModel": "gpt-5.6-luna",
-  "defaultThinkingLevel": "high",
-  "defaultProvider": "github-copilot",
+  "defaultThinkingLevel": "xhigh",
+  "defaultProvider": "openai-codex",
   "retry": {
     "enabled": true,
     "maxRetries": 8,
@@ -18,8 +18,8 @@
     "npm:pi-mcp-adapter@2.20.1"
   ],
   "pruning": {
-    "model": "deepseek-v4.1-flash:cloud",
-    "provider": "ollama",
+    "model": "gpt-5.6-luna",
+    "provider": "github-copilot",
     "thinkingLevel": "low",
     "prepass": {
       "temperature": 0.2,

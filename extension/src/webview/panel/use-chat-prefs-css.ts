@@ -6,9 +6,9 @@ import type { ChatPrefs, UiDensity } from '../../shared/protocol';
 import { ACTIVITY_TAIL_ROW_HEIGHT_PX } from './transcript/activity-tail';
 import { accentContrastColor } from './accent-contrast';
 
-/** Gap scale (px) per density. 'comfortable' reproduces the bundled defaults
- *  (xs 4 / sm 6 / md 8 / lg 12 / xl 16) so the default leaves the layout
- *  unchanged. Unknown densities fall back to comfortable in the effect. */
+/** Gap scale (px) per density. 'compact' reproduces the bundled defaults
+ *  (xs 3 / sm 5 / md 6 / lg 8 / xl 10) so the default leaves the layout
+ *  unchanged. Unknown densities fall back to compact in the effect. */
 const DENSITY_GAPS: Record<UiDensity, { xs: number; sm: number; md: number; lg: number; xl: number }> = {
   compact: { xs: 3, sm: 5, md: 6, lg: 8, xl: 10 },
   comfortable: { xs: 4, sm: 6, md: 8, lg: 12, xl: 16 },
@@ -27,7 +27,6 @@ export function useChatPrefsCss(prefs: ChatPrefs) {
     uiAccentColor,
     uiMutedColor,
     uiLinkColor,
-    uiMessageWidth,
     uiBackground,
     uiForeground,
     uiBorder,
@@ -67,9 +66,6 @@ export function useChatPrefsCss(prefs: ChatPrefs) {
     } else {
       root.removeProperty('--panel-font-mono');
     }
-    root.setProperty('--message-assistant-width', `${uiMessageWidth}%`);
-    root.setProperty('--message-assistant-width-narrow', `${Math.min(100, uiMessageWidth + 4)}%`);
-
     // Background → ink ramp. ink == base; lighter shades mix toward white at
     // small percentages so the default base (#050506) approximates the
     // bundled ramp; black is darkened slightly to preserve the shell layering.
@@ -145,8 +141,8 @@ export function useChatPrefsCss(prefs: ChatPrefs) {
     root.setProperty('--panel-radius-lg', `${uiCornerRadius + 2}px`);
     root.setProperty('--panel-radius-xl', `${uiCornerRadius + 4}px`);
 
-    // Density → gap scale. 'comfortable' reproduces the bundled defaults.
-    const gaps = DENSITY_GAPS[uiDensity] ?? DENSITY_GAPS.comfortable;
+    // Density → gap scale. 'compact' reproduces the bundled defaults.
+    const gaps = DENSITY_GAPS[uiDensity] ?? DENSITY_GAPS.compact;
     root.setProperty('--panel-gap-xs', `${gaps.xs}px`);
     root.setProperty('--panel-gap-sm', `${gaps.sm}px`);
     root.setProperty('--panel-gap-md', `${gaps.md}px`);
@@ -169,7 +165,6 @@ export function useChatPrefsCss(prefs: ChatPrefs) {
     uiAccentColor,
     uiMutedColor,
     uiLinkColor,
-    uiMessageWidth,
     uiBackground,
     uiForeground,
     uiBorder,

@@ -335,12 +335,11 @@ function appendDurableTerminal(state: ArchState, sessionPath: string, terminal: 
         && message.id === terminal.id
         && (terminal.durableEntryId === undefined || message.durableEntryId === undefined))
       : -1;
-    const streamingIndex = list.findIndex((message) =>
-      message.role === 'assistant' && message.status === 'streaming',
-    );
-    const index = durableEntryIndex >= 0
-      ? durableEntryIndex
-      : durableIdIndex >= 0 ? durableIdIndex : streamingIndex;
+    // A semantic terminal is authoritative only for its durable identity. An
+    // unrelated streaming row may belong to an older turn (for example when a
+    // queued follow-up has opened a fresh owner), so never claim it as a
+    // fallback merely because it is still streaming.
+    const index = durableEntryIndex >= 0 ? durableEntryIndex : durableIdIndex;
     if (index >= 0) {
       const previous = list[index];
       list[index] = previous?.role === 'assistant' && previous.status !== 'streaming'

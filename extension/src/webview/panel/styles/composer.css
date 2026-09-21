@@ -16,7 +16,7 @@
    the typing surface can be tuned for comfort without rescaling the
    transcript. Driven by --panel-composer-font-size (see ChatPrefs.uiComposerFontSize). */
 .composer-input-textarea {
-  font-size: var(--panel-composer-font-size, 13px);
+  font-size: var(--panel-composer-font-size, 11px);
 }
 
 .composer-shell {
@@ -1318,11 +1318,6 @@
   width: 100%;
   max-width: 100%;
 }
-
-/* Legacy preference toggles (hidden; kept for backward compat) */
-.pref-toggle,
-.pref-toggle-icon,
-.pref-toggle-check { display: none; }
 
 /* ── Block context menu ───────────────────────────────────────────────────── */
 

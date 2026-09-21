@@ -161,10 +161,10 @@ export function useAppHandlers(
   const handleMovePinnedItem = useCallback((sourcePath: string, toItemIndex: number) => postMessage({ type: 'movePinnedItem', sourcePath, toItemIndex }), [postMessage]);
   const handleDissolvePinnedGroup = useCallback((sourcePath: string) => postMessage({ type: 'dissolvePinnedGroup', sourcePath }), [postMessage]);
   const handleUnpinPinnedGroup = useCallback((sourcePath: string) => postMessage({ type: 'unpinPinnedGroup', sourcePath }), [postMessage]);
-  // Cancel a deferred trigger. `sessionPath` is the trigger's watcher session
-  // (carried on the trigger itself), not necessarily the active session, so it
-  // is passed explicitly rather than read from the ref. Omit `triggerId` to
-  // cancel every active trigger for that session.
+  // Cancel a deferred trigger. `sessionPath` is the trigger's creator/owner
+  // session (carried on the trigger itself), not necessarily the active
+  // session, so it is passed explicitly rather than read from the ref. Omit
+  // `triggerId` to cancel every active trigger for that creator.
   const handleCancelDeferredTrigger = useCallback((sessionPath: string, triggerId?: string) => {
     postMessage({ type: 'cancelDeferredTrigger', sessionPath, triggerId });
   }, [postMessage]);

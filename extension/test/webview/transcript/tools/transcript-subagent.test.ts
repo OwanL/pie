@@ -292,6 +292,35 @@ test('a completed parallel sibling stays completed when another child fails the 
   assert.equal(singleResultStatus(completed, 'failed', true), 'completed');
 });
 
+test('nested tool failure does not replace child lifecycle state, while provider failure remains visible', () => {
+  const nestedToolFailure = {
+    agent: 'worker',
+    task: 'Inspect regression',
+    exitCode: -1,
+    messages: [{ role: 'toolResult', toolCallId: 'bash-1', isError: true, content: 'permission denied' }],
+  };
+  const nested = getRenderableSubagentResultFromToolCall({
+    input: { agent: 'worker', task: 'Inspect regression' },
+    result: { details: { results: [nestedToolFailure] } },
+    status: 'failed',
+  } as any);
+  assert.equal(nested?.results[0]?.exitCode, -1, 'nested failure must not synthesize a child provider exit code');
+  assert.equal(singleResultStatus(nested!.results[0]!, 'failed', false), 'completed');
+
+  const providerFailure = getRenderableSubagentResultFromToolCall({
+    input: { agent: 'worker', task: 'Inspect regression' },
+    result: { details: { results: [{
+      agent: 'worker', task: 'Inspect regression', exitCode: -1, messages: [],
+      errorMessage: 'provider unavailable', failureClass: 'provider_error',
+    }] } },
+    status: 'failed',
+  } as any);
+  assert.equal(providerFailure?.results[0]?.exitCode, 1);
+  assert.equal(providerFailure?.results[0]?.failureClass, 'provider_error');
+  assert.equal(providerFailure?.results[0]?.errorMessage, 'provider unavailable');
+  assert.equal(singleResultStatus(providerFailure!.results[0]!, 'failed', false), 'failed');
+});
+
 test('explicitly queued subagents explain the concurrency wait while retaining the idle treatment', () => {
   const result = {
     agent: 'reviewer',

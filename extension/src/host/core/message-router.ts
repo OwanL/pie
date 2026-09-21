@@ -45,8 +45,9 @@ export interface SessionServiceLike {
   setSessionTitlesSettings(updates: Partial<SessionTitlesSettings>): Promise<void>;
   /** Consume `user_input` triggers using the real prompt (no synthetic Send). */
   notifyUserInput(sessionPath: string, corrId: string): void;
-  /** Cancel a deferred trigger (or all for `sessionPath` when `triggerId` is
-   *  omitted). Invoked by the webview's status-strip cancel affordance. */
+  /** Cancel a deferred trigger (or all triggers owned by `sessionPath` when
+   *  `triggerId` is omitted). Invoked by the webview's status-strip cancel
+   *  affordance. */
   cancelDeferredTrigger(sessionPath: string, triggerId?: string): void;
 }
 
@@ -1298,8 +1299,9 @@ export class MessageRouter {
     });
   }
 
-  /** `cancelDeferredTrigger` — cancel a deferred trigger (or all for the
-   *  session when `triggerId` is omitted) from the webview's status-strip
+  /** `cancelDeferredTrigger` — cancel a deferred trigger (or all triggers
+   *  owned by the supplied creator session when `triggerId` is omitted) from
+   *  the webview's status-strip
    *  cancel affordance. Side-effect only (no reducer event): the registry
    *  owns the in-memory set + sidecar op, and requests its own re-render. */
   private onCancelDeferredTrigger(msg: Extract<WebviewToHostMessage, { type: 'cancelDeferredTrigger' }>): void {

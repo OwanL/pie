@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import * as path from 'node:path';
 import test from 'node:test';
 
 import { createInitialArchState } from '../../../src/host/core/arch-state';
@@ -136,6 +137,62 @@ test('live path: parent + subagent edits to one file merge across relative/absol
   assert.equal(changes.length, 1, 'parent + subagent edits to one file must merge in the live path');
   assert.equal(changes[0].additions, 6);
   assert.equal(changes[0].deletions, 3);
+});
+
+test('live path: legacy mixed-cwd subagent summaries resolve against the owning cwd', () => {
+  const sessionPath = '/proj/session.jsonl';
+  const archState = createInitialArchState();
+  archState.sessions.sessions = [sessionWithCwd(sessionPath, '/proj')];
+  const deps = liveDeps(archState, sessionPath);
+
+  onToolFinished({
+    requestId: 'r1', sessionPath, messageId: 'm1', toolCallId: 't1',
+    name: 'subagent', input: { agent: 'worker', task: 't', cwd: '/other' },
+    result: {
+      details: { mode: 'single', results: [{
+        agent: 'worker', exitCode: 0, messages: [{
+          role: 'assistant',
+          content: [{ type: 'toolCall', name: 'edit', arguments: { path: 'src/legacy.ts', oldText: 'a', newText: 'b' } }],
+        }],
+      }] },
+    },
+    status: 'completed',
+  }, deps, { skipTranscriptMutation: true });
+
+  const changes = archState.fileChanges.bySession[sessionPath] ?? [];
+  assert.equal(changes.length, 1);
+  assert.equal(changes[0]?.path, path.resolve('/other/src/legacy.ts'));
+  assert.equal(changes[0]?.additions, 1);
+  assert.equal(changes[0]?.deletions, 1);
+});
+
+test('live path: compacted subagent file summaries survive terminal reattachment data', () => {
+  const sessionPath = '/proj/session.jsonl';
+  const archState = createInitialArchState();
+  archState.sessions.sessions = [sessionWithCwd(sessionPath, '/proj')];
+  const deps = liveDeps(archState, sessionPath);
+
+  onToolFinished({
+    requestId: 'r1', sessionPath, messageId: 'm1', toolCallId: 't1',
+    name: 'subagent', input: { agent: 'worker', task: 't' },
+    result: {
+      details: { mode: 'single', results: [{
+        agent: 'worker', cwd: '/proj', exitCode: 0, messages: [],
+        fileChanges: [{ path: 'src/compacted.ts', kind: 'modified', additions: 5, deletions: 2 }],
+      }] },
+    },
+    status: 'completed',
+  }, deps, { skipTranscriptMutation: true });
+
+  const changes = archState.fileChanges.bySession[sessionPath] ?? [];
+  assert.equal(changes.length, 1);
+  assert.ok(changes[0]?.path.endsWith('src\\compacted.ts') || changes[0]?.path.endsWith('src/compacted.ts'));
+  assert.equal(changes[0]?.kind, 'modified');
+  assert.equal(changes[0]?.toolCallId, 't1-sa0-fc0');
+  assert.equal(changes[0]?.messageId, 'm1');
+  assert.equal(changes[0]?.description, 'modified');
+  assert.equal(changes[0]?.additions, 5);
+  assert.equal(changes[0]?.deletions, 2);
 });
 
 test('live path: create-then-delete matches across relative/absolute spellings', () => {

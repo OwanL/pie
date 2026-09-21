@@ -130,10 +130,10 @@
           "additionalProperties": false,
           "required": ["maxConcurrentRequests"],
           "properties": {
-            "maxConcurrentRequests": { "type": "integer", "minimum": 1 },
-            "afterburnSeconds": { "type": "number", "minimum": 0 },
-            "queueWaitSeconds": { "type": "number", "minimum": 0 },
-            "headerWaitSeconds": { "type": "number", "minimum": 0 }
+            "maxConcurrentRequests": { "type": "integer", "minimum": 0, "maximum": 128, "description": "Provider-wide in-flight request cap; 0 means Unlimited." },
+            "afterburnSeconds": { "type": "number", "minimum": 0, "maximum": 300 },
+            "queueWaitSeconds": { "type": "number", "minimum": 0, "maximum": 300 },
+            "headerWaitSeconds": { "type": "number", "minimum": 0, "maximum": 300 }
           }
         },
         "models": {

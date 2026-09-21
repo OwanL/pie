@@ -84,3 +84,78 @@ test('router fences detail generation/path/address/subscription ownership and fo
   await router.handleWorkerFrame(sessionPath, { ...frameBase, seq: 4, kind: 'detail.delta', subscriptionId: 'subscription-1', baseRevision: 2, revision: 3, operations: [] });
   assert.equal(forwarded.length, 3, 'post-unsubscribe traffic cannot recreate ownership');
 });
+
+test('router preserves a detail page delivered in the same worker chunk as detail.start', async () => {
+  const sessionPath = `${process.cwd()}/detail-router-race.jsonl`;
+  const forwarded: CoordinatorToHostDetailMessage[] = [];
+  const address: LiveSubagentDetailAddress = {
+    sessionPath, turnId: 'turn-race', rootToolCallId: 'tool-race', rootAttemptId: 'root-attempt',
+    lineage: [{ childId: 'child-race', spawningToolCallId: 'tool-race', attemptId: 'attempt-race' }],
+  };
+  const payload = {
+    kind: 'json-segment' as const, encoding: 'utf8-json' as const, segmentId: 'segment-race', semanticPath: [],
+    startByte: 0, endByte: 4, totalBytes: 4, startCodePoint: 0, endCodePoint: 4, totalCodePoints: 4, text: 'null',
+  };
+  const checksum = createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+  const frameBase = {
+    ipcVersion: WORKER_IPC_VERSION, coordinatorGeneration: 1, workerId: 'worker-detail-race', workerGeneration: 1,
+    workerPid: 1, rootSessionPath: sessionPath, leasePath: sessionPath, leaseRevision: 1, sessionPath,
+  };
+  const routerRef = { value: undefined as WorkerRuntimeRouter | undefined };
+  let worker: any;
+  const client = {
+    getSnapshot: () => ({ status: 'ready' as const, stdoutTail: '', stderrTail: '' }),
+    requestFrame: (body: any) => {
+      if (body.kind === 'sync') return Promise.resolve({ kind: 'sync.ack', domain: body.domain, revision: body.revision });
+      if (body.kind === 'runtime.promote') return Promise.resolve({ kind: 'runtime.ready', runtimeMetadata: { mode: 'phase4', startedAt: 1 } });
+      if (body.kind === 'detail.subscribe') {
+        const start = {
+          kind: 'detail.start', subscriptionId: body.subscriptionId, address, source: 'live' as const,
+          baselineRevision: 1, pageCount: 1, totalBytes: 4, totalCodePoints: 4,
+        };
+        const startResponse = Promise.resolve(start);
+        // WorkerClient resolves the correlated start promise and then walks the
+        // next frame from the same IPC chunk before the router's await
+        // continuation can activate the subscription owner.
+        void routerRef.value!.handleWorkerFrame(sessionPath, {
+          ...frameBase, seq: 1, kind: 'detail.page', subscriptionId: body.subscriptionId,
+          ref: { baselineRevision: 1, pageIndex: 0, pageCount: 1 }, payload,
+          payloadBytes: Buffer.byteLength(JSON.stringify(payload)), checksum,
+        } as any);
+        return startResponse;
+      }
+      if (body.kind === 'detail.unsubscribe') return Promise.resolve({ kind: 'detail.unsubscribed', subscriptionId: body.subscriptionId });
+      throw new Error(`unexpected ${body.kind}`);
+    },
+    sendFrame: () => true,
+  };
+  const supervisor = {
+    startWorker: async (root: string, prepare: any) => {
+      await prepare({ workerId: 'worker-detail-race', workerGeneration: 1, sessionPath: root });
+      worker = { workerId: 'worker-detail-race', workerGeneration: 1, sessionPath: root, client };
+      return worker;
+    },
+    listWorkers: () => worker ? [worker] : [],
+  };
+  const router = new WorkerRuntimeRouter({
+    supervisor: supervisor as any,
+    coldStore: {
+      serializePromotionGrant: (target: string) => ({ grantId: 'grant', coordinatorGeneration: 1, sessionPath: target, sessionPathKey: target, fingerprint: 'f', creationReason: 'resume' }),
+      consumePromotionGrant: (grant: any) => grant,
+      abortPromotionGrant: () => undefined,
+    } as any,
+    ownership: {
+      registerHot: async (target: string, owner: any) => ({ ...owner, canonicalSessionPath: target, ownershipRevision: 1, nonce: 'lease' }),
+    } as any,
+    emit: () => undefined,
+    emitDetail: (message) => forwarded.push(message),
+    buildPromotionSnapshot: async () => ({ sdkPath: '/sdk', agentDir: '/agent', startupCwd: '/', sessionDir: '/sessions', openedPayload: opened(sessionPath) as any, modelSettings: { defaultModel: 'm', defaultThinkingLevel: 'off' } }),
+  });
+  routerRef.value = router;
+  await router.promote(sessionPath);
+
+  await router.subscribeDetail({ kind: 'detail.subscribe', requestId: 'public-race', subscriptionId: 'subscription-race', address, maxPageBytes: 4096 });
+
+  assert.deepEqual(forwarded.map((message) => message.kind), ['detail.start', 'detail.page']);
+  assert.equal(forwarded[1]?.kind, 'detail.page');
+});

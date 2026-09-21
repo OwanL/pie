@@ -99,6 +99,79 @@ test('live recursive previews expose bounded child metadata without traversing c
     'the stable owner still carries the latest producer revision');
 });
 
+test('lazy subagent preview preserves partial usage, throughput, and recovery metadata without zero-filling', () => {
+  const preview = compactSubagentResultPreview({
+    details: { mode: 'single', results: [{
+      agent: 'worker', task: 'inspect', exitCode: -1, messages: [],
+      model: 'provider/model', selectedModel: 'provider/model', thinkingLevel: 'high',
+      contextWindow: 200_000, usage: { output: 42 }, retryCount: 1,
+      fallback: true, failedModel: 'provider/old', failureClass: 'rate_limit',
+      stopReason: 'error', errorMessage: 'provider unavailable', stderr: 'retry exhausted',
+      turnThroughputSamples: [{ endedAt: '2026-01-01T00:00:01.000Z', outputTokens: 42, generationDurationMs: 1000, status: 'completed' }],
+    }] },
+  }) as { details?: { results?: Array<Record<string, any>> } };
+  const child = preview.details?.results?.[0];
+  assert.equal(child?.selectedModel, 'provider/model');
+  assert.equal(child?.thinkingLevel, 'high');
+  assert.deepEqual(child?.usage, { output: 42 });
+  assert.equal(child?.retryCount, 1);
+  assert.equal(child?.fallback, true);
+  assert.equal(child?.failedModel, 'provider/old');
+  assert.equal(child?.failureClass, 'rate_limit');
+  assert.equal(child?.stopReason, 'error');
+  assert.equal(child?.errorMessage, 'provider unavailable');
+  assert.equal(child?.stderr, 'retry exhausted');
+  assert.equal(child?.turnThroughputSamples?.[0]?.outputTokens, 42);
+  assert.equal((child?.usage as Record<string, unknown> | undefined)?.input, undefined);
+});
+
+test('subagent preview keeps bounded context, file summaries, and recursive failure/tool metadata', () => {
+  const preview = compactSubagentResultPreview({
+    details: { mode: 'single', results: [{
+      agent: 'outer',
+      task: 'delegate',
+      cwd: '/workspace/outer',
+      parentUserContextMode: 'all',
+      parentUserContext: 'context '.repeat(10_000),
+      fileChanges: [{ path: 'src/outer.ts', kind: 'modified', additions: 4, deletions: 2 }],
+      exitCode: -1,
+      messages: [
+        {
+          role: 'assistant',
+          content: [{
+            type: 'toolCall', id: 'edit-1', name: 'edit',
+            arguments: { path: 'src/outer.ts', oldText: 'old', newText: 'new' },
+          }],
+        },
+        {
+          role: 'toolResult', toolCallId: 'nested-1', toolName: 'subagent',
+          details: { mode: 'single', results: [{
+            agent: 'inner', task: 'nested', exitCode: 0,
+            fileChanges: [{ path: 'src/inner.ts', kind: 'created', additions: 3 }],
+            messages: [{
+              role: 'assistant',
+              content: [{ type: 'toolCall', id: 'write-1', name: 'write', arguments: { path: 'src/inner.ts', content: 'secret body' } }],
+            }],
+          }] },
+        },
+        { role: 'toolResult', toolCallId: 'failed-1', isError: true, content: 'permission denied' },
+      ],
+    }] },
+  }) as { details?: { results?: Array<Record<string, any>> } };
+
+  const child = preview.details?.results?.[0];
+  assert.equal(child?.cwd, '/workspace/outer');
+  assert.equal(child?.parentUserContextMode, 'all');
+  assert.equal((child?.parentUserContext as string).length, 12_000);
+  assert.deepEqual(child?.fileChanges, [{ path: 'src/outer.ts', kind: 'modified', additions: 4, deletions: 2 }]);
+  assert.equal(child?.hasNestedToolFailure, true);
+  assert.equal((child?.messages as any[])?.[0]?.content?.[0]?.arguments?.path, 'src/outer.ts');
+  assert.equal((child?.messages as any[])?.[0]?.content?.[0]?.arguments?.oldText, undefined);
+  assert.equal((child?.messages as any[])?.[1]?.details?.results?.[0]?.fileChanges?.[0]?.path, 'src/inner.ts');
+  assert.equal(JSON.stringify(preview).includes('secret body'), false);
+  assert.ok(Buffer.byteLength(JSON.stringify(preview), 'utf8') <= SUBAGENT_PREVIEW_MAX_BYTES);
+});
+
 test('subagent preview preserves every top-level card while bounding recursive history', () => {
   const messages = Array.from({ length: 50 }, (_, index) => ({
     role: 'assistant',

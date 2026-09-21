@@ -5,7 +5,12 @@ import {
   type AnalyticsDetailCapture,
   type AnalyticsObservation,
 } from '../../../shared/analytics/contracts.js';
-import { AnalyticsPrivacyScrubPendingError, SqliteAnalyticsRecorder } from './sqlite-recorder.js';
+import {
+  AnalyticsDetailValidationError,
+  AnalyticsPrivacyScrubPendingError,
+  AnalyticsReconciliationCapacityError,
+  SqliteAnalyticsRecorder,
+} from './sqlite-recorder.js';
 import { processObservationBatch } from './capture-batch-processing.js';
 import {
   createSqliteLockRetryBudget,
@@ -154,7 +159,11 @@ async function handle(raw: unknown): Promise<void> {
           throw new Error('Mixed analytics capture batch is not supported.');
         }
         const lockRetryBudget: SqliteLockRetryBudget = createSqliteLockRetryBudget();
-        const rejections: Array<{ index: number; code: 'subject_deleted' | 'source_conflict'; error: string }> = [];
+        const rejections: Array<{
+          index: number;
+          code: 'subject_deleted' | 'source_conflict' | 'invalid_record' | 'reconciliation_capacity';
+          error: string;
+        }> = [];
         if (firstKind === 'observation') {
           // The decoded envelopes already have the ObservationCapture shape;
           // retain that array instead of allocating one wrapper DTO per fact.
@@ -182,6 +191,8 @@ async function handle(raw: unknown): Promise<void> {
               if (deleted) rejections.push({ index, code: 'subject_deleted', error: deleted });
               else if (error instanceof AnalyticsSourceConflictError) {
                 rejections.push({ index, code: 'source_conflict', error: error.message });
+              } else if (error instanceof AnalyticsDetailValidationError) {
+                rejections.push({ index, code: 'invalid_record', error: error.message });
               } else throw error;
             }
           }
@@ -293,7 +304,9 @@ async function handle(raw: unknown): Promise<void> {
     let errorCode: string | undefined;
     if (message.startsWith('Analytics capture subject is deleted:')) errorCode = 'subject_deleted';
     else if (error instanceof AnalyticsPrivacyScrubPendingError) errorCode = 'privacy_scrub_pending';
+    else if (error instanceof AnalyticsDetailValidationError) errorCode = 'invalid_record';
     else if (error instanceof AnalyticsSourceConflictError) errorCode = 'source_conflict';
+    else if (error instanceof AnalyticsReconciliationCapacityError) errorCode = 'reconciliation_capacity';
     else if (isSqliteLockContention(error)) errorCode = 'database_locked';
     await send({
       type: 'error',

@@ -19,6 +19,7 @@ import { Tooltip } from '../components/tooltip';
 import { useResizableHeight } from '../components/use-resizable-height';
 import {
   getRenderableSubagentResultFromToolCall,
+  hasNestedToolFailure,
   isSubagentSingleResultInterrupted,
   isSubagentSingleResultRunning,
   subagentSingleResultToChatMessages,
@@ -42,6 +43,8 @@ import { SubagentCallContext } from './subagent-call-context';
 import { ACTIVITY_TAIL_MAX_LINES } from './activity-tail';
 import { TurnActivityTailBody, isIdle, subagentPreviewTail } from './activity-tail-preview';
 import { CommittedToolLeaf } from './commit-registry';
+import { subagentDisplayCosts, type SubagentDisplayCost } from './subagent-cost';
+import type { TokenPricingResolver } from '../session-tabs/token-usage';
 
 interface ToolCallItemProps {
   toolCall: ToolCall;
@@ -50,6 +53,7 @@ interface ToolCallItemProps {
   onOpenFile: (path: string) => void;
   onContextMenu: TranscriptContextMenuHandler;
   renderToolCall: RenderToolCall;
+  pricingForModel?: TokenPricingResolver;
 }
 
 interface SubagentBlockProps {
@@ -64,17 +68,12 @@ interface SubagentBlockProps {
   onContextMenu: (e: MouseEvent) => void;
   onNestedContextMenu: TranscriptContextMenuHandler;
   renderToolCall: RenderToolCall;
+  pricingForModel?: TokenPricingResolver;
 }
 
 function formatActivityDuration(ms: number): string {
   if (ms < 60_000) return `${Math.max(0, Math.floor(ms / 1000))}s`;
   return `${Math.floor(ms / 60_000)}m ${Math.floor((ms % 60_000) / 1000)}s`;
-}
-
-function compactTelemetryNumber(value: number): string {
-  if (value < 1_000) return String(Math.round(value));
-  if (value < 1_000_000) return `${(value / 1_000).toFixed(value < 10_000 ? 1 : 0)}k`;
-  return `${(value / 1_000_000).toFixed(1)}m`;
 }
 
 function normalizedUsageTokens(value: unknown): number {
@@ -86,7 +85,7 @@ function normalizedUsageTokens(value: unknown): number {
 export function aggregateSubagentUsageTokens(usage: SubagentSingleResult['usage']): number {
   if (!usage) return 0;
   return [usage.input, usage.output, usage.cacheRead, usage.cacheWrite]
-    .reduce((total, value) => total + normalizedUsageTokens(value), 0);
+    .reduce<number>((total, value) => total + normalizedUsageTokens(value), 0);
 }
 
 function formatContextPercent(tokens: number, contextWindow: number): string {
@@ -159,24 +158,40 @@ function subagentErrorDetail(result: SubagentSingleResult): string | undefined {
     : result.exitCode > 0 ? `Exit code ${result.exitCode}`
     : 'Failed';
   parts.push(label);
+  if (result.failureClass) parts.push(`Failure class: ${result.failureClass}`);
   if (result.errorMessage) parts.push(result.errorMessage);
   if (result.stderr) parts.push(result.stderr);
   return parts.join(': ');
 }
 
-/** Compact model label shown in the subagent header. */
-function ModelLabel({ result }: { result: SubagentSingleResult }) {
+/** Compact model label shown in the subagent header. Detailed runtime and
+ * handoff data is available from the keyboard-focusable model trigger below. */
+function ModelLabel({ result, requestedMode, displayCost }: { result: SubagentSingleResult; requestedMode?: ParentUserContextMode; displayCost?: SubagentDisplayCost }) {
   const model = result.selectedModel ?? result.model;
   if (!model) return null;
-  // Show short name: last segment after '/' or full if no slash
+  // Show short name: last segment after '/' or full if no slash.
   const short = model.includes('/') ? model.split('/').pop()! : model;
-  const title = result.thinkingLevel
-    ? `${model} (thinking: ${result.thinkingLevel})`
-    : model;
+  const reasoning = result.thinkingLevel;
+  const title = reasoning ? `${model} (reasoning: ${reasoning})` : model;
+  const accessibleLabel = `Show ${model}${reasoning ? `, reasoning ${reasoning}` : ''} and subagent runtime details`;
   return (
-    <span class="subagent-model-label transcript-header-summary-subtle" title={title}>
-      {short}{result.thinkingLevel && result.thinkingLevel !== 'off' ? ` · ${result.thinkingLevel}` : ''}
-    </span>
+    <Tooltip
+      placement="bottom"
+      freezeWhileVisible
+      contentNode={<SubagentModelDetailsTooltip result={result} requestedMode={requestedMode} displayCost={displayCost} />}
+    >
+      <span
+        class="subagent-model-details-trigger"
+        tabIndex={0}
+        aria-label={accessibleLabel}
+        onClick={(event) => event.stopPropagation()}
+        onKeyDown={(event) => event.stopPropagation()}
+      >
+        <span class="subagent-model-label transcript-header-summary-subtle" title={title}>
+          {short}{reasoning ? ` · ${reasoning}` : ''}
+        </span>
+      </span>
+    </Tooltip>
   );
 }
 
@@ -221,111 +236,189 @@ export function subagentContextHandoffSummary(
   return { label: 'context task only', state: 'task-only', promptCount: 0, clarificationCount: 0 };
 }
 
-function ContextHandoffLabel({ result, requestedMode }: { result: SubagentSingleResult; requestedMode?: ParentUserContextMode }) {
-  const summary = subagentContextHandoffSummary(result, requestedMode);
+function contextHandoffExplanation(summary: ContextHandoffSummary): string {
   const sourceSummary = [
     summary.promptCount > 0 ? `${summary.promptCount} user ${summary.promptCount === 1 ? 'prompt' : 'prompts'}` : undefined,
     summary.clarificationCount > 0 ? `${summary.clarificationCount} recorded ${summary.clarificationCount === 1 ? 'clarification' : 'clarifications'}` : undefined,
   ].filter(Boolean).join(' · ');
-  const explanation = summary.state === 'inherited'
+  return summary.state === 'inherited'
     ? `${sourceSummary || 'Parent user context'} inserted into the isolated child prompt.`
     : summary.state === 'empty'
       ? `The ${summary.mode} mode was requested, but no eligible parent prompt or completed clarification was available; only the task was sent.`
       : summary.state === 'unavailable'
         ? `The tool requested ${summary.mode} context. The exact inherited packet is not available in this live-start or older saved result.`
         : 'No parent user context was requested; the child received only the delegated task.';
+}
+
+function knownNonNegative(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function formatDetailTokens(value: unknown): string {
+  const known = knownNonNegative(value);
+  return known === undefined ? '—' : known.toLocaleString();
+}
+
+function formatDetailDuration(value: unknown): string {
+  const known = knownNonNegative(value);
+  if (known === undefined) return '—';
+  return known < 1_000 ? `${Math.round(known)}ms` : `${(known / 1_000).toFixed(1)}s`;
+}
+
+function latestThroughputSample(result: SubagentSingleResult) {
+  return result.turnThroughputSamples
+    ?.filter((sample) => knownNonNegative(sample.outputTokens) !== undefined
+      && knownNonNegative(sample.generationDurationMs) !== undefined
+      && knownNonNegative(sample.generationDurationMs)! > 0
+      && knownNonNegative(sample.outputTokens)! > 0)
+    .at(-1);
+}
+
+function ContextHandoffDetails({ result, requestedMode }: { result: SubagentSingleResult; requestedMode?: ParentUserContextMode }) {
+  const summary = subagentContextHandoffSummary(result, requestedMode);
+  return (
+    <>
+      <div class="subagent-context-tooltip-section">Context handoff · {summary.label}</div>
+      <div class="subagent-context-tooltip-summary">{contextHandoffExplanation(summary)}</div>
+      <div class="subagent-context-tooltip-section">Delegated task</div>
+      <pre class="subagent-context-tooltip-content">{result.task}</pre>
+      {summary.content && (
+        <>
+          <div class="subagent-context-tooltip-section">Exact inherited parent context</div>
+          <pre class="subagent-context-tooltip-content">{summary.content}</pre>
+        </>
+      )}
+    </>
+  );
+}
+
+function SubagentModelDetailsTooltip({ result, requestedMode, displayCost }: { result: SubagentSingleResult; requestedMode?: ParentUserContextMode; displayCost?: SubagentDisplayCost }) {
+  const model = result.selectedModel ?? result.model;
+  const usage = result.usage;
+  const tokenValues = [usage?.input, usage?.output, usage?.cacheRead, usage?.cacheWrite];
+  const hasTokenData = tokenValues.some((value) => knownNonNegative(value) !== undefined);
+  const hasCompleteTokenData = tokenValues.every((value) => knownNonNegative(value) !== undefined);
+  const contextTokens = knownNonNegative(usage?.contextTokens);
+  const contextWindow = knownNonNegative(result.contextWindow);
+  const hasContextData = contextTokens !== undefined || contextWindow !== undefined;
+  const contextPercent = contextTokens !== undefined && contextWindow !== undefined && contextWindow > 0
+    ? formatContextPercent(contextTokens, contextWindow)
+    : undefined;
+  const turns = knownNonNegative(usage?.turns);
+  const throughput = latestThroughputSample(result);
+  const outputTokens = throughput ? knownNonNegative(throughput.outputTokens)! : undefined;
+  const generationDurationMs = throughput ? knownNonNegative(throughput.generationDurationMs)! : undefined;
+  const tokensPerSecond = outputTokens !== undefined && generationDurationMs !== undefined && generationDurationMs > 0
+    ? outputTokens / (generationDurationMs / 1_000)
+    : undefined;
+  const retryCount = knownNonNegative(result.retryCount);
+  const failedModel = result.failedModel?.trim() || undefined;
+  const recovered = result.exitCode === 0
+    && !isSubagentSingleResultRunning(result)
+    && (retryCount !== undefined && retryCount > 0 || result.fallback === true);
+  const hasFailure = result.exitCode !== -1 && (result.exitCode !== 0 || result.stopReason === 'error' || result.stopReason === 'aborted');
 
   return (
-    <Tooltip
-      placement="bottom"
-      freezeWhileVisible
-      contentNode={(
-        <div class="subagent-context-tooltip">
-          <div class="subagent-context-tooltip-title">{summary.label}</div>
-          <div class="subagent-context-tooltip-summary">{explanation}</div>
-          <div class="subagent-context-tooltip-section">Delegated task</div>
-          <pre class="subagent-context-tooltip-content">{result.task}</pre>
-          {summary.content && (
-            <>
-              <div class="subagent-context-tooltip-section">Exact inherited parent context</div>
-              <pre class="subagent-context-tooltip-content">{summary.content}</pre>
-            </>
-          )}
+    <div class="subagent-model-details-tooltip subagent-context-tooltip">
+      <div class="subagent-context-tooltip-title">{model ?? 'Model unavailable'}{result.thinkingLevel ? ` · reasoning ${result.thinkingLevel}` : ''}</div>
+      {result.provider && <div class="subagent-context-tooltip-summary">Provider: {result.provider}</div>}
+      {result.selectedModel && result.model && result.selectedModel !== result.model && (
+        <>
+          <div class="subagent-context-tooltip-summary">Requested model: {result.selectedModel}</div>
+          <div class="subagent-context-tooltip-summary">Actual runtime model: {result.model}</div>
+        </>
+      )}
+
+      <div class="subagent-context-tooltip-section">Runtime details</div>
+      {hasContextData && (
+        <div class="subagent-detail-row">
+          <span>Context</span>
+          <span>{formatDetailTokens(contextTokens)} / {formatDetailTokens(contextWindow)} tokens{contextPercent ? ` (${contextPercent})` : ''}</span>
         </div>
       )}
-    >
-      <span class="subagent-context-label subagent-telemetry-item">{summary.label}</span>
-    </Tooltip>
+      {hasTokenData && (
+        <>
+          <div class="subagent-detail-row"><span>Input</span><span>{formatDetailTokens(usage?.input)} tokens</span></div>
+          <div class="subagent-detail-row"><span>Output</span><span>{formatDetailTokens(usage?.output)} tokens</span></div>
+          <div class="subagent-detail-row"><span>Cache read</span><span>{formatDetailTokens(usage?.cacheRead)} tokens</span></div>
+          <div class="subagent-detail-row"><span>Cache write</span><span>{formatDetailTokens(usage?.cacheWrite)} tokens</span></div>
+          <div class="subagent-detail-row"><span>Total tokens</span><span>{hasCompleteTokenData ? tokenValues.reduce<number>((total, value) => total + knownNonNegative(value)!, 0).toLocaleString() : '—'}</span></div>
+        </>
+      )}
+      {turns !== undefined && <div class="subagent-detail-row"><span>Provider turns</span><span>{formatDetailTokens(turns)}</span></div>}
+      {displayCost !== undefined && (
+        <div class="subagent-detail-row">
+          <span>{displayCost.estimated ? 'Estimated cost' : 'Cost'}</span>
+          <span>{displayCost.estimated ? '~' : ''}${displayCost.cost.toFixed(4)}</span>
+        </div>
+      )}
+      {throughput && tokensPerSecond !== undefined && (
+        <div class="subagent-detail-row">
+          <span>Latest generation{throughput.status !== 'completed' ? ` (${throughput.status})` : ''}</span>
+          <span>{formatDetailTokens(outputTokens)} output tokens / {formatDetailDuration(generationDurationMs)} · {tokensPerSecond.toFixed(1)} tokens/s</span>
+        </div>
+      )}
+      {(retryCount !== undefined && retryCount > 0 || result.fallback === true) && (
+        <div class="subagent-detail-row subagent-detail-recovery">
+          <span>{recovered ? 'Recovery' : 'Provider attempts'}</span>
+          <span>{recovered
+            ? `Recovered${retryCount !== undefined && retryCount > 0 ? ` after ${retryCount} ${retryCount === 1 ? 'retry' : 'retries'}` : ' via fallback'}${failedModel ? ` · failed ${failedModel}` : ''}`
+            : `${retryCount ?? 0} ${retryCount === 1 ? 'retry' : 'retries'}${result.fallback ? ' · fallback available' : ''}${failedModel ? ` · failed ${failedModel}` : ''}`}</span>
+        </div>
+      )}
+      {hasFailure && (result.failureClass || result.errorMessage || result.stderr) && (
+        <div class="subagent-detail-failure">
+          {result.failureClass && <div>Failure: {result.failureClass}</div>}
+          {(result.errorMessage || result.stderr) && <pre class="subagent-context-tooltip-content">{result.errorMessage ?? result.stderr}</pre>}
+        </div>
+      )}
+      <ContextHandoffDetails result={result} requestedMode={requestedMode} />
+    </div>
   );
 }
 
 /** High-priority metadata that should remain visible before summary text. */
-function PrimaryMeta({ result }: { result: SubagentSingleResult }) {
+function PrimaryMeta({ result, requestedMode, displayCost }: { result: SubagentSingleResult; requestedMode?: ParentUserContextMode; displayCost?: SubagentDisplayCost }) {
   const hasModel = !!(result.selectedModel ?? result.model);
   if (!hasModel) return null;
 
   return (
     <span class="subagent-primary-meta">
-      <ModelLabel result={result} />
+      <ModelLabel result={result} requestedMode={requestedMode} displayCost={displayCost} />
     </span>
   );
 }
 
-/** Runtime telemetry stays visible in the collapsed header at every panel
- * width. Items wrap rather than silently disappearing; full precision also
- * remains available in the tooltip. */
+/** Cost and recovered-retry state stay visible in the collapsed header;
+ * detailed context, token, cache, throughput, and handoff metrics live in the
+ * keyboard-accessible model tooltip. */
 function ElapsedTelemetry({ result, now }: { result: SubagentSingleResult; now: number }) {
   const startedAt = result.startedAt ?? result.activitySince;
-  if (!startedAt) return null;
+  if (startedAt === undefined || !Number.isFinite(startedAt)) return null;
   const endedAt = result.completedAt ?? (isSubagentSingleResultRunning(result) ? now : result.lastProgressAt ?? now);
   const elapsed = formatActivityDuration(Math.max(0, endedAt - startedAt));
   return <span class="subagent-telemetry-item subagent-telemetry-elapsed" title={`Total elapsed: ${elapsed}`}>{elapsed}</span>;
 }
 
-function RuntimeTelemetry({ result }: { result: SubagentSingleResult }) {
-  const usage = result.usage;
-  const contextTokens = usage?.contextTokens;
-  const contextWindow = result.contextWindow;
-  const hasContext = typeof contextTokens === 'number' && contextTokens > 0
-    && typeof contextWindow === 'number' && contextWindow > 0;
-  const latestThroughput = result.turnThroughputSamples
-    ?.filter((sample) => sample.generationDurationMs > 0 && sample.outputTokens > 0)
-    .at(-1);
-  const tokensPerSecond = latestThroughput
-    ? latestThroughput.outputTokens / (latestThroughput.generationDurationMs / 1000)
-    : undefined;
-  const totalTokens = aggregateSubagentUsageTokens(usage);
-  const hasTokens = totalTokens > 0;
-  const usageBreakdown = usage ? {
-    input: normalizedUsageTokens(usage.input),
-    output: normalizedUsageTokens(usage.output),
-    cacheRead: normalizedUsageTokens(usage.cacheRead),
-    cacheWrite: normalizedUsageTokens(usage.cacheWrite),
-  } : undefined;
-  const hasCost = typeof usage?.cost === 'number' && usage.cost > 0;
-  const hasRetries = typeof result.retryCount === 'number' && result.retryCount > 0;
-  if (!hasContext && !hasTokens && !hasCost && tokensPerSecond == null && !hasRetries) return null;
+function RuntimeTelemetry({ result, displayCost }: { result: SubagentSingleResult; displayCost?: SubagentDisplayCost }) {
+  const cost = displayCost;
+  const retryCount = knownNonNegative(result.retryCount);
+  const recovered = result.exitCode === 0
+    && !isSubagentSingleResultRunning(result)
+    && (retryCount !== undefined && retryCount > 0 || result.fallback === true);
+  if (cost === undefined && !recovered) return null;
 
   const title = [
-    hasContext ? `Context: ${contextTokens!.toLocaleString()} / ${contextWindow!.toLocaleString()} tokens (${formatContextPercent(contextTokens!, contextWindow!)})` : undefined,
-    hasTokens && usageBreakdown ? `Usage: ${totalTokens.toLocaleString()} total tokens (${usageBreakdown.input.toLocaleString()} input, ${usageBreakdown.output.toLocaleString()} output, ${usageBreakdown.cacheRead.toLocaleString()} cache read, ${usageBreakdown.cacheWrite.toLocaleString()} cache write)` : undefined,
-    tokensPerSecond != null ? `Latest completed generation: ${tokensPerSecond.toFixed(1)} tokens/s` : undefined,
-    usage?.cost ? `Cost: $${usage.cost.toFixed(4)}` : undefined,
-    hasRetries ? `${result.retryCount} provider ${result.retryCount === 1 ? 'retry' : 'retries'}` : undefined,
+    cost !== undefined ? `${cost.estimated ? 'Estimated cost: ~' : 'Cost: $'}${cost.cost.toFixed(4)}` : undefined,
+    recovered
+      ? `Recovered${retryCount !== undefined && retryCount > 0 ? ` after ${retryCount} ${retryCount === 1 ? 'retry' : 'retries'}` : ' via fallback'}`
+      : undefined,
   ].filter(Boolean).join(' · ');
 
   return (
     <span class="subagent-runtime-telemetry" title={title} aria-label={title}>
-      {hasContext && (
-        <span class="subagent-telemetry-item subagent-telemetry-context">
-          ctx {compactTelemetryNumber(contextTokens!)} / {compactTelemetryNumber(contextWindow!)}
-          <span class="subagent-telemetry-percent"> {formatContextPercent(contextTokens!, contextWindow!)}</span>
-        </span>
-      )}
-      {hasTokens && <span class="subagent-telemetry-item subagent-telemetry-tokens">tok {compactTelemetryNumber(totalTokens)}</span>}
-      {tokensPerSecond != null && <span class="subagent-telemetry-item subagent-telemetry-rate">last {tokensPerSecond.toFixed(1)} tok/s</span>}
-      {hasCost && <span class="subagent-telemetry-item subagent-telemetry-cost">${usage!.cost!.toFixed(3)}</span>}
-      {hasRetries && <span class="subagent-telemetry-item subagent-telemetry-retries">retry {result.retryCount}</span>}
+      {cost !== undefined && <span class="subagent-telemetry-item subagent-telemetry-cost">{cost.estimated ? '~' : ''}${cost.cost.toFixed(3)}</span>}
+      {recovered && <span class="subagent-telemetry-item subagent-telemetry-recovered">Recovered</span>}
     </span>
   );
 }
@@ -368,7 +461,10 @@ export function singleResultStatus(
   // child that explicitly completed must stay completed.
   if (toolCallStatus !== 'running') {
     if (isFailed(result)) return 'failed';
-    if (toolCallStatus === 'failed' && (!multipleResults || result.exitCode === -1)) return 'failed';
+    // A nested tool result can make the enclosing tool call terminal-failed
+    // while the child itself recovered or never received a producer terminal
+    // marker. Do not turn that nested error into a whole-agent failure.
+    if (toolCallStatus === 'failed' && !hasNestedToolFailure(result) && (!multipleResults || result.exitCode === -1)) return 'failed';
     return 'completed';
   }
   if (isFailed(result)) return 'failed';
@@ -402,6 +498,7 @@ interface SubagentSingleBlockProps {
   onNestedContextMenu: TranscriptContextMenuHandler;
   renderToolCall: RenderToolCall;
   multipleResults: boolean;
+  displayCost?: SubagentDisplayCost;
 }
 
 interface SubagentMessagesProps {
@@ -600,6 +697,7 @@ function SubagentSingleBlock({
   onNestedContextMenu,
   renderToolCall,
   multipleResults,
+  displayCost,
 }: SubagentSingleBlockProps) {
   // The generic draft card and this specialized renderer share one cache key,
   // so renderer/content promotion cannot reset a user's disclosure choice.
@@ -792,15 +890,15 @@ function SubagentSingleBlock({
           {!activity && status === 'idle' && (
             <span class="subagent-activity subagent-activity-idle"><span class="subagent-activity-dot" aria-hidden="true" />Waiting for dispatch</span>
           )}
-          <PrimaryMeta result={singleResult} />
-          <ContextHandoffLabel
+          <PrimaryMeta
             result={singleResult}
             requestedMode={requestedParentUserContextMode(toolCall.input)}
+            displayCost={displayCost}
           />
           <span class="subagent-runtime-telemetry subagent-runtime-telemetry-stable">
             <ElapsedTelemetry result={singleResult} now={activityNow} />
           </span>
-          <RuntimeTelemetry result={singleResult} />
+          <RuntimeTelemetry result={singleResult} displayCost={displayCost} />
         </div>
         <StatusIndicator status={status} errorDetail={errorDetail} />
         <CollapsibleChevron open={open} class="ml-0.5 shrink-0" />
@@ -888,8 +986,13 @@ function SubagentBlock({
   onContextMenu,
   onNestedContextMenu,
   renderToolCall,
+  pricingForModel,
 }: SubagentBlockProps) {
   const result = subagentResult ?? getRenderableSubagentResultFromToolCall(toolCall);
+  const displayCosts = useMemo(
+    () => subagentDisplayCosts(toolCall.result, result?.results.length ?? 0, pricingForModel),
+    [pricingForModel, result?.results.length, toolCall.result],
+  );
 
   if (!result) {
     return (
@@ -929,6 +1032,7 @@ function SubagentBlock({
               onNestedContextMenu={onNestedContextMenu}
               renderToolCall={renderToolCall}
               multipleResults
+              displayCost={displayCosts[index]}
             />
           </div>
         ))}
@@ -951,6 +1055,7 @@ function SubagentBlock({
       onNestedContextMenu={onNestedContextMenu}
       renderToolCall={renderToolCall}
       multipleResults={false}
+      displayCost={displayCosts[0]}
     />
   );
 }
@@ -962,6 +1067,7 @@ function areToolCallItemPropsEqual(previous: ToolCallItemProps, next: ToolCallIt
     || previous.onOpenFile !== next.onOpenFile
     || previous.onContextMenu !== next.onContextMenu
     || previous.renderToolCall !== next.renderToolCall
+    || previous.pricingForModel !== next.pricingForModel
   ) {
     return false;
   }
@@ -1002,6 +1108,7 @@ function ToolCallItemBody({
   onOpenFile,
   onContextMenu,
   renderToolCall,
+  pricingForModel,
 }: ToolCallItemProps) {
   const isSubagent = toolCall.name === 'subagent';
   // The compact tool/input projection is sufficient for the collapsed
@@ -1030,6 +1137,7 @@ function ToolCallItemBody({
         onOpenFile={onOpenFile}
         onContextMenu={onContextMenu}
         renderToolCall={renderToolCall}
+        pricingForModel={pricingForModel}
       />
     );
   }
@@ -1090,6 +1198,7 @@ export function SubagentToolRenderer({
   onOpenFile,
   onContextMenu,
   renderToolCall,
+  pricingForModel,
 }: import('./registry').ToolRendererProps) {
   const subagentResult = getRenderableSubagentResultFromToolCall(toolCall);
   const contextType = getToolCallContextType('subagent');
@@ -1112,6 +1221,7 @@ export function SubagentToolRenderer({
       onContextMenu={handleContextMenu}
       onNestedContextMenu={onContextMenu}
       renderToolCall={renderToolCall}
+      pricingForModel={pricingForModel}
     />
   );
 }

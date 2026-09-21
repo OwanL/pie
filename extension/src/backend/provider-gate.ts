@@ -31,6 +31,12 @@ import {
 	PROVIDER_GATE_REQUEST_CLASS_HEADER,
 	type ProviderGateRequestClass,
 } from '../../../shared/provider-gate-request-class.js';
+import {
+	PROVIDER_MAX_AFTERBURN_SECONDS,
+	PROVIDER_MAX_CONCURRENT_REQUESTS,
+	PROVIDER_NETWORK_PHASE_MAX_WAIT_MS,
+	PROVIDER_UNLIMITED_CONCURRENCY,
+} from '../shared/provider-concurrency.js';
 
 // ── Request class / queue priority ─────────────────────────────────────────────
 
@@ -54,6 +60,13 @@ function parseRequestClass(value: string | undefined | null): ProviderGateReques
 	return 'default';
 }
 
+/** Resolve fetch's effective signal: an explicit init member, including null,
+ * overrides a Request's signal; an absent member inherits it. */
+function extractFetchSignal(input: RequestInfo | URL, init: RequestInit | undefined): AbortSignal | undefined {
+	if (init !== undefined && init !== null && 'signal' in init) return init.signal ?? undefined;
+	return input instanceof Request ? input.signal : undefined;
+}
+
 /** Per-provider concurrency configuration. */
 export interface ProviderConcurrencyConfig {
 	/** Provider name (matches the `providers.<name>` key in models.json). */
@@ -64,7 +77,8 @@ export interface ProviderConcurrencyConfig {
 	baseUrl?: string;
 	/** Additional effective model URL prefixes discovered at runtime. */
 	baseUrls?: string[];
-	/** Max concurrent in-flight LLM requests to this provider. */
+	/** Max concurrent in-flight LLM requests to this provider. 0 = Unlimited
+	 * capacity/afterburn throttling; circuit and network safety remain active. */
 	maxConcurrentRequests: number;
 	/** Per-session sticky-slot window in seconds (0 = disabled). When a
 	 *  session's LLM call finishes, the slot it held stays reserved for THAT
@@ -111,6 +125,10 @@ interface AccountPauseState {
 interface TransportCircuitState {
 	consecutiveFailures: number;
 	openUntil: number;
+	/** Admission generation changes whenever a transport failure is observed.
+	 * A success admitted under an older generation cannot close a newer open
+	 * circuit. */
+	generation: number;
 	/** Monotonic probe ownership. A token is cleared only by the attempt that
 	 * claimed it, so a stale queued attempt cannot release a newer probe. */
 	nextProbeToken: number;
@@ -171,7 +189,17 @@ interface QueuedWaiter {
 	sessionId: string | null;
 }
 
-const PROVIDER_QUEUE_WAIT_SAFETY_MAX_MS = 5 * 60 * 1000;
+const PROVIDER_QUEUE_WAIT_SAFETY_MAX_MS = PROVIDER_NETWORK_PHASE_MAX_WAIT_MS;
+
+function normalizeMaxConcurrent(maxConcurrent: number): number {
+	if (!Number.isSafeInteger(maxConcurrent) || maxConcurrent < PROVIDER_UNLIMITED_CONCURRENCY) return 1;
+	return Math.min(PROVIDER_MAX_CONCURRENT_REQUESTS, maxConcurrent);
+}
+
+function normalizeAfterburnSeconds(afterburnSeconds: number): number {
+	if (!Number.isFinite(afterburnSeconds) || afterburnSeconds < 0) return 0;
+	return Math.min(PROVIDER_MAX_AFTERBURN_SECONDS, afterburnSeconds);
+}
 
 function normalizeQueueWaitMs(queueWaitSeconds: number): number {
 	const requestedMs = Math.max(0, queueWaitSeconds) * 1000;
@@ -185,6 +213,11 @@ class ProviderPool {
 	private configuredMaxConcurrent: number;
 	private configuredAfterburnMs: number;
 	private configuredQueueWaitMs: number;
+	/** Unlimited admissions use unique negative tokens instead of capacity
+	 * slots, so finite↔unlimited policy transitions can drain/release them
+	 * without confusing an old finite slot with a new request. */
+	private unlimitedLeases = new Set<number>();
+	private nextUnlimitedLease = -1;
 	private waiters: QueuedWaiter[] = [];
 	private holdWakeTimer: ReturnType<typeof setTimeout> | null = null;
 	private circuitBreaker: AccountPauseState = { pausedUntil: 0, strikeCount: 0 };
@@ -194,8 +227,8 @@ class ProviderPool {
 	private waiterSeq = 0;
 
 	constructor(readonly provider: string, maxConcurrent: number, afterburnSeconds: number, queueWaitSeconds: number) {
-		this.configuredMaxConcurrent = Math.max(1, Math.floor(maxConcurrent));
-		this.configuredAfterburnMs = Math.max(0, afterburnSeconds) * 1000;
+		this.configuredMaxConcurrent = normalizeMaxConcurrent(maxConcurrent);
+		this.configuredAfterburnMs = normalizeAfterburnSeconds(afterburnSeconds) * 1000;
 		this.configuredQueueWaitMs = normalizeQueueWaitMs(queueWaitSeconds);
 		this.slots = Array.from({ length: this.configuredMaxConcurrent }, (_, i) => ({
 			index: i,
@@ -223,8 +256,8 @@ class ProviderPool {
 	 * existing requests finish on their original slot, while new admissions wait
 	 * until active work is below the new cap. */
 	reconfigure(maxConcurrent: number, afterburnSeconds: number, queueWaitSeconds: number): void {
-		const nextMax = Math.max(1, Math.floor(maxConcurrent));
-		const nextAfterburnMs = Math.max(0, afterburnSeconds) * 1000;
+		const nextMax = normalizeMaxConcurrent(maxConcurrent);
+		const nextAfterburnMs = normalizeAfterburnSeconds(afterburnSeconds) * 1000;
 		const now = this.now();
 
 		while (this.slots.length < nextMax) {
@@ -236,7 +269,7 @@ class ProviderPool {
 		// but never extends a hold merely because preferences were reapplied.
 		for (const slot of this.slots) {
 			if (slot.inFlight) continue;
-			if (slot.index >= nextMax || nextAfterburnMs === 0) {
+			if (nextMax === PROVIDER_UNLIMITED_CONCURRENCY || slot.index >= nextMax || nextAfterburnMs === 0) {
 				slot.holder = null;
 				slot.holdUntil = 0;
 			} else if (nextAfterburnMs < this.configuredAfterburnMs && slot.holder !== null) {
@@ -251,7 +284,7 @@ class ProviderPool {
 	}
 
 	get activeRequests(): number {
-		return this.slots.filter((s) => s.inFlight).length;
+		return this.unlimitedLeases.size + this.slots.filter((s) => s.inFlight).length;
 	}
 
 	get queuedRequests(): number {
@@ -266,7 +299,9 @@ class ProviderPool {
 	 *  In-flight and afterburn-held slots are unavailable; queued waiters keep
 	 *  priority over a new unrelated session. */
 	canClaimImmediatelyForUnrelatedSession(): boolean {
-		if (this.isPaused() || this.waiters.length > 0) return false;
+		if (this.isPaused()) return false;
+		if (this.maxConcurrent === PROVIDER_UNLIMITED_CONCURRENCY) return true;
+		if (this.waiters.length > 0) return false;
 		if (this.activeRequests >= this.maxConcurrent) return false;
 		const now = this.now();
 		return this.slots.some((slot) => slot.index < this.maxConcurrent &&
@@ -276,7 +311,9 @@ class ProviderPool {
 
 	/** Exact pre-acquire classification for one session (includes afterburn). */
 	canClaimImmediately(sessionId: string | null): boolean {
-		if (this.isPaused() || this.waiters.length > 0) return false;
+		if (this.isPaused()) return false;
+		if (this.maxConcurrent === PROVIDER_UNLIMITED_CONCURRENCY) return true;
+		if (this.waiters.length > 0) return false;
 		if (this.activeRequests >= this.maxConcurrent) return false;
 		const now = this.now();
 		if (sessionId && this.afterburnMs > 0 && this.slots.some((slot) => slot.index < this.maxConcurrent &&
@@ -375,6 +412,15 @@ class ProviderPool {
 		if (this.disposed) throw new ProviderGateAbortError('disposing provider gate');
 		if (signal?.aborted) throw new ProviderGateAbortError();
 
+		// Unlimited bypasses only capacity/afterburn admission. The caller still
+		// performs account/transport circuit checks and header/body liveness
+		// handling around this permit.
+		if (this.maxConcurrent === PROVIDER_UNLIMITED_CONCURRENCY) {
+			const lease = this.nextUnlimitedLease--;
+			this.unlimitedLeases.add(lease);
+			return lease;
+		}
+
 		const now = this.now();
 
 		// Fast path: reuse a held slot for this session (afterburn).
@@ -399,6 +445,11 @@ class ProviderPool {
 	}
 
 	private tryClaimFreeSlot(sessionId: string | null, now: number): number | null {
+		if (this.maxConcurrent === PROVIDER_UNLIMITED_CONCURRENCY) {
+			const lease = this.nextUnlimitedLease--;
+			this.unlimitedLeases.add(lease);
+			return lease;
+		}
 		if (this.activeRequests >= this.maxConcurrent) return null;
 		for (const s of this.slots) {
 			if (s.index >= this.maxConcurrent) break;
@@ -490,6 +541,10 @@ class ProviderPool {
 
 	/** Release a slot, arming the afterburn hold for the session on success. */
 	release(slotIndex: number, sessionId: string | null, success: boolean): void {
+		if (slotIndex < 0) {
+			if (this.unlimitedLeases.delete(slotIndex)) this.wakeEligibleWaiters();
+			return;
+		}
 		const s = this.slots[slotIndex];
 		if (!s || !s.inFlight) return;
 		s.inFlight = false;
@@ -516,7 +571,8 @@ class ProviderPool {
 			clearTimeout(this.holdWakeTimer);
 			this.holdWakeTimer = null;
 		}
-		while (this.activeRequests < this.maxConcurrent && this.waiters.length > 0) {
+		while ((this.maxConcurrent === PROVIDER_UNLIMITED_CONCURRENCY
+			|| this.activeRequests < this.maxConcurrent) && this.waiters.length > 0) {
 			const next = this.popNextEligibleWaiter(this.now());
 			if (!next) break;
 			next.resolve();
@@ -546,6 +602,7 @@ class ProviderPool {
 	}
 
 	private hasClaimableSlotForSession(sessionId: string | null, now: number): boolean {
+		if (this.maxConcurrent === PROVIDER_UNLIMITED_CONCURRENCY) return !this.isPaused();
 		if (this.activeRequests >= this.maxConcurrent) return false;
 		return this.slots.some((slot) => {
 			if (slot.index >= this.maxConcurrent || slot.inFlight) return false;
@@ -562,7 +619,9 @@ class ProviderPool {
 			clearTimeout(this.holdWakeTimer);
 			this.holdWakeTimer = null;
 		}
-		if (this.waiters.length === 0 || this.activeRequests >= this.maxConcurrent) return;
+		if (this.waiters.length === 0
+			|| this.maxConcurrent === PROVIDER_UNLIMITED_CONCURRENCY
+			|| this.activeRequests >= this.maxConcurrent) return;
 		const now = this.now();
 		let earliest = Number.POSITIVE_INFINITY;
 		for (const slot of this.slots) {
@@ -793,7 +852,7 @@ export class ProviderGate {
 				);
 			}
 			const headerWaitMs = (cfg.headerWaitSeconds ?? 0) > 0
-				? cfg.headerWaitSeconds! * 1000
+				? Math.min(PROVIDER_NETWORK_PHASE_MAX_WAIT_MS, cfg.headerWaitSeconds! * 1000)
 				: this.defaultHeaderWaitMs;
 			this.pools.set(cfg.provider, { pool, headerWaitMs });
 		}
@@ -808,6 +867,7 @@ export class ProviderGate {
 			state = {
 				consecutiveFailures: 0,
 				openUntil: 0,
+				generation: 0,
 				nextProbeToken: 0,
 				activeProbeToken: null,
 			};
@@ -836,11 +896,24 @@ export class ProviderGate {
 		if (state.activeProbeToken === probeToken) state.activeProbeToken = null;
 	}
 
-	private recordTransportSuccess(provider: string, probeToken: number | null): void {
+	private recordTransportSuccess(
+		provider: string,
+		probeToken: number | null,
+		admissionGeneration: number,
+	): void {
 		const state = this.getTransportCircuit(provider);
 		// A request admitted before a newer half-open probe is not authoritative
 		// for that probe. Its late result must not close or release the new probe.
 		if (state.activeProbeToken !== null && state.activeProbeToken !== probeToken) return;
+		// A request admitted before a transport failure is stale even when no
+		// half-open probe currently owns the circuit. Do release the matching
+		// probe token so a stale result cannot leave the probe permanently held.
+		if (admissionGeneration !== state.generation) {
+			if (probeToken !== null && state.activeProbeToken === probeToken) {
+				state.activeProbeToken = null;
+			}
+			return;
+		}
 		state.consecutiveFailures = 0;
 		state.openUntil = 0;
 		if (probeToken !== null && state.activeProbeToken === probeToken) {
@@ -850,6 +923,7 @@ export class ProviderGate {
 
 	private recordTransportFailure(provider: string, probeToken: number | null): void {
 		const state = this.getTransportCircuit(provider);
+		state.generation += 1;
 		state.consecutiveFailures += 1;
 		if (probeToken !== null && state.activeProbeToken === probeToken) {
 			state.activeProbeToken = null;
@@ -989,7 +1063,7 @@ export class ProviderGate {
 		const { pool, config, headerWaitMs } = match;
 		const sessionId = this.extractSessionId(init);
 		const requestClass = this.extractRequestClass(init);
-		const signal = init?.signal ?? undefined;
+		const signal = extractFetchSignal(input, init);
 		const attemptId = `${config.provider}:${++this.nextProviderAttemptId}`;
 
 		// Account suspension and repeated transport stalls are independent shared
@@ -1040,6 +1114,7 @@ export class ProviderGate {
 			pool.release(slotIndex, sessionId, false);
 			throw error;
 		}
+		const transportGenerationAtAdmission = this.getTransportCircuit(config.provider).generation;
 		const pauseGenerationAtAdmission = pool.pauseGeneration();
 		if (sessionId) publishProviderTransportObservation({ sessionId, provider: config.provider, attemptId, kind: 'headers_wait' });
 
@@ -1058,7 +1133,7 @@ export class ProviderGate {
 			if (response.status >= 500 && response.status <= 599) {
 				this.recordTransportFailure(config.provider, transportProbeToken);
 			} else {
-				this.recordTransportSuccess(config.provider, transportProbeToken);
+				this.recordTransportSuccess(config.provider, transportProbeToken, transportGenerationAtAdmission);
 			}
 			if (sessionId) publishProviderTransportObservation({ sessionId, provider: config.provider, attemptId, kind: 'headers_received' });
 
@@ -1332,7 +1407,14 @@ export class ProviderGate {
 		const idleTimeoutMs = this.idleTimeoutMs;
 		const reader = originalBody.getReader();
 		let released = false;
+		let settled = false;
+		let pulling = false;
+		let timer: ReturnType<typeof setTimeout> | null = null;
 		let removeCallerAbort = () => {};
+
+		const clearTimer = () => {
+			if (timer) { clearTimeout(timer); timer = null; }
+		};
 
 		const releaseSlot = (success: boolean) => {
 			if (released) return;
@@ -1342,20 +1424,13 @@ export class ProviderGate {
 		};
 
 		const stream = new ReadableStream<Uint8Array>({
-			async start(controller) {
-				let timer: ReturnType<typeof setTimeout> | null = null;
-				let settled = false;
-
-				const clearTimer = () => {
-					if (timer) { clearTimeout(timer); timer = null; }
-				};
-
+			start(controller) {
 				const onCallerAbort = () => {
 					if (settled) return;
 					settled = true;
 					clearTimer();
 					const reason = signal?.reason ?? new ProviderGateAbortError('reading provider response body');
-					reader.cancel(reason).catch(() => {});
+					void reader.cancel(reason).catch(() => {});
 					try { controller.error(reason); } catch { /* already closed */ }
 					releaseSlot(false);
 				};
@@ -1364,15 +1439,18 @@ export class ProviderGate {
 					removeCallerAbort = () => signal.removeEventListener('abort', onCallerAbort);
 					if (signal.aborted) onCallerAbort();
 				}
+			},
 
-				const armTimer = () => {
-					if (idleTimeoutMs <= 0) return;
-					if (timer) clearTimeout(timer);
+			async pull(controller) {
+				if (settled || pulling) return;
+				pulling = true;
+				if (idleTimeoutMs > 0) {
 					timer = setTimeout(() => {
+						timer = null;
 						if (settled) return;
 						settled = true;
 						if (sessionId) publishProviderTransportObservation({ sessionId, provider, attemptId, kind: 'transport_error' });
-						reader.cancel().catch(() => {});
+						void reader.cancel().catch(() => {});
 						try {
 							controller.error(
 								new Error(`upstream stream stalled: no chunk for ${idleTimeoutMs / 1000}s (provider=${provider})`),
@@ -1380,47 +1458,45 @@ export class ProviderGate {
 						} catch { /* already closed */ }
 						releaseSlot(false);
 					}, idleTimeoutMs);
-				};
-
-				if (!settled) armTimer();
+				}
 				try {
-					while (true) {
-						const { done, value } = await reader.read();
-						// Caller cancellation may settle this wrapper while an upstream
-						// reader ignores abort briefly. Its eventual read completion is
-						// stale and must not publish a successful terminal observation.
-						if (settled) return;
-						clearTimer();
-						if (settled) return;
-						if (done) {
-							if (sessionId) publishProviderTransportObservation({ sessionId, provider, attemptId, kind: 'transport_terminal' });
-							controller.close();
-							settled = true;
-							releaseSlot(true);
-							return;
-						}
-						if (value) {
-							if (sessionId) publishProviderTransportObservation({ sessionId, provider, attemptId, kind: 'raw_chunk' });
-							controller.enqueue(value);
-						}
-						armTimer();
+					const { done, value } = await reader.read();
+					// Caller cancellation may settle this wrapper while an upstream
+					// reader ignores abort briefly. Its eventual read completion is
+					// stale and must not publish a successful terminal observation.
+					if (settled) return;
+					clearTimer();
+					if (done) {
+						if (sessionId) publishProviderTransportObservation({ sessionId, provider, attemptId, kind: 'transport_terminal' });
+						controller.close();
+						settled = true;
+						releaseSlot(true);
+						return;
+					}
+					if (value) {
+						if (sessionId) publishProviderTransportObservation({ sessionId, provider, attemptId, kind: 'raw_chunk' });
+						controller.enqueue(value);
 					}
 				} catch (err) {
-					if (sessionId) publishProviderTransportObservation({ sessionId, provider, attemptId, kind: 'transport_error' });
+					if (settled) return;
 					clearTimer();
-					if (!settled) {
-						settled = true;
-						try { controller.error(err); } catch { /* already closed */ }
-						releaseSlot(false);
-					}
+					settled = true;
+					if (sessionId) publishProviderTransportObservation({ sessionId, provider, attemptId, kind: 'transport_error' });
+					try { controller.error(err); } catch { /* already closed */ }
+					releaseSlot(false);
+				} finally {
+					pulling = false;
 				}
 			},
 
 			cancel(reason) {
-				reader.cancel(reason).catch(() => {});
+				if (settled) return;
+				settled = true;
+				clearTimer();
+				void reader.cancel(reason).catch(() => {});
 				releaseSlot(false);
 			},
-		});
+		}, { highWaterMark: 0 });
 
 		return new Response(stream, {
 			status: response.status,
@@ -1472,7 +1548,11 @@ export class ProviderGate {
 		const providers = modelsJson.providers ?? {};
 		for (const [name, entry] of Object.entries(providers)) {
 			const cc = entry.concurrency;
-			if (!cc || typeof cc.maxConcurrentRequests !== 'number' || cc.maxConcurrentRequests <= 0) continue;
+			if (!cc
+				|| typeof cc.maxConcurrentRequests !== 'number'
+				|| !Number.isInteger(cc.maxConcurrentRequests)
+				|| cc.maxConcurrentRequests < PROVIDER_UNLIMITED_CONCURRENCY
+				|| cc.maxConcurrentRequests > PROVIDER_MAX_CONCURRENT_REQUESTS) continue;
 			configs.push({
 				provider: name,
 				...(entry.baseUrl ? { baseUrl: entry.baseUrl } : {}),

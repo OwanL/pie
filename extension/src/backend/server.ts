@@ -14,7 +14,11 @@ import type { AnalyticsBackendDescriptor } from '../../../shared/analytics/activ
 import { attachJsonlLineReader, JSONL_MAX_LINE_BYTES } from '../shared/jsonl';
 import { toErrorMessage, parseJsonOrThrow } from '../shared/error-message';
 import { updateSettingsJsonObject } from '../shared/settings-json-update';
-import { SESSION_SNAPSHOT_MAX_LINE_BYTES, sessionSnapshotLineBytes } from '../shared/transcript-window';
+import {
+  SESSION_SNAPSHOT_MAX_LINE_BYTES,
+  boundTranscriptSnapshot,
+  sessionSnapshotLineBytes,
+} from '../shared/transcript-window';
 import {
   STORAGE_CUTOFF_AUTHORIZATION_ENV,
   STORAGE_CUTOFF_AUTHORIZATION_VALUE,
@@ -39,6 +43,7 @@ import {
   handleBackendRequest,
   parseLivePipelineToggleParams,
   waitForSessionTransition,
+  type ModelSettingsUnsetKey,
   type TranscriptPageLoadOptions,
 } from './request-handler';
 import {
@@ -126,7 +131,12 @@ import type { BackendDetailFence, LiveSubagentDetailAddress } from '../shared/pr
 import { WorkerSupervisor } from './worker-supervisor';
 import { SessionOwnershipAuthority } from './session-ownership-authority';
 import { WorkerRuntimeRouter } from './worker-runtime-router';
-import type { WorkerJsonObject, WorkerJsonValue } from './worker-protocol';
+import type {
+  WorkerJsonObject,
+  WorkerJsonValue,
+  WorkerSessionControlFrame,
+} from './worker-protocol';
+import type { WorkerSessionControlOutcome } from './worker-runtime-router';
 
 const ISOLATED_PROMOTION_METHODS = new Set([
   'message.send',
@@ -135,6 +145,18 @@ const ISOLATED_PROMOTION_METHODS = new Set([
 ]);
 /** Keep a transition-bound Stop below the host's 15-second RPC deadline. */
 const INTERRUPT_TRANSITION_WAIT_MS = 10_000;
+const AGENT_SESSION_CONTROL_MAX_LIST_ITEMS = 256;
+const AGENT_SESSION_CONTROL_MAX_RESULT_BYTES = 192 * 1024;
+const AGENT_SESSION_CONTROL_MAX_MESSAGE_BYTES = 64 * 1024;
+
+function workerJson(value: unknown): WorkerJsonValue {
+  const serialized = JSON.stringify(value);
+  return (serialized === undefined ? null : JSON.parse(serialized)) as WorkerJsonValue;
+}
+
+function boundedAgentString(value: unknown, maxBytes: number): value is string {
+  return typeof value === 'string' && Buffer.byteLength(value, 'utf8') <= maxBytes;
+}
 
 /** Live worker detail errors that mean the worker no longer retains the
  *  source and the durable JSONL is authoritative. */
@@ -263,6 +285,42 @@ interface PreparedViewedSessionTransition {
   revision: number;
   hadPrevious: boolean;
   previous?: string;
+}
+
+function modelSettingsFromRecord(
+  parsed: Partial<ModelSettings> | Record<string, unknown>,
+  defaults: ModelSettings,
+): ModelSettings {
+  const result: ModelSettings = {
+    defaultModel: typeof parsed.defaultModel === 'string' ? parsed.defaultModel : defaults.defaultModel,
+    defaultThinkingLevel: typeof parsed.defaultThinkingLevel === 'string'
+      ? parsed.defaultThinkingLevel as ThinkingLevel
+      : defaults.defaultThinkingLevel,
+  };
+  if (typeof parsed.defaultProvider === 'string' && parsed.defaultProvider.length > 0) {
+    result.defaultProvider = parsed.defaultProvider;
+  }
+  return result;
+}
+
+function sameModelSettings(left: ModelSettings, right: ModelSettings): boolean {
+  return left.defaultModel === right.defaultModel
+    && left.defaultThinkingLevel === right.defaultThinkingLevel
+    && left.defaultProvider === right.defaultProvider;
+}
+
+function applyModelSettingsMutation(
+  existing: Record<string, unknown>,
+  updates: Partial<ModelSettings>,
+  unset: readonly ModelSettingsUnsetKey[] = [],
+): Record<string, unknown> {
+  const next = { ...existing };
+  for (const [key, value] of Object.entries(updates as Record<string, unknown>)) {
+    if (value === undefined || (key === 'defaultProvider' && value === null)) delete next[key];
+    else next[key] = value;
+  }
+  for (const key of unset) delete next[key];
+  return next;
 }
 
 /** Surface swallowed promise rejections and uncaught exceptions on stderr (the
@@ -815,6 +873,7 @@ export class BackendServer {
         this.authStorage,
         path.join(this.agentDir, 'models.json'),
       );
+      this.registerProviderGateModelUrls();
     });
 
     const coldStore = this.initializeColdSessionStore();
@@ -853,6 +912,7 @@ export class BackendServer {
         ownership: this.sessionOwnershipAuthority,
         emit: (event, payload) => this.emit(event, payload),
         emitDetail: (message) => this.emit('detail.stream', message as unknown as WorkerJsonObject),
+        onSessionControl: (frame, source) => this.handleWorkerSessionControl(frame, source.sessionPath),
         onSessionReplaced: (sourcePath, destinationPath) => {
           if (this.viewedSessionPath && backendSessionPathKey(this.viewedSessionPath) === backendSessionPathKey(sourcePath)) {
             this.recordViewedSessionTransition(destinationPath, sourcePath);
@@ -860,6 +920,9 @@ export class BackendServer {
           }
         },
         writeModelSettings: (updates) => this.writeModelSettings(updates),
+        writeModelSettingsIfCurrent: (expected, updates, unset) => (
+          this.writeModelSettingsIfCurrent(expected, updates, unset)
+        ),
         readModelSettings: () => this.readModelSettings(),
         readRuntimePrefs: () => ({ ...this.runtimePrefs }),
         buildPromotionSnapshot: async (sessionPath) => {
@@ -1578,14 +1641,7 @@ export class BackendServer {
     try {
       const raw = await fs.readFile(path.join(this.agentDir, 'settings.json'), 'utf8');
       const parsed = parseJsonOrThrow<Partial<ModelSettings>>(raw, 'settings.json');
-      const result: ModelSettings = {
-        defaultModel: parsed.defaultModel ?? defaults.defaultModel,
-        defaultThinkingLevel: (parsed.defaultThinkingLevel as ThinkingLevel) ?? defaults.defaultThinkingLevel,
-      };
-      if (typeof parsed.defaultProvider === 'string' && parsed.defaultProvider.length > 0) {
-        result.defaultProvider = parsed.defaultProvider;
-      }
-      return result;
+      return modelSettingsFromRecord(parsed, defaults);
     } catch (error) {
       backendTrace('modelSettings', 'read.failed', { level: 'warn', error: toErrorMessage(error) });
       return defaults;
@@ -1607,11 +1663,34 @@ export class BackendServer {
 
   private async writeModelSettings(updates: Partial<ModelSettings>): Promise<ModelSettings> {
     const settingsPath = path.join(this.agentDir, 'settings.json');
+    let written: ModelSettings | undefined;
     // Model updates run in the backend while pruning updates run in the
     // extension host. Share the same cross-process lock so their
-    // read-modify-write cycles cannot silently overwrite each other.
-    await updateSettingsJsonObject(settingsPath, (existing) => ({ ...existing, ...updates }));
-    return await this.readModelSettings();
+    // read-modify-write cycles cannot silently overwrite each other. Return
+    // the snapshot produced inside that lock; a later writer must not change
+    // the rollback guard before this request sees its own result.
+    await updateSettingsJsonObject(settingsPath, (existing) => {
+      const next = applyModelSettingsMutation(existing, updates);
+      written = modelSettingsFromRecord(next, { defaultModel: '', defaultThinkingLevel: 'high' });
+      return next;
+    });
+    return written ?? await this.readModelSettings();
+  }
+
+  private async writeModelSettingsIfCurrent(
+    expected: ModelSettings,
+    updates: Partial<ModelSettings>,
+    unset: readonly ModelSettingsUnsetKey[] = [],
+  ): Promise<boolean> {
+    const settingsPath = path.join(this.agentDir, 'settings.json');
+    let applied = false;
+    await updateSettingsJsonObject(settingsPath, (existing) => {
+      const current = modelSettingsFromRecord(existing, { defaultModel: '', defaultThinkingLevel: 'high' });
+      if (!sameModelSettings(current, expected)) return existing;
+      applied = true;
+      return applyModelSettingsMutation(existing, updates, unset);
+    });
+    return applied;
   }
 
 
@@ -1890,6 +1969,23 @@ export class BackendServer {
     this.sessionCatalogPollTimer.unref();
   }
 
+  private registerProviderGateModelUrls(): void {
+    const gate = ProviderGate.getInstance();
+    const registry = this.modelRegistry;
+    if (!gate || !registry) return;
+    try {
+      // getAll includes hydrated built-in/OAuth models that may be unavailable
+      // until credentials are present; getAvailable supplies configured models
+      // on SDK versions where getAll is not exposed.
+      gate.registerModelBaseUrls([
+        ...(registry.getAll?.() ?? []),
+        ...registry.getAvailable(),
+      ]);
+    } catch (error) {
+      backendWarn('backend', 'providerGate.modelUrls.failed', { error: toErrorMessage(error) });
+    }
+  }
+
   private async pollSessionCatalog(): Promise<void> {
     if (!this.sessionCatalogPollingActive || this.sessionCatalogPollInFlight) return;
     this.sessionCatalogPollInFlight = true;
@@ -1949,6 +2045,7 @@ export class BackendServer {
             if (!catalog.ok) {
               throw new Error(`Configured model catalog reload failed: ${catalog.error}`);
             }
+            this.registerProviderGateModelUrls();
             await this.workerRuntimeRouter.syncCatalog(catalog.models as unknown as WorkerJsonValue[]);
             // Commit only after every authority publication succeeds. A
             // transient parse/sync failure must see the same fingerprint as
@@ -2680,6 +2777,247 @@ export class BackendServer {
     return { interrupted: false, alreadyStopped: true, settled: true };
   }
 
+  private async handleWorkerSessionControl(
+    frame: WorkerSessionControlFrame,
+    sourceSessionPath: string,
+  ): Promise<WorkerSessionControlOutcome> {
+    const payload = frame.payload as Record<string, unknown>;
+    const allowedPayloadKeys: ReadonlySet<string> = new Set(
+      frame.action === 'list'
+        ? []
+        : frame.action === 'create'
+          ? ['cwd']
+          : frame.action === 'read'
+            ? ['sessionPath', 'direction', 'cursor', 'limit']
+            : frame.action === 'message'
+              ? ['sessionPath', 'text']
+              : ['sessionPath', 'delete'],
+    );
+    const unexpectedPayloadKey = Object.keys(payload).find((key) => !allowedPayloadKeys.has(key));
+    if (unexpectedPayloadKey) {
+      throw new BackendError('INVALID_PARAMS', `Unexpected session_control payload key: ${unexpectedPayloadKey}`);
+    }
+    const operationId = `agent-session:${frame.requestId}`;
+
+    if (frame.action === 'list') {
+      const sessions = await this.listSessionSummaries();
+      const projected = sessions.slice(0, AGENT_SESSION_CONTROL_MAX_LIST_ITEMS).map((summary) => {
+        const route = this.workerRuntimeRouter?.getRoute(summary.path);
+        const busy = route !== undefined && route.state !== 'cold'
+          && (route.state !== 'hot' || route.checkpoint.requestId !== undefined);
+        return {
+          path: summary.path,
+          name: summary.name,
+          cwd: summary.cwd,
+          modifiedAt: summary.modifiedAt,
+          messageCount: summary.messageCount,
+          busy,
+          runtimeState: route?.state ?? 'cold',
+          ...(summary.modelId ? { modelId: summary.modelId } : {}),
+          ...(summary.provider ? { provider: summary.provider } : {}),
+          ...(summary.thinkingLevel ? { thinkingLevel: summary.thinkingLevel } : {}),
+          ...(summary.isPlaceholder !== undefined ? { isPlaceholder: summary.isPlaceholder } : {}),
+          ...(summary.sessionId ? { sessionId: summary.sessionId } : {}),
+        } satisfies WorkerJsonObject;
+      });
+      const listEnvelope = (rows: readonly WorkerJsonObject[]) => ({
+        scope: 'current-extension-host',
+        sessions: rows,
+        totalCount: sessions.length,
+        truncated: sessions.length > rows.length,
+      });
+      while (projected.length > 0
+          && Buffer.byteLength(JSON.stringify(listEnvelope(projected)), 'utf8') > AGENT_SESSION_CONTROL_MAX_RESULT_BYTES) {
+        projected.pop();
+      }
+      return { result: workerJson(listEnvelope(projected)) };
+    }
+
+    if (frame.action === 'create') {
+      if (payload.cwd !== undefined && !boundedAgentString(payload.cwd, 16 * 1024)) {
+        throw new BackendError('INVALID_PARAMS', 'create.cwd must be a bounded string.');
+      }
+      const result = await this.handleRequest({
+        id: `${frame.requestId}:create`,
+        method: 'session.create',
+        params: {
+          ...(typeof payload.cwd === 'string' && payload.cwd.trim() ? { cwd: payload.cwd.trim() } : {}),
+          operationId,
+          operationAttempt: 1,
+        },
+      });
+      return { result: workerJson(result) };
+    }
+
+    const sessions = await this.listSessionSummaries();
+    const requestedPath = payload.sessionPath;
+    if (requestedPath !== undefined && !boundedAgentString(requestedPath, 16 * 1024)) {
+      throw new BackendError('INVALID_PARAMS', 'sessionPath must be a bounded string.');
+    }
+    const requested = (typeof requestedPath === 'string' && requestedPath.trim())
+      ? requestedPath.trim()
+      : sourceSessionPath;
+    const matchingSummary = sessions.find((summary) => (
+      backendSessionPathKey(summary.path) === backendSessionPathKey(requested)
+    ));
+    const sourceMatches = backendSessionPathKey(sourceSessionPath) === backendSessionPathKey(requested);
+    if (!matchingSummary && !sourceMatches) {
+      throw new BackendError('SESSION_NOT_FOUND', 'The target session is not owned by the current extension host.');
+    }
+    const sessionPath = matchingSummary?.path ?? sourceSessionPath;
+
+    if (frame.action === 'read') {
+      const direction = payload.direction ?? 'latest';
+      if (direction !== 'older' && direction !== 'newer' && direction !== 'latest') {
+        throw new BackendError('INVALID_PARAMS', 'read.direction must be older, newer, or latest.');
+      }
+      const limit = payload.limit === undefined ? 32 : payload.limit;
+      if (!Number.isInteger(limit) || (limit as number) < 1 || (limit as number) > 64) {
+        throw new BackendError('INVALID_PARAMS', 'read.limit must be an integer from 1 through 64.');
+      }
+      const cursor = payload.cursor;
+      let loadedStart: number | undefined;
+      let loadedEnd: number | undefined;
+      if (cursor !== undefined) {
+        if (!cursor || typeof cursor !== 'object' || Array.isArray(cursor)) {
+          throw new BackendError('INVALID_PARAMS', 'read.cursor must be an object.');
+        }
+        const cursorRecord = cursor as Record<string, unknown>;
+        const unexpectedCursorKey = Object.keys(cursorRecord).find((key) => key !== 'start' && key !== 'end');
+        if (unexpectedCursorKey) {
+          throw new BackendError('INVALID_PARAMS', `Unexpected read.cursor key: ${unexpectedCursorKey}`);
+        }
+        if (!Number.isSafeInteger(cursorRecord.start) || (cursorRecord.start as number) < 0
+            || !Number.isSafeInteger(cursorRecord.end) || (cursorRecord.end as number) < 0
+            || (cursorRecord.start as number) > (cursorRecord.end as number)) {
+          throw new BackendError('INVALID_PARAMS', 'read.cursor must contain a non-inverted non-negative range.');
+        }
+        loadedStart = cursorRecord.start as number;
+        loadedEnd = cursorRecord.end as number;
+      } else if (direction !== 'latest') {
+        throw new BackendError('INVALID_PARAMS', `${direction} read requires a cursor.`);
+      }
+      const page = await this.handleRequest({
+        id: `${frame.requestId}:read`,
+        method: 'session.loadTranscriptPage',
+        params: {
+          sessionPath,
+          direction,
+          ...(loadedStart !== undefined ? { loadedStart } : {}),
+          ...(loadedEnd !== undefined ? { loadedEnd } : {}),
+        },
+      }) as TranscriptPagePayload;
+      const bounded = boundTranscriptSnapshot(page, {
+        transport: { kind: 'response', requestId: `${frame.requestId}:read` },
+        // The control page is the edge adjacent to the caller cursor: newer
+        // rows for an older request, and older rows for a newer request. Keep
+        // that edge when the expanded backend window must be bounded.
+        requestedEdge: direction === 'newer' ? 'older' : 'newer',
+        maxLineBytes: AGENT_SESSION_CONTROL_MAX_RESULT_BYTES,
+      });
+      const sourceStart = bounded.transcriptWindow.loadedStart;
+      const sourceEnd = bounded.transcriptWindow.loadedEnd;
+      const pageEdge = direction === 'older'
+        ? loadedStart ?? sourceEnd
+        : direction === 'newer'
+          ? loadedEnd ?? sourceStart
+          : sourceEnd;
+      const boundedEdge = Math.max(sourceStart, Math.min(sourceEnd, pageEdge));
+      const pageStart = direction === 'older'
+        ? Math.max(sourceStart, boundedEdge - (limit as number))
+        : direction === 'latest'
+          ? Math.max(sourceStart, sourceEnd - (limit as number))
+          : boundedEdge;
+      const pageEnd = direction === 'older'
+        ? boundedEdge
+        : Math.min(sourceEnd, pageStart + (limit as number));
+      const transcriptStart = pageStart - sourceStart;
+      const transcriptEnd = pageEnd - sourceStart;
+      const transcript = bounded.transcript.slice(transcriptStart, transcriptEnd);
+      const nextEnd = pageStart + transcript.length;
+      const nextWindow = {
+        ...bounded.transcriptWindow,
+        loadedStart: pageStart,
+        loadedEnd: nextEnd,
+        hasOlder: pageStart > 0,
+        hasNewer: nextEnd < bounded.transcriptWindow.totalCount,
+        isPartial: pageStart > 0 || nextEnd < bounded.transcriptWindow.totalCount,
+      };
+      return {
+        result: workerJson({
+          sessionPath: bounded.sessionPath,
+          transcript,
+          transcriptWindow: nextWindow,
+          busy: bounded.busy,
+          cursor: { start: pageStart, end: nextEnd },
+        }),
+      };
+    }
+
+    if (frame.action === 'message') {
+      if (!boundedAgentString(payload.text, AGENT_SESSION_CONTROL_MAX_MESSAGE_BYTES) || !payload.text.trim()) {
+        throw new BackendError('INVALID_PARAMS', 'message.text must be non-empty and bounded.');
+      }
+      const result = await this.handleRequest({
+        id: `${frame.requestId}:message`,
+        method: 'message.send',
+        params: {
+          sessionPath,
+          text: payload.text,
+          inputs: [],
+          operationId,
+          operationAttempt: 1,
+          localId: `agent-session:${frame.requestId}`,
+        },
+      });
+      return {
+        result: workerJson({ sessionPath, result }),
+      };
+    }
+
+    const deleteRequested = payload.delete === true;
+    if (payload.delete !== undefined && typeof payload.delete !== 'boolean') {
+      throw new BackendError('INVALID_PARAMS', 'close.delete must be boolean.');
+    }
+    const lifecycle = await this.handleRequest({
+      id: `${frame.requestId}:lifecycle-close`,
+      method: 'session.lifecycleClose',
+      params: {
+        sessionPath,
+        operationId,
+        privacyMode: deleteRequested,
+      },
+    });
+    return {
+      result: workerJson({
+        sessionPath,
+        closed: true,
+        deletionRequested: deleteRequested,
+        deletion: deleteRequested ? 'scheduled' : 'not-requested',
+        lifecycle,
+      }),
+      ...(deleteRequested
+        ? {
+            afterResponse: async () => {
+              try {
+                await this.handleRequest({
+                  id: `${frame.requestId}:forget`,
+                  method: 'session.forget',
+                  params: { sessionPath, operationId },
+                });
+              } catch (error) {
+                backendWarn('backend-session-control', 'session deletion failed after acknowledgement', {
+                  sessionPath,
+                  requestId: frame.requestId,
+                  error: toErrorMessage(error),
+                });
+              }
+            },
+          }
+        : {}),
+    };
+  }
+
   private async handleRequest(
     request: RequestEnvelope,
     onRequestValidated?: () => void,
@@ -3086,6 +3424,21 @@ export class BackendServer {
       },
       readModelSettings: () => this.readModelSettings(),
       writeModelSettings: (updates) => this.writeModelSettings(updates),
+      writeModelSettingsIfCurrent: (expected, updates, unset) => (
+        this.writeModelSettingsIfCurrent(expected, updates, unset)
+      ),
+      retireSessionRuntime: async (sessionPath, reason) => {
+        const runtimeRouter = this.workerRuntimeRouter;
+        if (!runtimeRouter || !runtimeRouter.hasHotOwner(sessionPath)) return false;
+        const route = runtimeRouter.getRoute(sessionPath);
+        if (route.state !== 'hot') return false;
+        // This path is fail-closed recovery after an SDK model rollback has
+        // failed. Unlike an ordinary recycle, it must retire even when a turn
+        // raced the settings check: the runtime cannot remain billable through
+        // an unverified provider identity.
+        await runtimeRouter.retire(sessionPath, reason);
+        return true;
+      },
       getProviderGateMetrics: () => this.workerRuntimeRouter?.getProviderGateMetrics(),
       acknowledgeAnalytics: (route, acknowledgement) => (
         this.workerRuntimeRouter?.acknowledgeAnalytics(route, acknowledgement) === true

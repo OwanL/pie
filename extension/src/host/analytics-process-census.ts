@@ -17,6 +17,9 @@ export interface ProcessBirthEvidence {
   processId: number;
   /** Parsed from Windows WMI CreationDate; null means unavailable. */
   processCreatedAtMs: number | null;
+  /** Present only for an analytics recorder worker, whose parent host may have
+   * exited while the worker is finishing an admitted write. */
+  analyticsRecorderWorkerParentProcessId?: number;
 }
 
 export interface BackendProcessOwnerEvidence {
@@ -38,6 +41,7 @@ export interface ProcessOwnerReadResult {
 
 interface RawWindowsProcessRecord {
   ProcessId?: unknown;
+  ParentProcessId?: unknown;
   /** Projected by PowerShell because ConvertTo-Json serializes DateTime as /Date(ms)/. */
   ProcessCreatedAtMs?: unknown;
   /** Retained as a compatibility fallback for injected/older census adapters. */
@@ -111,6 +115,10 @@ function isBackendCommand(commandLine: string): boolean {
     && parseSafeArgument(commandLine, '--sdkPath') !== undefined;
 }
 
+function isAnalyticsRecorderWorkerCommand(commandLine: string): boolean {
+  return /(?:^|[\\/\s"'])analytics-recorder-worker\.js(?:$|[\\/\s"'])/iu.test(commandLine);
+}
+
 /** Parse a bounded, already-collected process census. Command lines are used
  * only to derive sanitized owner fields and are never returned. */
 export function parseWindowsProcessOwnerRows(
@@ -132,7 +140,16 @@ export function parseWindowsProcessOwnerRows(
       && Number.isSafeInteger(projectedBirth) && projectedBirth > 0
       ? projectedBirth
       : parseWindowsProcessCreationDate(row.CreationDate);
-    processes.push({ processId, processCreatedAtMs });
+    const commandLine = typeof row.CommandLine === 'string' ? row.CommandLine : undefined;
+    const parentProcessId = Number(row.ParentProcessId);
+    processes.push({
+      processId,
+      processCreatedAtMs,
+      ...(commandLine && isAnalyticsRecorderWorkerCommand(commandLine)
+        && isPositivePid(parentProcessId)
+        ? { analyticsRecorderWorkerParentProcessId: parentProcessId }
+        : {}),
+    });
   }
   const ambiguousProcessPids = duplicateProcessIds(processes, (entry) => entry.processId);
   for (const processId of ambiguousProcessPids) {
@@ -221,7 +238,7 @@ export async function readProcessCensus(): Promise<ProcessOwnerReadResult> {
     const maxRows = ANALYTICS_PROCESS_CENSUS_MAX_ROWS;
     const query = [
       "$ErrorActionPreference='Stop'",
-      `$rows=[System.Collections.Generic.List[object]]::new();$truncated=$false;Get-CimInstance Win32_Process | ForEach-Object { if ($rows.Count -lt ${maxRows}) { $created=if ($null -eq $_.CreationDate) {$null} else {([DateTimeOffset]$_.CreationDate).ToUniversalTime().ToUnixTimeMilliseconds()}; [void]$rows.Add([pscustomobject]@{ProcessId=$_.ProcessId;CommandLine=$_.CommandLine;ProcessCreatedAtMs=$created}) } else { $truncated=$true } }`,
+      `$rows=[System.Collections.Generic.List[object]]::new();$truncated=$false;Get-CimInstance Win32_Process | ForEach-Object { if ($rows.Count -lt ${maxRows}) { $created=if ($null -eq $_.CreationDate) {$null} else {([DateTimeOffset]$_.CreationDate).ToUniversalTime().ToUnixTimeMilliseconds()}; [void]$rows.Add([pscustomobject]@{ProcessId=$_.ProcessId;ParentProcessId=$_.ParentProcessId;CommandLine=$_.CommandLine;ProcessCreatedAtMs=$created}) } else { $truncated=$true } }`,
       '[pscustomobject]@{rows=$rows;truncated=$truncated} | ConvertTo-Json -Compress -Depth 4',
     ].join(';');
     const result = await execFileAsync('powershell.exe', [

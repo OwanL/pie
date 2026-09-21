@@ -1,3 +1,4 @@
+import { providerReportedCostUsd } from '../../../shared/provider-cost.js';
 import type { AssistantUsage, ChatMessage, PruningDetails, ToolCall } from './protocol';
 import { formatToolResult } from './tool-result-format';
 import { getSubagentBillingEntries, getSubagentResultEntries, type RawMessage } from './subagent-result';
@@ -87,14 +88,18 @@ function nonNegativeNumber(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
 }
 
+function reportedCost(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function validTokenChannel(value: unknown): boolean {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
 function isoTimestamp(value: unknown): string | undefined {
   if (typeof value === 'string' && !Number.isNaN(Date.parse(value))) return value;
   if (typeof value === 'number' && Number.isFinite(value)) return new Date(value).toISOString();
   return undefined;
-}
-
-function reportedCost(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
 function sampleFromAssistant(message: ChatMessage): SessionUsageSample | null {
@@ -130,24 +135,35 @@ function samplesFromPruning(message: ChatMessage): SessionUsageSample[] {
   const details = message.customDetails as unknown as PruningDetails;
   if (details.prepassInvocations?.length) {
     return details.prepassInvocations.map((invocation) => {
-      const channelsKnown = invocation.input !== undefined && invocation.output !== undefined
-        && invocation.cacheRead !== undefined && invocation.cacheWrite !== undefined;
+      const tokenChannelPresence = {
+        input: validTokenChannel(invocation.input),
+        output: validTokenChannel(invocation.output),
+        cacheRead: validTokenChannel(invocation.cacheRead),
+        cacheWrite: validTokenChannel(invocation.cacheWrite),
+      };
+      const channelsKnown = Object.values(tokenChannelPresence).every(Boolean);
+      const inputTokens = tokenChannelPresence.input ? invocation.input! : 0;
+      const outputTokens = tokenChannelPresence.output ? invocation.output! : 0;
+      const cacheReadTokens = tokenChannelPresence.cacheRead ? invocation.cacheRead! : 0;
+      const cacheWriteTokens = tokenChannelPresence.cacheWrite ? invocation.cacheWrite! : 0;
+      const reportedCostUsd = validTokenChannel(invocation.reportedCostUsd)
+        ? invocation.reportedCostUsd : undefined;
       return {
         sourceId: invocation.invocationId,
         kind: 'skill_pruning_prepass',
         modelId: details.prepassModel,
         provider: details.prepassProvider,
-        inputTokens: invocation.input ?? 0,
-        outputTokens: invocation.output ?? 0,
-        cacheReadTokens: invocation.cacheRead ?? 0,
-        cacheWriteTokens: invocation.cacheWrite ?? 0,
+        inputTokens,
+        outputTokens,
+        cacheReadTokens,
+        cacheWriteTokens,
         totalTokens: channelsKnown
-          ? (invocation.input ?? 0) + (invocation.output ?? 0)
-            + (invocation.cacheRead ?? 0) + (invocation.cacheWrite ?? 0)
+          ? inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens
           : 0,
-        ...(invocation.reportedCostUsd !== undefined ? { reportedCostUsd: invocation.reportedCostUsd } : {}),
+        ...(reportedCostUsd !== undefined ? { reportedCostUsd } : {}),
+        ...(!channelsKnown ? { tokenChannelsKnown: false, tokenChannelPresence } : {}),
         provenance: channelsKnown
-          ? invocation.reportedCostUsd !== undefined ? 'exact' : 'estimated'
+          ? reportedCostUsd !== undefined ? 'exact' : 'estimated'
           : 'unknown',
         instrumentationGap: !channelsKnown,
         ...(!channelsKnown ? { instrumentationGapReason: 'The pruning provider invocation exposed no complete usage.' } : {}),
@@ -161,12 +177,42 @@ function samplesFromPruning(message: ChatMessage): SessionUsageSample[] {
   const outputTokens = nonNegativeNumber(details.prepassOutputTokens);
   const cacheReadTokens = nonNegativeNumber(details.prepassCacheReadTokens);
   const cacheWriteTokens = nonNegativeNumber(details.prepassCacheWriteTokens);
-  const totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
+  const declaredPresence = details.prepassTokenChannelPresence;
+  const hasChannelValues = [
+    details.prepassInputTokens,
+    details.prepassOutputTokens,
+    details.prepassCacheReadTokens,
+    details.prepassCacheWriteTokens,
+  ].some((value) => value !== undefined);
+  const inferredPresence = (value: unknown): boolean => details.prepassTokenChannelsKnown === false
+    ? false
+    : hasChannelValues ? validTokenChannel(value) : true;
+  const tokenChannelPresence = {
+    input: typeof declaredPresence?.input === 'boolean'
+      ? declaredPresence.input && validTokenChannel(details.prepassInputTokens)
+      : inferredPresence(details.prepassInputTokens),
+    output: typeof declaredPresence?.output === 'boolean'
+      ? declaredPresence.output && validTokenChannel(details.prepassOutputTokens)
+      : inferredPresence(details.prepassOutputTokens),
+    cacheRead: typeof declaredPresence?.cacheRead === 'boolean'
+      ? declaredPresence.cacheRead && validTokenChannel(details.prepassCacheReadTokens)
+      : inferredPresence(details.prepassCacheReadTokens),
+    cacheWrite: typeof declaredPresence?.cacheWrite === 'boolean'
+      ? declaredPresence.cacheWrite && validTokenChannel(details.prepassCacheWriteTokens)
+      : inferredPresence(details.prepassCacheWriteTokens),
+  };
+  const channelsKnown = details.prepassTokenChannelsKnown !== false
+    && Object.values(tokenChannelPresence).every(Boolean);
+  const totalTokens = channelsKnown
+    ? inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens
+    : 0;
   const reportedCostUsd = typeof details.prepassReportedCostUsd === 'number'
     && Number.isFinite(details.prepassReportedCostUsd) && details.prepassReportedCostUsd >= 0
     ? details.prepassReportedCostUsd
     : undefined;
-  if (!details.prepassModel || (totalTokens <= 0 && reportedCostUsd === undefined)) return [];
+  const hasIncompleteEvidence = !channelsKnown
+    && (details.prepassTokenChannelsKnown === false || declaredPresence !== undefined || hasChannelValues);
+  if (!details.prepassModel || (totalTokens <= 0 && reportedCostUsd === undefined && !hasIncompleteEvidence)) return [];
   return [{
     sourceId: `skill-pruning:${message.durableEntryId ?? message.id}`,
     kind: 'skill_pruning_prepass',
@@ -178,6 +224,12 @@ function samplesFromPruning(message: ChatMessage): SessionUsageSample[] {
     cacheWriteTokens,
     totalTokens,
     ...(reportedCostUsd !== undefined ? { reportedCostUsd } : {}),
+    ...(!channelsKnown ? { tokenChannelsKnown: false, tokenChannelPresence } : {}),
+    ...(!channelsKnown ? {
+      provenance: 'unknown' as const,
+      instrumentationGap: true,
+      instrumentationGapReason: 'The pruning provider response omitted one or more token channels.',
+    } : {}),
   }];
 }
 
@@ -229,15 +281,24 @@ function subagentUsage(value: unknown): RawSubagentUsage | null {
   const channelTokens = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
   const reportedTotal = nonNegativeNumber(value.totalTokens);
   const totalTokens = Math.max(channelTokens, reportedTotal);
-  const reportedCostUsd = reportedCost(value.cost);
+  // The nested SDK `cost.total` estimate is not evidence. A direct numeric
+  // `cost` remains a legacy subagent wire alias for explicit provider billing.
+  const reportedCostUsd = providerReportedCostUsd(value) ?? reportedCost(value.cost);
   if (totalTokens <= 0 && reportedCostUsd === undefined) return null;
-  const presence = {
-    input: typeof value.input === 'number',
-    output: typeof value.output === 'number',
-    cacheRead: typeof value.cacheRead === 'number',
-    cacheWrite: typeof value.cacheWrite === 'number',
+  const declaredPresence = isRecord(value.tokenChannelPresence) ? value.tokenChannelPresence : undefined;
+  const declaredIncomplete = value.tokenChannelsKnown === false;
+  const channelPresent = (raw: unknown, key: 'input' | 'output' | 'cacheRead' | 'cacheWrite'): boolean => {
+    if (!validTokenChannel(raw)) return false;
+    if (declaredPresence && typeof declaredPresence[key] === 'boolean') return declaredPresence[key] as boolean;
+    return !declaredIncomplete;
   };
-  const channelsKnown = Object.values(presence).every(Boolean);
+  const presence = {
+    input: channelPresent(value.input, 'input'),
+    output: channelPresent(value.output, 'output'),
+    cacheRead: channelPresent(value.cacheRead, 'cacheRead'),
+    cacheWrite: channelPresent(value.cacheWrite, 'cacheWrite'),
+  };
+  const channelsKnown = !declaredIncomplete && Object.values(presence).every(Boolean);
   return {
     inputTokens,
     outputTokens,
@@ -301,9 +362,16 @@ function addSubagentToolSamples(
       ? rawResult.model
       : typeof rawResult.selectedModel === 'string' ? rawResult.selectedModel : undefined;
     const resultProvider = typeof rawResult.provider === 'string' ? rawResult.provider : undefined;
-    const resultUsage = subagentUsage(rawResult.usage);
     const groupId = `subagent:${toolCall.id}:${path}${resultIndex}`;
     const attemptRecords = Array.isArray(rawResult.attemptRecords) ? rawResult.attemptRecords : [];
+    const parsedResultUsage = subagentUsage(rawResult.usage);
+    // A numeric aggregate `cost` is a legacy compatibility field. When
+    // per-attempt records exist, do not let a stale aggregate estimate become
+    // an exact residual; only an explicitly labelled provider report owns it.
+    const resultUsage = parsedResultUsage && attemptRecords.length > 0
+      && providerReportedCostUsd(rawResult.usage) === undefined
+      ? { ...parsedResultUsage, reportedCostUsd: undefined }
+      : parsedResultUsage;
     const resultStartedAt = attemptRecords
       .map((attempt) => isRecord(attempt) ? isoTimestamp(attempt.startedAt) : undefined)
       .find((timestamp) => timestamp !== undefined);
@@ -315,7 +383,14 @@ function addSubagentToolSamples(
       .find((timestamp) => timestamp !== undefined);
     const resultOutcome = rawResult.exitCode === 0 ? 'succeeded'
       : typeof rawResult.exitCode === 'number' ? 'failed' : 'unknown';
-    let remaining = resultUsage;
+    // A cost-only/zero-token aggregate must not clip independently captured
+    // attempts to zero. Its monetary evidence is reconciled below, while
+    // attempt token usage remains authoritative when present.
+    let remaining = resultUsage
+      && resultUsage.totalTokens > 0
+      && resultUsage.tokenChannelsKnown !== false
+      ? resultUsage
+      : null;
     let attributedReportedCost = 0;
 
     if (attemptRecords.length > 0) {
@@ -324,7 +399,9 @@ function addSubagentToolSamples(
         const attemptId = typeof attempt.attemptId === 'string' && attempt.attemptId.trim()
           ? attempt.attemptId.trim()
           : String(attemptIndex);
-        const usage = subagentUsage(attempt.usage);
+        const usage = attempt.providerResponseObserved === false
+          ? null
+          : subagentUsage(attempt.usage);
         const outcome = attempt.outcome === 'success' ? 'succeeded'
           : attempt.outcome === 'aborted' ? 'cancelled'
             : attempt.outcome === 'failure' ? 'failed' : 'unknown';
@@ -372,10 +449,11 @@ function addSubagentToolSamples(
           provider: typeof attempt.provider === 'string' ? attempt.provider : resultProvider,
           ...bounded,
           // When only the result aggregate reports an exact cost, its residual
-          // sample below owns that cost. Mark unpriced attempts as known-zero
-          // so catalog pricing cannot be added on top of the exact aggregate.
+          // sample below owns that cost. Keep attempts explicitly unpriced so
+          // catalog pricing cannot be added on top of the exact aggregate;
+          // absence is not fabricated free billing.
           ...(bounded.reportedCostUsd === undefined && resultUsage?.reportedCostUsd !== undefined
-            ? { reportedCostUsd: 0 }
+            ? { provenance: 'unpriced' as const }
             : {}),
           outcome,
           ...(startedAt ? { startedAt } : {}),
@@ -403,7 +481,7 @@ function addSubagentToolSamples(
         ...(resultStartedAt ? { startedAt: resultStartedAt } : {}),
         ...(resultEndedAt ? { endedAt: resultEndedAt } : {}),
       });
-    } else if (residualReportedCost !== undefined && residualReportedCost > 0) {
+    } else if (residualReportedCost !== undefined) {
       samples.push({
         sourceId: `${groupId}:residual-cost`,
         groupId,
@@ -416,6 +494,7 @@ function addSubagentToolSamples(
         cacheWriteTokens: 0,
         totalTokens: 0,
         reportedCostUsd: residualReportedCost,
+        provenance: 'exact',
         outcome: resultOutcome,
         ...(resultStartedAt ? { startedAt: resultStartedAt } : {}),
         ...(resultEndedAt ? { endedAt: resultEndedAt } : {}),
@@ -444,7 +523,19 @@ function sampleFromBillingUsage(
   groupId: string,
   modelId: string | undefined,
   provider: string | undefined,
-  usage: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens?: number; cost?: number } | undefined,
+  usage: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    totalTokens?: number;
+    tokenChannelsKnown?: boolean;
+    tokenChannelPresence?: SessionUsageSample['tokenChannelPresence'];
+    /** Legacy direct numeric provider-cost alias; never a nested cost.total. */
+    cost?: number;
+    reportedCostUsd?: number;
+    providerReportedCostUsd?: number;
+  } | undefined,
   outcome: SessionUsageSample['outcome'],
   startedAt?: number,
   completedAt?: number,
@@ -455,7 +546,9 @@ function sampleFromBillingUsage(
     evidenceKind: NonNullable<SessionUsageSample['producerEvidenceKind']>;
   },
 ): SessionUsageSample {
-  const channelsKnown = usage !== undefined;
+  const channelsKnown = usage !== undefined
+    && usage.tokenChannelsKnown !== false
+    && (!usage.tokenChannelPresence || Object.values(usage.tokenChannelPresence).every(Boolean));
   return {
     sourceId,
     groupId,
@@ -470,12 +563,17 @@ function sampleFromBillingUsage(
       usage.totalTokens ?? 0,
       usage.input + usage.output + usage.cacheRead + usage.cacheWrite,
     ) : 0,
-    ...(usage?.cost !== undefined ? { reportedCostUsd: usage.cost } : {}),
+    ...(usage?.tokenChannelPresence ? { tokenChannelPresence: usage.tokenChannelPresence } : {}),
+    ...(providerReportedCostUsd(usage) !== undefined
+      ? { reportedCostUsd: providerReportedCostUsd(usage) }
+      : usage?.cost !== undefined ? { reportedCostUsd: usage.cost } : {}),
     tokenChannelsKnown: channelsKnown,
     ...(!channelsKnown ? {
       provenance: 'unknown' as const,
       instrumentationGap: true,
-      instrumentationGapReason: 'The observable subagent provider invocation exposed no usage.',
+      instrumentationGapReason: usage
+        ? 'The subagent provider response omitted one or more token channels.'
+        : 'The observable subagent provider invocation exposed no usage.',
     } : {}),
     outcome,
     ...(startedAt !== undefined ? { startedAt: new Date(startedAt).toISOString() } : {}),
@@ -557,14 +655,58 @@ export function buildSubagentUsageSamples(toolCall: Pick<ToolCall, 'id' | 'resul
             evidenceKind: 'attemptGap',
           },
         );
-        if (sample.reportedCostUsd === undefined && entry.usage?.cost !== undefined) sample.reportedCostUsd = 0;
+        // The aggregate report owns the cost when an attempt did not expose
+        // independent provider billing. Do not synthesize a reported zero;
+        // mark the attempt unpriced so catalog pricing is also withheld.
+        if (sample.reportedCostUsd === undefined
+          && providerReportedCostUsd(entry.usage) !== undefined) {
+          sample.provenance = 'unpriced';
+        }
         samples.push(sample);
+      }
+      const representedAttemptCount = (entry.invocations?.length ?? 0)
+        + (entry.attempts?.length ?? 0) + (entry.omittedInvocationCount ?? 0);
+      // Numeric aggregate `cost` is retained only for a compact result with
+      // no attempt/invocation split. The direct numeric `cost` is a legacy
+      // provider-cost alias; nested SDK cost.total is never read here.
+      const aggregateReportedCost = providerReportedCostUsd(entry.usage)
+        ?? (representedAttemptCount === 0 && typeof entry.usage?.cost === 'number'
+          && Number.isFinite(entry.usage.cost) && entry.usage.cost >= 0 ? entry.usage.cost : undefined);
+      if (aggregateReportedCost !== undefined && representedAttemptCount > 0) {
+        const representedSamples = samples.filter((sample) => sample.groupId === groupId);
+        const attemptReportedCost = representedSamples.reduce(
+          (total, sample) => total + (sample.reportedCostUsd ?? 0),
+          0,
+        );
+        const attemptReportedCount = representedSamples.filter((sample) => sample.reportedCostUsd !== undefined).length;
+        if (aggregateReportedCost > attemptReportedCost || attemptReportedCount === 0) {
+          const residualCost = Math.max(0, aggregateReportedCost - attemptReportedCost);
+          samples.push(sampleFromBillingUsage(
+            `${groupId}:residual-cost`,
+            groupId,
+            entry.model ?? entry.selectedModel,
+            entry.provider,
+            {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              totalTokens: 0,
+              reportedCostUsd: residualCost,
+            },
+            'succeeded',
+            undefined,
+            entry.occurredAt,
+            { evidenceKind: 'aggregate' },
+          ));
+        }
       }
       if ((entry.invocations?.length ?? 0) === 0 && (entry.attempts?.length ?? 0) === 0
         && (entry.omittedInvocationCount ?? 0) === 0) {
         const aggregateHasEvidence = !!entry.usage && (entry.usage.input > 0 || entry.usage.output > 0
           || entry.usage.cacheRead > 0 || entry.usage.cacheWrite > 0 || (entry.usage.totalTokens ?? 0) > 0
-          || (entry.usage.cost ?? 0) > 0);
+          || providerReportedCostUsd(entry.usage) !== undefined
+          || (typeof entry.usage?.cost === 'number' && Number.isFinite(entry.usage.cost) && entry.usage.cost >= 0));
         samples.push(sampleFromBillingUsage(
           groupId,
           groupId,
@@ -762,7 +904,15 @@ export function mergeSessionUsageSnapshots(
     merged.set(sample.sourceId, sample);
   }
   for (const sample of overlaySamples) merged.set(sample.sourceId, sample);
-  return { samples: [...merged.values()] };
+  const authority = overlay?.authority ?? baseline?.authority;
+  const branchId = overlay?.branchId ?? baseline?.branchId;
+  const branchEntryIds = overlay?.branchEntryIds ?? baseline?.branchEntryIds;
+  return {
+    samples: [...merged.values()],
+    ...(authority !== undefined ? { authority } : {}),
+    ...(branchId !== undefined ? { branchId } : {}),
+    ...(branchEntryIds !== undefined ? { branchEntryIds } : {}),
+  };
 }
 
 export function mergeAssistantUsage(
@@ -791,9 +941,9 @@ export function assistantUsageFromSample(sample: SessionUsageSample): AssistantU
     cacheReadTokens: sample.cacheReadTokens,
     cacheWriteTokens: sample.cacheWriteTokens,
     totalTokens: sample.totalTokens,
+    ...(sample.tokenChannelsKnown !== undefined ? { tokenChannelsKnown: sample.tokenChannelsKnown } : {}),
+    ...(sample.tokenChannelPresence ? { tokenChannelPresence: sample.tokenChannelPresence } : {}),
     ...(sample.reasoningTokens !== undefined ? { reasoningTokens: sample.reasoningTokens } : {}),
-    ...(sample.reportedCostUsd !== undefined || sample.calculatedCostUsd !== undefined
-      ? { reportedCostUsd: sample.reportedCostUsd ?? sample.calculatedCostUsd }
-      : {}),
+    ...(sample.reportedCostUsd !== undefined ? { reportedCostUsd: sample.reportedCostUsd } : {}),
   };
 }

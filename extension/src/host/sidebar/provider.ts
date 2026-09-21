@@ -128,7 +128,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
   async resolveWebviewView(
     webviewView: vscode.WebviewView,
     _context: vscode.WebviewViewResolveContext,
-    _token: vscode.CancellationToken,
+    token: vscode.CancellationToken,
   ): Promise<void> {
     this.view = webviewView;
     this.hotReloader.resetReloadFlags();
@@ -139,9 +139,11 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
       localResourceRoots: [...this.getRoots()],
     };
 
+    this.installViewLifecycleHandlers(webviewView);
+
     const resolver = this.getResolveAssets();
     const resolvedAssets = await resolver(this.context, webviewView.webview);
-    if (this.view !== webviewView) return;
+    if (this.view !== webviewView || token.isCancellationRequested) return;
     this.hotReloader.setCurrentAssetVersion(resolvedAssets.assetVersion);
 
     bootLog('sidebar-provider', 'view.resolved', {
@@ -151,7 +153,6 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
     });
 
     this.installMessageHandler(webviewView);
-    this.installViewLifecycleHandlers(webviewView);
     this.hotReloader.ensureAssetWatcher();
     webviewView.webview.html = injectViewGenerationMeta(
       resolvedAssets.html,

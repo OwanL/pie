@@ -52,14 +52,9 @@ retained workflow.
 
 ## 2. Storage layout
 
-One OS-local data root owns Pie's persistent runtime data. It is resolved deterministically, never
-searched for:
-
-| Platform | Default root |
-|---|---|
-| Windows | `%LOCALAPPDATA%\pie\data` |
-| macOS | `~/Library/Application Support/pie/data` |
-| Linux | `${XDG_DATA_HOME:-~/.local/share}/pie/data` |
+One OS-local data root owns Pie's persistent runtime data. Pie currently supports Windows only,
+where the root defaults to `%LOCALAPPDATA%\pie\data`. It is resolved deterministically, never
+searched for.
 
 `PIE_DATA_DIR` overrides it (absolute values are used verbatim; relative values resolve once against
 the agent directory or an explicit `PI_CODING_AGENT_DIR`). Resolution failures raise
@@ -79,7 +74,7 @@ TTL: ordinary analytics survive transcript expiry, and only explicit privacy del
 removes them.
 
 Session transcripts keep their existing owners: `PI_CODING_AGENT_DIR` /
-`PI_CODING_AGENT_SESSION_DIR`. This checkout's installers pin the session dir to
+`PI_CODING_AGENT_SESSION_DIR`. This checkout's Windows installer pins the session dir to
 `<agent-dir>/data/outcomes/sessions`; when neither is configured the host synthesizes no path and
 the embedded SDK keeps its own defaults. The `<data-root>/sessions` location applies only under the
 gated cutoff in §7.
@@ -98,6 +93,17 @@ gated cutoff in §7.
   not write SQL.
 - Aggregates are never derived by scanning transcripts. Missing usage channels are unknown, not
   zero, and int64 values cross the query boundary as decimal strings.
+- Pi SDK `usage.cost.total` is a catalog estimate, not a provider invoice. New captures reserve
+  `reportedCostUsd` for explicitly labelled provider-reported amounts (including a real zero).
+  Otherwise cost is calculated from complete per-invocation channels and provider-qualified
+  catalog rates, including the applicable context tier. Subscription-provider catalog costs
+  measure estimated usage value, not necessarily money charged to the subscription account.
+- A definitive unconsumed non-tail rejection retires the host producer's sequence epoch. New
+  captures use a fresh origin/sequence stream; the old reconciliation gap remains auditable.
+  Ambiguous transport failures remain replayable and do not authorize sequence reuse. This
+  recovery prevents a missing receipt from blocking later accounting; it does not repair lost
+  facts or make historical totals complete. Historical SDK estimates already captured as reported
+  costs are not silently rewritten by this change.
 
 ## 4. Privacy: delete on explicit close
 
@@ -153,7 +159,33 @@ policy they implement is: sessions close at the cutoff and expire in place 24 ho
 privacy-on sessions delete immediately instead, new session-owned writes use the final root, and
 closed sessions have no Pie UI reopen/resume workflow.
 
-## 8. Explicit non-claims
+## 8. Historical migration and recalculation
+
+New capture fixes do not rewrite historical ledger or canonical settlement rows. Historical usage
+migration is an explicit, restartable operation owned by `BillableAccounting`; it appends only
+missing compatibility rows and marks them with `evidenceOrigin: migration`. Its stable invocation
+identity is derived from the selected session identity, billable kind, and source row/event id, so a
+retry is idempotent and cannot silently replace a live observation.
+
+A separate auditable recalculation is required when a historical catalog estimate must be corrected.
+Each run must retain, at minimum, the invocation id, source ledger/run/observation row ids, prior
+and replacement cost provenance, the catalog version/rate snapshot used, and the reason for the
+correction. It must not present a catalog estimate as provider-reported evidence or mutate the
+original source row in place.
+
+Migration and recalculation operators must record bounded-work metrics. The historical migration
+reports runs considered, attempted rows, new durable invocation rows, activity-batch flushes,
+duration, and cancellation. The ledger-to-activity healing pass separately reports ledger rows
+considered, intervals healed, activity-batch flushes, duration, and cancellation. These metrics are
+operational evidence of what was attempted; they are not proof that an unobserved provider cost was
+recovered.
+
+The legacy in-memory run tracker forwards auxiliary usage only when all token channels are known.
+An incomplete or cost-only auxiliary observation is still retained by the billable ledger and
+canonical analytics path; consumers that require complete historical coverage must read that
+canonical source rather than infer absence from the legacy tracker projection.
+
+## 9. Explicit non-claims
 
 - Analytics activation, the storage cutoff, and cleanup of legacy files are not properties of the
   source tree. Do not report them as completed or in effect.

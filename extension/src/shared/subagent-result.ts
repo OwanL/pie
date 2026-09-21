@@ -49,17 +49,33 @@ export interface RawMessage {
 
 export interface SubagentUsageSummary {
   /** Cumulative input tokens consumed by this sub-agent session. */
-  input: number;
+  input?: number;
   /** Cumulative output tokens consumed by this sub-agent session. */
-  output: number;
+  output?: number;
   /** Cumulative cache-read tokens consumed by this sub-agent session. */
-  cacheRead: number;
+  cacheRead?: number;
   /** Cumulative cache-write tokens consumed by this sub-agent session. */
-  cacheWrite: number;
+  cacheWrite?: number;
+  /** True only when every provider token channel in the aggregate was observed. */
+  tokenChannelsKnown?: boolean;
+  /** Per-channel evidence retained when one or more channels were omitted. */
+  tokenChannelPresence?: {
+    input: boolean;
+    output: boolean;
+    cacheRead: boolean;
+    cacheWrite: boolean;
+  };
   /** Context occupied by the most recent provider turn. */
   contextTokens?: number;
-  /** Cumulative attributed cost in provider billing units (normally USD). */
+  /** Cumulative attributed cost in provider billing units (normally USD).
+   *  Present only when at least one provider turn reported a numeric cost
+   *  total; absent — never an invented zero — when no cost evidence exists
+   *  (pre-dispatch failures, synthetic results, or event shapes without a
+   *  cost block). Display treats a projected zero as non-evidence. */
   cost?: number;
+  /** Explicit provider/invoice billing evidence, when present. */
+  reportedCostUsd?: number;
+  providerReportedCostUsd?: number;
   /** Completed assistant turns in this child session. */
   turns?: number;
 }
@@ -69,6 +85,8 @@ export interface SubagentSingleResult {
   task: string;
   /** Producer-issued logical child identity (page-backed detail addressing). */
   childId?: string;
+  /** Effective working directory used by this child session. */
+  cwd?: string;
   /** Complete root-to-target producer lineage. Legacy durable results without
    *  this field may render, but are explicitly not live-addressable. */
   lineage?: SubagentChildIdentity[];
@@ -82,6 +100,8 @@ export interface SubagentSingleResult {
   parentUserContextMode?: 'latest' | 'all';
   /** Exact bounded parent-context packet inserted into the child prompt. */
   parentUserContext?: string;
+  /** Producer/transport marker retained when child messages are compacted. */
+  hasNestedToolFailure?: boolean;
   /** `-1` while the subagent is still running. */
   exitCode: number;
   messages: RawMessage[];
@@ -122,6 +142,12 @@ export interface SubagentSingleResult {
   selectionPool?: string[];
   /** Number of model retries before success. */
   retryCount?: number;
+  /** True when the producer recovered by selecting a fallback model. */
+  fallback?: boolean;
+  /** Model attempt that failed before a later attempt recovered or settled. */
+  failedModel?: string;
+  /** Producer-labelled terminal failure category. */
+  failureClass?: string;
   /** Terminal model-attempt diagnostics emitted by the subagent extension. */
   attemptRecords?: unknown[];
   /** Streaming text from the current in-progress assistant turn. */
@@ -164,6 +190,51 @@ export function isSubagentSingleResultRunning(result: SubagentSingleResult): boo
 
 export function isSubagentSingleResultInterrupted(result: SubagentSingleResult): boolean {
   return result.stopReason === 'aborted' || result.activityPhase === 'cancelled';
+}
+
+/**
+ * A failed nested tool call is not, by itself, a terminal failure of the
+ * enclosing subagent. The child may still recover, report a useful answer, or
+ * be settled independently by the producer. Use only explicit tool-result
+ * error markers (and nested subagent terminal failures) when deciding whether
+ * an outer failed tool status came from a nested call.
+ */
+export function hasNestedToolFailure(result: {
+  messages?: unknown[];
+  hasNestedToolFailure?: unknown;
+}): boolean {
+  if (result.hasNestedToolFailure === true) return true;
+
+  function visitDetails(value: unknown, depth: number): boolean {
+    if (depth > 8 || !isRecord(value)) return false;
+    const details = isRecord(value.details) ? value.details : value;
+    if (!Array.isArray(details.results)) return false;
+    return details.results.some((entry) => {
+      if (!isRecord(entry)) return false;
+      if (entry.hasNestedToolFailure === true) return true;
+      const exitCode = entry.exitCode;
+      if (typeof exitCode === 'number' && Number.isFinite(exitCode) && exitCode !== -1 && exitCode !== 0) return true;
+      if (entry.stopReason === 'error' || entry.stopReason === 'aborted') return true;
+      return Array.isArray(entry.messages)
+        && entry.messages.some((message) => isRecord(message) && nestedMessageHasFailure(message, depth + 1));
+    });
+  }
+
+  function nestedMessageHasFailure(message: Record<string, unknown>, depth: number): boolean {
+    const isToolResult = message.role === 'toolResult' || typeof message.toolCallId === 'string';
+    if (isToolResult && message.isError === true) return true;
+    if (visitDetails(message.details, depth)) return true;
+    if (!Array.isArray(message.content)) return false;
+    return message.content.some((part) => {
+      if (!isRecord(part)) return false;
+      if (isToolResult && part.isError === true) return true;
+      if (!isRecord(part.result)) return false;
+      return part.result.isError === true || visitDetails(part.result, depth + 1);
+    });
+  }
+
+  return (Array.isArray(result.messages) ? result.messages : [])
+    .some((message) => isRecord(message) && nestedMessageHasFailure(message, 0));
 }
 
 function isSubagentSingleResultFailed(result: SubagentSingleResult): boolean {
@@ -306,8 +377,9 @@ function normalizeRenderableSubagentResult(
       results: result.results.map((current) => {
         const wasStillRunning = current.exitCode === -1;
         const interrupted = isSubagentSingleResultInterrupted(current);
+        const nestedToolFailure = hasNestedToolFailure(current);
         const terminalExitCode = wasStillRunning
-          ? (toolStatus === 'completed' ? 0 : 1)
+          ? (toolStatus === 'failed' && nestedToolFailure ? -1 : toolStatus === 'completed' ? 0 : 1)
           : current.exitCode;
         const hadLiveState = current.streaming === true || (current.runningTools?.length ?? 0) > 0;
         if (!wasStillRunning && !hadLiveState) return current;
@@ -317,14 +389,16 @@ function normalizeRenderableSubagentResult(
           exitCode: terminalExitCode,
           runningTools: [],
           streaming: false,
-          ...(wasStillRunning && toolStatus === 'failed' && !current.stopReason
+          ...(wasStillRunning && terminalExitCode !== -1 && toolStatus === 'failed' && !current.stopReason
             ? { stopReason: interrupted ? 'aborted' : 'error' }
             : {}),
           activityPhase: interrupted
             ? 'cancelled'
-            : terminalExitCode !== 0
-              ? 'failed'
-              : 'completed',
+            : terminalExitCode === -1
+              ? current.activityPhase
+              : terminalExitCode !== 0
+                ? 'failed'
+                : 'completed',
         };
       }),
     };
@@ -399,15 +473,45 @@ function billingUsage(value: unknown): SubagentBillingUsage | undefined {
   const output = finiteNonNegative(value.output);
   const cacheRead = finiteNonNegative(value.cacheRead);
   const cacheWrite = finiteNonNegative(value.cacheWrite);
-  if (input === null || output === null || cacheRead === null || cacheWrite === null) return undefined;
-  const cost = typeof value.cost === 'number' && Number.isFinite(value.cost) && value.cost >= 0
-    ? value.cost
-    : undefined;
+  const providerReportedCostUsd = nonNegativeCost(value.providerReportedCostUsd);
+  const reportedCostUsd = providerReportedCostUsd ?? nonNegativeCost(value.reportedCostUsd);
+  const legacyCost = nonNegativeCost(value.cost);
+  const cost = reportedCostUsd ?? legacyCost;
   const totalTokens = finiteNonNegative(value.totalTokens);
+  const turns = finiteNonNegative(value.turns);
+  const declaredPresence = isRecord(value.tokenChannelPresence) ? value.tokenChannelPresence : undefined;
+  const declaredIncomplete = value.tokenChannelsKnown === false;
+  const channelPresent = (raw: number | null, key: 'input' | 'output' | 'cacheRead' | 'cacheWrite'): boolean => {
+    if (raw === null) return false;
+    if (declaredPresence && typeof declaredPresence[key] === 'boolean') return declaredPresence[key] as boolean;
+    return !declaredIncomplete;
+  };
+  const tokenChannelPresence = {
+    input: channelPresent(input, 'input'),
+    output: channelPresent(output, 'output'),
+    cacheRead: channelPresent(cacheRead, 'cacheRead'),
+    cacheWrite: channelPresent(cacheWrite, 'cacheWrite'),
+  };
+  const tokenChannelsKnown = !declaredIncomplete && Object.values(tokenChannelPresence).every(Boolean);
+  const hasEvidence = input !== null || output !== null || cacheRead !== null || cacheWrite !== null
+    || totalTokens !== null || cost !== null;
+  // An observed but empty usage object is still an instrumentation gap. Keep
+  // it as zero-valued incomplete usage instead of dropping an exact cost or
+  // hiding the provider response from the ledger.
   return {
-    input, output, cacheRead, cacheWrite,
+    input: input ?? 0,
+    output: output ?? 0,
+    cacheRead: cacheRead ?? 0,
+    cacheWrite: cacheWrite ?? 0,
     ...(totalTokens === null ? {} : { totalTokens }),
-    ...(cost === undefined ? {} : { cost }),
+    ...(turns === null ? {} : { turns }),
+    ...(!tokenChannelsKnown ? { tokenChannelsKnown: false, tokenChannelPresence } : {}),
+    ...(cost === null ? {} : { cost }),
+    ...(reportedCostUsd === null ? {} : { reportedCostUsd }),
+    ...(providerReportedCostUsd === null ? {} : { providerReportedCostUsd }),
+    ...(!hasEvidence ? { tokenChannelsKnown: false, tokenChannelPresence: {
+      input: false, output: false, cacheRead: false, cacheWrite: false,
+    } } : {}),
   };
 }
 
@@ -608,6 +712,27 @@ export function getSubagentBillingEntries(rawResult: unknown): SubagentBillingEn
   return boundBillingInvocations(entries);
 }
 
+function normalizeRenderableFileChanges(value: unknown): SubagentSingleResult['fileChanges'] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const changes: NonNullable<SubagentSingleResult['fileChanges']> = [];
+  for (const candidate of value.slice(0, 64)) {
+    if (!isRecord(candidate) || typeof candidate.path !== 'string' || !candidate.path.trim()) continue;
+    if (candidate.kind !== 'created' && candidate.kind !== 'modified' && candidate.kind !== 'deleted') continue;
+    const additions = typeof candidate.additions === 'number' && Number.isFinite(candidate.additions) && candidate.additions >= 0
+      ? Math.trunc(candidate.additions) : undefined;
+    const deletions = typeof candidate.deletions === 'number' && Number.isFinite(candidate.deletions) && candidate.deletions >= 0
+      ? Math.trunc(candidate.deletions) : undefined;
+    changes.push({
+      path: candidate.path.slice(0, 2 * 1024),
+      kind: candidate.kind,
+      ...(typeof candidate.description === 'string' ? { description: candidate.description.slice(0, 1024) } : {}),
+      ...(additions !== undefined ? { additions } : {}),
+      ...(deletions !== undefined ? { deletions } : {}),
+    });
+  }
+  return changes.length > 0 ? changes : undefined;
+}
+
 export function getRenderableSubagentResult(rawResult: unknown): SubagentResult | undefined {
   const raw = rawResult as { kind?: unknown; mode?: unknown; children?: unknown; details?: unknown; results?: unknown } | undefined;
 
@@ -642,6 +767,7 @@ export function getRenderableSubagentResult(rawResult: unknown): SubagentResult 
       const messages: RawMessage[] = summary && !streamingText
         ? [{ role: 'assistant', content: [{ type: 'text', text: summary }] }]
         : [];
+      const fileChanges = normalizeRenderableFileChanges(candidate.fileChanges);
       return [{
         agent,
         task,
@@ -650,10 +776,14 @@ export function getRenderableSubagentResult(rawResult: unknown): SubagentResult 
         ...(lineage && lineage.length > 0 ? { lineage } : {}),
         ...(candidate.liveAddressable === true ? { liveAddressable: true as const } : {}),
         ...(detailAddress ? { detailAddress } : {}),
+        ...(typeof candidate.cwd === 'string' ? { cwd: candidate.cwd.slice(0, 2 * 1024) } : {}),
         ...(candidate.parentUserContextMode === 'latest' || candidate.parentUserContextMode === 'all'
           ? { parentUserContextMode: candidate.parentUserContextMode }
           : {}),
-        ...(typeof candidate.parentUserContext === 'string' ? { parentUserContext: candidate.parentUserContext } : {}),
+        ...(typeof candidate.parentUserContext === 'string'
+          ? { parentUserContext: candidate.parentUserContext.slice(0, 12_000) } : {}),
+        ...(candidate.hasNestedToolFailure === true ? { hasNestedToolFailure: true } : {}),
+        ...(fileChanges ? { fileChanges } : {}),
         ...(typeof candidate.model === 'string' ? { model: candidate.model } : {}),
         ...(typeof candidate.selectedModel === 'string' ? { selectedModel: candidate.selectedModel } : {}),
         ...(typeof candidate.provider === 'string' ? { provider: candidate.provider } : {}),
@@ -679,6 +809,17 @@ export function getRenderableSubagentResult(rawResult: unknown): SubagentResult 
         ...(isRecord(candidate.usage) ? { usage: candidate.usage as unknown as SubagentUsageSummary } : {}),
         ...(Array.isArray(candidate.selectionPool) ? { selectionPool: candidate.selectionPool.filter((model): model is string => typeof model === 'string') } : {}),
         ...(typeof candidate.retryCount === 'number' ? { retryCount: candidate.retryCount } : {}),
+        ...(typeof candidate.fallback === 'boolean' ? { fallback: candidate.fallback } : {}),
+        ...(typeof candidate.failedModel === 'string' ? { failedModel: candidate.failedModel } : {}),
+        ...(typeof candidate.failureClass === 'string' ? { failureClass: candidate.failureClass } : {}),
+        ...(Array.isArray(candidate.turnThroughputSamples)
+          ? { turnThroughputSamples: candidate.turnThroughputSamples.slice(-8).filter((sample): sample is NonNullable<SubagentSingleResult['turnThroughputSamples']>[number] => {
+            if (!isRecord(sample) || typeof sample.endedAt !== 'string') return false;
+            return typeof sample.outputTokens === 'number' && Number.isFinite(sample.outputTokens)
+              && typeof sample.generationDurationMs === 'number' && Number.isFinite(sample.generationDurationMs)
+              && typeof sample.status === 'string';
+          }) }
+          : {}),
         ...(typeof candidate.stopReason === 'string' ? { stopReason: candidate.stopReason } : {}),
         ...(typeof candidate.errorMessage === 'string' ? { errorMessage: candidate.errorMessage } : {}),
         ...(typeof candidate.stderr === 'string' ? { stderr: candidate.stderr } : {}),
@@ -814,6 +955,10 @@ function parsePhaseDurations(value: unknown): Partial<Record<SubagentAttemptPhas
 
 function finiteNonNegative(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER ? Math.trunc(value) : null;
+}
+
+function nonNegativeCost(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
 function nonEmptyUnknownString(value: unknown): string | undefined {

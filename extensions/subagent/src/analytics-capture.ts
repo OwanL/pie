@@ -198,6 +198,10 @@ function acknowledgedSequence(
   return typeof value === 'bigint' ? value.toString() : value;
 }
 
+function validTokenChannel(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
 function providerObservation(
   context: SubagentAnalyticsCaptureContext,
   stableOriginId: string,
@@ -211,10 +215,10 @@ function providerObservation(
   invocation.canonicalInvocationId = canonicalInvocationId;
   const usage = invocation.usage;
   const completeChannels = usage !== undefined
-    && typeof usage.input === 'number'
-    && typeof usage.output === 'number'
-    && typeof usage.cacheRead === 'number'
-    && typeof usage.cacheWrite === 'number';
+    && validTokenChannel(usage.input)
+    && validTokenChannel(usage.output)
+    && validTokenChannel(usage.cacheRead)
+    && validTokenChannel(usage.cacheWrite);
   const fields: AnalyticsProviderCallFields = {
     invocationId: canonicalInvocationId,
     sourceId: invocation.invocationId,
@@ -229,14 +233,18 @@ function providerObservation(
     }),
     ...(invocation.outcome ? { outcome: invocation.outcome } : {}),
     coverage: completeChannels ? 'known' : 'unknown',
-    ...(usage?.input === undefined ? {} : { inputTokens: usage.input }),
-    ...(usage?.output === undefined ? {} : { outputTokens: usage.output }),
-    ...(usage?.cacheRead === undefined ? {} : { cacheReadTokens: usage.cacheRead }),
-    ...(usage?.cacheWrite === undefined ? {} : { cacheWriteTokens: usage.cacheWrite }),
+    ...(validTokenChannel(usage?.input) ? { inputTokens: usage.input } : {}),
+    ...(validTokenChannel(usage?.output) ? { outputTokens: usage.output } : {}),
+    ...(validTokenChannel(usage?.cacheRead) ? { cacheReadTokens: usage.cacheRead } : {}),
+    ...(validTokenChannel(usage?.cacheWrite) ? { cacheWriteTokens: usage.cacheWrite } : {}),
     ...(completeChannels ? {
       providerTotalTokens: usage.input! + usage.output! + usage.cacheRead! + usage.cacheWrite!,
     } : {}),
-    ...(usage?.cost === undefined ? {} : { reportedCostUsd: usage.cost }),
+    // `usage.cost` is retained as a legacy alias for explicit provider
+    // evidence by new runners; SDK catalog estimates are never copied here.
+    ...(usage?.reportedCostUsd !== undefined
+      ? { reportedCostUsd: usage.reportedCostUsd }
+      : usage?.cost === undefined ? {} : { reportedCostUsd: usage.cost }),
     inputIncludesCache: false,
     outputIncludesReasoning: true,
     cacheChannelsOmittedAsZero: false,

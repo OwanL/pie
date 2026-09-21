@@ -1,6 +1,6 @@
 import type { ComponentChildren } from 'preact';
 
-import type { ChatMessage, ChatPrefs, ComposerInput, InlineEditDraft, PruningResult, PruningSettings, SystemPromptEntry, ThinkingLevel, ToolCall, TranscriptWindow } from '../../../shared/protocol';
+import type { ChatMessage, ChatPrefs, ComposerInput, InlineEditDraft, ModelInfo, PruningResult, PruningSettings, SystemPromptEntry, ThinkingLevel, ToolCall, TranscriptWindow } from '../../../shared/protocol';
 import type { LiveTurnPhase } from '../../../shared/live-pipeline-protocol';
 import type { TranscriptContextMenuType } from '../chat-prefs';
 
@@ -57,6 +57,8 @@ export interface TranscriptCommonProps {
   compacting?: boolean;
   liveTurnPhase?: LiveTurnPhase | null;
   prefs: ChatPrefs;
+  /** Current model catalog used for transcript-only cost estimates. */
+  availableModels?: ModelInfo[];
   pruningSettings: PruningSettings;
   systemPrompts: SystemPromptEntry[];
   pruningResult: PruningResult | null;

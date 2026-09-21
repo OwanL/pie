@@ -57,6 +57,56 @@ test('busy session.opened keeps the local streaming transcript', () => {
   assert.equal(result.transcriptWindow.hasNewer, true);
 });
 
+test('busy session.opened deduplicates the first optimistic user against its SDK echo', () => {
+  const localTranscript = [userMessage('local:send:1', 'First prompt')];
+  const incomingTranscript = [userMessage('sdk-user-1', 'First prompt')];
+
+  const result = resolveSessionOpenedTranscript({
+    busy: true,
+    localTranscript,
+    incomingTranscript,
+    incomingTranscriptWindow: window({ totalCount: 1, loadedEnd: 1 }),
+    localTranscriptWindow: window({ totalCount: 1, loadedEnd: 1 }),
+  });
+
+  assert.equal(result.preserveLocal, true);
+  assert.deepEqual(result.transcript, incomingTranscript);
+  assert.equal(result.transcriptWindow.totalCount, 1);
+});
+
+test('busy session.opened deduplicates a first image-only optimistic user against its SDK echo', () => {
+  const localTranscript = [{
+    ...userMessage('local:send:image', ''),
+    userParts: [{
+      kind: 'image' as const,
+      mimeType: 'image/png',
+      dataBase64: 'ZmFrZQ==',
+      name: 'screenshot.png',
+      width: 1600,
+      height: 900,
+    }],
+  }];
+  const incomingTranscript = [{
+    ...userMessage('sdk-user-image', ''),
+    userParts: [{
+      kind: 'image' as const,
+      mimeType: 'image/png',
+      dataBase64: 'ZmFrZQ==',
+    }],
+  }];
+
+  const result = resolveSessionOpenedTranscript({
+    busy: true,
+    localTranscript,
+    incomingTranscript,
+    incomingTranscriptWindow: window({ totalCount: 1, loadedEnd: 1 }),
+    localTranscriptWindow: window({ totalCount: 1, loadedEnd: 1 }),
+  });
+
+  assert.deepEqual(result.transcript, incomingTranscript);
+  assert.equal(result.transcriptWindow.totalCount, 1);
+});
+
 test('busy session.opened keeps optimistic local transcript rows when not yet persisted', () => {
   const localTranscript = [
     userMessage('user-1', 'Prompt'),
@@ -148,6 +198,50 @@ test('busy session.opened deduplicates optimistic image prompts despite metadata
   assert.equal(result.transcriptWindow.loadedEnd, 2);
 });
 
+test('busy session.opened matches distinct same-text first sends one-to-one from branch origin', () => {
+  const localTranscript = [
+    { ...userMessage('local:send:1', 'continue'), status: 'queued' as const },
+    { ...userMessage('local:send:2', 'continue'), status: 'queued' as const },
+  ];
+  const incomingTranscript = [
+    userMessage('sdk-continue-1', 'continue'),
+    userMessage('sdk-continue-2', 'continue'),
+  ];
+
+  const result = resolveSessionOpenedTranscript({
+    busy: true,
+    localTranscript,
+    incomingTranscript,
+    incomingTranscriptWindow: window({ totalCount: 2, loadedEnd: 2 }),
+    localTranscriptWindow: window({ totalCount: 2, loadedEnd: 2 }),
+  });
+
+  assert.deepEqual(result.transcript, incomingTranscript);
+  assert.equal(result.transcriptWindow.totalCount, 2);
+});
+
+test('busy session.opened leaves a queued repeated prompt local after one SDK echo', () => {
+  const localTranscript = [
+    { ...userMessage('local:send:1', 'continue'), status: 'queued' as const },
+    { ...userMessage('local:send:2', 'continue'), status: 'queued' as const },
+  ];
+  const incomingTranscript = [userMessage('sdk-continue-1', 'continue')];
+
+  const result = resolveSessionOpenedTranscript({
+    busy: true,
+    localTranscript,
+    incomingTranscript,
+    incomingTranscriptWindow: window({ totalCount: 1, loadedEnd: 1 }),
+    localTranscriptWindow: window({ totalCount: 2, loadedEnd: 2 }),
+  });
+
+  assert.deepEqual(
+    result.transcript.map((message) => message.id),
+    ['sdk-continue-1', 'local:send:2'],
+  );
+  assert.equal(result.transcriptWindow.totalCount, 2);
+});
+
 test('busy session.opened keeps repeated optimistic user text when the current send is not persisted', () => {
   const localTranscript = [
     userMessage('user-1', 'Repeat'),
@@ -171,6 +265,156 @@ test('busy session.opened keeps repeated optimistic user text when the current s
     ['user-1', 'assistant-1', 'local:send:1'],
   );
   assert.equal(result.transcriptWindow.loadedEnd, 3);
+});
+
+test('busy session.opened preserves a new repeated prompt when the snapshot predates its send', () => {
+  const localTranscript = [
+    userMessage('host-old-user', 'continue'),
+    {
+      ...assistantMessage('local:assistant-old', 'Previous answer', 'completed'),
+      durableEntryId: 'assistant-entry-old',
+    },
+    userMessage('local:send:new', 'continue'),
+  ];
+  const incomingTranscript = [
+    userMessage('sdk-old-user', 'continue'),
+    {
+      ...assistantMessage('sdk-assistant-old', 'Previous answer', 'completed'),
+      durableEntryId: 'assistant-entry-old',
+    },
+  ];
+
+  const result = resolveSessionOpenedTranscript({
+    busy: true,
+    localTranscript,
+    incomingTranscript,
+    incomingTranscriptWindow: window({ totalCount: 2, loadedEnd: 2, hasNewer: true, isPartial: true }),
+  });
+
+  assert.deepEqual(
+    result.transcript.map((message) => message.id),
+    ['sdk-old-user', 'sdk-assistant-old', 'local:send:new'],
+    'the latest optimistic continue must survive a snapshot that predates its send',
+  );
+  assert.equal(result.transcriptWindow.totalCount, 3);
+  assert.equal(result.transcriptWindow.loadedEnd, 3);
+});
+
+test('busy session.opened matches repeated optimistic users one-to-one', () => {
+  const localTranscript = [
+    userMessage('user-1', 'Earlier prompt'),
+    {
+      ...assistantMessage('assistant-1', 'Previous answer', 'completed'),
+      durableEntryId: 'assistant-entry-1',
+    },
+    userMessage('local:send:1', 'continue'),
+    userMessage('local:send:2', 'continue'),
+  ];
+  const incomingTranscript = [
+    userMessage('user-1', 'Earlier prompt'),
+    {
+      ...assistantMessage('assistant-sdk-1', 'Previous answer', 'completed'),
+      durableEntryId: 'assistant-entry-1',
+    },
+    userMessage('sdk-continue-1', 'continue'),
+  ];
+
+  const result = resolveSessionOpenedTranscript({
+    busy: true,
+    localTranscript,
+    incomingTranscript,
+    incomingTranscriptWindow: window({ totalCount: 3, loadedEnd: 3, hasNewer: true, isPartial: true }),
+  });
+
+  assert.deepEqual(
+    result.transcript.map((message) => message.id),
+    ['user-1', 'assistant-sdk-1', 'sdk-continue-1', 'local:send:2'],
+    'one incoming echo may reconcile only one of two identical local prompts',
+  );
+  assert.equal(result.transcriptWindow.totalCount, 4);
+  assert.equal(result.transcriptWindow.loadedEnd, 4);
+});
+
+test('busy session.opened does not scan from branch origin past an unmatched completed prefix', () => {
+  const localTranscript = [
+    userMessage('host-old-user', 'continue'),
+    userMessage('local:send:new', 'continue'),
+  ];
+  const incomingTranscript = [userMessage('sdk-old-user', 'continue')];
+
+  const result = resolveSessionOpenedTranscript({
+    busy: true,
+    localTranscript,
+    incomingTranscript,
+    incomingTranscriptWindow: window({ totalCount: 1, loadedEnd: 1 }),
+    localTranscriptWindow: window({ totalCount: 2, loadedEnd: 2 }),
+  });
+
+  assert.deepEqual(
+    result.transcript.map((message) => message.id),
+    ['sdk-old-user', 'local:send:new'],
+    'an unmatched completed prefix keeps the repeated current prompt ambiguous',
+  );
+});
+
+test('busy session.opened preserves ambiguity when a partial local window lacks its prefix', () => {
+  const localTranscript = [userMessage('local:send:new', 'continue')];
+  const incomingTranscript = [userMessage('sdk-continue', 'continue')];
+
+  const result = resolveSessionOpenedTranscript({
+    busy: true,
+    localTranscript,
+    incomingTranscript,
+    incomingTranscriptWindow: window({
+      totalCount: 5,
+      loadedStart: 4,
+      loadedEnd: 5,
+      hasOlder: true,
+      isPartial: true,
+    }),
+    localTranscriptWindow: window({
+      totalCount: 5,
+      loadedStart: 4,
+      loadedEnd: 5,
+      hasOlder: true,
+      isPartial: true,
+    }),
+  });
+
+  assert.deepEqual(
+    result.transcript.map((message) => message.id),
+    ['sdk-continue', 'local:send:new'],
+    'without the older prefix, same text cannot prove that the SDK row is this send',
+  );
+});
+
+test('busy session.opened still deduplicates the repeated prompt when its durable echo is present', () => {
+  const localTranscript = [
+    userMessage('host-old-user', 'continue'),
+    {
+      ...assistantMessage('local:assistant-old', 'Previous answer', 'completed'),
+      durableEntryId: 'assistant-entry-old',
+    },
+    userMessage('local:send:new', 'continue'),
+  ];
+  const incomingTranscript = [
+    userMessage('sdk-old-user', 'continue'),
+    {
+      ...assistantMessage('sdk-assistant-old', 'Previous answer', 'completed'),
+      durableEntryId: 'assistant-entry-old',
+    },
+    userMessage('sdk-new-user', 'continue'),
+  ];
+
+  const result = resolveSessionOpenedTranscript({
+    busy: true,
+    localTranscript,
+    incomingTranscript,
+    incomingTranscriptWindow: window({ totalCount: 3, loadedEnd: 3 }),
+  });
+
+  assert.deepEqual(result.transcript, incomingTranscript);
+  assert.equal(result.transcriptWindow.totalCount, 3);
 });
 
 test('busy session.opened keeps local streaming rows while adopting incoming latest window metadata', () => {

@@ -647,6 +647,36 @@ function coerceBooleanRecord(value: unknown): Record<string, boolean> {
   return result;
 }
 
+type TokenChannelPresence = {
+  input: boolean;
+  output: boolean;
+  cacheRead: boolean;
+  cacheWrite: boolean;
+};
+
+function validTokenChannel(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+function coerceTokenChannelPresence(
+  values: { input: unknown; output: unknown; cacheRead: unknown; cacheWrite: unknown },
+  declared: Record<string, unknown> | undefined,
+  declaredIncomplete: boolean,
+): TokenChannelPresence {
+  const hasAnyValue = Object.values(values).some((value) => value !== undefined);
+  const present = (key: keyof TokenChannelPresence, raw: unknown): boolean => {
+    if (declared !== undefined) return declared[key] === true && validTokenChannel(raw);
+    if (declaredIncomplete) return false;
+    return hasAnyValue ? validTokenChannel(raw) : false;
+  };
+  return {
+    input: present('input', values.input),
+    output: present('output', values.output),
+    cacheRead: present('cacheRead', values.cacheRead),
+    cacheWrite: present('cacheWrite', values.cacheWrite),
+  };
+}
+
 const THROUGHPUT_STATUSES = new Set<TurnThroughputStatus>(['completed', 'error', 'interrupted']);
 const AUXILIARY_LLM_USAGE_KINDS = new Set([
   'skill_pruning_prepass',
@@ -672,6 +702,15 @@ function coerceAuxiliaryLlmUsage(value: unknown): AuxiliaryLlmUsageSample[] {
     ) {
       continue;
     }
+    const declaredPresence = isRecord(entry.tokenChannelPresence) ? entry.tokenChannelPresence : undefined;
+    const declaredIncomplete = entry.tokenChannelsKnown === false;
+    const tokenChannelPresence = coerceTokenChannelPresence({
+      input: entry.inputTokens,
+      output: entry.outputTokens,
+      cacheRead: entry.cacheReadTokens,
+      cacheWrite: entry.cacheWriteTokens,
+    }, declaredPresence, declaredIncomplete);
+    const tokenChannelsKnown = !declaredIncomplete && Object.values(tokenChannelPresence).every(Boolean);
     samples.push({
       kind: entry.kind as AuxiliaryLlmUsageSample['kind'],
       sourceId: entry.sourceId,
@@ -682,6 +721,7 @@ function coerceAuxiliaryLlmUsage(value: unknown): AuxiliaryLlmUsageSample[] {
       outputTokens: toNonNegativeInteger(entry.outputTokens),
       cacheReadTokens: toNonNegativeInteger(entry.cacheReadTokens),
       cacheWriteTokens: toNonNegativeInteger(entry.cacheWriteTokens),
+      ...(!tokenChannelsKnown ? { tokenChannelsKnown: false, tokenChannelPresence } : {}),
       ...(typeof entry.reportedCostUsd === 'number' && Number.isFinite(entry.reportedCostUsd) && entry.reportedCostUsd >= 0
         ? { reportedCostUsd: entry.reportedCostUsd }
         : {}),
@@ -710,6 +750,15 @@ function coerceTurnThroughputSamples(value: unknown): TurnThroughputSample[] {
       typeof entry.status === 'string' && THROUGHPUT_STATUSES.has(entry.status as TurnThroughputStatus)
         ? (entry.status as TurnThroughputStatus)
         : 'completed';
+    const declaredPresence = isRecord(entry.tokenChannelPresence) ? entry.tokenChannelPresence : undefined;
+    const declaredIncomplete = entry.tokenChannelsKnown === false;
+    const tokenChannelPresence = coerceTokenChannelPresence({
+      input: entry.inputTokens,
+      output: entry.outputTokens,
+      cacheRead: entry.cacheReadTokens,
+      cacheWrite: entry.cacheWriteTokens,
+    }, declaredPresence, declaredIncomplete);
+    const tokenChannelsKnown = !declaredIncomplete && Object.values(tokenChannelPresence).every(Boolean);
     samples.push({
       endedAt: entry.endedAt,
       outputTokens: toNonNegativeInteger(entry.outputTokens),
@@ -726,6 +775,7 @@ function coerceTurnThroughputSamples(value: unknown): TurnThroughputSample[] {
         && Number.isFinite(entry.reportedCostUsd) && entry.reportedCostUsd >= 0
         ? entry.reportedCostUsd
         : undefined,
+      ...(!tokenChannelsKnown ? { tokenChannelsKnown: false, tokenChannelPresence } : {}),
       providerQueueMs: toNullableNonNegativeInteger(entry.providerQueueMs),
       ...(typeof entry.providerQueueAttemptCount === 'number' && Number.isFinite(entry.providerQueueAttemptCount) && entry.providerQueueAttemptCount >= 0
         ? { providerQueueAttemptCount: Math.trunc(entry.providerQueueAttemptCount) }
@@ -834,21 +884,31 @@ function coerceAssistantUsage(value: unknown): AssistantUsage | null {
   const totalTokens = reportedTotal > 0
     ? reportedTotal
     : inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
-  if (totalTokens === 0) {
-    return null;
-  }
   const reasoningRaw = toNonNegativeInteger(value.reasoningTokens);
   const reasoningTokens = reasoningRaw > 0 ? Math.min(reasoningRaw, outputTokens) : undefined;
   const reportedCostUsd = typeof value.reportedCostUsd === 'number'
     && Number.isFinite(value.reportedCostUsd) && value.reportedCostUsd >= 0
     ? value.reportedCostUsd
     : undefined;
+  const declaredPresence = isRecord(value.tokenChannelPresence) ? value.tokenChannelPresence : undefined;
+  const declaredIncomplete = value.tokenChannelsKnown === false;
+  const tokenChannelPresence = coerceTokenChannelPresence({
+    input: value.inputTokens,
+    output: value.outputTokens,
+    cacheRead: value.cacheReadTokens,
+    cacheWrite: value.cacheWriteTokens,
+  }, declaredPresence, declaredIncomplete);
+  const tokenChannelsKnown = !declaredIncomplete && Object.values(tokenChannelPresence).every(Boolean);
+  if (totalTokens === 0 && reportedCostUsd === undefined && tokenChannelsKnown) {
+    return null;
+  }
   return {
     inputTokens,
     outputTokens,
     cacheReadTokens,
     cacheWriteTokens,
     totalTokens,
+    ...(!tokenChannelsKnown ? { tokenChannelsKnown: false, tokenChannelPresence } : {}),
     ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
     ...(reportedCostUsd !== undefined ? { reportedCostUsd } : {}),
   };

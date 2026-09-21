@@ -166,6 +166,56 @@ test('busy session.opened records messageIdAlias when SDK message is deduped aga
   });
 });
 
+test('busy session.opened preserves a new repeated prompt when the durable prefix changed ids', () => {
+  const state = buildBaseState();
+  state.transcript.bySession['/s'] = [
+    userMessage('host-old-user', 'continue'),
+    {
+      id: 'local:assistant-old',
+      role: 'assistant',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      markdown: 'Previous answer',
+      status: 'completed',
+      durableEntryId: 'assistant-entry-old',
+    },
+    userMessage('local:send:new', 'continue'),
+  ];
+  state.transcript.windowBySession['/s'] = {
+    ...transcriptWindow,
+    totalCount: 3,
+    loadedEnd: 3,
+  };
+
+  const result = reducer(state, sessionOpenedEvent({
+    session: sessionSummary,
+    transcript: [
+      userMessage('sdk-old-user', 'continue'),
+      {
+        id: 'sdk-assistant-old',
+        role: 'assistant',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        markdown: 'Previous answer',
+        status: 'completed',
+        durableEntryId: 'assistant-entry-old',
+      },
+    ],
+    transcriptWindow: {
+      ...transcriptWindow,
+      totalCount: 3,
+      loadedEnd: 2,
+      hasNewer: true,
+      isPartial: true,
+    },
+    busy: true,
+  }));
+
+  assert.deepEqual(
+    result.state.transcript.bySession['/s']?.map((message) => message.id),
+    ['sdk-old-user', 'sdk-assistant-old', 'local:send:new'],
+    'the reducer must not erase the newest optimistic continue using the old echo',
+  );
+});
+
 test('aliased continuation MessageFinished accumulates usage for the live session cost', () => {
   const state = buildBaseState();
   const canonical = state.transcript.bySession['/s']![1]!;

@@ -1,4 +1,4 @@
-// Shared VS Code User-settings helper for the pie installers.
+// Shared VS Code User-settings helper for the Windows installer.
 //
 // The extension host reads `pie.agentDir` and forwards it to the backend as
 // PI_CODING_AGENT_DIR, because VS Code only picks up new User env vars on a
@@ -6,20 +6,17 @@
 // settings.json makes the backend use the correct agent dir on the first
 // reload after install.
 //
-// Previously duplicated as:
-//   - install.ps1: %APPDATA%/Code/User/settings.json read + ConvertTo-Json merge
-//   - install.sh:  inline `node --input-type=module -e` per candidate dir
-// Both now call `mergeAgentDirSetting` (pure) + `resolveVscodeSettingsDirs`.
+// `mergeAgentDirSetting` is pure; `resolveVscodeSettingsDirs` keeps portable
+// path resolution for isolated tests and direct helper reuse.
 
 import os from 'node:os';
 import path from 'node:path';
 
 /**
  * Candidate VS Code User settings directories for the current platform.
- * On Windows this mirrors install.ps1 (just %APPDATA%/Code/User); on POSIX it
- * mirrors install.sh's three-probe list (Code, Code - OSS, and the macOS
- * Application Support layout). Only directories that actually exist are
- * written to by the runner.
+ * The supported Windows installer uses %APPDATA%/Code/User. Portable fallback
+ * paths remain available for isolated tests and direct helper reuse. Only
+ * directories that actually exist are written to by the runner.
  *
  * @param {{ platform?: 'win32' | 'posix', env?: Record<string, string | undefined>, homedir?: string }} [options]
  * @returns {string[]}

@@ -30,6 +30,7 @@ export interface PanelMainProps {
   mergedTranscript: ChatMessage[];
   transcriptWindow: ViewState['transcriptWindow'];
   transcriptLoaded: ViewState['transcriptLoaded'];
+  availableModels: ViewState['availableModels'];
   busy: ViewState['busy'];
   /** True while the active session runs a history-compaction LLM call. */
   compacting: boolean;
@@ -83,6 +84,7 @@ export const PanelMain = memo(function PanelMain({
   mergedTranscript,
   transcriptWindow,
   transcriptLoaded,
+  availableModels,
   busy,
   compacting,
   liveTurnPhase,
@@ -140,6 +142,7 @@ export const PanelMain = memo(function PanelMain({
           transcript={mergedTranscript}
           transcriptWindow={transcriptWindow}
           transcriptLoaded={transcriptLoaded}
+          availableModels={availableModels}
           busy={busy}
           compacting={compacting}
           liveTurnPhase={liveTurnPhase}

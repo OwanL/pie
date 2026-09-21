@@ -92,6 +92,29 @@ function settlement(options: {
   return { ...base, idempotencyKey: deriveAnalyticsIdempotencyKey(base) };
 }
 
+function executionBeginObservation(rootSessionId: string, executionId: string, startedAtMs: number): AnalyticsObservation<object> {
+  const base: Omit<AnalyticsObservation<object>, 'idempotencyKey'> = {
+    schemaVersion: ANALYTICS_SCHEMA_VERSION,
+    generationId: 'generation-historical',
+    producerKind: 'test',
+    sourceKey: `${executionId}:begin`,
+    entityKind: 'execution',
+    entityKey: executionId,
+    observationKind: 'begin',
+    observedAtMs: startedAtMs,
+    scope: {
+      workspaceCoverage: 'known',
+      workspaceId: 'workspace-historical',
+      rootSessionId,
+      executionId,
+    },
+    captureSubject: { kind: 'session', rootSessionId },
+    producer: { buildId: 'test-build', processGeneration: 'test-process' },
+    fields: { operationKind: 'agent-run', startedAtMs },
+  };
+  return { ...base, idempotencyKey: deriveAnalyticsIdempotencyKey(base) };
+}
+
 function activityObservation(options: {
   spanId: string;
   rootSessionId: string;
@@ -201,12 +224,13 @@ test('canonical historical session and aggregate projections survive a new host 
   const writer = new SqliteAnalyticsRecorder(databasePath);
   const at = Date.parse('2026-01-15T12:00:00.000Z');
   writer.submitBatch([
+    executionBeginObservation('root-historical', 'execution-historical', at - 1_000),
     settlement({ invocationId: 'inv-conversation', rootSessionId: 'root-historical', purpose: 'conversation', settledAtMs: at, inputTokens: 100, outputTokens: 50, reportedCostUsd: 0.04 }),
     settlement({ invocationId: 'inv-retry', rootSessionId: 'root-historical', purpose: 'retry', settledAtMs: at + 1_000, inputTokens: 200, reportedCostUsd: 0.01 }),
   ]);
   // The projection is writer-maintained. Prepare the UTC local-day envelope
   // before handing the database to the disposable read helper.
-  writer.prepareProviderDailyProjection('UTC', Date.parse('2026-01-09T00:00:00.000Z'), Date.parse('2026-01-16T00:00:00.000Z'));
+  writer.prepareProviderDailyProjection('UTC', Date.parse('2026-01-02T00:00:00.000Z'), Date.parse('2026-01-16T00:00:00.000Z'));
   closeFixtureWriter(writer);
 
   const readModel = new CanonicalAnalyticsReadModel({ databasePath, workerScript, execArgv, timeoutMs: 20_000, revisionPollIntervalMs: 25 });
@@ -1049,7 +1073,35 @@ test('canonical revision refresh keeps the active session current with a large c
       }
       return {
         revision: snapshotRevision,
-        settlements: [],
+        settlements: [{
+          invocationId: `invocation-${scope.rootSessionId}`,
+          usage: {
+            inputTokens: 100,
+            outputTokens: 50,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            reasoningTokens: 0,
+            providerTotalTokens: 150,
+          },
+          reportedCostUsd: 0.25,
+          generationId: 'generation-revision-bound',
+          rootSessionId: scope.rootSessionId,
+          executionId: null,
+          branchId: null,
+          provider: 'fixture-provider',
+          model: 'fixture/model',
+          dispatchedModel: 'fixture/model',
+          reportedModel: 'fixture/model',
+          purpose: 'conversation',
+          outcome: 'succeeded',
+          settledAtMs: 1_700_000_000_000,
+          calculatedCostUsd: null,
+          calculatedCostComplete: false,
+          effectiveCostUsd: 0.25,
+          effectiveCostSource: 'reported',
+          effectiveCostCoverage: 'known',
+          revision: snapshotRevision,
+        }],
         truncated: false,
         scope: { kind: 'rootSession' as const, rootSessionId: scope.rootSessionId },
       };
@@ -1065,13 +1117,23 @@ test('canonical revision refresh keeps the active session current with a large c
     detailSink: { submitDetail: () => undefined },
     lifecycleSink: { bindPendingCreate: async () => undefined, deleteSession: async () => undefined },
   });
+  const statsHolder: { service?: StatsService } = {};
+  const renderedUsageAuthorities: Array<string | undefined> = [];
+  const renderedUsageCosts: Array<number | undefined> = [];
+  const render = () => {
+    const usage = statsHolder.service!.getSessionUsage(activePath);
+    renderedUsageAuthorities.push(usage.authority);
+    renderedUsageCosts.push(usage.samples[0]?.reportedCostUsd);
+  };
   const stats = new StatsService({
     dataOutcomesRootPath: path.join(root, 'legacy'),
     workspaceId: 'workspace-revision-bound',
     getArchState: () => state,
     analyticsCapture: capture,
     analyticsReadModel: readModel,
+    scheduleRender: render,
   });
+  statsHolder.service = stats;
   const internals = stats as unknown as {
     refreshCanonicalSessionUsage(): Promise<void>;
     markCanonicalRevisionDirty(nextRevision: string): void;
@@ -1081,18 +1143,39 @@ test('canonical revision refresh keeps the active session current with a large c
     await stats.start();
     assert.deepEqual(requestedRootSessionIds, ['root-active']);
     assert.equal(stats.getSessionUsage(activePath).authority, 'canonical');
+    const renderCountAfterStart = renderedUsageAuthorities.length;
+    assert.ok(renderCountAfterStart > 0);
+    assert.ok(renderedUsageAuthorities.every((authority) => authority === 'canonical'));
+    assert.ok(renderedUsageCosts.every((cost) => cost === 0.25));
 
     state.sessions.openTabPaths = [activePath, ...[1, 2, 3].map((index) => `/sessions/catalog-${index}.jsonl`)];
     holdNextRead = true;
     revision = '2';
     const refresh = internals.refreshCanonicalSessionUsage();
     await readStarted;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    // Model an unrelated reducer event: ExtensionHost.dispatchArchEvent always
+    // schedules a render after it applies the event, even while this read is
+    // held. The session-cost projection must keep its last complete snapshot.
+    render();
+    assert.equal(stats.getSessionUsage(activePath).authority, 'canonical');
+    assert.equal(stats.getSessionUsage(activePath).samples[0]?.reportedCostUsd, 0.25);
+    assert.equal(
+      renderedUsageAuthorities.length,
+      renderCountAfterStart + 1,
+      'an unrelated render must retain the held canonical usage while hydration is pending',
+    );
+    assert.equal(renderedUsageAuthorities.at(-1), 'canonical');
+    assert.equal(renderedUsageCosts.at(-1), 0.25);
     for (let nextRevision = 3; nextRevision <= 12; nextRevision += 1) {
       revision = String(nextRevision);
       internals.markCanonicalRevisionDirty(revision);
     }
     releaseHeldRead();
     await refresh;
+    assert.equal(renderedUsageAuthorities.length, renderCountAfterStart + 2);
+    assert.ok(renderedUsageAuthorities.every((authority) => authority === 'canonical'));
+    assert.ok(renderedUsageCosts.every((cost) => cost === 0.25));
 
     assert.deepEqual(
       requestedRootSessionIds,

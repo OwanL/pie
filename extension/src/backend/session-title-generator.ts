@@ -5,6 +5,7 @@ import {
   PROVIDER_GATE_REQUEST_CLASS_HEADER,
   PROVIDER_GATE_REQUEST_CLASS_SESSION_TITLE,
 } from '../../../shared/provider-gate-request-class.js';
+import { providerReportedCostUsd } from '../../../shared/provider-cost.js';
 import type { SessionContext } from './server-types.js';
 import type { AssistantUsage } from '../shared/protocol.js';
 
@@ -60,7 +61,9 @@ interface CompleteSimpleMessage {
     cacheRead?: number;
     cacheWrite?: number;
     totalTokens?: number;
-    cost?: { total?: number };
+    reportedCostUsd?: number;
+    providerReportedCostUsd?: number;
+    cost?: { total?: number; reportedCostUsd?: number; providerReportedCostUsd?: number };
   };
 }
 
@@ -234,18 +237,27 @@ async function completeGeneric(
   const outputTokens = finiteNonNegative(rawUsage?.output);
   const cacheReadTokens = finiteNonNegative(rawUsage?.cacheRead);
   const cacheWriteTokens = finiteNonNegative(rawUsage?.cacheWrite);
-  const usage = inputTokens !== undefined && outputTokens !== undefined
-    && cacheReadTokens !== undefined && cacheWriteTokens !== undefined
+  const totalTokens = finiteNonNegative(rawUsage?.totalTokens);
+  const reportedCostUsd = providerReportedCostUsd(rawUsage);
+  const tokenChannelPresence = {
+    input: inputTokens !== undefined,
+    output: outputTokens !== undefined,
+    cacheRead: cacheReadTokens !== undefined,
+    cacheWrite: cacheWriteTokens !== undefined,
+  };
+  const hasUsageEvidence = Object.values(tokenChannelPresence).some(Boolean)
+    || totalTokens !== undefined || reportedCostUsd !== undefined;
+  const channelsKnown = Object.values(tokenChannelPresence).every(Boolean);
+  const usage = hasUsageEvidence
     ? {
-        inputTokens,
-        outputTokens,
-        cacheReadTokens,
-        cacheWriteTokens,
-        totalTokens: finiteNonNegative(rawUsage?.totalTokens)
-          ?? inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
-        ...(finiteNonNegative(rawUsage?.cost?.total) !== undefined
-          ? { reportedCostUsd: finiteNonNegative(rawUsage?.cost?.total) }
-          : {}),
+        inputTokens: inputTokens ?? 0,
+        outputTokens: outputTokens ?? 0,
+        cacheReadTokens: cacheReadTokens ?? 0,
+        cacheWriteTokens: cacheWriteTokens ?? 0,
+        totalTokens: totalTokens
+          ?? (inputTokens ?? 0) + (outputTokens ?? 0) + (cacheReadTokens ?? 0) + (cacheWriteTokens ?? 0),
+        ...(!channelsKnown ? { tokenChannelsKnown: false, tokenChannelPresence } : {}),
+        ...(reportedCostUsd !== undefined ? { reportedCostUsd } : {}),
       }
     : undefined;
   return {

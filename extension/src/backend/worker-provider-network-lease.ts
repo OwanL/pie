@@ -54,6 +54,13 @@ function abortError(signal: AbortSignal): Error {
   return error;
 }
 
+/** Resolve fetch's effective signal: an explicit init member, including null,
+ * overrides a Request's signal; an absent member inherits it. */
+function extractFetchSignal(input: RequestInfo | URL, init: RequestInit | undefined): AbortSignal | undefined {
+  if (init !== undefined && init !== null && 'signal' in init) return init.signal ?? undefined;
+  return input instanceof Request ? input.signal : undefined;
+}
+
 /**
  * Installs the conservative cross-worker provider fence at the actual
  * network boundary. Install this before ProviderGate so retries, compaction,
@@ -87,7 +94,7 @@ export function installWorkerProviderNetworkLease(
       ...extra,
     });
     const admissionId = randomUUID();
-    const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+    const signal = extractFetchSignal(input, init);
     if (signal?.aborted) throw abortError(signal);
 
     const queuedAt = Date.now();
@@ -98,18 +105,47 @@ export function installWorkerProviderNetworkLease(
       turnId: identity.turnId ?? attemptId,
       attemptId,
     });
+    let admissionCancelled = false;
+    const releasedLateLeases = new Set<string>();
+    const bestEffort = (operation: () => Promise<unknown>): void => {
+      try {
+        void Promise.resolve(operation()).catch(() => undefined);
+      } catch {
+        // A worker can lose its coordinator between abort and cancellation.
+      }
+    };
+    const releaseLateLease = (lateLease: WorkerProviderNetworkLease): void => {
+      if (releasedLateLeases.has(lateLease.leaseId)) return;
+      releasedLateLeases.add(lateLease.leaseId);
+      bestEffort(() => client.release(lateLease.leaseId, 'cancelled'));
+    };
+    const cancelAdmission = (reason: string): void => {
+      if (admissionCancelled) return;
+      admissionCancelled = true;
+      // Cancellation is advisory at this boundary. Do not make fetch
+      // settlement wait for a coordinator ACK, but always leave the request
+      // correlated so a late grant can be released below.
+      bestEffort(() => client.cancel(admissionId, reason));
+    };
     // Always observe the acquire branch: cancellation can win while the
     // correlated provider.cancelled response settles this promise separately.
-    void acquire.catch(() => undefined);
+    // A coordinator can still grant after that race, so release that lease
+    // independently of the cancellation RPC's settlement.
+    void acquire.then((lateLease) => {
+      if (admissionCancelled) releaseLateLease(lateLease);
+    }, () => undefined).catch(() => undefined);
     let removeAbortListener = (): void => undefined;
     const aborted = signal
       ? new Promise<never>((_resolve, reject) => {
           const onAbort = (): void => {
-            void client.cancel(admissionId, 'Fetch AbortSignal fired while provider admission was queued.')
-              .then(() => reject(abortError(signal)), reject);
+            if (admissionCancelled) return;
+            cancelAdmission('Fetch AbortSignal fired while provider admission was queued.');
+            reject(abortError(signal));
           };
           signal.addEventListener('abort', onAbort, { once: true });
           removeAbortListener = () => signal.removeEventListener('abort', onAbort);
+          // Abort can occur between the initial check and listener install.
+          if (signal.aborted) onAbort();
         })
       : undefined;
 
@@ -127,9 +163,10 @@ export function installWorkerProviderNetworkLease(
     } finally {
       removeAbortListener();
     }
-    if (signal?.aborted) {
-      await client.cancel(admissionId, 'Fetch AbortSignal fired as provider admission was granted.');
-      throw abortError(signal);
+    if (admissionCancelled || signal?.aborted) {
+      cancelAdmission('Fetch AbortSignal fired as provider admission was granted.');
+      releaseLateLease(lease);
+      throw abortError(signal!);
     }
 
     let released = false;
@@ -159,7 +196,7 @@ export function installWorkerProviderNetworkLease(
       if (released) return;
       released = true;
       removeTransportAbortListener();
-      void client.release(lease.leaseId, outcome).catch(() => undefined);
+      bestEffort(() => client.release(lease.leaseId, outcome));
     };
     try {
       publishProgress('headers_wait');

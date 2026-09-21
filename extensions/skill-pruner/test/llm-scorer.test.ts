@@ -404,6 +404,42 @@ test("runLlmPruning calls completeFn and returns parsed prune lists", async () =
 	assert.equal(result.keptAllDueToParseFailure, undefined);
 });
 
+test("runLlmPruning keeps explicit provider cost provenance and incomplete channels", async () => {
+	const input = {
+		userPrompt: "test",
+		skills: [],
+		tools: [],
+		config: makeConfig(),
+	};
+	const result = await runLlmPruning(input, undefined, {}, async () => ({
+		text: '{"keep":[]}',
+		usage: {
+			input: 10,
+			output: 2,
+			cacheRead: 0,
+			cacheWrite: 0,
+			providerReportedCostUsd: 0,
+			cost: { total: 99 },
+		},
+	}));
+	assert.equal(result.usage?.reportedCostUsd, 0);
+	assert.equal(result.usage?.providerReportedCostUsd, 0);
+	assert.equal(result.usage?.tokenChannelsKnown, undefined);
+
+	const incomplete = await runLlmPruning(input, undefined, {}, async () => ({
+		text: '{"keep":[]}',
+		usage: { input: 10, output: 2 },
+	}));
+	assert.equal(incomplete.usage?.tokenChannelsKnown, false);
+	assert.deepEqual(incomplete.usage?.tokenChannelPresence, {
+		input: true,
+		output: true,
+		cacheRead: false,
+		cacheWrite: false,
+	});
+	assert.equal(incomplete.usage?.reportedCostUsd, undefined);
+});
+
 test("runLlmPruning propagates completion errors", async () => {
 	const input = {
 		userPrompt: "test",

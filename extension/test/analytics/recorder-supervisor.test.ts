@@ -14,6 +14,7 @@ import {
   type AnalyticsDetailCapture,
   type AnalyticsObservation,
 } from '../../../shared/analytics/contracts.js';
+import { CanonicalAnalyticsCapture } from '../../src/analytics/canonical-capture.js';
 import {
   AnalyticsCaptureCapacityError,
   AnalyticsRecorderWorkerRequestError,
@@ -148,6 +149,71 @@ test('supervisor owns immutable serialized capture, accounts retained bytes, and
   }
 });
 
+test('recorder admission rejection does not create a producer reconciliation gap', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'pie-recorder-sequence-rejection-'));
+  const logPath = path.join(root, 'capture.log');
+  const delivered: AnalyticsObservation<object>[] = [];
+  const supervisor = new AnalyticsRecorderSupervisor({
+    enabled: true,
+    workerScript,
+    databasePath: logPath,
+    maxQueueRecords: 1,
+  });
+  const capture = new CanonicalAnalyticsCapture({
+    authority: 'canonical',
+    generationId: 'generation-sequence-rejection',
+    workspaceId: 'workspace-a',
+    buildId: 'build-a',
+    processGeneration: 'process-a',
+    sink: {
+      submit: (observation) => {
+        supervisor.submit(observation);
+        delivered.push(observation);
+      },
+    },
+    detailSink: { submitDetail: () => undefined },
+    lifecycleSink: { bindPendingCreate: async () => undefined, deleteSession: async () => undefined },
+    onCaptureError: (error) => {
+      assert.ok(error instanceof AnalyticsCaptureCapacityError);
+    },
+  });
+  const base = {
+    sessionId: 'session-a',
+    sessionPath: '/session-a',
+    branchId: null,
+    parentOperationId: null,
+    parentRunId: null,
+    parentToolId: null,
+    kind: 'conversation' as const,
+    provider: 'provider-a',
+    model: 'model-a',
+    provenance: 'exact' as const,
+    startedAt: '2026-09-10T00:00:00.000Z',
+    endedAt: '2026-09-10T00:00:01.000Z',
+    outcome: 'succeeded' as const,
+    instrumentationGap: false as const,
+    schemaVersion: 1 as const,
+  };
+  try {
+    await supervisor.start();
+    assert.equal(capture.captureProviderSettlement({ ...base, invocationId: 'first', sourceId: 'first' }), 'submitted');
+    assert.equal(capture.captureProviderSettlement({ ...base, invocationId: 'rejected', sourceId: 'rejected' }), 'rejected');
+    await supervisor.flush();
+    assert.equal(capture.captureProviderSettlement({ ...base, invocationId: 'after-rejection', sourceId: 'after-rejection' }), 'submitted');
+    await supervisor.flush();
+    assert.deepEqual(delivered.map((observation) => observation.sourceSequence), ['1', '2']);
+    assert.deepEqual(readLog(logPath).map((row) => row.sourceKey), [
+      'provider-settlement:first', 'provider-settlement:after-rejection',
+    ]);
+    assert.equal(supervisor.backlog.rejectedRecords, 1);
+    assert.equal(supervisor.backlog.queuedRecords, 0);
+    assert.equal(supervisor.backlog.deliveryFailures, 0);
+  } finally {
+    await supervisor.shutdown().catch(() => {});
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('supervisor holds durable admission until capture and lifecycle writes settle', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'pie-recorder-admission-'));
   let activeLeases = 0;
@@ -270,6 +336,56 @@ test('tracked capture settles each durable replay or deletion rejection from the
     } finally {
       reader.close();
     }
+  } finally {
+    if (supervisor.workerPid) process.kill(supervisor.workerPid, 'SIGKILL');
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('reconciliation-capacity rejection settles through the real worker and later retry recovers', { timeout: 30_000 }, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'pie-recorder-reconciliation-capacity-'));
+  const databasePath = path.join(root, 'analytics.sqlite');
+  const seed = new SqliteAnalyticsRecorder(databasePath);
+  const subject = { kind: 'session' as const, rootSessionId: 'capacity-root' };
+  const makeObservation = (sourceKey: string, sourceSequence: number): AnalyticsObservation => {
+    const unsigned = { ...observation(sourceKey, subject, { stableOriginId: 'capacity-origin' }), sourceSequence };
+    return { ...unsigned, idempotencyKey: deriveAnalyticsIdempotencyKey(unsigned) };
+  };
+  try {
+    seed.submitBatch(Array.from({ length: 4_096 }, (_, index) => makeObservation(`capacity-${index + 2}`, index + 2)));
+  } finally {
+    seed.close();
+  }
+  const supervisor = new AnalyticsRecorderSupervisor({
+    enabled: true,
+    workerScript: sqliteWorkerScript,
+    databasePath,
+    execArgv: sqliteWorkerExecArgv,
+  });
+  const dispositions: AnalyticsRecorderCaptureDisposition[] = [];
+  const blocked = makeObservation('capacity-4098', 4_098);
+  try {
+    await supervisor.start();
+    supervisor.submitTracked(blocked, (disposition) => dispositions.push(disposition));
+    await supervisor.flush();
+    assert.deepEqual(dispositions, [{
+      status: 'rejected',
+      code: 'reconciliation_capacity',
+      message: 'Analytics producer reconciliation capacity exceeded for ["generation-a","test","capacity-origin"].',
+    }]);
+    assert.equal(supervisor.backlog.queuedRecords, 0);
+
+    supervisor.submit(makeObservation('capacity-1', 1));
+    await supervisor.flush();
+    supervisor.submit(blocked);
+    await supervisor.flush();
+    const reader = new SqliteAnalyticsRecorder(databasePath, { readOnly: true });
+    try {
+      assert.equal(reader.countObservations('capacity-root'), 4_098);
+    } finally {
+      reader.close();
+    }
+    await supervisor.shutdown();
   } finally {
     if (supervisor.workerPid) process.kill(supervisor.workerPid, 'SIGKILL');
     rmSync(root, { recursive: true, force: true });

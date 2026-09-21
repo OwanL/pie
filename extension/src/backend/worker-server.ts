@@ -65,14 +65,24 @@ export interface WorkerServerHandlers {
   analyticsSubjectRebindTimeoutMs?: number;
 }
 
-/** Recoverable-drop policy for worker enqueue rejections. Only the
- * `runtime.event` `live.semantic` envelope may opt into it, and only for
- * reason `capacity` or `oversize`: the dropped envelope never consumes a
- * transport sequence, its inner semantic sequence keeps the gap, and the host
- * checkpoint rebase is the authority that repairs the lost content.
- * `unavailable` and `invalid` rejections, asynchronous write failures, and
- * every other frame kind remain fatal/fail-closed. */
+/** Recoverable-drop policy for worker enqueue rejections. The
+ * `runtime.event` `live.semantic` envelope and fire-and-forget `runtime.report`
+ * telemetry may opt into it, and only for reason `capacity` or `oversize`.
+ * A dropped live envelope never consumes a transport sequence, its inner
+ * semantic sequence keeps the gap, and the host checkpoint rebase is the
+ * authority that repairs the lost content. `unavailable` and `invalid`
+ * rejections, asynchronous write failures, and every other frame kind remain
+ * fatal/fail-closed. */
 export function liveSemanticDroppableRejection(
+  reason: 'invalid' | 'oversize' | 'capacity' | 'unavailable',
+): boolean {
+  return reason === 'capacity' || reason === 'oversize';
+}
+
+/** Runtime catalog discovery is bounded latest-known telemetry, not the
+ * configured catalog authority. Capacity/size rejection therefore keeps the
+ * worker alive and leaves the coordinator's previous report in place. */
+export function runtimeReportDroppableRejection(
   reason: 'invalid' | 'oversize' | 'capacity' | 'unavailable',
 ): boolean {
   return reason === 'capacity' || reason === 'oversize';
@@ -85,6 +95,7 @@ interface PendingCoordinatorResponse {
   resolve: (frame: CoordinatorToWorkerFrame) => void;
   reject: (error: Error) => void;
   timeout?: ReturnType<typeof setTimeout>;
+  cleanupAbort?: () => void;
 }
 
 function positiveInteger(value: string | undefined, name: string): number {
@@ -159,6 +170,10 @@ export class WorkerServer {
   private closeDiagnosticWritten = false;
   private inbound = Promise.resolve();
   private readonly pending = new Map<string, PendingCoordinatorResponse>();
+  /** Late session-control results after a timeout/abort are typed stale. Keep
+   * their request identities so an otherwise healthy worker does not fail
+   * closed when the coordinator finishes the already-admitted operation. */
+  private readonly cancelledSessionControlRequests = new Set<string>();
   private pendingAnalyticsSubjectRebinds = 0;
   private readonly syncRevisions: Record<WorkerSyncDomain, number> = {
     settings: 0,
@@ -210,8 +225,11 @@ export class WorkerServer {
     this.transport.writable.once('close', () => this.close(1, new Error('Worker IPC write descriptor closed.')));
   }
 
-  /** Send a closed worker frame while the transport supplies exact identity and sequence fields. */
+  /** Send a closed worker frame while the transport supplies exact identity and sequence fields.
+   * Runtime catalog reports retain their bounded telemetry admission policy even
+   * when a legacy caller still reaches this generic seam. */
   sendFrame(body: WorkerToCoordinatorFrameBody): boolean {
+    if (body.kind === 'runtime.report') return this.sendRuntimeReportFrame(body.payload);
     return this.send({ ...this.frameBase, ...body } as WorkerIpcFrameDraft);
   }
 
@@ -310,37 +328,98 @@ export class WorkerServer {
     return false;
   }
 
+  /** Emit the fire-and-forget runtime catalog report. The coordinator retains
+   * one bounded latest report per worker, while configured catalog/settings
+   * remain authoritative, so synchronous capacity/size rejection is a
+   * recoverable telemetry drop rather than a worker-fatal protocol error. */
+  sendRuntimeReportFrame(
+    payload: Extract<WorkerToCoordinatorFrameBody, { kind: 'runtime.report' }>['payload'],
+  ): boolean {
+    const result = this.writer.enqueue({
+      ...this.frameBase,
+      kind: 'runtime.report',
+      domain: 'catalog',
+      payload,
+    } as WorkerIpcFrameDraft, {
+      onSettled: (settlement) => {
+        // A descriptor failure means the transport is no longer trustworthy;
+        // only synchronous bounded telemetry admission is recoverable.
+        if (settlement.status === 'failed') this.close(1, settlement.error);
+      },
+    });
+    if (result.accepted) return true;
+    if (runtimeReportDroppableRejection(result.reason)) return false;
+    this.failProtocol(
+      `Worker IPC frame rejected (${result.reason}): ${result.detail}`,
+      'INTERNAL_ERROR',
+    );
+    return false;
+  }
+
   /** Correlate a worker-originated request with its dedicated coordinator response. */
   requestFrame<K extends CoordinatorToWorkerResponseFrame['kind']>(
     body: WorkerToCoordinatorRequestBody,
     expectedKind: K,
     correlatedRequestId?: string,
     timeoutMs?: number,
+    signal?: AbortSignal,
   ): Promise<Extract<CoordinatorToWorkerResponseFrame, { kind: K }>> {
     if (this.closing) return Promise.reject(new Error('Coordinator transport is unavailable.'));
     const requestId = correlatedRequestId ?? randomUUID();
     if (this.pending.has(requestId)) return Promise.reject(new Error(`Coordinator IPC request ${requestId} is already pending.`));
+    if (signal?.aborted) return Promise.reject(createAbortError('Coordinator IPC request was cancelled.'));
     return new Promise((resolve, reject) => {
       const pending: PendingCoordinatorResponse = {
         expectedKind,
         resolve: (frame) => resolve(frame as Extract<CoordinatorToWorkerResponseFrame, { kind: K }>),
         reject,
       };
+      const cleanupAbort = (): void => {
+        if (!signal) return;
+        signal.removeEventListener('abort', onAbort);
+        pending.cleanupAbort = undefined;
+      };
+      const onAbort = (): void => {
+        if (this.pending.get(requestId) !== pending) return;
+        this.pending.delete(requestId);
+        if (pending.timeout) clearTimeout(pending.timeout);
+        cleanupAbort();
+        this.rememberCancelledSessionControl(requestId, expectedKind);
+        reject(createAbortError('Coordinator IPC request was cancelled.'));
+      };
+      pending.cleanupAbort = cleanupAbort;
       if (timeoutMs !== undefined) {
         pending.timeout = setTimeout(() => {
           if (this.pending.get(requestId) !== pending) return;
           this.pending.delete(requestId);
+          cleanupAbort();
+          this.rememberCancelledSessionControl(requestId, expectedKind);
           reject(new Error(`Coordinator IPC request ${requestId} timed out.`));
         }, timeoutMs);
         pending.timeout.unref?.();
       }
       this.pending.set(requestId, pending);
+      if (signal) signal.addEventListener('abort', onAbort, { once: true });
       if (!this.sendFrame({ ...body, requestId } as WorkerToCoordinatorFrameBody)) {
         this.pending.delete(requestId);
         if (pending.timeout) clearTimeout(pending.timeout);
+        cleanupAbort();
         reject(new Error('Coordinator IPC request was rejected.'));
       }
     });
+  }
+
+  private rememberCancelledSessionControl(
+    requestId: string,
+    expectedKind: CoordinatorToWorkerFrame['kind'],
+  ): void {
+    if (expectedKind !== 'session.control.result') return;
+    this.cancelledSessionControlRequests.add(requestId);
+    while (this.cancelledSessionControlRequests.size > 2_048) {
+      const oldest = this.cancelledSessionControlRequests.values().next().value as string | undefined;
+      if (!oldest) break;
+      this.cancelledSessionControlRequests.delete(oldest);
+    }
   }
 
   /** Terminalize a worker-local runtime invariant through the closed fatal
@@ -385,9 +464,14 @@ export class WorkerServer {
     }
     const requestId = 'requestId' in frame ? frame.requestId : undefined;
     const pending = requestId ? this.pending.get(requestId) : undefined;
+    if (!pending && requestId && frame.kind === 'session.control.result'
+        && this.cancelledSessionControlRequests.delete(requestId)) {
+      return;
+    }
     if (pending) {
       this.pending.delete(requestId!);
       if (pending.timeout) clearTimeout(pending.timeout);
+      pending.cleanupAbort?.();
       if (frame.kind === 'ownership.rejected') {
         pending.reject(new Error(`${frame.code}: ${frame.message}`));
         return;
@@ -398,6 +482,12 @@ export class WorkerServer {
       }
       if (frame.kind === 'provider.rejected') {
         pending.reject(createProviderRejectedError(frame.error));
+        return;
+      }
+      if (frame.kind === 'session.control.result' && !frame.ok) {
+        const error = new Error(`${frame.error.code}: ${frame.error.message}`);
+        error.name = frame.error.code;
+        pending.reject(error);
         return;
       }
       if (frame.kind !== pending.expectedKind) {
@@ -413,7 +503,8 @@ export class WorkerServer {
         || frame.kind === 'ownership.aborted' || frame.kind === 'ownership.rejected' || frame.kind === 'ownership.runtimeReadyAck'
         || frame.kind === 'provider.granted' || frame.kind === 'provider.cancelled' || frame.kind === 'provider.rejected'
         || frame.kind === 'provider.cancelAck'
-        || frame.kind === 'provider.released' || frame.kind === 'settings.authoritative') {
+        || frame.kind === 'provider.released' || frame.kind === 'settings.authoritative'
+        || frame.kind === 'session.control.result') {
       this.failProtocol(`Coordinator ${frame.kind} has unknown requestId ${frame.requestId}.`, 'PROTOCOL_ERROR');
       return;
     }
@@ -639,6 +730,7 @@ export class WorkerServer {
     const closedError = new Error('Coordinator transport closed.');
     for (const pending of this.pending.values()) {
       if (pending.timeout) clearTimeout(pending.timeout);
+      pending.cleanupAbort?.();
       pending.reject(closedError);
     }
     this.pending.clear();

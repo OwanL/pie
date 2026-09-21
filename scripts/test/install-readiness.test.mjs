@@ -1,5 +1,5 @@
 // Focused unit tests for scripts/install/lib/readiness.mjs — the post-install
-// auth/provider/split-brain readiness checks shared by both shell installers.
+// auth/provider/split-brain readiness checks used by the Windows installer.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -79,6 +79,7 @@ test('checkSplitBrain detects a real in-tree auth.json while the backend reads e
   assert.ok(check);
   assert.equal(check.level, 'warn');
   assert.match(check.lines.join('\n'), /Split-brain/);
+  assert.match(check.lines.join('\n'), /copy \/Y "/);
 }));
 
 test('checkSplitBrain returns null when the backend reads from the repo root', () => withTempDir((root) => {
@@ -97,7 +98,7 @@ test('checkSplitBrain returns null when the in-tree auth.json is empty', () => w
 
 // ---------------------------------------------------------------------------
 // checkVscodeAgentDir - pie.agentDir readiness (install.bat folds this into the
-// readiness call via --vscode-agent-dir-expected; install.sh leaves it unset)
+// readiness call via --vscode-agent-dir-expected)
 // ---------------------------------------------------------------------------
 
 test('checkVscodeAgentDir is ok when a VS Code User settings.json points at the repo root', () => withTempDir((root) => {

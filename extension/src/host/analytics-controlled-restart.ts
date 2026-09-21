@@ -16,7 +16,7 @@ import {
 import * as path from 'node:path';
 
 import { isAnalyticsRestartNonce } from '../../../shared/analytics/activation.js';
-import { ANALYTICS_HANDOFF_NONCE_WINDOW_MS } from '../../../shared/analytics/handoff.js';
+import { ANALYTICS_HANDOFF_NONCE_WINDOW_MS } from '../../../shared/analytics/host-status-messages.js';
 
 /** Task-specific terminal-handoff ingress: a signed, one-shot request that
  * makes one fenced VS Code extension host perform a supported quiet restart

@@ -52,11 +52,16 @@ export function deriveFileChangesFromTranscript(
       if (tool.status === 'failed') continue;
 
       if (tool.name === 'subagent' && isRecord(tool.result)) {
+        const owningCwd = isRecord(tool.input) && typeof tool.input.cwd === 'string' && tool.input.cwd.trim()
+          ? tool.input.cwd
+          : undefined;
         const subagentChanges = deriveFileChangesFromSubagentResult(
           tool.result,
           message.id,
           message.createdAt,
           tool.id,
+          cwd,
+          owningCwd,
         );
         for (const entry of subagentChanges) {
           accumulateFileChange(seen, createdPaths, entry, cwd);

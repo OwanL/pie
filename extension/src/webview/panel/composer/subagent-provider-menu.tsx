@@ -57,10 +57,9 @@ export function SubagentProviderMenu({ sessionPath, prefs, availableModels, onSe
 
   const toggle = (provider: string) => {
     const currentlyEnabled = isSubagentProviderEnabled(prefs, provider, sessionPath);
-    // Keep one route available. Turning subagents off entirely is controlled by
-    // the nesting setting; an empty provider set could otherwise fall through
-    // to an SDK default and defeat this cost-control surface.
-    if (currentlyEnabled && enabledCount <= 1) return;
+    // Unchecking every provider is allowed: the effective all-unchecked policy
+    // removes the subagent tool from this session entirely ("don't use sub
+    // agents" signal). Re-enabling any provider restores the tool.
     onSetPrefs(setSubagentProviderEnabled(prefs, sessionPath, provider, !currentlyEnabled));
   };
   const keydown = (event: JSX.TargetedKeyboardEvent<HTMLButtonElement>) => {
@@ -94,11 +93,9 @@ export function SubagentProviderMenu({ sessionPath, prefs, availableModels, onSe
           <div class="system-prompt-toggle-body">
             {providers.map((provider) => {
               const enabled = isSubagentProviderEnabled(prefs, provider, sessionPath);
-              const lastEnabled = enabled && enabledCount === 1;
               return (
                 <button key={provider} type="button" class={cx('toolbar-settings-item', enabled && 'checked')}
-                  role="checkbox" aria-checked={enabled} disabled={lastEnabled}
-                  title={lastEnabled ? 'At least one subagent provider must remain enabled' : undefined}
+                  role="checkbox" aria-checked={enabled}
                   onClick={() => toggle(provider)}>
                   <span class="toolbar-settings-item-check" aria-hidden="true">
                     <svg width="14" height="14" viewBox="0 0 13 13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style={enabled ? '' : 'opacity:0'}>

@@ -46,6 +46,12 @@ import {
   UI_PATH_PARENT_DEPTH_MIN,
 } from './protocol/settings.js';
 import {
+  PROVIDER_MAX_AFTERBURN_SECONDS,
+  PROVIDER_MAX_CONCURRENT_REQUESTS,
+  PROVIDER_NETWORK_PHASE_MAX_WAIT_SECONDS,
+  PROVIDER_UNLIMITED_CONCURRENCY,
+} from './provider-concurrency.js';
+import {
   isDetailCursor,
   isDetailPageRef,
   isLiveSubagentDetailAddress,
@@ -311,10 +317,14 @@ function isProviderConcurrencyPatch(value: unknown): boolean {
     for (const [key, setting] of Object.entries(overrides)) {
       if (!allowedKeys.has(key)) return false;
       if (key === 'maxConcurrentRequests') {
-        if (!Number.isInteger(setting) || (setting as number) < 1) return false;
+        if (!Number.isInteger(setting)
+          || (setting as number) < PROVIDER_UNLIMITED_CONCURRENCY
+          || (setting as number) > PROVIDER_MAX_CONCURRENT_REQUESTS) return false;
       } else if (key === 'afterburnSeconds') {
-        if (!isFiniteNumber(setting) || setting < 0) return false;
-      } else if (!Number.isInteger(setting) || (setting as number) < 0 || (setting as number) > 300) {
+        if (!isFiniteNumber(setting) || setting < 0 || setting > PROVIDER_MAX_AFTERBURN_SECONDS) return false;
+      } else if (!Number.isInteger(setting)
+        || (setting as number) < 0
+        || (setting as number) > PROVIDER_NETWORK_PHASE_MAX_WAIT_SECONDS) {
         return false;
       }
     }
@@ -363,7 +373,6 @@ function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
     expandedSectionFontSize: [8, 32],
     expandedSectionMaxHeight: [80, 1600],
     uiPathParentDepth: [UI_PATH_PARENT_DEPTH_MIN, UI_PATH_PARENT_DEPTH_MAX],
-    uiMessageWidth: [40, 100],
     uiCornerRadius: [0, 24],
     activityTailLines: [1, 12],
     uiMessageRailSize: [8, 40],

@@ -1,6 +1,7 @@
 import {
 	runLlmPruning,
 	type CompleteSimpleFn,
+	type CompleteSimpleResult,
 	type LlmPruningInput,
 	type RecentConversationMessage,
 } from "../llm-scorer.js";
@@ -14,6 +15,7 @@ import {
 } from "./copilot-headers.js";
 import type { PrepassInvocation, PrepassRunResult, PrepassUsage } from "./pruning-types.js";
 import { toErrorMessage, enrichConnectionError } from "../../../shared/error-message.js";
+import { providerReportedCostUsd } from "../../../shared/provider-cost.js";
 import { PROVIDER_GATE_REQUEST_CLASS_HEADER, PROVIDER_GATE_REQUEST_CLASS_SKILL_PRUNER } from "../../../shared/provider-gate-request-class.js";
 
 // Per-thinking-level timeout ceiling for ONE prepass model call. These are
@@ -158,6 +160,40 @@ export function getRecentConversation(ctx: unknown, maxMessages = RECENT_CONVERS
 
 type FetchLike = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
+function validUsageNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function mergePrepassUsage(left: PrepassUsage, right: PrepassUsage): PrepassUsage {
+	const presence = {
+		input: (left.tokenChannelPresence?.input ?? left.tokenChannelsKnown !== false)
+			&& (right.tokenChannelPresence?.input ?? right.tokenChannelsKnown !== false),
+		output: (left.tokenChannelPresence?.output ?? left.tokenChannelsKnown !== false)
+			&& (right.tokenChannelPresence?.output ?? right.tokenChannelsKnown !== false),
+		cacheRead: (left.tokenChannelPresence?.cacheRead ?? left.tokenChannelsKnown !== false)
+			&& (right.tokenChannelPresence?.cacheRead ?? right.tokenChannelsKnown !== false),
+		cacheWrite: (left.tokenChannelPresence?.cacheWrite ?? left.tokenChannelsKnown !== false)
+			&& (right.tokenChannelPresence?.cacheWrite ?? right.tokenChannelsKnown !== false),
+	};
+	const tokenChannelsKnown = Object.values(presence).every(Boolean)
+		&& left.tokenChannelsKnown !== false
+		&& right.tokenChannelsKnown !== false;
+	const reportedCostUsd = left.reportedCostUsd === undefined && right.reportedCostUsd === undefined
+		? undefined
+		: (left.reportedCostUsd ?? 0) + (right.reportedCostUsd ?? 0);
+	return {
+		input: left.input + right.input,
+		output: left.output + right.output,
+		cacheRead: left.cacheRead + right.cacheRead,
+		cacheWrite: left.cacheWrite + right.cacheWrite,
+		...(tokenChannelsKnown ? {} : { tokenChannelsKnown: false, tokenChannelPresence: presence }),
+		...(reportedCostUsd === undefined ? {} : {
+			reportedCostUsd,
+			providerReportedCostUsd: reportedCostUsd,
+		}),
+	};
+}
+
 /**
  * Use Ollama's native chat endpoint for local prepasses. Ollama's OpenAI-compatible
  * endpoint currently ignores its native `think: false` control, so reasoning-first
@@ -170,7 +206,7 @@ export async function completeOllamaNative(
 	context: Array<{ role: string; content: string }>,
 	options: Record<string, unknown>,
 	fetchFn: FetchLike = fetch,
-): Promise<{ text: string; thinking: string; stopReason?: string; errorMessage?: string; usage?: { input: number; output: number; cacheRead: number; cacheWrite: number } }> {
+): Promise<CompleteSimpleResult & { thinking: string }> {
 	const modelObj = model as { id?: unknown; baseUrl?: unknown };
 	if (typeof modelObj.id !== "string" || typeof modelObj.baseUrl !== "string") {
 		throw new Error("Invalid Ollama model configuration");
@@ -206,15 +242,15 @@ export async function completeOllamaNative(
 		prompt_eval_count?: unknown;
 		eval_count?: unknown;
 	};
+	const input = validUsageNumber(payload.prompt_eval_count);
+	const output = validUsageNumber(payload.eval_count);
 	return {
 		text: typeof payload.message?.content === "string" ? payload.message.content : "",
 		thinking: typeof payload.message?.thinking === "string" ? payload.message.thinking : "",
 		stopReason: typeof payload.done_reason === "string" ? payload.done_reason : undefined,
-		usage: {
-			input: typeof payload.prompt_eval_count === "number" ? payload.prompt_eval_count : 0,
-			output: typeof payload.eval_count === "number" ? payload.eval_count : 0,
-			cacheRead: 0,
-			cacheWrite: 0,
+		usage: input === undefined && output === undefined ? undefined : {
+			...(input === undefined ? {} : { input }),
+			...(output === undefined ? {} : { output }),
 		},
 	};
 }
@@ -282,6 +318,9 @@ export function getCompleteFn(_ctx: unknown): CompleteSimpleFn | null {
 				output?: number;
 				cacheRead?: number;
 				cacheWrite?: number;
+				reportedCostUsd?: number;
+				providerReportedCostUsd?: number;
+				cost?: { total?: number; reportedCostUsd?: number; providerReportedCostUsd?: number };
 			};
 		};
 		const content = assistantMessage.content ?? [];
@@ -293,17 +332,23 @@ export function getCompleteFn(_ctx: unknown): CompleteSimpleFn | null {
 			.filter((block) => block.type === "thinking")
 			.map((block) => block.thinking ?? "")
 			.join("");
+		const providerCost = providerReportedCostUsd(assistantMessage.usage);
+		const input = validUsageNumber(assistantMessage.usage?.input);
+		const output = validUsageNumber(assistantMessage.usage?.output);
+		const cacheRead = validUsageNumber(assistantMessage.usage?.cacheRead);
+		const cacheWrite = validUsageNumber(assistantMessage.usage?.cacheWrite);
 		return {
 			text,
 			thinking,
 			stopReason: assistantMessage.stopReason,
 			errorMessage: assistantMessage.errorMessage,
-			usage: assistantMessage.usage ? {
-				input: assistantMessage.usage.input ?? 0,
-				output: assistantMessage.usage.output ?? 0,
-				cacheRead: assistantMessage.usage.cacheRead ?? 0,
-				cacheWrite: assistantMessage.usage.cacheWrite ?? 0,
-			} : undefined,
+			usage: !assistantMessage.usage ? undefined : {
+				...(input === undefined ? {} : { input }),
+				...(output === undefined ? {} : { output }),
+				...(cacheRead === undefined ? {} : { cacheRead }),
+				...(cacheWrite === undefined ? {} : { cacheWrite }),
+				...(providerCost === undefined ? {} : { reportedCostUsd: providerCost, providerReportedCostUsd: providerCost }),
+			},
 		};
 	};
 	return adapter;
@@ -454,13 +499,9 @@ async function runLlmPruningWithParseRecovery(
 	return {
 		...recovered,
 		latencyMs: initial.latencyMs + recovered.latencyMs,
-		usage: initial.usage || recovered.usage ? {
-			input: (initial.usage?.input ?? 0) + (recovered.usage?.input ?? 0),
-			output: (initial.usage?.output ?? 0) + (recovered.usage?.output ?? 0),
-			cacheRead: (initial.usage?.cacheRead ?? 0) + (recovered.usage?.cacheRead ?? 0),
-			cacheWrite: (initial.usage?.cacheWrite ?? 0) + (recovered.usage?.cacheWrite ?? 0),
-			reportedCostUsd: (initial.usage?.reportedCostUsd ?? 0) + (recovered.usage?.reportedCostUsd ?? 0),
-		} : undefined,
+		usage: initial.usage && recovered.usage
+			? mergePrepassUsage(initial.usage, recovered.usage)
+			: initial.usage ?? recovered.usage,
 	};
 }
 
@@ -601,18 +642,28 @@ export async function runPruningPrepass(
 				? "cancelled" as const
 				: response.stopReason === "error" || !!response.errorMessage
 					? "failed" as const : "succeeded" as const;
+			const invocationUsageNumber = (key: "input" | "output" | "cacheRead" | "cacheWrite"): number | undefined => {
+				const value = validUsageNumber(usage?.[key]);
+				if (value === undefined) return undefined;
+				if (usage?.tokenChannelsKnown === false && usage.tokenChannelPresence?.[key] !== true) return undefined;
+				if (usage?.tokenChannelPresence?.[key] === false) return undefined;
+				return value;
+			};
+			const invocationInput = invocationUsageNumber("input");
+			const invocationOutput = invocationUsageNumber("output");
+			const invocationCacheRead = invocationUsageNumber("cacheRead");
+			const invocationCacheWrite = invocationUsageNumber("cacheWrite");
+			const invocationReportedCost = providerReportedCostUsd(usage);
 			prepassInvocations.push({
 				invocationId,
 				startedAt: new Date(started).toISOString(),
 				endedAt: new Date(ended).toISOString(),
 				outcome,
-				...(typeof usage?.input === "number" ? { input: usage.input } : {}),
-				...(typeof usage?.output === "number" ? { output: usage.output } : {}),
-				...(typeof usage?.cacheRead === "number" ? { cacheRead: usage.cacheRead } : {}),
-				...(typeof usage?.cacheWrite === "number" ? { cacheWrite: usage.cacheWrite } : {}),
-				...(typeof usage?.cost?.total === "number"
-					? { reportedCostUsd: usage.cost.total }
-					: typeof usage?.reportedCostUsd === "number" ? { reportedCostUsd: usage.reportedCostUsd } : {}),
+				...(invocationInput === undefined ? {} : { input: invocationInput }),
+				...(invocationOutput === undefined ? {} : { output: invocationOutput }),
+				...(invocationCacheRead === undefined ? {} : { cacheRead: invocationCacheRead }),
+				...(invocationCacheWrite === undefined ? {} : { cacheWrite: invocationCacheWrite }),
+				...(invocationReportedCost === undefined ? {} : { reportedCostUsd: invocationReportedCost }),
 			});
 			return response;
 		} catch (error) {
@@ -676,13 +727,9 @@ export async function runPruningPrepass(
 	const accountResult = (result: Awaited<ReturnType<typeof runLlmPruning>>): void => {
 		cumulativeLatencyMs += result.latencyMs;
 		if (!result.usage) return;
-		cumulativeUsage = {
-			input: (cumulativeUsage?.input ?? 0) + result.usage.input,
-			output: (cumulativeUsage?.output ?? 0) + result.usage.output,
-			cacheRead: (cumulativeUsage?.cacheRead ?? 0) + result.usage.cacheRead,
-			cacheWrite: (cumulativeUsage?.cacheWrite ?? 0) + result.usage.cacheWrite,
-			reportedCostUsd: (cumulativeUsage?.reportedCostUsd ?? 0) + (result.usage.reportedCostUsd ?? 0),
-		};
+		cumulativeUsage = cumulativeUsage
+			? mergePrepassUsage(cumulativeUsage, result.usage)
+			: result.usage;
 	};
 
 	for (let index = 0; index < attempts.length; index++) {

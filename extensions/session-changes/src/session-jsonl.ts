@@ -1,13 +1,13 @@
 /**
- * Minimal session-JSONL reader + the toolCall↔toolResult join for the
+ * Minimal session-entry reader + the toolCall↔toolResult join for the
  * `session_changes` tool.
  *
- * Re-derives file changes from the session JSONL ON DISK (option A) through
- * the SAME per-tool-call core the host uses (shared/file-change-derivation),
- * rather than querying host state at runtime — exactly the precedent
- * `session_review` sets (read-from-disk, self-contained, works for any session
- * file). Compaction appends a cursor and never deletes entries, so parsing the
- * JSONL is non-lossy even after compaction.
+ * Re-derives file changes from either the current runtime entries or an
+ * explicitly requested session JSONL through the SAME per-tool-call core the
+ * host uses (shared/file-change-derivation). Runtime entries are preferred for
+ * default self-review so in-memory sessions and the latest unsaved entries are
+ * visible; the JSONL path remains available for explicit review and lightweight
+ * contexts without the runtime entry API.
  *
  * THE JOIN (the substantive divergence from the host's already-merged
  * ChatMessage[]). pie's `ChatMessage.toolCalls[]` is a MERGED view: each entry
@@ -50,7 +50,7 @@ import {
 // is written by the SDK and may carry fields we don't model. We read only what
 // the derivation needs.
 
-interface SessionEntryLike {
+export interface SessionEntryLike {
   type?: string;
   id?: string;
   timestamp?: string;
@@ -80,6 +80,14 @@ interface JoinedToolCall {
   details: unknown;
 }
 
+/** The subagent call input owns the cwd for legacy child results that do not
+ * persist their effective cwd in `details.results[].cwd`. */
+function readToolCwd(input: unknown): string | undefined {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
+  const cwd = (input as Record<string, unknown>).cwd;
+  return typeof cwd === 'string' && cwd.trim() ? cwd : undefined;
+}
+
 /**
  * Derive file changes from already-parsed session entries (the two-pass join).
  *
@@ -90,14 +98,16 @@ interface JoinedToolCall {
  */
 export function deriveFileChangesFromSessionEntries(
   entries: SessionEntryLike[],
+  cwdOverride?: string,
 ): FileChange[] {
   const seen = new Map<string, FileChange>();
   const createdPaths = new Set<string>();
-  // Canonicalize file identity against the session cwd (read from the `session`
-  // header entry) so the same file reached through different spellings
+  // Canonicalize file identity against the session cwd (from the `session`
+  // header entry for persisted sessions or the runtime manager for in-memory
+  // sessions) so the same file reached through different spellings
   // (relative/absolute, `./`, separator/case variants, parent vs subagent)
   // collapses to one entry — matching the host's cwd-aware derivation.
-  const cwd = readSessionCwd(entries);
+  const cwd = cwdOverride ?? readSessionCwd(entries);
 
   // Pass 1: index toolResult entries by toolCallId (the join's right side).
   const resultsByCallId = new Map<string, { isError: boolean; details: unknown }>();
@@ -138,6 +148,8 @@ export function deriveFileChangesFromSessionEntries(
           messageId,
           timestamp,
           joined.id,
+          cwd,
+          readToolCwd(joined.input) ?? cwd,
         );
         for (const e of subagentChanges) accumulateFileChange(seen, createdPaths, e, cwd);
         continue;
@@ -190,7 +202,7 @@ export function readSessionCwd(entries: SessionEntryLike[]): string | undefined 
 }
 
 export interface ParsedSession {
-  sessionPath: string;
+  sessionPath: string | undefined;
   cwd: string | undefined;
   changes: FileChange[];
 }
@@ -226,6 +238,26 @@ function verifyDeletions(changes: FileChange[], cwd?: string): FileChange[] {
   });
 }
 
+/** Derive a parsed session from already-loaded entries. Runtime entries do
+ *  not include the session header, so callers may provide the current cwd.
+ *  Deletion verification is intentionally shared with the persisted-file path.
+ */
+export function parseSessionEntriesChanges(
+  entries: SessionEntryLike[],
+  sessionPath: string | undefined,
+  cwd?: string,
+): ParsedSession {
+  const sessionCwd = cwd ?? readSessionCwd(entries);
+  return {
+    sessionPath,
+    cwd: sessionCwd,
+    changes: verifyDeletions(
+      deriveFileChangesFromSessionEntries(entries, sessionCwd),
+      sessionCwd,
+    ),
+  };
+}
+
 /** Parse a session JSONL file into its derived file changes + the session cwd.
  *  Throws on read failure (the tool surfaces the message). */
 export function parseSessionFileChanges(sessionPath: string): ParsedSession {
@@ -249,9 +281,5 @@ export function parseSessionFileChanges(sessionPath: string): ParsedSession {
     entries.push(entry);
   }
 
-  return {
-    sessionPath,
-    cwd: readSessionCwd(entries),
-    changes: verifyDeletions(deriveFileChangesFromSessionEntries(entries), readSessionCwd(entries)),
-  };
+  return parseSessionEntriesChanges(entries, sessionPath);
 }

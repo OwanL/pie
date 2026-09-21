@@ -4,7 +4,7 @@ import {
   ANALYTICS_HANDOFF_NONCE_WINDOW_MS,
   assertFreshAnalyticsHandoffRequest,
   type AnalyticsHandoffHostIdentity,
-} from '../../../shared/analytics/handoff.js';
+} from '../../../shared/analytics/host-status-messages.js';
 import {
   type AnalyticsWriterFencePurpose,
   type AnalyticsWriterIdentity,

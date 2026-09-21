@@ -92,7 +92,7 @@ if (stranded.totalStranded > 0) {
   for (const entry of stranded.roots) {
     if (entry.stranded > 0) warn(`  ${entry.stranded} of ${entry.total} in ${entry.root}`);
   }
-  warn(`  Re-run the installer (./install.sh or .\\install.bat) to migrate them into the canonical store.`);
+  warn(`  Re-run .\\install.bat to migrate them into the canonical store.`);
 } else {
   ok("no legacy sessions stranded outside the canonical store");
 }

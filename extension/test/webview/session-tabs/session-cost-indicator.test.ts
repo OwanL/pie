@@ -768,7 +768,7 @@ test('whole-session subagent accounting reprices attempts without adding the sta
     () => ({ input: 100, output: 100, cacheRead: 100, cacheWrite: 100 }),
   );
 
-  assert.equal(accounting.samples.find((sample) => sample.sourceId.includes(':attempt:'))?.reportedCostUsd, 0);
+  assert.equal(accounting.samples.find((sample) => sample.sourceId.includes(':attempt:'))?.reportedCostUsd, undefined);
   assert.equal(summary.totalCost, 1.1);
   assert.equal(summary.modelCosts.get('openai/worker-model')?.cost, 1.1);
 });
@@ -822,7 +822,7 @@ test('buildSessionCostIndicator merges the live estimate into the selected model
 
   assert.ok(result);
   // Main: 0.1M*0.25 + 0.01M*2 = 0.025 + 0.02 = 0.045. Live: 0.05M*0.25 = 0.0125. Total: 0.0575.
-  assert.equal(result.label, '$0.06');
+  assert.equal(result.label, '$0.0575');
   assert.match(result.tooltip, /openai-codex \/ gpt-5\.4-mini:\s+\$0\.0575/);
   assert.equal(result.tooltip.match(/gpt-5\.4-mini/g)?.length, 1);
 });
@@ -1130,7 +1130,7 @@ test('buildSessionCostIndicator shows a live estimate while running without comp
 
   assert.ok(liveEstimate);
   assert.ok(result);
-  assert.equal(result.label, '<$0.01*');
+  assert.equal(result.label, '$0.0000*');
   assert.match(result.tooltip, /Unknown provider \/ Ollama Cloud: Gemma 3 4B: \$0\.0000\*/);
   assert.match(result.tooltip, /Excludes 126,500 tokens pending billing details or pricing/);
   assert.match(result.ariaLabel, /some provider\/model usage is not yet priced/);

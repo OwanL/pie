@@ -1,5 +1,6 @@
 import type { SystemPromptEntry } from '../shared/protocol';
 import { ASK_USER_TOOL_NAME } from '../../../shared/autonomous-mode.js';
+import { SUBAGENT_TOOL_NAME } from '../../../shared/subagent-provider-policy.js';
 import { contextFilePathKey, prepareContextFiles } from './context-files';
 import type { ActiveModelInfo } from './session-metadata';
 import type { SdkBuildSystemPromptOptions, SdkContextFile, SdkSkill, SdkToolInfo } from './sdk';
@@ -323,6 +324,50 @@ export function installMcpToolGuard(
         : toolNames.filter((name) => !(MCP_TOOL_NAMES as readonly string[]).includes(name)),
     );
   };
+}
+
+/** Keep the effective all-unchecked subagent provider policy authoritative
+ *  over every extension-driven tool update. Skill-pruner can restore tools it
+ *  previously pruned ("pruning reactivation") and extensions may re-expose
+ *  their own tools, so a one-time removal is insufficient: every later
+ *  setActiveTools call must continue to exclude the subagent tool while every
+ *  subagent provider is unchecked in the session's toggle surface.
+ *  (registerTool auto-activation is handled separately by re-enforcement at
+ *  bind and at every turn start — see worker-runtime-host.) */
+export function installSubagentPolicyToolGuard(
+  session: ToolToggleSession,
+  getSubagentsDisabled: () => boolean,
+): void {
+  const setActiveTools = session.setActiveToolsByName;
+  if (typeof setActiveTools !== 'function') return;
+
+  session.setActiveToolsByName = function guardedSetActiveTools(toolNames: string[]): void {
+    setActiveTools.call(
+      this,
+      getSubagentsDisabled()
+        ? toolNames.filter((name) => name !== SUBAGENT_TOOL_NAME)
+        : toolNames,
+    );
+  };
+}
+
+/** Pure active-tool update for the effective subagent provider policy.
+ *  Disabled → the subagent tool is dropped from the model-visible active set.
+ *  Enabled → a registered-but-inactive subagent tool is restored (after a
+ *  policy window removed it, a missed preference update, or a replacement
+ *  session). Returns undefined when the active list already satisfies the
+ *  policy, so callers never issue a no-op setActiveTools rebuild. */
+export function subagentPolicyActiveToolUpdate(
+  activeNames: readonly string[],
+  registeredNames: readonly string[],
+  subagentsDisabled: boolean,
+): string[] | undefined {
+  const isActive = activeNames.includes(SUBAGENT_TOOL_NAME);
+  if (subagentsDisabled) {
+    return isActive ? activeNames.filter((name) => name !== SUBAGENT_TOOL_NAME) : undefined;
+  }
+  if (isActive || !registeredNames.includes(SUBAGENT_TOOL_NAME)) return undefined;
+  return [...activeNames, SUBAGENT_TOOL_NAME];
 }
 
 /** Maintain `_originalSystemPromptOptions`: an unfiltered snapshot of the

@@ -5,10 +5,10 @@
    stylesheet. `--expanded-font-size` is the user-tweakable font size for
    expanded collapsible sections (tool calls, reasoning, system prompts,
    pruning, code blocks); the host sets it from the `expandedSectionFontSize`
-   chat pref. Default 12px (smaller than the 13px raw agent output). */
+   chat pref. Default 10px (smaller than the 11px raw agent output). */
 
 :root {
-  --expanded-font-size: 12px;
+  --expanded-font-size: 10px;
   /* Max height for expanded collapsible sections (reasoning, shell terminal,
      tool-result pres, subagent thread). Caps any one pane so it can't
      dominate the transcript; per-pane drag overrides stay ephemeral. The host
@@ -18,7 +18,7 @@
 
 /* ── Expanded-section font size ──────────────────────────────────────────── */
 /* Applied to expanded code/data + collapsible-section prose only. Raw agent
-   message prose (.message-body outside a collapsible) stays at 13px. */
+   message prose (.message-body outside a collapsible) stays at 11px. */
 
 .tool-call-terminal-pre,
 .tool-call-pre,

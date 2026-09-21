@@ -322,6 +322,44 @@ test('maintained execution summary counts agent runs across bind and deletion', 
   }
 });
 
+test('aggregate session count uses canonical executions including unsettled runs', () => {
+  const temp = tempDatabase();
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  const dayStart = Date.UTC(2025, 4, 1);
+  const dayEnd = dayStart + 86_400_000;
+  try {
+    recorder.prepareProviderDailyProjection('UTC', dayStart, dayEnd);
+    for (const [rootSessionId, executionId] of [
+      ['unsettled-root-a', 'unsettled-execution-a'],
+      ['unsettled-root-a', 'unsettled-execution-b'],
+      ['unsettled-root-b', 'unsettled-execution-c'],
+    ]) {
+      recorder.submit(observation({
+        sourceKey: `${executionId}-begin`,
+        rootSessionId,
+        entityKey: executionId,
+        observationKind: 'begin',
+        fields: { operationKind: 'agent-run', startedAtMs: dayStart + 1_000 },
+      }));
+    }
+    const aggregate = recorder.readProviderAggregateSummary({
+      todayStartMs: dayStart,
+      todayEndMs: dayEnd,
+      weekStartMs: dayStart,
+      weekEndMs: dayEnd,
+      timeZone: 'UTC',
+      dailyWindowStartMs: dayStart,
+      dailyWindowEndMs: dayEnd,
+    });
+    assert.equal(aggregate.executionSummary.executionCount, 3);
+    assert.equal(aggregate.sessionCount, 2);
+    assert.deepEqual(aggregate.groups, [], 'provider settlement groups must not define execution session count');
+  } finally {
+    recorder.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
 test('canonical latest run follows source completion and exact execution identity', () => {
   const temp = tempDatabase();
   const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
@@ -360,6 +398,7 @@ test('canonical latest run follows source completion and exact execution identit
         dispatchedModel: `${provider}-model`,
         purpose: 'conversation',
         outcome: 'success',
+        settledAtMs: windowStart + 150,
         inputTokens,
         outputTokens,
         inputIncludesCache: false,
@@ -388,6 +427,11 @@ test('canonical latest run follows source completion and exact execution identit
       dailyWindowStartMs: windowStart,
       dailyWindowEndMs: windowEnd,
     });
+    assert.equal(aggregate.series?.settlements.length, 2);
+    assert.equal(aggregate.series?.executions.length, 2);
+    assert.deepEqual(aggregate.series?.settlements.map((sample) => sample.provider), [
+      'new-provider', 'old-provider',
+    ]);
     assert.deepEqual(aggregate.latestRun, {
       generationId: 'generation-new',
       executionId: 'same-execution',
@@ -436,6 +480,30 @@ test('canonical latest run follows source completion and exact execution identit
       WHERE generation_id = 'generation-new' AND execution_id = 'same-execution'
     `);
     assert.ok(providerPlan.rows.some((row) => String(row.detail).includes('analytics_provider_settlement_execution_idx')));
+    const dailyExecutionPlan = recorder.executeReadOnlyQuery(`
+      EXPLAIN QUERY PLAN
+      WITH days(local_day, start_ms, end_ms) AS (VALUES ('2025-05-01', ?, ?))
+      SELECT days.local_day,
+        COUNT(execution.execution_id) AS run_count,
+        COUNT(DISTINCT execution.root_session_id) AS session_count
+      FROM days
+      LEFT JOIN analytics_execution_states execution
+        ON execution.operation_kind = 'agent-run'
+        AND (execution.ended_at_ms IS NOT NULL OR execution.started_at_ms IS NOT NULL)
+        AND CAST(COALESCE(execution.ended_at_ms, execution.started_at_ms) AS INTEGER) >= days.start_ms
+        AND CAST(COALESCE(execution.ended_at_ms, execution.started_at_ms) AS INTEGER) < days.end_ms
+      GROUP BY days.local_day
+      ORDER BY days.local_day
+    `, [windowStart, windowEnd]);
+    const dailyExecutionDetails = dailyExecutionPlan.rows.map((row) => String(row.detail));
+    assert.ok(
+      dailyExecutionDetails.some((detail) => detail.includes('analytics_execution_state_event_time_idx')),
+      `expected the daily execution range index, got ${JSON.stringify(dailyExecutionDetails)}`,
+    );
+    assert.ok(
+      !dailyExecutionDetails.some((detail) => detail.includes('SCAN execution LEFT-JOIN')),
+      `daily execution range must not scan the execution table, got ${JSON.stringify(dailyExecutionDetails)}`,
+    );
 
     // A private close removes the selected state and its exact provider rows;
     // the next source-chronological retained run becomes visible.
@@ -490,6 +558,136 @@ test('schema v10 to current adds source-time and exact execution indexes', () =>
     ]));
   } finally {
     upgraded?.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('schema v12 to current creates facet storage and aggregate-series indexes', () => {
+  const temp = tempDatabase();
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  recorder.close();
+  const raw = new DatabaseSync(temp.databasePath);
+  try {
+    raw.exec(`
+      DROP VIEW analytics_tool_facet_v1;
+      DROP TABLE analytics_tool_facet_states;
+      DROP TABLE analytics_tool_facet_observations;
+      DROP INDEX analytics_provider_settlement_settled_time_idx;
+      DROP INDEX analytics_execution_state_started_time_idx;
+      DROP INDEX analytics_execution_state_ended_time_idx;
+      DROP INDEX analytics_execution_state_event_time_idx;
+      PRAGMA user_version = 12;
+    `);
+  } finally {
+    raw.close();
+  }
+
+  let upgraded: SqliteAnalyticsRecorder | undefined;
+  try {
+    upgraded = new SqliteAnalyticsRecorder(temp.databasePath);
+    assert.equal(upgraded.getDatabaseSchemaVersion(), 13);
+    const names = new Set(
+      upgraded.executeReadOnlyQuery(`
+        SELECT name FROM sqlite_master
+        WHERE name IN (
+          'analytics_tool_facet_observations', 'analytics_tool_facet_states',
+          'analytics_tool_facet_v1',
+          'analytics_provider_settlement_settled_time_idx',
+          'analytics_execution_state_started_time_idx',
+          'analytics_execution_state_ended_time_idx',
+          'analytics_execution_state_event_time_idx'
+        )
+      `).rows.map((row) => String(row.name)),
+    );
+    assert.deepEqual(names, new Set([
+      'analytics_tool_facet_observations',
+      'analytics_tool_facet_states',
+      'analytics_tool_facet_v1',
+      'analytics_provider_settlement_settled_time_idx',
+      'analytics_execution_state_started_time_idx',
+      'analytics_execution_state_ended_time_idx',
+      'analytics_execution_state_event_time_idx',
+    ]));
+  } finally {
+    upgraded?.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('aggregate daily rollups stay exact when temporal samples exceed 4096', () => {
+  const temp = tempDatabase();
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  const dayStart = Date.UTC(2026, 0, 1);
+  const dayEnd = dayStart + 86_400_000;
+  const observations: AnalyticsObservation[] = [];
+  for (let index = 0; index < 4_097; index += 1) {
+    const rootSessionId = `bulk-root-${index}`;
+    const executionId = `bulk-execution-${index}`;
+    const atMs = dayStart + index + 1;
+    observations.push(
+      observation({
+        sourceKey: `${executionId}-begin`,
+        rootSessionId,
+        entityKey: executionId,
+        observationKind: 'begin',
+        fields: { operationKind: 'agent-run', startedAtMs: atMs },
+      }),
+      observation({
+        sourceKey: `${executionId}-end`,
+        rootSessionId,
+        entityKey: executionId,
+        observationKind: 'end',
+        fields: { operationKind: 'agent-run', endedAtMs: atMs + 1, outcome: 'success' },
+      }),
+      observation({
+        sourceKey: `${executionId}-settlement`,
+        rootSessionId,
+        invocationId: `bulk-invocation-${index}`,
+        executionId,
+        fields: {
+          invocationId: `bulk-invocation-${index}`,
+          provider: 'bulk-provider',
+          dispatchedModel: 'bulk-model',
+          purpose: 'conversation',
+          outcome: 'success',
+          settledAtMs: atMs,
+          inputTokens: 1,
+          outputTokens: 1,
+          inputIncludesCache: false,
+          outputIncludesReasoning: true,
+          cacheChannelsOmittedAsZero: true,
+          reportedCostUsd: 1,
+          coverage: 'known',
+        },
+      }),
+    );
+  }
+  try {
+    recorder.prepareProviderDailyProjection('UTC', dayStart, dayEnd);
+    recorder.submitBatch(observations);
+    const aggregate = recorder.readProviderAggregateSummary({
+      todayStartMs: dayStart,
+      todayEndMs: dayEnd,
+      weekStartMs: dayStart,
+      weekEndMs: dayEnd,
+      timeZone: 'UTC',
+      dailyWindowStartMs: dayStart,
+      dailyWindowEndMs: dayEnd,
+    });
+    assert.equal(aggregate.series?.truncated, true);
+    assert.equal(aggregate.series?.settlements.length, 4_096);
+    assert.equal(aggregate.series?.executions.length, 4_096);
+    assert.deepEqual(aggregate.series?.dailyCosts, [{
+      date: '2026-01-01',
+      totalCost: 4_097,
+      byProvider: [{ provider: 'bulk-provider', cost: 4_097 }],
+      byModel: [{ provider: 'bulk-provider', model: 'bulk-model', cost: 4_097 }],
+    }]);
+    assert.deepEqual(aggregate.series?.dailyExecutions, [{
+      date: '2026-01-01', runCount: 4_097, sessionCount: 4_097,
+    }]);
+  } finally {
+    recorder.close();
     rmSync(temp.root, { recursive: true, force: true });
   }
 });
@@ -1255,9 +1453,11 @@ test('branch and copy projections select original settlements without duplicatin
       kind: 'selectedBranch', generationId: 'generation-1', rootSessionId: 'source-root',
     }).settlements), 0.03);
     select('source-root', 'source:C', 'select:C');
-    assert.equal(totalCost(recorder.readScopedProviderSettlements({
+    const selectedC = recorder.readScopedProviderSettlements({
       kind: 'selectedBranch', generationId: 'generation-1', rootSessionId: 'source-root',
-    }).settlements), 0.04);
+    });
+    assert.equal(selectedC.selectedBranchId, 'source:C');
+    assert.equal(totalCost(selectedC.settlements), 0.04);
     assert.equal(totalCost(recorder.readScopedProviderSettlements({
       kind: 'rootSession', rootSessionId: 'source-root',
     }).settlements), 0.06);
@@ -1329,6 +1529,22 @@ test('branch and copy projections select original settlements without duplicatin
     assert.equal(totalCost(recorder.readScopedProviderSettlements({
       kind: 'copySelected', generationId: 'generation-1', copySessionId: 'copy-root',
     }).settlements), 0.07);
+
+    // Selected-branch pages retain the projection fence even though the
+    // selected branch id is resolved atomically for each page.
+    const selectedPage = recorder.readScopedProviderSettlements({
+      kind: 'selectedBranch', generationId: 'generation-1', rootSessionId: 'source-root',
+    }, { limit: 1 });
+    assert.equal(selectedPage.selectedBranchId, 'source:C');
+    assert.equal(selectedPage.truncated, true);
+    settle('source-root', 'source:C', 'invocation:page-fence', 0.04);
+    assert.throws(() => recorder.readScopedProviderSettlements({
+      kind: 'selectedBranch', generationId: 'generation-1', rootSessionId: 'source-root',
+    }, {
+      limit: 1,
+      offset: selectedPage.nextOffset!,
+      expectedRevision: selectedPage.revision,
+    }), /Scoped settlement projection changed/);
   } finally {
     recorder.close();
     rmSync(temp.root, { recursive: true, force: true });

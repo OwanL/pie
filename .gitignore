@@ -77,10 +77,7 @@ extension/test/perf/reports/
 extension/test-results/
 
 # Analysis package generated outputs
-/analysis/data/*.duckdb
-/analysis/data/*.duckdb.*
-/analysis/data/exports/
-/analysis/data/tmp-site-data/
+/analysis/data/
 /analysis/site/data/
 
 # Logs

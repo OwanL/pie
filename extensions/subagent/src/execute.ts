@@ -6,7 +6,7 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import type { TextContent } from "@mariozechner/pi-ai";
 import type { ToolContext } from "./tool-context.js";
 import { textContent } from "./text-content.js";
-import { realRetryClock, type RetryClock } from "./retry.js";
+import { realRetryClock, type RetryClock, zeroUsage } from "./retry.js";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { readKeptSkills } from "../../../shared/pruned-skills.js";
@@ -40,6 +40,7 @@ import {
 	parseProviderToggles,
 	parseSessionProviderToggles,
 	resolveSubagentProviderToggles,
+	subagentProvidersAllDisabledFromEnv,
 	readBucketAssignments,
 	readNestedAllowedBuckets,
 	canSpawnFromSubagentBucket,
@@ -99,7 +100,7 @@ export function validateSubagentParams(
 				exitCode: 1,
 				messages: [],
 				stderr: "Invalid parameters. Provide one non-empty agent and task; use sibling calls for independent work.",
-				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+				usage: zeroUsage(),
 			}],
 		};
 	}
@@ -142,6 +143,20 @@ function disabledErrorResponse(): ErrorResponse {
 function subagentsDisabledResponse(maxDepth: number): ErrorResponse {
 	return {
 		content: [textContent(`Subagents are disabled (nesting levels set to ${maxDepth}). Set "Nesting levels" above 0 to delegate to subagents.`)],
+		details: {
+			mode: "single" as const,
+			agentScope: DEFAULT_AGENT_SCOPE,
+			projectAgentsDir: null,
+			results: [],
+		},
+		isError: true,
+	};
+}
+
+/** Returns the standard response when every subagent provider is unchecked. */
+function subagentProvidersDisabledResponse(): ErrorResponse {
+	return {
+		content: [textContent('Subagents are disabled: every subagent provider is unchecked. Re-enable at least one subagent provider in the composer\'s subagent provider menu (or the "Default providers" section of the Subagents settings tab).')],
 		details: {
 			mode: "single" as const,
 			agentScope: DEFAULT_AGENT_SCOPE,
@@ -366,6 +381,23 @@ export async function execute(
 	runtimeCtx.analyticsCapture ??= resolveInstalledSubagentAnalyticsCapture();
 	const maxDepth = getMaxDepth();
 	if (maxDepth === 0) return subagentsDisabledResponse(maxDepth);
+
+	// Stale-execution guard for the pie all-unchecked provider policy: the host
+	// removes the subagent tool from the session's active tool set while every
+	// provider is unchecked, but a call that raced the preference change (stale
+	// turn snapshot, mid-turn flip) can still land here. The tree snapshot
+	// semantic keeps already-running trees coherent: a root call resolves fresh
+	// from the mirrored preferences, descendants consume the root snapshot, so
+	// an in-flight tree is never cancelled mid-flight by a new policy.
+	const rootSessionPath = runtimeCtx.rootSessionPath
+		?? ctx.sessionManager?.getSessionFile?.()
+		?? undefined;
+	if (subagentProvidersAllDisabledFromEnv(
+		resolveTreeSubagentProviderToggles(runtimeCtx, rootSessionPath),
+		ctx.modelRegistry?.getAvailable?.() ?? [],
+	)) {
+		return subagentProvidersDisabledResponse();
+	}
 	if (!canSpawnFromSubagentBucket(runtimeCtx.bucket)) {
 		return bucketDelegationBlockedResponse(runtimeCtx.bucket!);
 	}

@@ -45,6 +45,17 @@ const INTERRUPT_ABORT_WATCHDOG_ENV = 'PIE_INTERRUPT_ABORT_WATCHDOG_MS';
  */
 const DEFAULT_INTERRUPT_ABORT_WATCHDOG_MS = 30 * 1000;
 const DEFAULT_SESSION_TRANSITION_POLL_MS = 10;
+/** Provider error text is user-visible, but it is still carried by a bounded
+ * runtime-event frame. Keep the generic failure path aligned with the 2 KiB
+ * provider-incident diagnostic projection rather than allowing an SDK response
+ * body to make the worker transport fail closed. */
+const PROMPT_FAILURE_TEXT_MAX_CHARS = 2_048;
+
+function boundPromptFailureText(value: string): string {
+  return value.length > PROMPT_FAILURE_TEXT_MAX_CHARS
+    ? `${value.slice(0, PROMPT_FAILURE_TEXT_MAX_CHARS - 1)}…`
+    : value;
+}
 
 function resolveInterruptAbortWatchdogMs(): number {
   const raw = process.env[INTERRUPT_ABORT_WATCHDOG_ENV];
@@ -78,12 +89,12 @@ function reportPromptFailure(
   // Enrich connection-level errors (bare "Connection error.") with the real
   // transport cause; clean 429/5xx with a body pass through unchanged so
   // the upstream reason (e.g. account_suspended) shows.
-  const message = enrichConnectionError(error);
+  const message = boundPromptFailureText(enrichConnectionError(error));
   deps.emit('error', {
     ...createOperationalIncident({
       code: 'MESSAGE_SEND_FAILED',
       message,
-      detail: toErrorMessage(error),
+      detail: boundPromptFailureText(toErrorMessage(error)),
       sessionPath: context.sessionPath,
       requestId,
       ...(active?.operationId ? { operationId: active.operationId } : {}),

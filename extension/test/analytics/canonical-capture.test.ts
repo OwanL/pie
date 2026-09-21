@@ -53,6 +53,262 @@ test('tool detail capacity is checked before traversing and encoding rich input'
   assert.equal(submitted, 1);
 });
 
+test('synchronously rejected canonical facts do not consume producer sequence numbers', () => {
+  const observations: AnalyticsObservation<object>[] = [];
+  let reject = true;
+  const capture = new CanonicalAnalyticsCapture({
+    authority: 'canonical', generationId: 'generation-sequence', workspaceId: 'workspace-a',
+    buildId: 'build-a', processGeneration: 'process-a',
+    sink: { submit: (observation) => {
+      if (reject) throw new Error('capture capacity exhausted');
+      observations.push(observation);
+    } },
+    detailSink: { submitDetail: () => undefined },
+    lifecycleSink: { bindPendingCreate: async () => undefined, deleteSession: async () => undefined },
+  });
+  const base = {
+    schemaVersion: 1 as const,
+    sessionId: 'session-a', sessionPath: '/session-a', branchId: null,
+    parentOperationId: null, parentRunId: null, parentToolId: null,
+    kind: 'conversation' as const, provider: 'provider-a', model: 'model-a',
+    provenance: 'exact' as const, startedAt: '2026-09-10T00:00:00.000Z',
+    endedAt: '2026-09-10T00:00:01.000Z', outcome: 'succeeded' as const,
+    instrumentationGap: false as const,
+  };
+  assert.equal(capture.captureProviderSettlement({ ...base, invocationId: 'rejected', sourceId: 'rejected' }), 'rejected');
+  reject = false;
+  assert.equal(capture.captureProviderSettlement({ ...base, invocationId: 'accepted', sourceId: 'accepted' }), 'submitted');
+  reject = true;
+  assert.equal(capture.captureProviderSettlement({ ...base, invocationId: 'accepted', sourceId: 'accepted' }), 'rejected');
+  reject = false;
+  assert.equal(capture.captureProviderSettlement({ ...base, invocationId: 'later', sourceId: 'later' }), 'submitted');
+  assert.deepEqual(observations.map((entry) => entry.sourceSequence), ['1', '2']);
+});
+
+test('tracked recorder rejection remains explicit and releases an unconsumed sequence', () => {
+  const observations: AnalyticsObservation<object>[] = [];
+  const dispositions: Array<(value: { status: 'durable' } | { status: 'rejected'; code: string; message: string }) => void> = [];
+  const errors: string[] = [];
+  const capture = new CanonicalAnalyticsCapture({
+    authority: 'canonical', generationId: 'generation-tracked', workspaceId: 'workspace-a',
+    buildId: 'build-a', processGeneration: 'process-a',
+    sink: {
+      submit: () => undefined,
+      submitTracked: (observation, onDisposition) => {
+        observations.push(observation);
+        dispositions.push(onDisposition);
+      },
+    },
+    detailSink: { submitDetail: () => undefined },
+    lifecycleSink: { bindPendingCreate: async () => undefined, deleteSession: async () => undefined },
+    onCaptureError: (error) => { errors.push(error.message); },
+  });
+  const base = {
+    schemaVersion: 1 as const,
+    sessionId: 'session-tracked', sessionPath: '/session-tracked', branchId: null,
+    parentOperationId: null, parentRunId: null, parentToolId: null,
+    kind: 'conversation' as const, provider: 'provider-a', model: 'model-a',
+    provenance: 'exact' as const, startedAt: '2026-09-10T00:00:00.000Z',
+    endedAt: '2026-09-10T00:00:01.000Z', outcome: 'succeeded' as const,
+    instrumentationGap: false as const,
+  };
+  assert.equal(capture.captureProviderSettlement({ ...base, invocationId: 'first', sourceId: 'first' }), 'submitted');
+  dispositions[0]!({ status: 'rejected', code: 'source_conflict', message: 'conflicting source' });
+  assert.equal(capture.captureProviderSettlement({ ...base, invocationId: 'second', sourceId: 'second' }), 'submitted');
+  assert.deepEqual(observations.map((entry) => entry.sourceSequence), ['1', '1']);
+  assert.deepEqual(errors, ['conflicting source']);
+});
+
+test('async non-tail rejection rotates the producer epoch while a retry of the holed source keeps its old stream', () => {
+  const observations: AnalyticsObservation<object>[] = [];
+  const dispositions: Array<(value: { status: 'durable' } | { status: 'rejected'; code: string; message: string }) => void> = [];
+  const capture = new CanonicalAnalyticsCapture({
+    authority: 'canonical', generationId: 'generation-rotate', workspaceId: 'workspace-a',
+    buildId: 'build-a', processGeneration: 'process-a',
+    sink: {
+      submit: () => undefined,
+      submitTracked: (observation, onDisposition) => {
+        observations.push(observation);
+        dispositions.push(onDisposition);
+      },
+    },
+    detailSink: { submitDetail: () => undefined },
+    lifecycleSink: { bindPendingCreate: async () => undefined, deleteSession: async () => undefined },
+  });
+  const base = {
+    schemaVersion: 1 as const,
+    sessionId: 'session-rotate', sessionPath: '/session-rotate', branchId: null,
+    parentOperationId: null, parentRunId: null, parentToolId: null,
+    kind: 'conversation' as const, provider: 'provider-a', model: 'model-a',
+    provenance: 'exact' as const, startedAt: '2026-09-10T00:00:00.000Z',
+    endedAt: '2026-09-10T00:00:01.000Z', outcome: 'succeeded' as const,
+    instrumentationGap: false as const,
+  };
+  capture.captureProviderSettlement({ ...base, invocationId: 'hole', sourceId: 'hole' });
+  capture.captureProviderSettlement({ ...base, invocationId: 'later', sourceId: 'later' });
+  assert.deepEqual(observations.map((entry) => entry.sourceSequence), ['1', '2']);
+  // The later source settles first; the earlier rejection is definitive and
+  // arrives when it can no longer be released as the tail.
+  dispositions[1]!({ status: 'durable' });
+  dispositions[0]!({ status: 'rejected', code: 'invalid_record', message: 'invalid record' });
+
+  capture.captureProviderSettlement({ ...base, invocationId: 'fresh', sourceId: 'fresh' });
+  assert.match(observations[2]!.stableOriginId!, /^host-origin:[0-9a-f]{64}:epoch:1$/);
+  assert.equal(observations[2]!.sourceSequence, '1',
+    'the rotated epoch starts a fresh sequence stream with no fabricated receipt');
+  assert.equal(observations[2]!.idempotencyKey, JSON.stringify([
+    'generation-rotate', 'providerSettlement', 'provider-settlement:fresh',
+  ]), 'rotation must not change the source-key idempotency identity');
+
+  // A genuine retry of the holed source key reuses its retained assignment,
+  // so the retry still lands on the original holed stream and can fill it.
+  capture.captureProviderSettlement({ ...base, invocationId: 'hole', sourceId: 'hole' });
+  assert.equal(observations[3]!.stableOriginId, observations[0]!.stableOriginId);
+  assert.equal(observations[3]!.sourceSequence, '1');
+  assert.equal(observations[3]!.idempotencyKey, observations[0]!.idempotencyKey);
+  dispositions[2]!({ status: 'durable' });
+  dispositions[3]!({ status: 'durable' });
+  capture.captureProviderSettlement({ ...base, invocationId: 'after-retry', sourceId: 'after-retry' });
+  assert.equal(observations[4]!.stableOriginId, observations[2]!.stableOriginId,
+    'filled old holes do not resurrect the retired epoch for new facts');
+  assert.equal(observations[4]!.sourceSequence, '2');
+});
+
+test('evicted and reassigned source still rotates after its original non-tail rejection', () => {
+  const observations: AnalyticsObservation<object>[] = [];
+  const dispositions: Array<(value: { status: 'durable' } | { status: 'rejected'; code: string; message: string }) => void> = [];
+  const capture = new CanonicalAnalyticsCapture({
+    authority: 'canonical', generationId: 'generation-evicted', workspaceId: 'workspace-a',
+    buildId: 'build-a', processGeneration: 'process-a', maxTrackedSourceKeys: 2,
+    sink: {
+      submit: () => undefined,
+      submitTracked: (observation, onDisposition) => {
+        observations.push(observation);
+        dispositions.push(onDisposition);
+      },
+    },
+    detailSink: { submitDetail: () => undefined },
+    lifecycleSink: { bindPendingCreate: async () => undefined, deleteSession: async () => undefined },
+  });
+  const context = { sessionId: 'session-a', sessionPath: '/session-a', runId: 'run-a', operationId: 'op-a' };
+  const submit = (key: string) => capture.captureExecution(context, key, 'begin', key, 100, { source: 'host' });
+  submit('hole');
+  submit('later-a');
+  submit('later-b'); // Evicts the in-flight hole.
+  submit('hole'); // Replacement cache entry must not suppress recovery.
+  dispositions[0]!({ status: 'rejected', code: 'invalid_record', message: 'invalid record' });
+  submit('fresh');
+  assert.notEqual(observations[4]!.stableOriginId, observations[0]!.stableOriginId);
+  assert.equal(observations[4]!.sourceSequence, '1');
+  // A later acknowledgement for the replacement belongs to the retired epoch.
+  dispositions[3]!({ status: 'durable' });
+  submit('next');
+  assert.equal(observations[5]!.stableOriginId, observations[4]!.stableOriginId);
+  assert.equal(observations[5]!.sourceSequence, '2');
+});
+
+test('ambiguous transport failure retains the producer sequence without release or rotation', async () => {
+  const observations: AnalyticsObservation<object>[] = [];
+  const errors: string[] = [];
+  const capture = new CanonicalAnalyticsCapture({
+    authority: 'canonical', generationId: 'generation-ambiguity', workspaceId: 'workspace-a',
+    buildId: 'build-a', processGeneration: 'process-a',
+    sink: { submit: (observation) => {
+      observations.push(observation);
+      return Promise.reject(new Error('transport failed'));
+    } },
+    detailSink: { submitDetail: () => undefined },
+    lifecycleSink: { bindPendingCreate: async () => undefined, deleteSession: async () => undefined },
+    onCaptureError: (error) => { errors.push(error.message); },
+  });
+  const base = {
+    schemaVersion: 1 as const,
+    sessionId: 'session-ambiguity', sessionPath: '/session-ambiguity', branchId: null,
+    parentOperationId: null, parentRunId: null, parentToolId: null,
+    kind: 'conversation' as const, provider: 'provider-a', model: 'model-a',
+    provenance: 'exact' as const, startedAt: '2026-09-10T00:00:00.000Z',
+    endedAt: '2026-09-10T00:00:01.000Z', outcome: 'succeeded' as const,
+    instrumentationGap: false as const,
+  };
+  capture.captureProviderSettlement({ ...base, invocationId: 'first', sourceId: 'first' });
+  capture.captureProviderSettlement({ ...base, invocationId: 'second', sourceId: 'second' });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  capture.captureProviderSettlement({ ...base, invocationId: 'third', sourceId: 'third' });
+  // Ambiguous failure is replayable: the recorder may have committed, so the
+  // sequence stays owned by its source key and the origin never rotates.
+  assert.deepEqual(observations.map((entry) => entry.sourceSequence), ['1', '2', '3']);
+  assert.deepEqual(observations.map((entry) => entry.stableOriginId), [
+    observations[0]!.stableOriginId, observations[0]!.stableOriginId, observations[0]!.stableOriginId,
+  ]);
+  assert.deepEqual(errors, ['transport failed', 'transport failed']);
+  capture.captureProviderSettlement({ ...base, invocationId: 'first', sourceId: 'first' });
+  assert.equal(observations[3]!.sourceSequence, '1', 'the retained entry still owns its sequence');
+});
+
+test('deleted-subject dispositions consume the sequence without rotating the producer origin', () => {
+  const observations: AnalyticsObservation<object>[] = [];
+  const dispositions: Array<(value: { status: 'durable' } | { status: 'rejected'; code: string; message: string }) => void> = [];
+  const capture = new CanonicalAnalyticsCapture({
+    authority: 'canonical', generationId: 'generation-deleted', workspaceId: 'workspace-a',
+    buildId: 'build-a', processGeneration: 'process-a',
+    sink: {
+      submit: () => undefined,
+      submitTracked: (observation, onDisposition) => {
+        observations.push(observation);
+        dispositions.push(onDisposition);
+      },
+    },
+    detailSink: { submitDetail: () => undefined },
+    lifecycleSink: { bindPendingCreate: async () => undefined, deleteSession: async () => undefined },
+  });
+  const base = {
+    schemaVersion: 1 as const,
+    sessionId: 'session-deleted', sessionPath: '/session-deleted', branchId: null,
+    parentOperationId: null, parentRunId: null, parentToolId: null,
+    kind: 'conversation' as const, provider: 'provider-a', model: 'model-a',
+    provenance: 'exact' as const, startedAt: '2026-09-10T00:00:00.000Z',
+    endedAt: '2026-09-10T00:00:01.000Z', outcome: 'succeeded' as const,
+    instrumentationGap: false as const,
+  };
+  capture.captureProviderSettlement({ ...base, invocationId: 'deleted-subject', sourceId: 'deleted-subject' });
+  dispositions[0]!({ status: 'rejected', code: 'subject_deleted', message: 'subject deleted' });
+  capture.captureProviderSettlement({ ...base, invocationId: 'after-delete', sourceId: 'after-delete' });
+  assert.equal(observations[1]!.stableOriginId, observations[0]!.stableOriginId,
+    'a sink-consumed deleted-subject sequence must not rotate the origin');
+  assert.equal(observations[1]!.sourceSequence, '2');
+});
+
+test('reentrant canonical rejection does not release a sequence admitted by the nested capture', () => {
+  const observations: AnalyticsObservation<object>[] = [];
+  let reentered = false;
+  const base = {
+    schemaVersion: 1 as const,
+    sessionId: 'session-reentrant', sessionPath: '/session-reentrant', branchId: null,
+    parentOperationId: null, parentRunId: null, parentToolId: null,
+    kind: 'conversation' as const, provider: 'provider-a', model: 'model-a',
+    provenance: 'exact' as const, startedAt: '2026-09-10T00:00:00.000Z',
+    endedAt: '2026-09-10T00:00:01.000Z', outcome: 'succeeded' as const,
+    instrumentationGap: false as const,
+  };
+  const capture = new CanonicalAnalyticsCapture({
+    authority: 'canonical', generationId: 'generation-reentrant', workspaceId: 'workspace-a',
+    buildId: 'build-a', processGeneration: 'process-a',
+    sink: { submit: (observation) => {
+      if (!reentered) {
+        reentered = true;
+        assert.equal(capture.captureProviderSettlement({ ...base, invocationId: 'same-invocation', sourceId: 'same-source' }), 'submitted');
+        throw new Error('outer capture rejected');
+      }
+      observations.push(observation);
+    } },
+    detailSink: { submitDetail: () => undefined },
+    lifecycleSink: { bindPendingCreate: async () => undefined, deleteSession: async () => undefined },
+  });
+  assert.equal(capture.captureProviderSettlement({ ...base, invocationId: 'same-invocation', sourceId: 'same-source' }), 'rejected');
+  assert.equal(capture.captureProviderSettlement({ ...base, invocationId: 'different', sourceId: 'different-source' }), 'submitted');
+  assert.deepEqual(observations.map((entry) => entry.sourceSequence), ['1', '2']);
+});
+
 test('canonical provider adapter preserves exact accounting fields and assigns contiguous producer sequence', () => {
   const observations: AnalyticsObservation<object>[] = [];
   const capture = new CanonicalAnalyticsCapture({

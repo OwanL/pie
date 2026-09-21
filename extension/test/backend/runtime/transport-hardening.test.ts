@@ -215,6 +215,36 @@ test('oversized subagent progress preserves a renderable activity skeleton', () 
   assert.match(bounded.details.results[0].messages[0].content[0].text, /transcript omitted/i);
 });
 
+test('minimal oversized subagent previews retain tooltip telemetry and recovery metadata', () => {
+  const progress = {
+    details: {
+      mode: 'single',
+      results: [{
+        agent: 'worker', task: 'work', exitCode: -1, messages: [],
+        model: 'provider/model', selectedModel: 'provider/model', thinkingLevel: 'high',
+        contextWindow: 200_000, usage: { output: 42 }, retryCount: 1,
+        fallback: true, failedModel: 'provider/old', failureClass: 'rate_limit',
+        stopReason: 'error', errorMessage: 'provider unavailable',
+        turnThroughputSamples: [{ endedAt: '2026-01-01T00:00:01.000Z', outputTokens: 42, generationDurationMs: 1000, status: 'completed' }],
+        diagnostic: 'oversized non-transcript field'.repeat(5_000),
+      }],
+    },
+  };
+
+  const bounded = boundToolProgress(progress, 4_096) as any;
+  const child = bounded.details.results[0];
+  assert.equal(bounded.$toolProgress, 'truncated');
+  assert.equal(child.contextWindow, 200_000);
+  assert.deepEqual(child.usage, { output: 42 });
+  assert.equal(child.retryCount, 1);
+  assert.equal(child.fallback, true);
+  assert.equal(child.failedModel, 'provider/old');
+  assert.equal(child.failureClass, 'rate_limit');
+  assert.equal(child.stopReason, 'error');
+  assert.equal(child.errorMessage, 'provider unavailable');
+  assert.equal(child.turnThroughputSamples[0].outputTokens, 42);
+});
+
 test('ordered stdout writer waits for callbacks and preserves order', async () => {
   const written: string[] = [];
   const stream = new Writable({

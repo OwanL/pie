@@ -46,9 +46,9 @@ interface SessionTabsProps {
   onDissolvePinnedGroup?: (sourcePath: string) => void;
   onUnpinPinnedGroup?: (sourcePath: string) => void;
   onRunAction: (action: SessionTabRunAction, tabPath: string) => void;
-  /** Session paths that own a pending deferred trigger. Tabs in this set have
-   *  their close × greyed out with an explanatory tooltip (the trigger must be
-   *  cancelled first, from the status strip). */
+  /** Delivery-target session paths with a pending deferred trigger. Tabs in
+   *  this set have their close × greyed out with an explanatory tooltip (the
+   *  trigger must be cancelled first, from the status strip). */
   deferredSessionPaths: string[];
   /** Session paths whose pending deferred trigger includes a timer. */
   deferredTimerSessionPaths: string[];
@@ -400,7 +400,7 @@ function SessionTabsView({
 
     if (event.key === 'Delete') {
       event.preventDefault();
-      // A tab with a pending deferred trigger cannot be closed (greyed-out ×).
+      // A delivery-target tab with a pending deferred trigger cannot be closed (greyed-out ×).
       // Mirror that guard on the keyboard shortcut so Delete can't bypass it
       // and orphan the trigger.
       if (deferredPathSet.has(tabPath)) return;

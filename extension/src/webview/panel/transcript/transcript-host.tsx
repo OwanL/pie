@@ -13,6 +13,7 @@ import type {
   ChatPrefs,
   ComposerInput,
   InlineEditDraft,
+  ModelInfo,
   PruningResult,
   PruningSettings,
   SystemPromptEntry,
@@ -58,6 +59,7 @@ const TranscriptSurface = memo(function TranscriptSurface({
   pruningResult,
   pendingAssistantModelId,
   pendingAssistantThinkingLevel,
+  availableModels,
   workingDirectory,
   editingId,
   editingDraft,
@@ -98,6 +100,7 @@ const TranscriptSurface = memo(function TranscriptSurface({
         pruningResult={pruningResult}
         pendingAssistantModelId={pendingAssistantModelId}
         pendingAssistantThinkingLevel={pendingAssistantThinkingLevel}
+        availableModels={availableModels}
         workingDirectory={workingDirectory}
         editingId={editingId}
         editingDraft={editingDraft}
@@ -133,6 +136,8 @@ export interface TranscriptHostProps {
   pruningResult: PruningResult | null;
   pendingAssistantModelId?: string;
   pendingAssistantThinkingLevel?: ThinkingLevel;
+  /** Current model catalog used for transcript-only cost estimates. */
+  availableModels?: ModelInfo[];
   workingDirectory: string | null;
   editingId: string | null;
   editingDraft?: InlineEditDraft | null;
@@ -176,6 +181,7 @@ export function TranscriptHost({
   pruningResult,
   pendingAssistantModelId,
   pendingAssistantThinkingLevel,
+  availableModels,
   workingDirectory,
   editingId,
   editingDraft,
@@ -371,6 +377,7 @@ export function TranscriptHost({
           pruningResult={pruningResult}
           pendingAssistantModelId={pendingAssistantModelId}
           pendingAssistantThinkingLevel={pendingAssistantThinkingLevel}
+          availableModels={availableModels}
           workingDirectory={workingDirectory}
           editingId={editingId}
           editingDraft={editingDraft}

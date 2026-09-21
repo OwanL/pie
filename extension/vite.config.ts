@@ -119,6 +119,7 @@ export default defineConfig(({ mode }) => {
       resolve: {
         alias: {
           '@shared': path.join(srcDir, 'shared'),
+          '@mariozechner/pi-ai': path.join(rootDir, 'node_modules', '@earendil-works', 'pi-coding-agent', 'node_modules', '@earendil-works', 'pi-ai'),
         },
       },
     };
@@ -157,6 +158,7 @@ export default defineConfig(({ mode }) => {
     resolve: {
       alias: {
         '@shared': path.join(srcDir, 'shared'),
+        '@mariozechner/pi-ai': path.join(rootDir, 'node_modules', '@earendil-works', 'pi-coding-agent', 'node_modules', '@earendil-works', 'pi-ai'),
       },
     },
   };

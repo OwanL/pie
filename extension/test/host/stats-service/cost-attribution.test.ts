@@ -196,7 +196,7 @@ test('a recorded provider survives an unpriced model id instead of degrading to 
   assert.equal(providers.get('openai-codex')?.cost, 0.25);
 });
 
-test('known token usage is repriced from the catalog instead of preserving a stale stored estimate', () => {
+test('provider-reported usage cost wins the catalog estimate', () => {
   const map = new Map([['gpt-5.6-sol', [price('openai-codex', 4)]]]);
   const snapshot = run({
     modelId: 'gpt-5.6-sol', provider: 'openai-codex', inputTokens: 1_000_000,
@@ -210,8 +210,8 @@ test('known token usage is repriced from the catalog instead of preserving a sta
   });
 
   const stats = computeAggregateStats([snapshot], map, NOW, [], {}, 0);
-  assert.equal(stats.todayCost, 4);
-  assert.equal(stats.totalCost, 4);
+  assert.equal(stats.todayCost, 5);
+  assert.equal(stats.totalCost, 5);
 });
 
 test('mixed same-id parent turns and auxiliary summaries remain provider-discrete', () => {
@@ -239,7 +239,7 @@ test('mixed same-id parent turns and auxiliary summaries remain provider-discret
   const providers = new Map(stats.todayCostByProvider.map((entry) => [entry.provider, entry]));
   assert.equal(providers.get('github-copilot')?.inputTokens, 10);
   assert.equal(providers.get('openai-codex')?.inputTokens, 23);
-  assert.equal(providers.get('openai-codex')?.cost, 0.000115);
+  assert.equal(providers.get('openai-codex')?.cost, 0.4201);
 });
 
 test('durable assistant-message samples account for an active tool loop before its terminal reply', () => {
@@ -286,6 +286,100 @@ test('terminal parent totals reconcile with assistant-message samples without do
 
   assert.equal(stats.todayInputTokens, 300_000);
   assert.equal(stats.todayCost, 0.6);
+});
+
+test('assistant-message provider cost survives clipped incomplete token channels', () => {
+  const map = new Map([['gpt-5.6-sol', [price('github-copilot', 2)]]]);
+  const stats = computeAggregateStats([run({
+    modelId: 'gpt-5.6-sol', provider: 'github-copilot', inputTokens: 200,
+    auxiliaryLlmUsage: [{
+      kind: 'assistant_message', sourceId: 'assistant-partial', occurredAt: new Date(NOW - 500).toISOString(),
+      modelId: 'gpt-5.6-sol', provider: 'github-copilot', inputTokens: 100,
+      outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
+      tokenChannelsKnown: false,
+      tokenChannelPresence: { input: true, output: false, cacheRead: false, cacheWrite: false },
+      reportedCostUsd: 0.5,
+    }],
+    turnThroughputSamples: [{
+      endedAt: new Date(NOW - 500).toISOString(), inputTokens: 100, outputTokens: 0,
+      cacheReadTokens: 0, cacheWriteTokens: 0, generationDurationMs: 1,
+      concurrentBusySessions: 1, status: 'completed', modelId: 'gpt-5.6-sol',
+      provider: 'github-copilot', reportedCostUsd: 0.5,
+      turnLatencyMs: null, overheadMs: null, providerLatencyMs: null,
+    }],
+  })], map, NOW, [], {}, 0);
+
+  assert.equal(stats.todayInputTokens, 200);
+  assert.ok(Math.abs(stats.todayCost - 0.5002) < 1e-12,
+    'partial exact cost is retained while only the unobserved residual is catalog-priced');
+});
+
+test('matched throughput channels complete a partial assistant cost without catalog residuals', () => {
+  const map = new Map([['gpt-5.6-sol', [
+    { id: 'gpt-5.6-sol', provider: 'github-copilot', pricing: { input: 2, output: 4, cacheRead: 0, cacheWrite: 0 } },
+  ]]]);
+  const stats = computeAggregateStats([run({
+    modelId: 'gpt-5.6-sol', provider: 'github-copilot', inputTokens: 100, outputTokens: 500,
+    auxiliaryLlmUsage: [{
+      kind: 'assistant_message', sourceId: 'assistant-output-gap', occurredAt: new Date(NOW - 500).toISOString(),
+      modelId: 'gpt-5.6-sol', provider: 'github-copilot', inputTokens: 100,
+      outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
+      tokenChannelsKnown: false,
+      tokenChannelPresence: { input: true, output: false, cacheRead: false, cacheWrite: false },
+      reportedCostUsd: 0.5,
+    }],
+    turnThroughputSamples: [{
+      endedAt: new Date(NOW - 500).toISOString(), inputTokens: 100, outputTokens: 500,
+      cacheReadTokens: 0, cacheWriteTokens: 0, generationDurationMs: 1,
+      concurrentBusySessions: 1, status: 'completed', modelId: 'gpt-5.6-sol',
+      provider: 'github-copilot', reportedCostUsd: 0.5,
+      turnLatencyMs: null, overheadMs: null, providerLatencyMs: null,
+    }],
+  })], map, NOW, [], {}, 0);
+
+  assert.equal(stats.todayInputTokens, 100);
+  assert.equal(stats.todayOutputTokens, 500);
+  assert.equal(stats.todayCost, 0.5);
+});
+
+test('assistant-message explicit zero cost wins catalog pricing when terminal totals clip the sample', () => {
+  const map = new Map([['gpt-5.6-sol', [price('github-copilot', 2)]]]);
+  const stats = computeAggregateStats([run({
+    modelId: 'gpt-5.6-sol', provider: 'github-copilot', inputTokens: 200,
+    auxiliaryLlmUsage: [{
+      kind: 'assistant_message', sourceId: 'assistant-free', occurredAt: new Date(NOW - 500).toISOString(),
+      modelId: 'gpt-5.6-sol', provider: 'github-copilot', inputTokens: 100,
+      outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
+      reportedCostUsd: 0,
+    }],
+  })], map, NOW, [], {}, 0);
+
+  assert.equal(stats.todayInputTokens, 200);
+  assert.ok(Math.abs(stats.todayCost - 0.0002) < 1e-12,
+    'the observed free response is not replaced by a catalog estimate');
+});
+
+test('subagent provider cost survives clipped incomplete token channels', () => {
+  const map = new Map([['gpt-5.6-sol', [price('github-copilot', 2)]]]);
+  const stats = computeAggregateStats([run({
+    modelId: 'gpt-5.6-sol', provider: 'github-copilot',
+    toolUsage: {
+      ...run({}).toolUsage,
+      subagentInputTokens: 200,
+    },
+    auxiliaryLlmUsage: [{
+      kind: 'subagent', sourceId: 'child-partial', occurredAt: new Date(NOW - 500).toISOString(),
+      modelId: 'gpt-5.6-sol', provider: 'github-copilot', inputTokens: 100,
+      outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
+      tokenChannelsKnown: false,
+      tokenChannelPresence: { input: true, output: false, cacheRead: false, cacheWrite: false },
+      reportedCostUsd: 0.5,
+    }],
+  })], map, NOW, [], {}, 0);
+
+  assert.equal(stats.todayInputTokens, 200);
+  assert.ok(Math.abs(stats.todayCost - 0.5002) < 1e-12,
+    'partial child exact cost is retained while only the unobserved residual is catalog-priced');
 });
 
 test('provider-qualified ids keep one bare model separate per provider across today/week series', () => {

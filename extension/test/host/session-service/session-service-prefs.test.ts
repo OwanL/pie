@@ -14,6 +14,7 @@ import { NOOP_RUN_OBSERVER } from '../../../src/host/stats-service';
 import type { SessionService as SessionServiceType } from '../../../src/host/session-service/service';
 import type { BackendClient as BackendClientType } from '../../../src/host/backend/client';
 import { createOperationalIncident } from '../../../src/shared/incidents';
+import type { ChatPrefs } from '../../../src/shared/protocol';
 
 function installVscodeMock() {
   const moduleWithLoad = Module as typeof Module & { _load: (...args: any[]) => unknown };
@@ -295,6 +296,24 @@ test('setPrefs persists prefs without dispatching a recursive SetPrefs command',
   assert.equal(persisted?.composerInitialRows, 4);
 });
 
+test('setPrefs strips the retired width key while preserving appearance overrides', async () => {
+  const { service, context } = makeHarness();
+  const legacyPatch = {
+    uiMessageWidth: 100,
+    uiBaseFontSize: 15,
+    uiBackground: '#101820',
+  } as unknown as Partial<ChatPrefs>;
+
+  await service.setPrefs(legacyPatch);
+
+  const persisted = context.globalState.get('chatPrefs') as Record<string, unknown> | undefined;
+  assert.ok(persisted);
+  assert.equal(persisted.uiBaseFontSize, 15);
+  assert.equal(persisted.uiBackground, '#101820');
+  assert.equal('uiMessageWidth' in persisted, false);
+  service.dispose();
+});
+
 test('setPrefs no longer dispatches UnreadFinishedSessionsChanged (reducer owns the clear)', async () => {
   const { service, dispatched, context } = makeHarness();
 
@@ -366,6 +385,56 @@ test('setPrefs mirrors providerConcurrency and subagentDropTools to the backend 
   assert.deepEqual((runtimePrefsSet.params as any).providerConcurrency, providerConcurrency);
   assert.deepEqual((runtimePrefsSet.params as any).subagentDropTools, subagentDropTools);
   assert.equal((runtimePrefsSet.params as any).subagentRouteAroundSaturatedProviders, true);
+});
+
+test('backend generation failure rejects an undispatched deferred send and removes its queue entry', () => {
+  const sessionPath = '/sessions/deferred-queued.jsonl';
+  let archState: ArchState = {
+    ...createInitialArchState(),
+    settings: { ...createInitialArchState().settings, backendReady: false },
+    sessions: {
+      ...createInitialArchState().sessions,
+      openTabPaths: [sessionPath],
+      activeSessionPath: sessionPath,
+    },
+  };
+  const dispatched: Event[] = [];
+  const dispatchArch = (event: Event): void => {
+    dispatched.push(event);
+    archState = reducer(archState, event).state;
+  };
+  const service = new SessionServiceCtor(
+    createExtensionContext(),
+    new BackendClientCtor(),
+    () => undefined,
+    () => undefined,
+    dispatchArch,
+    () => archState,
+    undefined,
+    NOOP_RUN_OBSERVER,
+  );
+
+  dispatchArch({
+    kind: 'Command',
+    cmd: {
+      kind: 'Send', corrId: 'deferred-corr', operationId: 'deferred-operation', operationAttempt: 1,
+      operationSource: { kind: 'host' }, backendGeneration: 0, sessionPath,
+      text: 'resume', inputs: [], composedText: 'resume', localId: 'deferred-local',
+      previousSummary: null, timestamp: 100, customType: 'deferred-trigger',
+      customDetails: { reason: 'timer elapsed' },
+    },
+  });
+  assert.equal(archState.pending.backendReadyQueueBySession[sessionPath]?.length, 1);
+
+  (service as any).state.failPendingSendOperations('worker exited');
+
+  assert.ok(dispatched.some((event) => event.kind === 'SendResult'
+    && event.corrId === 'deferred-corr' && !event.ok
+    && event.error === 'worker exited'));
+  assert.equal(archState.pending.backendReadyQueueBySession[sessionPath], undefined);
+  assert.equal(archState.transcript.bySession[sessionPath]?.some((message) => message.id === 'deferred-local'), false);
+  assert.equal(archState.operations['deferred-operation']?.terminal?.reason, 'backend-generation-ended');
+  service.dispose();
 });
 
 test('private close does not reopen a deleted transcript when the final analytics scrub fails', async () => {
@@ -635,6 +704,8 @@ test('restart waits for confirmed death before terminalizing an ambiguous send a
   assert.equal(terminalTransitions[createOperationId], 1);
   assert.equal(dispatched.filter((event) => event.kind === 'SendOperationStatus'
     && event.operationId === 'send-operation' && event.state === 'generation-ended').length, 1);
+  assert.equal(dispatched.filter((event) => event.kind === 'SendResult'
+    && event.operationId === 'send-operation').length, 0);
   assert.equal(dispatched.filter((event) => event.kind === 'CreateOperationFailed'
     && event.operationId === createOperationId && event.reason === 'backend-generation-ended').length, 1);
 });

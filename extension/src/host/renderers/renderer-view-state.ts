@@ -21,7 +21,10 @@ export function rendererSessionCatalog(viewState: Pick<
 >): SessionSummary[] {
   const requiredPaths = new Set(viewState.openTabPaths);
   if (viewState.activeSession?.path) requiredPaths.add(viewState.activeSession.path);
-  for (const trigger of viewState.deferredTriggers) requiredPaths.add(trigger.sessionPath);
+  for (const trigger of viewState.deferredTriggers) {
+    requiredPaths.add(trigger.sessionPath);
+    requiredPaths.add(trigger.targetSession ?? trigger.sessionPath);
+  }
 
   // Preserve the historical recovery fallback when no tabs are open: the UI
   // may reopen the first durable session if host tab persistence is damaged.

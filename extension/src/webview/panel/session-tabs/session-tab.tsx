@@ -27,9 +27,9 @@ export interface SessionTabProps {
   isPinned: boolean;
   /** True when this pinned chip is the current group/merge drop target. */
   isDropTarget: boolean;
-  /** True when this session owns a pending deferred trigger — disables the
-   *  close × with an explanatory tooltip (the trigger must be cancelled first,
-   *  from the status strip). */
+  /** True when this session is the delivery target of a pending deferred
+   *  trigger — disables the close × with an explanatory tooltip (the trigger
+   *  must be cancelled first, from the status strip). */
   hasDeferredTriggers: boolean;
   /** True when a pending deferred trigger includes a timer. */
   hasDeferredTimer: boolean;
@@ -88,8 +88,8 @@ export const SessionTab = memo(function SessionTab({
             ? `${label} (finished, unread)`
             : label;
 
-  // A pending deferred trigger blocks closing the tab until it is cancelled
-  // from the status strip, preventing the trigger from being orphaned.
+  // A pending deferred trigger blocks closing its delivery target until it is
+  // cancelled from the status strip, preventing the trigger from being orphaned.
   const deferredBlockTitle = 'Pending deferred trigger(s) — cancel from the status bar first.';
 
   const classBits = ['session-tab'];

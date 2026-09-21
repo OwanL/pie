@@ -226,7 +226,7 @@ test("createInvalidAgentResult builds error result with stderr", () => {
 	assert.equal(result.messages.length, 0);
 	assert.ok(result.stderr.length > 0);
 	assert.equal(result.usage.input, 0);
-	assert.equal(result.usage.cost, 0);
+	assert.equal(result.usage.cost, undefined, "no provider turn ran, so no cost evidence exists");
 });
 
 test("createInvalidAgentResult includes step number when provided", () => {

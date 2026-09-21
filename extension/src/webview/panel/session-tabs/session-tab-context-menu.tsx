@@ -20,8 +20,9 @@ export interface SessionTabContextMenuProps {
   isPinned: boolean;
   /** Rendered pinned strip items used for dynamic Group with… actions. */
   pinnedItems?: PinnedItem[];
-  /** True when this tab's session owns a pending deferred trigger — greys out
-   *  the Close Tab item with an explanatory tooltip. */
+  /** True when this tab's session is the delivery target of a pending
+   *  deferred trigger — greys out the Close Tab item with an explanatory
+   *  tooltip. */
   hasDeferredTriggers: boolean;
   /** Create a new session (the strip's existing "+" affordance). */
   onNew: () => void;

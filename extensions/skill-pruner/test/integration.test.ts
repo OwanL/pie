@@ -291,7 +291,7 @@ const mockToolInfo = [
 	{ name: "bash", description: "Execute a bash command", parameters: { type: "object", properties: {} } },
 	{ name: "subagent", description: "Delegate tasks to specialized subagents", parameters: { type: "object", properties: {} } },
 	{ name: "web_search", description: "Search the web for information", parameters: { type: "object", properties: {} } },
-	{ name: "defer_trigger", description: "Wait for an external condition and resume later", parameters: { type: "object", properties: {} } },
+	{ name: "defer_trigger", description: "Register an external condition without ending the current turn", parameters: { type: "object", properties: {} } },
 ];
 
 // ---------------------------------------------------------------------------
@@ -431,7 +431,7 @@ test("alwaysKeep skills and tools protected even when the LLM prunes them", asyn
 	}
 });
 
-test("deferred-trigger wake turns keep defer_trigger available even when the prepass tries to prune it", async () => {
+test("wake turns keep defer_trigger available even when the prepass tries to prune it", async () => {
 	const setActiveToolsCalls: string[][] = [];
 	let prepassRequest = "";
 	__setCompleteFn(async (_model, context) => {
@@ -452,7 +452,7 @@ test("deferred-trigger wake turns keep defer_trigger available even when the pre
 			realisticSkills,
 		);
 
-		assert.doesNotMatch(prepassRequest, /- defer_trigger:/, "protected wake capability is omitted from pruning candidates");
+		assert.doesNotMatch(prepassRequest, /- defer_trigger:/, "defer_trigger is protected from pruning candidates");
 		assert.ok(setActiveToolsCalls.at(-1)?.includes("defer_trigger"));
 		assert.ok(!setActiveToolsCalls.at(-1)?.includes("web_search"));
 		assert.ok(result?.message?.details.includedTools.includes("defer_trigger"));
@@ -463,7 +463,7 @@ test("deferred-trigger wake turns keep defer_trigger available even when the pre
 	}
 });
 
-test("ordinary turns may still prune defer_trigger", async () => {
+test("ordinary turns may still prune the deferred trigger tool", async () => {
 	const setActiveToolsCalls: string[][] = [];
 	__setCompleteFn(mockCompleteFn({ pruneTools: ["defer_trigger"] }));
 	try {

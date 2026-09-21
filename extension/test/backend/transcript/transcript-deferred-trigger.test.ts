@@ -4,11 +4,11 @@ import assert from 'node:assert/strict';
 import { mapTranscript, type SessionEntryLike } from '../../../src/backend/transcript';
 
 /** The wake-up text the `DeferredTriggerRegistry` injects on fire. */
-function wakeUpText(reason: string, note = 'do the thing'): string {
+function wakeUpText(reason: string, message = 'do the thing'): string {
   return (
     `[deferred trigger fired: ${reason}]\n\n` +
     'A deferred trigger you registered fired. Re-evaluate your pending task and either complete it now or call `defer_trigger` with action `register` again to keep waiting.\n\n' +
-    `Task note:\n${note}`
+    `Task message:\n${message}`
   );
 }
 
@@ -111,6 +111,16 @@ test('mapTranscript repairs the intentional abort persisted by legacy deferred w
   assert.equal(message.errorDetail, undefined);
   assert.equal(message.toolCalls?.[0]?.name, 'defer_trigger');
   assert.equal(message.toolCalls?.[0]?.status, 'completed');
+});
+
+test('mapTranscript does not repair a new non-aborting registration result', () => {
+  const result = [
+    'Registered deferred trigger trigger-1:',
+    '  target: target.jsonl',
+    '  message: Your turn will end now; you will be resumed automatically when the trigger fires.',
+  ].join('\n');
+  const [message] = mapTranscript(legacyDeferredWaitEntries(result));
+  assert.equal(message.status, 'interrupted');
 });
 
 test('mapTranscript preserves genuine and failed deferred-trigger aborts as interrupted', () => {

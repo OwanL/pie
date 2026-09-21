@@ -9,33 +9,37 @@
  * merges into `ViewState.deferredTriggers` (see `PieExtension.buildViewState`)
  * so the webview can render the waiting triggers in the bottom status strip.
  *
- * `TriggerKind` / `TriggerSpec` are defined here (not in the host store) so
- * both the host store and the protocol share one source of truth.
+ * `TriggerKind` / `TriggerSpec` come from the shared wake-condition contract
+ * (not from the host store) so the tool, host, and renderer share one source
+ * of truth, including normalized periodic predicates.
  */
 
-export type TriggerKind = 'session_finished' | 'timer' | 'user_input';
+import type {
+  CommandTrigger,
+  TriggerKind,
+  TriggerSpec,
+} from '../../../../shared/wake-conditions';
 
-export interface TriggerSpec {
-  kind: TriggerKind;
-  /** `session_finished`: specific watched session path; undefined = any open session. */
-  sessionPath?: string;
-  /** `timer`: delay in milliseconds. */
-  ms?: number;
-}
+export type { CommandTrigger, TriggerKind, TriggerSpec };
 
 /**
  * A currently-active (registered, not yet fired/cancelled) deferred trigger,
- * projected to the webview. The webview resolves the watcher session's display
- * name from `ViewState.sessions` by `sessionPath`, so the name is not carried
- * here (keeps the projection lean and avoids a second source of truth for names).
+ * projected to the webview. `sessionPath` is the creator/owner used for list
+ * and cancel authorization. `targetSession` is the delivery target; legacy
+ * records omit it and are projected with the creator as their target.
  */
 export interface DeferredTriggerView {
   id: string;
-  /** The watcher's session path (the session that will be resumed on fire). */
+  /** Creator session path; targeted cancellation is authorized against this path. */
   sessionPath: string;
+  /** Delivery target path. Optional only for old test/renderer fixtures; host
+   * projections always populate it and fall back to sessionPath when reading. */
+  targetSession?: string;
   /** Trigger specs (OR semantics: the first to fire wins and consumes the trigger). */
   triggers: TriggerSpec[];
-  /** Task reminder replayed in the wake-up message when the trigger fires. */
+  /** New registration message, or the normalized value of a legacy note. */
+  message?: string;
+  /** Compatibility projection for legacy note records and existing renderers. */
   note: string;
   /** ISO timestamp of registration (used to render elapsed "waiting" time). */
   registeredAt: string;
@@ -45,6 +49,7 @@ export interface DeferredTriggerView {
   /** Distinguishes a safely recovered pre-dispatch owner crash from an
    * acknowledgement-ambiguous claim that must remain fail-closed. */
   recoveryState?: 'dead-owner-recovered' | 'acknowledgement-ambiguous';
-  /** Human-readable explanation for claimed/retryable delivery state. */
+  /** Human-readable delivery explanation or bounded unsatisfied-condition
+   * diagnostic for a pending periodic predicate. */
   deliveryDetail?: string;
 }

@@ -1,12 +1,9 @@
-// Shared toolchain verification for the pie installers.
+// Shared toolchain verification for the Windows installer.
 //
-// Both install.ps1 and install.sh pin Node, npm, and the global `pi` CLI to
-// exact versions (`.node-version`, `package.json#packageManager`, and the
-// extension lockfile respectively) and install the pinned npm/pi when the
-// running version drifts. The version-READING helpers already live in
-// scripts/toolchain.mjs (shared with doctor.mjs); this module adds the
-// comparison/decision logic that was previously duplicated inline in both
-// shell installers.
+// Node, npm, and the global `pi` CLI are pinned by `.node-version`,
+// `package.json#packageManager`, and the extension lockfile respectively. The
+// version-reading helpers live in scripts/toolchain.mjs (shared with doctor.mjs);
+// this module owns the comparison and installation-decision logic.
 //
 // `verifyToolchain` is a pure comparison — it NEVER installs anything. The
 // shell wrappers act on the returned `installCommands` (or the CLI runner

@@ -195,6 +195,23 @@ test('a matching-asset renderer from another build remains usable without a wind
   provider.dispose();
 });
 
+test('disposed view does not receive HTML after an in-flight asset resolution completes', async () => {
+  const clock = new FakeClock();
+  const routed: WebviewToHostMessage[] = [];
+  const assets = deferred<string>();
+  const { provider } = createProvider(clock, routed, [assets.promise]);
+  const view = new FakeView();
+
+  const resolving = provider.resolveWebviewView(view as never, {} as never, {} as never);
+  view.disposeView();
+  assets.resolve('<html>late</html>');
+  await resolving;
+
+  assert.equal(provider.getDebugState().hasView, false);
+  assert.equal(view.webview.html, '');
+  provider.dispose();
+});
+
 test('provider delegates state posts to one serialized lazy controller operation', async () => {
   const clock = new FakeClock();
   const routed: WebviewToHostMessage[] = [];

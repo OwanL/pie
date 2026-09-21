@@ -8,7 +8,9 @@ import {
   boundedTimerSlice,
   DeferredTriggerRegistry,
   MAX_TIMER_SLICE_MS,
+  type DeferredTriggerRegistryDeps,
 } from '../../../src/host/deferred-triggers/registry';
+import type { CommandPredicateRunner } from '../../../src/host/deferred-triggers/command-predicate';
 import { appendTriggerOp, DeferredTriggerStore, replayTriggers } from '../../../src/host/deferred-triggers/store';
 import type { ArchState } from '../../../src/host/core/arch-state';
 import type { Event } from '../../../src/host/core/events';
@@ -53,26 +55,28 @@ function fakeArchState(): ArchState {
   return { sessions: { openTabPaths: openTabs } } as unknown as ArchState;
 }
 
-function newRegistry(): DeferredTriggerRegistry {
+function newRegistry(overrides: Pick<DeferredTriggerRegistryDeps, 'commandRunner' | 'clock'> = {}): DeferredTriggerRegistry {
   const registry = new DeferredTriggerRegistry({
     getArchState: fakeArchState,
     dispatchArch: (event) => dispatched.push(event),
     // No-op watcher: avoids `fs.watch` (libuv crashes on Windows under rapid
     // create/dispose in tests). `start()` still calls `reload()` once.
     startWatcher: () => () => {},
+    ...overrides,
   });
   registry.start();
   registries.push(registry);
   return registry;
 }
 
-function register(id: string, sessionPath: string, triggers: unknown[], note = '', at?: string): void {
+function register(id: string, sessionPath: string, triggers: unknown[], message = '', at?: string, targetSession?: string): void {
   appendTriggerOp({
     id,
     op: 'register',
     sessionPath,
+    ...(targetSession ? { targetSession } : {}),
     triggers: triggers as never,
-    note,
+    message,
     at: at ?? new Date().toISOString(),
   });
 }
@@ -90,7 +94,7 @@ function sentCommands(): { kind: string; corrId?: string; customType?: string; c
 }
 
 function flushMicrotasks(): Promise<void> {
-  return new Promise((resolve) => setImmediate(resolve));
+  return new Promise((resolve) => setTimeout(resolve, 10));
 }
 
 test('session_finished (any): fires when another session finishes, delivers wake-up to watcher', () => {
@@ -100,7 +104,18 @@ test('session_finished (any): fires when another session finishes, delivers wake
   assert.equal(dispatched.length, 1);
   const text = sentTexts()[0];
   assert.match(text, /\[deferred trigger fired: session finished \(any open session\)\]/);
-  assert.match(text, /Task note:\nmark done \+ close/);
+  assert.match(text, /Task message:\nmark done \+ close/);
+});
+
+test('explicit target receives the synthetic wake while the creator remains the owner', () => {
+  openTabs = [WATCHER, OTHER];
+  register('targeted', WATCHER, [{ kind: 'timer', ms: 60_000 }], 'send to other', undefined, OTHER);
+  const r = newRegistry();
+  r.fire('targeted', 'timer elapsed');
+  assert.equal(dispatched.length, 1);
+  const send = dispatched[0] as { cmd?: { sessionPath?: string; text?: string } };
+  assert.equal(send.cmd?.sessionPath, OTHER);
+  assert.match(send.cmd?.text ?? '', /Task message:\nsend to other/);
 });
 
 test('synthetic wake-up Send is tagged for timer/session-finished differentiation', () => {
@@ -116,7 +131,7 @@ test('synthetic wake-up Send is tagged for timer/session-finished differentiatio
 test('session_finished: does NOT self-wake when the watcher itself finishes', () => {
   register('t1', WATCHER, [{ kind: 'session_finished' }], 'note');
   const r = newRegistry();
-  r.onSessionFinished(WATCHER); // watcher's own turn ending
+  r.onSessionFinished(WATCHER); // creator's own turn ending
   assert.equal(dispatched.length, 0);
 });
 
@@ -146,6 +161,19 @@ test('user_input: the real user prompt consumes the trigger without a synthetic 
   assert.match(sidecar, /"op":"fire"/);
 });
 
+test('user_input: an explicit target consumes the real prompt in that target only', () => {
+  openTabs = [WATCHER, OTHER];
+  register('targeted-input', WATCHER, [{ kind: 'user_input' }], 'resume in other', undefined, OTHER);
+  const r = newRegistry();
+  r.onUserInput(WATCHER, 'creator-send');
+  assert.equal(r.getActiveTriggers()[0]?.deliveryState, 'pending');
+  r.onUserInput(OTHER, 'target-send');
+  assert.equal(dispatched.length, 0, 'the real target prompt is the sole wake delivery');
+  assert.equal(replayTriggers(new DeferredTriggerStore().readOps()).get('targeted-input')?.deliveryState, 'claimed');
+  r.onSendResult('target-send', true);
+  assert.equal(r.getActiveTriggers().length, 0);
+});
+
 test('timer: delays beyond Node setTimeout range are scheduled in bounded slices', () => {
   assert.equal(boundedTimerSlice(MAX_TIMER_SLICE_MS + 60_000), MAX_TIMER_SLICE_MS);
   assert.equal(boundedTimerSlice(60_000), 60_000);
@@ -170,6 +198,125 @@ test('OR semantics: once one spec fires, the whole trigger is consumed', async (
   assert.equal(dispatched.length, 1);
 });
 
+test('command exit 0 uses the host runner and synthetic wake path', async () => {
+  register('command-true', WATCHER, [{
+    kind: 'command',
+    command: 'exit 0',
+    cwd: dir,
+    intervalMs: 1_000,
+    timeoutMs: 1_000,
+  }], 'command note');
+  let calls = 0;
+  const runner: CommandPredicateRunner = async () => {
+    calls += 1;
+    return { exitCode: 0, stdout: 'not a boolean', stderr: '' };
+  };
+  newRegistry({ commandRunner: runner });
+  await flushMicrotasks();
+  assert.equal(calls, 1);
+  assert.equal(dispatched.length, 1);
+  assert.match(sentTexts()[0] ?? '', /command condition satisfied/);
+  assert.match(sentTexts()[0] ?? '', /`defer_trigger`/);
+});
+
+test('command exit 1 stays pending with bounded retry diagnostics', async () => {
+  register('command-not-yet', WATCHER, [{
+    kind: 'command',
+    command: 'exit 1',
+    cwd: dir,
+    intervalMs: 60_000,
+    timeoutMs: 1_000,
+  }], 'command note');
+  const runner: CommandPredicateRunner = async () => ({
+    exitCode: 1,
+    stdout: 'not a boolean',
+    stderr: 'ignored',
+  });
+  const r = newRegistry({ commandRunner: runner });
+  await flushMicrotasks();
+  const active = r.getActiveTriggers()[0];
+  assert.equal(dispatched.length, 0);
+  assert.equal(active?.deliveryState, 'pending');
+  assert.match(active?.deliveryDetail ?? '', /returned false/);
+  assert.match(active?.deliveryDetail ?? '', /retry in/);
+});
+
+test('command evaluation errors stay pending with bounded retry diagnostics', async () => {
+  register('command-error', WATCHER, [{
+    kind: 'command',
+    command: 'exit 2',
+    cwd: dir,
+    intervalMs: 60_000,
+    timeoutMs: 1_000,
+  }], 'command note');
+  const runner: CommandPredicateRunner = async () => ({
+    exitCode: 2,
+    stderr: 'broken predicate',
+  });
+  const r = newRegistry({ commandRunner: runner });
+  await flushMicrotasks();
+  const active = r.getActiveTriggers()[0];
+  assert.equal(dispatched.length, 0);
+  assert.equal(active?.deliveryState, 'pending');
+  assert.match(active?.deliveryDetail ?? '', /exited with code 2/);
+  assert.match(active?.deliveryDetail ?? '', /broken predicate/);
+  assert.match(active?.deliveryDetail ?? '', /retry in/);
+});
+
+test('command cancellation aborts and fences a late true result', async () => {
+  register('command-cancel', WATCHER, [{
+    kind: 'command',
+    command: 'printf true',
+    cwd: dir,
+    intervalMs: 1_000,
+    timeoutMs: 1_000,
+  }]);
+  let signal: AbortSignal | undefined;
+  let resolveRunner!: (result: { exitCode: number; stdout: string }) => void;
+  const runner: CommandPredicateRunner = (_spec, runnerSignal) => {
+    signal = runnerSignal;
+    return new Promise((resolve) => { resolveRunner = resolve; });
+  };
+  const r = newRegistry({ commandRunner: runner });
+  await flushMicrotasks();
+  assert.equal(signal?.aborted, false);
+  r.cancel(WATCHER, 'command-cancel');
+  assert.equal(signal?.aborted, true);
+  resolveRunner({ exitCode: 0, stdout: 'true' });
+  await flushMicrotasks();
+  assert.equal(dispatched.length, 0);
+});
+
+test('two registries do not execute the same command predicate concurrently', async () => {
+  register('command-lease', WATCHER, [{
+    kind: 'command',
+    command: 'printf true',
+    cwd: dir,
+    intervalMs: 60_000,
+    timeoutMs: 1_000,
+  }]);
+  let firstCalls = 0;
+  let secondCalls = 0;
+  const resolvers: ((result: { exitCode: number; stdout: string }) => void)[] = [];
+  const first: CommandPredicateRunner = () => {
+    firstCalls += 1;
+    return new Promise((resolve) => { resolvers.push(resolve); });
+  };
+  const second: CommandPredicateRunner = () => {
+    secondCalls += 1;
+    return new Promise((resolve) => { resolvers.push(resolve); });
+  };
+  const firstRegistry = newRegistry({ commandRunner: first });
+  const secondRegistry = newRegistry({ commandRunner: second });
+  await flushMicrotasks();
+  assert.equal(firstCalls + secondCalls, 1);
+  resolvers[0]?.({ exitCode: 0, stdout: 'true' });
+  await flushMicrotasks();
+  assert.equal(dispatched.length, 1);
+  firstRegistry.dispose();
+  secondRegistry.dispose();
+});
+
 test('watcher tab closed: delivery is explicit and retryable, not consumed', () => {
   register('t1', WATCHER, [{ kind: 'session_finished' }], 'note');
   openTabs = []; // watcher no longer open
@@ -179,7 +326,7 @@ test('watcher tab closed: delivery is explicit and retryable, not consumed', () 
   const active = r.getActiveTriggers();
   assert.equal(active.length, 1);
   assert.equal(active[0]?.deliveryState, 'retryable');
-  assert.match(active[0]?.deliveryDetail ?? '', /tab is closed/);
+  assert.match(active[0]?.deliveryDetail ?? '', /target session is closed/);
   const sidecar = fs.readFileSync(path.join(dir, 'deferred-triggers', 'triggers.jsonl'), 'utf8');
   assert.match(sidecar, /"op":"failed"/);
   assert.doesNotMatch(sidecar, /"op":"fire"/);

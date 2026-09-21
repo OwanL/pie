@@ -74,7 +74,7 @@
 }
 
 .transcript-header-title-mono {
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--panel-font-mono);
   font-size: 11px;
   font-weight: 600;
   line-height: 1.25;
@@ -91,7 +91,7 @@
 .transcript-header-summary-emphasis,
 .transcript-header-summary-subtle,
 .transcript-header-summary-command {
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--panel-font-mono);
   font-size: 11px;
   line-height: 1.3;
 }
@@ -407,7 +407,7 @@
   flex: 0 1 auto;
   min-width: 0;
   width: fit-content;
-  max-width: min(var(--message-assistant-width), 100%);
+  max-width: 88%;
   overflow: hidden;
   padding: 3px var(--panel-gap-sm);
   border: 1px solid var(--panel-user-border);
@@ -621,7 +621,7 @@
   overflow: hidden;
   text-overflow: clip;
   white-space: nowrap;
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--panel-font-mono);
   font-size: 0.9em;
   font-weight: 600;
   letter-spacing: 0.08em;
@@ -650,7 +650,7 @@
   min-width: 0;
   padding: 0;
   overflow: hidden;
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--panel-font-mono);
   font-size: 9px;
   font-weight: 400;
   line-height: 1.25;
@@ -782,7 +782,7 @@
   display: flex;
   flex-direction: column;
   min-width: 0;
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--panel-font-mono);
   font-size: 12px;
   line-height: 18px;
   color: color-mix(in srgb, var(--panel-foreground) 64%, var(--panel-muted) 36%);
@@ -827,15 +827,15 @@
 }
 
 /* Reserved output rows: the content block reserves the configured content-row
-   budget (2 by default) so the block height stays constant as multi-row content
+   budget (5 by default) so the block height stays constant as multi-row content
    streams in. A measured single visual row opts out below, avoiding an empty
    reserved area beneath short activity. --activity-tail-content-min-height is
    the host-set pref var (driven by activityTailLines in app-body as content rows
-   × the 18px row height); 36px is the bundled default used before the effect
+   × the 18px row height); 90px is the bundled default used before the effect
    runs. */
 :root {
   --activity-tail-row-height: 18px;
-  --activity-tail-content-min-height: 36px;
+  --activity-tail-content-min-height: 90px;
 }
 
 .turn-activity-tail-content {
@@ -1186,7 +1186,7 @@
 /* ── Message body (markdown prose) ──────────────────────────────────────── */
 
 .message-body {
-  font-size: 13px;
+  font-size: var(--panel-font-size, 11px);
   line-height: 1.6;
   word-break: break-word;
   overflow-wrap: anywhere;
@@ -1210,7 +1210,7 @@
   border-radius: var(--panel-radius-lg);
   padding: 10px 12px;
   overflow-x: auto;
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--panel-font-mono);
   font-size: 12px;
   line-height: 1.5;
   margin: 8px 0;
@@ -1225,7 +1225,7 @@
   background: var(--panel-code-surface);
   border-radius: 5px;
   padding: 1px 4px;
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--panel-font-mono);
   font-size: 12px;
 }
 
@@ -1278,7 +1278,7 @@
 }
 
 .code-block-lang {
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--panel-font-mono);
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.04em;

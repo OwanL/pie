@@ -142,7 +142,8 @@ test('session.opened carries whole-session usage even when its transcript payloa
   assert.equal(payload.sessionUsage.samples.filter((sample: { kind: string }) => sample.kind === 'assistant').length, 61);
   const reportedCost = payload.sessionUsage.samples
     .reduce((total: number, sample: { reportedCostUsd?: number }) => total + (sample.reportedCostUsd ?? 0), 0);
-  assert.ok(Math.abs(reportedCost - 0.61) < 1e-9);
+  assert.equal(reportedCost, 0, 'SDK catalog estimates must not become provider-reported charges');
+  assert.ok(payload.sessionUsage.samples.every((sample: { reportedCostUsd?: number }) => sample.reportedCostUsd === undefined));
 
   const appendedRows = [{
     type: 'message',

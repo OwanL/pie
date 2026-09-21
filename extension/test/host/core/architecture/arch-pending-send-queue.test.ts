@@ -44,6 +44,9 @@ function sendCmd(corrId: string, sessionPath: string, text: string, extra: Parti
   localId: string;
   previousSummary: SessionSummary | null;
   timestamp: number;
+  operationId: string;
+  operationAttempt: number;
+  backendGeneration: number;
 }> = {}): Event {
   return {
     kind: 'Command',
@@ -52,6 +55,12 @@ function sendCmd(corrId: string, sessionPath: string, text: string, extra: Parti
       corrId,
       sessionPath,
       text,
+      ...(extra.operationId ? {
+        operationId: extra.operationId,
+        operationAttempt: extra.operationAttempt ?? 1,
+        operationSource: { kind: 'host' },
+        backendGeneration: extra.backendGeneration ?? 0,
+      } : {}),
       inputs: extra.inputs ?? [],
       composedText: extra.composedText ?? text,
       localId: extra.localId ?? `local:${corrId}`,
@@ -113,6 +122,32 @@ test('Send to pending path: inserts optimistic message, queues entry, clears dra
 
   // No pending.ops entry (no RPC to reconcile yet).
   assert.equal(out.state.pending.ops['c1'], undefined);
+});
+
+test('generation-ended send status removes an undispatched pending-path send', () => {
+  const state = buildState({
+    sessions: {
+      ...initialArchState.sessions,
+      sessions: [placeholderSummary(PENDING)],
+      openTabPaths: [PENDING],
+      activeSessionPath: PENDING,
+    },
+  });
+  const queued = reducer(state, sendCmd('queued-corr', PENDING, 'hello', {
+    operationId: 'queued-operation', operationAttempt: 1, backendGeneration: 0,
+  }));
+  assert.equal(queued.state.pending.sendQueueBySession[PENDING]?.length, 1);
+
+  const ended = reducer(queued.state, {
+    kind: 'SendOperationStatus', operationId: 'queued-operation', sessionPath: PENDING,
+    backendGeneration: 0, operationAttempt: 1, state: 'generation-ended', error: 'worker exited',
+  });
+
+  assert.equal(ended.state.pending.sendQueueBySession[PENDING], undefined);
+  assert.equal(ended.state.transcript.bySession[PENDING]?.some((message) => message.id === 'local:queued-corr'), false);
+  assert.equal(ended.state.operations['queued-operation']?.terminal?.reason, 'backend-generation-ended');
+  assert.ok(ended.effects.some((effect) => effect.kind === 'ClearSendTimer'
+    && effect.corrId === 'queued-corr'));
 });
 
 test('Send to pending path: previousSummary is null in the queue entry (not the placeholder)', () => {

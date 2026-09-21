@@ -1,7 +1,6 @@
 // Pure helpers for reading the pi SDK pin from the extension lockfile and
 // comparing semver-ish versions. Shared by scripts/bootstrap.mjs,
-// scripts/doctor.mjs, and the shell installers (which invoke this file as a
-// CLI: `node scripts/lib/sdk-version.mjs` prints the locked version).
+// scripts/doctor.mjs, and the Windows installer through its Node helper.
 //
 // The extension lock is the source of truth for the SDK the pie backend loads;
 // the global `pi` CLI is pinned to that same exact version so a `npm i -g`
@@ -110,7 +109,7 @@ export function inferRepoRoot() {
 }
 
 // When invoked directly as `node scripts/lib/sdk-version.mjs`, print the pinned
-// version so shell installers can consume it without duplicating the parsing.
+// version so install.bat can consume it without duplicating the parsing.
 const invokedDirectly = process.argv[1] &&
   pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
 if (invokedDirectly) {

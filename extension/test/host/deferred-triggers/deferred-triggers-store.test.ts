@@ -66,6 +66,26 @@ test('replay: cancel with targetId removes only that id', () => {
   assert.ok(!map.has('a'));
 });
 
+test('replay: targeted cancel from another creator does not remove the trigger', () => {
+  const ops: TriggerOp[] = [
+    register('a', '/owner.jsonl', [{ kind: 'user_input' }]),
+    { op: 'cancel', sessionPath: '/other.jsonl', targetId: 'a', at: new Date().toISOString() },
+  ];
+  const map = replayTriggers(ops);
+  assert.equal(map.size, 1);
+  assert.ok(map.has('a'));
+});
+
+test('replay: legacy note records default target and delivery message to the creator', () => {
+  const map = replayTriggers([
+    register('legacy', '/legacy.jsonl', [{ kind: 'timer', ms: 1000 }], 'legacy task'),
+  ]);
+  const trigger = map.get('legacy');
+  assert.equal(trigger?.targetSession, '/legacy.jsonl');
+  assert.equal(trigger?.message, 'legacy task');
+  assert.equal(trigger?.note, 'legacy task');
+});
+
 test('replay: cancel without targetId removes all triggers for that session only', () => {
   const ops: TriggerOp[] = [
     register('a', '/w.jsonl', [{ kind: 'user_input' }]),
@@ -106,6 +126,30 @@ test('readTriggerOps + replay: malformed register lines are skipped, valid kept'
   const map = replayTriggers(readTriggerOps());
   assert.equal(map.size, 1);
   assert.ok(map.has('ok'));
+});
+
+test('replay accepts normalized command fields and rejects fields needing registration defaults', () => {
+  const file = path.join(dir, 'deferred-triggers', 'triggers.jsonl');
+  const cwd = path.resolve(dir, 'repo');
+  const lines = [
+    {
+      op: 'register',
+      sessionPath: '/w.jsonl',
+      id: 'valid-command',
+      triggers: [{ kind: 'command', command: 'printf true', cwd, intervalMs: 1_000, timeoutMs: 2_000 }],
+    },
+    {
+      op: 'register',
+      sessionPath: '/w.jsonl',
+      id: 'relative-command',
+      triggers: [{ kind: 'command', command: 'printf true', cwd: 'repo', intervalMs: 1_000, timeoutMs: 2_000 }],
+    },
+  ];
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, lines.map((line) => JSON.stringify(line)).join('\n') + '\n', 'utf8');
+  const map = replayTriggers(readTriggerOps());
+  assert.equal(map.size, 1);
+  assert.equal(map.get('valid-command')?.triggers[0]?.kind, 'command');
 });
 
 test('append + read round-trips through the sidecar file', () => {

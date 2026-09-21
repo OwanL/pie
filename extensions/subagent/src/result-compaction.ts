@@ -1,7 +1,61 @@
 import type { Message } from "@mariozechner/pi-ai";
+import { deriveFileChangesFromSubagentResult } from "../../../extension/src/shared/file-change-derivation.js";
 import type { SingleResult, SubagentDetails } from "../types.js";
 import { getFinalOutput } from "../formatting.js";
 import { isRuntimeTraceEnabled } from "./runtime-trace.js";
+
+const PRODUCER_FILE_CHANGE_LIMIT = 64;
+const PRODUCER_FILE_CHANGE_PATH_CHARS = 2 * 1024;
+const PRODUCER_FILE_CHANGE_DESCRIPTION_CHARS = 1024;
+
+/**
+ * Preserve a bounded producer-owned summary before terminal transport/history
+ * projection can remove the verbose edit/write arguments. The summary is
+ * deliberately one record per modifying tool call: consumers can still
+ * accumulate later edits and retain the original created/modified semantics.
+ */
+function producerFileChanges(result: SingleResult): SingleResult["fileChanges"] {
+	const existing = Array.isArray(result.fileChanges) ? result.fileChanges : [];
+	const source = { ...result, fileChanges: undefined };
+	const derived = deriveFileChangesFromSubagentResult(
+		{ details: { results: [source] } },
+		"",
+		"",
+		result.attemptId ?? "subagent",
+		result.cwd,
+		result.cwd,
+	);
+	const candidates = derived.length > 0 ? derived : existing;
+	if (candidates.length === 0) return undefined;
+
+	return candidates.slice(0, PRODUCER_FILE_CHANGE_LIMIT).flatMap((change) => {
+		const path = typeof change.path === "string" ? change.path.trim() : "";
+		if (!path) return [];
+		const additions = typeof change.additions === "number"
+			&& Number.isFinite(change.additions) && change.additions >= 0
+			? Math.trunc(change.additions)
+			: undefined;
+		const deletions = typeof change.deletions === "number"
+			&& Number.isFinite(change.deletions) && change.deletions >= 0
+			? Math.trunc(change.deletions)
+			: undefined;
+		const description = typeof change.description === "string" && change.description.trim()
+			? change.description
+			: change.kind;
+		return [{
+			path: path.slice(0, PRODUCER_FILE_CHANGE_PATH_CHARS),
+			kind: change.kind,
+			description: description.slice(0, PRODUCER_FILE_CHANGE_DESCRIPTION_CHARS),
+			...(additions !== undefined ? { additions } : {}),
+			...(deletions !== undefined ? { deletions } : {}),
+		}];
+	});
+}
+
+export function populateFileChanges(result: SingleResult): void {
+	const fileChanges = producerFileChanges(result);
+	if (fileChanges) result.fileChanges = fileChanges;
+}
 
 /**
  * Terminalize a child result without discarding transcript information.
@@ -37,6 +91,7 @@ export function compactSingleResult(
 	// summing top-level segments equals the whole projection duration without
 	// an extra pass and without double counting nested work.
 	const segmentStartedAt = recursiveDepth === 1 ? performance.now() : undefined;
+	const fileChanges = Array.isArray(result.fileChanges) ? result.fileChanges : producerFileChanges(result);
 	const messages = Array.isArray(result.messages) ? result.messages : [];
 	if (activeCounters) {
 		activeCounters.childCount += 1;
@@ -45,6 +100,7 @@ export function compactSingleResult(
 	}
 	const compacted = {
 		...result,
+		...(fileChanges ? { fileChanges } : {}),
 		messages: terminalizeNestedSubagents(messages, activeCounters, recursiveDepth),
 		finalOutput: (result.finalOutput ?? (getFinalOutput(messages) || result.streamingText)) || undefined,
 		transcriptCompacted: false,

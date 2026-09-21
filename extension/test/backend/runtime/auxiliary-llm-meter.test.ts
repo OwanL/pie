@@ -3,7 +3,15 @@ import test from 'node:test';
 
 import { installAuxiliaryLlmMeter } from '../../../src/backend/auxiliary-llm-meter';
 
-function makeSession() {
+interface TestSession {
+  agent: {
+    streamFn: (model?: unknown) => Promise<{ result: () => Promise<{ usage?: unknown }> }>;
+  };
+  _compactionAbortController: unknown;
+  _branchSummaryAbortController: unknown;
+}
+
+function makeSession(): TestSession {
   return {
     agent: {
       streamFn: async (_model?: unknown) => ({
@@ -13,7 +21,7 @@ function makeSession() {
             output: 2,
             cacheRead: 3,
             cacheWrite: 1,
-            cost: { total: 0.25 },
+            reportedCostUsd: 0.25,
           },
         }),
       }),
@@ -47,10 +55,34 @@ test('meters native/custom history compaction and preserves provider-qualified i
       outputTokens: 2,
       cacheReadTokens: 3,
       cacheWriteTokens: 1,
+      tokenChannelsKnown: true,
+      tokenChannelPresence: { input: true, output: true, cacheRead: true, cacheWrite: true },
       reportedCostUsd: 0.25,
       durationMs: 125,
     },
   }]);
+});
+
+test('does not promote the SDK catalog total to provider-reported cost', async () => {
+  const session = makeSession();
+  session.agent.streamFn = async () => ({ result: async () => ({
+    usage: {
+      input: 10,
+      output: 2,
+      cacheRead: 3,
+      cacheWrite: 1,
+      cost: { total: 0.25 },
+    },
+  }) });
+  session._compactionAbortController = {};
+  const payloads: Array<{ reportedCostUsd?: number; instrumentationGap?: boolean }> = [];
+  installAuxiliaryLlmMeter(session, '/session.jsonl', (_event, payload) => payloads.push(payload));
+
+  await (await session.agent.streamFn({ id: 'model-a', provider: 'provider-a' })).result();
+
+  assert.equal(payloads.length, 1);
+  assert.equal(payloads[0]?.reportedCostUsd, undefined);
+  assert.equal(payloads[0]?.instrumentationGap, undefined);
 });
 
 test('emits an explicit gap when a summarization response omits provider usage', async () => {

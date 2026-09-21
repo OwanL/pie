@@ -1,11 +1,7 @@
-// Shared JSON helpers for the pie installers.
+// Shared JSON helpers for the Windows installer.
 //
-// Both install.ps1 and install.sh manipulate JSON config files (settings.json,
-// auth.json, VS Code User settings). PowerShell's default encoders can emit a
-// UTF-8 BOM and use ConvertTo-Json formatting; Node's fs always writes BOM-less
-// UTF-8. Routing every installer JSON read/write through these helpers gives
-// both platforms identical, BOM-less, 2-space-indented output so re-running the
-// installer is idempotent (a second run produces no diff).
+// Installer JSON writes use consistent BOM-less, 2-space-indented UTF-8 so
+// re-running the installer is idempotent (a second run produces no diff).
 //
 // These functions are intentionally pure / side-effect-free except for the
 // explicit fs calls in readJsonFile/writeJsonFile, so they can be unit-tested
@@ -32,7 +28,7 @@ export function parseJson(text, fallback = null) {
 
 /**
  * Read and parse a JSON file.
- * - Missing file -> `fallback` (installers treat a absent config as empty).
+ * - Missing file -> `fallback` (the installer treats absent config as empty).
  * - Unparseable file -> `fallback` (matches Read-AuthJson / VS Code settings
  *   try/catch fallbacks). Callers that want a hard error on corruption can pass
  *   `throwOnParseError: true`.

@@ -6,6 +6,7 @@
 
 const COORDINATOR_METHODS: ReadonlySet<string> = new Set([
   'app.ping',
+  'analytics.ack',
   'diagnostics.livePipeline.setEnabled',
   'mcp.list',
   'mcp.setServerEnabled',

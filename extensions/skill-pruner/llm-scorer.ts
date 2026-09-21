@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import type { PruningConfig } from "./types.js";
+import { providerReportedCostUsd } from "../../shared/provider-cost.js";
 import { parseJsonOrThrow } from "../../shared/error-message.js";
 
 export interface SkillCandidate {
@@ -42,12 +43,23 @@ export interface LlmPruningOutput {
 	keptAllDueToParseFailure?: boolean;
 }
 
+export interface TokenChannelPresence {
+	input: boolean;
+	output: boolean;
+	cacheRead: boolean;
+	cacheWrite: boolean;
+}
+
 export interface PrepassUsage {
 	input: number;
 	output: number;
 	cacheRead: number;
 	cacheWrite: number;
+	/** False when one or more provider token channels were omitted. */
+	tokenChannelsKnown?: boolean;
+	tokenChannelPresence?: TokenChannelPresence;
 	reportedCostUsd?: number;
+	providerReportedCostUsd?: number;
 }
 
 export interface CompleteSimpleResult {
@@ -55,7 +67,10 @@ export interface CompleteSimpleResult {
 	thinking?: string;
 	stopReason?: string;
 	errorMessage?: string;
-	usage?: Partial<PrepassUsage> & { cost?: { total?: number } };
+	usage?: Partial<PrepassUsage> & {
+		providerReportedCostUsd?: number;
+		cost?: { total?: number; reportedCostUsd?: number; providerReportedCostUsd?: number };
+	};
 }
 
 const DEFAULT_PROMPT_TEMPLATE = loadPromptTemplate();
@@ -310,6 +325,35 @@ export type CompleteSimpleFn = (
 	options: Record<string, unknown>,
 ) => Promise<CompleteSimpleResult>;
 
+function validTokenChannel(value: unknown): value is number {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function normalizePrepassUsage(raw: CompleteSimpleResult["usage"]): PrepassUsage | undefined {
+	if (!raw) return undefined;
+	const declaredPresence = raw.tokenChannelPresence;
+	const present = (key: keyof TokenChannelPresence): boolean =>
+		validTokenChannel(raw[key])
+			&& (typeof declaredPresence?.[key] !== "boolean" || declaredPresence[key] === true);
+	const tokenChannelPresence: TokenChannelPresence = {
+		input: present("input"),
+		output: present("output"),
+		cacheRead: present("cacheRead"),
+		cacheWrite: present("cacheWrite"),
+	};
+	const tokenChannelsKnown = raw.tokenChannelsKnown !== false
+		&& Object.values(tokenChannelPresence).every(Boolean);
+	const reportedCost = providerReportedCostUsd(raw);
+	return {
+		input: tokenChannelPresence.input ? raw.input as number : 0,
+		output: tokenChannelPresence.output ? raw.output as number : 0,
+		cacheRead: tokenChannelPresence.cacheRead ? raw.cacheRead as number : 0,
+		cacheWrite: tokenChannelPresence.cacheWrite ? raw.cacheWrite as number : 0,
+		...(tokenChannelsKnown ? {} : { tokenChannelsKnown: false, tokenChannelPresence }),
+		...(reportedCost === undefined ? {} : { reportedCostUsd: reportedCost, providerReportedCostUsd: reportedCost }),
+	};
+}
+
 /**
  * Run the LLM pruning call. Accepts a `completeFn` parameter for testability.
  */
@@ -355,16 +399,7 @@ export async function runLlmPruning(
 		latencyMs,
 		stopReason: response.stopReason,
 		errorMessage: response.errorMessage,
-		usage: response.usage ? {
-			input: response.usage.input ?? 0,
-			output: response.usage.output ?? 0,
-			cacheRead: response.usage.cacheRead ?? 0,
-			cacheWrite: response.usage.cacheWrite ?? 0,
-			...(typeof response.usage.cost?.total === "number"
-				&& Number.isFinite(response.usage.cost.total) && response.usage.cost.total >= 0
-				? { reportedCostUsd: response.usage.cost.total }
-				: {}),
-		} : undefined,
+		usage: normalizePrepassUsage(response.usage),
 		keptAllDueToParseFailure: parsed.keptAllDueToParseFailure,
 	};
 }

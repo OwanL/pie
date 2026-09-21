@@ -2,6 +2,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import * as path from "node:path";
 import { runSingleAgent, subagentRuntime } from "../runner.js";
 import type { AgentConfig } from "../agents.js";
 
@@ -79,13 +80,14 @@ function runFakeAgent(
 	sdk: unknown,
 	onUpdate?: (partial: any) => void,
 	signal?: AbortSignal,
+	cwd?: string,
 ) {
 	return runSingleAgent(
 		process.cwd(),
 		[makeAgent()],
 		"worker",
 		"do work",
-		undefined,
+		cwd,
 		undefined,
 		signal,
 		onUpdate,
@@ -174,6 +176,15 @@ test("runSingleAgent publishes its terminal lifecycle before a successful run se
 	assert.equal(result.activityPhase, "completed");
 	assert.equal(updates.at(-1)?.details.results[0]?.activityPhase, "completed");
 	assert.equal(updates.at(-1)?.details.results[0]?.exitCode, 0);
+});
+
+test("runSingleAgent persists the effective child cwd", async () => {
+	const { sdk } = successfulFakeSdk();
+	const cwd = path.join(process.cwd(), "child-cwd");
+
+	const result = await runFakeAgent(sdk, undefined, undefined, cwd);
+
+	assert.equal(result.cwd, cwd);
 });
 
 test("runner trace labels only source and dedupe work at the producer boundary", async () => {
@@ -338,4 +349,183 @@ test("runSingleAgent keeps duplicate-name parallel tools distinct until each cal
 		snapshots.some((snapshot) => snapshot.tools.length === 1 && snapshot.tools[0] === "bash"),
 		"ending one bash call must leave the sibling visible",
 	);
+});
+
+// ============================================================
+// COST EVIDENCE PROJECTION
+// ============================================================
+
+test("runSingleAgent leaves projected cost absent when no provider turn reports cost", async () => {
+	// Older/mock SDK event shapes may omit the cost block entirely. The
+	// transcript projection must carry no invented zero so the UI cannot
+	// display a fabricated "$0.000" free-run claim (STATE_CONTRACT: unknown
+	// values are absent rather than invented zeroes).
+	const { sdk } = createFakeSdk({
+		onPrompt: async (emit) => {
+			emit({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "done" }],
+					usage: { input: 11, output: 5, cacheRead: 2, cacheWrite: 1, totalTokens: 19 },
+					model: "session-model",
+					stopReason: "completed",
+				},
+			});
+		},
+	});
+
+	const result = await runFakeAgent(sdk);
+
+	assert.equal(result.usage.input, 11);
+	assert.equal(result.usage.output, 5);
+	assert.equal(result.usage.cost, undefined, "missing cost evidence must stay absent, not become 0");
+});
+
+test("runSingleAgent keeps SDK catalog estimates out of provider-reported cost", async () => {
+	const { sdk } = createFakeSdk({
+		onPrompt: async (emit) => {
+			emit({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "estimated only" }],
+					usage: {
+						input: 11,
+						output: 5,
+						cacheRead: 2,
+						cacheWrite: 1,
+						totalTokens: 19,
+						cost: { total: 0.42 },
+					},
+					model: "session-model",
+					stopReason: "completed",
+				},
+			});
+		},
+	});
+
+	const result = await runFakeAgent(sdk);
+
+	assert.equal(result.usage.cost, undefined, "SDK catalog estimates are not provider billing");
+	assert.equal(result.providerInvocations?.[0]?.usage?.cost, undefined);
+	assert.equal(result.providerInvocations?.[0]?.usage?.reportedCostUsd, undefined);
+});
+
+test("runSingleAgent preserves incomplete provider token channels as unknown", async () => {
+	const { sdk } = createFakeSdk({
+		onPrompt: async (emit) => {
+			emit({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "partial" }],
+					// The provider omitted cache channels and supplied an invalid
+					// negative output count; neither may become a known zero.
+					usage: { input: 11, output: -5, cacheRead: Number.NaN },
+					model: "session-model",
+					stopReason: "completed",
+				},
+			});
+		},
+	});
+
+	const result = await runFakeAgent(sdk);
+
+	assert.equal(result.usage.input, 11);
+	assert.equal(result.usage.output, 0);
+	assert.equal(result.usage.cacheRead, 0);
+	assert.equal(result.usage.tokenChannelsKnown, false);
+	assert.deepEqual(result.usage.tokenChannelPresence, {
+		input: true,
+		output: false,
+		cacheRead: false,
+		cacheWrite: false,
+	});
+	assert.deepEqual(result.providerInvocations?.[0]?.usage, { input: 11 });
+});
+
+test("runSingleAgent accumulates only provider-reported cost across turns", async () => {
+	const { sdk } = createFakeSdk({
+		onPrompt: async (emit) => {
+			emit({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "first" }],
+					usage: { input: 5, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 7, reportedCostUsd: 0.3, cost: { total: 0.3 } },
+					model: "session-model",
+					stopReason: "toolUse",
+				},
+			});
+			emit({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "done" }],
+					// Second turn's event shape carries no cost evidence.
+					usage: { input: 4, output: 3, cacheRead: 0, cacheWrite: 0, totalTokens: 7 },
+					model: "session-model",
+					stopReason: "completed",
+				},
+			});
+		},
+	});
+
+	const result = await runFakeAgent(sdk);
+
+	assert.equal(result.usage.turns, 2);
+	assert.equal(result.usage.cost, 0.3, "only the reported turn contributes cost evidence");
+});
+
+test("runSingleAgent keeps provider-reported zero cost as evidence", async () => {
+	const { sdk } = createFakeSdk({
+		onPrompt: async (emit) => {
+			emit({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "done" }],
+					usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, reportedCostUsd: 0, cost: { total: 0 } },
+					model: "session-model",
+					stopReason: "completed",
+				},
+			});
+		},
+	});
+
+	const result = await runFakeAgent(sdk);
+
+	assert.equal(result.usage.cost, 0, "an explicitly reported zero stays a numeric zero");
+});
+
+test("runSingleAgent ignores malformed cost evidence", async () => {
+	const { sdk } = createFakeSdk({
+		onPrompt: async (emit) => {
+			emit({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "first" }],
+					usage: { input: 5, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 7, cost: { total: Number.NaN } },
+					model: "session-model",
+					stopReason: "toolUse",
+				},
+			});
+			emit({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "done" }],
+					usage: { input: 4, output: 3, cacheRead: 0, cacheWrite: 0, totalTokens: 7, reportedCostUsd: 0.25, cost: { total: 0.25 } },
+					model: "session-model",
+					stopReason: "completed",
+				},
+			});
+		},
+	});
+
+	const result = await runFakeAgent(sdk);
+
+	assert.equal(result.usage.cost, 0.25, "non-finite reported totals are not cost evidence");
 });

@@ -1,4 +1,4 @@
-// Shared "repair extension paths" logic for the pie installers.
+// Shared "repair extension paths" logic for the Windows installer.
 //
 // settings.json is git-tracked and may reference extension packages via
 // absolute paths into ANOTHER machine's npm global node_modules tree (e.g.
@@ -8,10 +8,7 @@
 // pi can load them, preserving entries that already point at the right place
 // (idempotent: a second run produces no diff).
 //
-// Previously duplicated as:
-//   - install.ps1: Repair-SettingsExtensionPaths
-//   - install.sh:  inline `node - <<'NODE_SCRIPT'` repair_settings_extension_paths
-// Both are now thin callers of `repairExtensionPaths` below.
+// install.bat delegates the JSON transformation to `repairExtensionPaths` below.
 
 import { existsSync as fsExistsSync } from 'node:fs';
 import path from 'node:path';
@@ -28,8 +25,8 @@ const EXTENSION_PATH_TAIL = /[\\/]node_modules[\\/]+([^\\/]+)$/;
 function isRewritableAbsoluteExtensionPath(entry, platform) {
   if (typeof entry !== 'string') return false;
   const sep = platform === 'win32' ? '\\' : '/';
-  // Match install.sh's check exactly: normalise forward slashes to the native
-  // separator before testing absoluteness. On POSIX this is a no-op; on Windows
+  // Normalize forward slashes to the native separator before testing
+  // absoluteness. On POSIX this is a no-op; on Windows
   // it lets `path.win32.isAbsolute` see `C:\...` instead of `C:/...`.
   if (!path[platform].isAbsolute(entry.replace(/\//g, sep))) return false;
   return EXTENSION_PATH_TAIL.test(entry);
@@ -70,8 +67,7 @@ export function repairExtensionPaths(settings, { npmPrefix, platform = process.p
     const pkg = EXTENSION_PATH_TAIL.exec(entryStr)[1];
     const candidate = `${npmPrefix}${sep}node_modules${sep}${pkg}`;
     // Case-insensitive, slash-normalised comparison so we don't rewrite an
-    // entry that already points at the right place (idempotent). Matches both
-    // install.ps1 (-ne is case-insensitive) and install.sh (.toLowerCase()).
+    // entry that already points at the right place (idempotent).
     const same =
       entryStr.replace(/\\/g, '/').toLowerCase() ===
       candidate.replace(/\\/g, '/').toLowerCase();

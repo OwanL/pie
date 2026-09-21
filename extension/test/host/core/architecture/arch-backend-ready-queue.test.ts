@@ -42,11 +42,14 @@ function notReadyState(overrides: Partial<ArchState> = {}): ArchState {
   };
 }
 
-function sendCmd(corrId: string, sessionPath: string, text = 'hello'): Event {
+function sendCmd(corrId: string, sessionPath: string, text = 'hello', operationId?: string): Event {
   return {
     kind: 'Command',
     cmd: {
       kind: 'Send', corrId, sessionPath, text,
+      ...(operationId ? {
+        operationId, operationAttempt: 1, operationSource: { kind: 'host' }, backendGeneration: 0,
+      } : {}),
       inputs: [], composedText: text, localId: `local:${corrId}`,
       userParts: undefined, previousSummary: null, timestamp: 1000,
     },
@@ -372,6 +375,39 @@ test('BackendReadyChanged{ready:false}: just sets backendReady=false, no effects
 
   assert.equal(out.state.settings.backendReady, false);
   assert.deepEqual(out.effects, []);
+});
+
+test('generation-ended send status removes undispatched sends from backend-ready and model-gated queues', () => {
+  const modelGatedState = notReadyState({
+    settings: { ...initialArchState.settings, backendReady: true },
+    pending: {
+      ...initialArchState.pending,
+      deferredSetModelSequence: 1,
+      deferredSetModelBySession: {
+        [SESSION]: {
+          corrId: 'model-1', sessionPath: SESSION,
+          modelSettings: { defaultModel: 'new-model', defaultThinkingLevel: 'high' }, clearImages: false,
+          sequence: 1, previousModelId: 'old-model',
+        },
+      },
+    },
+  });
+
+  for (const [label, state] of [['backend-ready', notReadyState()], ['model-gated', modelGatedState]] as const) {
+    const queued = reducer(state, sendCmd(`corr-${label}`, SESSION, 'hello', `op-${label}`));
+    assert.equal(queued.state.pending.backendReadyQueueBySession[SESSION]?.length, 1);
+
+    const ended = reducer(queued.state, {
+      kind: 'SendOperationStatus', operationId: `op-${label}`, sessionPath: SESSION,
+      backendGeneration: 0, operationAttempt: 1, state: 'generation-ended', error: 'worker exited',
+    });
+
+    assert.equal(ended.state.pending.backendReadyQueueBySession[SESSION], undefined);
+    assert.equal(ended.state.transcript.bySession[SESSION]?.some((message) => message.id === `local:corr-${label}`), false);
+    assert.equal(ended.state.operations[`op-${label}`]?.terminal?.reason, 'backend-generation-ended', label);
+    assert.ok(ended.effects.some((effect) => effect.kind === 'ClearSendTimer'
+      && effect.corrId === `corr-${label}`), label);
+  }
 });
 
 // ─── BackendReadyWatchdogFired: drop queued messages ─────────────────────────

@@ -68,9 +68,31 @@ test('provider sliders survive validated host preference round trips without res
       assert.equal(slider.value, String(value), `${field} must not snap back on the host refresh`);
       assert.equal(state.settings.prefs.providerConcurrency.openai[field], value);
     }
-    assert.equal(updates, 4);
+
+    const maxSlider = container.querySelector<HTMLInputElement>('[aria-label="Max concurrent requests for openai"]');
+    assert.ok(maxSlider);
+    assert.equal(maxSlider.max, '129', 'the rightmost slider position is Unlimited after finite 1–128 values');
+    for (const label of [
+      'Max concurrent requests for openai',
+      'Afterburn sticky-slot window for openai',
+      'Queue wait timeout for openai',
+      'Header wait timeout for openai',
+    ]) {
+      const slider = container.querySelector<HTMLInputElement>(`[aria-label="${label}"]`);
+      assert.ok(slider?.title, `${label} must expose an explanatory tooltip`);
+    }
+    act(() => {
+      maxSlider.value = maxSlider.max;
+      maxSlider.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    act(paint);
+    assert.equal(state.settings.prefs.providerConcurrency.openai.maxConcurrentRequests, 0);
+    const unlimitedSlider = container.querySelector<HTMLInputElement>('[aria-label="Max concurrent requests for openai"]');
+    assert.equal(unlimitedSlider?.value, '129');
+    assert.equal(unlimitedSlider?.getAttribute('aria-valuetext'), 'Unlimited');
+    assert.equal(updates, 5);
     assert.deepEqual(state.settings.prefs.providerConcurrency, {
-      openai: { maxConcurrentRequests: 4, afterburnSeconds: 15, queueWaitSeconds: 45, headerWaitSeconds: 120 },
+      openai: { maxConcurrentRequests: 0, afterburnSeconds: 15, queueWaitSeconds: 45, headerWaitSeconds: 120 },
       anthropic: { maxConcurrentRequests: 3 },
     });
   } finally {

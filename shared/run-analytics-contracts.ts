@@ -60,8 +60,8 @@ export interface AssistantUsage {
    * at extraction so it can never exceed it.
    */
   reasoningTokens?: number;
-  /** Cost attached to this exact provider response by pi-ai/model metadata.
-   * Consumers prefer it over catalog re-pricing when present. */
+  /** Explicit provider/invoice-reported cost for this response. Pi SDK
+   * `usage.cost.total` is a catalog estimate and must not populate this field. */
   reportedCostUsd?: number;
 }
 
@@ -186,6 +186,14 @@ export interface TurnThroughputSample {
   provider?: string;
   /** Cost attached to this exact provider response, when reported. */
   reportedCostUsd?: number;
+  /** Explicit completeness for provider token channels. */
+  tokenChannelsKnown?: boolean;
+  tokenChannelPresence?: {
+    input: boolean;
+    output: boolean;
+    cacheRead: boolean;
+    cacheWrite: boolean;
+  };
   /**
    * Time spent waiting for provider-gate concurrency permits across the HTTP
    * attempts belonging to this turn. Zero is an explicit immediate grant;
@@ -265,6 +273,14 @@ export interface AuxiliaryLlmUsageSample {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
+  /** Explicit completeness for provider token channels. */
+  tokenChannelsKnown?: boolean;
+  tokenChannelPresence?: {
+    input: boolean;
+    output: boolean;
+    cacheRead: boolean;
+    cacheWrite: boolean;
+  };
   /** Cost attached to this exact provider response, when reported. */
   reportedCostUsd?: number;
   /** Wall-clock duration of the auxiliary call when measured. Undefined for

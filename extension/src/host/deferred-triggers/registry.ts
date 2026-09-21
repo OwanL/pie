@@ -5,6 +5,16 @@ import type { DeferredTriggerView } from '../../shared/protocol';
 import type { ArchState } from '../core/arch-state';
 import type { Event } from '../core/events';
 import {
+  parseCommandPredicateResult,
+  type CommandPredicateExecutionResult,
+  type CommandTrigger,
+} from '../../../../shared/wake-conditions';
+import {
+  createCommandPredicateRunner,
+  type CommandPredicateRunner,
+} from './command-predicate';
+import { CommandProbeLeaseStore, type CommandProbeLease } from './probe-lease';
+import {
   checkProcessOwnerLiveness,
   DeferredTriggerStore,
   replayTriggers,
@@ -26,15 +36,24 @@ import {
  *
  * Trigger types:
  *  - `session_finished`: fires when a session (specific path, or any) finishes
- *    streaming. Never fires on the watcher's OWN session (avoids a self-wake
- *    loop when the watcher's own deferring turn ends).
+ *    streaming. Never fires when the creator's own session finishes (avoids a
+ *    self-wake loop when its deferring turn ends).
  *  - `timer`: fires after `ms`. Re-armed on reload using the remaining time.
  *  - `user_input`: is consumed when the user sends a real message in the
- *    watcher's session (the literal "resume on type").
+ *    target session (the literal "resume on type").
+ *  - `command`: is polled in the host with a bounded shell process; exit 0
+ *    means satisfied and exit 1 means not yet satisfied. Other exits and
+ *    execution failures are evaluation errors without a model turn.
  *
  * Multiple specs in one trigger use OR semantics: the first to fire wins and
  * consumes the whole trigger.
  */
+export interface DeferredTriggerClock {
+  now?: () => number;
+  setTimeout?: typeof setTimeout;
+  clearTimeout?: typeof clearTimeout;
+}
+
 export interface DeferredTriggerRegistryDeps {
   getArchState: () => ArchState;
   dispatchArch: (event: Event) => void;
@@ -43,7 +62,7 @@ export interface DeferredTriggerRegistryDeps {
    *  via sidecar watcher, cancel, or fire). The active set is projected into
    *  `ViewState.deferredTriggers` by `PieExtension.buildViewState`, so a render
    *  must be requested whenever it mutates — `fire`'s wake-up dispatch only
-   *  renders when the watcher's tab is open, and a sidecar `register`/`cancel`
+   *  renders when the target tab is open, and a sidecar `register`/`cancel`
    *  by the backend tool otherwise wouldn't surface. Optional (tests omit it). */
   scheduleRender?: () => void;
   /** Override the sidecar watcher (tests pass a no-op to avoid `fs.watch`).
@@ -55,6 +74,10 @@ export interface DeferredTriggerRegistryDeps {
   /** OS ownership/liveness injection for deterministic crash-recovery tests. */
   ownerPid?: number;
   checkOwnerLiveness?: CheckClaimOwnerLiveness;
+  /** Host-side command execution seam. The default is a bounded fresh shell. */
+  commandRunner?: CommandPredicateRunner;
+  /** Injectable clock for deterministic command-poll tests. */
+  clock?: DeferredTriggerClock;
 }
 
 /** Prefix on the synthetic wake-up `Send` corrId (debugging + future filtering). */
@@ -69,6 +92,16 @@ export function boundedTimerSlice(remainingMs: number): number {
   return Math.max(1, Math.min(remainingMs, MAX_TIMER_SLICE_MS));
 }
 
+interface CommandCheck {
+  key: string;
+  id: string;
+  index: number;
+  spec: CommandTrigger;
+  generation: number;
+  controller: AbortController;
+  lease: CommandProbeLease;
+}
+
 export class DeferredTriggerRegistry {
   private readonly triggers = new Map<string, ActiveTrigger>();
   private readonly timers = new Map<string, NodeJS.Timeout | NodeJS.Immediate>();
@@ -78,13 +111,33 @@ export class DeferredTriggerRegistry {
   private readonly instanceId: string;
   private readonly ownerPid: number;
   private readonly checkOwnerLiveness: CheckClaimOwnerLiveness;
+  private readonly commandRunner: CommandPredicateRunner;
+  private readonly probeLeases: CommandProbeLeaseStore;
+  private readonly commandTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly commandChecks = new Map<string, CommandCheck>();
+  private readonly commandGenerations = new Map<string, number>();
+  private readonly commandDiagnostics = new Map<string, string>();
+  private readonly clock: Required<Pick<DeferredTriggerClock, 'now' | 'setTimeout' | 'clearTimeout'>>;
   private stopWatcher?: () => void;
+  private disposed = false;
 
   constructor(private readonly deps: DeferredTriggerRegistryDeps) {
     this.store = deps.store ?? new DeferredTriggerStore();
     this.instanceId = deps.instanceId ?? randomUUID();
     this.ownerPid = deps.ownerPid ?? process.pid;
     this.checkOwnerLiveness = deps.checkOwnerLiveness ?? checkProcessOwnerLiveness;
+    this.commandRunner = deps.commandRunner ?? createCommandPredicateRunner();
+    this.clock = {
+      now: deps.clock?.now ?? (() => Date.now()),
+      setTimeout: deps.clock?.setTimeout ?? setTimeout,
+      clearTimeout: deps.clock?.clearTimeout ?? clearTimeout,
+    };
+    this.probeLeases = new CommandProbeLeaseStore(this.store.getFilePath(), {
+      ownerId: this.instanceId,
+      ownerPid: this.ownerPid,
+      now: () => new Date(this.clock.now()),
+      checkOwnerLiveness: this.checkOwnerLiveness,
+    });
   }
 
   /** Load the sidecar + start watching for changes. Idempotent — safe to call
@@ -104,11 +157,11 @@ export class DeferredTriggerRegistry {
     // matching event.
     this.reload();
     for (const [id, t] of [...this.triggers.entries()]) {
-      // Never self-wake: a session finishing its own deferring turn must not
-      // trigger a `session_finished` wake on itself.
+      // Never self-wake: a creator finishing its own deferring turn must not
+      // trigger a `session_finished` wake for its own registration.
       if (t.sessionPath === finishedPath) continue;
       const spec = t.triggers.find(
-        (s) =>
+        (s): s is Extract<TriggerSpec, { kind: 'session_finished' }> =>
           s.kind === 'session_finished' &&
           (s.sessionPath === undefined || s.sessionPath === finishedPath),
       );
@@ -122,15 +175,15 @@ export class DeferredTriggerRegistry {
     }
   }
 
-  /** The user sent a real message in `sessionPath`. That already-dispatched
-   * prompt is the wake-up: consume matching triggers without dispatching a
-   * second synthetic Send. */
+  /** The user sent a real message in the delivery target `sessionPath`. That
+   * already-dispatched prompt is the wake-up: consume matching triggers
+   * without dispatching a second synthetic Send. */
   onUserInput(sessionPath: string, corrId: string): void {
     // See onSessionFinished: the sidecar writer and this host event can be
     // adjacent, so do not rely solely on the debounced filesystem watcher.
     this.reload();
     for (const [id, t] of [...this.triggers.entries()]) {
-      if (t.sessionPath !== sessionPath) continue;
+      if (t.targetSession !== sessionPath) continue;
       if (t.triggers.some((s) => s.kind === 'user_input')) {
         this.consumeWithClaim(id, 'user input received in this session', corrId);
       }
@@ -155,25 +208,32 @@ export class DeferredTriggerRegistry {
     );
   }
 
-  /** Cancel a trigger (or all triggers for `sessionPath` when `targetId` is
-   *  omitted). Mirrors the `defer_trigger` tool's `cancel` action: appends a
-   *  `cancel` op to the sidecar and updates the in-memory set immediately so
-   *  the webview reflects the removal without waiting for the debounced
-   *  sidecar watcher. Best-effort persist (see `fire`). */
+  /** Cancel a trigger (or all triggers owned by `sessionPath` when `targetId`
+   *  is omitted). Targeted cancellation is creator-owned too: a caller may not
+   *  cancel another creator's trigger merely by knowing its id. Mirrors the
+   *  `defer_trigger` tool's `cancel` action and updates memory immediately so
+   *  the webview need not wait for the debounced sidecar watcher. */
   cancel(sessionPath: string, targetId?: string): void {
     if (targetId) {
-      this.clearTimer(targetId);
-      this.triggers.delete(targetId);
+      const trigger = this.triggers.get(targetId);
+      if (trigger?.sessionPath === sessionPath) {
+        this.clearTimer(targetId);
+        this.stopCommandChecks(targetId);
+        this.commandDiagnostics.delete(targetId);
+        this.triggers.delete(targetId);
+      }
     } else {
       for (const [id, t] of [...this.triggers.entries()]) {
         if (t.sessionPath === sessionPath) {
           this.clearTimer(id);
+          this.stopCommandChecks(id);
+          this.commandDiagnostics.delete(id);
           this.triggers.delete(id);
         }
       }
     }
     try {
-      this.store.append({ op: 'cancel', sessionPath, targetId, at: new Date().toISOString() });
+      this.store.append({ op: 'cancel', sessionPath, ...(targetId ? { targetId } : {}), at: new Date().toISOString() });
     } catch {
       // Sidecar unavailable (env unset) or write error — in-memory is still
       // cleared; a later reload may re-arm from the sidecar's register op
@@ -182,13 +242,19 @@ export class DeferredTriggerRegistry {
     this.deps.scheduleRender?.();
   }
 
-  /** Fire a timer/session-finished trigger through a durable cross-host claim.
-   * Closed-tab and definite dispatch failures leave the trigger retryable. */
+  /** Fire a timer/session-finished/command trigger through a durable cross-host claim.
+   * A closed/unavailable target and definite dispatch failures leave the trigger
+   * retryable; delivery is never redirected to the creator. */
   fire(id: string, reason: string): void {
     const trigger = this.triggers.get(id);
     if (!trigger || trigger.deliveryState === 'claimed') return;
-    if (!this.deps.getArchState().sessions.openTabPaths.includes(trigger.sessionPath)) {
-      const detail = 'watcher tab is closed; delivery remains retryable';
+    // A timer/event/user-input/command winner consumes the OR group. Abort any
+    // in-flight predicate before claiming delivery; late completions are fenced
+    // by the command generation and cannot dispatch a second wake.
+    this.stopCommandChecks(id);
+    this.commandDiagnostics.delete(id);
+    if (!this.deps.getArchState().sessions.openTabPaths.includes(trigger.targetSession)) {
+      const detail = 'target session is closed or unavailable; delivery remains retryable';
       try {
         this.store.recordDeliveryFailure(id, trigger.sessionPath, reason, detail);
       } catch {
@@ -231,12 +297,12 @@ export class DeferredTriggerRegistry {
     this.deps.scheduleRender?.();
   }
 
-  /** Retry retained synthetic wakes after their watcher tab is opened again. */
+  /** Retry retained synthetic wakes after their target tab is opened again. */
   onSessionOpened(sessionPath: string): void {
     this.reload();
     for (const [id, trigger] of [...this.triggers.entries()]) {
-      if (trigger.sessionPath !== sessionPath || trigger.deliveryState !== 'retryable') continue;
-      if (trigger.triggers.some((spec) => spec.kind === 'timer' || spec.kind === 'session_finished')) {
+      if (trigger.targetSession !== sessionPath || trigger.deliveryState !== 'retryable') continue;
+      if (trigger.triggers.some((spec) => spec.kind === 'timer' || spec.kind === 'session_finished' || spec.kind === 'command')) {
         this.fire(id, trigger.wakeReason ?? 'retrying deferred-trigger delivery');
       }
     }
@@ -283,11 +349,16 @@ export class DeferredTriggerRegistry {
       return;
     }
 
-    // A tab can close after the pre-claim check but before dispatch. User-input
+    // This claim won the OR group. Keep the probe lease until its runner settles,
+    // but abort the local work now so a late true result cannot fire again.
+    this.stopCommandChecks(id);
+    this.commandDiagnostics.delete(id);
+
+    // A target can close after the pre-claim check but before dispatch. User-input
     // consumption has no synthetic delivery: the real prompt already proved
     // delivery and is the sole Send for this wake.
-    if (deliver && !this.deps.getArchState().sessions.openTabPaths.includes(trigger.sessionPath)) {
-      this.releaseClaim(claim, 'watcher tab closed before dispatch; delivery remains retryable');
+    if (deliver && !this.deps.getArchState().sessions.openTabPaths.includes(trigger.targetSession)) {
+      this.releaseClaim(claim, 'target session closed before dispatch; delivery remains retryable');
       return;
     }
 
@@ -323,11 +394,11 @@ export class DeferredTriggerRegistry {
   }
 
   private dispatchWakeUp(t: ActiveTrigger, reason: string, corrId: string): void {
-    const note = t.note.trim() || '(no note provided)';
+    const message = (t.message.trim() || t.note.trim()) || '(no message provided)';
     const text =
       `[deferred trigger fired: ${reason}]\n\n` +
       'A deferred trigger you registered fired. Re-evaluate your pending task and either complete it now or call `defer_trigger` with action `register` again to keep waiting.\n\n' +
-      `Task note:\n${note}`;
+      `Task message:\n${message}`;
     this.deps.dispatchArch({
       kind: 'Command',
       cmd: {
@@ -337,7 +408,7 @@ export class DeferredTriggerRegistry {
         operationAttempt: 1,
         operationSource: { kind: 'host' },
         backendGeneration: this.deps.getBackendGeneration?.() ?? 0,
-        sessionPath: t.sessionPath,
+        sessionPath: t.targetSession,
         text,
         inputs: [],
         composedText: text,
@@ -369,29 +440,40 @@ export class DeferredTriggerRegistry {
     for (const id of [...this.triggers.keys()]) {
       if (!next.has(id)) {
         this.clearTimer(id);
+        this.stopCommandChecks(id);
+        this.commandDiagnostics.delete(id);
         this.attemptedAutomaticRecoveries.delete(id);
         this.triggers.delete(id);
       }
     }
     for (const [id, trigger] of next) {
-      this.triggers.set(id, trigger);
+      const diagnostic = trigger.deliveryState === 'pending'
+        ? this.commandDiagnostics.get(id)
+        : undefined;
+      const visibleTrigger = diagnostic
+        ? { ...trigger, deliveryDetail: diagnostic }
+        : trigger;
+      this.triggers.set(id, visibleTrigger);
       if (
         trigger.deliveryState === 'retryable'
         && trigger.recoveryState === 'dead-owner-recovered'
-        && trigger.triggers.some((spec) => spec.kind === 'timer' || spec.kind === 'session_finished')
-        && this.deps.getArchState().sessions.openTabPaths.includes(trigger.sessionPath)
+        && trigger.triggers.some((spec) => spec.kind === 'timer' || spec.kind === 'session_finished' || spec.kind === 'command')
+        && this.deps.getArchState().sessions.openTabPaths.includes(trigger.targetSession)
       ) {
         // A stale local deadline may still be armed if this registry missed
         // the foreign claim before observing its recovery. Safe recovery owns
         // an immediate retry rather than waiting for that unrelated deadline.
+        this.stopCommandChecks(id);
         if (!this.attemptedAutomaticRecoveries.has(id)) {
           this.clearTimer(id);
           this.scheduleRecoveredDelivery(trigger);
         }
       } else if (trigger.deliveryState !== 'pending') {
         this.clearTimer(id);
-      } else if (!this.timers.has(id)) {
-        this.armTimer(trigger);
+        this.stopCommandChecks(id);
+      } else {
+        if (!this.timers.has(id)) this.armTimer(visibleTrigger);
+        this.syncCommandPredicates(visibleTrigger);
       }
     }
     // Surface sidecar-driven changes (a `register`/`cancel` appended by the
@@ -399,6 +481,158 @@ export class DeferredTriggerRegistry {
     // instance) to the webview. The watcher debounces ~200ms, so this fires
     // once per settled sidecar change.
     this.deps.scheduleRender?.();
+  }
+
+  /** Keep one asynchronous probe/timer per command condition. The first probe
+   * is queued on the host event loop; every later interval is armed only from
+   * the settled result, so a slow command can never overlap its own poll. */
+  private syncCommandPredicates(trigger: ActiveTrigger): void {
+    const desired = new Set<string>();
+    for (const [index, spec] of trigger.triggers.entries()) {
+      if (spec.kind !== 'command') continue;
+      const key = commandCheckKey(trigger.id, index);
+      desired.add(key);
+      const existing = this.commandChecks.get(key);
+      if (existing && commandSpecIdentity(existing.spec) !== commandSpecIdentity(spec)) {
+        this.stopCommandCheck(key);
+      }
+      if (!this.commandChecks.has(key) && !this.commandTimers.has(key)) {
+        this.scheduleCommandCheck(trigger.id, index, spec, 0);
+      }
+    }
+
+    const prefix = `${trigger.id}:`;
+    for (const key of new Set([
+      ...this.commandChecks.keys(),
+      ...this.commandTimers.keys(),
+    ])) {
+      if (key.startsWith(prefix) && !desired.has(key)) this.stopCommandCheck(key);
+    }
+  }
+
+  private scheduleCommandCheck(
+    id: string,
+    index: number,
+    spec: CommandTrigger,
+    delayMs: number,
+  ): void {
+    const key = commandCheckKey(id, index);
+    if (this.commandChecks.has(key) || this.commandTimers.has(key) || this.disposed) return;
+    const generation = this.commandGenerations.get(key) ?? 0;
+    this.commandGenerations.set(key, generation);
+    const handle = this.clock.setTimeout(() => {
+      this.commandTimers.delete(key);
+      if (this.disposed || (this.commandGenerations.get(key) ?? 0) !== generation) return;
+      const trigger = this.triggers.get(id);
+      const current = trigger?.triggers[index];
+      if (
+        !trigger
+        || trigger.deliveryState !== 'pending'
+        || current?.kind !== 'command'
+        || commandSpecIdentity(current) !== commandSpecIdentity(spec)
+      ) return;
+      this.beginCommandCheck(id, index, current);
+    }, Math.max(0, delayMs));
+    this.commandTimers.set(key, handle);
+  }
+
+  private beginCommandCheck(id: string, index: number, spec: CommandTrigger): void {
+    const key = commandCheckKey(id, index);
+    if (this.commandChecks.has(key) || this.disposed) return;
+    const trigger = this.triggers.get(id);
+    if (!trigger || trigger.deliveryState !== 'pending') return;
+
+    const lease = this.probeLeases.tryAcquire(spec);
+    if (!lease) {
+      // Another host is probing the same command (or owns an unknown lease).
+      // Waiting for the normal interval avoids a busy loop and leaves that
+      // host's process lifetime as the concurrency authority.
+      this.scheduleCommandCheck(id, index, spec, spec.intervalMs);
+      return;
+    }
+
+    const generation = this.commandGenerations.get(key) ?? 0;
+    const controller = new AbortController();
+    const check: CommandCheck = {
+      key,
+      id,
+      index,
+      spec,
+      generation,
+      controller,
+      lease,
+    };
+    this.commandChecks.set(key, check);
+
+    let pending: Promise<CommandPredicateExecutionResult>;
+    try {
+      pending = Promise.resolve(this.commandRunner(spec, controller.signal));
+    } catch (error) {
+      pending = Promise.resolve({ exitCode: null, error });
+    }
+    void pending.then(
+      (result) => this.settleCommandCheck(check, result),
+      (error) => this.settleCommandCheck(check, { exitCode: null, error }),
+    );
+  }
+
+  private settleCommandCheck(check: CommandCheck, result: CommandPredicateExecutionResult): void {
+    const currentCheck = this.commandChecks.get(check.key);
+    const isCurrent = currentCheck?.generation === check.generation;
+    if (isCurrent) this.commandChecks.delete(check.key);
+
+    // The lease is released only after the runner settles. On a true result,
+    // claim/delivery happens while the lease is still held so a second host
+    // cannot start the same predicate between satisfaction and durable fire.
+    if (isCurrent && !this.disposed) {
+      const trigger = this.triggers.get(check.id);
+      const currentSpec = trigger?.triggers[check.index];
+      if (
+        trigger
+        && trigger.deliveryState === 'pending'
+        && currentSpec?.kind === 'command'
+        && commandSpecIdentity(currentSpec) === commandSpecIdentity(check.spec)
+      ) {
+        const parsed = parseCommandPredicateResult(result);
+        if (parsed.satisfied) {
+          this.commandDiagnostics.delete(check.id);
+          this.triggers.set(check.id, { ...trigger, deliveryDetail: undefined });
+          this.fire(check.id, `command condition satisfied (${describeCommand(check.spec)})`);
+        } else {
+          const detail = commandDiagnosticDetail(check.spec, parsed.error);
+          this.commandDiagnostics.set(check.id, detail);
+          this.triggers.set(check.id, { ...trigger, deliveryDetail: detail });
+          this.scheduleCommandCheck(check.id, check.index, check.spec, check.spec.intervalMs);
+          this.deps.scheduleRender?.();
+        }
+      }
+    }
+
+    this.probeLeases.release(check.lease);
+  }
+
+  private stopCommandChecks(id: string): void {
+    const prefix = `${id}:`;
+    for (const key of new Set([
+      ...this.commandChecks.keys(),
+      ...this.commandTimers.keys(),
+    ])) {
+      if (key.startsWith(prefix)) this.stopCommandCheck(key);
+    }
+  }
+
+  private stopCommandCheck(key: string): void {
+    const handle = this.commandTimers.get(key);
+    if (handle !== undefined) {
+      this.clock.clearTimeout(handle);
+      this.commandTimers.delete(key);
+    }
+    this.commandGenerations.set(key, (this.commandGenerations.get(key) ?? 0) + 1);
+    const check = this.commandChecks.get(key);
+    if (check) {
+      this.commandChecks.delete(key);
+      check.controller.abort();
+    }
   }
 
   private scheduleRecoveredDelivery(trigger: ActiveTrigger): void {
@@ -425,19 +659,19 @@ export class DeferredTriggerRegistry {
     // multiple timer specs fires at the shortest delay, not the first listed).
     const spec = timerSpecs.reduce((a, b) => (a.ms <= b.ms ? a : b));
     const registeredAt = Date.parse(t.registeredAt);
-    const base = Number.isFinite(registeredAt) ? registeredAt : Date.now();
+    const base = Number.isFinite(registeredAt) ? registeredAt : this.clock.now();
     const deadline = base + spec.ms;
     const fire = (): void => this.fire(t.id, `timer elapsed after ${spec.ms}ms`);
     const scheduleNextSlice = (): void => {
       if (!this.triggers.has(t.id)) return;
-      const remaining = deadline - Date.now();
+      const remaining = deadline - this.clock.now();
       if (remaining <= 0) {
         fire();
         return;
       }
       this.timers.set(t.id, setTimeout(scheduleNextSlice, boundedTimerSlice(remaining)));
     };
-    if (deadline <= Date.now()) {
+    if (deadline <= this.clock.now()) {
       // Already elapsed (e.g. process was down) — fire on the next turn to
       // avoid re-entrancy during reload. Track the immediate so a claim/reload
       // can disarm it just like a future timer.
@@ -457,13 +691,53 @@ export class DeferredTriggerRegistry {
   }
 
   dispose(): void {
+    this.disposed = true;
     this.stopWatcher?.();
     this.stopWatcher = undefined;
     for (const id of [...this.timers.keys()]) this.clearTimer(id);
+    for (const key of new Set([
+      ...this.commandChecks.keys(),
+      ...this.commandTimers.keys(),
+    ])) this.stopCommandCheck(key);
     this.triggers.clear();
     this.pendingClaimsByCorrId.clear();
     this.attemptedAutomaticRecoveries.clear();
+    // In-flight leases are released by settleCommandCheck after their bounded
+    // runner exits. There is no eager release here: doing so would permit a
+    // second host to execute the same predicate concurrently with late work.
   }
+}
+
+function commandCheckKey(id: string, index: number): string {
+  return `${id}:${index}`;
+}
+
+function commandSpecIdentity(spec: CommandTrigger): string {
+  return JSON.stringify({
+    command: spec.command,
+    cwd: spec.cwd,
+    intervalMs: spec.intervalMs,
+    timeoutMs: spec.timeoutMs,
+  });
+}
+
+function describeCommand(spec: CommandTrigger): string {
+  const command = spec.command.replace(/\s+/g, ' ').trim();
+  const bounded = command.length > 120 ? `${command.slice(0, 117)}…` : command;
+  return `"${bounded}"`;
+}
+
+function commandDiagnosticDetail(spec: CommandTrigger, error: string | undefined): string {
+  const reason = error
+    ? error.replace(/\s+/g, ' ').trim().slice(0, 220)
+    : 'predicate returned false';
+  return `command condition unsatisfied: ${reason || 'predicate returned false'}; will retry in ${formatCommandInterval(spec.intervalMs)}.`;
+}
+
+function formatCommandInterval(ms: number): string {
+  if (ms < 60_000) return `${Math.max(1, Math.round(ms / 1000))}s`;
+  if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m`;
+  return `${(ms / 3_600_000).toFixed(1)}h`;
 }
 
 function isTimerSpec(s: TriggerSpec): s is TriggerSpec & { kind: 'timer'; ms: number } {

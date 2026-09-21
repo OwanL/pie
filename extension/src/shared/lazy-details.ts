@@ -5,7 +5,7 @@ import type {
   ToolCall,
 } from './protocol/messages.js';
 import { deduplicateToolCallResultsForTransport } from './chat-message-parts.js';
-import { getSubagentBillingEntries } from './subagent-result.js';
+import { getSubagentBillingEntries, hasNestedToolFailure } from './subagent-result.js';
 import { isRecord } from './type-guards.js';
 import { utf8ByteLength } from './utf8.js';
 
@@ -20,6 +20,21 @@ export const SUBAGENT_PREVIEW_MAX_BYTES = 64 * 1024;
 const SUBAGENT_PREVIEW_TEXT_CHARS = 8 * 1024;
 const SUBAGENT_PREVIEW_TASK_CHARS = 2 * 1024;
 const SUBAGENT_PREVIEW_LIST_ITEMS = 8;
+const SUBAGENT_PREVIEW_FILE_CHANGE_LIMIT = 64;
+const SUBAGENT_PREVIEW_FILE_PATH_CHARS = 2 * 1024;
+const SUBAGENT_PREVIEW_FILE_DESCRIPTION_CHARS = 1024;
+const SUBAGENT_PREVIEW_MESSAGE_LIMIT = 128;
+const SUBAGENT_PREVIEW_MESSAGE_PART_LIMIT = 16;
+const SUBAGENT_PREVIEW_ARGUMENT_CHARS = 4 * 1024;
+const SUBAGENT_PREVIEW_MAX_RECURSION = 8;
+
+export interface BoundedSubagentFileChange {
+  path: string;
+  kind: 'created' | 'modified' | 'deleted';
+  description?: string;
+  additions?: number;
+  deletions?: number;
+}
 
 export function jsonBytes(value: unknown): number {
   if (value === undefined) return 0;
@@ -51,15 +66,160 @@ function compactUnknownPreview(value: unknown, maxChars = SUBAGENT_PREVIEW_TEXT_
   return compact;
 }
 
-function compactSubagentChild(value: unknown): Record<string, unknown> | undefined {
+/** Keep the producer-owned file summary usable after verbose child transcripts
+ * are removed from the ordinary terminal/live transport lane. */
+export function compactSubagentFileChanges(value: unknown): BoundedSubagentFileChange[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const changes: BoundedSubagentFileChange[] = [];
+  for (const candidate of value.slice(0, SUBAGENT_PREVIEW_FILE_CHANGE_LIMIT)) {
+    if (!isRecord(candidate) || typeof candidate.path !== 'string' || !candidate.path.trim()) continue;
+    const kind = candidate.kind;
+    if (kind !== 'created' && kind !== 'modified' && kind !== 'deleted') continue;
+    const additions = typeof candidate.additions === 'number'
+      && Number.isFinite(candidate.additions) && candidate.additions >= 0
+      ? Math.trunc(candidate.additions) : undefined;
+    const deletions = typeof candidate.deletions === 'number'
+      && Number.isFinite(candidate.deletions) && candidate.deletions >= 0
+      ? Math.trunc(candidate.deletions) : undefined;
+    changes.push({
+      path: candidate.path.slice(0, SUBAGENT_PREVIEW_FILE_PATH_CHARS),
+      kind,
+      ...(typeof candidate.description === 'string'
+        ? { description: candidate.description.slice(0, SUBAGENT_PREVIEW_FILE_DESCRIPTION_CHARS) }
+        : {}),
+      ...(additions !== undefined ? { additions } : {}),
+      ...(deletions !== undefined ? { deletions } : {}),
+    });
+  }
+  return changes.length > 0 ? changes : undefined;
+}
+
+function compactSubagentToolArguments(value: unknown, subagent: boolean): unknown {
+  if (typeof value === 'string') return value.slice(0, SUBAGENT_PREVIEW_ARGUMENT_CHARS);
   if (!isRecord(value)) return undefined;
+  const keys = subagent
+    ? ['cwd']
+    : ['path', 'filePath', 'file', 'filepath', 'target', 'targetPath', 'command', 'cmd', 'command_str'];
+  const compact: Record<string, unknown> = {};
+  for (const key of keys) {
+    if (typeof value[key] === 'string') compact[key] = (value[key] as string).slice(0, SUBAGENT_PREVIEW_ARGUMENT_CHARS);
+  }
+  return Object.keys(compact).length > 0 ? compact : undefined;
+}
+
+function isFileChangeToolName(name: string): boolean {
+  const normalized = name.toLowerCase();
+  return normalized === 'subagent'
+    || normalized === 'bash'
+    || normalized === 'shell'
+    || normalized === 'execute_bash'
+    || normalized === 'run_command'
+    || normalized === 'execute_command'
+    || normalized.includes('edit')
+    || normalized.includes('write')
+    || normalized.includes('create')
+    || normalized.includes('delete')
+    || normalized.includes('remove')
+    || normalized.includes('rename')
+    || normalized.includes('move');
+}
+
+/** Retain only the bounded message structure needed for legacy file-change
+ * derivation and nested-failure markers. Ordinary prose/tool output remains
+ * behind the durable detail reference. */
+export function compactSubagentMessages(value: unknown, recursionDepth = 0): unknown[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const messages: Record<string, unknown>[] = [];
+  for (const candidate of value) {
+    if (!isRecord(candidate)) continue;
+    if (candidate.role === 'assistant' && Array.isArray(candidate.content)) {
+      const content = candidate.content.slice(0, SUBAGENT_PREVIEW_MESSAGE_PART_LIMIT).flatMap((part) => {
+        if (!isRecord(part) || part.type !== 'toolCall' || typeof part.name !== 'string') return [];
+        if (!isFileChangeToolName(part.name)) return [];
+        const argumentsValue = compactSubagentToolArguments(part.arguments, part.name.trim().toLowerCase() === 'subagent');
+        return [{
+          type: 'toolCall',
+          ...(typeof part.id === 'string' ? { id: part.id.slice(0, 512) } : {}),
+          name: part.name.slice(0, 256),
+          ...(argumentsValue !== undefined ? { arguments: argumentsValue } : {}),
+        }];
+      });
+      if (content.length > 0) messages.push({ role: 'assistant', content });
+      continue;
+    }
+    if (candidate.role !== 'toolResult') continue;
+    const toolName = typeof candidate.toolName === 'string' ? candidate.toolName : undefined;
+    if (toolName !== 'subagent' && candidate.isError !== true) continue;
+    const message: Record<string, unknown> = { role: 'toolResult' };
+    if (typeof candidate.toolCallId === 'string') message.toolCallId = candidate.toolCallId.slice(0, 512);
+    if (toolName) message.toolName = toolName.slice(0, 256);
+    if (candidate.isError === true) message.isError = true;
+    if (toolName === 'subagent' && candidate.details !== undefined && recursionDepth < SUBAGENT_PREVIEW_MAX_RECURSION) {
+      const nested = compactSubagentResultPreview({ details: candidate.details }, recursionDepth + 1);
+      const nestedDetails = isRecord(nested) && isRecord(nested.details) ? nested.details : undefined;
+      if (nestedDetails) message.details = nestedDetails;
+    }
+    if (message.isError === true || message.details !== undefined) messages.push(message);
+  }
+  return messages.slice(0, SUBAGENT_PREVIEW_MESSAGE_LIMIT);
+}
+
+function compactMinimalSubagentMessages(value: unknown): unknown[] {
+  const messages = compactSubagentMessages(value);
+  if (!messages) return [];
+  return messages.slice(0, 8).flatMap((candidate): unknown[] => {
+    if (!isRecord(candidate)) return [];
+    if (candidate.role === 'assistant' && Array.isArray(candidate.content)) {
+      const content = candidate.content.slice(0, 4).flatMap((part) => {
+        if (!isRecord(part) || part.type !== 'toolCall' || typeof part.name !== 'string') return [];
+        const argumentsValue = compactSubagentToolArguments(part.arguments, part.name.trim().toLowerCase() === 'subagent');
+        return [{
+          type: 'toolCall',
+          ...(typeof part.id === 'string' ? { id: part.id.slice(0, 128) } : {}),
+          name: part.name.slice(0, 128),
+          ...(argumentsValue !== undefined ? { arguments: argumentsValue } : {}),
+        }];
+      });
+      return content.length > 0 ? [{ role: 'assistant', content }] : [];
+    }
+    if (candidate.role !== 'toolResult') return [];
+    return [{
+      role: 'toolResult',
+      ...(typeof candidate.toolCallId === 'string' ? { toolCallId: candidate.toolCallId.slice(0, 128) } : {}),
+      ...(typeof candidate.toolName === 'string' ? { toolName: candidate.toolName.slice(0, 128) } : {}),
+      ...(candidate.isError === true ? { isError: true } : {}),
+    }];
+  });
+}
+
+function compactMinimalSubagentFileChanges(value: unknown): unknown[] | undefined {
+  const changes = compactSubagentFileChanges(value);
+  if (!changes) return undefined;
+  return changes.slice(0, 8).map((change) => ({
+    path: change.path.slice(0, 512),
+    kind: change.kind,
+    ...(change.description ? { description: change.description.slice(0, 128) } : {}),
+    ...(change.additions !== undefined ? { additions: change.additions } : {}),
+    ...(change.deletions !== undefined ? { deletions: change.deletions } : {}),
+  }));
+}
+
+function compactSubagentChild(value: unknown, recursionDepth = 0): Record<string, unknown> | undefined {
+  if (!isRecord(value)) return undefined;
+  const compactMessages = compactSubagentMessages(value.messages, recursionDepth) ?? [];
   const child: Record<string, unknown> = {
     id: boundedStart(value.id, 256),
     agent: boundedStart(value.agent, 256),
     task: boundedStart(value.task, SUBAGENT_PREVIEW_TASK_CHARS),
     exitCode: value.exitCode,
-    messages: [],
+    messages: compactMessages,
   };
+  if (hasNestedToolFailure({
+    messages: Array.isArray(value.messages) ? value.messages : undefined,
+    hasNestedToolFailure: value.hasNestedToolFailure,
+  })) {
+    child.hasNestedToolFailure = true;
+  }
   const copy = (key: string, candidate: unknown = value[key]): void => {
     if (candidate !== undefined) child[key] = candidate;
   };
@@ -71,7 +231,10 @@ function compactSubagentChild(value: unknown): Record<string, unknown> | undefin
   // must survive the compact preview so an expanded card can open the page-backed
   // detail subscription without a backend round-trip.
   copy('detailAddress', value.detailAddress);
+  copy('cwd', boundedStart(value.cwd, 2 * 1024));
   copy('parentUserContextMode');
+  copy('parentUserContext', boundedStart(value.parentUserContext, 12_000));
+  copy('fileChanges', compactSubagentFileChanges(value.fileChanges));
   copy('model', boundedStart(value.model, 256));
   copy('provider', boundedStart(value.provider, 256));
   copy('contextWindow');
@@ -95,6 +258,9 @@ function compactSubagentChild(value: unknown): Record<string, unknown> | undefin
   copy('errorMessage', boundedStart(value.errorMessage, 2048));
   copy('stderr', boundedTail(value.stderr, 2048));
   copy('retryCount');
+  copy('fallback');
+  copy('failedModel', boundedStart(value.failedModel, 256));
+  copy('failureClass', boundedStart(value.failureClass, 256));
   copy('usage', compactUnknownPreview(value.usage, 2048));
   copy('runningTools', Array.isArray(value.runningTools)
     ? value.runningTools.slice(0, SUBAGENT_PREVIEW_LIST_ITEMS).map((item) => boundedStart(item, 256))
@@ -113,7 +279,7 @@ function compactSubagentChild(value: unknown): Record<string, unknown> | undefin
  * transcript. The returned value intentionally matches the raw result shapes
  * already understood by getRenderableSubagentResult().
  */
-export function compactSubagentResultPreview(value: unknown): unknown {
+export function compactSubagentResultPreview(value: unknown, recursionDepth = 0): unknown {
   if (!isRecord(value)) return undefined;
   const typedChildren = value.kind === 'subagent' && Array.isArray(value.children)
     ? value.children
@@ -126,7 +292,7 @@ export function compactSubagentResultPreview(value: unknown): unknown {
   const billing = getSubagentBillingEntries(value);
 
   const children = source
-    .map(compactSubagentChild)
+    .map((child) => compactSubagentChild(child, recursionDepth))
     .filter((child): child is Record<string, unknown> => child !== undefined);
   if (children.length === 0) return undefined;
 
@@ -141,11 +307,14 @@ export function compactSubagentResultPreview(value: unknown): unknown {
   // recursive messages are removed. Preserve every card's identity/status and
   // a proportionally-sized task/live tail rather than dropping siblings.
   const perChildChars = Math.max(160, Math.floor(24 * 1024 / children.length));
+  const parentContextChars = Math.max(256, Math.min(12_000, Math.floor(12_000 / Math.max(1, children.length))));
   const minimalChildren = children.map((child) => ({
     id: child.id,
     childId: child.childId,
     attemptId: child.attemptId,
-    lineage: child.lineage,
+    lineage: Array.isArray(child.lineage)
+      ? child.lineage.slice(0, 8).map((item) => compactUnknownPreview(item, 256))
+      : undefined,
     liveAddressable: child.liveAddressable,
     detailAddress: child.detailAddress,
     agent: boundedStart(child.agent, 128),
@@ -153,6 +322,9 @@ export function compactSubagentResultPreview(value: unknown): unknown {
     exitCode: child.exitCode,
     model: boundedStart(child.model, 128),
     provider: boundedStart(child.provider, 128),
+    selectedModel: boundedStart(child.selectedModel, 128),
+    thinkingLevel: boundedStart(child.thinkingLevel, 64),
+    contextWindow: child.contextWindow,
     activityPhase: child.activityPhase,
     activityDetail: boundedStart(child.activityDetail, perChildChars),
     startedAt: child.startedAt,
@@ -162,13 +334,59 @@ export function compactSubagentResultPreview(value: unknown): unknown {
     streamingReasoning: boundedTail(child.streamingReasoning, perChildChars),
     runningTools: child.runningTools,
     usage: child.usage,
-    messages: [],
+    retryCount: child.retryCount,
+    fallback: child.fallback,
+    failedModel: boundedStart(child.failedModel, 128),
+    failureClass: boundedStart(child.failureClass, 128),
+    stopReason: boundedStart(child.stopReason, 128),
+    errorMessage: boundedStart(child.errorMessage, 2_048),
+    stderr: boundedTail(child.stderr, 2_048),
+    turnThroughputSamples: Array.isArray(child.turnThroughputSamples)
+      ? child.turnThroughputSamples.slice(-1)
+      : undefined,
+    cwd: boundedStart(child.cwd, 2 * 1024),
+    parentUserContextMode: child.parentUserContextMode,
+    parentUserContext: boundedStart(child.parentUserContext, parentContextChars),
+    fileChanges: compactMinimalSubagentFileChanges(child.fileChanges),
+    hasNestedToolFailure: child.hasNestedToolFailure,
+    messages: compactMinimalSubagentMessages(child.messages),
   }));
-  return typedChildren
-    ? { kind: 'subagent', mode: value.mode, children: minimalChildren, ...(billing.length > 0 ? { billing } : {}) }
+  const buildResult = (resultChildren: unknown[], includeBilling: boolean): unknown => typedChildren
+    ? { kind: 'subagent', mode: value.mode, children: resultChildren, ...(includeBilling && billing.length > 0 ? { billing } : {}) }
     : directResults
-      ? { mode: value.mode, results: minimalChildren, ...(billing.length > 0 ? { billing } : {}) }
-      : { details: { mode: nestedDetails?.mode, results: minimalChildren }, ...(billing.length > 0 ? { billing } : {}) };
+      ? { mode: value.mode, results: resultChildren, ...(includeBilling && billing.length > 0 ? { billing } : {}) }
+      : { details: { mode: nestedDetails?.mode, results: resultChildren }, ...(includeBilling && billing.length > 0 ? { billing } : {}) };
+  const minimal = buildResult(minimalChildren, true);
+  if (jsonBytes(minimal) <= SUBAGENT_PREVIEW_MAX_BYTES) return minimal;
+
+  // A pathological billing/context/file-summary combination can still exceed
+  // the preview budget. Keep lifecycle identity and nested-failure visibility
+  // before dropping optional telemetry, then retain as many cards as fit.
+  const identityChildren = children.map((child) => ({
+    id: child.id,
+    childId: child.childId,
+    attemptId: child.attemptId,
+    agent: boundedStart(child.agent, 128),
+    task: boundedStart(child.task, 256),
+    exitCode: child.exitCode,
+    messages: [],
+    activityPhase: child.activityPhase,
+    hasNestedToolFailure: child.hasNestedToolFailure,
+  }));
+  const identity = buildResult(identityChildren, false) as Record<string, unknown>;
+  if (jsonBytes(identity) <= SUBAGENT_PREVIEW_MAX_BYTES) return identity;
+  let retainedChildren = identityChildren;
+  while (retainedChildren.length > 0 && jsonBytes({ ...identity, ...(typedChildren
+    ? { children: retainedChildren }
+    : directResults
+      ? { results: retainedChildren }
+      : { details: { mode: nestedDetails?.mode, results: retainedChildren } }) }) > SUBAGENT_PREVIEW_MAX_BYTES) {
+    retainedChildren = retainedChildren.slice(0, -1);
+  }
+  const omittedChildren = identityChildren.length - retainedChildren.length;
+  const boundedIdentity = buildResult(retainedChildren, false) as Record<string, unknown>;
+  if (omittedChildren > 0) boundedIdentity.omittedChildren = omittedChildren;
+  return boundedIdentity;
 }
 
 function shortSummary(value: unknown): string {

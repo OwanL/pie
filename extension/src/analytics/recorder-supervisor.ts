@@ -470,7 +470,7 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
 
   preflightDetail(value: unknown): void {
     if (!this.options.enabled) return;
-    if (!this.accepting) throw this.failure ?? new Error('Analytics recorder worker is not accepting capture.');
+    if (!this.accepting || this.failure) throw this.failure ?? new Error('Analytics recorder worker is not accepting capture.');
     const startedAt = performance.now();
     const records = this.queuedRecords + this.inFlightRecords + 1;
     const maximumRecords = this.options.maxQueueRecords ?? 65_536;
@@ -686,7 +686,7 @@ export class AnalyticsRecorderSupervisor implements AnalyticsSink, AnalyticsDeta
     value: AnalyticsObservation<object> | AnalyticsDetailCapture,
     onDisposition?: (disposition: AnalyticsRecorderCaptureDisposition) => void,
   ): void {
-    if (!this.accepting) throw this.failure ?? new Error('Analytics recorder worker is not accepting capture.');
+    if (!this.accepting || this.failure) throw this.failure ?? new Error('Analytics recorder worker is not accepting capture.');
     const startedAt = performance.now();
     const records = this.queuedRecords + this.inFlightRecords + 1;
     const maximumRecords = this.options.maxQueueRecords ?? 65_536;

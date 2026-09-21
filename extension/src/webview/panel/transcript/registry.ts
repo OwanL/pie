@@ -6,6 +6,7 @@ import type { ChatMessage, ChatPrefs, ComposerInput, InlineEditDraft, PruningRes
 import type { RenderToolCall, TranscriptContextMenuHandler } from './types';
 import type { TranscriptRow } from './virtual-list-rows';
 import type { LazyDetailState } from './lazy-detail-store';
+import type { TokenPricingResolver } from '../session-tabs/token-usage';
 
 // --- Row Registry ---
 
@@ -69,6 +70,8 @@ export interface ToolRendererProps {
   onOpenFile: (path: string) => void;
   onContextMenu: TranscriptContextMenuHandler;
   renderToolCall: RenderToolCall;
+  /** Current provider-qualified catalog pricing for display-only estimates. */
+  pricingForModel?: TokenPricingResolver;
 }
 
 export type ToolRenderer = (props: ToolRendererProps) => ComponentChildren;

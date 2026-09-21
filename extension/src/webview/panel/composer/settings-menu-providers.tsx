@@ -3,6 +3,10 @@
 
 import { useState } from 'preact/hooks';
 import type { ChatPrefs, ProviderGateStats, ProviderGateProviderMetrics } from '../../../shared/protocol';
+import {
+  PROVIDER_MAX_CONCURRENT_REQUESTS,
+  PROVIDER_UNLIMITED_CONCURRENCY,
+} from '../../../shared/provider-concurrency';
 import { setProviderEnabled } from '../chat-prefs';
 import { CollapsibleChevron } from '../components/chevron';
 import { SettingCheckbox } from '../components/setting-checkbox';
@@ -15,6 +19,10 @@ export const PROVIDER_SETTING_LABELS = [
   'Queue wait',
   'Header wait',
 ] as const;
+
+/** The rightmost UI position is reserved for the explicit Unlimited sentinel;
+ * finite values remain the human-readable 1–128 range. */
+const PROVIDER_UNLIMITED_SLIDER_VALUE = PROVIDER_MAX_CONCURRENT_REQUESTS + 1;
 
 interface ProviderItemProps {
   provider: string;
@@ -38,6 +46,9 @@ function ProviderConcurrencyControls({
 }) {
   const overrides = prefs.providerConcurrency[provider] ?? {};
   const maxConcurrent = overrides.maxConcurrentRequests ?? metrics?.maxConcurrentRequests ?? 2;
+  const maxConcurrentSliderValue = maxConcurrent === PROVIDER_UNLIMITED_CONCURRENCY
+    ? PROVIDER_UNLIMITED_SLIDER_VALUE
+    : maxConcurrent;
   const afterburn = overrides.afterburnSeconds ?? metrics?.afterburnSeconds ?? 0;
   const queueWait = overrides.queueWaitSeconds ?? 30;
   const headerWait = overrides.headerWaitSeconds ?? 0;
@@ -58,13 +69,18 @@ function ProviderConcurrencyControls({
         {/* Max concurrent requests */}
         <SliderRow
           label="Max concurrent"
-          value={maxConcurrent}
+          value={maxConcurrentSliderValue}
           min={1}
-          max={8}
+          max={PROVIDER_UNLIMITED_SLIDER_VALUE}
           step={1}
+          formatValue={(value) => value === PROVIDER_UNLIMITED_SLIDER_VALUE ? 'Unlimited' : `${value}`}
           ariaLabel={`Max concurrent requests for ${provider}`}
-          hint="Max in-flight LLM requests to this provider. Lower = gentler on rate limits."
-          onChange={(value) => setOverride('maxConcurrentRequests', value)}
+          tooltip="Provider-wide in-flight request cap. Unlimited disables concurrency and afterburn capacity throttling while retaining circuit breakers and network safety deadlines."
+          hint="Max in-flight LLM requests to this provider. Move to the rightmost position for Unlimited."
+          onChange={(value) => setOverride(
+            'maxConcurrentRequests',
+            value === PROVIDER_UNLIMITED_SLIDER_VALUE ? PROVIDER_UNLIMITED_CONCURRENCY : value,
+          )}
         />
 
         {/* Afterburn sticky-slot window */}
@@ -72,11 +88,12 @@ function ProviderConcurrencyControls({
           label="Afterburn"
           value={afterburn}
           min={0}
-          max={60}
+          max={300}
           step={5}
           formatValue={(v) => (v === 0 ? 'Off' : `${v}s`)}
           ariaLabel={`Afterburn sticky-slot window for ${provider}`}
-          hint="Reserves a slot for the same session after it finishes. 0 = disabled."
+          tooltip="Afterburn keeps a completed capacity slot reserved for the same session. It is ignored when Max concurrent is Unlimited."
+          hint="Reserves a slot for the same session after it finishes. 0 = disabled; Unlimited max concurrency bypasses this capacity hold."
           onChange={(value) => setOverride('afterburnSeconds', value)}
         />
 
@@ -89,6 +106,7 @@ function ProviderConcurrencyControls({
           step={5}
           formatValue={(v) => (v === 0 ? '300s max' : `${v}s`)}
           ariaLabel={`Queue wait timeout for ${provider}`}
+          tooltip="Maximum time a request may wait for finite provider capacity before a retryable saturation error. Unlimited capacity normally avoids this queue."
           hint="How long a queued request waits before failing with 429. 0 uses the 300s safety maximum."
           onChange={(value) => setOverride('queueWaitSeconds', value)}
         />
@@ -102,6 +120,7 @@ function ProviderConcurrencyControls({
           step={10}
           formatValue={(v) => (v === 0 ? 'default' : `${v}s`)}
           ariaLabel={`Header wait timeout for ${provider}`}
+          tooltip="Maximum time to wait for upstream response headers. This network deadline remains active in Unlimited mode; 0 uses the provider default."
           hint="Max seconds to wait for upstream response headers. 0 = provider default."
           onChange={(value) => setOverride('headerWaitSeconds', value)}
         />

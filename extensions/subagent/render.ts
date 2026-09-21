@@ -86,13 +86,15 @@ export function renderDisplayItems(items: DisplayItem[], theme: Theme, expanded:
 }
 
 export function aggregateUsage(results: SingleResult[]) {
-	const total = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
+	// Cost is provider-reported evidence: the aggregate carries it only when at
+	// least one child reported cost, never an invented zero.
+	const total = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: undefined as number | undefined, turns: 0 };
 	for (const r of results) {
 		total.input += r.usage.input;
 		total.output += r.usage.output;
 		total.cacheRead += r.usage.cacheRead;
 		total.cacheWrite += r.usage.cacheWrite;
-		total.cost += r.usage.cost;
+		if (r.usage.cost !== undefined) total.cost = (total.cost ?? 0) + r.usage.cost;
 		total.turns += r.usage.turns;
 	}
 	return total;

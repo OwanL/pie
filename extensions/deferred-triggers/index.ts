@@ -1,14 +1,16 @@
 import { randomUUID } from 'node:crypto';
+import * as path from 'node:path';
 
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
+import { guardCommand } from '../safeguard/index.js';
+import { validateWakeConditions } from '../../shared/wake-conditions.js';
 import { deferTriggerSchema } from './src/types.js';
-import type { DeferTriggerParams, TriggerSpec } from './src/types.js';
+import type { ActiveTrigger, DeferTriggerParams, TriggerSpec } from './src/types.js';
 import { appendTriggerOp, listActiveForSession } from './src/store.js';
 
 /** Honor the host's per-extension toggle (PIE_EXTENSION_TOGGLES_JSON, keyed by
- *  extension id). Mirrors skill-pruner's isExtensionDisabledByToggle so the
- *  Settings → Extensions checkbox actually disables this tool at runtime. */
+ * extension id). Mirrors skill-pruner's toggle handling. */
 function isDisabledByToggle(): boolean {
   const raw = process.env['PIE_EXTENSION_TOGGLES_JSON'];
   if (!raw) return false;
@@ -20,31 +22,17 @@ function isDisabledByToggle(): boolean {
   }
 }
 
-/** Minimal context shape the tool needs: the current session's file path. */
+/** Minimal context shape used by the deferred-trigger tool. */
 interface ToolExecuteCtx {
   sessionManager: {
     getSessionFile(): string | undefined;
   };
-  /** Pi's active-turn abort hook. Optional for lightweight unit-test contexts. */
-  abort?: () => void;
-}
-
-interface AssistantTerminalLike {
-  role?: string;
-  stopReason?: string;
-  errorMessage?: string;
-  content?: unknown;
-}
-
-function hasAssistantOutput(content: unknown): boolean {
-  if (!Array.isArray(content)) return false;
-  return content.some((part) => {
-    if (!part || typeof part !== 'object') return false;
-    const candidate = part as Record<string, unknown>;
-    return candidate.type === 'toolCall'
-      || (candidate.type === 'text' && typeof candidate.text === 'string' && candidate.text.trim().length > 0)
-      || (candidate.type === 'thinking' && typeof candidate.thinking === 'string' && candidate.thinking.trim().length > 0);
-  });
+  cwd?: string;
+  hasUI?: boolean;
+  ui?: {
+    confirm(title: string, message: string): Promise<boolean>;
+    notify(message: string, level?: string): void;
+  };
 }
 
 function ok(text: string, details?: unknown) {
@@ -63,85 +51,107 @@ function err(message: string) {
   };
 }
 
-/** Validate + coerce a raw triggers array into `TriggerSpec[]`, or return an error string. */
-function validateTriggers(raw: unknown): { specs?: TriggerSpec[]; error?: string } {
-  if (!Array.isArray(raw) || raw.length === 0) {
-    return { error: 'triggers must be a non-empty array of trigger specs.' };
-  }
-  const specs: TriggerSpec[] = [];
-  for (const item of raw) {
-    if (!item || typeof item !== 'object') return { error: 'each trigger spec must be an object.' };
-    const s = item as Record<string, unknown>;
-    if (s.kind !== 'session_finished' && s.kind !== 'timer' && s.kind !== 'user_input') {
-      return { error: `trigger kind must be one of session_finished | timer | user_input (got ${String(s.kind)}).` };
-    }
-    const spec: TriggerSpec = { kind: s.kind };
-    if (s.kind === 'session_finished') {
-      if (s.sessionPath !== undefined) {
-        if (typeof s.sessionPath !== 'string' || s.sessionPath.trim() === '') {
-          return { error: 'session_finished.sessionPath must be a non-empty string or omitted.' };
-        }
-        spec.sessionPath = s.sessionPath;
-      }
-    } else if (s.kind === 'timer') {
-      if (typeof s.ms !== 'number' || !Number.isFinite(s.ms) || s.ms <= 0 || !Number.isInteger(s.ms)) {
-        return { error: 'timer.ms must be a positive integer (milliseconds).' };
-      }
-      spec.ms = s.ms;
-    }
-    specs.push(spec);
-  }
-  return { specs };
+function registrationCwd(ctx: ToolExecuteCtx): string {
+  return path.resolve(typeof ctx.cwd === 'string' && ctx.cwd.trim() ? ctx.cwd : process.cwd());
 }
 
-function describeTrigger(specs: TriggerSpec[]): string {
-  return specs
-    .map((s) => {
-      if (s.kind === 'session_finished') {
-        return s.sessionPath ? `session_finished(${s.sessionPath})` : 'session_finished(any)';
-      }
-      if (s.kind === 'timer') return `timer(${s.ms}ms)`;
-      return 'user_input';
-    })
-    .join(' OR ');
+async function checkCommandSafety(specs: TriggerSpec[], ctx: ToolExecuteCtx): Promise<string | undefined> {
+  for (const spec of specs) {
+    if (spec.kind !== 'command') continue;
+    const result = await guardCommand(spec.command, {
+      cwd: spec.cwd,
+      hasUI: ctx.hasUI === true,
+      ui: ctx.ui ?? {
+        confirm: async () => false,
+        notify: () => undefined,
+      },
+    });
+    if (result?.block) return result.reason;
+  }
+  return undefined;
 }
 
-function renderList(triggers: { id: string; triggers: TriggerSpec[]; note: string; registeredAt: string; deliveryState: 'pending' | 'claimed' | 'retryable'; deliveryDetail?: string }[]): string {
+function describeTrigger(spec: TriggerSpec): string {
+  if (spec.kind === 'session_finished') {
+    return spec.sessionPath ? `session_finished(${spec.sessionPath})` : 'session_finished(any)';
+  }
+  if (spec.kind === 'timer') return `timer(${spec.ms}ms)`;
+  if (spec.kind === 'user_input') return 'user_input';
+  return `command(${spec.command}; cwd=${spec.cwd}; every=${spec.intervalMs}ms; timeout=${spec.timeoutMs}ms)`;
+}
+
+function describeTriggers(specs: TriggerSpec[]): string {
+  return specs.map(describeTrigger).join(' OR ');
+}
+
+function renderList(triggers: ActiveTrigger[]): string {
   if (triggers.length === 0) return 'No pending deferred triggers for this session.';
-  const rows = triggers.map(
-    (t) => `  ${t.id}  [${describeTrigger(t.triggers)}]  delivery: ${t.deliveryState}${t.deliveryDetail ? ` (${t.deliveryDetail})` : ''}  note: ${t.note || '(none)'}  registered: ${t.registeredAt}`,
-  );
+  const rows = triggers.map((t) => {
+    const message = t.message.trim() || t.note.trim();
+    const target = t.targetSession === t.sessionPath ? 'caller' : t.targetSession;
+    return `  ${t.id}  [${describeTriggers(t.triggers)}]  target: ${target}  delivery: ${t.deliveryState}${t.deliveryDetail ? ` (${t.deliveryDetail})` : ''}  message: ${message || '(none)'}  registered: ${t.registeredAt}`;
+  });
   return `Pending deferred triggers (${triggers.length}):\n${rows.join('\n')}`;
 }
 
-export default function (pi: ExtensionAPI) {
-  // `defer_trigger register` must stop the active agent loop so the model
-  // cannot continue issuing tools before wake-up. The SDK represents that
-  // control-flow stop as an aborted assistant terminal. Replace only the
-  // empty terminal caused by our immediately scheduled abort; genuine user,
-  // provider, and content-bearing aborts remain interrupted.
-  let intentionalDeferralPending = false;
-  pi.on('message_end', (event: { message: AssistantTerminalLike }) => {
-    if (!intentionalDeferralPending || event.message.role !== 'assistant') return;
-    intentionalDeferralPending = false;
-    const message = event.message as AssistantTerminalLike;
-    if (message.stopReason !== 'aborted' || hasAssistantOutput(message.content)) return;
-    return {
-      message: {
-        ...event.message,
-        stopReason: 'stop',
-        errorMessage: undefined,
-      },
-    };
-  });
+function getSessionPath(ctx: ToolExecuteCtx): string | undefined {
+  return ctx?.sessionManager?.getSessionFile();
+}
 
+function readMessage(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+function readTargetSession(value: unknown, caller: string): { target?: string; error?: string } {
+  if (value === undefined) return { target: caller };
+  if (typeof value !== 'string' || value.trim() === '') {
+    return { error: 'targetSession must be a non-empty persisted session path when provided.' };
+  }
+  return { target: value.trim() };
+}
+
+async function registerWake(
+  rawTriggers: unknown,
+  message: string,
+  creatorSession: string,
+  targetSession: string,
+  ctx: ToolExecuteCtx,
+): Promise<{ id: string; specs: TriggerSpec[] } | { error: string }> {
+  const { specs, error } = validateWakeConditions(rawTriggers, { registrationCwd: registrationCwd(ctx) });
+  if (error || !specs) return { error: error ?? 'invalid wake conditions.' };
+
+  const safetyError = await checkCommandSafety(specs, ctx);
+  if (safetyError) return { error: safetyError };
+
+  const id = randomUUID();
+  try {
+    appendTriggerOp({
+      id,
+      op: 'register',
+      sessionPath: creatorSession,
+      targetSession,
+      triggers: specs,
+      message,
+      at: new Date().toISOString(),
+    });
+  } catch (cause) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    return { error: `could not persist the deferred trigger: ${detail}` };
+  }
+  return { id, specs };
+}
+
+export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: 'defer_trigger',
     label: 'Defer / resume',
-    description: 'Register, list, or cancel triggers that resume this session after a timer, user input, or another session finishes. Registered triggers use OR semantics.',
-    promptSnippet: 'Wait for an asynchronous condition and resume this session when it fires.',
+    description: 'Register, list, or cancel durable triggers that deliver a message to a session after a timer, user input, another session finishes, or a periodic predicate. Registration never ends this turn.',
+    promptSnippet: 'Register an asynchronous condition and message for a session to receive later.',
     promptGuidelines: [
-      'After defer_trigger register, end the turn; on wake-up re-check the condition and complete or re-register. Prefer specific triggers; session_finished never fires for this session itself.',
+      'Use defer_trigger action register to persist a trigger and required message; registration does not end the current turn, so continue working or finish normally.',
+      'Use targetSession only with an explicitly persisted session path. The target must be open when delivery occurs; a closed or unavailable target is not redirected to the caller.',
+      'Use defer_trigger action list or cancel to manage triggers created by the current session. On a wake, re-check the task and either complete it or register another trigger.',
+      'Conditions in one registration use OR semantics. A command predicate exits 0 when satisfied and 1 when not yet satisfied; other exits are evaluation errors and are retried periodically.',
     ],
     parameters: deferTriggerSchema,
 
@@ -155,58 +165,68 @@ export default function (pi: ExtensionAPI) {
       if (isDisabledByToggle()) {
         return err('The deferred-triggers extension is disabled. Enable it in Settings → Extensions to defer/resume sessions.');
       }
-      const p = (params ?? {}) as DeferTriggerParams;
+      const p = (params ?? {}) as Partial<DeferTriggerParams>;
       if (p.action !== 'register' && p.action !== 'cancel' && p.action !== 'list') {
         return err(`action must be one of register | cancel | list (got ${String(p.action)}).`);
       }
 
-      const sessionPath = ctx?.sessionManager?.getSessionFile();
-      if (!sessionPath) {
-        return err('no active session path available — cannot determine which session to resume.');
+      const creatorSession = getSessionPath(ctx);
+      if (!creatorSession) {
+        return err('no active session path available — cannot determine trigger ownership.');
       }
 
       if (p.action === 'list') {
-        const triggers = listActiveForSession(sessionPath);
+        const triggers = listActiveForSession(creatorSession);
         return ok(renderList(triggers), { count: triggers.length });
       }
 
       if (p.action === 'cancel') {
-        const targetId = typeof p.triggerId === 'string' && p.triggerId ? p.triggerId : undefined;
-        appendTriggerOp({
-          op: 'cancel',
-          sessionPath,
-          ...(targetId ? { targetId } : {}),
-          at: new Date().toISOString(),
-        });
+        if (p.triggerId !== undefined && (typeof p.triggerId !== 'string' || !p.triggerId.trim())) {
+          return err('triggerId must be a non-empty string when provided; omit it to cancel all triggers owned by this session.');
+        }
+        const targetId = p.triggerId as string | undefined;
+        if (targetId) {
+          const owned = listActiveForSession(creatorSession).some((trigger) => trigger.id === targetId);
+          if (!owned) {
+            return err(`deferred trigger ${targetId} is not owned by the current session.`);
+          }
+        }
+        try {
+          appendTriggerOp({
+            op: 'cancel',
+            sessionPath: creatorSession,
+            ...(targetId ? { targetId } : {}),
+            at: new Date().toISOString(),
+          });
+        } catch (cause) {
+          const detail = cause instanceof Error ? cause.message : String(cause);
+          return err(`could not persist cancellation: ${detail}`);
+        }
         return ok(
           targetId
             ? `Cancelled deferred trigger ${targetId} for this session.`
             : 'Cancelled all pending deferred triggers for this session.',
-          undefined,
         );
       }
 
-      // register
-      const { specs, error } = validateTriggers(p.triggers);
-      if (error || !specs) return err(error!);
-      const note = typeof p.note === 'string' ? p.note : '';
-      const id = randomUUID();
-      appendTriggerOp({
-        id,
-        op: 'register',
-        sessionPath,
-        triggers: specs,
-        note,
-        at: new Date().toISOString(),
-      });
-      // Let the successful tool result reach Pi before aborting the active
-      // operation. This ends the current turn after registration, preventing
-      // the model from continuing with extra tools before the wake-up.
-      intentionalDeferralPending = true;
-      setImmediate(() => ctx.abort?.());
+      const message = readMessage(p.message);
+      if (!message.trim()) {
+        return err('message is required and must be a non-empty string for action register.');
+      }
+      const target = readTargetSession(p.targetSession, creatorSession);
+      if (target.error || !target.target) return err(target.error ?? 'targetSession is invalid.');
+
+      const registration = await registerWake(
+        p.triggers,
+        message,
+        creatorSession,
+        target.target,
+        ctx,
+      );
+      if ('error' in registration) return err(registration.error);
       return ok(
-        `Registered deferred trigger ${id}:\n  [${describeTrigger(specs)}]\n  note: ${note || '(none)'}\n\nYour turn will end now; you will be resumed automatically when the trigger fires. When resumed, re-evaluate the condition and either complete the task or call \`defer_trigger\` with action \`register\` again to keep waiting.`,
-        undefined,
+        `Registered deferred trigger ${registration.id}:\n  [${describeTriggers(registration.specs)}]\n  target: ${target.target}\n  message: ${message}\n\nThe current turn continues; the target session must be open when the trigger fires.`,
+        { id: registration.id },
       );
     },
   });

@@ -91,8 +91,8 @@ test("truncate: ellipsis replaces the tail beyond max (slice(0, max))", () => {
 // aggregateUsage
 // ---------------------------------------------------------------------------
 
-test("aggregateUsage: empty results -> all zeros", () => {
-	assert.deepEqual(aggregateUsage([]), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 });
+test("aggregateUsage: empty results -> all zeros, no invented cost", () => {
+	assert.deepEqual(aggregateUsage([]), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: undefined, turns: 0 });
 });
 
 test("aggregateUsage: sums tokens, cost, and turns across results", () => {
@@ -106,6 +106,16 @@ test("aggregateUsage: sums tokens, cost, and turns across results", () => {
 	assert.equal(total.cacheWrite, 20);
 	assert.equal(total.cost, 0.35);
 	assert.equal(total.turns, 5);
+});
+
+test("aggregateUsage: cost evidence stays absent when no child reported cost", () => {
+	const total = aggregateUsage([
+		result({ usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, contextTokens: 15, turns: 1 } }),
+		result({ usage: { input: 20, output: 10, cacheRead: 0, cacheWrite: 0, contextTokens: 30, turns: 2 } }),
+	]);
+	assert.equal(total.input, 30);
+	assert.equal(total.turns, 3);
+	assert.equal(total.cost, undefined, "no reported cost evidence must stay absent in the aggregate");
 });
 
 test("aggregateUsage: result shape has only the 6 aggregated fields (no contextTokens)", () => {

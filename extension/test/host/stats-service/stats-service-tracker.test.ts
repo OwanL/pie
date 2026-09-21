@@ -926,6 +926,32 @@ test('skill-pruning duration is retained even when the provider reports no token
   );
 });
 
+test('skill-pruning preserves an explicit zero provider cost without tokens', () => {
+  const harness = createHarness();
+  harness.tracker.prepareForSend(harness.sessionPath, []);
+  harness.tracker.onSkillPruningUsage(
+    harness.sessionPath,
+    'pruning-free',
+    '2026-01-01T00:00:00.250Z',
+    { prepassModel: 'openai/pruner', prepassReportedCostUsd: 0 },
+  );
+
+  assert.deepEqual(
+    harness.tracker.serializeSessions()[harness.sessionPath]?.currentRun?.auxiliaryLlmUsage,
+    [{
+      kind: 'skill_pruning_prepass',
+      sourceId: 'pruning-free',
+      occurredAt: '2026-01-01T00:00:00.250Z',
+      modelId: 'openai/pruner',
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      reportedCostUsd: 0,
+    }],
+  );
+});
+
 test('retry timing keeps scheduled delay and updates measured delay/duration idempotently', () => {
   const harness = createHarness();
   harness.tracker.prepareForSend(harness.sessionPath, []);

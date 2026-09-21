@@ -568,12 +568,11 @@ derive umans routing info from models.json only (they do, per the scout). If an 
 script ever needs litellm routing, it should read `models.yaml`'s `upstream` block directly
 going forward.
 
-### 11.6 install.bat / install.sh
+### 11.6 install.bat
 
-Scout reported these write only VS Code's `settings.json` (IDE settings), not pi's
-`models.json`/`settings.json`. Verify they don't reference model config files in a way that
-breaks. If they do, update them to point at `models.yaml` (the source) or leave as-is if they
-only read derived files.
+The Windows installer writes VS Code's `settings.json` (IDE settings), not Pi's
+`models.json`/`settings.json`. It reads the generated runtime files without owning model
+configuration.
 
 ## 12. What this plan does NOT do (non-goals)
 

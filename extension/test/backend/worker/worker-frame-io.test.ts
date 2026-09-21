@@ -94,13 +94,77 @@ test('writer has one active send, priority FIFO lanes, contiguous dispatch seque
       ['response', 2, undefined],
       ['response', 3, undefined],
       ['provider.rejected', 4, undefined],
-      ['fatal', 5, undefined],
-      ['command', 6, undefined],
-      ['heartbeat', 7, 2],
+      ['heartbeat', 5, 2],
+      ['fatal', 6, undefined],
+      ['command', 7, undefined],
     ],
   );
-  assert.deepEqual(latestHeartbeat, [{ status: 'sent', seq: 7 }]);
+  assert.deepEqual(latestHeartbeat, [{ status: 'sent', seq: 5 }]);
   assert.equal(writer.getDebugState().active, false);
+});
+
+test('heartbeat uses the bounded control reservation and coalesces within that lane when ordinary is full', () => {
+  const target = new FakeSendTarget();
+  const writer = new BoundedWorkerIpcWriter(target, {
+    maxQueuedControlBytes: 1_024,
+    maxQueuedOrdinaryBytes: 1,
+  });
+  const ordinary: WorkerIpcFrameDraft = {
+    ...frameBase,
+    kind: 'runtime.event',
+    event: 'tool.progress',
+    payload: { sessionPath: '/session.jsonl', progress: 'ordinary' },
+  };
+
+  // Keep the descriptor blocked behind an ordinary frame, then saturate its
+  // bounded ordinary reservation. Heartbeats must not inherit that pressure.
+  assert.equal(writer.enqueue(ordinary).accepted, true);
+  assert.equal(writer.enqueue(ordinary).accepted, true);
+  assert.equal(writer.enqueue(ordinary).accepted, false);
+
+  const staleHeartbeat: WorkerIpcSettlement[] = [];
+  const latestHeartbeat: WorkerIpcSettlement[] = [];
+  assert.equal(writer.enqueue(heartbeat(1), { onSettled: (value) => staleHeartbeat.push(value) }).accepted, true);
+  assert.deepEqual(
+    writer.enqueue(heartbeat(2), { onSettled: (value) => latestHeartbeat.push(value) }),
+    { accepted: true, coalesced: true },
+  );
+  assert.equal(writer.getDebugState().queueDepth.control, 1,
+    'the pending heartbeat occupies the bounded control reservation, not ordinary backlog');
+  assert.deepEqual(staleHeartbeat, [{ status: 'coalesced' }]);
+
+  while (target.callbacks.length > 0) target.callbacks.shift()!(null);
+  assert.deepEqual(
+    target.sent.map((frame) => frame.kind === 'heartbeat'
+      ? [frame.kind, frame.heartbeat.lastEventSeq]
+      : [frame.kind, frame.kind === 'runtime.event' ? frame.event : undefined]),
+    [
+      ['runtime.event', 'tool.progress'],
+      ['heartbeat', 2],
+      ['runtime.event', 'tool.progress'],
+    ],
+  );
+  assert.deepEqual(latestHeartbeat, [{ status: 'sent', seq: 2 }]);
+});
+
+test('capacity diagnostics identify the rejected kind and event without including payload data', () => {
+  const target = new FakeSendTarget();
+  const writer = new BoundedWorkerIpcWriter(target, { maxQueuedOrdinaryBytes: 1 });
+  const ordinary = (marker: string): WorkerIpcFrameDraft => ({
+    ...frameBase,
+    kind: 'runtime.event',
+    event: 'tool.progress',
+    payload: { sessionPath: '/session.jsonl', marker },
+  });
+
+  assert.equal(writer.enqueue(ordinary('active')).accepted, true);
+  assert.equal(writer.enqueue(ordinary('queued')).accepted, true);
+  const rejected = writer.enqueue(ordinary('secret-payload-must-not-appear'));
+  assert.equal(rejected.accepted, false);
+  if (rejected.accepted) return;
+  assert.equal(rejected.reason, 'capacity');
+  assert.match(rejected.detail, /kind=runtime\.event event=tool\.progress/u);
+  assert.doesNotMatch(rejected.detail, /secret-payload-must-not-appear/u);
 });
 
 test('writer prioritizes lifecycle over progress and bounds detail independently', () => {
@@ -121,6 +185,54 @@ test('writer prioritizes lifecycle over progress and bounds detail independently
   assert.deepEqual(target.sent.map((frame) => frame.kind), [
     'command', 'response', 'runtime.event', 'command', 'detail.delta',
   ]);
+});
+
+test('mandatory non-progress events use lifecycle priority while runtime reports remain recoverable telemetry', () => {
+  const target = new FakeSendTarget();
+  const writer = new BoundedWorkerIpcWriter(target, { maxQueuedOrdinaryBytes: 1_024 });
+  const ordinary: WorkerIpcFrameDraft = {
+    ...frameBase,
+    kind: 'runtime.event',
+    event: 'tool.progress',
+    payload: { sessionPath: '/session.jsonl', progress: 'x'.repeat(128) },
+  };
+  const lifecycleEvents = [
+    'message.custom', 'message.queuedDelivered', 'contextUsage.changed', 'extension_ui.request',
+    'preflight.failed', 'retry.started', 'retry.ended', 'retry.measured',
+    'compaction.started', 'compaction.ended', 'auxiliary-llm.usage',
+    'analytics.branch',
+  ] as const;
+
+  writer.enqueue(command('active'));
+  assert.equal(writer.enqueue(ordinary).accepted, true);
+  assert.equal(writer.enqueue(ordinary).accepted, true);
+  const report = writer.enqueue({
+    ...frameBase,
+    kind: 'runtime.report',
+    domain: 'catalog',
+    payload: { models: [] },
+  });
+  assert.equal(report.accepted, false, 'runtime.report must not consume a reserved lifecycle slot');
+  if (!report.accepted) assert.equal(report.reason, 'capacity');
+
+  for (const event of lifecycleEvents) {
+    const payload = event === 'analytics.branch'
+      ? {
+          sessionPath: '/session.jsonl', entryId: 'entry-1',
+          selectedEntryId: 'entry-1', observedAt: 1,
+        }
+      : { sessionPath: '/session.jsonl' };
+    assert.equal(writer.enqueue({
+      ...frameBase, kind: 'runtime.event', event, payload,
+    } as unknown as WorkerIpcFrameDraft).accepted, true, event);
+  }
+  assert.equal(writer.getDebugState().queueDepth.lifecycle, lifecycleEvents.length);
+
+  while (target.callbacks.length > 0) target.callbacks.shift()!(null);
+  assert.deepEqual(
+    target.sent.filter((frame) => frame.kind === 'runtime.event').map((frame) => frame.event),
+    [...lifecycleEvents, 'tool.progress', 'tool.progress'],
+  );
 });
 
 test('provider observation stays ordered before its correlated release under backpressure', () => {

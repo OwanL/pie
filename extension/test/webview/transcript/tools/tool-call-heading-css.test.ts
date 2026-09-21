@@ -23,6 +23,7 @@ test('collapsed tool-call headers use the shared path hierarchy', async () => {
     status: 'completed',
     summary: 'src/example.ts',
     summaryPath: '/repo/src/example.ts',
+    prefs: { ...DEFAULT_CHAT_PREFS, uiPathParentDepth: 1 },
     sizeHint: '+3 lines',
     onToggle: () => {},
     onOpenFile: () => {},
@@ -65,6 +66,7 @@ test('collapsed bash headers emphasize the shell verb over the path context', as
     name: 'bash',
     status: 'completed',
     summary: 'rm somepath/somefile.txt',
+    prefs: { ...DEFAULT_CHAT_PREFS, uiPathParentDepth: 1 },
     sizeHint: '+3 lines',
     onToggle: () => {},
     onOpenFile: () => {},
@@ -83,6 +85,7 @@ test('collapsed bash headers keep surrounding quotes separate from the emphasize
     name: 'bash',
     status: 'completed',
     summary: 'rm "some dir/file name.txt"',
+    prefs: { ...DEFAULT_CHAT_PREFS, uiPathParentDepth: 1 },
     onToggle: () => {},
     onOpenFile: () => {},
   }));

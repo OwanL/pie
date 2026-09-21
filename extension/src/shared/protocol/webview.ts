@@ -552,7 +552,8 @@ export interface ViewState {
    *  across ALL sessions, projected host-side from the `DeferredTriggerRegistry`.
    *  The webview renders a waiting-trigger segment in the bottom status strip
    *  (with a cancel affordance) and greys out the mark-done / close-tab actions
-   *  for sessions that own a pending trigger. Empty array when none are active. */
+   *  for delivery-target sessions with a pending trigger. Empty array when none
+   *  are active. */
   deferredTriggers: DeferredTriggerView[];
 }
 
@@ -920,8 +921,8 @@ type WebviewToHostMessagePayload =
       disablePruning?: boolean;
     }
   | {
-      /** Cancel a deferred trigger registered for `sessionPath`. When
-       *  `triggerId` is omitted, cancels ALL active triggers for that session
+      /** Cancel a deferred trigger owned by `sessionPath`. When `triggerId`
+       *  is omitted, cancels ALL active triggers for that creator session
        *  (mirrors the `defer_trigger` tool's `cancel` action with no
        *  `triggerId`). The host appends a `cancel` op to the sidecar and
        *  updates its in-memory set; the next snapshot reflects the removal. */

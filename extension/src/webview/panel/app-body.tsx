@@ -179,8 +179,8 @@ export function AppBody({ adapter }: AppBodyProps) {
 
   useChatPrefsCss(viewState.prefs);
 
-  // Session lookup for the deferred-triggers menu (resolves watcher session
-  // paths to display names). Memoized on the sessions array ref.
+  // Session lookup for the deferred-triggers menu (resolves creator/target
+  // session paths to display names). Memoized on the sessions array ref.
   const sessionByPath = useMemo(
     () => new Map(viewState.sessions.map((s) => [s.path, s] as const)),
     [viewState.sessions],
@@ -283,6 +283,7 @@ export function AppBody({ adapter }: AppBodyProps) {
         mergedTranscript={mergedTranscript}
         transcriptWindow={viewState.transcriptWindow}
         transcriptLoaded={viewState.transcriptLoaded}
+        availableModels={viewState.availableModels}
         busy={transcriptBusy}
         compacting={viewState.compactingSessionPaths.includes(derived.activeSessionPath ?? '')}
         liveTurnPhase={viewState.liveTurnPhase}

@@ -262,11 +262,17 @@ export function subagentDetailLines(result: SubagentSingleResult, now = Date.now
 
   const model = result.selectedModel ?? result.model;
   const usage = result.usage;
-  const cache = usage ? usage.cacheRead + usage.cacheWrite : 0;
   const contextTokens = usage?.contextTokens;
   const contextWindow = result.contextWindow;
-  const contextPercent = contextTokens && contextWindow
+  const contextPercent = typeof contextTokens === 'number' && contextTokens >= 0
+    && typeof contextWindow === 'number' && contextWindow > 0
     ? Math.round((contextTokens / contextWindow) * 100)
+    : undefined;
+  const formatOptionalTokens = (value: unknown): string =>
+    typeof value === 'number' && Number.isFinite(value) && value >= 0 ? compactTokens(value) : '—';
+  const cache = typeof usage?.cacheRead === 'number' && Number.isFinite(usage.cacheRead)
+    && typeof usage.cacheWrite === 'number' && Number.isFinite(usage.cacheWrite)
+    ? usage.cacheRead + usage.cacheWrite
     : undefined;
   const latestThroughput = result.turnThroughputSamples
     ?.filter((sample) => sample.generationDurationMs > 0 && sample.outputTokens > 0)
@@ -278,9 +284,11 @@ export function subagentDetailLines(result: SubagentSingleResult, now = Date.now
     result.provider && !model?.startsWith(`${result.provider}/`) ? result.provider : undefined,
     model,
     result.thinkingLevel && result.thinkingLevel !== 'off' ? `thinking ${result.thinkingLevel}` : undefined,
-    contextTokens && contextWindow ? `context ${compactTokens(contextTokens)} / ${compactTokens(contextWindow)}${contextPercent != null ? ` (${contextPercent}%)` : ''}` : undefined,
-    usage ? `tokens ${compactTokens(usage.input)} in / ${compactTokens(usage.output)} out` : undefined,
-    cache > 0 ? `${compactTokens(cache)} cached` : undefined,
+    contextTokens !== undefined || contextWindow !== undefined
+      ? `context ${formatOptionalTokens(contextTokens)} / ${formatOptionalTokens(contextWindow)}${contextPercent != null ? ` (${contextPercent}%)` : ''}`
+      : undefined,
+    usage ? `tokens ${formatOptionalTokens(usage.input)} in / ${formatOptionalTokens(usage.output)} out` : undefined,
+    cache !== undefined && cache > 0 ? `${compactTokens(cache)} cached` : undefined,
     tokensPerSecond != null ? `last ${tokensPerSecond.toFixed(1)} tok/s` : undefined,
     result.retryCount ? `${result.retryCount} ${result.retryCount === 1 ? 'retry' : 'retries'}` : undefined,
     result.selectionPool?.length ? `${result.selectionPool.length} model candidates` : undefined,

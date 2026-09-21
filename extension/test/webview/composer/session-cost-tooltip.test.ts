@@ -4,7 +4,7 @@ import test from 'node:test';
 import { h } from 'preact';
 import renderToString from 'preact-render-to-string';
 
-import { CanonicalActivityTooltip, SessionCostTooltip } from '../../../src/webview/panel/composer/session-cost-tooltip';
+import { SessionCostTooltip } from '../../../src/webview/panel/composer/session-cost-tooltip';
 import type {
   CanonicalSessionActivitySummary,
   SessionCostIndicatorState,
@@ -204,17 +204,4 @@ test('exact oversized int64 sums render exactly, never rounded or zero-filled', 
   }));
   assert.match(html, /\+9,007,199,254,740,999\/−4 lines/);
   assert.doesNotMatch(html, /\+\?/);
-});
-
-test('the activity-only fallback tooltip shows canonical activity and never fabricates cost content', () => {
-  const html = renderToString(h(CanonicalActivityTooltip, { summary: canonicalSummary() }));
-  assert.match(html, /Canonical activity/);
-  assert.match(html, /Root session \(all branches\) · selected-branch totals not shown/);
-  assert.match(html, /10 spans · measured work/);
-  assert.match(html, /attempted-change entry/);
-  assert.doesNotMatch(html, /Estimated API-equivalent/);
-  assert.doesNotMatch(html, /Main conversation/);
-  assert.doesNotMatch(html, /Total:/);
-  assert.doesNotMatch(html, /\$/);
-  assert.doesNotMatch(html, /unpriced/i);
 });

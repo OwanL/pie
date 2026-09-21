@@ -47,7 +47,7 @@ import {
 } from "./pruning.js";
 
 const DEFERRED_TRIGGER_WAKE_PREFIX = "[deferred trigger fired: ";
-const DEFERRED_TRIGGER_TOOL_NAME = "defer_trigger";
+const WAKE_TOOL_NAMES = ["defer_trigger"];
 
 export default function register(pi: ExtensionAPI) {
 	// Asynchronously pre-warm the cached code version (git SHA) so the first
@@ -232,7 +232,7 @@ export default function register(pi: ExtensionAPI) {
 			// under the previous decision are not protected here: this new decision
 			// may hide them again when the task changes.
 			const turnProtectedToolNames = event.prompt.startsWith(DEFERRED_TRIGGER_WAKE_PREFIX)
-				? [DEFERRED_TRIGGER_TOOL_NAME]
+				? WAKE_TOOL_NAMES
 				: [];
 			const forcedToolNames = new Set<string>([
 				...(activeConfig.tools?.alwaysKeep ?? []),

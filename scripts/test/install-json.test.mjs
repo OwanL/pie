@@ -1,5 +1,5 @@
 // Focused unit tests for scripts/install/lib/json.mjs — the BOM-less UTF-8 JSON
-// read/write helpers shared by both shell installers.
+// read/write helpers used by the Windows installer.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, statSync } from 'node:fs';

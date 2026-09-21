@@ -8,7 +8,7 @@
  * `extension/src/host/deferred-triggers/store.ts`.
  *
  * Op shapes (one JSON object per line):
- *   register: { id, op:'register', sessionPath, triggers, note, at }
+ *   register: { id, op:'register', sessionPath, targetSession?, triggers, message?, note?, at }
  *   claim:    { id, op:'claim', sessionPath, claimId, ownerId, ownerPid, reason, at, dispatchStartedAt? }
  *   dispatch: { id, op:'dispatch-started', sessionPath, claimId, ownerId, ownerPid, at }
  *   release:  { id, op:'release', sessionPath, claimId, reason, at, recoveryState? }
@@ -16,14 +16,16 @@
  *   fire:     { id, op:'fire', sessionPath, claimId, reason, at }
  *   cancel:   { op:'cancel', sessionPath, targetId?, at }
  *
- * `sessionPath` is the WATCHER's session (the session that called `defer_trigger`
- * and will be resumed). The tool reads the watcher's path from
- * `ctx.sessionManager.getSessionFile()`.
+ * `sessionPath` is the CREATOR's session (the session that registered the
+ * wake and owns list/cancel). `targetSession` is the session that receives the
+ * delivery; legacy records omit it and target their creator. The tool reads
+ * the creator path from `ctx.sessionManager.getSessionFile()`.
  */
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
+import { validateWakeConditions } from '../../../shared/wake-conditions.js';
 import type { ActiveTrigger, TriggerOp, TriggerSpec } from './types.js';
 
 const TRIGGERS_DIR_ENV = 'PIE_TRIGGERS_DIR';
@@ -112,14 +114,19 @@ export function replayTriggers(ops: TriggerOp[]): Map<string, ActiveTrigger> {
       map.set(op.id, {
         id: op.id,
         sessionPath: op.sessionPath,
+        targetSession: op.targetSession?.trim() ? op.targetSession : op.sessionPath,
         triggers: op.triggers,
-        note: op.note ?? '',
+        message: normalizedMessage(op),
+        note: normalizedMessage(op),
         registeredAt: op.at ?? new Date(0).toISOString(),
         deliveryState: 'pending',
       });
     } else if (op.op === 'cancel') {
       if (op.targetId) {
-        map.delete(op.targetId);
+        // A targeted cancel is creator-owned. Do not let a session that merely
+        // knows another trigger id consume it.
+        const target = map.get(op.targetId);
+        if (target?.sessionPath === op.sessionPath) map.delete(op.targetId);
       } else {
         for (const [id, t] of map) {
           if (t.sessionPath === op.sessionPath) map.delete(id);
@@ -182,10 +189,15 @@ export function replayTriggers(ops: TriggerOp[]): Map<string, ActiveTrigger> {
   return map;
 }
 
-/** Active triggers for a given watcher session (newest first by id is fine). */
+/** Active triggers owned by a given creator session (newest first by id is fine). */
 export function listActiveForSession(sessionPath: string): ActiveTrigger[] {
   const all = replayTriggers(readTriggerOps());
   return [...all.values()].filter((t) => t.sessionPath === sessionPath);
+}
+
+function normalizedMessage(op: Pick<TriggerOp, 'message' | 'note'>): string {
+  if (typeof op.message === 'string' && op.message.trim()) return op.message;
+  return typeof op.note === 'string' ? op.note : '';
 }
 
 function normalizeOp(value: unknown): TriggerOp | undefined {
@@ -196,7 +208,9 @@ function normalizeOp(value: unknown): TriggerOp | undefined {
   const op: TriggerOp = { op: v.op as TriggerOp['op'], sessionPath: v.sessionPath };
   if (typeof v.id === 'string') op.id = v.id;
   if (typeof v.at === 'string') op.at = v.at;
+  if (typeof v.message === 'string') op.message = v.message;
   if (typeof v.note === 'string') op.note = v.note;
+  if (typeof v.targetSession === 'string' && v.targetSession.trim()) op.targetSession = v.targetSession;
   if (typeof v.reason === 'string') op.reason = v.reason;
   if (typeof v.wakeReason === 'string') op.wakeReason = v.wakeReason;
   if (typeof v.targetId === 'string') op.targetId = v.targetId;
@@ -217,23 +231,5 @@ function normalizeOp(value: unknown): TriggerOp | undefined {
 }
 
 function normalizeSpecs(value: unknown): TriggerSpec[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const specs: TriggerSpec[] = [];
-  for (const item of value) {
-    if (!item || typeof item !== 'object') return undefined;
-    const s = item as Record<string, unknown>;
-    if (s.kind !== 'session_finished' && s.kind !== 'timer' && s.kind !== 'user_input') return undefined;
-    const spec: TriggerSpec = { kind: s.kind };
-    if (s.kind === 'session_finished') {
-      if (s.sessionPath !== undefined) {
-        if (typeof s.sessionPath !== 'string' || s.sessionPath.trim() === '') return undefined;
-        spec.sessionPath = s.sessionPath;
-      }
-    } else if (s.kind === 'timer') {
-      if (typeof s.ms !== 'number' || !Number.isFinite(s.ms) || s.ms <= 0 || !Number.isInteger(s.ms)) return undefined;
-      spec.ms = s.ms;
-    }
-    specs.push(spec);
-  }
-  return specs;
+  return validateWakeConditions(value).specs;
 }

@@ -10,6 +10,8 @@ import {
   AggregateStatsStrip,
   ProviderLegend,
   aggregateStatsSignature,
+  todayCostTooltipNode,
+  weekCostTooltipNode,
   throughputTooltipNode,
   userInputTooltipNode,
   workTooltipNode,
@@ -48,6 +50,37 @@ test('deferred trigger menu exposes safe crash recovery separately from ambiguou
 
   assert.match(html, /owner exited before dispatch; delivery recovered and is retryable/);
   assert.match(html, /delivery may have started; awaiting acknowledgement and automatic retry is blocked/);
+});
+
+test('deferred trigger menu renders command predicates and bounds diagnostics', () => {
+  const html = renderToString(h(DeferredTriggersMenu, {
+    triggers: [{
+      id: 'command',
+      sessionPath: '/workspace/session.jsonl',
+      triggers: [{
+        kind: 'command' as const,
+        command: 'printf true && printf a-very-long-command-that-is-still-readable',
+        cwd: '/workspace',
+        intervalMs: 30_000,
+        timeoutMs: 5_000,
+      }],
+      note: 'wait for the check',
+      registeredAt: '2026-09-03T10:00:00.000Z',
+      deliveryState: 'pending' as const,
+      recoveryState: undefined,
+      deliveryDetail: 'diagnostic '.repeat(100),
+    }],
+    sessionByPath: new Map(),
+    x: 0,
+    y: 0,
+    onCancel: () => undefined,
+    onClose: () => undefined,
+  }));
+
+  assert.match(html, /when command returns true/);
+  assert.match(html, /printf true/);
+  assert.match(html, /diagnostic/);
+  assert.ok(html.length < 5_000, 'command diagnostics should not dump unbounded output');
 });
 
 function renderRate(
@@ -164,6 +197,46 @@ test('aggregate informational rich-tooltip triggers are keyboard-focusable and l
   assert.match(html, /Provider concurrency:/);
   assert.match(html, /Today's adjusted user input: 0 characters, fully tracked\. Focus for Today and 7-day character-volume details\./);
   assert.match(html, /Focus for 14-day work trend/);
+});
+
+test('daily and weekly cost tooltips render canonical graphs and token counts', () => {
+  const stats = {
+    ...EMPTY_AGGREGATE_STATS,
+    ready: true,
+    todayCost: 1.25,
+    weekCost: 4.5,
+    todayRunCount: 2,
+    weekRunCount: 5,
+    todayInputTokens: 1_200,
+    todayOutputTokens: 3_400,
+    todayCostByProvider: [{
+      provider: 'alpha', cost: 1.25, inputTokens: 1_200, outputTokens: 3_400,
+      cacheReadTokens: 0, cacheWriteTokens: 0,
+    }],
+    weekCostByProvider: [{
+      provider: 'alpha', cost: 4.5, inputTokens: 5_600, outputTokens: 7_800,
+      cacheReadTokens: 0, cacheWriteTokens: 0,
+    }],
+    todayCostSeries: [{
+      ms: 1_750_000_000_000,
+      byProvider: [{ key: 'alpha', value: 1.25 }],
+      byModel: [{ key: 'model-a', provider: 'alpha', model: 'model-a', value: 1.25 }],
+    }],
+    weekCostSeries: [{
+      ms: 1_750_000_000_000,
+      byProvider: [{ key: 'alpha', value: 4.5 }],
+      byModel: [{ key: 'model-a', provider: 'alpha', model: 'model-a', value: 4.5 }],
+    }],
+  };
+  const todayHtml = renderToString(todayCostTooltipNode(stats));
+  const weekHtml = renderToString(weekCostTooltipNode(stats));
+
+  assert.match(todayHtml, /<svg\b/);
+  assert.match(todayHtml, /↓1\.2k in {2}↑3\.4k out/);
+  assert.match(todayHtml, /model-a/);
+  assert.match(weekHtml, /<svg\b/);
+  assert.match(weekHtml, /Token counts by provider · alpha ↓5\.6k in ↑7\.8k out/);
+  assert.match(weekHtml, /model-a/);
 });
 
 test('aggregate stats strip labels calendar-day cost as today', () => {

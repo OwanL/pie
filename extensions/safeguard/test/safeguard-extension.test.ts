@@ -22,6 +22,7 @@ type ToolCallHandler = (event: any, ctx: any) => Promise<unknown>;
 type SafeguardModule = {
 	default: (pi: { on: (eventName: string, handler: ToolCallHandler) => void }) => void;
 	isSafe(command: string, options?: { cwd?: string }): boolean;
+	guardCommand(command: string, ctx: any): Promise<{ block: true; reason: string } | undefined>;
 };
 
 async function loadSafeguard(): Promise<SafeguardModule> {
@@ -84,6 +85,35 @@ describe('isSafe – obvious safe commands are allowed', () => {
 	});
 });
 
+describe('guardCommand reuses bash analysis and confirmation', () => {
+	test('allows benign predicates', async () => {
+		const mod = await loadSafeguard();
+		const { ctx } = makeCtx({ hasUI: false, cwd: '/repo' });
+		assert.equal(await mod.guardCommand('git status --short', ctx), undefined);
+	});
+
+	test('blocks destructive predicates before registration', async () => {
+		const mod = await loadSafeguard();
+		const { ctx, notifications } = makeCtx({ hasUI: false, cwd: '/repo' });
+		const result = await mod.guardCommand('rm -rf /', ctx);
+		assert.equal(result?.block, true);
+		assert.match(result?.reason ?? '', /Safeguard/);
+		assert.equal(notifications.length, 0, 'no-UI command guards do not attempt notifications');
+	});
+
+	test('uses the existing confirmation rule for prompt-class predicates', async () => {
+		const mod = await loadSafeguard();
+		const denied = makeCtx({ hasUI: true, confirmResult: false });
+		const deniedResult = await mod.guardCommand('sudo git status', denied.ctx);
+		assert.equal(deniedResult?.block, true);
+		assert.equal(denied.confirmations.length, 1);
+
+		const allowed = makeCtx({ hasUI: true, confirmResult: true });
+		assert.equal(await mod.guardCommand('sudo git status', allowed.ctx), undefined);
+		assert.equal(allowed.confirmations.length, 1);
+	});
+});
+
 describe('isSafe – obvious dangerous commands are blocked', () => {
 	test('blocks catastrophically dangerous commands', async () => {
 		const { isSafe } = await loadSafeguard();
@@ -131,6 +161,46 @@ describe('isSafe – scoped temp-directory cleanup', () => {
 			isSafe('rm -rf /tmp/godot-docs && git clone --depth 1 https://github.com/godotengine/godot-docs.git /tmp/godot-docs', { cwd: '/repo' }),
 			true,
 		);
+	});
+
+	test('allows the observed machine-scratch cleanup compound command', async () => {
+		const { isSafe } = await loadSafeguard();
+		const command = 'cd /c/dev/repos/twin-ui && mkdir -p /c/dev/scratch/tmp-biome-check/Popover && git show HEAD:src/components/undermaps/common/Popover/Popover.tsx > /c/dev/scratch/tmp-biome-check/Popover/Popover.tsx && npx biome check /c/dev/scratch/tmp-biome-check/Popover/Popover.tsx 2>&1 | grep -E "lint/" | head; rm -rf /c/dev/scratch/tmp-biome-check';
+		assert.equal(isSafe(command, { cwd: '/c/dev/repos/twin-ui' }), true);
+	});
+
+	test('allows concrete children of the machine scratch root in both path spellings', async () => {
+		const { isSafe } = await loadSafeguard();
+		assert.equal(isSafe('rm -rf C:/dev/scratch/tmp-biome-check', { cwd: 'C:/dev/repos/twin-ui' }), true);
+		assert.equal(isSafe('rm -rf /c/dev/scratch/tmp-biome-check', { cwd: 'C:/dev/repos/twin-ui' }), true);
+	});
+
+	test('still prompts for the machine scratch root, wildcards, escapes, durable data, and other outside paths', async () => {
+		const { isSafe } = await loadSafeguard();
+		const denied = [
+			'rm -rf C:/dev/scratch',
+			'rm -rf /c/dev/scratch',
+			'rm -rf /c/dev/scratch/*',
+			'rm -rf C:/dev/scratch/tmp-biome-check/../../data',
+			'rm -rf C:/dev/data',
+			'rm -rf /outside/project',
+		];
+		for (const command of denied) assert.equal(isSafe(command, { cwd: 'C:/dev/repos/twin-ui' }), false, command);
+	});
+
+	test('denies unevaluated brace expansion from the temp and scratch exemption', async () => {
+		const { isSafe } = await loadSafeguard();
+		// Bash expands `rm -rf /c/dev/scratch/{keep,../data}` into
+		// `rm -rf /c/dev/scratch/keep /c/dev/data`, so the literal prefix does
+		// not prove every expanded target stays disposable.
+		assert.equal(isSafe('rm -rf /c/dev/scratch/{keep,../data}', { cwd: 'C:/dev/repos/twin-ui' }), false);
+		assert.equal(isSafe('rm -rf C:/dev/scratch/{keep,../data}', { cwd: 'C:/dev/repos/twin-ui' }), false);
+		// The temp-child check is shared with ordinary temp roots:
+		// `/tmp/{build,../../home}` expands to `/tmp/build /home`.
+		assert.equal(isSafe('rm -rf /tmp/{build,../../home}', { cwd: '/repo' }), false);
+		// Rejection is conservative: prompt even when every expanded target
+		// would have stayed inside the temp root.
+		assert.equal(isSafe('rm -rf /tmp/{build,cache}', { cwd: '/repo' }), false);
 	});
 
 	test('allows a concrete child of the platform temp directory', async () => {

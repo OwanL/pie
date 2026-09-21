@@ -273,14 +273,17 @@ function resolveAndDispatch(
         incomingTranscript: payload.transcript,
         incomingTranscriptWindow: payload.transcriptWindow,
         localTranscript,
+        localTranscriptWindow: existingWindow,
       });
-  const preserveStreamingState = transcriptResolution.preserveLocal && preserveBusy;
-
+  // Transcript reconciliation must not suppress independent session metadata.
+  // In particular, a runtime-ready snapshot can carry the prompt catalog that
+  // enables the picker even while the host keeps an optimistic first-send row.
+  // Stale opened payloads may still refresh cached data; selection ownership is
+  // handled separately by computeOpeningFlags above.
   const resolvedPayload: SessionOpenedPayload = {
     ...payload,
     transcript: transcriptResolution.transcript,
     transcriptWindow: transcriptResolution.transcriptWindow,
-    ...(preserveStreamingState && { systemPrompts: undefined }),
   };
 
   const selectionRequest = deps.state.getSelectionRequest(payload.selectionToken);
@@ -449,7 +452,7 @@ export function handleBusyChangedPayload(
   // A session finishing streaming fires any `session_finished` deferred
   // triggers watching it. `busy=false` covers both normal completion AND
   // interrupts (Stop) — an interrupted session is no longer running, so it
-  // counts as "finished". The registry excludes the watcher's own session
+  // counts as "finished". The registry excludes the creator's own session
   // so a deferring turn's completion never self-wakes.
   if (!payload.busy) {
     deps.triggers.onSessionFinished(sessionPath);

@@ -3,6 +3,12 @@ import { randomUUID } from 'node:crypto';
 import type { ProviderGateMetrics } from './provider-gate';
 import type { SdkWorkerOwnershipIdentity } from './sdk';
 import type { WorkerProviderReleaseOutcome } from './worker-protocol';
+import {
+  PROVIDER_MAX_AFTERBURN_SECONDS,
+  PROVIDER_MAX_CONCURRENT_REQUESTS,
+  PROVIDER_NETWORK_PHASE_MAX_WAIT_MS,
+  PROVIDER_UNLIMITED_CONCURRENCY,
+} from '../shared/provider-concurrency';
 
 interface PendingLease {
   requestId: string;
@@ -51,6 +57,8 @@ export interface CoordinatorProviderCancellation {
 }
 
 export interface CoordinatorProviderPolicy {
+  /** 0 disables only capacity/afterburn throttling; circuit and network
+   * deadlines remain enforced. */
   maxConcurrentRequests: number;
   /** Per-owner sticky capacity retained after a healthy settlement. */
   afterburnMs: number;
@@ -95,7 +103,7 @@ const DEFAULT_POLICY: CoordinatorProviderPolicy = {
 /** No individual provider-network phase may monopolize a worker for longer
  * than five minutes. Together, queue + headers + first body chunk remain below
  * the 20-minute semantic hard ceiling used by both host and backend. */
-export const PROVIDER_NETWORK_PHASE_MAX_WAIT_MS = 5 * 60 * 1000;
+export { PROVIDER_NETWORK_PHASE_MAX_WAIT_MS };
 
 function sameOwner(left: SdkWorkerOwnershipIdentity, right: SdkWorkerOwnershipIdentity): boolean {
   return left.coordinatorGeneration === right.coordinatorGeneration
@@ -133,6 +141,14 @@ function positiveInteger(value: unknown, fallback: number): number {
   return Number.isSafeInteger(value) && Number(value) > 0 ? Number(value) : fallback;
 }
 
+function boundedConcurrency(value: unknown, fallback: number): number {
+  return Number.isSafeInteger(value)
+    && Number(value) >= PROVIDER_UNLIMITED_CONCURRENCY
+    && Number(value) <= PROVIDER_MAX_CONCURRENT_REQUESTS
+    ? Number(value)
+    : fallback;
+}
+
 function nonNegativeNumber(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : fallback;
 }
@@ -153,7 +169,7 @@ function boundedQueueMilliseconds(value: unknown, fallback: number): number {
 function boundedAfterburnMilliseconds(value: unknown, fallback: number): number {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return fallback;
   if (value === 0) return 0;
-  return Math.max(1, Math.min(PROVIDER_NETWORK_PHASE_MAX_WAIT_MS, Math.ceil(value)));
+  return Math.max(1, Math.min(PROVIDER_MAX_AFTERBURN_SECONDS * 1000, Math.ceil(value)));
 }
 
 function afterburnPolicyMilliseconds(record: Record<string, unknown>, fallback: number): number {
@@ -217,7 +233,7 @@ export class CoordinatorProviderNetworkLeaseAuthority {
     this.setTimer = options.setTimeout ?? ((callback, delayMs) => setTimeout(callback, delayMs));
     this.clearTimer = options.clearTimeout ?? ((timer) => clearTimeout(timer as ReturnType<typeof setTimeout>));
     this.defaultPolicy = {
-      maxConcurrentRequests: positiveInteger(options.defaultPolicy?.maxConcurrentRequests, DEFAULT_POLICY.maxConcurrentRequests),
+      maxConcurrentRequests: boundedConcurrency(options.defaultPolicy?.maxConcurrentRequests, DEFAULT_POLICY.maxConcurrentRequests),
       afterburnMs: boundedAfterburnMilliseconds(options.defaultPolicy?.afterburnMs, DEFAULT_POLICY.afterburnMs),
       circuitFailureThreshold: positiveInteger(options.defaultPolicy?.circuitFailureThreshold, DEFAULT_POLICY.circuitFailureThreshold),
       circuitResetMs: nonNegativeNumber(options.defaultPolicy?.circuitResetMs, DEFAULT_POLICY.circuitResetMs),
@@ -240,7 +256,7 @@ export class CoordinatorProviderNetworkLeaseAuthority {
       const record = raw as Record<string, unknown>;
       const previous = this.configuredPolicies.get(provider) ?? this.defaultPolicy;
       const policy: CoordinatorProviderPolicy = {
-        maxConcurrentRequests: positiveInteger(record.maxConcurrentRequests, previous.maxConcurrentRequests),
+        maxConcurrentRequests: boundedConcurrency(record.maxConcurrentRequests, previous.maxConcurrentRequests),
         afterburnMs: afterburnPolicyMilliseconds(record, previous.afterburnMs),
         circuitFailureThreshold: positiveInteger(record.circuitFailureThreshold, previous.circuitFailureThreshold),
         circuitResetMs: nonNegativeNumber(
@@ -480,7 +496,12 @@ export class CoordinatorProviderNetworkLeaseAuthority {
       const halfOpen = pool.circuit === 'half-open';
       if (halfOpen && pool.halfOpenLeaseId) return;
       let next: PendingLease;
-      if (!halfOpen) {
+      if (!halfOpen && pool.policy.maxConcurrentRequests === PROVIDER_UNLIMITED_CONCURRENCY) {
+        // Unlimited disables only capacity throttling. Do not retain stale
+        // afterburn holds, but keep the circuit/half-open branch above active.
+        this.clearAfterburnHolds(pool);
+        next = pool.queue.shift()!;
+      } else if (!halfOpen) {
         const stickyIndex = pool.queue.findIndex((pending) => this.findAfterburnHold(pool, pending.owner) !== undefined);
         if (stickyIndex >= 0) {
           next = pool.queue.splice(stickyIndex, 1)[0]!;
@@ -544,7 +565,8 @@ export class CoordinatorProviderNetworkLeaseAuthority {
   }
 
   private createAfterburnHold(provider: string, pool: ProviderPool, owner: SdkWorkerOwnershipIdentity): void {
-    if (pool.policy.afterburnMs <= 0 || pool.circuit !== 'closed'
+    if (pool.policy.maxConcurrentRequests === PROVIDER_UNLIMITED_CONCURRENCY
+      || pool.policy.afterburnMs <= 0 || pool.circuit !== 'closed'
       || pool.active.size + pool.holds.size >= pool.policy.maxConcurrentRequests) return;
     const hold: AfterburnHold = {
       holdId: randomUUID(),
@@ -586,7 +608,8 @@ export class CoordinatorProviderNetworkLeaseAuthority {
     pool: ProviderPool,
     previousPolicy: CoordinatorProviderPolicy,
   ): void {
-    if (pool.policy.afterburnMs === 0) {
+    if (pool.policy.maxConcurrentRequests === PROVIDER_UNLIMITED_CONCURRENCY
+      || pool.policy.afterburnMs === 0) {
       this.clearAfterburnHolds(pool);
     } else if (pool.policy.afterburnMs < previousPolicy.afterburnMs) {
       const latestExpiry = this.now() + pool.policy.afterburnMs;
@@ -641,7 +664,9 @@ export class CoordinatorProviderNetworkLeaseAuthority {
     // A non-retryable HTTP failure proves transport health and may reset the
     // circuit, but it did not complete useful work and must not reserve sticky
     // capacity ahead of unrelated queued requests.
-    if (outcome === 'completed' && pool.circuit === 'closed') {
+    if (outcome === 'completed'
+      && pool.circuit === 'closed'
+      && pool.policy.maxConcurrentRequests !== PROVIDER_UNLIMITED_CONCURRENCY) {
       this.createAfterburnHold(provider, pool, active.owner);
     }
 

@@ -4,8 +4,13 @@ import * as path from 'node:path';
 
 import { getDeferredTriggersDir, TRIGGERS_FILE } from '../../shared/deferred-triggers-paths';
 import type { DeferredTriggerView, TriggerKind, TriggerSpec } from '../../shared/protocol';
+import {
+  validateWakeConditions,
+  type CommandTrigger,
+} from '../../../../shared/wake-conditions';
 
 export type { TriggerKind, TriggerSpec };
+export type { CommandTrigger };
 
 /**
  * Deferred-trigger sidecar persistence + pure replay.
@@ -19,9 +24,14 @@ export type { TriggerKind, TriggerSpec };
 export interface TriggerOp {
   id?: string;
   op: 'register' | 'cancel' | 'claim' | 'dispatch-started' | 'release' | 'failed' | 'fire';
-  /** The watcher's session path (the session to resume). */
+  /** Creator/owner session path used for list and cancel. Legacy records also
+   * used this as the delivery target. */
   sessionPath: string;
+  /** Delivery target for a new registration; omitted in legacy records. */
+  targetSession?: string;
   triggers?: TriggerSpec[];
+  /** New registrations use message; note is retained for legacy records. */
+  message?: string;
   note?: string;
   at?: string;
   targetId?: string;
@@ -41,7 +51,11 @@ export interface TriggerOp {
   recoveryState?: 'dead-owner-recovered';
 }
 
-export type ActiveTrigger = DeferredTriggerView & {
+export type ActiveTrigger = Omit<DeferredTriggerView, 'targetSession' | 'message'> & {
+  /** Normalized delivery target; legacy records fall back to sessionPath. */
+  targetSession: string;
+  /** Normalized delivery message; legacy notes are mapped here. */
+  message: string;
   /** Host-only durable claim correlation; never projected to the renderer. */
   claimId?: string;
   claimOwnerId?: string;
@@ -107,6 +121,11 @@ export class DeferredTriggerStore {
     private readonly file: string | undefined = getTriggersFilePath(),
     private readonly now: () => Date = () => new Date(),
   ) {}
+
+  /** The sidecar path shared by durable delivery claims and command probes. */
+  getFilePath(): string | undefined {
+    return this.file;
+  }
 
   readOps(): TriggerOp[] {
     if (!this.file) return [];
@@ -347,8 +366,10 @@ export function replayTriggers(ops: TriggerOp[]): Map<string, ActiveTrigger> {
       map.set(op.id, {
         id: op.id,
         sessionPath: op.sessionPath,
+        targetSession: op.targetSession?.trim() ? op.targetSession : op.sessionPath,
         triggers: op.triggers,
-        note: typeof op.note === 'string' ? op.note : '',
+        message: normalizedMessage(op),
+        note: normalizedMessage(op),
         registeredAt: op.at ?? new Date(0).toISOString(),
         deliveryState: 'pending',
       });
@@ -357,7 +378,10 @@ export function replayTriggers(ops: TriggerOp[]): Map<string, ActiveTrigger> {
 
     if (op.op === 'cancel') {
       if (op.targetId) {
-        map.delete(op.targetId);
+        // Targeted cancellation is creator-owned. A session that merely knows
+        // a trigger id must not be able to consume another creator's trigger.
+        const target = map.get(op.targetId);
+        if (target?.sessionPath === op.sessionPath) map.delete(op.targetId);
       } else {
         for (const [id, trigger] of map) {
           if (trigger.sessionPath === op.sessionPath) map.delete(id);
@@ -523,6 +547,11 @@ function readClaimArtifacts(file: string, logOps: TriggerOp[]): TriggerOp[] {
   return claims;
 }
 
+function normalizedMessage(op: Pick<TriggerOp, 'message' | 'note'>): string {
+  if (typeof op.message === 'string' && op.message.trim()) return op.message;
+  return typeof op.note === 'string' ? op.note : '';
+}
+
 function normalizeOp(value: unknown): TriggerOp | undefined {
   if (!value || typeof value !== 'object') return undefined;
   const v = value as Record<string, unknown>;
@@ -531,7 +560,9 @@ function normalizeOp(value: unknown): TriggerOp | undefined {
   const op: TriggerOp = { op: v.op as TriggerOp['op'], sessionPath: v.sessionPath };
   if (typeof v.id === 'string') op.id = v.id;
   if (typeof v.at === 'string') op.at = v.at;
+  if (typeof v.message === 'string') op.message = v.message;
   if (typeof v.note === 'string') op.note = v.note;
+  if (typeof v.targetSession === 'string' && v.targetSession.trim()) op.targetSession = v.targetSession;
   if (typeof v.reason === 'string') op.reason = v.reason;
   if (typeof v.wakeReason === 'string') op.wakeReason = v.wakeReason;
   if (typeof v.targetId === 'string') op.targetId = v.targetId;
@@ -553,22 +584,41 @@ function normalizeOp(value: unknown): TriggerOp | undefined {
 
 function normalizeSpecs(value: unknown): TriggerSpec[] | undefined {
   if (!Array.isArray(value)) return undefined;
-  const specs: TriggerSpec[] = [];
+
+  // Registration resolves command defaults and cwd before it writes the
+  // sidecar. Replay must not silently fill those fields from the host's cwd:
+  // that would make an old or hand-written record execute a different
+  // predicate after restart. Legacy timer/session/user specs intentionally go
+  // through the same shared validator below unchanged.
   for (const item of value) {
     if (!item || typeof item !== 'object') return undefined;
-    const s = item as Record<string, unknown>;
-    if (s.kind !== 'session_finished' && s.kind !== 'timer' && s.kind !== 'user_input') return undefined;
-    const spec: TriggerSpec = { kind: s.kind };
-    if (s.kind === 'session_finished') {
-      if (s.sessionPath !== undefined) {
-        if (typeof s.sessionPath !== 'string' || s.sessionPath.trim() === '') return undefined;
-        spec.sessionPath = s.sessionPath;
-      }
-    } else if (s.kind === 'timer') {
-      if (typeof s.ms !== 'number' || !Number.isFinite(s.ms) || s.ms <= 0 || !Number.isInteger(s.ms)) return undefined;
-      spec.ms = s.ms;
-    }
-    specs.push(spec);
+    const spec = item as Record<string, unknown>;
+    if (spec.kind !== 'command') continue;
+    if (typeof spec.cwd !== 'string' || !path.isAbsolute(spec.cwd)) return undefined;
+    if (typeof spec.intervalMs !== 'number' || !Number.isSafeInteger(spec.intervalMs)) return undefined;
+    if (typeof spec.timeoutMs !== 'number' || !Number.isSafeInteger(spec.timeoutMs)) return undefined;
   }
-  return specs;
+
+  const validation = validateWakeConditions(value);
+  if (!validation.specs) return undefined;
+
+  // A normalized command is self-contained. Require the replayed JSON to
+  // already equal the normalized command fields rather than accepting a
+  // relative cwd/default interval and rewriting it on load.
+  for (let index = 0; index < value.length; index += 1) {
+    const raw = value[index];
+    const normalized = validation.specs[index];
+    if (!raw || typeof raw !== 'object' || !normalized) return undefined;
+    const input = raw as Record<string, unknown>;
+    if (input.kind !== 'command') continue;
+    if (normalized.kind !== 'command'
+      || input.command !== normalized.command
+      || input.cwd !== normalized.cwd
+      || input.intervalMs !== normalized.intervalMs
+      || input.timeoutMs !== normalized.timeoutMs) {
+      return undefined;
+    }
+  }
+
+  return validation.specs;
 }

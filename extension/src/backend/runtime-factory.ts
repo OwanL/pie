@@ -6,6 +6,7 @@
 import { prepareContextFiles } from './context-files';
 import { backendInfo } from './log';
 import { recordBackendLivePipelineTrace } from './live-pipeline-trace-runtime';
+import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
 import type { SdkModule, SdkSessionEvent, SdkSessionManager } from './sdk';
 
 /** Arguments the SDK passes into the runtime factory callback. */
@@ -19,6 +20,50 @@ interface RuntimeFactoryArgs {
 export interface RuntimeFactoryOptions {
   /** Wrap every manager received from the SDK, including replacements. */
   wrapSessionManager?: (manager: SdkSessionManager) => SdkSessionManager;
+  /** Custom tools are constructed inside the isolated runtime so their
+   * callbacks retain the worker transport boundary rather than reaching into
+   * the coordinator from the factory. */
+  customTools?: (sessionPath: string | undefined) => ToolDefinition[];
+}
+
+interface RuntimeModelRegistry {
+  find: (provider: string, modelId: string) => unknown;
+}
+
+interface RuntimeSettingsManager {
+  getDefaultProvider?: () => string | undefined;
+  getDefaultModel?: () => string | undefined;
+}
+
+/** Resolve the provider-qualified identity before the SDK's own initial-model
+ * fallback runs. The SDK accepts an explicit `model` in
+ * `createAgentSessionFromServices`; passing it is what prevents a new session
+ * from silently selecting another provider when the configured identity is
+ * unavailable to its auth-based default resolver. */
+function resolveExplicitModel(
+  services: Record<string, unknown>,
+  sessionManager: SdkSessionManager,
+): unknown | undefined {
+  const sessionModel = sessionManager.buildSessionContext?.().model;
+  const settingsManager = services.settingsManager as RuntimeSettingsManager | undefined;
+  const configuredModel = settingsManager?.getDefaultModel?.();
+  const configuredProvider = settingsManager?.getDefaultProvider?.();
+  const identity = sessionModel ?? (
+    configuredProvider && configuredModel
+      ? { provider: configuredProvider, modelId: configuredModel }
+      : undefined
+  );
+  if (!identity) return undefined;
+
+  const registry = services.modelRegistry as RuntimeModelRegistry | undefined;
+  if (!registry || typeof registry.find !== 'function') {
+    throw new Error(`Cannot resolve selected model ${identity.provider}/${identity.modelId}: model registry unavailable.`);
+  }
+  const model = registry.find(identity.provider, identity.modelId);
+  if (!model) {
+    throw new Error(`Selected model is unavailable: ${identity.provider}/${identity.modelId}`);
+  }
+  return model;
 }
 
 /** Thrown by `ServiceLoadingGate` for work queued after (or refused during)
@@ -231,10 +276,14 @@ export function createRuntimeFactory(
     });
     let created: Record<string, unknown>;
     try {
+      const model = resolveExplicitModel(services, guardedSessionManager);
+      const customTools = options.customTools?.(guardedSessionManager.getSessionFile?.());
       created = (await sdk.createAgentSessionFromServices({
         services,
         sessionManager: guardedSessionManager,
         sessionStartEvent,
+        ...(model !== undefined ? { model } : {}),
+        ...(customTools && customTools.length > 0 ? { customTools } : {}),
       })) as Record<string, unknown>;
     } catch (error) {
       recordBackendLivePipelineTrace({

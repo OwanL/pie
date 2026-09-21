@@ -204,12 +204,20 @@ function isRootDeleteTarget(target: string): boolean {
 /**
  * Temp cleanup is a routine development operation, even though the OS temp
  * directory normally lives outside the project. Only exempt a concrete child:
- * deleting the temp root itself, a wildcard spanning it, or a path that
- * normalizes back out of it must still prompt.
+ * deleting the temp root itself, a wildcard spanning it, an unevaluated brace
+ * expansion (the lexer does not evaluate `{a,b}`, so a literal like
+ * `/c/dev/scratch/{keep,../data}` passes the prefix check while bash expands
+ * it into `/c/dev/data`), or a path that normalizes back out of it must still
+ * prompt.
  *
  * `/tmp` and `/var/tmp` are included explicitly because Windows-hosted Git Bash
  * exposes those virtual paths while Node reports a native `%TEMP%` path.
+ * `C:/dev/scratch` is the machine-designated disposable tree in
+ * `C:/dev/AGENTS.md`; keep both its native and Git Bash spellings literal and
+ * child-only rather than introducing a configurable exemption.
  */
+const MACHINE_DISPOSABLE_SCRATCH_ROOTS = ["C:/dev/scratch", "/c/dev/scratch"] as const;
+
 function canonicalizeExistingWindowsPathPrefix(target: string, cwd: string): string | undefined {
 	if (process.platform !== "win32") return undefined;
 	let existingPrefix = trimTrailingPathSeparatorForComparison(resolvePathForComparison(target, cwd));
@@ -233,7 +241,10 @@ function canonicalizeExistingWindowsPathPrefix(target: string, cwd: string): str
 }
 
 function isTemporaryDirectoryChild(target: string, cwd: string): boolean {
-	if (/[*?\[]/.test(target)) return false;
+	// Unevaluated glob and brace syntax is rejected conservatively: the lexer
+	// cannot know what bash would expand `*`, `?`, `[...]`, or `{a,b}` into, so
+	// any target containing it must still prompt.
+	if (/[*?[\]{}]/.test(target)) return false;
 	const normalizedTarget = trimTrailingPathSeparatorForComparison(resolvePathForComparison(target, cwd));
 	const canonicalTarget = canonicalizeExistingWindowsPathPrefix(target, cwd);
 	const normalizedTargets = canonicalTarget ? [normalizedTarget, canonicalTarget] : [normalizedTarget];
@@ -246,9 +257,13 @@ function isTemporaryDirectoryChild(target: string, cwd: string): boolean {
 	} catch {
 		// The lexical platform root remains useful if canonicalization fails.
 	}
-	const tempRoots = ["/tmp", "/var/tmp", platformTempRoot, canonicalPlatformTempRoot].filter(
-		(root): root is string => typeof root === "string",
-	);
+	const tempRoots = [
+		"/tmp",
+		"/var/tmp",
+		platformTempRoot,
+		canonicalPlatformTempRoot,
+		...MACHINE_DISPOSABLE_SCRATCH_ROOTS,
+	].filter((root): root is string => typeof root === "string");
 	return tempRoots.some((root) => {
 		const normalizedRoot = trimTrailingPathSeparatorForComparison(resolvePathForComparison(root, cwd));
 		return normalizedTargets.some((candidate) => candidate.startsWith(`${normalizedRoot}/`));

@@ -1,17 +1,9 @@
-// Shared auth.json helpers for the pie installers.
+// Shared auth.json helpers for the Windows installer.
 //
-// Covers the duplicated credential operations:
-//   - split-brain merge (in-tree auth.json -> secure PI_CODING_AGENT_AUTH_DIR
-//     location, in-tree wins on conflict), previously duplicated as
-//       install.ps1: Read-AuthJson / Write-AuthJson + Compare-Object merge
-//       install.sh:  inline `node -e` deep-merge
-//   - "has real content" detection used by the post-install readiness check,
-//     previously duplicated as inline `node -e` snippets in both installers.
-//
-// The merge compares provider credential blocks by JSON serialisation (the
-// install.sh canonical behaviour). install.ps1 previously used Compare-Object,
-// which is order/representation-sensitive; JSON-stringify comparison is the
-// robust, cross-platform equivalent and produces the same merged result.
+// Covers split-brain merge (in-tree auth.json -> secure
+// PI_CODING_AGENT_AUTH_DIR, with in-tree values winning on conflict) and the
+// "has real content" detection used by the post-install readiness check.
+// Provider blocks are compared by JSON serialization.
 
 import { createHash } from 'node:crypto';
 import { chmodSync, copyFileSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
@@ -94,10 +86,8 @@ function sha256File(file) {
  * the Node subprocess cannot or should not do: the interactive prompt, the
  * Windows ACL restriction (icacls), `setx PI_CODING_AGENT_AUTH_DIR`, removing
  * the in-tree file, and writing the `auth.json.removed` breadcrumb — all of
- * which run only after this returns `ok: true`. install.ps1 did the same steps
- * inline in PowerShell; install.sh does the inline `shasum`/`sha256sum` + chmod
- * equivalent. On POSIX the destination is chmod 600 (a no-op concern on
- * Windows, which uses ACLs instead).
+ * which run only after this returns `ok: true`. Non-Windows direct callers
+ * receive a best-effort chmod 600, while Windows uses ACLs instead.
  *
  * @param {{ src: string, dest: string, platform?: 'win32' | 'posix' }} input
  * @returns {{ ok: boolean, dest?: string, reason?: 'hash-mismatch' }}
@@ -110,7 +100,7 @@ export function relocateAuthFile({ src, dest, platform = process.platform }) {
     return { ok: false, reason: 'hash-mismatch' };
   }
   if (platform !== 'win32') {
-    try { chmodSync(dest, 0o600); } catch { /* best-effort; matches install.sh */ }
+    try { chmodSync(dest, 0o600); } catch { /* best-effort owner-only permissions */ }
   }
   return { ok: true, dest };
 }

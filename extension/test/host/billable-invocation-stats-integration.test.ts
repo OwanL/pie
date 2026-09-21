@@ -129,6 +129,33 @@ test('compacted terminal subagent results preserve each invocation and explicit 
   assert.equal(samples[1]?.outcome, 'failed');
 });
 
+test('partial subagent usage preserves exact provider cost while marking channels incomplete', () => {
+  const samples = buildSubagentUsageSamples({
+    id: 'tool-partial-provider-cost',
+    status: 'completed',
+    result: {
+      mode: 'single',
+      results: [{
+        agent: 'worker', task: 'task', exitCode: 0, messages: [],
+        usage: {
+          input: 4,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          tokenChannelsKnown: false,
+          tokenChannelPresence: { input: true, output: false, cacheRead: false, cacheWrite: false },
+          reportedCostUsd: 0.12,
+        },
+      }],
+    },
+  });
+  assert.equal(samples.length, 1);
+  assert.equal(samples[0]?.reportedCostUsd, 0.12);
+  assert.equal(samples[0]?.tokenChannelsKnown, false);
+  assert.equal(samples[0]?.instrumentationGap, true);
+  assert.equal(samples[0]?.inputTokens, 4);
+});
+
 test('dispatched subagent attempt with aggregate zeroes but no provider response emits a gap', () => {
   const samples = buildSubagentUsageSamples({
     id: 'tool-dispatched-gap',

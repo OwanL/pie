@@ -127,8 +127,8 @@ export function attachBoundedWorkerIpcReader(
  * Bounded, sequence-owning JSONL writer for one inherited private FD.
  *
  * Only one stream.write may be active. Correlated responses drain first, then
- * control/terminal frames, then ordinary commands and heartbeats; every lane
- * is FIFO. Pending heartbeats replace the older pending heartbeat before
+ * bounded control/terminal frames (including heartbeats), then ordinary
+ * commands; every lane is FIFO. Pending heartbeats replace the older pending heartbeat before
  * either receives a sequence number. Every frame is serialized and checked
  * against its exact JSON+LF byte cap before the first OS write.
  */
@@ -217,16 +217,20 @@ export class BoundedWorkerIpcWriter {
     };
 
     if (pending.kind === 'heartbeat') {
-      const heartbeatIndex = this.lanes.ordinary.findIndex((entry) => entry.kind === 'heartbeat');
+      // Heartbeats use whichever bounded control reservation laneFor assigned
+      // to them. Keeping this lookup lane-aware prevents a later control-plane
+      // classification from silently coalescing against ordinary backlog.
+      const heartbeatLane = pending.lane;
+      const heartbeatIndex = this.lanes[heartbeatLane].findIndex((entry) => entry.kind === 'heartbeat');
       if (heartbeatIndex >= 0) {
-        const previous = this.lanes.ordinary[heartbeatIndex]!;
-        const replacementBytes = this.queuedBytes.ordinary - previous.bytes + pending.bytes;
-        if (replacementBytes > this.capacities.ordinary) {
-          return this.reject(options.onSettled, 'capacity', capacityDetail('ordinary', replacementBytes, this.capacities.ordinary));
+        const previous = this.lanes[heartbeatLane][heartbeatIndex]!;
+        const replacementBytes = this.queuedBytes[heartbeatLane] - previous.bytes + pending.bytes;
+        if (replacementBytes > this.capacities[heartbeatLane]) {
+          return this.reject(options.onSettled, 'capacity', capacityDetail(heartbeatLane, replacementBytes, this.capacities[heartbeatLane], pending));
         }
-        this.lanes.ordinary.splice(heartbeatIndex, 1);
-        this.lanes.ordinary.push(pending);
-        this.queuedBytes.ordinary = replacementBytes;
+        this.lanes[heartbeatLane].splice(heartbeatIndex, 1);
+        this.lanes[heartbeatLane].push(pending);
+        this.queuedBytes[heartbeatLane] = replacementBytes;
         settle(previous.onSettled, { status: 'coalesced' });
         return { accepted: true, coalesced: true };
       }
@@ -259,7 +263,7 @@ export class BoundedWorkerIpcWriter {
     const exceptionalBytes = Math.max(exceptionalQueuedFrameBytes, exceptionalPendingBytes);
     const reservedLaneBytes = retainedLaneBytes + pending.bytes - exceptionalBytes;
     if (retainedLaneBytes > 0 && reservedLaneBytes > this.capacities[lane]) {
-      return this.reject(options.onSettled, 'capacity', capacityDetail(lane, nextLaneBytes, this.capacities[lane]));
+      return this.reject(options.onSettled, 'capacity', capacityDetail(lane, nextLaneBytes, this.capacities[lane], pending));
     }
     this.lanes[lane].push(pending);
     // `queuedBytes` deliberately excludes the descriptor's active write. The
@@ -402,7 +406,7 @@ function laneFor(frame: WorkerIpcFrame): WriterLane {
       || kind === 'provider.cancelAck' || kind === 'provider.released'
       || kind === 'settings.authoritative' || kind === 'analytics.ack' || kind === 'analytics.rebound'
       || kind === 'detail.unsubscribed') return 'response';
-  if (kind === 'bootstrap' || kind === 'interrupt' || kind === 'shutdown'
+  if (kind === 'heartbeat' || kind === 'bootstrap' || kind === 'interrupt' || kind === 'shutdown'
       || kind === 'ready' || kind === 'fatal' || kind === 'runtime.promote'
       || kind === 'runtime.command' || kind === 'sync'
       || kind === 'ownership.reserve' || kind === 'ownership.commit'
@@ -419,8 +423,17 @@ function laneFor(frame: WorkerIpcFrame): WriterLane {
 
 function isLifecycleRuntimeEvent(event: string): boolean {
   return event === 'session.opened' || event === 'message.started' || event === 'message.finished'
-    || event === 'message.aborted' || event === 'tool.started' || event === 'tool.finished'
-    || event === 'agent.settled' || event === 'busy.changed' || event === 'live.lifecycle';
+    || event === 'message.aborted' || event === 'message.custom' || event === 'message.queuedDelivered'
+    || event === 'tool.started' || event === 'tool.finished'
+    || event === 'agent.settled' || event === 'busy.changed' || event === 'contextUsage.changed'
+    || event === 'extension_ui.request' || event === 'preflight.failed'
+    || event === 'retry.started' || event === 'retry.ended' || event === 'retry.measured'
+    || event === 'compaction.started' || event === 'compaction.ended' || event === 'auxiliary-llm.usage'
+    || event === 'live.lifecycle'
+    // Completion-critical observations and actionable terminal diagnostics must
+    // not inherit lossy ordinary progress pressure. They retain one-way,
+    // bounded lifecycle delivery rather than gaining a replay path.
+    || event === 'analytics.branch' || event === 'operational-error' || event === 'error';
 }
 
 function validateCapacity(value: number, name: string): number {
@@ -432,8 +445,11 @@ function sizeDetail(bytes: number, limit: number): string {
   return `Worker IPC frame is ${bytes} UTF-8 wire bytes; limit is ${limit}.`;
 }
 
-function capacityDetail(lane: WriterLane, bytes: number, capacity: number): string {
-  return `Worker IPC ${lane} queue would use ${bytes} bytes; reserved capacity is ${capacity}.`;
+function capacityDetail(lane: WriterLane, bytes: number, capacity: number, frame: PendingFrame): string {
+  const event = frame.kind === 'runtime.event' && frame.draft.kind === 'runtime.event'
+    ? ` event=${frame.draft.event}`
+    : '';
+  return `Worker IPC ${lane} queue rejected frame kind=${frame.kind}${event}; would use ${bytes} bytes; reserved capacity is ${capacity}.`;
 }
 
 function settle(callback: WorkerIpcEnqueueOptions['onSettled'], settlement: WorkerIpcSettlement): void {

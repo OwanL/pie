@@ -23,7 +23,7 @@
   overflow: hidden;
   white-space: nowrap;
   text-align: center;
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--panel-font-mono);
   font-size: 9px;
   font-weight: 500;
   line-height: 1;

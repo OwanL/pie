@@ -28,6 +28,7 @@ import {
 export {
   getRenderableSubagentResult,
   getRenderableSubagentResultFromToolCall,
+  hasNestedToolFailure,
   isSubagentSingleResultInterrupted,
   isSubagentSingleResultRunning,
 } from '../../../shared/subagent-result';

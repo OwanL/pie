@@ -394,9 +394,6 @@ export function SubagentSection({ prefs, onSetPrefs, availableModels }: Subagent
     () => getSubagentBucketProviders(prefs, availableModels),
     [availableModels, prefs.subagentBuckets, prefs.subagentProviderDefaults],
   );
-  const defaultEnabledCount = subagentProviders.filter(
-    (provider) => isSubagentProviderEnabled(prefs, provider),
-  ).length;
 
   return (
     <div class="toolbar-settings-ext-settings">
@@ -433,14 +430,11 @@ export function SubagentSection({ prefs, onSetPrefs, availableModels }: Subagent
       )}
       {subagentProviders.map((provider) => {
         const enabled = isSubagentProviderEnabled(prefs, provider);
-        const lastEnabled = enabled && defaultEnabledCount === 1;
         return (
           <SettingCheckbox
             key={provider}
             label={provider}
             checked={enabled}
-            disabled={lastEnabled}
-            title={lastEnabled ? 'At least one subagent provider must remain enabled by default' : undefined}
             onChange={() => onSetPrefs(setSubagentProviderDefaultEnabled(prefs, provider, !enabled))}
           />
         );

@@ -13,6 +13,8 @@ const MODEL_CONFIG_TESTS = [
   'extension/test/integration/model-config-sync.test.ts',
   'extension/test/integration/model-profile-coverage.test.ts',
 ];
+const WINDOWS_INSTALLER_PATHS = new Set(['install.bat', '.gitattributes']);
+const WINDOWS_INSTALLER_TESTS = ['scripts/test/install-batch.test.mjs'];
 
 function normalize(value) {
   return value.replace(/\\/gu, '/');
@@ -127,8 +129,11 @@ export function planAffectedTests(repoRoot, changedFiles) {
   const uniqueFiles = [...new Set(files)];
   const testFiles = uniqueFiles.filter((file) => TEST_FILE.test(file));
   const modelConfigChanged = normalizedChanges.some((file) => MODEL_CONFIG_PATHS.has(file));
+  const windowsInstallerChanged = normalizedChanges.some((file) => WINDOWS_INSTALLER_PATHS.has(file));
   const relevantChanges = normalizedChanges.filter((file) => owningPackage(file) !== null);
-  if (relevantChanges.length === 0 && !modelConfigChanged) return { mode: 'none', testFiles: [], reasons: [] };
+  if (relevantChanges.length === 0 && !modelConfigChanged && !windowsInstallerChanged) {
+    return { mode: 'none', testFiles: [], reasons: [] };
+  }
 
   const allForPackages = new Set(relevantChanges.filter((file) => PACKAGE_CONFIG.test(file)).map(owningPackage));
   const dependencyChanges = relevantChanges.filter((file) => !allForPackages.has(owningPackage(file)));
@@ -142,6 +147,11 @@ export function planAffectedTests(repoRoot, changedFiles) {
   const selected = new Set(impact.testFiles);
   if (modelConfigChanged) {
     for (const testFile of MODEL_CONFIG_TESTS) {
+      if (testFiles.includes(testFile)) selected.add(testFile);
+    }
+  }
+  if (windowsInstallerChanged) {
+    for (const testFile of WINDOWS_INSTALLER_TESTS) {
       if (testFiles.includes(testFile)) selected.add(testFile);
     }
   }

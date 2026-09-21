@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import * as path from 'node:path';
 
 import type { ModelSettings, RequestEnvelope, SessionOpenedPayload } from '../shared/protocol';
+import type { ModelSettingsUnsetKey } from './request-handler-shared';
 import type {
   CoordinatorToHostDetailMessage,
   HostToCoordinatorDetailMessage,
@@ -36,6 +37,7 @@ import type {
   WorkerJsonObject,
   WorkerJsonValue,
   WorkerRuntimeOperation,
+  WorkerSessionControlFrame,
   WorkerSyncDomain,
   WorkerToCoordinatorFrame,
 } from './worker-protocol';
@@ -65,6 +67,11 @@ export interface WorkerRuntimeTransitionRoute {
   retireStarted: boolean;
   retired: boolean;
   cancelled: boolean;
+  /** A promoted-route cleanup that is in flight or cannot confirm/process the
+   *  full ownership release leaves this transition fenced; its route must not
+   *  settle hot or cold while the old authority is ambiguous. */
+  cleanupPending: boolean;
+  cleanupFailed: boolean;
   recoveryStops: Map<string, Promise<void>>;
 }
 
@@ -157,6 +164,10 @@ export interface WorkerRuntimePromotionSnapshot {
   providerPolicy?: Record<string, WorkerJsonValue>;
 }
 
+type WorkerDetailStreamFrame = Extract<WorkerToCoordinatorFrame, {
+  kind: 'detail.page' | 'detail.delta' | 'detail.rebase' | 'detail.terminal' | 'detail.error';
+}>;
+
 interface DetailSubscriptionOwner {
   address: LiveSubagentDetailAddress;
   route: HotWorkerRoute;
@@ -165,6 +176,18 @@ interface DetailSubscriptionOwner {
   baselineRevision: number;
   pageCount: number;
   nextPageIndex: number;
+  /** WorkerClient can resolve detail.start and dispatch following frames from
+   * the same IPC chunk before subscribeDetail's await continuation runs. Keep
+   * those frames ordered until the start binds the baseline owner. */
+  preStartFrames: WorkerDetailStreamFrame[];
+}
+
+export interface WorkerSessionControlOutcome {
+  result: WorkerJsonValue;
+  /** Lifecycle deletion can retire the source worker. The response is sent
+   * first, then this callback runs so a tool closing its own session still
+   * receives its correlated acknowledgement. */
+  afterResponse?: () => void | Promise<void>;
 }
 
 export interface WorkerRuntimeRouterOptions {
@@ -176,6 +199,11 @@ export interface WorkerRuntimeRouterOptions {
   providerLeases?: CoordinatorProviderNetworkLeaseAuthority;
   buildPromotionSnapshot(sessionPath: string): Promise<WorkerRuntimePromotionSnapshot>;
   writeModelSettings?(updates: Partial<ModelSettings>): Promise<ModelSettings>;
+  writeModelSettingsIfCurrent?(
+    expected: ModelSettings,
+    updates: Partial<ModelSettings>,
+    unset?: readonly ModelSettingsUnsetKey[],
+  ): Promise<boolean>;
   readModelSettings?(): Promise<ModelSettings>;
   readRuntimePrefs?(): WorkerJsonObject;
   /** A sync acknowledgement is a small, priority-path control response. Keep
@@ -187,6 +215,12 @@ export interface WorkerRuntimeRouterOptions {
   runtimeReadyTimeoutMs?: number;
   scheduler?: WorkerClientScheduler;
   emit(event: string, payload?: unknown): void;
+  /** Handle the narrowly scoped worker-originated agent session-control
+   * request after the route identity fence has accepted its frame. */
+  onSessionControl?: (
+    frame: WorkerSessionControlFrame,
+    source: { sessionPath: string; rootSessionPath: string; owner: SdkWorkerOwnershipIdentity },
+  ) => Promise<WorkerSessionControlOutcome>;
   /** Inactive until the P7 manifest owner supplies one immutable generation. */
   analyticsActivation?: {
     generationId: string;
@@ -514,6 +548,7 @@ export class WorkerRuntimeRouter {
     const owner: DetailSubscriptionOwner = {
       address: cloneDetailAddress(message.address), route, state: 'subscribing',
       revision: 0, baselineRevision: 0, pageCount: 0, nextPageIndex: 0,
+      preStartFrames: [],
     };
     this.detailSubscriptions.set(message.subscriptionId, owner);
     try {
@@ -522,7 +557,9 @@ export class WorkerRuntimeRouter {
         ...(message.cursor ? { cursor: message.cursor } : {}), maxPageBytes: message.maxPageBytes,
       }, 'detail.start');
       if (!this.isCurrent(route) || this.detailSubscriptions.get(message.subscriptionId) !== owner
-        || !sameDetailAddress(start.address, message.address)) throw new Error('Detail start owner changed before acknowledgement.');
+        || owner.state !== 'subscribing' || !sameDetailAddress(start.address, message.address)) {
+        throw new Error('Detail start owner changed before acknowledgement.');
+      }
       owner.state = 'active';
       owner.revision = start.baselineRevision;
       owner.baselineRevision = start.baselineRevision;
@@ -533,7 +570,9 @@ export class WorkerRuntimeRouter {
         source: start.source, baselineRevision: start.baselineRevision, pageCount: start.pageCount,
         totalBytes: start.totalBytes, totalCodePoints: start.totalCodePoints, fence: this.detailFence(route),
       });
+      this.flushPreStartDetailFrames(message.subscriptionId, owner, route);
     } catch (error) {
+      owner.preStartFrames.length = 0;
       this.detailSubscriptions.delete(message.subscriptionId);
       throw error;
     }
@@ -543,6 +582,7 @@ export class WorkerRuntimeRouter {
     const owner = this.detailSubscriptions.get(message.subscriptionId);
     if (!owner) return;
     owner.state = 'closing';
+    owner.preStartFrames.length = 0;
     try {
       await owner.route.worker.client.requestFrame!({
         kind: 'detail.unsubscribe', subscriptionId: message.subscriptionId,
@@ -566,6 +606,16 @@ export class WorkerRuntimeRouter {
       address: message.address, ref: message.ref, maxPageBytes: message.maxPageBytes,
     });
     if (!sent) throw new Error('Detail fetch could not be queued to its owning worker.');
+  }
+
+  private flushPreStartDetailFrames(subscriptionId: string, owner: DetailSubscriptionOwner, route: HotWorkerRoute): void {
+    while (owner.preStartFrames.length > 0) {
+      const frames = owner.preStartFrames.splice(0);
+      for (const frame of frames) {
+        if (this.detailSubscriptions.get(subscriptionId) !== owner) return;
+        this.handleDetailFrame(route, frame);
+      }
+    }
   }
 
   private async routeCommand(
@@ -757,6 +807,8 @@ export class WorkerRuntimeRouter {
       retireStarted: false,
       retired: false,
       cancelled: false,
+      cleanupPending: false,
+      cleanupFailed: false,
       recoveryStops: new Map(),
     };
     this.roots.set(routeKey(route.rootSessionPath), transition);
@@ -832,10 +884,7 @@ export class WorkerRuntimeRouter {
       try {
         const result = await operation(control);
         if (this.roots.get(routeKey(transition.rootSessionPath)) === transition) {
-          const settled: WorkerRuntimeRouteState = transition.promoted
-            ?? (transition.retired
-              ? { state: 'cold', rootSessionPath: route.currentLeasePath }
-              : route);
+          const settled = this.settledTransitionRoute(transition, route);
           this.roots.set(routeKey(settled.rootSessionPath), settled);
           this.notify(settled);
         }
@@ -844,15 +893,17 @@ export class WorkerRuntimeRouter {
         const transitionRootKey = routeKey(transition.rootSessionPath);
         const current = this.roots.get(transitionRootKey);
         if (current === transition && !transition.retireStarted
+            && !transition.cleanupPending && !transition.cleanupFailed
             && this.currentPaths.get(routeKey(route.currentLeasePath)) === route) {
           this.roots.set(routeKey(route.rootSessionPath), route);
           this.notify(route);
         } else if (transition.retired && (!current || current === transition)) {
           // A post-promotion compound-command failure keeps the fresh runtime
-          // authoritative. A promotion failure instead falls back to the
-          // retained cold handle for explicit retry.
-          const settled: WorkerRuntimeRouteState = transition.promoted
-            ?? { state: 'cold', rootSessionPath: route.currentLeasePath };
+          // authoritative only while its route is still live. A cancelled or
+          // otherwise stopped promotion falls back to the retained cold handle
+          // only after cleanup confirms that no ambiguous owner remains; a
+          // pending or failed cleanup keeps the transition fence in place.
+          const settled = this.settledTransitionRoute(transition, route);
           this.roots.set(routeKey(settled.rootSessionPath), settled);
           this.notify(settled);
         }
@@ -884,7 +935,29 @@ export class WorkerRuntimeRouter {
     const key = `${route.owner.workerId}\u0000${route.owner.workerGeneration}`;
     const existing = transition.recoveryStops.get(key);
     if (existing) return existing;
-    const stopping = this.stopTransitionRoute(route, reason);
+    // Fence settlement before starting the first await. Otherwise a
+    // cancellation can reject the compound operation in the same turn that a
+    // failed stop/reconciliation rejects, allowing the catch path to publish
+    // the still-mapped promoted route before the cleanup failure is recorded.
+    transition.cleanupPending = true;
+    transition.cleanupFailed = false;
+    const stopping = this.stopTransitionRoute(route, reason).then(
+      () => {
+        transition.cleanupPending = false;
+      },
+      (error) => {
+        // stopWorker may fail before process death is confirmed, and ownership
+        // reconciliation may fail after that confirmation. In either case the
+        // route maps are intentionally retained and the public transition must
+        // remain fenced rather than settling a still-addressable owner hot or
+        // exposing a reusable cold path. Remove the rejected attempt so a later
+        // confirmed-exit callback can retry the cleanup.
+        transition.cleanupPending = false;
+        transition.cleanupFailed = true;
+        transition.recoveryStops.delete(key);
+        throw error;
+      },
+    );
     transition.recoveryStops.set(key, stopping);
     return stopping;
   }
@@ -1060,12 +1133,15 @@ export class WorkerRuntimeRouter {
     const owningState = this.roots.get(routeKey(route.rootSessionPath));
     if (intentionalExit && owningState?.state === 'retiring') return;
     let confirmedExitOwnsFailedTransition = false;
+    let failedPromotedCleanup: WorkerRuntimeTransitionRoute | undefined;
     if (owningState?.state === 'transitioning'
-      && sameWorkerOwner(owningState.owner, route.owner)) {
-      // A controlled interrupt/retirement owns authority revocation. Wait for
-      // that transition to publish its terminal route before applying the exit
-      // snapshot; this avoids both duplicate terminalization and restoring a
-      // process whose exit raced a nominally-soft interrupt.
+      && (sameWorkerOwner(owningState.owner, route.owner)
+        || (owningState.promoted === route && sameWorkerOwner(owningState.promoted.owner, route.owner)))) {
+      // A controlled interrupt/retirement owns authority revocation. A promoted
+      // replacement is also owned by this transition while its public root is
+      // fenced. Wait for that transition to publish its terminal route before
+      // applying the exit snapshot; this avoids both duplicate terminalization
+      // and restoring a process whose exit raced a nominally-soft interrupt.
       await owningState.completion.catch(() => undefined);
       if (this.roots.get(routeKey(route.rootSessionPath)) !== owningState) {
         return await this.handleWorkerStateChange(rootSessionPath, snapshot, identity);
@@ -1074,6 +1150,12 @@ export class WorkerRuntimeRouter {
       // transition fenced. This later exited snapshot is the missing proof;
       // finish revocation below instead of recursing on the same transition.
       confirmedExitOwnsFailedTransition = true;
+      if (owningState.promoted === route && owningState.cleanupFailed) {
+        // The first recovery attempt may have raced the process exit. Retry the
+        // complete stop/reconciliation now that this exact promoted owner has
+        // supplied confirmed-exit evidence; a rejected attempt is not reusable.
+        failedPromotedCleanup = owningState;
+      }
     }
     this.clearLiveSyncRetries(route.worker);
     // Snapshot the bounded checkpoint (including the detail subscription
@@ -1084,9 +1166,15 @@ export class WorkerRuntimeRouter {
     this.extensionUiOwners.clearWorker(route.owner.workerId, route.owner.workerGeneration);
     this.clearPendingProviderAcquires(route);
     this.providerLeases.releaseOwner(route.owner, 'Worker crashed.');
-    await this.options.supervisor.stopWorker(route.currentLeasePath, 'confirmed worker exit').catch(() => undefined);
-    this.closeAnalyticsRoute(route);
-    await this.options.ownership.reconcileCrash({ owner: route.owner, processDeathConfirmed: true });
+    if (failedPromotedCleanup) {
+      // Reuse the transition cleanup path so a delayed exit retries both the
+      // supervisor's process-map removal and the ownership reconciliation.
+      await this.stopTransitionRouteOnce(failedPromotedCleanup, route, 'confirmed worker exit');
+    } else {
+      await this.options.supervisor.stopWorker(route.currentLeasePath, 'confirmed worker exit').catch(() => undefined);
+      this.closeAnalyticsRoute(route);
+      await this.options.ownership.reconcileCrash({ owner: route.owner, processDeathConfirmed: true });
+    }
     if (!this.isCurrent(route) && !confirmedExitOwnsFailedTransition) return;
     this.currentPaths.delete(routeKey(route.currentLeasePath));
     this.workersById.delete(route.owner.workerId);
@@ -1147,6 +1235,49 @@ export class WorkerRuntimeRouter {
       || routeKey(frame.leasePath) !== routeKey(route.currentLeasePath)
       || frame.leaseRevision !== route.currentLeaseRevision) {
       return; // stale/cross-session frames are telemetry-only drops
+    }
+
+    if (frame.kind === 'session.control') {
+      const handler = this.options.onSessionControl;
+      if (!handler || !this.isCurrentOrPromoting(route)) return;
+      let outcome: WorkerSessionControlOutcome;
+      try {
+        outcome = await handler(frame, {
+          sessionPath: route.currentLeasePath,
+          rootSessionPath: route.workerRootSessionPath,
+          owner: route.owner,
+        });
+      } catch (error) {
+        if (!this.isCurrentOrPromoting(route)) return;
+        const message = truncateUtf8Field(
+          error instanceof Error ? error.message : error,
+          'Session control failed.',
+          64 * 1024,
+        );
+        const sent = route.worker.client.sendFrame?.({
+          kind: 'session.control.result',
+          requestId: frame.requestId,
+          ok: false,
+          error: { code: 'SESSION_CONTROL_FAILED', message, retryable: false },
+        });
+        if (!sent) return;
+        return;
+      }
+      if (!this.isCurrentOrPromoting(route)) return;
+      const sent = route.worker.client.sendFrame?.({
+        kind: 'session.control.result',
+        requestId: frame.requestId,
+        ok: true,
+        result: outcome.result,
+      });
+      if (sent && outcome.afterResponse) void Promise.resolve(outcome.afterResponse()).catch((error) => {
+        backendWarn('backend-session-control', 'after-response failed', {
+          requestId: frame.requestId,
+          sessionPath: route.currentLeasePath,
+          error: toErrorMessage(error),
+        });
+      });
+      return;
     }
 
     if (frame.kind === 'runtime.event') {
@@ -1400,13 +1531,33 @@ export class WorkerRuntimeRouter {
     }
     if (frame.kind === 'settings.mutate') {
       try {
-        if (!this.options.writeModelSettings) throw new Error('Coordinator settings authority is unavailable.');
+        const writeSettings = this.options.writeModelSettings;
+        if (!writeSettings) throw new Error('Coordinator settings authority is unavailable.');
         // Persist + revision allocation + enqueue stay one short sync-locked
         // unit, but acknowledgements run outside it on per-worker/domain tails.
         // That preserves monotonic writes without letting one wedged worker
         // block unrelated startup synchronization.
         const settlements = await this.withSyncLock(async () => {
-          const values = await this.options.writeModelSettings!(frame.updates as unknown as Partial<ModelSettings>);
+          const updates = { ...(frame.updates as unknown as Record<string, unknown>) };
+          for (const key of frame.unset ?? []) updates[key] = undefined;
+          let applied = true;
+          let values: ModelSettings;
+          if (frame.expected !== undefined) {
+            const writeIfCurrent = this.options.writeModelSettingsIfCurrent;
+            if (!writeIfCurrent) {
+              throw new Error('Coordinator conditional settings authority is unavailable.');
+            }
+            applied = await writeIfCurrent(
+              modelSettingsFromWorkerObject(frame.expected),
+              updates as Partial<ModelSettings>,
+              frame.unset as ModelSettingsUnsetKey[] | undefined,
+            );
+            values = this.options.readModelSettings
+              ? await this.options.readModelSettings()
+              : modelSettingsFromWorkerObject(frame.expected);
+          } else {
+            values = await writeSettings(updates as Partial<ModelSettings>);
+          }
           const revision = this.syncRevisions.settings + 1;
           this.syncRevisions.settings = revision;
           const payload = { values: asWorkerJsonObject(values) };
@@ -1416,6 +1567,7 @@ export class WorkerRuntimeRouter {
             requestId: frame.requestId,
             revision,
             values: asWorkerJsonObject(values),
+            applied,
           });
           return this.scheduleBroadcastLocked('settings', payload, revision, 'broadcast');
         });
@@ -1426,14 +1578,18 @@ export class WorkerRuntimeRouter {
     }
   }
 
-  private handleDetailFrame(
-    route: HotWorkerRoute,
-    frame: Extract<WorkerToCoordinatorFrame, {
-      kind: 'detail.page' | 'detail.delta' | 'detail.rebase' | 'detail.terminal' | 'detail.error';
-    }>,
-  ): void {
+  private handleDetailFrame(route: HotWorkerRoute, frame: WorkerDetailStreamFrame): void {
     const owner = this.detailSubscriptions.get(frame.subscriptionId);
     if (!owner || owner.route !== route || owner.state === 'closing' || !this.isCurrent(route)) return;
+    if (owner.state === 'subscribing') {
+      // The correlated detail.start is resolved before WorkerClient dispatches
+      // later frames from the same IPC chunk. Do not validate or rebase against
+      // an unbound baseline; the subscribe continuation will replay these
+      // frames after forwarding detail.start.
+      if (frame.kind === 'detail.error' && frame.requestId !== undefined) return;
+      owner.preStartFrames.push(frame);
+      return;
+    }
     const fence = this.detailFence(route);
     if (frame.kind === 'detail.page') {
       if (frame.ref.baselineRevision !== owner.baselineRevision || frame.ref.pageCount !== owner.pageCount
@@ -1486,10 +1642,8 @@ export class WorkerRuntimeRouter {
     // subscriptionId, and a forwarded error would kill the owner before the
     // durable baseline arrives. Stream-time errors (no requestId, or after the
     // start) are forwarded normally.
-    if (frame.requestId === undefined || owner.state !== 'subscribing') {
-      this.forwardDetail(route, { kind: 'detail.error', subscriptionId: frame.subscriptionId,
-        code: frame.code, message: frame.message, retryable: frame.retryable, fence });
-    }
+    this.forwardDetail(route, { kind: 'detail.error', subscriptionId: frame.subscriptionId,
+      code: frame.code, message: frame.message, retryable: frame.retryable, fence });
   }
 
   private rebaseDetail(owner: DetailSubscriptionOwner, reason: 'gap' | 'backpressure' | 'evicted' | 'generation-change'): void {
@@ -1581,7 +1735,15 @@ export class WorkerRuntimeRouter {
             sessionPath: exactSessionPath,
             creationReason: grant.creationReason,
             writeLease: lease,
-            openedPayload: snapshot.openedPayload,
+            // The cold snapshot has already reached the host before the first
+            // execution mutation. Promotion only needs bounded metadata to
+            // hydrate the worker and publish runtime readiness; re-sending the
+            // durable transcript here can cross the private protocol's
+            // structural validator even when it fits the byte cap (notably for
+            // large subagent detail projections). Keep the source snapshot
+            // untouched so its lazy detail refs and durable history remain
+            // available to the existing cold view and to the promoted worker.
+            openedPayload: promotionOpenedPayload(snapshot.openedPayload),
             modelSettings: snapshot.modelSettings,
             ...(this.options.analyticsActivation && route.analyticsCaptureSubject
               ? {
@@ -2158,6 +2320,28 @@ export class WorkerRuntimeRouter {
       && this.workersById.get(route.owner.workerId) === route;
   }
 
+  private settledTransitionRoute(
+    transition: WorkerRuntimeTransitionRoute,
+    source: HotWorkerRoute,
+  ): WorkerRuntimeRouteState {
+    if (transition.cleanupPending || transition.cleanupFailed) {
+      // A pending or failed stop/reconciliation retains the transition as the
+      // public fence. Do not infer cold authority from cleanup that has not
+      // completed: an ambiguous worker or ownership record must never overlap
+      // a later writer.
+      return transition;
+    }
+    const promoted = transition.promoted;
+    if (promoted) {
+      return this.isCurrentOrPromoting(promoted)
+        ? promoted
+        : { state: 'cold', rootSessionPath: source.currentLeasePath };
+    }
+    return transition.retired
+      ? { state: 'cold', rootSessionPath: source.currentLeasePath }
+      : source;
+  }
+
   /** True when `route` is the legitimate owner, including while it is still
    *  promoting. During promotion the public root holds a `promoting` placeholder
    *  (the hot route is installed in `roots` only after `runtime.ready`), so
@@ -2641,6 +2825,7 @@ export class WorkerRuntimeRouter {
   private invalidateDetailSubscriptions(route: HotWorkerRoute, reason: 'generation-change' | 'evicted'): void {
     for (const [subscriptionId, owner] of [...this.detailSubscriptions]) {
       if (owner.route !== route) continue;
+      owner.preStartFrames.length = 0;
       this.forwardDetail(route, { kind: 'detail.rebase', subscriptionId, currentRevision: owner.revision,
         reason, fence: this.detailFence(route) });
       this.detailSubscriptions.delete(subscriptionId);
@@ -2730,6 +2915,36 @@ function cloneDetailAddress(address: LiveSubagentDetailAddress): LiveSubagentDet
 
 function sameDetailAddress(left: LiveSubagentDetailAddress, right: LiveSubagentDetailAddress): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function modelSettingsFromWorkerObject(value: WorkerJsonObject): ModelSettings {
+  const settings: ModelSettings = {
+    defaultModel: typeof value.defaultModel === 'string' ? value.defaultModel : '',
+    defaultThinkingLevel: value.defaultThinkingLevel as ModelSettings['defaultThinkingLevel'],
+  };
+  if (typeof value.defaultProvider === 'string' && value.defaultProvider.length > 0) {
+    settings.defaultProvider = value.defaultProvider;
+  }
+  return settings;
+}
+
+function promotionOpenedPayload(payload: SessionOpenedPayload): SessionOpenedPayload {
+  const totalCount = Number.isSafeInteger(payload.transcriptWindow.totalCount)
+    ? Math.max(0, payload.transcriptWindow.totalCount)
+    : 0;
+  return {
+    ...payload,
+    transcript: [],
+    transcriptSkipped: true,
+    transcriptWindow: {
+      ...payload.transcriptWindow,
+      loadedStart: 0,
+      loadedEnd: 0,
+      hasOlder: false,
+      hasNewer: totalCount > 0,
+      isPartial: totalCount > 0,
+    },
+  };
 }
 
 function asWorkerJsonObject(value: unknown): WorkerJsonObject {

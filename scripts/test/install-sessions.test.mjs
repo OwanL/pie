@@ -1,7 +1,7 @@
 // Focused unit tests for scripts/install/lib/sessions.mjs — the session-history
 // merge core. Verifies bucket naming, header-cwd parsing, latest-timestamp
 // selection, and the copy/identical/conflict-backup merge semantics that both
-// shell installers rely on (and that scripts/migrate-local-sessions.mjs
+// Windows installer relies on (and that scripts/migrate-local-sessions.mjs
 // delegates to).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

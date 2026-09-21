@@ -8,6 +8,9 @@ import registerDeferredTriggers from '../index.js';
 
 const TRIGGERS_DIR_ENV = 'PIE_TRIGGERS_DIR';
 
+type Tool = { name: string; execute: (...args: unknown[]) => Promise<unknown> };
+type ToolResult = { isError: boolean; content: Array<{ text: string }>; details?: any };
+
 let tempDir: string;
 let savedTriggersDir: string | undefined;
 
@@ -23,81 +26,154 @@ afterEach(() => {
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
-test('successful registration normalizes only its own empty abort terminal', async () => {
-  let tool: { execute: (...args: unknown[]) => Promise<unknown> } | undefined;
-  let messageEnd: ((event: { message: Record<string, unknown> }) => unknown) | undefined;
+function setup(): { tools: Record<string, Tool> } {
+  const tools: Record<string, Tool> = {};
   registerDeferredTriggers({
     registerTool(value: unknown) {
-      tool = value as typeof tool;
-    },
-    on(event: string, handler: unknown) {
-      if (event === 'message_end') messageEnd = handler as typeof messageEnd;
+      const tool = value as Tool;
+      tools[tool.name] = tool;
     },
   } as never);
+  assert.ok(tools.defer_trigger);
+  return { tools };
+}
 
-  assert.ok(tool);
-  assert.ok(messageEnd);
-  let aborts = 0;
-  const result = await tool.execute(
-    'defer-call',
-    { action: 'register', triggers: [{ kind: 'timer', ms: 1_000 }], note: 'resume later' },
-    undefined,
-    undefined,
-    {
-      sessionManager: { getSessionFile: () => path.join(tempDir, 'session.jsonl') },
-      abort: () => { aborts += 1; },
-    },
-  ) as { isError: boolean };
-  assert.equal(result.isError, false);
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.equal(aborts, 1);
-
-  const aborted = {
-    role: 'assistant',
-    stopReason: 'aborted',
-    errorMessage: 'Request was aborted.',
-    content: [],
+function context(session = 'session.jsonl', cwd = tempDir) {
+  return {
+    sessionManager: { getSessionFile: () => path.join(tempDir, session) },
+    cwd,
+    hasUI: false,
   };
-  const replacement = messageEnd({ message: aborted }) as { message?: Record<string, unknown> };
-  assert.equal(replacement.message?.stopReason, 'stop');
-  assert.equal(replacement.message?.errorMessage, undefined);
+}
 
-  assert.equal(
-    messageEnd({ message: aborted }),
+function readSidecar(): any[] {
+  const file = path.join(tempDir, 'triggers.jsonl');
+  if (!fs.existsSync(file)) return [];
+  return fs.readFileSync(file, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+}
+
+test('defer_trigger registers a normalized wake without aborting the current turn', async () => {
+  const { tools } = setup();
+  const registrationCwd = path.join(tempDir, 'project');
+  const result = await tools.defer_trigger.execute(
+    'defer-call',
+    {
+      action: 'register',
+      triggers: [{ kind: 'command', command: 'git status', cwd: '.' }],
+      message: 'resume later',
+    },
     undefined,
-    'the one-shot marker cannot normalize a later genuine abort',
-  );
+    undefined,
+    context('caller.jsonl', registrationCwd),
+  ) as ToolResult;
+
+  assert.equal(result.isError, false);
+  assert.match(result.content[0].text, /Registered deferred trigger/);
+
+  const [op] = readSidecar();
+  assert.equal(op.op, 'register');
+  assert.equal(op.message, 'resume later');
+  assert.equal(op.sessionPath, path.join(tempDir, 'caller.jsonl'));
+  assert.equal(op.targetSession, path.join(tempDir, 'caller.jsonl'));
+  assert.equal(op.triggers[0].cwd, path.resolve(registrationCwd));
+  assert.equal(op.triggers[0].intervalMs, 30_000);
+  assert.equal(op.triggers[0].timeoutMs, 10_000);
 });
 
-test('content-bearing and unrelated aborts remain interrupted terminals', async () => {
-  let tool: { execute: (...args: unknown[]) => Promise<unknown> } | undefined;
-  let messageEnd: ((event: { message: Record<string, unknown> }) => unknown) | undefined;
-  registerDeferredTriggers({
-    registerTool(value: unknown) { tool = value as typeof tool; },
-    on(event: string, handler: unknown) {
-      if (event === 'message_end') messageEnd = handler as typeof messageEnd;
-    },
-  } as never);
-  assert.ok(tool);
-  assert.ok(messageEnd);
-
-  assert.equal(messageEnd({ message: { role: 'assistant', stopReason: 'aborted', content: [] } }), undefined);
-  await tool.execute(
+test('register requires a message and never writes a partial registration', async () => {
+  const { tools } = setup();
+  const result = await tools.defer_trigger.execute(
     'defer-call',
-    { action: 'register', triggers: [{ kind: 'user_input' }] },
+    { action: 'register', triggers: [{ kind: 'timer', ms: 1_000 }] },
     undefined,
     undefined,
-    {
-      sessionManager: { getSessionFile: () => path.join(tempDir, 'session.jsonl') },
-      abort: () => undefined,
-    },
-  );
+    context(),
+  ) as ToolResult;
 
-  const contentBearing = {
-    role: 'assistant',
-    stopReason: 'aborted',
-    errorMessage: 'Request was aborted.',
-    content: [{ type: 'text', text: 'partial answer' }],
-  };
-  assert.equal(messageEnd({ message: contentBearing }), undefined);
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /message is required/);
+  assert.deepEqual(readSidecar(), []);
+});
+
+test('register persists an explicit target session without changing creator ownership', async () => {
+  const { tools } = setup();
+  const result = await tools.defer_trigger.execute(
+    'defer-call',
+    {
+      action: 'register',
+      triggers: [{ kind: 'user_input' }],
+      message: 'tell the target to continue',
+      targetSession: path.join(tempDir, 'target.jsonl'),
+    },
+    undefined,
+    undefined,
+    context('creator.jsonl'),
+  ) as ToolResult;
+
+  assert.equal(result.isError, false);
+  const [op] = readSidecar();
+  assert.equal(op.sessionPath, path.join(tempDir, 'creator.jsonl'));
+  assert.equal(op.targetSession, path.join(tempDir, 'target.jsonl'));
+});
+
+test('command predicates are denied by safeguard before a wake is persisted', async () => {
+  const { tools } = setup();
+  const result = await tools.defer_trigger.execute(
+    'defer-call',
+    { action: 'register', triggers: [{ kind: 'command', command: 'rm -rf /' }], message: 'unsafe' },
+    undefined,
+    undefined,
+    context(),
+  ) as ToolResult;
+
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /Safeguard/);
+  assert.deepEqual(readSidecar(), []);
+});
+
+test('list and targeted cancel are restricted to the creator session', async () => {
+  const { tools } = setup();
+  const registered = await tools.defer_trigger.execute(
+    'defer-call',
+    { action: 'register', triggers: [{ kind: 'user_input' }], message: 'owned wake' },
+    undefined,
+    undefined,
+    context('creator.jsonl'),
+  ) as ToolResult;
+  const id = registered.details.id as string;
+
+  const foreignCancel = await tools.defer_trigger.execute(
+    'cancel-call',
+    { action: 'cancel', triggerId: id },
+    undefined,
+    undefined,
+    context('other.jsonl'),
+  ) as ToolResult;
+  assert.equal(foreignCancel.isError, true);
+
+  const listed = await tools.defer_trigger.execute(
+    'list-call',
+    { action: 'list' },
+    undefined,
+    undefined,
+    context('creator.jsonl'),
+  ) as ToolResult;
+  assert.match(listed.content[0].text, new RegExp(id));
+
+  const cancelled = await tools.defer_trigger.execute(
+    'cancel-call',
+    { action: 'cancel', triggerId: id },
+    undefined,
+    undefined,
+    context('creator.jsonl'),
+  ) as ToolResult;
+  assert.equal(cancelled.isError, false);
+  const after = await tools.defer_trigger.execute(
+    'list-call',
+    { action: 'list' },
+    undefined,
+    undefined,
+    context('creator.jsonl'),
+  ) as ToolResult;
+  assert.match(after.content[0].text, /No pending deferred triggers/);
 });

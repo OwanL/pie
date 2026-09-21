@@ -6,8 +6,14 @@ import { SDK_PATCH_IDENTITY_VERSION } from '../../../src/backend/sdk-patch-barri
 import {
   WORKER_IPC_VERSION,
   type WorkerIpcFrame,
+  type WorkerJsonObject,
 } from '../../../src/backend/worker-protocol';
-import { liveSemanticDroppableRejection, WorkerServer } from '../../../src/backend/worker-server';
+import {
+  liveSemanticDroppableRejection,
+  runtimeReportDroppableRejection,
+  WorkerServer,
+} from '../../../src/backend/worker-server';
+import { createOperationalIncident } from '../../../src/shared/incidents';
 
 const identity = {
   coordinatorGeneration: 2,
@@ -503,6 +509,284 @@ function parseFrames(lines: readonly string[]): SentRuntimeFrame[] {
   return lines.map((line) => JSON.parse(line) as SentRuntimeFrame);
 }
 
+test('worker server keeps timer heartbeats admissible while ordinary transport is full', async () => {
+  const inbound = new PassThrough();
+  const target = new BlockedWorkerWriteTarget();
+  const exitCodes: number[] = [];
+  const server = new WorkerServer(identity, {
+    pid: frameBase.workerPid,
+    exit: (code = 0) => {
+      exitCodes.push(code);
+      return undefined as never;
+    },
+  }, { readable: inbound, writable: target as never }, { validateBootstrap: () => undefined });
+  server.start();
+
+  try {
+    inbound.write(`${JSON.stringify({ ...frameBase, seq: 1, kind: 'bootstrap', heartbeatIntervalMs: 5, sdkPatchIdentity })}\n`);
+    await waitUntil(() => target.written.length > 0);
+
+    let droppedSeq = 0;
+    for (let seq = 1; seq <= 24; seq += 1) {
+      if (!server.sendLiveSemanticFrame({ kind: 'turn.text', delta: 'x'.repeat(200 * 1024), seq } as never)) {
+        droppedSeq = seq;
+        break;
+      }
+    }
+    assert.ok(droppedSeq >= 4, `the ordinary lane must be full before testing heartbeat admission (dropped at ${droppedSeq})`);
+
+    // Give the interval a chance to enqueue behind the blocked descriptor. The
+    // old ordinary classification rejected this and scheduled a fatal close.
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    assert.deepEqual(exitCodes, []);
+
+    target.drain();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const frames = parseFrames(target.written);
+    assert.equal(frames.some((frame) => frame.kind === 'heartbeat'), true,
+      'at least one timer heartbeat must survive ordinary-lane pressure');
+    assert.equal(frames.some((frame) => frame.kind === 'fatal'), false);
+    assert.deepEqual(exitCodes, []);
+  } finally {
+    inbound.destroy();
+  }
+});
+
+test('worker server delivers analytics.branch through lifecycle priority under full ordinary pressure', async () => {
+  const inbound = new PassThrough();
+  const target = new BlockedWorkerWriteTarget();
+  const exitCodes: number[] = [];
+  const server = new WorkerServer(identity, {
+    pid: frameBase.workerPid,
+    exit: (code = 0) => {
+      exitCodes.push(code);
+      return undefined as never;
+    },
+  }, { readable: inbound, writable: target as never }, { validateBootstrap: () => undefined });
+  server.start();
+
+  try {
+    const admittedSemanticSeqs: number[] = [];
+    let droppedSemanticSeq = 0;
+    for (let seq = 1; seq <= 24; seq += 1) {
+      if (!server.sendLiveSemanticFrame({ kind: 'turn.text', delta: 'x'.repeat(200 * 1024), seq } as never)) {
+        droppedSemanticSeq = seq;
+        break;
+      }
+      admittedSemanticSeqs.push(seq);
+    }
+    assert.ok(droppedSemanticSeq >= 4, `the ordinary lane must be full before testing branch admission (dropped at ${droppedSemanticSeq})`);
+
+    assert.equal(server.sendFrame({
+      kind: 'runtime.event',
+      event: 'analytics.branch',
+      payload: {
+        sessionPath: '/root.jsonl',
+        entryId: 'entry-branch',
+        selectedEntryId: 'entry-branch',
+        observedAt: 1_700_000_000_000,
+      },
+    }), true, 'branch observations are completion-critical and use lifecycle priority');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(exitCodes, []);
+
+    target.drain();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const frames = parseFrames(target.written);
+    const branchIndex = frames.findIndex((frame) => frame.kind === 'runtime.event' && frame.event === 'analytics.branch');
+    assert.equal(branchIndex, 1, 'the branch event must precede the queued ordinary backlog');
+    assert.equal(frames.some((frame) => frame.kind === 'fatal'), false);
+    assert.deepEqual(exitCodes, []);
+    assert.deepEqual(
+      frames.filter((frame) => frame.kind === 'runtime.event' && frame.event === 'live.semantic')
+        .map((frame) => (frame.payload as { seq?: number }).seq),
+      admittedSemanticSeqs,
+    );
+  } finally {
+    inbound.destroy();
+  }
+});
+
+test('worker server preserves mandatory lifecycle events and drops telemetry reports under semantic pressure', async () => {
+  const inbound = new PassThrough();
+  const target = new BlockedWorkerWriteTarget();
+  const exitCodes: number[] = [];
+  const server = new WorkerServer(identity, {
+    pid: frameBase.workerPid,
+    exit: (code = 0) => {
+      exitCodes.push(code);
+      return undefined as never;
+    },
+  }, { readable: inbound, writable: target as never }, { validateBootstrap: () => undefined });
+  server.start();
+
+  try {
+    let droppedSemanticSeq = 0;
+    for (let seq = 1; seq <= 24; seq += 1) {
+      if (!server.sendLiveSemanticFrame({ kind: 'turn.text', delta: 'x'.repeat(200 * 1024), seq } as never)) {
+        droppedSemanticSeq = seq;
+        break;
+      }
+    }
+    assert.ok(droppedSemanticSeq >= 4, `the ordinary lane must be backpressured (dropped at ${droppedSemanticSeq})`);
+    // Consume the remaining ordinary reservation so the report itself reaches
+    // the bounded-admission rejection path rather than fitting in leftover
+    // bytes behind the large semantic frames.
+    let fillerSeq = droppedSemanticSeq + 1;
+    while (server.sendLiveSemanticFrame({
+      kind: 'turn.text', delta: 'f'.repeat(64), seq: fillerSeq,
+    } as never)) fillerSeq += 1;
+
+    const lifecycleEvents = [
+      'message.custom', 'message.queuedDelivered', 'contextUsage.changed', 'extension_ui.request',
+      'preflight.failed', 'retry.started', 'retry.ended', 'retry.measured',
+      'compaction.started', 'compaction.ended', 'auxiliary-llm.usage', 'analytics.branch',
+    ] as const;
+    for (const event of lifecycleEvents) {
+      const payload = event === 'analytics.branch'
+        ? {
+            sessionPath: '/root.jsonl', entryId: 'entry-branch',
+            selectedEntryId: 'entry-branch', observedAt: 1_700_000_000_000,
+          }
+        : { sessionPath: '/root.jsonl' };
+      assert.equal(server.sendFrame({
+        kind: 'runtime.event', event, payload,
+      } as never), true, `${event} must use the reserved lifecycle lane`);
+    }
+    assert.equal(server.sendRuntimeReportFrame({ models: [] }), false,
+      'runtime.report is bounded telemetry and may be dropped under ordinary pressure');
+    assert.equal(server.sendFrame({
+      kind: 'runtime.report', domain: 'catalog', payload: { models: [] },
+    }), false, 'the generic send seam must preserve runtime.report telemetry policy');
+
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(exitCodes, [], 'recoverable telemetry pressure must not retire the worker');
+
+    target.drain();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const frames = parseFrames(target.written);
+    const runtimeEvents = frames
+      .filter((frame) => frame.kind === 'runtime.event')
+      .map((frame) => frame.event);
+    assert.deepEqual(runtimeEvents.slice(1, 1 + lifecycleEvents.length), [...lifecycleEvents]);
+    assert.equal(frames.some((frame) => frame.kind === 'runtime.report'), false);
+    assert.equal(frames.some((frame) => frame.kind === 'fatal'), false);
+    assert.deepEqual(exitCodes, []);
+  } finally {
+    inbound.destroy();
+  }
+});
+
+test('worker server routes operational and generic provider errors around ordinary backpressure without replay or fatal close', async () => {
+  const inbound = new PassThrough();
+  const target = new BlockedWorkerWriteTarget();
+  const exitCodes: number[] = [];
+  const server = new WorkerServer(identity, {
+    pid: frameBase.workerPid,
+    exit: (code = 0) => {
+      exitCodes.push(code);
+      return undefined as never;
+    },
+  }, { readable: inbound, writable: target as never }, { validateBootstrap: () => undefined });
+  server.start();
+
+  try {
+    // Fill the ordinary lane behind one blocked descriptor write. The live
+    // semantic envelopes are intentionally lossy at admission; both error
+    // event forms must use a priority lane rather than inheriting that policy.
+    const admittedSemanticSeqs: number[] = [];
+    let droppedSemanticSeq = 0;
+    for (let seq = 1; seq <= 24; seq += 1) {
+      const accepted = server.sendLiveSemanticFrame({
+        kind: 'turn.text', delta: 'x'.repeat(200 * 1024), seq,
+      } as never);
+      if (!accepted) {
+        droppedSemanticSeq = seq;
+        break;
+      }
+      admittedSemanticSeqs.push(seq);
+    }
+    assert.ok(droppedSemanticSeq >= 4, `the ordinary lane must be backpressured (dropped at ${droppedSemanticSeq})`);
+
+    // Consume the remaining ordinary reservation with bounded lossy frames so
+    // the incident itself would be rejected by the old ordinary classification,
+    // not merely queued behind a large but still admissible remainder.
+    let fillerSeq = droppedSemanticSeq + 1;
+    const fillerDelta = 'f'.repeat(4 * 1024);
+    while (server.sendLiveSemanticFrame({ kind: 'turn.text', delta: fillerDelta, seq: fillerSeq } as never)) {
+      admittedSemanticSeqs.push(fillerSeq);
+      fillerSeq += 1;
+    }
+    const nextSemanticSeq = fillerSeq + 1; // leave the rejected filler sequence as a permanent gap
+
+    const operationalIncident = createOperationalIncident({
+      code: 'PROVIDER_QUOTA_EXHAUSTED',
+      message: 'Provider quota is exhausted until the next reset.',
+      detail: `provider=api.example.test; status=429; ${'quota response '.repeat(1024)}`,
+      sessionPath: '/sessions/provider.jsonl',
+      requestId: 'ipc-operational-error',
+      severity: 'error',
+      certainty: 'definitive',
+      phase: 'provider',
+      recovery: { retry: true, showLogs: true },
+    });
+    const genericError = createOperationalIncident({
+      code: 'MESSAGE_SEND_FAILED',
+      message: 'The provider rejected the prompt.',
+      detail: `provider=api.example.test; ${'provider response '.repeat(1024)}`,
+      sessionPath: '/sessions/provider.jsonl',
+      requestId: 'ipc-generic-error',
+      severity: 'error',
+      certainty: 'definitive',
+      phase: 'provider',
+    });
+    assert.equal(server.sendFrame({
+      kind: 'runtime.event',
+      event: 'operational-error',
+      payload: operationalIncident as unknown as WorkerJsonObject,
+    }), true, 'an actionable provider incident must not use the saturated ordinary lane');
+    assert.equal(server.sendFrame({
+      kind: 'runtime.event',
+      event: 'error',
+      payload: genericError as unknown as WorkerJsonObject,
+    }), true, 'a generic provider error must not use the saturated ordinary lane');
+    assert.equal(server.sendLiveSemanticFrame({
+      kind: 'turn.text', delta: 'after incident', seq: nextSemanticSeq,
+    } as never), true);
+    admittedSemanticSeqs.push(nextSemanticSeq);
+
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(exitCodes, [], 'recoverable ordinary pressure must not retire the worker');
+
+    target.drain();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(exitCodes, []);
+    const frames = parseFrames(target.written);
+    const incidentFrames = frames.filter((frame) => frame.kind === 'runtime.event' && frame.event === 'operational-error');
+    const errorFrames = frames.filter((frame) => frame.kind === 'runtime.event' && frame.event === 'error');
+    assert.equal(incidentFrames.length, 1, 'the provider incident is delivered once, not replayed');
+    assert.equal(errorFrames.length, 1, 'the generic provider error is delivered once, not replayed');
+    assert.equal((incidentFrames[0]!.payload as { code?: string }).code, 'PROVIDER_QUOTA_EXHAUSTED');
+    assert.equal((errorFrames[0]!.payload as { code?: string }).code, 'MESSAGE_SEND_FAILED');
+    assert.equal(frames[1]?.kind, 'runtime.event');
+    assert.equal((frames[1] as SentRuntimeFrame | undefined)?.event, 'operational-error',
+      'priority incident delivery precedes the queued ordinary backlog');
+    assert.equal(frames[2]?.kind, 'runtime.event');
+    assert.equal((frames[2] as SentRuntimeFrame | undefined)?.event, 'error',
+      'generic error delivery receives the same priority guarantee');
+    assert.deepEqual(
+      frames.filter((frame) => frame.kind === 'runtime.event' && frame.event === 'live.semantic')
+        .map((frame) => (frame.payload as { seq?: number }).seq),
+      admittedSemanticSeqs,
+      'the ordinary drops remain semantic gaps; no transport replay or renumbering is introduced',
+    );
+    assert.equal(frames.some((frame) => frame.kind === 'fatal'), false);
+    assert.deepEqual(frames.map((frame) => frame.seq), Array.from({ length: frames.length }, (_, index) => index + 1));
+  } finally {
+    inbound.destroy();
+  }
+});
+
 test('worker server drops a backpressured live.semantic enqueue instead of failing the worker', async () => {
   const inbound = new PassThrough();
   const target = new BlockedWorkerWriteTarget();
@@ -703,9 +987,11 @@ test('worker server keeps a failed live.semantic write callback fail-closed', as
   }
 });
 
-test('the recoverable-drop policy admits only capacity and oversize rejections', () => {
-  assert.equal(liveSemanticDroppableRejection('capacity'), true);
-  assert.equal(liveSemanticDroppableRejection('oversize'), true);
-  assert.equal(liveSemanticDroppableRejection('invalid'), false);
-  assert.equal(liveSemanticDroppableRejection('unavailable'), false);
+test('recoverable-drop policies admit only capacity and oversize rejections', () => {
+  for (const policy of [liveSemanticDroppableRejection, runtimeReportDroppableRejection]) {
+    assert.equal(policy('capacity'), true);
+    assert.equal(policy('oversize'), true);
+    assert.equal(policy('invalid'), false);
+    assert.equal(policy('unavailable'), false);
+  }
 });

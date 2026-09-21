@@ -27,10 +27,10 @@ export interface FileChange {
 
 export interface SessionChangesParams {
   action: SessionChangesAction;
-  /** Absolute path of the session JSONL file. Defaults to the calling session
-   *  via `ctx.sessionManager.getSessionFile()` — so "review my own changes"
-   *  needs no param. Compaction appends (never deletes), so parsing the JSONL
-   *  is non-lossy even after compaction. */
+  /** Absolute path of a session JSONL file to review explicitly. When omitted,
+   *  the tool uses the calling runtime session's current `getEntries()` list,
+   *  including in-memory sessions; lightweight contexts without that API fall
+   *  back to `ctx.sessionManager.getSessionFile()`. */
   sessionPath?: string;
   /** `diff`: one or more file paths to diff, as an array. Use `["path"]` for a
    *  single file. Paths are relative to the session cwd as the `list` manifest
@@ -56,7 +56,7 @@ export const sessionChangesSchema = {
     sessionPath: {
       type: 'string',
       description:
-        'Absolute path of the session JSONL file. Defaults to the calling session, so reviewing your own changes needs no param.',
+        'Explicit session JSONL path. When omitted, use the calling runtime session entries; lightweight contexts fall back to the active session file.',
     },
     path: {
       type: 'array',

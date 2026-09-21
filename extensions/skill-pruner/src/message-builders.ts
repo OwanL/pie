@@ -39,6 +39,8 @@ function applyPrepassUsage(details: PruningResult, usage: PrepassUsage | undefin
 	details.prepassOutputTokens = usage.output;
 	details.prepassCacheReadTokens = usage.cacheRead;
 	details.prepassCacheWriteTokens = usage.cacheWrite;
+	if (usage.tokenChannelsKnown !== undefined) details.prepassTokenChannelsKnown = usage.tokenChannelsKnown;
+	if (usage.tokenChannelPresence) details.prepassTokenChannelPresence = usage.tokenChannelPresence;
 	if (usage.reportedCostUsd !== undefined) details.prepassReportedCostUsd = usage.reportedCostUsd;
 }
 

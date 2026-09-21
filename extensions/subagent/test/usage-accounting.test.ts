@@ -247,7 +247,7 @@ test("runSingleAgent stamps runtime provider and model from the assistant messag
 			message: {
 				role: "assistant",
 				content: [{ type: "text", text: "done" }],
-				usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15, cost: { total: 0.0015 } },
+				usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15, reportedCostUsd: 0.0015 },
 				model: "runtime-model",
 				stopReason: "completed",
 			},
@@ -264,7 +264,7 @@ test("runSingleAgent stamps runtime provider and model from the assistant messag
 	assert.equal(result.usage.cost, 0.0015);
 	assert.equal(result.providerInvocations?.length, 1);
 	assert.deepEqual(result.providerInvocations?.[0]?.usage, {
-		input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: 0.0015,
+		input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: 0.0015, reportedCostUsd: 0.0015,
 	});
 });
 
@@ -388,7 +388,7 @@ test("runSingleAgent preserves depth >= 2 results without mixing child usage int
 			message: {
 				role: "assistant",
 				content: [{ type: "text", text: "parent done" }],
-				usage: { input: 7, output: 3, cost: { total: 0.0002 } },
+				usage: { input: 7, output: 3, reportedCostUsd: 0.0002 },
 				model: "parent-model",
 				stopReason: "completed",
 			},

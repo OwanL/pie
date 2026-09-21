@@ -4,6 +4,18 @@ import test from 'node:test';
 import { ProviderGate } from '../../../src/backend/provider-gate';
 import { mergeProviderPolicies, providerPoliciesFromConfigs } from '../../../src/backend/server';
 
+test('Unlimited provider policy survives catalog extraction and sparse preference overlays', () => {
+  const configs = ProviderGate.resolveConfigs({
+    providers: {
+      unlimited: { concurrency: { maxConcurrentRequests: 0, afterburnSeconds: 45 } },
+    },
+  });
+  const base = providerPoliciesFromConfigs(configs);
+  assert.equal((base.unlimited as { maxConcurrentRequests?: number }).maxConcurrentRequests, 0);
+  assert.equal((mergeProviderPolicies(base, {}).unlimited as { maxConcurrentRequests?: number }).maxConcurrentRequests, 0);
+  assert.equal((mergeProviderPolicies(base, { unlimited: { maxConcurrentRequests: 0 } }).unlimited as { maxConcurrentRequests?: number }).maxConcurrentRequests, 0);
+});
+
 test('isolated provider policy keeps models.json capacity and overlays sparse runtime preferences', () => {
   const configs = ProviderGate.resolveConfigs({
     providers: {

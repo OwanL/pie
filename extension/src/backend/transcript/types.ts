@@ -93,6 +93,15 @@ export interface MessageLike {
     completion_tokens_details?: {
       reasoning_tokens?: number;
     };
-    cost?: { total?: number };
+    /** Explicit provider/invoice evidence, when an adapter supplies it.
+     * `cost.total` is the Pi SDK catalog estimate and is intentionally not
+     * treated as reported billing. */
+    reportedCostUsd?: number;
+    providerReportedCostUsd?: number;
+    cost?: {
+      total?: number;
+      reportedCostUsd?: number;
+      providerReportedCostUsd?: number;
+    };
   };
 }

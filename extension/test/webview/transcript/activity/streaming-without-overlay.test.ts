@@ -436,9 +436,9 @@ test('MessageItem stabilizes layout during streaming via class hooks and footer 
     hasOlder: false,
   }));
 
-  // Assistant replies always fill the allowed width (prevents horizontal
+  // Assistant replies always fill the transcript width (prevents horizontal
   // token growth / column resize while streaming).
-  assert.match(html, /w-\[min\(var\(--message-assistant-width\),100%\)\]/, 'assistant width utility should be applied');
+  assert.match(html, /self-start w-full max-w-full/, 'assistant replies should use the full transcript width');
   // The footer slot reserves a constant footer height for the turn.
   assert.match(html, /message-activity-footer/, 'activity footer slot should render');
 });

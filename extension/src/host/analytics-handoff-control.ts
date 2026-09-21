@@ -15,7 +15,7 @@ import {
   type AnalyticsHandoffHostIdentity,
   type AnalyticsHandoffInventoryProof,
   type AnalyticsHandoffStatus,
-} from '../../../shared/analytics/handoff.js';
+} from '../../../shared/analytics/host-status-messages.js';
 import {
   SessionLifecycleStore,
   type AnalyticsHostRecord,
@@ -56,6 +56,8 @@ export interface AnalyticsHandoffControlOptions {
   /** Optional authenticated controlled-restart handler. Registration alone
    * never advertises this capability. */
   restart?: AnalyticsHostRestartHandler;
+  /** Retire crash-stale host rows before the fresh host enters admission. */
+  recoverStaleHosts?: () => Promise<void>;
   onError?: (error: Error, stage: string) => void;
 }
 
@@ -149,6 +151,11 @@ export class AnalyticsHandoffControl {
     try {
       await this.listen();
       if (this.stopping) return;
+      try {
+        await this.options.recoverStaleHosts?.();
+      } catch (error) {
+        this.options.onError?.(normalizeError(error), 'start.stale-recovery');
+      }
       this.options.registry.registerAnalyticsHost({
         ...this.options.identity,
         capabilities: [

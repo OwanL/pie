@@ -15,10 +15,16 @@ import type {
   ToolStartedPayload,
 } from '../shared/protocol';
 import { createOperationalIncident } from '../shared/incidents.js';
-import { compactSubagentResultPreview } from '../shared/lazy-details';
+import {
+  compactSubagentFileChanges,
+  compactSubagentMessages,
+  compactSubagentResultPreview,
+} from '../shared/lazy-details';
+import { hasNestedToolFailure } from '../shared/subagent-result';
 import { LIVE_PIPELINE_LIMITS, LIVE_PIPELINE_PROTOCOL_VERSION } from '../shared/live-pipeline-protocol';
 import type { DurationClockDomain } from '../shared/timing.js';
 import type { SdkSessionEvent } from './sdk';
+import { FENCED_ENTRY_ID } from './session-manager-fence';
 import { BackendLiveTurnAccumulator } from './live-turn-accumulator';
 import {
   estimateCumulativeSubagentTokens,
@@ -213,10 +219,21 @@ export function boundToolProgress(value: unknown, maxBytes = TOOL_PROGRESS_MAX_B
           ? result.streamingReasoning.slice(-32 * 1024)
           : result.streamingReasoning;
         const cumulativeOutputTokens = estimateCumulativeSubagentTokens(result);
+        const nestedFailure = hasNestedToolFailure({
+          messages: Array.isArray(result.messages) ? result.messages : undefined,
+          hasNestedToolFailure: result.hasNestedToolFailure,
+        });
+        const compactMessages = compactSubagentMessages(result.messages);
         return {
           ...result,
+          cwd: typeof result.cwd === 'string' ? result.cwd.slice(0, 2 * 1024) : result.cwd,
+          parentUserContext: typeof result.parentUserContext === 'string'
+            ? result.parentUserContext.slice(0, 12_000)
+            : result.parentUserContext,
+          fileChanges: compactSubagentFileChanges(result.fileChanges),
+          ...(nestedFailure ? { hasNestedToolFailure: true } : {}),
           cumulativeOutputTokens,
-          messages: [{
+          messages: compactMessages && compactMessages.length > 0 ? compactMessages : [{
             role: 'assistant',
             content: [{ type: 'text', text: 'Earlier live transcript omitted while progress exceeded the transport limit.' }],
           }],
@@ -242,12 +259,65 @@ export function boundToolProgress(value: unknown, maxBytes = TOOL_PROGRESS_MAX_B
         // far below the production limit, regardless of transcript/tool data.
         const boundedText = (candidate: unknown, chars: number): unknown =>
           typeof candidate === 'string' ? candidate.slice(0, chars) : candidate;
+        const compactUsage = (candidate: unknown): unknown => {
+          if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return undefined;
+          const usage = candidate as Record<string, unknown>;
+          const compact: Record<string, unknown> = {};
+          for (const key of [
+            'input', 'output', 'cacheRead', 'cacheWrite', 'contextTokens', 'cost',
+            'reportedCostUsd', 'providerReportedCostUsd', 'turns',
+          ]) {
+            if (typeof usage[key] === 'number' && Number.isFinite(usage[key]) && usage[key] >= 0) {
+              compact[key] = usage[key];
+            }
+          }
+          if (typeof usage.tokenChannelsKnown === 'boolean') {
+            compact.tokenChannelsKnown = usage.tokenChannelsKnown;
+          }
+          if (usage.tokenChannelPresence && typeof usage.tokenChannelPresence === 'object'
+            && !Array.isArray(usage.tokenChannelPresence)) {
+            const presence = usage.tokenChannelPresence as Record<string, unknown>;
+            if (['input', 'output', 'cacheRead', 'cacheWrite'].every((key) => typeof presence[key] === 'boolean')) {
+              compact.tokenChannelPresence = {
+                input: presence.input,
+                output: presence.output,
+                cacheRead: presence.cacheRead,
+                cacheWrite: presence.cacheWrite,
+              };
+            }
+          }
+          return Object.keys(compact).length > 0 ? compact : undefined;
+        };
+        const compactThroughputSamples = (candidate: unknown): unknown => {
+          if (!Array.isArray(candidate)) return undefined;
+          return candidate.slice(-1).map((sample) => {
+            if (!sample || typeof sample !== 'object' || Array.isArray(sample)) return undefined;
+            const record = sample as Record<string, unknown>;
+            return {
+              endedAt: boundedText(record.endedAt, 128),
+              outputTokens: record.outputTokens,
+              generationDurationMs: record.generationDurationMs,
+              status: boundedText(record.status, 64),
+              modelId: boundedText(record.modelId, 256),
+              provider: boundedText(record.provider, 256),
+            };
+          });
+        };
         const minimalResults = compactResults.map((entry) => {
           if (!entry || typeof entry !== 'object') return entry;
           const result = entry as Record<string, unknown>;
+          const nestedFailure = hasNestedToolFailure({
+            messages: Array.isArray(result.messages) ? result.messages : undefined,
+            hasNestedToolFailure: result.hasNestedToolFailure,
+          });
           return {
             agent: boundedText(result.agent, 256),
             task: boundedText(result.task, 2_048),
+            cwd: boundedText(result.cwd, 2 * 1024),
+            parentUserContextMode: result.parentUserContextMode,
+            parentUserContext: boundedText(result.parentUserContext, 12_000),
+            fileChanges: compactSubagentFileChanges(result.fileChanges),
+            ...(nestedFailure ? { hasNestedToolFailure: true } : {}),
             exitCode: result.exitCode,
             stopReason: boundedText(result.stopReason, 256),
             errorMessage: boundedText(result.errorMessage, 2_048),
@@ -262,11 +332,23 @@ export function boundToolProgress(value: unknown, maxBytes = TOOL_PROGRESS_MAX_B
             streamingText: boundedText(result.streamingText, 8_192),
             streamingReasoning: boundedText(result.streamingReasoning, 8_192),
             cumulativeOutputTokens: result.cumulativeOutputTokens,
+            contextWindow: result.contextWindow,
+            usage: compactUsage(result.usage),
+            selectedModel: boundedText(result.selectedModel, 256),
+            thinkingLevel: boundedText(result.thinkingLevel, 64),
+            retryCount: result.retryCount,
+            fallback: result.fallback,
+            failedModel: boundedText(result.failedModel, 256),
+            failureClass: boundedText(result.failureClass, 256),
+            turnThroughputSamples: compactThroughputSamples(result.turnThroughputSamples),
             runningTools: Array.isArray(result.runningTools) ? result.runningTools.slice(0, 20) : undefined,
-            messages: [{
-              role: 'assistant',
-              content: [{ type: 'text', text: 'Live transcript omitted while progress exceeded the transport limit.' }],
-            }],
+            messages: (() => {
+              const messages = compactSubagentMessages(result.messages);
+              return messages && messages.length > 0 ? messages : [{
+                role: 'assistant',
+                content: [{ type: 'text', text: 'Live transcript omitted while progress exceeded the transport limit.' }],
+              }];
+            })(),
             progressTranscriptTruncated: true,
           };
         });
@@ -1193,6 +1275,13 @@ function handleContentToolSessionEvent(
         return;
       }
 
+      // A fenced manager returns this sentinel when a retired runtime races a
+      // terminal callback. It is not evidence that the SDK append succeeded.
+      if (event.sessionEntryId === FENCED_ENTRY_ID) {
+        emitRejectedObservation(deps, context, 'malformed_observation');
+        return;
+      }
+
       if (event.message.role === 'assistant') {
         context.activeRequest.mayNeedOverflowRecovery = mayNeedOverflowRecovery(context, event.message);
       }
@@ -1440,6 +1529,12 @@ function handleContentToolSessionEvent(
           ...(message.usage.tokenChannelPresence?.cacheWrite !== false
             ? { cacheWriteTokens: message.usage.cacheWriteTokens } : {}),
           providerTotalTokens: message.usage.totalTokens,
+          ...(message.usage.tokenChannelsKnown !== undefined
+            ? { tokenChannelsKnown: message.usage.tokenChannelsKnown }
+            : {}),
+          ...(message.usage.tokenChannelPresence
+            ? { tokenChannelPresence: message.usage.tokenChannelPresence }
+            : {}),
           ...(message.usage.reportedCostUsd !== undefined
             ? { reportedCostUsd: message.usage.reportedCostUsd }
             : {}),

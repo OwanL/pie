@@ -116,14 +116,14 @@ test('AppearanceSection renders the corner-radius slider with the current value 
   assert.match(html, /<input[^>]*type="range"[^>]*min="0"[^>]*max="24"[^>]*step="1"[^>]*value="12"[^>]*aria-label="Corner radius"/);
 });
 
-test('AppearanceSection renders the density select with comfortable selected by default', () => {
+test('AppearanceSection renders the density select with compact selected by default', () => {
   const html = renderToString(h(AppearanceSection, {
     prefs: prefsWith({}),
     onSetPrefs: () => undefined,
   }));
 
   assert.match(html, /Density/);
-  assert.match(html, /<option\b(?=[^>]*selected)(?=[^>]*value="comfortable")[^>]*>Comfortable</);
+  assert.match(html, /<option\b(?=[^>]*selected)(?=[^>]*value="compact")[^>]*>Compact</);
   assert.match(html, />Compact</);
   assert.match(html, />Spacious</);
 });
@@ -136,17 +136,6 @@ test('AppearanceSection renders the path-depth slider with filename-only support
 
   assert.match(html, /Path parent depth/);
   assert.match(html, /<input[^>]*type="range"[^>]*min="0"[^>]*max="8"[^>]*step="1"[^>]*value="0"[^>]*aria-label="Path parent depth"/);
-});
-
-test('AppearanceSection renders the message-width slider with the current value', () => {
-  const html = renderToString(h(AppearanceSection, {
-    prefs: prefsWith({ uiMessageWidth: 70 }),
-    onSetPrefs: () => undefined,
-  }));
-
-  assert.match(html, /Message width/);
-  assert.match(html, />70%</);
-  assert.match(html, /<input[^>]*type="range"[^>]*min="40"[^>]*max="100"[^>]*step="2"[^>]*value="70"[^>]*aria-label="Message width"/);
 });
 
 test('AppearanceSection renders the initial composer rows control with the configured value', () => {

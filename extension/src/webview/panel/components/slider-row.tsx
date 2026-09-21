@@ -17,6 +17,8 @@ export interface SliderRowProps {
   disabled?: boolean;
   /** Accessible name when the visible label needs qualification. */
   ariaLabel?: string;
+  /** Native hover tooltip for controls whose visible hint needs a compact summary. */
+  tooltip?: string;
 }
 
 /** A full-width labeled range control (`toolbar-settings-ui-control` head with
@@ -34,6 +36,7 @@ export function SliderRow({
   hint,
   disabled = false,
   ariaLabel,
+  tooltip,
 }: SliderRowProps) {
   const handleInput = (event: JSX.TargetedEvent<HTMLInputElement>) => {
     onChange(Number((event.target as HTMLInputElement).value));
@@ -56,6 +59,8 @@ export function SliderRow({
         onInput={handleInput}
         disabled={disabled}
         aria-label={ariaLabel ?? label}
+        aria-valuetext={formatValue ? formatValue(value) : undefined}
+        title={tooltip}
       />
       {hint && <div class="toolbar-settings-item-hint">{hint}</div>}
     </div>

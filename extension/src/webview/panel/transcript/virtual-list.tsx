@@ -26,6 +26,7 @@ import type {
 import { TranscriptVirtualRow } from './virtual-list-row';
 import { extractRangeWithPinnedIndexes } from './virtual-range';
 import { buildTranscriptRows, estimateTranscriptRowSize, scopeTranscriptRowsToSession, type TranscriptRow } from './virtual-list-rows';
+import { createTokenPricingResolver } from '../session-tabs/token-usage';
 
 // Count-based overscan must stay small because a single transcript row can be
 // a multi-minute assistant turn containing dozens of collapsed tool cards.
@@ -237,11 +238,17 @@ function useTranscriptRenderToolCall({
   prefs,
   workingDirectory,
   onOpenFile,
+  availableModels,
 }: {
   prefs: ChatPrefs;
   workingDirectory: string | null;
   onOpenFile: (path: string) => void;
+  availableModels?: TranscriptVirtualListProps['availableModels'];
 }) {
+  const pricingForModel = useMemo(
+    () => createTokenPricingResolver(availableModels ?? []),
+    [availableModels],
+  );
   const renderToolCallRef = useRef<RenderToolCall>((_toolCall, _contextMenuHandler) => null);
   const renderToolCall = useCallback<RenderToolCall>((toolCall: ToolCall, contextMenuHandler: TranscriptContextMenuHandler) => (
     <ToolCallItem
@@ -251,8 +258,9 @@ function useTranscriptRenderToolCall({
       onOpenFile={onOpenFile}
       onContextMenu={contextMenuHandler}
       renderToolCall={renderToolCallRef.current}
+      pricingForModel={pricingForModel}
     />
-  ), [onOpenFile, prefs, workingDirectory]);
+  ), [onOpenFile, prefs, pricingForModel, workingDirectory]);
   renderToolCallRef.current = renderToolCall;
   return renderToolCall;
 }
@@ -374,6 +382,7 @@ export function TranscriptVirtualList({
   pruningResult,
   pendingAssistantModelId,
   pendingAssistantThinkingLevel,
+  availableModels,
   workingDirectory,
   editingId,
   editingDraft,
@@ -418,6 +427,7 @@ export function TranscriptVirtualList({
     prefs,
     workingDirectory,
     onOpenFile,
+    availableModels,
   });
 
   // Stable ref: tanstack's `measureElement` measures synchronously on mount and

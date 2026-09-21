@@ -33,24 +33,43 @@ export function transcriptUsageSignature(transcript: readonly ChatMessage[]): st
 
 /**
  * O(streaming messages) — in practice O(1) (one streaming message). A
- * fingerprint of the streaming message's growing prose. Used by memos whose
- * result legitimately changes as the streaming content grows: the context-window
- * breakdown's ESTIMATED branch (when no live `contextUsage.tokens` is reported)
- * and the live cost estimate. Empty when nothing is streaming.
+ * fingerprint of the streaming message's growing prose and provisional tool
+ * calls. Used by memos whose result legitimately changes as the streaming
+ * content grows: the context-window breakdown's ESTIMATED branch (when no live
+ * `contextUsage.tokens` is reported) and the live cost estimate. Empty when
+ * nothing is streaming.
  *
  * Uses `markdown.length` + `thinking.length` (not a BPE estimate) deliberately:
  * streaming prose is APPEND-ONLY (the reducer concatenates deltas), so its
  * length strictly grows every delta and the signature changes every delta —
  * exactly when the gated result (an `estimateTextTokens` estimate of that same
- * prose) legitimately changes. A same-length content swap of a streaming
- * message's prose cannot occur mid-stream, so the length proxy is sound here
- * and avoids re-running BPE in the signature on every tick.
+ * prose) legitimately changes. The live cost estimate also includes transient
+ * tool-call names and argument JSON, so those fields must invalidate the memo
+ * when they advance even if no prose delta arrived. Tool-call revisions avoid
+ * retaining the argument body in the memo key; the bounded argument digest is
+ * the fallback for legacy snapshots without a live revision.
  */
 export function streamingContentSignature(transcript: readonly ChatMessage[]): string {
   const parts: string[] = [];
   for (const m of transcript) {
     if (m.status !== 'streaming') continue;
-    parts.push(`${m.id}:${m.markdown.length}:${(m.thinking ?? '').length}`);
+    const toolCalls = (m.toolCalls ?? [])
+      .filter((toolCall) => toolCall.status === 'drafting' || toolCall.status === 'ready')
+      .map((toolCall) => {
+        const hasLiveRevision = typeof toolCall.seq === 'number'
+          && Number.isFinite(toolCall.seq) && toolCall.seq > 0;
+        const argsText = toolCall.argumentsText
+          ?? (typeof toolCall.input === 'string' ? toolCall.input : '');
+        const argumentRevision = hasLiveRevision
+          ? `seq:${toolCall.seq}`
+          : `args:${boundedStringSignature(argsText)}`;
+        return `${toolCallContextSignature(toolCall)}:${argumentRevision}`;
+      })
+      .join(';');
+    const legacyDraft = m.draftingToolCall
+      ? `${m.draftingToolCall.id}:${boundedStringSignature(m.draftingToolCall.name)}:${boundedStringSignature(m.draftingToolCall.argumentsText)}`
+      : '';
+    parts.push(`${m.id}:${m.markdown.length}:${(m.thinking ?? '').length}:tools:${toolCalls}:draft:${legacyDraft}`);
   }
   return parts.join(',');
 }

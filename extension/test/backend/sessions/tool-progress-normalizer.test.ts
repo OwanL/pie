@@ -46,6 +46,8 @@ test('subagent previews understand the real details.results progress shape', () 
         parentUserContext: '[User prompt]\nKeep the queue fair.\n\n[Recorded clarification]\nQuestion: Preserve order?\nAnswer: Yes',
         model: 'provider/model', provider: 'provider', thinkingLevel: 'high',
         contextWindow: 200000, usage: { input: 1200, output: 300, cacheRead: 50, cacheWrite: 0, contextTokens: 1550, cost: 0.02, turns: 2 },
+        retryCount: 1, fallback: true, failedModel: 'provider/old-model', failureClass: 'rate_limit',
+        turnThroughputSamples: [{ endedAt: '2026-01-01T00:00:02.000Z', outputTokens: 300, generationDurationMs: 1500, status: 'completed', modelId: 'provider/model', provider: 'provider' }],
         startedAt: 1000, activitySince: 1100,
         activityPhase: 'streaming', activityDetail: 'replying',
         streaming: true, streamingText: 'The child reply is visible while running.',
@@ -64,6 +66,11 @@ test('subagent previews understand the real details.results progress shape', () 
     assert.match(preview.children[0]?.parentUserContext ?? '', /Keep the queue fair/);
     assert.equal(preview.children[0]?.streamingText, 'The child reply is visible while running.');
     assert.equal(preview.children[0]?.usage?.input, 1200);
+    assert.equal(preview.children[0]?.retryCount, 1);
+    assert.equal(preview.children[0]?.fallback, true);
+    assert.equal(preview.children[0]?.failedModel, 'provider/old-model');
+    assert.equal(preview.children[0]?.failureClass, 'rate_limit');
+    assert.equal(preview.children[0]?.turnThroughputSamples?.[0]?.outputTokens, 300);
     assert.equal(preview.children[0]?.contextWindow, 200000);
     assert.equal(preview.children[0]?.startedAt, 1000);
     assert.equal(preview.children[0]?.messages, undefined);
@@ -138,6 +145,8 @@ test('modern subagent counters include the in-progress tool-call draft', () => {
       child.cumulativeOutputTokens,
       120 + estimateTextTokens('bash') + estimateTextTokens(argumentsText),
     );
+    assert.deepEqual(child.usage, { output: 120 });
+    assert.equal((child.usage as Record<string, unknown>).input, undefined, 'missing usage channels stay unknown instead of becoming zero');
   }
 });
 

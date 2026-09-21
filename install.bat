@@ -2,10 +2,10 @@
 REM ============================================================================
 REM  install.bat -- Bootstrap the pie portable coding-agent config on Windows.
 REM
-REM  Native Windows (cmd.exe) port of the former install.ps1. It does NOT require
-REM  PowerShell, WSL, Git Bash, or any Unix tools: only cmd built-ins, node/npm,
-REM  and the shared Node runner (scripts/install/run.mjs) which holds the
-REM  cross-platform business logic. winget/icacls/reg/where are native Windows
+REM  Native Windows (cmd.exe) installer. It does NOT require PowerShell, WSL,
+REM  Git Bash, or any Unix tools: only cmd built-ins, node/npm, and the shared
+REM  Node runner (scripts/install/run.mjs), which holds the testable installer
+REM  business logic. winget/icacls/reg/where are native Windows
 REM  utilities used only where a cmd built-in cannot do the job.
 REM
 REM  Run once after cloning:
@@ -122,7 +122,7 @@ if not defined PIN_NPM goto :pins_failed
 if not defined PIN_PI goto :pins_failed
 
 if /i not "%NODE_VERSION%"=="%PIN_NODE%" (
-  echo ==^> Node.js %PIN_NODE% is required for reproducible installs; found %NODE_VERSION%. Use .nvmrc/.node-version.
+  echo ==^> Node.js %PIN_NODE% is required for reproducible installs; found %NODE_VERSION%. See .node-version.
   goto :error
 )
 for /f "delims=" %%V in ('npm --version 2^>nul') do set "ACTUAL_NPM=%%V"

@@ -92,7 +92,7 @@ function showRenderErrorOverlay(error: unknown) {
     position: fixed; inset: 0; z-index: 99999;
     background: var(--vscode-editorWidget-background, #1e1e1e);
     color: var(--vscode-errorForeground, #f48771);
-    padding: 16px; overflow: auto; font-family: var(--vscode-editor-font-family, monospace);
+    padding: 16px; overflow: auto; font-family: var(--panel-font-mono);
     font-size: 12px; line-height: 1.5;
   `;
   const stack = (error as any)?.stack || String(error);

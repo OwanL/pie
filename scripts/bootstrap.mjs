@@ -18,13 +18,13 @@ const normalizedRoot = path.resolve(repoRoot).toLowerCase();
 const authDir = process.env.PI_CODING_AGENT_AUTH_DIR;
 const normalizedAuthDir = authDir ? path.resolve(authDir).toLowerCase() : "";
 if (!authDir || normalizedAuthDir === normalizedRoot || normalizedAuthDir.startsWith(`${normalizedRoot}${path.sep}`)) {
-  throw new Error("Run the OS installer first: PI_CODING_AGENT_AUTH_DIR must point outside the Git checkout");
+  throw new Error("Run .\\install.bat first: PI_CODING_AGENT_AUTH_DIR must point outside the Git checkout");
 }
 const inTreeAuth = path.join(repoRoot, "auth.json");
 if (fs.existsSync(inTreeAuth)) {
   let hasCredentials = true;
   try { hasCredentials = Object.keys(JSON.parse(fs.readFileSync(inTreeAuth, "utf8"))).length > 0; } catch {}
-  if (hasCredentials) throw new Error("Refusing to bootstrap with credentials in the working tree; re-run the OS installer");
+  if (hasCredentials) throw new Error("Refusing to bootstrap with credentials in the working tree; re-run .\\install.bat");
 }
 if (process.versions.node !== nodeVersion) throw new Error(`Node ${nodeVersion} required; found ${process.versions.node}`);
 const npm = spawn("npm", ["--version"], { encoding: "utf8" });

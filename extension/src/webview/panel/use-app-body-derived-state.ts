@@ -90,26 +90,26 @@ export function useAppBodyDerivedState(
   // re-serialises the array on every post, which would otherwise defeat the
   // SessionTabs / SessionTab memo barriers).
   const deferredSig = useMemo(
-    () => deferredTriggers.map((t) => `${t.sessionPath}:${t.id}`).sort().join('|'),
+    () => deferredTriggers.map((t) => `${t.sessionPath}:${t.targetSession ?? t.sessionPath}:${t.id}`).sort().join('|'),
     [deferredTriggers],
   );
   const deferredTimerSig = useMemo(
     () => deferredTriggers
       .filter((t) => t.triggers.some((trigger) => trigger.kind === 'timer'))
-      .map((t) => `${t.sessionPath}:${t.id}`)
+      .map((t) => `${t.sessionPath}:${t.targetSession ?? t.sessionPath}:${t.id}`)
       .sort()
       .join('|'),
     [deferredTriggers],
   );
   const deferredSessionPaths = useMemo(
-    () => Array.from(new Set(deferredTriggers.map((t) => t.sessionPath))),
+    () => Array.from(new Set(deferredTriggers.map((t) => t.targetSession ?? t.sessionPath))),
     [deferredSig],
   );
   const deferredTimerSessionPaths = useMemo(
     () => Array.from(new Set(
       deferredTriggers
         .filter((t) => t.triggers.some((trigger) => trigger.kind === 'timer'))
-        .map((t) => t.sessionPath),
+        .map((t) => t.targetSession ?? t.sessionPath),
     )),
     [deferredTimerSig],
   );

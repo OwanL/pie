@@ -91,6 +91,41 @@ test('SubagentSection renders per-bucket delegation toggles reflecting prefs', (
   assert.match(html, /Allow Small subagents to delegate/);
 });
 
+test('SubagentSection allows unchecking every default provider (no last-enabled lock)', () => {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const calls: Partial<ChatPrefs>[] = [];
+  try {
+    act(() => render(h(SubagentBehaviorSection, {
+      prefs: prefsWith({
+        subagentBuckets: {
+          small: [{ model: 'anthropic/haiku', thinkingLevel: 'off' }],
+          medium: [],
+          frontier: [],
+        },
+        subagentProviderDefaults: {},
+      }),
+      onSetPrefs: (patch) => calls.push(patch),
+      availableModels: AVAILABLE_MODELS,
+    }), container));
+
+    // The only enabled provider renders enabled AND clickable: the effective
+    // all-unchecked policy is allowed (it removes the subagent tool).
+    const toggle = [...container.querySelectorAll('.toolbar-settings-item')]
+      .find((item) => item.textContent?.trim() === 'anthropic') as HTMLButtonElement | null;
+    assert.ok(toggle, 'anthropic default toggle rendered');
+    assert.equal(toggle!.disabled, false, 'the last enabled provider stays uncheckable-free');
+    assert.equal(toggle!.title, '', 'no last-enabled guard hint');
+    assert.doesNotMatch(document.body.innerHTML, /At least one subagent provider/);
+
+    act(() => { toggle!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    assert.deepEqual(calls.at(-1)?.subagentProviderDefaults, { anthropic: false });
+  } finally {
+    act(() => render(null, container));
+    container.remove();
+  }
+});
+
 test('SubagentSection renders default toggles only for providers used by subagent buckets', () => {
   const html = renderToString(
     h(SubagentBehaviorSection, {

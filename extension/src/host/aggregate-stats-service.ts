@@ -1,7 +1,11 @@
 import {
   EMPTY_AGGREGATE_STATS,
+  type AggregateDailyCost,
   type AggregateLastRun,
+  type AggregateModelSeriesSegment,
   type AggregateProviderCost,
+  type AggregateSeriesPoint,
+  type AggregateSeriesSegment,
   type AggregateStats,
   type ProviderGateStats,
 } from '../shared/protocol/aggregate-stats';
@@ -11,6 +15,7 @@ import { RollingAggregateRate } from './rolling-aggregate-rate';
 import type { StatsServicePort } from './stats-service';
 import {
   accumulateAggregateStats,
+  buildCumulativeSeries,
   finalizeAggregateStatsLayers,
   localDateString,
   type AggregateStatsAccumulator,
@@ -18,6 +23,7 @@ import {
 import {
   addLocalCalendarDaysMs,
   localCalendarDayStartMs,
+  localCalendarDayKey,
 } from '../../../shared/analytics/metrics.js';
 import type { RunSnapshot } from './run-analytics';
 import type { TokenRateIndicatorState } from '../shared/token-rate';
@@ -33,7 +39,10 @@ import {
 import { AggregatePricingCache } from './aggregate-pricing-cache';
 import { CompletedHistoryCache, type CompletedHistoryMtimeFn } from './completed-history-cache';
 import type { CanonicalAnalyticsReadModel } from '../analytics/query-entry.js';
-import type { ProviderAccountingSummary } from '../analytics/sqlite-recorder.js';
+import type {
+  ProviderAccountingSummary,
+  ProviderAggregateSeries,
+} from '../analytics/sqlite-recorder.js';
 import type { CanonicalExecutionLatestRun } from '../analytics/execution-summary.js';
 
 /**
@@ -389,8 +398,9 @@ export class AggregateStatsService {
 
   /** Canonical authority has durable provider settlements and a bounded root
    * execution summary, but no RunSnapshot transcript replay. Provider/model
-   * groups and latest-run fields are read from the same SQLite snapshot. A
-   * truncated group result is rejected so partial history never reaches UI. */
+   * groups, temporal chart samples, and latest-run fields are read from the
+   * same SQLite snapshot. A truncated group result is rejected so partial
+   * summary history never reaches UI; temporal samples carry their own bound. */
   private async recomputeCanonical(
     readModel: CanonicalAnalyticsReadModel,
     nowMs: number,
@@ -419,15 +429,17 @@ export class AggregateStatsService {
     // Accounting and provider/model groups are read by one bounded recorder
     // transaction. This prevents a provider grouping result from being paired
     // with a newer or older maintained accounting projection.
-    const todayStartMs = localCalendarDayStartMs(nowMs, this.deps.analyticsTimeZone ?? 'UTC');
-    const dailyWindowStartMs = addLocalCalendarDaysMs(todayStartMs, -6, this.deps.analyticsTimeZone ?? 'UTC');
-    const dailyWindowEndMs = addLocalCalendarDaysMs(todayStartMs, 1, this.deps.analyticsTimeZone ?? 'UTC');
+    const timeZone = this.deps.analyticsTimeZone ?? 'UTC';
+    const todayStartMs = localCalendarDayStartMs(nowMs, timeZone);
+    const weekStartMs = addLocalCalendarDaysMs(todayStartMs, -6, timeZone);
+    const dailyWindowStartMs = addLocalCalendarDaysMs(todayStartMs, -13, timeZone);
+    const dailyWindowEndMs = addLocalCalendarDaysMs(todayStartMs, 1, timeZone);
     const aggregate = await readModel.readProviderAggregateSummary({
       todayStartMs,
       todayEndMs: nowMs,
-      weekStartMs: dailyWindowStartMs,
+      weekStartMs,
       weekEndMs: nowMs,
-      timeZone: this.deps.analyticsTimeZone,
+      timeZone,
       dailyWindowStartMs,
       dailyWindowEndMs,
       maxGroups: CANONICAL_AGGREGATE_MAX_GROUP_ROWS,
@@ -437,10 +449,14 @@ export class AggregateStatsService {
       throw new Error('Canonical aggregate provider grouping exceeded its bounded read limit.');
     }
     const { accounting, groups, executionSummary } = aggregate;
-    const overlay = canonicalAccountingOverlay(accounting, groups);
-    const sessionCount = groups.length === 0
-      ? 0
-      : metricInteger(groups[0]?.session_count, 'global session count');
+    const overlay = canonicalAccountingOverlay(
+      accounting,
+      groups,
+      aggregate.series,
+      nowMs,
+      timeZone,
+    );
+    const sessionCount = metricInteger(aggregate.sessionCount, 'global session count');
     const runningSessionCount = new Set(runningSessionPaths).size;
     const next = applyLedgerUsageOverlay({
       ...EMPTY_AGGREGATE_STATS,
@@ -456,6 +472,14 @@ export class AggregateStatsService {
       ready: true,
       providerGate: this.cached.providerGate,
     }, overlay);
+    applyCanonicalExecutionMetrics(
+      next,
+      aggregate.series?.executions ?? [],
+      aggregate.series?.dailyExecutions,
+      aggregate.series?.truncated !== true,
+      nowMs,
+      timeZone,
+    );
     next.providerGate = providerGate;
     const observedRevisionAfterRead = this.observedCanonicalRevision();
     const observedRevision = observedRevisionAfterRead ?? observedRevisionBeforeRead;
@@ -599,6 +623,9 @@ const CANONICAL_AGGREGATE_MAX_RESULT_BYTES = 2 * 1024 * 1024;
 function canonicalAccountingOverlay(
   accounting: ProviderAccountingSummary,
   rows: Array<Record<string, unknown>>,
+  series: ProviderAggregateSeries | undefined,
+  nowMs: number,
+  timeZone: string,
 ): LedgerUsageOverlay {
   const allByProvider = providerGroups(rows, 'all');
   const todayByProvider = providerGroups(rows, 'today');
@@ -614,20 +641,77 @@ function canonicalAccountingOverlay(
   if (accounting.invocationCount > 0 && rows.length === 0) {
     throw new Error('Canonical accounting has invocations but no provider grouping rows.');
   }
+
+  const todayStartMs = localCalendarDayStartMs(nowMs, timeZone);
+  const weekStartMs = addLocalCalendarDaysMs(todayStartMs, -6, timeZone);
+  // A bounded source sample cannot certify a cumulative chart endpoint. Do not
+  // snap a truncated sample stream to exact totals: that would draw a complete
+  // history with an unobserved jump. The exact daily projection below remains
+  // available for headline/tooltip rollups.
+  const settlementSamples = series?.truncated === true ? [] : (series?.settlements ?? []);
+  const costSamples = canonicalSeriesSamples(settlementSamples, 'cost');
+  const inputSamples = canonicalSeriesSamples(settlementSamples, 'inputTokens');
+  const outputSamples = canonicalSeriesSamples(settlementSamples, 'outputTokens');
+  const dailyCost = series?.dailyCosts !== undefined
+    ? canonicalDailyCosts(series.dailyCosts)
+    : series?.truncated === true
+      ? []
+      : buildCanonicalDailyCost(costSamples, nowMs, timeZone);
+  // A combined temporal truncation flag may be caused by execution evidence
+  // alone, so the settlement samples cannot safely be treated as a complete
+  // cumulative stream. The exact daily projection is still a valid cost
+  // series; use it as a coarse fallback rather than dropping the graph. It
+  // deliberately applies only to cost: the recorder exposes no exact daily
+  // token rollup, so token charts must retain their honest missingness.
+  const todayCostSamples = filterCanonicalSeriesSamples(costSamples, todayStartMs, nowMs);
+  const weekCostSamples = filterCanonicalSeriesSamples(costSamples, weekStartMs, nowMs);
+  const useTodayDailyCostSeries = series?.truncated === true
+    || (todayCostSamples.length === 0 && dailyCost.length > 0);
+  const useWeekDailyCostSeries = series?.truncated === true
+    || (weekCostSamples.length === 0 && dailyCost.length > 0);
+  const todayCostSeries = useTodayDailyCostSeries
+    ? buildCanonicalDailyCostSeries(dailyCost, todayStartMs, nowMs, nowMs, timeZone)
+    : buildCumulativeSeries(
+      todayCostSamples,
+      nowMs,
+      undefined,
+      { timeZone, targetTotals: seriesTarget(rows, 'today', 'cost'), roundValues: true },
+    );
+  const todayInputTokenSeries = buildCumulativeSeries(
+    filterCanonicalSeriesSamples(inputSamples, todayStartMs, nowMs),
+    nowMs,
+    undefined,
+    { timeZone, targetTotals: seriesTarget(rows, 'today', 'input') },
+  );
+  const todayTokenSeries = buildCumulativeSeries(
+    filterCanonicalSeriesSamples(outputSamples, todayStartMs, nowMs),
+    nowMs,
+    undefined,
+    { timeZone, targetTotals: seriesTarget(rows, 'today', 'output') },
+  );
+  const weekCostSeries = useWeekDailyCostSeries
+    ? buildCanonicalDailyCostSeries(dailyCost, weekStartMs, nowMs, nowMs, timeZone)
+    : buildCumulativeSeries(
+      weekCostSamples,
+      nowMs,
+      undefined,
+      { timeZone, targetTotals: seriesTarget(rows, 'week', 'cost'), roundValues: true },
+    );
+
   return {
     todayCost: today.cost,
     todayCostByProvider: todayByProvider,
     todayInputTokens: today.input,
     todayOutputTokens: today.output,
-    todayCostSeries: [],
-    todayInputTokenSeries: [],
-    todayTokenSeries: [],
+    todayCostSeries,
+    todayInputTokenSeries,
+    todayTokenSeries,
     todayProductivityInputTokens: today.input,
     weekCost: week.cost,
     weekCostByProvider: weekByProvider,
-    weekCostSeries: [],
+    weekCostSeries,
     weekProductivityInputTokens: week.input,
-    dailyCost: [],
+    dailyCost,
     totalCost,
     costByProvider: allByProvider,
     totalInputTokens,
@@ -647,6 +731,298 @@ function canonicalAccountingOverlay(
       instrumentationGapInvocationCount: all.gap,
     },
   };
+}
+
+function applyCanonicalExecutionMetrics(
+  aggregate: AggregateStats,
+  executions: ProviderAggregateSeries['executions'],
+  dailyExecutions: ProviderAggregateSeries['dailyExecutions'],
+  temporalSamplesComplete: boolean,
+  nowMs: number,
+  timeZone: string,
+): void {
+  const todayStartMs = localCalendarDayStartMs(nowMs, timeZone);
+  const trendStartMs = addLocalCalendarDaysMs(todayStartMs, -13, timeZone);
+  const todayDate = localCalendarDayKey(nowMs, timeZone);
+  const weekDates = new Set<string>();
+  const trendDates: string[] = [];
+  for (let offset = -13; offset <= 0; offset += 1) {
+    const date = localCalendarDayKey(addLocalCalendarDaysMs(todayStartMs, offset, timeZone), timeZone);
+    trendDates.push(date);
+    if (offset >= -6) weekDates.add(date);
+  }
+  const byDate = new Map<string, { count: number; sessionCount: number; sessionIds?: Set<string> }>();
+  if (dailyExecutions !== undefined) {
+    // These are exact bounded SQL day buckets, independent of the 4096-row
+    // temporal evidence cap. They are the only source used for daily headline
+    // run/session metrics when the recorder supplies them.
+    for (const daily of dailyExecutions) {
+      if (!trendDates.includes(daily.date)) continue;
+      const count = metricInteger(daily.runCount, `daily run count for ${daily.date}`);
+      const sessionCount = metricInteger(daily.sessionCount, `daily session count for ${daily.date}`);
+      byDate.set(daily.date, { count, sessionCount });
+    }
+  } else if (temporalSamplesComplete) {
+    for (const execution of executions) {
+      const start = execution.startedAtMs === null ? null : canonicalTimestamp(execution.startedAtMs, 'execution start');
+      const end = execution.endedAtMs === null ? null : canonicalTimestamp(execution.endedAtMs, 'execution end');
+      const eventMs = end ?? start;
+      if (eventMs === null || eventMs > nowMs || eventMs < trendStartMs) continue;
+      const date = localCalendarDayKey(eventMs, timeZone);
+      const day = byDate.get(date) ?? { count: 0, sessionCount: 0, sessionIds: new Set<string>() };
+      day.count += 1;
+      if (execution.rootSessionId) day.sessionIds!.add(execution.rootSessionId);
+      day.sessionCount = day.sessionIds!.size;
+      byDate.set(date, day);
+    }
+  }
+  aggregate.todayRunCount = byDate.get(todayDate)?.count ?? 0;
+  aggregate.weekRunCount = [...weekDates].reduce((total, date) => total + (byDate.get(date)?.count ?? 0), 0);
+  const dailyRunCount = trendDates.map((date) => ({ date, runCount: byDate.get(date)?.count ?? 0 }));
+  let firstRunDay = 0;
+  while (firstRunDay < dailyRunCount.length - 1 && dailyRunCount[firstRunDay]!.runCount === 0) firstRunDay += 1;
+  aggregate.dailyRunCount = dailyRunCount.slice(firstRunDay);
+  const dailyWorkTrend = trendDates.map((date) => {
+    const day = byDate.get(date);
+    return {
+      date,
+      sessionsUsed: day?.sessionCount ?? 0,
+      // Canonical execution rows do not carry the legacy concurrent-busy
+      // samples. One observed execution is therefore conservative evidence of
+      // one working session, never a fabricated concurrency peak.
+      peakWorkingSessions: day && day.count > 0 ? 1 : 0,
+      productivity: { ...EMPTY_AGGREGATE_STATS.todayProductivity, userInputCharCap: null },
+    };
+  });
+  let firstWorkDay = 0;
+  while (
+    firstWorkDay < dailyWorkTrend.length - 1
+    && dailyWorkTrend[firstWorkDay]!.sessionsUsed === 0
+    && dailyWorkTrend[firstWorkDay]!.productivity.expectedUserInputCharSampleCount === 0
+  ) firstWorkDay += 1;
+  aggregate.dailyWorkTrend = dailyWorkTrend.slice(firstWorkDay);
+}
+
+type CanonicalSeriesSample = {
+  ms: number;
+  provider: string;
+  model: string;
+  value: number;
+};
+
+function canonicalSeriesSamples(
+  settlements: ProviderAggregateSeries['settlements'],
+  field: 'cost' | 'inputTokens' | 'outputTokens',
+): CanonicalSeriesSample[] {
+  const samples: CanonicalSeriesSample[] = [];
+  for (const settlement of settlements) {
+    const ms = canonicalTimestamp(settlement.ms, 'settlement timestamp');
+    const rawValue = settlement[field];
+    if (ms === null || rawValue === null) continue;
+    const value = metricNumber(rawValue, `series ${field}`);
+    samples.push({
+      ms,
+      provider: settlement.provider?.trim() || 'unknown',
+      model: settlement.model?.trim() || 'unknown',
+      value,
+    });
+  }
+  return samples.sort((left, right) => left.ms - right.ms);
+}
+
+function filterCanonicalSeriesSamples(
+  samples: CanonicalSeriesSample[],
+  startMs: number,
+  endMs: number,
+): CanonicalSeriesSample[] {
+  return samples.filter((sample) => sample.ms >= startMs && sample.ms <= endMs);
+}
+
+function seriesTarget(
+  rows: Array<Record<string, unknown>>,
+  prefix: string,
+  dimension: 'cost' | 'input' | 'output',
+): { byProvider: AggregateSeriesSegment[]; byModel: AggregateModelSeriesSegment[] } {
+  const providerField = dimension === 'cost' ? `${prefix}_cost`
+    : dimension === 'input' ? `${prefix}_input` : `${prefix}_output`;
+  const byProvider = new Map<string, number>();
+  const byModel = new Map<string, AggregateModelSeriesSegment>();
+  for (const row of rows) {
+    const provider = String(row.provider ?? 'unknown') || 'unknown';
+    const model = String(row.model ?? 'unknown') || 'unknown';
+    const value = metricNumber(row[providerField], `${prefix} ${dimension} target`);
+    byProvider.set(provider, (byProvider.get(provider) ?? 0) + value);
+    const key = `${provider}\u0000${model}`;
+    const existing = byModel.get(key);
+    if (existing) existing.value += value;
+    else byModel.set(key, { key: model, provider, model, value });
+  }
+  return {
+    byProvider: [...byProvider.entries()]
+      .map(([key, value]) => ({ key, value }))
+      .sort((left, right) => right.value - left.value || left.key.localeCompare(right.key)),
+    byModel: [...byModel.values()]
+      .sort((left, right) => right.value - left.value
+        || left.provider.localeCompare(right.provider)
+        || left.model.localeCompare(right.model)),
+  };
+}
+
+function canonicalDailyCosts(
+  dailyCosts: NonNullable<ProviderAggregateSeries['dailyCosts']>,
+): AggregateDailyCost[] {
+  return dailyCosts.map((day) => ({
+    date: day.date,
+    totalCost: metricNumber(day.totalCost, `daily cost for ${day.date}`),
+    byProvider: day.byProvider.map((provider) => ({
+      provider: provider.provider,
+      cost: metricNumber(provider.cost, `daily provider cost for ${day.date}`),
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+    })),
+    byModel: day.byModel.map((model) => ({
+      provider: model.provider,
+      model: model.model,
+      cost: metricNumber(model.cost, `daily model cost for ${day.date}`),
+    })),
+  }));
+}
+
+function buildCanonicalDailyCost(
+  samples: CanonicalSeriesSample[],
+  nowMs: number,
+  timeZone: string,
+): AggregateDailyCost[] {
+  const byDate = new Map<string, {
+    byProvider: Map<string, AggregateProviderCost>;
+    byModel: Map<string, { provider: string; model: string; cost: number }>;
+  }>();
+  for (const sample of samples) {
+    if (sample.ms > nowMs) continue;
+    const date = localCalendarDayKey(sample.ms, timeZone);
+    let day = byDate.get(date);
+    if (!day) {
+      day = { byProvider: new Map(), byModel: new Map() };
+      byDate.set(date, day);
+    }
+    const provider = day.byProvider.get(sample.provider) ?? {
+      provider: sample.provider,
+      cost: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+    };
+    provider.cost += sample.value;
+    day.byProvider.set(sample.provider, provider);
+    const modelKey = `${sample.provider}\u0000${sample.model}`;
+    const model = day.byModel.get(modelKey);
+    if (model) model.cost += sample.value;
+    else day.byModel.set(modelKey, { provider: sample.provider, model: sample.model, cost: sample.value });
+  }
+  return [...byDate.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([date, day]) => ({
+      date,
+      totalCost: [...day.byProvider.values()].reduce((total, provider) => total + provider.cost, 0),
+      byProvider: [...day.byProvider.values()].sort((left, right) => right.cost - left.cost || left.provider.localeCompare(right.provider)),
+      byModel: [...day.byModel.values()]
+        .sort((left, right) => right.cost - left.cost
+          || left.provider.localeCompare(right.provider)
+          || left.model.localeCompare(right.model)),
+    }));
+}
+
+function buildCanonicalDailyCostSeries(
+  dailyCosts: AggregateDailyCost[],
+  rangeStartMs: number,
+  rangeEndMs: number,
+  nowMs: number,
+  timeZone: string,
+): AggregateSeriesPoint[] {
+  const cumulativeByProvider = new Map<string, number>();
+  const cumulativeByModel = new Map<string, AggregateModelSeriesSegment>();
+  const points: AggregateSeriesPoint[] = [];
+  const orderedDailyCosts = [...dailyCosts].sort((left, right) => left.date.localeCompare(right.date));
+  for (const day of orderedDailyCosts) {
+    const dayStartMs = canonicalLocalDayStartForDate(day.date, nowMs, timeZone);
+    if (dayStartMs === null || dayStartMs > nowMs) continue;
+    const dayEndMs = addLocalCalendarDaysMs(dayStartMs, 1, timeZone);
+    if (dayEndMs <= rangeStartMs) continue;
+    const pointMs = Math.min(dayEndMs, rangeEndMs, nowMs);
+    if (pointMs < rangeStartMs || pointMs > rangeEndMs) continue;
+    for (const provider of day.byProvider) {
+      cumulativeByProvider.set(
+        provider.provider,
+        (cumulativeByProvider.get(provider.provider) ?? 0) + metricNumber(
+          provider.cost,
+          `daily provider cost for ${day.date}`,
+        ),
+      );
+    }
+    for (const model of day.byModel) {
+      const key = `${model.provider}\u0000${model.model}`;
+      const existing = cumulativeByModel.get(key);
+      if (existing) existing.value += metricNumber(model.cost, `daily model cost for ${day.date}`);
+      else {
+        cumulativeByModel.set(key, {
+          key: model.model,
+          provider: model.provider,
+          model: model.model,
+          value: metricNumber(model.cost, `daily model cost for ${day.date}`),
+        });
+      }
+    }
+    points.push({
+      ms: pointMs,
+      byProvider: [...cumulativeByProvider.entries()]
+        .map(([key, value]) => ({ key, value: canonicalSeriesCostValue(value) }))
+        .sort((left, right) => right.value - left.value || left.key.localeCompare(right.key)),
+      byModel: [...cumulativeByModel.values()]
+        .map((model) => ({ ...model, value: canonicalSeriesCostValue(model.value) }))
+        .sort((left, right) => right.value - left.value
+          || left.provider.localeCompare(right.provider)
+          || left.model.localeCompare(right.model)),
+    });
+  }
+  if (points.length === 0) return [];
+  // Keep a zero baseline when the first daily point is later than the range
+  // start. This gives a one-day fallback a visible rising area instead of a
+  // degenerate single-point path, without inventing any provider attribution.
+  if (points[0]!.ms > rangeStartMs) {
+    points.unshift({ ms: rangeStartMs, byProvider: [], byModel: [] });
+  }
+  return points;
+}
+
+function canonicalLocalDayStartForDate(date: string, referenceMs: number, timeZone: string): number | null {
+  const referenceStartMs = localCalendarDayStartMs(referenceMs, timeZone);
+  // Canonical daily reads are bounded to the trailing 14-day window. Search a
+  // little wider so a DST boundary or a compatibility fixture cannot turn a
+  // valid local date into an invisible chart point.
+  for (let offset = -31; offset <= 31; offset += 1) {
+    const candidate = addLocalCalendarDaysMs(referenceStartMs, offset, timeZone);
+    if (localCalendarDayKey(candidate, timeZone) === date) return candidate;
+  }
+  return null;
+}
+
+function canonicalSeriesCostValue(value: number): number {
+  return Math.round(value * 1e12) / 1e12;
+}
+
+function canonicalTimestamp(value: number | string, name: string): number | null {
+  try {
+    const parsed = BigInt(value);
+    const number = Number(parsed);
+    if (!Number.isSafeInteger(number)) throw new Error(`Canonical ${name} exceeds the safe integer range.`);
+    return number;
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('Canonical ')) throw error;
+    throw new Error(`Canonical ${name} is not a valid integer timestamp.`);
+  }
 }
 
 function providerGroups(rows: Array<Record<string, unknown>>, prefix: string): AggregateProviderCost[] {

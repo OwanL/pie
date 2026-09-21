@@ -339,6 +339,30 @@ test('terminal append does not reconcile metadata across conflicting durable ent
   assert.equal(transcript?.[1]?.renderIdentity, 'new-live-render');
 });
 
+test('terminal append does not consume an unrelated streaming assistant row', () => {
+  let state = createInitialArchState();
+  state.transcript.bySession[base.sessionPath] = [{
+    id: 'prior-streaming', role: 'assistant', createdAt: new Date(80).toISOString(), markdown: 'prior',
+    status: 'streaming', renderIdentity: 'prior-render',
+  }];
+  state = dispatch(state, {
+    ...base, kind: 'turn.started', seq: 1, canonicalMessageId: 'new-live-render', startedAt: 90,
+  }).state;
+  state = dispatch(state, {
+    ...base, kind: 'turn.terminal', seq: 2, terminalKind: 'completed', durableEntryId: 'new-entry',
+    durableMessage: {
+      id: 'new-assistant', role: 'assistant', createdAt: new Date(100).toISOString(), markdown: 'new',
+      status: 'completed', durableEntryId: 'new-entry',
+    },
+  }).state;
+
+  const transcript = state.transcript.bySession[base.sessionPath];
+  assert.equal(transcript?.length, 2);
+  assert.equal(transcript?.[0]?.id, 'prior-streaming');
+  assert.equal(transcript?.[1]?.id, 'new-assistant');
+  assert.equal(transcript?.[1]?.renderIdentity, 'new-live-render');
+});
+
 test('a delayed checkpoint cannot revive an attempt after its terminal tombstone', () => {
   let state = createInitialArchState();
   state = dispatch(state, {

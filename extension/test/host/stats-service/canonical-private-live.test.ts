@@ -118,13 +118,27 @@ test('private close prevents cache rehydration while deletion is in flight', asy
       return recorder.readScopedProviderSettlements(...args);
     },
   } as unknown as CanonicalAnalyticsReadModel;
+  const statsHolder: { service?: StatsService } = {};
+  const renderedUsageAuthorities: Array<string | undefined> = [];
+  const render = () => {
+    renderedUsageAuthorities.push(statsHolder.service!.getSessionUsage(sessionPath).authority);
+  };
   const stats = new StatsService({ dataOutcomesRootPath: path.join(root, 'legacy'), workspaceId: 'workspace',
-    getArchState: () => state, analyticsCapture: capture, analyticsReadModel: readModel });
+    getArchState: () => state, analyticsCapture: capture, analyticsReadModel: readModel,
+    scheduleRender: render });
+  statsHolder.service = stats;
   let closing: Promise<void> | undefined;
   try {
     await stats.start();
     assert.equal(stats.getSessionUsage(sessionPath).samples.length, 1);
+    const rendersBeforeClose = renderedUsageAuthorities.length;
     closing = stats.closePrivateSessionAnalytics(sessionPath, undefined, 'private-root');
+    // Privacy/deletion invalidation is strict: even an unrelated host render
+    // while the recorder acknowledgement is held must not reuse the prior
+    // canonical cost read.
+    render();
+    assert.ok(renderedUsageAuthorities.length > rendersBeforeClose);
+    assert.equal(renderedUsageAuthorities.at(-1), 'unknown');
     const readsBefore = reads;
     for (let index = 0; index < 3; index++) {
       assert.deepEqual(stats.getSessionUsage(sessionPath), { samples: [], authority: 'unknown' });

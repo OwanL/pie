@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import * as path from 'node:path';
 import {
   deriveFileChangeFromToolCall,
   deriveFileChangesFromToolCall,
@@ -460,6 +461,62 @@ test('deriveFileChangesFromSubagentResult: skips non-file tools inside subagent'
   ]);
   const changes = deriveFileChangesFromSubagentResult(subagentResult, 'msg1', '2024-01-01T00:00:00Z', 'tc1');
   assert.equal(changes.length, 0);
+});
+
+test('deriveFileChangesFromTranscript: modern child cwd keeps same-cwd relative paths', () => {
+  const transcript: ChatMessage[] = [
+    makeChatMessage({
+      toolCalls: [{
+        id: 'tc-modern-cwd',
+        name: 'subagent',
+        input: { agent: 'worker', task: 'edit', cwd: '/proj' },
+        result: {
+          details: {
+            results: [{
+              cwd: '/proj',
+              messages: [{
+                role: 'assistant',
+                content: [{ type: 'toolCall', name: 'edit', arguments: { path: 'src/modern.ts', oldText: 'a', newText: 'b' } }],
+              }],
+            }],
+          },
+        },
+        status: 'completed',
+      }],
+    }),
+  ];
+
+  const changes = deriveFileChangesFromTranscript(transcript, '/proj');
+  assert.equal(changes.length, 1);
+  assert.equal(changes[0].path, 'src/modern.ts');
+});
+
+test('deriveFileChangesFromTranscript: legacy mixed-cwd child resolves relative paths against owning cwd', () => {
+  const transcript: ChatMessage[] = [
+    makeChatMessage({
+      toolCalls: [{
+        id: 'tc-legacy-cwd',
+        name: 'subagent',
+        input: { agent: 'worker', task: 'edit', cwd: '/other' },
+        result: {
+          details: {
+            results: [{
+              // Legacy result: no child cwd provenance.
+              messages: [{
+                role: 'assistant',
+                content: [{ type: 'toolCall', name: 'edit', arguments: { path: 'src/legacy.ts', oldText: 'a', newText: 'b' } }],
+              }],
+            }],
+          },
+        },
+        status: 'completed',
+      }],
+    }),
+  ];
+
+  const changes = deriveFileChangesFromTranscript(transcript, '/proj');
+  assert.equal(changes.length, 1);
+  assert.equal(changes[0].path, path.resolve('/other/src/legacy.ts'));
 });
 
 test('deriveFileChangesFromSubagentResult: handles multiple results (parallel mode)', () => {

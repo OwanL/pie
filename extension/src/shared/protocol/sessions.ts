@@ -617,6 +617,14 @@ export interface AuxiliaryLlmUsagePayload {
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
   providerTotalTokens?: number;
+  /** Explicit channel completeness from the provider response. */
+  tokenChannelsKnown?: boolean;
+  tokenChannelPresence?: {
+    input: boolean;
+    output: boolean;
+    cacheRead: boolean;
+    cacheWrite: boolean;
+  };
   reportedCostUsd?: number;
   durationMs?: number;
   startedAt?: string;

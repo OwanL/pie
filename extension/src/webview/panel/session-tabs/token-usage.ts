@@ -1,4 +1,5 @@
-import { qualifyModelId as qualifyBillingModelId } from '../../../shared/model-id';
+import { providerReportedCostUsd } from '../../../../../shared/provider-cost.js';
+import { providerPrefixOf, qualifyModelId as qualifyBillingModelId, stripProviderPrefix } from '../../../shared/model-id';
 import type {
   AssistantUsage,
   CanonicalActivityCounts,
@@ -8,6 +9,7 @@ import type {
   CanonicalToolFacetProjectionView,
   ChatMessage,
   ContextWindowUsage,
+  ModelInfo,
   PruningDetails,
   SessionSummary,
   ToolCall,
@@ -85,7 +87,7 @@ export function buildSessionTokenUsageFromSnapshot(snapshot: SessionUsageSnapsho
     totalTokens += usage.totalTokens;
     reasoningTokens += usage.reasoningTokens ?? 0;
     reportedTurnCount += 1;
-    if (sample.tokenChannelsKnown === false || sample.instrumentationGap) {
+    if (!tokenChannelsComplete(sample) || sample.instrumentationGap) {
       incompleteInvocationCount += 1;
     } else {
       knownTokenInvocationCount += 1;
@@ -109,6 +111,15 @@ export function buildSessionTokenUsageFromSnapshot(snapshot: SessionUsageSnapsho
 }
 
 export { formatReadableTokens, formatCompactTokens, formatCostUsd };
+
+/** Keep the active-turn chip in step with the gross aggregate cost. The normal
+ * session formatter intentionally collapses sub-cent values, but a live turn
+ * needs enough precision for successive streaming updates to be visible. */
+function formatLiveCostUsd(cost: number): string {
+  if (!Number.isFinite(cost) || cost <= 0) return '$0.00';
+  if (cost < 1) return `$${cost.toFixed(4)}`;
+  return formatCostUsd(cost);
+}
 
 export interface SessionTokenIndicatorState {
   /** Compact token counts \u2014 e.g. "\u2191 12.3k \u2193 4.5k". */
@@ -184,12 +195,62 @@ export interface TokenPricing {
 
 export type TokenPricingResolver = (modelId: string, provider?: string) => TokenPricing | undefined;
 
-interface CostUsage {
+/** Build the provider-qualified pricing lookup shared by session metrics and
+ * transcript display. A bare model id is only used when it is unique across
+ * providers; an explicit provider always wins. */
+export function createTokenPricingResolver(
+  availableModels: readonly ModelInfo[],
+): TokenPricingResolver {
+  const byProviderAndId = new Map<string, TokenPricing>();
+  const uniqueById = new Map<string, TokenPricing>();
+  const seenIds = new Set<string>();
+  for (const model of availableModels) {
+    const pricing = model.subagent?.pricing;
+    const bareId = stripProviderPrefix(model.id);
+    if (pricing) byProviderAndId.set(`${model.provider}\u0000${bareId}`, pricing);
+    if (seenIds.has(bareId)) {
+      uniqueById.delete(bareId);
+    } else {
+      seenIds.add(bareId);
+      if (pricing) uniqueById.set(bareId, pricing);
+    }
+  }
+
+  return (modelId: string, provider?: string) => {
+    const bareId = stripProviderPrefix(modelId);
+    const resolvedProvider = provider ?? providerPrefixOf(modelId);
+    return resolvedProvider
+      ? byProviderAndId.get(`${resolvedProvider}\u0000${bareId}`)
+      : uniqueById.get(bareId);
+  };
+}
+
+export interface CostUsage {
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
   totalTokens: number;
+  tokenChannelsKnown?: boolean;
+  tokenChannelPresence?: {
+    input: boolean;
+    output: boolean;
+    cacheRead: boolean;
+    cacheWrite: boolean;
+  };
+}
+
+function tokenChannelsComplete(usage: CostUsage): boolean {
+  if (usage.tokenChannelsKnown === false) return false;
+  if (![usage.inputTokens, usage.outputTokens, usage.cacheReadTokens, usage.cacheWriteTokens]
+    .every((value) => Number.isFinite(value) && value >= 0)) {
+    return false;
+  }
+  if (!usage.tokenChannelPresence) return true;
+  return usage.tokenChannelPresence.input === true
+    && usage.tokenChannelPresence.output === true
+    && usage.tokenChannelPresence.cacheRead === true
+    && usage.tokenChannelPresence.cacheWrite === true;
 }
 
 export interface LiveSessionCostEstimate extends CostUsage {
@@ -423,7 +484,7 @@ function formatCostTokens(tokens: number): string {
   return `${formatReadableTokens(tokens)} token${tokens === 1 ? '' : 's'}`;
 }
 
-function effectivePricing(usage: CostUsage, pricing: TokenPricing): TokenPricing {
+export function effectivePricing(usage: CostUsage, pricing: TokenPricing): TokenPricing {
   const promptTokens = usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
   let effective = pricing;
   for (const tier of pricing.tiers ?? []) {
@@ -432,7 +493,7 @@ function effectivePricing(usage: CostUsage, pricing: TokenPricing): TokenPricing
   return effective;
 }
 
-function costFromUsage(usage: CostUsage, pricing: TokenPricing, applyLongContextTier = true): number {
+export function costFromUsage(usage: CostUsage, pricing: TokenPricing, applyLongContextTier = true): number {
   const effective = applyLongContextTier ? effectivePricing(usage, pricing) : pricing;
   return ((usage.inputTokens / 1_000_000) * effective.input)
     + ((usage.outputTokens / 1_000_000) * effective.output)
@@ -440,7 +501,7 @@ function costFromUsage(usage: CostUsage, pricing: TokenPricing, applyLongContext
     + ((usage.cacheWriteTokens / 1_000_000) * effective.cacheWrite);
 }
 
-function costBreakdownFromUsage(usage: CostUsage, pricing: TokenPricing) {
+export function costBreakdownFromUsage(usage: CostUsage, pricing: TokenPricing) {
   const effective = effectivePricing(usage, pricing);
   const input = (usage.inputTokens / 1_000_000) * effective.input;
   const output = (usage.outputTokens / 1_000_000) * effective.output;
@@ -455,7 +516,7 @@ function costBreakdownFromUsage(usage: CostUsage, pricing: TokenPricing) {
   };
 }
 
-interface ResolvedUsageCost {
+export interface ResolvedUsageCost {
   cost: number;
   hasKnownCost: boolean;
   unpricedTokens: number;
@@ -470,27 +531,14 @@ function tokenChannelTotal(usage: CostUsage): number {
  * known zero. A catalog can price a record only when its four channels account
  * for the reported total; otherwise a stored/provider cost is the only usable
  * total. */
-function resolveUsageCost(
+export function resolveUsageCost(
   usage: CostUsage,
   pricing: TokenPricing | undefined,
   reportedCostUsd: number | undefined,
   applyLongContextTier = true,
 ): ResolvedUsageCost {
-  const channelTokens = tokenChannelTotal(usage);
-  const canUseCatalog = pricing !== undefined && usage.totalTokens > 0 && channelTokens === usage.totalTokens;
-  if (canUseCatalog) {
-    const catalogBreakdown = applyLongContextTier ? costBreakdownFromUsage(usage, pricing!) : null;
-    return {
-      cost: catalogBreakdown?.total ?? costFromUsage(usage, pricing!, false),
-      hasKnownCost: true,
-      unpricedTokens: 0,
-      catalogBreakdown,
-    };
-  }
-
-  // A reported cost, including an explicit zero, remains authoritative when
-  // channel pricing cannot be reconstructed. An absent report is unpriced,
-  // rather than a known zero.
+  // A genuine provider report, including an explicit zero, remains
+  // authoritative even when complete token channels allow catalog pricing.
   const hasUsableReportedCost = typeof reportedCostUsd === 'number'
     && Number.isFinite(reportedCostUsd)
     && reportedCostUsd >= 0;
@@ -503,6 +551,23 @@ function resolveUsageCost(
     };
   }
 
+  const channelTokens = tokenChannelTotal(usage);
+  const canUseCatalog = pricing !== undefined
+    && tokenChannelsComplete(usage)
+    && usage.totalTokens > 0
+    && channelTokens === usage.totalTokens;
+  if (canUseCatalog) {
+    const catalogBreakdown = applyLongContextTier ? costBreakdownFromUsage(usage, pricing!) : null;
+    return {
+      cost: catalogBreakdown?.total ?? costFromUsage(usage, pricing!, false),
+      hasKnownCost: true,
+      unpricedTokens: 0,
+      catalogBreakdown,
+    };
+  }
+
+  // Missing token channels and missing provider evidence remain unknown rather
+  // than becoming a fabricated zero.
   return {
     cost: 0,
     hasKnownCost: false,
@@ -552,6 +617,10 @@ function numberValue(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
 
+function nonNegativeTokenValue(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
 function toolCallsFromMessage(message: ChatMessage): ToolCall[] {
   const ordered = message.parts
     ?.filter((part) => part.kind === 'toolCall')
@@ -579,19 +648,41 @@ function emptySubagentCostSummary(): SubagentCostSummary {
   };
 }
 
-function usageFromSubagentUsage(rawUsage: unknown): (CostUsage & { cost?: number }) | null {
+function usageFromSubagentUsage(rawUsage: unknown): (CostUsage & { cost?: number; reportedCostExplicit?: boolean }) | null {
   if (!isRecord(rawUsage)) return null;
-  const inputTokens = numberValue(rawUsage.input);
-  const outputTokens = numberValue(rawUsage.output);
-  const cacheReadTokens = numberValue(rawUsage.cacheRead);
-  const cacheWriteTokens = numberValue(rawUsage.cacheWrite);
+  const input = nonNegativeTokenValue(rawUsage.input);
+  const output = nonNegativeTokenValue(rawUsage.output);
+  const cacheRead = nonNegativeTokenValue(rawUsage.cacheRead);
+  const cacheWrite = nonNegativeTokenValue(rawUsage.cacheWrite);
+  const inputTokens = input ?? 0;
+  const outputTokens = output ?? 0;
+  const cacheReadTokens = cacheRead ?? 0;
+  const cacheWriteTokens = cacheWrite ?? 0;
   const channelTokens = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
   const reportedTotal = numberValue(rawUsage.totalTokens);
   const totalTokens = Math.max(channelTokens, reportedTotal);
+  const declaredPresence = isRecord(rawUsage.tokenChannelPresence) ? rawUsage.tokenChannelPresence : undefined;
+  const declaredIncomplete = rawUsage.tokenChannelsKnown === false;
+  const channelPresent = (value: number | undefined, key: 'input' | 'output' | 'cacheRead' | 'cacheWrite'): boolean => {
+    if (value === undefined) return false;
+    if (declaredPresence && typeof declaredPresence[key] === 'boolean') return declaredPresence[key] as boolean;
+    return !declaredIncomplete;
+  };
+  const tokenChannelPresence = {
+    input: channelPresent(input, 'input'),
+    output: channelPresent(output, 'output'),
+    cacheRead: channelPresent(cacheRead, 'cacheRead'),
+    cacheWrite: channelPresent(cacheWrite, 'cacheWrite'),
+  };
+  const tokenChannelsKnown = !declaredIncomplete && Object.values(tokenChannelPresence).every(Boolean);
+  // New captures carry explicit provider evidence. Keep a numeric legacy
+  // aggregate cost for already-persisted child transcripts only; SDK
+  // `usage.cost.total` never reaches this shape from new producers.
+  const explicitCost = providerReportedCostUsd(rawUsage);
   const rawCost = rawUsage.cost;
-  const cost = typeof rawCost === 'number' && Number.isFinite(rawCost) && rawCost >= 0
+  const cost = explicitCost ?? (typeof rawCost === 'number' && Number.isFinite(rawCost) && rawCost >= 0
     ? rawCost
-    : undefined;
+    : undefined);
   if (cost === undefined && totalTokens <= 0) return null;
   return {
     inputTokens,
@@ -599,7 +690,9 @@ function usageFromSubagentUsage(rawUsage: unknown): (CostUsage & { cost?: number
     cacheReadTokens,
     cacheWriteTokens,
     totalTokens,
-    ...(cost !== undefined ? { cost } : {}),
+    tokenChannelsKnown,
+    tokenChannelPresence,
+    ...(cost !== undefined ? { cost, reportedCostExplicit: explicitCost !== undefined } : {}),
   };
 }
 
@@ -657,11 +750,15 @@ function addSubagentToolCallCost(
       })
       : [];
     const resultUsage = usageFromSubagentUsage(rawResult.usage);
+    const hasAggregateReportedCost = attemptUsages.length > 0
+      && resultUsage?.cost !== undefined && resultUsage.reportedCostExplicit === true;
     const attributedUsages = attemptUsages.length > 0
       ? attemptUsages
       : resultUsage ? [{ usage: resultUsage, modelId: resultModelId, provider: resultProvider }] : [];
     if (attributedUsages.length > 0) {
       let resultCost = 0;
+      let attemptReportedCost = 0;
+      let attemptReportedCount = 0;
       for (const item of attributedUsages) {
         const modelId = normalizeModelId(
           qualifyBillingModelId(item.modelId, item.provider),
@@ -669,10 +766,17 @@ function addSubagentToolCallCost(
         );
         const estimatedPricing = item.modelId ? pricingForModel?.(item.modelId, item.provider) : undefined;
         const channelTokens = tokenChannelTotal(item.usage);
-        const canUseCatalog = estimatedPricing !== undefined
+        const hasReportedCost = item.usage.cost !== undefined;
+        if (hasReportedCost) {
+          attemptReportedCost += item.usage.cost!;
+          attemptReportedCount += 1;
+        }
+        // An aggregate provider report owns attempts that did not expose
+        // independent billing. Do not add catalog estimates on top of it.
+        const canUseCatalog = !hasAggregateReportedCost && tokenChannelsComplete(item.usage)
+          && estimatedPricing !== undefined
           && item.usage.totalTokens > 0
           && item.usage.totalTokens === channelTokens;
-        const hasReportedCost = item.usage.cost !== undefined;
         const attributedCost = hasReportedCost
           ? item.usage.cost!
           : canUseCatalog ? costFromUsage(item.usage, estimatedPricing!) : 0;
@@ -686,6 +790,24 @@ function addSubagentToolCallCost(
           hasKnownCost,
           hasKnownCost ? 0 : item.usage.totalTokens,
         );
+      }
+      if (hasAggregateReportedCost
+        && resultUsage
+        && (resultUsage.cost! > attemptReportedCost || attemptReportedCount === 0)) {
+        const aggregateResidual = Math.max(0, resultUsage.cost! - attemptReportedCost);
+        const aggregateModelId = normalizeModelId(
+          qualifyBillingModelId(resultModelId, resultProvider),
+          depth <= 1 ? 'Unknown subagent model' : 'Unknown nested subagent model',
+        );
+        const aggregateCostUsage: CostUsage = {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          totalTokens: 0,
+        };
+        resultCost += aggregateResidual;
+        addModelCost(summary.modelCosts, aggregateModelId, aggregateCostUsage, aggregateResidual, true);
       }
       summary.totalCost += resultCost;
       if (depth <= 1) {
@@ -746,12 +868,53 @@ function buildPruningPrepassSummary(
   // (often cheaper/local) model; pricing it at the selected model's rate
   // would silently over-state the prepass cost.
   const prepassPricing = pricingForModel?.(details.prepassModel, details.prepassProvider);
-  const usage = {
-    inputTokens: numberValue(details.prepassInputTokens),
-    outputTokens: numberValue(details.prepassOutputTokens),
-    cacheReadTokens: numberValue(details.prepassCacheReadTokens),
-    cacheWriteTokens: numberValue(details.prepassCacheWriteTokens),
+  const rawChannels = [
+    details.prepassInputTokens,
+    details.prepassOutputTokens,
+    details.prepassCacheReadTokens,
+    details.prepassCacheWriteTokens,
+  ];
+  const hasAnyTokenChannelValue = rawChannels.some((value) => value !== undefined);
+  const hasExplicitCoverageMetadata = details.prepassTokenChannelsKnown !== undefined
+    || details.prepassTokenChannelPresence !== undefined;
+  const hasInvalidChannelValue = rawChannels.some((value) => value !== undefined
+    && nonNegativeTokenValue(value) === undefined);
+  const declaredPresence = details.prepassTokenChannelPresence;
+  const inferredPresence = (value: unknown): boolean => details.prepassTokenChannelsKnown === false
+    ? false : hasAnyTokenChannelValue ? nonNegativeTokenValue(value) !== undefined : true;
+  const tokenChannelPresence = {
+    input: typeof declaredPresence?.input === 'boolean'
+      ? declaredPresence.input && nonNegativeTokenValue(details.prepassInputTokens) !== undefined
+      : inferredPresence(details.prepassInputTokens),
+    output: typeof declaredPresence?.output === 'boolean'
+      ? declaredPresence.output && nonNegativeTokenValue(details.prepassOutputTokens) !== undefined
+      : inferredPresence(details.prepassOutputTokens),
+    cacheRead: typeof declaredPresence?.cacheRead === 'boolean'
+      ? declaredPresence.cacheRead && nonNegativeTokenValue(details.prepassCacheReadTokens) !== undefined
+      : inferredPresence(details.prepassCacheReadTokens),
+    cacheWrite: typeof declaredPresence?.cacheWrite === 'boolean'
+      ? declaredPresence.cacheWrite && nonNegativeTokenValue(details.prepassCacheWriteTokens) !== undefined
+      : inferredPresence(details.prepassCacheWriteTokens),
+  };
+  // Pre-metadata pruning details used optional cache aliases and treated an
+  // omitted alias as legacy zero. Preserve that wire compatibility; once the
+  // producer supplies presence metadata (or an invalid value is observed),
+  // the conservative completeness contract applies.
+  const tokenChannelsKnown = hasExplicitCoverageMetadata || hasInvalidChannelValue
+    ? details.prepassTokenChannelsKnown !== false && Object.values(tokenChannelPresence).every(Boolean)
+    : true;
+  const usage: CostUsage = {
+    inputTokens: nonNegativeTokenValue(details.prepassInputTokens) ?? 0,
+    outputTokens: nonNegativeTokenValue(details.prepassOutputTokens) ?? 0,
+    cacheReadTokens: nonNegativeTokenValue(details.prepassCacheReadTokens) ?? 0,
+    cacheWriteTokens: nonNegativeTokenValue(details.prepassCacheWriteTokens) ?? 0,
     totalTokens: 0,
+    ...(hasExplicitCoverageMetadata || hasInvalidChannelValue ? {
+      tokenChannelsKnown,
+    } : {}),
+    ...((hasExplicitCoverageMetadata || hasInvalidChannelValue) && (!tokenChannelsKnown || details.prepassTokenChannelPresence) ? {
+      tokenChannelPresence,
+    } : {}),
   };
   usage.totalTokens = usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
   const hasUsage = usage.totalTokens > 0;
@@ -879,6 +1042,7 @@ export function extractSubagentCostSummaryFromSnapshot(
       const usage = assistantUsageFromSample(sample);
       const channelTokens = tokenChannelTotal(usage);
       return sample.provenance === undefined
+        && tokenChannelsComplete(usage)
         && !!sample.modelId
         && usage.totalTokens === channelTokens
         && pricingForModel?.(sample.modelId, sample.provider) !== undefined;
@@ -1166,14 +1330,15 @@ export function buildSessionCostIndicator(
       : `Total: ${displayedTotal}`,
   );
 
+  const displayCost = liveEstimate ? formatLiveCostUsd(totalCost) : formatCostUsd(totalCost);
   const label = hasIncompleteCost
-    ? hasAnyKnownCost ? `${formatCostUsd(totalCost)}*` : '—*'
-    : formatCostUsd(totalCost);
+    ? hasAnyKnownCost ? `${displayCost}*` : '—*'
+    : displayCost;
   const ariaLabel = hasIncompleteCost
     ? hasAnyKnownCost
-      ? `Known estimated session cost ${formatCostUsd(totalCost)}; some provider/model usage is not yet priced.`
+      ? `Known estimated session cost ${displayCost}; some provider/model usage is not yet priced.`
       : 'Estimated session cost unavailable because provider/model usage is not yet priced.'
-    : `Estimated session cost ${formatCostUsd(totalCost)}.`;
+    : `Estimated session cost ${displayCost}.`;
 
   return {
     label,

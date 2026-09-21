@@ -768,7 +768,7 @@ test("completeOllamaNative disables thinking and maps native usage", async () =>
 	assert.deepEqual(requestedBody.options, { num_predict: 512, temperature: 0.2 });
 	assert.equal(result.text, '{"keep":["read"]}');
 	assert.equal(result.stopReason, "stop");
-	assert.deepEqual(result.usage, { input: 20, output: 6, cacheRead: 0, cacheWrite: 0 });
+	assert.deepEqual(result.usage, { input: 20, output: 6 });
 });
 
 test("completeOllamaNative surfaces HTTP status for transport retry classification", async () => {

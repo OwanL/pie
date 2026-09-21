@@ -34,6 +34,10 @@ const MIGRATION_YIELD_SLICE_MS = 16;
  *  per this many re-derived intervals instead of one rewrite per row. */
 const HEAL_ACTIVITY_BATCH_SIZE = 128;
 
+function validTokenChannel(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
 /** Structured counters for one historical-migration pass. Persisted via the
  *  pie log on completion/cancellation and returned to the caller. */
 export interface HistoricalMigrationMetrics {
@@ -423,6 +427,8 @@ export class BillableAccounting {
           cacheReadTokens: auxiliary.cacheReadTokens,
           cacheWriteTokens: auxiliary.cacheWriteTokens,
           totalTokens: auxiliary.inputTokens + auxiliary.outputTokens + auxiliary.cacheReadTokens + auxiliary.cacheWriteTokens,
+          ...(auxiliary.tokenChannelsKnown !== undefined ? { tokenChannelsKnown: auxiliary.tokenChannelsKnown } : {}),
+          ...(auxiliary.tokenChannelPresence ? { tokenChannelPresence: auxiliary.tokenChannelPresence } : {}),
           ...(auxiliary.reportedCostUsd !== undefined ? { reportedCostUsd: auxiliary.reportedCostUsd } : {}),
           endedAt: auxiliary.occurredAt,
         }, auxiliary.kind === 'assistant_message' ? 'conversation' : auxiliary.kind);
@@ -598,6 +604,12 @@ export class BillableAccounting {
         cacheReadTokens: usage.cacheReadTokens,
         cacheWriteTokens: usage.cacheWriteTokens,
         totalTokens: usage.totalTokens,
+        ...(usage.tokenChannelsKnown !== undefined ? { tokenChannelsKnown: usage.tokenChannelsKnown } : {}),
+        ...(usage.tokenChannelPresence ? { tokenChannelPresence: usage.tokenChannelPresence } : {}),
+        ...(usage.tokenChannelsKnown === false ? {
+          instrumentationGap: true,
+          instrumentationGapReason: 'The assistant provider response omitted one or more token channels.',
+        } : {}),
         ...(usage.reasoningTokens !== undefined ? { reasoningTokens: usage.reasoningTokens } : {}),
         ...(usage.reportedCostUsd !== undefined ? { reportedCostUsd: usage.reportedCostUsd } : {}),
         startedAt: new Date(Math.max(0, Date.parse(endedAt) - Math.max(0, durationMs))).toISOString(),
@@ -754,13 +766,23 @@ export class BillableAccounting {
     sample: Omit<AuxiliaryLlmUsagePayload, 'sessionPath'>
       & { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number };
   } {
-    const channelsKnown = sample.inputTokens !== undefined && sample.outputTokens !== undefined
-      && sample.cacheReadTokens !== undefined && sample.cacheWriteTokens !== undefined;
-    const inputTokens = sample.inputTokens ?? 0;
-    const outputTokens = sample.outputTokens ?? 0;
-    const cacheReadTokens = sample.cacheReadTokens ?? 0;
-    const cacheWriteTokens = sample.cacheWriteTokens ?? 0;
-    const totalTokens = sample.providerTotalTokens
+    const declaredPresence = sample.tokenChannelPresence;
+    const tokenChannelPresence = {
+      input: validTokenChannel(sample.inputTokens) && (declaredPresence?.input ?? true),
+      output: validTokenChannel(sample.outputTokens) && (declaredPresence?.output ?? true),
+      cacheRead: validTokenChannel(sample.cacheReadTokens) && (declaredPresence?.cacheRead ?? true),
+      cacheWrite: validTokenChannel(sample.cacheWriteTokens) && (declaredPresence?.cacheWrite ?? true),
+    };
+    const channelsKnown = sample.tokenChannelsKnown !== false
+      && Object.values(tokenChannelPresence).every(Boolean);
+    const inputTokens = validTokenChannel(sample.inputTokens) ? sample.inputTokens : 0;
+    const outputTokens = validTokenChannel(sample.outputTokens) ? sample.outputTokens : 0;
+    const cacheReadTokens = validTokenChannel(sample.cacheReadTokens) ? sample.cacheReadTokens : 0;
+    const cacheWriteTokens = validTokenChannel(sample.cacheWriteTokens) ? sample.cacheWriteTokens : 0;
+    const providerTotalTokens = validTokenChannel(sample.providerTotalTokens)
+      ? sample.providerTotalTokens
+      : undefined;
+    const totalTokens = providerTotalTokens
       ?? inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
     const assistantInvocation = sample.kind === 'assistant_message';
     if (assistantInvocation) {
@@ -782,13 +804,8 @@ export class BillableAccounting {
       cacheWriteTokens,
       totalTokens,
       tokenChannelsKnown: channelsKnown,
-      tokenChannelPresence: {
-        input: sample.inputTokens !== undefined,
-        output: sample.outputTokens !== undefined,
-        cacheRead: sample.cacheReadTokens !== undefined,
-        cacheWrite: sample.cacheWriteTokens !== undefined,
-      },
-      ...(sample.providerTotalTokens !== undefined ? { providerTotalTokens: sample.providerTotalTokens } : {}),
+      tokenChannelPresence,
+      ...(providerTotalTokens !== undefined ? { providerTotalTokens } : {}),
       ...(sample.reportedCostUsd !== undefined ? { reportedCostUsd: sample.reportedCostUsd } : {}),
       ...(sample.parentOperationId ? { parentOperationId: sample.parentOperationId } : {}),
       endedAt: sample.occurredAt,
@@ -1051,6 +1068,37 @@ export class BillableAccounting {
       }
       return { invocationId, appendedDurable: false };
     }
+    const declaredPresence = sample.tokenChannelPresence;
+    const tokenChannelPresence = {
+      input: validTokenChannel(sample.inputTokens) && (declaredPresence?.input ?? true),
+      output: validTokenChannel(sample.outputTokens) && (declaredPresence?.output ?? true),
+      cacheRead: validTokenChannel(sample.cacheReadTokens) && (declaredPresence?.cacheRead ?? true),
+      cacheWrite: validTokenChannel(sample.cacheWriteTokens) && (declaredPresence?.cacheWrite ?? true),
+    };
+    const channelsKnown = sample.tokenChannelsKnown !== false
+      && Object.values(tokenChannelPresence).every(Boolean);
+    const inputTokens = validTokenChannel(sample.inputTokens) ? sample.inputTokens : 0;
+    const outputTokens = validTokenChannel(sample.outputTokens) ? sample.outputTokens : 0;
+    const cacheReadTokens = validTokenChannel(sample.cacheReadTokens) ? sample.cacheReadTokens : 0;
+    const cacheWriteTokens = validTokenChannel(sample.cacheWriteTokens) ? sample.cacheWriteTokens : 0;
+    const reportedCostUsd = validTokenChannel(sample.reportedCostUsd)
+      ? sample.reportedCostUsd : undefined;
+    sample = {
+      ...sample,
+      inputTokens,
+      outputTokens,
+      cacheReadTokens,
+      cacheWriteTokens,
+      totalTokens: validTokenChannel(sample.totalTokens)
+        ? sample.totalTokens
+        : channelsKnown ? inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens : 0,
+      tokenChannelsKnown: channelsKnown,
+      tokenChannelPresence,
+      ...(validTokenChannel(sample.providerTotalTokens)
+        ? { providerTotalTokens: sample.providerTotalTokens }
+        : { providerTotalTokens: undefined }),
+      ...(reportedCostUsd !== undefined ? { reportedCostUsd } : { reportedCostUsd: undefined }),
+    };
     const normalizedTimes = normalizeInvocationTimes(
       sample.startedAt,
       sample.endedAt,
@@ -1060,8 +1108,8 @@ export class BillableAccounting {
     const { startedAt, endedAt } = normalizedTimes;
     const provider = sample.provider ?? identity.provider ?? 'unknown-provider';
     const model = sample.modelId ?? identity.modelId ?? 'unknown-model';
-    const gap = sample.instrumentationGap === true || sample.provenance === 'unknown';
-    const pricing = gap || sample.tokenChannelsKnown === false
+    const gap = sample.instrumentationGap === true || sample.provenance === 'unknown' || !channelsKnown;
+    const pricing = gap || !channelsKnown
       || sample.provenance === 'unpriced' || sample.provenance === 'unknown'
       ? undefined : this.pricingFor(model, provider, sample);
     const provenance = sample.provenance
@@ -1253,8 +1301,13 @@ function pruningUsageSamples(messageId: string, occurredAt: string, details: unk
       const output = read('output');
       const cacheRead = read('cacheRead');
       const cacheWrite = read('cacheWrite');
-      const usageKnown = input !== undefined && output !== undefined
-        && cacheRead !== undefined && cacheWrite !== undefined;
+      const tokenChannelPresence = {
+        input: input !== undefined,
+        output: output !== undefined,
+        cacheRead: cacheRead !== undefined,
+        cacheWrite: cacheWrite !== undefined,
+      };
+      const usageKnown = Object.values(tokenChannelPresence).every(Boolean);
       const sourceId = typeof invocation.invocationId === 'string' && invocation.invocationId.trim()
         ? invocation.invocationId : `skill-pruning:${messageId}:attempt:${index}`;
       const startedAt = validIso(typeof invocation.startedAt === 'string' ? invocation.startedAt : undefined)
@@ -1271,8 +1324,9 @@ function pruningUsageSamples(messageId: string, occurredAt: string, details: unk
         outputTokens: output ?? 0,
         cacheReadTokens: cacheRead ?? 0,
         cacheWriteTokens: cacheWrite ?? 0,
-        totalTokens: usageKnown ? input + output + cacheRead + cacheWrite : 0,
+        totalTokens: usageKnown ? input! + output! + cacheRead! + cacheWrite! : 0,
         ...(reportedCost !== undefined ? { reportedCostUsd: reportedCost } : {}),
+        ...(!usageKnown ? { tokenChannelsKnown: false, tokenChannelPresence } : {}),
         provenance: usageKnown ? (reportedCost !== undefined ? 'exact' : 'estimated') : 'unknown',
         instrumentationGap: !usageKnown,
         ...(!usageKnown ? { instrumentationGapReason: 'The pruning provider invocation returned no usage.' } : {}),
@@ -1285,17 +1339,41 @@ function pruningUsageSamples(messageId: string, occurredAt: string, details: unk
   }
 
   if (value.cacheHit === true) return [];
-  const read = (key: string): number => typeof value[key] === 'number'
-    && Number.isFinite(value[key]) && (value[key] as number) >= 0 ? value[key] as number : 0;
-  const inputTokens = read('prepassInputTokens');
-  const outputTokens = read('prepassOutputTokens');
-  const cacheReadTokens = read('prepassCacheReadTokens');
-  const cacheWriteTokens = read('prepassCacheWriteTokens');
+  const readOptional = (key: string): number | undefined => typeof value[key] === 'number'
+    && Number.isFinite(value[key]) && (value[key] as number) >= 0 ? value[key] as number : undefined;
+  const inputRaw = value.prepassInputTokens;
+  const outputRaw = value.prepassOutputTokens;
+  const cacheReadRaw = value.prepassCacheReadTokens;
+  const cacheWriteRaw = value.prepassCacheWriteTokens;
+  const inputTokens = readOptional('prepassInputTokens') ?? 0;
+  const outputTokens = readOptional('prepassOutputTokens') ?? 0;
+  const cacheReadTokens = readOptional('prepassCacheReadTokens') ?? 0;
+  const cacheWriteTokens = readOptional('prepassCacheWriteTokens') ?? 0;
+  const declaredPresence = value.prepassTokenChannelPresence && typeof value.prepassTokenChannelPresence === 'object'
+    && !Array.isArray(value.prepassTokenChannelPresence)
+    ? value.prepassTokenChannelPresence as Record<string, unknown> : undefined;
+  const hasChannelValues = [inputRaw, outputRaw, cacheReadRaw, cacheWriteRaw].some((channel) => channel !== undefined);
+  const inferredPresence = (raw: unknown): boolean => value.prepassTokenChannelsKnown === false
+    ? false : hasChannelValues ? validTokenChannel(raw) : true;
+  const tokenChannelPresence = {
+    input: typeof declaredPresence?.input === 'boolean'
+      ? declaredPresence.input && validTokenChannel(inputRaw) : inferredPresence(inputRaw),
+    output: typeof declaredPresence?.output === 'boolean'
+      ? declaredPresence.output && validTokenChannel(outputRaw) : inferredPresence(outputRaw),
+    cacheRead: typeof declaredPresence?.cacheRead === 'boolean'
+      ? declaredPresence.cacheRead && validTokenChannel(cacheReadRaw) : inferredPresence(cacheReadRaw),
+    cacheWrite: typeof declaredPresence?.cacheWrite === 'boolean'
+      ? declaredPresence.cacheWrite && validTokenChannel(cacheWriteRaw) : inferredPresence(cacheWriteRaw),
+  };
+  const tokenChannelsKnown = value.prepassTokenChannelsKnown !== false
+    && Object.values(tokenChannelPresence).every(Boolean);
   const reportedCostUsd = typeof value.prepassReportedCostUsd === 'number'
     && Number.isFinite(value.prepassReportedCostUsd) && value.prepassReportedCostUsd >= 0
     ? value.prepassReportedCostUsd : undefined;
-  const hasUsage = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens > 0
-    || reportedCostUsd !== undefined;
+  const totalTokens = tokenChannelsKnown
+    ? inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens : 0;
+  const hasUsage = totalTokens > 0 || reportedCostUsd !== undefined || !tokenChannelsKnown;
+  const instrumentationGap = !tokenChannelsKnown || !hasUsage;
   if (!value.prepassModel && !hasUsage && !value.prepassError) return [];
   return [{
     sourceId: `skill-pruning:${messageId}`,
@@ -1306,11 +1384,15 @@ function pruningUsageSamples(messageId: string, occurredAt: string, details: unk
     outputTokens,
     cacheReadTokens,
     cacheWriteTokens,
-    totalTokens: inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
+    totalTokens,
     ...(reportedCostUsd !== undefined ? { reportedCostUsd } : {}),
-    provenance: hasUsage ? (reportedCostUsd !== undefined ? 'exact' : 'estimated') : 'unknown',
-    instrumentationGap: !hasUsage,
-    ...(!hasUsage ? { instrumentationGapReason: 'The pruning prepass completed without provider usage.' } : {}),
+    ...(!tokenChannelsKnown ? { tokenChannelsKnown: false, tokenChannelPresence } : {}),
+    provenance: instrumentationGap ? 'unknown'
+      : reportedCostUsd !== undefined ? 'exact' : 'estimated',
+    instrumentationGap,
+    ...(instrumentationGap ? { instrumentationGapReason: !tokenChannelsKnown
+      ? 'The pruning provider response omitted one or more token channels.'
+      : 'The pruning prepass completed without provider usage.' } : {}),
     outcome: value.prepassError ? 'failed' : 'succeeded',
     startedAt: occurredAt,
     endedAt: occurredAt,

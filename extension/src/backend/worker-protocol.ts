@@ -274,6 +274,8 @@ export interface WorkerSettingsAuthoritativeFrame extends WorkerFrameBase {
   requestId: string;
   revision: number;
   values: WorkerJsonObject;
+  /** False when a conditional mutation observed a newer settings identity. */
+  applied?: boolean;
 }
 
 export interface WorkerInterruptFrame extends WorkerFrameBase {
@@ -342,6 +344,7 @@ export type CoordinatorToWorkerFrame =
   | WorkerProviderCancelAckFrame
   | WorkerProviderReleasedFrame
   | WorkerSettingsAuthoritativeFrame
+  | WorkerSessionControlResultFrame
   | WorkerInterruptFrame
   | WorkerShutdownFrame
   | WorkerDetailSubscribeFrame
@@ -468,7 +471,39 @@ export interface WorkerSettingsMutateFrame extends WorkerFrameBase {
   kind: 'settings.mutate';
   requestId: string;
   updates: WorkerJsonObject;
+  /** Explicit JSON deletion intent; undefined object properties do not survive
+   * worker serialization. */
+  unset?: string[];
+  /** Exact model-settings snapshot required for a conditional rollback. */
+  expected?: WorkerJsonObject;
 }
+
+/** Narrow worker-originated bridge for agent-facing session control. This is
+ * deliberately separate from runtime.command: the coordinator validates and
+ * owns the public session operation, while the worker only carries the tool's
+ * bounded request and correlated result. */
+export type WorkerSessionControlAction = 'list' | 'create' | 'read' | 'message' | 'close';
+
+export interface WorkerSessionControlFrame extends WorkerFrameBase {
+  kind: 'session.control';
+  requestId: string;
+  action: WorkerSessionControlAction;
+  payload: WorkerJsonObject;
+}
+
+export interface WorkerSessionControlError {
+  code: 'SESSION_CONTROL_FAILED';
+  message: string;
+  retryable: boolean;
+}
+
+export type WorkerSessionControlResultFrame = (WorkerFrameBase & {
+  kind: 'session.control.result';
+  requestId: string;
+}) & (
+  | { ok: true; result: WorkerJsonValue }
+  | { ok: false; error: WorkerSessionControlError }
+);
 
 export type WorkerResponseResult =
   | { kind: 'pong' }
@@ -595,6 +630,7 @@ export type WorkerToCoordinatorFrame =
   | WorkerProviderObservationFrame
   | WorkerProviderReleaseFrame
   | WorkerSettingsMutateFrame
+  | WorkerSessionControlFrame
   | WorkerResponseFrame
   | WorkerHeartbeatFrame
   | WorkerFatalFrame
@@ -634,12 +670,12 @@ export type WorkerToCoordinatorResponseFrame = Extract<WorkerToCoordinatorFrame,
 }> | WorkerDetailPageFrame | WorkerDetailErrorFrame;
 export type WorkerToCoordinatorRequestFrame = Extract<WorkerToCoordinatorFrame, {
   kind: 'ownership.reserve' | 'ownership.commit' | 'ownership.consume' | 'ownership.abort' | 'ownership.runtimeReady'
-    | 'provider.acquire' | 'provider.cancel' | 'provider.release' | 'settings.mutate' | 'analytics.rebind';
+    | 'provider.acquire' | 'provider.cancel' | 'provider.release' | 'settings.mutate' | 'analytics.rebind' | 'session.control';
 }>;
 export type CoordinatorToWorkerResponseFrame = Extract<CoordinatorToWorkerFrame, {
   kind: 'ownership.reserved' | 'ownership.committed' | 'ownership.consumed' | 'ownership.aborted' | 'ownership.rejected'
     | 'ownership.runtimeReadyAck' | 'provider.granted' | 'provider.cancelled' | 'provider.rejected' | 'provider.cancelAck'
-    | 'provider.released' | 'settings.authoritative' | 'analytics.rebound';
+    | 'provider.released' | 'settings.authoritative' | 'analytics.rebound' | 'session.control.result';
 }>;
 export type CoordinatorToWorkerRequestBody = RequestFrameBody<CoordinatorToWorkerRequestFrame>;
 export type WorkerToCoordinatorRequestBody = RequestFrameBody<WorkerToCoordinatorRequestFrame>;
@@ -777,6 +813,8 @@ function parseWorkerIpcFrameShapeInternal(value: unknown, requireSeq: boolean): 
     case 'provider.release': detail = validateProviderRelease(value, requireSeq); break;
     case 'provider.released': detail = validateProviderReleased(value, requireSeq); break;
     case 'settings.mutate': detail = validateSettingsMutate(value, requireSeq); break;
+    case 'session.control': detail = validateSessionControl(value, requireSeq); break;
+    case 'session.control.result': detail = validateSessionControlResult(value, requireSeq); break;
     case 'settings.authoritative': detail = validateSettingsAuthoritative(value, requireSeq); break;
     case 'sync': detail = validateSync(value, requireSeq); break;
     case 'sync.ack': detail = validateSyncAck(value, requireSeq); break;
@@ -828,7 +866,7 @@ function validateFrame<T extends WorkerIpcFrame>(
   const coordinatorKinds: ReadonlySet<WorkerIpcFrameKind> = new Set([
     'bootstrap', 'command', 'runtime.promote', 'runtime.command', 'sync',
     'ownership.reserved', 'ownership.committed', 'ownership.consumed', 'ownership.aborted', 'ownership.rejected', 'ownership.runtimeReadyAck',
-    'provider.granted', 'provider.cancelled', 'provider.rejected', 'provider.cancelAck', 'provider.released', 'settings.authoritative', 'interrupt', 'shutdown',
+    'provider.granted', 'provider.cancelled', 'provider.rejected', 'provider.cancelAck', 'provider.released', 'settings.authoritative', 'session.control.result', 'interrupt', 'shutdown',
     'detail.subscribe', 'detail.unsubscribe', 'detail.fetch', 'analytics.ack', 'analytics.rebound',
   ]);
   if ((direction === 'coordinator') !== coordinatorKinds.has(frame.kind)) {
@@ -1346,18 +1384,82 @@ function validateProviderReleased(value: Record<string, unknown>, requireSeq: bo
 }
 
 function validateSettingsMutate(value: Record<string, unknown>, requireSeq: boolean): string | undefined {
-  const extra = exactKeys(value, [...baseKeys(requireSeq), 'requestId', 'updates']);
+  const extra = exactKeys(value, [...baseKeys(requireSeq), 'requestId', 'updates'], ['unset', 'expected']);
   if (extra) return extra;
   if (!boundedString(value.requestId, MAX_ID_BYTES)) return 'requestId must be a bounded non-empty string.';
-  return validateJsonObject(value.updates, 'settings.mutate.updates');
+  const updatesError = validateJsonObject(value.updates, 'settings.mutate.updates');
+  if (updatesError) return updatesError;
+  if (value.unset !== undefined) {
+    if (!Array.isArray(value.unset)
+        || value.unset.some((key) => key !== 'defaultProvider')) {
+      return 'settings.mutate.unset may contain only defaultProvider.';
+    }
+  }
+  if (value.expected !== undefined) {
+    const expectedError = validateJsonObject(value.expected, 'settings.mutate.expected');
+    if (expectedError) return expectedError;
+    if (!isRecord(value.expected)) return 'settings.mutate.expected must be an object.';
+    const expectedKeys = Object.keys(value.expected);
+    if (expectedKeys.some((key) => key !== 'defaultModel'
+      && key !== 'defaultThinkingLevel' && key !== 'defaultProvider')) {
+      return 'settings.mutate.expected contains an unsupported key.';
+    }
+    if (typeof value.expected.defaultModel !== 'string'
+      || Buffer.byteLength(value.expected.defaultModel, 'utf8') > MAX_ID_BYTES) {
+      return 'settings.mutate.expected.defaultModel must be a bounded string.';
+    }
+    if (!boundedString(value.expected.defaultThinkingLevel, MAX_ID_BYTES)) {
+      return 'settings.mutate.expected.defaultThinkingLevel must be a bounded non-empty string.';
+    }
+    if (value.expected.defaultProvider !== undefined
+      && value.expected.defaultProvider !== null
+      && !boundedString(value.expected.defaultProvider, MAX_ID_BYTES)) {
+      return 'settings.mutate.expected.defaultProvider must be null or a bounded non-empty string.';
+    }
+  }
+  return undefined;
 }
 
 function validateSettingsAuthoritative(value: Record<string, unknown>, requireSeq: boolean): string | undefined {
-  const extra = exactKeys(value, [...baseKeys(requireSeq), 'requestId', 'revision', 'values']);
+  const extra = exactKeys(value, [...baseKeys(requireSeq), 'requestId', 'revision', 'values'], ['applied']);
   if (extra) return extra;
   if (!boundedString(value.requestId, MAX_ID_BYTES)) return 'requestId must be a bounded non-empty string.';
   if (!isSafePositiveInteger(value.revision)) return 'settings.authoritative.revision must be positive.';
+  if (value.applied !== undefined && typeof value.applied !== 'boolean') return 'settings.authoritative.applied must be boolean.';
   return validateJsonObject(value.values, 'settings.authoritative.values');
+}
+
+function validateSessionControl(value: Record<string, unknown>, requireSeq: boolean): string | undefined {
+  const extra = exactKeys(value, [...baseKeys(requireSeq), 'requestId', 'action', 'payload']);
+  if (extra) return extra;
+  if (!boundedString(value.requestId, MAX_ID_BYTES)) return 'requestId must be a bounded non-empty string.';
+  if (value.action !== 'list' && value.action !== 'create' && value.action !== 'read'
+      && value.action !== 'message' && value.action !== 'close') {
+    return 'session.control.action is invalid.';
+  }
+  return validateJsonObject(value.payload, 'session.control.payload');
+}
+
+function validateSessionControlResult(value: Record<string, unknown>, requireSeq: boolean): string | undefined {
+  if (value.ok === true) {
+    const extra = exactKeys(value, [...baseKeys(requireSeq), 'requestId', 'ok', 'result']);
+    if (extra) return extra;
+    if (!boundedString(value.requestId, MAX_ID_BYTES)) return 'requestId must be a bounded non-empty string.';
+    return validateJsonValue(value.result, 'session.control.result');
+  }
+  if (value.ok === false) {
+    const extra = exactKeys(value, [...baseKeys(requireSeq), 'requestId', 'ok', 'error']);
+    if (extra) return extra;
+    if (!boundedString(value.requestId, MAX_ID_BYTES)) return 'requestId must be a bounded non-empty string.';
+    if (!isRecord(value.error)) return 'session.control.result.error must be an object.';
+    const errorKeys = exactKeys(value.error, ['code', 'message', 'retryable']);
+    if (errorKeys) return `session.control.result.error ${errorKeys}`;
+    if (value.error.code !== 'SESSION_CONTROL_FAILED') return 'session.control.result.error.code is invalid.';
+    if (!boundedString(value.error.message, MAX_ERROR_MESSAGE_BYTES)) return 'session.control.result.error.message must be bounded.';
+    if (typeof value.error.retryable !== 'boolean') return 'session.control.result.error.retryable must be boolean.';
+    return undefined;
+  }
+  return 'session.control.result.ok must be boolean.';
 }
 
 function validateSync(value: Record<string, unknown>, requireSeq: boolean): string | undefined {

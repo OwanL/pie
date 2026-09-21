@@ -17,11 +17,13 @@ import {
   contextFileEntryId,
   installAutonomousModeToolGuard,
   installMcpToolGuard,
+  installSubagentPolicyToolGuard,
   installSystemPromptToggleRebuildGuard,
   installSystemPromptToolToggleGuard,
   isSupersetSystemPromptOptions,
   markDisabledEntries,
   stripDisabledSectionsFromPrompt,
+  subagentPolicyActiveToolUpdate,
 } from '../../../src/backend/system-prompts';
 
 function makeSkill(name: string): SdkSkill {
@@ -697,5 +699,49 @@ test('building display entries from filtered options drops the disabled row (the
     promptOptions: filtered,
   });
   assert.ok(!prompts.some((p) => p.id === contextFileEntryId('/repo/AGENTS.md')));
+});
+
+test('Subagent policy guard strips the subagent tool while every provider is unchecked', () => {
+  let subagentsDisabled = true;
+  const applied: string[][] = [];
+  const session = {
+    setActiveToolsByName(names: string[]) { applied.push(names); },
+  };
+
+  installSubagentPolicyToolGuard(session, () => subagentsDisabled);
+  // Simulates skill-pruner restoration re-adding previously pruned tools.
+  session.setActiveToolsByName(['read', 'subagent', 'bash']);
+  assert.deepEqual(applied, [['read', 'bash']]);
+
+  // Re-enabling any provider stops the filtering (the tool may be restored by
+  // the worker host's policy application).
+  subagentsDisabled = false;
+  session.setActiveToolsByName(['read', 'subagent', 'bash']);
+  assert.deepEqual(applied.at(-1), ['read', 'subagent', 'bash']);
+});
+
+test('subagentPolicyActiveToolUpdate removes while disabled and restores when registered', () => {
+  // Disabled + present → removed.
+  assert.deepEqual(
+    subagentPolicyActiveToolUpdate(['read', 'subagent', 'bash'], ['read', 'subagent', 'bash'], true),
+    ['read', 'bash'],
+  );
+  // Disabled + absent → no-op.
+  assert.equal(subagentPolicyActiveToolUpdate(['read', 'bash'], ['read', 'bash'], true), undefined);
+  // Enabled + present → no-op.
+  assert.equal(
+    subagentPolicyActiveToolUpdate(['read', 'subagent'], ['read', 'subagent'], false),
+    undefined,
+  );
+  // Enabled + registered but inactive → restored.
+  assert.deepEqual(
+    subagentPolicyActiveToolUpdate(['read', 'bash'], ['read', 'subagent', 'bash'], false),
+    ['read', 'bash', 'subagent'],
+  );
+  // Enabled but not registered (extension toggle off) → no-op.
+  assert.equal(
+    subagentPolicyActiveToolUpdate(['read', 'bash'], ['read', 'bash'], false),
+    undefined,
+  );
 });
 

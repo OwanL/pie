@@ -67,28 +67,52 @@ test('DEFAULT_CHAT_PREFS shape', () => {
     medium: true,
     frontier: true,
   });
-  assert.equal(typeof DEFAULT_CHAT_PREFS.uiMessageWidth, 'number');
-  assert.equal(DEFAULT_CHAT_PREFS.uiMessageWidth, 88);
   assert.equal(typeof DEFAULT_CHAT_PREFS.uiBackground, 'string');
   assert.equal(typeof DEFAULT_CHAT_PREFS.uiForeground, 'string');
   assert.equal(typeof DEFAULT_CHAT_PREFS.uiBorder, 'string');
   assert.equal(typeof DEFAULT_CHAT_PREFS.uiCornerRadius, 'number');
-  assert.equal(DEFAULT_CHAT_PREFS.uiCornerRadius, 8);
+  assert.equal(DEFAULT_CHAT_PREFS.uiCornerRadius, 4);
   assert.equal(typeof DEFAULT_CHAT_PREFS.uiDensity, 'string');
-  assert.equal(DEFAULT_CHAT_PREFS.uiDensity, 'comfortable');
-  // Per-place font sizes default to the bundled sizes (13px) so an uncustomized
-  // panel is unchanged; color overrides default to '' (use bundled defaults).
+  assert.equal(DEFAULT_CHAT_PREFS.uiDensity, 'compact');
+  // These values are the current customized appearance promoted to the
+  // bundled baseline; color overrides remain empty so the palette stays in CSS.
   assert.equal(typeof DEFAULT_CHAT_PREFS.uiBaseFontSize, 'number');
-  assert.equal(DEFAULT_CHAT_PREFS.uiBaseFontSize, 13);
+  assert.equal(DEFAULT_CHAT_PREFS.uiBaseFontSize, 11);
   assert.equal(typeof DEFAULT_CHAT_PREFS.uiComposerFontSize, 'number');
-  assert.equal(DEFAULT_CHAT_PREFS.uiComposerFontSize, 13);
+  assert.equal(DEFAULT_CHAT_PREFS.uiComposerFontSize, 11);
+  assert.equal(DEFAULT_CHAT_PREFS.expandedSectionFontSize, 10);
+  assert.equal(DEFAULT_CHAT_PREFS.uiFontMono, '"JetBrains Mono", "Cascadia Code", Consolas, monospace');
+  assert.equal(DEFAULT_CHAT_PREFS.activityTailLines, 5);
   assert.equal(typeof DEFAULT_CHAT_PREFS.composerInitialRows, 'number');
   assert.equal(DEFAULT_CHAT_PREFS.composerInitialRows, 1);
   assert.equal(typeof DEFAULT_CHAT_PREFS.uiMutedColor, 'string');
   assert.equal(DEFAULT_CHAT_PREFS.uiMutedColor, '');
   assert.equal(typeof DEFAULT_CHAT_PREFS.uiLinkColor, 'string');
   assert.equal(DEFAULT_CHAT_PREFS.uiLinkColor, '');
-  assert.equal(DEFAULT_CHAT_PREFS.uiPathParentDepth, 1);
+  assert.equal(DEFAULT_CHAT_PREFS.uiPathParentDepth, 0);
+});
+
+test('resolveChatPrefs promotes new appearance defaults without resetting stored overrides', () => {
+  const stored = {
+    uiBaseFontSize: 15,
+    uiComposerFontSize: 17,
+    expandedSectionFontSize: 12,
+    uiFontMono: 'Consolas, monospace',
+    uiBackground: '#101820',
+    uiCornerRadius: 12,
+    uiDensity: 'spacious',
+    uiMessageWidth: 100,
+  } as unknown as Partial<import('../../../src/shared/protocol').ChatPrefs>;
+
+  const resolved = resolveChatPrefs(stored);
+  assert.equal(resolved.uiBaseFontSize, 15);
+  assert.equal(resolved.uiComposerFontSize, 17);
+  assert.equal(resolved.expandedSectionFontSize, 12);
+  assert.equal(resolved.uiFontMono, 'Consolas, monospace');
+  assert.equal(resolved.uiBackground, '#101820');
+  assert.equal(resolved.uiCornerRadius, 12);
+  assert.equal(resolved.uiDensity, 'spacious');
+  assert.equal(Object.prototype.hasOwnProperty.call(resolved, 'uiMessageWidth'), false);
 });
 
 test('resolveChatPrefs defaults and validates autonomous mode', () => {
@@ -118,7 +142,7 @@ test('resolveChatPrefs preserves valid path depth and defaults malformed stored 
   assert.equal(resolveChatPrefs({ uiPathParentDepth: 0 }).uiPathParentDepth, 0);
   assert.equal(resolveChatPrefs({ uiPathParentDepth: 8 }).uiPathParentDepth, 8);
   for (const invalid of [-1, 9, 1.5, Number.NaN, '2']) {
-    assert.equal(resolveChatPrefs({ uiPathParentDepth: invalid as never }).uiPathParentDepth, 1);
+    assert.equal(resolveChatPrefs({ uiPathParentDepth: invalid as never }).uiPathParentDepth, 0);
   }
 });
 

@@ -1,15 +1,8 @@
-// Shared post-install readiness checks for the pie installers.
+// Shared post-install readiness checks for the Windows installer.
 //
-// The app starts but cannot talk to any model without auth/provider keys. Both
-// installers detect that gap and tell the user exactly what to do next. The
-// auth-content, provider-env, and split-brain checks were duplicated as inline
-// PowerShell / `node -e` snippets; they now share these pure helpers.
-//
-// Platform-specific remediation advice (setx on Windows, export on POSIX) is
-// selected via the `platform` option so the shared reporter stays accurate on
-// both OSes. install.ps1 additionally keeps its pie.agentDir /
-// PI_CODING_AGENT_DIR env checks in PowerShell (those are Windows-only and not
-// duplicated with install.sh).
+// The app starts but cannot talk to any model without auth/provider keys. These
+// pure helpers detect that gap and report remediation. The platform option is
+// retained so the helpers remain independently testable.
 
 import path from 'node:path';
 import { authHasContent, authProviderNames, readAuthProviders } from './auth.mjs';
@@ -32,10 +25,9 @@ const PROVIDER_ENV_VARS = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GOOGLE_API_KE
  * Check whether the backend has any usable credentials (auth.json content or a
  * provider API key env var). Returns platform-appropriate remediation advice.
  *
- * `providerEnvPresent` (when defined) overrides the env-var scan — install.ps1
- * checks provider keys at Windows User scope (registry), which a Node subprocess
- * cannot see in process.env, so the wrapper computes that itself and passes it
- * in. install.sh leaves it unset so this falls back to process.env.
+ * `providerEnvPresent` (when defined) overrides the env-var scan. install.bat
+ * checks provider keys at Windows User scope, which a Node subprocess cannot
+ * see in process.env, so the wrapper computes that itself and passes it in.
  *
  * @param {{ authPath: string, providerEnv?: Record<string, string | undefined>, providerEnvPresent?: boolean, platform?: 'win32' | 'posix' }} input
  * @returns {ReadinessCheck}
@@ -78,9 +70,8 @@ export function checkAuthReadiness({ authPath, providerEnv = process.env, provid
 
 /**
  * Verify `pie.agentDir` is set to the expected repo root in VS Code User
- * settings. install.ps1 did this check inline in PowerShell; install.bat folds
- * it into the shared readiness call via `--vscode-agent-dir-expected` (install.sh
- * leaves it unset, so this is skipped on POSIX). The setting is read from every
+ * settings. install.bat folds this into the shared readiness call via
+ * `--vscode-agent-dir-expected`. The setting is read from every
  * candidate VS Code User settings dir; the check passes if ANY of them already
  * points at the expected repo root (write-vscode-agent-dir writes to all that
  * exist, creating %APPDATA%/Code/User on Windows).
@@ -120,7 +111,7 @@ export function checkSplitBrain({ inTreeAuthPath, authDirResolved, repoRoot }) {
     level: 'warn',
     lines: [
       `[!] Split-brain: auth.json with real creds found in repo root, but backend reads from ${authDirResolved}`,
-      `      Re-run this installer to auto-merge, or copy manually: cp '${inTreeAuthPath}' '${backendAuthPath}'`,
+      `      Re-run this installer to auto-merge, or copy manually: copy /Y "${inTreeAuthPath}" "${backendAuthPath}"`,
     ],
   };
 }

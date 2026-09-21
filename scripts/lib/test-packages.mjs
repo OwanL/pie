@@ -302,7 +302,6 @@ const GLOBAL_INFRA_EXACT_PATHS = new Set([
   'scripts/test-reporter.mjs',
   'package.json',
   'package-lock.json',
-  '.nvmrc',
   '.node-version',
 ]);
 

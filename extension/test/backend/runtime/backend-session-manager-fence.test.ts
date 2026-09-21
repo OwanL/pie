@@ -87,6 +87,56 @@ test('mutation methods delegate before invalidation', () => {
   ]);
 });
 
+test('unexpected admission failures surface instead of becoming fenced success', () => {
+  const manager = createMockManager();
+  const admissionError = new Error('writer admission failed unexpectedly');
+  const { manager: wrapped } = createSessionManagerFence(manager, {
+    admission: {
+      acquire: () => { throw admissionError; },
+    },
+  });
+
+  assert.throws(
+    () => wrapped.appendMessage({ role: 'assistant', content: 'reply' }),
+    (error) => error === admissionError,
+  );
+  assert.deepEqual(manager.calls as Call[], []);
+});
+
+test('unexpected admission failures can be handed to an owning fail-closed boundary', () => {
+  const manager = createMockManager();
+  const admissionError = new Error('writer admission failed unexpectedly');
+  const observed: unknown[] = [];
+  const { manager: wrapped } = createSessionManagerFence(manager, {
+    admission: {
+      acquire: () => { throw admissionError; },
+    },
+    onUnexpectedAdmissionFailure: (error) => observed.push(error),
+  });
+
+  assert.equal(wrapped.appendMessage({ role: 'assistant', content: 'reply' }), FENCED_ENTRY_ID);
+  assert.deepEqual(observed, [admissionError]);
+  assert.deepEqual(manager.calls as Call[], []);
+});
+
+test('admission failure after revocation remains a fenced no-op', () => {
+  const manager = createMockManager();
+  const admissionError = new Error('writer was revoked during admission');
+  const invalidation: { run: () => void } = { run: () => undefined };
+  const guarded = createSessionManagerFence(manager, {
+    admission: {
+      acquire: () => {
+        invalidation.run();
+        throw admissionError;
+      },
+    },
+  });
+  invalidation.run = guarded.fence.invalidate;
+
+  assert.equal(guarded.manager.appendMessage({ role: 'assistant', content: 'reply' }), FENCED_ENTRY_ID);
+  assert.deepEqual(manager.calls as Call[], []);
+});
+
 test('mutation methods are no-ops after invalidation', () => {
   const manager = createMockManager();
   const { manager: wrapped, fence } = createSessionManagerFence(manager);

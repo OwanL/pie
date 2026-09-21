@@ -16,6 +16,11 @@ export interface TranscriptPageLoadOptions {
   requiredMessageId?: string;
 }
 
+/** The only model-settings key whose absence has meaning on the JSON wire.
+ * Keep deletion explicit across the worker boundary; JSON.stringify otherwise
+ * drops an `undefined` provider and turns a rollback into a merge-only update. */
+export type ModelSettingsUnsetKey = 'defaultProvider';
+
 const DEFAULT_SESSION_TRANSITION_WAIT_MS = 30 * 1000;
 const DEFAULT_SESSION_TRANSITION_POLL_MS = 10;
 
@@ -57,6 +62,11 @@ export interface BackendRequestHandlerDeps {
    *  busy/transitioning, or the coordinator has no runtime router — never
    *  throws for the ordinary refusal cases. */
   recycleSessionRuntime?(sessionPath: string, reason: string): Promise<boolean>;
+  /** Fail closed when a live model setter cannot restore the exact predecessor.
+   * A successful result means the runtime is no longer able to bill; a false
+   * result must be surfaced rather than silently leaving a possibly wrong model
+   * active. */
+  retireSessionRuntime?(sessionPath: string, reason: string): Promise<boolean>;
   /** Runtime-free coordinator operations. Production wires these to the one
    * generation-scoped ColdSessionStore and retains its process-local manager
    * handle for the first legacy promotion (or later isolated worker transfer). */
@@ -183,6 +193,15 @@ export interface BackendRequestHandlerDeps {
   listAvailableModels(context?: SessionContext): ModelInfo[] | Promise<ModelInfo[]>;
   readModelSettings(): Promise<ModelSettings>;
   writeModelSettings(updates: Partial<ModelSettings>): Promise<ModelSettings>;
+  /** Atomically apply a rollback only while the persisted model identity still
+   * equals `expected`. The coordinator/worker implementation also carries the
+   * explicit provider deletion wire bit, so a newer switch cannot be replaced
+   * by stale predecessor settings. */
+  writeModelSettingsIfCurrent?(
+    expected: ModelSettings,
+    updates: Partial<ModelSettings>,
+    unset?: readonly ModelSettingsUnsetKey[],
+  ): Promise<boolean>;
   /** Cross-worker provider-gate metrics for the `provider_gate.metrics` RPC.
    *  Production injects the coordinator lease authority; standalone paths
    *  fall back to the in-process gate inside the handler. */

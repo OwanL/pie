@@ -178,15 +178,20 @@ export function onToolFinished(
   // status==='failed' tools) — otherwise the live manifest would diverge from
   // the reattach manifest by leaking a failed subagent's inner changes.
   if (toolCall.name === 'subagent' && isRecord(payload.result) && payload.status !== 'failed') {
+    const arch = deps.getArchState();
+    const cwd = resolveSessionCwd(arch.sessions.sessions, arch.sessions.workspaceCwd, sessionPath);
+    const owningCwd = isRecord(toolCall.input) && typeof toolCall.input.cwd === 'string' && toolCall.input.cwd.trim()
+      ? toolCall.input.cwd
+      : undefined;
     const subagentChanges = deriveFileChangesFromSubagentResult(
       payload.result,
       payload.messageId,
       new Date().toISOString(),
       payload.toolCallId,
+      cwd,
+      owningCwd,
     );
     if (subagentChanges.length > 0) {
-      const arch = deps.getArchState();
-      const cwd = resolveSessionCwd(arch.sessions.sessions, arch.sessions.workspaceCwd, sessionPath);
       const existingChanges = arch.fileChanges.bySession[sessionPath] ?? [];
       const next = [...existingChanges];
       for (const change of subagentChanges) {

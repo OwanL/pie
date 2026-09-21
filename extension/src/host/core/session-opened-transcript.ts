@@ -19,8 +19,21 @@ export interface SessionOpenedTranscriptResolution {
 
 function isEphemeralMessage(message: ChatMessage): boolean {
   return message.status === 'streaming'
-    || message.id.startsWith('local:')
+    || message.status === 'queued'
+    || (message.durableEntryId === undefined && message.id.startsWith('local:'))
     || (message.toolCalls?.some((tc) => tc.status === 'running') ?? false);
+}
+
+/** Compare transcript rows without treating a changed transport id as a new
+ * logical entry when the SDK's durable identity survived the boundary. */
+function hasSameTranscriptIdentity(left: ChatMessage, right: ChatMessage): boolean {
+  if (left.role !== right.role) {
+    return false;
+  }
+  if (left.durableEntryId !== undefined && right.durableEntryId !== undefined) {
+    return left.durableEntryId === right.durableEntryId;
+  }
+  return left.id === right.id;
 }
 
 function hasEphemeralLocalTranscript(localTranscript: ChatMessage[]): boolean {
@@ -53,30 +66,48 @@ function userContentSignature(message: ChatMessage): string | null {
 
 function hasEquivalentIncomingUserAfterLocalPrefix(options: {
   incomingTranscript: ChatMessage[];
+  incomingTranscriptWindow: TranscriptWindow;
   localTranscript: ChatMessage[];
+  localTranscriptWindow: TranscriptWindow | undefined;
   localIndex: number;
   signature: string;
-}): boolean {
-  let incomingStartIndex = 0;
-
-  for (let index = options.localIndex - 1; index >= 0; index -= 1) {
-    const previousLocalMessage = options.localTranscript[index];
-    if (!previousLocalMessage || isEphemeralMessage(previousLocalMessage)) {
-      continue;
-    }
-
-    const matchingIncomingIndex = options.incomingTranscript.findIndex(
-      (message) => message.id === previousLocalMessage.id,
-    );
-    if (matchingIncomingIndex !== -1) {
-      incomingStartIndex = matchingIncomingIndex + 1;
-      break;
-    }
+  matchedIncomingIndices: ReadonlySet<number>;
+  nextIncomingIndexByPrefix: Map<number, number | null>;
+}): { equivalent: true; incomingIndex: number } | { equivalent: false } {
+  const incomingStartIndex = findIncomingStartIndexForLocalPrefix({
+    incomingTranscript: options.incomingTranscript,
+    incomingTranscriptWindow: options.incomingTranscriptWindow,
+    localTranscript: options.localTranscript,
+    localTranscriptWindow: options.localTranscriptWindow,
+    localIndex: options.localIndex,
+  });
+  // Content alone cannot establish which earlier turn a repeated prompt
+  // belongs to. Require either an identity anchor or explicit knowledge that
+  // both windows begin at the branch origin before using it as a transport
+  // echo fallback.
+  if (incomingStartIndex === undefined) {
+    return { equivalent: false };
   }
 
-  return options.incomingTranscript
-    .slice(incomingStartIndex)
-    .some((message) => userContentSignature(message) === options.signature);
+  // Local optimistic rows after the same durable prefix are matched in order.
+  // Once one row has no matching echo, later rows stay local rather than
+  // allowing a later echo to be assigned to the wrong prompt.
+  const nextIncomingIndex = options.nextIncomingIndexByPrefix.get(incomingStartIndex);
+  if (nextIncomingIndex === null) {
+    return { equivalent: false };
+  }
+  const searchStartIndex = nextIncomingIndex ?? incomingStartIndex;
+  for (let index = searchStartIndex; index < options.incomingTranscript.length; index += 1) {
+    if (options.matchedIncomingIndices.has(index)) {
+      continue;
+    }
+    if (userContentSignature(options.incomingTranscript[index]) === options.signature) {
+      options.nextIncomingIndexByPrefix.set(incomingStartIndex, index + 1);
+      return { equivalent: true, incomingIndex: index };
+    }
+  }
+  options.nextIncomingIndexByPrefix.set(incomingStartIndex, null);
+  return { equivalent: false };
 }
 
 /**
@@ -146,7 +177,9 @@ function reconcileIncomingDurableRenderMetadata(
 
 function mergeIncomingWithEphemeralLocal(
   incomingTranscript: ChatMessage[],
+  incomingTranscriptWindow: TranscriptWindow,
   localTranscript: ChatMessage[],
+  localTranscriptWindow: TranscriptWindow | undefined,
 ): { transcript: ChatMessage[]; appendedCount: number; aliases: Array<{ aliasId: string; canonicalId: string }> } {
   const merged = [...incomingTranscript];
   const indexById = new Map<string, number>();
@@ -155,6 +188,8 @@ function mergeIncomingWithEphemeralLocal(
   }
 
   const aliases: Array<{ aliasId: string; canonicalId: string }> = [];
+  const matchedIncomingUserIndices = new Set<number>();
+  const nextIncomingUserIndexByPrefix = new Map<number, number | null>();
   let appendedCount = 0;
   for (let localIndex = 0; localIndex < localTranscript.length; localIndex += 1) {
     const localMessage = localTranscript[localIndex];
@@ -166,13 +201,16 @@ function mergeIncomingWithEphemeralLocal(
     if (existingIndex !== undefined) {
       // Same id already exists in the incoming snapshot. Keep the richer local
       // streaming/optimistic state until authoritative data lands. The ids are
-      // identical, so no alias is needed.
+      // identical, so no alias is needed. Claim the row so a later repeated
+      // optimistic user cannot consume the same incoming echo again.
       merged[existingIndex] = localMessage;
+      matchedIncomingUserIndices.add(existingIndex);
       continue;
     }
 
-    // No id match — for user messages, fall back to content-signature dedup.
-    // For assistant messages, fall back to tool-call-id dedup because the
+    // No id match — for user messages, use content-signature dedup only
+    // after an identity-anchored prefix. For assistant messages, fall back to
+    // tool-call-id dedup because the
     // message id is not stable across the local↔incoming boundary but
     // tool-call ids assigned by the SDK ARE stable. Without this check, a
     // streaming assistant message in the local transcript and its persisted
@@ -180,23 +218,30 @@ function mergeIncomingWithEphemeralLocal(
     // up in the merged transcript, producing a visible duplicate.
     if (localMessage.role === 'user') {
       const signature = userContentSignature(localMessage);
-      if (
-        signature
-        && hasEquivalentIncomingUserAfterLocalPrefix({
+      if (signature) {
+        const equivalent = hasEquivalentIncomingUserAfterLocalPrefix({
           incomingTranscript,
+          incomingTranscriptWindow,
           localTranscript,
+          localTranscriptWindow,
           localIndex,
           signature,
-        })
-      ) {
-        continue;
+          matchedIncomingIndices: matchedIncomingUserIndices,
+          nextIncomingIndexByPrefix: nextIncomingUserIndexByPrefix,
+        });
+        if (equivalent.equivalent) {
+          matchedIncomingUserIndices.add(equivalent.incomingIndex);
+          continue;
+        }
       }
     } else if (localMessage.role === 'assistant') {
       const incomingStartIndex = findIncomingStartIndexForLocalPrefix({
         incomingTranscript,
+        incomingTranscriptWindow,
         localTranscript,
+        localTranscriptWindow,
         localIndex,
-      });
+      }) ?? 0;
       const localToolCallIds = assistantToolCallIds(localMessage);
       const equivalent = hasEquivalentIncomingAssistantByToolCallIds({
         incomingTranscript,
@@ -226,31 +271,44 @@ function mergeIncomingWithEphemeralLocal(
   return { transcript: merged, appendedCount, aliases };
 }
 
+/** A loaded window at index zero is the only safe way to know that its
+ * first row is the branch origin. A partial window can begin in the middle of
+ * a repeated prompt sequence, so its first row must not be treated as index
+ * zero for content-only matching. */
+function isBranchOriginWindow(window: TranscriptWindow | undefined): boolean {
+  return window !== undefined && window.loadedStart === 0 && !window.hasOlder;
+}
+
 /**
- * Mirror of `hasEquivalentIncomingUserAfterLocalPrefix`: find the earliest
- * non-ephemeral local message before `localIndex` whose id appears in the
- * incoming transcript, then start scanning the incoming from the position
- * after that match. Falls back to scanning from index 0 when no pivot is
- * found.
+ * Find the position after the nearest preceding non-ephemeral local row that
+ * is also present in the incoming snapshot. Durable entry ids are preferred
+ * over transport ids because local assistant rows may use synthetic ids. If
+ * there is no completed prefix, use index zero only when both transcript
+ * windows explicitly include the branch origin; otherwise leave repeated
+ * content ambiguous.
  */
 function findIncomingStartIndexForLocalPrefix(options: {
   incomingTranscript: ChatMessage[];
+  incomingTranscriptWindow: TranscriptWindow;
   localTranscript: ChatMessage[];
+  localTranscriptWindow: TranscriptWindow | undefined;
   localIndex: number;
-}): number {
+}): number | undefined {
   for (let index = options.localIndex - 1; index >= 0; index -= 1) {
     const previousLocalMessage = options.localTranscript[index];
     if (!previousLocalMessage || isEphemeralMessage(previousLocalMessage)) {
       continue;
     }
     const matchingIncomingIndex = options.incomingTranscript.findIndex(
-      (message) => message.id === previousLocalMessage.id,
+      (message) => hasSameTranscriptIdentity(message, previousLocalMessage),
     );
-    if (matchingIncomingIndex !== -1) {
-      return matchingIncomingIndex + 1;
-    }
+    return matchingIncomingIndex === -1 ? undefined : matchingIncomingIndex + 1;
   }
-  return 0;
+
+  return isBranchOriginWindow(options.localTranscriptWindow)
+    && isBranchOriginWindow(options.incomingTranscriptWindow)
+    ? 0
+    : undefined;
 }
 
 export function resolveSessionOpenedTranscript({
@@ -258,11 +316,13 @@ export function resolveSessionOpenedTranscript({
   incomingTranscript,
   incomingTranscriptWindow,
   localTranscript,
+  localTranscriptWindow,
 }: {
   busy: boolean;
   incomingTranscript: ChatMessage[];
   incomingTranscriptWindow: TranscriptWindow;
   localTranscript: ChatMessage[];
+  localTranscriptWindow?: TranscriptWindow;
 }): SessionOpenedTranscriptResolution {
   // Backend transcript snapshots carry complete tool results once in ordered
   // `parts`; restore the legacy flat mirror only after the JSON transport has
@@ -283,7 +343,12 @@ export function resolveSessionOpenedTranscript({
     };
   }
 
-  const merged = mergeIncomingWithEphemeralLocal(reconciledIncomingTranscript, localTranscript);
+  const merged = mergeIncomingWithEphemeralLocal(
+    reconciledIncomingTranscript,
+    incomingTranscriptWindow,
+    localTranscript,
+    localTranscriptWindow,
+  );
   const mergedWindow: TranscriptWindow = {
     ...incomingTranscriptWindow,
     totalCount: incomingTranscriptWindow.totalCount + merged.appendedCount,

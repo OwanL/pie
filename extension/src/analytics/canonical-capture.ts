@@ -52,6 +52,42 @@ export interface CanonicalAnalyticsLifecycleSink {
   ): Promise<unknown>;
 }
 
+export type CanonicalAnalyticsCaptureDisposition =
+  | { status: 'durable' }
+  | { status: 'rejected'; code: string; message: string };
+
+export interface CanonicalAnalyticsSink extends AnalyticsSink {
+  /** Optional acknowledgement-preserving ingress. A rejected disposition is
+   * definitive for this observation; a Promise rejection from submit() is
+   * intentionally treated as ambiguous and retained for replay. */
+  submitTracked?: (
+    observation: AnalyticsObservation<object>,
+    onDisposition: (disposition: CanonicalAnalyticsCaptureDisposition) => void,
+  ) => void;
+}
+
+interface SourceSequenceEntry {
+  readonly value: string;
+  readonly epoch: SourceSequenceEpoch;
+  pendingSubmissions: number;
+  admitted: boolean;
+}
+
+/** One producer origin epoch: a stable origin identity plus its own monotonic
+ * delivery-sequence counter. Epochs let the producer quarantine a permanently
+ * holed sequence stream while new facts keep recording on a fresh origin. */
+interface SourceSequenceEpoch {
+  readonly index: number;
+  readonly originId: string;
+  sequence: bigint;
+}
+
+interface SourceSequenceAssignment {
+  readonly value: string;
+  readonly entry: SourceSequenceEntry;
+  settled: boolean;
+}
+
 export interface CanonicalAnalyticsCaptureOptions {
   authority: AnalyticsAuthority;
   generationId?: string;
@@ -61,7 +97,7 @@ export interface CanonicalAnalyticsCaptureOptions {
   /** Bounded recent-source replay cache. Older exact redetections receive a
    * new delivery sequence and remain idempotent at the recorder. */
   maxTrackedSourceKeys?: number;
-  sink?: AnalyticsSink;
+  sink?: CanonicalAnalyticsSink;
   detailSink?: AnalyticsDetailSink;
   lifecycleSink?: CanonicalAnalyticsLifecycleSink;
   onCaptureError?: (error: Error, observation: AnalyticsObservation<object>) => void;
@@ -92,6 +128,10 @@ function optionalNonNegativeDuration(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
+function isSequenceConsumedBySinkRejection(error: unknown): boolean {
+  return error instanceof Error && error.message.startsWith('Analytics capture subject is deleted:');
+}
+
 /** Stable fallback only for pre-identity observations. The path itself is not
  * persisted in canonical analytics or source identities. */
 export function analyticsRootSessionId(sessionId: string | null, sessionPath: string): string {
@@ -108,23 +148,38 @@ export function analyticsPendingOperationId(operationId: string | null | undefin
 
 /**
  * Producer-side adapter for the canonical recorder DTO. It assigns one
- * monotonic source sequence per process generation and never waits for a
+ * monotonic source sequence per producer origin epoch and never waits for a
  * recorder acknowledgement. A synchronous capacity failure or asynchronous
  * transport rejection is surfaced through onCaptureError; it never falls back
  * to the legacy analytics authority.
+ *
+ * Sequence recovery: a definitive rejection consumes the delivery of its
+ * source sequence and may release that number only while it is still the tail
+ * of its origin epoch. A definitive rejection stranded behind a newer
+ * assignment would otherwise leave a permanent hole: the recorder's bounded
+ * reconciliation window fills around the missing sequence and then rejects
+ * every later delivery, discarding all future host settlements. Recovery
+ * therefore rotates to a fresh `host-origin:…:epoch:N` producer origin: the
+ * retired epoch's gap stays auditable at the recorder, no receipt is
+ * fabricated or reissued, and exact source keys remain deduplicated because
+ * idempotency and registry keys exclude the origin and sequence, as does the
+ * recorder's content fingerprint. A retained source entry still redelivers
+ * under its original origin and sequence, so a genuine retry of a holed
+ * source can fill the old hole on the original stream.
  */
 export class CanonicalAnalyticsCapture {
-  private sequence = 0n;
-  private readonly sequenceBySourceKey = new Map<string, string>();
-  private readonly stableOriginId: string;
+  private readonly baseOriginId: string;
+  private currentEpoch: SourceSequenceEpoch;
+  private readonly sequenceBySourceKey = new Map<string, SourceSequenceEntry>();
 
   constructor(private readonly options: CanonicalAnalyticsCaptureOptions) {
-    this.stableOriginId = `host-origin:${createHash('sha256').update(JSON.stringify([
+    this.baseOriginId = `host-origin:${createHash('sha256').update(JSON.stringify([
       options.generationId ?? null,
       options.workspaceId,
       options.buildId,
       options.processGeneration,
     ])).digest('hex')}`;
+    this.currentEpoch = { index: 0, originId: this.baseOriginId, sequence: 0n };
     if (options.authority === 'canonical'
       && (!options.generationId || !options.sink || !options.detailSink || !options.lifecycleSink)) {
       throw new Error('Canonical analytics authority requires generation, fact/detail, and lifecycle sinks.');
@@ -471,7 +526,7 @@ export class CanonicalAnalyticsCapture {
       this.options.detailSink.submitDetail({
         schemaVersion: ANALYTICS_SCHEMA_VERSION,
         generationId: this.options.generationId!,
-        stableOriginId: `${this.stableOriginId}:detail:${scopedToolCallId}`,
+        stableOriginId: `${this.currentEpoch.originId}:detail:${scopedToolCallId}`,
         producerKind: 'host',
         producer: {
           buildId: this.options.buildId,
@@ -672,12 +727,17 @@ export class CanonicalAnalyticsCapture {
     if (!this.enabled) return 'disabled';
     const stableSessionId = context.sessionId?.trim() || undefined;
     const pendingOperationId = analyticsPendingOperationId(context.operationId, context.sessionPath);
+    const sequence = this.sourceSequence(sourceKey);
+    // The origin must be the epoch that owns the assigned sequence: a
+    // redelivered retained source entry keeps its original producer stream so
+    // its retry can fill that stream's hole instead of minting a receipt on
+    // the rotated stream.
     const base = {
       schemaVersion: ANALYTICS_SCHEMA_VERSION,
       generationId: this.options.generationId!,
       producerKind: 'host',
-      stableOriginId: this.stableOriginId,
-      sourceSequence: this.sourceSequence(sourceKey),
+      stableOriginId: sequence.entry.epoch.originId,
+      sourceSequence: sequence.value,
       sourceKey,
       entityKind,
       entityKey,
@@ -706,36 +766,121 @@ export class CanonicalAnalyticsCapture {
       idempotencyKey: deriveAnalyticsIdempotencyKey(base),
     };
     try {
-      const submitted = this.options.sink!.submit(observation);
-      if (submitted) {
-        void submitted.catch((error: unknown) => this.report(error, observation));
+      const sink = this.options.sink!;
+      if (sink.submitTracked) {
+        sink.submitTracked(observation, (disposition) => {
+          // A tracked disposition settles exactly one submission. Durable and
+          // deleted-subject outcomes both consume the sequence; other
+          // rejections are definitive and release the sequence once all
+          // reentrant submissions sharing this source key have settled — or
+          // rotate the producer origin epoch when the rejected sequence is no
+          // longer the releasable tail.
+          this.settleSourceSequence(
+            sourceKey,
+            sequence,
+            disposition.status === 'durable' || disposition.code === 'subject_deleted',
+          );
+          if (disposition.status === 'rejected') {
+            this.report(new Error(disposition.message), observation);
+          }
+        });
+      } else {
+        const submitted = sink.submit(observation);
+        // A synchronous return means the sink admitted the observation. A
+        // Promise rejection after that point is transport-ambiguous: the
+        // recorder may have committed before the channel failed, so retain the
+        // sequence for replay/idempotency.
+        this.settleSourceSequence(sourceKey, sequence, true);
+        if (submitted) {
+          void submitted.catch((error: unknown) => this.report(error, observation));
+        }
       }
       return 'submitted';
     } catch (error) {
+      // A synchronous admission rejection normally means the observation never
+      // entered the sink (for example, bounded-capacity admission). A recorder
+      // can instead durably record a deleted-subject disposition before
+      // throwing; retain that sequence so its rejection remains reconcilable.
+      this.settleSourceSequence(sourceKey, sequence, isSequenceConsumedBySinkRejection(error));
       this.report(error, observation);
       return 'rejected';
     }
   }
 
-  private sourceSequence(sourceKey: string): string {
+  private sourceSequence(sourceKey: string): SourceSequenceAssignment {
     const existing = this.sequenceBySourceKey.get(sourceKey);
     if (existing) {
       // Refresh insertion order so the bounded cache behaves as an LRU.
       this.sequenceBySourceKey.delete(sourceKey);
       this.sequenceBySourceKey.set(sourceKey, existing);
-      return existing;
+      existing.pendingSubmissions += 1;
+      return { value: existing.value, entry: existing, settled: false };
     }
-    const assigned = (++this.sequence).toString();
+    const epoch = this.currentEpoch;
+    const assigned = (++epoch.sequence).toString();
+    const entry: SourceSequenceEntry = { value: assigned, epoch, pendingSubmissions: 1, admitted: false };
     const maximum = Math.max(0, Math.trunc(this.options.maxTrackedSourceKeys ?? 4_096));
     if (maximum > 0) {
-      this.sequenceBySourceKey.set(sourceKey, assigned);
+      this.sequenceBySourceKey.set(sourceKey, entry);
       while (this.sequenceBySourceKey.size > maximum) {
         const oldest = this.sequenceBySourceKey.keys().next().value as string | undefined;
         if (oldest === undefined) break;
         this.sequenceBySourceKey.delete(oldest);
       }
     }
-    return assigned;
+    return { value: assigned, entry, settled: false };
+  }
+
+  private settleSourceSequence(
+    sourceKey: string,
+    assignment: SourceSequenceAssignment,
+    admitted: boolean,
+  ): void {
+    if (assignment.settled) return;
+    assignment.settled = true;
+    if (admitted) assignment.entry.admitted = true;
+    assignment.entry.pendingSubmissions -= 1;
+    if (assignment.entry.pendingSubmissions === 0 && !assignment.entry.admitted) {
+      this.releaseOrRotateSourceSequence(sourceKey, assignment.entry);
+    }
+  }
+
+  /** Definitive-rejection recovery for one fully settled, never-admitted
+   * source sequence. A tail rejection recycles its number exactly as before.
+   * A non-tail rejection strands a hole no later delivery can fill without
+   * fabricating a receipt, so the producer rotates to a fresh origin epoch:
+   * the old stream keeps its gap as audit evidence while all future facts
+   * deliver under a fresh origin with a fresh sequence space. Exact source
+   * keys stay idempotent at the recorder because idempotency and registry
+   * keys exclude the origin and sequence, and the content fingerprint treats
+   * both as transport receipts. */
+  private releaseOrRotateSourceSequence(sourceKey: string, entry: SourceSequenceEntry): void {
+    const tracked = this.sequenceBySourceKey.get(sourceKey);
+    if (entry.epoch.sequence.toString() !== entry.value) {
+      // Retired-epoch holes never block new facts, so only the live epoch
+      // needs recovery. The retained source entry still accepts a genuine
+      // retry that fills the old hole under its original origin.
+      if (entry.epoch === this.currentEpoch) this.rotateSequenceEpoch();
+      return;
+    }
+    // Reassignment after LRU eviction must not suppress non-tail recovery
+    // above. Only recycling a tail needs to protect a replacement entry.
+    if (tracked !== undefined && tracked !== entry) return;
+    if (tracked === entry) this.sequenceBySourceKey.delete(sourceKey);
+    entry.epoch.sequence -= 1n;
+  }
+
+  /** Rotate to a fresh producer origin epoch. The recorder keys producer
+   * reconciliation by origin identity, so recovery can never reuse or
+   * fabricate a receipt of the holed stream; the old gap stays visible for
+   * audit exactly as delivered. */
+  private rotateSequenceEpoch(): void {
+    const index = this.currentEpoch.index + 1;
+    this.currentEpoch = {
+      index,
+      originId: `${this.baseOriginId}:epoch:${index}`,
+      sequence: 0n,
+    };
   }
 
   private report(error: unknown, observation: AnalyticsObservation<object>): void {

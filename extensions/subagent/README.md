@@ -90,6 +90,13 @@ on every change).
   available under the current provider toggles. The root chat's effective
   subagent-provider policy is inherited by the entire nested tree, including
   children created through independently loaded AgentSession extensions.
+- Unchecking **every** subagent provider in pie (all of them explicitly
+  disabled) is a "don't use subagents" signal: the host removes the subagent
+  tool from the session's model-visible active tool set and the tool's
+  execution guard refuses to spawn anyway (so a call that raced the preference
+  change fails cleanly). Re-enabling any provider restores the tool. An empty
+  toggle surface (no buckets, no toggle entries) stays enabled and keeps the
+  empty-bucket parent-model fallback.
 - **Route around busy providers** is an opt-in, default-off setting. When enabled,
   bucket selection softly excludes a model only when every enabled/configured
   provider offering it is paused or has no immediately claimable ProviderGate

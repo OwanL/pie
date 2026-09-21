@@ -1,3 +1,5 @@
+import * as path from 'node:path';
+
 import type { FileChangeEntry } from './protocol';
 import { isRecord } from './type-guards';
 import { parseDeletedPathsFromCommand } from './shell-deletion-parsing';
@@ -30,6 +32,7 @@ export interface ToolCallLikeInput {
 /** Minimal structural types for subagent result traversal (pi-ai Message shape). */
 interface SubagentContentPart {
   type: string;
+  id?: string;
   name?: string;
   arguments?: unknown;
 }
@@ -37,11 +40,14 @@ interface SubagentContentPart {
 interface SubagentMessage {
   role: string;
   content?: SubagentContentPart[];
+  toolCallId?: string;
   toolName?: string;
   details?: unknown;
 }
 
 interface SubagentSingleResult {
+  /** Effective cwd of this child session. Legacy results may omit it. */
+  cwd?: string;
   messages?: SubagentMessage[];
   fileChanges?: Array<{
     path: string;
@@ -294,9 +300,60 @@ export function accumulateFileChange(
   }
 }
 
+/** Return a non-empty cwd from an untrusted tool input/result field. */
+function readCwd(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value : undefined;
+}
+
+/** Compare cwd spellings without changing the path spelling used for display. */
+function sameCwd(left: string | undefined, right: string | undefined): boolean {
+  if (!left || !right) return false;
+  return canonicalFilePath('.', left) === canonicalFilePath('.', right);
+}
+
+/**
+ * Resolve a descendant path against the cwd where its tool actually ran when
+ * that cwd differs from the parent accumulator's cwd. Keeping paths relative
+ * when both sessions share a cwd preserves the existing manifest display
+ * convention; making mixed-cwd descendants absolute is what lets the parent
+ * accumulator and focused diff resolve the real file rather than guessing from
+ * the parent's cwd.
+ */
+function normalizeDescendantPath(
+  entry: FileChangeEntry,
+  originCwd: string | undefined,
+  parentCwd: string | undefined,
+): FileChangeEntry {
+  if (!originCwd || path.isAbsolute(entry.path) || sameCwd(originCwd, parentCwd)) return entry;
+  return { ...entry, path: path.resolve(originCwd, entry.path) };
+}
+
+/** Index nested subagent call inputs so legacy nested results can still use the
+ * owning call's explicit cwd when the result itself predates cwd provenance. */
+function indexSubagentCwds(messages: SubagentMessage[]): Map<string, string> {
+  const cwds = new Map<string, string>();
+  for (const message of messages) {
+    if (message.role !== 'assistant' || !Array.isArray(message.content)) continue;
+    for (const part of message.content) {
+      if (part.type !== 'toolCall' || part.name !== 'subagent' || !part.id) continue;
+      const input = isRecord(part.arguments) ? part.arguments.cwd : undefined;
+      const cwd = readCwd(input);
+      if (cwd) cwds.set(part.id, cwd);
+    }
+  }
+  return cwds;
+}
+
 /**
  * Derive file changes from a subagent tool result by scanning the inner
  * subagent transcripts for file-modifying tool calls (edit, write, etc.).
+ *
+ * `parentCwd` is the cwd of the session accumulating the returned entries.
+ * `owningCwd` is the cwd on the subagent call input, used only as a fallback
+ * for legacy results which do not persist their own cwd. Descendant results
+ * carry their own cwd when available; recursive calls use the immediate
+ * parent's cwd as their display/accumulation base and normalize back to the
+ * outer base before returning.
  *
  * `result` is the joined tool-result object (the `{content, details}` shape):
  * the host passes `ChatMessage.toolCalls[i].result` (already merged), the
@@ -309,6 +366,8 @@ export function deriveFileChangesFromSubagentResult(
   messageId: string,
   timestamp: string,
   toolCallId: string,
+  parentCwd?: string,
+  owningCwd?: string,
 ): FileChangeEntry[] {
   if (!isRecord(result)) return [];
   const details = result.details as SubagentDetails | undefined;
@@ -318,11 +377,16 @@ export function deriveFileChangesFromSubagentResult(
 
   for (let rIdx = 0; rIdx < details.results.length; rIdx++) {
     const singleResult = details.results[rIdx];
-    if (Array.isArray(singleResult?.fileChanges)) {
+    if (!singleResult) continue;
+    const resultCwd = readCwd(singleResult.cwd) ?? owningCwd ?? parentCwd;
+    const normalize = (entry: FileChangeEntry): FileChangeEntry =>
+      normalizeDescendantPath(entry, resultCwd, parentCwd);
+
+    if (Array.isArray(singleResult.fileChanges)) {
       for (let changeIdx = 0; changeIdx < singleResult.fileChanges.length; changeIdx++) {
         const change = singleResult.fileChanges[changeIdx];
         if (!change?.path || !change.kind) continue;
-        changes.push({
+        changes.push(normalize({
           path: change.path,
           kind: change.kind,
           toolCallId: `${toolCallId}-sa${rIdx}-fc${changeIdx}`,
@@ -331,21 +395,29 @@ export function deriveFileChangesFromSubagentResult(
           timestamp,
           ...(typeof change.additions === 'number' ? { additions: change.additions } : {}),
           ...(typeof change.deletions === 'number' ? { deletions: change.deletions } : {}),
-        });
+        }));
       }
       continue;
     }
-    if (!singleResult?.messages) continue;
+    if (!Array.isArray(singleResult.messages)) continue;
 
+    const nestedCwds = indexSubagentCwds(singleResult.messages);
     for (let mIdx = 0; mIdx < singleResult.messages.length; mIdx++) {
       const msg = singleResult.messages[mIdx];
       if (msg.role === 'toolResult' && msg.toolName === 'subagent' && msg.details !== undefined) {
-        changes.push(...deriveFileChangesFromSubagentResult(
+        const nestedToolCwd = msg.toolCallId ? nestedCwds.get(msg.toolCallId) : undefined;
+        const nestedChanges = deriveFileChangesFromSubagentResult(
           { details: msg.details },
           messageId,
           timestamp,
           `${toolCallId}-sa${rIdx}-m${mIdx}`,
-        ));
+          resultCwd,
+          nestedToolCwd ?? resultCwd,
+        );
+        // A legacy nested result may have used the immediate child's cwd as its
+        // fallback and therefore retained a relative path. Normalize that path
+        // once more when returning to the outer session's accumulation base.
+        for (const entry of nestedChanges) changes.push(normalize(entry));
         continue;
       }
       if (msg.role !== 'assistant') continue;
@@ -361,7 +433,7 @@ export function deriveFileChangesFromSubagentResult(
           messageId,
           timestamp,
         );
-        for (const entry of entries) changes.push(entry);
+        for (const entry of entries) changes.push(normalize(entry));
       }
     }
   }

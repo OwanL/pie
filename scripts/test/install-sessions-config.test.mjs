@@ -1,9 +1,7 @@
-// Focused unit tests for scripts/install/lib/sessions-config.mjs — the
-// settings.json#sessionDir rewrite + legacy-session-import orchestration that
-// install.bat delegates to (batch cannot parse/rewrite JSON). install.sh keeps
-// its simpler scripts/migrate-local-sessions.mjs flow, so this module is the
-// Windows installer's fuller behaviour; the file-merge core (sessions.mjs) is
-// tested separately.
+// Focused unit tests for scripts/install/lib/sessions-config.mjs: the
+// settings.json#sessionDir rewrite and legacy-session-import orchestration that
+// install.bat delegates to because batch cannot parse or rewrite JSON. The
+// file-merge core (sessions.mjs) is tested separately.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';

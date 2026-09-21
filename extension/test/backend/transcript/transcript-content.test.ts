@@ -251,6 +251,45 @@ test('assistantStatus, usage helpers, and systemMessage normalize edge cases', (
   assert.equal(usageFromMessage({ role: 'assistant', usage: { input: -1, output: Number.NaN, totalTokens: 0 } }), undefined);
   assert.deepEqual(usageFromMessage({
     role: 'assistant',
+    usage: {
+      input: -1,
+      output: 4,
+      cacheRead: 0,
+      cacheWrite: Number.POSITIVE_INFINITY,
+      totalTokens: 4,
+      cost: { total: 99 },
+      reportedCostUsd: 0.42,
+    },
+  }), {
+    inputTokens: 0,
+    outputTokens: 4,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    totalTokens: 4,
+    tokenChannelsKnown: false,
+    tokenChannelPresence: { input: false, output: true, cacheRead: true, cacheWrite: false },
+    reportedCostUsd: 0.42,
+  });
+  assert.deepEqual(usageFromMessage({
+    role: 'assistant',
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      reportedCostUsd: 0,
+      cost: { total: 99 },
+    },
+  }), {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    totalTokens: 0,
+    reportedCostUsd: 0,
+  });
+  assert.deepEqual(usageFromMessage({
+    role: 'assistant',
     usage: { input: 2.9, output: 3.2, cacheRead: 1.8, cacheWrite: 0.4, totalTokens: 99.7 },
   }), {
     inputTokens: 2,

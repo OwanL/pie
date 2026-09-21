@@ -23,6 +23,36 @@ import {
   toNullableNonNegativeInteger,
 } from './coercion-utils';
 
+type TokenChannelPresence = {
+  input: boolean;
+  output: boolean;
+  cacheRead: boolean;
+  cacheWrite: boolean;
+};
+
+function validTokenChannel(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+function coerceTokenChannelPresence(
+  values: { input: unknown; output: unknown; cacheRead: unknown; cacheWrite: unknown },
+  declared: Record<string, unknown> | undefined,
+  declaredIncomplete: boolean,
+): TokenChannelPresence {
+  const hasAnyValue = Object.values(values).some((value) => value !== undefined);
+  const present = (key: keyof TokenChannelPresence, raw: unknown): boolean => {
+    if (declared !== undefined) return declared[key] === true && validTokenChannel(raw);
+    if (declaredIncomplete) return false;
+    return hasAnyValue ? validTokenChannel(raw) : false;
+  };
+  return {
+    input: present('input', values.input),
+    output: present('output', values.output),
+    cacheRead: present('cacheRead', values.cacheRead),
+    cacheWrite: present('cacheWrite', values.cacheWrite),
+  };
+}
+
 function coerceAssistantUsage(value: unknown): AssistantUsage | null {
   if (!isObjectRecord(value)) {
     return null;
@@ -35,9 +65,6 @@ function coerceAssistantUsage(value: unknown): AssistantUsage | null {
   const totalTokens = reportedTotal > 0
     ? reportedTotal
     : inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
-  if (totalTokens === 0) {
-    return null;
-  }
   // reasoningTokens is a subset of output (never added to totals); clamp to
   // outputTokens defensively so persisted/malformed data can't exceed it.
   const reasoningRaw = toNonNegativeInteger(value.reasoningTokens);
@@ -46,12 +73,25 @@ function coerceAssistantUsage(value: unknown): AssistantUsage | null {
     && Number.isFinite(value.reportedCostUsd) && value.reportedCostUsd >= 0
     ? value.reportedCostUsd
     : undefined;
+  const declaredPresence = isObjectRecord(value.tokenChannelPresence) ? value.tokenChannelPresence : undefined;
+  const declaredIncomplete = value.tokenChannelsKnown === false;
+  const tokenChannelPresence = coerceTokenChannelPresence({
+    input: value.inputTokens,
+    output: value.outputTokens,
+    cacheRead: value.cacheReadTokens,
+    cacheWrite: value.cacheWriteTokens,
+  }, declaredPresence, declaredIncomplete);
+  const tokenChannelsKnown = !declaredIncomplete && Object.values(tokenChannelPresence).every(Boolean);
+  if (totalTokens === 0 && reportedCostUsd === undefined && tokenChannelsKnown) {
+    return null;
+  }
   return {
     inputTokens,
     outputTokens,
     cacheReadTokens,
     cacheWriteTokens,
     totalTokens,
+    ...(!tokenChannelsKnown ? { tokenChannelsKnown: false, tokenChannelPresence } : {}),
     ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
     ...(reportedCostUsd !== undefined ? { reportedCostUsd } : {}),
   };
@@ -93,6 +133,15 @@ function coerceAuxiliaryLlmUsage(value: unknown): AuxiliaryLlmUsageSample[] {
       && Number.isFinite(entry.reportedCostUsd) && entry.reportedCostUsd >= 0
       ? entry.reportedCostUsd
       : undefined;
+    const declaredPresence = isObjectRecord(entry.tokenChannelPresence) ? entry.tokenChannelPresence : undefined;
+    const declaredIncomplete = entry.tokenChannelsKnown === false;
+    const tokenChannelPresence = coerceTokenChannelPresence({
+      input: entry.inputTokens,
+      output: entry.outputTokens,
+      cacheRead: entry.cacheReadTokens,
+      cacheWrite: entry.cacheWriteTokens,
+    }, declaredPresence, declaredIncomplete);
+    const tokenChannelsKnown = !declaredIncomplete && Object.values(tokenChannelPresence).every(Boolean);
     samples.push({
       kind: entry.kind as AuxiliaryLlmUsageSample['kind'],
       sourceId: entry.sourceId,
@@ -103,6 +152,7 @@ function coerceAuxiliaryLlmUsage(value: unknown): AuxiliaryLlmUsageSample[] {
       outputTokens: toNonNegativeInteger(entry.outputTokens),
       cacheReadTokens: toNonNegativeInteger(entry.cacheReadTokens),
       cacheWriteTokens: toNonNegativeInteger(entry.cacheWriteTokens),
+      ...(!tokenChannelsKnown ? { tokenChannelsKnown: false, tokenChannelPresence } : {}),
       ...(reportedCostUsd === undefined ? {} : { reportedCostUsd }),
       ...(durationMs === undefined ? {} : { durationMs }),
     });
@@ -258,6 +308,15 @@ function coerceTurnThroughputSamples(value: unknown): TurnThroughputSample[] {
       typeof entry.status === 'string' && THROUGHPUT_STATUSES.has(entry.status as TurnThroughputStatus)
         ? (entry.status as TurnThroughputStatus)
         : 'completed';
+    const declaredPresence = isObjectRecord(entry.tokenChannelPresence) ? entry.tokenChannelPresence : undefined;
+    const declaredIncomplete = entry.tokenChannelsKnown === false;
+    const tokenChannelPresence = coerceTokenChannelPresence({
+      input: entry.inputTokens,
+      output: entry.outputTokens,
+      cacheRead: entry.cacheReadTokens,
+      cacheWrite: entry.cacheWriteTokens,
+    }, declaredPresence, declaredIncomplete);
+    const tokenChannelsKnown = !declaredIncomplete && Object.values(tokenChannelPresence).every(Boolean);
     samples.push({
       endedAt,
       outputTokens: toNonNegativeInteger(entry.outputTokens),
@@ -274,6 +333,7 @@ function coerceTurnThroughputSamples(value: unknown): TurnThroughputSample[] {
         && Number.isFinite(entry.reportedCostUsd) && entry.reportedCostUsd >= 0
         ? entry.reportedCostUsd
         : undefined,
+      ...(!tokenChannelsKnown ? { tokenChannelsKnown: false, tokenChannelPresence } : {}),
       providerQueueMs: toNullableNonNegativeInteger(entry.providerQueueMs),
       providerQueueAttemptCount: toNonNegativeInteger(entry.providerQueueAttemptCount),
       turnLatencyMs: toNullableNonNegativeInteger(entry.turnLatencyMs),

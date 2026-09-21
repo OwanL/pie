@@ -205,14 +205,6 @@ function ToolFacetLines({ facets }: { facets: NonNullable<CanonicalSessionActivi
   return <div class="rich-tooltip-sub">{lines.join('\n')}</div>;
 }
 
-/** Activity-only rich tooltip for the fallback toolbar trigger: shown when
- *  canonical activity exists but the session cost chip does not (no usage of
- *  any kind is known). Renders ONLY the canonical activity section — no cost,
- *  provider, or usage content is fabricated to host it. */
-export function CanonicalActivityTooltip({ summary }: { summary: CanonicalSessionActivitySummary }): JSX.Element {
-  return <CanonicalActivitySection summary={summary} />;
-}
-
 interface CostBarSegment {
   key: string;
   label: string;

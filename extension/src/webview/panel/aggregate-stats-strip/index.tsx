@@ -5,9 +5,11 @@ import { memo } from 'preact/compat';
 import type { JSX } from 'preact';
 import { useState } from 'preact/hooks';
 
+import { PROVIDER_UNLIMITED_CONCURRENCY } from '../../../shared/provider-concurrency';
 import type {
   AggregateLastRun,
   AggregateProductivityStats,
+  AggregateProviderCost,
   AggregateSeriesPoint,
   AggregateStats,
   DeferredTriggerView,
@@ -84,10 +86,10 @@ function AggregateStatsStripView({ stats, deferredTriggers, onOpenDeferredMenu }
         <span
           class="aggregate-strip-seg aggregate-strip-seg--primary"
           tabIndex={0}
-          aria-label={`Today's estimated token cost ${formatCostAdaptive(todayCost)}${(stats.billableAccounting?.todayUnknownInvocationCount ?? 0) + (stats.billableAccounting?.todayUnpricedInvocationCount ?? 0) > 0 ? '; incomplete billing provenance' : ''}. Focus for today's cost and provider details.`}
+          aria-label={`Today's estimated token cost ${formatCostAdaptive(todayCost)}${(stats.billableAccounting?.todayUnknownInvocationCount ?? 0) + (stats.billableAccounting?.todayUnpricedInvocationCount ?? 0) + (stats.billableAccounting?.todayInstrumentationGapInvocationCount ?? 0) > 0 ? '; incomplete billing provenance' : ''}. Focus for today's cost and provider details.`}
         >
           today <Num value={todayCost} format={formatCostAdaptive} width={8} class="aggregate-strip-cost" />
-          {(stats.billableAccounting?.todayUnknownInvocationCount ?? 0) + (stats.billableAccounting?.todayUnpricedInvocationCount ?? 0) > 0 ? '*' : null}
+          {(stats.billableAccounting?.todayUnknownInvocationCount ?? 0) + (stats.billableAccounting?.todayUnpricedInvocationCount ?? 0) + (stats.billableAccounting?.todayInstrumentationGapInvocationCount ?? 0) > 0 ? '*' : null}
         </span>
       </Tooltip>
       <Sep />
@@ -95,10 +97,10 @@ function AggregateStatsStripView({ stats, deferredTriggers, onOpenDeferredMenu }
         <span
           class="aggregate-strip-seg"
           tabIndex={0}
-          aria-label={`Estimated token cost this week ${formatCostAdaptive(weekCost)}${(stats.billableAccounting?.weekUnknownInvocationCount ?? 0) + (stats.billableAccounting?.weekUnpricedInvocationCount ?? 0) > 0 ? '; incomplete billing provenance' : ''}. Focus for seven-day cost and provider details.`}
+          aria-label={`Estimated token cost this week ${formatCostAdaptive(weekCost)}${(stats.billableAccounting?.weekUnknownInvocationCount ?? 0) + (stats.billableAccounting?.weekUnpricedInvocationCount ?? 0) + (stats.billableAccounting?.weekInstrumentationGapInvocationCount ?? 0) > 0 ? '; incomplete billing provenance' : ''}. Focus for seven-day cost and provider details.`}
         >
           wk <Num value={weekCost} format={formatCostAdaptive} width={8} class="aggregate-strip-cost" />
-          {(stats.billableAccounting?.weekUnknownInvocationCount ?? 0) + (stats.billableAccounting?.weekUnpricedInvocationCount ?? 0) > 0 ? '*' : null}
+          {(stats.billableAccounting?.weekUnknownInvocationCount ?? 0) + (stats.billableAccounting?.weekUnpricedInvocationCount ?? 0) + (stats.billableAccounting?.weekInstrumentationGapInvocationCount ?? 0) > 0 ? '*' : null}
         </span>
       </Tooltip>
       <Sep />
@@ -150,7 +152,7 @@ function AggregateStatsStripView({ stats, deferredTriggers, onOpenDeferredMenu }
             <span
               class="aggregate-strip-seg aggregate-strip-providers"
               tabIndex={0}
-              aria-label={`Provider concurrency: ${stats.providerGate.providers.map((p) => `${p.provider} ${p.activeRequests} of ${p.maxConcurrentRequests} active${p.queuedRequests > 0 ? `, ${p.queuedRequests} queued` : ''}${p.paused ? ', paused' : ''}`).join('; ')}. Focus for provider gate details.`}
+              aria-label={`Provider concurrency: ${stats.providerGate.providers.map((p) => `${p.provider} ${p.activeRequests} of ${providerLimitLabel(p.maxConcurrentRequests)} active${p.queuedRequests > 0 ? `, ${p.queuedRequests} queued` : ''}${p.paused ? ', paused' : ''}`).join('; ')}. Focus for provider gate details.`}
             >
               {stats.providerGate.providers.map((p, i) => (
                 <span
@@ -163,7 +165,7 @@ function AggregateStatsStripView({ stats, deferredTriggers, onOpenDeferredMenu }
                 >
                   {i > 0 && ' '}
                   <span class="aggregate-strip-provider-name">{p.provider}</span>{' '}
-                  <span class="aggregate-strip-provider-counts">{p.activeRequests}/{p.maxConcurrentRequests}</span>
+                  <span class="aggregate-strip-provider-counts">{p.activeRequests}/{providerLimitLabel(p.maxConcurrentRequests)}</span>
                   {p.queuedRequests > 0 && <span class="aggregate-strip-provider-queued">+{p.queuedRequests}</span>}
                 </span>
               ))}
@@ -245,7 +247,7 @@ function arePropsEqual(
  *  strip skips re-render when the set is unchanged across a fresh host-serialised
  *  `deferredTriggers` array reference (the host re-serialises every snapshot). */
 function deferredSignature(t: DeferredTriggerView[]): string {
-  return t.map((x) => `${x.id}:${x.sessionPath}:${x.deliveryState}:${x.recoveryState ?? ''}:${x.deliveryDetail ?? ''}`).sort().join(',');
+  return t.map((x) => `${x.id}:${x.sessionPath}:${x.targetSession ?? x.sessionPath}:${x.message?.trim() || x.note}:${x.deliveryState}:${x.recoveryState ?? ''}:${x.deliveryDetail ?? ''}`).sort().join(',');
 }
 
 function seriesSignature(series: AggregateSeriesPoint[]): string {
@@ -297,7 +299,7 @@ export function aggregateStatsSignature(s: AggregateStats): string {
     ].join(':') : '',
     s.costByProvider.map((p) => `${p.provider}:${p.cost}`).join(','),
     s.todayCostByProvider.map((p) => `${p.provider}:${p.cost}:${p.inputTokens}:${p.outputTokens}`).join(','),
-    s.weekCostByProvider.map((p) => `${p.provider}:${p.cost}`).join(','),
+    s.weekCostByProvider.map((p) => `${p.provider}:${p.cost}:${p.inputTokens}:${p.outputTokens}:${p.cacheReadTokens}:${p.cacheWriteTokens}`).join(','),
     s.dailyCost.map((d) => [
       d.date,
       d.totalCost,
@@ -517,6 +519,13 @@ function modelValuesForProvider(
   return [...latestByModel.values()];
 }
 
+function providerTokenSummary(providers: AggregateProviderCost[]): string {
+  return providers
+    .filter((provider) => provider.inputTokens > 0 || provider.outputTokens > 0)
+    .map((provider) => `${provider.provider} ↓${formatCompactTokens(provider.inputTokens)} in ↑${formatCompactTokens(provider.outputTokens)} out`)
+    .join('  ·  ');
+}
+
 function ariaLabel(s: AggregateStats): string {
   if (!s.ready) return 'Usage stats: computing.';
   const active = s.activeGenerationTokensPerSecond > 0
@@ -533,7 +542,7 @@ function ariaLabel(s: AggregateStats): string {
 
 // ── Scoped rich tooltips ────────────────────────────────────────────────────
 
-function todayCostTooltipNode(s: AggregateStats): JSX.Element {
+export function todayCostTooltipNode(s: AggregateStats): JSX.Element {
   if (!s.ready) return <div class="rich-tooltip"><div class="rich-tooltip-sub">Computing usage stats…</div></div>;
   const sub: string[] = [`Across all sessions · ${s.todayRunCount} run${s.todayRunCount === 1 ? '' : 's'}`];
   if (s.todayInputTokens > 0 || s.todayOutputTokens > 0) {
@@ -553,6 +562,7 @@ function todayCostTooltipNode(s: AggregateStats): JSX.Element {
       {!!s.billableAccounting && (
         s.billableAccounting.todayUnknownInvocationCount > 0
         || s.billableAccounting.todayUnpricedInvocationCount > 0
+        || s.billableAccounting.todayInstrumentationGapInvocationCount > 0
       ) && (
         <div class="rich-tooltip-sub">
           Incomplete billing provenance: {s.billableAccounting.todayUnknownInvocationCount} unknown and{' '}
@@ -582,8 +592,9 @@ function todayCostTooltipNode(s: AggregateStats): JSX.Element {
   );
 }
 
-function weekCostTooltipNode(s: AggregateStats): string | JSX.Element {
+export function weekCostTooltipNode(s: AggregateStats): JSX.Element {
   if (!s.ready) return <div class="rich-tooltip"><div class="rich-tooltip-sub">Computing usage stats…</div></div>;
+  const tokenSummary = providerTokenSummary(s.weekCostByProvider);
   return (
     <div class="rich-tooltip">
       <div class="rich-tooltip-head">
@@ -592,8 +603,10 @@ function weekCostTooltipNode(s: AggregateStats): string | JSX.Element {
       </div>
       <div class="rich-tooltip-sub">API-equivalent catalog estimate · subscriptions, plan allowances, and invoices are not reconciled</div>
       <div class="rich-tooltip-sub">{s.weekRunCount} run{s.weekRunCount === 1 ? '' : 's'}</div>
+      {tokenSummary && <div class="rich-tooltip-sub">Token counts by provider · {tokenSummary}</div>}
       {!!s.billableAccounting && (s.billableAccounting.weekUnknownInvocationCount > 0
-        || s.billableAccounting.weekUnpricedInvocationCount > 0) && (
+        || s.billableAccounting.weekUnpricedInvocationCount > 0
+        || s.billableAccounting.weekInstrumentationGapInvocationCount > 0) && (
         <div class="rich-tooltip-sub">
           Incomplete billing provenance: {s.billableAccounting.weekUnknownInvocationCount} unknown and{' '}
           {s.billableAccounting.weekUnpricedInvocationCount} unpriced invocation(s)
@@ -721,15 +734,19 @@ function lastRunTooltipNode(r: AggregateLastRun): JSX.Element {
   );
 }
 
+function providerLimitLabel(maxConcurrentRequests: number): string {
+  return maxConcurrentRequests === PROVIDER_UNLIMITED_CONCURRENCY ? 'Unlimited' : String(maxConcurrentRequests);
+}
+
 function providerGateTooltipNode(g: ProviderGateStats): JSX.Element {
   const lines: string[] = [];
   for (const p of g.providers) {
-    let line = `${pad(p.provider, 14)}${p.activeRequests}/${p.maxConcurrentRequests} active`;
+    let line = `${pad(p.provider, 14)}${p.activeRequests}/${providerLimitLabel(p.maxConcurrentRequests)} active`;
     if (p.queuedRequests > 0) line += `  · ${p.queuedRequests} queued`;
     if (p.paused) {
       const seconds = Math.max(0, Math.ceil((p.pausedUntilMs - Date.now()) / 1000));
       line += `  · PAUSED (${seconds}s, ${p.strikeCount} strike${p.strikeCount === 1 ? '' : 's'})`;
-    } else if (p.afterburnSeconds > 0) {
+    } else if (p.maxConcurrentRequests !== PROVIDER_UNLIMITED_CONCURRENCY && p.afterburnSeconds > 0) {
       line += `  · afterburn ${p.afterburnSeconds}s`;
     }
     lines.push(line);
@@ -879,14 +896,15 @@ export function workTooltipNode(s: AggregateStats): JSX.Element {
 }
 
 /** Tooltip for the waiting-trigger segment: one line per active trigger
- *  (session + condition + note), so the user can preview before opening the
+ *  (target + condition + message), so the user can preview before opening the
  *  cancel popup. */
 function deferredTooltipNode(triggers: DeferredTriggerView[]): JSX.Element {
   const lines: string[] = [`${triggers.length} pending — click to cancel`, ''];
   for (const t of triggers) {
-    const note = t.note.trim() || '(no note)';
+    const targetPath = t.targetSession ?? t.sessionPath;
+    const message = (t.message?.trim() || t.note.trim()) || '(no message)';
     const status = t.deliveryState === 'pending' ? '' : ` [${t.deliveryState}]`;
-    const head = `${t.sessionPath.split(/[\\/]/).pop() ?? t.sessionPath}${status}: ${note}`;
+    const head = `${targetPath.split(/[\\/]/).pop() ?? targetPath}${status}: ${message}`;
     lines.push(head.length > 80 ? `${head.slice(0, 77)}…` : head);
   }
   return (

@@ -1,5 +1,5 @@
 // Focused unit tests for scripts/install/lib/auth.mjs — the split-brain auth
-// merge and content-detection helpers shared by both shell installers.
+// merge and content-detection helpers used by the Windows installer.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';

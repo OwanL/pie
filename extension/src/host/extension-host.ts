@@ -88,7 +88,8 @@ import {
   discoverAnalyticsHostWriters,
   type RuntimeGenerationIdentity,
 } from './analytics-handoff-discovery.js';
-import { createPerBootAnalyticsHandoffKey } from '../../../shared/analytics/handoff.js';
+import { readProcessCensus } from './analytics-process-census.js';
+import { createPerBootAnalyticsHandoffKey } from '../../../shared/analytics/host-status-messages.js';
 import {
   createSessionLifecycleWriterAdmission,
   SessionLifecycleStore,
@@ -264,6 +265,72 @@ export class PieExtension implements vscode.Disposable {
         ...successorCapabilities,
       ],
     };
+    const recoverStaleAnalyticsHosts = async (): Promise<void> => {
+      const processCensus = await readProcessCensus();
+      if (!processCensus.complete) {
+        appendPieLog('warn', 'analytics-handoff', 'stale-host recovery skipped; process census is incomplete', {
+          reasonCodes: processCensus.reasons.map(({ code }) => code).slice(0, 16),
+        });
+        return;
+      }
+      const processById = new Map(processCensus.processes.map((entry) => [entry.processId, entry] as const));
+      const recorderWorkers = processCensus.processes.filter(
+        (entry) => entry.analyticsRecorderWorkerParentProcessId !== undefined,
+      );
+      let recoveredCount = 0;
+      let cursor: string | undefined;
+      while (true) {
+        const page = analyticsHandoffRegistry.listAnalyticsHosts(analyticsWorkspaceId, {
+          ...(cursor ? { cursor } : {}),
+        });
+        for (const host of page.hosts) {
+          if (host.state === 'stopped') continue;
+          const process = processById.get(host.processId);
+          let registeredAtMs: bigint;
+          try {
+            registeredAtMs = BigInt(host.registeredAtMs);
+          } catch {
+            // Invalid lifecycle timestamps are not enough evidence to retire a
+            // writer identity. Leave it in the census for explicit repair.
+            continue;
+          }
+          const sameHostProcessIsLive = process !== undefined
+            && (process.processCreatedAtMs === null
+              || BigInt(process.processCreatedAtMs) <= registeredAtMs + 2_000n);
+          const backendMayStillWrite = processCensus.backendOwners.some((owner) =>
+            owner.hostProcessId === host.processId
+            && (!owner.analyticsHostInstanceId || owner.analyticsHostInstanceId === host.hostInstanceId));
+          // A recorder child may still be completing an admitted SQLite write
+          // after its extension-host parent exits. Compare both process birth
+          // times so PID reuse cannot confuse an old child with a new host.
+          const recorderWorkerMayStillWrite = recorderWorkers.some((worker) => {
+            if (worker.analyticsRecorderWorkerParentProcessId !== host.processId) return false;
+            if (!process) return true;
+            if (process.processCreatedAtMs === null || worker.processCreatedAtMs === null) return true;
+            return worker.processCreatedAtMs < process.processCreatedAtMs;
+          });
+          if (sameHostProcessIsLive || backendMayStillWrite || recorderWorkerMayStillWrite) continue;
+          try {
+            analyticsHandoffRegistry.recoverAnalyticsHostAfterProcessExit({
+              hostInstanceId: host.hostInstanceId,
+              workspaceId: host.workspaceId,
+              generationId: host.generationId,
+              buildId: host.buildId,
+              processId: host.processId,
+            }, Date.now());
+            recoveredCount += 1;
+          } catch (error) {
+            appendPieLog('warn', 'analytics-handoff', 'stale host could not be retired', {
+              state: host.state,
+              error: toErrorMessage(error),
+            });
+          }
+        }
+        if (!page.truncated || !page.nextCursor) break;
+        cursor = page.nextCursor;
+      }
+      if (recoveredCount > 0) appendPieLog('info', 'analytics-handoff', 'retired stale writer hosts', { count: recoveredCount });
+    };
     const analyticsWriterAdmission = createSessionLifecycleWriterAdmission(
       analyticsHandoffRegistry,
       analyticsHostIdentity,
@@ -329,6 +396,7 @@ export class PieExtension implements vscode.Disposable {
             });
         },
       }),
+      recoverStaleHosts: recoverStaleAnalyticsHosts,
       key: analyticsHandoffKey,
       readInventory: async () => {
         if (!runtimeIdentity) {
@@ -413,11 +481,10 @@ export class PieExtension implements vscode.Disposable {
     });
     const fenceAnalyticsWriters = (timeoutMs: number) => analyticsRuntime.fenceWriters(timeoutMs);
     // Under canonical authority the capture requires fact, detail and lifecycle
-    // sinks, and throws without them. Those sinks are the canonical recorder,
-    // which only exists after AnalyticsRuntime.start() succeeds. This holder is
-    // therefore the sink now: it forwards once the runtime has attached the real
-    // recorder and throws before that, so a record can never be silently dropped
-    // if a producer runs before the helpers are ready.
+    // sinks. This holder forwards to the recorder after runtime readiness and
+    // rejects capture before then. Rejection never redirects data to the legacy
+    // store, while the primary session/backend harness can still start if the
+    // optional analytics helpers are unavailable.
     const runtimeSinks = {
       preflightDetail: (value: unknown) => {
         const sink = analyticsRuntime.sink;
@@ -428,6 +495,14 @@ export class PieExtension implements vscode.Disposable {
         const sink = analyticsRuntime.sink;
         if (!sink) throw new Error('Canonical capture sink is not ready; activation has not completed.');
         return sink.submit(observation);
+      },
+      submitTracked: (
+        observation: AnalyticsObservation<object>,
+        onDisposition: (disposition: { status: 'durable' } | { status: 'rejected'; code: string; message: string }) => void,
+      ) => {
+        const sink = analyticsRuntime.sink;
+        if (!sink) throw new Error('Canonical capture sink is not ready; activation has not completed.');
+        sink.submitTracked(observation, onDisposition);
       },
       submitDetail: (capture: AnalyticsDetailCapture) => {
         const sink = analyticsRuntime.sink;
@@ -799,20 +874,26 @@ export class PieExtension implements vscode.Disposable {
   async start(): Promise<void> {
     this.updateStatusBar('Starting');
     await this.analyticsHandoffControl?.start();
+    // Try canonical analytics before services can produce captures. A failed
+    // analytics helper must not take down Pie's primary session/backend
+    // harness; its capture closures remain fail-closed and never write to the
+    // legacy authority. Keep startup evidence tied to a successful readiness
+    // probe so a degraded host cannot claim canonical readiness.
+    try {
+      await this.analyticsRuntime.start();
+      this.analyticsRuntime.recordLoadedGeneration();
+    } catch (error) {
+      const message = toErrorMessage(error);
+      appendPieLog('warn', 'extension', 'analytics unavailable; continuing Pie startup without canonical capture', {
+        error: message,
+      });
+      void vscode.window.showWarningMessage(
+        'Pie started, but analytics is unavailable for this window. New analytics capture is paused; see Output > pie for the startup error.',
+      );
+    }
     this.hydratePrivacyMarkers();
     this.tokenRateService.start();
     this.aggregateStatsService.start();
-    // Start canonical helpers before any capture can be produced. Under legacy
-    // authority this spawns nothing and returns the legacy readiness snapshot;
-    // under an active manifest it spawns the recorder and proves the read path
-    // with a disposable query. A failure here throws before the services start,
-    // so the host fails closed rather than capturing into an authority it cannot
-    // read back.
-    await this.analyticsRuntime.start();
-    // Record that this process actually reached canonical readiness, so
-    // post-restart evidence can distinguish "the manifest records a generation"
-    // from "a host loaded and passed readiness for it".
-    this.analyticsRuntime.recordLoadedGeneration();
     await this.statsService.start();
     await this.service.start();
     // M2 (§7.2): start the browser server only after the host can build a

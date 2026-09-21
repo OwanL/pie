@@ -1446,3 +1446,104 @@ test('phase6 concurrent settings mutations serialize revisions so no worker skip
   assert.equal(authoritatives.length, 2);
   assert.deepEqual([...new Set(authoritatives.map((call) => call.revision))].sort(), [2, 3]);
 });
+
+test('phase6 worker rollback carries provider deletion and preserves unrelated settings', async () => {
+  let current: Record<string, unknown> = {
+    defaultModel: 'new-model', defaultProvider: 'new-provider', defaultThinkingLevel: 'high',
+    customTools: { keep: true },
+  };
+  const sent: any[] = [];
+  let conditionalCalls = 0;
+  const { router, sessionPath } = makeRouter(makeClient({
+    sendFrame: (frame: any) => { sent.push(frame); return true; },
+  }), {
+    options: {
+      writeModelSettings: async (updates: any) => {
+        current = { ...current, ...updates };
+        return current as any;
+      },
+      writeModelSettingsIfCurrent: async (expected: any, updates: any, unset?: string[]) => {
+        conditionalCalls += 1;
+        if (current.defaultModel !== expected.defaultModel
+          || current.defaultProvider !== expected.defaultProvider
+          || current.defaultThinkingLevel !== expected.defaultThinkingLevel) return false;
+        current = { ...current, ...updates };
+        for (const key of unset ?? []) delete current[key];
+        return true;
+      },
+      readModelSettings: async () => current as any,
+    },
+  });
+  const route = await router.promote(sessionPath);
+  await router.handleWorkerFrame(sessionPath, {
+    ipcVersion: WORKER_IPC_VERSION, coordinatorGeneration: 1, workerId: route.owner.workerId,
+    workerGeneration: route.owner.workerGeneration, workerPid: 1, rootSessionPath: sessionPath,
+    leasePath: sessionPath, leaseRevision: 1, sessionPath, seq: 1,
+    kind: 'settings.mutate', requestId: 'rollback-absent-provider',
+    updates: { defaultModel: 'old-model', defaultThinkingLevel: 'medium' },
+    unset: ['defaultProvider'],
+    expected: { defaultModel: 'new-model', defaultProvider: 'new-provider', defaultThinkingLevel: 'high' },
+  });
+
+  assert.equal(conditionalCalls, 1);
+  assert.deepEqual(current, {
+    defaultModel: 'old-model', defaultThinkingLevel: 'medium', customTools: { keep: true },
+  });
+  const authoritative = sent.find((frame) => frame.kind === 'settings.authoritative');
+  assert.equal(authoritative?.applied, true);
+  assert.equal(authoritative?.values.defaultProvider, undefined);
+});
+
+test('phase6 stale rollback skips a newer successful model/provider switch', async () => {
+  let current: Record<string, unknown> = {
+    defaultModel: 'old-model', defaultProvider: 'old-provider', defaultThinkingLevel: 'medium',
+    customTools: { keep: true },
+  };
+  const sent: any[] = [];
+  const { router, sessionPath } = makeRouter(makeClient({
+    sendFrame: (frame: any) => { sent.push(frame); return true; },
+  }), {
+    options: {
+      writeModelSettings: async (updates: any) => {
+        current = { ...current, ...updates };
+        return current as any;
+      },
+      writeModelSettingsIfCurrent: async (expected: any, updates: any, unset?: string[]) => {
+        if (current.defaultModel !== expected.defaultModel
+          || current.defaultProvider !== expected.defaultProvider
+          || current.defaultThinkingLevel !== expected.defaultThinkingLevel) return false;
+        current = { ...current, ...updates };
+        for (const key of unset ?? []) delete current[key];
+        return true;
+      },
+      readModelSettings: async () => current as any,
+    },
+  });
+  const route = await router.promote(sessionPath);
+  const frame = (requestId: string, updates: Record<string, unknown>, expected?: Record<string, unknown>) => ({
+    ipcVersion: WORKER_IPC_VERSION, coordinatorGeneration: 1, workerId: route.owner.workerId,
+    workerGeneration: route.owner.workerGeneration, workerPid: 1, rootSessionPath: sessionPath,
+    leasePath: sessionPath, leaseRevision: 1, sessionPath, seq: 1,
+    kind: 'settings.mutate' as const, requestId, updates: updates as any,
+    ...(expected ? { expected: expected as any } : {}),
+  }) as any;
+  await router.handleWorkerFrame(sessionPath, frame('switch-a', {
+    defaultModel: 'model-a', defaultProvider: 'provider-a', defaultThinkingLevel: 'high',
+  }));
+  await router.handleWorkerFrame(sessionPath, frame('switch-b', {
+    defaultModel: 'model-b', defaultProvider: 'provider-b', defaultThinkingLevel: 'high',
+  }));
+  await router.handleWorkerFrame(sessionPath, frame('rollback-a', {
+    defaultModel: 'old-model', defaultProvider: 'old-provider', defaultThinkingLevel: 'medium',
+  }, {
+    defaultModel: 'model-a', defaultProvider: 'provider-a', defaultThinkingLevel: 'high',
+  }));
+
+  assert.deepEqual(current, {
+    defaultModel: 'model-b', defaultProvider: 'provider-b', defaultThinkingLevel: 'high',
+    customTools: { keep: true },
+  });
+  const rollbackAck = sent.find((frame) => frame.kind === 'settings.authoritative'
+    && frame.requestId === 'rollback-a');
+  assert.equal(rollbackAck?.applied, false);
+});

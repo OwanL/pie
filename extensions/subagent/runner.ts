@@ -27,7 +27,8 @@ import { getFinalOutput } from "./formatting.js";
 import type { ThinkingLevel, BucketSelection } from "./bucket-selector.js";
 import { resolveExecutionModel } from "./model-resolution.js";
 import { formatRequirementDiagnostic, requirementIsActive } from "./src/selection.js";
-import type { ModelRequirements, OnUpdateCallback, SingleResult, SubagentAttemptPhase, SubagentChildIdentity, SubagentDetails, SubagentProviderInvocationRecord, SubagentTurnThroughputSample } from "./types.js";
+import { reportedUsageCost } from "./src/usage-evidence.js";
+import type { ModelRequirements, OnUpdateCallback, SingleResult, SubagentAttemptPhase, SubagentChildIdentity, SubagentDetails, SubagentProviderInvocationRecord, SubagentTurnThroughputSample, TokenChannelPresence } from "./types.js";
 import { createInvalidAgentResult } from "./validation.js";
 import { toErrorMessage } from "../../shared/error-message.js";
 import { installPieSystemPromptRebuildGuard, type PieSystemPromptOptions } from "../../shared/pie-harness-prompt.js";
@@ -50,6 +51,7 @@ import { inflightSemaphore, type Release } from "./src/concurrency-limit.js";
 import { globalOrphanRegistry, type OrphanCleanupRegistry } from "./src/cleanup.js";
 import type { RetryClock } from "./src/retry.js";
 import { isRuntimeTraceEnabled, recordRuntimeTrace } from "./src/runtime-trace.js";
+import { populateFileChanges } from "./src/result-compaction.js";
 import type { SubagentAnalyticsCaptureContext } from "./src/analytics-capture.js";
 
 type SubagentSkillsOverride = (base: { skills: Skill[]; diagnostics: ResourceDiagnostic[] }) => { skills: Skill[]; diagnostics: ResourceDiagnostic[] };
@@ -112,7 +114,9 @@ interface SubagentEventMessage {
 		output?: number;
 		cacheRead?: number;
 		cacheWrite?: number;
-		cost?: { total?: number };
+		reportedCostUsd?: number;
+		providerReportedCostUsd?: number;
+		cost?: { total?: number; reportedCostUsd?: number; providerReportedCostUsd?: number };
 		totalTokens?: number;
 	};
 }
@@ -346,7 +350,18 @@ function createInitialResult(
 		exitCode: -1,
 		messages: [],
 		stderr: "",
-		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+		// `cost` is intentionally absent until a provider turn reports evidence.
+		// Token channels remain unknown until an assistant response supplies them.
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			tokenChannelsKnown: false,
+			tokenChannelPresence: { input: false, output: false, cacheRead: false, cacheWrite: false },
+			contextTokens: 0,
+			turns: 0,
+		},
 		model: actualModelId,
 		provider,
 		contextWindow,
@@ -497,6 +512,33 @@ function assistantMessageStatus(msg: SubagentEventMessage): SubagentTurnThroughp
 	return "completed";
 }
 
+function finiteNonNegativeToken(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0
+		? Math.trunc(value)
+		: undefined;
+}
+
+function tokenChannelPresence(usage: SubagentEventMessage["usage"] | undefined): TokenChannelPresence {
+	return {
+		input: finiteNonNegativeToken(usage?.input) !== undefined,
+		output: finiteNonNegativeToken(usage?.output) !== undefined,
+		cacheRead: finiteNonNegativeToken(usage?.cacheRead) !== undefined,
+		cacheWrite: finiteNonNegativeToken(usage?.cacheWrite) !== undefined,
+	};
+}
+
+function mergeTokenChannelPresence(
+	prior: TokenChannelPresence | undefined,
+	current: TokenChannelPresence,
+): TokenChannelPresence {
+	return {
+		input: (prior?.input ?? true) && current.input,
+		output: (prior?.output ?? true) && current.output,
+		cacheRead: (prior?.cacheRead ?? true) && current.cacheRead,
+		cacheWrite: (prior?.cacheWrite ?? true) && current.cacheWrite,
+	};
+}
+
 /** Record a completed assistant message's usage, runtime model/provider, and a
  *  per-turn throughput sample into the result. */
 function recordAssistantMessage(
@@ -505,15 +547,33 @@ function recordAssistantMessage(
 	turnStartMs: number | undefined,
 	providerForModel?: (modelId: string) => string | undefined,
 ): void {
-	result.usage.turns++;
+	const turnNumber = result.usage.turns + 1;
+	result.usage.turns = turnNumber;
 	const usage = msg.usage;
+	const input = finiteNonNegativeToken(usage?.input);
+	const output = finiteNonNegativeToken(usage?.output);
+	const cacheRead = finiteNonNegativeToken(usage?.cacheRead);
+	const cacheWrite = finiteNonNegativeToken(usage?.cacheWrite);
+	const presence = tokenChannelPresence(usage);
+	const aggregatePresence = turnNumber === 1
+		? presence
+		: mergeTokenChannelPresence(result.usage.tokenChannelPresence, presence);
+	result.usage.tokenChannelPresence = aggregatePresence;
+	result.usage.tokenChannelsKnown = Object.values(aggregatePresence).every(Boolean);
+	// Cost is provider-reported evidence only when an adapter supplies an
+	// explicit billing field. The SDK's `usage.cost.total` is a catalog
+	// estimate and must not accumulate into the exact-cost path.
+	const reportedCost = reportedUsageCost(usage);
 	if (usage) {
-		result.usage.input += usage.input || 0;
-		result.usage.output += usage.output || 0;
-		result.usage.cacheRead += usage.cacheRead || 0;
-		result.usage.cacheWrite += usage.cacheWrite || 0;
-		result.usage.cost += usage.cost?.total || 0;
-		result.usage.contextTokens = usage.totalTokens || 0;
+		result.usage.input += input ?? 0;
+		result.usage.output += output ?? 0;
+		result.usage.cacheRead += cacheRead ?? 0;
+		result.usage.cacheWrite += cacheWrite ?? 0;
+		if (reportedCost !== undefined) {
+			result.usage.cost = (result.usage.cost ?? 0) + reportedCost;
+			result.usage.reportedCostUsd = (result.usage.reportedCostUsd ?? 0) + reportedCost;
+		}
+		result.usage.contextTokens = finiteNonNegativeToken(usage.totalTokens) ?? 0;
 	}
 	if (msg.model) result.model = msg.model;
 	// Prefer the serving provider stamped by the runtime. Some adapters omit it;
@@ -534,18 +594,19 @@ function recordAssistantMessage(
 		typeof turnStartMs === "number" && Number.isFinite(turnStartMs) && turnStartMs > 0
 			? Math.max(0, endedMs - turnStartMs)
 			: 0;
+	const providerUsage = usage ? {
+		...(input !== undefined ? { input } : {}),
+		...(output !== undefined ? { output } : {}),
+		...(cacheRead !== undefined ? { cacheRead } : {}),
+		...(cacheWrite !== undefined ? { cacheWrite } : {}),
+		...(reportedCost !== undefined ? { cost: reportedCost, reportedCostUsd: reportedCost } : {}),
+	} : undefined;
 	const providerInvocation: SubagentProviderInvocationRecord = {
 		invocationId: `${result.attemptId ?? "unknown-attempt"}:provider:${result.usage.turns}`,
 		attemptId: result.attemptId ?? 'unknown-attempt',
 		...(result.model ? { model: result.model } : {}),
 		...(result.provider ? { provider: result.provider } : {}),
-		...(usage ? { usage: {
-			...(typeof usage.input === 'number' ? { input: usage.input } : {}),
-			...(typeof usage.output === 'number' ? { output: usage.output } : {}),
-			...(typeof usage.cacheRead === 'number' ? { cacheRead: usage.cacheRead } : {}),
-			...(typeof usage.cacheWrite === 'number' ? { cacheWrite: usage.cacheWrite } : {}),
-			...(typeof usage.cost?.total === 'number' ? { cost: usage.cost.total } : {}),
-		} } : {}),
+		...(providerUsage ? { usage: providerUsage } : {}),
 		startedAt: typeof turnStartMs === 'number' && Number.isFinite(turnStartMs) ? turnStartMs : endedMs,
 		completedAt: endedMs,
 		outcome: msg.stopReason === 'aborted' ? 'aborted' : msg.errorMessage ? 'failure' : 'success',
@@ -1174,8 +1235,13 @@ function reclaimOrphanedSignalListeners(before: Map<string, Set<Function>>): voi
 /** Environment key for the user-configured list of tool names to always drop
  *  from subagent sessions (e.g. ["ask_user"]). Mirrored by the pie host from
  *  the Subagent settings UI via the runtimePrefs.set RPC, same pattern as
- *  PIE_SUBAGENT_BUCKETS_JSON. Empty/unset → no tools dropped (today's behavior). */
+ *  PIE_SUBAGENT_BUCKETS_JSON. Empty/unset → no user-configured tools dropped. */
 const SUBAGENT_DROP_TOOLS_ENV = "PIE_SUBAGENT_DROP_TOOLS_JSON";
+
+/** Wake tools are owned by resumable main sessions. In-memory children cannot
+ *  be resumed by the host wake registry, so never expose these capabilities to
+ *  a child even when the parent tool catalog contains them. */
+const UNSUPPORTED_SUBAGENT_TOOLS = new Set(["defer_trigger"]);
 
 /** Reads the user-configured drop-tools list from the environment. Returns a
  *  Set for O(1) membership checks; empty when unset/invalid. */
@@ -1238,7 +1304,11 @@ export async function runSingleAgent(
 ): Promise<SingleResult> {
 	// 1. Preflight: locate the agent config or short-circuit with an invalid result.
 	const agent = agents.find((a) => a.name === agentName);
-	if (!agent) return createInvalidAgentResult(agentName, task, agents, step);
+	if (!agent) {
+		const invalid = createInvalidAgentResult(agentName, task, agents, step);
+		invalid.cwd = cwd ?? defaultCwd;
+		return invalid;
+	}
 	const runtimeContext = readRuntimeContext();
 	let ownedProcessPermit: Release | undefined;
 
@@ -1275,6 +1345,9 @@ export async function runSingleAgent(
 		thinkingLevel,
 		modelResolutionDiagnostic,
 	);
+	// Persist the effective cwd alongside the child transcript. This is the
+	// provenance needed when a parent later re-derives relative file changes.
+	currentResult.cwd = sessionCwd;
 	if (parentUserContext) {
 		currentResult.parentUserContextMode = parentUserContext.mode;
 		if (parentUserContext.content) currentResult.parentUserContext = parentUserContext.content;
@@ -1346,19 +1419,18 @@ export async function runSingleAgent(
 		}
 	}
 
-	// Tools: subtract the user-configured drop list (e.g. ["ask_user"]) from
-	// the agent's effective tool set. For agents with an explicit `tools:`
-	// frontmatter we filter that list; for unrestricted agents (no `tools:`)
-	// we filter the full parent tool set passed in as `allToolNames`. When the
-	// drop set is empty, `agent.tools` passes through unchanged (undefined →
-	// SDK loads all tools), preserving today's behavior exactly.
+	// Tools: subtract the user-configured drop list (e.g. ["ask_user"]) and
+	// capabilities unsupported by an in-memory child from the effective tool set.
+	// For agents with explicit `tools:` frontmatter we filter that list; for
+	// unrestricted agents we filter the full parent set passed as `allToolNames`.
+	// An undefined unrestricted set still means "SDK loads all tools" subject to
+	// the explicit excludeTools capability fence; an explicit empty list remains empty.
 	const dropSet = readDropTools();
 	let effectiveTools: string[] | undefined = agent.tools;
-	if (dropSet.size > 0) {
-		const base = agent.tools ?? allToolNames;
-		if (base && base.length > 0) {
-			effectiveTools = base.filter((t) => !dropSet.has(t));
-		}
+	const baseTools = agent.tools ?? allToolNames;
+	if (baseTools) {
+		effectiveTools = baseTools.filter((toolName) =>
+			!dropSet.has(toolName) && !UNSUPPORTED_SUBAGENT_TOOLS.has(toolName));
 	}
 
 	const resourceLoader = sdk.createResourceLoader({
@@ -1416,6 +1488,7 @@ export async function runSingleAgent(
 			model: resolvedModel,
 			thinkingLevel,
 			tools: effectiveTools,
+			excludeTools: [...UNSUPPORTED_SUBAGENT_TOOLS],
 			sessionManager: sdk.createSessionManager(sessionCwd),
 			resourceLoader,
 		});
@@ -1570,6 +1643,11 @@ export async function runSingleAgent(
 		sessionCleanedUp = true;
 		const terminalStartedAt = performance.now();
 		try {
+			// Stamp the bounded file-change summary before the terminal lifecycle
+			// update and before execute.ts performs its durable projection. This keeps
+			// edit/write semantics and line stats available even when the live
+			// transcript is later transport-compacted.
+			populateFileChanges(currentResult);
 			// Publish terminal lifecycle state before teardown. Parallel siblings can
 			// keep the enclosing tool call live, so the webview cannot rely on the
 			// durability-gated tool result to learn that this child has finished.

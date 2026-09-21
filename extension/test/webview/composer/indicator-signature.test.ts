@@ -98,6 +98,41 @@ test('streamingContentSignature changes as the streaming message grows', () => {
   assert.notEqual(streamingContentSignature(grown), before);
 });
 
+test('streamingContentSignature changes as tool-call arguments stream', () => {
+  const base = [msg({
+    id: 's',
+    status: 'streaming',
+    markdown: '',
+    toolCalls: [{
+      id: 'tool-1',
+      name: 'bash',
+      input: '{"command":"ec',
+      argumentsText: '{"command":"ec',
+      status: 'drafting',
+      seq: 1,
+    }],
+  })];
+  const before = streamingContentSignature(base);
+  const grown = structuredClone(base);
+  grown[0].toolCalls![0].input = '{"command":"echo generated output"';
+  grown[0].toolCalls![0].argumentsText = '{"command":"echo generated output"';
+  grown[0].toolCalls![0].seq = 2;
+  assert.notEqual(streamingContentSignature(grown), before);
+});
+
+test('streamingContentSignature tracks legacy tool-call drafts', () => {
+  const base = [msg({
+    id: 's',
+    status: 'streaming',
+    markdown: '',
+    draftingToolCall: { id: 'tool-1', name: 'bash', argumentsText: '{"co' },
+  })];
+  const before = streamingContentSignature(base);
+  const grown = structuredClone(base);
+  grown[0].draftingToolCall!.argumentsText = '{"command":"pwd"}';
+  assert.notEqual(streamingContentSignature(grown), before);
+});
+
 // ── systemPromptsSignature ──────────────────────────────────────────────────
 
 test('systemPromptsSignature is stable for byte-identical content under a fresh ref', () => {

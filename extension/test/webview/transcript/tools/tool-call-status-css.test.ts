@@ -21,7 +21,7 @@ test('shared status chip uses content-sized width for tool/subagent headers', as
   assert.match(indexCss, /--status-chip-dot-size:\s*4px;/);
 
   assert.ok(baseRule, 'expected .status-chip base rule in status-chip.css');
-  assert.match(baseRule[0], /font-family:\s*var\(--vscode-editor-font-family,\s*monospace\);/);
+  assert.match(baseRule[0], /font-family:\s*var\(--panel-font-mono\);/);
 
   assert.ok(fixedRule, 'expected .status-chip-fixed rule in status-chip.css');
   // Fixed variant now auto-sizes to content with a max-width cap

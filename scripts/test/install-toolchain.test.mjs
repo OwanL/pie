@@ -1,5 +1,5 @@
 // Focused unit tests for scripts/install/lib/toolchain.mjs — the pure
-// pinned-vs-actual comparison (no installs) shared by both shell installers and
+// pinned-vs-actual comparison (no installs) used by the Windows installer and
 // exercised by the `verify-toolchain` dry-run.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

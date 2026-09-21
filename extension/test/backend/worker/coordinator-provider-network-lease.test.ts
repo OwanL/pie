@@ -241,6 +241,49 @@ test('coordinator policies expose base metrics and grant worker transport bounds
   authority.releaseOwner(owner('base'));
 });
 
+test('coordinator Unlimited bypasses capacity and afterburn but keeps transport bounds', async () => {
+  const clock = new FakeClock();
+  const authority = new CoordinatorProviderNetworkLeaseAuthority({
+    now: clock.now,
+    setTimeout: clock.setTimeout,
+    clearTimeout: clock.clearTimeout,
+  });
+  authority.updatePolicies({
+    p: {
+      maxConcurrentRequests: 0,
+      afterburnSeconds: 60,
+      queueWaitSeconds: 1,
+      headerWaitSeconds: 2.5,
+      streamIdleTimeoutSeconds: 3.5,
+    },
+  });
+
+  const first = await authority.acquire(owner('a'), 'unlimited-first', { provider: 'p', model: 'm' });
+  const second = await authority.acquire(owner('b'), 'unlimited-second', { provider: 'p', model: 'm' });
+  const third = await authority.acquire(owner('c'), 'unlimited-third', { provider: 'p', model: 'm' });
+  assert.equal(authority.inspect().queued, 0);
+  assert.equal(authority.getMetrics()[0]?.activeRequests, 3);
+  assert.equal(authority.getMetrics()[0]?.maxConcurrentRequests, 0);
+  assert.equal(first.headerWaitMs, 2_500);
+  assert.equal(first.streamIdleTimeoutMs, 3_500);
+
+  authority.release(owner('a'), first.leaseId, 'completed');
+  authority.release(owner('b'), second.leaseId, 'completed');
+  authority.release(owner('c'), third.leaseId, 'completed');
+  assert.equal(authority.inspect().queued, 0);
+  assert.equal(authority.inspect().providers, undefined, 'Unlimited completion must not retain afterburn capacity');
+
+  // A live finite policy can be restored without stale Unlimited state.
+  authority.updatePolicies({ p: { maxConcurrentRequests: 1, afterburnSeconds: 0 } });
+  const finite = await authority.acquire(owner('finite-a'), 'finite-a', { provider: 'p', model: 'm' });
+  const waiting = authority.acquire(owner('finite-b'), 'finite-b', { provider: 'p', model: 'm' });
+  await Promise.resolve();
+  assert.equal(authority.inspect().queued, 1);
+  authority.release(owner('finite-a'), finite.leaseId, 'completed');
+  const admitted = await waiting;
+  authority.release(owner('finite-b'), admitted.leaseId, 'completed');
+});
+
 test('coordinator normalizes provider deadlines to finite positive integer milliseconds', async () => {
   const clock = new FakeClock();
   const authority = new CoordinatorProviderNetworkLeaseAuthority({
@@ -439,6 +482,94 @@ test('worker provider admission observes an AbortSignal carried by the Request o
     await assert.rejects(fetching, (error: Error) => error.name === 'AbortError');
     assert.ok(acquiredRequestId);
     assert.equal(cancelledRequestId, acquiredRequestId);
+  } finally {
+    uninstall();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('worker provider admission treats explicit null init.signal as overriding a Request signal', async () => {
+  const originalFetch = globalThis.fetch;
+  let resolveAcquire: ((lease: { leaseId: string; headerWaitMs: number; streamIdleTimeoutMs: number }) => void) | undefined;
+  let cancelled = false;
+  globalThis.fetch = (async () => new Response('ok')) as typeof fetch;
+  const uninstall = installWorkerProviderNetworkLease({
+    acquire: async () => await new Promise((resolve) => { resolveAcquire = resolve; }),
+    cancel: async () => { cancelled = true; },
+    observe: () => undefined,
+    release: async () => undefined,
+  });
+  try {
+    const controller = new AbortController();
+    const request = new Request('https://provider.example/v1/chat', { signal: controller.signal });
+    const fetching = globalThis.fetch(request, { signal: null });
+    await Promise.resolve();
+    controller.abort();
+    resolveAcquire?.({ leaseId: 'lease-null-signal', headerWaitMs: 1_000, streamIdleTimeoutMs: 1_000 });
+    const response = await fetching;
+    assert.equal(await response.text(), 'ok');
+    assert.equal(cancelled, false);
+  } finally {
+    uninstall();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('worker provider admission settles promptly when cancellation RPC rejects', async () => {
+  const originalFetch = globalThis.fetch;
+  let cancelled = false;
+  globalThis.fetch = (async () => { throw new Error('underlying fetch must not run'); }) as typeof fetch;
+  const uninstall = installWorkerProviderNetworkLease({
+    acquire: async () => await new Promise<{ leaseId: string; headerWaitMs: number; streamIdleTimeoutMs: number }>(() => undefined),
+    cancel: async () => {
+      cancelled = true;
+      throw new Error('coordinator cancellation failed');
+    },
+    observe: () => undefined,
+    release: async () => undefined,
+  });
+  try {
+    const controller = new AbortController();
+    const fetching = globalThis.fetch('https://provider.example/v1/chat', { signal: controller.signal });
+    await Promise.resolve();
+    controller.abort();
+    await assert.rejects(fetching, (error: Error) => error.name === 'AbortError');
+    assert.equal(cancelled, true);
+    await new Promise((resolve) => setImmediate(resolve));
+  } finally {
+    uninstall();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('worker provider admission releases a late grant after prompt abort when cancellation RPC hangs', async () => {
+  const originalFetch = globalThis.fetch;
+  let resolveAcquire: ((lease: { leaseId: string; headerWaitMs: number; streamIdleTimeoutMs: number }) => void) | undefined;
+  let cancelled = false;
+  const released: Array<{ leaseId: string; outcome: string }> = [];
+  globalThis.fetch = (async () => { throw new Error('underlying fetch must not run'); }) as typeof fetch;
+  const uninstall = installWorkerProviderNetworkLease({
+    acquire: async () => await new Promise((resolve) => { resolveAcquire = resolve; }),
+    cancel: async () => {
+      cancelled = true;
+      return await new Promise<void>(() => undefined);
+    },
+    observe: () => undefined,
+    release: async (leaseId, outcome) => {
+      released.push({ leaseId, outcome });
+      throw new Error('late release failed');
+    },
+  });
+  try {
+    const controller = new AbortController();
+    const fetching = globalThis.fetch('https://provider.example/v1/chat', { signal: controller.signal });
+    await Promise.resolve();
+    controller.abort();
+    await assert.rejects(fetching, (error: Error) => error.name === 'AbortError');
+    assert.equal(cancelled, true);
+    resolveAcquire?.({ leaseId: 'late-lease', headerWaitMs: 1_000, streamIdleTimeoutMs: 1_000 });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(released, [{ leaseId: 'late-lease', outcome: 'cancelled' }]);
   } finally {
     uninstall();
     globalThis.fetch = originalFetch;

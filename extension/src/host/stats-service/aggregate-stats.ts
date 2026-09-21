@@ -38,6 +38,11 @@ import {
   type RunSnapshot,
   type TurnThroughputSample,
 } from '../run-analytics';
+import {
+  addLocalCalendarDaysMs,
+  localCalendarDayKey,
+  localCalendarDayStartMs,
+} from '../../../../shared/analytics/metrics.js';
 
 /** How many trailing days (inclusive of today) the daily-cost series covers. */
 export const DAILY_COST_WINDOW_DAYS = 14;
@@ -133,6 +138,9 @@ interface AttributedUsage extends TokenCounts {
   provider: string;
   occurredAtMs: number;
   cost: number;
+  /** True when this row carries either provider cost evidence or a complete
+   * catalog-priced token observation, including an explicit zero cost. */
+  costObserved: boolean;
 }
 
 /** Per-hour throughput accumulator for today's intraday throughput chart. */
@@ -547,13 +555,6 @@ function usageTotal(usage: TokenCounts): number {
   return usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
 }
 
-function equalUsage(left: TokenCounts, right: TokenCounts): boolean {
-  return left.inputTokens === right.inputTokens
-    && left.outputTokens === right.outputTokens
-    && left.cacheReadTokens === right.cacheReadTokens
-    && left.cacheWriteTokens === right.cacheWriteTokens;
-}
-
 function subtractUsage(left: TokenCounts, right: TokenCounts): TokenCounts {
   return {
     inputTokens: Math.max(0, left.inputTokens - right.inputTokens),
@@ -592,6 +593,96 @@ function providerForSample(
     : undefined;
 }
 
+type TokenChannelSample = Partial<TokenCounts> & {
+  tokenChannelsKnown?: boolean;
+  tokenChannelPresence?: {
+    input: boolean;
+    output: boolean;
+    cacheRead: boolean;
+    cacheWrite: boolean;
+  };
+};
+
+type TokenChannelKey = keyof TokenCounts;
+
+function tokenChannelValueIsValid(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
+function tokenChannelsComplete(sample: TokenChannelSample): boolean {
+  if (sample.tokenChannelsKnown === false) return false;
+  // Samples written before explicit channel metadata used omitted input/cache
+  // fields as legacy zeroes. Keep that wire behavior; persisted/coerced
+  // samples carry presence metadata when omission means unknown. Invalid
+  // values are never treated as legacy zeroes.
+  if (!sample.tokenChannelPresence) {
+    return [sample.inputTokens, sample.outputTokens, sample.cacheReadTokens, sample.cacheWriteTokens]
+      .every((value) => value === undefined || tokenChannelValueIsValid(value));
+  }
+  const channels: Array<[TokenChannelKey, number | undefined]> = [
+    ['inputTokens', sample.inputTokens],
+    ['outputTokens', sample.outputTokens],
+    ['cacheReadTokens', sample.cacheReadTokens],
+    ['cacheWriteTokens', sample.cacheWriteTokens],
+  ];
+  return channels.every(([, value]) => tokenChannelValueIsValid(value))
+    && sample.tokenChannelPresence.input === true
+    && sample.tokenChannelPresence.output === true
+    && sample.tokenChannelPresence.cacheRead === true
+    && sample.tokenChannelPresence.cacheWrite === true;
+}
+
+function tokenChannelIsKnown(sample: TokenChannelSample, channel: TokenChannelKey): boolean {
+  const presenceKey = channel === 'inputTokens' ? 'input'
+    : channel === 'outputTokens' ? 'output'
+      : channel === 'cacheReadTokens' ? 'cacheRead' : 'cacheWrite';
+  if (!tokenChannelValueIsValid(sample[channel])) return false;
+  return sample.tokenChannelPresence
+    ? sample.tokenChannelPresence[presenceKey] === true
+    : sample.tokenChannelsKnown !== false;
+}
+
+function sameAssistantAndThroughputSample(
+  assistant: NonNullable<RunSnapshot['auxiliaryLlmUsage']>[number],
+  throughput: TurnThroughputSample,
+  run: RunSnapshot,
+  runModel: string,
+  pricingMap: Map<string, ModelPricingRecord[]>,
+): boolean {
+  const assistantModel = assistant.modelId ?? runModel;
+  const throughputModel = throughput.modelId ?? runModel;
+  const assistantProvider = providerForModel(
+    assistantModel,
+    pricingMap,
+    providerForSample(assistant.modelId, assistant.provider, run.modelId, run.provider),
+  );
+  const throughputProvider = providerForModel(
+    throughputModel,
+    pricingMap,
+    providerForSample(throughput.modelId, throughput.provider, run.modelId, run.provider),
+  );
+  if (canonicalModel(assistantModel, pricingMap) !== canonicalModel(throughputModel, pricingMap)
+    || assistantProvider !== throughputProvider) {
+    return false;
+  }
+
+  const throughputCounts: TokenCounts = {
+    inputTokens: throughput.inputTokens ?? 0,
+    outputTokens: throughput.outputTokens,
+    cacheReadTokens: throughput.cacheReadTokens ?? 0,
+    cacheWriteTokens: throughput.cacheWriteTokens ?? 0,
+  };
+  let comparableChannel = false;
+  for (const channel of ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens'] as const) {
+    if (!tokenChannelIsKnown(assistant, channel) || !tokenChannelIsKnown(throughput, channel)) continue;
+    comparableChannel = true;
+    if (assistant[channel] !== throughputCounts[channel]) return false;
+  }
+  // A cost-only pair has no channel evidence to compare. Same attribution and
+  // zero channel placeholders are the only available duplicate identity.
+  return comparableChannel || usageTotal(assistant) === 0 && usageTotal(throughputCounts) === 0;
+}
+
 function usageForModel(
   model: string,
   occurredAtMs: number,
@@ -600,6 +691,7 @@ function usageForModel(
   preferredProvider?: string,
   reportedCostUsd?: number,
   aggregateAcrossRequests = false,
+  allowCatalogPricing = true,
 ): AttributedUsage {
   // Unknown/stale model IDs are folded into one stable bucket. This keeps every
   // model/provider breakdown bounded by the current pricing catalog plus one,
@@ -611,14 +703,14 @@ function usageForModel(
   const attributedModel = canonicalModel(model, pricingMap);
   const attributedProvider = providerForModel(model, pricingMap, preferredProvider);
   const pricing = pricingForModel(attributedModel, pricingMap, attributedProvider);
-  const calculatedCost = costFromTokens(
+  const calculatedCost = allowCatalogPricing ? costFromTokens(
     counts.inputTokens,
     counts.outputTokens,
     counts.cacheReadTokens,
     counts.cacheWriteTokens,
     pricing,
     !aggregateAcrossRequests,
-  );
+  ) : 0;
   const validReportedCost = typeof reportedCostUsd === 'number'
     && Number.isFinite(reportedCostUsd) && reportedCostUsd >= 0
     ? reportedCostUsd
@@ -628,11 +720,11 @@ function usageForModel(
     model: attributedModel,
     provider: attributedProvider,
     occurredAtMs,
-    // Pi's persisted `usage.cost` is itself calculated from the model catalog;
-    // it is not a provider invoice. Recalculate known, token-bearing usage so
-    // a corrected catalog immediately repairs stale stored estimates. Preserve
-    // the stored value only when the model is unpriced or tokens are absent.
-    cost: pricing && usageTotal(counts) > 0 ? calculatedCost : validReportedCost ?? calculatedCost,
+    // Explicit provider evidence is authoritative, including a genuine zero.
+    // Catalog pricing is only a fallback when the provider did not report cost.
+    cost: validReportedCost ?? calculatedCost,
+    costObserved: validReportedCost !== undefined
+      || (allowCatalogPricing && pricing !== null && usageTotal(counts) > 0),
   };
 }
 
@@ -676,30 +768,39 @@ function attributedRunUsage(
     observedParent.cacheWriteTokens += sample.cacheWriteTokens;
   }
   let parentRemaining = maxUsage(terminalParent, observedParent);
-  for (const sample of assistantMessageSamples) {
-    if (usageTotal(parentRemaining) === 0) break;
+  const assistantUsageEntries: Array<AttributedUsage | undefined> = [];
+  for (const [assistantIndex, sample] of assistantMessageSamples.entries()) {
+    if (usageTotal(parentRemaining) === 0 && sample.reportedCostUsd === undefined) {
+      assistantUsageEntries[assistantIndex] = undefined;
+      continue;
+    }
     const counts: TokenCounts = {
       inputTokens: Math.min(parentRemaining.inputTokens, sample.inputTokens),
       outputTokens: Math.min(parentRemaining.outputTokens, sample.outputTokens),
       cacheReadTokens: Math.min(parentRemaining.cacheReadTokens, sample.cacheReadTokens),
       cacheWriteTokens: Math.min(parentRemaining.cacheWriteTokens, sample.cacheWriteTokens),
     };
-    if (usageTotal(counts) === 0 && sample.reportedCostUsd === undefined) continue;
+    if (usageTotal(counts) === 0 && sample.reportedCostUsd === undefined) {
+      assistantUsageEntries[assistantIndex] = undefined;
+      continue;
+    }
     const occurredAtMs = Date.parse(sample.occurredAt);
-    const sampleCounts: TokenCounts = {
-      inputTokens: sample.inputTokens,
-      outputTokens: sample.outputTokens,
-      cacheReadTokens: sample.cacheReadTokens,
-      cacheWriteTokens: sample.cacheWriteTokens,
-    };
-    usage.push(usageForModel(
+    const attributed = usageForModel(
       sample.modelId ?? runModel,
       Number.isNaN(occurredAtMs) ? fallbackMs : occurredAtMs,
       counts,
       pricingMap,
       providerForSample(sample.modelId, sample.provider, run.modelId, run.provider),
-      equalUsage(counts, sampleCounts) ? sample.reportedCostUsd : undefined,
-    ));
+      // The sample's explicit cost belongs to that provider response even when
+      // terminal totals clip its token channels during reconciliation. A
+      // clipped/partial observation must not turn an authoritative zero into a
+      // catalog estimate.
+      sample.reportedCostUsd,
+      false,
+      tokenChannelsComplete(sample),
+    );
+    usage.push(attributed);
+    assistantUsageEntries[assistantIndex] = attributed;
     parentRemaining = subtractUsage(parentRemaining, counts);
   }
   // Forwarded child throughput samples must never participate in the parent
@@ -736,16 +837,62 @@ function attributedRunUsage(
   // Per-turn samples carry the provider/model that actually served that turn.
   // Reconcile them against canonical run totals so mixed-model runs remain
   // discrete without allowing duplicate/malformed samples to inflate usage.
+  const matchedAssistantSamples = new Set<number>();
   for (const sample of run.turnThroughputSamples) {
-    if (usageTotal(parentRemaining) === 0) break;
+    if (usageTotal(parentRemaining) === 0 && sample.reportedCostUsd === undefined) continue;
     if (isForwardedChildSample(sample)) continue;
+    const matchingAssistantIndex = assistantMessageSamples.findIndex((assistant, index) =>
+      !matchedAssistantSamples.has(index)
+      && assistantUsageEntries[index] !== undefined
+      && sameAssistantAndThroughputSample(assistant, sample, run, runModel, pricingMap));
+    if (matchingAssistantIndex >= 0) {
+      matchedAssistantSamples.add(matchingAssistantIndex);
+      const assistantUsage = assistantUsageEntries[matchingAssistantIndex];
+      if (assistantUsage) {
+        const throughputCounts: TokenCounts = {
+          inputTokens: sample.inputTokens ?? 0,
+          outputTokens: sample.outputTokens,
+          cacheReadTokens: sample.cacheReadTokens ?? 0,
+          cacheWriteTokens: sample.cacheWriteTokens ?? 0,
+        };
+        // If the durable sample omitted a channel, a matching throughput
+        // observation can fill that channel from the still-unreconciled
+        // terminal total. This keeps an exact response cost from being paired
+        // with a separately catalog-priced residual.
+        const additional: TokenCounts = {
+          inputTokens: tokenChannelIsKnown(sample, 'inputTokens')
+            ? Math.min(parentRemaining.inputTokens, Math.max(0, throughputCounts.inputTokens - assistantUsage.inputTokens)) : 0,
+          outputTokens: tokenChannelIsKnown(sample, 'outputTokens')
+            ? Math.min(parentRemaining.outputTokens, Math.max(0, throughputCounts.outputTokens - assistantUsage.outputTokens)) : 0,
+          cacheReadTokens: tokenChannelIsKnown(sample, 'cacheReadTokens')
+            ? Math.min(parentRemaining.cacheReadTokens, Math.max(0, throughputCounts.cacheReadTokens - assistantUsage.cacheReadTokens)) : 0,
+          cacheWriteTokens: tokenChannelIsKnown(sample, 'cacheWriteTokens')
+            ? Math.min(parentRemaining.cacheWriteTokens, Math.max(0, throughputCounts.cacheWriteTokens - assistantUsage.cacheWriteTokens)) : 0,
+        };
+        assistantUsage.inputTokens += additional.inputTokens;
+        assistantUsage.outputTokens += additional.outputTokens;
+        assistantUsage.cacheReadTokens += additional.cacheReadTokens;
+        assistantUsage.cacheWriteTokens += additional.cacheWriteTokens;
+        parentRemaining = subtractUsage(parentRemaining, additional);
+        // Throughput and durable assistant observations normally describe the
+        // same provider response. Transfer an exact throughput cost only when
+        // the durable sample lacked one; never add the two observations together.
+        if (assistantMessageSamples[matchingAssistantIndex]!.reportedCostUsd === undefined
+          && typeof sample.reportedCostUsd === 'number'
+          && Number.isFinite(sample.reportedCostUsd) && sample.reportedCostUsd >= 0) {
+          assistantUsage.cost = sample.reportedCostUsd;
+          assistantUsage.costObserved = true;
+        }
+      }
+      continue;
+    }
     const counts: TokenCounts = {
       inputTokens: Math.min(parentRemaining.inputTokens, sample.inputTokens ?? 0),
       outputTokens: Math.min(parentRemaining.outputTokens, sample.outputTokens),
       cacheReadTokens: Math.min(parentRemaining.cacheReadTokens, sample.cacheReadTokens ?? 0),
       cacheWriteTokens: Math.min(parentRemaining.cacheWriteTokens, sample.cacheWriteTokens ?? 0),
     };
-    if (usageTotal(counts) === 0) continue;
+    if (usageTotal(counts) === 0 && sample.reportedCostUsd === undefined) continue;
     const occurredAtMs = Date.parse(sample.endedAt);
     usage.push(usageForModel(
       sample.modelId ?? runModel,
@@ -754,6 +901,8 @@ function attributedRunUsage(
       pricingMap,
       providerForSample(sample.modelId, sample.provider, run.modelId, run.provider),
       sample.reportedCostUsd,
+      false,
+      tokenChannelsComplete(sample),
     ));
     parentRemaining = subtractUsage(parentRemaining, counts);
   }
@@ -783,6 +932,7 @@ function attributedRunUsage(
       providerForSample(sample.modelId, sample.provider, run.modelId, run.provider),
       sample.reportedCostUsd,
       false,
+      tokenChannelsComplete(sample),
     ));
   }
 
@@ -793,7 +943,8 @@ function attributedRunUsage(
     cacheWriteTokens: run.toolUsage?.subagentCacheWriteTokens ?? 0,
   };
   for (const sample of auxiliary) {
-    if (sample.kind !== 'subagent' || usageTotal(remaining) === 0) continue;
+    if (sample.kind !== 'subagent'
+      || (usageTotal(remaining) === 0 && sample.reportedCostUsd === undefined)) continue;
     const dedupKey = `${sample.kind}:${sample.sourceId}`;
     if (seen.has(dedupKey)) continue;
     seen.add(dedupKey);
@@ -803,22 +954,20 @@ function attributedRunUsage(
       cacheReadTokens: Math.min(remaining.cacheReadTokens, sample.cacheReadTokens),
       cacheWriteTokens: Math.min(remaining.cacheWriteTokens, sample.cacheWriteTokens),
     };
-    if (usageTotal(counts) === 0) continue;
+    if (usageTotal(counts) === 0 && sample.reportedCostUsd === undefined) continue;
     const occurredAtMs = Date.parse(sample.occurredAt);
-    const sampleCounts: TokenCounts = {
-      inputTokens: sample.inputTokens,
-      outputTokens: sample.outputTokens,
-      cacheReadTokens: sample.cacheReadTokens,
-      cacheWriteTokens: sample.cacheWriteTokens,
-    };
     usage.push(usageForModel(
       sample.modelId ?? runModel,
       Number.isNaN(occurredAtMs) ? fallbackMs : occurredAtMs,
       counts,
       pricingMap,
       providerForSample(sample.modelId, sample.provider, run.modelId, run.provider),
-      equalUsage(counts, sampleCounts) ? sample.reportedCostUsd : undefined,
+      // Subagent billing samples carry exact cost for the individual child
+      // response; preserving it is independent of how much aggregate token
+      // usage remains after reconciliation.
+      sample.reportedCostUsd,
       true,
+      tokenChannelsComplete(sample),
     ));
     remaining = subtractUsage(remaining, counts);
   }
@@ -874,6 +1023,7 @@ function distributeUsageForSeries(
     current.cacheReadTokens += item.cacheReadTokens;
     current.cacheWriteTokens += item.cacheWriteTokens;
     current.cost += item.cost;
+    current.costObserved ||= item.costObserved;
     current.occurredAtMs = Math.max(current.occurredAtMs, item.occurredAtMs);
   }
 
@@ -903,7 +1053,7 @@ function distributeUsageForSeries(
     const sampleOutput = samples.reduce((sum, entry) => sum + entry.sample.outputTokens, 0);
     if (samples.length === 0) {
       const ms = includeSample(group.occurredAtMs) ? group.occurredAtMs : fallbackMs;
-      if (group.cost > 0) cost.push({ ms, provider: group.provider, model: group.model, cost: group.cost });
+      if (group.costObserved) cost.push({ ms, provider: group.provider, model: group.model, cost: group.cost });
       if (group.outputTokens > 0) outputTokens.push({ ms, provider: group.provider, model: group.model, tokens: group.outputTokens });
       continue;
     }
@@ -911,8 +1061,17 @@ function distributeUsageForSeries(
       const share = sampleOutput > 0
         ? entry.sample.outputTokens / sampleOutput
         : 1 / samples.length;
-      if (group.cost > 0) cost.push({ ms: entry.ms, provider: group.provider, model: group.model, cost: group.cost * share });
-      if (group.outputTokens > 0) outputTokens.push({ ms: entry.ms, provider: group.provider, model: group.model, tokens: group.outputTokens * share });
+      if (group.costObserved) {
+        cost.push({ ms: entry.ms, provider: group.provider, model: group.model, cost: group.cost * share });
+      }
+      if (group.outputTokens > 0) {
+        outputTokens.push({
+          ms: entry.ms,
+          provider: group.provider,
+          model: group.model,
+          tokens: group.outputTokens * share,
+        });
+      }
     }
   }
   return { cost, inputTokens, outputTokens };
@@ -1708,6 +1867,8 @@ export function buildCumulativeSeries(
   nowMs: number,
   maxPoints: number = MAX_INTRADAY_CHART_POINTS,
   options: {
+    /** IANA projection timezone used for calendar-day bucketing. */
+    timeZone?: string;
     forceBucketing?: boolean;
     fixedRange?: { startMs: number; endMs: number };
     targetTotals?: { byProvider: AggregateSeriesSegment[]; byModel: AggregateModelSeriesSegment[] };
@@ -1718,14 +1879,15 @@ export function buildCumulativeSeries(
   const forceBucketing = options.forceBucketing ?? false;
   const targetTotals = options.targetTotals;
   const roundValues = options.roundValues ?? false;
-  const now = new Date(nowMs);
-  const dayStart = new Date(now);
-  dayStart.setHours(0, 0, 0, 0);
-  const nextDay = new Date(dayStart);
-  nextDay.setDate(nextDay.getDate() + 1);
-  const todayDate = localDateString(nowMs);
-  const allToday = samples.every((sample) => localDateString(sample.ms) === todayDate);
-  // A stable whole-local-day grid makes downsampling composable: a cached
+  // Legacy callers do not yet carry the projection zone; preserve their
+  // process-local calendar while canonical callers always provide the explicit
+  // analytics IANA zone.
+  const timeZone = options.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const todayDate = localCalendarDayKey(nowMs, timeZone);
+  const allToday = samples.every((sample) => localCalendarDayKey(sample.ms, timeZone) === todayDate);
+  const dayStartMs = localCalendarDayStartMs(nowMs, timeZone);
+  const nextDayMs = addLocalCalendarDaysMs(dayStartMs, 1, timeZone);
+  // A stable whole-projection-day grid makes downsampling composable: a cached
   // completed layer and a separately accumulated open layer produce exactly
   // the same buckets as a one-pass finalize, even after either side exceeds
   // the point cap.
@@ -1733,7 +1895,7 @@ export function buildCumulativeSeries(
     samples,
     maxPoints - 1,
     options.fixedRange
-      ?? (allToday ? { startMs: dayStart.getTime(), endMs: nextDay.getTime() } : undefined),
+      ?? (allToday ? { startMs: dayStartMs, endMs: nextDayMs } : undefined),
     forceBucketing,
   );
   const byProvider = new Map<string, number>();

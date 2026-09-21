@@ -25,7 +25,6 @@ export const APPEARANCE_SETTING_LABELS = [
   'Corner radius',
   'Density',
   'Path parent depth',
-  'Message width',
   'Initial composer rows',
   'Expanded height',
   'Activity rows',
@@ -329,16 +328,6 @@ export function AppearanceSection({ prefs, onSetPrefs }: AppearanceSectionProps)
       </UiSettingsGroup>
 
       <UiSettingsGroup label="Layout">
-      <SliderRow
-        label="Message width"
-        value={prefs.uiMessageWidth}
-        min={40}
-        max={100}
-        step={2}
-        formatValue={(v) => `${v}%`}
-        hint="Max width of chat bubbles. Narrow view scales up to keep content readable."
-        onChange={(uiMessageWidth) => onSetPrefs({ uiMessageWidth })}
-      />
       <SliderRow
         label="Initial composer rows"
         value={prefs.composerInitialRows}

@@ -101,8 +101,8 @@ test('FileChangesPanel collapsed: renders sliver + aggregate header (SSR-safe)',
   assert.match(html, /sliver-file kind-modified/);
   assert.doesNotMatch(html, /sliver-file-dot/);
   assert.doesNotMatch(html, /sliver-file-glyph/);
-  assert.match(html, /sliver-file-name">src\/a.ts/);
-  assert.match(html, /sliver-file-name">src\/b.ts/);
+  assert.match(html, /sliver-file-name">a.ts/);
+  assert.match(html, /sliver-file-name">b.ts/);
   assert.match(html, /sliver-file-stats/);
   assert.match(html, /sliver-file-add">\+20/);
   assert.match(html, /sliver-file-del">-5/);
@@ -564,7 +564,7 @@ test('Shift+F10 on a keyboard-focused changed-file row opens its context menu', 
     const menu = host.querySelector('.file-change-context-menu');
     assert.ok(menu, 'the keyboard request opens the changed-file row menu via its onContextMenu path');
     const title = menu!.querySelector('.file-change-ctx-title');
-    assert.match(title?.textContent ?? '', /src\/a\.ts/, 'the menu targets the focused row\'s file');
+    assert.match(title?.textContent ?? '', /a\.ts/, 'the menu targets the focused row\'s file');
   } finally {
     act(() => { render(null, host); });
     host.remove();

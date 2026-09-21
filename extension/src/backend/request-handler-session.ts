@@ -570,12 +570,16 @@ async function handleSessionTitleGenerate(
         outputTokens: usage?.outputTokens ?? 0,
         cacheReadTokens: usage?.cacheReadTokens ?? 0,
         cacheWriteTokens: usage?.cacheWriteTokens ?? 0,
+        ...(usage?.tokenChannelsKnown !== undefined ? { tokenChannelsKnown: usage.tokenChannelsKnown } : {}),
+        ...(usage?.tokenChannelPresence ? { tokenChannelPresence: usage.tokenChannelPresence } : {}),
         ...(usage?.reportedCostUsd !== undefined ? { reportedCostUsd: usage.reportedCostUsd } : {}),
         durationMs: Math.max(0, Date.parse(endedAt) - Date.parse(startedAt)),
         outcome,
-        ...(!usage ? {
+        ...(!usage || usage.tokenChannelsKnown === false ? {
           instrumentationGap: true,
-          instrumentationGapReason: 'The session-title provider invocation exposed no usage.',
+          instrumentationGapReason: !usage
+            ? 'The session-title provider invocation exposed no usage.'
+            : 'The session-title provider response omitted one or more token channels.',
         } : {}),
       } satisfies AuxiliaryLlmUsagePayload);
     },

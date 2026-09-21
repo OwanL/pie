@@ -21,7 +21,7 @@ import { reducer } from '../../../../src/host/core/reducer';
 import { SessionServiceState } from '../../../../src/host/session-service/state';
 import { SessionTabActions } from '../../../../src/host/session-service/tab-actions';
 import { applySessionOpenedPayload } from '../../../../src/host/session-service/handlers/attach';
-import type { SessionOpenedPayload, SessionSummary } from '../../../../src/shared/protocol';
+import type { ChatMessage, SessionOpenedPayload, SessionSummary } from '../../../../src/shared/protocol';
 import { EffectRunner, type EffectRunnerDeps } from '../../../../src/host/core/effect-runner';
 import type { Event, EffectResultEvent } from '../../../../src/host/core/events';
 import { makeEffectRunnerDeps } from '../../../helpers/effect-runner-deps';
@@ -529,4 +529,98 @@ test('SDK replacement publication atomically rekeys and activates the selected s
   assert.equal(archState.sessions.sessions.some((summary) => summary.path === source), false);
   assert.equal(archState.sessions.sessions.some((summary) => summary.path === destination), true);
   assert.equal(archState.transcript.systemPromptsBySession[destination]?.[0]?.text, 'destination prompt');
+});
+
+test('cold first-send session.opened preserves the optimistic transcript and incoming runtime prompt catalog', () => {
+  const sessionPath = '/workspace/cold-first-send.jsonl';
+  const optimisticUser: ChatMessage = {
+    id: 'local:first-send',
+    role: 'user',
+    createdAt: '2026-01-02T00:00:00.000Z',
+    markdown: 'hello',
+    status: 'queued',
+  };
+  const systemPrompt = {
+    id: 'harness',
+    source: 'harness' as const,
+    title: 'Harness',
+    text: 'runtime-ready prompt',
+    summary: 'runtime-ready',
+    availability: 'available' as const,
+  };
+  const session: SessionSummary = {
+    path: sessionPath,
+    name: 'Cold first send',
+    cwd: '/w',
+    modifiedAt: '2026-01-02T00:00:00.000Z',
+    messageCount: 0,
+  };
+  const initial = createInitialArchState();
+  let archState: ArchState = {
+    ...initial,
+    sessions: {
+      ...initial.sessions,
+      sessions: [session],
+      openTabPaths: [sessionPath],
+      activeSessionPath: sessionPath,
+      runningSessionPaths: [sessionPath],
+    },
+    transcript: {
+      ...initial.transcript,
+      bySession: { [sessionPath]: [optimisticUser] },
+      windowBySession: {
+        [sessionPath]: {
+          totalCount: 1,
+          loadedStart: 0,
+          loadedEnd: 1,
+          hasOlder: false,
+          hasNewer: false,
+          isPartial: false,
+          hasUserMessages: true,
+        },
+      },
+    },
+  };
+  const context = createExtensionContext();
+  const getArchState = () => archState;
+  const dispatchArch = (event: Event): void => {
+    archState = reducer(archState, event).state;
+  };
+  const state = new SessionServiceState(
+    context,
+    { request: async () => ({}) } as any,
+    () => undefined,
+    getArchState,
+    dispatchArch,
+    0,
+  );
+
+  applySessionOpenedPayload({
+    session,
+    transcript: [],
+    transcriptWindow: {
+      totalCount: 0,
+      loadedStart: 0,
+      loadedEnd: 0,
+      hasOlder: false,
+      hasNewer: false,
+      isPartial: false,
+      hasUserMessages: false,
+    },
+    // The cold first send owns the host running marker before the backend
+    // reports its first busy snapshot.
+    busy: false,
+    runtimeReady: true,
+    systemPrompts: [systemPrompt],
+  }, {
+    getArchState,
+    dispatchArch,
+    runObserver: NOOP_RUN_OBSERVER,
+    scheduleRender: () => undefined,
+    context,
+    state,
+  });
+
+  assert.deepEqual(archState.transcript.bySession[sessionPath], [optimisticUser]);
+  assert.deepEqual(archState.transcript.systemPromptsBySession[sessionPath], [systemPrompt]);
 });

@@ -23,6 +23,7 @@ import {
 	type SubagentResult,
 	type SubagentAttemptRecord,
 	type SubagentProviderInvocationRecord,
+	type TokenChannelPresence,
 	type UsageStats,
 } from "../types.js";
 import {
@@ -33,7 +34,7 @@ import {
 	type SelectionContext,
 } from "./selection.js";
 import type { ParentBridge } from "./parent-extension-ui-bridge-proxy.js";
-import { compactSingleResult } from "./result-compaction.js";
+import { compactSingleResult, populateFileChanges } from "./result-compaction.js";
 import { textContent } from "./text-content.js";
 import { buildParentUserContext } from "./user-context.js";
 import { hashDelegatedPrompt, withRuntimeProvenance } from "./runtime-provenance.js";
@@ -44,6 +45,7 @@ import {
 	readSubagentAnalyticsAttemptState,
 	type SubagentProviderDispatch,
 } from "./analytics-capture.js";
+import { sumReportedCost } from "./usage-evidence.js";
 import {
 	readRetryPolicy,
 	parseRetryAfterMs,
@@ -71,11 +73,34 @@ function isResultError(result: SingleResult): boolean {
 }
 
 function addUsage(target: UsageStats, source: UsageStats): void {
+	const targetHadTurns = target.turns > 0;
+	const targetPresence = usagePresence(target);
+	const sourcePresence = usagePresence(source);
 	target.input += source.input || 0;
 	target.output += source.output || 0;
 	target.cacheRead += source.cacheRead || 0;
 	target.cacheWrite += source.cacheWrite || 0;
-	target.cost += source.cost || 0;
+	const tokenChannelPresence: TokenChannelPresence = targetHadTurns
+		? {
+			input: targetPresence.input && sourcePresence.input,
+			output: targetPresence.output && sourcePresence.output,
+			cacheRead: targetPresence.cacheRead && sourcePresence.cacheRead,
+			cacheWrite: targetPresence.cacheWrite && sourcePresence.cacheWrite,
+		}
+		: sourcePresence;
+	target.tokenChannelsKnown = Object.values(tokenChannelPresence).every(Boolean);
+	target.tokenChannelPresence = tokenChannelPresence;
+	// Cost is provider-reported evidence: the sum stays defined only when at
+	// least one operand reported cost, never an invented zero. Prefer the
+	// explicit field; `cost` is the compact legacy alias.
+	const reportedCost = sumReportedCost(
+		target.reportedCostUsd ?? target.cost,
+		source.reportedCostUsd ?? source.cost,
+	);
+	if (reportedCost !== undefined) {
+		target.cost = reportedCost;
+		target.reportedCostUsd = reportedCost;
+	}
 	// Context occupancy is a latest-turn gauge, not a billable cumulative stream.
 	if (source.contextTokens > 0) target.contextTokens = source.contextTokens;
 	target.turns += source.turns || 0;
@@ -104,14 +129,38 @@ interface RunWithModelRetryArgs {
 	) => Promise<SingleResult>;
 }
 
+function usagePresence(usage: UsageStats): TokenChannelPresence {
+	if (usage.tokenChannelPresence) return usage.tokenChannelPresence;
+	if (usage.tokenChannelsKnown === false) {
+		return { input: false, output: false, cacheRead: false, cacheWrite: false };
+	}
+	return { input: true, output: true, cacheRead: true, cacheWrite: true };
+}
+
 function usageWithPriorAttempts(current: UsageStats, prior: UsageStats): UsageStats {
+	const reportedCost = sumReportedCost(
+		prior.reportedCostUsd ?? prior.cost,
+		current.reportedCostUsd ?? current.cost,
+	);
+	const priorPresence = usagePresence(prior);
+	const currentPresence = usagePresence(current);
+	const tokenChannelPresence: TokenChannelPresence = prior.turns > 0
+		? {
+			input: priorPresence.input && currentPresence.input,
+			output: priorPresence.output && currentPresence.output,
+			cacheRead: priorPresence.cacheRead && currentPresence.cacheRead,
+			cacheWrite: priorPresence.cacheWrite && currentPresence.cacheWrite,
+		}
+		: currentPresence;
 	return {
 		...current,
 		input: prior.input + (current.input || 0),
 		output: prior.output + (current.output || 0),
 		cacheRead: prior.cacheRead + (current.cacheRead || 0),
 		cacheWrite: prior.cacheWrite + (current.cacheWrite || 0),
-		cost: prior.cost + (current.cost || 0),
+		tokenChannelsKnown: Object.values(tokenChannelPresence).every(Boolean),
+		tokenChannelPresence,
+		...(reportedCost !== undefined ? { cost: reportedCost, reportedCostUsd: reportedCost } : {}),
 		turns: prior.turns + (current.turns || 0),
 	};
 }
@@ -513,6 +562,10 @@ export async function executeSingleTask(args: {
 	if (params.userContext) result.parentUserContextMode = params.userContext;
 	if (parentUserContext) result.parentUserContext = parentUserContext;
 
+	// Test seams and provider-retry paths can return a result without passing
+	// through runSingleAgent's terminal cleanup. Stamp the producer summary here
+	// as the final common boundary before durable result projection.
+	if (!Array.isArray(result.fileChanges)) populateFileChanges(result);
 	const compact = compactSingleResult(result);
 	const details = makeDetailsWithProvenance([compact]);
 	if (isResultError(result)) {

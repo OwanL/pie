@@ -12,6 +12,7 @@ import {
   upsertAssistantToolPart,
 } from '../../shared/chat-message-parts';
 
+import { providerReportedCostUsd } from '../../../../shared/provider-cost.js';
 import type { ContentPart, MessageLike } from './types';
 
 export function isoDate(entryTimestamp: string, messageTimestamp?: number): string {
@@ -185,7 +186,7 @@ function toNonNegativeInt(value: number | undefined): number {
 }
 
 function firstNumber(...values: Array<number | undefined>): number | undefined {
-  return values.find((value) => typeof value === 'number' && Number.isFinite(value));
+  return values.find((value) => typeof value === 'number' && Number.isFinite(value) && value >= 0);
 }
 
 /**
@@ -245,11 +246,9 @@ export function usageFromMessage(message: MessageLike): AssistantUsage | undefin
     usage.completion_tokens_details?.reasoning_tokens,
   ));
   const reasoningTokens = reasoningRaw > 0 ? Math.min(reasoningRaw, output) : undefined;
-  const reportedCostRaw = usage.cost?.total;
-  const reportedCostUsd = typeof reportedCostRaw === 'number'
-    && Number.isFinite(reportedCostRaw) && reportedCostRaw >= 0
-    ? reportedCostRaw
-    : undefined;
+  // Pi's `usage.cost.total` is calculated from the SDK model catalog. Only an
+  // explicitly labelled provider/invoice value is exact billing evidence.
+  const reportedCostUsd = providerReportedCostUsd(usage);
 
   if (total === 0 && reportedCostUsd === undefined) {
     return undefined;

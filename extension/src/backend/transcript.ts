@@ -338,7 +338,12 @@ function isLegacyDeferredWaitAbort(message: MessageLike, current: ChatMessage | 
   if (lastTool?.name !== 'defer_trigger' || lastTool.status !== 'completed') return false;
   const result = toolResultText(lastTool.result);
   return result.startsWith('Registered deferred trigger ')
-    && result.includes('Your turn will end now; you will be resumed automatically when the trigger fires.');
+    && result.includes('Your turn will end now; you will be resumed automatically when the trigger fires.')
+    // New non-aborting registrations include target/message fields; do not
+    // repair an unrelated abort merely because its user message repeats the
+    // legacy guidance text.
+    && !result.includes('\n  target: ')
+    && !result.includes('\n  message: ');
 }
 
 /** Merge a new assistant turn into the current bubble, or push a new one. */

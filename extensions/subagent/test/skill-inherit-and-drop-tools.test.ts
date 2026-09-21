@@ -111,6 +111,26 @@ test("runSingleAgent subtracts the drop-tools list from an unrestricted agent's 
 	}
 });
 
+test("runSingleAgent omits wake tools unsupported by in-memory children", async () => {
+	const previous = process.env[DROP_ENV];
+	delete process.env[DROP_ENV];
+	try {
+		const { sdk, state } = createCapturingSdk();
+		await runSingleAgent(
+			process.cwd(), [makeAgent()], "worker", "do work", undefined, undefined, undefined, undefined,
+			details, makeModelRegistry(), undefined, selection,
+			undefined, undefined, undefined, undefined,
+			["read", "defer_trigger", "bash"],
+			{ sdk },
+		);
+		assert.deepEqual(state.createSessionArgs[0].tools, ["read", "bash"]);
+		assert.deepEqual(state.createSessionArgs[0].excludeTools, ["defer_trigger"]);
+	} finally {
+		if (previous === undefined) delete process.env[DROP_ENV];
+		else process.env[DROP_ENV] = previous;
+	}
+});
+
 test("runSingleAgent subtracts the drop-tools list from an agent's explicit tools frontmatter", async () => {
 	const previous = process.env[DROP_ENV];
 	process.env[DROP_ENV] = JSON.stringify(["ask_user"]);

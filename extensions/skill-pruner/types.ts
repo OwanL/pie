@@ -104,6 +104,14 @@ export interface PruningResult {
 	prepassOutputTokens?: number;
 	prepassCacheReadTokens?: number;
 	prepassCacheWriteTokens?: number;
+	/** False when one or more provider token channels were omitted. */
+	prepassTokenChannelsKnown?: boolean;
+	prepassTokenChannelPresence?: {
+		input: boolean;
+		output: boolean;
+		cacheRead: boolean;
+		cacheWrite: boolean;
+	};
 	/** Cost attached to the prepass provider responses, including retries. */
 	prepassReportedCostUsd?: number;
 	/** Per-provider-call settlements; aggregate fields above remain compatibility projections. */

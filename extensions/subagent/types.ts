@@ -28,12 +28,29 @@ export interface ModelRequirements {
 	inputKinds?: Array<"image">;
 }
 
+export interface TokenChannelPresence {
+	input: boolean;
+	output: boolean;
+	cacheRead: boolean;
+	cacheWrite: boolean;
+}
+
 export interface UsageStats {
 	input: number;
 	output: number;
 	cacheRead: number;
 	cacheWrite: number;
-	cost: number;
+	/** True only when every provider token channel in the aggregate was observed. */
+	tokenChannelsKnown?: boolean;
+	/** Per-channel evidence retained when one or more channels were omitted. */
+	tokenChannelPresence?: TokenChannelPresence;
+	/** Cumulative provider-reported cost. Present only when at least one
+	 *  provider turn supplied explicit billing evidence; absent — never an
+	 *  invented zero or SDK catalog estimate — when no such evidence exists. */
+	cost?: number;
+	/** Canonical spelling of the explicit provider-reported total. `cost` is
+	 *  retained as the compact legacy wire alias. */
+	reportedCostUsd?: number;
 	contextTokens: number;
 	turns: number;
 }
@@ -73,6 +90,10 @@ export interface SingleResult {
 	agent: string;
 	agentSource: "user" | "project" | "unknown";
 	task: string;
+	/** Effective working directory used to create this child session. Legacy
+	 * results may omit it; consumers should use the owning call input cwd, then
+	 * the parent cwd, when reconstructing those results. */
+	cwd?: string;
 	/** Parent-context mode requested for this delegation. Kept on the result so
 	 * the parent UI can make the handoff visible instead of hiding it in the
 	 * isolated child prompt. */
@@ -80,6 +101,9 @@ export interface SingleResult {
 	/** Exact bounded parent-context packet inserted into the child prompt,
 	 * including its [User prompt] / [Recorded clarification] source markers. */
 	parentUserContext?: string;
+	/** Retained when the child transcript is compacted so a nested tool failure
+	 * remains distinguishable from a child/provider terminal failure. */
+	hasNestedToolFailure?: boolean;
 	exitCode: number;
 	messages: Message[];
 	/** Bounded terminal answer kept separately so durable transcript compaction
@@ -249,7 +273,7 @@ export interface SubagentProviderInvocationRecord {
 	attemptId: string;
 	provider?: string;
 	model?: string;
-	usage?: Partial<Pick<UsageStats, "input" | "output" | "cacheRead" | "cacheWrite" | "cost">>;
+	usage?: Partial<Pick<UsageStats, "input" | "output" | "cacheRead" | "cacheWrite" | "cost" | "reportedCostUsd">>;
 	startedAt: number;
 	completedAt: number;
 	outcome: "success" | "failure" | "aborted";

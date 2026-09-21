@@ -246,6 +246,7 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
         incomingTranscript: payload.transcript,
         incomingTranscriptWindow: payload.transcriptWindow,
         localTranscript,
+        localTranscriptWindow: existingWindow,
       });
 
   // Sessions: running state, backend ready, upsert summary. An active Stop
@@ -1434,6 +1435,14 @@ export function handleSendOperationStatus(state: ArchState, event: Extract<Event
     || (event.operationAttempt !== undefined && event.operationAttempt !== operation.attempt)) {
     return { state, effects: [] };
   }
+  const queuedSendEntries = event.state === 'generation-ended'
+    ? [
+        ...Object.entries(state.pending.sendQueueBySession).flatMap(([sessionPath, entries]) =>
+          entries.map((entry) => ({ ...entry, sessionPath }))),
+        ...Object.values(state.pending.backendReadyQueueBySession).flat(),
+      ].filter((entry) => entry.operationId === operation.operationId
+        && (entry.operationAttempt === undefined || entry.operationAttempt === operation.attempt))
+    : [];
   if (event.reconciliationAttempt !== undefined) {
     const reconciliation = operation.reconciliation;
     if (!reconciliation || event.reconciliationAttempt !== reconciliation.attempts + 1) {
@@ -1530,6 +1539,25 @@ export function handleSendOperationStatus(state: ArchState, event: Extract<Event
     .map(([corrId]) => corrId);
   const registryState = produce(state, (draft) => {
     draft.operations[event.operationId] = updated;
+    if (queuedSendEntries.length > 0) {
+      for (const entry of queuedSendEntries) {
+        const pendingQueue = draft.pending.sendQueueBySession[entry.sessionPath];
+        if (pendingQueue) {
+          const index = pendingQueue.findIndex((candidate) => candidate.corrId === entry.corrId
+            && candidate.operationId === entry.operationId);
+          if (index >= 0) pendingQueue.splice(index, 1);
+          if (pendingQueue.length === 0) delete draft.pending.sendQueueBySession[entry.sessionPath];
+        }
+        const backendReadyQueue = draft.pending.backendReadyQueueBySession[entry.sessionPath];
+        if (backendReadyQueue) {
+          const index = backendReadyQueue.findIndex((candidate) => candidate.corrId === entry.corrId
+            && candidate.operationId === entry.operationId);
+          if (index >= 0) backendReadyQueue.splice(index, 1);
+          if (backendReadyQueue.length === 0) delete draft.pending.backendReadyQueueBySession[entry.sessionPath];
+        }
+        removeMessage(draft, entry.sessionPath, entry.localId);
+      }
+    }
     if (event.state === 'cancelled' || event.state === 'superseded') {
       for (const corrId of owningCorrIds) {
         delete draft.pending.ops[corrId];
@@ -1603,15 +1631,20 @@ export function handleSendOperationStatus(state: ArchState, event: Extract<Event
     }
   }
   const effects: Effect[] = [];
-  if (updated.terminal?.outcome === 'settled') {
-    effects.push(...(owningCorrIds.length > 0 ? owningCorrIds : [operation.causal.selectionToken])
-      .map((corrId) => {
-        const mode = (state.pending.promoted[corrId] ?? state.pending.ops[corrId])?.priorPruningMode;
-        return {
-          kind: 'ClearSendTimer' as const, corrId,
-          ...(mode ? { restorePruningMode: mode } : {}),
-        };
-      }));
+  if (updated.terminal?.outcome === 'settled' || queuedSendEntries.length > 0) {
+    const terminalCorrIds = owningCorrIds.length > 0
+      ? owningCorrIds
+      : queuedSendEntries.length > 0
+        ? queuedSendEntries.map((entry) => entry.corrId)
+        : [operation.causal.selectionToken];
+    effects.push(...terminalCorrIds.map((corrId) => {
+      const mode = (state.pending.promoted[corrId] ?? state.pending.ops[corrId])?.priorPruningMode
+        ?? queuedSendEntries.find((entry) => entry.corrId === corrId)?.priorPruningMode;
+      return {
+        kind: 'ClearSendTimer' as const, corrId,
+        ...(mode ? { restorePruningMode: mode } : {}),
+      };
+    }));
   }
   if (updated.terminal || event.reconciliationAttempt !== undefined) {
     const release = releaseOperationResources(operation);

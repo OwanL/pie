@@ -1,6 +1,6 @@
-// Focused unit tests for scripts/lib/sdk-version.mjs — the version-coercion and
-// lockfile-reading helpers that bootstrap.mjs, doctor.mjs, and the shell
-// installers rely on to pin the global `pi` CLI to the extension's locked SDK.
+// Focused unit tests for scripts/lib/sdk-version.mjs: version-coercion and
+// lockfile-reading helpers used by bootstrap.mjs, doctor.mjs, and install.bat
+// to pin the global `pi` CLI to the extension's locked SDK.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';

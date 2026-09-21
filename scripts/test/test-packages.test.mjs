@@ -68,7 +68,6 @@ test('isGlobalTestInfra recognises the test tooling and root config', () => {
     'scripts/test-reporter.mjs',
     'package.json',
     'package-lock.json',
-    '.nvmrc',
     '.node-version',
   ]) {
     assert.equal(isGlobalTestInfra(p), true, `${p} should be global`);

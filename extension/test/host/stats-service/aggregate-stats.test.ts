@@ -341,6 +341,32 @@ test('computeAggregateStats: throughput is generation-time-weighted', () => {
   assert.equal(stats.todayTokensPerSecondByProvider[0]!.sampleCount, 2);
 });
 
+test('computeAggregateStats: preserves an explicit zero provider cost for a tokenless response', () => {
+  const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 10, 10)]]]);
+  const run = makeRun({
+    runId: 'free-response',
+    modelId: 'm',
+    provider: 'openai',
+    auxiliaryLlmUsage: [{
+      kind: 'assistant_message',
+      sourceId: 'free-response:turn-1',
+      occurredAt: '2026-07-04T10:00:00.000Z',
+      modelId: 'm',
+      provider: 'openai',
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      reportedCostUsd: 0,
+    }],
+  });
+  const stats = computeAggregateStats([run], pricingMap, NOW, [], {}, 0);
+  assert.equal(stats.totalCost, 0);
+  assert.equal(stats.costByProvider.length, 1);
+  assert.equal(stats.costByProvider[0]?.provider, 'openai');
+  assert.equal(stats.costByProvider[0]?.cost, 0);
+});
+
 test('computeAggregateStats: unknown/unpriced model attributes to unknown with zero cost', () => {
   const pricingMap = new Map<string, ModelPricingRecord[]>();
   const runs = [makeRun({ runId: 'r1', modelId: 'mystery', inputTokens: 500_000, outputTokens: 100_000 })];
@@ -969,6 +995,31 @@ test('buildCumulativeSeries: trailing now point is included without exceeding ca
   assert.ok(series.length <= cap, `series length ${series.length} exceeds cap ${cap}`);
   assert.ok(series.length > 1, 'expected sample buckets plus the trailing now point');
   assert.equal(series[series.length - 1]!.ms, 2000);
+});
+
+test('buildCumulativeSeries: explicit projection timezone controls calendar buckets', () => {
+  // Choose a projection zone that differs from the process zone so an
+  // implementation that falls back to Date's local calendar fails this test.
+  const processTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const projectionTimeZone = processTimeZone === 'America/Los_Angeles' ? 'UTC' : 'America/Los_Angeles';
+  const first = Date.parse('2026-01-01T08:30:00Z');
+  const second = Date.parse('2026-01-01T19:30:00Z');
+  const third = Date.parse('2026-01-02T00:10:00Z');
+  const fourth = Date.parse('2026-01-02T00:20:00Z');
+  const now = Date.parse('2026-01-02T00:30:00Z');
+  const series = buildCumulativeSeries([
+    { ms: first, provider: 'openai', model: 'm', value: 1 },
+    { ms: second, provider: 'openai', model: 'm', value: 1 },
+    { ms: third, provider: 'openai', model: 'm', value: 1 },
+    { ms: fourth, provider: 'openai', model: 'm', value: 1 },
+  ], now, 3, { forceBucketing: true, timeZone: projectionTimeZone });
+  if (projectionTimeZone === 'America/Los_Angeles') {
+    assert.deepEqual(series.map((point) => point.ms), [first, third, now]);
+    assert.deepEqual(series.map((point) => point.byProvider[0]?.value), [2, 4, 4]);
+  } else {
+    assert.deepEqual(series.map((point) => point.ms), [first, second, now]);
+    assert.deepEqual(series.map((point) => point.byProvider[0]?.value), [1, 4, 4]);
+  }
 });
 
 test('layered and one-pass cumulative cost series are deterministic and match the aggregate total', () => {

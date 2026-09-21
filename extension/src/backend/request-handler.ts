@@ -41,6 +41,7 @@ export {
   type SessionTransitionWaitOptions,
   type SessionTransitionWaitOutcome,
   type TranscriptPageLoadOptions,
+  type ModelSettingsUnsetKey,
   formatInterruptWatchdogDuration,
   waitForSessionTransition,
 } from './request-handler-shared';
@@ -281,6 +282,13 @@ async function handleSettingsGet(
   return await deps.readModelSettings();
 }
 
+function liveModelIdentityEqual(
+  left: { id: string; provider?: string } | undefined,
+  right: { id: string; provider?: string } | undefined,
+): boolean {
+  return left?.id === right?.id && left?.provider === right?.provider;
+}
+
 async function handleSettingsSet(
   deps: BackendRequestHandlerDeps,
   request: RequestEnvelope,
@@ -361,33 +369,63 @@ async function handleSettingsSet(
     throw new BackendError('REQUEST_IN_PROGRESS', 'Cannot switch model or thinking level while this session has billable activity.');
   }
 
-  const result = hasPersistedChanges
+  // Resolve the exact live model before touching global settings. An explicit
+  // provider that is unavailable must fail without a persistence mutation or
+  // an opportunity for the SDK to select a same-id alternate.
+  let resolvedLiveModel: unknown;
+  let resolvedLiveProvider: string | undefined;
+  if (targetContext && isChangingModel) {
+    const modelRegistry = targetContext.runtime.services?.modelRegistry;
+    const available = modelRegistry?.getAvailable() ?? [];
+    const info = requestedProvider
+      ? available.find((model) => model.provider === requestedProvider && model.id === requestedId)
+      : available.find((model) => model.id === requestedId);
+    if (!info) {
+      throw new BackendError('MODEL_UNAVAILABLE', `Model not available in this session: ${params.defaultModel}`);
+    }
+    if (!modelRegistry || typeof modelRegistry.find !== 'function') {
+      throw new BackendError('MODEL_UNAVAILABLE', `Could not resolve model in registry: ${params.defaultModel}`);
+    }
+    resolvedLiveModel = modelRegistry.find(info.provider, info.id);
+    if (!resolvedLiveModel) {
+      throw new BackendError('MODEL_UNAVAILABLE', `Could not resolve model in registry: ${params.defaultModel}`);
+    }
+    const resolvedProvider = (resolvedLiveModel as { provider?: unknown }).provider;
+    if (requestedProvider !== undefined && resolvedProvider !== requestedProvider) {
+      throw new BackendError(
+        'MODEL_UNAVAILABLE',
+        `Resolved model provider does not match the requested provider: ${requestedProvider}`,
+      );
+    }
+    resolvedLiveProvider = requestedProvider
+      ?? (typeof resolvedProvider === 'string' ? resolvedProvider : undefined);
+  }
+
+  const persistedSettings = hasPersistedChanges
     ? await deps.writeModelSettings(settingsUpdates)
-    : previousSettings;
+    : undefined;
+  const result = persistedSettings ?? previousSettings;
+  let liveModelSwitchAttempted = false;
+  let previousLiveModel = targetContext?.session.model;
 
   try {
     if (targetContext && (params.defaultModel !== undefined
       || params.defaultProvider !== undefined
       || params.defaultThinkingLevel !== undefined)) {
       if (isChangingModel) {
-        const available = targetContext.runtime.services?.modelRegistry?.getAvailable() ?? [];
-        const info = available.find((model) => model.provider === requestedProvider && model.id === requestedId)
-          ?? available.find((model) => model.id === requestedId);
-        if (!info) {
-          throw new BackendError('MODEL_UNAVAILABLE', `Model not available in this session: ${params.defaultModel}`);
-        }
-
-        const resolvedModel = targetContext.runtime.services.modelRegistry.find(info.provider, info.id);
-        if (!resolvedModel) {
+        // `resolvedLiveModel` was provider-qualified before persistence above.
+        // Keep this setter boundary free of any id-only fallback.
+        if (!resolvedLiveModel) {
           throw new BackendError('MODEL_UNAVAILABLE', `Could not resolve model in registry: ${params.defaultModel}`);
         }
-
         if (typeof targetContext.session.setModel !== 'function') {
           throw new BackendError('MODEL_SWITCH_UNSUPPORTED', 'This PI session does not support live model switching.');
         }
 
-        await targetContext.session.setModel(resolvedModel);
-        if (targetContext.session.model?.id !== requestedId || targetContext.session.model?.provider !== requestedProvider) {
+        previousLiveModel = targetContext.session.model;
+        liveModelSwitchAttempted = true;
+        await targetContext.session.setModel(resolvedLiveModel);
+        if (targetContext.session.model?.id !== requestedId || targetContext.session.model?.provider !== resolvedLiveProvider) {
           throw new BackendError('MODEL_SWITCH_FAILED', `Live model switch did not take effect: ${params.defaultModel}`);
         }
       }
@@ -446,18 +484,99 @@ async function handleSettingsSet(
 
     return result;
   } catch (error) {
-    // Roll back to the exact previous settings. defaultProvider must be
-    // restored too (the merge-only writer can't otherwise drop a provider we
-    // just added), and when it was previously absent we explicitly delete it
-    // so the file returns to its prior shape rather than retaining `undefined`.
-    const rollback: Partial<ModelSettings> = {
-      defaultModel: previousSettings.defaultModel,
-      defaultThinkingLevel: previousSettings.defaultThinkingLevel,
-    };
-    // Explicitly set defaultProvider (even to undefined) so the merge-only
-    // writer drops a provider we just added when the previous state had none.
-    rollback.defaultProvider = previousSettings.defaultProvider;
-    if (hasPersistedChanges) await deps.writeModelSettings(rollback);
+    // A live setter can reject after mutating the SDK state, or can resolve
+    // while leaving a different provider active. Restore the exact predecessor
+    // before rolling back settings; otherwise a failed switch can keep billing
+    // the session against the wrong account even though persistence recovers.
+    let liveRollbackError: Error | undefined;
+    if (liveModelSwitchAttempted && targetContext) {
+      const currentLiveModel = targetContext.session.model;
+      if (!liveModelIdentityEqual(currentLiveModel, previousLiveModel)) {
+        if (!previousLiveModel || typeof targetContext.session.setModel !== 'function') {
+          liveRollbackError = new Error('The previous live model is unavailable for rollback.');
+        } else {
+          try {
+            await targetContext.session.setModel(previousLiveModel);
+            if (!liveModelIdentityEqual(targetContext.session.model, previousLiveModel)) {
+              liveRollbackError = new Error('The live model rollback did not restore the exact predecessor.');
+            }
+          } catch (rollbackError) {
+            liveRollbackError = rollbackError instanceof Error
+              ? rollbackError
+              : new Error(String(rollbackError));
+          }
+        }
+      }
+    }
+
+    // Roll back only if the exact settings written by this request are still
+    // current. A later successful switch must never be overwritten by stale
+    // `previousSettings`. The provider deletion is an explicit wire operation;
+    // an `undefined` property cannot survive worker JSON serialization.
+    let persistenceRollbackError: Error | undefined;
+    if (hasPersistedChanges && persistedSettings) {
+      const rollback: Partial<ModelSettings> = {
+        defaultModel: previousSettings.defaultModel,
+        defaultThinkingLevel: previousSettings.defaultThinkingLevel,
+      };
+      const rollbackUnset = previousSettings.defaultProvider === undefined
+        ? ['defaultProvider'] as const
+        : [];
+      if (previousSettings.defaultProvider !== undefined) {
+        rollback.defaultProvider = previousSettings.defaultProvider;
+      } else {
+        // Preserve the legacy direct-writer shape for standalone callers; the
+        // coordinator/worker path uses rollbackUnset instead.
+        rollback.defaultProvider = undefined;
+      }
+      try {
+        if (deps.writeModelSettingsIfCurrent) {
+          await deps.writeModelSettingsIfCurrent(persistedSettings, rollback, rollbackUnset);
+        } else {
+          // Legacy embeddings predate the atomic conditional seam. Keep their
+          // existing rollback behavior; production coordinator/worker paths
+          // always supply the seam above.
+          await deps.writeModelSettings(rollback);
+        }
+      } catch (rollbackError) {
+        persistenceRollbackError = rollbackError instanceof Error
+          ? rollbackError
+          : new Error(String(rollbackError));
+      }
+    }
+
+    if (liveRollbackError && targetContext && sessionPath) {
+      // A failed SDK rollback is not recoverable by merely restoring JSON: the
+      // already-promoted runtime could still send a billable turn through the
+      // wrong provider. Retire/fence that runtime before surfacing the error.
+      const retire = deps.retireSessionRuntime ?? deps.recycleSessionRuntime;
+      let retired = false;
+      try {
+        retired = await retire?.(
+          sessionPath,
+          `model settings rollback failed: ${liveRollbackError.message}`,
+        ) ?? false;
+      } catch {
+        retired = false;
+      }
+      if (!retired) {
+        throw new BackendError(
+          'MODEL_ROLLBACK_FAILED',
+          `Could not restore the previous live model or retire the runtime: ${liveRollbackError.message}`,
+        );
+      }
+      throw new BackendError(
+        'MODEL_ROLLBACK_FAILED',
+        `The live model rollback failed; the runtime was retired: ${liveRollbackError.message}`,
+      );
+    }
+
+    if (persistenceRollbackError) {
+      throw new BackendError(
+        'MODEL_SETTINGS_ROLLBACK_FAILED',
+        `The model settings rollback failed: ${persistenceRollbackError.message}`,
+      );
+    }
     throw error;
   }
 }

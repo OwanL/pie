@@ -83,9 +83,20 @@ export function readRetryPolicy(): RetryPolicy {
 	};
 }
 
-/** Zero usage stats for synthetic budget-exhausted / no-eligible-model results. */
+/** Zero usage stats for synthetic budget-exhausted / no-eligible-model results.
+ *  `cost` is intentionally absent: these results have no provider-reported cost
+ *  evidence, and the projection must never invent a zero. */
 export function zeroUsage(): UsageStats {
-	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
+	return {
+		input: 0,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		tokenChannelsKnown: false,
+		tokenChannelPresence: { input: false, output: false, cacheRead: false, cacheWrite: false },
+		contextTokens: 0,
+		turns: 0,
+	};
 }
 
 /**

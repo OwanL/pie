@@ -6,7 +6,12 @@ import test from 'node:test';
 
 import type { SdkSessionEvent } from '../../../src/backend/sdk';
 import type { SessionContext } from '../../../src/backend/server-types';
-import type { MutableSdkSessionManager, SessionManagerFence } from '../../../src/backend/session-manager-fence';
+import { SessionLifecycleConflictError } from '../../../src/backend/session-lifecycle-store';
+import {
+  FENCED_ENTRY_ID,
+  type MutableSdkSessionManager,
+  type SessionManagerFence,
+} from '../../../src/backend/session-manager-fence';
 import type { ProviderIncident } from '../../../src/backend/provider-incident';
 import type { ProviderTransportObservation } from '../../../src/backend/provider-progress-bus';
 import { BackendLiveTurnAccumulator } from '../../../src/backend/live-turn-accumulator';
@@ -33,7 +38,9 @@ interface WorkerRuntimeHostInternals {
   resolveNetworkProvider: (url: string, fallbackProvider?: string) => string | undefined;
   fenceSessionManager: (manager: MutableSdkSessionManager) => MutableSdkSessionManager;
   sessionManagerFenceRecords: WeakMap<object, { fence: SessionManagerFence }>;
+  analyticsWriterAdmission?: { acquire(): () => void };
   bindSession: (context: SessionContext, session: SessionContext['session']) => Promise<void>;
+  requestDeps: () => any;
   getSystemPromptModule: () => Promise<{ buildSystemPrompt: (...args: unknown[]) => unknown }>;
   autonomousMode: boolean;
   mcpEnabled: boolean;
@@ -142,6 +149,52 @@ function makeReplacementSession(
   } as unknown as SessionContext['session'];
 }
 
+test('worker settings rollback keeps provider deletion explicit on the coordinator wire', async () => {
+  const requests: any[] = [];
+  const host = new WorkerRuntimeHost({
+    server: {
+      requestFrame: async (body: any) => {
+        requests.push(body);
+        return {
+          kind: 'settings.authoritative', requestId: 'settings', revision: 1, applied: true,
+          values: { defaultModel: 'old-model', defaultThinkingLevel: 'medium' },
+        };
+      },
+      sendFrame: () => true,
+      sendLiveSemanticFrame: () => true,
+      sendDetailFrame: () => true,
+      failRuntime: () => undefined,
+    } as never,
+    owner: { coordinatorGeneration: 1, workerId: 'settings-worker', workerGeneration: 1 },
+    patchIdentity: { relativePath: 'dist/core/session-manager.js', patchVersion: 1, sha256: 'a'.repeat(64) },
+  } as never);
+  const internals = getInternals(host);
+  internals.sdk = { VERSION: 'test' };
+  internals.context = makeSessionEventContext('/repo/session.jsonl');
+
+  const deps = internals.requestDeps();
+  const applied = await deps.writeModelSettingsIfCurrent(
+    { defaultModel: 'new-model', defaultProvider: 'new-provider', defaultThinkingLevel: 'high' },
+    { defaultModel: 'old-model', defaultThinkingLevel: 'medium' },
+    ['defaultProvider'],
+  );
+
+  assert.equal(applied, true);
+  assert.deepEqual(requests, [{
+    kind: 'settings.mutate',
+    updates: { defaultModel: 'old-model', defaultThinkingLevel: 'medium' },
+    unset: ['defaultProvider'],
+    expected: { defaultModel: 'new-model', defaultThinkingLevel: 'high', defaultProvider: 'new-provider' },
+  }]);
+
+  requests.length = 0;
+  await deps.writeModelSettings({ defaultModel: 'next-model' });
+  assert.deepEqual(requests, [{
+    kind: 'settings.mutate',
+    updates: { defaultModel: 'next-model' },
+  }], 'omitting provider must preserve it rather than encode an implicit deletion');
+});
+
 test('worker manager-fence command drains admitted persistence and rejects retired writes', async () => {
   const { host } = makeHost();
   const internals = getInternals(host);
@@ -170,6 +223,42 @@ test('worker manager-fence command drains admitted persistence and rejects retir
   releasePersist();
   assert.deepEqual(await fence, { admissionRevoked: true, writersDrained: true, activeWriterCount: 0 });
   await pending;
+});
+
+test('worker fails closed and disposes on an unexpected durable admission failure', async () => {
+  const { host, runtimeFailures } = makeHost();
+  const internals = getInternals(host);
+  const admissionError = new SessionLifecycleConflictError('Analytics writer admission lease capacity is exhausted.');
+  internals.analyticsWriterAdmission = {
+    acquire: () => { throw admissionError; },
+  };
+  const sessionPath = path.join(os.tmpdir(), `pie-worker-admission-failure-${process.pid}`, 'session.jsonl');
+  const manager = makeFenceManager(sessionPath);
+  const guarded = internals.fenceSessionManager(manager);
+  const record = internals.sessionManagerFenceRecords.get(manager as object);
+  assert.ok(record);
+  let runtimeDisposed = 0;
+  let unsubscribed = 0;
+  internals.context = {
+    runtime: {
+      dispose: async () => { runtimeDisposed += 1; },
+    } as unknown as SessionContext['runtime'],
+    session: makeReplacementSession(guarded, sessionPath),
+    sessionPath,
+    sessionManagerFence: record.fence,
+    unsubscribe: () => { unsubscribed += 1; },
+    busySeq: 0,
+  };
+
+  assert.equal(guarded.appendMessage({ role: 'assistant', content: 'reply' }), FENCED_ENTRY_ID);
+  assert.deepEqual(runtimeFailures, [admissionError], 'unexpected conflicts must reach the worker owner');
+  await waitForAsyncEvent();
+  assert.equal(runtimeDisposed, 1, 'the worker callback must dispose the runtime');
+  assert.equal(unsubscribed, 1, 'the worker callback must retire the session context');
+
+  await host.dispose();
+  assert.equal(runtimeDisposed, 1);
+  assert.equal(unsubscribed, 1);
 });
 
 test('replacement and disposal retain manager fences at both retirement boundaries', async () => {

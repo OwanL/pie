@@ -280,8 +280,9 @@ export class SessionService implements vscode.Disposable {
     return this.triggers.getActiveTriggers();
   }
 
-  /** Cancel a deferred trigger (or all for `sessionPath` when `triggerId` is
-   *  omitted). Invoked by the webview's status-strip cancel affordance. */
+  /** Cancel a deferred trigger (or all triggers owned by `sessionPath` when
+   *  `triggerId` is omitted). Invoked by the webview's status-strip cancel
+   *  affordance. */
   cancelDeferredTrigger(sessionPath: string, triggerId?: string): void {
     this.triggers.cancel(sessionPath, triggerId);
   }

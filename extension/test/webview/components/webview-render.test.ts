@@ -669,9 +669,10 @@ test('rendered ToolCallItem hides subagent model-selection badges in collapsed h
   assert.match(html, /claude-opus-4\.6/);  // selectedModel is now visible in header
   assert.match(html, /subagent-model-label/);
   assert.match(html, />1m 5s</);
-  assert.match(html, />ctx 1\.6k \/ 200k/);
-  assert.match(html, />tok 1\.6k</);
+  assert.doesNotMatch(html, />ctx 1\.6k \/ 200k/);
+  assert.doesNotMatch(html, />tok 1\.6k</);
   assert.doesNotMatch(html, />in 1\.2k<|>out 345<|>cache 50<|>2t</);
+  assert.match(html, /subagent-model-details-trigger/);
   assert.match(html, />\$0\.012</);
   assert.doesNotMatch(html, /subagent-model-tag/);
 });
@@ -808,12 +809,12 @@ test('rendered ToolCallItem covers collapsed and parallel subagent branches with
   assert.match(runningParentHtml, /status-chip-completed[^>]*>.*Finished/);
   assert.doesNotMatch(runningParentHtml, /Starting|waiting for first status update/);
   assert.match(runningParentHtml, /subagent-runtime-telemetry/);
-  assert.match(runningParentHtml, /ctx 51k \/ 200k/);
-  assert.match(runningParentHtml, /26%/);
-  assert.match(runningParentHtml, /tok 92k/);
+  assert.doesNotMatch(runningParentHtml, /ctx 51k \/ 200k/);
+  assert.doesNotMatch(runningParentHtml, /26%/);
+  assert.doesNotMatch(runningParentHtml, /tok 92k/);
   assert.doesNotMatch(runningParentHtml, />in 51k<|>out 2\.4k<|>cache 38\.6k<|>2t</);
-  assert.match(runningParentHtml, /last 12\.0 tok\/s/);
-  assert.match(runningParentHtml, /retry 1/);
+  assert.doesNotMatch(runningParentHtml, /last 12\.0 tok\/s/);
+  assert.match(runningParentHtml, /Recovered/);
 
   const abortedHtml = renderToString(h(ToolCallItem, {
     toolCall: toolCall({

@@ -1,11 +1,10 @@
 #!/usr/bin/env node
-// Shared installer operations dispatcher.
+// Windows installer operations dispatcher.
 //
-// install.bat and install.sh are thin platform wrappers: they handle
-// shell-specific concerns (env-var persistence, interactive prompts, exit
-// handling, executable PATH hints) and delegate the cross-platform business
-// logic here. Each subcommand is a focused, side-effect-bounded operation that
-// the shell invokes at the right point in its flow:
+// install.bat handles cmd-specific concerns (environment persistence,
+// interactive prompts, exit handling, and executable PATH hints) and delegates
+// testable business logic here. Each subcommand is a focused,
+// side-effect-bounded operation invoked at the right point in its flow:
 //
 //   node scripts/install/run.mjs repair-settings <settings.json>
 //   node scripts/install/run.mjs merge-auth <in-tree-auth.json> <secure-auth.json>
@@ -123,8 +122,7 @@ function cmdMergeAuth(args) {
   if (secureEmpty) {
     mkdirSync(path.dirname(securePath), { recursive: true });
     copyFileSync(inTreePath, securePath);
-    // Match install.sh: restrict the relocated credentials to the owner on
-    // POSIX (chmod is a no-op concern on Windows, which uses ACLs).
+    // Restrict credentials for direct non-Windows use; Windows uses ACLs.
     if (process.platform !== 'win32') chmodSync(securePath, 0o600);
     console.log(`==> auth.json copied from working tree to secure location '${securePath}' (was empty/missing)`);
     rmSync(inTreePath, { force: true });
@@ -166,10 +164,9 @@ function cmdRelocateAuth(args) {
 }
 
 function cmdConfigureSessions(args) {
-  // install.bat delegates its full settings.json#sessionDir + legacy-import
-  // orchestration here (batch cannot parse/rewrite JSON). install.sh keeps its
-  // simpler scripts/migrate-local-sessions.mjs flow. Mirrors install.ps1's
-  // session block exactly (default roots recursive; configured dir flat).
+  // install.bat delegates its settings.json#sessionDir + legacy-import
+  // orchestration here because batch cannot parse or rewrite JSON. Default
+  // roots are recursive; a configured legacy directory is flat.
   const root = args[0] ? path.resolve(args[0]) : repoRoot;
   const { lines } = configureSessions({ repoRoot: root });
   for (const line of lines) console.log(line);
@@ -216,9 +213,9 @@ function cmdVerifyToolchain(args) {
 function cmdWriteVscodeAgentDir(args) {
   const root = args[0] ? path.resolve(args[0]) : repoRoot;
   const dirs = resolveVscodeSettingsDirs();
-  // install.bat creates %APPDATA%/Code/User even when VS Code is not yet
-  // installed (so the setting is ready on first launch); install.sh only
-  // writes to existing VS Code User dirs. Preserve both behaviours.
+  // On Windows, create %APPDATA%/Code/User even when VS Code is not yet
+  // installed so the setting is ready on first launch. Portable direct callers
+  // only write to existing directories.
   const createIfMissing = process.platform === 'win32';
   for (const dir of dirs) {
     if (!existsSync(dir)) {
@@ -263,8 +260,8 @@ function cmdReadiness(args) {
       opts.providerEnvPresent = args[++i] === '1';
     }
     else if (a === '--vscode-agent-dir-expected') {
-      // install.bat folds its pie.agentDir check in here; install.sh leaves this
-      // unset (it has no equivalent check). Backward compatible when absent.
+      // install.bat folds its pie.agentDir check in here. Keep the option
+      // backward compatible when absent for direct callers.
       opts.vscodeAgentDirExpected = args[++i];
     }
   }
@@ -302,8 +299,8 @@ function cmdHasJsonl(args) {
 
 function cmdPinnedVersions() {
   // Single source of truth for the three pinned versions, read via the shared
-  // scripts/toolchain.mjs helpers. Both shell installers consume this instead
-  // of each re-parsing .node-version / package.json / the extension lockfile.
+  // scripts/toolchain.mjs helpers so install.bat does not need to parse
+  // .node-version, package.json, or the extension lockfile.
   // Prints node, npm, pi (one per line). Exits non-zero if any pin is missing.
   const { node, npm, pi } = readPinnedVersions(repoRoot);
   if (!node || !npm || !pi) {

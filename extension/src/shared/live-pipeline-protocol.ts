@@ -80,6 +80,8 @@ export interface SubagentChildPreview {
    * durable history but cannot own a live subscription. */
   liveAddressable?: boolean;
   detailAddress?: LiveSubagentDetailAddress;
+  /** Effective working directory used by this child session. */
+  cwd?: string;
   phase: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
   agent?: string;
   task?: string;
@@ -87,6 +89,16 @@ export interface SubagentChildPreview {
   parentUserContextMode?: 'latest' | 'all';
   /** Exact bounded parent-context packet inserted into the child prompt. */
   parentUserContext?: string;
+  /** Producer/transport marker retained when child messages are compacted. */
+  hasNestedToolFailure?: boolean;
+  /** Compact modifying-tool summary retained after transcript compaction. */
+  fileChanges?: Array<{
+    path: string;
+    kind: 'created' | 'modified' | 'deleted';
+    description?: string;
+    additions?: number;
+    deletions?: number;
+  }>;
   summary?: string;
   exitCode?: number;
   model?: string;
@@ -113,16 +125,40 @@ export interface SubagentChildPreview {
   transcriptCompacted?: boolean;
   contextWindow?: number;
   usage?: {
-    input: number;
-    output: number;
-    cacheRead: number;
-    cacheWrite: number;
+    input?: number;
+    output?: number;
+    cacheRead?: number;
+    cacheWrite?: number;
     contextTokens?: number;
     cost?: number;
+    reportedCostUsd?: number;
+    providerReportedCostUsd?: number;
+    tokenChannelsKnown?: boolean;
+    tokenChannelPresence?: {
+      input: boolean;
+      output: boolean;
+      cacheRead: boolean;
+      cacheWrite: boolean;
+    };
     turns?: number;
   };
   selectionPool?: string[];
   retryCount?: number;
+  /** True when the producer recovered by selecting a fallback model. */
+  fallback?: boolean;
+  /** Model attempt that failed before a later attempt recovered or settled. */
+  failedModel?: string;
+  /** Producer-labelled terminal failure category. */
+  failureClass?: string;
+  /** Bounded provider generation observations for the detailed card tooltip. */
+  turnThroughputSamples?: Array<{
+    endedAt: string;
+    outputTokens: number;
+    generationDurationMs: number;
+    status: string;
+    modelId?: string;
+    provider?: string;
+  }>;
   stopReason?: string;
   errorMessage?: string;
   stderr?: string;
@@ -134,7 +170,21 @@ export interface SubagentBillingUsage {
   cacheRead: number;
   cacheWrite: number;
   totalTokens?: number;
+  /** Number of provider turns represented by an aggregate legacy usage record. */
+  turns?: number;
+  /** False when one or more numeric channel values are placeholders. */
+  tokenChannelsKnown?: boolean;
+  tokenChannelPresence?: {
+    input: boolean;
+    output: boolean;
+    cacheRead: boolean;
+    cacheWrite: boolean;
+  };
+  /** Legacy compact alias for explicit provider-reported billing. */
   cost?: number;
+  /** Explicit provider/invoice billing evidence. */
+  reportedCostUsd?: number;
+  providerReportedCostUsd?: number;
 }
 
 export interface SubagentBillingAttempt {
@@ -530,12 +580,64 @@ function isJsonPatchOperation(value: unknown): value is JsonStructuralPatchOpera
   return value.op === 'set' && isJsonSafeValue(value.value);
 }
 
+function isTokenChannelPresence(value: unknown): boolean {
+  return isRecord(value)
+    && typeof value.input === 'boolean'
+    && typeof value.output === 'boolean'
+    && typeof value.cacheRead === 'boolean'
+    && typeof value.cacheWrite === 'boolean';
+}
+
+function isSubagentChildPreviewTelemetry(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (value.cwd !== undefined && typeof value.cwd !== 'string') return false;
+  if (value.parentUserContextMode !== undefined
+    && value.parentUserContextMode !== 'latest' && value.parentUserContextMode !== 'all') return false;
+  if (value.parentUserContext !== undefined && typeof value.parentUserContext !== 'string') return false;
+  if (value.hasNestedToolFailure !== undefined && typeof value.hasNestedToolFailure !== 'boolean') return false;
+  if (value.usage !== undefined) {
+    if (!isRecord(value.usage)
+      || !optionalNonNegativeFiniteNumber(value.usage.input)
+      || !optionalNonNegativeFiniteNumber(value.usage.output)
+      || !optionalNonNegativeFiniteNumber(value.usage.cacheRead)
+      || !optionalNonNegativeFiniteNumber(value.usage.cacheWrite)
+      || !optionalNonNegativeFiniteNumber(value.usage.contextTokens)
+      || !optionalNonNegativeFiniteNumber(value.usage.cost)
+      || !optionalNonNegativeFiniteNumber(value.usage.reportedCostUsd)
+      || !optionalNonNegativeFiniteNumber(value.usage.providerReportedCostUsd)
+      || !optionalNonNegativeFiniteNumber(value.usage.turns)
+      || (value.usage.tokenChannelsKnown !== undefined && typeof value.usage.tokenChannelsKnown !== 'boolean')
+      || (value.usage.tokenChannelPresence !== undefined && !isTokenChannelPresence(value.usage.tokenChannelPresence))) return false;
+  }
+  if (value.fileChanges !== undefined && (!Array.isArray(value.fileChanges) || !value.fileChanges.every((change) => {
+    return isRecord(change)
+      && typeof change.path === 'string'
+      && (change.kind === 'created' || change.kind === 'modified' || change.kind === 'deleted')
+      && (change.description === undefined || typeof change.description === 'string')
+      && (change.additions === undefined || isNonNegativeSafeInteger(change.additions))
+      && (change.deletions === undefined || isNonNegativeSafeInteger(change.deletions));
+  }))) return false;
+  if (value.turnThroughputSamples !== undefined) {
+    if (!Array.isArray(value.turnThroughputSamples) || !value.turnThroughputSamples.every((sample) => {
+      return isRecord(sample)
+        && typeof sample.endedAt === 'string'
+        && typeof sample.status === 'string'
+        && isFiniteNumber(sample.outputTokens)
+        && isFiniteNumber(sample.generationDurationMs)
+        && (sample.modelId === undefined || typeof sample.modelId === 'string')
+        && (sample.provider === undefined || typeof sample.provider === 'string');
+    })) return false;
+  }
+  return true;
+}
+
 export function isToolPreview(value: unknown): value is ToolPreview {
   if (!isRecord(value) || typeof value.kind !== 'string') return false;
   switch (value.kind) {
     case 'text': return typeof value.tail === 'string' && isFiniteNumber(value.omittedChars);
     case 'command': return typeof value.commandSummary === 'string' && (value.outputTail === undefined || typeof value.outputTail === 'string') && isFiniteNumber(value.omittedChars);
     case 'subagent': return Array.isArray(value.children)
+      && value.children.every(isSubagentChildPreviewTelemetry)
       && isFiniteNumber(value.omittedChildren)
       && (value.billing === undefined || (Array.isArray(value.billing) && value.billing.every(isSubagentBillingEntry)));
     case 'question': return typeof value.promptSummary === 'string' && isFiniteNumber(value.optionCount);
@@ -545,13 +647,25 @@ export function isToolPreview(value: unknown): value is ToolPreview {
 }
 
 function isSubagentBillingUsage(value: unknown): boolean {
+  const tokenChannelPresence = value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>).tokenChannelPresence
+    : undefined;
   return isRecord(value)
-    && isFiniteNumber(value.input)
-    && isFiniteNumber(value.output)
-    && isFiniteNumber(value.cacheRead)
-    && isFiniteNumber(value.cacheWrite)
-    && optionalFiniteNumber(value.totalTokens)
-    && (value.cost === undefined || isFiniteNumber(value.cost));
+    && isNonNegativeFiniteNumber(value.input)
+    && isNonNegativeFiniteNumber(value.output)
+    && isNonNegativeFiniteNumber(value.cacheRead)
+    && isNonNegativeFiniteNumber(value.cacheWrite)
+    && optionalNonNegativeFiniteNumber(value.totalTokens)
+    && optionalNonNegativeFiniteNumber(value.turns)
+    && optionalNonNegativeFiniteNumber(value.cost)
+    && optionalNonNegativeFiniteNumber(value.reportedCostUsd)
+    && optionalNonNegativeFiniteNumber(value.providerReportedCostUsd)
+    && (value.tokenChannelsKnown === undefined || typeof value.tokenChannelsKnown === 'boolean')
+    && (tokenChannelPresence === undefined || (isRecord(tokenChannelPresence)
+      && typeof tokenChannelPresence.input === 'boolean'
+      && typeof tokenChannelPresence.output === 'boolean'
+      && typeof tokenChannelPresence.cacheRead === 'boolean'
+      && typeof tokenChannelPresence.cacheWrite === 'boolean'));
 }
 
 function isSubagentBillingAttempt(value: unknown, requireInvocationId = false): boolean {
@@ -583,6 +697,12 @@ function isSubagentBillingEntry(value: unknown): boolean {
 
 function isLiveTurnPhase(value: unknown): value is LiveTurnPhase {
   return ['queued', 'preparing', 'waiting_provider', 'streaming', 'running_tool', 'waiting_input', 'retry_wait', 'aborting', 'reconciling_gap'].includes(String(value));
+}
+function isNonNegativeFiniteNumber(value: unknown): boolean {
+  return isFiniteNumber(value) && value >= 0;
+}
+function optionalNonNegativeFiniteNumber(value: unknown): boolean {
+  return value === undefined || isNonNegativeFiniteNumber(value);
 }
 function optionalFiniteNumber(value: unknown): boolean { return value === undefined || isFiniteNumber(value); }
 function optionalDurationClockDomain(value: unknown): boolean {

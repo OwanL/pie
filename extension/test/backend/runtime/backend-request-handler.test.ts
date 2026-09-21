@@ -809,6 +809,43 @@ test('message.send accepts requests, handles preflight rejection, and guards con
   assert.equal(rejectedHarness.context.activeRequest, undefined);
 });
 
+test('message.send bounds committed prompt failure diagnostics before emitting a generic error', async () => {
+  let rejectPrompt!: (reason?: unknown) => void;
+  const providerMessage = `account_suspended: ${'provider response '.repeat(30_000)}`;
+  const harness = createHarness({
+    sessionOverrides: {
+      prompt: async (_text: string, options?: { preflightResult?: (success: boolean) => void }) => {
+        options?.preflightResult?.(true);
+        await new Promise<void>((_resolve, reject) => {
+          rejectPrompt = reject;
+        });
+      },
+    },
+  });
+
+  const accepted = await handleBackendRequest(harness.deps, {
+    id: 'committed-failure',
+    method: 'message.send',
+    params: { sessionPath: '/repo/session.jsonl', text: 'Provider request', inputs: [] },
+  });
+  assert.equal(typeof (accepted as { requestId: string }).requestId, 'string');
+  assert.ok(harness.context.activeRequest);
+  harness.context.activeRequest!.messageIndex = 1;
+  rejectPrompt(new Error(providerMessage));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  const failure = harness.emitted.find((entry) => entry.event === 'error');
+  assert.ok(failure, 'a committed prompt failure must emit the generic error event');
+  const payload = failure?.payload as { message?: string; detail?: string };
+  assert.equal(payload.message?.length, 2_048);
+  assert.equal(payload.detail?.length, 2_048);
+  assert.equal(payload.message?.startsWith('account_suspended:'), true);
+  assert.equal(payload.detail?.startsWith('account_suspended:'), true);
+  assert.equal(payload.message?.endsWith('…'), true);
+  assert.equal(payload.detail?.endsWith('…'), true);
+  assert.ok(Buffer.byteLength(JSON.stringify(payload), 'utf8') < 256 * 1024);
+});
+
 test('message.continue resumes after a completed tool without invoking the prompt preflight path', async () => {
   let continueCalls = 0;
   let promptCalls = 0;
@@ -2113,6 +2150,212 @@ test('settings.set applies live model changes and rolls back persisted settings 
     // merge-persisted settings.json.
     { defaultModel: 'model-a', defaultThinkingLevel: 'medium', defaultProvider: undefined },
   ]);
+});
+
+test('settings.set conditionally rolls back so a newer provider switch wins', async () => {
+  let stored: ModelSettings = {
+    defaultModel: 'old-model', defaultProvider: 'old-provider', defaultThinkingLevel: 'medium',
+  };
+  const harness = createHarness({ modelSettings: stored });
+  harness.deps.getSessionContext = () => undefined;
+  harness.deps.readModelSettings = async () => ({ ...stored });
+  harness.deps.listAvailableModels = () => [
+    { id: 'model-b', name: 'Model B', provider: 'provider-b', reasoning: false, inputKinds: ['text'] },
+    { id: 'model-c', name: 'Model C', provider: 'provider-c', reasoning: false, inputKinds: ['text'] },
+  ];
+  harness.deps.writeModelSettings = async (updates) => {
+    stored = { ...stored, ...updates };
+    if (updates.defaultProvider === undefined) delete stored.defaultProvider;
+    return { ...stored };
+  };
+  harness.deps.writeModelSettingsIfCurrent = async (expected, updates, unset = []) => {
+    if (stored.defaultModel !== expected.defaultModel
+      || stored.defaultProvider !== expected.defaultProvider
+      || stored.defaultThinkingLevel !== expected.defaultThinkingLevel) return false;
+    stored = { ...stored, ...updates };
+    for (const key of unset) delete stored[key];
+    return true;
+  };
+  let releaseFirst!: () => void;
+  let firstStarted!: () => void;
+  const firstReady = new Promise<void>((resolve) => { firstStarted = resolve; });
+  const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  harness.deps.applyColdSessionModelSettings = async (_sessionPath, updates) => {
+    if (updates.model?.modelId !== 'model-b') return;
+    firstStarted();
+    await firstGate;
+    throw new Error('first switch failed after persistence');
+  };
+
+  const first = handleBackendRequest(harness.deps, {
+    id: 'switch-a',
+    method: 'settings.set',
+    params: {
+      sessionPath: '/repo/session.jsonl', defaultModel: 'model-b', defaultProvider: 'provider-b',
+    },
+  });
+  await firstReady;
+  await handleBackendRequest(harness.deps, {
+    id: 'switch-b',
+    method: 'settings.set',
+    params: {
+      sessionPath: '/repo/session.jsonl', defaultModel: 'model-c', defaultProvider: 'provider-c',
+    },
+  });
+  releaseFirst();
+  await assert.rejects(first, /first switch failed after persistence/);
+
+  assert.deepEqual(stored, {
+    defaultModel: 'model-c', defaultProvider: 'provider-c', defaultThinkingLevel: 'medium',
+  });
+});
+
+test('settings.set never switches to an alternate provider when the exact provider is unavailable', async () => {
+  const harness = createHarness({
+    modelSettings: {
+      defaultModel: 'shared-model',
+      defaultProvider: 'provider-a',
+      defaultThinkingLevel: 'medium',
+    },
+  });
+  const session = harness.context.session as unknown as {
+    model: { id: string; provider?: string };
+    setModel: (model: { id: string; provider?: string }) => Promise<void>;
+  };
+  session.model = { id: 'shared-model', provider: 'provider-a' };
+  const setModelCalls: Array<{ id: string; provider?: string }> = [];
+  session.setModel = async (model) => {
+    setModelCalls.push(model);
+    session.model = model;
+  };
+  const registry = harness.context.runtime.services!.modelRegistry as unknown as {
+    getAvailable: () => Array<{ id: string; provider: string }>;
+    find: (provider: string, modelId: string) => { id: string; provider: string } | undefined;
+  };
+  // provider-a is available for the requested id, but the exact requested
+  // provider-b identity is not. The handler must fail closed rather than use
+  // provider-a and attribute the request to the wrong account.
+  registry.getAvailable = () => [{ id: 'shared-model', provider: 'provider-a' }];
+  registry.find = (provider, modelId) => ({ id: modelId, provider });
+
+  await assert.rejects(
+    handleBackendRequest(harness.deps, {
+      id: 'settings-exact-provider',
+      method: 'settings.set',
+      params: {
+        sessionPath: '/repo/session.jsonl',
+        defaultModel: 'shared-model',
+        defaultProvider: 'provider-b',
+      },
+    }),
+    (error: unknown) => error instanceof BackendError && error.code === 'MODEL_UNAVAILABLE',
+  );
+
+  assert.deepEqual(setModelCalls, [], 'an alternate provider must never receive setModel');
+  assert.deepEqual(harness.writtenSettings, [], 'an unavailable exact provider must not persist a switch');
+  assert.deepEqual(session.model, { id: 'shared-model', provider: 'provider-a' });
+});
+
+test('settings.set restores the previous live model when a switch reports the wrong identity', async () => {
+  const harness = createHarness({
+    modelSettings: {
+      defaultModel: 'shared-model',
+      defaultProvider: 'provider-a',
+      defaultThinkingLevel: 'medium',
+    },
+  });
+  const session = harness.context.session as unknown as {
+    model: { id: string; provider?: string };
+    setModel: (model: { id: string; provider?: string }) => Promise<void>;
+  };
+  session.model = { id: 'shared-model', provider: 'provider-a' };
+  const target = { id: 'target-model', provider: 'provider-b' };
+  const previous = { id: 'shared-model', provider: 'provider-a' };
+  const setModelCalls: Array<{ id: string; provider?: string }> = [];
+  session.setModel = async (model) => {
+    setModelCalls.push(model);
+    // Simulate a broken live switch that resolves but leaves an alternate
+    // provider active. The rollback call below restores the exact predecessor.
+    session.model = setModelCalls.length === 1
+      ? { id: model.id, provider: 'provider-a' }
+      : model;
+  };
+  const registry = harness.context.runtime.services!.modelRegistry as unknown as {
+    getAvailable: () => Array<{ id: string; provider: string }>;
+    find: (provider: string, modelId: string) => { id: string; provider: string } | undefined;
+  };
+  registry.getAvailable = () => [target];
+  registry.find = (provider, modelId) => provider === target.provider && modelId === target.id
+    ? target
+    : provider === previous.provider && modelId === previous.id
+      ? previous
+      : undefined;
+
+  await assert.rejects(
+    handleBackendRequest(harness.deps, {
+      id: 'settings-live-rollback',
+      method: 'settings.set',
+      params: {
+        sessionPath: '/repo/session.jsonl',
+        defaultModel: target.id,
+        defaultProvider: target.provider,
+      },
+    }),
+    (error: unknown) => error instanceof BackendError && error.code === 'MODEL_SWITCH_FAILED',
+  );
+
+  assert.deepEqual(setModelCalls, [target, previous]);
+  assert.deepEqual(session.model, previous);
+});
+
+test('settings.set retires a runtime when exact live-model rollback fails', async () => {
+  const harness = createHarness({
+    modelSettings: {
+      defaultModel: 'old-model', defaultProvider: 'provider-a', defaultThinkingLevel: 'medium',
+    },
+  });
+  const session = harness.context.session as unknown as {
+    model: { id: string; provider?: string };
+    setModel: (model: { id: string; provider?: string }) => Promise<void>;
+  };
+  session.model = { id: 'old-model', provider: 'provider-a' };
+  const target = { id: 'new-model', provider: 'provider-b' };
+  const previous = { id: 'old-model', provider: 'provider-a' };
+  const registry = harness.context.runtime.services!.modelRegistry as unknown as {
+    getAvailable: () => Array<{ id: string; provider: string }>;
+    find: (provider: string, modelId: string) => { id: string; provider: string } | undefined;
+  };
+  registry.getAvailable = () => [target];
+  registry.find = (provider, modelId) => provider === target.provider && modelId === target.id
+    ? target
+    : provider === previous.provider && modelId === previous.id ? previous : undefined;
+  let setModelCalls = 0;
+  session.setModel = async (model) => {
+    setModelCalls += 1;
+    if (setModelCalls === 1) {
+      session.model = { id: model.id, provider: 'wrong-provider' };
+      return;
+    }
+    throw new Error('rollback refused');
+  };
+  let retired = false;
+  harness.deps.retireSessionRuntime = async () => {
+    retired = true;
+    return true;
+  };
+
+  await assert.rejects(
+    handleBackendRequest(harness.deps, {
+      id: 'settings-live-rollback-failure',
+      method: 'settings.set',
+      params: {
+        sessionPath: '/repo/session.jsonl', defaultModel: target.id, defaultProvider: target.provider,
+      },
+    }),
+    (error: unknown) => error instanceof BackendError && error.code === 'MODEL_ROLLBACK_FAILED',
+  );
+  assert.equal(retired, true);
+  assert.equal(setModelCalls, 2);
 });
 
 test('settings.set persists an explicit provider-only default update', async () => {

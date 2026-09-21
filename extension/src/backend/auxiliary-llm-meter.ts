@@ -1,3 +1,4 @@
+import { providerReportedCostUsd } from '../../../shared/provider-cost.js';
 import type { AuxiliaryLlmUsagePayload } from '../shared/protocol';
 
 type StreamResult = { usage?: unknown };
@@ -16,6 +17,10 @@ function nonNegativeInt(value: unknown): number {
     : 0;
 }
 
+function validTokenChannel(value: unknown): boolean {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
 function readModel(model: unknown): { modelId?: string; provider?: string } {
   if (!model || typeof model !== 'object') return {};
   const candidate = model as { id?: unknown; provider?: unknown };
@@ -27,13 +32,15 @@ function readModel(model: unknown): { modelId?: string; provider?: string } {
 
 function readUsage(usage: unknown, kind: AuxiliaryLlmUsagePayload['kind']): Pick<AuxiliaryLlmUsagePayload,
   'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheWriteTokens' | 'reportedCostUsd'
-  | 'instrumentationGap' | 'instrumentationGapReason'> {
+  | 'tokenChannelsKnown' | 'tokenChannelPresence' | 'instrumentationGap' | 'instrumentationGapReason'> {
   if (!usage || typeof usage !== 'object') {
     return {
       inputTokens: 0,
       outputTokens: 0,
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
+      tokenChannelsKnown: false,
+      tokenChannelPresence: { input: false, output: false, cacheRead: false, cacheWrite: false },
       instrumentationGap: true,
       instrumentationGapReason: kind === 'other'
         ? 'The unexpected auxiliary response exposed no provider usage.'
@@ -45,16 +52,29 @@ function readUsage(usage: unknown, kind: AuxiliaryLlmUsagePayload['kind']): Pick
     output?: unknown;
     cacheRead?: unknown;
     cacheWrite?: unknown;
-    cost?: { total?: unknown };
+    reportedCostUsd?: unknown;
+    providerReportedCostUsd?: unknown;
+    cost?: unknown;
   };
-  const reported = candidate.cost?.total;
+  // `cost.total` is the Pi SDK catalog estimate, not provider billing.
+  const reported = providerReportedCostUsd(candidate);
   const hasChannels = ['input', 'output', 'cacheRead', 'cacheWrite']
-    .every((key) => typeof candidate[key as keyof typeof candidate] === 'number');
+    .every((key) => {
+      const value = candidate[key as keyof typeof candidate];
+      return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+    });
   return {
     inputTokens: nonNegativeInt(candidate.input),
     outputTokens: nonNegativeInt(candidate.output),
     cacheReadTokens: nonNegativeInt(candidate.cacheRead),
     cacheWriteTokens: nonNegativeInt(candidate.cacheWrite),
+    tokenChannelsKnown: hasChannels,
+    tokenChannelPresence: {
+      input: validTokenChannel(candidate.input),
+      output: validTokenChannel(candidate.output),
+      cacheRead: validTokenChannel(candidate.cacheRead),
+      cacheWrite: validTokenChannel(candidate.cacheWrite),
+    },
     ...(typeof reported === 'number' && Number.isFinite(reported) && reported >= 0
       ? { reportedCostUsd: reported }
       : {}),

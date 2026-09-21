@@ -22,7 +22,7 @@ import type {
   CanonicalSessionActivitySummary,
   SessionCostIndicatorState,
 } from '../session-tabs/token-usage';
-import { CanonicalActivityTooltip, SessionCostTooltip } from './session-cost-tooltip';
+import { SessionCostTooltip } from './session-cost-tooltip';
 import { ComposerSettingsMenu } from './settings-menu';
 import { SubagentProviderMenu } from './subagent-provider-menu';
 import { CompactionButton } from './compaction-button';
@@ -293,24 +293,6 @@ export const ComposerToolbar = memo(function ComposerToolbar({
             }
             richRole="region"
             label={sessionCostIndicator.label}
-            freezeWhileVisible
-          />
-        )}
-
-        {/* Accessible activity fallback: when canonical activity exists for the
-            active session but no cost indicator does (no usage of any kind is
-            known), the cost chip — and with it the canonical section — would be
-            unreachable. Reuse the same toolbar chip/tooltip affordance with an
-            activity-only tooltip; no cost, provider, or usage value is shown or
-            fabricated. Legacy snapshots (no canonical fields) still render
-            nothing. */}
-        {!sessionCostIndicator && canonicalActivitySummary && !canonicalActivitySummary.missing && !prefs.hideSessionCost && (
-          <ToolbarIndicatorChip
-            kind="cost"
-            ariaLabel="Canonical session activity (root session, all branches) — no session cost usage is reported for this session"
-            tooltipNode={<CanonicalActivityTooltip summary={canonicalActivitySummary} />}
-            richRole="region"
-            label="Activity"
             freezeWhileVisible
           />
         )}

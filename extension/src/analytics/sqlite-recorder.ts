@@ -23,7 +23,9 @@ import {
 import {
   calculateCompleteCostUsd,
   costWithinParityTolerance,
+  addLocalCalendarDaysMs,
   localCalendarDayKey,
+  localCalendarDayStartMs,
   localCalendarWeekDateKeys,
   normalizeUsageChannels,
   type CoverageMetric,
@@ -200,8 +202,39 @@ const sqlite = createRequire(process.execPath)('node:sqlite') as SqliteModule;
 const DATABASE_SCHEMA_VERSION = 13;
 const BUSY_TIMEOUT_MS = 5_000;
 const MAX_PENDING_SEQUENCES_PER_PRODUCER = 4_096;
+
+/** A delivered observation can be permanently unable to advance the producer
+ * stream when earlier source sequences are missing. Keep that condition
+ * record-scoped: the supervisor can reject this capture without retaining an
+ * otherwise valid batch forever. */
+export class AnalyticsReconciliationCapacityError extends Error {
+  readonly code = 'reconciliation_capacity';
+
+  constructor(readonly producerIdentity: string) {
+    super(`Analytics producer reconciliation capacity exceeded for ${producerIdentity}.`);
+    this.name = 'AnalyticsReconciliationCapacityError';
+  }
+}
+
+/** Detail validation is a record-scoped input failure. It must be returned in
+ * the capture receipt instead of making the worker replay the whole queue. */
+export class AnalyticsDetailValidationError extends Error {
+  readonly code = 'invalid_record';
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'AnalyticsDetailValidationError';
+  }
+}
+
 const DEFAULT_QUERY_ROWS = 200;
 const MAX_QUERY_ROWS = 10_000;
+/** Temporal chart evidence is deliberately much smaller than the immutable
+ * settlement history. Summary groups remain the exact source for totals. */
+const MAX_AGGREGATE_SERIES_ROWS = 4_096;
+/** Headline daily projections are bounded by the protocol's trailing window;
+ * unlike temporal samples, they are exact rollups over the maintained tables. */
+const MAX_AGGREGATE_DAILY_DAYS = 14;
 const DEFAULT_QUERY_BYTES = 256 * 1024;
 const MAX_QUERY_BYTES = 16 * 1024 * 1024;
 const MAX_DETAIL_CAPTURE_BYTES = 64 * 1024 * 1024;
@@ -340,6 +373,9 @@ export interface ScopedProviderSettlementReadModel extends ProviderSettlementRea
   truncated: boolean;
   nextOffset: number | null;
   selectionCoverage: 'known' | 'unknown' | 'not_applicable';
+  /** The current selected branch resolved in the same snapshot as the rows.
+   * Present only for selected-branch reads with an unambiguous selection. */
+  selectedBranchId?: string;
   inheritanceCoverage: 'not_applicable' | 'known' | 'unknown';
   inheritanceUnavailableReason?: 'source_scrubbed' | 'missing_source_selection' | 'incomplete_source_ancestry';
 }
@@ -392,6 +428,60 @@ export interface ProviderAggregateReadRequest {
   dailyWindowEndMs?: number;
 }
 
+export interface ProviderAggregateSeriesSample {
+  /** Source settlement time. Samples without a canonical settlement time are
+   * intentionally excluded from temporal charts. */
+  ms: number | string;
+  provider: string | null;
+  model: string | null;
+  cost: number | null;
+  inputTokens: number | string | null;
+  outputTokens: number | string | null;
+}
+
+export interface ProviderAggregateExecutionSample {
+  startedAtMs: number | string | null;
+  endedAtMs: number | string | null;
+  rootSessionId: string | null;
+}
+
+/** Exact per-day cost rollup from the maintained calendar projection. The
+ * dimensions are intentionally narrower than the source projection's purpose
+ * and workspace facets because the aggregate protocol exposes provider/model
+ * attribution only. */
+export interface ProviderAggregateDailyCost {
+  date: string;
+  totalCost: number;
+  byProvider: Array<{ provider: string; cost: number }>;
+  byModel: Array<{ provider: string; model: string; cost: number }>;
+}
+
+/** Exact per-day root execution rollup. The temporal execution samples remain
+ * separately bounded for latest-view evidence; these counts are not sampled. */
+export interface ProviderAggregateDailyExecution {
+  date: string;
+  runCount: number;
+  sessionCount: number;
+}
+
+export interface ProviderAggregateSeries {
+  /** Recent settlement samples, bounded to keep the read model payload small.
+   * The consumer compacts these into the protocol's chart points. */
+  settlements: ProviderAggregateSeriesSample[];
+  /** Root execution timing evidence used for bounded temporal evidence. */
+  executions: ProviderAggregateExecutionSample[];
+  /** Exact daily cost rollups from the maintained provider/model projection.
+   * Optional for compatibility with older read-model test adapters. */
+  dailyCosts?: ProviderAggregateDailyCost[];
+  /** Exact daily root-execution counts from bounded SQL day buckets. Optional
+   * for compatibility with older read-model test adapters. */
+  dailyExecutions?: ProviderAggregateDailyExecution[];
+  /** True when the bounded sample read did not include every settlement or
+   * execution in the requested daily window. Summary groups and daily rollups
+   * remain exact over their maintained projections. */
+  truncated: boolean;
+}
+
 export interface ProviderAggregateReadModel {
   revision: number | string;
   snapshotWatermark: number | string;
@@ -402,6 +492,13 @@ export interface ProviderAggregateReadModel {
   /** Source-chronological latest completed root execution. */
   latestRun: CanonicalExecutionLatestRun | null;
   groups: Array<Record<string, unknown>>;
+  /** Distinct retained root sessions with at least one canonical execution.
+   * This is independent of provider settlement coverage, so unsettled runs
+   * remain represented. */
+  sessionCount: number;
+  /** Temporal settlement evidence used by the main-view charts. Optional for
+   * compatibility with older read-model test adapters. */
+  series?: ProviderAggregateSeries;
   truncation: AnalyticsQueryTruncation;
 }
 
@@ -569,15 +666,19 @@ function contentDigest(encoding: 'utf8' | 'binary', bytes: Uint8Array): string {
  * deserialize, and the canonical buffer is only produced when it differs from
  * the input. */
 function canonicalDetailCapture(bytes: Uint8Array): { bytes: Uint8Array; value: unknown } {
-  // `deserialize` and `Buffer.compare` both accept a Uint8Array view directly,
-  // so the bytes are never copied onto the per-payload hot path.
-  const value = deserialize(bytes);
-  const scrubbed = sanitizeAnalyticsDetail(value);
-  const canonical = serializeV8(scrubbed);
-  return {
-    bytes: Buffer.compare(bytes, canonical) === 0 ? bytes : canonical,
-    value: scrubbed,
-  };
+  try {
+    // `deserialize` and `Buffer.compare` both accept a Uint8Array view directly,
+    // so the bytes are never copied onto the per-payload hot path.
+    const value = deserialize(bytes);
+    const scrubbed = sanitizeAnalyticsDetail(value);
+    const canonical = serializeV8(scrubbed);
+    return {
+      bytes: Buffer.compare(bytes, canonical) === 0 ? bytes : canonical,
+      value: scrubbed,
+    };
+  } catch (error) {
+    throw new AnalyticsDetailValidationError(error instanceof Error ? error.message : String(error));
+  }
 }
 
 function captureFingerprint(capture: AnalyticsDetailCapture): string {
@@ -1423,6 +1524,35 @@ function migrateV9(database: SqliteDatabase): void {
   `);
 }
 
+/** Indexes for the bounded temporal aggregate read. These are additive and
+ * are ensured on every writable open rather than changing the logical schema
+ * version: older databases can create them before the existing migrations
+ * finish, while read-only helpers continue to require the current version. */
+function ensureAggregateSeriesIndexes(database: SqliteDatabase): void {
+  database.exec(`
+    CREATE INDEX IF NOT EXISTS analytics_provider_settlement_settled_time_idx
+      ON analytics_provider_settlements(
+        CAST(settled_at_ms AS INTEGER) DESC, generation_id DESC, invocation_id DESC
+      ) WHERE settled_at_ms IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS analytics_execution_state_started_time_idx
+      ON analytics_execution_states(
+        operation_kind, CAST(started_at_ms AS INTEGER), generation_id, execution_id
+      ) WHERE started_at_ms IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS analytics_execution_state_ended_time_idx
+      ON analytics_execution_states(
+        operation_kind, CAST(ended_at_ms AS INTEGER), generation_id, execution_id
+      ) WHERE ended_at_ms IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS analytics_execution_state_event_time_idx
+      ON analytics_execution_states(
+        operation_kind,
+        CAST(COALESCE(ended_at_ms, started_at_ms) AS INTEGER),
+        generation_id,
+        execution_id
+      ) WHERE operation_kind = 'agent-run'
+        AND (ended_at_ms IS NOT NULL OR started_at_ms IS NOT NULL);
+  `);
+}
+
 /** Schema v10 -> v11: add source-time and exact execution lookup indexes for
  * the bounded canonical latest-run projection. Delivery revision remains the
  * ordering used by the diagnostic latestSettled field. */
@@ -1498,9 +1628,12 @@ function migrateV11(database: SqliteDatabase): void {
  * the migration creates only the new storage. Reconstructing facet evidence
  * from transcripts or today's defaults is prohibited; new facets accumulate
  * from post-upgrade capture, and every retained row, deletion marker,
- * projection and detail reference is preserved untouched. */
+ * projection and detail reference is preserved untouched. The shared aggregate
+ * indexes are also ensured here so every explicit v1-v12 upgrade reaches the
+ * same indexed current schema. */
 function migrateV12(database: SqliteDatabase): void {
   createToolFacetProjectionSchema(database as unknown as ToolFacetDatabase);
+  ensureAggregateSeriesIndexes(database);
 }
 
 function databaseTransaction<T>(database: SqliteDatabase, operation: () => T): T {
@@ -1536,6 +1669,11 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
         `Unsupported newer analytics database schema version ${version}; this recorder supports ${DATABASE_SCHEMA_VERSION}.`,
       );
     }
+    // The aggregate read is a steady-state host query, not a migration-only
+    // diagnostic. Ensure its time predicates stay indexed on every writable
+    // open that already has the current schema. Older migrations create their
+    // tables first; the version-0 path ensures the indexes after creation.
+    if (version === DATABASE_SCHEMA_VERSION) ensureAggregateSeriesIndexes(database);
     if (version === 0) {
       const existing = database.prepare(`
         SELECT name FROM sqlite_master
@@ -1555,6 +1693,7 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
       migrateV10(database);
       migrateV11(database);
       migrateV12(database);
+      ensureAggregateSeriesIndexes(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
       return;
     }
@@ -1684,23 +1823,27 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
 }
 
 function validateDetailCapture(capture: AnalyticsDetailCapture): void {
-  for (const [name, value] of [
-    ['generationId', capture.generationId],
-    ['payloadId', capture.payloadId],
-    ['sourceKey', capture.sourceKey],
-  ] as const) {
-    if (!value || value.includes('\0')) throw new Error(`${name} must be a non-empty string without NUL.`);
-  }
-  if (capture.schemaVersion < 1 || !Number.isSafeInteger(capture.schemaVersion)) {
-    throw new Error('Detail capture schemaVersion must be a positive safe integer.');
-  }
-  parseInt64(capture.observedAtMs, 'observedAtMs');
-  if ((capture.mediaType !== 'application/x-pie-subagent-result'
-      && capture.mediaType !== 'application/x-pie-tool-observation')
-    || capture.encoding !== 'node-v8'
-    || capture.complete !== true
-    || !(capture.bytes instanceof Uint8Array)) {
-    throw new Error('Unsupported or incomplete analytics detail capture.');
+  try {
+    for (const [name, value] of [
+      ['generationId', capture.generationId],
+      ['payloadId', capture.payloadId],
+      ['sourceKey', capture.sourceKey],
+    ] as const) {
+      if (!value || value.includes('\0')) throw new Error(`${name} must be a non-empty string without NUL.`);
+    }
+    if (capture.schemaVersion < 1 || !Number.isSafeInteger(capture.schemaVersion)) {
+      throw new Error('Detail capture schemaVersion must be a positive safe integer.');
+    }
+    parseInt64(capture.observedAtMs, 'observedAtMs');
+    if ((capture.mediaType !== 'application/x-pie-subagent-result'
+        && capture.mediaType !== 'application/x-pie-tool-observation')
+      || capture.encoding !== 'node-v8'
+      || capture.complete !== true
+      || !(capture.bytes instanceof Uint8Array)) {
+      throw new Error('Unsupported or incomplete analytics detail capture.');
+    }
+  } catch (error) {
+    throw new AnalyticsDetailValidationError(error instanceof Error ? error.message : String(error));
   }
 }
 
@@ -1970,7 +2113,7 @@ function recordSourceSequence(
       SELECT COUNT(*) AS count FROM analytics_producer_sequences WHERE producer_identity = ?
     `).get(identity) as CountRow).count);
     if (pendingCount >= MAX_PENDING_SEQUENCES_PER_PRODUCER) {
-      throw new Error(`Analytics producer reconciliation capacity exceeded for ${identity}.`);
+      throw new AnalyticsReconciliationCapacityError(identity);
     }
     prepareWriterStatement(database, statements, 'reconciliation.insert-pending', `
       INSERT INTO analytics_producer_sequences (
@@ -3005,7 +3148,7 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
   }
 
   /** Writer-only calendar preparation. Read helpers never call this method:
-   * changing the active IANA zone and rebuilding the bounded seven-day table
+   * changing the active IANA zone and rebuilding the bounded local-day table
    * is an explicit recorder command owned by the runtime/supervisor. */
   prepareProviderDailyProjection(
     timeZone: string,
@@ -3112,7 +3255,9 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     this.assertWritable();
     validateDetailCapture(capture);
     if (capture.bytes.byteLength > MAX_DETAIL_CAPTURE_BYTES) {
-      throw new RangeError(`Analytics detail exceeds the ${MAX_DETAIL_CAPTURE_BYTES}-byte storage bound.`);
+      throw new AnalyticsDetailValidationError(
+        `Analytics detail exceeds the ${MAX_DETAIL_CAPTURE_BYTES}-byte storage bound.`,
+      );
     }
     const canonical = canonicalDetailCapture(capture.bytes);
     if (canonical.bytes !== capture.bytes) capture = { ...capture, bytes: canonical.bytes };
@@ -4501,6 +4646,21 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
         rootSessionId, generationId, limit + 1, offset,
       ) as Array<Record<string, unknown>>;
     };
+    const currentSelectedBranchId = (
+      generationId: string,
+      rootSessionId: string,
+    ): string | null => {
+      const rows = this.database.prepare(`
+        SELECT branch_id FROM analytics_current_branch_selections
+        WHERE generation_id = ? AND root_session_id = ?
+      `).all(generationId, rootSessionId) as Array<{ branch_id: string }>;
+      // More than one current selection for the requested generation is not a
+      // bounded choice. Keep the selected-branch read fail-closed instead of
+      // combining rows from multiple subjects or labeling them ambiguously.
+      if (rows.length !== 1) return null;
+      const branchId = String(rows[0]?.branch_id ?? '').trim();
+      return branchId || null;
+    };
     const ancestryCoverage = (
       generationId: string,
       rootSessionId: string,
@@ -4567,12 +4727,23 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
         };
       }
       if (scope.kind === 'selectedBranch') {
-        const coverage = ancestryCoverage(scope.generationId, scope.rootSessionId);
+        // Resolve the selection once inside this read transaction and use that
+        // exact branch for both ancestry and rows. The host may have looked up
+        // an older branch before this query started; the returned id must label
+        // the rows actually read, not that foreign lookup result.
+        const selectedBranchId = currentSelectedBranchId(scope.generationId, scope.rootSessionId);
+        const coverage = selectedBranchId === null
+          ? 'unknown' as const
+          : ancestryCoverage(scope.generationId, scope.rootSessionId, selectedBranchId);
+        const rows = selectedBranchId === null
+          ? []
+          : selectedRows(scope.generationId, scope.rootSessionId, selectedBranchId)
+            .map((row) => providerSettlementProjection(row));
         return {
           revision,
           scope,
-          ...pageResult(selectedRows(scope.generationId, scope.rootSessionId)
-            .map((row) => providerSettlementProjection(row))),
+          ...pageResult(rows),
+          ...(selectedBranchId === null ? {} : { selectedBranchId }),
           selectionCoverage: coverage,
           inheritanceCoverage: 'not_applicable' as const,
         };
@@ -4921,10 +5092,239 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     };
   }
 
-  /** Bounded global provider aggregate. Accounting, grouped dimensions, the
-   * projection revision, and the observation watermark are all read while one
-   * SQLite read transaction is open. Only aggregate rows (plus one sentinel
-   * row for truncation detection) are materialized. */
+  /** Read exact daily headline rollups without materializing the bounded
+   * temporal sample set. Provider costs come from the maintained local-day
+   * projection; execution counts and distinct root sessions use one bounded
+   * SQL day bucket per local date. */
+  private readProviderAggregateDailyMetricsInSnapshot(
+    timeZone: string,
+    windowStartMs: number,
+    windowEndMs: number,
+    nowMs: number,
+    groups: Array<Record<string, unknown>>,
+  ): {
+    dailyCosts: ProviderAggregateDailyCost[];
+    dailyExecutions: ProviderAggregateDailyExecution[];
+  } {
+    const trailingWindowStartMs = addLocalCalendarDaysMs(
+      localCalendarDayStartMs(nowMs as Int64Value, timeZone) as Int64Value,
+      -(MAX_AGGREGATE_DAILY_DAYS - 1),
+      timeZone,
+    );
+    // The protocol exposes a trailing 14-day daily view even when a direct
+    // diagnostic request supplies a much wider source window. Clamp the exact
+    // projection rather than scanning or returning an unbounded daily result.
+    const effectiveWindowStartMs = Math.max(windowStartMs, trailingWindowStartMs);
+    const effectiveWindowEndMs = Math.min(windowEndMs, nowMs);
+    if (effectiveWindowStartMs >= effectiveWindowEndMs) return { dailyCosts: [], dailyExecutions: [] };
+    const firstDayStartMs = localCalendarDayStartMs(effectiveWindowStartMs as Int64Value, timeZone);
+    const lastDayStartMs = localCalendarDayStartMs(
+      (effectiveWindowEndMs - 1) as Int64Value,
+      timeZone,
+    );
+    const days: Array<{ date: string; startMs: number; endMs: number }> = [];
+    for (let startMs = firstDayStartMs; startMs <= lastDayStartMs;) {
+      if (days.length >= MAX_AGGREGATE_DAILY_DAYS) {
+        throw new RangeError(`Canonical aggregate daily window exceeds ${MAX_AGGREGATE_DAILY_DAYS} days.`);
+      }
+      const endMs = addLocalCalendarDaysMs(startMs as Int64Value, 1, timeZone);
+      days.push({
+        date: localCalendarDayKey(startMs as Int64Value, timeZone),
+        startMs: Math.max(startMs, effectiveWindowStartMs),
+        endMs: Math.min(endMs, effectiveWindowEndMs),
+      });
+      startMs = endMs;
+    }
+
+    const pairs = new Map<string, [string, string]>();
+    for (const row of groups) {
+      const provider = String(row.provider ?? 'unknown');
+      const model = String(row.model ?? 'unknown');
+      // Projection keys use the empty string for missing dimensions while the
+      // public aggregate row uses "unknown". Include both spellings so the
+      // exact rollup remains faithful for either a missing or literal value.
+      const providerKeys = provider === 'unknown' ? ['', 'unknown'] : [provider];
+      const modelKeys = model === 'unknown' ? ['', 'unknown'] : [model];
+      for (const providerKey of providerKeys) {
+        for (const modelKey of modelKeys) pairs.set(`${providerKey}\u0000${modelKey}`, [providerKey, modelKey]);
+      }
+    }
+    const pairEntries = [...pairs.values()];
+    const byDate = new Map<string, {
+      byProvider: Map<string, number>;
+      byModel: Map<string, { provider: string; model: string; cost: number }>;
+    }>();
+    const consumeDailyRows = (dailyRows: Iterable<Record<string, unknown>>): void => {
+      for (const row of dailyRows) {
+        const summary = JSON.parse(String(row.summary_json)) as {
+          cost?: { knownTotal?: unknown };
+        };
+        const cost = Number(summary.cost?.knownTotal);
+        if (!Number.isFinite(cost) || cost < 0) {
+          throw new Error('Canonical provider daily cost projection is malformed.');
+        }
+        const date = String(row.local_day);
+        const provider = String(row.provider_key) || 'unknown';
+        const model = String(row.model_key) || 'unknown';
+        const day = byDate.get(date) ?? { byProvider: new Map(), byModel: new Map() };
+        day.byProvider.set(provider, (day.byProvider.get(provider) ?? 0) + cost);
+        const modelKey = `${provider}\u0000${model}`;
+        const modelEntry = day.byModel.get(modelKey);
+        if (modelEntry) modelEntry.cost += cost;
+        else day.byModel.set(modelKey, { provider, model, cost });
+        byDate.set(date, day);
+      }
+    };
+    // Keep each VALUES predicate well below SQLite's host-parameter limit even
+    // when the bounded grouped read returns many provider/model dimensions.
+    for (let offset = 0; offset < pairEntries.length; offset += 400) {
+      const chunk = pairEntries.slice(offset, offset + 400);
+      const chunkPredicate = `(provider_key, model_key) IN (VALUES ${chunk.map(() => '(?, ?)').join(', ')})`;
+      const chunkParameters = chunk.flatMap(([provider, model]) => [provider, model]);
+      const dailyRows = this.database.prepare(`
+        SELECT local_day, provider_key, model_key, summary_json
+        FROM analytics_provider_model_daily
+        WHERE time_zone = ?
+          AND local_day IN (${days.map(() => '?').join(', ')})
+          AND scope_kind = 'global' AND scope_key = '*'
+          AND ${chunkPredicate}
+      `).iterate(
+        timeZone,
+        ...days.map((day) => day.date),
+        ...chunkParameters,
+      ) as Iterable<Record<string, unknown>>;
+      consumeDailyRows(dailyRows);
+    }
+    const dailyCosts = [...byDate.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([date, day]) => {
+        const byProvider = [...day.byProvider.entries()]
+          .map(([provider, cost]) => ({ provider, cost }))
+          .sort((left, right) => right.cost - left.cost || left.provider.localeCompare(right.provider));
+        const byModel = [...day.byModel.values()]
+          .sort((left, right) => right.cost - left.cost
+            || left.provider.localeCompare(right.provider)
+            || left.model.localeCompare(right.model));
+        return {
+          date,
+          totalCost: byProvider.reduce((total, provider) => total + provider.cost, 0),
+          byProvider,
+          byModel,
+        };
+      });
+
+    const dayValues = days.flatMap((day) => [day.date, day.startMs, day.endMs]);
+    const executionRows = this.database.prepare(`
+      WITH days(local_day, start_ms, end_ms) AS (
+        VALUES ${days.map(() => '(?, ?, ?)').join(', ')}
+      )
+      SELECT days.local_day,
+        COUNT(execution.execution_id) AS run_count,
+        COUNT(DISTINCT execution.root_session_id) AS session_count
+      FROM days
+      LEFT JOIN analytics_execution_states execution
+        ON execution.operation_kind = 'agent-run'
+        AND (execution.ended_at_ms IS NOT NULL OR execution.started_at_ms IS NOT NULL)
+        AND CAST(COALESCE(execution.ended_at_ms, execution.started_at_ms) AS INTEGER) >= days.start_ms
+        AND CAST(COALESCE(execution.ended_at_ms, execution.started_at_ms) AS INTEGER) < days.end_ms
+      GROUP BY days.local_day
+      ORDER BY days.local_day
+    `).all(...dayValues) as Array<Record<string, unknown>>;
+    const dailyExecutions = executionRows.map((row) => ({
+      date: String(row.local_day),
+      runCount: safeExecutionSummaryCount(row.run_count as string | number | bigint, 'daily run count'),
+      sessionCount: safeExecutionSummaryCount(row.session_count as string | number | bigint, 'daily session count'),
+    }));
+    return { dailyCosts, dailyExecutions };
+  }
+
+  /** Read the bounded source samples needed to reconstruct temporal charts.
+   * This is intentionally separate from maintained provider/model totals: the
+   * latter are exact summary values, while charts need source timestamps and
+   * provider-qualified model attribution. Newest samples are retained when a
+   * very busy window exceeds the bound so the current view remains useful. */
+  private readProviderAggregateSeriesInSnapshot(
+    windowStartMs: number,
+    windowEndMs: number,
+  ): ProviderAggregateSeries {
+    const windowStart = canonicalInt64(windowStartMs as Int64Value);
+    const windowEnd = canonicalInt64(windowEndMs as Int64Value);
+    const rows = this.database.prepare(`
+      SELECT settled_at_ms, provider, effective_model, effective_cost_usd,
+        normalized_base_input_tokens, normalized_output_tokens,
+        generation_id, invocation_id
+      FROM analytics_provider_settlements
+      WHERE settled_at_ms IS NOT NULL
+        AND CAST(settled_at_ms AS INTEGER) >= ?
+        AND CAST(settled_at_ms AS INTEGER) < ?
+      ORDER BY CAST(settled_at_ms AS INTEGER) DESC, generation_id DESC, invocation_id DESC
+      LIMIT ?
+    `).all(windowStart, windowEnd, MAX_AGGREGATE_SERIES_ROWS + 1) as Array<Record<string, unknown>>;
+    const executionRows = this.database.prepare(`
+      SELECT started_at_ms, ended_at_ms, root_session_id
+      FROM analytics_execution_states
+      WHERE operation_kind = 'agent-run'
+        AND (
+          (started_at_ms IS NOT NULL AND CAST(started_at_ms AS INTEGER) >= ? AND CAST(started_at_ms AS INTEGER) < ?)
+          OR (ended_at_ms IS NOT NULL AND CAST(ended_at_ms AS INTEGER) >= ? AND CAST(ended_at_ms AS INTEGER) < ?)
+        )
+      ORDER BY CAST(COALESCE(ended_at_ms, started_at_ms) AS INTEGER) DESC,
+        generation_id DESC, execution_id DESC
+      LIMIT ?
+    `).all(windowStart, windowEnd, windowStart, windowEnd, MAX_AGGREGATE_SERIES_ROWS + 1) as Array<Record<string, unknown>>;
+    const settlementTruncated = rows.length > MAX_AGGREGATE_SERIES_ROWS;
+    const executionTruncated = executionRows.length > MAX_AGGREGATE_SERIES_ROWS;
+    const selected = (settlementTruncated ? rows.slice(0, MAX_AGGREGATE_SERIES_ROWS) : rows).reverse();
+    const selectedExecutions = (executionTruncated
+      ? executionRows.slice(0, MAX_AGGREGATE_SERIES_ROWS)
+      : executionRows).reverse();
+    const decodeInt = (value: unknown): number | string | null => value === null || value === undefined
+      ? null
+      : encodeInt64(String(value));
+    const decodeCost = (value: unknown): number | null => {
+      if (value === null || value === undefined) return null;
+      const cost = Number(value);
+      if (!Number.isFinite(cost) || cost < 0) return null;
+      return cost;
+    };
+    return {
+      settlements: selected.map((row) => ({
+        ms: encodeInt64(String(row.settled_at_ms)),
+        provider: row.provider === null || row.provider === undefined ? null : String(row.provider),
+        model: row.effective_model === null || row.effective_model === undefined ? null : String(row.effective_model),
+        cost: decodeCost(row.effective_cost_usd),
+        inputTokens: decodeInt(row.normalized_base_input_tokens),
+        outputTokens: decodeInt(row.normalized_output_tokens),
+      })),
+      executions: selectedExecutions.map((row) => ({
+        startedAtMs: row.started_at_ms === null || row.started_at_ms === undefined
+          ? null : encodeInt64(String(row.started_at_ms)),
+        endedAtMs: row.ended_at_ms === null || row.ended_at_ms === undefined
+          ? null : encodeInt64(String(row.ended_at_ms)),
+        rootSessionId: row.root_session_id === null || row.root_session_id === undefined
+          ? null : String(row.root_session_id),
+      })),
+      truncated: settlementTruncated || executionTruncated,
+    };
+  }
+
+  /** Count retained root sessions from the canonical execution summary. The
+   * summary row exists for a session as soon as an execution is captured, so
+   * this remains correct when a run is still unsettled or has no provider
+   * settlement. */
+  private readExecutionSessionCountInSnapshot(): number {
+    const row = this.database.prepare(`
+      SELECT COUNT(*) AS count
+      FROM analytics_execution_summary
+      WHERE scope_kind = 'session'
+    `).get() as { count: number | bigint } | undefined;
+    return safeExecutionSummaryCount(row?.count ?? 0, 'session_count');
+  }
+
+  /** Bounded global provider aggregate. Accounting, grouped dimensions,
+   * temporal source samples, the projection revision, and the observation
+   * watermark are all read while one SQLite read transaction is open. Summary
+   * groups and temporal samples each have an explicit bound. */
   readProviderAggregateSummary(request: ProviderAggregateReadRequest): ProviderAggregateReadModel {
     this.assertOpen();
     const todayStartMs = boundedTimestamp(request.todayStartMs, 'todayStartMs');
@@ -4949,6 +5349,7 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
       const revision = this.getProjectionRevision();
       const accounting = this.readProviderAccountingSummaryInSnapshot(undefined, revision);
       const executionSummary = this.readExecutionSummaryInSnapshot(undefined, revision);
+      const sessionCount = this.readExecutionSessionCountInSnapshot();
       const latestRun = this.readLatestRunInSnapshot();
       const projection = readProviderModelGroups(
         this.database as unknown as ProviderProjectionDatabase,
@@ -4963,13 +5364,39 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
       );
       const rows = projection.rows as Array<Record<string, unknown>>;
       const truncated = projection.truncated;
+      const seriesWindowStart = boundedTimestamp(
+        request.dailyWindowStartMs ?? weekStartMs,
+        'dailyWindowStartMs',
+      );
+      const seriesWindowEnd = boundedTimestamp(
+        request.dailyWindowEndMs ?? weekEndMs,
+        'dailyWindowEndMs',
+      );
+      if (seriesWindowStart > seriesWindowEnd) {
+        throw new RangeError('Canonical aggregate daily date bounds must be ordered.');
+      }
+      const aggregateGroups = truncated ? rows.slice(0, maxGroups) : rows;
+      const dailyMetrics = this.readProviderAggregateDailyMetricsInSnapshot(
+        timeZone,
+        seriesWindowStart,
+        seriesWindowEnd,
+        todayEndMs,
+        aggregateGroups,
+      );
+      const series = {
+        ...this.readProviderAggregateSeriesInSnapshot(seriesWindowStart, seriesWindowEnd),
+        dailyCosts: dailyMetrics.dailyCosts,
+        dailyExecutions: dailyMetrics.dailyExecutions,
+      };
       return {
         revision,
         snapshotWatermark: this.readObservationWatermark(),
         accounting,
         executionSummary,
+        sessionCount,
         latestRun,
-        groups: truncated ? rows.slice(0, maxGroups) : rows,
+        groups: aggregateGroups,
+        series,
         truncation: { rowLimit: truncated, byteLimit: false, cellLimit: false },
       };
     });
@@ -5082,8 +5509,17 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
   readProducerAcknowledgements(observations: readonly AnalyticsObservation[]): ProducerReconciliation[] {
     this.assertOpen();
     const identities = [...new Set(observations
-      .filter((observation) => sourceSequence(observation) !== null)
-      .map((observation) => producerIdentity(observation)))];
+      .flatMap((observation) => {
+        try {
+          if (sourceSequence(observation) === null) return [];
+          return [producerIdentity(observation)];
+        } catch {
+          // A rejected malformed capture must not turn the acknowledgement
+          // read into a second request failure after the rest of the batch has
+          // already been durably processed.
+          return [];
+        }
+      }))];
     const statement = this.database.prepare(`
       SELECT state.producer_identity, state.contiguous_watermark,
         state.highest_observed_sequence, state.visible_gaps_json,

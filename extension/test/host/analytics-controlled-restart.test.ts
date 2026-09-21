@@ -7,7 +7,7 @@ import test from 'node:test';
 
 import {
   createAnalyticsHandoffPipeName,
-} from '../../../shared/analytics/handoff.js';
+} from '../../../shared/analytics/host-status-messages.js';
 import {
   ANALYTICS_CONTROLLED_RESTART_PROTOCOL,
   claimPendingControlledRestart,

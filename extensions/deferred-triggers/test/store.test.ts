@@ -81,6 +81,26 @@ test('replay: host crash-recovery and ambiguous acknowledgement states remain vi
   assert.equal(active.get('ambiguous')?.recoveryState, 'acknowledgement-ambiguous');
 });
 
+test('replay: a legacy note record defaults its target and message to the creator', () => {
+  appendTriggerOp({
+    id: 'legacy',
+    op: 'register',
+    sessionPath: '/legacy.jsonl',
+    triggers: [{ kind: 'timer', ms: 1000 }],
+    note: 'legacy task',
+    at: new Date().toISOString(),
+  });
+  const trigger = replayTriggers(readTriggerOps()).get('legacy');
+  assert.equal(trigger?.targetSession, '/legacy.jsonl');
+  assert.equal(trigger?.message, 'legacy task');
+});
+
+test('replay: targeted cancel from another creator does not remove the trigger', () => {
+  appendTriggerOp({ id: 'owned', op: 'register', sessionPath: '/owner.jsonl', triggers: [{ kind: 'user_input' }], at: new Date().toISOString() });
+  appendTriggerOp({ op: 'cancel', sessionPath: '/other.jsonl', targetId: 'owned', at: new Date().toISOString() });
+  assert.ok(replayTriggers(readTriggerOps()).has('owned'));
+});
+
 test('replay: cancel-all removes only that session’s triggers', () => {
   appendTriggerOp({ id: 'a', op: 'register', sessionPath: '/w.jsonl', triggers: [{ kind: 'user_input' }], at: new Date().toISOString() });
   appendTriggerOp({ id: 'b', op: 'register', sessionPath: '/w.jsonl', triggers: [{ kind: 'timer', ms: 1000 }], at: new Date().toISOString() });

@@ -11,9 +11,9 @@ import type { DeferredTriggerView, SessionSummary, TriggerSpec } from '../../../
 
 /**
  * Popup listing every currently-active deferred trigger, opened from the
- * bottom status strip's waiting-trigger segment. Each item shows the watcher
- * session, the trigger condition, the task note, the elapsed wait time, and a
- * per-item cancel (×) button.
+ * bottom status strip's waiting-trigger segment. Each item shows the target
+ * session, creator when different, trigger condition, task message, elapsed
+ * wait time, and a per-item cancel (×) button.
  *
  * Webview-local ephemeral UI (STATE_CONTRACT § Webview-Local State — the moral
  * equivalent of `contextMenu`): position + open state live in AppBody; this
@@ -78,17 +78,26 @@ export function DeferredTriggersMenu({
       </div>
       <div class="deferred-triggers-menu-list">
         {triggers.map((t) => {
-          const session = sessionByPath.get(t.sessionPath);
-          const name = session?.name ?? baseName(t.sessionPath) ?? t.sessionPath;
+          const targetPath = t.targetSession ?? t.sessionPath;
+          const target = sessionByPath.get(targetPath);
+          const creator = sessionByPath.get(t.sessionPath);
+          const name = target?.name ?? baseName(targetPath) ?? targetPath;
+          const creatorName = creator?.name ?? baseName(t.sessionPath) ?? t.sessionPath;
+          const message = t.message?.trim() || t.note.trim();
           return (
             <div class="deferred-triggers-menu-item" key={t.id}>
               <div class="deferred-triggers-menu-item-main">
                 <div class="deferred-triggers-menu-item-head">
-                  <span class="deferred-triggers-menu-item-name" title={t.sessionPath}>{name}</span>
+                  <span class="deferred-triggers-menu-item-name" title={targetPath}>{name}</span>
                   <span class="deferred-triggers-menu-item-kind">{formatTriggerSpecs(t.triggers, sessionByPath)}</span>
                 </div>
-                {t.note.trim() && (
-                  <div class="deferred-triggers-menu-item-note" title={t.note}>{t.note.trim()}</div>
+                {message && (
+                  <div class="deferred-triggers-menu-item-note" title={message}>{message}</div>
+                )}
+                {targetPath !== t.sessionPath && (
+                  <div class="deferred-triggers-menu-item-wait" title={`Created by ${t.sessionPath}`}>
+                    created by {creatorName}
+                  </div>
                 )}
                 <div class="deferred-triggers-menu-item-wait">
                   {formatDeliveryState(t)} · waiting {formatElapsed(t.registeredAt)}
@@ -143,6 +152,8 @@ function formatSpec(s: TriggerSpec, sessionByPath: Map<string, SessionSummary>):
         : 'when any session finishes';
     case 'user_input':
       return 'on user input';
+    case 'command':
+      return `when command returns true: ${formatCommand(s.command)} · cwd ${formatPath(s.cwd)} · every ${formatMs(s.intervalMs)} · timeout ${formatMs(s.timeoutMs)}`;
     default:
       return 'unknown';
   }
@@ -157,15 +168,35 @@ function formatMs(ms: number): string {
   return `${(min / 60).toFixed(1)}h`;
 }
 
+function formatCommand(command: string): string {
+  const compact = command.replace(/\s+/g, ' ').trim();
+  if (compact.length <= 140) return `“${compact}”`;
+  return `“${compact.slice(0, 137)}…”`;
+}
+
+function formatPath(value: string): string {
+  if (value.length <= 100) return value;
+  return `…${value.slice(-97)}`;
+}
+
+function boundedDiagnostic(detail: string): string {
+  const compact = detail.replace(/\s+/g, ' ').trim();
+  if (compact.length <= 240) return compact;
+  return `${compact.slice(0, 237)}…`;
+}
+
 function formatDeliveryState(trigger: DeferredTriggerView): string {
+  if (trigger.deliveryState === 'pending' && trigger.deliveryDetail) {
+    return boundedDiagnostic(trigger.deliveryDetail);
+  }
   if (trigger.recoveryState === 'dead-owner-recovered') {
-    return trigger.deliveryDetail ?? 'host exited before dispatch; delivery recovered and retryable';
+    return boundedDiagnostic(trigger.deliveryDetail ?? 'host exited before dispatch; delivery recovered and retryable');
   }
   if (trigger.recoveryState === 'acknowledgement-ambiguous') {
-    return trigger.deliveryDetail ?? 'delivery acknowledgement pending; automatic retry blocked';
+    return boundedDiagnostic(trigger.deliveryDetail ?? 'delivery acknowledgement pending; automatic retry blocked');
   }
-  if (trigger.deliveryState === 'claimed') return trigger.deliveryDetail ?? 'delivery claimed';
-  if (trigger.deliveryState === 'retryable') return trigger.deliveryDetail ?? 'delivery retryable';
+  if (trigger.deliveryState === 'claimed') return boundedDiagnostic(trigger.deliveryDetail ?? 'delivery claimed');
+  if (trigger.deliveryState === 'retryable') return boundedDiagnostic(trigger.deliveryDetail ?? 'delivery retryable');
   return 'pending';
 }
 

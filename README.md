@@ -21,48 +21,42 @@ A personal stack built around the [`pi` coding agent](https://www.npmjs.com/pack
 
 These are the *original* design drivers. The architecture is being adjusted so external users can adopt the publishable pieces (extension, pi plugins) without inheriting the personal layer. Design docs and archived plans are in [`docs/`](docs/INDEX.md).
 
+## Supported platform
+
+Pie is currently developed and tested on Windows only. Other operating systems may work in parts, but they have no supported installation path.
+
 ## Prerequisites
 
-- Node.js **24.16.0**, pinned by `.nvmrc` and `.node-version`
+- Node.js **24.16.0**, pinned by `.node-version`
 - npm **11.13.0**, pinned by `packageManager` in `package.json`
 - VS Code, for interactive extension work
 
-The installers pin the optional standalone `pi` CLI to the exact SDK version resolved by `extension/package-lock.json`. The VS Code backend always prefers that repo-local locked SDK, so a global package upgrade cannot silently change it.
+The installer pins the optional standalone `pi` CLI to the exact SDK version resolved by `extension/package-lock.json`. The VS Code backend always prefers that repo-local locked SDK, so a global package upgrade cannot silently change it.
 
 ## Install
-
-### Windows
 
 ```cmd
 .\install.bat
 ```
 
-(Double-clicking `install.bat` also works — it pauses at the end so the
-window doesn't close immediately.)
-
-### macOS / Linux
-
-```bash
-chmod +x install.sh
-./install.sh
-```
+Double-clicking `install.bat` also works; it pauses at the end so the window doesn't close immediately.
 
 ### What the installer does
 
-Both installers are idempotent and safe to re-run. On each run they:
+The installer is idempotent and safe to re-run. On each run it:
 
-1. **Set `PI_CODING_AGENT_DIR`** to the repo root (User env var on Windows; shell rc on macOS/Linux) so the `pi` CLI reads `settings.json` and `models.json` from here.
-2. **Pin `PI_CODING_AGENT_SESSION_DIR`** to this checkout's `data/outcomes/sessions/` so standalone `pi` writes session JSONL to the repo-local store even when launched outside the checkout.
-3. **Pin `pi`** ([`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)) globally to the exact version in `extension/package-lock.json`, then restore packages with `pi update --extensions` without self-updating the CLI.
-4. **Relocate `auth.json`** out of the working tree into a secure OS user-data directory (`%LOCALAPPDATA%\pie\` on Windows; `~/.config/pie/` or `~/Library/Application Support/pie/` on macOS/Linux) and set `PI_CODING_AGENT_AUTH_DIR`.
-5. **Merge split-brain auth** — if a *new* in-tree `auth.json` appears after relocation (from running `pi` in a shell without `PI_CODING_AGENT_AUTH_DIR`), the installer merges its credentials into the secure location and removes the in-tree copy.
-6. **Write `pie.agentDir`** to VS Code User settings so the extension host forwards the correct config dir to the backend, even before VS Code picks up the new User env vars (which only happens on a full restart, not a window reload).
-7. **Repair extension paths** in `settings.json` (committed paths may reference another machine's npm global tree).
-8. **Migrate session history** from legacy `~/.pi/agent/sessions/`, `data/sessions/`, and `<repo>/sessions/` roots into the current checkout's local `data/outcomes/sessions/` store.
-9. **Install dependencies with `npm ci`**, then build, package, and install the pie VS Code extension when the VS Code CLI is available.
-10. **Run post-install verification** for auth, paths, versions, and split-brain credentials.
+1. **Sets `PI_CODING_AGENT_DIR`** to the repo root as a Windows User environment variable so the `pi` CLI reads `settings.json` and `models.json` from here.
+2. **Pins `PI_CODING_AGENT_SESSION_DIR`** to this checkout's `data/outcomes/sessions/` so standalone `pi` writes session JSONL to the repo-local store even when launched outside the checkout.
+3. **Pins `pi`** ([`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)) globally to the exact version in `extension/package-lock.json`, then restores each configured package source with `pi install` without self-updating the CLI.
+4. **Relocates `auth.json`** out of the working tree into `%LOCALAPPDATA%\pie\` and sets `PI_CODING_AGENT_AUTH_DIR`.
+5. **Merges split-brain auth** — if a *new* in-tree `auth.json` appears after relocation (from running `pi` in a shell without `PI_CODING_AGENT_AUTH_DIR`), the installer merges its credentials into the secure location and removes the in-tree copy.
+6. **Writes `pie.agentDir`** to VS Code User settings so the extension host forwards the correct config dir to the backend, even before VS Code picks up the new User env vars (which only happens on a full restart, not a window reload).
+7. **Repairs extension paths** in `settings.json` (committed paths may reference another machine's npm global tree).
+8. **Migrates session history** from legacy `~/.pi/agent/sessions/`, `data/sessions/`, and `<repo>/sessions/` roots into the current checkout's local `data/outcomes/sessions/` store.
+9. **Installs dependencies with `npm ci`**, then builds, packages, and installs the pie VS Code extension when the VS Code CLI is available.
+10. **Runs post-install verification** for auth, paths, versions, and split-brain credentials.
 
-Both installers enforce the same portability policy: configuration comes from Git, while credentials, sessions, logs, analytics, dependencies, and build outputs remain local to each machine.
+Configuration comes from Git, while credentials, sessions, logs, analytics, dependencies, and build outputs remain local to each machine.
 
 ## Model Configuration
 
@@ -83,16 +77,9 @@ Remote providers need credentials before the pie panel can send messages through
 
 Set a provider API key as a persistent environment variable. The backend reads it automatically.
 
-**Windows:**
 ```cmd
 setx ANTHROPIC_API_KEY "sk-ant-..."
 REM then open a NEW terminal for it to take effect
-```
-
-**macOS / Linux:**
-```bash
-echo 'export ANTHROPIC_API_KEY="sk-ant-..."' >> ~/.zshrc   # or ~/.bashrc
-source ~/.zshrc
 ```
 
 Supported env vars (checked in this order): `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`.
@@ -109,11 +96,9 @@ pi
 
 ### Where auth.json lives
 
-| OS | Default secure location | Env var override |
-|---|---|---|
-| Windows | `%LOCALAPPDATA%\pie\auth.json` | `PI_CODING_AGENT_AUTH_DIR` |
-| Linux | `~/.config/pie/auth.json` | `PI_CODING_AGENT_AUTH_DIR` |
-| macOS | `~/Library/Application Support/pie/auth.json` | `PI_CODING_AGENT_AUTH_DIR` |
+| Default secure location | Env var override |
+|---|---|
+| `%LOCALAPPDATA%\pie\auth.json` | `PI_CODING_AGENT_AUTH_DIR` |
 
 `auth.json` is git-ignored and should never be committed. The installer restricts file permissions to the current user only.
 
@@ -140,8 +125,6 @@ This happens when `pi` was run in a shell that didn't inherit `PI_CODING_AGENT_A
 ```cmd
 .\install.bat
 ```
-
-On macOS/Linux, run `./install.sh` instead.
 
 ### Backend fails to start: "SDK path not allowed"
 
@@ -172,7 +155,7 @@ npm config get prefix   # shows where pi was installed
 
 ## Multi-machine workflow
 
-Use Git—not Dropbox, OneDrive, or copied working directories—to move configuration between machines. Clone to the final location, select the pinned Node version, and run the OS installer. Authenticate each machine independently; never transfer `auth.json`.
+Use Git—not Dropbox, OneDrive, or copied working directories—to move configuration between Windows machines. Clone to the final location, select the pinned Node version, and run `install.bat`. Authenticate each machine independently; never transfer `auth.json`.
 
 For a deterministic dependency/build refresh after pulling, first close all VS Code windows using pie (Windows locks the running extension's native/esbuild files), then run from an external terminal:
 
@@ -282,17 +265,17 @@ Pie has one OS-local runtime-data root, resolved from `PIE_DATA_DIR` or the plat
 - Analytics have two authorities, and only one is active at a time: the legacy owners (`data/outcomes/<workspace-id>/` run analytics plus the workspace billable-invocation ledger and activity timeline) stay authoritative whenever the resolved state directory records no active canonical generation — no manifest, or a validated candidate/ready manifest. With a validated active generation, capture goes exclusively to `<data-root>/analytics/analytics.sqlite` and the legacy ledger is not written at all — never a dual-write, and no import of old analytics into the canonical store. A malformed or inconsistent activation state fails startup closed instead of falling back to legacy.
 - Privacy mode means delete on explicit session close: capture stays available while the session is open, and closing a private session deletes its captured analytics. Under legacy authority, privacy instead suppresses run analytics and scrubs existing records.
 - `data/outcomes/` is the machine-wide session authority for this checkout, independent of cwd and VS Code workspace. It contains canonical session JSONL and workspace-sharded analytics stores.
-- Both installers pin `PI_CODING_AGENT_SESSION_DIR` to `data/outcomes/sessions/`. The separate transcript-root switch that would move new sessions under `<data-root>/sessions/` is implemented behind the explicit `PIE_STORAGE_CUTOFF_AUTHORIZATION=p7b-authorized-v1` gate; nothing in this repository sets it, so do not assume it is in effect.
+- The installer pins `PI_CODING_AGENT_SESSION_DIR` to `data/outcomes/sessions/`. The separate transcript-root switch that would move new sessions under `<data-root>/sessions/` is implemented behind the explicit `PIE_STORAGE_CUTOFF_AUTHORIZATION=p7b-authorized-v1` gate; nothing in this repository sets it, so do not assume it is in effect.
 - `data/` is git-ignored runtime data, not portable configuration. Do not cloud-sync it and never let two machines write to the same outcomes authority.
-- When an existing session environment points elsewhere, both installers merge its durable transcripts and completed run snapshots into the canonical authority. Retired review and closure files remain at their source; private close still scrubs the exact session from those legacy files before deleting its transcript.
+- When an existing session environment points elsewhere, the installer merges its durable transcripts and completed run snapshots into the canonical authority. Retired review and closure files remain at their source; private close still scrubs the exact session from those legacy files before deleting its transcript.
 - Back up session data only to encrypted storage; transcripts can contain source code, prompts, paths, tool output, and secrets.
 
 ### Storage locations
 
 | State | Default location | Override env var |
 |---|---|---|
-| Auth tokens | `%LOCALAPPDATA%\pie\auth.json` (Win) / `~/.config/pie/auth.json` (macOS/Linux) | `PI_CODING_AGENT_AUTH_DIR` |
-| Runtime data root | `%LOCALAPPDATA%\pie\data` (Win) / `~/Library/Application Support/pie/data` (macOS) / `${XDG_DATA_HOME:-~/.local/share}/pie/data` (Linux) | `PIE_DATA_DIR` |
+| Auth tokens | `%LOCALAPPDATA%\pie\auth.json` | `PI_CODING_AGENT_AUTH_DIR` |
+| Runtime data root | `%LOCALAPPDATA%\pie\data` | `PIE_DATA_DIR` |
 | Canonical analytics | `<data-root>/analytics/analytics.sqlite` (only under canonical activation) | `PIE_DATA_DIR` |
 | Sessions | `data/outcomes/sessions/` (in-tree, git-ignored) | `PI_CODING_AGENT_SESSION_DIR` |
 | Run analytics | `data/outcomes/<workspace-id>/` (globally aggregated) | `PIE_ANALYTICS_DIR` |

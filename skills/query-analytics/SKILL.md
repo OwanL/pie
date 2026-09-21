@@ -13,9 +13,7 @@ The authoritative analytics root is one normalized SQLite database:
 
 The canonical data root comes from `PIE_DATA_DIR` (absolute, or relative
 rooted at the agent directory); with no override it defaults to
-`%LOCALAPPDATA%\pie\data` on Windows,
-`~/Library/Application Support/pie/data` on macOS, and
-`$XDG_DATA_HOME/pie/data` (else `~/.local/share/pie/data`) on Linux.
+`%LOCALAPPDATA%\pie\data` on the supported Windows host.
 
 **Rules of engagement:**
 

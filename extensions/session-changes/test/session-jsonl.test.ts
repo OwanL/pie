@@ -6,6 +6,7 @@ import * as path from 'node:path';
 
 import {
   deriveFileChangesFromSessionEntries,
+  parseSessionEntriesChanges,
   parseSessionFileChanges,
   readSessionCwd,
 } from '../src/session-jsonl';
@@ -238,7 +239,118 @@ test('derive: create-then-delete matches across relative/absolute spellings', ()
   assert.equal(changes.length, 0, 'create + delete of the same file is a net no-op');
 });
 
-// ─── parseSessionFileChanges (read-from-disk) ───────────────────────────────
+test('derive: mixed-cwd legacy child resolves its relative path and deduplicates a later parent edit', async () => {
+  const parentDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-sc-parent-'));
+  const childDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-sc-child-'));
+  const childPath = path.join(childDir, 'extension', 'x.ts');
+  await fs.mkdir(path.dirname(childPath), { recursive: true });
+  try {
+    const details = {
+      mode: 'single', agentScope: 'user', projectAgentsDir: null,
+      results: [{
+        // Deliberately omit cwd: this models a durable result written before
+        // cwd provenance was added. The owning call below supplies it.
+        messages: [{
+          role: 'assistant',
+          content: [tc('inner', 'edit', { path: 'extension/x.ts', oldText: 'old', newText: 'old\nchild' })],
+        }],
+      }],
+    };
+    const changes = derive([
+      header(parentDir),
+      assistantMsg('child-parent', 't1', [tc('child-call', 'subagent', { agent: 'worker', task: 'edit', cwd: childDir })]),
+      toolResult('child-result', 't1', 'child-call', 'subagent', { details }),
+      assistantMsg('parent', 't2', [tc('parent-edit', 'edit', { path: childPath, oldText: 'old\nchild', newText: 'old\nchild\nparent' })]),
+      toolResult('parent-result', 't2', 'parent-edit', 'edit'),
+    ]);
+
+    assert.equal(changes.length, 1, 'mixed-cwd child and absolute parent edit must merge');
+    assert.equal(changes[0]?.path, childPath, 'the child path is normalized to the real child cwd');
+    assert.equal(changes[0]?.additions, 5);
+    assert.equal(changes[0]?.deletions, 3);
+  } finally {
+    await fs.rm(parentDir, { recursive: true, force: true });
+    await fs.rm(childDir, { recursive: true, force: true });
+  }
+});
+
+test('derive: nested mixed-cwd descendants use each result cwd, including compact fileChanges', async () => {
+  const parentDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-sc-parent-'));
+  const childDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-sc-child-'));
+  const grandchildDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-sc-grandchild-'));
+  try {
+    const combinedDetails = {
+      mode: 'single', agentScope: 'user', projectAgentsDir: null,
+      results: [
+        {
+          cwd: childDir,
+          // Compact summaries have no verbose tool arguments, but still carry
+          // paths relative to the child that produced them.
+          fileChanges: [{ path: 'child.ts', kind: 'modified', description: '1 edit', additions: 1, deletions: 1 }],
+        },
+        {
+          cwd: childDir,
+          messages: [{
+            role: 'assistant',
+            content: [tc('grand-call', 'subagent', { agent: 'worker', task: 'nested', cwd: grandchildDir })],
+          }, {
+            role: 'toolResult',
+            toolCallId: 'grand-call',
+            toolName: 'subagent',
+            details: {
+              mode: 'single', agentScope: 'user', projectAgentsDir: null,
+              results: [{
+                // Legacy nested result: its owning nested call input supplies
+                // the cwd through the recursive call join.
+                messages: [{
+                  role: 'assistant',
+                  content: [tc('grand-edit', 'edit', { path: 'nested.ts', oldText: 'a', newText: 'b\nc' })],
+                }],
+              }],
+            },
+          }],
+        },
+      ],
+    };
+    const changes = derive([
+      header(parentDir),
+      assistantMsg('m1', 't1', [tc('outer-call', 'subagent', { agent: 'worker', task: 'mixed', cwd: childDir })]),
+      toolResult('tr1', 't1', 'outer-call', 'subagent', { details: combinedDetails }),
+    ]);
+
+    assert.equal(changes.length, 2);
+    assert.deepEqual(changes.map((change) => change.path).sort(), [
+      path.join(childDir, 'child.ts'),
+      path.join(grandchildDir, 'nested.ts'),
+    ].sort());
+    assert.equal(changes.find((change) => change.path === path.join(childDir, 'child.ts'))?.additions, 1);
+    assert.equal(changes.find((change) => change.path === path.join(grandchildDir, 'nested.ts'))?.additions, 2);
+  } finally {
+    await fs.rm(parentDir, { recursive: true, force: true });
+    await fs.rm(childDir, { recursive: true, force: true });
+    await fs.rm(grandchildDir, { recursive: true, force: true });
+  }
+});
+
+// ─── parseSessionEntriesChanges / parseSessionFileChanges ───────────────────
+
+test('parseSessionEntriesChanges: derives runtime entries with an explicit cwd', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-sc-runtime-'));
+  await fs.writeFile(path.join(dir, 'runtime.ts'), 'runtime\n', 'utf8');
+  const entries = [
+    assistantMsg('m1', 't1', [tc('c1', 'write', { path: 'runtime.ts', content: 'runtime\n' })]),
+    toolResult('tr1', 't1', 'c1', 'write'),
+  ];
+  try {
+    const parsed = parseSessionEntriesChanges(entries as never, undefined, dir);
+    assert.equal(parsed.sessionPath, undefined);
+    assert.equal(parsed.cwd, dir);
+    assert.equal(parsed.changes.length, 1);
+    assert.equal(parsed.changes[0]?.path, 'runtime.ts');
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
 
 test('parseSessionFileChanges: reads cwd from header + derives from a JSONL file', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-sc-'));

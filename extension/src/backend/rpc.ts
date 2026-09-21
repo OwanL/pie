@@ -3,6 +3,12 @@ import { isThinkingLevel } from '../shared/thinking-level';
 import { ALL_NESTED_BUCKETS_ALLOWED, ALL_SUBAGENT_BUCKETS_CAN_SPAWN, DEFAULT_HISTORY_COMPACTION_SETTINGS } from '../shared/protocol';
 import { ALLOWED_IMAGE_MIME_TYPES, decodedBase64ByteLength, MAX_AGGREGATE_IMAGE_INPUT_BYTES, MAX_IMAGE_INPUT_BYTES } from '../shared/image-constraints';
 import { THINKING_LEVELS } from '../shared/thinking-level.js';
+import {
+  PROVIDER_MAX_AFTERBURN_SECONDS,
+  PROVIDER_MAX_CONCURRENT_REQUESTS,
+  PROVIDER_NETWORK_PHASE_MAX_WAIT_SECONDS,
+  PROVIDER_UNLIMITED_CONCURRENCY,
+} from '../shared/provider-concurrency.js';
 import { isPendingTabPath } from '../shared/tab-behavior.js';
 import {
   isDetailCursor,
@@ -16,9 +22,6 @@ import { BackendError } from './server-io';
 import type { AnalyticsBackendDescriptor } from '../../../shared/analytics/activation.js';
 
 export { MAX_IMAGE_INPUT_BYTES } from '../shared/image-constraints';
-
-/** Mirrors the isolated coordinator authority's finite per-phase safety cap. */
-const PROVIDER_NETWORK_PHASE_MAX_WAIT_SECONDS = 5 * 60;
 
 // ─── Argument parsing ────────────────────────────────────────────────────────
 
@@ -894,15 +897,22 @@ function validateOptionalProviderConcurrency(
     const cleaned: NonNullable<RuntimePrefsSetParams['providerConcurrency']>[string] = {};
     const maxConcurrent = o['maxConcurrentRequests'];
     if (maxConcurrent !== undefined) {
-      if (typeof maxConcurrent !== 'number' || !Number.isFinite(maxConcurrent) || maxConcurrent < 1 || Math.floor(maxConcurrent) !== maxConcurrent) {
-        fail(method, `providerConcurrency.${provider}.maxConcurrentRequests must be a positive integer when provided`);
+      if (typeof maxConcurrent !== 'number'
+        || !Number.isFinite(maxConcurrent)
+        || maxConcurrent < PROVIDER_UNLIMITED_CONCURRENCY
+        || maxConcurrent > PROVIDER_MAX_CONCURRENT_REQUESTS
+        || Math.floor(maxConcurrent) !== maxConcurrent) {
+        fail(method, `providerConcurrency.${provider}.maxConcurrentRequests must be an integer from ${PROVIDER_UNLIMITED_CONCURRENCY} (Unlimited) to ${PROVIDER_MAX_CONCURRENT_REQUESTS} when provided`);
       }
       cleaned.maxConcurrentRequests = maxConcurrent;
     }
     const afterburn = o['afterburnSeconds'];
     if (afterburn !== undefined) {
-      if (typeof afterburn !== 'number' || !Number.isFinite(afterburn) || afterburn < 0) {
-        fail(method, `providerConcurrency.${provider}.afterburnSeconds must be a non-negative number when provided`);
+      if (typeof afterburn !== 'number'
+        || !Number.isFinite(afterburn)
+        || afterburn < 0
+        || afterburn > PROVIDER_MAX_AFTERBURN_SECONDS) {
+        fail(method, `providerConcurrency.${provider}.afterburnSeconds must be a number from 0 to ${PROVIDER_MAX_AFTERBURN_SECONDS} when provided`);
       }
       cleaned.afterburnSeconds = afterburn;
     }

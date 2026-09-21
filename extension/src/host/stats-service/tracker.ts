@@ -15,6 +15,7 @@ import type {
 } from '../../shared/protocol';
 import { appendUnique, summarizeInputs } from './helpers';
 import { estimateTextTokens } from '../../shared/tokenize';
+import { providerReportedCostUsd } from '../../../../shared/provider-cost.js';
 import { isRecord } from '../../shared/type-guards';
 import {
   getSubagentBillingEntries,
@@ -38,8 +39,22 @@ import type { PersistedBusyInterval } from '../working-time-service';
 
 const TOOL_FAILURE_SAMPLE_LIMIT = 20;
 
+function validTokenChannel(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
 function toNonNegativeInt(value: unknown): number {
   return Number.isFinite(value) && typeof value === 'number' && value > 0 ? Math.trunc(value) : 0;
+}
+
+/** New subagent captures use an explicit provider-report field. Numeric
+ * `usage.cost` remains a legacy wire alias for already-produced results. */
+function reportedSubagentCost(value: unknown): number | undefined {
+  const explicit = providerReportedCostUsd(value);
+  if (explicit !== undefined) return explicit;
+  if (!isRecord(value)) return undefined;
+  const legacy = value.cost;
+  return typeof legacy === 'number' && Number.isFinite(legacy) && legacy >= 0 ? legacy : undefined;
 }
 
 function finiteOrNull(value: unknown): number | null {
@@ -191,7 +206,40 @@ export class SessionRunTracker {
       && Number.isFinite(details.prepassLatencyMs) && details.prepassLatencyMs >= 0
       ? Math.trunc(details.prepassLatencyMs)
       : undefined;
-    if (inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens === 0 && durationMs === undefined) {
+    const declaredPresence = isRecord(details.prepassTokenChannelPresence)
+      ? details.prepassTokenChannelPresence
+      : undefined;
+    const rawChannels = [
+      details.prepassInputTokens,
+      details.prepassOutputTokens,
+      details.prepassCacheReadTokens,
+      details.prepassCacheWriteTokens,
+    ];
+    const hasAnyTokenChannelValue = rawChannels.some((value) => value !== undefined);
+    const inferredPresence = (value: unknown): boolean => details.prepassTokenChannelsKnown === false
+      ? false : hasAnyTokenChannelValue ? validTokenChannel(value) : true;
+    const tokenChannelPresence = {
+      input: typeof declaredPresence?.input === 'boolean'
+        ? declaredPresence.input && validTokenChannel(details.prepassInputTokens)
+        : inferredPresence(details.prepassInputTokens),
+      output: typeof declaredPresence?.output === 'boolean'
+        ? declaredPresence.output && validTokenChannel(details.prepassOutputTokens)
+        : inferredPresence(details.prepassOutputTokens),
+      cacheRead: typeof declaredPresence?.cacheRead === 'boolean'
+        ? declaredPresence.cacheRead && validTokenChannel(details.prepassCacheReadTokens)
+        : inferredPresence(details.prepassCacheReadTokens),
+      cacheWrite: typeof declaredPresence?.cacheWrite === 'boolean'
+        ? declaredPresence.cacheWrite && validTokenChannel(details.prepassCacheWriteTokens)
+        : inferredPresence(details.prepassCacheWriteTokens),
+    };
+    const tokenChannelsKnown = details.prepassTokenChannelsKnown !== false
+      && Object.values(tokenChannelPresence).every(Boolean);
+    const reportedCostUsd = typeof details.prepassReportedCostUsd === 'number'
+      && Number.isFinite(details.prepassReportedCostUsd) && details.prepassReportedCostUsd >= 0
+      ? details.prepassReportedCostUsd
+      : undefined;
+    if (inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens === 0
+      && durationMs === undefined && tokenChannelsKnown && reportedCostUsd === undefined) {
       return;
     }
 
@@ -212,10 +260,8 @@ export class SessionRunTracker {
       outputTokens,
       cacheReadTokens,
       cacheWriteTokens,
-      ...(typeof details.prepassReportedCostUsd === 'number'
-        && Number.isFinite(details.prepassReportedCostUsd) && details.prepassReportedCostUsd >= 0
-        ? { reportedCostUsd: details.prepassReportedCostUsd }
-        : {}),
+      ...(!tokenChannelsKnown ? { tokenChannelsKnown: false, tokenChannelPresence } : {}),
+      ...(reportedCostUsd === undefined ? {} : { reportedCostUsd }),
       ...(durationMs === undefined ? {} : { durationMs }),
     }];
     run.updatedAt = this.runState.isoNow();
@@ -250,17 +296,40 @@ export class SessionRunTracker {
 
     const generationDurationMs = Math.max(0, Math.trunc(durationMs));
     run.assistantTurnDurationMs += generationDurationMs;
+    const declaredPresence = usage?.tokenChannelPresence;
+    const tokenChannelPresence = usage ? {
+      input: validTokenChannel(usage.inputTokens) && (declaredPresence?.input ?? true),
+      output: validTokenChannel(usage.outputTokens) && (declaredPresence?.output ?? true),
+      cacheRead: validTokenChannel(usage.cacheReadTokens) && (declaredPresence?.cacheRead ?? true),
+      cacheWrite: validTokenChannel(usage.cacheWriteTokens) && (declaredPresence?.cacheWrite ?? true),
+    } : undefined;
+    const tokenChannelsKnown = usage !== undefined
+      && usage.tokenChannelsKnown !== false
+      && Object.values(tokenChannelPresence ?? {}).every(Boolean);
+    const tokenChannelsIncomplete = usage !== undefined && !tokenChannelsKnown;
+    const generationReportedCostUsd = usage && validTokenChannel(usage.reportedCostUsd)
+      ? usage.reportedCostUsd : undefined;
     const outputTokens = usage ? toNonNegativeInt(usage.outputTokens) : 0;
     const inputTokens = usage ? toNonNegativeInt(usage.inputTokens) : 0;
     const cacheReadTokens = usage ? toNonNegativeInt(usage.cacheReadTokens) : 0;
     const cacheWriteTokens = usage ? toNonNegativeInt(usage.cacheWriteTokens) : 0;
     if (usage) {
-      run.inputTokens += toNonNegativeInt(usage.inputTokens);
-      run.outputTokens += toNonNegativeInt(usage.outputTokens);
-      run.cacheReadTokens += toNonNegativeInt(usage.cacheReadTokens);
-      run.cacheWriteTokens += toNonNegativeInt(usage.cacheWriteTokens);
+      run.inputTokens += inputTokens;
+      run.outputTokens += outputTokens;
+      run.cacheReadTokens += cacheReadTokens;
+      run.cacheWriteTokens += cacheWriteTokens;
       run.tokenReportedTurnCount += 1;
-      run.lastTurnUsage = usage;
+      const usageWithoutCost = { ...usage };
+      delete usageWithoutCost.reportedCostUsd;
+      run.lastTurnUsage = {
+        ...usageWithoutCost,
+        inputTokens,
+        outputTokens,
+        cacheReadTokens,
+        cacheWriteTokens,
+        ...(generationReportedCostUsd !== undefined ? { reportedCostUsd: generationReportedCostUsd } : {}),
+        ...(tokenChannelsIncomplete ? { tokenChannelsKnown: false, tokenChannelPresence } : {}),
+      };
     }
 
     // Record a throughput sample whenever the turn produced measurable
@@ -275,7 +344,8 @@ export class SessionRunTracker {
         || latency.overheadMs !== undefined
         || latency.providerLatencyMs !== undefined
         || latency.providerQueueMs !== undefined);
-    if (generationDurationMs > 0 || outputTokens > 0 || status !== 'completed' || hasLatency) {
+    if (generationDurationMs > 0 || outputTokens > 0 || status !== 'completed' || hasLatency
+      || generationReportedCostUsd !== undefined || tokenChannelsIncomplete) {
       const sample: TurnThroughputSample = {
         endedAt: this.runState.isoNow(),
         outputTokens,
@@ -288,7 +358,8 @@ export class SessionRunTracker {
         status,
         modelId: run.modelId ?? undefined,
         provider: run.provider ?? undefined,
-        reportedCostUsd: usage?.reportedCostUsd,
+        ...(generationReportedCostUsd !== undefined ? { reportedCostUsd: generationReportedCostUsd } : {}),
+        ...(tokenChannelsIncomplete && tokenChannelPresence ? { tokenChannelsKnown: false, tokenChannelPresence } : {}),
         turnLatencyMs: finiteOrNull(latency?.turnLatencyMs),
         overheadMs: finiteOrNull(latency?.overheadMs),
         providerLatencyMs: finiteOrNull(latency?.providerLatencyMs),
@@ -601,11 +672,55 @@ export class SessionRunTracker {
       analysis.subagentAgentNames,
     );
     const billing = getSubagentBillingEntries(toolCall.result);
-    const usageForEntry = (entry: (typeof billing)[number]) => entry.usage ?? {
-      input: (entry.invocations ?? []).reduce((sum, item) => sum + (item.usage?.input ?? 0), 0),
-      output: (entry.invocations ?? []).reduce((sum, item) => sum + (item.usage?.output ?? 0), 0),
-      cacheRead: (entry.invocations ?? []).reduce((sum, item) => sum + (item.usage?.cacheRead ?? 0), 0),
-      cacheWrite: (entry.invocations ?? []).reduce((sum, item) => sum + (item.usage?.cacheWrite ?? 0), 0),
+    const usagePresence = (usage: {
+      tokenChannelsKnown?: boolean;
+      tokenChannelPresence?: {
+        input: boolean;
+        output: boolean;
+        cacheRead: boolean;
+        cacheWrite: boolean;
+      };
+    } | undefined) => !usage
+      ? { input: false, output: false, cacheRead: false, cacheWrite: false }
+      : ({
+        input: usage.tokenChannelPresence?.input ?? usage.tokenChannelsKnown !== false,
+        output: usage.tokenChannelPresence?.output ?? usage.tokenChannelsKnown !== false,
+        cacheRead: usage.tokenChannelPresence?.cacheRead ?? usage.tokenChannelsKnown !== false,
+        cacheWrite: usage.tokenChannelPresence?.cacheWrite ?? usage.tokenChannelsKnown !== false,
+      });
+    const usageForEntry = (entry: (typeof billing)[number]) => {
+      const attempts = (entry.invocations?.length ? entry.invocations : entry.attempts) ?? [];
+      const attemptPresence = {
+        input: attempts.length > 0 && attempts.every((item) => usagePresence(item.usage).input),
+        output: attempts.length > 0 && attempts.every((item) => usagePresence(item.usage).output),
+        cacheRead: attempts.length > 0 && attempts.every((item) => usagePresence(item.usage).cacheRead),
+        cacheWrite: attempts.length > 0 && attempts.every((item) => usagePresence(item.usage).cacheWrite),
+      };
+      const attemptUsage = {
+        input: attempts.reduce((sum, item) => sum + (item.usage?.input ?? 0), 0),
+        output: attempts.reduce((sum, item) => sum + (item.usage?.output ?? 0), 0),
+        cacheRead: attempts.reduce((sum, item) => sum + (item.usage?.cacheRead ?? 0), 0),
+        cacheWrite: attempts.reduce((sum, item) => sum + (item.usage?.cacheWrite ?? 0), 0),
+        ...(!Object.values(attemptPresence).every(Boolean)
+          ? { tokenChannelsKnown: false, tokenChannelPresence: attemptPresence }
+          : {}),
+      };
+      const aggregate = entry.usage;
+      const aggregateTokens = aggregate
+        ? aggregate.input + aggregate.output + aggregate.cacheRead + aggregate.cacheWrite
+        : 0;
+      const attemptTokens = attemptUsage.input + attemptUsage.output
+        + attemptUsage.cacheRead + attemptUsage.cacheWrite;
+      // A cost-only/placeholder aggregate must not suppress independently
+      // captured attempt tokens. Prefer the aggregate when it carries token
+      // evidence, otherwise reconcile from the observable attempts.
+      return aggregate && (aggregateTokens > 0 || attemptTokens === 0)
+        ? aggregate
+        : {
+          ...attemptUsage,
+          ...(aggregate?.reportedCostUsd !== undefined ? { reportedCostUsd: aggregate.reportedCostUsd } : {}),
+          ...(aggregate?.providerReportedCostUsd !== undefined ? { providerReportedCostUsd: aggregate.providerReportedCostUsd } : {}),
+        };
     };
     const billingTotals = billing.reduce((totals, entry) => {
       const usage = usageForEntry(entry);
@@ -642,6 +757,11 @@ export class SessionRunTracker {
           cacheWriteTokens: toNonNegativeInt(entryUsage.cacheWrite),
         };
         const invocationOrAttempts = (entry.invocations?.length ? entry.invocations : entry.attempts) ?? [];
+        const aggregateReportedCost = reportedSubagentCost(entry.usage);
+        const entryChannelPresence = usagePresence(entryUsage);
+        const entryChannelsKnown = Object.values(entryChannelPresence).every(Boolean);
+        let attemptReportedCost = 0;
+        let attemptReportedCount = 0;
         for (const [attemptIndex, attempt] of invocationOrAttempts.entries()) {
           if (!attempt.usage) continue;
           const counts = {
@@ -650,7 +770,15 @@ export class SessionRunTracker {
             cacheReadTokens: Math.min(remaining.cacheReadTokens, toNonNegativeInt(attempt.usage.cacheRead)),
             cacheWriteTokens: Math.min(remaining.cacheWriteTokens, toNonNegativeInt(attempt.usage.cacheWrite)),
           };
-          if (counts.inputTokens + counts.outputTokens + counts.cacheReadTokens + counts.cacheWriteTokens === 0) continue;
+          const attemptCost = reportedSubagentCost(attempt.usage);
+          const attemptChannelPresence = usagePresence(attempt.usage);
+          const attemptChannelsKnown = Object.values(attemptChannelPresence).every(Boolean);
+          if (attemptCost !== undefined) {
+            attemptReportedCost += attemptCost;
+            attemptReportedCount += 1;
+          }
+          if (counts.inputTokens + counts.outputTokens + counts.cacheReadTokens + counts.cacheWriteTokens === 0
+            && attemptCost === undefined) continue;
           additions.push({
             kind: 'subagent',
             sourceId: `${sourceId}:${'invocationId' in attempt ? `invocation:${attempt.invocationId}` : `attempt:${attempt.attemptId || attemptIndex}`}`,
@@ -658,16 +786,25 @@ export class SessionRunTracker {
             modelId: attempt.model ?? entry.model ?? entry.selectedModel,
             ...(attempt.provider ? { provider: attempt.provider } : entry.provider ? { provider: entry.provider } : {}),
             ...counts,
-            ...(typeof attempt.usage.cost === 'number' && attempt.usage.cost > 0
-              ? { reportedCostUsd: attempt.usage.cost }
-              : {}),
+            ...(!attemptChannelsKnown ? {
+              tokenChannelsKnown: false,
+              tokenChannelPresence: attemptChannelPresence,
+            } : {}),
+            ...(attemptCost !== undefined ? { reportedCostUsd: attemptCost } : {}),
           });
           remaining.inputTokens -= counts.inputTokens;
           remaining.outputTokens -= counts.outputTokens;
           remaining.cacheReadTokens -= counts.cacheReadTokens;
           remaining.cacheWriteTokens -= counts.cacheWriteTokens;
         }
-        if (remaining.inputTokens + remaining.outputTokens + remaining.cacheReadTokens + remaining.cacheWriteTokens > 0) {
+        const aggregateOwnsResidual = aggregateReportedCost !== undefined
+          && (invocationOrAttempts.length > 0 || (entry.omittedInvocationCount ?? 0) > 0);
+        // Do not catalog-price aggregate tokens that have exact aggregate
+        // evidence but no independent attempt split. Tool totals still retain
+        // those tokens; the residual cost sample below retains exact billing.
+        if ((remaining.inputTokens + remaining.outputTokens + remaining.cacheReadTokens + remaining.cacheWriteTokens > 0
+          || aggregateReportedCost !== undefined)
+          && !aggregateOwnsResidual) {
           additions.push({
             kind: 'subagent',
             sourceId,
@@ -675,9 +812,29 @@ export class SessionRunTracker {
             modelId: entry.model ?? entry.selectedModel,
             ...(entry.provider ? { provider: entry.provider } : {}),
             ...remaining,
-            ...(invocationOrAttempts.length ? {} : typeof entry.usage?.cost === 'number' && entry.usage.cost > 0
-              ? { reportedCostUsd: entry.usage.cost }
-              : {}),
+            ...(!entryChannelsKnown ? {
+              tokenChannelsKnown: false,
+              tokenChannelPresence: entryChannelPresence,
+            } : {}),
+            ...(aggregateReportedCost !== undefined ? { reportedCostUsd: aggregateReportedCost } : {}),
+          });
+        }
+        if (aggregateOwnsResidual
+          && aggregateReportedCost !== undefined
+          && (aggregateReportedCost > attemptReportedCost || attemptReportedCount === 0)) {
+          additions.push({
+            kind: 'subagent',
+            sourceId: `${sourceId}:aggregate-cost`,
+            occurredAt,
+            modelId: entry.model ?? entry.selectedModel,
+            ...(entry.provider ? { provider: entry.provider } : {}),
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            tokenChannelsKnown: false,
+            tokenChannelPresence: { input: false, output: false, cacheRead: false, cacheWrite: false },
+            reportedCostUsd: Math.max(0, aggregateReportedCost - attemptReportedCost),
           });
         }
       }
@@ -712,6 +869,9 @@ export class SessionRunTracker {
             cacheWriteTokens: toNonNegativeInt(usage.cacheWrite),
           };
           const rawResult = result as typeof result & { attemptRecords?: unknown[] };
+          const aggregateReportedCost = reportedSubagentCost(usage);
+          let attemptReportedCost = 0;
+          let attemptReportedCount = 0;
           for (const [attemptIndex, attempt] of (rawResult.attemptRecords ?? []).entries()) {
             if (!isRecord(attempt) || !isRecord(attempt.usage)) continue;
             const counts = {
@@ -720,7 +880,13 @@ export class SessionRunTracker {
               cacheReadTokens: Math.min(remaining.cacheReadTokens, toNonNegativeInt(attempt.usage.cacheRead)),
               cacheWriteTokens: Math.min(remaining.cacheWriteTokens, toNonNegativeInt(attempt.usage.cacheWrite)),
             };
-            if (counts.inputTokens + counts.outputTokens + counts.cacheReadTokens + counts.cacheWriteTokens === 0) continue;
+            const attemptCost = reportedSubagentCost(attempt.usage);
+            if (attemptCost !== undefined) {
+              attemptReportedCost += attemptCost;
+              attemptReportedCount += 1;
+            }
+            if (counts.inputTokens + counts.outputTokens + counts.cacheReadTokens + counts.cacheWriteTokens === 0
+              && attemptCost === undefined) continue;
             const attemptId = typeof attempt.attemptId === 'string' && attempt.attemptId.trim()
               ? attempt.attemptId.trim()
               : String(attemptIndex);
@@ -733,16 +899,19 @@ export class SessionRunTracker {
                 ? { provider: attempt.provider }
                 : result.provider ? { provider: result.provider } : {}),
               ...counts,
-              ...(typeof attempt.usage.cost === 'number' && Number.isFinite(attempt.usage.cost) && attempt.usage.cost > 0
-                ? { reportedCostUsd: attempt.usage.cost }
-                : {}),
+              ...(attemptCost !== undefined ? { reportedCostUsd: attemptCost } : {}),
             });
             remaining.inputTokens -= counts.inputTokens;
             remaining.outputTokens -= counts.outputTokens;
             remaining.cacheReadTokens -= counts.cacheReadTokens;
             remaining.cacheWriteTokens -= counts.cacheWriteTokens;
           }
-          if (remaining.inputTokens + remaining.outputTokens + remaining.cacheReadTokens + remaining.cacheWriteTokens > 0) {
+          const aggregateOwnsResidual = aggregateReportedCost !== undefined
+            && (rawResult.attemptRecords?.length ?? 0) > 0;
+          // Exact aggregate evidence must not cause the leftover aggregate
+          // tokens to be catalog-priced a second time.
+          if (remaining.inputTokens + remaining.outputTokens + remaining.cacheReadTokens + remaining.cacheWriteTokens > 0
+            && !aggregateOwnsResidual) {
             additions.push({
               kind: 'subagent',
               sourceId,
@@ -750,13 +919,23 @@ export class SessionRunTracker {
               modelId: result.model ?? result.selectedModel,
               ...(result.provider ? { provider: result.provider } : {}),
               ...remaining,
-              // Subagent usage initializes cost to zero even when a provider
-              // omitted billing metadata. Preserve only positive exact costs so
-              // zero does not suppress provider-qualified catalog estimation.
-              ...(typeof usage.cost === 'number' && Number.isFinite(usage.cost) && usage.cost > 0
-                && (rawResult.attemptRecords?.length ?? 0) === 0
-                ? { reportedCostUsd: usage.cost }
-                : {}),
+              ...(aggregateReportedCost !== undefined ? { reportedCostUsd: aggregateReportedCost } : {}),
+            });
+          }
+          if (aggregateOwnsResidual
+            && aggregateReportedCost !== undefined
+            && (aggregateReportedCost > attemptReportedCost || attemptReportedCount === 0)) {
+            additions.push({
+              kind: 'subagent',
+              sourceId: `${sourceId}:aggregate-cost`,
+              occurredAt,
+              modelId: result.model ?? result.selectedModel,
+              ...(result.provider ? { provider: result.provider } : {}),
+              inputTokens: 0,
+              outputTokens: 0,
+              cacheReadTokens: 0,
+              cacheWriteTokens: 0,
+              reportedCostUsd: Math.max(0, aggregateReportedCost - attemptReportedCost),
             });
           }
         }
@@ -891,6 +1070,13 @@ export class SessionRunTracker {
       outputTokens: number;
       cacheReadTokens: number;
       cacheWriteTokens: number;
+      tokenChannelsKnown?: boolean;
+      tokenChannelPresence?: {
+        input: boolean;
+        output: boolean;
+        cacheRead: boolean;
+        cacheWrite: boolean;
+      };
       reportedCostUsd?: number;
       durationMs?: number;
     },
@@ -900,12 +1086,27 @@ export class SessionRunTracker {
     if (!run || !state || !sample.sourceId) return;
     const samples = run.auxiliaryLlmUsage ?? [];
     if (samples.some((existing) => existing.kind === sample.kind && existing.sourceId === sample.sourceId)) return;
+    const declaredPresence = sample.tokenChannelPresence;
+    const tokenChannelPresence = {
+      input: validTokenChannel(sample.inputTokens) && (declaredPresence?.input ?? true),
+      output: validTokenChannel(sample.outputTokens) && (declaredPresence?.output ?? true),
+      cacheRead: validTokenChannel(sample.cacheReadTokens) && (declaredPresence?.cacheRead ?? true),
+      cacheWrite: validTokenChannel(sample.cacheWriteTokens) && (declaredPresence?.cacheWrite ?? true),
+    };
+    const tokenChannelsKnown = sample.tokenChannelsKnown !== false
+      && Object.values(tokenChannelPresence).every(Boolean);
+    const normalizedReportedCostUsd = validTokenChannel(sample.reportedCostUsd)
+      ? sample.reportedCostUsd : undefined;
+    const normalizedSample = { ...sample };
+    delete normalizedSample.reportedCostUsd;
     run.auxiliaryLlmUsage = [...samples, {
-      ...sample,
+      ...normalizedSample,
       inputTokens: toNonNegativeInt(sample.inputTokens),
       outputTokens: toNonNegativeInt(sample.outputTokens),
       cacheReadTokens: toNonNegativeInt(sample.cacheReadTokens),
       cacheWriteTokens: toNonNegativeInt(sample.cacheWriteTokens),
+      ...(normalizedReportedCostUsd !== undefined ? { reportedCostUsd: normalizedReportedCostUsd } : {}),
+      ...(!tokenChannelsKnown ? { tokenChannelsKnown: false, tokenChannelPresence } : {}),
     }];
     run.updatedAt = this.runState.isoNow();
     this.runState.persist(state.currentRun ? undefined : run);

@@ -40,7 +40,8 @@ test("formatTokens: 1M+ returns one decimal M", () => {
 // --- formatUsageStats ---
 
 test("formatUsageStats: empty usage returns empty string", () => {
-	assert.equal(formatUsageStats({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }), "");
+	assert.equal(formatUsageStats({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }), "");
+	assert.equal(formatUsageStats({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }), "$0.0000");
 });
 
 test("formatUsageStats: includes turns, tokens, cost, model", () => {

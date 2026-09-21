@@ -3,18 +3,13 @@
 // machine-local data/outcomes/sessions store, preserving conflicting copies in
 // .conflict.*.bak backups.
 //
-// This is the shared session-migration runner for both shell installers:
-//   - install.sh:  `node scripts/migrate-local-sessions.mjs` (no args -> the
-//                  three default legacy locations, all recursive)
-//   - install.ps1: `node scripts/migrate-local-sessions.mjs --source <path>
-//                  [--flat-source <path>] --dest <path>` (explicit sources, so
-//                  the Windows installer can import from a configured sessionDir
-//                  non-recursively while keeping its settings.json orchestration)
+// This standalone runner accepts no arguments for the three recursive default
+// legacy locations, or explicit --source/--flat-source/--dest arguments for a
+// controlled migration. The Windows installer uses the orchestration in
+// scripts/install/lib/sessions-config.mjs instead.
 //
 // The file-merge core lives in scripts/install/lib/sessions.mjs (pure, tested).
-// When invoked with no sources, this runner preserves the original aggregate
-// one-line report so install.sh's output is unchanged. With explicit sources it
-// prints one line per source (matching install.ps1's per-import reporting).
+// With explicit sources this runner prints one line per source.
 
 import os from 'node:os';
 import path from 'node:path';

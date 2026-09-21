@@ -52,7 +52,17 @@ export function createInvalidAgentResult(
 		exitCode: 1,
 		messages: [],
 		stderr: buildUnknownAgentError(agentName, agents),
-		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+		// No provider turn ran, so cost and token-channel evidence are absent.
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			tokenChannelsKnown: false,
+			tokenChannelPresence: { input: false, output: false, cacheRead: false, cacheWrite: false },
+			contextTokens: 0,
+			turns: 0,
+		},
 		step,
 	};
 }

@@ -1,5 +1,5 @@
 // Focused unit tests for scripts/install/lib/pi-binary.mjs — the pi CLI
-// resolver (PATH first, then npm-prefix probe) shared by both shell installers.
+// resolver (PATH first, then npm-prefix probe) used by the Windows installer.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 

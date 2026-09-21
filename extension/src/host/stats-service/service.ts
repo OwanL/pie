@@ -76,6 +76,12 @@ type CanonicalSessionReadResult = {
   scopeKey: string;
   branchId?: string;
   unknown?: boolean;
+  /** The durable store has no committed branch selection for this root, but
+   * the host has observed one. The settle-boundary captures (terminal
+   * settlement, branch edge, selection) are usually still pending durable
+   * commitment, so this is a delayed-commit window rather than a deleted or
+   * ambiguous subject; the prior complete read must survive it. */
+  pendingSelection?: boolean;
 };
 
 type CanonicalActivityReadResult = {
@@ -182,6 +188,16 @@ export class StatsService implements RunObserver {
   private canonicalSessionUsageCacheBytes = 0;
   private canonicalSessionUsageCacheSamples = 0;
   private canonicalSessionUsageUseSequence = 0;
+  /** Ordinary bounded rehydration keeps the last complete visible read here
+   * while the replacement pass is in flight. The live cache is rebuilt behind
+   * this held read, so an unrelated host render cannot turn a known cost into
+   * an intermediate empty/unknown snapshot. Explicit privacy, deletion,
+   * branch, and authority invalidations clear this held read instead. */
+  private canonicalSessionUsageHeldByPath: Map<string, CanonicalSessionUsageCacheEntry> | null = null;
+  /** Strict invalidation fence. While set, every canonical projection is
+   * fail-closed even if a replacement helper has already returned a partial
+   * result; the fence is released only after the bounded refresh settles. */
+  private canonicalCacheFailClosed = false;
   private canonicalCacheEpoch = 0;
   private canonicalDirtyRevision: string | null = null;
   private canonicalRefreshRequested = false;
@@ -1000,7 +1016,10 @@ export class StatsService implements RunObserver {
       this.canonicalBranchEntriesBySession.set(sessionPath, state);
       if (this.canonicalCapture
         && (previousSelectedEntryId !== state.selectedEntryId || previousSelectedDepth !== state.selectedDepth)) {
-        this.invalidateCanonicalSessionCache();
+        // Same-root branch/selection transition: keep the held read so the
+        // settle-boundary refresh does not drop the displayed cost to an
+        // em dash while its captures are still pending durable commitment.
+        this.invalidateCanonicalSessionCache(true, false);
       }
     }
     if (snapshot.branchId && selectionId) {
@@ -1037,7 +1056,9 @@ export class StatsService implements RunObserver {
     this.canonicalBranchEntriesBySession.set(sessionPath, state);
     if (this.canonicalCapture
       && (previousSelectedEntryId !== state.selectedEntryId || previousSelectedDepth !== state.selectedDepth)) {
-      this.invalidateCanonicalSessionCache();
+      // Same-root branch/selection transition: keep the held read (see
+      // invalidateCanonicalSessionCache) while the replacement pass re-reads.
+      this.invalidateCanonicalSessionCache(true, false);
     }
     const context = this.analyticsContext(sessionPath);
     this.canonicalCapture?.captureBranchEdge(context, entryId, parentEntryId, observedAt);
@@ -1597,7 +1618,7 @@ export class StatsService implements RunObserver {
    * the busy wall-time union; callers must retain the `truncated` and
    * known/unknown counts from the projection. */
   getCanonicalActivityProjection(sessionPath?: string): CanonicalActivityProjectionSnapshot {
-    if (this.canonicalActivityReadSuppressed(sessionPath)) {
+    if (this.canonicalCacheFailClosed || this.canonicalActivityReadSuppressed(sessionPath)) {
       return {
         authority: 'unknown',
         scope: this.canonicalProjectionScope(sessionPath),
@@ -1621,7 +1642,7 @@ export class StatsService implements RunObserver {
    * visible session. Returned rows retain their explicit verification and
    * attempted-change qualification; they are not verified worktree changes. */
   getCanonicalToolFacetProjection(sessionPath?: string): CanonicalToolFacetProjectionSnapshot {
-    if (this.canonicalActivityReadSuppressed(sessionPath)) {
+    if (this.canonicalCacheFailClosed || this.canonicalActivityReadSuppressed(sessionPath)) {
       return {
         authority: 'unknown',
         scope: this.canonicalProjectionScope(sessionPath),
@@ -1653,7 +1674,18 @@ export class StatsService implements RunObserver {
   /** Ledger-backed session usage projection for UI and fixture conservation checks. */
   getSessionUsage(sessionPath: string): SessionUsageSnapshot {
     if (!this.canonicalCapture) return this.accounting.projectSessionUsage(sessionPath);
-    if (this.canonicalPrivateClosesByPath.has(sessionPath)) return { samples: [], authority: 'unknown' };
+    if (this.canonicalPrivateClosesByPath.has(sessionPath) || this.canonicalCacheFailClosed) {
+      return { samples: [], authority: 'unknown' };
+    }
+    // During an ordinary bounded rehydration, serve only the held complete
+    // read. New/omitted paths remain explicitly unknown until the replacement
+    // pass commits, rather than exposing its partially populated cache.
+    if (this.canonicalSessionUsageRefresh && this.canonicalSessionUsageHeldByPath) {
+      const held = this.canonicalSessionUsageHeldByPath.get(sessionPath);
+      if (!held) return { samples: [], authority: 'unknown' };
+      held.lastUsed = ++this.canonicalSessionUsageUseSequence;
+      return held.snapshot;
+    }
     const durable = this.canonicalSessionUsageByPath.get(sessionPath);
     if (durable) {
       durable.lastUsed = ++this.canonicalSessionUsageUseSequence;
@@ -1756,6 +1788,7 @@ export class StatsService implements RunObserver {
 
   private canHydrateCanonicalActivity(): boolean {
     return !this.disposed
+      && !this.canonicalCacheFailClosed
       && Boolean(this.analyticsReadModel && this.canonicalCapture)
       && this.started
       && !this.canonicalRevisionAwaitingBaseline
@@ -1953,11 +1986,24 @@ export class StatsService implements RunObserver {
 
   /** Rehydrate each known session from the canonical root-session projection.
    * Every query is capped by the read-model transport. A truncated session is
-   * left unknown rather than exposing a partial usage history. */
+   * left unknown rather than exposing a partial usage history. Ordinary passes
+   * serve a held complete read while the replacement cache is built; strict
+   * invalidations stay fail-closed. Render notification is deferred until all
+   * bounded reads in the pass have settled. */
   private async refreshCanonicalSessionUsage(): Promise<void> {
     if (!this.analyticsReadModel || !this.canonicalCapture) return;
     const readModel = this.analyticsReadModel;
     if (this.canonicalSessionUsageRefresh) return await this.canonicalSessionUsageRefresh;
+    // A normal bounded rehydration is stale-while-revalidate for the visible
+    // session usage read. Move the last complete cache behind a held-read
+    // fence, then build the replacement cache without making an unrelated
+    // render observe an empty map. Strict invalidations set failClosed and
+    // deliberately skip this hold so they remain unknown immediately.
+    if (!this.canonicalCacheFailClosed && this.canonicalSessionUsageHeldByPath === null) {
+      this.canonicalSessionUsageHeldByPath = new Map(this.canonicalSessionUsageByPath);
+      this.clearCanonicalSessionCache();
+    }
+    let refreshSucceeded = false;
     const refresh = (async () => {
       let firstPass = true;
       for (;;) {
@@ -1967,7 +2013,6 @@ export class StatsService implements RunObserver {
         this.canonicalRefreshRequested = false;
         this.canonicalDirtyRevision = null;
         const epoch = ++this.canonicalCacheEpoch;
-        this.clearCanonicalSessionCache();
         // Startup/revision work is limited to the actual displayed/running UI
         // surface. The session catalogue may be much larger than that surface;
         // omitted paths hydrate lazily when requested and remain unknown until
@@ -1992,7 +2037,6 @@ export class StatsService implements RunObserver {
         const hydrateGlobalActivity = globalActivityRead.then((result) => {
           if (!this.disposed && epoch === this.canonicalCacheEpoch) {
             this.applyCanonicalActivityRead(undefined, result, epoch);
-            this.scheduleRender();
           }
         }).catch((error: unknown) => {
           if (!this.disposed && epoch === this.canonicalCacheEpoch) {
@@ -2048,6 +2092,7 @@ export class StatsService implements RunObserver {
         firstPass = false;
         if (this.disposed || (!this.canonicalRefreshRequested && !this.canonicalDirtyRevision)) break;
       }
+      refreshSucceeded = true;
     })();
     this.canonicalSessionUsageRefresh = refresh;
     try {
@@ -2057,17 +2102,48 @@ export class StatsService implements RunObserver {
         error: error instanceof Error ? error.message : String(error),
       });
     } finally {
-      if (this.canonicalSessionUsageRefresh === refresh) this.canonicalSessionUsageRefresh = null;
+      if (this.canonicalSessionUsageRefresh === refresh) {
+        this.canonicalSessionUsageRefresh = null;
+        if (!refreshSucceeded && !this.disposed) {
+          // An unexpected refresh failure cannot safely release either the
+          // strict fence or a stale held read. Leave all canonical surfaces
+          // fail-closed until a later bounded refresh succeeds.
+          this.canonicalCacheFailClosed = true;
+          this.clearCanonicalSessionCache();
+        } else if (refreshSucceeded && !this.disposed
+          && !this.canonicalRefreshRequested && !this.canonicalDirtyRevision) {
+          this.canonicalCacheFailClosed = false;
+        }
+        this.canonicalSessionUsageHeldByPath = null;
+        // Render only after the complete bounded pass has settled. Ordinary
+        // renders read the held snapshot above; strict invalidations remain
+        // fail-closed until this point.
+        if (!this.disposed && this.started) this.scheduleRender();
+      }
     }
   }
 
   /** Invalidate every host-side canonical snapshot before a revision or scope
    * transition. The next durable read is the only source allowed to repopulate
-   * the cache. */
-  private invalidateCanonicalSessionCache(schedule = true): void {
+   * the cache.
+   *
+   * `failClosed` distinguishes the two invalidation families. The default
+   * strict form (privacy close, path rename away, reconciliation failure,
+   * revision change) may hide or delete a subject, so it clears the held read
+   * and the live cache immediately and fails closed until the replacement
+   * pass lands. A same-root branch or selection transition keeps its subject
+   * — the root never changes — so it passes `false`: the prior complete read
+   * continues to serve renders while the replacement pass re-reads, instead
+   * of dropping the displayed cost to an em dash for the whole
+   * pending-commit window. */
+  private invalidateCanonicalSessionCache(schedule = true, failClosed = true): void {
     this.canonicalCacheEpoch += 1;
     this.canonicalRefreshRequested = true;
-    this.clearCanonicalSessionCache();
+    if (failClosed) {
+      this.canonicalCacheFailClosed = true;
+      this.canonicalSessionUsageHeldByPath = null;
+      this.clearCanonicalSessionCache();
+    }
     if (schedule && !this.disposed && this.analyticsReadModel && this.canonicalCapture
       && !this.canonicalSessionUsageRefresh) {
       void this.refreshCanonicalSessionUsage();
@@ -2077,6 +2153,11 @@ export class StatsService implements RunObserver {
   private markCanonicalRevisionDirty(revision: string): void {
     this.canonicalCacheEpoch += 1;
     this.canonicalRefreshRequested = true;
+    // A revision change may be a peer deletion or an authority transition.
+    // Until the new durable watermark has been read, it is not safe to serve
+    // the prior subject even if an unrelated event asks for a render.
+    this.canonicalCacheFailClosed = true;
+    this.canonicalSessionUsageHeldByPath = null;
     if (this.canonicalDirtyRevision === null
       || canonicalRevision(revision) > canonicalRevision(this.canonicalDirtyRevision)) {
       this.canonicalDirtyRevision = canonicalRevisionString(revision);
@@ -2163,6 +2244,11 @@ export class StatsService implements RunObserver {
     });
     this.canonicalSessionUsageCacheBytes += estimatedBytes;
     this.canonicalSessionUsageCacheSamples += sampleCount;
+    this.evictCanonicalSessionUsageOverflow();
+  }
+
+  /** Shared LRU eviction for bounded session-usage cache insertion. */
+  private evictCanonicalSessionUsageOverflow(): void {
     while (this.canonicalSessionUsageByPath.size > MAX_CANONICAL_SESSION_CACHE_ENTRIES
       || this.canonicalSessionUsageCacheBytes > MAX_CANONICAL_SESSION_CACHE_BYTES
       || this.canonicalSessionUsageCacheSamples > MAX_CANONICAL_SESSION_CACHE_SAMPLES) {
@@ -2185,6 +2271,26 @@ export class StatsService implements RunObserver {
     epoch: number,
   ): void {
     if (this.disposed || epoch !== this.canonicalCacheEpoch) return;
+    if (result.pendingSelection) {
+      // The durable store has not committed the host-observed branch selection
+      // yet. The prior complete read is still the last known truth for this
+      // root; retain it (stale-while-revalidate) instead of caching a sticky
+      // unknown that only a later revision change could clear. The revision
+      // refresher converges the retained read once the pending commit lands.
+      const prior = this.canonicalSessionUsageHeldByPath?.get(sessionPath)
+        ?? this.canonicalSessionUsageByPath.get(sessionPath);
+      if (prior && !this.canonicalPrivateClosesByPath.has(sessionPath)) {
+        prior.lastUsed = ++this.canonicalSessionUsageUseSequence;
+        // Re-add through the bounded accounting path so byte/sample totals and
+        // LRU eviction stay exact.
+        this.removeCanonicalSessionCache(sessionPath);
+        this.canonicalSessionUsageByPath.set(sessionPath, prior);
+        this.canonicalSessionUsageCacheBytes += prior.estimatedBytes;
+        this.canonicalSessionUsageCacheSamples += prior.sampleCount;
+        this.evictCanonicalSessionUsageOverflow();
+        return;
+      }
+    }
     if (result.unknown || result.truncated) {
       this.cacheCanonicalUnknown(sessionPath, result.revision, result.scopeKey, epoch);
       return;
@@ -2203,11 +2309,13 @@ export class StatsService implements RunObserver {
     // The normal unbranched path is one bounded helper query. Branch metadata
     // already observed by the host selects the durable branch directly; after
     // restart, a root read is used only to detect branch rows before the
-    // additional selection lookup.
+    // additional selection lookup. No separate watermark read is issued here:
+    // the selected-branch read below returns the revision of its own snapshot,
+    // and a revision captured in a different snapshot could only serve the
+    // removed cross-snapshot fence.
     const hasObservedBranch = this.canonicalBranchEntriesBySession.get(sessionPath)?.selectedEntryId !== undefined;
     if (hasObservedBranch) {
-      const revision = canonicalRevisionString(await readModel.readRevision());
-      return await this.readCanonicalSelectedBranch(rootSessionId, revision);
+      return await this.readCanonicalSelectedBranch(rootSessionId, '0', { pendingSelectionOnMissingRow: true });
     }
     const rootResult = await readModel.readScopedProviderSettlements(
       { kind: 'rootSession', rootSessionId },
@@ -2225,9 +2333,24 @@ export class StatsService implements RunObserver {
     return await this.readCanonicalSelectedBranch(rootSessionId, rootRead.revision);
   }
 
+  /** Read the root's durable selected-branch projection.
+   *
+   * The selection lookup only discovers the generation and disambiguates the
+   * selection; the selected-branch settlement read is the one consistent
+   * snapshot and supplies the label. The recorder resolves the root's current
+   * selection, walks its ancestry, and reads the settlement rows with their
+   * projection revision inside a single SQLite transaction, so the returned
+   * branch id and revision always describe exactly these rows. The first page is
+   * deliberately not fenced with `expectedRevision`: that page fence rejects
+   * page continuations whose projection changed, and fencing a first page
+   * from a foreign snapshot only failed every read that raced a concurrent
+   * commit while the answer was already self-consistent. `unknownRevision`
+   * only labels the fail-closed results when no unambiguous selection exists.
+   */
   private async readCanonicalSelectedBranch(
     rootSessionId: string,
-    revision: string,
+    unknownRevision: string,
+    options: { pendingSelectionOnMissingRow?: boolean } = {},
   ): Promise<CanonicalSessionReadResult> {
     const readModel = this.analyticsReadModel!;
     const selection = await readModel.executeQuery({
@@ -2242,7 +2365,7 @@ export class StatsService implements RunObserver {
       maxResultBytes: 64 * 1024,
     });
     if (selection.truncation.byteLimit || selection.truncation.cellLimit || selection.rows.length > 1) {
-      return { revision, settlements: [], truncated: false, scopeKey: `unknown:${rootSessionId}`, unknown: true };
+      return { revision: unknownRevision, settlements: [], truncated: false, scopeKey: `unknown:${rootSessionId}`, unknown: true };
     }
     const branchSelection = selection.rows[0];
     const generationId = typeof branchSelection?.generation_id === 'string'
@@ -2250,22 +2373,32 @@ export class StatsService implements RunObserver {
     const branchId = typeof branchSelection?.branch_id === 'string'
       ? branchSelection.branch_id.trim() : '';
     if (branchSelection === undefined || !generationId || !branchId) {
-      return { revision, settlements: [], truncated: false, scopeKey: `unknown:${rootSessionId}`, unknown: true };
+      // No committed selection row for this root. When the host itself has
+      // observed a selected branch, this is the delayed-commit window at the
+      // settle boundary: the settle-boundary captures have been submitted but
+      // not committed. Label the read pending so the prior complete read is
+      // retained instead of caching a sticky unknown.
+      if (options.pendingSelectionOnMissingRow && branchSelection === undefined) {
+        return { revision: unknownRevision, settlements: [], truncated: false, scopeKey: `unknown:${rootSessionId}`, unknown: true, pendingSelection: true };
+      }
+      return { revision: unknownRevision, settlements: [], truncated: false, scopeKey: `unknown:${rootSessionId}`, unknown: true };
     }
     const scope: ProviderSettlementScope = { kind: 'selectedBranch', generationId, rootSessionId };
     const result = await readModel.readScopedProviderSettlements(scope, {
       limit: MAX_CANONICAL_SESSION_CACHE_SAMPLES,
-      expectedRevision: revision,
       maxResultBytes: MAX_CANONICAL_SESSION_CACHE_BYTES,
     });
     const scopeKey = JSON.stringify(scope);
+    const atomicBranchId = typeof result.selectedBranchId === 'string'
+      ? result.selectedBranchId.trim() : '';
+    const selectedBranchKnown = result.selectionCoverage === 'known' && atomicBranchId.length > 0;
     return {
       revision: canonicalRevisionString(result.revision),
       settlements: result.settlements,
       truncated: result.truncated,
       scopeKey,
-      ...(scope.kind === 'selectedBranch' ? { branchId } : {}),
-      ...(scope.kind === 'selectedBranch' && result.selectionCoverage !== 'known' ? { unknown: true } : {}),
+      ...(selectedBranchKnown ? { branchId: atomicBranchId } : {}),
+      ...(!selectedBranchKnown ? { unknown: true } : {}),
     };
   }
 
@@ -2320,9 +2453,10 @@ export class StatsService implements RunObserver {
    *
    * Only another host's committed summary, correction or private close is
    * observable through the shared projection revision, so this reads that small
-   * value at a bounded interval and re-renders on change. It never scans
-   * history, never replays events and retains no per-history state. Dormant
-   * under the legacy authority: there is no canonical revision to follow yet. */
+   * value at a bounded interval and hydrates before rendering on change. It
+   * never scans history, never replays events and retains no per-history state.
+   * Dormant under the legacy authority: there is no canonical revision to
+   * follow yet. */
   private async startCanonicalRevisionRefresh(): Promise<string | null> {
     if (!this.analyticsReadModel) return null;
     if (this.analyticsRevisionRefresher) {
@@ -2333,17 +2467,15 @@ export class StatsService implements RunObserver {
       readModel: this.analyticsReadModel,
       onRevisionChange: (revision) => {
         this.markCanonicalRevisionDirty(revision);
-        this.scheduleRender();
       },
       onCheck: ({ revision }) => {
         if (revision === null || !this.canonicalRevisionAwaitingBaseline) return;
         this.canonicalRevisionAwaitingBaseline = false;
         // A recovered first baseline is intentionally a non-change from the
         // refresher's perspective, but it is a change from this host's
-        // fail-closed state: wake the renderer and hydrate on demand.
+        // fail-closed state: hydrate before waking the renderer.
         if (!this.disposed && this.started) {
           this.markCanonicalRevisionDirty(revision);
-          this.scheduleRender();
         }
       },
       onError: (error) => {
@@ -2451,6 +2583,8 @@ export class StatsService implements RunObserver {
       ].filter((promise): promise is Promise<void> => promise !== null);
       await Promise.allSettled(refreshes);
       this.clearCanonicalSessionCache();
+      this.canonicalSessionUsageHeldByPath = null;
+      this.canonicalCacheFailClosed = true;
       this.canonicalSessionPathEpochs.clear();
       this.canonicalSessionPathRefreshes.clear();
       this.canonicalPrivateClosesByPath.clear();

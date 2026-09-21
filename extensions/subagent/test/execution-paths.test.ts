@@ -7,6 +7,8 @@ import { pathToFileURL } from "node:url";
 import type { AgentConfig } from "../agents.js";
 import { buildPieSystemPrompt, type PieSystemPromptOptions } from "../../../shared/pie-harness-prompt.js";
 import { runSingleAgent, subagentRuntime } from "../runner.js";
+import { compactSingleResult } from "../src/result-compaction.js";
+import { boundToolFinishedPayload } from "../../../extension/src/backend/session-event-content-tool.js";
 import { execute, validateSubagentParams } from "../src/execute.js";
 import { isInSubagentContext } from "../../../shared/subagent-context.js";
 
@@ -156,7 +158,7 @@ test("runSingleAgent returns successful result and captures usage/model", async 
 						cacheRead: 2,
 						cacheWrite: 1,
 						totalTokens: 16,
-						cost: { total: 0.42 },
+						reportedCostUsd: 0.42,
 					},
 					model: "assistant-model",
 					stopReason: "completed",
@@ -203,6 +205,67 @@ test("runSingleAgent returns successful result and captures usage/model", async 
 	assert.equal(state.promptCalls, 1);
 	assert.equal(state.unsubscribeCalls, 1);
 	assert.equal(state.disposeCalls, 1);
+});
+
+test("production terminal path preserves bounded file changes through projection and transport", async () => {
+	const { sdk } = createFakeSdk({
+		onPrompt: async (emit) => {
+			emit({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [
+						{ type: "toolCall", id: "write-1", name: "write", arguments: { path: "src/change.ts", content: "one\ntwo" } },
+						{ type: "toolCall", id: "edit-1", name: "edit", arguments: { path: "src/change.ts", oldText: "one\ntwo", newText: "one\ntwo\nthree" } },
+					],
+					stopReason: "toolUse",
+				},
+			});
+			emit({ type: "message_end", message: { role: "toolResult", toolCallId: "write-1", toolName: "write", content: "ok" } });
+			emit({ type: "message_end", message: { role: "toolResult", toolCallId: "edit-1", toolName: "edit", content: "ok" } });
+			emit({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "finished" }], stopReason: "completed" } });
+		},
+	});
+
+	const result = await runSingleAgent(
+		process.cwd(),
+		[makeAgent()],
+		"worker",
+		"change a file",
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		(results) => ({ mode: "single", agentScope: "user", projectAgentsDir: null, results }),
+		makeModelRegistry(),
+		undefined,
+		{ modelId: "model-a", bucket: "medium", thinkingLevel: "low", pool: ["model-a"], fallback: false },
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		{ sdk: sdk as any },
+	);
+
+	assert.deepEqual(result.fileChanges, [
+		{ path: "src/change.ts", kind: "created", description: "created", additions: 2, deletions: 0 },
+		{ path: "src/change.ts", kind: "modified", description: "edited", additions: 3, deletions: 2 },
+	]);
+
+	const terminal = compactSingleResult(result);
+	assert.deepEqual(terminal.fileChanges, result.fileChanges);
+	const transported = boundToolFinishedPayload({
+		requestId: "request-1",
+		sessionPath: "/session.jsonl",
+		messageId: "message-1",
+		toolCallId: "subagent-1",
+		name: "subagent",
+		status: "completed",
+		result: { content: [{ type: "text", text: "finished" }], details: { mode: "single", results: [terminal] } },
+	} as any) as any;
+	const transportedChanges = transported.result.details.results[0].fileChanges;
+	assert.deepEqual(transportedChanges, result.fileChanges);
 });
 
 test("runSingleAgent wires Pie ownership through child prompt and tool/resource rebuilds", async () => {

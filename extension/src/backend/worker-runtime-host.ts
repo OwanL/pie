@@ -41,8 +41,10 @@ import { projectRegistryModels, resolveActiveModel } from './session-metadata';
 import { ExtensionUIBridge } from './extension-ui-bridge';
 import { installAuxiliaryLlmMeter } from './auxiliary-llm-meter';
 import { handleBackendRequest } from './request-handler';
+import type { ModelSettingsUnsetKey } from './request-handler-shared';
 import { buildSessionCapabilities, hasBillableSessionActivity } from './session-activity';
 import { createRuntimeFactory, ServiceLoadingGate } from './runtime-factory';
+import { createSessionControlTool } from './session-control-tool';
 import { handleSdkSessionEvent } from './session-event-handler';
 import {
   buildSessionOpenedPayload as buildSessionOpenedPayloadHelper,
@@ -79,11 +81,13 @@ import {
   captureOriginalSystemPromptOptions,
   installAutonomousModeToolGuard,
   installMcpToolGuard,
+  installSubagentPolicyToolGuard,
   installSystemPromptToggleRebuildGuard,
   installSystemPromptToolToggleGuard,
   markDisabledEntries,
   MCP_TOOL_NAMES,
   normalizePromptText,
+  subagentPolicyActiveToolUpdate,
   TOOLS_ENTRY_ID,
 } from './system-prompts';
 import type { DetailCursor, DetailPageRef, LiveSubagentDetailAddress } from '../shared/protocol/subagent-detail.js';
@@ -100,6 +104,10 @@ import {
 } from './provider-incident';
 import { observeProviderTransport, type ProviderTransportObservation } from './provider-progress-bus';
 import { resolvePieDataPaths } from '../../../shared/pie-data-root.js';
+import {
+  SUBAGENT_TOOL_NAME,
+  subagentProvidersAllDisabled,
+} from '../../../shared/subagent-provider-policy.js';
 import {
   createSessionLifecycleWriterAdmission,
   SessionLifecycleStore,
@@ -202,6 +210,10 @@ export class WorkerRuntimeHost {
   private systemPromptModule?: Promise<SdkSystemPromptModule>;
   private autonomousMode = false;
   private mcpEnabled = true;
+  /** Effective all-unchecked subagent provider policy for the hosted session:
+   *  true while every provider in the session's toggle surface is unchecked
+   *  (the webview's "don't use subagents" signal). */
+  private subagentPolicyDisabled = false;
   private readonly detailStore: WorkerLiveDetailStore;
   private lifecycleStore?: SessionLifecycleStore;
   private analyticsWriterAdmission?: SessionLifecycleWriterAdmission;
@@ -243,7 +255,10 @@ export class WorkerRuntimeHost {
     this.syncRevisions.set(domain, revision);
     this.syncPayloads.set(domain, payload);
     if (domain === 'settings' && payload.values && typeof payload.values === 'object' && !Array.isArray(payload.values)) {
-      this.settings = { ...this.settings, ...(payload.values as unknown as Partial<ModelSettings>) };
+      // Settings snapshots are complete model-settings values. Replace rather
+      // than merge so an authoritative provider deletion cannot resurrect the
+      // worker's older provider from local state.
+      this.settings = modelSettingsFromWorkerObject(payload.values);
     } else if (domain === 'catalog' && Array.isArray(payload.models)) {
       // Consume the configured catalog authority snapshot. It is the fallback
       // for `models.list` when the runtime registry is unavailable; the
@@ -653,6 +668,9 @@ export class WorkerRuntimeHost {
     const runtime = await this.sdk.createAgentSessionRuntime(
       createRuntimeFactory(this.sdk, authStorage, this.startupCwd, this.gate, {
         wrapSessionManager: (candidate) => this.fenceSessionManager(candidate),
+        customTools: () => [createSessionControlTool((body, signal) => (
+          this.options.server.requestFrame(body, 'session.control.result', undefined, 120_000, signal)
+        ))],
       }),
       {
         cwd: guardedManager.getCwd() || this.startupCwd,
@@ -790,6 +808,7 @@ export class WorkerRuntimeHost {
     installSystemPromptToolToggleGuard(session, () => context.systemPromptDisabledEntries ?? []);
     installAutonomousModeToolGuard(session, () => this.autonomousMode);
     installMcpToolGuard(session, () => this.mcpEnabled);
+    installSubagentPolicyToolGuard(session, () => this.subagentPolicyDisabled);
     if (persistedPromptToggles.length > 0) {
       await this.applySystemPromptToggles(context, persistedPromptToggles);
     }
@@ -864,6 +883,7 @@ export class WorkerRuntimeHost {
     // setActiveTools guard), so re-apply the disabled state after extension
     // bind and again at every turn start.
     if (!this.mcpEnabled) this.enforceMcpToolsDisabled(context);
+    this.applySubagentProviderPolicy(context, { force: true });
     if (this.openedPayload) {
       const previous = this.openedPayload;
       const replacementSource = previousSessionPath && !sameSessionPath(previousSessionPath, sessionPath)
@@ -983,11 +1003,14 @@ export class WorkerRuntimeHost {
   }
 
   private handleSessionEvent(context: SessionContext, event: SdkSessionEvent): void {
-    if (context.retired) return;
+    if (this.disposed || context.retired) return;
     // The adapter can re-register its tools between turns (config changes via
     // /mcp commands); registerTool auto-activates them, so re-apply the MCP
     // disabled state at the start of every turn.
-    if (event.type === 'turn_start') this.enforceMcpToolsDisabled(context);
+    if (event.type === 'turn_start') {
+      this.enforceMcpToolsDisabled(context);
+      this.enforceSubagentPolicyDisabled(context);
+    }
     handleSdkSessionEvent({
       emit: (name, payload) => this.emit(name, payload),
       backendGeneration: this.options.owner.coordinatorGeneration,
@@ -1314,12 +1337,30 @@ export class WorkerRuntimeHost {
         // The coordinator is the sole persistence/revision authority. Apply
         // locally only after its correlated acknowledgement, so failed writes
         // cannot leave this worker ahead of future workers/settings.get.
+        const mutation = serializeModelSettingsUpdates(updates);
         const response = await this.options.server.requestFrame({
           kind: 'settings.mutate',
-          updates: asWorkerJsonObject(updates),
+          updates: mutation.updates,
+          ...(mutation.unset.length > 0 ? { unset: mutation.unset } : {}),
         }, 'settings.authoritative');
-        this.settings = response.values as unknown as ModelSettings;
+        this.settings = modelSettingsFromWorkerObject(response.values);
         return { ...this.settings };
+      },
+      writeModelSettingsIfCurrent: async (expected, updates, unset) => {
+        const mutation = serializeModelSettingsUpdates(updates, unset);
+        const response = await this.options.server.requestFrame({
+          kind: 'settings.mutate',
+          updates: mutation.updates,
+          ...(mutation.unset.length > 0 ? { unset: mutation.unset } : {}),
+          expected: modelSettingsToWorkerObject(expected),
+        }, 'settings.authoritative');
+        this.settings = modelSettingsFromWorkerObject(response.values);
+        return response.applied !== false;
+      },
+      retireSessionRuntime: async (sessionPath, reason) => {
+        if (!sameSessionPath(sessionPath, context.sessionPath)) return false;
+        this.options.server.failRuntime(new Error(reason));
+        return true;
       },
       suppressRequestTrace: true,
     };
@@ -1364,6 +1405,14 @@ export class WorkerRuntimeHost {
     if (existing) return existing.manager;
     const guarded = createSessionManagerFence(manager, {
       admission: this.analyticsWriterAdmission,
+      onUnexpectedAdmissionFailure: (error) => {
+        const terminal = error instanceof Error ? error : new Error(String(error));
+        this.options.server.failRuntime(terminal);
+        // The SDK invokes its event listeners synchronously and does not own
+        // rejected callback promises. Dispose at this host boundary instead
+        // of throwing back into that callback.
+        void this.dispose().catch(() => undefined);
+      },
     });
     const record: SessionManagerFenceRecord = {
       manager: guarded.manager,
@@ -1398,6 +1447,9 @@ export class WorkerRuntimeHost {
     const runtime = await this.sdk.createAgentSessionRuntime(
       createRuntimeFactory(this.sdk, authStorage, this.startupCwd, this.gate, {
         wrapSessionManager: (candidate) => this.fenceSessionManager(candidate),
+        customTools: () => [createSessionControlTool((body, signal) => (
+          this.options.server.requestFrame(body, 'session.control.result', undefined, 120_000, signal)
+        ))],
       }),
       {
         cwd: guardedManager.getCwd() || this.startupCwd,
@@ -1528,6 +1580,12 @@ export class WorkerRuntimeHost {
     for (const [key, env] of scalarEnv) {
       if (typeof values[key] === 'string' || typeof values[key] === 'number') process.env[env] = String(values[key]);
     }
+    if (this.context
+      && (values.subagentProviderDefaults !== undefined
+        || values.subagentProviderTogglesBySession !== undefined
+        || values.subagentBuckets !== undefined)) {
+      this.applySubagentProviderPolicy(this.context);
+    }
     if (typeof values.autonomousMode === 'boolean') {
       process.env[AUTONOMOUS_MODE_ENV] = values.autonomousMode ? '1' : '0';
       this.setAutonomousMode(values.autonomousMode);
@@ -1604,6 +1662,58 @@ export class WorkerRuntimeHost {
     context.session.setActiveToolsByName?.(active.filter((name) => !(MCP_TOOL_NAMES as readonly string[]).includes(name)));
   }
 
+  /** Effective per-session subagent provider policy for the hosted session:
+   *  true when every provider on the toggle surface (subagent buckets,
+   *  provider defaults, this session's per-session overrides) is unchecked —
+   *  the webview's "don't use subagents" signal. An unspecified/empty surface
+   *  keeps subagents enabled. Preferences arrive through the runtimePrefs
+   *  env mirrors; the session's overrides are resolved against the hosted
+   *  session path with the backend's canonical path identity. */
+  private computeSubagentPolicyDisabled(context: SessionContext): boolean {
+    return subagentProvidersAllDisabled({
+      buckets: parseJsonEnv(process.env[SUBAGENT_BUCKETS_ENV]),
+      defaults: parseJsonEnv(process.env[SUBAGENT_PROVIDER_DEFAULTS_ENV]),
+      sessionToggles: resolveSessionProviderToggles(
+        parseJsonEnv(process.env[SUBAGENT_PROVIDER_TOGGLES_ENV]),
+        context.sessionPath,
+      ),
+      availableModels: this.availableModels(),
+    });
+  }
+
+  /** Apply the effective subagent provider policy to the session's active
+   *  tool set: remove the subagent tool while every provider is unchecked and
+   *  restore it (registered but inactive) when any provider is re-enabled.
+   *  `force` runs the update even when the computed policy is unchanged —
+   *  used at bind, where a replacement session may carry a stale active set,
+   *  and after a Tools-entry restore, where a policy flip during the
+   *  Tools-disabled window could not move the active set. */
+  private applySubagentProviderPolicy(context: SessionContext, options: { force?: boolean } = {}): void {
+    const disabled = this.computeSubagentPolicyDisabled(context);
+    const previous = this.subagentPolicyDisabled;
+    this.subagentPolicyDisabled = disabled;
+    if (!options.force && disabled === previous) return;
+    const active = context.session.getActiveToolNames?.()
+      ?? context.session.getAllTools?.().map((tool) => tool.name)
+      ?? [];
+    const registered = context.session.getAllTools?.().map((tool) => tool.name) ?? [];
+    const next = subagentPolicyActiveToolUpdate(active, registered, disabled);
+    if (next) context.session.setActiveToolsByName?.(next);
+  }
+
+  /** Turn-start re-enforcement: the subagent extension's registerTool
+   *  auto-activates its tool (bypassing the setActiveTools guard), so re-apply
+   *  the all-unchecked removal at the start of every turn, mirroring the MCP
+   *  disabled-state enforcement. */
+  private enforceSubagentPolicyDisabled(context: SessionContext): void {
+    if (!this.subagentPolicyDisabled) return;
+    const active = context.session.getActiveToolNames?.()
+      ?? context.session.getAllTools?.().map((tool) => tool.name)
+      ?? [];
+    if (!active.includes(SUBAGENT_TOOL_NAME)) return;
+    context.session.setActiveToolsByName?.(active.filter((name) => name !== SUBAGENT_TOOL_NAME));
+  }
+
   private withAnalyticsWriterAdmission<T>(operation: () => T): T {
     const releaseAdmission = this.analyticsWriterAdmission?.acquire();
     let released = false;
@@ -1639,6 +1749,11 @@ export class WorkerRuntimeHost {
     }
     const disablingTools = next.includes(TOOLS_ENTRY_ID);
     const wasDisablingTools = context.systemPromptDisabledEntries?.includes(TOOLS_ENTRY_ID) === true;
+    // Publish the new disabled-entry set before any tool-activation call. The
+    // Tools guard is authoritative while the entry is disabled; once the entry
+    // is re-enabled, the host's own restore below must pass through it instead
+    // of being coerced to an empty set by the stale disabled state.
+    context.systemPromptDisabledEntries = next;
     if (disablingTools && !wasDisablingTools) {
       context.systemPromptToolsBeforeDisable = context.session.getActiveToolNames?.()
         ?? context.session.getAllTools?.().map((tool) => tool.name)
@@ -1647,8 +1762,16 @@ export class WorkerRuntimeHost {
     } else if (!disablingTools && wasDisablingTools) {
       context.session.setActiveToolsByName?.(context.systemPromptToolsBeforeDisable ?? []);
       context.systemPromptToolsBeforeDisable = undefined;
+      // The saved snapshot predates any subagent-provider-policy flip made
+      // while Tools was disabled, and a policy restore issued during that
+      // window was (correctly) filtered by the Tools-disabled guard. Re-apply
+      // the policy over the restored set: an enabled policy restores the
+      // registered-but-inactive subagent tool, a disabled policy keeps it
+      // pruned. `force` is required because a policy flip during the filtered
+      // window already moved the policy field without being able to move the
+      // active set.
+      this.applySubagentProviderPolicy(context, { force: true });
     }
-    context.systemPromptDisabledEntries = next;
     const persistPromptToggles = () => writeSystemPromptTogglesForSession(context.sessionPath, next);
     const sessionId = context.session.sessionManager.getSessionId?.();
     if (this.lifecycleBarrier && typeof sessionId === 'string' && sessionId) {
@@ -1765,11 +1888,7 @@ export class WorkerRuntimeHost {
   private reportRuntimeCatalog(): void {
     try {
       const models = asWorkerJson(this.availableModels());
-      this.options.server.sendFrame({
-        kind: 'runtime.report',
-        domain: 'catalog',
-        payload: { models },
-      });
+      this.options.server.sendRuntimeReportFrame({ models });
     } catch {
       // The report is best-effort telemetry; never fail promotion for it.
     }
@@ -1875,9 +1994,79 @@ function sameSessionPath(left: string, right: string): boolean {
   return canonical(left) === canonical(right);
 }
 
+/** Parse a mirrored runtime-prefs JSON environment value. Returns undefined
+ *  for unset/malformed values so the policy computation treats them as
+ *  unspecified instead of silently disabling subagents. */
+function parseJsonEnv(raw: string | undefined): Record<string, unknown> | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+    return parsed as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Resolve one session's provider-toggle record from the mirrored
+ *  by-session map, matching the hosted session path with the backend's
+ *  canonical path identity (the mirrors may spell the same session with
+ *  different drive-letter casing or separators). */
+function resolveSessionProviderToggles(
+  value: unknown,
+  sessionPath: string,
+): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    if (sameSessionPath(key, sessionPath)) return entry as Record<string, unknown>;
+  }
+  return undefined;
+}
+
 function resolveAuthPath(agentDir: string): string {
   const authDir = process.env.PI_CODING_AGENT_AUTH_DIR?.trim();
   return authDir ? path.resolve(authDir, 'auth.json') : path.resolve(agentDir, 'auth.json');
+}
+
+function modelSettingsFromWorkerObject(value: WorkerJsonObject): ModelSettings {
+  const settings: ModelSettings = {
+    defaultModel: typeof value.defaultModel === 'string' ? value.defaultModel : '',
+    defaultThinkingLevel: typeof value.defaultThinkingLevel === 'string'
+      ? value.defaultThinkingLevel as ModelSettings['defaultThinkingLevel']
+      : 'high',
+  };
+  if (typeof value.defaultProvider === 'string' && value.defaultProvider.length > 0) {
+    settings.defaultProvider = value.defaultProvider;
+  }
+  return settings;
+}
+
+function modelSettingsToWorkerObject(settings: ModelSettings): WorkerJsonObject {
+  return asWorkerJsonObject({
+    defaultModel: settings.defaultModel,
+    defaultThinkingLevel: settings.defaultThinkingLevel,
+    defaultProvider: settings.defaultProvider ?? null,
+  });
+}
+
+function serializeModelSettingsUpdates(
+  updates: Partial<ModelSettings>,
+  unset: readonly ModelSettingsUnsetKey[] = [],
+): { updates: WorkerJsonObject; unset: ModelSettingsUnsetKey[] } {
+  const source = { ...(updates as Record<string, unknown>) };
+  const explicitUnset = new Set<ModelSettingsUnsetKey>(unset);
+  // Absence means "leave the provider unchanged"; only an own property with
+  // an undefined/null value is an explicit deletion request.
+  if (Object.prototype.hasOwnProperty.call(source, 'defaultProvider')
+    && (source.defaultProvider === undefined || source.defaultProvider === null)) {
+    delete source.defaultProvider;
+    explicitUnset.add('defaultProvider');
+  }
+  return {
+    updates: asWorkerJsonObject(source),
+    unset: [...explicitUnset],
+  };
 }
 
 function asWorkerJson(value: unknown): WorkerJsonValue {

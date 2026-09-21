@@ -1,17 +1,10 @@
-// Shared session-history migration core for the pie installers.
+// Shared session-history migration core for the Windows installer and migration CLI.
 //
 // Session JSONL transcripts are kept machine-local under
 // `data/outcomes/sessions/<bucket>/<file>.jsonl`, where `<bucket>` is derived
 // from the session's recorded cwd. This module migrates (or merges) legacy
 // session stores into that checkout-local destination, preserving conflicting
 // copies in `.conflict.*.bak` backups when the source and destination differ.
-//
-// Previously duplicated as:
-//   - install.sh:  scripts/migrate-local-sessions.mjs (the canonical Node impl)
-//   - install.ps1: Merge-LegacySessionFiles + Get-SessionHeaderCwd +
-//                  Get-SessionContentTimestamp + Get-DefaultSessionBucketName
-// install.ps1 now delegates to `mergeLegacySessions`; install.sh's runner keeps
-// its exact behaviour by calling the same core.
 //
 // The file-merge semantics are preserved exactly from the original
 // migrate-local-sessions.mjs: SHA-256 equality short-circuits; otherwise the
@@ -43,8 +36,8 @@ export function listJsonlFiles(root, { recursive = true } = {}) {
 }
 
 /**
- * Does a directory contain any `.jsonl` file? (Used by install.ps1 to decide
- * whether a legacy store is worth importing and to re-check after migration.)
+ * Does a directory contain any `.jsonl` file? Used by the installer to decide
+ * whether a legacy store is worth importing and to re-check after migration.
  * @param {string} root
  * @param {{ recursive?: boolean }} [options]
  * @returns {boolean}

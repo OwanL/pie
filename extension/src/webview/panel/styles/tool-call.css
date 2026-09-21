@@ -216,7 +216,7 @@
   padding: 8px 10px;
   background: var(--panel-code-surface);
   border-radius: 0;
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--panel-font-mono);
   font-size: 12px;
   line-height: 1.5;
   /* Wrap long caption/prose lines instead of horizontal-scrolling; preserves
@@ -245,7 +245,7 @@
 
 .tool-call-result-unsupported {
   padding: 4px 10px;
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--panel-font-mono);
   font-size: 11px;
   font-style: italic;
   color: var(--panel-muted);
@@ -322,7 +322,7 @@
   align-items: center;
   gap: 5px;
   color: var(--panel-muted);
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--panel-font-mono);
   font-size: 10.5px;
   line-height: 1.35;
   font-variant-numeric: tabular-nums;
@@ -429,8 +429,21 @@
   flex: 0 0 auto;
 }
 
-/* Dense runtime telemetry wraps without pushing status/model off-screen.
-   Operational metrics remain visible rather than disappearing at narrow widths. */
+.subagent-model-details-trigger {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  border-radius: var(--panel-radius-sm);
+  cursor: help;
+}
+
+.subagent-model-details-trigger:focus-visible {
+  outline: 1px solid var(--panel-accent);
+  outline-offset: 2px;
+}
+
+/* Cost and recovery remain inline; detailed runtime telemetry is available
+   from the rich, keyboard-focusable model tooltip. */
 .subagent-runtime-telemetry {
   display: inline-flex;
   min-width: 0;
@@ -441,7 +454,7 @@
   gap: 5px;
   overflow: visible;
   color: var(--panel-muted);
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--panel-font-mono);
   font-size: 10px;
   line-height: 1.35;
   font-variant-numeric: tabular-nums;
@@ -463,21 +476,47 @@
 
 .subagent-context-label {
   color: var(--panel-foreground-soft);
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--panel-font-mono);
   font-size: 10px;
   line-height: 1.35;
   white-space: nowrap;
   cursor: help;
 }
 
-.subagent-context-tooltip {
+.subagent-context-tooltip,
+.subagent-model-details-tooltip {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  width: min(390px, calc(100vw - 40px));
-  max-height: min(60vh, 480px);
+  width: min(480px, calc(100vw - 40px));
+  max-height: min(70vh, 560px);
   overflow: auto;
   user-select: text;
+}
+
+.subagent-detail-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  color: var(--panel-foreground-soft);
+  font-family: var(--panel-font-mono);
+  font-size: 10px;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+}
+
+.subagent-detail-row > :last-child {
+  color: var(--panel-foreground);
+  text-align: right;
+}
+
+.subagent-detail-recovery {
+  color: var(--panel-warning);
+}
+
+.subagent-detail-failure {
+  color: var(--panel-danger);
+  font-size: 10px;
 }
 
 .subagent-context-tooltip-title {
@@ -505,7 +544,7 @@
   border-radius: var(--panel-radius-sm);
   background: var(--panel-code-surface);
   color: var(--panel-foreground);
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--panel-font-mono);
   font-size: 10px;
   line-height: 1.45;
   white-space: pre-wrap;
@@ -516,12 +555,13 @@
   color: var(--panel-foreground-soft);
 }
 
-.subagent-telemetry-retries {
+.subagent-telemetry-retries,
+.subagent-telemetry-recovered {
   color: var(--panel-warning);
 }
 
-/* Header telemetry is intentionally never hidden at narrow widths. It wraps
-   instead: token/cost/context data is operational information, not decoration. */
+/* The detailed metric surface is intentionally available on demand rather
+   than competing with the role, task, lifecycle, model, and cost at rest. */
 @media (max-width: 700px) {
   .subagent-activity-detail { max-width: 100px; }
 }
@@ -702,7 +742,7 @@
   gap: 4px;
   padding: 1px 6px;
   border-radius: 4px;
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--panel-font-mono);
   font-size: 10.5px;
   background: var(--panel-control-hover);
   color: var(--panel-muted);
@@ -743,7 +783,7 @@
   align-items: baseline;
   gap: 6px;
   padding: 4px 10px;
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--panel-font-mono);
   font-size: 12px;
   color: var(--panel-foreground-soft);
   background: var(--panel-code-surface);
@@ -778,7 +818,7 @@
   overscroll-behavior: contain;
   background: transparent;
   border-radius: 0;
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--panel-font-mono);
   font-size: 12px;
   line-height: 1.5;
   /* Terminal output preserves alignment (tables, columns, progress) by
@@ -854,7 +894,7 @@
   padding: 0;
   background: transparent;
   color: var(--panel-muted);
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--panel-font-mono);
   font-size: 9.5px;
   line-height: 1.4;
   font-variant-numeric: tabular-nums;
@@ -888,7 +928,7 @@
   padding: 0;
   border: 0;
   background: transparent;
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--panel-font-mono);
   font-size: 10px;
   font-weight: 600;
   line-height: 1.4;
@@ -1012,7 +1052,7 @@
   padding: 4px 8px;
   border-radius: var(--panel-radius-sm);
   background: var(--panel-code-surface);
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--panel-font-mono);
   font-size: 12px;
   line-height: 1.45;
   color: var(--panel-foreground-soft);
@@ -1050,7 +1090,7 @@
   padding: 0;
   background: transparent;
   border: 0;
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--panel-font-mono);
   font-size: 10px;
   line-height: 1.5;
   color: var(--panel-muted);
@@ -1079,7 +1119,7 @@
    per delta. pre-wrap preserves the streamed line breaks while wrapping long
    lines instead of horizontal-scrolling. */
 .web-search-result-streaming {
-  font-family: var(--vscode-editor-font-family, monospace);
+  font-family: var(--panel-font-mono);
   font-size: 12px;
   line-height: 1.5;
   white-space: pre-wrap;

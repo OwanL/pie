@@ -83,12 +83,14 @@ async function withFixture(run) {
   try {
     await mkdir(path.join(root, 'extension', 'src'), { recursive: true });
     await mkdir(path.join(root, 'extension', 'test', 'integration'), { recursive: true });
+    await mkdir(path.join(root, 'scripts', 'test'), { recursive: true });
     await writeFile(path.join(root, 'extension', 'src', 'used.ts'), 'export const used = true;');
     await writeFile(path.join(root, 'extension', 'src', 'orphan.ts'), 'export const orphan = true;');
     await writeFile(path.join(root, 'extension', 'test', 'used.test.ts'), "import '../src/used';");
     await writeFile(path.join(root, 'extension', 'test', 'other.test.ts'), 'export {};');
     await writeFile(path.join(root, 'extension', 'test', 'integration', 'model-config-sync.test.ts'), 'export {};');
     await writeFile(path.join(root, 'extension', 'test', 'integration', 'model-profile-coverage.test.ts'), 'export {};');
+    await writeFile(path.join(root, 'scripts', 'test', 'install-batch.test.mjs'), 'export {};');
     for (const protectedDir of ['data', 'build', '.pie-sdk-fixture']) {
       await mkdir(path.join(root, 'extension', protectedDir), { recursive: true });
       await writeFile(path.join(root, 'extension', protectedDir, `${protectedDir}.test.ts`), 'export {};');
@@ -122,6 +124,12 @@ test('planAffectedTests selects a package for manifest changes and full suite fo
     assert.deepEqual(planAffectedTests(root, ['models.yaml']).testFiles, [
       'extension/test/integration/model-config-sync.test.ts',
       'extension/test/integration/model-profile-coverage.test.ts',
+    ]);
+    assert.deepEqual(planAffectedTests(root, ['install.bat']).testFiles, [
+      'scripts/test/install-batch.test.mjs',
+    ]);
+    assert.deepEqual(planAffectedTests(root, ['.gitattributes']).testFiles, [
+      'scripts/test/install-batch.test.mjs',
     ]);
     assert.equal(planAffectedTests(root, ['scripts/run-tests.mjs']).mode, 'full');
   });

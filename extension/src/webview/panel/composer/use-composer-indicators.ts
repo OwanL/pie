@@ -15,7 +15,6 @@ import type {
   WorkingTimeState,
 } from '../../../shared/protocol';
 import type { TokenRateIndicatorState } from '../../../shared/token-rate';
-import { stripProviderPrefix } from '../../../shared/model-id';
 import type {
   ContextWindowBreakdown,
   ContextWindowBreakdownEntry,
@@ -32,7 +31,7 @@ import {
   buildSessionTokenIndicator,
   buildSessionTokenUsageFromSnapshot,
   canonicalActivitySignature,
-  type TokenPricing,
+  createTokenPricingResolver,
 } from '../session-tabs/token-usage';
 import {
   sessionUsageSignature,
@@ -146,23 +145,6 @@ export function useComposerIndicators({
     modelSettings,
     availableModels,
   }), [activeModelId, activeProvider, activeThinkingLevel, modelSettings?.defaultModel, modelSettings?.defaultProvider, modelSettings?.defaultThinkingLevel, availableModels]);
-
-  const modelPricing = useMemo(() => {
-    const byProviderAndId = new Map<string, TokenPricing>();
-    const uniqueById = new Map<string, TokenPricing>();
-    const seenIds = new Set<string>();
-    for (const model of availableModels) {
-      const pricing = model.subagent?.pricing;
-      if (pricing) byProviderAndId.set(`${model.provider}\0${model.id}`, pricing);
-      if (seenIds.has(model.id)) {
-        uniqueById.delete(model.id);
-      } else {
-        seenIds.add(model.id);
-        if (pricing) uniqueById.set(model.id, pricing);
-      }
-    }
-    return { byProviderAndId, uniqueById };
-  }, [availableModels]);
 
   const supportsImageInputs = selectedModelInfo?.inputKinds.includes('image') ?? false;
 
@@ -324,18 +306,11 @@ export function useComposerIndicators({
   );
 
   // Stable pricing resolver so the completed-cost memo doesn't see a fresh
-  // function ref every snapshot. Provider-qualified ids (subagent/child usage
-  // records e.g. `ollama/glm-5.2:cloud`) are normalized to their bare id so
-  // the registry key (`provider\u0000id`) matches; without this the lookup
-  // misses and child cost falls back to zero/unpriced.
+  // function ref every snapshot. Provider-qualified ids are normalized by the
+  // shared resolver used by transcript display as well.
   const resolvePricing = useMemo(
-    () => (modelId: string, provider?: string) => {
-      const bareId = stripProviderPrefix(modelId);
-      return provider
-        ? modelPricing.byProviderAndId.get(`${provider}\u0000${bareId}`)
-        : modelPricing.uniqueById.get(bareId);
-    },
-    [modelPricing],
+    () => createTokenPricingResolver(availableModels),
+    [availableModels],
   );
 
   // The O(transcript) completed-cost summary and subagent direct-cost walk are

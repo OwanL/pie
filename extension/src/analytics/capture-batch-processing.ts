@@ -1,7 +1,9 @@
 import {
   AnalyticsSourceConflictError,
+  AnalyticsValidationError,
   type AnalyticsObservation,
 } from '../../../shared/analytics/contracts.js';
+import { AnalyticsReconciliationCapacityError } from './sqlite-recorder.js';
 import {
   retrySqliteLock,
   type SqliteLockRetryBudget,
@@ -19,13 +21,30 @@ export interface ObservationBatchRecorder {
 
 export interface ObservationRejection {
   readonly index: number;
-  readonly code: 'subject_deleted' | 'source_conflict';
+  readonly code: 'subject_deleted' | 'source_conflict' | 'invalid_record' | 'reconciliation_capacity';
   readonly error: string;
 }
 
 function deletedSubjectError(error: unknown): string | undefined {
   const message = error instanceof Error ? error.message : String(error);
   return message.startsWith('Analytics capture subject is deleted:') ? message : undefined;
+}
+
+function observationRejection(error: unknown): Omit<ObservationRejection, 'index'> | undefined {
+  const deleted = deletedSubjectError(error);
+  if (deleted) return { code: 'subject_deleted', error: deleted };
+  if (error instanceof AnalyticsSourceConflictError
+    || (error instanceof Error
+      && /^Analytics source sequence .* (?:is behind contiguous watermark|was already delivered without this source fact)\./u.test(error.message))) {
+    return { code: 'source_conflict', error: error instanceof Error ? error.message : String(error) };
+  }
+  if (error instanceof AnalyticsValidationError) {
+    return { code: 'invalid_record', error: error.message };
+  }
+  if (error instanceof AnalyticsReconciliationCapacityError) {
+    return { code: 'reconciliation_capacity', error: error.message };
+  }
+  return undefined;
 }
 
 /**
@@ -59,31 +78,35 @@ export async function processObservationBatch(
         lockRetryBudget,
       );
     } catch (error) {
-      const deleted = deletedSubjectError(error);
-      if (deleted) {
+      const batchRejection = observationRejection(error);
+      if (!batchRejection) throw error;
+      if (batchRejection.code === 'subject_deleted') {
+        // Deletion is sink-consumed: the recorder transaction already durably
+        // retained each deletion disposition and the thrown error is only the
+        // per-batch signal. Replaying would double-count deleted delivery.
         for (let index = start; index < end; index += 1) {
-          rejections.push({ index, code: 'subject_deleted', error: deleted });
+          rejections.push({ index, ...batchRejection });
         }
-      } else if (error instanceof AnalyticsSourceConflictError) {
-        // The batch transaction retained every original row. Replay the
-        // bounded slice record-by-record so only changed identities are
-        // rejected and unrelated immutable facts still advance.
-        for (let index = start; index < end; index += 1) {
-          try {
-            await retrySqliteLock(
-              () => recorder.submit(captures[index]!.value),
-              lockRetryBudget,
-            );
-          } catch (recordError) {
-            const recordDeleted = deletedSubjectError(recordError);
-            if (recordDeleted) rejections.push({ index, code: 'subject_deleted', error: recordDeleted });
-            else if (recordError instanceof AnalyticsSourceConflictError) {
-              rejections.push({ index, code: 'source_conflict', error: recordError.message });
-            } else throw recordError;
-          }
+        start = end;
+        continue;
+      }
+
+      // The batch transaction could not isolate the individual outcome. Replay
+      // the bounded slice record-by-record so a malformed, conflicting, or
+      // reconciliation capacity-blocked record is acknowledged as rejected
+      // instead of poisoning the immutable queue and making every later flush
+      // retry it.
+      for (let index = start; index < end; index += 1) {
+        try {
+          await retrySqliteLock(
+            () => recorder.submit(captures[index]!.value),
+            lockRetryBudget,
+          );
+        } catch (recordError) {
+          const recordRejection = observationRejection(recordError);
+          if (!recordRejection) throw recordError;
+          rejections.push({ index, ...recordRejection });
         }
-      } else {
-        throw error;
       }
     }
     start = end;

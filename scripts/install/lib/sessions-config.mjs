@@ -1,16 +1,10 @@
-// Shared settings.json#sessionDir + legacy-session-import orchestration for the
-// pie installers.
+// settings.json#sessionDir + legacy-session-import orchestration for the
+// Windows installer.
 //
-// install.ps1 (now install.bat) inspects settings.json#sessionDir, rewrites it
-// to the canonical "data/outcomes/sessions" store (so `pi` writes session JSONL
-// to the repo-local location even when launched from an arbitrary cwd), backs up
-// the prior settings.json, and imports legacy session history from the prior
-// configured dir (non-recursive) plus the default legacy roots (recursive).
-// install.sh runs the simpler `scripts/migrate-local-sessions.mjs` (default
-// roots only, no settings.json rewrite). This module encapsulates the Windows
-// installer's fuller orchestration so the native install.bat can delegate to it
-// (batch cannot parse/rewrite JSON), while install.sh keeps its own simpler
-// flow. The file-merge core is scripts/install/lib/sessions.mjs (pure, tested).
+// install.bat delegates here to rewrite settings.json to the canonical
+// "data/outcomes/sessions" store, back up the prior file, and import legacy
+// history from a prior configured directory plus the default legacy roots.
+// The file-merge core is scripts/install/lib/sessions.mjs (pure, tested).
 //
 // `configureSessions` performs real filesystem mutations (settings.json backup +
 // rewrite, session file copy/merge) against the repo it is given, so it is
@@ -32,7 +26,7 @@ export const DESIRED_SESSION_DIR = 'data/outcomes/sessions';
  * Resolve a settings.json `sessionDir` value to an absolute path, honouring
  * `~`, `~/`, `~\` home-relative and absolute values. Relative values (other than
  * ~) return null (the installer replaces them with the canonical store rather
- * than guessing a base). Mirrors install.ps1 Resolve-ConfiguredSessionDir.
+ * than guessing a base).
  * @param {string} value
  * @param {{ homeDir?: string }} [options]
  * @returns {string | null}
@@ -51,7 +45,7 @@ export function resolveConfiguredSessionDir(value, { homeDir } = {}) {
 /**
  * Inspect settings.json#sessionDir, rewrite it to the canonical store if needed
  * (backing up the prior file), and migrate (or merge) legacy session history
- * into the checkout-local store. Mirrors install.ps1's session block exactly:
+ * into the checkout-local store. The installer semantics are:
  * default legacy roots are imported recursively; a prior configured sessionDir
  * is imported non-recursively; sources are de-duplicated; a source that resolves
  * to the destination is skipped.
@@ -133,7 +127,7 @@ export function configureSessions({ repoRoot, homeDir }) {
   }
 
   // De-duplicate / normalize import sources by resolved path + recursiveness,
-  // skipping non-directories (matches install.ps1's normalization loop).
+  // skipping non-directories.
   const seen = new Set();
   const normalized = [];
   for (const source of importSources) {
@@ -146,8 +140,7 @@ export function configureSessions({ repoRoot, homeDir }) {
   }
 
   // Run the migration. The verb ("Migrating" vs "Merging") reflects whether the
-  // destination already holds sessions; install.ps1 recomputes this after each
-  // source import, so we do too.
+  // destination already holds sessions; recompute this after each source import.
   const resolvedNewSessions = path.resolve(newSessions);
   let hasRepoSessions = directoryHasJsonlFiles(newSessions);
   let migrated = false;
@@ -165,8 +158,7 @@ export function configureSessions({ repoRoot, homeDir }) {
         sources: [{ path: source.path, recursive: source.recursive }],
         destination: newSessions,
       });
-      // Per-source report mirrors scripts/migrate-local-sessions.mjs (explicit
-      // form) so install.bat's output matches install.ps1's per-import lines.
+      // Keep a detailed per-source report for install.bat output.
       const r = perSource[0].result;
       lines.push(
         `==> Imported ${r.copied} new session file(s); refreshed ${r.updated} newer file(s); ` +

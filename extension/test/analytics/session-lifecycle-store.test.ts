@@ -231,6 +231,188 @@ test('durable writer admission holds leases through writes and rejects a fenced 
   }
 });
 
+test('shared writer admission accepts more than the durable lease cap for simultaneous captures', () => {
+  const temp = tempDatabase();
+  const store = new SessionLifecycleStore(temp.databasePath);
+  const identity = {
+    hostInstanceId: 'writer-shared-backlog-host',
+    workspaceId: 'writer-shared-backlog-workspace',
+    generationId: 'writer-shared-backlog-generation',
+    buildId: 'writer-shared-backlog-build',
+    processId: 403,
+  };
+  const releases: Array<() => void> = [];
+  try {
+    store.registerAnalyticsHost({
+      ...identity,
+      capabilities: ['authenticated-control', 'writer-fence'],
+      registeredAtMs: '1',
+    });
+    const admission = createSessionLifecycleWriterAdmission(store, identity, () => 2);
+    for (let index = 0; index < 4_097; index += 1) releases.push(admission.acquire());
+    assert.equal(store.listAnalyticsWriterLeases(identity.workspaceId).length, 1);
+  } finally {
+    for (const release of releases) release();
+    assert.equal(store.listAnalyticsWriterLeases(identity.workspaceId).length, 0);
+    store.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('normal lifecycle creation remains admissible while a recorder backlog is held', () => {
+  const temp = tempDatabase();
+  const store = new SessionLifecycleStore(temp.databasePath);
+  const identity = {
+    hostInstanceId: 'writer-lifecycle-backlog-host',
+    workspaceId: 'writer-lifecycle-backlog-workspace',
+    generationId: 'writer-lifecycle-backlog-generation',
+    buildId: 'writer-lifecycle-backlog-build',
+    processId: 407,
+  };
+  const captureReleases: Array<() => void> = [];
+  try {
+    store.registerAnalyticsHost({
+      ...identity,
+      capabilities: ['authenticated-control', 'writer-fence'],
+      registeredAtMs: '1',
+    });
+    const admission = createSessionLifecycleWriterAdmission(store, identity, () => 2);
+    for (let index = 0; index < 4_096; index += 1) captureReleases.push(admission.acquire());
+    assert.equal(store.listAnalyticsWriterLeases(identity.workspaceId).length, 1);
+
+    const lifecycleCreateRelease = admission.acquire();
+    try {
+      store.registerPendingCreateOperation('writer-lifecycle-backlog-session', 'writer-lifecycle-backlog-create', 3);
+    } finally {
+      lifecycleCreateRelease();
+    }
+    assert.equal(store.get('writer-lifecycle-backlog-session')?.pendingCreateOperationId, 'writer-lifecycle-backlog-create');
+    assert.equal(store.listAnalyticsWriterLeases(identity.workspaceId).length, 1);
+  } finally {
+    for (const release of captureReleases) release();
+    assert.equal(store.listAnalyticsWriterLeases(identity.workspaceId).length, 0);
+    store.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('shared writer admission retains its durable lease until the last owner releases', () => {
+  const temp = tempDatabase();
+  const store = new SessionLifecycleStore(temp.databasePath);
+  const identity = {
+    hostInstanceId: 'writer-shared-release-host',
+    workspaceId: 'writer-shared-release-workspace',
+    generationId: 'writer-shared-release-generation',
+    buildId: 'writer-shared-release-build',
+    processId: 404,
+  };
+  try {
+    store.registerAnalyticsHost({
+      ...identity,
+      capabilities: ['authenticated-control', 'writer-fence'],
+      registeredAtMs: '1',
+    });
+    const admission = createSessionLifecycleWriterAdmission(store, identity, () => 2);
+    const firstRelease = admission.acquire();
+    const leaseId = store.listAnalyticsWriterLeases(identity.workspaceId)[0]?.leaseId;
+    assert.ok(leaseId);
+    const secondRelease = admission.acquire();
+    assert.deepEqual(store.listAnalyticsWriterLeases(identity.workspaceId).map((lease) => lease.leaseId), [leaseId]);
+
+    firstRelease();
+    assert.deepEqual(store.listAnalyticsWriterLeases(identity.workspaceId).map((lease) => lease.leaseId), [leaseId]);
+    firstRelease();
+    assert.deepEqual(store.listAnalyticsWriterLeases(identity.workspaceId).map((lease) => lease.leaseId), [leaseId]);
+
+    secondRelease();
+    assert.deepEqual(store.listAnalyticsWriterLeases(identity.workspaceId), []);
+    secondRelease();
+    assert.deepEqual(store.listAnalyticsWriterLeases(identity.workspaceId), []);
+  } finally {
+    store.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('a failed final shared release retains ownership for a later retry', () => {
+  const temp = tempDatabase();
+  const store = new SessionLifecycleStore(temp.databasePath);
+  const identity = {
+    hostInstanceId: 'writer-shared-release-failure-host',
+    workspaceId: 'writer-shared-release-failure-workspace',
+    generationId: 'writer-shared-release-failure-generation',
+    buildId: 'writer-shared-release-failure-build',
+    processId: 406,
+  };
+  try {
+    store.registerAnalyticsHost({
+      ...identity,
+      capabilities: ['authenticated-control', 'writer-fence'],
+      registeredAtMs: '1',
+    });
+    const admission = createSessionLifecycleWriterAdmission(store, identity, () => 2);
+    const release = admission.acquire();
+    const originalRelease = store.releaseAnalyticsWriterLease.bind(store);
+    let failOnce = true;
+    store.releaseAnalyticsWriterLease = (lease) => {
+      if (failOnce) {
+        failOnce = false;
+        throw new Error('synthetic durable release failure');
+      }
+      originalRelease(lease);
+    };
+
+    assert.throws(() => release(), /synthetic durable release failure/);
+    assert.equal(store.listAnalyticsWriterLeases(identity.workspaceId).length, 1);
+    release();
+    assert.deepEqual(store.listAnalyticsWriterLeases(identity.workspaceId), []);
+    release();
+    assert.deepEqual(store.listAnalyticsWriterLeases(identity.workspaceId), []);
+  } finally {
+    store.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('a writer fence rejects fresh shared admissions while an existing owner still holds the lease', () => {
+  const temp = tempDatabase();
+  const store = new SessionLifecycleStore(temp.databasePath);
+  const identity = {
+    hostInstanceId: 'writer-shared-fence-host',
+    workspaceId: 'writer-shared-fence-workspace',
+    generationId: 'writer-shared-fence-generation',
+    buildId: 'writer-shared-fence-build',
+    processId: 405,
+  };
+  try {
+    store.registerAnalyticsHost({
+      ...identity,
+      capabilities: ['authenticated-control', 'writer-fence'],
+      registeredAtMs: '1',
+    });
+    const admission = createSessionLifecycleWriterAdmission(store, identity, () => 2);
+    const firstRelease = admission.acquire();
+    const secondRelease = admission.acquire();
+    store.beginAnalyticsWriterFence({
+      workspaceId: identity.workspaceId,
+      operationId: 'writer-shared-fence-operation',
+      purpose: 'analytics-activation',
+      expectedHosts: [identity],
+      nowMs: 3,
+    });
+
+    assert.throws(() => admission.acquire(), /admission is fencing/);
+    assert.equal(store.listAnalyticsWriterLeases(identity.workspaceId).length, 1);
+    firstRelease();
+    assert.equal(store.listAnalyticsWriterLeases(identity.workspaceId).length, 1);
+    secondRelease();
+    assert.equal(store.listAnalyticsWriterLeases(identity.workspaceId).length, 0);
+  } finally {
+    store.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
 test('ordinary restart atomically rotates an open writer census to the registered successor', () => {
   const temp = tempDatabase();
   const store = new SessionLifecycleStore(temp.databasePath);
@@ -406,6 +588,31 @@ test('stopping and stopped host identities cannot be revived by heartbeat or reg
       /heartbeat identity is stale/,
     );
     assert.equal(store.getAnalyticsHost(host.hostInstanceId)?.state, 'stopped');
+  } finally {
+    store.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('process-exit recovery retires a stopping host and its orphaned writer leases atomically', () => {
+  const temp = tempDatabase();
+  const store = new SessionLifecycleStore(temp.databasePath);
+  const identity = {
+    hostInstanceId: 'host-process-exit', workspaceId: 'workspace-process-exit',
+    generationId: 'generation-process-exit', buildId: 'build-process-exit', processId: 202,
+  };
+  try {
+    store.registerAnalyticsHost({
+      ...identity, capabilities: ['authenticated-control', 'writer-fence'], registeredAtMs: '1',
+    });
+    const admission = createSessionLifecycleWriterAdmission(store, identity, () => 2);
+    const release = admission.acquire();
+    store.markAnalyticsHostState(identity.hostInstanceId, identity.processId, identity.generationId, 'stopping', 3);
+
+    const recovered = store.recoverAnalyticsHostAfterProcessExit(identity, 4);
+    assert.equal(recovered.state, 'stopped');
+    assert.deepEqual(store.listAnalyticsWriterLeases(identity.workspaceId), []);
+    release();
   } finally {
     store.close();
     rmSync(temp.root, { recursive: true, force: true });

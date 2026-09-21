@@ -11,6 +11,7 @@ import {
 } from '../../../src/backend/session-event-handler';
 import type { SdkSession, SdkSessionEvent, SdkSessionManager } from '../../../src/backend/sdk';
 import type { SessionContext } from '../../../src/backend/server-types';
+import { FENCED_ENTRY_ID } from '../../../src/backend/session-manager-fence';
 import { BackendLiveTurnAccumulator } from '../../../src/backend/live-turn-accumulator';
 import { OrderedJsonlWriter } from '../../../src/backend/server-io';
 import { SendOperationLedger, canonicalSendIntentFingerprint } from '../../../src/backend/send-operation-ledger';
@@ -519,6 +520,32 @@ test('handleSdkSessionEvent ignores unsupported or incomplete events', () => {
   assert.deepEqual(busy, []);
   assert.equal(getContextUsageChangedCount(), 0);
   assert.equal(getListChangedCount(), 0);
+});
+
+test('fenced message_end is not accepted as a durable terminal', () => {
+  const { deps, emitted } = createDeps();
+  const context = createContext({
+    activeRequest: {
+      id: 'req-fenced',
+      messageIndex: 0,
+      currentMessageId: 'req-fenced:0',
+      aborted: false,
+    },
+  });
+
+  handleSdkSessionEventImpl(deps, context, {
+    type: 'message_end',
+    sessionEntryId: FENCED_ENTRY_ID,
+    message: {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'reply was never persisted' }],
+      stopReason: 'end_turn',
+    },
+  });
+
+  assert.equal(emitted.some((entry) => entry.event === 'message.finished'), false);
+  assert.equal(emitted.some((entry) => entry.event === 'analytics.branch'), false);
+  assert.equal(context.activeRequest?.currentMessageId, 'req-fenced:0');
 });
 
 test('agent_start forwards the persisted pruning result once without rescanning the branch', () => {
@@ -1060,6 +1087,11 @@ test('nested subagent terminal result stays within the backend JSONL transport l
       results: [{
         agent: 'worker',
         task: 'exercise nested result transport',
+        cwd: '/workspace/worker',
+        parentUserContextMode: 'all',
+        parentUserContext: '[User prompt]\nKeep the API stable.',
+        fileChanges: [{ path: 'src/worker.ts', kind: 'modified', additions: 4, deletions: 1 }],
+        hasNestedToolFailure: true,
         exitCode: 0,
         model: 'outer-model',
         provider: 'github-copilot',
@@ -1097,7 +1129,12 @@ test('nested subagent terminal result stays within the backend JSONL transport l
   });
 
   const payload = emitted.find((entry) => entry.event === 'tool.finished')?.payload as {
-    result?: { $toolResult?: string; originalBytes?: number; billing?: Array<{ path: string; provider?: string }> };
+    result?: {
+      $toolResult?: string;
+      originalBytes?: number;
+      billing?: Array<{ path: string; provider?: string }>;
+      details?: { results?: Array<Record<string, any>> };
+    };
   } | undefined;
   assert.ok(payload, 'durability-confirmed terminal event is emitted');
   assert.equal(payload.result?.$toolResult, undefined);
@@ -1106,6 +1143,13 @@ test('nested subagent terminal result stays within the backend JSONL transport l
   assert.deepEqual(payload.result?.billing?.map((entry) => [entry.path, entry.provider]), [
     ['0', 'github-copilot'], ['0.0', 'ollama'],
   ]);
+  assert.equal(payload.result?.details?.results?.[0]?.cwd, '/workspace/worker');
+  assert.equal(payload.result?.details?.results?.[0]?.parentUserContextMode, 'all');
+  assert.equal(payload.result?.details?.results?.[0]?.parentUserContext, '[User prompt]\nKeep the API stable.');
+  assert.deepEqual(payload.result?.details?.results?.[0]?.fileChanges, [{
+    path: 'src/worker.ts', kind: 'modified', additions: 4, deletions: 1,
+  }]);
+  assert.equal(payload.result?.details?.results?.[0]?.hasNestedToolFailure, true);
   let fatal: Error | undefined;
   const writer = new OrderedJsonlWriter(new Writable({
     write(_chunk, _encoding, callback) { callback(); },
@@ -1153,13 +1197,23 @@ test('nested subagent terminal result stays within the backend JSONL transport l
     entry.event === 'live.semantic' && (entry.payload as { kind?: string }).kind === 'tool.terminal');
   assert.ok(liveTerminal, 'sequenced live path emits the durability-confirmed tool terminal');
   const liveResult = (liveTerminal.payload as {
-    result?: { $toolResult?: string; billing?: Array<{ path: string; provider?: string }> };
+    result?: {
+      $toolResult?: string;
+      billing?: Array<{ path: string; provider?: string }>;
+      children?: Array<Record<string, any>>;
+    };
   }).result;
   assert.equal(liveResult?.$toolResult, undefined);
   assert.equal(JSON.stringify(liveResult).includes(repeatedTranscript), false);
   assert.deepEqual(liveResult?.billing?.map((entry) => [entry.path, entry.provider]), [
     ['0', 'github-copilot'], ['0.0', 'ollama'],
   ]);
+  assert.equal(liveResult?.children?.[0]?.cwd, '/workspace/worker');
+  assert.equal(liveResult?.children?.[0]?.parentUserContextMode, 'all');
+  assert.deepEqual(liveResult?.children?.[0]?.fileChanges, [{
+    path: 'src/worker.ts', kind: 'modified', additions: 4, deletions: 1,
+  }]);
+  assert.equal(liveResult?.children?.[0]?.hasNestedToolFailure, true);
   assert.doesNotThrow(() => writer.write(liveTerminal));
   assert.equal(fatal, undefined);
 });

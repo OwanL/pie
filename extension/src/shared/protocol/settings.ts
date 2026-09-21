@@ -1,6 +1,12 @@
 import type { ThinkingLevel } from './models.js';
 import { isThinkingLevel } from '../thinking-level.js';
 import type { TranscriptWindow } from './sessions.js';
+import {
+  PROVIDER_MAX_AFTERBURN_SECONDS,
+  PROVIDER_MAX_CONCURRENT_REQUESTS,
+  PROVIDER_NETWORK_PHASE_MAX_WAIT_SECONDS,
+  PROVIDER_UNLIMITED_CONCURRENCY,
+} from '../provider-concurrency.js';
 
 /** Webview-local UI preferences. Owned by the host so they survive teardown. */
 /** Metadata describing a known pi extension (tool or hook). */
@@ -63,6 +69,14 @@ export interface PruningDetails {
   prepassOutputTokens?: number;
   prepassCacheReadTokens?: number;
   prepassCacheWriteTokens?: number;
+  /** False when one or more provider token channels were omitted. */
+  prepassTokenChannelsKnown?: boolean;
+  prepassTokenChannelPresence?: {
+    input: boolean;
+    output: boolean;
+    cacheRead: boolean;
+    cacheWrite: boolean;
+  };
   /** Exact provider-reported prepass cost, when available. */
   prepassReportedCostUsd?: number;
   /** One settlement for every scorer provider request, including retries. */
@@ -391,7 +405,7 @@ export const ALL_SUBAGENT_BUCKETS_CAN_SPAWN: SubagentBucketCanSpawn = {
  *  When the user changes any field, the host reconfigures the live
  *  `ProviderGate` pool for that provider (no restart needed). */
 export interface ProviderConcurrencyOverrides {
-  /** Max concurrent in-flight LLM requests to this provider. */
+  /** Max concurrent in-flight LLM requests to this provider. 0 = Unlimited. */
   maxConcurrentRequests?: number;
   /** Per-session sticky-slot window in seconds (0 = disabled). */
   afterburnSeconds?: number;
@@ -491,18 +505,18 @@ export interface ChatPrefs {
   completionSoundVolume: number;
   /** Base font size (px) for body text and message prose — the primary
    *  readable content (assistant/user messages and the inline editor). Drives
-   *  --panel-font-size. Default 13 reproduces the bundled size. */
+   *  --panel-font-size. Default 11 reproduces the bundled size. */
   uiBaseFontSize: number;
   /** Font size (px) for the composer input textarea (where you type). Drives
    *  --panel-composer-font-size, independent of the base size so the input can
-   *  be sized for comfort without rescaling the transcript. Default 13. */
+   *  be sized for comfort without rescaling the transcript. Default 11. */
   uiComposerFontSize: number;
   /** Minimum visible text rows in the empty composer before content-driven
    *  auto-expansion begins. Default 1; range 1–6. */
   composerInitialRows: number;
   /** Font size (px) for expanded collapsible sections — tool-call bodies,
    *  reasoning, system prompts, pruning raw output, and code blocks. Smaller
-   *  than the 13px raw agent output since expanded text is lower priority. */
+   *  than the raw agent output since expanded text is lower priority. */
   expandedSectionFontSize: number;
   /** Max height (px) for expanded collapsible sections — reasoning, shell
    *  terminal output, tool-result pres, and the subagent message thread. Caps
@@ -531,12 +545,8 @@ export interface ChatPrefs {
    *  structured path labels (tool-call summaries, full-log links, and changed-
    *  file rows). 0 shows only the filename, 1 shows parent/filename, N shows N
    *  parents plus filename. The full path is always preserved for tooltips and
-   *  open/copy actions. Range 0..8; default 1. */
+   *  open/copy actions. Range 0..8; default 0. */
   uiPathParentDepth: number;
-  /** Max width (%) of chat bubbles (sets --message-assistant-width). Also
-   *  scales the narrow variant up by 4 points (clamped to 100). The bundled
-   *  default is 88. */
-  uiMessageWidth: number;
   /** Base background color. Drives the whole --panel-ink ramp that every
    *  surface token (cards, inputs, hover, overlays) derives from. Empty string
    *  falls back to the bundled night palette. */
@@ -548,9 +558,9 @@ export interface ChatPrefs {
    *  Empty = bundled default. */
   uiBorder: string;
   /** Base corner radius in px. Drives the --panel-radius-* scale as r-2 / r /
-   *  r+2 / r+4. Default 8 reproduces the bundled 6/8/10/12 ramp. */
+   *  r+2 / r+4. Default 4 reproduces the bundled 2/4/6/8 ramp. */
   uiCornerRadius: number;
-  /** Spacing density. Drives the --panel-gap-* scale. 'comfortable' reproduces
+  /** Spacing density. Drives the --panel-gap-* scale. 'compact' reproduces
    *  the bundled defaults. */
   uiDensity: UiDensity;
   /** Proactive soft/hard history-compaction policy. */
@@ -561,7 +571,10 @@ export interface ChatPrefs {
   providerToggles: Record<string, boolean>;
   /** Default enabled state for providers in the per-session subagent provider
    *  selector. Missing entries mean enabled. A session-specific toggle takes
-   *  precedence over this default. This does not affect the parent model picker. */
+   *  precedence over this default. This does not affect the parent model picker.
+   *  When every provider on a session's toggle surface (buckets + defaults +
+   *  per-session overrides) is unchecked, the effective all-unchecked policy
+   *  removes the subagent tool from that session ("don't use subagents"). */
   subagentProviderDefaults: Record<string, boolean>;
   /** Per-session subagent-only provider toggles. The outer key is the session
    *  path; inner keys are provider names. Missing entries inherit from
@@ -569,14 +582,15 @@ export interface ChatPrefs {
    *  session's model picker. */
   subagentProviderTogglesBySession: Record<string, Record<string, boolean>>;
   /** Per-provider concurrency overrides (maxConcurrentRequests, afterburnSeconds,
-   *  queueWaitSeconds, headerWaitSeconds). A provider absent from this map uses
+   *  queueWaitSeconds, headerWaitSeconds). maxConcurrentRequests=0 means
+   *  Unlimited (no concurrency/afterburn capacity throttle). A provider absent from this map uses
    *  its models.json `concurrency` defaults. Mirrored to the backend via
    *  `runtimePrefs.set` → `ProviderGate.reconfigure()`. */
   providerConcurrency: ProviderConcurrencyMap;
   /** Content rows reserved in the live activity-tail preview (the streaming
    *  reasoning/reply text or a running tool/subagent's output shown at the
-   *  bottom of a turn). Tools/subagents add one header row on top. Default 2
-   *  reproduces the bundled 2-row (reasoning) / 3-row (tool) preview. */
+   *  bottom of a turn). Tools/subagents add one header row on top. Default 5
+   *  reproduces the bundled 5-row (reasoning) / 6-row (tool) preview. */
   activityTailLines: number;
   /** Size (px) of the clickable user-message markers in the thin rail to the
    *  left of the transcript scrollbar. Each marker is a jump-to button; this
@@ -672,30 +686,29 @@ export const DEFAULT_CHAT_PREFS: ChatPrefs = {
   subagentBucketCanSpawn: { ...ALL_SUBAGENT_BUCKETS_CAN_SPAWN },
   subagentDropTools: [],
   completionSoundVolume: 50,
-  uiBaseFontSize: 13,
-  uiComposerFontSize: 13,
+  uiBaseFontSize: 11,
+  uiComposerFontSize: 11,
   composerInitialRows: 1,
-  expandedSectionFontSize: 12,
+  expandedSectionFontSize: 10,
   expandedSectionMaxHeight: 240,
   uiFontSans: '',
-  uiFontMono: '',
+  uiFontMono: '"JetBrains Mono", "Cascadia Code", Consolas, monospace',
   uiAccentColor: '',
   uiMutedColor: '',
   uiLinkColor: '',
-  uiPathParentDepth: 1,
-  uiMessageWidth: 88,
+  uiPathParentDepth: 0,
   uiBackground: '',
   uiForeground: '',
   uiBorder: '',
-  uiCornerRadius: 8,
-  uiDensity: 'comfortable',
+  uiCornerRadius: 4,
+  uiDensity: 'compact',
   historyCompaction: { ...DEFAULT_HISTORY_COMPACTION_SETTINGS },
   extensionToggles: {},
   providerToggles: {},
   subagentProviderDefaults: {},
   subagentProviderTogglesBySession: {},
   providerConcurrency: {},
-  activityTailLines: 2,
+  activityTailLines: 5,
   uiMessageRailSize: 20,
   hideStatusStrip: false,
   hideTokenRate: false,
@@ -977,36 +990,41 @@ export function normalizeUiPathParentDepth(value: unknown): number {
 }
 
 export function resolveChatPrefs(prefs?: Partial<ChatPrefs> | null): ChatPrefs {
+  const storedPrefs = { ...(prefs ?? {}) };
+  // Remove the retired width preference before spreading persisted state. The
+  // next service write therefore normalizes legacy globalState without
+  // disturbing any other stored override.
+  delete (storedPrefs as Record<string, unknown>)['uiMessageWidth'];
   return {
     ...DEFAULT_CHAT_PREFS,
-    ...prefs,
-    autonomousMode: typeof prefs?.autonomousMode === 'boolean'
-      ? prefs.autonomousMode
+    ...storedPrefs,
+    autonomousMode: typeof storedPrefs.autonomousMode === 'boolean'
+      ? storedPrefs.autonomousMode
       : DEFAULT_CHAT_PREFS.autonomousMode,
-    mcpEnabled: typeof prefs?.mcpEnabled === 'boolean'
-      ? prefs.mcpEnabled
+    mcpEnabled: typeof storedPrefs.mcpEnabled === 'boolean'
+      ? storedPrefs.mcpEnabled
       : DEFAULT_CHAT_PREFS.mcpEnabled,
-    composerInitialRows: normalizeComposerInitialRows(prefs?.composerInitialRows),
-    uiPathParentDepth: normalizeUiPathParentDepth(prefs?.uiPathParentDepth),
+    composerInitialRows: normalizeComposerInitialRows(storedPrefs.composerInitialRows),
+    uiPathParentDepth: normalizeUiPathParentDepth(storedPrefs.uiPathParentDepth),
     extensionToggles: {
       ...DEFAULT_CHAT_PREFS.extensionToggles,
-      ...(prefs?.extensionToggles ?? {}),
+      ...(storedPrefs.extensionToggles ?? {}),
     },
     providerToggles: {
       ...DEFAULT_CHAT_PREFS.providerToggles,
-      ...(prefs?.providerToggles ?? {}),
+      ...(storedPrefs.providerToggles ?? {}),
     },
-    subagentProviderDefaults: normalizeBooleanMap(prefs?.subagentProviderDefaults),
-    subagentProviderTogglesBySession: normalizeNestedBooleanMap(prefs?.subagentProviderTogglesBySession),
-    providerConcurrency: normalizeProviderConcurrency(prefs?.providerConcurrency),
-    historyCompaction: resolveHistoryCompactionSettings(prefs?.historyCompaction),
-    subagentBuckets: normalizeSubagentBuckets(prefs?.subagentBuckets),
-    subagentNestedAllowedBuckets: normalizeNestedAllowedBuckets(prefs?.subagentNestedAllowedBuckets),
-    subagentBucketCanSpawn: normalizeSubagentBucketCanSpawn(prefs?.subagentBucketCanSpawn),
-    subagentDropTools: normalizeStringArray(prefs?.subagentDropTools),
+    subagentProviderDefaults: normalizeBooleanMap(storedPrefs.subagentProviderDefaults),
+    subagentProviderTogglesBySession: normalizeNestedBooleanMap(storedPrefs.subagentProviderTogglesBySession),
+    providerConcurrency: normalizeProviderConcurrency(storedPrefs.providerConcurrency),
+    historyCompaction: resolveHistoryCompactionSettings(storedPrefs.historyCompaction),
+    subagentBuckets: normalizeSubagentBuckets(storedPrefs.subagentBuckets),
+    subagentNestedAllowedBuckets: normalizeNestedAllowedBuckets(storedPrefs.subagentNestedAllowedBuckets),
+    subagentBucketCanSpawn: normalizeSubagentBucketCanSpawn(storedPrefs.subagentBucketCanSpawn),
+    subagentDropTools: normalizeStringArray(storedPrefs.subagentDropTools),
     autoExpandSubagentCalls:
-      prefs?.autoExpandSubagentCalls
-      ?? prefs?.autoExpandToolCalls
+      storedPrefs.autoExpandSubagentCalls
+      ?? storedPrefs.autoExpandToolCalls
       ?? DEFAULT_CHAT_PREFS.autoExpandSubagentCalls,
   };
 }
@@ -1109,12 +1127,16 @@ export function normalizeProviderConcurrency(value: unknown): ProviderConcurrenc
     if (typeof maxConcurrentRequests === 'number'
       && Number.isFinite(maxConcurrentRequests)
       && Number.isInteger(maxConcurrentRequests)
-      && maxConcurrentRequests >= 1) {
+      && maxConcurrentRequests >= PROVIDER_UNLIMITED_CONCURRENCY
+      && maxConcurrentRequests <= PROVIDER_MAX_CONCURRENT_REQUESTS) {
       cleaned.maxConcurrentRequests = maxConcurrentRequests;
       hasAny = true;
     }
     const afterburnSeconds = o.afterburnSeconds;
-    if (typeof afterburnSeconds === 'number' && Number.isFinite(afterburnSeconds) && afterburnSeconds >= 0) {
+    if (typeof afterburnSeconds === 'number'
+      && Number.isFinite(afterburnSeconds)
+      && afterburnSeconds >= 0
+      && afterburnSeconds <= PROVIDER_MAX_AFTERBURN_SECONDS) {
       cleaned.afterburnSeconds = afterburnSeconds;
       hasAny = true;
     }
@@ -1127,7 +1149,7 @@ export function normalizeProviderConcurrency(value: unknown): ProviderConcurrenc
         && Number.isFinite(timeoutSeconds)
         && Number.isInteger(timeoutSeconds)
         && timeoutSeconds >= 0
-        && timeoutSeconds <= 300) {
+        && timeoutSeconds <= PROVIDER_NETWORK_PHASE_MAX_WAIT_SECONDS) {
         cleaned[key] = timeoutSeconds;
         hasAny = true;
       }

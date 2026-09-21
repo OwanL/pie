@@ -6,7 +6,8 @@
  */
 
 import { parseJsonOrThrow } from "../../../shared/error-message.js";
-import { qualifiedModelSpec } from "./bucket-config.js";
+import { subagentProvidersAllDisabled } from "../../../shared/subagent-provider-policy.js";
+import { qualifiedModelSpec, readBucketAssignments } from "./bucket-config.js";
 
 export const PROVIDER_TOGGLES_ENV = "PIE_PROVIDER_TOGGLES_JSON";
 export const SUBAGENT_PROVIDER_DEFAULTS_ENV = "PIE_SUBAGENT_PROVIDER_DEFAULTS_JSON";
@@ -94,4 +95,25 @@ export function getAllowedModelIdsForProviders(
   return new Set(
     enabled.flatMap((model) => [model.id, qualifiedModelSpec(model.provider, model.id)]),
   );
+}
+
+/** Whether the effective subagent provider policy leaves no enabled provider
+ *  in the pie toggle surface — the host's "don't use subagents" signal. The
+ *  host removes the subagent tool from the session's active tool set while
+ *  this holds; re-checking here keeps a call that raced the preference change
+ *  (stale turn snapshot, mid-turn flip) from spawning a tree anyway.
+ *
+ *  `subagentProviderToggles` is the merged (defaults + session overrides)
+ *  policy — the root call's fresh resolution or the tree snapshot consumed by
+ *  descendants. Bare legacy bucket ids are resolved against the available
+ *  runtime registry. Unspecified/empty surfaces keep subagents enabled. */
+export function subagentProvidersAllDisabledFromEnv(
+  subagentProviderToggles: Record<string, boolean>,
+  availableModels: ReadonlyArray<ModelProviderRef>,
+): boolean {
+  return subagentProvidersAllDisabled({
+    buckets: readBucketAssignments(),
+    defaults: subagentProviderToggles,
+    availableModels,
+  });
 }

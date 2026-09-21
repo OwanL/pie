@@ -109,7 +109,7 @@
   background: color-mix(in srgb, var(--panel-control-surface) 60%, transparent);
   border: 1px solid var(--panel-border);
   color: color-mix(in srgb, var(--panel-foreground) 88%, transparent);
-  font-family: var(--vscode-editor-font-family, var(--panel-font-mono, monospace));
+  font-family: var(--panel-font-mono);
   font-size: 11px;
   line-height: 1.4;
   white-space: pre-wrap;

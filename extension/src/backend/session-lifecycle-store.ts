@@ -12,8 +12,11 @@ import {
   type Int64Value,
 } from '../../../shared/analytics/contracts.js';
 import type { SessionOwnershipAdmission } from './session-ownership-authority.js';
-import type { SessionManagerFenceAdmission } from './session-manager-fence.js';
-import { ANALYTICS_HANDOFF_MAX_STATUS_HOSTS } from '../../../shared/analytics/handoff.js';
+import {
+  SessionManagerFenceAdmissionRevokedError,
+  type SessionManagerFenceAdmission,
+} from './session-manager-fence.js';
+import { ANALYTICS_HANDOFF_MAX_STATUS_HOSTS } from '../../../shared/analytics/host-status-messages.js';
 
 interface SqliteRunResult { changes: number | bigint }
 interface SqliteStatement {
@@ -421,20 +424,53 @@ export function createSessionLifecycleWriterAdmission(
   const currentEpoch = (): number => successorStartupAdmitted
     ? store.getAnalyticsWriterAdmissionState(normalizedIdentity.workspaceId).fenceEpoch
     : expectedFenceEpoch;
+  // Capture admission is process-local and can have many simultaneous owners,
+  // while the durable lease is only the all-host fence's proof that this
+  // process has at least one outstanding writer. Keep the durable row shared;
+  // every acquire still re-checks the durable fence before joining it.
+  let sharedLease: AnalyticsWriterLeaseRecord | undefined;
+  let sharedLeaseHolders = 0;
+  const releaseStandaloneLease = (lease: AnalyticsWriterLeaseRecord): (() => void) => {
+    let released = false;
+    return () => {
+      if (released) return;
+      // Mark the token released only after the durable deletion succeeds. A
+      // transient close/SQLite error must not discard the caller's ownership;
+      // the caller can retry the same idempotent release instead.
+      store.releaseAnalyticsWriterLease(lease);
+      released = true;
+    };
+  };
   return {
     assertAdmitted: () => {
       store.assertAnalyticsWriterAdmitted(normalizedIdentity, currentEpoch());
     },
     acquire: () => {
-      const lease = store.acquireAnalyticsWriterLease(normalizedIdentity, currentEpoch(), now());
+      const epoch = currentEpoch();
+      // Do not rely on the shared row as admission evidence. A fence can be
+      // installed while that row is still held, and every fresh owner must be
+      // checked against the current identity and epoch before joining it.
+      store.assertAnalyticsWriterAdmitted(normalizedIdentity, epoch);
+      if (!sharedLease) sharedLease = store.acquireAnalyticsWriterLease(normalizedIdentity, epoch, now());
+      sharedLeaseHolders += 1;
       let released = false;
       return () => {
         if (released) return;
+        if (sharedLeaseHolders > 1) {
+          sharedLeaseHolders -= 1;
+          released = true;
+          return;
+        }
+        const lease = sharedLease;
+        if (lease) store.releaseAnalyticsWriterLease(lease);
+        sharedLease = undefined;
+        sharedLeaseHolders = 0;
         released = true;
-        store.releaseAnalyticsWriterLease(lease);
       };
     },
     acquireStartup: () => {
+      // Startup remains a separate durable bridge: while admission is fenced,
+      // the store's successor checks—not the normal shared row—authorize it.
       const state = store.getAnalyticsWriterAdmissionState(normalizedIdentity.workspaceId);
       let successor = false;
       const followsReconciledOpenEpoch = state.state === 'open' && state.fenceEpoch !== expectedFenceEpoch;
@@ -445,12 +481,7 @@ export function createSessionLifecycleWriterAdmission(
           return store.acquireAnalyticsWriterStartupLease(normalizedIdentity, now());
         })();
       if (successor || followsReconciledOpenEpoch) successorStartupAdmitted = true;
-      let released = false;
-      return () => {
-        if (released) return;
-        released = true;
-        store.releaseAnalyticsWriterLease(lease);
-      };
+      return releaseStandaloneLease(lease);
     },
   };
 }
@@ -1012,6 +1043,54 @@ export class SessionLifecycleStore {
       .get(hostInstanceId) as AnalyticsHostRow);
   }
 
+  /** Retire a nonterminal host only after an external process census proves its
+   * process and writer children have exited. Crash-left `registered` rows are
+   * recoverable under the same evidence as an orderly `stopping` row. */
+  recoverAnalyticsHostAfterProcessExit(
+    identity: AnalyticsWriterIdentity,
+    nowMs: Int64Value,
+  ): AnalyticsHostRecord {
+    const normalizedIdentity = requireWriterIdentity(identity, 'Analytics stale host identity');
+    const encodedNow = encodeTimestamp(nowMs, 'nowMs');
+    return this.database.transaction(() => {
+      const row = this.database.prepare('SELECT * FROM analytics_hosts WHERE host_instance_id = ?')
+        .get(normalizedIdentity.hostInstanceId) as AnalyticsHostRow | undefined;
+      if (!row) throw new SessionLifecycleConflictError(`Analytics host ${normalizedIdentity.hostInstanceId} is not registered.`);
+      const host = toAnalyticsHost(row);
+      if (!sameWriterIdentity(writerIdentityFromHost(host), normalizedIdentity)) {
+        throw new SessionLifecycleConflictError(`Analytics host ${normalizedIdentity.hostInstanceId} identity is stale.`);
+      }
+      if (host.state === 'stopped') return host;
+      if (host.state !== 'registered' && host.state !== 'stopping' && host.state !== 'unsupported') {
+        throw new SessionLifecycleConflictError(`Analytics host ${normalizedIdentity.hostInstanceId} is not recoverable.`);
+      }
+      this.database.prepare(`
+        DELETE FROM analytics_writer_leases
+        WHERE host_instance_id = ? AND workspace_id = ? AND generation_id = ?
+          AND build_id = ? AND process_id = ?
+      `).run(
+        normalizedIdentity.hostInstanceId,
+        normalizedIdentity.workspaceId,
+        normalizedIdentity.generationId,
+        normalizedIdentity.buildId,
+        normalizedIdentity.processId,
+      );
+      const result = this.database.prepare(`
+        UPDATE analytics_hosts SET state = 'stopped', heartbeat_at_ms = ?, stopped_at_ms = ?, updated_at_ms = ?
+        WHERE host_instance_id = ? AND process_id = ? AND generation_id = ?
+          AND state IN ('registered', 'stopping', 'unsupported')
+      `).run(
+        encodedNow, encodedNow, encodedNow,
+        normalizedIdentity.hostInstanceId, normalizedIdentity.processId, normalizedIdentity.generationId,
+      );
+      if (Number(result.changes) !== 1) {
+        throw new SessionLifecycleConflictError(`Analytics host ${normalizedIdentity.hostInstanceId} state identity is stale.`);
+      }
+      return toAnalyticsHost(this.database.prepare('SELECT * FROM analytics_hosts WHERE host_instance_id = ?')
+        .get(normalizedIdentity.hostInstanceId) as AnalyticsHostRow);
+    })();
+  }
+
   getAnalyticsHost(hostInstanceId: string): AnalyticsHostRecord | undefined {
     requireHostField(hostInstanceId, 'hostInstanceId');
     const row = this.database.prepare('SELECT * FROM analytics_hosts WHERE host_instance_id = ?')
@@ -1457,26 +1536,11 @@ export class SessionLifecycleStore {
     }
     const acquiredAtMs = encodeTimestamp(nowMs, 'nowMs');
     return this.database.transaction(() => {
+      // Check the durable epoch before the host row so a predecessor that is
+      // already fenced/stale gets the typed fail-closed signal even after its
+      // host row has been terminalized. Capacity remains a normal conflict.
+      this.assertAnalyticsWriterAdmissionState(normalizedIdentity, expectedFenceEpoch);
       this.assertRegisteredWriterIdentity(normalizedIdentity);
-      const admission = this.getAnalyticsWriterAdmissionState(normalizedIdentity.workspaceId);
-      const fence = this.database.prepare('SELECT * FROM analytics_writer_fences WHERE workspace_id = ?')
-        .get(normalizedIdentity.workspaceId) as AnalyticsWriterFenceRow | undefined;
-      const expectedHosts = fence ? parseWriterHosts(fence.expected_hosts_json, fence.expected_hosts_sha256) : [];
-      const registered = this.getAnalyticsHost(normalizedIdentity.hostInstanceId);
-      const storageSuccessor = admission.state === 'fenced'
-        && fence?.purpose === 'storage-cutoff'
-        && fence.successor_capability !== null
-        && !expectedHosts.some((host) => host.hostInstanceId === normalizedIdentity.hostInstanceId)
-        && registered?.capabilities.includes(fence.successor_capability) === true;
-      if (admission.fenceEpoch !== expectedFenceEpoch || (admission.state !== 'open' && !storageSuccessor)) {
-        throw new SessionLifecycleConflictError(
-          `Analytics writer admission is ${admission.state} at epoch ${admission.fenceEpoch}; expected admitted epoch ${expectedFenceEpoch}.`,
-        );
-      }
-      if (fence && admission.state === 'open'
-        && !expectedHosts.some((host) => sameWriterIdentity(host, normalizedIdentity))) {
-        throw new SessionLifecycleConflictError('Analytics writer identity is outside the current admission census.');
-      }
       if (this.countActiveWriterLeases(normalizedIdentity.workspaceId) >= MAX_ANALYTICS_WRITER_LEASES) {
         throw new SessionLifecycleConflictError('Analytics writer admission lease capacity is exhausted.');
       }
@@ -1561,27 +1625,41 @@ export class SessionLifecycleStore {
       throw new Error('Analytics writer admission epoch is invalid.');
     }
     this.database.transaction(() => {
+      // Check the durable epoch before the host row so a predecessor that is
+      // already fenced/stale gets the typed fail-closed signal even after its
+      // host row has been terminalized. Capacity remains a normal conflict.
+      this.assertAnalyticsWriterAdmissionState(normalizedIdentity, expectedFenceEpoch);
       this.assertRegisteredWriterIdentity(normalizedIdentity);
-      const admission = this.getAnalyticsWriterAdmissionState(normalizedIdentity.workspaceId);
-      const fence = this.database.prepare('SELECT * FROM analytics_writer_fences WHERE workspace_id = ?')
-        .get(normalizedIdentity.workspaceId) as AnalyticsWriterFenceRow | undefined;
-      const expectedHosts = fence ? parseWriterHosts(fence.expected_hosts_json, fence.expected_hosts_sha256) : [];
-      const registered = this.getAnalyticsHost(normalizedIdentity.hostInstanceId);
-      const storageSuccessor = admission.state === 'fenced'
-        && fence?.purpose === 'storage-cutoff'
-        && fence.successor_capability !== null
-        && !expectedHosts.some((host) => host.hostInstanceId === normalizedIdentity.hostInstanceId)
-        && registered?.capabilities.includes(fence.successor_capability) === true;
-      if (admission.fenceEpoch !== expectedFenceEpoch || (admission.state !== 'open' && !storageSuccessor)) {
-        throw new SessionLifecycleConflictError(
-          `Analytics writer admission is ${admission.state} at epoch ${admission.fenceEpoch}; expected admitted epoch ${expectedFenceEpoch}.`,
-        );
-      }
-      if (fence && admission.state === 'open'
-        && !expectedHosts.some((host) => sameWriterIdentity(host, normalizedIdentity))) {
-        throw new SessionLifecycleConflictError('Analytics writer identity is outside the current admission census.');
-      }
     })();
+  }
+
+  /** Distinguish deliberate durable revocation from ordinary lifecycle
+   * conflicts. The latter include bounded lease capacity and malformed or
+   * otherwise inconsistent database evidence, and must remain unexpected to a
+   * SessionManager fence owner. */
+  private assertAnalyticsWriterAdmissionState(
+    identity: AnalyticsWriterIdentity,
+    expectedFenceEpoch: number,
+  ): void {
+    const admission = this.getAnalyticsWriterAdmissionState(identity.workspaceId);
+    const fence = this.database.prepare('SELECT * FROM analytics_writer_fences WHERE workspace_id = ?')
+      .get(identity.workspaceId) as AnalyticsWriterFenceRow | undefined;
+    const expectedHosts = fence ? parseWriterHosts(fence.expected_hosts_json, fence.expected_hosts_sha256) : [];
+    const registered = this.getAnalyticsHost(identity.hostInstanceId);
+    const storageSuccessor = admission.state === 'fenced'
+      && fence?.purpose === 'storage-cutoff'
+      && fence.successor_capability !== null
+      && !expectedHosts.some((host) => host.hostInstanceId === identity.hostInstanceId)
+      && registered?.capabilities.includes(fence.successor_capability) === true;
+    if (admission.fenceEpoch !== expectedFenceEpoch || (admission.state !== 'open' && !storageSuccessor)) {
+      throw new SessionManagerFenceAdmissionRevokedError(
+        `Analytics writer admission is ${admission.state} at epoch ${admission.fenceEpoch}; expected admitted epoch ${expectedFenceEpoch}.`,
+      );
+    }
+    if (fence && admission.state === 'open'
+      && !expectedHosts.some((host) => sameWriterIdentity(host, identity))) {
+      throw new SessionLifecycleConflictError('Analytics writer identity is outside the current admission census.');
+    }
   }
 
   releaseAnalyticsWriterLease(lease: AnalyticsWriterLeaseRecord): void {

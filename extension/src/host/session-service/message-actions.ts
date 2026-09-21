@@ -305,6 +305,7 @@ export class SessionMessageActions {
         incomingTranscript: payload.transcript,
         incomingTranscriptWindow: payload.transcriptWindow,
         localTranscript: this.getArchState().transcript.bySession[payload.sessionPath] ?? [],
+        localTranscriptWindow: currentWindow,
       });
 
       this.dispatchArch({

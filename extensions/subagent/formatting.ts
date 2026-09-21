@@ -22,7 +22,8 @@ export function formatUsageStats(
 		output: number;
 		cacheRead: number;
 		cacheWrite: number;
-		cost: number;
+		/** Provider-reported cost evidence; zero is a valid free-run segment. */
+		cost?: number;
 		contextTokens?: number;
 		turns?: number;
 	},
@@ -34,7 +35,7 @@ export function formatUsageStats(
 	if (usage.output) parts.push(`↓${formatTokens(usage.output)}`);
 	if (usage.cacheRead) parts.push(`R${formatTokens(usage.cacheRead)}`);
 	if (usage.cacheWrite) parts.push(`W${formatTokens(usage.cacheWrite)}`);
-	if (usage.cost) parts.push(`$${usage.cost.toFixed(4)}`);
+	if (usage.cost !== undefined) parts.push(`$${usage.cost.toFixed(4)}`);
 	if (usage.contextTokens && usage.contextTokens > 0) {
 		parts.push(`ctx:${formatTokens(usage.contextTokens)}`);
 	}

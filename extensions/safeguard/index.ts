@@ -169,6 +169,19 @@ export function isSafe(command: string, options: { cwd?: string } = {}): boolean
 	return analyzeBash(command, options.cwd ?? process.cwd()).action === "allow";
 }
 
+type SafeguardContext = Pick<ExtensionContext, "cwd" | "hasUI" | "ui">;
+
+/** Apply the same analysis and interactive confirmation used for bash tool calls. */
+export async function guardCommand(command: string, ctx: SafeguardContext): Promise<{ block: true; reason: string } | undefined> {
+	const safety = analyzeBash(command, ctx.cwd);
+	if (safety.action === "block") {
+		notify(ctx, `🛑 BLOCKED: ${safety.reason}`);
+		return { block: true, reason: `Safeguard: ${safety.reason}` };
+	}
+	if (safety.action === "prompt") return promptOrBlock(ctx, command, safety.reason ?? "Risky command");
+	return undefined;
+}
+
 export default function (pi: ExtensionAPI) {
 	pi.on("tool_call", async (event, ctx) => {
 		if (event.toolName === "bash") {
@@ -184,13 +197,7 @@ export default function (pi: ExtensionAPI) {
 }
 
 function handleBash(command: string, ctx: ExtensionContext) {
-	const safety = analyzeBash(command, ctx.cwd);
-	if (safety.action === "block") {
-		notify(ctx, `🛑 BLOCKED: ${safety.reason}`);
-		return { block: true, reason: `Safeguard: ${safety.reason}` };
-	}
-	if (safety.action === "prompt") return promptOrBlock(ctx, command, safety.reason ?? "Risky command");
-	return undefined;
+	return guardCommand(command, ctx);
 }
 
 function handleWritePath(targetPath: string, ctx: ExtensionContext) {
@@ -209,7 +216,7 @@ function handleWritePath(targetPath: string, ctx: ExtensionContext) {
 	return undefined;
 }
 
-async function promptOrBlock(ctx: ExtensionContext, target: string, reason: string): Promise<{ block: true; reason: string } | undefined> {
+async function promptOrBlock(ctx: SafeguardContext, target: string, reason: string): Promise<{ block: true; reason: string } | undefined> {
 	if (!ctx.hasUI) return { block: true, reason: `Safeguard: ${reason} (no UI for confirmation)` };
 	const truncated = target.length > 120 ? `${target.slice(0, 120)}…` : target;
 	try {
@@ -220,6 +227,6 @@ async function promptOrBlock(ctx: ExtensionContext, target: string, reason: stri
 	}
 }
 
-function notify(ctx: ExtensionContext, message: string): void {
+function notify(ctx: Pick<ExtensionContext, "hasUI" | "ui">, message: string): void {
 	if (ctx.hasUI) ctx.ui.notify(message, "warning");
 }

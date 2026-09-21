@@ -4,8 +4,8 @@ import * as path from 'node:path';
 
 import { MAX_DIFF_PATHS, sessionChangesSchema } from './src/types.js';
 import type { SessionChangesParams, FileChange } from './src/types.js';
-import { parseSessionFileChanges } from './src/session-jsonl.js';
-import type { ParsedSession } from './src/session-jsonl.js';
+import { parseSessionEntriesChanges, parseSessionFileChanges } from './src/session-jsonl.js';
+import type { ParsedSession, SessionEntryLike } from './src/session-jsonl.js';
 import { renderList, renderDiffs } from './src/render.js';
 import { computeFileDiff } from './src/diff.js';
 import type { DiffOutput, DiffKind } from './src/diff.js';
@@ -25,14 +25,19 @@ function isDisabledByToggle(): boolean {
   }
 }
 
-/** Minimal context shape the tool needs: the calling session's file path + cwd.
- *  (ExtensionContext exposes a ReadonlySessionManager with both.) */
+/** Minimal context shape the tool needs. The runtime API's getEntries()
+ *  returns the current session entries (excluding its header); getCwd() supplies
+ *  the cwd needed to resolve relative tool inputs. Optional members preserve the
+ *  persisted-JSONL fallback used by lightweight test/integration contexts. */
 const DIFF_CONCURRENCY = 4;
 
 interface ToolExecuteCtx {
-  sessionManager: {
-    getSessionFile(): string | undefined;
+  cwd?: string;
+  sessionManager?: {
+    getEntries?(): SessionEntryLike[];
     getCwd?(): string;
+    getHeader?(): { cwd?: string } | null;
+    getSessionFile?(): string | undefined;
   };
 }
 
@@ -53,6 +58,19 @@ function err(message: string) {
     details: { error: message },
     isError: true as const,
   };
+}
+
+/** Prefer the live runtime entry list for default self-review. SessionManager's
+ *  getEntries() is intentionally used instead of getBranch()/buildContextEntries
+ *  so the existing session-wide attribution semantics do not change. */
+function parseRuntimeSessionChanges(ctx: ToolExecuteCtx): ParsedSession | undefined {
+  const manager = ctx?.sessionManager;
+  if (typeof manager?.getEntries !== 'function') return undefined;
+
+  const entries = manager.getEntries();
+  if (!Array.isArray(entries)) return undefined;
+  const cwd = manager.getCwd?.() ?? manager.getHeader?.()?.cwd ?? ctx?.cwd;
+  return parseSessionEntriesChanges(entries, undefined, cwd);
 }
 
 /** Resolve a (possibly relative) manifest path against the session cwd. Falls
@@ -154,6 +172,7 @@ export default function (pi: ExtensionAPI) {
     description: 'Review files changed by the current or specified Pi session after editing, using a session-scoped manifest and focused diffs before workspace-wide Git checks; includes subagent edits.',
     promptSnippet: 'Review this session\'s changed-file manifest and focused diffs after file edits.',
     promptGuidelines: [
+      'For the current runtime session, omit sessionPath so session_changes reads live entries (including in-memory sessions); pass sessionPath only to review another persisted session.',
       'After editing files, use session_changes list before claiming or reviewing what this session changed; then use session_changes diff only for relevant manifest paths.',
       'Use git status/diff separately for overall worktree state and integration checks. For files already dirty at session start, session_changes diff may include pre-existing hunks from its Git baseline; do not attribute those hunks to the session without corroboration.',
       'Read files when session_changes reports generated or untracked files whose focused diff is incomplete.',
@@ -175,14 +194,24 @@ export default function (pi: ExtensionAPI) {
         return err(`action must be one of list | diff (got ${String(p.action)}).`);
       }
 
-      const sessionPath = p.sessionPath || ctx?.sessionManager?.getSessionFile();
-      if (!sessionPath) {
-        return err('no sessionPath provided and no active session path available — pass sessionPath (a session JSONL file path).');
-      }
+      const requestedSessionPath = p.sessionPath || undefined;
 
-      let parsed: ParsedSession;
+      let parsed: ParsedSession | undefined;
       try {
-        parsed = parseSessionFileChanges(sessionPath);
+        // An explicit path always selects that persisted session, even when a
+        // live runtime session is also available. Defaults use current runtime
+        // entries first so in-memory sessions never require a JSONL file.
+        parsed = requestedSessionPath
+          ? parseSessionFileChanges(requestedSessionPath)
+          : parseRuntimeSessionChanges(ctx);
+
+        if (!parsed) {
+          const sessionPath = ctx?.sessionManager?.getSessionFile?.();
+          if (!sessionPath) {
+            return err('no sessionPath provided and no active runtime session entries or session path available — pass sessionPath (a session JSONL file path).');
+          }
+          parsed = parseSessionFileChanges(sessionPath);
+        }
       } catch (e) {
         return err((e as Error).message);
       }

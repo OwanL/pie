@@ -1,15 +1,4 @@
-# Keep the cross-platform source tree consistently LF by default. Explicit
-# Windows-only batch (.bat) overrides remain below.
+# Keep the source tree consistently LF by default. Windows batch files are the
+# only exception and must remain CRLF regardless of local core.autocrlf settings.
 * text=auto eol=lf
-
-# Force LF line endings on shell scripts so they run on Linux/macOS even when
-# checked out on Windows with core.autocrlf=true (otherwise CRLF breaks bash:
-#   $'\r': command not found  /  syntax error near unexpected token).
-*.sh     text eol=lf
-install.sh text eol=lf
-
-# Batch scripts are only ever run on Windows by cmd.exe. Normalize to CRLF so
-# they parse reliably (labels/goto/`set /p` are happiest with CRLF) regardless
-# of how they were committed or core.autocrlf.
-*.bat    text eol=crlf
-install.bat text eol=crlf
+*.bat text eol=crlf

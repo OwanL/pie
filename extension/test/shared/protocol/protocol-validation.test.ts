@@ -487,7 +487,8 @@ test('validateWebviewToHostMessage validates setPrefs patches and rejects unknow
   );
   assert.equal(
     validateWebviewToHostMessage({ type: 'setPrefs', prefs: { uiMessageWidth: 80 } }).ok,
-    true,
+    false,
+    'the retired uiMessageWidth preference must not cross the renderer validation boundary',
   );
   assert.equal(
     validateWebviewToHostMessage({ type: 'setPrefs', prefs: { uiBackground: '#0d1117' } }).ok,
@@ -513,17 +514,6 @@ test('validateWebviewToHostMessage validates setPrefs patches and rejects unknow
     validateWebviewToHostMessage({ type: 'setPrefs', prefs: { uiDensity: 'invalid' } }).ok,
     false,
     'uiDensity must be one of compact/comfortable/spacious',
-  );
-  // ── Widened slider bounds (see ChatPrefs numericRanges) ─────────────
-  assert.equal(
-    validateWebviewToHostMessage({ type: 'setPrefs', prefs: { uiMessageWidth: 40 } }).ok,
-    true,
-    'uiMessageWidth at the 40 floor should validate',
-  );
-  assert.equal(
-    validateWebviewToHostMessage({ type: 'setPrefs', prefs: { uiMessageWidth: 30 } }).ok,
-    false,
-    'uiMessageWidth below the 40 floor should be rejected',
   );
   assert.equal(
     validateWebviewToHostMessage({ type: 'setPrefs', prefs: { uiCornerRadius: -1 } }).ok,
@@ -684,6 +674,7 @@ test('validateWebviewToHostMessage accepts valid provider concurrency preference
             queueWaitSeconds: 45,
             headerWaitSeconds: 120,
           },
+          unlimited: { maxConcurrentRequests: 0 },
         },
       },
     }).ok,
@@ -694,7 +685,8 @@ test('validateWebviewToHostMessage accepts valid provider concurrency preference
 
 test('validateWebviewToHostMessage rejects invalid provider concurrency preference patches', () => {
   const invalidOverrides = [
-    { maxConcurrentRequests: 0 },
+    { maxConcurrentRequests: -1 },
+    { maxConcurrentRequests: 129 },
     { maxConcurrentRequests: 1.5 },
     { afterburnSeconds: -1 },
     { afterburnSeconds: Number.NaN },
