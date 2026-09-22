@@ -10,11 +10,13 @@ import { findDurableDetail } from '../shared/lazy-details';
 import { LIVE_PIPELINE_LIMITS } from '../shared/live-pipeline-protocol';
 import type {
   DetailResult,
+  InitialContextEstimate,
   LazyDetailRef,
   ModelInfo,
   ModelSettings,
   SessionOpenedPayload,
   SessionSummary,
+  SystemPromptEntry,
   ThinkingLevel,
   TranscriptMode,
   TranscriptPageDirection,
@@ -49,6 +51,7 @@ import {
 import { SessionCatalog } from './session-catalog';
 import { backendSessionPathKey } from './session-directory';
 import { recordWriteOwnership } from './write-ownership-trace';
+import { appendAgentCreatedSessionProvenance } from './session-provenance';
 import { BackendError } from './server-io';
 import type { SessionOwnershipAdmission } from './session-ownership-authority';
 import type { SdkModule, SdkSessionManager } from './sdk';
@@ -403,7 +406,9 @@ export interface ColdSessionOpenOptions {
   operationAttempt?: number;
   transcript?: TranscriptMode;
   transport?: SessionSnapshotTransport;
+  systemPrompts?: readonly SystemPromptEntry[];
   systemPromptDisabledEntries?: readonly string[];
+  initialContextEstimate?: InitialContextEstimate;
 }
 
 /** Canonical per-session configuration written while no execution runtime owns
@@ -738,12 +743,13 @@ export class ColdSessionStore {
   /** The coordinator patch barrier makes SessionManager.create itself the
    * atomic durable-header boundary. Do not fabricate or reopen the file here:
    * the returned manager is the exact one-use handoff manager. */
-  create(options: { cwd?: string; sessionDir?: string } = {}): ColdSessionManagerHandle {
+  create(options: { cwd?: string; sessionDir?: string; agentCreated?: boolean } = {}): ColdSessionManagerHandle {
     return this.withWriterAdmission(() => {
       const manager = this.sdk.SessionManager.create(
         options.cwd || this.startupCwd,
         options.sessionDir ?? this.sessionDir,
       );
+      if (options.agentCreated) appendAgentCreatedSessionProvenance(manager);
       this.refreshCatalog();
       return this.createHandle(manager);
     });
@@ -1133,7 +1139,9 @@ export class ColdSessionStore {
       operationAttempt: options.operationAttempt,
       transcript: options.transcript,
       transport: options.transport,
+      systemPrompts: options.systemPrompts,
       systemPromptDisabledEntries: options.systemPromptDisabledEntries,
+      initialContextEstimate: options.initialContextEstimate,
     });
     this.stampResult(payload, [stamp]);
     return payload;

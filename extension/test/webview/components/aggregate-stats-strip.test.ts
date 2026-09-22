@@ -12,7 +12,6 @@ import {
   aggregateStatsSignature,
   todayCostTooltipNode,
   weekCostTooltipNode,
-  throughputTooltipNode,
   userInputTooltipNode,
   workTooltipNode,
 } from '../../../src/webview/panel/aggregate-stats-strip';
@@ -83,26 +82,6 @@ test('deferred trigger menu renders command predicates and bounds diagnostics', 
   assert.ok(html.length < 5_000, 'command diagnostics should not dump unbounded output');
 });
 
-function renderRate(
-  runningSessionCount: number,
-  rollingRate = runningSessionCount > 0 ? 25 : 0,
-  activeRate = 0,
-): string {
-  return renderToString(h(AggregateStatsStrip, {
-    stats: {
-      ...EMPTY_AGGREGATE_STATS,
-      ready: true,
-      todayTokensPerSecond: 50,
-      tokensPerSecond: 42,
-      activeGenerationTokensPerSecond: activeRate,
-      liveTokensPerSecond: rollingRate,
-      runningSessionCount,
-    },
-    deferredTriggers: [],
-    onOpenDeferredMenu: () => {},
-  }));
-}
-
 test('aggregate stats strip reads the work segment as N working · M open', () => {
   const html = renderToString(h(AggregateStatsStrip, {
     stats: { ...EMPTY_AGGREGATE_STATS, ready: true, runningSessionCount: 2, openTabCount: 5 },
@@ -157,8 +136,6 @@ test('aggregate informational rich-tooltip triggers are keyboard-focusable and l
       weekCost: 4.5,
       todayInputTokens: 120,
       todayOutputTokens: 340,
-      activeGenerationTokensPerSecond: 12,
-      liveTokensPerSecond: 10,
       runningSessionCount: 1,
       openTabCount: 2,
       lastRun: {
@@ -187,12 +164,11 @@ test('aggregate informational rich-tooltip triggers are keyboard-focusable and l
 
   const segmentTags = [...html.matchAll(/<span[^>]*class="[^"]*aggregate-strip-seg[^"]*"[^>]*>/g)].map((match) => match[0]);
   const focusableSegments = segmentTags.filter((tag) => tag.includes('tabindex="0"') && tag.includes('aria-label="'));
-  assert.equal(focusableSegments.length, 8, 'today, week, tokens, throughput, last, provider gate, user input, and work are focusable');
+  assert.equal(focusableSegments.length, 7, 'today, week, tokens, last, provider gate, user input, and work are focusable');
   for (const tag of focusableSegments) assert.ok(tag.length > 80, 'each segment has a meaningful label');
   assert.match(html, /Today's estimated token cost/);
   assert.match(html, /Estimated token cost this week/);
   assert.match(html, /Today's tokens:/);
-  assert.match(html, /Throughput:/);
   assert.match(html, /Latest completed run across all sessions/);
   assert.match(html, /Provider concurrency:/);
   assert.match(html, /Today's adjusted user input: 0 characters, fully tracked\. Focus for Today and 7-day character-volume details\./);
@@ -239,55 +215,44 @@ test('daily and weekly cost tooltips render canonical graphs and token counts', 
   assert.match(weekHtml, /model-a/);
 });
 
-test('aggregate stats strip labels calendar-day cost as today', () => {
-  const html = renderRate(0);
-  assert.match(html, /today/);
-});
+test('aggregate strip keeps cost and token segments clean while provenance detail stays accessible', () => {
+  const stats = {
+    ...EMPTY_AGGREGATE_STATS,
+    ready: true,
+    todayCost: 1.25,
+    weekCost: 4.5,
+    todayInputTokens: 1_200,
+    todayOutputTokens: 3_400,
+    billableAccounting: {
+      invocationCount: 10,
+      todayUnknownInvocationCount: 1,
+      todayUnpricedInvocationCount: 2,
+      todayInstrumentationGapInvocationCount: 1,
+      weekUnknownInvocationCount: 1,
+      weekUnpricedInvocationCount: 2,
+      weekInstrumentationGapInvocationCount: 1,
+      unknownInvocationCount: 1,
+      unpricedInvocationCount: 2,
+      instrumentationGapInvocationCount: 1,
+    },
+  };
+  const html = renderToString(h(AggregateStatsStrip, {
+    stats,
+    deferredTriggers: [],
+    onOpenDeferredMenu: () => {},
+  }));
 
-test('aggregate stats strip does not present historical throughput as live while idle', () => {
-  const html = renderRate(0);
-  assert.match(html, /aggregate-strip-rate[^>]*>—<\/span><span class="aggregate-strip-unit"> tok\/s/);
-  assert.doesNotMatch(html, />50<\/span><span class="aggregate-strip-unit"> tok\/s/);
-});
+  // Weak visible suffixes are gone from the strip's cost and token segments.
+  assert.doesNotMatch(html, /\*[\s<]/);
+  assert.doesNotMatch(html, /~[\s<]/);
+  // The detail stays in the accessible labels — unknown is never a silent zero.
+  assert.match(html, /Estimated token cost this week \$4\.50; incomplete billing provenance/);
+  assert.match(html, /known subtotal with incomplete invocation usage/);
 
-test('aggregate stats strip prefers active-generation speed while generating', () => {
-  const html = renderRate(1, 25, 60);
-  assert.match(html, />60<\/span><span class="aggregate-strip-unit"> tok\/s/);
-  assert.match(html, /Active-generation speed 60 tokens per second/);
-});
-
-test('aggregate stats strip presents the rolling throughput without a window label while running', () => {
-  const html = renderRate(1);
-  assert.doesNotMatch(html, />30s<\/span>/);
-  assert.match(html, />25<\/span><span class="aggregate-strip-unit"> tok\/s/);
-});
-
-test('aggregate stats strip says measuring instead of showing zero for an unmeasured run', () => {
-  const html = renderRate(1, 0, 0);
-  assert.match(html, />…<\/span><span class="aggregate-strip-unit"> tok\/s/);
-  assert.match(html, /measuring or paused/i);
-});
-
-test('aggregate stats strip shows the corrected rolling fallback after a short burst', () => {
-  // After a between-ticks burst settles, active-generation speed is 0 (nothing
-  // is observed streaming) while the corrected rolling 30s rate carries the
-  // burst. The strip must show that rolling fallback, not a measuring dash,
-  // and must still switch back to active speed the moment generation resumes.
-  const afterBurst = renderRate(1, 40, 0);
-  assert.match(afterBurst, />40<\/span><span class="aggregate-strip-unit"> tok\/s/);
-  assert.doesNotMatch(afterBurst, />…<\/span>/);
-  assert.doesNotMatch(afterBurst, />—<\/span><span class="aggregate-strip-unit"/);
-
-  // While output is observed again, active-generation speed stays primary.
-  const generating = renderRate(1, 40, 60);
-  assert.match(generating, />60<\/span><span class="aggregate-strip-unit"> tok\/s/);
-  assert.doesNotMatch(generating, />40<\/span><span class="aggregate-strip-unit"> tok\/s/);
-});
-
-test('aggregate stats strip retains recent throughput without a window label after the run becomes idle', () => {
-  const html = renderRate(0, 12);
-  assert.doesNotMatch(html, />30s<\/span>/);
-  assert.match(html, />12<\/span><span class="aggregate-strip-unit"> tok\/s/);
+  const todayTooltip = renderToString(todayCostTooltipNode(stats));
+  assert.match(todayTooltip, /Incomplete billing provenance: 1 unknown and 2 unpriced invocation\(s\) today/);
+  const weekTooltip = renderToString(weekCostTooltipNode(stats));
+  assert.match(weekTooltip, /Incomplete billing provenance: 1 unknown and 2 unpriced invocation\(s\)/);
 });
 
 test('provider legend entries are focusable and expose provider-qualified nested model tooltips', () => {
@@ -303,36 +268,6 @@ test('provider legend entries are focusable and expose provider-qualified nested
   assert.match(html, /aria-describedby="pie-provider-legend-detail-/);
   assert.match(html, /shared-model/);
   assert.match(html, /\(copilot\)/);
-});
-
-test('throughput provider model details retain every sampled model and label their rate scope', () => {
-  const html = renderToString(throughputTooltipNode({
-    ...EMPTY_AGGREGATE_STATS,
-    ready: true,
-    activeGenerationTokensPerSecond: 12,
-    todayTokensPerSecondByProvider: [{
-      provider: 'provider',
-      tokensPerSecond: 15,
-      outputTokens: 900,
-      generationDurationMs: 60_000,
-      sampleCount: 2,
-    }],
-    todayThroughputSeries: [
-      {
-        ms: 1,
-        byProvider: [{ key: 'provider', value: 10 }],
-        byModel: [{ key: 'model-a', provider: 'provider', model: 'model-a', value: 10 }],
-      },
-      {
-        ms: 2,
-        byProvider: [{ key: 'provider', value: 20 }],
-        byModel: [{ key: 'model-b', provider: 'provider', model: 'model-b', value: 20 }],
-      },
-    ],
-  }, 'active'));
-  assert.match(html, /model-a/);
-  assert.match(html, /model-b/);
-  assert.match(html, /Model values: latest sampled rate/);
 });
 
 test('aggregate memo signature includes interior redistribution and new token/week series', () => {
@@ -363,10 +298,6 @@ test('aggregate memo signature includes interior redistribution and new token/we
   assert.notEqual(
     aggregateStatsSignature(base),
     aggregateStatsSignature({ ...base, weekCostSeries: base.todayCostSeries }),
-  );
-  assert.notEqual(
-    aggregateStatsSignature(base),
-    aggregateStatsSignature({ ...base, activeGenerationTokensPerSecond: 99 }),
   );
   const lastRun = {
     cost: 1, durationMs: 2, startedAt: 's', endedAt: 'e', modelId: 'm', provider: 'p',

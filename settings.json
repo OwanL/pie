@@ -1,6 +1,6 @@
 {
-  "defaultModel": "gpt-5.6-luna",
-  "defaultThinkingLevel": "xhigh",
+  "defaultModel": "gpt-6-astra",
+  "defaultThinkingLevel": "low",
   "defaultProvider": "openai-codex",
   "retry": {
     "enabled": true,

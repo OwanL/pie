@@ -41,24 +41,6 @@ export interface AggregateProviderCost {
   cacheWriteTokens: number;
 }
 
-/**
- * Per-provider output-throughput rollup. The rate is a **generation-time-
- * weighted mean** across completed turn samples:
- *
- *   tokensPerSecond = Σ outputTokens / (Σ generationDurationMs / 1000)
- *
- * so a long slow turn correctly dominates the average over a short fast one
- * (rather than a naive mean-of-per-turn-rates that over-weights fast bursts).
- */
-export interface AggregateProviderThroughput {
-  provider: string;
-  tokensPerSecond: number;
-  outputTokens: number;
-  generationDurationMs: number;
-  /** Number of completed turn samples that fed this provider's rate. */
-  sampleCount: number;
-}
-
 /** One day's per-provider cost (local `YYYY-MM-DD`). */
 export interface AggregateDailyCost {
   /** Local calendar date (`YYYY-MM-DD`); resets at local midnight. */
@@ -196,8 +178,7 @@ export interface AggregateModelSeriesSegment extends AggregateSeriesSegment {
  *  - **Cumulative series** (cost, tokens): `byProvider`/`byModel` are cumulative
  *    up to and including this point; the chart uses non-overshooting monotone
  *    curves between the exact samples.
- *  - **Rate series** (throughput): `byProvider`/`byModel` are the bucket's
- *    per-provider/per-model rate (tok/s); the chart draws per-bucket bands. */
+ */
 export interface AggregateSeriesPoint {
   /** ms epoch the point is anchored at (turn-end time, or bucket start). */
   ms: number;
@@ -342,10 +323,6 @@ export interface AggregateStats {
   todayCost: number;
   /** Today's spend per provider, sorted descending by cost. */
   todayCostByProvider: AggregateProviderCost[];
-  /** Mean output tok/s across completed turns whose sample ended today (local). */
-  todayTokensPerSecond: number;
-  /** Per-provider throughput for today, sorted descending by output tokens. */
-  todayTokensPerSecondByProvider: AggregateProviderThroughput[];
   /** Number of runs that landed (finalized/updated/started) today. */
   todayRunCount: number;
   /** Cumulative input tokens across today's runs. */
@@ -366,9 +343,6 @@ export interface AggregateStats {
   /** Intraday cumulative output-token series for today (local), one point per
    * turn. Stacked by provider; provider-qualified models on hover. */
   todayTokenSeries: AggregateSeriesPoint[];
-  /** Intraday per-hour throughput series for today (local), one point per hour
-   *  with data. Stacked by provider (tok/s); per-model on hover. */
-  todayThroughputSeries: AggregateSeriesPoint[];
   /** Today's productivity summary (see {@link AggregateProductivityStats}). */
   todayProductivity: AggregateProductivityStats;
 
@@ -394,17 +368,6 @@ export interface AggregateStats {
   dailyWorkTrend: AggregateDailyWorkTrend[];
 
   // ── Current: live / open ──
-  /** Sum of the primary per-session active-generation speeds. This uses each
-   * running session's generation-time window and excludes TTFT, tools, and
-   * between-turn waits. */
-  activeGenerationTokensPerSecond: number;
-  /**
-   * Aggregate output rate over the trailing 30 seconds of wall time. Includes
-   * every session and decays through tool calls, idle gaps, and run completion.
-   * This is the end-to-end/experienced metric, retained separately from the
-   * active-generation speed above.
-   */
-  liveTokensPerSecond: number;
   /** Number of currently-running sessions. */
   runningSessionCount: number;
   /** Number of currently-open session tabs (current UI state, not analytics). */
@@ -421,10 +384,6 @@ export interface AggregateStats {
   totalCost: number;
   /** Cost per provider (all runs), sorted descending by cost. */
   costByProvider: AggregateProviderCost[];
-  /** Generation-time-weighted mean output tok/s across ALL completed turns. */
-  tokensPerSecond: number;
-  /** Per-provider throughput (all runs), sorted descending by output tokens. */
-  tokensPerSecondByProvider: AggregateProviderThroughput[];
   totalInputTokens: number;
   totalOutputTokens: number;
   totalCacheReadTokens: number;
@@ -459,8 +418,6 @@ export interface AggregateStats {
 export const EMPTY_AGGREGATE_STATS: AggregateStats = {
   todayCost: 0,
   todayCostByProvider: [],
-  todayTokensPerSecond: 0,
-  todayTokensPerSecondByProvider: [],
   todayRunCount: 0,
   todayInputTokens: 0,
   todayOutputTokens: 0,
@@ -469,7 +426,6 @@ export const EMPTY_AGGREGATE_STATS: AggregateStats = {
   todayCostSeries: [],
   todayInputTokenSeries: [],
   todayTokenSeries: [],
-  todayThroughputSeries: [],
   todayProductivity: EMPTY_PRODUCTIVITY_STATS,
   weekCost: 0,
   weekCostByProvider: [],
@@ -479,16 +435,12 @@ export const EMPTY_AGGREGATE_STATS: AggregateStats = {
   dailyCost: [],
   dailyRunCount: [],
   dailyWorkTrend: [],
-  activeGenerationTokensPerSecond: 0,
-  liveTokensPerSecond: 0,
   runningSessionCount: 0,
   openTabCount: 0,
   subagentLifecycle: EMPTY_SUBAGENT_LIFECYCLE_STATS,
   providerGate: EMPTY_PROVIDER_GATE_STATS,
   totalCost: 0,
   costByProvider: [],
-  tokensPerSecond: 0,
-  tokensPerSecondByProvider: [],
   totalInputTokens: 0,
   totalOutputTokens: 0,
   totalCacheReadTokens: 0,

@@ -13,6 +13,10 @@ import { normalizeThinkingLevel, resolveModelInputKinds } from './message-inputs
 import type { SdkCatalogModel, SdkModelRegistry, SdkModule, SdkSessionInfo } from './sdk';
 import type { SessionContext } from './server-types';
 import { findSubagentProfile, loadSubagentProfiles } from './subagent-profiles';
+import {
+  AGENT_CREATED_SESSION_CUSTOM_TYPE,
+  isAgentCreatedSession,
+} from './session-provenance';
 import { summarizeSession, type SessionEntryLike } from './transcript';
 import { backendTrace } from './log';
 import {
@@ -49,6 +53,7 @@ interface SessionMetadataAccumulator {
   cwd: string;
   headerTimestamp?: string;
   sessionId?: string;
+  agentCreated: boolean;
   explicitName: string | null;
   derivedName: string;
   derivedIsPlaceholder: boolean;
@@ -88,6 +93,7 @@ function emptyMetadataAccumulator(): SessionMetadataAccumulator {
     headerSeen: false,
     invalidRoot: false,
     cwd: '',
+    agentCreated: false,
     explicitName: null,
     derivedName: NEW_SESSION_NAME,
     derivedIsPlaceholder: true,
@@ -126,6 +132,16 @@ function applyMetadataLine(line: Buffer, accumulator: SessionMetadataAccumulator
     return;
   }
   if (accumulator.invalidRoot) return;
+
+  if (entry.type === 'custom' && entry.customType === AGENT_CREATED_SESSION_CUSTOM_TYPE) {
+    const data = entry.data;
+    if (accumulator.sessionId && data && typeof data === 'object' && !Array.isArray(data)
+      && (data as Record<string, unknown>).version === 1
+      && (data as Record<string, unknown>).sessionId === accumulator.sessionId) {
+      accumulator.agentCreated = true;
+    }
+    return;
+  }
 
   if (entry.type === 'session_info') {
     accumulator.explicitName = typeof entry.name === 'string' && entry.name.trim()
@@ -233,6 +249,7 @@ function buildIndexedSummary(
     modifiedAt: new Date(modifiedMs).toISOString(),
     messageCount: accumulator.messageCount,
     ...(accumulator.sessionId ? { sessionId: accumulator.sessionId } : {}),
+    ...(accumulator.agentCreated ? { agentCreated: true } : {}),
   };
 }
 
@@ -465,6 +482,7 @@ export function buildCurrentSummary(
     provider: resolveActiveModel(context).provider,
     thinkingLevel: normalizeThinkingLevel(context.session.thinkingLevel),
     ...(sessionId ? { sessionId } : {}),
+    ...(isAgentCreatedSession(context.session.sessionManager) ? { agentCreated: true } : {}),
   };
   return summary;
 }

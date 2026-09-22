@@ -76,6 +76,9 @@ export interface RunObserver {
   /** Authoritative backend execution settlement. Registry mutation commits
    * (including message-start acknowledgement) do not close this boundary. */
   onAgentSettled?(payload: AgentSettledPayload): void;
+  /** A session.opened publication supplies the authoritative root identity and
+   * gives canonical cold-session hydration a post-reducer lifecycle boundary. */
+  onSessionOpened?(sessionPath: string, sessionId?: string): void;
   /** Transcript-derived usage is migration/rebuild input only. */
   onSessionUsageSnapshot(
     sessionPath: string,
@@ -216,6 +219,7 @@ export const NOOP_RUN_OBSERVER: RunObserver = {
   onAssistantTurnEnded: () => undefined,
   onAssistantTerminalWatermark: () => undefined,
   onAgentSettled: () => undefined,
+  onSessionOpened: () => undefined,
   onSessionUsageSnapshot: () => undefined,
   onBranchObserved: () => undefined,
   onSessionDuplicated: () => undefined,

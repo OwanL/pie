@@ -25,8 +25,8 @@ import {
  * timings — that a 200ms measurement tick's BPE work is bounded by the sampling
  * window (a few KB of tail sample) rather than proportional to the transcript
  * size, while the estimated-rate semantics are preserved: growth is still
- * counted, terminal estimates stay stable, authoritative provider usage is
- * never estimated on top, and parallel/nested subagent attribution is intact.
+ * counted, terminal caches stay stable, authoritative provider usage is never
+ * estimated on top, and parallel/nested subagent attribution is intact.
  */
 
 const BASE_NOW = 100_000;
@@ -117,24 +117,21 @@ test('stable terminal output: repeated ticks reuse the cached estimate (no re-BP
     ...streamingMessage({ id: 't1', markdown: largeProse(24) }),
     status: 'completed',
     durationMs: 10_000,
-    // No usage: the end-to-end rate and the aggregate terminal estimate both
-    // tokenize this message — the exact per-tick cost being bounded here.
+    // No usage: the end-to-end rate tokenizes this message — the exact
+    // per-tick cost being bounded here.
   };
 
   resetTokenRateWorkChars();
   const first = tickTokenRate(acc, [terminal], BASE_NOW + 200);
   const firstWork = readTokenRateWorkChars();
-  const estimate = first.terminalOutputTokensEstimate;
   const endToEnd = first.endToEndRate;
 
   resetTokenRateWorkChars();
   const second = tickTokenRate(acc, [terminal], BASE_NOW + 400);
   const secondWork = readTokenRateWorkChars();
 
-  assert.ok(estimate !== undefined && estimate > 0, 'no-usage terminal exposes its conservative estimate');
   assert.ok(firstWork < WORK_BOUND_CHARS, `first tick tokenized ${firstWork} chars`);
-  assert.ok(secondWork < WORK_BOUND_CHARS, `stable-terminal tick tokenized ${secondWork} chars — must reuse the cached terminal estimate`);
-  assert.equal(second.terminalOutputTokensEstimate, estimate, 'terminal estimate is stable across ticks');
+  assert.ok(secondWork < WORK_BOUND_CHARS, `stable-terminal tick tokenized ${secondWork} chars — must reuse the terminal cache`);
   assert.equal(second.endToEndRate, endToEnd, 'estimated end-to-end rate is stable across ticks');
 });
 
@@ -234,7 +231,6 @@ test('authoritative usage is never re-estimated: a usage-bearing terminal tokeni
   const state = tickTokenRate(acc, [terminal], BASE_NOW + 200);
   const work = readTokenRateWorkChars();
 
-  assert.equal(state.terminalOutputTokensEstimate, undefined, 'provider usage is authoritative — never estimated on top');
   assert.equal(state.endToEndRate, 10);
   assert.ok(work < WORK_BOUND_CHARS, `usage-bearing terminal must not tokenize its ${terminal.markdown!.length} chars of markdown (tokenized ${work})`);
 });
@@ -274,12 +270,12 @@ test('same-length corrected terminal text is re-estimated (terminal cache not ke
   });
 
   const first = tickTokenRate(acc, [terminal(before)], BASE_NOW + 200);
-  assert.equal(first.terminalOutputTokensEstimate, estimateTextTokens(before));
+  assert.equal(first.endToEndRate, estimateTextTokens(before) / 10);
 
   const second = tickTokenRate(acc, [terminal(after)], BASE_NOW + 400);
   assert.equal(
-    second.terminalOutputTokensEstimate, estimateTextTokens(after),
-    'a corrected terminal must expose its corrected estimate, never the stale length-keyed value',
+    second.endToEndRate, estimateTextTokens(after) / 10,
+    'a corrected terminal must use its corrected cached estimate, never the stale length-keyed value',
   );
 });
 

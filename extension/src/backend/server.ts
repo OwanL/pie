@@ -14,11 +14,7 @@ import type { AnalyticsBackendDescriptor } from '../../../shared/analytics/activ
 import { attachJsonlLineReader, JSONL_MAX_LINE_BYTES } from '../shared/jsonl';
 import { toErrorMessage, parseJsonOrThrow } from '../shared/error-message';
 import { updateSettingsJsonObject } from '../shared/settings-json-update';
-import {
-  SESSION_SNAPSHOT_MAX_LINE_BYTES,
-  boundTranscriptSnapshot,
-  sessionSnapshotLineBytes,
-} from '../shared/transcript-window';
+import { boundTranscriptSnapshot } from '../shared/transcript-window';
 import {
   STORAGE_CUTOFF_AUTHORIZATION_ENV,
   STORAGE_CUTOFF_AUTHORIZATION_VALUE,
@@ -81,6 +77,7 @@ import {
 } from './session-filesystem-lifecycle';
 import {
   isSystemPromptTogglePersistenceAvailable,
+  readSystemPromptTogglesForSession,
   writeSystemPromptTogglesForSession,
 } from './session-settings-store';
 import {
@@ -91,6 +88,7 @@ import {
   type SdkModelRegistry,
 } from './sdk';
 import { ProviderGate, type ProviderConcurrencyConfig } from './provider-gate.js';
+import { markDisabledEntries } from './system-prompts';
 import { CreateOperationLedger } from './create-operation-ledger';
 import {
   canonicalEditIntentFingerprint,
@@ -1704,7 +1702,7 @@ export class BackendServer {
     operationId?: string,
     operationAttempt?: number,
     systemPromptDisabledEntries?: readonly string[],
-    includeInitialContextEstimate = true,
+    includeInitialContextInventory = true,
     publicRequestId?: string,
   ): Promise<SessionOpenedPayload> {
     return await timed('buildSessionOpenedPayload', async () => {
@@ -1730,6 +1728,9 @@ export class BackendServer {
       const store = this.initializeColdSessionStore();
       const retained = this.coldSessionManagerHandles.get(this.coldManagerKey(sessionPath));
       try {
+        const disabledEntries = systemPromptDisabledEntries !== undefined
+          ? [...new Set(systemPromptDisabledEntries)]
+          : await readSystemPromptTogglesForSession(sessionPath);
         const options = {
           modelSettings,
           availableModels: catalog.ok ? availableModels : undefined,
@@ -1738,37 +1739,75 @@ export class BackendServer {
           transport,
           operationId,
           operationAttempt,
-          systemPromptDisabledEntries,
+          systemPromptDisabledEntries: disabledEntries,
         };
-        const payload = retained
-          ? await store.openHandleSnapshot(retained.handle, options)
-          : await store.openSnapshot(sessionPath, options);
-        if (includeInitialContextEstimate
+        const openColdSnapshot = async (openOptions: typeof options & {
+          systemPrompts?: SessionOpenedPayload['systemPrompts'];
+          initialContextEstimate?: SessionOpenedPayload['initialContextEstimate'];
+        }): Promise<SessionOpenedPayload> => (
+          retained
+            ? await store.openHandleSnapshot(retained.handle, openOptions)
+            : await store.openSnapshot(sessionPath, openOptions)
+        );
+        const resolveInventoryTarget = (snapshot: SessionOpenedPayload) => {
+          const modelId = snapshot.session.modelId ?? modelSettings.defaultModel;
+          const provider = snapshot.session.provider ?? modelSettings.defaultProvider
+            ?? availableModels.find((model) => model.id === modelId)?.provider;
+          return modelId && provider
+            ? { cwd: snapshot.session.cwd || this.startupCwd, model: { provider, id: modelId } }
+            : undefined;
+        };
+        const disabledKey = (entries: readonly string[]) => (
+          JSON.stringify([...new Set(entries)].sort())
+        );
+        const isInitialEstimateEligible = (snapshot: SessionOpenedPayload) => (
+          snapshot.transcriptWindow.hasUserMessages === false
+          && snapshot.contextUsage === undefined
+          && (snapshot.sessionUsage?.samples.length ?? 0) === 0
+        );
+        let payload = await openColdSnapshot(options);
+        if (includeInitialContextInventory
           && payload.runtimeReady === false
-          && payload.transcriptWindow.hasUserMessages === false
-          && payload.contextUsage === undefined
-          && (payload.sessionUsage?.samples.length ?? 0) === 0
           && this.initialContextEstimateClient) {
-          const selectedModelId = payload.session.modelId ?? modelSettings.defaultModel;
-          const selectedProvider = payload.session.provider ?? modelSettings.defaultProvider
-            ?? availableModels.find((model) => model.id === selectedModelId)?.provider;
-          if (selectedModelId && selectedProvider) {
-            const estimate = await this.initialContextEstimateClient.estimate({
-              cwd: payload.session.cwd || this.startupCwd,
+          // Discovery is intentionally outside the cold ownership critical
+          // section. Fence its cwd/model and sidecar inputs against a fresh
+          // final snapshot so a concurrent cold settings/toggle/history write
+          // cannot publish a mixed catalog or stale empty-session estimate.
+          // Bounded retries fail closed by returning
+          // the ordinary catalog-free snapshot.
+          for (let attempt = 0; attempt < 3; attempt += 1) {
+            const target = resolveInventoryTarget(payload);
+            if (!target) break;
+            const inventory = await this.initialContextEstimateClient.discover({
+              cwd: target.cwd,
               agentDir: this.agentDir,
-              model: { provider: selectedProvider, id: selectedModelId },
+              model: target.model,
             });
-            if (estimate) {
-              // Preserve the cold store's WeakMap ownership stamp by mutating
-              // the already-stamped object. The field is omitted instead of
-              // violating the producer envelope when the fitted snapshot has
-              // no remaining headroom.
-              const transportShape = transport ?? { kind: 'event' as const, event: 'session.opened' };
-              const candidate = { ...payload, initialContextEstimate: estimate };
-              if (sessionSnapshotLineBytes(candidate, transportShape) <= SESSION_SNAPSHOT_MAX_LINE_BYTES) {
-                payload.initialContextEstimate = estimate;
-              }
+            if (!inventory) break;
+            const observedDisabledEntries = await readSystemPromptTogglesForSession(sessionPath);
+            const includeEstimate = isInitialEstimateEligible(payload);
+            const candidate = await openColdSnapshot({
+              ...options,
+              systemPromptDisabledEntries: observedDisabledEntries,
+              systemPrompts: markDisabledEntries(
+                inventory.systemPrompts,
+                new Set(observedDisabledEntries),
+              ),
+              ...(includeEstimate ? { initialContextEstimate: inventory.estimate } : {}),
+            });
+            const confirmedDisabledEntries = await readSystemPromptTogglesForSession(sessionPath);
+            const confirmedTarget = resolveInventoryTarget(candidate);
+            if (confirmedTarget
+              && confirmedTarget.cwd === target.cwd
+              && confirmedTarget.model.id === target.model.id
+              && confirmedTarget.model.provider === target.model.provider
+              && disabledKey(confirmedDisabledEntries) === disabledKey(observedDisabledEntries)
+              && isInitialEstimateEligible(candidate) === includeEstimate) {
+              payload = candidate;
+              break;
             }
+            options.systemPromptDisabledEntries = confirmedDisabledEntries;
+            payload = await openColdSnapshot(options);
           }
         }
         this.registerColdResult(payload);
@@ -1789,7 +1828,7 @@ export class BackendServer {
               operationId,
               operationAttempt,
               systemPromptDisabledEntries,
-              includeInitialContextEstimate,
+              includeInitialContextInventory,
             );
           }
           throw new BackendError(
@@ -1802,13 +1841,15 @@ export class BackendServer {
     });
   }
 
-  private async emitSessionListChanged(): Promise<void> {
+  private async emitSessionListChanged(
+    liveSummaries: readonly SessionSummary[] = [],
+  ): Promise<void> {
     if (this.disposed) return;
     // Rejection-safe: most callers fire-and-forget this (`void …`). A thrown
     // session-list scan must log and swallow instead of becoming an unhandled
     // rejection; the next catalog poll/emit refreshes the list opportunistically.
     try {
-      const sessions = await this.listSessionSummaries();
+      const sessions = await this.listSessionSummaries(liveSummaries);
       const payload: SessionListChangedPayload = {
         sessions,
         activeSessionPath: this.viewedSessionPath,
@@ -1953,8 +1994,10 @@ export class BackendServer {
     this.emit('session.opened', authoritative);
   }
 
-  private async listSessionSummaries(): Promise<SessionSummary[]> {
-    return await this.initializeColdSessionStore().list([]);
+  private async listSessionSummaries(
+    liveSummaries: readonly SessionSummary[] = [],
+  ): Promise<SessionSummary[]> {
+    return await this.initializeColdSessionStore().list(liveSummaries);
   }
 
   private startSessionCatalogPolling(intervalMs = SESSION_CATALOG_POLL_INTERVAL_MS): void {
@@ -2842,6 +2885,7 @@ export class BackendServer {
         method: 'session.create',
         params: {
           ...(typeof payload.cwd === 'string' && payload.cwd.trim() ? { cwd: payload.cwd.trim() } : {}),
+          agentCreated: true,
           operationId,
           operationAttempt: 1,
         },
@@ -2861,10 +2905,18 @@ export class BackendServer {
       backendSessionPathKey(summary.path) === backendSessionPathKey(requested)
     ));
     const sourceMatches = backendSessionPathKey(sourceSessionPath) === backendSessionPathKey(requested);
-    if (!matchingSummary && !sourceMatches) {
+    // Catalog publication is intentionally asynchronous. A create commits its
+    // durable manager before its list reconciliation can observe the file, so
+    // use the coordinator's retained cold handle as the addressability
+    // authority for that narrow gap. Do not turn this into an arbitrary
+    // filesystem/path probe: the fallback is already owned by the normal
+    // coordinator/cold-store authority.
+    const retainedCold = this.coldSessionManagerHandles.get(this.coldManagerKey(requested));
+    if (!matchingSummary && !sourceMatches && !retainedCold) {
       throw new BackendError('SESSION_NOT_FOUND', 'The target session is not owned by the current extension host.');
     }
-    const sessionPath = matchingSummary?.path ?? sourceSessionPath;
+    const sessionPath = matchingSummary?.path
+      ?? (sourceMatches ? sourceSessionPath : retainedCold?.handle.sessionPath ?? requested);
 
     if (frame.action === 'read') {
       const direction = payload.direction ?? 'latest';
@@ -3286,10 +3338,10 @@ export class BackendServer {
         await runtimeRouter.retire(sessionPath, reason);
         return true;
       },
-      createColdSession: (cwd, pendingCreateOperationId) => {
+      createColdSession: (cwd, pendingCreateOperationId, agentCreated) => {
         const replayPath = this.resolvePendingCreateReplay(pendingCreateOperationId);
         if (replayPath) return { sessionPath: replayPath };
-        const handle = this.initializeColdSessionStore().create({ cwd });
+        const handle = this.initializeColdSessionStore().create({ cwd, agentCreated });
         this.retainColdSessionManager(handle, 'new');
         this.registerNewSessionLifecycle(handle.sessionPath, pendingCreateOperationId);
         return { sessionPath: handle.sessionPath };
@@ -3411,7 +3463,7 @@ export class BackendServer {
       emit: (event, payload) => this.emit(event, payload),
       emitBusyChanged: () => undefined,
       emitContextUsageChanged: () => undefined,
-      emitSessionListChanged: () => this.emitSessionListChanged(),
+      emitSessionListChanged: (liveSummaries) => this.emitSessionListChanged(liveSummaries),
       listSessions: () => this.listSessionSummaries(),
       listAvailableModels: async (context) => {
         const catalog = context

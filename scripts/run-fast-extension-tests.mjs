@@ -305,19 +305,57 @@ async function main() {
     const bundlePiPackageDeps = {
       name: 'bundle-pi-package-deps',
       setup(esbuild) {
+        // What a bundled test's runtime requires look like: temp bundles sit
+        // in %TEMP% with only a `node_modules` junction to the extension's
+        // top-level node_modules. Resolve from that anchor so we can tell
+        // which bare imports the runtime will and will not find.
+        const bundleAnchorRequire = createRequire(path.join(extensionRoot, 'node_modules', '.pi-anchor.cjs'));
         esbuild.onResolve({ filter: /^[^./]/ }, (args) => {
-          // Leave node: builtins and imports from outside the pi-package
-          // workspace to esbuild's default (`packages: 'external'`) handling.
+          // Leave node: builtins to esbuild's default (`packages: 'external'`)
+          // handling.
           if (args.path.startsWith('node:')) return null;
-          if (!args.resolveDir || !args.resolveDir.startsWith(npmNodeModules)) return null;
+          if (!args.resolveDir) return null;
+          if (args.resolveDir.startsWith(npmNodeModules)) {
+            try {
+              // Resolve exactly as Node would from the importing file so
+              // nested (non-hoisted) pi-package deps are found too.
+              const importerRequire = createRequire(path.join(args.resolveDir, '.pi-anchor.cjs'));
+              const resolved = importerRequire.resolve(args.path);
+              if (resolved.startsWith(npmNodeModules)) return { path: resolved, external: false };
+            } catch {
+              // Not resolvable from npm/node_modules; fall through to default.
+            }
+            return null;
+          }
+          // Extension sources may import pi packages through tsconfig path
+          // aliases (e.g. @mariozechner/pi-ai), which esbuild resolves to
+          // absolute paths inside node_modules and therefore bundles. Their
+          // own bare deps (e.g. typebox) exist only nested under
+          // node_modules/<pkg>/node_modules and are invisible to the runtime
+          // anchor above, so bundle exactly those nested-only deps.
           try {
-            // Resolve exactly as Node would from the importing file so nested
-            // (non-hoisted) pi-package deps are found too.
             const importerRequire = createRequire(path.join(args.resolveDir, '.pi-anchor.cjs'));
-            const resolved = importerRequire.resolve(args.path);
-            if (resolved.startsWith(npmNodeModules)) return { path: resolved, external: false };
+            let resolved;
+            try {
+              resolved = importerRequire.resolve(args.path);
+            } catch {
+              // Not Node-resolvable from the importer (e.g. resolved later by
+              // tsconfig paths); fall through to esbuild's default handling.
+              return null;
+            }
+            let anchored;
+            try {
+              anchored = bundleAnchorRequire.resolve(args.path);
+            } catch {
+              anchored = null;
+            }
+            if (anchored === resolved) return null; // runtime finds it via the junction: keep external
+            if (resolved.startsWith(path.join(extensionRoot, 'node_modules'))
+              || resolved.startsWith(npmNodeModules)) {
+              return { path: resolved, external: false };
+            }
           } catch {
-            // Not resolvable from npm/node_modules; fall through to default.
+            // Fall through to esbuild's default handling.
           }
           return null;
         });

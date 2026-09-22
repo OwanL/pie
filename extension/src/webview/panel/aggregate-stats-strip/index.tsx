@@ -27,16 +27,21 @@ import { Num } from './num';
  * Thin status strip anchored at the bottom of the panel (below the composer).
  * Focused on **recent + current** activity over long-term totals:
  *
- *   today $X · wk $Y · tok/s (active generation / rolling experienced) · N tabs
+ *   today $X · wk $Y · N tabs
  *
  * Each segment's tooltip is a **rich** tooltip (JSX rendered into an
  * out-of-tree host via the `Tooltip` component's `contentNode`): the numeric
- * segments (today/week cost, tokens, throughput, last run, sessions) carry a
+ * segments (today/week cost, tokens, last run, sessions) carry a
  * small timeseries graph — a stacked-area chart with per-provider bands and a
  * per-model breakdown on hover — while the live-state segments (provider gate)
  * use richly-formatted text. Custom tooltips are used
  * instead of native `title` because the strip re-renders ~7×/sec during
  * streaming — native `title` tooltips close on every re-render and flicker.
+ *
+ * The strip is kept visually clean: incomplete billing provenance and token
+ * coverage gaps are never marked on the numbers (no `*` or `~` suffixes); the
+ * accessible labels and the scoped tooltips carry that detail explicitly, and
+ * an unknown subtotal is never conflated with a verified zero.
  *
  * Host-owned (STATE_CONTRACT § Webview-Local State): the strip is a pure
  * projection of `ViewState.aggregateStats`; it computes nothing itself.
@@ -55,26 +60,12 @@ function AggregateStatsStripView({ stats, deferredTriggers, onOpenDeferredMenu }
     weekCost,
     todayInputTokens,
     todayOutputTokens,
-    activeGenerationTokensPerSecond,
-    liveTokensPerSecond,
     runningSessionCount,
     openTabCount,
     lastRun,
   } = stats;
 
-  // Prefer the host-computed active-generation sum while work is producing
-  // output. The 30-second wall-clock rate remains the experienced fallback
-  // through tools and briefly after completion; if neither has a value while a
-  // session is running, say so instead of rendering a misleading zero.
   const running = runningSessionCount > 0;
-  const hasActiveRate = activeGenerationTokensPerSecond > 0;
-  const hasRollingRate = liveTokensPerSecond > 0;
-  const rateSource: 'active' | 'rolling' | 'measuring' | 'none' = hasActiveRate
-    ? 'active'
-    : hasRollingRate
-      ? 'rolling'
-      : running ? 'measuring' : 'none';
-  const headlineRate = rateSource === 'active' ? activeGenerationTokensPerSecond : liveTokensPerSecond;
 
   return (
     <div
@@ -89,7 +80,6 @@ function AggregateStatsStripView({ stats, deferredTriggers, onOpenDeferredMenu }
           aria-label={`Today's estimated token cost ${formatCostAdaptive(todayCost)}${(stats.billableAccounting?.todayUnknownInvocationCount ?? 0) + (stats.billableAccounting?.todayUnpricedInvocationCount ?? 0) + (stats.billableAccounting?.todayInstrumentationGapInvocationCount ?? 0) > 0 ? '; incomplete billing provenance' : ''}. Focus for today's cost and provider details.`}
         >
           today <Num value={todayCost} format={formatCostAdaptive} width={8} class="aggregate-strip-cost" />
-          {(stats.billableAccounting?.todayUnknownInvocationCount ?? 0) + (stats.billableAccounting?.todayUnpricedInvocationCount ?? 0) + (stats.billableAccounting?.todayInstrumentationGapInvocationCount ?? 0) > 0 ? '*' : null}
         </span>
       </Tooltip>
       <Sep />
@@ -100,7 +90,6 @@ function AggregateStatsStripView({ stats, deferredTriggers, onOpenDeferredMenu }
           aria-label={`Estimated token cost this week ${formatCostAdaptive(weekCost)}${(stats.billableAccounting?.weekUnknownInvocationCount ?? 0) + (stats.billableAccounting?.weekUnpricedInvocationCount ?? 0) + (stats.billableAccounting?.weekInstrumentationGapInvocationCount ?? 0) > 0 ? '; incomplete billing provenance' : ''}. Focus for seven-day cost and provider details.`}
         >
           wk <Num value={weekCost} format={formatCostAdaptive} width={8} class="aggregate-strip-cost" />
-          {(stats.billableAccounting?.weekUnknownInvocationCount ?? 0) + (stats.billableAccounting?.weekUnpricedInvocationCount ?? 0) + (stats.billableAccounting?.weekInstrumentationGapInvocationCount ?? 0) > 0 ? '*' : null}
         </span>
       </Tooltip>
       <Sep />
@@ -112,22 +101,6 @@ function AggregateStatsStripView({ stats, deferredTriggers, onOpenDeferredMenu }
         >
           <span class="aggregate-strip-tok-down">↓<Num value={todayInputTokens} format={formatCompactTokens} width={5} /></span>
           {' '}<span class="aggregate-strip-tok-up">↑<Num value={todayOutputTokens} format={formatCompactTokens} width={5} /></span>
-          {(stats.billableAccounting?.todayInstrumentationGapInvocationCount ?? 0) > 0 ? '*' : null}
-        </span>
-      </Tooltip>
-      <Sep />
-      <Tooltip contentNode={throughputTooltipNode(stats, rateSource)} placement="top" freezeWhileVisible richRole="region">
-        <span
-          class="aggregate-strip-seg"
-          tabIndex={0}
-          aria-label={`Throughput: ${rateSource === 'measuring' ? 'measuring' : rateSource === 'none' ? 'unavailable' : `${formatRate(headlineRate)} tokens per second`}. Focus for active and rolling throughput details.`}
-        >
-          {rateSource === 'measuring'
-            ? <span class="aggregate-strip-rate aggregate-strip-num" style="min-width:4ch">…</span>
-            : rateSource === 'none'
-              ? <span class="aggregate-strip-rate aggregate-strip-num" style="min-width:4ch">—</span>
-              : <Num value={headlineRate} format={formatRate} width={4} class="aggregate-strip-rate" />}
-          <span class="aggregate-strip-unit"> tok/s</span>
         </span>
       </Tooltip>
       {lastRun && (
@@ -279,7 +252,6 @@ export function aggregateStatsSignature(s: AggregateStats): string {
     s.ready,
     s.todayCost, s.weekCost,
     s.todayInputTokens, s.todayOutputTokens,
-    s.todayTokensPerSecond, s.tokensPerSecond, s.activeGenerationTokensPerSecond, s.liveTokensPerSecond,
     s.todayRunCount, s.todayToolCallCount, s.todayTouchedFileCount, s.weekRunCount,
     s.runningSessionCount, s.openTabCount,
     s.totalCost, s.totalInputTokens, s.totalOutputTokens,
@@ -317,10 +289,7 @@ export function aggregateStatsSignature(s: AggregateStats): string {
     seriesSignature(s.todayCostSeries),
     seriesSignature(s.todayInputTokenSeries),
     seriesSignature(s.todayTokenSeries),
-    seriesSignature(s.todayThroughputSeries),
     seriesSignature(s.weekCostSeries),
-    s.tokensPerSecondByProvider.map((p) => `${p.provider}:${p.tokensPerSecond}`).join(','),
-    s.todayTokensPerSecondByProvider.map((p) => `${p.provider}:${p.tokensPerSecond}`).join(','),
     s.lastRun ? `${s.lastRun.generationId ?? ''}:${s.lastRun.executionId ?? ''}:${s.lastRun.rootSessionId ?? ''}:${s.lastRun.sourceKey ?? ''}:${s.lastRun.outcome ?? ''}:${s.lastRun.cost}:${s.lastRun.durationMs}:${s.lastRun.startedAt}:${s.lastRun.endedAt}:${s.lastRun.modelId}:${s.lastRun.provider}:${s.lastRun.inputTokens}:${s.lastRun.outputTokens}:${s.lastRun.usageCoverage ?? ''}:${s.lastRun.attributionCoverage ?? ''}:${s.lastRun.turnSeriesCoverage ?? ''}:${s.lastRun.turnSeries.map((t) => `${t.ms}:${t.outputTokens}`).join(',')}` : '',
     s.providerGate.enabled,
     s.providerGate.providers.map((p) => `${p.provider}:${p.activeRequests}:${p.queuedRequests}:${p.maxConcurrentRequests}:${p.afterburnSeconds}:${p.queueWaitSeconds ?? ''}:${p.paused}:${p.pausedUntilMs}:${p.strikeCount}`).join(','),
@@ -336,13 +305,6 @@ function formatCostAdaptive(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return '$0.00';
   if (n < 1) return `$${n.toFixed(4)}`;
   return `$${n.toFixed(2)}`;
-}
-
-/** tok/s: round when ≥10, one decimal below (matches `formatRate` in token-rate). */
-function formatRate(n: number): string {
-  if (!Number.isFinite(n) || n <= 0) return '0';
-  if (n >= 10) return String(Math.round(n));
-  return n.toFixed(1);
 }
 
 /** Character volume is exact only when every expected event in the displayed
@@ -438,8 +400,6 @@ interface ProviderLegendItem {
   key: string;
   value: string;
   models: { provider: string; model: string; value: string }[];
-  /** Qualifies model values that use a sampled view instead of the headline rollup. */
-  detailLabel?: string;
 }
 
 /** Provider legend buttons expose a second, focus-associated tooltip. The
@@ -460,7 +420,7 @@ export function ProviderLegend({ items }: { items: ProviderLegendItem[] }): JSX.
             <button
               type="button"
               class="rich-tooltip-legend-trigger"
-              aria-label={`${it.key} ${it.value}. Focus for model breakdown${it.detailLabel ? ` (${it.detailLabel})` : ''}.`}
+              aria-label={`${it.key} ${it.value}. Focus for model breakdown.`}
               aria-describedby={detailId}
             >
               <span class="rich-tooltip-swatch" style={`background:${colors.get(it.key)}`} />
@@ -471,7 +431,6 @@ export function ProviderLegend({ items }: { items: ProviderLegendItem[] }): JSX.
               <span class="rich-tooltip-legend-detail-head">
                 <span>{it.key}</span><span>{it.value}</span>
               </span>
-              {it.detailLabel && <span class="rich-tooltip-sub">Model values: {it.detailLabel}</span>}
               {it.models.length > 0
                 ? it.models.map((model) => (
                     <span class="rich-tooltip-legend-detail-row" key={`${model.provider}\u0000${model.model}`}>
@@ -494,29 +453,12 @@ function modelValuesForProvider(
   series: AggregateSeriesPoint[],
   provider: string,
   format: (value: number) => string,
-  view: 'final' | 'latestByModel' = 'final',
 ): ProviderLegendItem['models'] {
-  if (view === 'final') {
-    const final = series.at(-1);
-    if (!final) return [];
-    return final.byModel
-      .filter((entry) => entry.provider === provider)
-      .map((entry) => ({ provider: entry.provider, model: entry.model, value: format(entry.value) }));
-  }
-
-  // Throughput points are per-hour rates, while the provider legend is a
-  // generation-time-weighted day rollup. Do not add rates across hours or
-  // present the last hour as today's total; retain each model's latest sampled
-  // rate and label that view explicitly in the nested detail.
-  const latestByModel = new Map<string, { provider: string; model: string; value: string }>();
-  for (const point of series) {
-    for (const entry of point.byModel) {
-      if (entry.provider === provider) {
-        latestByModel.set(entry.model, { provider: entry.provider, model: entry.model, value: format(entry.value) });
-      }
-    }
-  }
-  return [...latestByModel.values()];
+  const final = series.at(-1);
+  if (!final) return [];
+  return final.byModel
+    .filter((entry) => entry.provider === provider)
+    .map((entry) => ({ provider: entry.provider, model: entry.model, value: format(entry.value) }));
 }
 
 function providerTokenSummary(providers: AggregateProviderCost[]): string {
@@ -528,16 +470,9 @@ function providerTokenSummary(providers: AggregateProviderCost[]): string {
 
 function ariaLabel(s: AggregateStats): string {
   if (!s.ready) return 'Usage stats: computing.';
-  const active = s.activeGenerationTokensPerSecond > 0
-    ? `Active-generation speed ${formatRate(s.activeGenerationTokensPerSecond)} tokens per second.`
-    : s.runningSessionCount > 0 ? 'Active-generation speed is measuring or paused.' : 'Active-generation speed unavailable.';
-  const rolling = s.liveTokensPerSecond > 0
-    ? `30-second end-to-end throughput ${formatRate(s.liveTokensPerSecond)} tokens per second.`
-    : '30-second end-to-end throughput unavailable.';
-  const throughput = `${active} ${rolling}`;
   return `Estimated API-equivalent token cost across all runs today ${formatCostAdaptive(s.todayCost)}. This week ${formatCostAdaptive(s.weekCost)}. `
     + `Today's adjusted user input ${userInputCharsLabel(s.todayProductivity)} characters. `
-    + `${throughput} ${s.runningSessionCount} session${s.runningSessionCount === 1 ? '' : 's'} working, ${s.openTabCount} open.`;
+    + `${s.runningSessionCount} session${s.runningSessionCount === 1 ? '' : 's'} working, ${s.openTabCount} open.`;
 }
 
 // ── Scoped rich tooltips ────────────────────────────────────────────────────
@@ -662,47 +597,6 @@ function TokensTooltip({ stats }: { stats: AggregateStats }): JSX.Element {
           key: provider.provider,
           value: formatCompactTokens(input ? provider.inputTokens : provider.outputTokens),
           models: modelValuesForProvider(series, provider.provider, formatCompactTokens),
-        }))} />
-      )}
-    </div>
-  );
-}
-
-export function throughputTooltipNode(s: AggregateStats, source: 'active' | 'rolling' | 'measuring' | 'none'): JSX.Element {
-  if (!s.ready) return <div class="rich-tooltip"><div class="rich-tooltip-sub">Computing usage stats…</div></div>;
-  const activeLine = s.activeGenerationTokensPerSecond > 0
-    ? `Active-generation speed ${formatRate(s.activeGenerationTokensPerSecond)} tok/s`
-    : s.runningSessionCount > 0
-      ? 'Active-generation speed measuring or paused'
-      : 'Active-generation speed unavailable';
-  const rollingLine = s.liveTokensPerSecond > 0
-    ? `30-second wall-clock throughput ${formatRate(s.liveTokensPerSecond)} tok/s`
-    : '30-second wall-clock throughput unavailable';
-  const lines: string[] = [activeLine, rollingLine];
-  if (s.runningSessionCount > 0) lines.push(`${s.runningSessionCount} running`);
-  if (s.todayTokensPerSecond > 0) lines.push(`Today ${formatRate(s.todayTokensPerSecond)} tok/s`);
-  if (s.tokensPerSecond > 0) lines.push(`All-time ${formatRate(s.tokensPerSecond)} tok/s`);
-  lines.push('Active-generation speed sums per-session output over generation time; it excludes TTFT, tools, and between-turn waits.');
-  lines.push('30-second wall-clock throughput includes the experienced waits and remains after a burst while its rolling window decays.');
-  return (
-    <div class="rich-tooltip">
-      <div class="rich-tooltip-head">
-        <span>Throughput</span>
-        <span class="rich-tooltip-head-value">{source === 'active'
-          ? formatRate(s.activeGenerationTokensPerSecond)
-          : source === 'rolling'
-            ? formatRate(s.liveTokensPerSecond)
-            : source === 'measuring' ? '…' : '—'} tok/s</span>
-      </div>
-      <div class="rich-tooltip-sub">{lines.join('\n')}</div>
-      <StackedAreaChart points={s.todayThroughputSeries} mode="rate" formatY={(n) => formatRate(n)} formatX={formatTimeOfDay} unit="tok/s"
-        colorKeys={s.todayTokensPerSecondByProvider.map((p) => p.provider)} />
-      {s.todayTokensPerSecondByProvider.length > 0 && (
-        <ProviderLegend items={s.todayTokensPerSecondByProvider.map((p) => ({
-          key: p.provider,
-          value: `${formatRate(p.tokensPerSecond)} tok/s`,
-          models: modelValuesForProvider(s.todayThroughputSeries, p.provider, (value) => `${formatRate(value)} tok/s`, 'latestByModel'),
-          detailLabel: 'latest sampled rate',
         }))} />
       )}
     </div>

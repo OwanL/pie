@@ -15,7 +15,7 @@ export const DEFAULT_DETAIL_PAGE_BYTES = 128 * 1024;
 export const MAX_DETAIL_PAGE_BYTES = 192 * 1024;
 
 /** Reserved envelope bytes for the JSON-wrapped page payload fields. */
-const DETAIL_PAGE_ENVELOPE_SLACK_BYTES = 384;
+export const DETAIL_PAGE_ENVELOPE_SLACK_BYTES = 384;
 
 export interface DetailSegmentPage {
   ref: DetailPageRef;

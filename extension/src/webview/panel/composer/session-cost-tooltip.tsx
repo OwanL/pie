@@ -54,6 +54,11 @@ export function SessionCostTooltip({
       </div>
       <div class="rich-tooltip-sub">API-equivalent catalog estimate · subscriptions, plan allowances, and invoices are not reconciled</div>
       <div class="rich-tooltip-sub">{subtitle}</div>
+      {indicator.refreshStatus === 'error' ? (
+        <div class="rich-tooltip-sub">Usage refresh failed · showing the last completed snapshot.</div>
+      ) : indicator.freshness === 'stale' ? (
+        <div class="rich-tooltip-sub">Usage refresh in progress · showing the last completed snapshot.</div>
+      ) : null}
 
       <CostBar
         className="session-cost-provider-bar"
@@ -108,7 +113,7 @@ export function SessionCostTooltip({
 
       {breakdown.hasIncompleteCost && (
         <div class="rich-tooltip-sub session-cost-note">
-          * Excludes {formatCostTokens(breakdown.unpricedTokens)} pending billing details or pricing.
+          Excludes {formatCostTokens(breakdown.unpricedTokens)} pending billing details or pricing
         </div>
       )}
 
@@ -243,9 +248,9 @@ function CostBar({
   );
 }
 
-function costLabel(cost: number, hasKnownCost: boolean, unpricedTokens: number): string {
-  if (!hasKnownCost) return unpricedTokens > 0 ? `unavailable*` : 'unavailable';
-  return `${formatDetailedCost(cost)}${unpricedTokens > 0 ? '*' : ''}`;
+function costLabel(cost: number, hasKnownCost: boolean, _unpricedTokens: number): string {
+  if (!hasKnownCost) return 'unavailable';
+  return formatDetailedCost(cost);
 }
 
 function formatDetailedCost(cost: number): string {

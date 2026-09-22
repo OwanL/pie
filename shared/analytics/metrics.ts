@@ -675,6 +675,21 @@ export function addLocalCalendarDaysMs(timestampMs: Int64Value, days: number, ti
   return calendarDayStartForKey(shiftedKey, timeZone);
 }
 
+/** Explicit per-range bucket widths for the canonical aggregate cost-chart
+ * buckets. Shared authority so the recorder's SQL aggregation and the host's
+ * cumulative bucket anchoring cannot drift apart through duplicated magic
+ * constants. Today's range charts minute by minute; longer ranges (week) keep
+ * hourly buckets because a minute-width week could exhaust the bounded
+ * emitted bucket-row cap and fall back to the coarse daily rollup. Bucket
+ * starts are epoch multiples of the range's width, so — because every IANA
+ * zone offset is a whole number of minutes — a minute-width bucket can never
+ * straddle a local calendar boundary, and the recorder's exact settlement-time
+ * predicate stays the boundary authority for every width. */
+export const CANONICAL_COST_BUCKET_WIDTH_MS = Object.freeze({
+  today: 60_000,
+  week: 3_600_000,
+} as const);
+
 export interface LocalCostBucketResult {
   buckets: ReadonlyMap<string, EffectiveCostMetric>;
   /** Known values with no source settlement timestamp remain queryable here. */

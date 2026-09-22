@@ -11,7 +11,6 @@ import {
 } from '../shared/protocol/aggregate-stats';
 import type { ArchState } from './core/arch-state';
 import type { TokenRateService } from './token-rate-service';
-import { RollingAggregateRate } from './rolling-aggregate-rate';
 import type { StatsServicePort } from './stats-service';
 import {
   accumulateAggregateStats,
@@ -24,6 +23,7 @@ import {
   addLocalCalendarDaysMs,
   localCalendarDayStartMs,
   localCalendarDayKey,
+  CANONICAL_COST_BUCKET_WIDTH_MS,
 } from '../../../shared/analytics/metrics.js';
 import type { RunSnapshot } from './run-analytics';
 import type { TokenRateIndicatorState } from '../shared/token-rate';
@@ -42,14 +42,14 @@ import type { CanonicalAnalyticsReadModel } from '../analytics/query-entry.js';
 import type {
   ProviderAccountingSummary,
   ProviderAggregateSeries,
+  ProviderAggregateCostBucket,
 } from '../analytics/sqlite-recorder.js';
 import type { CanonicalExecutionLatestRun } from '../analytics/execution-summary.js';
 
 /**
  * Measures aggregate usage stats across ALL sessions host-side — total + per-
- * provider cost (with a daily series), token totals, and generation-throughput
- * (mean tok/s with a per-provider breakdown) — and posts them to the webview as
- * `ViewState.aggregateStats`.
+ * provider cost (with a daily series) and token totals — and posts them to
+ * the webview as `ViewState.aggregateStats`.
  *
  * Mirrors `TokenRateService`'s host-owned pattern (STATE_CONTRACT § Webview-
  * Local State): the webview is a pure projection and never computes aggregates
@@ -62,13 +62,12 @@ import type { CanonicalExecutionLatestRun } from '../analytics/execution-summary
  * A {@link RECOMPUTE_MS} interval refreshes history and backend metrics.
  * Completed-run history and pricing live in {@link CompletedHistoryCache} and
  * {@link AggregatePricingCache}; this service owns only the refresh cadence,
- * the open-run layer, the rolling rate, and ledger projection. Independently,
- * TokenRateService signals aggregate-relevant changes every 200 ms; that path
- * rebuilds only the small in-memory open-run layer and reuses completed history.
- * Live throughput, counts, token totals, and charts therefore move during all
- * active streams without rereading completed history or rebuilding ledger
- * snapshots at the fast cadence; the ledger authority check remains cheap and
- * signature-gated.
+ * the open-run layer, and ledger projection. Independently, TokenRateService
+ * signals aggregate-relevant changes every 200 ms; that path rebuilds only the
+ * small in-memory open-run layer and reuses completed history. Live counts,
+ * token totals, and charts therefore move during active streams without
+ * rereading completed history or rebuilding ledger snapshots at the fast
+ * cadence; the ledger authority check remains cheap and signature-gated.
  *
  * Side-effectful (wall-clock + `setInterval` + disk reads) by design — it lives
  * outside the pure reducer, mirroring `TokenRateService`.
@@ -103,7 +102,7 @@ export interface AggregateStatsServiceDeps {
   onAccumulatorBuilt?: (scope: 'completed' | 'open', runCount: number) => void;
   /** Test/benchmark seam proving unbounded completed-history entries are only
    * visited while preparing a new completed layer, never on open-run ticks. */
-  onCompletedSourceEntryVisited?: (kind: 'day' | 'cost_sample' | 'token_sample' | 'throughput_hour') => void;
+  onCompletedSourceEntryVisited?: (kind: 'day' | 'cost_sample' | 'token_sample') => void;
   /** Clock seam for deterministic date-boundary tests. */
   now?: () => Date;
   /** Stable canonical local-day zone selected by AnalyticsRuntime. */
@@ -140,7 +139,6 @@ export class AggregateStatsService {
   private liveRunIds = new Set<string>();
   private liveRevision = 0;
   private lastFinalizedDate: string | null = null;
-  private readonly rollingRate = new RollingAggregateRate();
   /** Only ledger-owned arrays/totals are cached. The surrounding aggregate is
    * rebuilt so live working/time productivity fields never become stale. */
   private readonly ledgerOverlayCache: LedgerOverlayCacheState = { entry: null };
@@ -209,7 +207,6 @@ export class AggregateStatsService {
     const nowMs = (this.deps.now?.() ?? new Date()).getTime();
     const openRuns = this.deps.statsService.getOpenRuns();
     const pendingCompletedRuns = this.deps.statsService.getPendingCompletedRuns();
-    const rollingRate = this.observeRollingRate(nowMs, openRuns, pendingCompletedRuns, ratesBySession);
     const completedLayer = this.completedHistory.currentLayer();
     if (completedLayer === null || this.lastFinalizedDate === null) return;
 
@@ -251,7 +248,6 @@ export class AggregateStatsService {
       ratesBySession,
       openTabCount,
     );
-    next.liveTokensPerSecond = rollingRate;
     next.providerGate = this.cached.providerGate;
     // Preserve the cheap live path: it does not rebuild the ledger projection.
     // The authority getter still runs so its lock/signature/privacy fence is
@@ -300,8 +296,6 @@ export class AggregateStatsService {
     // the open run disappears. Use that snapshot as the persistence bridge so
     // status, outcome, finalizedAt, and day bucketing are never stale.
     const pendingCompletedRuns = this.deps.statsService.getPendingCompletedRuns();
-    const rollingRate = this.observeRollingRate(nowMs, openRuns, pendingCompletedRuns, ratesBySession);
-
     const canonicalReadModel = this.deps.statsService.getAnalyticsReadModel?.();
     if (canonicalReadModel) {
       await this.recomputeCanonical(
@@ -309,7 +303,6 @@ export class AggregateStatsService {
         nowMs,
         runningSessionPaths,
         openTabCount,
-        rollingRate,
         liveRevisionAtStart,
       );
       return;
@@ -368,14 +361,12 @@ export class AggregateStatsService {
         ratesBySession,
         openTabCount,
       );
-      next.liveTokensPerSecond = rollingRate;
       next.providerGate = providerGate;
       this.lastFinalizedDate = currentDate;
     } else {
       // Live-only refresh: preserve every historical array/object reference.
       next = {
         ...this.cached,
-        liveTokensPerSecond: rollingRate,
         runningSessionCount: new Set(runningSessionPaths).size,
         openTabCount,
         providerGate,
@@ -406,7 +397,6 @@ export class AggregateStatsService {
     nowMs: number,
     runningSessionPaths: string[],
     openTabCount: number,
-    rollingRate: number,
     liveRevisionAtStart: number,
   ): Promise<void> {
     let providerGate = this.cached.providerGate;
@@ -462,8 +452,6 @@ export class AggregateStatsService {
       ...EMPTY_AGGREGATE_STATS,
       runningSessionCount,
       openTabCount,
-      liveTokensPerSecond: rollingRate,
-      activeGenerationTokensPerSecond: this.cached.activeGenerationTokensPerSecond,
       // Count only maintained root agent-run execution identities. Provider
       // invocations and assistant-turn facets are separate projections.
       runCount: executionSummary.executionCount,
@@ -476,7 +464,11 @@ export class AggregateStatsService {
       next,
       aggregate.series?.executions ?? [],
       aggregate.series?.dailyExecutions,
-      aggregate.series?.truncated !== true,
+      // Execution evidence is bounded independently of the settlement samples
+      // and of the cost buckets: only an explicit execution truncation (or the
+      // legacy combined flag from older read models) marks it incomplete, so
+      // settlement/execution truncation never discards complete cost buckets.
+      !executionTemporalTruncated(aggregate.series),
       nowMs,
       timeZone,
     );
@@ -499,7 +491,6 @@ export class AggregateStatsService {
       const latestArchState = this.deps.getArchState();
       next.runningSessionCount = new Set(latestArchState.sessions.runningSessionPaths).size;
       next.openTabCount = latestArchState.sessions.openTabPaths.length;
-      next.liveTokensPerSecond = this.rollingRate.getRate();
     }
     if (!aggregateStatsEqual(this.cached, next)) {
       this.cached = next;
@@ -509,48 +500,6 @@ export class AggregateStatsService {
 
   private observedCanonicalRevision(): string | null {
     return this.deps.statsService.getAnalyticsRevisionRefreshStats?.()?.revision ?? null;
-  }
-
-  private observeRollingRate(
-    nowMs: number,
-    openRuns: RunSnapshot[],
-    pendingCompletedRuns: RunSnapshot[],
-    ratesBySession: Record<string, TokenRateIndicatorState>,
-  ): number {
-    const byRun = new Map<string, {
-      runId: string;
-      reportedOutputTokens: number;
-      liveOutputTokens?: number;
-      terminalOutputTokensEstimate?: number;
-      terminal?: boolean;
-    }>();
-    for (const run of openRuns) {
-      const rateState = ratesBySession[run.sessionPath];
-      byRun.set(run.runId, {
-        runId: run.runId,
-        reportedOutputTokens: run.outputTokens,
-        liveOutputTokens: rateState?.liveOutputTokens,
-        terminalOutputTokensEstimate: rateState?.terminalOutputTokensEstimate,
-      });
-    }
-    // A terminal snapshot is authoritative: the first terminal observation
-    // applies RollingAggregateRate's one-time signed settlement correction, so
-    // replacing a possibly-larger live estimate can neither double-count nor
-    // leave the cumulative rate overstated. The session's terminal estimate
-    // rides along so a no-usage burst that completed between sampler ticks is
-    // still reconciled into the run's terminal total (the estimate is exposed
-    // only for a turn without provider usage, so it cannot double-count the
-    // reported output it is added to).
-    for (const run of pendingCompletedRuns) {
-      const rateState = ratesBySession[run.sessionPath];
-      byRun.set(run.runId, {
-        runId: run.runId,
-        reportedOutputTokens: run.outputTokens,
-        terminalOutputTokensEstimate: rateState?.terminalOutputTokensEstimate,
-        terminal: true,
-      });
-    }
-    return this.rollingRate.observe(nowMs, [...byRun.values()]);
   }
 
   private buildOpenAccumulator(
@@ -665,18 +614,47 @@ function canonicalAccountingOverlay(
   // token rollup, so token charts must retain their honest missingness.
   const todayCostSamples = filterCanonicalSeriesSamples(costSamples, todayStartMs, nowMs);
   const weekCostSamples = filterCanonicalSeriesSamples(costSamples, weekStartMs, nowMs);
+  // Cost charts prefer the recorder's exact per-range buckets (minute width
+  // for today, hour for week): they aggregate every canonical settlement in
+  // the range, so a busy window can never truncate them, and each range's
+  // sums are restricted to its exact local calendar bounds, keeping the
+  // endpoint totals exact without any partial-sample snapping. They fall back to the bounded raw samples
+  // (usable only when complete) and finally to the exact daily rollups; a
+  // partial source is never snapped to the exact totals and no rate graph is
+  // implied.
+  const todayBucketSamples = canonicalBucketSeriesSamples(
+    series?.todayCostBuckets,
+    series?.todayCostBucketsTruncated === true,
+    todayStartMs,
+    nowMs,
+    CANONICAL_COST_BUCKET_WIDTH_MS.today,
+  );
+  const weekBucketSamples = canonicalBucketSeriesSamples(
+    series?.weekCostBuckets,
+    series?.weekCostBucketsTruncated === true,
+    weekStartMs,
+    nowMs,
+    CANONICAL_COST_BUCKET_WIDTH_MS.week,
+  );
   const useTodayDailyCostSeries = series?.truncated === true
     || (todayCostSamples.length === 0 && dailyCost.length > 0);
   const useWeekDailyCostSeries = series?.truncated === true
     || (weekCostSamples.length === 0 && dailyCost.length > 0);
-  const todayCostSeries = useTodayDailyCostSeries
-    ? buildCanonicalDailyCostSeries(dailyCost, todayStartMs, nowMs, nowMs, timeZone)
-    : buildCumulativeSeries(
-      todayCostSamples,
+  const todayCostSeries = todayBucketSamples !== null
+    ? buildCumulativeSeries(
+      todayBucketSamples,
       nowMs,
       undefined,
       { timeZone, targetTotals: seriesTarget(rows, 'today', 'cost'), roundValues: true },
-    );
+    )
+    : useTodayDailyCostSeries
+      ? buildCanonicalDailyCostSeries(dailyCost, todayStartMs, nowMs, nowMs, timeZone)
+      : buildCumulativeSeries(
+        todayCostSamples,
+        nowMs,
+        undefined,
+        { timeZone, targetTotals: seriesTarget(rows, 'today', 'cost'), roundValues: true },
+      );
   const todayInputTokenSeries = buildCumulativeSeries(
     filterCanonicalSeriesSamples(inputSamples, todayStartMs, nowMs),
     nowMs,
@@ -689,14 +667,21 @@ function canonicalAccountingOverlay(
     undefined,
     { timeZone, targetTotals: seriesTarget(rows, 'today', 'output') },
   );
-  const weekCostSeries = useWeekDailyCostSeries
-    ? buildCanonicalDailyCostSeries(dailyCost, weekStartMs, nowMs, nowMs, timeZone)
-    : buildCumulativeSeries(
-      weekCostSamples,
+  const weekCostSeries = weekBucketSamples !== null
+    ? buildCumulativeSeries(
+      weekBucketSamples,
       nowMs,
       undefined,
       { timeZone, targetTotals: seriesTarget(rows, 'week', 'cost'), roundValues: true },
-    );
+    )
+    : useWeekDailyCostSeries
+      ? buildCanonicalDailyCostSeries(dailyCost, weekStartMs, nowMs, nowMs, timeZone)
+      : buildCumulativeSeries(
+        weekCostSamples,
+        nowMs,
+        undefined,
+        { timeZone, targetTotals: seriesTarget(rows, 'week', 'cost'), roundValues: true },
+      );
 
   return {
     todayCost: today.cost,
@@ -810,6 +795,14 @@ type CanonicalSeriesSample = {
   value: number;
 };
 
+/** Execution evidence is truncated only by the recorder's explicit execution
+ * bound, or — for older read-model adapters without the split flags — by the
+ * legacy combined sample flag. Settlement-sample truncation and cost-bucket
+ * truncation are independent of execution evidence. */
+function executionTemporalTruncated(series: ProviderAggregateSeries | undefined): boolean {
+  return series?.executionTruncated ?? (series?.truncated ?? false);
+}
+
 function canonicalSeriesSamples(
   settlements: ProviderAggregateSeries['settlements'],
   field: 'cost' | 'inputTokens' | 'outputTokens',
@@ -836,6 +829,45 @@ function filterCanonicalSeriesSamples(
   endMs: number,
 ): CanonicalSeriesSample[] {
   return samples.filter((sample) => sample.ms >= startMs && sample.ms <= endMs);
+}
+
+/** Convert the recorder's exact cost buckets into cumulative-series samples.
+ * Each bucket's cost step is anchored at its end (exclusive) so the cumulative
+ * value rises across the interval the bucket covers, and the final bucket
+ * cannot extend past the range end. `bucketWidthMs` is the shared per-range
+ * width authority (`CANONICAL_COST_BUCKET_WIDTH_MS`): minute for today, hour
+ * for week, matching the recorder's aggregation exactly. Bucket sums already
+ * cover only the recorder range's settlements, so no bucket can leak across
+ * the local calendar boundary. Returns null — never a partial stream — when the recorder
+ * supplied no buckets for the range (older read-model adapters) or marked the
+ * range's bucket read truncated; callers then fall back to the bounded raw
+ * samples or the exact daily rollups. Unknown-cost settlements carry no
+ * value: their count stays available on the read model and the
+ * billable-accounting counters, so no fabricated distribution is drawn for
+ * them. */
+function canonicalBucketSeriesSamples(
+  buckets: ProviderAggregateCostBucket[] | undefined,
+  truncated: boolean,
+  rangeStartMs: number,
+  rangeEndMs: number,
+  bucketWidthMs: number,
+): CanonicalSeriesSample[] | null {
+  if (buckets === undefined || truncated) return null;
+  const samples: CanonicalSeriesSample[] = [];
+  for (const bucket of buckets) {
+    const bucketStartMs = canonicalTimestamp(bucket.ms, 'cost bucket start');
+    if (bucketStartMs === null) continue;
+    const bucketEndMs = Math.min(bucketStartMs + bucketWidthMs, rangeEndMs);
+    if (bucketEndMs <= rangeStartMs || bucketStartMs >= rangeEndMs) continue;
+    if (bucket.cost === null) continue;
+    samples.push({
+      ms: bucketEndMs,
+      provider: bucket.provider?.trim() || 'unknown',
+      model: bucket.model?.trim() || 'unknown',
+      value: metricNumber(bucket.cost, 'series cost bucket'),
+    });
+  }
+  return samples.sort((left, right) => left.ms - right.ms);
 }
 
 function seriesTarget(

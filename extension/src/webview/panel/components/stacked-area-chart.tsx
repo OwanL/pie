@@ -8,14 +8,12 @@ import type { AggregateSeriesPoint } from '../../../shared/protocol';
 import { colorsFor } from './chart-colors';
 
 /**
- * Reusable SVG stacked-area/bar chart for status-strip tooltip graphs.
+ * Reusable SVG stacked-area/line chart for status-strip tooltip graphs.
  *
- * Three modes:
+ * Two modes:
  *  - **`cumulative`** (cost / tokens): exact timestamped cumulative samples
  *    are joined with monotone cubic curves. The interpolation cannot overshoot
  *    adjacent values, and the final sample remains the exact headline total.
- *  - **`rate`** (today's throughput / daily run count): per-bucket values
- *    rendered as spaced stacked bars.
  *  - **`line`** (work trend counts): one non-stacked line per series, so
  *    overlapping quantities (sessions used vs peak working) are compared
  *    rather than summed.
@@ -33,7 +31,7 @@ import { colorsFor } from './chart-colors';
 
 export interface StackedAreaChartProps {
   points: AggregateSeriesPoint[];
-  mode: 'cumulative' | 'rate' | 'line';
+  mode: 'cumulative' | 'line';
   /** Format a y-value for the axis max + hover. */
   formatY: (n: number) => string;
   /** Format an x-ms value for the axis labels + hover. */
@@ -276,7 +274,7 @@ export function StackedAreaChart({
         );
       }
     }
-  } else if (mode === 'cumulative') {
+  } else {
     // One closed path per provider, built from per-provider CONTRIBUTION
     // curves (see stackedBoundaryCurves). Never smooth the stacked upper/lower
     // boundaries independently: two ordered monotone boundaries can still
@@ -320,26 +318,6 @@ export function StackedAreaChart({
         d += ' Z';
       }
       marks.push(<path key={provider} d={d} fill={model.colors.get(provider)} opacity="0.92" />);
-    }
-  } else {
-    for (let i = 0; i < pointSegs.length; i += 1) {
-      const ps = pointSegs[i]!;
-      const x = xFor(ps.ms);
-      const bw = Math.min(16, (plotW / Math.max(1, pointSegs.length)) * 0.7);
-      const dim = hoverIdx !== null && hoverIdx !== i;
-      for (const seg of ps.segs) {
-        if (seg.y1 - seg.y0 <= 0) continue;
-        marks.push(
-          <rect
-            x={x - bw / 2}
-            y={yFor(seg.y1)}
-            width={bw}
-            height={yFor(seg.y0) - yFor(seg.y1)}
-            fill={model.colors.get(seg.provider)}
-            opacity={dim ? 0.4 : 0.92}
-          />,
-        );
-      }
     }
   }
 
@@ -464,7 +442,7 @@ function ChartAccessibilityTable({
   formatY: (value: number) => string;
   unit?: string;
 }): JSX.Element {
-  const modeLabel = mode === 'cumulative' ? 'cumulative' : mode === 'rate' ? 'rate' : 'line';
+  const modeLabel = mode === 'cumulative' ? 'cumulative' : 'line';
   const accessiblePoints = sampleAccessibilityPoints(points, 12);
   const sampled = accessiblePoints.length < points.length;
   return (

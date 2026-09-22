@@ -2,10 +2,12 @@ import * as fs from 'node:fs';
 
 import type {
   DetailResult,
+  InitialContextEstimate,
   LazyDetailRef,
   ModelInfo,
   ModelSettings,
   SessionOpenedPayload,
+  SystemPromptEntry,
   TranscriptMode,
   TranscriptPageDirection,
   TranscriptPagePayload,
@@ -33,7 +35,9 @@ export interface ColdBrowseHelperOpenOptions {
   readonly operationAttempt?: number;
   readonly transcript?: TranscriptMode;
   readonly transport?: SessionSnapshotTransport;
+  readonly systemPrompts?: readonly SystemPromptEntry[];
   readonly systemPromptDisabledEntries?: readonly string[];
+  readonly initialContextEstimate?: InitialContextEstimate;
 }
 
 export interface ColdBrowseHelperPageOptions {

@@ -61,6 +61,9 @@ function makeHost(): {
       return true;
     },
     sendDetailFrame: () => true,
+    // WorkerLiveDetailStore registers its drain listener through this hook;
+    // the real server returns an unsubscribe function.
+    onDetailDrain: () => () => undefined,
     failRuntime: (error: Error) => { runtimeFailures.push(error); },
   } as never;
   const host = new WorkerRuntimeHost({
@@ -163,6 +166,7 @@ test('worker settings rollback keeps provider deletion explicit on the coordinat
       sendFrame: () => true,
       sendLiveSemanticFrame: () => true,
       sendDetailFrame: () => true,
+      onDetailDrain: () => () => undefined,
       failRuntime: () => undefined,
     } as never,
     owner: { coordinatorGeneration: 1, workerId: 'settings-worker', workerGeneration: 1 },
@@ -1128,6 +1132,7 @@ test('live.semantic emission uses the recoverable-drop seam while other events s
       return false;
     },
     sendDetailFrame: () => true,
+    onDetailDrain: () => () => undefined,
     failRuntime: (error: Error) => { runtimeFailures.push(error); },
   } as never;
   const host = new WorkerRuntimeHost({

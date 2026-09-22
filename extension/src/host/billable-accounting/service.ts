@@ -763,6 +763,10 @@ export class BillableAccounting {
     sample: Omit<AuxiliaryLlmUsagePayload, 'sessionPath'>,
   ): {
     channelsKnown: boolean;
+    invocationId: string;
+    kind: BillableInvocationKind;
+    canonicalAccepted?: boolean;
+    record?: BillableInvocationRecord;
     sample: Omit<AuxiliaryLlmUsagePayload, 'sessionPath'>
       & { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number };
   } {
@@ -793,7 +797,7 @@ export class BillableAccounting {
     const invocationKind: BillableInvocationKind = sample.kind === 'assistant_message'
       ? this.pendingRetryBySession[sessionPath] ? 'retry' : 'conversation'
       : sample.kind;
-    this.appendUsageSample(sessionPath, {
+    const appended = this.appendUsageSample(sessionPath, {
       sourceId: sample.sourceId,
       kind: invocationKind,
       modelId: sample.modelId,
@@ -826,7 +830,14 @@ export class BillableAccounting {
       outcome: sample.outcome,
     });
     if (assistantInvocation) delete this.pendingRetryBySession[sessionPath];
-    return { channelsKnown, sample: { ...sample, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens } };
+    return {
+      channelsKnown,
+      invocationId: appended.invocationId,
+      kind: invocationKind,
+      ...(appended.canonicalAccepted !== undefined ? { canonicalAccepted: appended.canonicalAccepted } : {}),
+      ...(appended.record ? { record: appended.record } : {}),
+      sample: { ...sample, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens },
+    };
   }
 
   observeAutoRetry(
@@ -1050,7 +1061,7 @@ export class BillableAccounting {
     sessionPath: string,
     sample: SessionUsageSample,
     options: AppendUsageOptions = {},
-  ): { invocationId: string; appendedDurable: boolean } {
+  ): { invocationId: string; appendedDurable: boolean; canonicalAccepted?: boolean; record?: BillableInvocationRecord } {
     this.retryPendingWrites();
     const identity = this.deps.sessionIdentity(sessionPath);
     const stableSessionId = options.sessionId ?? identity.sessionId;
@@ -1066,7 +1077,7 @@ export class BillableAccounting {
       if (!options.skipExistingActivity) {
         this.invocationLedger.transaction(() => this.recordInvocationActivity(existing));
       }
-      return { invocationId, appendedDurable: false };
+      return { invocationId, appendedDurable: false, record: existing };
     }
     const declaredPresence = sample.tokenChannelPresence;
     const tokenChannelPresence = {
@@ -1178,7 +1189,7 @@ export class BillableAccounting {
       // Canonical mode never falls through to the legacy JSONL ledger. P5
       // replaces the legacy query consumers before P7 is allowed to select
       // this authority.
-      return { invocationId, appendedDurable: false };
+      return { invocationId, appendedDurable: false, canonicalAccepted: capture !== 'rejected', record };
     }
     try {
       const appendedDurable = this.persistInvocationRecord(record, options.deferredActivity);
@@ -1188,7 +1199,7 @@ export class BillableAccounting {
         this.currentBranchSourcesBySession[sessionPath]?.add(sample.sourceId);
       }
       this.deps.scheduleRender();
-      return { invocationId, appendedDurable };
+      return { invocationId, appendedDurable, record };
     } catch (error) {
       this.pendingInvocationWrites.set(record.invocationId, record);
       appendPieLog('warn', 'billable-ledger', 'could not append invocation; queued for retry', {
@@ -1203,7 +1214,7 @@ export class BillableAccounting {
         noticeRaw: `Billable invocation ${record.invocationId} persistence failed: ${error instanceof Error ? error.message : String(error)}`,
       });
     }
-    return { invocationId, appendedDurable: false };
+    return { invocationId, appendedDurable: false, record };
   }
 
   private recordInvocationActivity(record: BillableInvocationRecord): void {

@@ -12,7 +12,6 @@ export type BooleanPrefKey =
   | 'runtimeAuditLog'
   | 'hideStatusStrip'
   | 'hideTokenRate'
-  | 'hideSessionTokens'
   | 'hideSessionCost'
   | 'hideContextIndicator'
   | 'hideRunStatus';
@@ -73,10 +72,6 @@ export const CHAT_PREF_MENU_SECTIONS: readonly ChatPrefMenuSection[] = [
       {
         key: 'hideTokenRate',
         label: 'Hide tokens/sec',
-      },
-      {
-        key: 'hideSessionTokens',
-        label: 'Hide session tokens',
       },
       {
         key: 'hideSessionCost',

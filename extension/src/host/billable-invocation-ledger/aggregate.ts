@@ -20,8 +20,8 @@ interface UsageRow {
 }
 
 /** The immutable portion of an aggregate which is owned by the invocation
- * ledger. Live run counts, throughput, and productivity fields other than
- * input-token totals remain owned by the run analytics aggregate. */
+ * ledger. Live run counts and productivity fields other than input-token totals
+ * remain owned by the run analytics aggregate. */
 export interface LedgerUsageOverlay {
   todayCost: number;
   todayCostByProvider: AggregateProviderCost[];
@@ -145,8 +145,8 @@ export function applyLedgerUsageOverlay(base: AggregateStats, overlay: LedgerUsa
 }
 
 /** Replace every aggregate usage/cost field with one projection over the
- * immutable invocation ledger. Run analytics still owns run counts,
- * throughput, productivity, tools, and settlement/timing fields. */
+ * immutable invocation ledger. Run analytics still owns run counts, productivity,
+ * tools, and settlement/timing fields. */
 export function projectLedgerUsageOntoAggregate(
   base: AggregateStats,
   records: readonly BillableInvocationRecord[],

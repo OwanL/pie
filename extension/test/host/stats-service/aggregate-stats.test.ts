@@ -17,7 +17,6 @@ import {
 import { MAX_USER_INPUT_SAMPLE_CHARS, type RunSnapshot } from '../../../src/host/run-analytics';
 import type { ModelPricingRecord } from '../../../../shared/pricing-core';
 import type { AggregateSeriesSegment } from '../../../src/shared/protocol/aggregate-stats';
-import type { TokenRateIndicatorState } from '../../../src/shared/token-rate';
 
 function makeRun(overrides: Partial<RunSnapshot>): RunSnapshot {
   return {
@@ -316,31 +315,6 @@ test('computeAggregateStats: last run is the most-recently ended run', () => {
   assert.equal(stats.lastRun!.outputTokens, 500_000);
 });
 
-test('computeAggregateStats: throughput is generation-time-weighted', () => {
-  const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 0, 0)]]]);
-  const runs = [
-    makeRun({
-      runId: 'r1', modelId: 'm',
-      turnThroughputSamples: [
-        { endedAt: isoLocal(2026, 7, 4, 10, 0), outputTokens: 1000, generationDurationMs: 10_000, concurrentBusySessions: 1, status: 'completed', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
-        { endedAt: isoLocal(2026, 7, 4, 10, 1), outputTokens: 3000, generationDurationMs: 10_000, concurrentBusySessions: 1, status: 'completed', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
-        // interrupted turn is excluded
-        { endedAt: isoLocal(2026, 7, 4, 10, 2), outputTokens: 500, generationDurationMs: 5_000, concurrentBusySessions: 1, status: 'interrupted', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
-      ],
-    }),
-  ];
-  const stats = computeAggregateStats(runs, pricingMap, NOW, [], {}, 0);
-  // weighted: (1000 + 3000) / (20_000/1000) = 4000 / 20 = 200 tok/s
-  assert.equal(stats.tokensPerSecond, 200);
-  assert.equal(stats.tokensPerSecondByProvider.length, 1);
-  assert.equal(stats.tokensPerSecondByProvider[0]!.tokensPerSecond, 200);
-  assert.equal(stats.tokensPerSecondByProvider[0]!.sampleCount, 2);
-  // today's throughput (samples ended today) = same 200 tok/s
-  assert.equal(stats.todayTokensPerSecond, 200);
-  assert.equal(stats.todayTokensPerSecondByProvider.length, 1);
-  assert.equal(stats.todayTokensPerSecondByProvider[0]!.sampleCount, 2);
-});
-
 test('computeAggregateStats: preserves an explicit zero provider cost for a tokenless response', () => {
   const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 10, 10)]]]);
   const run = makeRun({
@@ -379,80 +353,6 @@ test('computeAggregateStats: unknown/unpriced model attributes to unknown with z
   assert.equal(stats.totalOutputTokens, 100_000);
 });
 
-test('computeAggregateStats: live tok/s sums running sessions rates', () => {
-  const pricingMap = new Map<string, ModelPricingRecord[]>();
-  const rates: Record<string, TokenRateIndicatorState> = {
-    '/s/1': { label: '40 tok/s', ariaLabel: '', tooltip: '', state: 'generating', paused: false, rate: 40 },
-    '/s/2': { label: '5.5 tok/s', ariaLabel: '', tooltip: '', state: 'generating', paused: false, rate: 5.5 },
-    '/s/3': { label: '—', ariaLabel: '', tooltip: '', state: 'paused', paused: true }, // no rate → 0
-  };
-  const stats = computeAggregateStats([], pricingMap, NOW, ['/s/1', '/s/2', '/s/3'], rates, 3);
-  assert.equal(stats.activeGenerationTokensPerSecond, 45.5);
-  assert.equal(stats.liveTokensPerSecond, 45.5);
-  assert.equal(stats.runningSessionCount, 3);
-  assert.equal(stats.openTabCount, 3);
-});
-
-test('computeAggregateStats: a paused session (held rate) is excluded from live tok/s', () => {
-  // A session paused on a tool call holds its last rate for the chip display
-  // (token-rate.ts returns state:'paused' with a held `rate`) but must NOT
-  // contribute to the status-bar aggregate for the whole tool-call duration.
-  const pricingMap = new Map<string, ModelPricingRecord[]>();
-  const rates: Record<string, TokenRateIndicatorState> = {
-    '/s/1': { label: '⏸ 200 tok/s', ariaLabel: '', tooltip: '', state: 'paused', paused: true, rate: 200 },
-  };
-  const stats = computeAggregateStats([], pricingMap, NOW, ['/s/1'], rates, 1);
-  assert.equal(stats.liveTokensPerSecond, 0);
-  // Still counted as a running session so ready/warming counts stay accurate.
-  assert.equal(stats.runningSessionCount, 1);
-});
-
-test('computeAggregateStats: a long-running bash (paused peer) does not inflate the live total', () => {
-  // Two running sessions: one generating at 150 tok/s, one paused on a tool
-  // call holding 200 tok/s. The aggregate must be 150 (the generating session
-  // only), not 350 — the user's exact symptom.
-  const pricingMap = new Map<string, ModelPricingRecord[]>();
-  const rates: Record<string, TokenRateIndicatorState> = {
-    '/s/1': { label: '150 tok/s', ariaLabel: '', tooltip: '', state: 'generating', paused: false, rate: 150 },
-    '/s/2': { label: '⏸ 200 tok/s', ariaLabel: '', tooltip: '', state: 'paused', paused: true, rate: 200 },
-  };
-  const stats = computeAggregateStats([], pricingMap, NOW, ['/s/1', '/s/2'], rates, 2);
-  assert.equal(stats.liveTokensPerSecond, 150);
-  assert.equal(stats.runningSessionCount, 2);
-});
-
-test('computeAggregateStats: all-paused aggregate is 0 but running counts are unaffected', () => {
-  // Two paused sessions (both mid tool call) → 0 live tok/s, but both still
-  // counted in runningSessionCount so the ready/warming counts stay accurate.
-  const pricingMap = new Map<string, ModelPricingRecord[]>();
-  const rates: Record<string, TokenRateIndicatorState> = {
-    '/s/1': { label: '⏸ 180 tok/s', ariaLabel: '', tooltip: '', state: 'paused', paused: true, rate: 180 },
-    '/s/2': { label: '⏸ 220 tok/s', ariaLabel: '', tooltip: '', state: 'paused', paused: true, rate: 220 },
-  };
-  const stats = computeAggregateStats([], pricingMap, NOW, ['/s/1', '/s/2'], rates, 2);
-  assert.equal(stats.liveTokensPerSecond, 0);
-  assert.equal(stats.runningSessionCount, 2);
-  assert.equal(stats.openTabCount, 2);
-});
-
-test('computeAggregateStats: resuming after a tool call restores the session\'s contribution', () => {
-  // Same session transitions paused → generating across two computes. While
-  // paused (tool running) it contributes 0; once generating again its rate is
-  // summed back in.
-  const pricingMap = new Map<string, ModelPricingRecord[]>();
-  const pausedRates: Record<string, TokenRateIndicatorState> = {
-    '/s/1': { label: '⏸ 200 tok/s', ariaLabel: '', tooltip: '', state: 'paused', paused: true, rate: 200 },
-  };
-  const pausedStats = computeAggregateStats([], pricingMap, NOW, ['/s/1'], pausedRates, 1);
-  assert.equal(pausedStats.liveTokensPerSecond, 0);
-
-  const generatingRates: Record<string, TokenRateIndicatorState> = {
-    '/s/1': { label: '200 tok/s', ariaLabel: '', tooltip: '', state: 'generating', paused: false, rate: 200 },
-  };
-  const generatingStats = computeAggregateStats([], pricingMap, NOW, ['/s/1'], generatingRates, 1);
-  assert.equal(generatingStats.liveTokensPerSecond, 200);
-});
-
 test('computeAggregateStats: week window excludes runs older than 7 days', () => {
   const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 1, 1)]]]);
   const today = isoLocal(2026, 7, 4, 10);
@@ -469,29 +369,6 @@ test('computeAggregateStats: week window excludes runs older than 7 days', () =>
   assert.equal(stats.todayRunCount, 1);
   assert.equal(stats.weekRunCount, 1);
   assert.equal(stats.runCount, 2);
-});
-
-test('computeAggregateStats: today throughput buckets by sample end-date', () => {
-  const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 0, 0)]]]);
-  const yesterdaySample = isoLocal(2026, 7, 3, 23, 30);
-  const todaySample = isoLocal(2026, 7, 4, 10);
-  const runs = [
-    makeRun({
-      runId: 'r1', modelId: 'm',
-      // Run landed today, but one of its samples ended yesterday (pre-local-midnight).
-      startedAt: isoLocal(2026, 7, 3, 23, 0), updatedAt: todaySample, finalizedAt: todaySample,
-      turnThroughputSamples: [
-        { endedAt: yesterdaySample, outputTokens: 2000, generationDurationMs: 10_000, concurrentBusySessions: 1, status: 'completed', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
-        { endedAt: todaySample, outputTokens: 1000, generationDurationMs: 10_000, concurrentBusySessions: 1, status: 'completed', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
-      ],
-    }),
-  ];
-  const stats = computeAggregateStats(runs, pricingMap, NOW, [], {}, 0);
-  // All-time: (2000 + 1000) / 20s = 150 tok/s
-  assert.equal(stats.tokensPerSecond, 150);
-  // Today: only the sample that ended today → 1000 / 10s = 100 tok/s
-  assert.equal(stats.todayTokensPerSecond, 100);
-  assert.equal(stats.todayTokensPerSecondByProvider[0]!.sampleCount, 1);
 });
 
 test('providerForModel / pricingForModel: ambiguous bare ids require an explicit provider', () => {
@@ -512,40 +389,6 @@ test('providerForModel / pricingForModel: ambiguous bare ids require an explicit
   assert.equal(pricingForModel('m', pricingMap, 'openai-codex'), null);
   assert.equal(providerForModel(undefined, pricingMap), 'unknown');
   assert.equal(pricingForModel('nope', pricingMap), null);
-});
-
-test('computeAggregateStats: throughput samples attribute to their own model with run-model fallback', () => {
-  const pricingMap = new Map<string, ModelPricingRecord[]>([
-    ['openai/gpt', [pricing('openai', 0, 0)]],
-    ['anthropic/claude', [pricing('anthropic', 0, 0)]],
-  ]);
-  const runs = [
-    makeRun({
-      runId: 'r1', modelId: 'openai/gpt',
-      turnThroughputSamples: [
-        // Sample with its own model on a different provider.
-        { endedAt: isoLocal(2026, 7, 4, 10, 0), outputTokens: 3000, generationDurationMs: 10_000, concurrentBusySessions: 1, status: 'completed', modelId: 'anthropic/claude', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
-        // Sample without modelId falls back to the run's model.
-        { endedAt: isoLocal(2026, 7, 4, 10, 1), outputTokens: 1000, generationDurationMs: 10_000, concurrentBusySessions: 1, status: 'completed', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
-      ],
-    }),
-  ];
-  const stats = computeAggregateStats(runs, pricingMap, NOW, [], {}, 0);
-  // Total throughput: (3000 + 1000) / 20s = 200 tok/s
-  assert.equal(stats.tokensPerSecond, 200);
-  assert.equal(stats.tokensPerSecondByProvider.length, 2);
-  const anthropic = stats.tokensPerSecondByProvider.find((p) => p.provider === 'anthropic');
-  const openai = stats.tokensPerSecondByProvider.find((p) => p.provider === 'openai');
-  assert.ok(anthropic, 'anthropic provider should be present');
-  assert.ok(openai, 'openai provider should be present');
-  // anthropic: 3000 / 10s = 300 tok/s
-  assert.equal(anthropic!.tokensPerSecond, 300);
-  assert.equal(anthropic!.outputTokens, 3000);
-  assert.equal(anthropic!.sampleCount, 1);
-  // openai: 1000 / 10s = 100 tok/s
-  assert.equal(openai!.tokensPerSecond, 100);
-  assert.equal(openai!.outputTokens, 1000);
-  assert.equal(openai!.sampleCount, 1);
 });
 
 test('computeAggregateStats: today cost series is cumulative, pruned, with per-provider/model breakdown', () => {
@@ -640,7 +483,7 @@ test('computeAggregateStats: provider-qualified model identity survives daily an
     'weekly area keeps underlying usage timestamps rather than daily midnight bars');
 });
 
-test('computeAggregateStats: today token + throughput series, daily run count, last-run turns', () => {
+test('computeAggregateStats: today token series, daily run count, last-run turns', () => {
   const pricingMap = new Map<string, ModelPricingRecord[]>([['openai/gpt', [pricing('openai', 0, 0)]]]);
   const runs = [
     makeRun({
@@ -660,10 +503,6 @@ test('computeAggregateStats: today token + throughput series, daily run count, l
   assert.equal(stats.todayTokenSeries.length, 3);
   assert.equal(stats.todayTokenSeries[0]!.byProvider[0]!.value, 400_000);
   assert.equal(stats.todayTokenSeries[2]!.byProvider[0]!.value, 1_000_000);
-  // Throughput series: one point per active hour (9 and 10).
-  assert.equal(stats.todayThroughputSeries.length, 2);
-  // hour 9: 400k / 10s = 40000 tok/s
-  assert.equal(stats.todayThroughputSeries[0]!.byProvider[0]!.value, 40_000);
   // Daily run count: pruned to today only (1 run).
   assert.equal(stats.dailyRunCount.length, 1);
   assert.equal(stats.dailyRunCount[0]!.runCount, 1);
@@ -739,8 +578,6 @@ test('computeAggregateStats: parent, subagent, and pruning usage reconcile acros
   assertClose(finalCostPoint.byModel.reduce((sum, entry) => sum + entry.value, 0), 7.3);
   assert.equal(finalTokenPoint.byProvider.reduce((sum, entry) => sum + entry.value, 0), 650_000);
   assert.equal(finalTokenPoint.byModel.reduce((sum, entry) => sum + entry.value, 0), 650_000);
-  assert.equal(stats.tokensPerSecondByProvider.reduce((sum, entry) => sum + entry.sampleCount, 0), 2,
-    'auxiliary usage must not create duplicate throughput samples');
   assertClose(stats.lastRun?.cost ?? undefined, 7.3);
   assert.equal(stats.lastRun?.inputTokens, 1_300_000);
   assert.equal(stats.lastRun?.outputTokens, 650_000);
@@ -854,10 +691,6 @@ test('computeAggregateStats: multi-turn child turns never consume or steal paren
   assert.equal(stats.totalInputTokens, 1_200_000);
   assert.equal(stats.totalOutputTokens, 180_000, 'canonical totals preserved without double counting');
   assertClose(stats.totalCost, 4.4);
-  // Both child turns remain distinct throughput observations for their provider.
-  const throughput = new Map(stats.tokensPerSecondByProvider.map((entry) => [entry.provider, entry]));
-  assert.equal(throughput.get('child-provider')?.sampleCount, 2);
-  assert.equal(throughput.get('parent-provider')?.sampleCount, 1);
 });
 
 test('computeAggregateStats: long-context tiers apply per request, not to multi-turn child aggregates', () => {
@@ -939,7 +772,6 @@ test('computeAggregateStats: empty series when no today runs', () => {
   assert.equal(stats.todayCostSeries.length, 0);
   assert.equal(stats.todayInputTokenSeries.length, 0);
   assert.equal(stats.todayTokenSeries.length, 0);
-  assert.equal(stats.todayThroughputSeries.length, 0);
 });
 
 function segmentMap(segments: AggregateSeriesSegment[]): Map<string, number> {
@@ -1527,7 +1359,7 @@ test('layered completed/open accumulation matches one-pass productivity and work
   assert.equal(todayTrend.productivity.userInputCharCap, 80, 'fewer than five merged samples use the maximum');
 });
 
-test('completed throughput samples without output are unavailable for historical rates', () => {
+test('completed zero-output samples remain available for usage attribution', () => {
   const pricingMap = new Map<string, ModelPricingRecord[]>([['m', [pricing('openai', 0, 0)]]]);
   const run = makeRun({
     runId: 'r1', modelId: 'm', inputTokens: 1_500, outputTokens: 1_000,
@@ -1535,25 +1367,14 @@ test('completed throughput samples without output are unavailable for historical
     turnThroughputSamples: [
       // Real completed turn: contributes tokens + duration.
       { endedAt: isoLocal(2026, 7, 4, 10, 0), inputTokens: 1_000, outputTokens: 1_000, generationDurationMs: 10_000, concurrentBusySessions: 1, status: 'completed', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
-      // Completed but no output (e.g. a tool-only turn): unavailable, must not
-      // contribute duration/sample count/provider rate/chart values.
+      // Completed but no output (e.g. a tool-only turn) still contributes its
+      // known input usage.
       { endedAt: isoLocal(2026, 7, 4, 10, 5), inputTokens: 500, outputTokens: 0, generationDurationMs: 5_000, concurrentBusySessions: 1, status: 'completed', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
       // No output and no generation time either.
       { endedAt: isoLocal(2026, 7, 4, 10, 6), inputTokens: 0, outputTokens: 0, generationDurationMs: 0, concurrentBusySessions: 1, status: 'completed', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
     ],
   });
   const stats = computeAggregateStats([run], pricingMap, NOW, [], {}, 0);
-  // Only the 1000-token / 10s sample feeds the rate.
-  assert.equal(stats.tokensPerSecond, 100);
-  assert.equal(stats.tokensPerSecondByProvider.length, 1);
-  assert.equal(stats.tokensPerSecondByProvider[0]!.outputTokens, 1_000);
-  assert.equal(stats.tokensPerSecondByProvider[0]!.generationDurationMs, 10_000);
-  assert.equal(stats.tokensPerSecondByProvider[0]!.sampleCount, 1);
-  assert.equal(stats.todayTokensPerSecond, 100);
-  assert.equal(stats.todayTokensPerSecondByProvider[0]!.sampleCount, 1);
-  // The throughput chart carries the one usable hour point at its true rate.
-  assert.equal(stats.todayThroughputSeries.length, 1);
-  assert.equal(stats.todayThroughputSeries[0]!.byProvider[0]!.value, 100);
   // Usage attribution is unchanged: the zero-output sample still bills its input.
   assert.equal(stats.totalInputTokens, 1_500);
   assert.equal(stats.totalOutputTokens, 1_000);

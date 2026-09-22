@@ -120,6 +120,9 @@ function mergeSessionSummaryPreservingLocalName(
     provider: incoming.provider ?? existing.provider,
     thinkingLevel: incoming.thinkingLevel ?? existing.thinkingLevel,
     sessionId: incoming.sessionId ?? existing.sessionId,
+    ...(incoming.agentCreated === true || existing.agentCreated === true
+      ? { agentCreated: true }
+      : {}),
     // `identityFallback` qualifies the identity arriving in the same summary.
     // Stable backend summaries intentionally omit the false value, so carrying
     // an older `true` across that refresh would incorrectly mark the new stable
@@ -352,15 +355,26 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
   const coldPromptDisabledIds = payload.systemPromptDisabledEntries !== undefined
     ? new Set(payload.systemPromptDisabledEntries)
     : undefined;
+  // An ordinary cold snapshot always attempted fresh, target-specific prompt
+  // discovery. Its missing catalog is therefore an authoritative discovery
+  // failure, not permission to keep text from an older cwd/model. The explicit
+  // snapshot-unavailable fallback is different: it intentionally omits bulky
+  // fields, so preserve the existing entries (while still applying its bounded
+  // toggle confirmation). Hot omitted-field semantics remain unchanged too.
+  const coldPromptDiscoveryFailed = payload.runtimeReady === false
+    && payload.systemPrompts === undefined
+    && payload.snapshotUnavailable === undefined;
   const reconciledSystemPrompts = payload.systemPrompts ?? (
-    coldPromptDisabledIds
-      ? (next.transcript.systemPromptsBySession[sessionPath] ?? []).map((entry) => ({
-          ...entry,
-          disabled: entry.toggleable !== false
-            && entry.id !== undefined
-            && coldPromptDisabledIds.has(entry.id),
-        }))
-      : undefined
+    coldPromptDiscoveryFailed
+      ? []
+      : coldPromptDisabledIds
+        ? (next.transcript.systemPromptsBySession[sessionPath] ?? []).map((entry) => ({
+            ...entry,
+            disabled: entry.toggleable !== false
+              && entry.id !== undefined
+              && coldPromptDisabledIds.has(entry.id),
+          }))
+        : undefined
   );
 
   next = {

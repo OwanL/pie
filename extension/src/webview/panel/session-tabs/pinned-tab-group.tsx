@@ -7,6 +7,8 @@ import { memo } from 'preact/compat';
 import type { SessionSummary } from '../../../shared/protocol';
 import { isPendingTabPath } from '../../../shared/tab-behavior';
 import { handleContextMenuKeyRequest } from '../components/context-menu-key';
+import { AgentIcon } from './icons';
+import { getSessionTabTooltip } from './session-tab';
 import { getTabAvatarColor, getTabAvatarLabel } from './tab-avatar';
 import type { SessionTabContextTarget } from './types';
 
@@ -18,6 +20,7 @@ export interface PinnedTabGroupProps {
    *  drag drop gap). */
   itemIndex: number;
   sessionByPath: Map<string, SessionSummary>;
+  agentCreatedPathSet: Set<string>;
   runningPathSet: Set<string>;
   generatingTitlePathSet?: Set<string>;
   startingModelPathSet: Set<string>;
@@ -59,6 +62,7 @@ function PinnedTabGroupView({
   members,
   itemIndex,
   sessionByPath,
+  agentCreatedPathSet,
   runningPathSet,
   generatingTitlePathSet = new Set<string>(),
   startingModelPathSet,
@@ -80,6 +84,8 @@ function PinnedTabGroupView({
 
   const firstMember = members[0] ?? '';
   const hasActiveMember = activePath !== null && members.includes(activePath);
+  const hasAgentCreatedMember = members.some((memberPath) => agentCreatedPathSet.has(memberPath));
+  const allMembersAgentCreated = members.length > 0 && members.every((memberPath) => agentCreatedPathSet.has(memberPath));
 
   // Measure the chip's viewport rect when the dropdown opens so the dropdown
   // can be fixed-positioned just below it (escaping the strip's overflow).
@@ -136,7 +142,7 @@ function PinnedTabGroupView({
         data-pinned-item="true"
         data-pinned-item-path={firstMember}
         data-pinned-item-group="true"
-        title={`${members.length} pinned sessions`}
+        title={`${members.length} pinned sessions${hasAgentCreatedMember ? ' · Includes agent-created session' : ''}`}
       >
         <button
           class="pinned-tab-group-main"
@@ -167,6 +173,7 @@ function PinnedTabGroupView({
               ),
             )}
           </span>
+          {allMembersAgentCreated && <AgentIcon compact />}
         </button>
       </div>
       {open && anchor && (
@@ -195,7 +202,7 @@ function PinnedTabGroupView({
                 key={memberPath}
                 class={rowClassBits.join(' ')}
                 type="button"
-                title={label}
+                title={getSessionTabTooltip(session?.agentCreated, label) ?? label}
                 onClick={() => onSelectMember(memberPath)}
                 onContextMenu={(event) => onContextMenu(
                   event as MouseEvent,
@@ -219,6 +226,7 @@ function PinnedTabGroupView({
                 >
                   {label}
                 </span>
+                {session?.agentCreated === true && <AgentIcon />}
                 {isRunning || isPreparing
                   ? <span class={isStartingModel ? 'session-tab-running starting-model' : 'session-tab-running'} aria-hidden="true" />
                   : isDeferredTimer

@@ -4,10 +4,9 @@
  *
  * Given the raw {@link RunSnapshot}s (completed + open), a model-pricing map,
  * the set of currently-running session paths, the live per-session rate
- * states, and the open-tab count, it rolls up cost / tokens / throughput per
- * provider and overall — with a recent/current focus (today + this-week cost,
- * today throughput, live rate, open/running counts) plus all-time context for
- * tooltips.
+ * states, and the open-tab count, it rolls up cost / tokens per provider and
+ * overall — with a recent/current focus (today + this-week cost, open/running
+ * counts) plus all-time context for tooltips.
  *
  * Provider attribution policy: see {@link ../../shared/protocol/aggregate-stats.ts}.
  */
@@ -25,14 +24,12 @@ import type {
   AggregateModelSeriesSegment,
   AggregateProductivityStats,
   AggregateProviderCost,
-  AggregateProviderThroughput,
   AggregateSeriesPoint,
   AggregateSeriesSegment,
   AggregateStats,
   AggregateSubagentLifecycleStats,
 } from '../../shared/protocol';
 import { EMPTY_PRODUCTIVITY_STATS, EMPTY_PROVIDER_GATE_STATS } from '../../shared/protocol/aggregate-stats';
-import type { TokenRateIndicatorState } from '../../shared/token-rate';
 import {
   MAX_USER_INPUT_SAMPLE_CHARS,
   type RunSnapshot,
@@ -61,10 +58,6 @@ interface ProviderAccumulator {
   outputTokens: number;
   cacheReadTokens: number;
   cacheWriteTokens: number;
-  // Throughput accumulators (completed turns only):
-  throughputOutputTokens: number;
-  throughputGenerationMs: number;
-  sampleCount: number;
 }
 
 interface DayAccumulator {
@@ -143,20 +136,6 @@ interface AttributedUsage extends TokenCounts {
   costObserved: boolean;
 }
 
-/** Per-hour throughput accumulator for today's intraday throughput chart. */
-interface HourThroughput {
-  byProvider: Map<string, { out: number; genMs: number }>;
-  byModel: Map<string, { provider: string; model: string; out: number; genMs: number }>;
-}
-
-/** Minimal throughput accumulator for a (date, provider) bucket. */
-interface ThroughputAcc {
-  provider: string;
-  outputTokens: number;
-  generationDurationMs: number;
-  sampleCount: number;
-}
-
 /** Window dates used for today / this-week bucketing. */
 interface DateWindow {
   todayDate: string;
@@ -174,19 +153,15 @@ interface DateWindow {
 export interface AggregateStatsAccumulator {
   byProvider: Map<string, ProviderAccumulator>;
   byDay: Map<string, DayAccumulator>;
-  throughputByDay: Map<string, Map<string, ThroughputAcc>>;
   sessionPaths: Set<string>;
   totalCost: number;
   totalInputTokens: number;
   totalOutputTokens: number;
   totalCacheReadTokens: number;
   totalCacheWriteTokens: number;
-  totalThroughputOutputTokens: number;
-  totalThroughputGenerationMs: number;
   costSamplesByDay: Map<string, TodayCostSample[]>;
   inputTokenSamplesByDay: Map<string, TodayTokenSample[]>;
   tokenSamplesByDay: Map<string, TodayTokenSample[]>;
-  throughputByHourByDay: Map<string, Map<number, HourThroughput>>;
   lastRunEndedMs: number;
   lastRun: AggregateLastRun | null;
   runCount: number;
@@ -201,7 +176,7 @@ export interface AggregateStatsInstrumentation {
 /** Instrumentation for proving that preparation is the only operation which
  * visits unbounded completed-history day/sample collections. */
 export interface AggregateStatsLayerInstrumentation {
-  onCompletedSourceEntryVisited?: (kind: 'day' | 'cost_sample' | 'token_sample' | 'throughput_hour') => void;
+  onCompletedSourceEntryVisited?: (kind: 'day' | 'cost_sample' | 'token_sample') => void;
 }
 
 /**
@@ -217,24 +192,16 @@ export interface PreparedAggregateStatsLayer {
   tokenSamplesCompacted: boolean;
 }
 
-/** Today-specific cost and throughput rollups. */
+/** Today-specific cost rollup. */
 interface TodayStats {
   todayCost: number;
   todayCostByProvider: AggregateProviderCost[];
-  todayTokensPerSecond: number;
-  todayTokensPerSecondByProvider: AggregateProviderThroughput[];
 }
 
 /** Week cost rollup. */
 interface WeekStats {
   weekCost: number;
   weekCostByProvider: AggregateProviderCost[];
-}
-
-/** Live aggregate tok/s and running-session count. */
-interface LiveStats {
-  liveTokensPerSecond: number;
-  runningSessionCount: number;
 }
 
 function createDayAccumulator(date: string): DayAccumulator {
@@ -464,9 +431,6 @@ function createProviderAccumulator(provider: string): ProviderAccumulator {
     outputTokens: 0,
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
-    throughputOutputTokens: 0,
-    throughputGenerationMs: 0,
-    sampleCount: 0,
   };
 }
 
@@ -1131,38 +1095,8 @@ function toProviderCost(acc: ProviderAccumulator): AggregateProviderCost {
   };
 }
 
-function toProviderThroughput(acc: ProviderAccumulator): AggregateProviderThroughput {
-  const tokensPerSecond = acc.throughputGenerationMs > 0
-    ? acc.throughputOutputTokens / (acc.throughputGenerationMs / 1000)
-    : 0;
-  return {
-    provider: acc.provider,
-    tokensPerSecond,
-    outputTokens: acc.throughputOutputTokens,
-    generationDurationMs: acc.throughputGenerationMs,
-    sampleCount: acc.sampleCount,
-  };
-}
-
-function throughputAccToEntry(acc: ThroughputAcc): AggregateProviderThroughput {
-  const tokensPerSecond = acc.generationDurationMs > 0
-    ? acc.outputTokens / (acc.generationDurationMs / 1000)
-    : 0;
-  return {
-    provider: acc.provider,
-    tokensPerSecond,
-    outputTokens: acc.outputTokens,
-    generationDurationMs: acc.generationDurationMs,
-    sampleCount: acc.sampleCount,
-  };
-}
-
 function sortCostDesc(a: AggregateProviderCost, b: AggregateProviderCost): number {
   return b.cost - a.cost || a.provider.localeCompare(b.provider);
-}
-
-function sortThroughputDesc(a: AggregateProviderThroughput, b: AggregateProviderThroughput): number {
-  return b.outputTokens - a.outputTokens || a.provider.localeCompare(b.provider);
 }
 
 /** Build the rolling week window's ordered local dates (oldest → newest). */
@@ -1175,7 +1109,7 @@ function buildDateWindows(nowMs: number): DateWindow {
 
 /**
  * Single pass over all runs that accumulates per-provider, per-day,
- * per-day-throughput, intraday sample, and most-recent-run state without
+ * intraday sample and most-recent-run state without
  * consulting the current wall clock.
  */
 export function accumulateAggregateStats(
@@ -1185,22 +1119,16 @@ export function accumulateAggregateStats(
 ): AggregateStatsAccumulator {
   const byProvider = new Map<string, ProviderAccumulator>();
   const byDay = new Map<string, DayAccumulator>();
-  // Throughput is bucketed by each sample's end-date. Date-window selection is
-  // deferred until finalization, keeping this accumulator independent of now.
-  const throughputByDay = new Map<string, Map<string, ThroughputAcc>>();
   const sessionPaths = new Set<string>();
   const costSamplesByDay = new Map<string, TodayCostSample[]>();
   const inputTokenSamplesByDay = new Map<string, TodayTokenSample[]>();
   const tokenSamplesByDay = new Map<string, TodayTokenSample[]>();
-  const throughputByHourByDay = new Map<string, Map<number, HourThroughput>>();
 
   let totalCost = 0;
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
   let totalCacheReadTokens = 0;
   let totalCacheWriteTokens = 0;
-  let totalThroughputOutputTokens = 0;
-  let totalThroughputGenerationMs = 0;
   const subagentLifecycle = createSubagentLifecycleStats();
 
   // Most-recent run (max finalized/updated/started timestamp across all runs).
@@ -1212,20 +1140,6 @@ export function accumulateAggregateStats(
     if (!acc) {
       acc = createProviderAccumulator(provider);
       byProvider.set(provider, acc);
-    }
-    return acc;
-  };
-
-  const dayThroughput = (date: string, provider: string): ThroughputAcc => {
-    let dayMap = throughputByDay.get(date);
-    if (!dayMap) {
-      dayMap = new Map();
-      throughputByDay.set(date, dayMap);
-    }
-    let acc = dayMap.get(provider);
-    if (!acc) {
-      acc = { provider, outputTokens: 0, generationDurationMs: 0, sampleCount: 0 };
-      dayMap.set(provider, acc);
     }
     return acc;
   };
@@ -1261,34 +1175,6 @@ export function accumulateAggregateStats(
       totalOutputTokens += item.outputTokens;
       totalCacheReadTokens += item.cacheReadTokens;
       totalCacheWriteTokens += item.cacheWriteTokens;
-    }
-
-    // Throughput is derived only from completed turn samples. Auxiliary usage
-    // affects billable token/cost totals but never creates a second throughput
-    // observation; forwarded subagent samples are already present here once.
-    // A completed sample without output tokens is unavailable (the live
-    // zero-output rule): it must not contribute duration, sample count, or a
-    // zero-token rate observation to any provider/chart rollup.
-    for (const sample of run.turnThroughputSamples) {
-      if (sample.status !== 'completed' || sample.generationDurationMs <= 0 || sample.outputTokens <= 0) continue;
-      const sampleProvider = providerForModel(
-        sample.modelId ?? run.modelId,
-        pricingMap,
-        providerForSample(sample.modelId, sample.provider, run.modelId, run.provider),
-      );
-      const sampleAcc = providerAcc(sampleProvider);
-      sampleAcc.throughputOutputTokens += sample.outputTokens;
-      sampleAcc.throughputGenerationMs += sample.generationDurationMs;
-      sampleAcc.sampleCount += 1;
-      totalThroughputOutputTokens += sample.outputTokens;
-      totalThroughputGenerationMs += sample.generationDurationMs;
-      const sampleMs = Date.parse(sample.endedAt);
-      if (!Number.isNaN(sampleMs)) {
-        const tAcc = dayThroughput(localDateString(sampleMs), sampleProvider);
-        tAcc.outputTokens += sample.outputTokens;
-        tAcc.generationDurationMs += sample.generationDurationMs;
-        tAcc.sampleCount += 1;
-      }
     }
 
     // Cost and tokens belong to the day the provider usage occurred. Bucketing
@@ -1369,44 +1255,6 @@ export function accumulateAggregateStats(
       }
     }
 
-    for (const sample of run.turnThroughputSamples) {
-      const sMs = Date.parse(sample.endedAt);
-      if (Number.isNaN(sMs)) continue;
-      if (sample.status !== 'completed' || sample.generationDurationMs <= 0 || sample.outputTokens <= 0) continue;
-      const date = localDateString(sMs);
-      const sProvider = providerForModel(
-        sample.modelId ?? run.modelId,
-        pricingMap,
-        providerForSample(sample.modelId, sample.provider, run.modelId, run.provider),
-      );
-      const sModel = canonicalModel(sample.modelId ?? run.modelId, pricingMap);
-      const hourDate = new Date(sMs);
-      hourDate.setMinutes(0, 0, 0);
-      const hourMs = hourDate.getTime();
-      let byHour = throughputByHourByDay.get(date);
-      if (!byHour) {
-        byHour = new Map();
-        throughputByHourByDay.set(date, byHour);
-      }
-      let hour = byHour.get(hourMs);
-      if (!hour) {
-        hour = { byProvider: new Map(), byModel: new Map() };
-        byHour.set(hourMs, hour);
-      }
-      let p = hour.byProvider.get(sProvider);
-      if (!p) { p = { out: 0, genMs: 0 }; hour.byProvider.set(sProvider, p); }
-      p.out += sample.outputTokens;
-      p.genMs += sample.generationDurationMs;
-      const modelKey = providerModelKey(sProvider, sModel);
-      let m = hour.byModel.get(modelKey);
-      if (!m) {
-        m = { provider: sProvider, model: sModel, out: 0, genMs: 0 };
-        hour.byModel.set(modelKey, m);
-      }
-      m.out += sample.outputTokens;
-      m.genMs += sample.generationDurationMs;
-    }
-
     // Track the most-recent run by its end timestamp. Its token sparkline is
     // normalized to canonical usage, so prepass/subagent output is included
     // without counting forwarded child throughput samples twice.
@@ -1433,19 +1281,15 @@ export function accumulateAggregateStats(
   return {
     byProvider,
     byDay,
-    throughputByDay,
     sessionPaths,
     totalCost,
     totalInputTokens,
     totalOutputTokens,
     totalCacheReadTokens,
     totalCacheWriteTokens,
-    totalThroughputOutputTokens,
-    totalThroughputGenerationMs,
     costSamplesByDay,
     inputTokenSamplesByDay,
     tokenSamplesByDay,
-    throughputByHourByDay,
     lastRunEndedMs,
     lastRun,
     runCount: runs.length,
@@ -1459,9 +1303,6 @@ function addProviderAccumulator(target: ProviderAccumulator, source: ProviderAcc
   target.outputTokens += source.outputTokens;
   target.cacheReadTokens += source.cacheReadTokens;
   target.cacheWriteTokens += source.cacheWriteTokens;
-  target.throughputOutputTokens += source.throughputOutputTokens;
-  target.throughputGenerationMs += source.throughputGenerationMs;
-  target.sampleCount += source.sampleCount;
 }
 
 function mergeProviderMap(
@@ -1482,19 +1323,15 @@ function createEmptyAccumulator(): AggregateStatsAccumulator {
   return {
     byProvider: new Map(),
     byDay: new Map(),
-    throughputByDay: new Map(),
     sessionPaths: new Set(),
     totalCost: 0,
     totalInputTokens: 0,
     totalOutputTokens: 0,
     totalCacheReadTokens: 0,
     totalCacheWriteTokens: 0,
-    totalThroughputOutputTokens: 0,
-    totalThroughputGenerationMs: 0,
     costSamplesByDay: new Map(),
     inputTokenSamplesByDay: new Map(),
     tokenSamplesByDay: new Map(),
-    throughputByHourByDay: new Map(),
     lastRunEndedMs: -1,
     lastRun: null,
     runCount: 0,
@@ -1548,31 +1385,12 @@ export function mergeAccumulatorInto(
       targetDay.peakWorkingSessions = sourceDay.peakWorkingSessions;
     }
   }
-  for (const [date, sourceProviders] of source.throughputByDay) {
-    let targetProviders = target.throughputByDay.get(date);
-    if (!targetProviders) {
-      targetProviders = new Map();
-      target.throughputByDay.set(date, targetProviders);
-    }
-    for (const [provider, sourceThroughput] of sourceProviders) {
-      let targetThroughput = targetProviders.get(provider);
-      if (!targetThroughput) {
-        targetThroughput = { provider, outputTokens: 0, generationDurationMs: 0, sampleCount: 0 };
-        targetProviders.set(provider, targetThroughput);
-      }
-      targetThroughput.outputTokens += sourceThroughput.outputTokens;
-      targetThroughput.generationDurationMs += sourceThroughput.generationDurationMs;
-      targetThroughput.sampleCount += sourceThroughput.sampleCount;
-    }
-  }
   for (const sessionPath of source.sessionPaths) target.sessionPaths.add(sessionPath);
   target.totalCost += source.totalCost;
   target.totalInputTokens += source.totalInputTokens;
   target.totalOutputTokens += source.totalOutputTokens;
   target.totalCacheReadTokens += source.totalCacheReadTokens;
   target.totalCacheWriteTokens += source.totalCacheWriteTokens;
-  target.totalThroughputOutputTokens += source.totalThroughputOutputTokens;
-  target.totalThroughputGenerationMs += source.totalThroughputGenerationMs;
   target.runCount += source.runCount;
   addSubagentLifecycleStats(target.subagentLifecycle, source.subagentLifecycle);
 
@@ -1591,33 +1409,6 @@ export function mergeAccumulatorInto(
     if (existing) existing.push(...samples);
     else target.tokenSamplesByDay.set(date, [...samples]);
   }
-  for (const [date, sourceHours] of source.throughputByHourByDay) {
-    let targetHours = target.throughputByHourByDay.get(date);
-    if (!targetHours) {
-      targetHours = new Map();
-      target.throughputByHourByDay.set(date, targetHours);
-    }
-    for (const [hourMs, sourceHour] of sourceHours) {
-      let targetHour = targetHours.get(hourMs);
-      if (!targetHour) {
-        targetHour = { byProvider: new Map(), byModel: new Map() };
-        targetHours.set(hourMs, targetHour);
-      }
-      for (const [provider, values] of sourceHour.byProvider) {
-        const entry = targetHour.byProvider.get(provider) ?? { out: 0, genMs: 0 };
-        entry.out += values.out;
-        entry.genMs += values.genMs;
-        targetHour.byProvider.set(provider, entry);
-      }
-      for (const [key, values] of sourceHour.byModel) {
-        const entry = targetHour.byModel.get(key)
-          ?? { provider: values.provider, model: values.model, out: 0, genMs: 0 };
-        entry.out += values.out;
-        entry.genMs += values.genMs;
-        targetHour.byModel.set(key, entry);
-      }
-    }
-  }
   if (source.lastRun && source.lastRunEndedMs > target.lastRunEndedMs) {
     target.lastRunEndedMs = source.lastRunEndedMs;
     target.lastRun = source.lastRun;
@@ -1635,43 +1426,18 @@ export function mergeAggregateStatsAccumulators(
   return merged;
 }
 
-/** Derive today's per-provider cost and throughput from accumulated buckets. */
+/** Derive today's per-provider cost from accumulated buckets. */
 function buildTodayStats(
   todayDate: string,
   byDay: Map<string, DayAccumulator>,
-  throughputByDay: Map<string, Map<string, ThroughputAcc>>,
 ): TodayStats {
   const todayAcc = byDay.get(todayDate);
   const todayCostByProvider: AggregateProviderCost[] = todayAcc
     ? [...todayAcc.byProvider.values()].map(toProviderCost).sort(sortCostDesc)
     : [];
-  const todayCost = todayCostByProvider.reduce((sum, entry) => sum + entry.cost, 0);
-
-  const todayThroughputMap = throughputByDay.get(todayDate);
-  const todayTokensPerSecondByProvider: AggregateProviderThroughput[] = todayThroughputMap
-    ? [...todayThroughputMap.values()]
-      .map(throughputAccToEntry)
-      .filter((entry) => entry.sampleCount > 0)
-      .sort(sortThroughputDesc)
-    : [];
-
-  let todayThroughputOutputTokens = 0;
-  let todayThroughputGenerationMs = 0;
-  if (todayThroughputMap) {
-    for (const acc of todayThroughputMap.values()) {
-      todayThroughputOutputTokens += acc.outputTokens;
-      todayThroughputGenerationMs += acc.generationDurationMs;
-    }
-  }
-  const todayTokensPerSecond = todayThroughputGenerationMs > 0
-    ? todayThroughputOutputTokens / (todayThroughputGenerationMs / 1000)
-    : 0;
-
   return {
-    todayCost,
+    todayCost: todayCostByProvider.reduce((sum, entry) => sum + entry.cost, 0),
     todayCostByProvider,
-    todayTokensPerSecond,
-    todayTokensPerSecondByProvider,
   };
 }
 
@@ -1944,31 +1710,6 @@ export function buildCumulativeSeries(
   return points;
 }
 
-/** Build today's per-hour throughput series (rate, not cumulative). One point
- *  per hour with data; ends at the last active hour. */
-function buildThroughputSeries(byHour: Map<number, HourThroughput>): AggregateSeriesPoint[] {
-  if (byHour.size === 0) return [];
-  const hours = [...byHour.keys()].sort((a, b) => a - b);
-  const rate = (out: number, genMs: number) => (genMs > 0 ? out / (genMs / 1000) : 0);
-  const points: AggregateSeriesPoint[] = [];
-  for (const hourMs of hours) {
-    const hour = byHour.get(hourMs)!;
-    points.push({
-      ms: hourMs,
-      byProvider: [...hour.byProvider.entries()].map(([key, v]) => ({ key, value: rate(v.out, v.genMs) })).sort((a, b) => b.value - a.value),
-      byModel: [...hour.byModel.values()].map((v) => ({
-        key: v.model,
-        provider: v.provider,
-        model: v.model,
-        value: rate(v.out, v.genMs),
-      })).sort((a, b) => b.value - a.value
-        || a.provider.localeCompare(b.provider)
-        || a.model.localeCompare(b.model)),
-    });
-  }
-  return points;
-}
-
 /** Build the 14-day run-count series (ascending date), pruning leading
  *  zero-run days while keeping the trailing run through today for context. */
 function buildDailyRunCount(byDay: Map<string, DayAccumulator>, nowMs: number): AggregateDailyRunCount[] {
@@ -2089,33 +1830,6 @@ function buildDailyWorkTrend(
   return out.slice(first);
 }
 
-/**
- * Sum the primary active-generation rate across running sessions. Paused
- * sessions holding a final/tool-wait rate are intentionally excluded; the
- * separate wall-clock rolling metric covers experienced throughput after a
- * burst or during pauses.
- */
-function computeActiveGenerationTokensPerSecond(
-  runningSessionPaths: string[],
-  ratesBySession: Record<string, TokenRateIndicatorState>,
-): LiveStats {
-  let liveTokensPerSecond = 0;
-  const runningSet = new Set(runningSessionPaths);
-  for (const sessionPath of runningSet) {
-    const state = ratesBySession[sessionPath];
-    if (
-      state
-      && state.state === 'generating'
-      && typeof state.rate === 'number'
-      && Number.isFinite(state.rate)
-      && state.rate > 0
-    ) {
-      liveTokensPerSecond += state.rate;
-    }
-  }
-  return { liveTokensPerSecond, runningSessionCount: runningSet.size };
-}
-
 /** Compact one day's raw samples into the same bounded buckets used by the
  * protocol chart while retaining provider/model pair attribution. */
 function compactIntradaySamples<T extends { ms: number; provider: string; model: string }>(
@@ -2226,13 +1940,6 @@ export function prepareAggregateStatsLayer(
     fixedIntradayRange,
   );
 
-  const throughputHours = source.throughputByHourByDay.get(todayDate);
-  if (throughputHours) {
-    for (const _hour of throughputHours) {
-      instrumentation?.onCompletedSourceEntryVisited?.('throughput_hour');
-    }
-  }
-
   return {
     completedSessionPaths: source.sessionPaths,
     costSamplesCompacted: compactedCost.compacted,
@@ -2241,9 +1948,6 @@ export function prepareAggregateStatsLayer(
     accumulator: {
       byProvider: source.byProvider,
       byDay,
-      throughputByDay: source.throughputByDay.has(todayDate)
-        ? new Map([[todayDate, source.throughputByDay.get(todayDate)!]])
-        : new Map(),
       // Session union is handled without copying this potentially historical set
       // in finalizeAggregateStatsLayers.
       sessionPaths: new Set(),
@@ -2252,8 +1956,6 @@ export function prepareAggregateStatsLayer(
       totalOutputTokens: source.totalOutputTokens,
       totalCacheReadTokens: source.totalCacheReadTokens,
       totalCacheWriteTokens: source.totalCacheWriteTokens,
-      totalThroughputOutputTokens: source.totalThroughputOutputTokens,
-      totalThroughputGenerationMs: source.totalThroughputGenerationMs,
       costSamplesByDay: (() => {
         // Today keeps the finer intraday grid; the other six week dates carry
         // the fixed-grid weekly compaction so a merged finalize can rebuild
@@ -2274,7 +1976,6 @@ export function prepareAggregateStatsLayer(
         ? new Map([[todayDate, compactedInputTokens.samples]])
         : new Map(),
       tokenSamplesByDay: compactedTokens.samples.length > 0 ? new Map([[todayDate, compactedTokens.samples]]) : new Map(),
-      throughputByHourByDay: throughputHours ? new Map([[todayDate, throughputHours]]) : new Map(),
       lastRunEndedMs: source.lastRunEndedMs,
       lastRun: source.lastRun,
       runCount: source.runCount,
@@ -2289,7 +1990,9 @@ export function finalizeAggregateStatsLayers(
   open: AggregateStatsAccumulator,
   nowMs: number,
   runningSessionPaths: string[],
-  ratesBySession: Record<string, TokenRateIndicatorState>,
+  /** Deprecated rate snapshot argument retained for positional compatibility
+   * with older callers; it is no longer read. */
+  _legacyRatesBySession: Record<string, unknown>,
   openTabCount: number,
 ): AggregateStats {
   const merged = mergeAggregateStatsAccumulators(completed.accumulator, open);
@@ -2297,7 +2000,7 @@ export function finalizeAggregateStatsLayers(
     merged,
     nowMs,
     runningSessionPaths,
-    ratesBySession,
+    _legacyRatesBySession,
     openTabCount,
     {
       forceCostSeriesBucketing: completed.costSamplesCompacted,
@@ -2318,7 +2021,9 @@ export function finalizeAggregateStats(
   acc: AggregateStatsAccumulator,
   nowMs: number,
   runningSessionPaths: string[],
-  ratesBySession: Record<string, TokenRateIndicatorState>,
+  /** Deprecated rate snapshot argument retained for positional compatibility
+   * with older callers; it is no longer read. */
+  _legacyRatesBySession: Record<string, unknown>,
   openTabCount: number,
   options: {
     forceCostSeriesBucketing?: boolean;
@@ -2333,17 +2038,8 @@ export function finalizeAggregateStats(
     .map(toProviderCost)
     .sort(sortCostDesc);
 
-  const tokensPerSecondByProvider = [...acc.byProvider.values()]
-    .map(toProviderThroughput)
-    .filter((entry) => entry.sampleCount > 0)
-    .sort(sortThroughputDesc);
-
-  const tokensPerSecond = acc.totalThroughputGenerationMs > 0
-    ? acc.totalThroughputOutputTokens / (acc.totalThroughputGenerationMs / 1000)
-    : 0;
-
   // ── Today / week / daily rollups ──
-  const todayStats = buildTodayStats(todayDate, acc.byDay, acc.throughputByDay);
+  const todayStats = buildTodayStats(todayDate, acc.byDay);
   const weekStats = buildWeekStats(acc.byDay, weekDates);
   const dailyCost = buildDailyCostSeries(acc.byDay, nowMs);
   const todayDay = acc.byDay.get(todayDate);
@@ -2451,9 +2147,6 @@ export function finalizeAggregateStats(
       roundValues: true,
     },
   );
-  const todayThroughputSeries = buildThroughputSeries(
-    acc.throughputByHourByDay.get(todayDate) ?? new Map(),
-  );
   const userInputCharCap = trailingUserInputCharCap(acc.byDay, nowMs);
   const dailyRunCount = buildDailyRunCount(acc.byDay, nowMs);
   const dailyWorkTrend = buildDailyWorkTrend(acc.byDay, nowMs, userInputCharCap);
@@ -2463,15 +2156,9 @@ export function finalizeAggregateStats(
     weekDates.map((date) => acc.byDay.get(date)),
     userInputCharCap,
   );
-
-  // ── Live aggregate tok/s ──
-  const liveStats = computeActiveGenerationTokensPerSecond(runningSessionPaths, ratesBySession);
-
   return {
     todayCost: todayStats.todayCost,
     todayCostByProvider: todayStats.todayCostByProvider,
-    todayTokensPerSecond: todayStats.todayTokensPerSecond,
-    todayTokensPerSecondByProvider: todayStats.todayTokensPerSecondByProvider,
     todayRunCount: todayDay?.runCount ?? 0,
     todayInputTokens: todayDay?.inputTokens ?? 0,
     todayOutputTokens: todayDay?.outputTokens ?? 0,
@@ -2480,7 +2167,6 @@ export function finalizeAggregateStats(
     todayCostSeries,
     todayInputTokenSeries,
     todayTokenSeries,
-    todayThroughputSeries,
     todayProductivity: todayDay
       ? productivityFromDay(todayDay, userInputCharCap)
       : { ...EMPTY_PRODUCTIVITY_STATS, userInputCharCap },
@@ -2492,18 +2178,11 @@ export function finalizeAggregateStats(
     dailyCost,
     dailyRunCount,
     dailyWorkTrend,
-    activeGenerationTokensPerSecond: liveStats.liveTokensPerSecond,
-    // The pure aggregate helper has no rolling-rate accumulator. Keep its
-    // historical value as an active-rate fallback; AggregateStatsService
-    // replaces this field with the authoritative 30s wall-clock rate.
-    liveTokensPerSecond: liveStats.liveTokensPerSecond,
-    runningSessionCount: liveStats.runningSessionCount,
+    runningSessionCount: new Set(runningSessionPaths).size,
     openTabCount,
     subagentLifecycle: acc.subagentLifecycle,
     totalCost: canonicalCostValue(acc.totalCost),
     costByProvider,
-    tokensPerSecond,
-    tokensPerSecondByProvider,
     totalInputTokens: acc.totalInputTokens,
     totalOutputTokens: acc.totalOutputTokens,
     totalCacheReadTokens: acc.totalCacheReadTokens,
@@ -2525,14 +2204,16 @@ export function computeAggregateStats(
   pricingMap: Map<string, ModelPricingRecord[]>,
   nowMs: number,
   runningSessionPaths: string[],
-  ratesBySession: Record<string, TokenRateIndicatorState>,
+  /** Deprecated rate snapshot argument retained for positional compatibility
+   * with older callers; it is no longer read. */
+  _legacyRatesBySession: Record<string, unknown>,
   openTabCount: number,
 ): AggregateStats {
   return finalizeAggregateStats(
     accumulateAggregateStats(runs, pricingMap),
     nowMs,
     runningSessionPaths,
-    ratesBySession,
+    _legacyRatesBySession,
     openTabCount,
   );
 }

@@ -8,6 +8,7 @@ type StreamFn = (model: unknown, ...args: unknown[]) => Promise<StreamLike>;
 interface MeterableSession {
   agent?: { streamFn?: StreamFn };
   _compactionAbortController?: unknown;
+  _autoCompactionAbortController?: unknown;
   _branchSummaryAbortController?: unknown;
 }
 
@@ -89,8 +90,12 @@ function readUsage(usage: unknown, kind: AuxiliaryLlmUsagePayload['kind']): Pick
 
 /** Meter SDK summarization requests that bypass assistant message events.
  *
- * Pi routes both history compaction and /tree branch summaries through the
- * session's stream function while their dedicated abort controller is live.
+ * Pi routes history compaction (manual, plus automatic threshold/overflow
+ * recovery) and /tree branch summaries through the session's stream function
+ * while their dedicated abort controller is live. Automatic compaction runs
+ * inside or beside an active turn, so the ordinary-conversation classifier
+ * alone would silently leave those provider calls unmetered; checking the
+ * `_autoCompactionAbortController` keeps them in the root scope exactly once.
  * Wrapping that one seam captures native and Pie-custom compaction (including
  * split-turn calls) without touching normal assistant turns. */
 export function installAuxiliaryLlmMeter(
@@ -107,11 +112,13 @@ export function installAuxiliaryLlmMeter(
 
   let sequence = 0;
   agent.streamFn = async function meteredStreamFn(model: unknown, ...args: unknown[]): Promise<StreamLike> {
-    // isCompacting also covers branch summaries in the pinned SDK, so inspect
-    // the more specific controller first to keep the usage class truthful.
+    // isCompacting also covers branch summaries and auto compaction in the
+    // pinned SDK, so inspect the more specific controller first to keep the
+    // usage class truthful.
     const kind = meterable._branchSummaryAbortController !== undefined
       ? 'branch_summary' as const
       : meterable._compactionAbortController !== undefined
+        || meterable._autoCompactionAbortController !== undefined
         ? 'history_compaction' as const
         : isOrdinaryConversationCall() ? null : 'other' as const;
     const startedAt = now();

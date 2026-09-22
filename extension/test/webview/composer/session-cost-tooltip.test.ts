@@ -12,7 +12,7 @@ import type {
 
 test('session cost tooltip renders provider graph, model details, and cost sources', () => {
   const indicator: SessionCostIndicatorState = {
-    label: '$0.14*',
+    label: '$0.14',
     ariaLabel: 'Known estimated session cost $0.14; some usage is not priced.',
     tooltip: 'Plain-text fallback',
     breakdown: {
@@ -59,7 +59,8 @@ test('session cost tooltip renders provider graph, model details, and cost sourc
   assert.match(html, /anthropic: \$0\.1000 \(71%\)/);
   assert.match(html, /claude/);
   assert.match(html, /unpriced-model/);
-  assert.match(html, /unavailable\*/);
+  assert.match(html, /unavailable/);
+  assert.doesNotMatch(html, /unavailable\*/);
   assert.match(html, /Cost sources/);
   assert.match(html, /Main conversation/);
   assert.match(html, /Subagents/);
@@ -102,7 +103,7 @@ function canonicalSummary(
 
 function costIndicator(): SessionCostIndicatorState {
   return {
-    label: '$0.14*',
+    label: '$0.14',
     ariaLabel: 'cost',
     tooltip: 'fallback',
     breakdown: {

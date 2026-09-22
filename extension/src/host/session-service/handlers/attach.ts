@@ -14,7 +14,7 @@ import { backendExitEvents, type InterruptedSessionActivity } from '../backend-e
 import { appendPieLog } from '../../util/pie-log.js';
 import type { DeferredTriggerRegistry } from '../../deferred-triggers/registry';
 
-interface ApplySessionOpenedDeps {
+export interface ApplySessionOpenedDeps {
   getArchState: () => ArchState;
   dispatchArch: (event: Event) => void;
   runObserver: RunObserver;
@@ -119,6 +119,16 @@ export function applySessionOpenedPayload(
 
   applyPostDispatchState(deps, payload, session.path, flags, transcriptResolution.transcript);
 
+  // The reducer has now installed the opened summary and applied tab/selection
+  // state. Canonical cold hydration must run at this lifecycle boundary rather
+  // than depending on a non-empty transcript usage/branch cache.
+  if (!flags.staleSessionData) {
+    deps.runObserver.onSessionOpened?.(
+      session.path,
+      session.identityFallback === true ? undefined : session.sessionId?.trim() || undefined,
+    );
+  }
+
   if (payload.snapshotUnavailable) {
     deps.dispatchArch({
       kind: 'Error',
@@ -131,7 +141,7 @@ export function applySessionOpenedPayload(
   finalizeSessionOpening(deps, payload, flags);
 }
 
-function computeOpeningFlags(payload: SessionOpenedPayload, deps: ApplySessionOpenedDeps) {
+export function computeOpeningFlags(payload: SessionOpenedPayload, deps: ApplySessionOpenedDeps) {
   const { session, selectionToken } = payload;
   const archState = deps.getArchState();
   const selectionRequest = deps.state.getSelectionRequest(selectionToken);
@@ -169,12 +179,19 @@ function computeOpeningFlags(payload: SessionOpenedPayload, deps: ApplySessionOp
     && archState.sessions.openTabPaths.includes(replacementSource);
   const replacementWasActive = !!replacementSource
     && archState.sessions.activeSessionPath === replacementSource;
+  // Durable provenance is a tooltip/catalog property, not lifecycle intent.
+  // Only the one-shot marker on the creation publication inserts in the
+  // background and suppresses activation; a later explicit open of the same
+  // session must follow ordinary selection rules.
+  const isAgentCreationEvent = payload.agentCreated === true;
   const shouldOpenTab = rejected
     ? archState.sessions.openTabPaths.includes(session.path)
-    : (createResolution?.fresh
-        ? !createResolution.hidden
-        : !!selectionRequest || replacementWasOpen || archState.sessions.openTabPaths.includes(session.path));
-  const shouldActivate = !createResolution?.hidden && !rejected && (replacementWasActive || (selectionToken
+    : (isAgentCreationEvent
+        ? true
+        : createResolution?.fresh
+          ? !createResolution.hidden
+          : !!selectionRequest || replacementWasOpen || archState.sessions.openTabPaths.includes(session.path));
+  const shouldActivate = !isAgentCreationEvent && !createResolution?.hidden && !rejected && (replacementWasActive || (selectionToken
     ? (deps.state.isCurrentSelectionToken(selectionToken) && !duplicate)
     : (archState.sessions.activeSessionPath === session.path
         || (!!selectionRequest?.pendingPath

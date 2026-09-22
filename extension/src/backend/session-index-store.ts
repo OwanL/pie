@@ -181,7 +181,8 @@ function isSessionSummary(value: unknown): value is SessionSummary {
     && typeof summary.cwd === 'string'
     && typeof summary.name === 'string'
     && typeof summary.modifiedAt === 'string'
-    && typeof summary.messageCount === 'number';
+    && typeof summary.messageCount === 'number'
+    && (summary.agentCreated === undefined || typeof summary.agentCreated === 'boolean');
 }
 
 function isFingerprint(value: unknown): value is BackendSessionFileFingerprint {
@@ -217,6 +218,7 @@ function isCheckpoint(value: unknown): value is SessionMetadataCheckpoint {
     && typeof state.cwd === 'string'
     && validOptionalString('headerTimestamp')
     && validOptionalString('sessionId')
+    && (state.agentCreated === undefined || typeof state.agentCreated === 'boolean')
     && (state.explicitName === null || typeof state.explicitName === 'string')
     && typeof state.derivedName === 'string'
     && typeof state.derivedIsPlaceholder === 'boolean'

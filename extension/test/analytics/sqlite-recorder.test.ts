@@ -573,6 +573,8 @@ test('schema v12 to current creates facet storage and aggregate-series indexes',
       DROP TABLE analytics_tool_facet_states;
       DROP TABLE analytics_tool_facet_observations;
       DROP INDEX analytics_provider_settlement_settled_time_idx;
+      DROP INDEX analytics_provider_settlement_cost_bucket_idx;
+      DROP INDEX analytics_provider_settlement_cost_bucket_minute_idx;
       DROP INDEX analytics_execution_state_started_time_idx;
       DROP INDEX analytics_execution_state_ended_time_idx;
       DROP INDEX analytics_execution_state_event_time_idx;
@@ -593,6 +595,8 @@ test('schema v12 to current creates facet storage and aggregate-series indexes',
           'analytics_tool_facet_observations', 'analytics_tool_facet_states',
           'analytics_tool_facet_v1',
           'analytics_provider_settlement_settled_time_idx',
+          'analytics_provider_settlement_cost_bucket_idx',
+          'analytics_provider_settlement_cost_bucket_minute_idx',
           'analytics_execution_state_started_time_idx',
           'analytics_execution_state_ended_time_idx',
           'analytics_execution_state_event_time_idx'
@@ -604,6 +608,8 @@ test('schema v12 to current creates facet storage and aggregate-series indexes',
       'analytics_tool_facet_states',
       'analytics_tool_facet_v1',
       'analytics_provider_settlement_settled_time_idx',
+      'analytics_provider_settlement_cost_bucket_idx',
+      'analytics_provider_settlement_cost_bucket_minute_idx',
       'analytics_execution_state_started_time_idx',
       'analytics_execution_state_ended_time_idx',
       'analytics_execution_state_event_time_idx',

@@ -182,8 +182,8 @@ async function awaitCanonicalUsage(
   for (;;) {
     const usage = stats.getSessionUsage(sessionPath);
     if (usage.authority === 'canonical'
-      && JSON.stringify(usage.samples.map((sample) => sample.sourceId))
-        === JSON.stringify(expectedSourceIds)) {
+      && JSON.stringify(usage.samples.map((sample) => sample.sourceId).sort())
+        === JSON.stringify([...expectedSourceIds].sort())) {
       return;
     }
     if (Date.now() >= deadline) {
@@ -194,14 +194,11 @@ async function awaitCanonicalUsage(
 }
 
 /**
- * Regression: the session-cost read is a selection lookup plus one
- * selected-branch settlement snapshot. A concurrent commit inside that window
- * must not fail the read: the settlement read already pairs its own projection
- * revision with its rows, its current selection, and its ancestry inside one
- * SQLite snapshot, so fencing its first page against a revision captured in a
- * foreign snapshot only manufactured failures.
+ * Regression: session-cost hydration is one root-session snapshot. A
+ * concurrent commit around that read must not make the root projection fail
+ * or switch to selected-branch ownership.
  */
-test('a commit between the selection lookup and the selected-branch read cannot fail the session cost read', async () => {
+test('a concurrent commit cannot fail the root-owned session cost read', async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'pie-canonical-read-race-'));
   const databasePath = canonicalAnalyticsDatabasePath(path.join(root, 'analytics'));
   const at = Date.parse('2026-01-15T12:00:00.000Z');
@@ -220,11 +217,10 @@ test('a commit between the selection lookup and the selected-branch read cannot 
   const state = fixtureState();
   const baseReadModel = new CanonicalAnalyticsReadModel({ databasePath, workerScript, execArgv });
   let raceArmed = false;
-  let armedReadError: unknown = null;
   const raceWriterRef: { current: SqliteAnalyticsRecorder | null } = { current: null };
   const readModel = Object.create(baseReadModel) as CanonicalAnalyticsReadModel;
   readModel.readScopedProviderSettlements = async (scope, page, signal) => {
-    if (raceArmed && scope.kind === 'selectedBranch') {
+    if (raceArmed && scope.kind === 'rootSession') {
       raceArmed = false;
       raceWriterRef.current ??= new SqliteAnalyticsRecorder(databasePath);
       raceWriterRef.current.submit(settlement({
@@ -237,12 +233,7 @@ test('a commit between the selection lookup and the selected-branch read cannot 
         reportedCostUsd: 0.04,
         branchId: 'branch-b',
       }));
-      try {
-        return await baseReadModel.readScopedProviderSettlements(scope, page, signal);
-      } catch (error) {
-        armedReadError = error;
-        throw error;
-      }
+      return await baseReadModel.readScopedProviderSettlements(scope, page, signal);
     }
     return baseReadModel.readScopedProviderSettlements(scope, page, signal);
   };
@@ -252,19 +243,21 @@ test('a commit between the selection lookup and the selected-branch read cannot 
     await stats.start();
     const baseline = stats.getSessionUsage(SESSION_PATH);
     assert.equal(baseline.authority, 'canonical');
-    assert.equal(baseline.branchId, 'branch-b');
-    assert.deepEqual(baseline.samples.map((sample) => sample.sourceId), ['inv-race-a', 'inv-race-b']);
+    assert.equal(baseline.branchId, undefined);
+    assert.deepEqual(baseline.samples.map((sample) => sample.sourceId).sort(), [
+      'inv-race-a', 'inv-race-b', 'inv-race-c',
+    ].sort());
 
     raceArmed = true;
     await (stats as unknown as { refreshCanonicalSessionUsage(): Promise<void> }).refreshCanonicalSessionUsage();
-    assert.equal(armedReadError, null,
-      'the raced selected-branch read must succeed on one consistent snapshot');
-    // The raced commit also bumps the durable revision, so the invalidation
+    // The raced commit also bumps the durable revision, so the replacement
     // pass may still be repopulating; only the settled state is asserted.
-    await awaitCanonicalUsage(stats, SESSION_PATH, ['inv-race-a', 'inv-race-b', 'inv-race-late']);
+    await awaitCanonicalUsage(stats, SESSION_PATH, [
+      'inv-race-a', 'inv-race-b', 'inv-race-c', 'inv-race-late',
+    ]);
     const usage = stats.getSessionUsage(SESSION_PATH);
     assert.equal(usage.authority, 'canonical');
-    assert.equal(usage.branchId, 'branch-b', 'the abandoned branch must stay excluded');
+    assert.equal(usage.branchId, undefined, 'root usage must not claim selected-branch ownership');
   } finally {
     raceWriterRef.current?.close();
     await stats.shutdown();
@@ -273,11 +266,11 @@ test('a commit between the selection lookup and the selected-branch read cannot 
 });
 
 /**
- * Regression: the selection lookup and selected-branch page are separate
- * bounded queries. If the selection changes from B to C between them, the
- * rows and the displayed branch label must both come from the C snapshot.
+ * Root-owned session usage is independent of the currently selected branch.
+ * Explicit selected-branch consumers continue to use their own scoped query
+ * (covered by the read-model contract) rather than this session indicator.
  */
-test('a selection change between lookup and first page uses the atomic branch label', async () => {
+test('a selection change does not change root-owned session usage', async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'pie-canonical-selection-race-'));
   const databasePath = canonicalAnalyticsDatabasePath(path.join(root, 'analytics'));
   const at = Date.parse('2026-01-15T12:00:00.000Z');
@@ -295,34 +288,40 @@ test('a selection change between lookup and first page uses the atomic branch la
 
   const state = fixtureState();
   const baseReadModel = new CanonicalAnalyticsReadModel({ databasePath, workerScript, execArgv });
-  let raceArmed = true;
   const raceWriterRef: { current: SqliteAnalyticsRecorder | null } = { current: null };
-  const readModel = Object.create(baseReadModel) as CanonicalAnalyticsReadModel;
-  readModel.executeQuery = async (request, signal) => {
-    const result = await baseReadModel.executeQuery(request, signal);
-    if (raceArmed && request.sql.includes('analytics_current_branch_selections')) {
-      raceArmed = false;
-      raceWriterRef.current ??= new SqliteAnalyticsRecorder(databasePath);
-      raceWriterRef.current.submit(branchObservation({
-        branchId: 'branch-c',
-        parentBranchId: 'branch-a',
-        rootSessionId: ROOT_ID,
-        observedAtMs: at + 7,
-        selection: true,
-      }));
-    }
-    return result;
-  };
-  const stats = statsFixture(state, readModel, at, root);
+  const stats = statsFixture(state, baseReadModel, at, root);
   try {
     await stats.start();
-    await awaitCanonicalUsage(stats, SESSION_PATH, ['inv-selection-a', 'inv-selection-c']);
+    await awaitCanonicalUsage(stats, SESSION_PATH, [
+      'inv-selection-a', 'inv-selection-b', 'inv-selection-c',
+    ]);
     const usage = stats.getSessionUsage(SESSION_PATH);
     assert.equal(usage.authority, 'canonical');
-    assert.equal(usage.branchId, 'branch-c');
-    assert.deepEqual(usage.samples.map((sample) => sample.sourceId), [
+    assert.equal(usage.branchId, undefined);
+    assert.deepEqual(usage.samples.map((sample) => sample.sourceId).sort(), [
+      'inv-selection-a', 'inv-selection-b', 'inv-selection-c',
+    ].sort());
+    // A caller that explicitly asks for the selected branch still receives
+    // the branch-aware ancestry projection; only the session indicator is
+    // root-owned. Change the durable selection for this explicit query.
+    raceWriterRef.current ??= new SqliteAnalyticsRecorder(databasePath);
+    raceWriterRef.current.submit(branchObservation({
+      branchId: 'branch-c',
+      parentBranchId: 'branch-a',
+      rootSessionId: ROOT_ID,
+      observedAtMs: at + 7,
+      selection: true,
+    }));
+    const explicitBranch = await baseReadModel.readScopedProviderSettlements({
+      kind: 'selectedBranch',
+      generationId: 'generation-historical',
+      rootSessionId: ROOT_ID,
+    });
+    assert.equal(explicitBranch.scope.kind, 'selectedBranch');
+    assert.equal(explicitBranch.selectionCoverage, 'known');
+    assert.deepEqual(explicitBranch.settlements.map((settlement) => settlement.invocationId).sort(), [
       'inv-selection-a', 'inv-selection-c',
-    ]);
+    ].sort());
   } finally {
     raceWriterRef.current?.close();
     await stats.shutdown();
@@ -331,13 +330,10 @@ test('a selection change between lookup and first page uses the atomic branch la
 });
 
 /**
- * Regression: the post-restart fallback (root read detects branch rows, then
- * selects the durable branch) must keep the same property: a commit between
- * the root read and the selected-branch snapshot read must not fail the
- * session read, and the ancestry-filtered result must still exclude the
- * abandoned branch.
+ * Regression: a root read that races a commit must converge on the complete
+ * root snapshot rather than falling back to an automatically selected branch.
  */
-test('a commit between the root fallback read and the selected-branch read cannot fail startup hydration', async () => {
+test('a raced root read converges without an artificial branch reset', async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'pie-canonical-fallback-race-'));
   const databasePath = canonicalAnalyticsDatabasePath(path.join(root, 'analytics'));
   const at = Date.parse('2026-01-15T12:00:00.000Z');
@@ -356,16 +352,14 @@ test('a commit between the root fallback read and the selected-branch read canno
   const state = fixtureState();
   const baseReadModel = new CanonicalAnalyticsReadModel({ databasePath, workerScript, execArgv });
   let raceArmed = true;
-  let captureNextSelected = false;
-  let armedReadError: unknown = null;
   const raceWriterRef: { current: SqliteAnalyticsRecorder | null } = { current: null };
   const readModel = Object.create(baseReadModel) as CanonicalAnalyticsReadModel;
   readModel.readScopedProviderSettlements = async (scope, page, signal) => {
     if (raceArmed && scope.kind === 'rootSession' && scope.rootSessionId === ROOT_ID) {
       raceArmed = false;
       const result = await baseReadModel.readScopedProviderSettlements(scope, page, signal);
-      // Commit after the root snapshot answered, before the host's
-      // selection lookup and selected-branch read run.
+      // Commit after the first root snapshot answered, before the host's
+      // revision-fenced replacement read runs.
       raceWriterRef.current ??= new SqliteAnalyticsRecorder(databasePath);
       raceWriterRef.current.submit(settlement({
         invocationId: 'inv-fallback-late',
@@ -377,35 +371,67 @@ test('a commit between the root fallback read and the selected-branch read canno
         reportedCostUsd: 0.04,
         branchId: 'branch-b',
       }));
-      captureNextSelected = true;
       return result;
-    }
-    if (captureNextSelected && scope.kind === 'selectedBranch') {
-      captureNextSelected = false;
-      try {
-        return await baseReadModel.readScopedProviderSettlements(scope, page, signal);
-      } catch (error) {
-        armedReadError = error;
-        throw error;
-      }
     }
     return baseReadModel.readScopedProviderSettlements(scope, page, signal);
   };
   const stats = statsFixture(state, readModel, at, root);
   try {
     await stats.start();
-    assert.equal(armedReadError, null,
-      'the raced selected-branch read must succeed on one consistent snapshot');
-    // The raced commit also bumps the durable revision, so the invalidation
-    // pass may still be repopulating; only the settled state is asserted.
     await awaitCanonicalUsage(stats, SESSION_PATH, [
-      'inv-fallback-a', 'inv-fallback-b', 'inv-fallback-late',
+      'inv-fallback-a', 'inv-fallback-b', 'inv-fallback-c', 'inv-fallback-late',
     ]);
     const usage = stats.getSessionUsage(SESSION_PATH);
     assert.equal(usage.authority, 'canonical');
-    assert.equal(usage.branchId, 'branch-b', 'the abandoned branch must stay excluded');
+    assert.equal(usage.branchId, undefined, 'root usage must not claim selected-branch ownership');
   } finally {
     raceWriterRef.current?.close();
+    await stats.shutdown();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** Regression: startup may finish before the opened session enters the
+ * displayed-session set. The opened payload must bind its stable root and
+ * trigger a completed canonical read even when no branch/pending cache exists. */
+test('a cold session opened after an empty startup pass hydrates by payload root identity', async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'pie-canonical-cold-open-'));
+  const databasePath = canonicalAnalyticsDatabasePath(path.join(root, 'analytics'));
+  const at = Date.parse('2026-01-15T12:00:00.000Z');
+  const writer = new SqliteAnalyticsRecorder(databasePath);
+  writer.submit(settlement({
+    invocationId: 'inv-cold-open',
+    rootSessionId: ROOT_ID,
+    purpose: 'conversation',
+    settledAtMs: at,
+    inputTokens: 10,
+    outputTokens: 5,
+    reportedCostUsd: 0.01,
+  }));
+  closeFixtureWriter(writer);
+
+  const state = createInitialArchState();
+  const readModel = new CanonicalAnalyticsReadModel({ databasePath, workerScript, execArgv });
+  const stats = statsFixture(state, readModel, at, root);
+  try {
+    await stats.start();
+    // The startup pass saw no active/open session. Model the placeholder that
+    // is replaced by session.opened; the explicit payload ID is the only valid
+    // root identity available to this test state.
+    state.sessions.sessions.push({
+      path: SESSION_PATH,
+      name: 'read-race',
+      cwd: '/sessions',
+      modifiedAt: new Date(at).toISOString(),
+      messageCount: 1,
+    });
+    state.sessions.activeSessionPath = SESSION_PATH;
+    state.sessions.openTabPaths = [SESSION_PATH];
+    stats.onSessionOpened(SESSION_PATH, ROOT_ID);
+
+    await awaitCanonicalUsage(stats, SESSION_PATH, ['inv-cold-open']);
+    assert.equal(stats.getSessionUsage(SESSION_PATH).authority, 'canonical');
+  } finally {
     await stats.shutdown();
     rmSync(root, { recursive: true, force: true });
   }

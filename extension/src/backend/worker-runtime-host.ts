@@ -229,7 +229,8 @@ export class WorkerRuntimeHost {
 
   constructor(private readonly options: WorkerRuntimeHostOptions) {
     this.detailStore = new WorkerLiveDetailStore({
-      emit: (frame) => this.options.server.sendDetailFrame(frame),
+      emit: (frame, onSettled) => this.options.server.sendDetailFrame(frame, onSettled),
+      onDrain: (listener) => this.options.server.onDetailDrain(listener),
     });
   }
 

@@ -51,12 +51,16 @@ test('SessionCatalog scans once and overlays live session metadata', async () =>
 
   assert.equal((await catalog.list(sdk, configuredDir)).length, 1);
   const livePath = process.platform === 'win32' ? canonicalPath.toUpperCase() : canonicalPath;
-  const live = summary(livePath, 'Live canonical', '2026-01-02T00:00:00.000Z');
+  const live = {
+    ...summary(livePath, 'Live canonical', '2026-01-02T00:00:00.000Z'),
+    agentCreated: true,
+  };
   const second = await catalog.list(sdk, configuredDir, [live]);
 
   assert.deepEqual(calls, [configuredDir]);
   assert.equal(second.length, 1, 'live metadata replaces the discovered path instead of duplicating it');
   assert.equal(second[0]?.name, 'Live canonical');
+  assert.equal(second[0]?.agentCreated, true);
   assert.equal(second.filter((item) => item.name === 'Live canonical').length, 1);
 });
 

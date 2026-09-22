@@ -28,6 +28,7 @@ import {
   localCalendarDayStartMs,
   localCalendarWeekDateKeys,
   normalizeUsageChannels,
+  CANONICAL_COST_BUCKET_WIDTH_MS,
   type CoverageMetric,
   type EffectiveCostMetric,
   type NormalizedUsageChannels,
@@ -232,6 +233,22 @@ const MAX_QUERY_ROWS = 10_000;
 /** Temporal chart evidence is deliberately much smaller than the immutable
  * settlement history. Summary groups remain the exact source for totals. */
 const MAX_AGGREGATE_SERIES_ROWS = 4_096;
+/** Cost chart buckets are a full aggregation over every settlement in the
+ * requested range, so their coverage is never bounded by the raw sample cap;
+ * only the emitted bucket-row count is. Exceeding a range's bound marks that
+ * range truncated so consumers fall back to the exact daily rollups instead
+ * of charting a partial cost stream. Caps are per range because the widths
+ * differ: at minute width a full local day already holds 1 440 buckets, so
+ * the hourly cap would truncate a complete today for as few as three active
+ * provider/model pairs — exactly the daily-diagonal regression minute
+ * resolution must not reintroduce. The today cap keeps a complete
+ * minute-resolution day untruncated for up to ten grouped provider/model
+ * pairs even across the longest DST day (25 h = 1 500 minutes); wider
+ * cardinality still truncates into the safe exact-daily fallback rather than
+ * charting a partial cumulative stream. The week range keeps hourly width
+ * and the original cap. */
+const MAX_AGGREGATE_COST_BUCKET_ROWS = 4_096;
+const MAX_AGGREGATE_TODAY_COST_BUCKET_ROWS = 15_000;
 /** Headline daily projections are bounded by the protocol's trailing window;
  * unlike temporal samples, they are exact rollups over the maintained tables. */
 const MAX_AGGREGATE_DAILY_DAYS = 14;
@@ -464,6 +481,31 @@ export interface ProviderAggregateDailyExecution {
   sessionCount: number;
 }
 
+/** Exact time-bucket cost aggregation over EVERY canonical settlement in a
+ * requested range, at the range's explicit bucket width (minute for today,
+ * hour for week — see {@link CANONICAL_COST_BUCKET_WIDTH_MS}). Unlike the
+ * bounded raw settlement samples, bucket rows
+ * are produced by a full SQL aggregation, so a busy window can never discard
+ * part of the cost history: coverage is complete unless the matching per-range
+ * truncated flag is set. Unknown-cost settlements contribute no cost and are
+ * counted explicitly, so the known/unknown distinction survives aggregation.
+ * Buckets are aligned to epoch multiples of the range's width; each bucket's
+ * sum covers only settlements inside the request's exact range, so local
+ * calendar boundaries stay exact and the first/last buckets are short. */
+export interface ProviderAggregateCostBucket {
+  /** Inclusive epoch-ms bucket start (aligned to the range's bucket width);
+   * the final bucket is short. */
+  ms: number | string;
+  provider: string | null;
+  model: string | null;
+  /** Sum of known effective costs for the bucket's settlements; null when the
+   * bucket holds only unknown-cost settlements. */
+  cost: number | null;
+  /** Settlements in the bucket whose effective cost is unknown or unpriced —
+   * never silently dropped from temporal evidence. */
+  unknownCostCount: number | string;
+}
+
 export interface ProviderAggregateSeries {
   /** Recent settlement samples, bounded to keep the read model payload small.
    * The consumer compacts these into the protocol's chart points. */
@@ -477,9 +519,27 @@ export interface ProviderAggregateSeries {
    * for compatibility with older read-model test adapters. */
   dailyExecutions?: ProviderAggregateDailyExecution[];
   /** True when the bounded sample read did not include every settlement or
-   * execution in the requested daily window. Summary groups and daily rollups
-   * remain exact over their maintained projections. */
+   * execution in the requested daily window. Summary groups, daily rollups,
+   * and the cost buckets below remain exact over their maintained
+   * projections or full-range aggregation. */
   truncated: boolean;
+  /** Explicit per-kind sample truncation. Optional for compatibility with
+   * older read-model test adapters; `truncated` stays the combined flag.
+   * Cost buckets and daily rollups are independent of both flags. */
+  settlementTruncated?: boolean;
+  executionTruncated?: boolean;
+  /** Exact cost buckets for the requested today and week ranges at the
+   * shared per-range widths (minute for today, hour for week —
+   * `CANONICAL_COST_BUCKET_WIDTH_MS` in `shared/analytics/metrics`).
+   * Optional for compatibility with older read-model test adapters. Each
+   * range is aggregated with its own exact settlement-time bounds, so bucket
+   * sums never leak across the local calendar boundary; the ranges are
+   * complete unless the matching truncated flag is set, and
+   * settlement/execution sample truncation never removes cost buckets. */
+  todayCostBuckets?: ProviderAggregateCostBucket[];
+  weekCostBuckets?: ProviderAggregateCostBucket[];
+  todayCostBucketsTruncated?: boolean;
+  weekCostBucketsTruncated?: boolean;
 }
 
 export interface ProviderAggregateReadModel {
@@ -1533,6 +1593,26 @@ function ensureAggregateSeriesIndexes(database: SqliteDatabase): void {
     CREATE INDEX IF NOT EXISTS analytics_provider_settlement_settled_time_idx
       ON analytics_provider_settlements(
         CAST(settled_at_ms AS INTEGER) DESC, generation_id DESC, invocation_id DESC
+      ) WHERE settled_at_ms IS NOT NULL;
+    /** Covers the aggregate cost-bucket chart aggregation: the leading bucket
+     * expression plus provider/model/cost lets SQLite stream the hourly
+     * GROUP BY in index order without sorting the whole range, and the
+     * trailing settled_at_ms keeps the exact settlement-time range predicate
+     * covered too, so a very busy window costs one index scan instead of one
+     * table-row fetch per settlement. Additive only; no stored value or
+     * ordering semantics change. The minute-width twin below serves the
+     * today range's minute-by-minute aggregation with the same streamed
+     * GROUP BY; the divisor is a literal in both indexes and queries because
+     * a bound-parameter divisor cannot match an expression index. */
+    CREATE INDEX IF NOT EXISTS analytics_provider_settlement_cost_bucket_idx
+      ON analytics_provider_settlements(
+        (CAST(settled_at_ms AS INTEGER) / 3600000), provider, effective_model, effective_cost_usd,
+        settled_at_ms
+      ) WHERE settled_at_ms IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS analytics_provider_settlement_cost_bucket_minute_idx
+      ON analytics_provider_settlements(
+        (CAST(settled_at_ms AS INTEGER) / 60000), provider, effective_model, effective_cost_usd,
+        settled_at_ms
       ) WHERE settled_at_ms IS NOT NULL;
     CREATE INDEX IF NOT EXISTS analytics_execution_state_started_time_idx
       ON analytics_execution_states(
@@ -5305,6 +5385,133 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
           ? null : String(row.root_session_id),
       })),
       truncated: settlementTruncated || executionTruncated,
+      settlementTruncated,
+      executionTruncated,
+    };
+  }
+
+  /** Exact cost buckets over every canonical settlement in the range at the
+   * requested bucket width (minute for today, hour for week). The aggregation
+   * is served by the covering cost-bucket index for that width (bucket,
+   * provider, model, cost) with both an exact settlement-time predicate (so an
+   * edge bucket can never leak out-of-range settlements) and a bucket-range
+   * predicate, which lets SQLite stream the GROUP BY in index order instead of
+   * sorting the whole range. The width must be interpolated into the SQL (a
+   * bound-parameter divisor cannot match the expression index); it arrives
+   * only from the frozen shared `CANONICAL_COST_BUCKET_WIDTH_MS` authority and
+   * is validated here. Bucket starts are epoch multiples of the width and only
+   * the emitted row count is bounded; sums are exact over the requested
+   * range. */
+  private readProviderAggregateCostBucketsInSnapshot(
+    rangeStartMs: number,
+    rangeEndMs: number,
+    bucketWidthMs: number,
+    maxRows: number,
+  ): { buckets: ProviderAggregateCostBucket[]; truncated: boolean } {
+    if (rangeStartMs >= rangeEndMs) return { buckets: [], truncated: false };
+    if (!Number.isSafeInteger(bucketWidthMs) || bucketWidthMs <= 0) {
+      throw new RangeError('Canonical aggregate cost bucket width must be a positive safe integer.');
+    }
+    if (!Number.isSafeInteger(maxRows) || maxRows <= 0) {
+      throw new RangeError('Canonical aggregate cost bucket row cap must be a positive safe integer.');
+    }
+    const divisor = String(bucketWidthMs);
+    const minBucket = Math.floor(rangeStartMs / bucketWidthMs);
+    const maxBucket = Math.floor((rangeEndMs - 1) / bucketWidthMs);
+    const rows = this.database.prepare(`
+      SELECT CAST(settled_at_ms AS INTEGER) / ${divisor} AS bucket_index,
+        provider, effective_model,
+        SUM(effective_cost_usd) AS cost,
+        COUNT(*) - COUNT(effective_cost_usd) AS unknown_cost_count
+      FROM analytics_provider_settlements
+      WHERE settled_at_ms IS NOT NULL
+        AND CAST(settled_at_ms AS INTEGER) >= ?
+        AND CAST(settled_at_ms AS INTEGER) < ?
+        AND CAST(settled_at_ms AS INTEGER) / ${divisor} >= ?
+        AND CAST(settled_at_ms AS INTEGER) / ${divisor} <= ?
+      GROUP BY CAST(settled_at_ms AS INTEGER) / ${divisor}, provider, effective_model
+      ORDER BY 1 DESC
+      LIMIT ?
+    `).all(
+      rangeStartMs,
+      rangeEndMs,
+      minBucket,
+      maxBucket,
+      maxRows + 1,
+    ) as Array<Record<string, unknown>>;
+    const truncated = rows.length > maxRows;
+    // The newest buckets are retained when a very wide range exceeds the
+    // bound, matching the raw samples' "current view stays useful" policy;
+    // consumers must still fall back to the exact daily rollups instead of
+    // charting a partial cumulative stream.
+    const selected = (truncated ? rows.slice(0, maxRows) : rows).reverse();
+    // The SQL groups raw dimensions so the covering index order serves the
+    // GROUP BY; missing dimensions (NULL and '') merge here, mirroring the
+    // maintained projection's empty-string keys.
+    const merged = new Map<string, ProviderAggregateCostBucket>();
+    for (const row of selected) {
+      const bucketIndex = Number(row.bucket_index);
+      if (!Number.isSafeInteger(bucketIndex) || bucketIndex < 0) {
+        throw new Error('Canonical aggregate cost bucket index is malformed.');
+      }
+      const cost = row.cost === null || row.cost === undefined ? null : Number(row.cost);
+      if (cost !== null && (!Number.isFinite(cost) || cost < 0)) {
+        throw new Error('Canonical aggregate cost bucket total is malformed.');
+      }
+      const provider = row.provider === null || row.provider === undefined ? '' : String(row.provider);
+      const model = row.effective_model === null || row.effective_model === undefined ? '' : String(row.effective_model);
+      const unknownCostCount = toNumber(row.unknown_cost_count as number | bigint);
+      const key = `${bucketIndex}\u0000${provider}\u0000${model}`;
+      const existing = merged.get(key);
+      if (existing) {
+        if (cost !== null) {
+          existing.cost = (existing.cost ?? 0) + cost;
+        }
+        existing.unknownCostCount = encodeInt64(String(
+          Number(existing.unknownCostCount) + unknownCostCount,
+        ));
+        continue;
+      }
+      merged.set(key, {
+        ms: encodeInt64(String(bucketIndex * bucketWidthMs)),
+        provider: provider === '' ? null : provider,
+        model: model === '' ? null : model,
+        cost,
+        unknownCostCount: encodeInt64(String(unknownCostCount)),
+      });
+    }
+    return { buckets: [...merged.values()], truncated };
+  }
+
+  /** Cost buckets for the request's today and week ranges. Each range is
+   * aggregated at its own explicit shared width (minute for today, hour for
+   * week) with its own exact settlement-time bounds, so each range's local
+   * calendar boundary stays exact regardless of zone offsets, and each
+   * carries an independent truncation flag. */
+  private readProviderAggregateCostBucketSeriesInSnapshot(
+    todayStartMs: number,
+    todayEndMs: number,
+    weekStartMs: number,
+    weekEndMs: number,
+  ): Pick<ProviderAggregateSeries,
+    'todayCostBuckets' | 'weekCostBuckets' | 'todayCostBucketsTruncated' | 'weekCostBucketsTruncated'> {
+    const week = this.readProviderAggregateCostBucketsInSnapshot(
+      weekStartMs,
+      weekEndMs,
+      CANONICAL_COST_BUCKET_WIDTH_MS.week,
+      MAX_AGGREGATE_COST_BUCKET_ROWS,
+    );
+    const today = this.readProviderAggregateCostBucketsInSnapshot(
+      todayStartMs,
+      todayEndMs,
+      CANONICAL_COST_BUCKET_WIDTH_MS.today,
+      MAX_AGGREGATE_TODAY_COST_BUCKET_ROWS,
+    );
+    return {
+      todayCostBuckets: today.buckets,
+      todayCostBucketsTruncated: today.truncated,
+      weekCostBuckets: week.buckets,
+      weekCostBucketsTruncated: week.truncated,
     };
   }
 
@@ -5387,6 +5594,12 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
         ...this.readProviderAggregateSeriesInSnapshot(seriesWindowStart, seriesWindowEnd),
         dailyCosts: dailyMetrics.dailyCosts,
         dailyExecutions: dailyMetrics.dailyExecutions,
+        ...this.readProviderAggregateCostBucketSeriesInSnapshot(
+          todayStartMs,
+          todayEndMs,
+          weekStartMs,
+          weekEndMs,
+        ),
       };
       return {
         revision,

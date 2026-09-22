@@ -326,7 +326,6 @@
  "test/host/core/lifecycle/session-streaming-handler.test.ts": 4,
  "test/webview/components/lru-cache.test.ts": 4,
  "test/backend/transcript/transcript-deferred-trigger.test.ts": 4,
- "test/host/util/rolling-aggregate-rate.test.ts": 4,
  "test/shared/fs-retry.test.ts": 4,
  "test/host/core/state/projection-draft.test.ts": 3,
  "test/host/backend/stderr-classifier.test.ts": 3,

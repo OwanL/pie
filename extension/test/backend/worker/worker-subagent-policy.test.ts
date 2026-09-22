@@ -68,6 +68,9 @@ function makeHostWithContext(
     sendFrame: () => true,
     sendLiveSemanticFrame: () => true,
     sendDetailFrame: () => true,
+    // WorkerLiveDetailStore registers its drain listener through this hook in
+    // its constructor; the real server returns an unsubscribe function.
+    onDetailDrain: () => () => undefined,
     failRuntime: () => undefined,
   } as never;
   const host = new WorkerRuntimeHost({

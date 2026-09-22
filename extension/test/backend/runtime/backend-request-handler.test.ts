@@ -65,6 +65,7 @@ interface Harness {
   writtenSettings: Partial<ModelSettings>[];
   emitContextUsageChangedCalls: SessionContext[];
   viewedTransitions: Array<{ sessionPath: string; previousSessionPath: string | null }>;
+  liveSessionListUpdates: unknown[][];
 }
 
 function createHarness(overrides: {
@@ -81,6 +82,7 @@ function createHarness(overrides: {
   const appliedToggles: Array<{ sessionPath: string; disabledEntries: string[] }> = [];
   const emitContextUsageChangedCalls: SessionContext[] = [];
   const viewedTransitions: Array<{ sessionPath: string; previousSessionPath: string | null }> = [];
+  const liveSessionListUpdates: unknown[][] = [];
   let viewedSessionPath: string | undefined;
   const modelSettings = overrides.modelSettings ?? { defaultModel: 'model-a', defaultThinkingLevel: 'medium' };
 
@@ -203,7 +205,8 @@ function createHarness(overrides: {
     emitContextUsageChanged(context) {
       emitContextUsageChangedCalls.push(context);
     },
-    async emitSessionListChanged() {
+    async emitSessionListChanged(liveSummaries) {
+      if (liveSummaries) liveSessionListUpdates.push([...liveSummaries]);
       emitted.push({ event: 'session.list.changed' });
     },
     async listSessions() {
@@ -237,6 +240,7 @@ function createHarness(overrides: {
     writtenSettings,
     emitContextUsageChangedCalls,
     viewedTransitions,
+    liveSessionListUpdates,
   } as Harness;
 }
 
@@ -275,6 +279,7 @@ test('handleBackendRequest covers handshake and session orchestration methods', 
   assert.equal(harness.emitted[0]?.event, 'session.opened');
   assert.equal((harness.emitted[0]?.payload as { selectionToken?: string }).selectionToken, 'sel-1');
   assert.deepEqual(harness.emitted[1], { event: 'session.list.changed' });
+  assert.equal((harness.liveSessionListUpdates[0]?.[0] as { path?: string } | undefined)?.path, '/repo/session.jsonl');
 
   const opened = await handleBackendRequest(harness.deps, {
     id: '4',
@@ -558,6 +563,33 @@ test('session.create returns a session from the configured backend session direc
   }) as { sessionPath: string };
 
   assert.equal(created.sessionPath, path.join(configuredDir, 'new-session.jsonl'));
+});
+
+test('agent-created session.create carries provenance without selecting the new session', async () => {
+  const harness = createHarness();
+  let receivedAgentCreated: boolean | undefined;
+  harness.deps.createColdSession = (_cwd, _pendingCreateOperationId, agentCreated) => {
+    receivedAgentCreated = agentCreated;
+    return { sessionPath: '/repo/agent-created.jsonl' };
+  };
+  await handleBackendRequest(harness.deps, {
+    id: 'agent-create',
+    method: 'session.create',
+    params: { cwd: '/repo', agentCreated: true },
+  });
+
+  assert.equal(receivedAgentCreated, true);
+  assert.equal(harness.viewedSessionPath, undefined);
+  assert.equal(
+    (harness.emitted[0]?.payload as { agentCreated?: boolean }).agentCreated,
+    true,
+    'creation publication carries a one-shot lifecycle marker separate from durable provenance',
+  );
+  assert.equal(
+    (harness.liveSessionListUpdates[0]?.[0] as { path?: string } | undefined)?.path,
+    '/repo/agent-created.jsonl',
+    'creation publication forwards its live summary to the catalog refresh',
+  );
 });
 
 test('create and duplicate transport their exact pending-create origin to durable registration', async () => {

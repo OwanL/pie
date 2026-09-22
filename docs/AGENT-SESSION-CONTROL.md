@@ -9,8 +9,10 @@ worker RPC tunnel.
 - `list` returns bounded session summaries and `scope: "current-extension-host"`.
   `busy` reflects the owning runtime's active request.
 - `create` uses the existing `session.create` operation and returns a cold
-  session. Supplying `cwd` is optional. A later `message` promotes the session
-  through the normal isolated-runtime path.
+  session. Supplying `cwd` is optional. The new session is durably marked as
+  agent-created, appears as an ordinary main tab in the background, and does
+  not change the selected tab. A later `message` promotes the session through
+  the normal isolated-runtime path. Its tab tooltip is `Agent-created session`.
 - `read` uses the existing transcript paging operation. The first request uses
   `direction: "latest"`; subsequent requests pass the returned
   `cursor: { start, end }` with `direction: "older"` or `"newer"`. `limit` is

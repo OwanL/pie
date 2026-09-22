@@ -255,6 +255,8 @@ test('HostToWebviewMessage state envelope carries hostInstanceId and revision', 
         hasUserMessages: false,
       },
       sessionUsage: {
+        freshness: 'fresh',
+        refreshStatus: 'idle',
         samples: [{
           sourceId: 'assistant:durable-1',
           kind: 'assistant',
@@ -266,6 +268,19 @@ test('HostToWebviewMessage state envelope carries hostInstanceId and revision', 
           cacheWriteTokens: 0,
           totalTokens: 1_100,
           reportedCostUsd: 0.01,
+        }],
+        pendingSamples: [{
+          sourceId: 'assistant:stream-1',
+          canonicalInvocationId: 'canonical-1',
+          provisionalMessageId: 'stream-1',
+          kind: 'conversation',
+          modelId: 'gpt-5.4',
+          provider: 'openai-codex',
+          inputTokens: 1_000,
+          outputTokens: 100,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          totalTokens: 1_100,
         }],
       },
       transcriptLoaded: false,
@@ -333,6 +348,10 @@ test('HostToWebviewMessage state envelope carries hostInstanceId and revision', 
     assert.equal(msg.state.activeRunSummary, null);
     assert.deepEqual(msg.state.runSummariesBySession, {});
     assert.equal(msg.state.sessionUsage?.samples[0]?.reportedCostUsd, 0.01);
+    assert.equal(msg.state.sessionUsage?.freshness, 'fresh');
+    assert.equal(msg.state.sessionUsage?.refreshStatus, 'idle');
+    assert.equal(msg.state.sessionUsage?.pendingSamples?.[0]?.canonicalInvocationId, 'canonical-1');
+    assert.equal(msg.state.sessionUsage?.pendingSamples?.[0]?.provisionalMessageId, 'stream-1');
   }
 });
 
@@ -476,6 +495,34 @@ test('SessionOpenedPayload can carry structured analytics factors', () => {
   assert.equal(payload.analyticsFactors?.selectedToolIds[0], 'read');
 });
 
+test('cold SessionOpenedPayload carries complete prompt catalog, disabled state, and optional estimate together', () => {
+  const payload: SessionOpenedPayload = {
+    session: {
+      path: '/workspace/session.jsonl', name: 'Session', cwd: '/workspace',
+      modifiedAt: '2026-01-01T00:00:00.000Z', messageCount: 0,
+    },
+    transcript: [],
+    transcriptWindow: {
+      totalCount: 0, loadedStart: 0, loadedEnd: 0,
+      hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: false,
+    },
+    busy: false,
+    capabilities: { billableActivity: false, canContinue: false, canInterrupt: false, canCompact: true },
+    runtimeReady: false,
+    systemPrompts: [{
+      source: 'harness', id: 'harness', title: 'Harness system prompt',
+      text: 'Complete discovered prompt.', summary: 'Complete discovered prompt.',
+      availability: 'available', disabled: true,
+    }],
+    systemPromptDisabledEntries: ['harness'],
+    initialContextEstimate: { tokens: 123, contextWindow: 200_000 },
+  };
+
+  assert.equal(payload.systemPrompts?.[0]?.text, 'Complete discovered prompt.');
+  assert.equal(payload.systemPrompts?.[0]?.disabled, true);
+  assert.deepEqual(payload.systemPromptDisabledEntries, ['harness']);
+  assert.equal(payload.initialContextEstimate?.tokens, 123);
+});
 
 test('ToolFinishedPayload carries normalized failure status', () => {
   const payload: ToolFinishedPayload = {

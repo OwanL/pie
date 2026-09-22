@@ -157,6 +157,83 @@ function assistantUsage() {
   };
 }
 
+const WHOLE_ROOT_CALL_TYPES = [
+  'conversation',
+  'retry',
+  'history_compaction',
+  'branch_summary',
+  'skill_pruning_prepass',
+  'session_title',
+  'subagent',
+  'other',
+] as const;
+
+function wholeRootSettlement(options: {
+  invocationId: string;
+  purpose: string;
+  settledAtMs: number;
+  branchId?: string;
+}): AnalyticsObservation<object> {
+  const base: Omit<AnalyticsObservation<object>, 'idempotencyKey'> = {
+    schemaVersion: ANALYTICS_SCHEMA_VERSION,
+    generationId: 'generation-settle-idle',
+    producerKind: 'test',
+    sourceKey: `root-call:${options.invocationId}`,
+    entityKind: 'providerCall',
+    entityKey: options.invocationId,
+    observationKind: 'providerSettlement',
+    observedAtMs: options.settledAtMs,
+    scope: {
+      workspaceCoverage: 'known',
+      workspaceId: 'workspace-settle-idle',
+      rootSessionId: ROOT_ID,
+      invocationId: options.invocationId,
+      ...(options.branchId ? { branchId: options.branchId } : {}),
+    },
+    captureSubject: { kind: 'session', rootSessionId: ROOT_ID },
+    producer: { buildId: 'test-build', processGeneration: 'test-process' },
+    fields: {
+      invocationId: options.invocationId,
+      sourceId: options.invocationId,
+      provider: 'fixture-provider',
+      dispatchedModel: 'fixture/model',
+      reportedModel: 'fixture/model',
+      purpose: options.purpose,
+      outcome: 'succeeded',
+      startedAtMs: options.settledAtMs - 1_000,
+      endedAtMs: options.settledAtMs,
+      settledAtMs: options.settledAtMs,
+      inputTokens: 10,
+      outputTokens: 5,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      providerTotalTokens: 15,
+      reportedCostUsd: 0.01,
+      inputIncludesCache: false,
+      outputIncludesReasoning: true,
+      cacheChannelsOmittedAsZero: false,
+      coverage: 'known',
+    },
+  };
+  return { ...base, idempotencyKey: deriveAnalyticsIdempotencyKey(base) };
+}
+
+function submitWholeRootSettlements(sink: DelayedCommitSink, observedAtMs: number): void {
+  const branchByPurpose: Partial<Record<typeof WHOLE_ROOT_CALL_TYPES[number], string>> = {
+    conversation: 'branch:root-conversation',
+    retry: 'branch:root-retry',
+    branch_summary: 'branch:root-summary',
+  };
+  for (const [index, purpose] of WHOLE_ROOT_CALL_TYPES.entries()) {
+    sink.submit(wholeRootSettlement({
+      invocationId: `root-call-${purpose}`,
+      purpose,
+      settledAtMs: observedAtMs + index,
+      branchId: branchByPurpose[purpose],
+    }));
+  }
+}
+
 /** One real settle lifecycle turn: a send opens the run, the terminal
  * assistant message settles with provider usage, the durable transcript
  * append is observed (branch edge + selection), the run leaves busy, and the
@@ -289,6 +366,10 @@ test('the first settled turn keeps the displayed cost known until its delayed co
       occurredAtMs: Date.parse('2026-01-15T12:00:06.000Z'),
     }];
     runTurn(stats, turn1);
+    // The root projection must retain every canonical provider-call kind,
+    // including branchless auxiliary and child calls, not just the turn that
+    // selected the currently visible branch.
+    submitWholeRootSettlements(sink, turn1[0]!.occurredAtMs + 100);
     const live = stats.getSessionUsage(SESSION_PATH);
     assert.equal(live.authority, 'canonical',
       `the idle render must keep a known read while the commit is pending, got ${live.authority}`);
@@ -304,11 +385,21 @@ test('the first settled turn keeps the displayed cost known until its delayed co
     // The delayed durable settlement lands; the revision refresher schedules
     // the replacement pass and the idle cost converges to the full ledger.
     sink.commit();
-    await awaitIdleUsage(stats, 1);
+    await awaitIdleUsage(stats, WHOLE_ROOT_CALL_TYPES.length + 1);
     const settled = stats.getSessionUsage(SESSION_PATH);
     assert.equal(settled.authority, 'canonical');
-    assert.match(settled.branchId ?? '', /^branch:/);
-    assert.equal(settled.samples.length, 1);
+    assert.equal(settled.branchId, undefined, 'root usage must not claim selected-branch ownership');
+    assert.deepEqual(
+      new Set(settled.samples.map((sample) => sample.kind)),
+      new Set(WHOLE_ROOT_CALL_TYPES),
+      'root usage must include every canonical provider-call kind',
+    );
+    assert.equal(settled.samples.reduce((total, sample) => total + (sample.inputTokens ?? 0), 0), 180);
+    assert.equal(settled.samples.reduce((total, sample) => total + (sample.outputTokens ?? 0), 0), 90);
+    assert.equal(
+      Number(settled.samples.reduce((total, sample) => total + (sample.reportedCostUsd ?? 0), 0).toFixed(8)),
+      0.1,
+    );
   } finally {
     await fixture.close();
   }
@@ -393,19 +484,19 @@ test('a rejected settle keeps the last known durable cost while the commit never
   }
 });
 
-/** A foreign-generation selection for the same root makes the durable
- * selection ambiguous (two rows for one root). Mirrors the recorder's
- * branch-selection observation shape. */
-function submitForeignGenerationSelection(
+/** Add a second current-selection subject in the same generation. The
+ * selected-branch scope must fail closed when it cannot choose between the
+ * two durable rows, while root scope remains unambiguous. */
+function submitAmbiguousSelection(
   writer: SqliteAnalyticsRecorder,
   observedAtMs: number,
 ): void {
-  const branchId = 'branch:foreign-generation-ambiguous';
+  const branchId = 'entry-1';
   const base: Omit<AnalyticsObservation<object>, 'idempotencyKey'> = {
     schemaVersion: ANALYTICS_SCHEMA_VERSION,
-    generationId: 'generation-settle-idle-foreign',
+    generationId: 'generation-settle-idle',
     producerKind: 'test',
-    sourceKey: `branch-selection:foreign:${observedAtMs}`,
+    sourceKey: `branch-selection:ambiguous:${observedAtMs}`,
     entityKind: 'branch',
     entityKey: branchId,
     observationKind: 'phase',
@@ -417,24 +508,22 @@ function submitForeignGenerationSelection(
       sessionId: ROOT_ID,
       branchId,
     },
-    captureSubject: { kind: 'session', rootSessionId: ROOT_ID },
+    captureSubject: { kind: 'host', hostId: 'ambiguous-selection-host' },
     producer: { buildId: 'test-build', processGeneration: 'test-process' },
-    fields: { branchId, sourceSelectionId: 'selection:foreign', sourceEntryId: 'entry-foreign' },
+    fields: { branchId, sourceSelectionId: 'selection:ambiguous', sourceEntryId: branchId },
   };
   writer.submitBatch([{ ...base, idempotencyKey: deriveAnalyticsIdempotencyKey(base) }]);
 }
 
 /**
- * Fail-closed boundary: when the durable store itself reports an ambiguous
- * selection for the root (two selection rows), the read cannot prove a
- * complete selection, so the session cost must stay an explicit unknown even
- * when a prior complete read exists. Only the missing-selection
- * delayed-commit window is pending (retained); genuine ambiguity must not
- * borrow the prior read.
+ * Fail-closed boundary: an explicit selected-branch read cannot prove a
+ * complete selection when the durable store contains two current subjects.
+ * Root-owned session usage has a different contract and must remain complete
+ * rather than borrowing selected-branch ownership or ambiguity.
  */
-test('an ambiguous durable selection stays fail-closed unknown', async () => {
+test('selected-branch ambiguity stays fail-closed without corrupting root usage', async () => {
   const fixture = await lifecycleFixture();
-  const { stats, sink } = fixture;
+  const { stats, sink, readModel } = fixture;
   try {
     fixture.setNow(Date.parse('2026-01-15T12:00:05.000Z'));
     const turn1 = [{ index: 1, entryId: 'entry-1', parentEntryId: null, occurredAtMs: Date.parse('2026-01-15T12:00:06.000Z') }];
@@ -442,20 +531,25 @@ test('an ambiguous durable selection stays fail-closed unknown', async () => {
     sink.commit();
     await awaitIdleUsage(stats, 1);
 
-    // A second selection row (foreign generation) for the same root makes the
-    // selection lookup ambiguous; the commit also advances the revision, so
-    // the strict revision-dirty refresh reads the ambiguous store.
+    // A second subject selection in the same generation makes the explicit
+    // selected-branch scope ambiguous. Root-owned session usage must remain a
+    // complete root snapshot rather than inheriting that ambiguity.
     fixture.setNow(Date.parse('2026-01-15T12:03:00.000Z'));
-    submitForeignGenerationSelection(fixture.writer, Date.parse('2026-01-15T12:03:01.000Z'));
-    const deadline = Date.now() + 15_000;
-    for (;;) {
-      const usage = stats.getSessionUsage(SESSION_PATH);
-      if (usage.authority === 'unknown') break;
-      if (Date.now() >= deadline) {
-        assert.fail(`ambiguous selection must stay fail-closed, got authority=${usage.authority}`);
-      }
-      await new Promise<void>((resolve) => setTimeout(resolve, 50));
-    }
+    submitAmbiguousSelection(fixture.writer, Date.parse('2026-01-15T12:03:01.000Z'));
+    const selected = await readModel.readScopedProviderSettlements({
+      kind: 'selectedBranch',
+      generationId: 'generation-settle-idle',
+      rootSessionId: ROOT_ID,
+    });
+    assert.equal(selected.selectionCoverage, 'unknown');
+    assert.deepEqual(selected.settlements, []);
+
+    await (stats as unknown as { refreshCanonicalSessionUsage(): Promise<void> }).refreshCanonicalSessionUsage();
+    await awaitSettlePass(stats);
+    const usage = stats.getSessionUsage(SESSION_PATH);
+    assert.equal(usage.authority, 'canonical');
+    assert.equal(usage.branchId, undefined, 'root usage must not claim selected-branch ownership');
+    assert.equal(usage.samples.length, 1);
   } finally {
     await fixture.close();
   }

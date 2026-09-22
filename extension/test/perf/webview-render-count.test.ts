@@ -370,7 +370,6 @@ function makeIndicatorsProbe() {
   const tracker = new RefTracker();
   function Probe({ inputs }: { inputs: IndicatorsInputs }) {
     const r = useComposerIndicators(inputs);
-    tracker.record('sessionTokenIndicator', r.sessionTokenIndicator);
     tracker.record('contextBreakdown', r.contextBreakdown);
     tracker.record('sessionCostIndicator', r.sessionCostIndicator);
     return null;
@@ -402,8 +401,8 @@ test('Part B (streaming): token-usage + context-breakdown recompute is independe
   // Streaming assistant message growing over DELTAS deltas; contextUsage.tokens
   // is reported (the common case) so the context breakdown's used/remaining
   // values come from the live snapshot, not the growing transcript estimate.
-  // buildSessionTokenUsage sums message.usage — the streaming message has none,
-  // so its result is stable across deltas and must NOT recompute per delta.
+  // Session cost accounting excludes the streaming message from completed
+  // usage walks, while its live estimate remains responsive to deltas.
   const { Probe, tracker } = makeIndicatorsProbe();
   const base = buildTranscript({ pairs: 2, streaming: true });
   const contextUsage: ContextWindowUsage = { tokens: 50_000, contextWindow: 200_000, percent: 25 };
@@ -422,14 +421,6 @@ test('Part B (streaming): token-usage + context-breakdown recompute is independe
     });
   }
 
-  // Stable-result indicators: recompute exactly once (initial), independent of
-  // the 50 deltas. Before the Step 2 fix these recomputed 51× (once per
-  // snapshot) because the transcript array ref changed every clone.
-  assert.equal(
-    tracker.distinct('sessionTokenIndicator'),
-    1,
-    `sessionTokenIndicator (sums usage; streaming msg has none) must be stable across deltas — got ${tracker.distinct('sessionTokenIndicator')}`,
-  );
   assert.equal(
     tracker.distinct('contextBreakdown'),
     1,
@@ -470,11 +461,6 @@ test('Part B (busy, idle transcript): all indicator walks are independent of del
     });
   }
 
-  assert.equal(
-    tracker.distinct('sessionTokenIndicator'),
-    1,
-    `sessionTokenIndicator must be stable across identical-content clones — got ${tracker.distinct('sessionTokenIndicator')}`,
-  );
   assert.equal(
     tracker.distinct('contextBreakdown'),
     1,
@@ -595,7 +581,7 @@ test('Part B: recompute count is independent of transcript length for stable res
   // must recompute each indicator the same number of times (~1). Before the
   // Step 2 fix, each recompute walked the whole transcript, so the cost grew
   // with length — this asserts the walks no longer scale with transcript size.
-  function runLength(pairs: number): { token: number; breakdown: number; cost: number } {
+  function runLength(pairs: number): { breakdown: number; cost: number } {
     const freshContainer = document.createElement('div');
     document.body.appendChild(freshContainer);
     try {
@@ -617,7 +603,6 @@ test('Part B: recompute count is independent of transcript length for stable res
         });
       }
       return {
-        token: tracker.distinct('sessionTokenIndicator'),
         breakdown: tracker.distinct('contextBreakdown'),
         cost: tracker.distinct('sessionCostIndicator'),
       };
@@ -630,14 +615,11 @@ test('Part B: recompute count is independent of transcript length for stable res
   const short = runLength(2);
   const long = runLength(20);
 
-  assert.equal(short.token, 1, `short transcript token-usage recompute should be 1 — got ${short.token}`);
-  assert.equal(long.token, 1, `long transcript token-usage recompute should be 1 — got ${long.token}`);
   assert.equal(short.breakdown, 1, `short breakdown recompute should be 1 — got ${short.breakdown}`);
   assert.equal(long.breakdown, 1, `long breakdown recompute should be 1 — got ${long.breakdown}`);
   assert.equal(short.cost, 1, `short cost-indicator recompute should be 1 — got ${short.cost}`);
   assert.equal(long.cost, 1, `long cost-indicator recompute should be 1 — got ${long.cost}`);
   // The whole point: recompute count does not grow with transcript length.
-  assert.equal(short.token, long.token, 'token-usage recompute must not scale with transcript length');
   assert.equal(short.breakdown, long.breakdown, 'breakdown recompute must not scale with transcript length');
   assert.equal(short.cost, long.cost, 'cost-indicator recompute must not scale with transcript length');
 });

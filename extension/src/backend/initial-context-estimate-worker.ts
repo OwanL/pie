@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import type { Readable } from 'node:stream';
 
 import { attachJsonlLineReader } from '../shared/jsonl';
-import type { InitialContextEstimate } from '../shared/protocol';
+import type { InitialContextEstimate, SystemPromptEntry } from '../shared/protocol';
 import { estimateTextTokens } from '../shared/tokenize';
 import { prepareContextFiles } from './context-files';
 import type {
@@ -19,13 +19,17 @@ import { loadSdk, loadSdkInternalModule } from './sdk';
 import type { SdkPatchIdentity } from './sdk-patch-barrier';
 import { createPieSystemPromptBuilder } from '../../../shared/pie-harness-prompt.js';
 import {
+  buildSessionSystemPrompts,
   captureOriginalSystemPromptOptions,
   normalizePromptText,
 } from './system-prompts';
 
 const IPC_READ_FD = 3;
 const IPC_WRITE_FD = 4;
-const MAX_FRAME_BYTES = 256 * 1024;
+// The inventory carries the lossless prompt catalog, including complete context
+// files and tool schemas. Keep it bounded below the public 32 MiB JSONL ceiling
+// without imposing the old 256 KiB text truncation/failure cliff.
+const MAX_FRAME_BYTES = 30 * 1024 * 1024;
 const PARENT_WATCHDOG_INTERVAL_MS = 1_000;
 
 export interface InitialContextEstimateWorkerInput {
@@ -37,8 +41,13 @@ export interface InitialContextEstimateWorkerInput {
   model: { provider: string; id: string };
 }
 
+export interface InitialContextInventory {
+  estimate: InitialContextEstimate;
+  systemPrompts: SystemPromptEntry[];
+}
+
 export type InitialContextEstimateWorkerOutput =
-  | { ok: true; estimate: InitialContextEstimate }
+  | { ok: true; inventory: InitialContextInventory }
   | { ok: false; error: string };
 
 interface RuntimeFactoryArgs {
@@ -65,14 +74,14 @@ interface PromptStateLike {
  * resources excluded by Pi resource settings, unavailable packages, and failed
  * discoveries are not registered and therefore are not part of this inventory.
  * The caller owns process isolation and the timeout; this function never prompts. */
-export async function collectInitialContextEstimate(
+export async function collectInitialContextInventory(
   sdk: SdkModule,
   systemPromptModule: SdkSystemPromptModule,
   input: Pick<InitialContextEstimateWorkerInput, 'cwd' | 'agentDir' | 'model'>,
-): Promise<InitialContextEstimate> {
+): Promise<InitialContextInventory> {
   const providerBoundary = installInventoryProviderDenyBoundary();
   try {
-    return await collectInitialContextEstimateInsideBoundary(
+    return await collectInitialContextInventoryInsideBoundary(
       sdk,
       systemPromptModule,
       input,
@@ -83,12 +92,12 @@ export async function collectInitialContextEstimate(
   }
 }
 
-async function collectInitialContextEstimateInsideBoundary(
+async function collectInitialContextInventoryInsideBoundary(
   sdk: SdkModule,
   systemPromptModule: SdkSystemPromptModule,
   input: Pick<InitialContextEstimateWorkerInput, 'cwd' | 'agentDir' | 'model'>,
   assertNoProviderAttempts: () => void,
-): Promise<InitialContextEstimate> {
+): Promise<InitialContextInventory> {
   const authDir = process.env.PI_CODING_AGENT_AUTH_DIR?.trim();
   const authPath = authDir
     ? path.resolve(authDir, 'auth.json')
@@ -149,6 +158,15 @@ async function collectInitialContextEstimateInsideBoundary(
     const pieBuildSystemPrompt = createPieSystemPromptBuilder(systemPromptModule.buildSystemPrompt, input.agentDir);
     const fullSystemPrompt = normalizePromptText(pieBuildSystemPrompt(inventoryPromptOptions));
     if (!fullSystemPrompt) throw new Error('Fresh inventory did not build a system prompt.');
+    // Match the hot picker exactly: its harness card is rebuilt from only the
+    // harness/tool/runtime inputs, while custom/append/context/skill entries
+    // are projected independently from the unfiltered options below.
+    const harnessPrompt = normalizePromptText(pieBuildSystemPrompt({
+      cwd: inventoryPromptOptions.cwd,
+      selectedTools: inventoryPromptOptions.selectedTools,
+      toolSnippets: inventoryPromptOptions.toolSnippets,
+      promptGuidelines: inventoryPromptOptions.promptGuidelines,
+    }));
 
     // Count the exact Pie-owned prompt text used by runtime requests.
     // Provider tool descriptions/schemas are separate request metadata and are
@@ -159,7 +177,18 @@ async function collectInitialContextEstimateInsideBoundary(
       || !Number.isSafeInteger(contextWindow) || (contextWindow ?? 0) <= 0) {
       throw new Error('Fresh inventory did not resolve a valid token total and context window.');
     }
-    return { tokens, contextWindow: contextWindow! };
+    const estimate = { tokens, contextWindow: contextWindow! };
+    const systemPrompts = buildSessionSystemPrompts({
+      harnessPrompt,
+      promptOptions: inventoryPromptOptions,
+      formatSkillsForPrompt: sdk.formatSkillsForPrompt,
+      tools,
+      activeProvider: {
+        provider: input.model.provider,
+        modelId: input.model.id,
+      },
+    });
+    return { estimate, systemPrompts };
   } finally {
     await runtime.dispose();
   }
@@ -348,8 +377,8 @@ async function main(): Promise<void> {
       path.join('core', 'system-prompt.js'),
       { mode: 'worker', patchIdentity: input.sdkPatchIdentity },
     );
-    const estimate = await collectInitialContextEstimate(sdk, systemPromptModule, input);
-    await writeOutput(outputStream, { ok: true, estimate });
+    const inventory = await collectInitialContextInventory(sdk, systemPromptModule, input);
+    await writeOutput(outputStream, { ok: true, inventory });
   } catch (error) {
     await writeOutput(outputStream, {
       ok: false,

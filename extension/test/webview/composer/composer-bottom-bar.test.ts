@@ -14,6 +14,7 @@ import {
   EMPTY_TRANSCRIPT_WINDOW,
   type ModelInfo,
   type SystemPromptEntry,
+  type WorkingTimeState,
 } from '../../../src/shared/protocol';
 import { ComposerActions } from '../../../src/webview/panel/composer/actions';
 import { ComposerToolbar } from '../../../src/webview/panel/composer/toolbar';
@@ -267,10 +268,14 @@ test('working-time tooltip moves legacy subagent tool timing into its own sectio
 });
 
 test('composer uses the configured initial textarea rows and defaults to one', () => {
-  const renderComposer = (composerInitialRows: number) => renderToString(h(Composer, {
+  const renderComposer = (
+    composerInitialRows: number,
+    sessionPath: string | null = null,
+    workingTimeBySession: Record<string, WorkingTimeState> = {},
+  ) => renderToString(h(Composer, {
     busy: false,
     retryStatus: null,
-    sessionPath: null,
+    sessionPath,
     draftText: '',
     modelSettings: null,
     availableModels: [],
@@ -289,7 +294,7 @@ test('composer uses the configured initial textarea rows and defaults to one', (
     transcriptWindow: EMPTY_TRANSCRIPT_WINDOW,
     pendingComposerInputs: [],
     tokenRateBySession: {},
-    workingTimeBySession: {},
+    workingTimeBySession,
     compacting: false,
     lastCompaction: null,
     postMessage: () => {},
@@ -316,6 +321,12 @@ test('composer uses the configured initial textarea rows and defaults to one', (
   assert.match(renderComposer(1), /<textarea[^>]*rows="1"/);
   assert.match(renderComposer(4), /<textarea[^>]*rows="4"/);
   assert.doesNotMatch(renderComposer(1), /composer-input-textarea[^>]*min-h-10/);
+
+  const emptySessionHtml = renderComposer(1, '/session/new.jsonl', {
+    '/session/new.jsonl': { accumulatedMs: 0, activeSince: null },
+  });
+  assert.doesNotMatch(emptySessionHtml, /panel-chip-indicator-speed/);
+  assert.doesNotMatch(emptySessionHtml, /panel-chip-indicator-time/);
 });
 
 test('composer actions use compact icons in clear, stop, and queue order', () => {

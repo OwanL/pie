@@ -243,6 +243,9 @@ export interface SessionCreateParams {
    *  result, and echoes it on the resulting `session.opened`. */
   operationId?: string;
   operationAttempt?: number;
+  /** Internal provenance marker used only by the agent session_control create
+   *  path; persisted in the new session and never inferred from lineage. */
+  agentCreated?: boolean;
 }
 
 export interface SessionOpenParams extends SessionPathParams {
@@ -362,11 +365,16 @@ export function validateSessionCreate(params: unknown): SessionCreateParams {
   }
   const operationId = readOperationId('session.create', params);
   const operationAttempt = readOperationAttempt('session.create', params);
+  const agentCreated = params['agentCreated'];
+  if (agentCreated !== undefined && typeof agentCreated !== 'boolean') {
+    fail('session.create', 'agentCreated must be a boolean when provided');
+  }
   return {
     cwd: cwd as string | undefined,
     selectionToken: readSelectionToken('session.create', params),
     ...(operationId !== undefined ? { operationId } : {}),
     ...(operationAttempt !== undefined ? { operationAttempt } : {}),
+    ...(agentCreated === true ? { agentCreated: true } : {}),
   };
 }
 

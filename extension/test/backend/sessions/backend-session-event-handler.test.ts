@@ -1373,6 +1373,7 @@ test('message_end emits finished and aborted payloads and clears the current mes
       sessionPath: '/workspace/session.jsonl',
       kind: 'assistant_message',
       sourceId: (emitted[0]?.payload as { sourceId: string }).sourceId,
+      provisionalMessageId: 'req-3:1',
       occurredAt: '2026-01-01T00:00:05.000Z',
       modelId: 'claude-test',
       inputTokens: 2,

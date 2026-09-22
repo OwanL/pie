@@ -14,7 +14,7 @@ const SESSION_PATH_MAX_LENGTH = 16 * 1024;
 const MESSAGE_MAX_LENGTH = 64 * 1024;
 
 const SessionControlAction = StringEnum(['list', 'create', 'read', 'message', 'close'] as const, {
-  description: 'Session operation to perform. list discovers local sessions; create makes a cold session; read pages a transcript; message sends a normal message; close uses host lifecycle close.',
+  description: 'Session operation to perform. list discovers local sessions; create makes a durably agent-created cold session and opens its ordinary tab in the background without selecting it; read pages a transcript; message sends a normal message; close uses host lifecycle close.',
 });
 
 const TranscriptCursor = Type.Object(
@@ -90,14 +90,14 @@ export function createSessionControlTool(request: SessionControlToolRequest): To
   return {
     name: 'session_control',
     label: 'Session control',
-    description: 'Discover and control local primary Pie sessions. Read bounded transcript pages with a cursor, send ordinary messages to idle or busy sessions, create cold sessions, and close through Pie\'s existing lifecycle.',
-    promptSnippet: 'List, read, message, create, or close a local Pie session through host-owned lifecycle controls.',
+    description: 'Discover and control local primary Pie sessions. Read bounded transcript pages with a cursor, send ordinary messages to idle or busy sessions, create cold sessions that open as background tabs without changing selection, and close through Pie\'s existing lifecycle.',
+    promptSnippet: 'List, read, message, create a background agent-created session, or close a local Pie session through host-owned lifecycle controls.',
     promptGuidelines: [
       'Only sessions in the current extension host\'s local catalog are addressable; do not guess paths from another window.',
       'Use read direction latest for the first page, then pass the returned cursor with direction older or newer.',
       'message uses ordinary send semantics: an idle target wakes and a busy target receives Pie\'s normal queued-send behavior.',
       'close defaults to a reversible lifecycle close; pass delete:true only when the existing privacy/deletion behavior is intended.',
-      'create returns a cold session path; message can subsequently wake it and promote its isolated runtime.',
+      'create returns a durably agent-created cold session path; it opens as an ordinary background tab without changing the selected tab, and message can subsequently wake it and promote its isolated runtime.',
     ],
     parameters: SessionControlParameters,
     executionMode: 'sequential',

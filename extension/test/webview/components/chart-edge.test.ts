@@ -24,7 +24,7 @@ import type { AggregateSeriesPoint } from '../../../src/shared/protocol/aggregat
  * Zero / single-point boundary tests for the extension's status-strip charts.
  * These components render inside high-frequency tooltips and must never emit
  * `NaN`/`Infinity` geometry or crash on degenerate inputs (empty runs, a single
- * turn, all-zero throughput). Disjoint from chart.test.ts, which covers the
+ * turn, all-zero data). Disjoint from chart.test.ts, which covers the
  * multi-point and hover paths.
  */
 
@@ -87,20 +87,6 @@ test('StackedAreaChart with all-zero point totals renders no area paths and no N
   assert.equal(container.querySelector('.chart-empty'), null, 'all-zero is not the points-length-zero empty state');
 });
 
-test('StackedAreaChart rate mode renders a single bar without crashing', () => {
-  const single: AggregateSeriesPoint[] = [
-    { ms: 1_000, byProvider: [{ key: 'openai', value: 5 }], byModel: [{ key: 'gpt', provider: 'openai', model: 'gpt', value: 5 }] },
-  ];
-  render(h(StackedAreaChart, { points: single, mode: 'rate', formatY: fmt, formatX: fmtX }), container);
-  const rects = container.querySelectorAll('rect');
-  assert.ok(rects.length >= 1, 'single rate point renders at least one bar');
-  for (const rect of rects) {
-    const y = Number(rect.getAttribute('y'));
-    const height = Number(rect.getAttribute('height'));
-    assert.ok(Number.isFinite(y) && Number.isFinite(height), 'bar geometry must be finite');
-  }
-});
-
 test('StackedAreaChart line mode draws one unstroked-stack line per series on a shared scale', () => {
   const points: AggregateSeriesPoint[] = [
     { ms: 1_000, byProvider: [{ key: 'sessions used', value: 3 }, { key: 'peak working', value: 2 }], byModel: [] },
@@ -128,24 +114,24 @@ test('StackedAreaChart line mode draws one unstroked-stack line per series on a 
   assert.equal(new Set(cys).size, 4, 'each of the four sample values (2,3,4,5) maps to its own non-stacked cy');
 });
 
-test('AggregateStatsStrip renders a placeholder while not ready and a dash rate when idle', () => {
+test('AggregateStatsStrip renders a placeholder while not ready', () => {
   const html = renderToString(h(AggregateStatsStrip, {
     stats: EMPTY_AGGREGATE_STATS,
     deferredTriggers: [],
     onOpenDeferredMenu: () => {},
   }));
   assert.match(html, /aggregate-strip--placeholder/);
-  assert.match(html, /aggregate-strip-rate[^>]*>—</, 'no live rate while not ready → dash');
+  assert.doesNotMatch(html, /tok\/s/, 'aggregate strip has no speed indicator');
 });
 
-test('AggregateStatsStrip with ready zero stats shows a dash rate and no last-run segment', () => {
+test('AggregateStatsStrip with ready zero stats omits the last-run segment', () => {
   const html = renderToString(h(AggregateStatsStrip, {
     stats: { ...EMPTY_AGGREGATE_STATS, ready: true },
     deferredTriggers: [],
     onOpenDeferredMenu: () => {},
   }));
   assert.doesNotMatch(html, /aggregate-strip--placeholder/, 'ready state drops the placeholder class');
-  assert.match(html, /aggregate-strip-rate[^>]*>—</, 'idle (0 tok/s) shows a dash, not 0 or NaN');
+  assert.doesNotMatch(html, /tok\/s/, 'aggregate strip has no speed indicator');
   assert.doesNotMatch(html, /aggregate-strip-dur/, 'no last-run segment when lastRun is null');
 });
 

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { h, render } from 'preact';
 import { act } from 'preact/test-utils';
 import renderToString from 'preact-render-to-string';
@@ -45,6 +46,73 @@ test('pending new-session tab shows background preparation without disabling int
   assert.match(html, /preparing in background/);
   assert.match(html, /session-tab-running/);
   assert.doesNotMatch(html, /session-tab-main[^>]*disabled/);
+});
+
+test('agent-created sessions render a muted bot icon and preserve provenance tooltips', () => {
+  const tabPath = '/sessions/agent-created';
+  const summary: SessionSummary = {
+    path: tabPath,
+    name: 'Agent helper',
+    cwd: '/workspace',
+    modifiedAt: '2026-01-01T00:00:00.000Z',
+    messageCount: 1,
+    agentCreated: true,
+  };
+  const props = {
+    tabPath,
+    index: 0,
+    sessionByPath: new Map([[tabPath, summary]]),
+    openIndexByPath: new Map([[tabPath, 0]]),
+    runningPathSet: new Set<string>(),
+    startingModelPathSet: new Set<string>(),
+    unreadFinishedPathSet: new Set<string>(),
+    activePath: tabPath,
+    hasPendingExtensionUIRequest: false,
+    isDropTarget: false,
+    hasDeferredTriggers: false,
+    hasDeferredTimer: false,
+    onContextMenu: () => undefined,
+    onPointerDown: () => undefined,
+    onClick: () => undefined,
+    onClose: () => undefined,
+  };
+
+  const html = renderToString(h(SessionTab, { ...props, isPinned: false }));
+  assert.match(html, /class="session-tab active"/);
+  assert.match(html, /class="session-tab-agent-icon"/);
+  assert.match(html, /<circle[^>]*fill="currentColor"/);
+  assert.match(html, /title="Agent helper · Agent-created session"/);
+
+  const pinnedHtml = renderToString(h(SessionTab, { ...props, isPinned: true }));
+  assert.match(pinnedHtml, /class="session-tab active pinned"/);
+  assert.match(pinnedHtml, /class="session-tab-agent-icon compact"/);
+  assert.match(pinnedHtml, /title="Agent helper · Agent-created session"/);
+
+  const runningHtml = renderToString(h(SessionTab, {
+    ...props,
+    runningPathSet: new Set([tabPath]),
+    isPinned: false,
+  }));
+  assert.match(runningHtml, /class="session-tab active running"/);
+  assert.match(runningHtml, /session-tab-running/);
+  assert.match(runningHtml, /session-tab-agent-icon/);
+
+  const humanHtml = renderToString(h(SessionTab, {
+    ...props,
+    sessionByPath: new Map([[tabPath, { ...summary, agentCreated: false }]]),
+    isPinned: false,
+  }));
+  assert.doesNotMatch(humanHtml, /session-tab-agent-icon/);
+  assert.doesNotMatch(humanHtml, /Agent-created session/);
+});
+
+test('agent icon stays muted without a surface or accent style', async () => {
+  const tabsCss = await readFile(new URL('../../../src/webview/panel/styles/tabs.css', import.meta.url), 'utf8');
+
+  assert.match(tabsCss, /\.session-tab-agent-icon\s*\{[^}]*color:\s*var\(--panel-muted\);[^}]*opacity:\s*0\.72;/);
+  assert.doesNotMatch(tabsCss, /agent-badge/);
+  assert.doesNotMatch(tabsCss, /\.session-tab-agent-icon\s*\{[^}]*\b(?:background|border(?:-color)?)\s*:/);
+  assert.doesNotMatch(tabsCss, /\.session-tab-agent-icon\s*\{[^}]*var\(--panel-accent\)/);
 });
 
 test('tab shows a subtle title sheen while its LLM title is pending', () => {

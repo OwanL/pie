@@ -599,16 +599,13 @@ export interface ChatPrefs {
    *  clearly visible marker; smaller values are more compact, larger values are
    *  easier to click and see. Range 8–40. */
   uiMessageRailSize: number;
-  /** Hide the bottom usage status strip (today/wk cost, tok/s, tab count, last
-   *  run). The strip is auxiliary info, not core to chatting; this hides it
-   *  entirely. Default false (visible). */
+  /** Hide the bottom usage status strip (today/wk cost, tokens, work status,
+   *  and last run). The strip is auxiliary info, not core to chatting; this
+   *  hides it entirely. Default false (visible). */
   hideStatusStrip: boolean;
   /** Hide the tokens-per-second (tok/s) indicator chip in the composer
    *  toolbar. Default false (visible). */
   hideTokenRate: boolean;
-  /** Hide the per-session token-usage indicator chip in the composer toolbar.
-   *  Default false (visible). */
-  hideSessionTokens: boolean;
   /** Hide the per-session cost indicator chip in the composer toolbar.
    *  Default false (visible). */
   hideSessionCost: boolean;
@@ -712,7 +709,6 @@ export const DEFAULT_CHAT_PREFS: ChatPrefs = {
   uiMessageRailSize: 20,
   hideStatusStrip: false,
   hideTokenRate: false,
-  hideSessionTokens: false,
   hideSessionCost: false,
   hideContextIndicator: false,
   hideRunStatus: false,

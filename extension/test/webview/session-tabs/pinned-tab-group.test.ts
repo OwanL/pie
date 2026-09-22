@@ -114,6 +114,50 @@ test('a group of 5 shows the first 3 avatars plus a "+" tile', () => {
   }
 });
 
+test('agent icons identify group members without labeling a mixed group as all-agent', () => {
+  const restore = mockResizeObserver();
+  const agent = { ...session('/agent', 'Agent helper'), agentCreated: true };
+  const human = session('/human', 'Human session');
+  const paths = ['/agent', '/human'];
+  const { container, unmount } = mount(baseProps({
+    sessions: [agent, human],
+    openTabPaths: paths,
+    pinnedTabPaths: paths,
+    pinnedTabGroups: [paths],
+  }));
+  try {
+    const chip = container.querySelector<HTMLElement>('.pinned-tab-group');
+    assert.ok(chip);
+    assert.equal(chip!.querySelectorAll('.session-tab-agent-icon').length, 0, 'mixed group has no aggregate agent icon');
+    const chipButton = chip!.querySelector<HTMLButtonElement>('.pinned-tab-group-main');
+    assert.ok(chipButton);
+    act(() => { chipButton!.click(); });
+    const members = container.querySelectorAll('.pinned-tab-group-member');
+    assert.equal(members.length, 2);
+    assert.equal(members[0].querySelectorAll('.session-tab-agent-icon').length, 1);
+    assert.equal(members[1].querySelectorAll('.session-tab-agent-icon').length, 0);
+  } finally {
+    unmount();
+  }
+
+  const allAgentSessions = [
+    { ...session('/agent-a', 'Agent A'), agentCreated: true },
+    { ...session('/agent-b', 'Agent B'), agentCreated: true },
+  ];
+  const { container: allAgentContainer, unmount: unmountAllAgent } = mount(baseProps({
+    sessions: allAgentSessions,
+    openTabPaths: allAgentSessions.map((entry) => entry.path),
+    pinnedTabPaths: allAgentSessions.map((entry) => entry.path),
+    pinnedTabGroups: [allAgentSessions.map((entry) => entry.path)],
+  }));
+  try {
+    assert.equal(allAgentContainer.querySelectorAll('.pinned-tab-group > .pinned-tab-group-main .session-tab-agent-icon').length, 1);
+  } finally {
+    unmountAllAgent();
+    restore();
+  }
+});
+
 test('clicking a group chip opens a dropdown listing each member', () => {
   const restore = mockResizeObserver();
   const sessions = [session('/a', 'Alpha'), session('/b', 'Beta')];

@@ -17,6 +17,8 @@
    transcript. Driven by --panel-composer-font-size (see ChatPrefs.uiComposerFontSize). */
 .composer-input-textarea {
   font-size: var(--panel-composer-font-size, 11px);
+  /* The sizing hook enables scrolling only once content exceeds the height cap. */
+  overflow-y: hidden;
 }
 
 .composer-shell {

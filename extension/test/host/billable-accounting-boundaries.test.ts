@@ -199,8 +199,8 @@ test('completed history and pricing caches are owned by focused aggregate module
   ]) {
     assert.doesNotMatch(service, new RegExp(moved), `AggregateStatsService must not own ${moved}`);
   }
-  // Refresh cadence, open-run layer, rolling rate, and ledger projection stay.
-  for (const kept of ['refreshLive', 'observeRollingRate', 'buildOpenAccumulator', 'projectLedgerIfAvailable', 'RECOMPUTE_MS']) {
+  // Refresh cadence, open-run layer, and ledger projection stay.
+  for (const kept of ['refreshLive', 'buildOpenAccumulator', 'projectLedgerIfAvailable', 'RECOMPUTE_MS']) {
     assert.match(service, new RegExp(kept), `AggregateStatsService must keep ${kept}`);
   }
 

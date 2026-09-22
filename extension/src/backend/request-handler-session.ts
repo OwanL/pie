@@ -6,6 +6,7 @@ import type { AuxiliaryLlmUsagePayload, DetailResult, LazyDetailRef, RequestEnve
 import { toErrorMessage } from '../shared/error-message';
 import { boundTranscriptSnapshot } from '../shared/transcript-window';
 import { generateSessionTitle } from './session-title-generator';
+import { appendAgentCreatedSessionProvenance } from './session-provenance';
 import { hasBillableSessionActivity } from './session-activity';
 import type { SdkSessionManager } from './sdk';
 import type { SessionContext } from './server-types';
@@ -37,12 +38,15 @@ async function handleSessionList(
   return await deps.listSessions();
 }
 
-/** Attempt and selection metadata are transport concerns, not mutation intent. */
+/** Attempt and selection metadata are transport concerns; create provenance is mutation intent. */
 function createOperationIntentFingerprint(
   kind: 'session.create' | 'session.duplicate',
   pathIdentity: string,
+  agentCreated?: boolean,
 ): string {
-  return JSON.stringify([kind, path.resolve(pathIdentity)]);
+  return JSON.stringify(kind === 'session.create'
+    ? [kind, path.resolve(pathIdentity), agentCreated === true]
+    : [kind, path.resolve(pathIdentity)]);
 }
 
 /** Shared post-durable-create publication phase for `session.create` and
@@ -52,14 +56,21 @@ function createOperationIntentFingerprint(
 async function publishCreatedSession(
   deps: BackendRequestHandlerDeps,
   sessionPath: string,
-  params: { selectionToken?: string; operationId?: string; operationAttempt?: number },
+  params: {
+    selectionToken?: string;
+    operationId?: string;
+    operationAttempt?: number;
+    agentCreated?: boolean;
+  },
   publicRequestId: string,
 ): Promise<{ sessionPath: string }> {
-  const viewedRevision = deps.captureViewedSessionRevision?.();
-  if (deps.setViewedSessionPathIfCurrent && viewedRevision !== undefined) {
-    deps.setViewedSessionPathIfCurrent(sessionPath, viewedRevision);
-  } else {
-    deps.setViewedSessionPath(sessionPath);
+  if (!params.agentCreated) {
+    const viewedRevision = deps.captureViewedSessionRevision?.();
+    if (deps.setViewedSessionPathIfCurrent && viewedRevision !== undefined) {
+      deps.setViewedSessionPathIfCurrent(sessionPath, viewedRevision);
+    } else {
+      deps.setViewedSessionPath(sessionPath);
+    }
   }
   const payload = await deps.buildSessionOpenedPayload(
     sessionPath,
@@ -71,8 +82,12 @@ async function publishCreatedSession(
     undefined,
     publicRequestId,
   );
+  // `session.agentCreated` is durable provenance. This top-level marker is
+  // intentionally scoped to this creation publication so later opens and
+  // runtime refreshes retain ordinary tab lifecycle semantics.
+  if (params.agentCreated) payload.agentCreated = true;
   deps.emit('session.opened', payload);
-  void deps.emitSessionListChanged();
+  void deps.emitSessionListChanged([payload.session]);
   return { sessionPath };
 }
 
@@ -86,9 +101,21 @@ function createColdSession(
   deps: BackendRequestHandlerDeps,
   cwd?: string,
   pendingCreateOperationId?: string,
+  agentCreated?: boolean,
 ): { sessionPath: string } {
-  if (deps.createColdSession) return deps.createColdSession(cwd, pendingCreateOperationId);
+  if (deps.createColdSession) return deps.createColdSession(cwd, pendingCreateOperationId, agentCreated);
   const manager = deps.sdk.SessionManager.create(cwd || deps.startupCwd, deps.sessionDir);
+  if (agentCreated) {
+    // The production cold store owns the durable marker; retain a compatible
+    // fallback for embedders that do not install that seam.
+    try {
+      appendAgentCreatedSessionProvenance(manager as SdkSessionManager & {
+        appendCustomEntry?: (customType: string, data?: unknown) => string;
+      });
+    } catch (error) {
+      throw new BackendError('SESSION_CREATE_FAILED', error instanceof Error ? error.message : String(error));
+    }
+  }
   return { sessionPath: sessionManagerPath(manager) };
 }
 
@@ -123,9 +150,10 @@ async function handleSessionCreate(
       intentFingerprint: createOperationIntentFingerprint(
         'session.create',
         params.cwd || deps.startupCwd,
+        params.agentCreated,
       ),
       execute: async (registerDurablePath) => {
-        const created = createColdSession(deps, params.cwd, params.operationId);
+        const created = createColdSession(deps, params.cwd, params.operationId, params.agentCreated);
         // The server callback installs the process-local manager handle before
         // returning. Only then may the ledger record the durable commit.
         registerDurablePath(created.sessionPath);
@@ -147,12 +175,14 @@ async function handleSessionCreate(
           undefined,
           request.id,
         );
+        if (params.agentCreated) payload.agentCreated = true;
         deps.emit('session.opened', payload);
+        void deps.emitSessionListChanged([payload.session]);
       },
     });
     return { ok: true, sessionPath: result.sessionPath };
   }
-  const created = createColdSession(deps, params.cwd, params.operationId);
+  const created = createColdSession(deps, params.cwd, params.operationId, params.agentCreated);
   const result = await publishCreatedSession(deps, created.sessionPath, params, request.id);
   return { ok: true, sessionPath: result.sessionPath };
 }
@@ -251,6 +281,7 @@ async function handleSessionDuplicate(
           request.id,
         );
         deps.emit('session.opened', payload);
+        void deps.emitSessionListChanged([payload.session]);
       },
     });
     return { ok: true, sessionPath: result.sessionPath };

@@ -29,8 +29,13 @@ const COMPOSER_TEXTAREA_MAX_HEIGHT = 200;
 const CHECKPOINT_DEBOUNCE_MS = 500;
 
 export function resizeComposerTextarea(textarea: HTMLTextAreaElement): void {
+  // Measure without native scrollbar chrome shrinking the text's available width.
+  textarea.style.overflowY = 'hidden';
   textarea.style.height = 'auto';
-  textarea.style.height = `${Math.min(textarea.scrollHeight, COMPOSER_TEXTAREA_MAX_HEIGHT)}px`;
+  const contentHeight = textarea.scrollHeight;
+  textarea.style.height = `${Math.min(contentHeight, COMPOSER_TEXTAREA_MAX_HEIGHT)}px`;
+  // Short textareas can otherwise expose native arrow buttons for rounding overflow.
+  textarea.style.overflowY = contentHeight > COMPOSER_TEXTAREA_MAX_HEIGHT ? 'auto' : 'hidden';
 }
 
 export function useComposerInput({

@@ -4,10 +4,12 @@ import { deriveSessionNameFromText, NEW_SESSION_NAME } from '../shared/session-n
 import {
   SESSION_SNAPSHOT_TOO_LARGE_CODE,
   type ContextWindowUsage,
+  type InitialContextEstimate,
   type ModelInfo,
   type ModelSettings,
   type SessionOpenedPayload,
   type SessionSummary,
+  type SystemPromptEntry,
   type TranscriptMode,
 } from '../shared/protocol';
 import {
@@ -20,6 +22,7 @@ import { deriveContextUsageFromBranch } from './context-usage';
 import type { SdkSessionManager } from './sdk';
 import { normalizeThinkingLevel } from './message-inputs';
 import { buildDisplayTranscriptCache, buildTailTranscriptWindow } from './transcript-window';
+import { isAgentCreatedSession } from './session-provenance';
 import { normalizeDanglingTranscript } from './session-opened';
 import type { SessionEntryLike } from './transcript';
 import { buildIdleSessionCapabilities } from './session-activity';
@@ -91,6 +94,7 @@ export async function openSessionBrowseSnapshot(options: {
     ...(activeModel ? { modelId: activeModel.modelId, provider: activeModel.provider } : {}),
     ...(durableContext?.thinkingLevel ? { thinkingLevel: normalizeThinkingLevel(durableContext.thinkingLevel) } : {}),
     ...(manager.getSessionId?.() ? { sessionId: manager.getSessionId?.() } : {}),
+    ...(isAgentCreatedSession(manager) ? { agentCreated: true } : {}),
   };
   // The projection exposes no SessionManager and is immutable by ownership:
   // downstream browse builders only read it. Freeze the small containers to
@@ -160,7 +164,9 @@ export function buildBrowseSessionOpenedPayload(options: {
   operationAttempt?: number;
   transcript?: TranscriptMode;
   transport?: SessionSnapshotTransport;
+  systemPrompts?: readonly SystemPromptEntry[];
   systemPromptDisabledEntries?: readonly string[];
+  initialContextEstimate?: InitialContextEstimate;
 }): SessionOpenedPayload {
   const mode = options.transcript ?? 'tail';
   const slice = mode === 'skip'
@@ -202,8 +208,12 @@ export function buildBrowseSessionOpenedPayload(options: {
     ...(options.availableModels !== undefined ? { availableModels: options.availableModels } : {}),
     contextUsage: deriveContextUsage(options.browse, options.availableModels ?? []),
     sessionUsage: options.browse.cache.sessionUsage,
+    ...(options.systemPrompts !== undefined ? { systemPrompts: [...options.systemPrompts] } : {}),
     ...(options.systemPromptDisabledEntries !== undefined
       ? { systemPromptDisabledEntries: [...options.systemPromptDisabledEntries] }
+      : {}),
+    ...(options.initialContextEstimate !== undefined
+      ? { initialContextEstimate: options.initialContextEstimate }
       : {}),
   };
   const unavailableWindow = {

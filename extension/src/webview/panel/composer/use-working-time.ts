@@ -35,6 +35,13 @@ export function useWorkingTimeIndicator({
 
   const elapsedMs = Math.max(0, state?.accumulatedMs ?? 0)
     + (activeSince === null ? 0 : Math.max(0, now - activeSince));
+  // A session can exist before the working-time service has observed any work.
+  // Do not turn that absence of data into a misleading `0s` chip. An active
+  // interval is meaningful even when it has only just started, so preserve the
+  // live zero-second display in that case.
+  if (state === undefined || (activeSince === null && elapsedMs === 0)) {
+    return { label: null, ariaLabel: 'Agent working time unavailable', tooltip: '' };
+  }
   const label = formatWorkingTime(elapsedMs);
   const spoken = formatWorkingTimeLong(elapsedMs);
   return {

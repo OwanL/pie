@@ -87,7 +87,9 @@ export class ColdBrowseHelperRuntime {
           operationAttempt: payload.options.operationAttempt,
           transcript: payload.options.transcript,
           transport: payload.options.transport,
+          systemPrompts: payload.options.systemPrompts,
           systemPromptDisabledEntries: payload.options.systemPromptDisabledEntries,
+          initialContextEstimate: payload.options.initialContextEstimate,
         })
       ));
     }

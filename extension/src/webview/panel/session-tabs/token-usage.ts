@@ -48,8 +48,6 @@ export interface SessionTokenUsageSummary {
   knownTokenInvocationCount: number;
   /** True when no authoritative ledger snapshot was supplied. */
   accountingUnknown: boolean;
-  /** Usage from the most recent assistant turn that reported it. */
-  lastTurn: AssistantUsage | null;
 }
 
 export function buildSessionTokenUsage(transcript: ChatMessage[]): SessionTokenUsageSummary {
@@ -76,7 +74,6 @@ export function buildSessionTokenUsageFromSnapshot(snapshot: SessionUsageSnapsho
   let reportedTurnCount = 0;
   let incompleteInvocationCount = 0;
   let knownTokenInvocationCount = 0;
-  let lastTurn: AssistantUsage | null = null;
 
   for (const sample of snapshot.samples) {
     const usage = assistantUsageFromSample(sample);
@@ -91,7 +88,6 @@ export function buildSessionTokenUsageFromSnapshot(snapshot: SessionUsageSnapsho
       incompleteInvocationCount += 1;
     } else {
       knownTokenInvocationCount += 1;
-      lastTurn = usage;
     }
   }
 
@@ -106,7 +102,6 @@ export function buildSessionTokenUsageFromSnapshot(snapshot: SessionUsageSnapsho
     incompleteInvocationCount: Math.max(incompleteInvocationCount, snapshot.incompleteInvocationCount ?? 0),
     knownTokenInvocationCount,
     accountingUnknown: snapshot.authority === 'unknown',
-    lastTurn,
   };
 }
 
@@ -119,70 +114,6 @@ function formatLiveCostUsd(cost: number): string {
   if (!Number.isFinite(cost) || cost <= 0) return '$0.00';
   if (cost < 1) return `$${cost.toFixed(4)}`;
   return formatCostUsd(cost);
-}
-
-export interface SessionTokenIndicatorState {
-  /** Compact token counts \u2014 e.g. "\u2191 12.3k \u2193 4.5k". */
-  label: string;
-  ariaLabel: string;
-  /** Multi-line tooltip with totals + last turn + cache breakdown. */
-  tooltip: string;
-}
-
-export function buildSessionTokenIndicator(
-  summary: SessionTokenUsageSummary,
-): SessionTokenIndicatorState {
-  // Always show token indicator, even when no usage reported
-  const hasKnownTokens = summary.knownTokenInvocationCount > 0
-    || (summary.incompleteInvocationCount === 0 && summary.reportedTurnCount > 0);
-  const compactIn = hasKnownTokens && !summary.accountingUnknown ? formatCompactTokens(summary.inputTokens) : '\u2014';
-  const compactOut = hasKnownTokens && !summary.accountingUnknown ? formatCompactTokens(summary.outputTokens) : '\u2014';
-
-  // Token counts label (always present). An asterisk marks a known subtotal.
-  const label = `\u2191 ${compactIn} \u2193 ${compactOut}${summary.incompleteInvocationCount > 0 ? '*' : ''}`;
-
-  const tooltipLines: string[] = [
-    `Session tokens (${summary.reportedTurnCount} assistant turn${summary.reportedTurnCount === 1 ? '' : 's'})`,
-    `  Input:  ${formatReadableTokens(summary.inputTokens)}`,
-    `  Output: ${formatReadableTokens(summary.outputTokens)}`,
-  ];
-  if (summary.reasoningTokens > 0) {
-    tooltipLines.push(`  Reasoning (included in output): ${formatReadableTokens(summary.reasoningTokens)}`);
-  }
-  if (summary.cacheReadTokens > 0 || summary.cacheWriteTokens > 0) {
-    tooltipLines.push(
-      `  Cache read:  ${formatReadableTokens(summary.cacheReadTokens)}`,
-      `  Cache write: ${formatReadableTokens(summary.cacheWriteTokens)}`,
-    );
-  }
-  tooltipLines.push(`  Total: ${formatReadableTokens(summary.totalTokens)}`);
-  if (summary.accountingUnknown) {
-    tooltipLines.push('  Usage unknown · no authoritative ledger snapshot is available');
-  } else if (summary.incompleteInvocationCount > 0) {
-    tooltipLines.push(`  Known subtotal · ${summary.incompleteInvocationCount} invocation(s) have incomplete token usage`);
-  }
-  if (summary.lastTurn) {
-    tooltipLines.push(
-      '',
-      'Last turn:',
-      `  \u2191 ${formatReadableTokens(summary.lastTurn.inputTokens)}  \u2193 ${formatReadableTokens(summary.lastTurn.outputTokens)}`,
-    );
-  }
-
-  const ariaLabel =
-    `Session token usage: input ${formatReadableTokens(summary.inputTokens)}, `
-    + `output ${formatReadableTokens(summary.outputTokens)}`
-    + (summary.accountingUnknown
-      ? '; authoritative ledger usage is unknown.'
-      : summary.incompleteInvocationCount > 0
-        ? `; known subtotal with ${summary.incompleteInvocationCount} incomplete invocation(s).`
-        : '.');
-
-  return {
-    label,
-    ariaLabel,
-    tooltip: tooltipLines.join('\n'),
-  };
 }
 
 export interface TokenPricing {
@@ -303,6 +234,9 @@ export interface SessionCostIndicatorState {
   label: string;
   ariaLabel: string;
   tooltip: string;
+  /** Durable usage freshness is explicit so stale costs are never presented as fresh. */
+  freshness?: SessionUsageSnapshot['freshness'];
+  refreshStatus?: SessionUsageSnapshot['refreshStatus'];
   /** Structured whole-branch data for the graph-bearing rich tooltip. */
   breakdown: SessionCostBreakdown;
 }
@@ -471,11 +405,10 @@ function formatProviderModelCosts(models: Map<string, ModelCostBreakdown>): Form
     const units = costDetailUnits(entry.cost);
     const cost = entry.hasKnownCost ? formatCostDetailUnits(units) : 'unavailable';
     if (entry.hasKnownCost) displayedKnownCostUnits += units;
-    const partial = entry.unpricedTokens > 0 ? '*' : '';
     const unavailableUsage = !entry.hasKnownCost && entry.unpricedTokens > 0
       ? ` (${formatCostTokens(entry.unpricedTokens)})`
       : '';
-    lines.push(`  ${billingIdentity}: ${cost}${partial}${unavailableUsage}`);
+    lines.push(`  ${billingIdentity}: ${cost}${unavailableUsage}`);
   }
   return { lines, displayedKnownCostUnits };
 }
@@ -580,6 +513,8 @@ export function buildLiveSessionCostEstimate(
   transcript: ChatMessage[],
   contextUsage: ContextWindowUsage | null,
   busy: boolean,
+  liveOutputTokens?: number,
+  suppressedStreamingMessageIds?: readonly string[],
 ): LiveSessionCostEstimate | null {
   if (!busy) return null;
 
@@ -587,10 +522,27 @@ export function buildLiveSessionCostEstimate(
     ? Math.max(0, Math.trunc(contextUsage.tokens))
     : 0;
 
-  let outputTokens = 0;
-  for (const message of transcript) {
-    if (message.role !== 'assistant' || message.usage || message.status !== 'streaming') continue;
-    outputTokens += estimateLiveAssistantOutputTokens(message);
+  const suppressed = new Set(suppressedStreamingMessageIds ?? []);
+  const currentStreamingMessage = transcript.find((message) => (
+    message.role === 'assistant' && message.status === 'streaming'
+  ));
+  const currentStreamSuppressed = currentStreamingMessage !== undefined
+    && suppressed.has(currentStreamingMessage.id);
+  // The host sampler owns a per-delta incremental count. Prefer it when it is
+  // present; the transcript estimator is only the pre-sampler compatibility
+  // path and must not be re-priced on every streaming delta. A settled
+  // provisional row suppresses only the matching current stream, leaving a
+  // subsequent tool-loop call free to contribute its own live tokens.
+  let outputTokens: number;
+  if (typeof liveOutputTokens === 'number' && Number.isFinite(liveOutputTokens)) {
+    outputTokens = currentStreamSuppressed ? 0 : Math.max(0, Math.trunc(liveOutputTokens));
+  } else {
+    outputTokens = 0;
+    for (const message of transcript) {
+      if (message.role !== 'assistant' || message.usage || message.status !== 'streaming'
+        || suppressed.has(message.id)) continue;
+      outputTokens += estimateLiveAssistantOutputTokens(message);
+    }
   }
 
   const totalTokens = unclassifiedContextTokens + outputTokens;
@@ -969,6 +921,7 @@ function addCompletedUsageCost(
   pricing: TokenPricing | undefined,
   modelId: string | undefined,
   provider?: string,
+  calculatedCostUsd?: number,
 ): void {
   summary.inputTokens += usage.inputTokens;
   summary.outputTokens += usage.outputTokens;
@@ -977,7 +930,11 @@ function addCompletedUsageCost(
   summary.totalTokens += usage.totalTokens;
   const billingModelId = qualifyBillingModelId(modelId, provider);
   if (billingModelId) summary.modelIds.add(billingModelId);
-  const resolved = resolveUsageCost(usage, pricing, usage.reportedCostUsd);
+  const resolved = resolveUsageCost(
+    usage,
+    pricing,
+    usage.reportedCostUsd ?? calculatedCostUsd,
+  );
   if (resolved.catalogBreakdown) {
     summary.inputCost += resolved.catalogBreakdown.input;
     summary.outputCost += resolved.catalogBreakdown.output;
@@ -1017,6 +974,7 @@ export function buildCompletedCostSummaryFromSnapshot(
       pricing,
       sample.modelId,
       sample.provider,
+      sample.calculatedCostUsd,
     );
   }
   return completed;
@@ -1195,10 +1153,14 @@ export function buildSessionCostIndicator(
   const mainCost = completed.totalCost;
   const totalCost = mainCost + auxiliaryCost + liveCost + subagents.totalCost + prepassCost;
   const subagentsHaveUsage = tokensIn(subagents.modelCosts) > 0 || unpricedTokensIn(subagents.modelCosts) > 0;
+  const usageIsStale = sessionUsage?.freshness === 'stale';
+  const usageRefreshFailed = sessionUsage?.refreshStatus === 'error';
+  const usageNeedsStatusIndicator = usageIsStale || usageRefreshFailed;
 
   if (!summary.accountingUnknown
     && summary.reportedTurnCount === 0 && !liveEstimate && totalCost <= 0
-    && !prepassHasUsage && !prepassHasKnownCost && !subagentsHaveUsage) return null;
+    && !prepassHasUsage && !prepassHasKnownCost && !subagentsHaveUsage
+    && !usageNeedsStatusIndicator) return null;
 
   const modelCosts = new Map<string, ModelCostBreakdown>();
   mergeModelCosts(modelCosts, completed.modelCosts);
@@ -1315,9 +1277,14 @@ export function buildSessionCostIndicator(
     const unpricedInvocations = sessionUsage?.unpricedInvocationCount ?? 0;
     tooltipLines.push(
       '',
-      `* Excludes ${formatCostTokens(unpricedTokens)} pending billing details or pricing.`,
+      `Excludes ${formatCostTokens(unpricedTokens)} pending billing details or pricing`,
       `  Provenance: ${incompleteInvocations} unknown and ${unpricedInvocations} unpriced invocation(s).`,
     );
+  }
+  if (usageRefreshFailed) {
+    tooltipLines.push('', 'Usage refresh failed · showing the last completed snapshot.');
+  } else if (usageIsStale) {
+    tooltipLines.push('', 'Usage refresh in progress · showing the last completed snapshot.');
   }
   // Make the displayed subtotal reconcile with the independently rounded rows.
   // Full-precision totalCost remains authoritative for the compact label.
@@ -1331,19 +1298,32 @@ export function buildSessionCostIndicator(
   );
 
   const displayCost = liveEstimate ? formatLiveCostUsd(totalCost) : formatCostUsd(totalCost);
+  // Keep the visible label clean: a stale (refresh in progress) snapshot and
+  // an unpriced/known-subtotal spend are unmarked here — the tooltip and the
+  // accessible description carry that detail explicitly. Only a failed usage
+  // refresh keeps its `!` marker. Missing cost is an explicit em dash, never
+  // a fabricated zero.
+  const refreshErrorMarker = usageRefreshFailed ? '!' : '';
   const label = hasIncompleteCost
-    ? hasAnyKnownCost ? `${displayCost}*` : '—*'
-    : displayCost;
+    ? hasAnyKnownCost ? `${displayCost}${refreshErrorMarker}` : `—${refreshErrorMarker}`
+    : usageNeedsStatusIndicator && !hasAnyKnownCost ? `—${refreshErrorMarker}` : `${displayCost}${refreshErrorMarker}`;
+  const freshnessAria = usageRefreshFailed
+    ? ' Usage refresh failed; showing the last completed snapshot.'
+    : usageIsStale
+      ? ' Usage refresh in progress; showing the last completed snapshot.'
+      : '';
   const ariaLabel = hasIncompleteCost
     ? hasAnyKnownCost
-      ? `Known estimated session cost ${displayCost}; some provider/model usage is not yet priced.`
-      : 'Estimated session cost unavailable because provider/model usage is not yet priced.'
-    : `Estimated session cost ${displayCost}.`;
+      ? `Known estimated session cost ${displayCost}; some provider/model usage is not yet priced.${freshnessAria}`
+      : `Estimated session cost unavailable because provider/model usage is not yet priced.${freshnessAria}`
+    : `Estimated session cost ${displayCost}.${freshnessAria}`;
 
   return {
     label,
     ariaLabel,
     tooltip: tooltipLines.join('\n'),
+    ...(sessionUsage?.freshness === undefined ? {} : { freshness: sessionUsage.freshness }),
+    ...(sessionUsage?.refreshStatus === undefined ? {} : { refreshStatus: sessionUsage.refreshStatus }),
     breakdown: {
       totalCost,
       hasIncompleteCost,

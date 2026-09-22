@@ -40,6 +40,11 @@ export class WorkingTimeService {
   private readonly restoredBusyRunIds: Record<string, true> = {};
   private readonly restoredActivityIds: Record<string, true> = {};
   private readonly timelineCoveredRunIds: Record<string, true> = {};
+  /** Closed busy intervals observed by this process. Canonical hydration keeps
+   * its durable union separate from this process-local union, so a delayed
+   * first restore can reconcile a union that already includes live cycles
+   * without counting those cycles twice. */
+  private readonly liveBusyIntervalsBySession: Record<string, Array<{ startedAt: number; endedAt: number }> | undefined> = {};
   private readonly activeToolsBySession: Record<string, Record<string, {
     name: string;
     startedAt: number;
@@ -167,6 +172,11 @@ export class WorkingTimeService {
     // unknown rather than assigning it the host receipt time.
     delete this.activeToolsBySession[sessionPath];
     delete this.activeToolSinceBySession[sessionPath];
+    const liveIntervals = mergeWallIntervals([
+      ...(this.liveBusyIntervalsBySession[sessionPath] ?? []),
+      { startedAt, endedAt: Math.max(startedAt, endedAt) },
+    ]);
+    this.liveBusyIntervalsBySession[sessionPath] = liveIntervals;
     this.totalMsBySession[sessionPath] = (this.totalMsBySession[sessionPath] ?? 0)
       + Math.max(0, endedAt - startedAt);
     delete this.activeSinceBySession[sessionPath];
@@ -238,6 +248,32 @@ export class WorkingTimeService {
     this.publish();
   }
 
+  /** Restore one session's cumulative agent-busy wall time from a durable
+   * canonical busy wall-time interval union. The canonical service normally
+   * queries only spans settled before its process boundary and asks this
+   * method to add the exact current-process closed intervals. Other callers
+   * may provide a union that already includes those intervals; in that mode
+   * no additive live delta is applied. Historical open spans are deliberately
+   * not rearmed: only onBusyChanged(true) in this process may own activeSince.
+   * The durable union is assigned, not maxed, so a correction cannot be hidden
+   * by a monotonic latch. Legacy timeline/run restoration never calls this. */
+  restoreCanonicalBusyUnion(
+    sessionPath: string,
+    unionMs: number,
+    options: { durableUnionExcludesLive?: boolean } = {},
+  ): void {
+    if (!sessionPath || !Number.isFinite(unionMs) || unionMs < 0) return;
+    const restoredUnion = Math.trunc(unionMs);
+    const liveMs = options.durableUnionExcludesLive === true
+      ? wallIntervalUnionMs(this.liveBusyIntervalsBySession[sessionPath] ?? []) : 0;
+    const nextTotal = restoredUnion + liveMs;
+    const previousTotal = this.totalMsBySession[sessionPath];
+    if (previousTotal === nextTotal && this.activeSinceBySession[sessionPath] === undefined) return;
+    if (nextTotal > 0) this.totalMsBySession[sessionPath] = nextTotal;
+    else delete this.totalMsBySession[sessionPath];
+    this.publish();
+  }
+
   /** Privacy mode discards prior timing and attribution and optionally starts a
    * fresh, process-local interval for a run that is already active. */
   resetSession(sessionPath: string, active: boolean): void {
@@ -249,6 +285,7 @@ export class WorkingTimeService {
     delete this.activeToolSinceBySession[sessionPath];
     delete this.toolExecutionFloorMsBySession[sessionPath];
     delete this.toolExecutionIntervalsBySession[sessionPath];
+    delete this.liveBusyIntervalsBySession[sessionPath];
     for (const [runId, observed] of Object.entries(this.observedRunsById)) {
       if (observed.sessionPath === sessionPath) delete this.observedRunsById[runId];
     }
@@ -267,8 +304,10 @@ export class WorkingTimeService {
     const oldActiveToolSince = this.activeToolSinceBySession[oldPath];
     const oldToolFloor = this.toolExecutionFloorMsBySession[oldPath];
     const oldToolIntervals = this.toolExecutionIntervalsBySession[oldPath];
+    const oldLiveBusyIntervals = this.liveBusyIntervalsBySession[oldPath];
     if (oldTotal === undefined && oldExtra === undefined && oldActiveSince === undefined && oldBreakdown === undefined
-      && oldActiveTools === undefined && oldToolFloor === undefined && oldToolIntervals === undefined) return;
+      && oldActiveTools === undefined && oldToolFloor === undefined && oldToolIntervals === undefined
+      && oldLiveBusyIntervals === undefined) return;
 
     if (oldTotal !== undefined) {
       this.totalMsBySession[newPath] = (this.totalMsBySession[newPath] ?? 0) + oldTotal;
@@ -324,6 +363,13 @@ export class WorkingTimeService {
       ]);
       this.toolExecutionIntervalsBySession[newPath] = merged;
       delete this.toolExecutionIntervalsBySession[oldPath];
+    }
+    if (oldLiveBusyIntervals) {
+      this.liveBusyIntervalsBySession[newPath] = mergeWallIntervals([
+        ...(this.liveBusyIntervalsBySession[newPath] ?? []),
+        ...oldLiveBusyIntervals,
+      ]);
+      delete this.liveBusyIntervalsBySession[oldPath];
     }
     this.publish();
   }
@@ -422,13 +468,25 @@ export class WorkingTimeService {
 function mergeToolIntervals(
   intervals: Array<{ startedAt: number; endedAt: number }>,
 ): Array<{ startedAt: number; endedAt: number }> {
+  return mergeWallIntervals(intervals);
+}
+
+function mergeWallIntervals(
+  intervals: Array<{ startedAt: number; endedAt: number }>,
+): Array<{ startedAt: number; endedAt: number }> {
   const merged: Array<{ startedAt: number; endedAt: number }> = [];
-  for (const interval of intervals.sort((left, right) => left.startedAt - right.startedAt)) {
+  for (const interval of intervals
+    .filter((candidate) => Number.isFinite(candidate.startedAt) && Number.isFinite(candidate.endedAt))
+    .sort((left, right) => left.startedAt - right.startedAt || left.endedAt - right.endedAt)) {
     const previous = merged[merged.length - 1];
     if (!previous || interval.startedAt > previous.endedAt) merged.push({ ...interval });
     else previous.endedAt = Math.max(previous.endedAt, interval.endedAt);
   }
   return merged;
+}
+
+function wallIntervalUnionMs(intervals: readonly { startedAt: number; endedAt: number }[]): number {
+  return intervals.reduce((total, interval) => total + Math.max(0, interval.endedAt - interval.startedAt), 0);
 }
 
 function firstUncoveredToolStart(

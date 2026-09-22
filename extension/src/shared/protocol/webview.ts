@@ -423,7 +423,7 @@ export interface ViewState {
   workingTimeBySession: Record<string, WorkingTimeState>;
   /**
    * Aggregate usage stats across ALL sessions (cost per provider, daily spend,
-   * token totals, generation throughput), computed host-side by
+   * token totals), computed host-side by
    * `AggregateStatsService` and merged in `PieExtension.buildViewState` (the
    * pure projection sets an empty placeholder — it must not read services or
    * disk). The webview renders this as a thin strip above the tab row. The

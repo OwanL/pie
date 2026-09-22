@@ -400,13 +400,12 @@ Count check: 13 + 6 + 22 + 15 + 7 + 5 + 4 + 2 + 4 + 2 + 6 + 3 = **89** — nothi
 | `host/analytics-handoff-discovery.ts` → `host/analytics-control/analytics-handoff-discovery.ts` |
 | `host/analytics-process-census.ts` → `host/analytics-control/analytics-process-census.ts` |
 
-**`host/aggregate-stats/` (new; 5 files).** Ownership: the aggregate-strip service and its direct collaborators (live token rate, rolling rate, pricing cache, completed-history cache). `working-time-service.ts` stays at host root — verified to be consumed by `stats-service/` (legacy authority), not this cluster (§2.1 R11).
+**`host/aggregate-stats/` (new; 4 files).** Ownership: the aggregate-strip service and its direct collaborators (live token rate, pricing cache, completed-history cache). `working-time-service.ts` stays at host root — verified to be consumed by `stats-service/` (legacy authority), not this cluster (§2.1 R11).
 
 | Current → Target |
 |---|
 | `host/aggregate-stats-service.ts` → `host/aggregate-stats/aggregate-stats-service.ts` |
 | `host/token-rate-service.ts` → `host/aggregate-stats/token-rate-service.ts` |
-| `host/rolling-aggregate-rate.ts` → `host/aggregate-stats/rolling-aggregate-rate.ts` |
 | `host/aggregate-pricing-cache.ts` → `host/aggregate-stats/aggregate-pricing-cache.ts` |
 | `host/completed-history-cache.ts` → `host/aggregate-stats/completed-history-cache.ts` |
 

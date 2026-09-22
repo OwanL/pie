@@ -83,7 +83,7 @@ const TOKEN_SAMPLE_CHARS = 8_192;
  * tail window's token density scaled by total characters. Deliberately NOT an
  * exact incremental BPE claim — it is the same approximate magnitude estimate
  * the backend uses for live subagent counters. Estimated quantities derived
- * from it (rate, live/terminal estimates) remain estimates; provider-reported
+ * from it (rate, live/end-to-end estimates) remain estimates; provider-reported
  * usage stays authoritative wherever it exists.
  *
  * One-shot only: this reprices the WHOLE text at the tail's density, so it
@@ -295,21 +295,9 @@ export interface TokenRateIndicatorState {
   /**
    * Estimated output tokens in the currently-unreported main turn and running
    * subagents. This is transient: provider-reported usage replaces it when the
-   * turn/tool completes. Aggregate analytics use it to keep live token totals
-   * and charts moving while output streams.
+   * turn/tool completes. Live cost and token totals use it while output streams.
    */
   liveOutputTokens?: number;
-  /**
-   * Conservative visible-output token estimate for the newest terminal
-   * assistant turn, exposed only when the provider did not report usage for it
-   * (privacy-safe numeric size — never the text). A burst that completes
-   * between sampler ticks never appears in {@link liveOutputTokens}, so the
-   * aggregate 30s wall-clock throughput uses this estimate to still count it.
-   * `undefined` when the newest terminal turn reported usage (its provider
-   * count is authoritative and must never be estimated on top — that would
-   * double-count it) or when it produced no visible output.
-   */
-  terminalOutputTokensEstimate?: number;
 }
 
 export const IDLE_STATE: TokenRateIndicatorState = {
@@ -386,9 +374,9 @@ export interface Accumulator {
   subagentEstimateStates: Map<string, FieldState>;
   /** Single-slot cached per-field estimates for the newest terminal assistant
    * turn, keyed by message id. Terminal content is stable, so the per-tick
-   * scans in `latestEndToEndRate` / `latestTerminalHasNoOutput` /
-   * `latestTerminalOutputEstimate` reuse it instead of re-tokenizing a large
-   * finished turn on every tick. Content identity is exact for short fields
+   * scans in `latestEndToEndRate` / `latestTerminalHasNoOutput` reuse it
+   * instead of re-tokenizing a large finished turn on every tick. Content
+   * identity is exact for short fields
    * and fingerprint-checked for long ones — a corrected terminal is
    * re-estimated, not served stale. */
   terminalEstimateCache?: { id: string; markdown?: FieldState; thinking?: FieldState };
@@ -591,27 +579,6 @@ function latestEndToEndRate(transcript: ChatMessage[], acc?: Accumulator): EndTo
       if (outputTokens <= 0) continue;
     }
     return { rate: outputTokens / (durationMs / 1000), estimated };
-  }
-  return null;
-}
-
-/**
- * Estimated visible output of the newest terminal assistant turn, exposed only
- * when the provider did not report usage for it. A usage-bearing terminal is
- * authoritative: estimating on top of its reported output could double-count it
- * in the aggregate. This is a deliberately bounded fallback — only the NEWEST
- * terminal turn is estimated, so a mixed run (some turns reported, some not)
- * reconciles conservatively at settlement: authoritative reported totals win
- * and older unreported turns are never invented.
- */
-function latestTerminalOutputEstimate(transcript: ChatMessage[], acc?: Accumulator): number | null {
-  for (let i = transcript.length - 1; i >= 0; i -= 1) {
-    const message = transcript[i];
-    if (message.role !== 'assistant'
-      || (message.status !== 'completed' && message.status !== 'error' && message.status !== 'interrupted')) continue;
-    if (message.usage !== undefined) return null;
-    const estimated = cachedTerminalOutputTokens(acc, message);
-    return estimated > 0 ? estimated : null;
   }
   return null;
 }
@@ -1181,15 +1148,7 @@ export function tickTokenRate(
   const latencyStats = computeTurnLatencyStats(transcript);
   const endToEnd = latestEndToEndRate(transcript, acc);
   const zeroOutputTerminal = !generating && streaming === null && latestTerminalHasNoOutput(transcript, acc);
-  let state = buildState(acc, generating, streaming, toolBlocked, latencyStats, provisionalRate, endToEnd, zeroOutputTerminal);
-  // The newest terminal turn's no-usage estimate is exposed whenever present —
-  // including while a later turn generates — so the aggregate can keep counting
-  // that burst until authoritative usage (or a settlement reconciliation)
-  // replaces it. It is numeric only; the text is never exposed.
-  const terminalEstimate = latestTerminalOutputEstimate(transcript, acc);
-  if (terminalEstimate !== null) {
-    state = { ...state, terminalOutputTokensEstimate: terminalEstimate };
-  }
+  const state = buildState(acc, generating, streaming, toolBlocked, latencyStats, provisionalRate, endToEnd, zeroOutputTerminal);
   return liveOutputTokens > 0 ? { ...state, liveOutputTokens } : state;
 }
 
@@ -1225,13 +1184,8 @@ export function computeIdleDisplayState(
 ): TokenRateIndicatorState {
   const stats = computeTurnLatencyStats(transcript);
   const endToEnd = includeEndToEnd ? latestEndToEndRate(transcript) : null;
-  if (stats.count === 0 && endToEnd === null) {
-    const terminalEstimate = latestTerminalOutputEstimate(transcript);
-    if (terminalEstimate === null) return IDLE_STATE;
-    return { ...IDLE_STATE, terminalOutputTokensEstimate: terminalEstimate };
-  }
+  if (stats.count === 0 && endToEnd === null) return IDLE_STATE;
   const latency = latencyDisplay(stats);
-  const terminalEstimate = latestTerminalOutputEstimate(transcript);
   if (endToEnd === null) {
     const base: TokenRateIndicatorState = {
       label: latency.withTurnLatency('—'),
@@ -1240,7 +1194,7 @@ export function computeIdleDisplayState(
       state: 'idle',
       paused: false,
     };
-    return terminalEstimate === null ? base : { ...base, terminalOutputTokensEstimate: terminalEstimate };
+    return base;
   }
   const num = formatRate(endToEnd.rate);
   const source = endToEnd.estimated ? 'estimated visible output' : 'provider-reported output';
@@ -1256,6 +1210,5 @@ export function computeIdleDisplayState(
     paused: false,
     endToEndRate: endToEnd.rate,
     endToEndRateEstimated: endToEnd.estimated,
-    ...(terminalEstimate === null ? {} : { terminalOutputTokensEstimate: terminalEstimate }),
   };
 }

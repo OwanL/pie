@@ -6,7 +6,6 @@ import {
   buildCompletedCostSummaryFromSnapshot,
   buildLiveSessionCostEstimate,
   buildSessionCostIndicator,
-  buildSessionTokenIndicator,
   buildSessionTokenUsageFromSnapshot,
   extractSubagentCostSummary,
   extractSubagentCostSummaryFromSnapshot,
@@ -17,6 +16,7 @@ import {
 import {
   buildSessionUsageSnapshot,
   mergeSessionUsageSnapshots,
+  sessionUsageSnapshotFromLedger,
   type SessionUsageSnapshot,
 } from '../../../src/shared/session-usage';
 import { estimateTextTokens } from '../../../src/shared/tokenize';
@@ -33,7 +33,6 @@ function makeSummary(partial: Partial<SessionTokenUsageSummary> = {}): SessionTo
     incompleteInvocationCount: 0,
     knownTokenInvocationCount: 0,
     accountingUnknown: false,
-    lastTurn: null,
     ...partial,
   };
 }
@@ -46,16 +45,8 @@ test('formatCostUsd renders zero, sub-cent, and normal amounts', () => {
   assert.equal(formatCostUsd(1.5), '$1.50');
 });
 
-test('buildSessionTokenIndicator shows em-dash counts when no usage is reported', () => {
-  const indicator = buildSessionTokenIndicator(makeSummary());
-  assert.equal(indicator.label, '\u2191 \u2014 \u2193 \u2014');
-});
-
-test('explicitly unknown ledger authority never renders transcript-like known zero', () => {
+test('explicitly unknown ledger authority remains explicit in cost accounting', () => {
   const summary = buildSessionTokenUsageFromSnapshot({ samples: [], authority: 'unknown' });
-  const indicator = buildSessionTokenIndicator(summary);
-  assert.equal(indicator.label, '↑ — ↓ —');
-  assert.match(indicator.tooltip, /authoritative ledger snapshot is available/);
 
   const cost = buildSessionCostIndicator(
     summary,
@@ -65,51 +56,129 @@ test('explicitly unknown ledger authority never renders transcript-like known ze
     0,
     undefined,
   );
-  assert.equal(cost?.label, '—*');
+  assert.equal(cost?.label, '—');
   assert.match(cost?.tooltip ?? '', /authoritative ledger unavailable/);
 });
 
-test('buildSessionTokenIndicator shows real counts once usage is reported', () => {
-  const summary = makeSummary({
-    inputTokens: 1820,
-    outputTokens: 540,
-    totalTokens: 2360,
-    reasoningTokens: 400,
-    reportedTurnCount: 1,
-    lastTurn: {
-      inputTokens: 1820,
-      outputTokens: 540,
-      cacheReadTokens: 0,
-      cacheWriteTokens: 0,
-      totalTokens: 2360,
-      reasoningTokens: 400,
+test('incomplete-cost session labels stay visually clean without weak suffix markers', () => {
+  // Unknown cost is an explicit em dash, never a marked zero.
+  const unknown = buildSessionCostIndicator(
+    makeSummary({ accountingUnknown: true, reportedTurnCount: 1 }),
+    undefined,
+    'Selected',
+    buildCompletedCostSummaryFromSnapshot({ samples: [] }, undefined, undefined),
+    0,
+    undefined,
+  );
+  assert.ok(unknown);
+  assert.equal(unknown.label, '—');
+  assert.doesNotMatch(unknown.label, /[~*]/);
+  assert.match(unknown.ariaLabel, /unavailable because provider\/model usage is not yet priced/);
+
+  // A known subtotal with unpriced usage keeps a plain dollar label; the
+  // incompleteness detail lives in the tooltip, not on the visible number.
+  const pricing = { input: 10, output: 10, cacheRead: 0, cacheWrite: 0 };
+  const summary = makeSummary({ inputTokens: 100_000, outputTokens: 0, totalTokens: 100_000, reportedTurnCount: 1 });
+  const subtotal = buildSessionCostIndicator(
+    summary,
+    pricing,
+    'Selected',
+    buildCompletedCostSummary(summary, [{
+      id: 'a1',
+      role: 'assistant' as const,
+      createdAt: '',
+      markdown: '',
+      status: 'completed' as const,
+      modelId: 'selected-model',
+      usage: { inputTokens: 100_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 100_000 },
+    }], pricing, (id) => (id === 'selected-model' ? pricing : undefined)),
+    extractSubagentDirectCost([]),
+    {
+      mode: 'auto' as const,
+      skillTokensSaved: 0,
+      toolTokensSaved: 0,
+      includedSkills: [],
+      excludedSkills: [],
+      includedTools: [],
+      excludedTools: [],
+      prepassModel: 'gemma3:4b',
+      prepassInputTokens: 1_000,
+      prepassOutputTokens: 0,
     },
-  });
-  const indicator = buildSessionTokenIndicator(summary);
-  assert.equal(indicator.label, '\u2191 1.8k \u2193 540');
-  assert.match(indicator.tooltip, /Reasoning \(included in output\): 400/);
+    (id) => (id === 'selected-model' ? pricing : undefined),
+  );
+  assert.ok(subtotal);
+  assert.doesNotMatch(subtotal.label, /[~*]/);
+  assert.match(subtotal.label, /^\$/);
+  assert.match(subtotal.tooltip, /Known subtotal:/);
+  assert.match(subtotal.ariaLabel, /not yet priced/);
 });
 
-test('session token indicator marks incomplete invocation totals instead of known zero', () => {
-  const summary = buildSessionTokenUsageFromSnapshot({
+test('stale canonical usage remains visible but is explicitly marked', () => {
+  const snapshot: SessionUsageSnapshot = {
     samples: [{
-      sourceId: 'gap',
-      kind: 'conversation',
-      inputTokens: 0,
-      outputTokens: 0,
+      sourceId: 'assistant:stale',
+      kind: 'assistant',
+      modelId: 'gpt-5.4',
+      provider: 'openai-codex',
+      inputTokens: 100,
+      outputTokens: 20,
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
-      totalTokens: 0,
-      tokenChannelsKnown: false,
-      provenance: 'unknown',
-      instrumentationGap: true,
+      totalTokens: 120,
+      reportedCostUsd: 0.01,
     }],
-    incompleteInvocationCount: 1,
-  });
-  const indicator = buildSessionTokenIndicator(summary);
-  assert.equal(indicator.label, '↑ — ↓ —*');
-  assert.match(indicator.tooltip, /Known subtotal · 1 invocation/);
-  assert.match(indicator.ariaLabel, /known subtotal/);
+    authority: 'canonical',
+    freshness: 'stale',
+    refreshStatus: 'refreshing',
+  };
+  const summary = buildSessionTokenUsageFromSnapshot(snapshot);
+  const cost = buildSessionCostIndicator(
+    summary,
+    undefined,
+    'Selected',
+    buildCompletedCostSummaryFromSnapshot(snapshot, undefined, undefined),
+    0,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    snapshot,
+  );
+  // Clean label: no stale/uncertainty marker; the cost itself is unchanged and
+  // the detail stays in the tooltip and accessible description.
+  assert.equal(cost?.label, '$0.01');
+  assert.doesNotMatch(cost?.label ?? '', /[~*]/);
+  assert.match(cost?.ariaLabel ?? '', /refresh in progress/i);
+  assert.match(cost?.tooltip ?? '', /last completed snapshot/i);
+  assert.equal(cost?.freshness, 'stale');
+});
+
+test('failed canonical usage refresh is explicitly marked', () => {
+  const snapshot: SessionUsageSnapshot = {
+    samples: [],
+    authority: 'unknown',
+    freshness: 'unknown',
+    refreshStatus: 'error',
+  };
+  const summary = buildSessionTokenUsageFromSnapshot(snapshot);
+  const cost = buildSessionCostIndicator(
+    summary,
+    undefined,
+    'Selected',
+    buildCompletedCostSummaryFromSnapshot(snapshot, undefined, undefined),
+    0,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    snapshot,
+  );
+  assert.match(cost?.label ?? '', /!/);
+  assert.match(cost?.ariaLabel ?? '', /refresh failed/i);
+  assert.equal(cost?.refreshStatus, 'error');
 });
 
 test('buildSessionCostIndicator returns null when nothing has been spent', () => {
@@ -287,6 +356,61 @@ test('total-only usage falls back to reported cost for assistant, subagent, and 
   );
 });
 
+test('snapshot cost summary uses stored calculated cost without repricing or losing zero/report precedence', () => {
+  const snapshot = sessionUsageSnapshotFromLedger([
+    {
+      sourceId: 'calculated',
+      kind: 'conversation',
+      model: 'historical-model',
+      provider: 'historical-provider',
+      inputTokens: 1_000_000,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      calculatedCostUsd: 0.25,
+      priceCatalogVersion: 'catalog-old',
+    },
+    {
+      sourceId: 'reported-zero',
+      kind: 'conversation',
+      model: 'historical-model',
+      provider: 'historical-provider',
+      inputTokens: 1_000_000,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      providerReportedCostUsd: 0,
+      calculatedCostUsd: 99,
+      priceCatalogVersion: 'catalog-old',
+      provenance: 'exact',
+    },
+    {
+      sourceId: 'unknown',
+      kind: 'conversation',
+      model: 'historical-model',
+      provider: 'historical-provider',
+      inputTokens: 10,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      provenance: 'unknown',
+    },
+  ]);
+  const summary = buildCompletedCostSummaryFromSnapshot(
+    snapshot,
+    { input: 900, output: 900, cacheRead: 900, cacheWrite: 900 },
+    () => ({ input: 900, output: 900, cacheRead: 900, cacheWrite: 900 }),
+  );
+
+  assert.equal(summary.totalCost, 0.25);
+  assert.equal(summary.pricedTurnCount, 2);
+  const model = summary.modelCosts.get('historical-provider/historical-model');
+  assert.ok(model);
+  assert.equal(model.cost, 0.25);
+  assert.equal(model.hasKnownCost, true);
+  assert.equal(model.unpricedTokens, 10);
+});
+
 test('ledger-unpriced usage is not repriced from the current catalog', () => {
   const summary = buildCompletedCostSummaryFromSnapshot({
     samples: [{
@@ -368,10 +492,10 @@ test('total-only usage without a usable cost stays unavailable instead of known 
     accounting,
   );
   assert.ok(result);
-  assert.equal(result.label, '—*');
-  assert.match(result.tooltip, /provider-a \/ assistant-model: unavailable\* \(100 tokens\)/);
-  assert.match(result.tooltip, /provider-b \/ subagent-model: unavailable\* \(200 tokens\)/);
-  assert.match(result.tooltip, /provider-c \/ prepass-model: unavailable\* \(300 tokens\)/);
+  assert.equal(result.label, '—');
+  assert.match(result.tooltip, /provider-a \/ assistant-model: unavailable \(100 tokens\)/);
+  assert.match(result.tooltip, /provider-b \/ subagent-model: unavailable \(200 tokens\)/);
+  assert.match(result.tooltip, /provider-c \/ prepass-model: unavailable \(300 tokens\)/);
   assert.match(result.tooltip, /Total: unavailable/);
   assert.doesNotMatch(result.tooltip, /Known subtotal: \$0\.0000/);
 });
@@ -837,8 +961,8 @@ test('buildSessionCostIndicator shows tokens when no pricing (Ollama)', () => {
 
   const result = buildSessionCostIndicator(summary, undefined, 'Ollama: llama3.1', buildCompletedCostSummary(summary, [], undefined, undefined), extractSubagentDirectCost([]), undefined);
   assert.ok(result);
-  assert.equal(result.label, '—*');
-  assert.match(result.tooltip, /Unknown provider \/ Selected model: unavailable\* \(150,000 tokens\)/);
+  assert.equal(result.label, '—');
+  assert.match(result.tooltip, /Unknown provider \/ Selected model: unavailable \(150,000 tokens\)/);
   assert.match(result.tooltip, /Total: unavailable/);
 });
 
@@ -866,7 +990,7 @@ test('buildSessionCostIndicator shows prepass cost from pruning details', () => 
 
   const result = buildSessionCostIndicator(summary, pricing, 'Test', buildCompletedCostSummary(summary, [], pricing, undefined), extractSubagentDirectCost([]), pruningDetails);
   assert.ok(result);
-  assert.match(result.tooltip, /Unknown provider \/ gemma3:4b: unavailable\*/);
+  assert.match(result.tooltip, /Unknown provider \/ gemma3:4b: unavailable/);
   assert.match(result.tooltip, /Known subtotal:/);
 });
 
@@ -982,8 +1106,8 @@ test('buildSessionCostIndicator does not price the prepass at the selected model
 
   assert.ok(result);
   // Main: 0.1M * 10 = 1.0. Prepass: unavailable → $0. Total: $1.00 (NOT $11).
-  assert.equal(result.label, '$1.00*');
-  assert.match(result.tooltip, /Unknown provider \/ gemma3:4b: unavailable\* \(1,000,000 tokens\)/);
+  assert.equal(result.label, '$1.00');
+  assert.match(result.tooltip, /Unknown provider \/ gemma3:4b: unavailable \(1,000,000 tokens\)/);
   assert.match(result.tooltip, /Known subtotal: \$1\.0000/);
   assert.doesNotMatch(result.tooltip, /gemma3:4b:[^\n]*\$10/);
 });
@@ -1130,8 +1254,9 @@ test('buildSessionCostIndicator shows a live estimate while running without comp
 
   assert.ok(liveEstimate);
   assert.ok(result);
-  assert.equal(result.label, '$0.0000*');
-  assert.match(result.tooltip, /Unknown provider \/ Ollama Cloud: Gemma 3 4B: \$0\.0000\*/);
+  assert.equal(result.label, '$0.0000');
+  assert.match(result.tooltip, /Unknown provider \/ Ollama Cloud: Gemma 3 4B: \$0\.0000/);
+  assert.doesNotMatch(result.tooltip, /\$0\.0000\*/);
   assert.match(result.tooltip, /Excludes 126,500 tokens pending billing details or pricing/);
   assert.match(result.ariaLabel, /some provider\/model usage is not yet priced/);
 });
@@ -1163,6 +1288,51 @@ test('live session cost includes streaming tool-call output', () => {
   assert.equal(estimate.totalTokens, 1_000 + expectedOutput);
 });
 
+test('live session cost prefers host incremental output tokens over transcript repricing', () => {
+  const transcript = [{
+    id: 'stream-1',
+    role: 'assistant' as const,
+    createdAt: '',
+    markdown: 'a long visible stream that should not determine the host count',
+    status: 'streaming' as const,
+  }];
+  const estimate = buildLiveSessionCostEstimate(
+    transcript,
+    { tokens: 1_000, contextWindow: 100_000, percent: 1 },
+    true,
+    17,
+  );
+  assert.ok(estimate);
+  assert.equal(estimate.outputTokens, 17);
+  assert.equal(estimate.totalTokens, 1_017);
+});
+
+test('live session cost suppresses only the settled matching stream', () => {
+  const transcript = [{
+    id: 'stream-1',
+    role: 'assistant' as const,
+    createdAt: '',
+    markdown: 'still projected as streaming while canonical settlement arrives',
+    status: 'streaming' as const,
+  }];
+  const suppressed = buildLiveSessionCostEstimate(
+    transcript,
+    null,
+    true,
+    17,
+    ['stream-1'],
+  );
+  const unmatched = buildLiveSessionCostEstimate(
+    transcript,
+    null,
+    true,
+    17,
+    ['different-stream'],
+  );
+  assert.equal(suppressed, null);
+  assert.equal(unmatched?.outputTokens, 17);
+});
+
 test('buildSessionCostIndicator does not present unpriced live usage as zero cost', () => {
   const transcript = [{
     id: 'unpriced-live',
@@ -1188,7 +1358,7 @@ test('buildSessionCostIndicator does not present unpriced live usage as zero cos
   );
 
   assert.ok(result);
-  assert.equal(result.label, '—*');
+  assert.equal(result.label, '—');
   assert.match(result.ariaLabel, /cost unavailable.*not yet priced/i);
   assert.match(result.tooltip, /Total: unavailable/);
   assert.doesNotMatch(result.tooltip, /Known (?:estimated )?(?:subtotal|session cost) \$0/);
@@ -1230,7 +1400,7 @@ test('buildSessionCostIndicator does not price unclassified live context as unca
   assert.equal(liveEstimate.cacheWriteTokens, 0);
   assert.equal(liveEstimate.unclassifiedContextTokens, 1_000_000);
   assert.ok(result);
-  assert.equal(result.label, '$0.00*');
+  assert.equal(result.label, '$0.00');
   assert.match(result.tooltip, /Excludes 1,000,000 tokens pending billing details or pricing/);
   assert.match(result.tooltip, /Known subtotal: \$0\.0000/);
   assert.doesNotMatch(result.tooltip, /\$30\.0000|\$0\.0300|\$37\.5000/);

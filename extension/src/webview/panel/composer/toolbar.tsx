@@ -298,7 +298,10 @@ export const ComposerToolbar = memo(function ComposerToolbar({
         )}
 
         {/* Live stats — throughput, then run state */}
-        {tokenRateIndicator.label && !prefs.hideTokenRate && (
+        {/* An em dash is the rate service's no-data sentinel. Keep the
+            placeholder out of the toolbar; a real rate, end-to-end rate, or
+            historical latency label still renders normally. */}
+        {tokenRateIndicator.label !== '—' && tokenRateIndicator.label && !prefs.hideTokenRate && (
           <ToolbarIndicatorChip
             kind="speed"
             state={tokenRateIndicator.paused ? 'paused' : null}

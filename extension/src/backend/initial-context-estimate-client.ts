@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
 
 import { attachJsonlLineReader } from '../shared/jsonl';
-import type { InitialContextEstimate } from '../shared/protocol';
+import type { SystemPromptEntry } from '../shared/protocol';
 import {
   establishWindowsProcessTreeGuardian,
   terminateProcessTree,
@@ -12,11 +12,12 @@ import type { SdkPatchIdentity } from './sdk-patch-barrier';
 import type {
   InitialContextEstimateWorkerInput,
   InitialContextEstimateWorkerOutput,
+  InitialContextInventory,
 } from './initial-context-estimate-worker';
 
 const IPC_READ_FD = 3;
 const IPC_WRITE_FD = 4;
-const MAX_FRAME_BYTES = 256 * 1024;
+const MAX_FRAME_BYTES = 30 * 1024 * 1024;
 
 export interface InitialContextEstimateClientOptions {
   entryPath: string;
@@ -76,11 +77,11 @@ export class InitialContextEstimateClient {
     }
   }
 
-  async estimate(input: {
+  async discover(input: {
     cwd: string;
     agentDir: string;
     model: { provider: string; id: string };
-  }): Promise<InitialContextEstimate | undefined> {
+  }): Promise<InitialContextInventory | undefined> {
     if (this.disposed) return undefined;
     let active: ActiveChild | undefined;
     try {
@@ -118,7 +119,7 @@ export class InitialContextEstimateClient {
       outbound.end(wire);
 
       const output = await withTimeout(response, this.timeoutMs, 'Initial-context inventory worker timed out.');
-      return output.ok ? output.estimate : undefined;
+      return output.ok ? output.inventory : undefined;
     } catch {
       return undefined;
     } finally {
@@ -242,10 +243,29 @@ function isOutput(value: unknown): value is InitialContextEstimateWorkerOutput {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const output = value as Record<string, unknown>;
   if (output.ok === false) return typeof output.error === 'string';
-  if (output.ok !== true || !output.estimate || typeof output.estimate !== 'object' || Array.isArray(output.estimate)) return false;
-  const estimate = output.estimate as Record<string, unknown>;
-  return Number.isSafeInteger(estimate.tokens) && (estimate.tokens as number) >= 0
-    && Number.isSafeInteger(estimate.contextWindow) && (estimate.contextWindow as number) > 0;
+  if (output.ok !== true || !output.inventory || typeof output.inventory !== 'object' || Array.isArray(output.inventory)) return false;
+  const inventory = output.inventory as Record<string, unknown>;
+  const estimate = inventory.estimate as Record<string, unknown> | undefined;
+  return !!estimate
+    && Number.isSafeInteger(estimate.tokens) && (estimate.tokens as number) >= 0
+    && Number.isSafeInteger(estimate.contextWindow) && (estimate.contextWindow as number) > 0
+    && Array.isArray(inventory.systemPrompts)
+    && inventory.systemPrompts.every(isSystemPromptEntry);
+}
+
+function isSystemPromptEntry(value: unknown): value is SystemPromptEntry {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const entry = value as Record<string, unknown>;
+  return (entry.source === 'provider' || entry.source === 'harness' || entry.source === 'user')
+    && typeof entry.title === 'string'
+    && typeof entry.text === 'string'
+    && typeof entry.summary === 'string'
+    && (entry.availability === 'available' || entry.availability === 'missing'
+      || entry.availability === 'hidden' || entry.availability === 'unknown')
+    && (entry.tooltip === undefined || typeof entry.tooltip === 'string')
+    && (entry.id === undefined || typeof entry.id === 'string')
+    && (entry.disabled === undefined || typeof entry.disabled === 'boolean')
+    && (entry.toggleable === undefined || typeof entry.toggleable === 'boolean');
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {

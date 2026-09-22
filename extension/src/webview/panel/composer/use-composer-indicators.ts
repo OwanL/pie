@@ -28,7 +28,6 @@ import {
   extractSubagentCostSummaryFromSnapshot,
   buildLiveSessionCostEstimate,
   buildSessionCostIndicator,
-  buildSessionTokenIndicator,
   buildSessionTokenUsageFromSnapshot,
   canonicalActivitySignature,
   createTokenPricingResolver,
@@ -288,21 +287,50 @@ export function useComposerIndicators({
   const durableUsageSig = useMemo(() => sessionUsageSignature(sessionUsage), [sessionUsage]);
   const effectiveSessionUsage = useMemo(
     // Ledger state is the sole steady-state authority. An old/unavailable host
-    // is explicit unknown; transcript rows are never promoted into accounting.
-    () => sessionUsage ?? { samples: [], authority: 'unknown' as const },
+    // is explicit unknown; transcript rows are never substituted. Pending
+    // provider observations are a bounded handoff overlay, not durable rows.
+    () => {
+      if (!sessionUsage) return { samples: [], authority: 'unknown' as const };
+      const durableIds = new Set<string>();
+      for (const sample of sessionUsage.samples) {
+        if (sample.canonicalInvocationId) durableIds.add(sample.canonicalInvocationId);
+        durableIds.add(sample.sourceId);
+      }
+      // A matched pending row can remain in the transport briefly as a
+      // handoff marker while its runtime message is still streaming. It must
+      // suppress the live estimator, but it must not be counted beside the
+      // already-visible canonical row.
+      const pending = (sessionUsage.pendingSamples ?? []).filter((sample) => (
+        !sample.canonicalInvocationId || !durableIds.has(sample.canonicalInvocationId)
+      ));
+      return pending.length === 0
+        ? sessionUsage
+        : { ...sessionUsage, samples: [...sessionUsage.samples, ...pending] };
+    },
     [sessionPath, durableUsageSig],
   );
   const sessionTokenUsage = useMemo(
     () => buildSessionTokenUsageFromSnapshot(effectiveSessionUsage),
     [effectiveSessionUsage],
   );
-  const sessionTokenIndicator = useMemo(
-    () => buildSessionTokenIndicator(sessionTokenUsage),
-    [sessionTokenUsage],
+  const liveOutputTokens = sessionPath === null || sessionPath === undefined
+    ? undefined
+    : tokenRateBySession[sessionPath]?.liveOutputTokens;
+  const pendingStreamingMessageIds = useMemo(
+    () => sessionUsage?.pendingSamples
+      ?.map((sample) => sample.provisionalMessageId)
+      .filter((messageId): messageId is string => Boolean(messageId)),
+    [durableUsageSig],
   );
   const liveCostEstimate = useMemo(
-    () => buildLiveSessionCostEstimate(transcript, contextUsage, busy),
-    [sessionPath, busy, contextUsage?.tokens, liveStreamSig],
+    () => buildLiveSessionCostEstimate(
+      transcript,
+      contextUsage,
+      busy,
+      liveOutputTokens,
+      pendingStreamingMessageIds,
+    ),
+    [sessionPath, busy, contextUsage?.tokens, liveStreamSig, liveOutputTokens, durableUsageSig],
   );
 
   // Stable pricing resolver so the completed-cost memo doesn't see a fresh
@@ -382,7 +410,6 @@ export function useComposerIndicators({
     supportsImageInputs,
     contextBreakdown,
     contextIndicator,
-    sessionTokenIndicator,
     sessionCostIndicator,
     canonicalActivitySummary,
     tokenRateIndicator,

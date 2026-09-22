@@ -6,7 +6,13 @@ import { memo } from 'preact/compat';
 import type { SessionSummary } from '../../../shared/protocol';
 import { isPendingTabPath } from '../../../shared/tab-behavior';
 import { handleContextMenuKeyRequest } from '../components/context-menu-key';
+import { AgentIcon } from './icons';
 import { getTabAvatarColor, getTabAvatarLabel } from './tab-avatar';
+
+export function getSessionTabTooltip(agentCreated?: boolean, existingTooltip?: string): string | undefined {
+  if (agentCreated !== true) return existingTooltip;
+  return existingTooltip ? `${existingTooltip} · Agent-created session` : 'Agent-created session';
+}
 
 export interface SessionTabProps {
   tabPath: string;
@@ -75,8 +81,9 @@ export const SessionTab = memo(function SessionTab({
   const isCreationDelayed = session?.creationState === 'delayed';
   const isStartingModel = isRunning && startingModelPathSet.has(tabPath);
   const isUnreadFinished = unreadFinishedPathSet.has(tabPath) && !hasDeferredTimer;
+  const isAgentCreated = session?.agentCreated === true;
   const originalIndex = openIndexByPath.get(tabPath) ?? index;
-  const title = hasPendingExtensionUIRequest
+  const statusTitle = hasPendingExtensionUIRequest
     ? `${label} (waiting for your answer)`
     : isCreationDelayed
       ? `${label} (creation delayed — retry or wait for completion)`
@@ -87,6 +94,7 @@ export const SessionTab = memo(function SessionTab({
           : isUnreadFinished
             ? `${label} (finished, unread)`
             : label;
+  const title = getSessionTabTooltip(session?.agentCreated, statusTitle) ?? statusTitle;
 
   // A pending deferred trigger blocks closing its delivery target until it is
   // cancelled from the status strip, preventing the trigger from being orphaned.
@@ -127,14 +135,17 @@ export const SessionTab = memo(function SessionTab({
         onKeyDown={(event) => handleContextMenuKeyRequest(event as KeyboardEvent)}
       >
         {isPinned ? (
-          <span
-            class={isGeneratingTitle ? 'session-tab-avatar session-title-loading session-title-loading-avatar' : 'session-tab-avatar'}
-            data-label={isGeneratingTitle ? getTabAvatarLabel(label) : undefined}
-            style={{ background: getTabAvatarColor(tabPath) }}
-            aria-hidden="true"
-          >
-            {getTabAvatarLabel(label)}
-          </span>
+          <>
+            <span
+              class={isGeneratingTitle ? 'session-tab-avatar session-title-loading session-title-loading-avatar' : 'session-tab-avatar'}
+              data-label={isGeneratingTitle ? getTabAvatarLabel(label) : undefined}
+              style={{ background: getTabAvatarColor(tabPath) }}
+              aria-hidden="true"
+            >
+              {getTabAvatarLabel(label)}
+            </span>
+            {isAgentCreated && <AgentIcon compact />}
+          </>
         ) : (
           <>
             {isRunning || isPreparing
@@ -150,6 +161,7 @@ export const SessionTab = memo(function SessionTab({
             >
               {label}
             </span>
+            {isAgentCreated && <AgentIcon />}
           </>
         )}
       </button>

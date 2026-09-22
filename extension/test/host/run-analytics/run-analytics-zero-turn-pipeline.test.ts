@@ -102,7 +102,6 @@ test('an empty run set produces finite, zero-state aggregate stats', () => {
   assert.equal(stats.runCount, 0);
   assert.equal(stats.sessionCount, 0);
   assert.equal(stats.totalCost, 0);
-  assert.equal(stats.tokensPerSecond, 0);
   assert.equal(stats.ready, true);
 });
 
@@ -112,25 +111,6 @@ test('a zero-turn run with null analyticsFactors and no pricing produces finite 
   assertNoNaNInfinity(stats);
   assert.equal(stats.runCount, 1);
   assert.equal(stats.totalCost, 0);
-  assert.equal(stats.tokensPerSecond, 0, 'no completed throughput → 0, not NaN');
-  assert.equal(stats.tokensPerSecondByProvider.length, 0);
-});
-
-test('throughput samples that do not qualify (errored / zero duration) yield zero rate, not NaN', () => {
-  const run = makeRun({
-    runId: 'errored',
-    modelId: 'openai/gpt',
-    turnThroughputSamples: [
-      { endedAt: '2026-07-04T10:00:00.000Z', outputTokens: 100, generationDurationMs: 0, concurrentBusySessions: 1, status: 'completed', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
-      { endedAt: '2026-07-04T10:00:01.000Z', outputTokens: 50, generationDurationMs: 500, concurrentBusySessions: 1, status: 'error', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
-      { endedAt: '2026-07-04T10:00:02.000Z', outputTokens: 0, generationDurationMs: 500, concurrentBusySessions: 1, status: 'interrupted', turnLatencyMs: null, overheadMs: null, providerLatencyMs: null },
-    ],
-  });
-  const stats = computeAggregateStats([run], new Map(), NOW, [], {}, 0);
-  assertNoNaNInfinity(stats);
-  // All samples are filtered (zero duration or non-completed) → no throughput observation.
-  assert.equal(stats.tokensPerSecond, 0);
-  assert.equal(stats.tokensPerSecondByProvider.length, 0);
 });
 
 test('the layered finalize path stays finite for a zero-turn completed layer merged with an empty open accumulator', () => {
@@ -142,10 +122,9 @@ test('the layered finalize path stays finite for a zero-turn completed layer mer
   assertNoNaNInfinity(stats);
   assert.equal(stats.runCount, 1);
   assert.equal(stats.sessionCount, 1);
-  assert.equal(stats.tokensPerSecond, 0);
 });
 
-test('a zero-turn run mixed with a productive run yields finite stats and a non-zero rate', () => {
+test('a zero-turn run mixed with a productive run yields finite stats and cost', () => {
   const pricingMap = new Map<string, ModelPricingRecord[]>([
     ['openai/gpt', [{ id: 'm', provider: 'openai', pricing: { input: 2, output: 6, cacheRead: 0, cacheWrite: 0 } }]],
   ]);
@@ -164,6 +143,5 @@ test('a zero-turn run mixed with a productive run yields finite stats and a non-
   const stats = computeAggregateStats([zeroRun, productiveRun], pricingMap, NOW, [], {}, 0);
   assertNoNaNInfinity(stats);
   assert.equal(stats.runCount, 2);
-  assert.ok(stats.tokensPerSecond > 0, 'productive run contributes a positive rate');
   assert.ok(stats.totalCost > 0, 'productive run accrues cost');
 });

@@ -1,10 +1,34 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-// Small reusable inline-SVG icons shared by the session-tab context menu. Each
-// renders a 13×13 leading indicator slot (the `context-menu-check` class) kept
-// at opacity:0 so menu item text stays left-aligned whether or not an icon is
-// shown — the empty `CheckmarkIcon` is the spacer used on items without one.
+// Small reusable inline-SVG icons shared by session-tab controls and the
+// context menu. Context-menu icons render in a 13×13 leading indicator slot;
+// the empty `CheckmarkIcon` is the spacer used on items without one.
+
+/** Quiet provenance cue for sessions created by an agent. */
+export function AgentIcon({ compact = false }: { compact?: boolean } = {}) {
+  const size = compact ? 11 : 13;
+  return (
+    <svg
+      class={`session-tab-agent-icon${compact ? ' compact' : ''}`}
+      width={size}
+      height={size}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.35"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M8 1.75v2" />
+      <rect x="3" y="4" width="10" height="9" rx="2" />
+      <circle cx="6.25" cy="8.25" r="0.7" fill="currentColor" stroke="none" />
+      <circle cx="9.75" cy="8.25" r="0.7" fill="currentColor" stroke="none" />
+      <path d="M5.75 10.75h4.5" />
+    </svg>
+  );
+}
 
 export function CheckmarkIcon() {
   return (

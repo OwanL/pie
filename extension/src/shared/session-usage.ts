@@ -62,20 +62,38 @@ export interface SessionUsageSample {
   /** Producer-owned canonical provider identity. The host may project or
    * reconcile it, but must not mint a replacement. */
   canonicalInvocationId?: string;
+  /** Runtime assistant message id associated with a pending live handoff. It
+   * is not durable accounting identity and is omitted from settled rows. */
+  provisionalMessageId?: string;
   producerCaptureReceipt?: SubagentBillingCaptureReceipt;
   producerAttemptId?: string;
   producerEvidenceKind?: 'providerInvocation' | 'attemptGap' | 'omittedGap' | 'aggregate';
 }
 
 /** Complete ledger projection for a session branch. */
+export type SessionUsageFreshness = 'fresh' | 'stale' | 'unknown';
+export type SessionUsageRefreshStatus = 'idle' | 'refreshing' | 'error';
+
 export interface SessionUsageSnapshot {
   samples: SessionUsageSample[];
+  /** Host-observed provider settlements awaiting the canonical authority. These
+   * rows are display-only handoff evidence, never durable accounting, and are
+   * removed once their canonical invocation identity is present in `samples`. */
+  pendingSamples?: SessionUsageSample[];
   /** Steady-state renderer authority. Absent is treated as unknown for an old
    * host; transcript data is never substituted. `ledger` is the legacy
    * JSONL authority, `canonical` the normalized canonical analytics store.
    * Both are authoritative; the value only tells the webview which durable
    * store answered the projection. */
   authority?: 'ledger' | 'canonical' | 'unknown';
+  /** Whether the rows belong to the latest known durable revision. A stale
+   * snapshot remains usable only as an explicitly labelled last-known value;
+   * it must never be presented as fresh. */
+  freshness?: SessionUsageFreshness;
+  /** Refresh state for the durable projection. `error` means the last bounded
+   * replacement read failed; a stale last-known snapshot may still be shown
+   * with that error marker. */
+  refreshStatus?: SessionUsageRefreshStatus;
   branchId?: string;
   /** Raw durable IDs in the selected branch, including assistant responses
    * folded together by the display transcript mapper. */
@@ -767,6 +785,7 @@ export function buildSessionUsageSnapshot(transcript: ChatMessage[], branchId?: 
  */
 export type SessionUsageProjectionRow = {
   readonly sourceId: string;
+  readonly canonicalInvocationId?: string;
   readonly kind: Exclude<SessionUsageKind, 'assistant'>;
   readonly model: string | null;
   readonly provider: string | null;
@@ -798,6 +817,7 @@ export function sessionUsageSnapshotFromLedger(
 ): SessionUsageSnapshot {
   const samples = records.map((record): SessionUsageSample => ({
     sourceId: record.sourceId,
+    ...(record.canonicalInvocationId ? { canonicalInvocationId: record.canonicalInvocationId } : {}),
     kind: record.kind,
     modelId: record.model === 'unknown-model' || record.model === null ? undefined : record.model,
     provider: record.provider === 'unknown-provider' || record.provider === null ? undefined : record.provider,
@@ -853,8 +873,10 @@ export function sessionUsageSnapshotFromLedger(
  * transcript/subagent walks on content rather than reference identity.
  */
 export function sessionUsageSignature(snapshot: SessionUsageSnapshot | null | undefined): string {
-  return JSON.stringify({ authority: snapshot?.authority ?? 'unknown', samples: (snapshot?.samples ?? []).map((sample) => [
+  const sampleSignature = (sample: SessionUsageSample) => [
     sample.sourceId,
+    sample.canonicalInvocationId ?? '',
+    sample.provisionalMessageId ?? '',
     sample.groupId ?? '',
     sample.kind,
     sample.modelId ?? '',
@@ -872,7 +894,14 @@ export function sessionUsageSignature(snapshot: SessionUsageSnapshot | null | un
     sample.provenance ?? '',
     sample.instrumentationGap ?? '',
     sample.outcome ?? '',
-  ]) });
+  ];
+  return JSON.stringify({
+    authority: snapshot?.authority ?? 'unknown',
+    freshness: snapshot?.freshness ?? 'unknown',
+    refreshStatus: snapshot?.refreshStatus ?? 'idle',
+    samples: (snapshot?.samples ?? []).map(sampleSignature),
+    pendingSamples: (snapshot?.pendingSamples ?? []).map(sampleSignature),
+  });
 }
 
 function sessionUsageGroupId(sample: SessionUsageSample): string {
@@ -905,11 +934,17 @@ export function mergeSessionUsageSnapshots(
   }
   for (const sample of overlaySamples) merged.set(sample.sourceId, sample);
   const authority = overlay?.authority ?? baseline?.authority;
+  const freshness = overlay?.freshness ?? baseline?.freshness;
+  const refreshStatus = overlay?.refreshStatus ?? baseline?.refreshStatus;
   const branchId = overlay?.branchId ?? baseline?.branchId;
   const branchEntryIds = overlay?.branchEntryIds ?? baseline?.branchEntryIds;
+  const pendingSamples = [...(baseline?.pendingSamples ?? []), ...(overlay?.pendingSamples ?? [])];
   return {
     samples: [...merged.values()],
+    ...(pendingSamples.length > 0 ? { pendingSamples } : {}),
     ...(authority !== undefined ? { authority } : {}),
+    ...(freshness !== undefined ? { freshness } : {}),
+    ...(refreshStatus !== undefined ? { refreshStatus } : {}),
     ...(branchId !== undefined ? { branchId } : {}),
     ...(branchEntryIds !== undefined ? { branchEntryIds } : {}),
   };

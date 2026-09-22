@@ -3,11 +3,18 @@ import test from 'node:test';
 
 import { installAuxiliaryLlmMeter } from '../../../src/backend/auxiliary-llm-meter';
 
+// Usage variants the meter must tolerate: provider-reported cost, the SDK
+// catalog estimate (`cost.total`), and no usage at all.
+type TestUsage =
+  | { input: number; output: number; cacheRead: number; cacheWrite: number; reportedCostUsd: number }
+  | { input: number; output: number; cacheRead: number; cacheWrite: number; cost: { total: number } };
+
 interface TestSession {
   agent: {
-    streamFn: (model?: unknown) => Promise<{ result: () => Promise<{ usage?: unknown }> }>;
+    streamFn: (model?: unknown) => Promise<{ result: () => Promise<{ usage?: TestUsage }> }>;
   };
   _compactionAbortController: unknown;
+  _autoCompactionAbortController: unknown;
   _branchSummaryAbortController: unknown;
 }
 
@@ -27,6 +34,7 @@ function makeSession(): TestSession {
       }),
     },
     _compactionAbortController: undefined as unknown,
+    _autoCompactionAbortController: undefined as unknown,
     _branchSummaryAbortController: undefined as unknown,
   };
 }
@@ -145,6 +153,68 @@ test('unexpected auxiliary calls without usage emit one explicit other gap', asy
   assert.equal(payloads.length, 1);
   assert.equal(payloads[0]?.kind, 'other');
   assert.equal(payloads[0]?.instrumentationGap, true);
+});
+
+test('meters automatic threshold/overflow compaction in the root scope exactly once', async () => {
+  const session = makeSession();
+  const payloads: Array<{ sessionPath: string; kind: string; sourceId: string }> = [];
+  // Overflow auto compaction runs while the root request is still active, so
+  // the ordinary-conversation classifier would otherwise swallow the call.
+  let ordinary = true;
+  installAuxiliaryLlmMeter(
+    session,
+    '/session.jsonl',
+    (_event, payload) => payloads.push(payload),
+    Date.now,
+    () => ordinary,
+  );
+
+  session._autoCompactionAbortController = {};
+  const overflow = await session.agent.streamFn({ id: 'model-a', provider: 'provider-a' });
+  const overflowUsage = await overflow.result();
+  assert.equal(overflowUsage.usage?.input, 10);
+  // The stream wrapper must stay transparent to the SDK caller.
+  await overflow.result();
+
+  // A later threshold compaction while the request is still classified as an
+  // ordinary conversation call must also meter exactly once.
+  const threshold = await session.agent.streamFn({ id: 'model-a', provider: 'provider-a' });
+  await threshold.result();
+
+  session._autoCompactionAbortController = undefined;
+  ordinary = true;
+  await (await session.agent.streamFn({ id: 'model-a', provider: 'provider-a' })).result();
+
+  assert.equal(payloads.length, 2);
+  for (const payload of payloads) {
+    assert.equal(payload.sessionPath, '/session.jsonl');
+    assert.equal(payload.kind, 'history_compaction');
+  }
+  assert.notEqual(payloads[0]?.sourceId, payloads[1]?.sourceId);
+});
+
+test('automatic compaction failures emit one explicit gap and remain unmetered once cleared', async () => {
+  const session = makeSession();
+  session.agent.streamFn = async () => ({ result: async () => ({ usage: undefined as never }) });
+  const payloads: Array<{ kind: string; instrumentationGap?: boolean; instrumentationGapReason?: string; outcome?: string }> = [];
+  installAuxiliaryLlmMeter(
+    session,
+    '/session.jsonl',
+    (_event, payload) => payloads.push(payload),
+    Date.now,
+    () => true,
+  );
+
+  session._autoCompactionAbortController = {};
+  await (await session.agent.streamFn({ id: 'model-a', provider: 'provider-a' })).result();
+
+  session._autoCompactionAbortController = undefined;
+  await (await session.agent.streamFn({ id: 'model-a', provider: 'provider-a' })).result();
+
+  assert.equal(payloads.length, 1);
+  assert.equal(payloads[0]?.kind, 'history_compaction');
+  assert.equal(payloads[0]?.instrumentationGap, true);
+  assert.match(String(payloads[0]?.instrumentationGapReason), /no provider usage/);
 });
 
 test('classifies branch summaries separately and ignores ordinary assistant streams', async () => {

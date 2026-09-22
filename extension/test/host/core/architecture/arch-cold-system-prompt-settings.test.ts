@@ -19,17 +19,19 @@ function prompt(id: string, disabled: boolean, toggleable = true): SystemPromptE
   };
 }
 
-test('a cold SessionOpened toggle confirmation updates existing prompt entries without a runtime catalog', () => {
+test('an authoritative cold discovery failure clears existing prompt entries instead of reusing stale text', () => {
   const before: ArchState = {
     ...initialArchState,
     sessions: {
       ...initialArchState.sessions,
       sessions: [{
         path: SESSION,
-        cwd: '/repo',
+        cwd: '/old-repo',
         name: 'Cold',
         modifiedAt: '2026-08-25T00:00:00.000Z',
         messageCount: 0,
+        modelId: 'model-a',
+        provider: 'mock',
       }],
       openTabPaths: [SESSION],
       activeSessionPath: SESSION,
@@ -46,7 +48,11 @@ test('a cold SessionOpened toggle confirmation updates existing prompt entries w
     },
   };
   const payload: SessionOpenedPayload = {
-    session: before.sessions.sessions[0]!,
+    session: {
+      ...before.sessions.sessions[0]!,
+      cwd: '/new-repo',
+      modelId: 'model-b',
+    },
     transcript: [],
     transcriptWindow: {
       totalCount: 0,
@@ -59,7 +65,6 @@ test('a cold SessionOpened toggle confirmation updates existing prompt entries w
     },
     busy: false,
     runtimeReady: false,
-    initialContextEstimate: { tokens: 12_345, contextWindow: 200_000 },
     systemPromptDisabledEntries: ['skills'],
   };
 
@@ -73,19 +78,76 @@ test('a cold SessionOpened toggle confirmation updates existing prompt entries w
     payload,
   });
 
-  assert.deepEqual(out.state.settings.initialContextEstimateBySession[SESSION], {
-    tokens: 12_345,
-    contextWindow: 200_000,
+  assert.equal(out.state.settings.initialContextEstimateBySession[SESSION], null);
+  assert.equal(out.state.sessions.sessions[0]?.cwd, '/new-repo');
+  assert.equal(out.state.sessions.sessions[0]?.modelId, 'model-b');
+  assert.deepEqual(out.state.transcript.systemPromptsBySession[SESSION], []);
+});
+
+test('a slim snapshot omission preserves existing prompt text while applying its bounded toggle confirmation', () => {
+  const existingPrompts = [
+    prompt('provider', false, false),
+    prompt('skills', false),
+    prompt('tools', true),
+  ];
+  const before: ArchState = {
+    ...initialArchState,
+    sessions: {
+      ...initialArchState.sessions,
+      sessions: [{
+        path: SESSION,
+        cwd: '/repo',
+        name: 'Cold',
+        modifiedAt: '2026-08-25T00:00:00.000Z',
+        messageCount: 0,
+      }],
+    },
+    transcript: {
+      ...initialArchState.transcript,
+      systemPromptsBySession: { [SESSION]: existingPrompts },
+    },
+  };
+  const payload: SessionOpenedPayload = {
+    session: before.sessions.sessions[0]!,
+    transcript: [],
+    transcriptWindow: {
+      totalCount: 0,
+      loadedStart: 0,
+      loadedEnd: 0,
+      hasOlder: false,
+      hasNewer: false,
+      isPartial: false,
+      hasUserMessages: false,
+    },
+    busy: false,
+    runtimeReady: false,
+    systemPromptDisabledEntries: ['skills'],
+    snapshotUnavailable: {
+      code: 'SESSION_SNAPSHOT_TOO_LARGE',
+      message: 'Lossless snapshot unavailable.',
+    },
+  };
+
+  const out = reducer(before, {
+    kind: 'SessionOpened',
+    backendGeneration: 0,
+    modelWriteFence: 0,
+    modelHydrationRevision: 0,
+    catalogHydrationRevision: 0,
+    sessionPath: SESSION,
+    payload,
   });
+
   assert.deepEqual(
     out.state.transcript.systemPromptsBySession[SESSION]?.map((entry) => ({
       id: entry.id,
+      text: entry.text,
       disabled: entry.disabled,
     })),
     [
-      { id: 'provider', disabled: false },
-      { id: 'skills', disabled: true },
-      { id: 'tools', disabled: false },
+      { id: 'provider', text: 'provider', disabled: false },
+      { id: 'skills', text: 'skills', disabled: true },
+      { id: 'tools', text: 'tools', disabled: false },
     ],
   );
 });

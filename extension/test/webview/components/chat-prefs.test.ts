@@ -83,7 +83,6 @@ const prefs: ChatPrefs = {
   uiMessageRailSize: 18,
   hideStatusStrip: false,
   hideTokenRate: false,
-  hideSessionTokens: false,
   hideSessionCost: false,
   hideContextIndicator: false,
   hideRunStatus: false,
@@ -99,7 +98,7 @@ test('chat pref menu sections expose transcript, display, notifications, and dia
   assert.equal(CHAT_PREF_MENU_SECTIONS[1]?.id, 'display');
   assert.deepEqual(
     CHAT_PREF_MENU_SECTIONS[1]?.items.map((item) => item.key),
-    ['hideStatusStrip', 'hideTokenRate', 'hideSessionTokens', 'hideSessionCost', 'hideContextIndicator', 'hideRunStatus'],
+    ['hideStatusStrip', 'hideTokenRate', 'hideSessionCost', 'hideContextIndicator', 'hideRunStatus'],
   );
   assert.equal(CHAT_PREF_MENU_SECTIONS[2]?.id, 'notifications');
   assert.deepEqual(
@@ -203,7 +202,6 @@ test('toggle helpers return partial pref patches without mutating source prefs',
     uiMessageRailSize: 18,
     hideStatusStrip: false,
     hideTokenRate: false,
-    hideSessionTokens: false,
     hideSessionCost: false,
     hideContextIndicator: false,
     hideRunStatus: false,

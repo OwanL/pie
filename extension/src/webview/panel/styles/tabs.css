@@ -285,6 +285,40 @@ body.session-tab-dragging {
 
 /* ── Tab states ──────────────────────────────────────────────────────────── */
 
+/* Agent-created sessions use a small, muted bot icon as a provenance cue.
+   It follows the same inline SVG convention as the rest of the panel and does
+   not introduce a badge surface, border, or accent color. */
+.session-tab-agent-icon {
+  display: block;
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+  color: var(--panel-muted);
+  opacity: 0.72;
+  pointer-events: none;
+}
+
+/* Pinned tabs and all-agent group chips have fixed dimensions, so keep their
+   provenance icon in the top-right corner without changing the chip width.
+   Mixed groups deliberately omit the aggregate icon; their dropdown members
+   carry the per-session cue instead. */
+.session-tab-agent-icon.compact {
+  width: 11px;
+  height: 11px;
+}
+
+.session-tab.pinned .session-tab-agent-icon.compact,
+.pinned-tab-group .session-tab-agent-icon.compact {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  z-index: 2;
+}
+
+.pinned-tab-group-member .session-tab-agent-icon {
+  margin-left: 2px;
+}
+
 .session-tab.unread-finished:not(.active) .session-tab-shell::after {
   box-shadow:
     inset 0 0 0 1px color-mix(in srgb, var(--panel-success) 28%, var(--session-tab-outline)),

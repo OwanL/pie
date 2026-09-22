@@ -82,16 +82,6 @@
   font-variant-numeric: tabular-nums;
 }
 
-.aggregate-strip-rate {
-  color: var(--panel-accent);
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
-}
-
-.aggregate-strip-unit {
-  color: color-mix(in srgb, var(--panel-muted) 90%, transparent);
-}
-
 .aggregate-strip-tokens {
   color: color-mix(in srgb, var(--panel-foreground) 60%, var(--panel-muted));
   font-variant-numeric: tabular-nums;

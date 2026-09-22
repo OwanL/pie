@@ -71,10 +71,21 @@ function pinnedTabGroupsEqual(left: readonly string[][], right: readonly string[
   return left.every((group, index) => stringArraysEqual(group, right[index]));
 }
 
-function openSessionNamesEqual(previous: SessionTabsProps, next: SessionTabsProps): boolean {
-  const previousNames = new Map(previous.sessions.map((session) => [session.path, session.name]));
-  const nextNames = new Map(next.sessions.map((session) => [session.path, session.name]));
-  return previous.openTabPaths.every((path) => previousNames.get(path) === nextNames.get(path));
+function openSessionMetadataEqual(previous: SessionTabsProps, next: SessionTabsProps): boolean {
+  const previousMetadata = new Map(previous.sessions.map((session) => [session.path, {
+    name: session.name,
+    agentCreated: session.agentCreated,
+  }]));
+  const nextMetadata = new Map(next.sessions.map((session) => [session.path, {
+    name: session.name,
+    agentCreated: session.agentCreated,
+  }]));
+  return previous.openTabPaths.every((path) => {
+    const previousSession = previousMetadata.get(path);
+    const nextSession = nextMetadata.get(path);
+    return previousSession?.name === nextSession?.name
+      && previousSession?.agentCreated === nextSession?.agentCreated;
+  });
 }
 
 function pendingRequestsEqual(previous: SessionTabsProps, next: SessionTabsProps): boolean {
@@ -131,7 +142,7 @@ function areSessionTabsPropsEqual(
     && stringArraysEqual(previous.unreadFinishedSessionPaths, next.unreadFinishedSessionPaths)
     && stringArraysEqual(previous.deferredSessionPaths, next.deferredSessionPaths)
     && stringArraysEqual(previous.deferredTimerSessionPaths, next.deferredTimerSessionPaths)
-    && openSessionNamesEqual(previous, next)
+    && openSessionMetadataEqual(previous, next)
     && pendingRequestsEqual(previous, next)
     && runSummariesEqual(previous, next)
   );
@@ -271,6 +282,10 @@ function SessionTabsView({
   // skip re-render while their props are unchanged — essential during a drag,
   // where the parent re-renders on every pointermove.
   const sessionByPath = useMemo(() => new Map(sessions.map((session) => [session.path, session])), [sessions]);
+  const agentCreatedPathSet = useMemo(
+    () => new Set(sessions.filter((session) => session.agentCreated === true).map((session) => session.path)),
+    [sessions],
+  );
   const openIndexByPath = useMemo(() => new Map(openTabPaths.map((path, index) => [path, index])), [openTabPaths]);
   const runningPathSet = useMemo(() => new Set(runningSessionPaths), [runningSessionPaths]);
   const generatingTitlePathSet = useMemo(() => new Set(generatingTitleSessionPaths), [generatingTitleSessionPaths]);
@@ -528,6 +543,7 @@ function SessionTabsView({
               members={item.members}
               itemIndex={itemIndex}
               sessionByPath={sessionByPath}
+              agentCreatedPathSet={agentCreatedPathSet}
               runningPathSet={runningPathSet}
               generatingTitlePathSet={generatingTitlePathSet}
               startingModelPathSet={startingModelPathSet}

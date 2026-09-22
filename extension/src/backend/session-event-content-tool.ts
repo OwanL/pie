@@ -1515,6 +1515,7 @@ function handleContentToolSessionEvent(
         sessionPath: context.sessionPath,
         kind: 'assistant_message',
         sourceId: `assistant:${event.sessionEntryId ?? message.id}`,
+        provisionalMessageId: message.id,
         occurredAt: message.createdAt,
         ...(message.modelId ? { modelId: message.modelId } : {}),
         ...(message.provider ? { provider: message.provider } : {}),

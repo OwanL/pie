@@ -3,7 +3,7 @@ import test from 'node:test';
 
 import { buildPieSystemPrompt } from '../../../../shared/pie-harness-prompt.js';
 import {
-  collectInitialContextEstimate,
+  collectInitialContextInventory,
   installInventoryProviderDenyBoundary,
 } from '../../../src/backend/initial-context-estimate-worker';
 import { estimateTextTokens } from '../../../src/shared/tokenize';
@@ -90,7 +90,7 @@ test('fresh inventory binds resources, counts the unfiltered catalog, and dispos
     },
   };
 
-  const estimate = await collectInitialContextEstimate(sdk, systemPromptModule, {
+  const inventory = await collectInitialContextInventory(sdk, systemPromptModule, {
     cwd: '/workspace',
     agentDir: '/agent',
     model: { provider: 'mock', id: 'model-a' },
@@ -100,7 +100,7 @@ test('fresh inventory binds resources, counts the unfiltered catalog, and dispos
   assert.equal(disposed, true, 'the temporary runtime is always disposed');
   assert.equal(promptCalls, 0, 'inventory never invokes the original AgentSession.prompt');
   assert.equal(turnDenied, true, 'extension-triggered turns are rejected before session_start');
-  assert.equal(estimate.contextWindow, 200_000);
+  assert.equal(inventory.estimate.contextWindow, 200_000);
   assert.deepEqual(builtPromptOptions.selectedTools, ['read', 'hidden_inventory']);
   const expectedPiePrompt = buildPieSystemPrompt(
     builtPromptOptions,
@@ -117,16 +117,24 @@ test('fresh inventory binds resources, counts the unfiltered catalog, and dispos
     return entry;
   }).join('\n\n---\n\n');
   assert.equal(
-    estimate.tokens,
+    inventory.estimate.tokens,
     estimateTextTokens(expectedPiePrompt) + estimateTextTokens(expectedToolCatalog),
     'initial estimate counts the same shared Pie prompt plus the separate tool catalog',
   );
   assert.equal(builtPromptOptions.toolSnippets.hidden_inventory, inactiveSnippet);
   assert.ok(builtPromptOptions.promptGuidelines.includes(inactiveGuideline));
   assert.ok(
-    estimate.tokens >= estimateTextTokens(`${inactiveSnippet}\n${inactiveGuideline}`),
+    inventory.estimate.tokens >= estimateTextTokens(`${inactiveSnippet}\n${inactiveGuideline}`),
     'inactive/all-tool snippet and guideline text contributes to the initial payload estimate',
   );
+
+  const promptsById = new Map(inventory.systemPrompts.map((entry) => [entry.id, entry]));
+  assert.match(promptsById.get('harness')?.text ?? '', /^You are a coding assistant operating inside Pie/);
+  assert.match(inventory.systemPrompts.find((entry) => entry.title.endsWith('AGENTS.md'))?.text ?? '', /Project instructions\./);
+  assert.match(promptsById.get('tools')?.text ?? '', /Inspect inactive inventory\./);
+  assert.match(promptsById.get('tools')?.text ?? '', /"query": \{/);
+  assert.match(promptsById.get('skills')?.text ?? '', /debugging/);
+  assert.equal(promptsById.get('provider')?.summary, 'mock');
 });
 
 test('inventory network deny boundary detects caught provider attempts instead of allowing a partial estimate', async () => {

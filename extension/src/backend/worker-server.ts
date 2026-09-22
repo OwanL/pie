@@ -7,6 +7,7 @@ import {
   attachBoundedWorkerIpcReader,
   BoundedWorkerIpcWriter,
   WORKER_IPC_COORDINATOR_TO_WORKER_FD,
+  type WorkerIpcSettlement,
   WORKER_IPC_WORKER_TO_COORDINATOR_FD,
   type WorkerIpcWriteTarget,
 } from './worker-frame-io';
@@ -87,6 +88,11 @@ export function runtimeReportDroppableRejection(
 ): boolean {
   return reason === 'capacity' || reason === 'oversize';
 }
+
+export type WorkerDetailFrameSettlement =
+  | { status: 'sent' }
+  | { status: 'rejected'; retryable: boolean }
+  | { status: 'failed' };
 
 const WORKER_CLOSE_DIAGNOSTIC_MAX_BYTES = 8 * 1024;
 
@@ -184,6 +190,7 @@ export class WorkerServer {
   };
   private readonly syncPayloadFingerprints: Partial<Record<WorkerSyncDomain, string>> = {};
   private readonly syncApplications: Partial<Record<WorkerSyncDomain, Promise<void>>> = {};
+  private readonly detailDrainListeners = new Set<() => void>();
 
   constructor(
     private readonly identity: WorkerServerIdentity,
@@ -275,12 +282,24 @@ export class WorkerServer {
     }
   }
 
+  /** Register a bounded detail producer wake-up. The callback runs after a
+   * detail frame settles, allowing a rejected baseline page to be retried
+   * without retaining an unbounded page burst. */
+  onDetailDrain(listener: () => void): () => void {
+    if (this.closing) return () => undefined;
+    this.detailDrainListeners.add(listener);
+    return () => this.detailDrainListeners.delete(listener);
+  }
+
   /** Detail pages/deltas use a separately bounded low-priority lane. Queue
-   * capacity rejection is recoverable and lets the canonical store emit an
-   * explicit rebase instead of killing the worker generation. */
-  sendDetailFrame(body: Extract<WorkerToCoordinatorFrameBody, {
-    kind: 'detail.start' | 'detail.page' | 'detail.delta' | 'detail.rebase' | 'detail.terminal' | 'detail.error' | 'detail.unsubscribed';
-  }>): boolean {
+   * capacity rejection is recoverable and lets the canonical store retry one
+   * retained page after the lane drains instead of killing the worker generation. */
+  sendDetailFrame(
+    body: Extract<WorkerToCoordinatorFrameBody, {
+      kind: 'detail.start' | 'detail.page' | 'detail.delta' | 'detail.rebase' | 'detail.terminal' | 'detail.error' | 'detail.unsubscribed';
+    }>,
+    onSettled?: (settlement: WorkerDetailFrameSettlement) => void,
+  ): boolean {
     const revision = 'revision' in body && typeof body.revision === 'number'
       ? body.revision
       : 'currentRevision' in body && typeof body.currentRevision === 'number'
@@ -292,7 +311,12 @@ export class WorkerServer {
     if (body.kind === 'detail.terminal') this.lastDurableAppendId = body.durableRef.messageId;
     const result = this.writer.enqueue({ ...this.frameBase, ...body } as WorkerIpcFrameDraft, {
       onSettled: (settlement) => {
-        if (settlement.status === 'failed') this.close(1, settlement.error);
+        onSettled?.(detailFrameSettlement(settlement));
+        if (settlement.status === 'sent' && (body.kind === 'detail.page' || body.kind === 'detail.delta')) {
+          for (const listener of this.detailDrainListeners) {
+            try { listener(); } catch { /* producer wake-ups cannot alter transport invariants */ }
+          }
+        } else if (settlement.status === 'failed') this.close(1, settlement.error);
       },
     });
     return result.accepted;
@@ -727,6 +751,7 @@ export class WorkerServer {
     }
     if (!this.closing) this.closing = true;
     this.stopHeartbeat();
+    this.detailDrainListeners.clear();
     const closedError = new Error('Coordinator transport closed.');
     for (const pending of this.pending.values()) {
       if (pending.timeout) clearTimeout(pending.timeout);
@@ -741,6 +766,16 @@ export class WorkerServer {
       this.transport.writable.end(exit);
     } else exit();
   }
+}
+
+function detailFrameSettlement(settlement: WorkerIpcSettlement): WorkerDetailFrameSettlement {
+  if (settlement.status === 'sent') return { status: 'sent' };
+  if (settlement.status === 'failed') return { status: 'failed' };
+  if (settlement.status !== 'rejected') return { status: 'rejected', retryable: false };
+  return {
+    status: 'rejected',
+    retryable: settlement.reason === 'capacity' || settlement.reason === 'oversize',
+  };
 }
 
 function createAbortError(message: string): Error {

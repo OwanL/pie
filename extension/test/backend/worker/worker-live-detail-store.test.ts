@@ -1,13 +1,23 @@
 import assert from 'node:assert/strict';
+import { readdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import test from 'node:test';
 
 import {
   WorkerLiveDetailStore,
   reassembleDetailPages,
+  segmentCanonicalDetail,
   type DetailBaselinePage,
 } from '../../../src/backend/worker-live-detail-store';
 import type { LiveSubagentDetailAddress } from '../../../src/shared/protocol/subagent-detail';
-import type { WorkerToCoordinatorFrameBody } from '../../../src/backend/worker-protocol';
+import { PassThrough } from 'node:stream';
+
+import {
+  type WorkerIpcFrame,
+  type WorkerToCoordinatorFrameBody,
+} from '../../../src/backend/worker-protocol';
+import type { WorkerIpcWriteTarget } from '../../../src/backend/worker-frame-io';
+import { WorkerServer } from '../../../src/backend/worker-server';
 
 const root = {
   sessionPath: 'C:/sessions/root.jsonl',
@@ -20,6 +30,10 @@ const target = { childId: 'child-target', spawningToolCallId: 'tool-nested', att
 const address: LiveSubagentDetailAddress = { ...root, lineage: [parent, target] };
 
 type DetailFrame = Extract<WorkerToCoordinatorFrameBody, { kind: `detail.${string}` }>;
+
+function liveDetailSpools(): string[] {
+  return readdirSync(tmpdir()).filter((entry) => entry.startsWith('pie-live-detail-'));
+}
 
 function child(identity: typeof parent, lineage: readonly (typeof parent)[], text: string, generation = 1) {
   return {
@@ -76,6 +90,344 @@ test('baseline pages reassemble huge non-ASCII strings exactly under a tiny inje
   const rebuilt = reassembleDetailPages(pages) as any;
   assert.equal(rebuilt.messages[0].content[0].text, text);
   assert.equal(store.debugState().canonicalBytes, 0, 'oversized canonical value is not retained in the bounded delta window');
+});
+
+test('large live baseline drains through the bounded detail queue without a rebase loop', async () => {
+  const emitted: DetailFrame[] = [];
+  const target: WorkerIpcWriteTarget & {
+    readonly sent: WorkerIpcFrame[];
+    readonly callbacks: Array<(error?: Error | null) => void>;
+  } = {
+    writable: true,
+    sent: [],
+    callbacks: [],
+    write(data, callback) {
+      this.sent.push(JSON.parse(data) as WorkerIpcFrame);
+      this.callbacks.push(callback);
+      return false;
+    },
+  };
+  const server = new WorkerServer({
+    coordinatorGeneration: 1,
+    workerId: 'worker',
+    workerGeneration: 1,
+    sessionPath: root.sessionPath,
+    rootSessionPath: root.sessionPath,
+    leasePath: root.sessionPath,
+    leaseRevision: 1,
+    ipcReadFd: 3,
+    ipcWriteFd: 4,
+  }, {
+    pid: 1234,
+    exit: () => undefined as never,
+  }, {
+    readable: new PassThrough(),
+    writable: target as never,
+  });
+  const prefillPage = segmentCanonicalDetail(JSON.stringify({ filler: 'x'.repeat(120_000) }), 1, address, 128 * 1024)[0]!;
+  let prefillCount = 0;
+  for (let index = 0; index < 32; index += 1) {
+    if (!server.sendDetailFrame({
+      kind: 'detail.page', subscriptionId: `prefill-${index}`, ...prefillPage,
+    })) break;
+    prefillCount += 1;
+  }
+  assert.ok(prefillCount >= 15, 'the test must begin with a materially occupied detail queue');
+
+  const store = new WorkerLiveDetailStore({
+    emit: (frame, onSettled) => {
+      emitted.push(frame as DetailFrame);
+      return server.sendDetailFrame(frame, onSettled);
+    },
+    onDrain: (listener) => server.onDetailDrain(listener),
+    // Exercise the streaming path: the baseline is intentionally larger than
+    // the whole canonical retention budget.
+    budgets: { maxCanonicalBytes: 1_024 },
+  });
+  store.observe({ ...root, details: details('x'.repeat(2_300_000)) });
+  store.subscribe('request-large', 'subscription-large', address, undefined, 128 * 1024);
+
+  const start = emitted.find((frame): frame is Extract<DetailFrame, { kind: 'detail.start' }> => frame.kind === 'detail.start');
+  assert.ok(start);
+  assert.equal(emitted.filter((frame) => frame.kind === 'detail.page').length, 0,
+    'pages wait behind the correlated baseline manifest');
+  const settleNextWrite = async (): Promise<void> => {
+    const callback = target.callbacks.shift();
+    assert.ok(callback, 'the blocked descriptor should retain one bounded active write');
+    callback?.(null);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  };
+  await settleNextWrite();
+  while (emitted.filter((frame) => frame.kind === 'detail.page').length < start.pageCount) {
+    await settleNextWrite();
+  }
+  await settleNextWrite();
+  const pages = emitted.filter((frame) => frame.kind === 'detail.page');
+  assert.ok(start.pageCount > 15, 'the baseline must exceed the bounded detail queue');
+  assert.equal(pages.length, start.pageCount,
+    'every baseline page should remain queued for progressive delivery instead of being abandoned');
+  const rebuilt = reassembleDetailPages(pages.map((frame) => ({
+    ref: frame.ref, payload: frame.payload, payloadBytes: frame.payloadBytes, checksum: frame.checksum,
+  })));
+  assert.equal((rebuilt as any).messages[0].content[0].text, 'x'.repeat(2_300_000),
+    'the bounded cursor must preserve the complete oversized baseline');
+  assert.equal(emitted.some((frame) => frame.kind === 'detail.rebase'), false,
+    'queue pressure must not turn a healthy baseline into a rebase loop');
+  assert.equal(store.debugState().canonicalBytes, 0,
+    'an oversized baseline must not leave an unaccounted full snapshot retained');
+});
+
+test('source updates during an oversized baseline rebase only after every original page settles', async () => {
+  const emitted: DetailFrame[] = [];
+  const pending: Array<{ settle: (value: { status: 'sent' }) => void }> = [];
+  const listeners = new Set<() => void>();
+  const store = new WorkerLiveDetailStore({
+    emit: (frame, onSettled) => {
+      emitted.push(frame as DetailFrame);
+      if (onSettled) pending.push({ settle: () => onSettled({ status: 'sent' }) });
+      return true;
+    },
+    onDrain: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    budgets: { maxCanonicalBytes: 1_024 },
+  });
+  const settle = async (): Promise<void> => {
+    const write = pending.shift();
+    assert.ok(write);
+    write?.settle({ status: 'sent' });
+    for (const listener of listeners) listener();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  };
+  const beforeText = 'before🙂é漢字'.repeat(500);
+  store.observe({ ...root, details: details(beforeText, 1) });
+  store.subscribe('request-update', 'subscription-update', address, undefined, 1024);
+  const start = emitted.find((frame): frame is Extract<DetailFrame, { kind: 'detail.start' }> => frame.kind === 'detail.start');
+  assert.ok(start && start.pageCount > 1, 'the update must race an oversized baseline');
+  await settle();
+  assert.equal(emitted.filter((frame) => frame.kind === 'detail.page').length, 1);
+  store.observe({ ...root, details: details('after'.repeat(500), 2) });
+  assert.equal(emitted.some((frame) => frame.kind === 'detail.rebase'), false,
+    'a revision change must not overtake the already admitted page');
+  while (emitted.filter((frame) => frame.kind === 'detail.page').length < start!.pageCount) {
+    await settle();
+  }
+  const originalPages = emitted.filter((frame): frame is Extract<DetailFrame, { kind: 'detail.page' }> => frame.kind === 'detail.page')
+    .map((frame) => ({ ref: frame.ref, payload: frame.payload, payloadBytes: frame.payloadBytes, checksum: frame.checksum }));
+  assert.equal((reassembleDetailPages(originalPages) as any).messages[0].content[0].text, beforeText,
+    'the original Unicode baseline must remain byte-exact while updates are deferred');
+  // The final page is only complete after its settlement callback, which is
+  // where the deferred rebase is flushed.
+  await settle();
+  assert.equal(emitted.at(-1)?.kind, 'detail.rebase');
+  assert.equal(emitted.filter((frame) => frame.kind === 'detail.page').length, start!.pageCount,
+    'the immutable original baseline must finish before rebase');
+});
+
+test('terminal during an in-flight spooled baseline is ordered after the page and releases the spool without later pages', async () => {
+  const before = liveDetailSpools();
+  const emitted: DetailFrame[] = [];
+  const pending: Array<() => void> = [];
+  const listeners = new Set<() => void>();
+  const store = new WorkerLiveDetailStore({
+    emit: (frame, onSettled) => {
+      emitted.push(frame as DetailFrame);
+      if (onSettled) pending.push(() => onSettled({ status: 'sent' }));
+      return true;
+    },
+    onDrain: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    budgets: { maxCanonicalBytes: 1_024 },
+  });
+  try {
+    store.observe({ ...root, details: details('terminal'.repeat(1_000)) });
+    store.subscribe('request-terminal', 'subscription-terminal', address, undefined, 1_024);
+    const start = emitted.find((frame): frame is Extract<DetailFrame, { kind: 'detail.start' }> => frame.kind === 'detail.start');
+    assert.ok(start && start.pageCount > 1, 'terminal must race a multi-page baseline');
+    assert.ok(liveDetailSpools().length > before.length, 'the in-flight baseline must use a private spool');
+
+    assert.deepEqual(emitted.map((frame) => frame.kind), ['detail.start']);
+    pending.shift()?.();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(emitted.map((frame) => frame.kind), ['detail.start', 'detail.page']);
+    assert.equal((emitted[1] as Extract<DetailFrame, { kind: 'detail.page' }>).ref.pageIndex, 0);
+
+    // Terminal is requested while page zero is still in flight. It must wait
+    // for that admitted page rather than overtaking it or allowing later pages
+    // to escape after the durable handoff.
+    store.terminal(root, 'durable-terminal');
+    assert.deepEqual(emitted.map((frame) => frame.kind), ['detail.start', 'detail.page']);
+    assert.equal(pending.length, 1, 'the admitted page remains the only unsettled frame');
+
+    pending.shift()?.();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(emitted.map((frame) => frame.kind), ['detail.start', 'detail.page', 'detail.terminal']);
+    assert.equal(store.debugState().subscriptions, 0, 'terminal drops the live owner after handoff');
+    assert.deepEqual(liveDetailSpools(), before, 'terminal releases the private spool before completing the handoff');
+
+    for (const listener of listeners) listener();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(emitted.map((frame) => frame.kind), ['detail.start', 'detail.page', 'detail.terminal'],
+      'no page may be emitted after the durable terminal');
+  } finally {
+    store.dispose();
+  }
+});
+
+test('in-place producer mutation cannot alter a stable baseline already in flight', async () => {
+  const emitted: DetailFrame[] = [];
+  const pending: Array<() => void> = [];
+  const mutableTarget = child(target, [parent, target], 'original🙂é漢字'.repeat(500));
+  const store = new WorkerLiveDetailStore({
+    emit: (frame, onSettled) => {
+      emitted.push(frame as DetailFrame);
+      if (onSettled) pending.push(() => onSettled({ status: 'sent' }));
+      return true;
+    },
+    onDrain: (listener) => {
+      const listeners = [listener];
+      return () => { listeners.length = 0; };
+    },
+    budgets: { maxCanonicalBytes: 1_024 },
+  });
+  store.observe({ ...root, details: { details: { results: [mutableTarget] } } });
+  store.subscribe('request-in-place', 'subscription-in-place', address, undefined, 1_024);
+  const start = emitted.find((frame): frame is Extract<DetailFrame, { kind: 'detail.start' }> => frame.kind === 'detail.start');
+  assert.ok(start && start.pageCount > 1);
+  pending.shift()?.();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  (mutableTarget.messages[0]!.content[0] as { text: string }).text = 'mutated-after-subscribe'.repeat(500);
+  while (emitted.filter((frame) => frame.kind === 'detail.page').length < start!.pageCount) {
+    assert.ok(pending.length > 0, 'the next page should remain the only pending delivery');
+    pending.shift()?.();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  assert.ok(pending.length > 0, 'the final page settlement should release the snapshot');
+  pending.shift()?.();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const pages = emitted.filter((frame): frame is Extract<DetailFrame, { kind: 'detail.page' }> => frame.kind === 'detail.page')
+    .map((frame) => ({ ref: frame.ref, payload: frame.payload, payloadBytes: frame.payloadBytes, checksum: frame.checksum }));
+  const rebuilt = reassembleDetailPages(pages) as any;
+  assert.equal(rebuilt.messages[0].content[0].text, 'original🙂é漢字'.repeat(500));
+  assert.equal(emitted.some((frame) => frame.kind === 'detail.rebase'), false);
+});
+
+test('above-budget snapshots use a private spool and release it on unsubscribe, dispose, and completion', async () => {
+  const before = liveDetailSpools();
+  const createStore = (id: string) => {
+    const pending: Array<() => void> = [];
+    const emitted: DetailFrame[] = [];
+    const store = new WorkerLiveDetailStore({
+      emit: (frame, onSettled) => {
+        emitted.push(frame as DetailFrame);
+        if (onSettled) pending.push(() => onSettled({ status: 'sent' }));
+        return true;
+      },
+      onDrain: (listener) => {
+        const listeners = [listener];
+        return () => { listeners.length = 0; };
+      },
+      budgets: { maxCanonicalBytes: 1_024 },
+    });
+    store.observe({ ...root, details: details('spooled'.repeat(1_000)) });
+    store.subscribe(`request-${id}`, `subscription-${id}`, address, undefined, 1_024);
+    return { emitted, pending, store };
+  };
+
+  const unsubscribed = createStore('unsubscribe');
+  assert.ok(liveDetailSpools().length > before.length, 'the oversized baseline should create a temp spool');
+  unsubscribed.store.unsubscribe('unsubscribe', 'subscription-unsubscribe');
+  assert.deepEqual(liveDetailSpools(), before, 'unsubscribe removes the private spool');
+
+  const disposed = createStore('dispose');
+  disposed.store.dispose();
+  assert.deepEqual(liveDetailSpools(), before, 'dispose removes the private spool');
+
+  const completed = createStore('complete');
+  const start = completed.emitted.find((frame): frame is Extract<DetailFrame, { kind: 'detail.start' }> => frame.kind === 'detail.start')!;
+  completed.pending.shift()?.();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  while (completed.emitted.filter((frame) => frame.kind === 'detail.page').length < start.pageCount) {
+    completed.pending.shift()?.();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  // The final page is emitted before its write settlement releases the spool.
+  completed.pending.shift()?.();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(liveDetailSpools(), before, 'completion removes the private spool');
+});
+
+test('global retention accounting charges in-memory baselines and spools later snapshots', () => {
+  const before = liveDetailSpools();
+  const pending: Array<() => void> = [];
+  const store = new WorkerLiveDetailStore({
+    emit: (_frame, onSettled) => {
+      if (onSettled) pending.push(() => onSettled({ status: 'sent' }));
+      return true;
+    },
+    onDrain: (listener) => {
+      const listeners = [listener];
+      return () => { listeners.length = 0; };
+    },
+    budgets: { maxCanonicalBytes: 1_500 },
+  });
+  store.observe({ ...root, details: details('accounted'.repeat(50)) });
+  store.subscribe('request-accounted-1', 'subscription-accounted-1', address, undefined, 1_024);
+  const firstBytes = store.debugState().canonicalBytes;
+  assert.ok(firstBytes > 0 && firstBytes <= 1_500, `first retained bytes: ${firstBytes}`);
+  store.subscribe('request-accounted-2', 'subscription-accounted-2', address, undefined, 1_024);
+  assert.ok(store.debugState().canonicalBytes <= 1_500, 'retained baseline bytes stay globally bounded');
+  assert.ok(liveDetailSpools().length > before.length, `the second snapshot does not bypass the global memory budget (first=${firstBytes}, retained=${store.debugState().canonicalBytes})`);
+  store.dispose();
+  assert.equal(store.debugState().canonicalBytes, 0);
+  assert.deepEqual(liveDetailSpools(), before);
+  assert.ok(pending.length >= 2);
+});
+
+test('unsubscribe and disposal fence pending baseline delivery', async () => {
+  const createPendingStore = async () => {
+    const emitted: DetailFrame[] = [];
+    const pending: Array<(value: { status: 'sent' }) => void> = [];
+    const listeners = new Set<() => void>();
+    const store = new WorkerLiveDetailStore({
+      emit: (frame, onSettled) => {
+        emitted.push(frame as DetailFrame);
+        if (onSettled) pending.push(() => onSettled({ status: 'sent' }));
+        return true;
+      },
+      onDrain: (listener) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    });
+    store.observe({ ...root, details: details('pending') });
+    store.subscribe('request-pending', 'subscription-pending', address, undefined, 1024);
+    const start = pending.shift();
+    assert.ok(start);
+    start?.({ status: 'sent' });
+    for (const listener of listeners) listener();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    return { emitted, pending, store, listeners };
+  };
+
+  const unsubscribed = await createPendingStore();
+  unsubscribed.store.unsubscribe('unsubscribe', 'subscription-pending');
+  unsubscribed.pending.shift()?.({ status: 'sent' });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(unsubscribed.store.debugState().subscriptions, 0);
+  assert.equal(unsubscribed.emitted.filter((frame) => frame.kind === 'detail.page').length, 1);
+
+  const disposed = await createPendingStore();
+  disposed.store.dispose();
+  disposed.pending.shift()?.({ status: 'sent' });
+  for (const listener of disposed.listeners) listener();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(disposed.store.debugState(), { sources: 0, subscriptions: 0, canonicalBytes: 0 });
+  assert.equal(disposed.emitted.filter((frame) => frame.kind === 'detail.page').length, 1);
 });
 
 test('stable lineage survives source reorder and changed revisions emit one ordered structural delta', () => {

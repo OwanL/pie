@@ -70,7 +70,11 @@ export interface BackendRequestHandlerDeps {
   /** Runtime-free coordinator operations. Production wires these to the one
    * generation-scoped ColdSessionStore and retains its process-local manager
    * handle for the first legacy promotion (or later isolated worker transfer). */
-  createColdSession?(cwd?: string, pendingCreateOperationId?: string): { sessionPath: string };
+  createColdSession?(
+    cwd?: string,
+    pendingCreateOperationId?: string,
+    agentCreated?: boolean,
+  ): { sessionPath: string };
   duplicateColdSession?(
     sessionPath: string,
     publicRequestId: string,
@@ -188,7 +192,7 @@ export interface BackendRequestHandlerDeps {
     capabilities?: import('../shared/protocol').SessionCapabilities,
   ): void;
   emitContextUsageChanged(context: SessionContext): void;
-  emitSessionListChanged(): Promise<void>;
+  emitSessionListChanged(liveSummaries?: readonly SessionSummary[]): Promise<void>;
   listSessions(): Promise<SessionSummary[]>;
   listAvailableModels(context?: SessionContext): ModelInfo[] | Promise<ModelInfo[]>;
   readModelSettings(): Promise<ModelSettings>;

@@ -70,8 +70,50 @@ test('session-control server delegates cold-session creation with an idempotent 
   assert.deepEqual(created.result, { ok: true, sessionPath: '/workspace/new.jsonl' });
   assert.equal(request?.method, 'session.create');
   assert.deepEqual(request?.params, {
-    cwd: '/workspace/project', operationId: 'agent-session:control-create', operationAttempt: 1,
+    cwd: '/workspace/project', agentCreated: true,
+    operationId: 'agent-session:control-create', operationAttempt: 1,
   });
+});
+
+test('session-control server addresses a newly created retained cold session despite a stale warm catalog', async () => {
+  const server = serverForTests();
+  const newSessionPath = '/workspace/new.jsonl';
+  server.listSessionSummaries = async () => summaries;
+  const coordinator = server as unknown as {
+    retainColdSessionManager(handle: { sessionPath: string }, creationReason: 'new'): void;
+  };
+  const requests: Array<{ method: string; params?: unknown }> = [];
+  server.handleRequest = async (request) => {
+    requests.push(request);
+    if (request.method === 'session.create') {
+      // Mirror the normal coordinator create callback: the durable cold-store
+      // handle is authoritative before the create acknowledgement is returned.
+      coordinator.retainColdSessionManager({ sessionPath: newSessionPath }, 'new');
+      return { ok: true, sessionPath: newSessionPath };
+    }
+    return { accepted: true };
+  };
+
+  const created = await server.handleWorkerSessionControl(
+    frame('create', { cwd: '/workspace/project' }),
+    '/workspace/current.jsonl',
+  );
+  assert.deepEqual(created.result, { ok: true, sessionPath: newSessionPath });
+
+  await server.handleWorkerSessionControl(
+    frame('message', { sessionPath: newSessionPath, text: 'wake the new session' }),
+    '/workspace/current.jsonl',
+  );
+  await server.handleWorkerSessionControl(
+    frame('close', { sessionPath: newSessionPath }),
+    '/workspace/current.jsonl',
+  );
+
+  assert.deepEqual(requests.map((request) => request.method), [
+    'session.create', 'message.send', 'session.lifecycleClose',
+  ]);
+  assert.equal((requests[1]?.params as { sessionPath: string }).sessionPath, newSessionPath);
+  assert.equal((requests[2]?.params as { sessionPath: string }).sessionPath, newSessionPath);
 });
 
 test('session-control server adapts transcript cursors and ordinary message sends', async () => {

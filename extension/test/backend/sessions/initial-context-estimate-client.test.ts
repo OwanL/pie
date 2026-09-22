@@ -8,7 +8,7 @@ import {
   InitialContextEstimateClient,
 } from '../../../src/backend/initial-context-estimate-client';
 
-function createRespondingChild(): any {
+function createRespondingChild(systemPromptText = 'Complete prompt text.'): any {
   const stdout = new PassThrough();
   const stderr = new PassThrough();
   const outbound = new PassThrough();
@@ -22,7 +22,13 @@ function createRespondingChild(): any {
   outbound.once('finish', () => {
     inbound.end(`${JSON.stringify({
       ok: true,
-      estimate: { tokens: 12_345, contextWindow: 200_000 },
+      inventory: {
+        estimate: { tokens: 12_345, contextWindow: 200_000 },
+        systemPrompts: [{
+          source: 'harness', id: 'harness', title: 'Harness system prompt',
+          text: systemPromptText, summary: 'Complete prompt text.', availability: 'available',
+        }],
+      },
     })}\n`);
   });
   return child;
@@ -51,6 +57,24 @@ test('inventory child environment forces Pi, npm, yarn, and telemetry offline', 
   assert.equal(env.NPM_CONFIG_OFFLINE, undefined, 'npm cannot inherit a conflicting online setting');
 });
 
+test('inventory IPC preserves complete prompt text beyond the former 256 KiB estimate-only frame', async () => {
+  const fullText = 'prompt-body\n'.repeat(30_000);
+  const client = new InitialContextEstimateClient({
+    entryPath: '/inventory-worker.js',
+    sdkPath: '/sdk',
+    sdkPatchIdentity: {} as any,
+    spawnProcess: (() => createRespondingChild(fullText)) as any,
+    establishGuardian: async () => ({ terminate: async () => undefined }),
+  });
+
+  const discovered = await client.discover({
+    cwd: '/workspace', agentDir: '/agent', model: { provider: 'mock', id: 'model-a' },
+  });
+
+  assert.equal(discovered?.systemPrompts[0]?.text, fullText);
+  await client.dispose();
+});
+
 test('guardian failure falls back to process-tree termination and retains failed cleanup for disposal retry', async () => {
   let spawnedEnv: NodeJS.ProcessEnv | undefined;
   let guardianAttempts = 0;
@@ -76,13 +100,19 @@ test('guardian failure falls back to process-tree termination and retains failed
     },
   });
 
-  const estimate = await client.estimate({
+  const inventory = await client.discover({
     cwd: '/workspace',
     agentDir: '/agent',
     model: { provider: 'mock', id: 'model-a' },
   });
 
-  assert.deepEqual(estimate, { tokens: 12_345, contextWindow: 200_000 });
+  assert.deepEqual(inventory, {
+    estimate: { tokens: 12_345, contextWindow: 200_000 },
+    systemPrompts: [{
+      source: 'harness', id: 'harness', title: 'Harness system prompt',
+      text: 'Complete prompt text.', summary: 'Complete prompt text.', availability: 'available',
+    }],
+  });
   assert.equal(spawnedEnv?.PI_OFFLINE, '1');
   assert.equal(treeAttempts, 1, 'guardian failure attempts the process-tree fallback');
   assert.equal((client as any).active.size, 1, 'failed cleanup remains tracked');

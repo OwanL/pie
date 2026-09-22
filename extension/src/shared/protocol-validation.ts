@@ -349,7 +349,6 @@ function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
     'bashFastPath',
     'hideStatusStrip',
     'hideTokenRate',
-    'hideSessionTokens',
     'hideSessionCost',
     'hideContextIndicator',
     'hideRunStatus',

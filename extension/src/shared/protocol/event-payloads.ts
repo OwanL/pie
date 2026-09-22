@@ -107,6 +107,7 @@ function isSessionSummary(value: unknown): value is Record<string, unknown> {
     && isString(value.cwd)
     && isString(value.modifiedAt)
     && isFiniteNumber(value.messageCount)
+    && (value.agentCreated === undefined || isBoolean(value.agentCreated))
   );
 }
 
@@ -222,6 +223,7 @@ export function isSessionOpenedPayload(value: unknown): value is SessionOpenedPa
     && isOptionalInitialContextEstimate(value.initialContextEstimate)
     && isOptionalLiveTurnRecoveryIdentity(value.liveTurnRecoveryIdentity)
     && isOptionalSnapshotUnavailable(value.snapshotUnavailable)
+    && isOptionalBoolean(value.agentCreated)
     && isOptionalString(value.operationId)
     && (value.operationAttempt === undefined
       || (Number.isInteger(value.operationAttempt) && (value.operationAttempt as number) >= 1))
@@ -575,6 +577,7 @@ export function isAuxiliaryLlmUsagePayload(value: unknown): value is AuxiliaryLl
     && (value.kind === 'assistant_message' || value.kind === 'history_compaction'
       || value.kind === 'branch_summary' || value.kind === 'session_title' || value.kind === 'other')
     && isString(value.sourceId)
+    && isOptionalString(value.provisionalMessageId)
     && isString(value.occurredAt)
     && isOptionalString(value.modelId)
     && isOptionalString(value.provider)

@@ -310,7 +310,7 @@ test('canonical historical session and aggregate projections survive a new host 
     assert.ok(BigInt(deletedRevision) > BigInt(revision));
     await (aggregate as unknown as { recompute(): Promise<void> }).recompute();
     assert.equal(aggregate.getAggregateStats().totalCost, 0);
-    for (let index = 0; index < 50 && stats.getSessionUsage('/sessions/historical.jsonl').samples.length > 0; index += 1) {
+    for (let index = 0; index < 200 && stats.getSessionUsage('/sessions/historical.jsonl').samples.length > 0; index += 1) {
       await new Promise<void>((resolve) => setTimeout(resolve, 30));
     }
     assert.equal(stats.getSessionUsage('/sessions/historical.jsonl').samples.length, 0);
@@ -400,7 +400,7 @@ test('StatsService hydrates bounded canonical activity and facets, refreshes the
     analyticsReadModel: readModel,
   });
   const waitFor = async (predicate: () => boolean): Promise<void> => {
-    for (let index = 0; index < 100; index += 1) {
+    for (let index = 0; index < 240; index += 1) {
       if (predicate()) return;
       await new Promise<void>((resolve) => setTimeout(resolve, 25));
     }
@@ -878,7 +878,7 @@ test('canonical refresh rejects a delayed pre-delete response instead of resurre
   }
 });
 
-test('canonical hydration uses the durable selected branch and excludes abandoned branches', async () => {
+test('canonical session hydration is root-owned and includes branchless child and auxiliary calls', async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'pie-canonical-selected-branch-'));
   const databasePath = canonicalAnalyticsDatabasePath(path.join(root, 'analytics'));
   const at = Date.parse('2026-01-15T12:00:00.000Z');
@@ -891,6 +891,10 @@ test('canonical hydration uses the durable selected branch and excludes abandone
     settlement({ invocationId: 'inv-branch-a', rootSessionId: 'root-branch', purpose: 'conversation', settledAtMs: at + 4, inputTokens: 10, outputTokens: 5, reportedCostUsd: 0.01, branchId: 'branch-a' }),
     settlement({ invocationId: 'inv-branch-b', rootSessionId: 'root-branch', purpose: 'conversation', settledAtMs: at + 5, inputTokens: 20, outputTokens: 5, reportedCostUsd: 0.02, branchId: 'branch-b' }),
     settlement({ invocationId: 'inv-branch-c', rootSessionId: 'root-branch', purpose: 'conversation', settledAtMs: at + 6, inputTokens: 30, outputTokens: 5, reportedCostUsd: 0.03, branchId: 'branch-c' }),
+    // These calls intentionally carry no branch ID. Root scope must retain
+    // them alongside branch-attributed calls for the session indicator.
+    settlement({ invocationId: 'inv-branchless-child', rootSessionId: 'root-branch', purpose: 'subagent', settledAtMs: at + 7, inputTokens: 40, outputTokens: 5, reportedCostUsd: 0.04 }),
+    settlement({ invocationId: 'inv-auxiliary', rootSessionId: 'root-branch', purpose: 'history_compaction', settledAtMs: at + 8, inputTokens: 50, outputTokens: 5, reportedCostUsd: 0.05 }),
   ]);
   closeFixtureWriter(writer);
   const state = createInitialArchState();
@@ -929,8 +933,70 @@ test('canonical hydration uses the durable selected branch and excludes abandone
     await stats.start();
     const usage = stats.getSessionUsage(sessionPath);
     assert.equal(usage.authority, 'canonical');
-    assert.equal(usage.branchId, 'branch-b');
-    assert.deepEqual(usage.samples.map((sample) => sample.sourceId), ['inv-branch-a', 'inv-branch-b']);
+    assert.equal(usage.branchId, undefined, 'the root projection must not claim selected-branch ownership');
+    assert.deepEqual(
+      usage.samples.map((sample) => sample.sourceId).sort(),
+      ['inv-branch-a', 'inv-branch-b', 'inv-branch-c', 'inv-branchless-child', 'inv-auxiliary'].sort(),
+    );
+  } finally {
+    await stats.shutdown();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('canonical usage fails closed when a session path is rebound to a new identity', async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'pie-canonical-identity-guard-'));
+  const databasePath = canonicalAnalyticsDatabasePath(path.join(root, 'analytics'));
+  const at = Date.parse('2026-01-15T12:00:00.000Z');
+  const writer = new SqliteAnalyticsRecorder(databasePath);
+  writer.submit(settlement({
+    invocationId: 'inv-old-identity',
+    rootSessionId: 'root-old-identity',
+    purpose: 'conversation',
+    settledAtMs: at,
+    inputTokens: 10,
+    outputTokens: 5,
+    reportedCostUsd: 0.01,
+  }));
+  closeFixtureWriter(writer);
+  const state = createInitialArchState();
+  const sessionPath = '/sessions/rebound.jsonl';
+  state.sessions.sessions.push({
+    path: sessionPath,
+    name: 'rebound',
+    cwd: '/sessions',
+    modifiedAt: new Date(at).toISOString(),
+    messageCount: 1,
+    sessionId: 'root-old-identity',
+  });
+  state.sessions.activeSessionPath = sessionPath;
+  state.sessions.openTabPaths = [sessionPath];
+  const readModel = new CanonicalAnalyticsReadModel({ databasePath, workerScript, execArgv });
+  const capture = new CanonicalAnalyticsCapture({
+    authority: 'canonical',
+    generationId: 'generation-historical',
+    workspaceId: 'workspace-historical',
+    buildId: 'test-build',
+    processGeneration: 'test-process',
+    sink: { submit: () => undefined },
+    detailSink: { submitDetail: () => undefined },
+    lifecycleSink: { bindPendingCreate: async () => undefined, deleteSession: async () => undefined },
+  });
+  const stats = new StatsService({
+    dataOutcomesRootPath: path.join(root, 'legacy'),
+    workspaceId: 'workspace-historical',
+    getArchState: () => state,
+    now: () => new Date(at),
+    analyticsCapture: capture,
+    analyticsReadModel: readModel,
+  });
+  try {
+    await stats.start();
+    assert.equal(stats.getSessionUsage(sessionPath).samples.length, 1);
+    state.sessions.sessions[0]!.sessionId = 'root-new-identity';
+    const rebound = stats.getSessionUsage(sessionPath);
+    assert.equal(rebound.authority, 'unknown');
+    assert.equal(rebound.samples.length, 0, 'old-root data must not appear under the replacement identity');
   } finally {
     await stats.shutdown();
     rmSync(root, { recursive: true, force: true });
@@ -1029,7 +1095,13 @@ test('canonical startup hydrates visible sessions within query capacity and isol
       await new Promise<void>((resolve) => setTimeout(resolve, 25));
     }
     assert.ok(requestedRootSessionIds.includes('root-fail'), 'lazy failed session read must be attempted');
-    assert.equal(stats.getSessionUsage(failedPath).authority, 'unknown');
+    let failedUsage = stats.getSessionUsage(failedPath);
+    for (let attempt = 0; attempt < 100 && failedUsage.refreshStatus !== 'error'; attempt += 1) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      failedUsage = stats.getSessionUsage(failedPath);
+    }
+    assert.equal(failedUsage.authority, 'unknown');
+    assert.equal(failedUsage.refreshStatus, 'error');
   } finally {
     await stats.shutdown();
     rmSync(root, { recursive: true, force: true });
@@ -1136,7 +1208,8 @@ test('canonical revision refresh keeps the active session current with a large c
   statsHolder.service = stats;
   const internals = stats as unknown as {
     refreshCanonicalSessionUsage(): Promise<void>;
-    markCanonicalRevisionDirty(nextRevision: string): void;
+    markCanonicalRevisionForRefresh(nextRevision: string): void;
+    canonicalSessionUsageRefresh: Promise<void> | null;
     canonicalSessionUsageByPath: Map<string, { revision: string }>;
   };
   try {
@@ -1151,15 +1224,22 @@ test('canonical revision refresh keeps the active session current with a large c
     state.sessions.openTabPaths = [activePath, ...[1, 2, 3].map((index) => `/sessions/catalog-${index}.jsonl`)];
     holdNextRead = true;
     revision = '2';
-    const refresh = internals.refreshCanonicalSessionUsage();
+    // Exercise the ordinary revision-refresh path, not a direct manual
+    // hydration. The prior complete root snapshot must remain visible while
+    // this replacement read is held.
+    internals.markCanonicalRevisionForRefresh(revision);
+    const refresh = internals.canonicalSessionUsageRefresh!;
     await readStarted;
     await new Promise<void>((resolve) => setImmediate(resolve));
     // Model an unrelated reducer event: ExtensionHost.dispatchArchEvent always
     // schedules a render after it applies the event, even while this read is
     // held. The session-cost projection must keep its last complete snapshot.
     render();
-    assert.equal(stats.getSessionUsage(activePath).authority, 'canonical');
-    assert.equal(stats.getSessionUsage(activePath).samples[0]?.reportedCostUsd, 0.25);
+    const heldUsage = stats.getSessionUsage(activePath);
+    assert.equal(heldUsage.authority, 'canonical');
+    assert.equal(heldUsage.freshness, 'stale');
+    assert.equal(heldUsage.refreshStatus, 'refreshing');
+    assert.equal(heldUsage.samples[0]?.reportedCostUsd, 0.25);
     assert.equal(
       renderedUsageAuthorities.length,
       renderCountAfterStart + 1,
@@ -1169,7 +1249,7 @@ test('canonical revision refresh keeps the active session current with a large c
     assert.equal(renderedUsageCosts.at(-1), 0.25);
     for (let nextRevision = 3; nextRevision <= 12; nextRevision += 1) {
       revision = String(nextRevision);
-      internals.markCanonicalRevisionDirty(revision);
+      internals.markCanonicalRevisionForRefresh(revision);
     }
     releaseHeldRead();
     await refresh;
@@ -1183,6 +1263,7 @@ test('canonical revision refresh keeps the active session current with a large c
       'an invalidated pass skips its remaining tabs and refreshes the active path first at the latest revision',
     );
     assert.equal(internals.canonicalSessionUsageByPath.get(activePath)?.revision, '12');
+    assert.equal(stats.getSessionUsage(activePath).freshness, 'fresh');
     assert.equal(stats.getSessionUsage('/sessions/catalog-319.jsonl').authority, 'unknown');
   } finally {
     releaseHeldRead();
@@ -1306,6 +1387,189 @@ test('canonical lazy hydration bounds distinct paths and reclaims epoch tokens',
       assert.equal(stats.getSessionUsage(sessionPath).authority, 'canonical');
     }
     assert.ok(internals.canonicalSessionPathEpochs.size <= 256, 'epoch tokens must follow bounded cache retention');
+  } finally {
+    await stats.shutdown();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a bounded displayed refresh converges with more cached paths than its targets and omitted paths recover on demand', async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'pie-canonical-omit-bound-'));
+  const state = createInitialArchState();
+  const activePath = '/sessions/omit-active.jsonl';
+  state.sessions.activeSessionPath = activePath;
+  state.sessions.openTabPaths = [activePath];
+  const sessionCount = 40;
+  for (let index = 0; index < sessionCount; index += 1) {
+    const sessionPath = index === 0 ? activePath : `/sessions/omit-catalog-${index}.jsonl`;
+    state.sessions.sessions.push({
+      path: sessionPath,
+      name: `omit-${index}`,
+      cwd: '/sessions',
+      modifiedAt: new Date(1_700_000_000_000 + index).toISOString(),
+      messageCount: 1,
+      sessionId: index === 0 ? 'root-omit-active' : `root-omit-catalog-${index}`,
+    });
+  }
+  let revision = '1';
+  const readRoots: string[] = [];
+  const readModel = {
+    getMaxConcurrentQueries: () => 4,
+    readRevision: async () => revision,
+    readScopedProviderSettlements: async (scope: { rootSessionId: string }) => {
+      const snapshotRevision = revision;
+      readRoots.push(scope.rootSessionId);
+      return {
+        revision: snapshotRevision,
+        settlements: [{
+          invocationId: `invocation-${scope.rootSessionId}`,
+          usage: {
+            inputTokens: 100,
+            outputTokens: 50,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            reasoningTokens: 0,
+            providerTotalTokens: 150,
+          },
+          reportedCostUsd: 0.25,
+          generationId: 'generation-omit-bound',
+          rootSessionId: scope.rootSessionId,
+          executionId: null,
+          branchId: null,
+          provider: 'fixture-provider',
+          model: 'fixture/model',
+          dispatchedModel: 'fixture/model',
+          reportedModel: 'fixture/model',
+          purpose: 'conversation',
+          outcome: 'succeeded',
+          settledAtMs: 1_700_000_000_000,
+          calculatedCostUsd: null,
+          calculatedCostComplete: false,
+          effectiveCostUsd: 0.25,
+          effectiveCostSource: 'reported',
+          effectiveCostCoverage: 'known',
+          revision: snapshotRevision,
+        }],
+        truncated: false,
+        scope: { kind: 'rootSession' as const, rootSessionId: scope.rootSessionId },
+      };
+    },
+  } as unknown as CanonicalAnalyticsReadModel;
+  const capture = new CanonicalAnalyticsCapture({
+    authority: 'canonical',
+    generationId: 'generation-omit-bound',
+    workspaceId: 'workspace-omit-bound',
+    buildId: 'test-build',
+    processGeneration: 'test-process',
+    sink: { submit: () => undefined },
+    detailSink: { submitDetail: () => undefined },
+    lifecycleSink: { bindPendingCreate: async () => undefined, deleteSession: async () => undefined },
+  });
+  const stats = new StatsService({
+    dataOutcomesRootPath: path.join(root, 'legacy'),
+    workspaceId: 'workspace-omit-bound',
+    getArchState: () => state,
+    analyticsCapture: capture,
+    analyticsReadModel: readModel,
+  });
+  const internals = stats as unknown as {
+    refreshCanonicalSessionUsage(): Promise<void>;
+    canonicalSessionUsageRefresh: Promise<void> | null;
+    canonicalSessionUsageRetryTimer: unknown;
+    canonicalSessionUsageByPath: Map<string, { snapshot: {
+      authority?: string;
+      freshness?: string;
+      refreshStatus?: string;
+    } }>;
+    analyticsRevisionRefresher?: { getStats(): { revision: string | null } };  };
+  const waitUntil = async (predicate: () => boolean, attempts = 600): Promise<void> => {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      if (predicate()) return;
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(predicate(), 'condition did not converge');
+  };
+  try {
+    await stats.start();
+    assert.deepEqual(readRoots, ['root-omit-active'], 'startup reads only the displayed surface');
+    // Hydrate the whole catalogue on demand so the cache holds more paths
+    // than the bounded displayed pass can ever re-read.
+    for (const catalogPath of state.sessions.sessions.map((session) => session.path)) {
+      if (catalogPath === activePath) continue;
+      await waitUntil(() => {
+        stats.getSessionUsage(catalogPath);
+        return stats.getSessionUsage(catalogPath).authority === 'canonical';
+      });
+    }
+    assert.equal(internals.canonicalSessionUsageByPath.size, sessionCount);
+    const afterHydrationReadCount = readRoots.length;
+    assert.equal(new Set(readRoots).size, sessionCount, 'every catalogue path is cached beyond the displayed bound');
+
+    // A peer commit advances the shared revision. Only the displayed surface
+    // is re-read; the omitted paths are retained at the older revision.
+    revision = '2';
+    await waitUntil(() => internals.analyticsRevisionRefresher?.getStats().revision === '2');
+    // The revision notification triggers the ordinary bounded pass; with
+    // instant fixture reads it may already have settled. Drain it, then run
+    // one explicit bounded pass over the retained cache for determinism.
+    await waitUntil(() => internals.canonicalSessionUsageRefresh === null);
+    await internals.refreshCanonicalSessionUsage();
+    assert.equal(stats.getSessionUsage(activePath).freshness, 'fresh');
+    assert.ok(
+      readRoots.slice(afterHydrationReadCount).every((root) => root === 'root-omit-active'),
+      'the bounded pass must not re-read omitted paths',
+    );
+
+    // The displayed surface is fully fresh, so the refresh must converge:
+    // no 250ms retry timer may survive for paths the pass omits.
+    assert.equal(internals.canonicalSessionUsageRetryTimer, undefined, 'a converged refresh must not schedule a retry');
+    const afterRefreshReadCount = readRoots.length;
+    await new Promise<void>((resolve) => setTimeout(resolve, 3 * 250 + 150));
+    assert.equal(readRoots.length, afterRefreshReadCount, 'a converged refresh must not keep re-reading on a timer');
+    assert.equal(internals.canonicalSessionUsageRetryTimer, undefined);
+
+    // The omitted paths stay retained (never eager re-read) and the retained
+    // entry carries revision-truthful stale metadata, inspected without a
+    // renderer read so no hydration is scheduled by the assertion itself.
+    const omittedPath = '/sessions/omit-catalog-7.jsonl';
+    const retainedEntry = internals.canonicalSessionUsageByPath.get(omittedPath);
+    assert.equal(retainedEntry?.snapshot.authority, 'canonical');
+    assert.equal(retainedEntry?.snapshot.freshness, 'stale', 'a retained entry at the older revision is explicitly stale');
+    assert.equal(retainedEntry?.snapshot.refreshStatus, 'refreshing');
+    const staleNeighbour = internals.canonicalSessionUsageByPath.get('/sessions/omit-catalog-8.jsonl');
+    assert.equal(staleNeighbour?.snapshot.freshness, 'stale', 'omitted paths stay retained without eager re-reads');
+    assert.ok(
+      !readRoots.slice(afterHydrationReadCount).includes('root-omit-catalog-8'),
+      'omitted paths remain lazy',
+    );
+
+    // The omitted path recovers with exactly one on-demand read.
+    const beforeDemand = readRoots.length;
+    const retained = stats.getSessionUsage(omittedPath);
+    assert.equal(retained.authority, 'canonical');
+    assert.equal(retained.freshness, 'stale');
+    assert.equal(retained.refreshStatus, 'refreshing');
+    await waitUntil(() => stats.getSessionUsage(omittedPath).freshness === 'fresh');
+    assert.equal(stats.getSessionUsage(omittedPath).samples[0]?.reportedCostUsd, 0.25);
+    assert.equal(
+      readRoots.slice(beforeDemand).filter((root) => root === 'root-omit-catalog-7').length,
+      1,
+      'exactly one on-demand read recovered the omitted path',
+    );
+
+    // A refresh with no revision change retains the recovered omitted entry
+    // as fresh with an idle status instead of a permanent stale badge.
+    const directRefreshCount = readRoots.length;
+    await internals.refreshCanonicalSessionUsage();
+    const retainedFresh = stats.getSessionUsage(omittedPath);
+    assert.equal(retainedFresh.freshness, 'fresh');
+    assert.equal(retainedFresh.refreshStatus, 'idle');
+    assert.equal(internals.canonicalSessionUsageRetryTimer, undefined);
+    assert.equal(
+      readRoots.slice(directRefreshCount).filter((root) => root === 'root-omit-catalog-7').length,
+      0,
+      'a fresh omitted entry must not be re-read by the bounded pass',
+    );
   } finally {
     await stats.shutdown();
     rmSync(root, { recursive: true, force: true });

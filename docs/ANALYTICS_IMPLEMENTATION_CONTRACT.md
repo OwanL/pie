@@ -132,7 +132,10 @@ The canonical store is queried read-only through the four logical commands (`sch
 `detail`, `storage`) exposed by the read helper and the `CanonicalAnalyticsReadModel` host adapter.
 The helper forks one disposable process per request with bounded rows/bytes, a caller-cancellable
 inactivity timeout, and explicit truncation and coverage metadata. A missing database or a schema
-mismatch is a hard stop — there is no legacy fallback in the read path. Field-level semantics,
+mismatch is a hard stop — there is no legacy fallback in the read path. Session-usage refreshes
+publish only completed coherent root reads and carry explicit fresh/stale/unknown plus idle/
+refreshing/error metadata. Catch-up is bounded under sustained revision changes; same-root stale
+reads remain visibly stale, while deletion/privacy/identity fences remain fail-closed. Field-level semantics,
 scopes, coverage, and example SQL belong to
 [`skills/query-analytics/SKILL.md`](../skills/query-analytics/SKILL.md).
 

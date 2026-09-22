@@ -277,6 +277,7 @@ export function sessionUsageSnapshotFromCanonicalSettlements(
     const endedAt = int64IsoTimestamp(settlement.settledAtMs);
     return {
       sourceId: settlement.invocationId,
+      canonicalInvocationId: settlement.invocationId,
       kind: canonicalUsageKind(settlement.purpose),
       model: settlement.model,
       provider: settlement.provider,

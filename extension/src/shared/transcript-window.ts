@@ -87,6 +87,7 @@ export function buildSlimSessionOpenedUnavailableFallback(
       ? { sessionId: boundedUtf8(original.sessionId, SLIM_IDENTITY_BYTES) }
       : {}),
     ...(original.identityFallback !== undefined ? { identityFallback: original.identityFallback } : {}),
+    ...(original.agentCreated === true ? { agentCreated: true } : {}),
     ...(original.modelId !== undefined
       ? { modelId: boundedUtf8(original.modelId, SLIM_SETTING_ID_BYTES) }
       : {}),
@@ -125,6 +126,7 @@ export function buildSlimSessionOpenedUnavailableFallback(
     ...(payload.selectionToken
       ? { selectionToken: boundedUtf8(payload.selectionToken, SLIM_SELECTION_BYTES) }
       : {}),
+    ...(payload.agentCreated === true ? { agentCreated: true } : {}),
     ...(payload.operationId
       ? { operationId: boundedUtf8(payload.operationId, SLIM_SELECTION_BYTES) }
       : {}),

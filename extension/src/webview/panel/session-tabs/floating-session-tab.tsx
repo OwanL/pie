@@ -5,6 +5,7 @@ import type { RefObject } from 'preact';
 
 import type { SessionSummary } from '../../../shared/protocol';
 import type { SessionTabDragState } from './types';
+import { AgentIcon } from './icons';
 import { getTabAvatarColor, getTabAvatarLabel } from './tab-avatar';
 
 export interface FloatingSessionTabProps {
@@ -47,6 +48,9 @@ export function FloatingSessionTab({
   const floatingRunning = runningPathSet.has(draggedPath);
   const floatingActive = activeSession?.path === draggedPath;
   const isGroupChip = !!draggedMembers && draggedMembers.length > 0;
+  const floatingAgentCreated = floatingSession?.agentCreated === true;
+  const groupIsAllAgentCreated = isGroupChip
+    && draggedMembers!.every((memberPath) => sessionByPath.get(memberPath)?.agentCreated === true);
 
   if (isGroupChip) {
     const tiles = buildGhostTiles(draggedMembers!);
@@ -82,6 +86,7 @@ export function FloatingSessionTab({
               ),
             )}
           </span>
+          {groupIsAllAgentCreated && <AgentIcon compact />}
         </div>
       </div>
     );
@@ -107,17 +112,21 @@ export function FloatingSessionTab({
       <span class="session-tab-shell" aria-hidden="true" />
       <div class="session-tab-main">
         {isPinned ? (
-          <span
-            class="session-tab-avatar"
-            style={{ background: getTabAvatarColor(draggedPath) }}
-            aria-hidden="true"
-          >
-            {getTabAvatarLabel(floatingLabel)}
-          </span>
+          <>
+            <span
+              class="session-tab-avatar"
+              style={{ background: getTabAvatarColor(draggedPath) }}
+              aria-hidden="true"
+            >
+              {getTabAvatarLabel(floatingLabel)}
+            </span>
+            {floatingAgentCreated && <AgentIcon compact />}
+          </>
         ) : (
           <>
             {floatingRunning && <span class="session-tab-running" aria-hidden="true" />}
             <span class="session-tab-label">{floatingLabel}</span>
+            {floatingAgentCreated && <AgentIcon />}
           </>
         )}
       </div>

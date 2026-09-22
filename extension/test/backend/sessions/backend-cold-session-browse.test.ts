@@ -6,8 +6,36 @@ import * as path from 'node:path';
 import test from 'node:test';
 
 import { BackendServer } from '../../../src/backend';
-import { SESSION_SETTINGS_DIR_ENV, readSystemPromptTogglesForSession } from '../../../src/backend/session-settings-store';
+import {
+  SESSION_SETTINGS_DIR_ENV,
+  readSystemPromptTogglesForSession,
+  writeSystemPromptTogglesForSession,
+} from '../../../src/backend/session-settings-store';
 import { SESSION_SNAPSHOT_MAX_LINE_BYTES, sessionSnapshotLineBytes } from '../../../src/shared/transcript-window';
+
+function inventory(systemPromptText = 'Complete cold prompt text.') {
+  return {
+    estimate: { tokens: 321, contextWindow: 1000 },
+    systemPrompts: [
+      {
+        source: 'provider', id: 'provider', title: 'Provider system prompt',
+        text: 'Provider details.', summary: 'mock', availability: 'unknown', toggleable: false,
+      },
+      {
+        source: 'harness', id: 'harness', title: 'Harness system prompt',
+        text: systemPromptText, summary: systemPromptText, availability: 'available',
+      },
+      {
+        source: 'user', id: 'skills', title: 'Skills',
+        text: 'Full skill catalog.', summary: 'debugging', availability: 'available',
+      },
+      {
+        source: 'harness', id: 'tools', title: 'Tools',
+        text: 'Full tool catalog and schema.', summary: 'read', availability: 'available',
+      },
+    ],
+  } as const;
+}
 
 function entry(id: string, role: 'user' | 'assistant', text: string) {
   return {
@@ -198,6 +226,158 @@ test('cold open/preload/page/detail projections remain runtime-free and pages re
   }
 });
 
+test('fresh isolated inventory supplies full prompts for historical and empty cold opens without promotion', async () => {
+  const h = await makeColdServer();
+  let discoveries = 0;
+  h.server.initialContextEstimateClient = {
+    discover: async () => {
+      discoveries += 1;
+      return inventory(`Complete cold prompt text ${discoveries}.`);
+    },
+  };
+  try {
+    const historical = await h.server.buildSessionOpenedPayload(h.sessionPath);
+    assert.equal(historical.runtimeReady, false);
+    assert.equal(historical.systemPrompts?.find((prompt: any) => prompt.id === 'harness')?.text, 'Complete cold prompt text 1.');
+    assert.equal(historical.initialContextEstimate, undefined, 'historical sessions do not expose an initial estimate');
+    assert.equal(h.server.workerRuntimeRouter, undefined, 'catalog discovery must not promote the durable session');
+
+    h.replaceBranch([]);
+    await fs.writeFile(h.sessionPath, `${JSON.stringify({ type: 'session', id: 'stable-session-id', version: 3, cwd: h.dir })}\n`);
+    h.server.coldSessionStore = undefined;
+    const empty = await h.server.buildSessionOpenedPayload(h.sessionPath);
+    assert.equal(empty.systemPrompts?.find((prompt: any) => prompt.id === 'harness')?.text, 'Complete cold prompt text 2.');
+    assert.deepEqual(empty.initialContextEstimate, { tokens: 321, contextWindow: 1000 });
+    assert.equal(discoveries, 2, 'each public cold open uses a fresh session-specific inventory');
+  } finally {
+    await fs.rm(h.dir, { recursive: true, force: true });
+  }
+});
+
+test('cold discovery failure publishes an authoritative catalog omission with its disabled-entry sidecar', async () => {
+  const h = await makeColdServer();
+  const previousSettingsDir = process.env[SESSION_SETTINGS_DIR_ENV];
+  process.env[SESSION_SETTINGS_DIR_ENV] = h.dir;
+  h.server.initialContextEstimateClient = { discover: async () => undefined };
+  try {
+    await writeSystemPromptTogglesForSession(h.sessionPath, ['skills']);
+    const opened = await h.server.buildSessionOpenedPayload(h.sessionPath);
+    assert.equal(opened.runtimeReady, false);
+    assert.equal(opened.systemPrompts, undefined);
+    assert.equal(opened.initialContextEstimate, undefined);
+    assert.deepEqual(opened.systemPromptDisabledEntries, ['skills']);
+    assert.equal(opened.snapshotUnavailable, undefined);
+  } finally {
+    if (previousSettingsDir === undefined) delete process.env[SESSION_SETTINGS_DIR_ENV];
+    else process.env[SESSION_SETTINGS_DIR_ENV] = previousSettingsDir;
+    await fs.rm(h.dir, { recursive: true, force: true });
+  }
+});
+
+test('cold discovery retries when model settings and prompt toggles change before its final snapshot', async () => {
+  const h = await makeColdServer();
+  const previousSettingsDir = process.env[SESSION_SETTINGS_DIR_ENV];
+  process.env[SESSION_SETTINGS_DIR_ENV] = h.dir;
+  let markFirstDiscovery!: () => void;
+  let releaseFirstDiscovery!: () => void;
+  const firstDiscoveryStarted = new Promise<void>((resolve) => { markFirstDiscovery = resolve; });
+  const firstDiscoveryBlocked = new Promise<void>((resolve) => { releaseFirstDiscovery = resolve; });
+  const discoveredModels: string[] = [];
+  h.server.initialContextEstimateClient = {
+    discover: async ({ model }: { model: { id: string } }) => {
+      discoveredModels.push(model.id);
+      if (discoveredModels.length === 1) {
+        markFirstDiscovery();
+        await firstDiscoveryBlocked;
+      }
+      return inventory(`Prompt for ${model.id}.`);
+    },
+  };
+  try {
+    const opening = h.server.buildSessionOpenedPayload(h.sessionPath);
+    await firstDiscoveryStarted;
+    h.server.coldSessionStore.setModelSettings(h.sessionPath, {
+      model: { provider: 'mock', modelId: 'model-b' },
+    });
+    await writeSystemPromptTogglesForSession(h.sessionPath, ['skills']);
+    releaseFirstDiscovery();
+
+    const opened = await opening;
+    assert.deepEqual(discoveredModels, ['model-a', 'model-b']);
+    assert.equal(opened.session.modelId, 'model-b');
+    assert.equal(
+      opened.systemPrompts?.find((prompt: any) => prompt.id === 'harness')?.text,
+      'Prompt for model-b.',
+    );
+    assert.equal(opened.systemPrompts?.find((prompt: any) => prompt.id === 'skills')?.disabled, true);
+    assert.deepEqual(opened.systemPromptDisabledEntries, ['skills']);
+  } finally {
+    releaseFirstDiscovery();
+    if (previousSettingsDir === undefined) delete process.env[SESSION_SETTINGS_DIR_ENV];
+    else process.env[SESSION_SETTINGS_DIR_ENV] = previousSettingsDir;
+    await fs.rm(h.dir, { recursive: true, force: true });
+  }
+});
+
+test('cold discovery drops the empty-session estimate when history appears before publication', async () => {
+  const h = await makeColdServer();
+  h.replaceBranch([]);
+  await fs.writeFile(
+    h.sessionPath,
+    `${JSON.stringify({ type: 'session', id: 'stable-session-id', version: 3, cwd: h.dir })}\n`,
+  );
+  h.server.coldSessionStore = undefined;
+  let markFirstDiscovery!: () => void;
+  let releaseFirstDiscovery!: () => void;
+  const firstDiscoveryStarted = new Promise<void>((resolve) => { markFirstDiscovery = resolve; });
+  const firstDiscoveryBlocked = new Promise<void>((resolve) => { releaseFirstDiscovery = resolve; });
+  let discoveries = 0;
+  h.server.initialContextEstimateClient = {
+    discover: async () => {
+      discoveries += 1;
+      if (discoveries === 1) {
+        markFirstDiscovery();
+        await firstDiscoveryBlocked;
+      }
+      return inventory();
+    },
+  };
+  try {
+    const opening = h.server.buildSessionOpenedPayload(h.sessionPath);
+    await firstDiscoveryStarted;
+    await h.append(entry('user-during-discovery', 'user', 'new history'));
+    releaseFirstDiscovery();
+
+    const opened = await opening;
+    assert.equal(discoveries, 2, 'history eligibility changes are fenced and retried');
+    assert.equal(opened.transcriptWindow.hasUserMessages, true);
+    assert.equal(opened.initialContextEstimate, undefined);
+    assert.equal(opened.systemPrompts?.find((prompt: any) => prompt.id === 'harness')?.text, 'Complete cold prompt text.');
+  } finally {
+    releaseFirstDiscovery();
+    await fs.rm(h.dir, { recursive: true, force: true });
+  }
+});
+
+test('cold reopen hydrates persisted prompt exclusions into its discovered catalog', async () => {
+  const h = await makeColdServer();
+  const previousSettingsDir = process.env[SESSION_SETTINGS_DIR_ENV];
+  process.env[SESSION_SETTINGS_DIR_ENV] = h.dir;
+  h.server.initialContextEstimateClient = { discover: async () => inventory() };
+  try {
+    await writeSystemPromptTogglesForSession(h.sessionPath, ['skills']);
+    const reopened = await h.server.buildSessionOpenedPayload(h.sessionPath);
+    const byId = new Map(reopened.systemPrompts?.map((prompt: any) => [prompt.id, prompt]) ?? []);
+    assert.equal((byId.get('skills') as any)?.disabled, true);
+    assert.notEqual((byId.get('tools') as any)?.disabled, true);
+    assert.deepEqual(reopened.systemPromptDisabledEntries, ['skills']);
+  } finally {
+    if (previousSettingsDir === undefined) delete process.env[SESSION_SETTINGS_DIR_ENV];
+    else process.env[SESSION_SETTINGS_DIR_ENV] = previousSettingsDir;
+    await fs.rm(h.dir, { recursive: true, force: true });
+  }
+});
+
 test('cold sessions inherit configured reasoning until the branch records an explicit choice', async () => {
   const h = await makeColdServer({ contextThinkingLevel: 'off' });
   try {
@@ -286,6 +466,7 @@ test('coordinator-routed cold system-prompt toggles persist and confirm without 
   process.env[SESSION_SETTINGS_DIR_ENV] = h.dir;
   try {
     const emitted: Array<{ event: string; payload: any }> = [];
+    h.server.initialContextEstimateClient = { discover: async () => inventory() };
     h.server.emit = (event: string, payload: any) => { emitted.push({ event, payload }); };
 
     const result = await h.server.handleRequest({
@@ -300,13 +481,13 @@ test('coordinator-routed cold system-prompt toggles persist and confirm without 
     assert.deepEqual(result, { ok: true });
     assert.equal(h.server.workerRuntimeRouter, undefined, 'a config-only write must not promote a runtime');
     assert.deepEqual(await readSystemPromptTogglesForSession(h.sessionPath), ['skills', 'tools']);
-    assert.deepEqual(emitted.at(-1), {
-      event: 'session.opened',
-      payload: {
-        ...emitted.at(-1)!.payload,
-        systemPromptDisabledEntries: ['skills', 'tools'],
-      },
-    });
+    const refreshed = emitted.at(-1);
+    assert.equal(refreshed?.event, 'session.opened');
+    assert.deepEqual(refreshed?.payload.systemPromptDisabledEntries, ['skills', 'tools']);
+    assert.equal(refreshed?.payload.systemPrompts.find((prompt: any) => prompt.id === 'skills')?.disabled, true);
+    assert.equal(refreshed?.payload.systemPrompts.find((prompt: any) => prompt.id === 'tools')?.disabled, true);
+    assert.equal(refreshed?.payload.systemPrompts.find((prompt: any) => prompt.id === 'harness')?.disabled, undefined);
+    assert.equal(refreshed?.payload.systemPrompts.find((prompt: any) => prompt.id === 'harness')?.text, 'Complete cold prompt text.');
   } finally {
     if (previousSettingsDir === undefined) delete process.env[SESSION_SETTINGS_DIR_ENV];
     else process.env[SESSION_SETTINGS_DIR_ENV] = previousSettingsDir;

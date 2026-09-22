@@ -46,9 +46,9 @@ export interface TokenRateServiceDeps {
   /** Called when the active session's displayed rate state changed, so the
    * host can post a fresh snapshot to the webview. */
   onActiveRateChanged: () => void;
-  /** Called after every measurement tick. Aggregate analytics use this cheap
-   * 200 ms signal to refresh live fields without polling history or backend
-   * metrics at the same cadence. */
+  /** Called after every measurement tick. Aggregate live token/cost fields use
+   * this cheap 200 ms signal without polling history or backend metrics at the
+   * same cadence. */
   onRatesTick?: () => void;
 }
 
@@ -172,8 +172,7 @@ export class TokenRateService {
         sessionPath === activePath
         && (prev?.label !== next.label
           || prev?.state !== next.state
-          || prev?.tooltip !== next.tooltip
-          || prev?.terminalOutputTokensEstimate !== next.terminalOutputTokensEstimate)
+          || prev?.tooltip !== next.tooltip)
       ) {
         activeChanged = true;
       }
@@ -202,8 +201,7 @@ export class TokenRateService {
       this.expiredRateTerminalBySession.set(path, terminalSignature(transcript));
       if (path === activePath
         && (current.label !== expired.label
-          || current.tooltip !== expired.tooltip
-          || current.terminalOutputTokensEstimate !== expired.terminalOutputTokensEstimate)) {
+          || current.tooltip !== expired.tooltip)) {
         activeChanged = true;
       }
     }
@@ -244,8 +242,7 @@ export class TokenRateService {
       this.expiredRateTerminalBySession.delete(path);
       const idleState = computeIdleDisplayState(transcript);
       if (!current || current.label !== idleState.label || current.tooltip !== idleState.tooltip
-        || current.endToEndRate !== idleState.endToEndRate
-        || current.terminalOutputTokensEstimate !== idleState.terminalOutputTokensEstimate) {
+        || current.endToEndRate !== idleState.endToEndRate) {
         this.statesBySession.set(path, idleState);
         if (path === activePath && (current !== undefined || idleState !== IDLE_STATE)) activeChanged = true;
       }
@@ -263,28 +260,15 @@ export class TokenRateService {
       this.deps.onActiveRateChanged();
     }
 
-    // Aggregate analytics only need a fast refresh when a perceptible live
-    // input changed. Avoid rebuilding chart series five times per second while
-    // idle or while a running session is stalled at an unchanged tool state.
-    // A terminal no-usage estimate is aggregate-relevant on any open tab — not
-    // only running ones — because `RollingAggregateRate` counts it for open and
-    // just-finished runs alike (a burst that completed between ticks). It is a
-    // deterministic function of the transcript, so listing finished open tabs
-    // here cannot churn: the entry only changes when the terminal changes.
+    // Aggregate live token/cost projections only need a fast refresh when
+    // running-session output estimates change, or when open/running membership
+    // changes. Avoid rebuilding chart series while a session is stalled.
     const aggregateSignature = [
       `tabs=${[...openTabs].sort().join(',')}`,
       ...[...new Set(running)].sort().map((path) => {
         const measured = this.statesBySession.get(path);
-        return `${path}:${measured?.state ?? ''}:${measured?.rate ?? ''}:${measured?.endToEndRate ?? ''}:${measured?.liveOutputTokens ?? ''}:${measured?.terminalOutputTokensEstimate ?? ''}`;
+        return `${path}:${measured?.state ?? ''}:${measured?.liveOutputTokens ?? ''}`;
       }),
-      ...[...openTabs]
-        .filter((path) => !runningSet.has(path))
-        .sort()
-        .map((path) => {
-          const estimate = this.statesBySession.get(path)?.terminalOutputTokensEstimate;
-          return estimate !== undefined ? `${path}:terminal=${estimate}` : '';
-        })
-        .filter((entry) => entry !== ''),
     ].join('|');
     if (aggregateSignature !== this.lastAggregateSignature) {
       this.lastAggregateSignature = aggregateSignature;

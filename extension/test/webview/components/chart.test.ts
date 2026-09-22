@@ -44,15 +44,6 @@ test('StackedAreaChart renders solid stacked paths for cumulative points', () =>
   assert.ok(axis);
 });
 
-test('StackedAreaChart renders spaced bars in rate mode', () => {
-  render(
-    h(StackedAreaChart, { points, mode: 'rate', formatY: (n) => String(n), formatX: (ms) => String(ms) }),
-    container,
-  );
-  const rects = container.querySelectorAll('rect');
-  assert.ok(rects.length >= 3, `expected bars, got ${rects.length}`);
-});
-
 test('StackedAreaChart exposes all provider-qualified hover details in an SR table', () => {
   render(
     h(StackedAreaChart, { points, mode: 'cumulative', formatY: (n) => String(n), formatX: (ms) => String(ms) }),
@@ -66,23 +57,6 @@ test('StackedAreaChart exposes all provider-qualified hover details in an SR tab
   assert.match(table!.textContent ?? '', /claude \(anthropic\)/);
   assert.equal(table!.querySelectorAll('[tabindex]').length, 0, 'chart samples are not tab stops');
   assert.equal(table!.querySelectorAll('tbody tr').length, 10, 'provider and model rows cover every point');
-});
-
-test('StackedAreaChart bounds long-series accessibility tables with representative points', () => {
-  const longSeries: AggregateSeriesPoint[] = Array.from({ length: 180 }, (_, index) => ({
-    ms: index,
-    byProvider: [{ key: 'openai', value: index }],
-    byModel: [{ key: 'gpt', provider: 'openai', model: 'gpt', value: index }],
-  }));
-  render(
-    h(StackedAreaChart, { points: longSeries, mode: 'rate', formatY: String, formatX: String }),
-    container,
-  );
-
-  const table = container.querySelector('.chart-a11y-table')!;
-  assert.match(table.querySelector('caption')?.textContent ?? '', /12 representative points from 180/);
-  assert.equal(table.querySelectorAll('tbody tr').length, 24, '12 samples × provider and model rows');
-  assert.match(table.textContent ?? '', /179/, 'the final sample remains represented');
 });
 
 test('StackedAreaChart shows empty state when there is no data', () => {

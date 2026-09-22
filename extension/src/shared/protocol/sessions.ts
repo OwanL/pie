@@ -45,6 +45,9 @@ export interface SessionSummary {
    *  path hash only when the header is missing or malformed. */
   sessionId?: string;
   identityFallback?: boolean;
+  /** Explicit durable provenance for sessions created through the worker-local
+   *  agent `session_control create` flow. This is not inferred from lineage. */
+  agentCreated?: boolean;
 }
 
 export type TranscriptPageDirection = 'older' | 'newer' | 'latest';
@@ -205,6 +208,10 @@ export interface SessionOpenedPayload {
    * selected/open tab from this released source to `session.path`; this is not
    * a create/duplicate operation identity or a reusable selection token. */
   replacesSessionPath?: string;
+  /** True only on the transport publication caused by an agent session
+   * creation. This is a one-event lifecycle hint; do not use the durable
+   * `session.agentCreated` provenance for tab selection or reopening. */
+  agentCreated?: boolean;
   /** Host-generated lifecycle-operation identity (additive optional). Create,
    * duplicate, and open publications echo it so response/event order and a
    * dropped local acknowledgement reconcile against one reducer operation. */
@@ -221,18 +228,25 @@ export interface SessionOpenedPayload {
    *  contextUsage, modelSettings, availableModels, session summary). Set only
    *  in response to a `session.open` whose `transcript` param was `'skip'`. */
   transcriptSkipped?: boolean;
+  /** Complete prompt catalog discovered from a hot-equivalent isolated runtime.
+   * Cold public opens carry this without promoting the durable session; hot
+   * snapshots build it from their owning runtime. An ordinary `runtimeReady:
+   * false` snapshot that omits this field authoritatively reports discovery
+   * failure and clears an older host catalog. `snapshotUnavailable` is the
+   * explicit slim omission whose existing-field semantics remain unchanged. */
   systemPrompts?: SystemPromptEntry[];
-  /** Cold-session confirmation for a system-prompt toggle write. A cold
-   * coordinator has no runtime prompt catalog to rebuild, so it returns the
-   * authoritative disabled-id set and the host applies it to the prompt entries
-   * it already owns. A later hot snapshot replaces those entries normally. */
+  /** Authoritative disabled-id set persisted for a cold session. It accompanies
+   * both successful discovery and its authoritative failure result. The slim
+   * snapshot fallback may retain it as a bounded toggle confirmation while
+   * omitting the prompt catalog itself. */
   systemPromptDisabledEntries?: string[];
   analyticsFactors?: SessionAnalyticsFactors;
   modelSettings?: ModelSettings;
   availableModels?: ModelInfo[];
   contextUsage?: ContextWindowUsage;
   /** Fresh all-configured initial catalog estimate for an empty cold session.
-   * Omitted on helper failure/timeout and on every hot runtime snapshot. */
+   * It is produced by the same isolated discovery as `systemPrompts`, and is
+   * omitted on helper failure/timeout and on every hot runtime snapshot. */
   initialContextEstimate?: InitialContextEstimate;
   /** Complete durable billable usage for the branch, independent of the loaded transcript window. */
   sessionUsage?: SessionUsageSnapshot;
@@ -608,6 +622,10 @@ export interface AuxiliaryLlmUsagePayload {
   sessionPath: string;
   kind: 'assistant_message' | 'history_compaction' | 'branch_summary' | 'session_title' | 'other';
   sourceId: string;
+  /** Runtime assistant message id that was streaming when this provider
+   * response settled. It is distinct from the canonical invocation identity;
+   * the host uses it only for the provisional live-cost handoff. */
+  provisionalMessageId?: string;
   occurredAt: string;
   modelId?: string;
   provider?: string;
