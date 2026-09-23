@@ -312,10 +312,11 @@ test("runSingleAgent never lets a same-id registry collision override the runtim
 // -----------------------------------------------------------------------------
 // 2. Per-turn throughput samples
 // -----------------------------------------------------------------------------
-test("runSingleAgent produces per-turn throughput samples from terminal assistant usage and timestamps", async () => {
+test("runSingleAgent measures throughput through terminal observation rather than the reused SDK timestamp", async (t) => {
 	const registry = makeModelRegistry([{ id: "fast-model", provider: "fast-provider" }]);
 	const start = 1_000_000;
 	const end = 1_000_123;
+	t.mock.method(Date, "now", () => end);
 	const { sdk } = createFakeSdk([
 		{
 			type: "message_start",
@@ -329,7 +330,7 @@ test("runSingleAgent produces per-turn throughput samples from terminal assistan
 				usage: { input: 4, output: 16, cost: { total: 0.0001 } },
 				model: "fast-model",
 				stopReason: "completed",
-				timestamp: end,
+				timestamp: start,
 			},
 		},
 	]);

@@ -1351,6 +1351,7 @@ test('message_end emits finished and aborted payloads and clears the current mes
       type: 'message_end',
       message: {
         role: 'assistant',
+        timestamp: Date.UTC(2026, 0, 1, 0, 0, 1),
         content: [
           { type: 'thinking', thinking: 'Trace' },
           { type: 'text', text: 'Done' },
@@ -1375,6 +1376,7 @@ test('message_end emits finished and aborted payloads and clears the current mes
       sourceId: (emitted[0]?.payload as { sourceId: string }).sourceId,
       provisionalMessageId: 'req-3:1',
       occurredAt: '2026-01-01T00:00:05.000Z',
+      startedAt: '2026-01-01T00:00:01.000Z',
       modelId: 'claude-test',
       inputTokens: 2,
       outputTokens: 3,
@@ -1399,6 +1401,79 @@ test('message_end emits finished and aborted payloads and clears the current mes
       reason: 'The session stopped unexpectedly before the assistant finished responding.',
     });
     assert.equal(getContextUsageChangedCount(), 1);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test('message_end settlement retains ordering and explicit incomplete usage channels', () => {
+  const { deps, emitted } = createDeps();
+  const originalNow = Date.now;
+  Date.now = () => Date.UTC(2026, 0, 1, 0, 0, 5);
+  try {
+    const context = createContext({
+      activeRequest: {
+        id: 'req-incomplete-usage',
+        messageIndex: 1,
+        currentMessageId: 'req-incomplete-usage:1',
+        currentMessageStartedAt: Date.UTC(2026, 0, 1, 0, 0, 2),
+        aborted: false,
+      },
+    });
+    handleSdkSessionEvent(deps, context, {
+      type: 'message_end',
+      message: {
+        role: 'assistant',
+        timestamp: '2026-01-01T00:00:01.000Z',
+        usage: { input: 1, output: 2 },
+      },
+    });
+    assert.deepEqual(emitted.map((entry) => entry.event), ['auxiliary-llm.usage', 'message.finished']);
+    const usage = emitted[0]?.payload as {
+      occurredAt: string;
+      startedAt?: string;
+      tokenChannelsKnown?: boolean;
+      tokenChannelPresence?: { input: boolean; output: boolean; cacheRead: boolean; cacheWrite: boolean };
+      cacheReadTokens?: number;
+      cacheWriteTokens?: number;
+    };
+    assert.equal(usage.occurredAt, '2026-01-01T00:00:05.000Z');
+    assert.equal(usage.startedAt, '2026-01-01T00:00:01.000Z');
+    assert.equal(usage.tokenChannelsKnown, false);
+    assert.deepEqual(usage.tokenChannelPresence, {
+      input: true, output: true, cacheRead: false, cacheWrite: false,
+    });
+    assert.equal(usage.cacheReadTokens, undefined);
+    assert.equal(usage.cacheWriteTokens, undefined);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test('message_end falls back to the observed message start when the SDK has no creation timestamp', () => {
+  const { deps, emitted } = createDeps();
+  const originalNow = Date.now;
+  Date.now = () => Date.UTC(2026, 0, 1, 0, 0, 5);
+  try {
+    const context = createContext({
+      activeRequest: {
+        id: 'req-observed-start',
+        messageIndex: 1,
+        currentMessageId: 'req-observed-start:1',
+        currentMessageStartedAt: Date.UTC(2026, 0, 1, 0, 0, 2),
+        aborted: false,
+      },
+    });
+    handleSdkSessionEvent(deps, context, {
+      type: 'message_end',
+      message: { role: 'assistant', usage: { input: 1, output: 1 } },
+    });
+    const usage = emitted.find((entry) => entry.event === 'auxiliary-llm.usage')?.payload as {
+      occurredAt: string;
+      startedAt?: string;
+    };
+    assert.equal(usage.occurredAt, '2026-01-01T00:00:05.000Z');
+    assert.equal(usage.startedAt, '2026-01-01T00:00:02.000Z');
   } finally {
     Date.now = originalNow;
   }

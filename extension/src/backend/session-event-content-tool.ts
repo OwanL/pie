@@ -66,6 +66,15 @@ export const TOOL_TERMINAL_PAYLOAD_MAX_BYTES = Math.min(
 const PROVIDER_TOOL_PROTOCOL_LEAK_BLOCK_LIMIT = 4;
 const PROVIDER_TOOL_PROTOCOL_LEAK_TAIL_CHARS = 64;
 
+function observedTimestampIso(value: unknown): string | undefined {
+  const timestamp = typeof value === 'number'
+    ? value
+    : typeof value === 'string' ? Date.parse(value) : Number.NaN;
+  if (!Number.isFinite(timestamp) || timestamp < 0) return undefined;
+  const date = new Date(timestamp);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : undefined;
+}
+
 interface ProviderToolProtocolLeakState {
   tail: string;
   rawToolCallContainers: number;
@@ -1431,9 +1440,14 @@ function handleContentToolSessionEvent(
       context.activeRequest.lastAssistantMessageId = messageId;
       context.activeRequest.currentMessageId = undefined;
 
-      const durationMs = context.activeRequest.currentMessageStartedAt !== undefined
-        ? Date.now() - context.activeRequest.currentMessageStartedAt
+      const messageEndedAt = Date.now();
+      const messageStartedAt = context.activeRequest.currentMessageStartedAt;
+      const durationMs = messageStartedAt !== undefined
+        ? messageEndedAt - messageStartedAt
         : undefined;
+      const startedAt = observedTimestampIso(event.message.timestamp)
+        ?? observedTimestampIso(messageStartedAt);
+      const occurredAt = new Date(messageEndedAt).toISOString();
       // Turn-latency breakdown, anchored on turnBoundaryAt (last tool end, or
       // prompt-send for the first turn) and turnStartedAt (SDK `turn_start`).
       // The provider boundary is the first content delta (providerFirstDeltaAt).
@@ -1516,7 +1530,8 @@ function handleContentToolSessionEvent(
         kind: 'assistant_message',
         sourceId: `assistant:${event.sessionEntryId ?? message.id}`,
         provisionalMessageId: message.id,
-        occurredAt: message.createdAt,
+        occurredAt,
+        ...(startedAt ? { startedAt } : {}),
         ...(message.modelId ? { modelId: message.modelId } : {}),
         ...(message.provider ? { provider: message.provider } : {}),
         ...(context.activeRequest.operationId ? { parentOperationId: context.activeRequest.operationId } : {}),

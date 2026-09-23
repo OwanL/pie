@@ -57,6 +57,7 @@ test('meters native/custom history compaction and preserves provider-qualified i
       kind: 'history_compaction',
       sourceId: 'history_compaction:1000:1',
       occurredAt: '1970-01-01T00:00:01.125Z',
+      startedAt: '1970-01-01T00:00:01.000Z',
       modelId: 'gpt-5.6-sol',
       provider: 'openai-codex',
       inputTokens: 10,
@@ -69,6 +70,23 @@ test('meters native/custom history compaction and preserves provider-qualified i
       durationMs: 125,
     },
   }]);
+});
+
+test('success emit carries the measured startedAt from the injected now endpoints', async () => {
+  const session = makeSession();
+  const payloads: Array<{ startedAt?: string; occurredAt: string; durationMs?: number }> = [];
+  let now = 4_200_000;
+  installAuxiliaryLlmMeter(session, '/session.jsonl', (_event, payload) => payloads.push(payload), () => now);
+
+  session._branchSummaryAbortController = {};
+  const stream = await session.agent.streamFn({ id: 'model-a', provider: 'provider-a' });
+  now = 4_200_250;
+  await stream.result();
+
+  assert.equal(payloads.length, 1);
+  assert.equal(payloads[0]?.startedAt, new Date(4_200_000).toISOString());
+  assert.equal(payloads[0]?.occurredAt, new Date(4_200_250).toISOString());
+  assert.equal(payloads[0]?.durationMs, 250);
 });
 
 test('does not promote the SDK catalog total to provider-reported cost', async () => {

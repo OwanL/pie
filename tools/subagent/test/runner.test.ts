@@ -4,6 +4,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import * as path from "node:path";
 import { runSingleAgent, subagentRuntime } from "../runner.js";
+import { captureSubagentTerminalResult } from "../src/analytics-capture.js";
+import { parseModelPricing, resolveApplicablePricing } from "../../../shared/pricing-core.js";
 import type { AgentConfig } from "../agents.js";
 
 function makeAgent(overrides: Partial<AgentConfig> = {}): AgentConfig {
@@ -412,51 +414,115 @@ test("runSingleAgent keeps SDK catalog estimates out of provider-reported cost",
 	assert.equal(result.providerInvocations?.[0]?.usage?.reportedCostUsd, undefined);
 });
 
-test("provider invocation timestamps omit synthesized endpoints", async () => {
-	const { sdk } = createFakeSdk({
-		onPrompt: async (emit) => {
-			emit({ type: "message_start", message: { role: "assistant" } });
-			emit({
-				type: "message_end",
-				message: {
-					role: "assistant",
-					content: [{ type: "text", text: "untimed" }],
-					usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 },
-					model: "session-model",
-					stopReason: "completed",
-				},
-			});
-		},
-	});
-
-	const result = await runFakeAgent(sdk);
+test("provider invocation keeps missing SDK start unknown and observes terminal clock", async () => {
+	const terminalObservedAt = 1_800_000_000_000;
+	const originalDateNow = Date.now;
+	Date.now = () => terminalObservedAt;
+	let result: Awaited<ReturnType<typeof runFakeAgent>>;
+	try {
+		const { sdk } = createFakeSdk({
+			onPrompt: async (emit) => {
+				emit({ type: "message_start", message: { role: "assistant" } });
+				emit({
+					type: "message_end",
+					message: {
+						role: "assistant",
+						content: [{ type: "text", text: "untimed" }],
+						usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 },
+						model: "session-model",
+						stopReason: "completed",
+					},
+				});
+			},
+		});
+		result = await runFakeAgent(sdk);
+	} finally {
+		Date.now = originalDateNow;
+	}
 	assert.equal(result.providerInvocations?.[0]?.startedAt, undefined);
-	assert.equal(result.providerInvocations?.[0]?.completedAt, undefined);
+	assert.equal(result.providerInvocations?.[0]?.completedAt, terminalObservedAt);
 });
 
-test("provider invocation timestamps preserve observed SDK endpoints", async () => {
-	const startedAt = 1_800_000_000_000;
-	const completedAt = startedAt + 1_000;
-	const { sdk } = createFakeSdk({
-		onPrompt: async (emit) => {
-			emit({ type: "message_start", message: { role: "assistant", timestamp: startedAt } });
-			emit({
-				type: "message_end",
-				message: {
-					role: "assistant",
-					content: [{ type: "text", text: "timed" }],
-					usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 },
-					model: "session-model",
-					timestamp: completedAt,
-					stopReason: "completed",
-				},
-			});
+test("provider invocation completion uses message_end wall time for scheduled pricing", async () => {
+	// The SDK stamps its assistant message when the request starts and reuses
+	// that timestamp at message_end. This interval crosses the schedule boundary.
+	const startedAt = Date.UTC(2026, 8, 24, 11, 59, 59, 500);
+	const terminalObservedAt = startedAt + 1_000;
+	const pricing = parseModelPricing({
+		input: 0.1,
+		output: 0.2,
+		cacheRead: 0.01,
+		cacheWrite: 0,
+		peak: {
+			weekdaysUtc: [4],
+			startMinutesUtc: 12 * 60,
+			endMinutesUtc: 13 * 60,
+			override: { input: 0.3, output: 0.4, cacheRead: 0.02, cacheWrite: 0 },
 		},
 	});
+	assert.ok(pricing);
 
-	const result = await runFakeAgent(sdk);
+	let wallClock = startedAt;
+	const originalDateNow = Date.now;
+	Date.now = () => wallClock;
+	let result: Awaited<ReturnType<typeof runFakeAgent>>;
+	try {
+		const { sdk } = createFakeSdk({
+			onPrompt: async (emit) => {
+				emit({ type: "message_start", message: { role: "assistant", timestamp: startedAt } });
+				wallClock = terminalObservedAt;
+				emit({
+					type: "message_end",
+					message: {
+						role: "assistant",
+						content: [{ type: "text", text: "timed" }],
+						usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 },
+						model: "session-model",
+						// Deliberately the same creation timestamp as message_start.
+						timestamp: startedAt,
+						stopReason: "completed",
+					},
+				});
+			},
+		});
+		result = await runFakeAgent(sdk);
+	} finally {
+		Date.now = originalDateNow;
+	}
+
 	assert.equal(result.providerInvocations?.[0]?.startedAt, startedAt);
-	assert.equal(result.providerInvocations?.[0]?.completedAt, completedAt);
+	assert.equal(result.providerInvocations?.[0]?.completedAt, terminalObservedAt);
+	assert.equal(result.turnThroughputSamples?.[0]?.endedAt, new Date(terminalObservedAt).toISOString());
+	assert.equal(result.turnThroughputSamples?.[0]?.generationDurationMs, terminalObservedAt - startedAt);
+
+	const observations: any[] = [];
+	const priceRequests: any[] = [];
+	assert.equal(captureSubagentTerminalResult(result, {
+		generationId: "runner-timestamp-regression",
+		captureSubject: { kind: "session", rootSessionId: "runner-timestamp-regression" },
+		sink: { submitDetail: () => undefined },
+		factSink: { submit: (observation) => observations.push(observation) },
+		priceSettlement: (request) => {
+			priceRequests.push(request);
+			if (request.startedAtMs === undefined || request.endedAtMs === undefined) return undefined;
+			const applicable = resolveApplicablePricing(pricing, {
+				interval: { startedAtMs: request.startedAtMs, endedAtMs: request.endedAtMs },
+				cacheReadTokens: request.usage.cacheRead,
+			});
+			return applicable ? {
+				inputUsdPerMillionTokens: applicable.input,
+				outputUsdPerMillionTokens: applicable.output,
+				cacheReadUsdPerMillionTokens: applicable.cacheRead,
+				cacheWriteUsdPerMillionTokens: applicable.cacheWrite,
+			} : undefined;
+		},
+	}, "parent-tool"), "submitted");
+	assert.deepEqual(priceRequests.map(({ startedAtMs, endedAtMs }) => ({ startedAtMs, endedAtMs })), [
+		{ startedAtMs: startedAt, endedAtMs: terminalObservedAt },
+	]);
+	const settlement = observations.find((observation) => observation.observationKind === "providerSettlement");
+	assert.equal(settlement?.fields?.pricing, undefined, "a schedule-boundary crossing remains explicitly unpriced");
+	assert.equal(settlement?.fields?.endedAtMs, terminalObservedAt);
 });
 
 test("runSingleAgent preserves incomplete provider token channels as unknown", async () => {

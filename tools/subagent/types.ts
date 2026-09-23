@@ -56,7 +56,7 @@ export interface UsageStats {
 }
 
 export interface SubagentTurnThroughputSample {
-	/** ISO timestamp when the assistant turn ended (`message_end`). */
+	/** ISO timestamp of the runner's local wall-clock observation of `message_end`. */
 	endedAt: string;
 	/** Output tokens reported for this turn. */
 	outputTokens: number;
@@ -274,9 +274,9 @@ export interface SubagentProviderInvocationRecord {
 	provider?: string;
 	model?: string;
 	usage?: Partial<Pick<UsageStats, "input" | "output" | "cacheRead" | "cacheWrite" | "cost" | "reportedCostUsd">>;
-	/** Original observed endpoint; absent when the SDK did not provide it. */
+	/** SDK assistant-message timestamp observed at `message_start`; absent when not provided. */
 	startedAt?: number;
-	/** Original observed endpoint; absent when the SDK did not provide it. */
+	/** Runner's local wall-clock observation of `message_end`, not the SDK message timestamp. */
 	completedAt?: number;
 	outcome: "success" | "failure" | "aborted";
 }

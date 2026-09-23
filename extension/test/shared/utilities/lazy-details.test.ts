@@ -346,3 +346,42 @@ test('transport projection pathological fallback keeps identity and a bounded te
   assert.ok(projected.parts?.[0]?.kind === 'text' && projected.parts[0].text.endsWith('tail-'), 'keeps the tail');
   assert.equal(JSON.stringify(projected).includes('tail-'.repeat(10_000)), false, 'large body is bounded');
 });
+
+test('compacted subagent previews preserve opaque provider lineage identities', () => {
+  // GitHub Copilot tool-call IDs carry a ~600-byte signature suffix; both the
+  // rich and the byte-budget minimal preview paths must keep every lineage
+  // identity intact (exact-match addressability), not char-truncate the object.
+  const signedToolCallId = `gh-${'q'.repeat(592)}-sig`;
+  const child = (index: number) => ({
+    id: `child-${index}`,
+    childId: signedToolCallId,
+    attemptId: 'attempt-1',
+    agent: 'worker',
+    task: 'inspect the long session',
+    exitCode: 0,
+    liveAddressable: true,
+    lineage: [{ childId: signedToolCallId, spawningToolCallId: signedToolCallId, attemptId: 'attempt-1' }],
+    parentUserContext: 'p'.repeat(40_000),
+    messages: [] as unknown[],
+  });
+
+  const rich = compactSubagentResultPreview({ mode: 'parallel', results: [child(0), child(1)] }) as {
+    results?: Array<Record<string, unknown>>;
+  };
+  const minimal = compactSubagentResultPreview({
+    mode: 'parallel',
+    results: Array.from({ length: 6 }, (_, index) => child(index)),
+  }) as { results?: Array<Record<string, unknown>> };
+
+  for (const [label, preview] of [['rich', rich], ['minimal', minimal]] as const) {
+    assert.ok(Array.isArray(preview.results) && preview.results.length > 0, `${label} preview keeps results`);
+    for (const result of preview.results!) {
+      assert.equal(result.childId, signedToolCallId, `${label} preview keeps the child identity`);
+      const compactedLineage = result.lineage as Array<Record<string, unknown>> | undefined;
+      assert.ok(Array.isArray(compactedLineage) && compactedLineage.length > 0, `${label} preview keeps lineage`);
+      assert.equal(compactedLineage[0]?.childId, signedToolCallId, `${label} lineage child ID is not truncated`);
+      assert.equal(compactedLineage[0]?.spawningToolCallId, signedToolCallId, `${label} lineage spawning ID is not truncated`);
+      assert.equal(compactedLineage[0]?.attemptId, 'attempt-1');
+    }
+  }
+});

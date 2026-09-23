@@ -6,6 +6,7 @@ import {
   isCoordinatorToHostDetailMessage,
   isHostToCoordinatorDetailMessage,
   isLiveSubagentDetailAddress,
+  PROVIDER_TOOL_CALL_ID_MAX_BYTES,
   type BackendDetailFence,
   type LiveSubagentDetailAddress,
 } from '../../../src/shared/protocol/subagent-detail';
@@ -58,4 +59,51 @@ test('closed detail validators reject revision identity, legacy/synthesized line
     kind: 'detail.rebase', subscriptionId: 's', currentRevision: 1, reason: 'gap',
     fence: { backendGeneration: 1, coordinatorGeneration: 1, workerId: 'worker-only' },
   }), false);
+});
+
+test('long opaque provider tool-call IDs stay addressable (GitHub Copilot signed IDs)', () => {
+  // Real GitHub Copilot tool-call IDs carry a ~600-byte signature suffix;
+  // they are opaque provider identities, far past UUID-sized assumptions.
+  const signedToolCallId = `gh-${'q'.repeat(592)}-sig`;
+  const longAddress: LiveSubagentDetailAddress = {
+    sessionPath: address.sessionPath,
+    turnId: address.turnId,
+    rootToolCallId: signedToolCallId,
+    rootAttemptId: address.rootAttemptId,
+    lineage: [{ childId: signedToolCallId, spawningToolCallId: signedToolCallId, attemptId: 'attempt-1' }],
+  };
+  assert.equal(isLiveSubagentDetailAddress(longAddress), true);
+  assert.equal(
+    isLiveSubagentDetailAddress({ ...longAddress, rootToolCallId: 'x'.repeat(PROVIDER_TOOL_CALL_ID_MAX_BYTES + 1) }),
+    false,
+    'root tool-call ID above the provider bound is rejected',
+  );
+  assert.equal(
+    isLiveSubagentDetailAddress({
+      ...longAddress,
+      lineage: [
+        { childId: 'child-1', spawningToolCallId: 'tool-1', attemptId: 'attempt-1' },
+        { childId: 'x'.repeat(PROVIDER_TOOL_CALL_ID_MAX_BYTES + 1), spawningToolCallId: 'tool-2', attemptId: 'attempt-2' },
+      ],
+    }),
+    false,
+    'lineage tool-call ID above the provider bound is rejected',
+  );
+});
+
+test('detail.terminal durable refs carry long opaque provider IDs through validation', () => {
+  const signedToolCallId = `gh-${'q'.repeat(592)}-sig`;
+  const longDurableRef = {
+    ...durableRef,
+    key: `durable:subagent:${address.sessionPath}:entry-1:${signedToolCallId}`,
+    toolCallId: signedToolCallId,
+    executionId: `attempt-1:${signedToolCallId}`,
+  };
+  assert.equal(isCoordinatorToHostDetailMessage({
+    kind: 'detail.terminal', subscriptionId: 'subscription-1', revision: 3, durableRef: longDurableRef, fence,
+  }), true);
+  assert.equal(isCoordinatorToHostDetailMessage({
+    kind: 'detail.terminal', subscriptionId: 'subscription-1', revision: 3,
+    durableRef: { ...longDurableRef, toolCallId: 'x'.repeat(PROVIDER_TOOL_CALL_ID_MAX_BYTES + 1) }, fence,
+  }), false, 'tool-call ID above the provider bound is rejected');
 });

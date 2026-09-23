@@ -27,6 +27,7 @@
  */
 
 import type { WebviewToHostMessage } from './protocol';
+import { DETAIL_REF_KEY_MAX_BYTES, PROVIDER_EXECUTION_ID_MAX_BYTES, PROVIDER_TOOL_CALL_ID_MAX_BYTES } from './protocol/subagent-detail';
 import { validateWebviewToHostMessage, type ValidationResult } from './protocol-validation';
 import { isRecord } from './type-guards';
 import { utf8ByteLength } from './utf8';
@@ -429,7 +430,7 @@ function validateRequestDetailRef(value: Record<string, unknown>): ValidationRes
   const ref = value.ref;
   if (!isRecord(ref)) return fail('requestDetail: invalid `ref`');
   if (!hasOnlyKeys(ref, DETAIL_REF_KEYS)) return fail('requestDetail: unknown fields in `ref`');
-  if (!boundedString(ref.key, 512) || ref.key.length === 0) return fail('requestDetail: invalid `ref.key`');
+  if (!boundedString(ref.key, DETAIL_REF_KEY_MAX_BYTES) || ref.key.length === 0) return fail('requestDetail: invalid `ref.key`');
   if (!boundedString(ref.sessionPath, BROWSER_INGRESS_LIMITS.maxPathUtf8Bytes)) {
     return fail('requestDetail: invalid `ref.sessionPath`');
   }
@@ -437,10 +438,10 @@ function validateRequestDetailRef(value: Record<string, unknown>): ValidationRes
   if (!boundedString(ref.summary, BROWSER_INGRESS_LIMITS.maxStringUtf8Bytes)) {
     return fail('requestDetail: invalid `ref.summary`');
   }
-  if (ref.toolCallId !== undefined && !boundedString(ref.toolCallId, 256)) {
+  if (ref.toolCallId !== undefined && !boundedString(ref.toolCallId, PROVIDER_TOOL_CALL_ID_MAX_BYTES)) {
     return fail('requestDetail: invalid `ref.toolCallId`');
   }
-  if (ref.executionId !== undefined && !boundedString(ref.executionId, 256)) {
+  if (ref.executionId !== undefined && !boundedString(ref.executionId, PROVIDER_EXECUTION_ID_MAX_BYTES)) {
     return fail('requestDetail: invalid `ref.executionId`');
   }
   if (ref.childCount !== undefined

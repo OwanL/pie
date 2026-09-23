@@ -216,6 +216,7 @@ export function installAuxiliaryLlmMeter(
                 kind,
                 sourceId,
                 occurredAt: new Date(endedAt).toISOString(),
+                startedAt: new Date(startedAt).toISOString(),
                 ...readModel(model),
                 ...readUsage(response?.usage, kind),
                 durationMs: Math.max(0, endedAt - startedAt),

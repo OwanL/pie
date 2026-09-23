@@ -1,5 +1,5 @@
 import { LIVE_PIPELINE_LIMITS, type SubagentChildPreview, type ToolPreview } from '../shared/live-pipeline-protocol.js';
-import { isLiveSubagentDetailAddress, type LiveSubagentDetailAddress, type SubagentChildIdentity } from '../shared/protocol/subagent-detail.js';
+import { isLiveSubagentDetailAddress, PROVIDER_TOOL_CALL_ID_MAX_BYTES, type LiveSubagentDetailAddress, type SubagentChildIdentity } from '../shared/protocol/subagent-detail.js';
 import { estimateTextTokens } from '../shared/tokenize.js';
 import { hasNestedToolFailure } from '../shared/subagent-result.js';
 import { compactSubagentFileChanges } from '../shared/lazy-details.js';
@@ -161,7 +161,7 @@ function normalizeSubagent(value: unknown, counters?: ToolProgressRecursiveCount
     );
     children.push({
       id: boundedHead(id, 128),
-      childId: childId ? boundedHead(childId, 512) : undefined,
+      childId: childId ? boundedHead(childId, PROVIDER_TOOL_CALL_ID_MAX_BYTES) : undefined,
       attemptId: attemptId ? boundedHead(attemptId, 512) : undefined,
       lineage,
       liveAddressable: validDetailAddress !== undefined,

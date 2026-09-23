@@ -52,6 +52,7 @@ import {
   PROVIDER_UNLIMITED_CONCURRENCY,
 } from './provider-concurrency.js';
 import {
+  DETAIL_REF_KEY_MAX_BYTES,
   isDetailCursor,
   isDetailPageRef,
   isLiveSubagentDetailAddress,
@@ -515,7 +516,6 @@ function validateToolResultPruningSettingsPatch(value: unknown): value is Partia
   return true;
 }
 
-const DETAIL_KEY_MAX_BYTES = 512;
 const DETAIL_REASON_SET: ReadonlySet<string> = new Set(['collapse', 'unmount', 'session-change']);
 const DETAIL_REBASE_REASON_SET: ReadonlySet<string> = new Set(['gap', 'backpressure', 'evicted', 'generation-change']);
 const DETAIL_ERROR_CODE_SET: ReadonlySet<string> = new Set([
@@ -524,7 +524,9 @@ const DETAIL_ERROR_CODE_SET: ReadonlySet<string> = new Set([
 ]);
 
 function isDetailKey(value: unknown): value is string {
-  return isString(value) && value.length > 0 && utf8ByteLength(value) <= DETAIL_KEY_MAX_BYTES;
+  // Composite detail keys (`subagent:${toolCallId}:${index}`) embed opaque
+  // provider tool-call IDs; they share the bounded composite ref-key limit.
+  return isString(value) && value.length > 0 && utf8ByteLength(value) <= DETAIL_REF_KEY_MAX_BYTES;
 }
 
 function validateHostDetailRoute(value: Record<string, unknown>): value is HostDetailRoute & Record<string, unknown> {

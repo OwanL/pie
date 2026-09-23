@@ -691,6 +691,30 @@ test('generation reset (host restart) discards records, pages, tombstones, and c
   assert.deepEqual(getDetailStoreDebugState(), { records: 0, pages: 0, pageBytes: 0, valueBytes: 0, tombstones: 0, cursors: 0 });
 });
 
+test('a mounted expanded hook reopens its owner after the host advances view generation', () => {
+  const posts = install();
+  const probe = mountSubscriptionProbe();
+  try {
+    assert.equal(subscribePosts(posts).length, 1);
+    act(() => setDetailStoreContext({
+      hostInstanceId: 'h1', viewGeneration: 2, rendererId: 'renderer-1', rendererGeneration: 1,
+      postMessage: (message) => { posts.push(message); },
+    }));
+
+    const subscribes = subscribePosts(posts);
+    assert.equal(subscribes.length, 2, 'the retained expanded card re-subscribes under the new view owner');
+    assert.equal(subscribes[1]?.viewGeneration, 2);
+    assert.equal(subscribes[1]?.detailAttempt, 1, 'the new route starts a fresh attempt namespace');
+    assert.equal(probe.handle.status, 'subscribing');
+
+    const oldRouteStart = streamStart(makeStream(KEY, 'old-subscription'));
+    act(() => receiveDetailImperative(oldRouteStart));
+    assert.equal(probe.handle.status, 'subscribing', 'a pre-switch start cannot bind the new route');
+  } finally {
+    probe.unmount();
+  }
+});
+
 test('renderer reconnect invalidates an owner even when the view generation is unchanged', () => {
   const posts = install();
   openDetailSubscription({ detailKey: KEY, address: ADDRESS });

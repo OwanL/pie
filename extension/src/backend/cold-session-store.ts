@@ -9,6 +9,7 @@ import { deduplicateToolCallResultsForTransport } from '../shared/chat-message-p
 import { findDurableDetail } from '../shared/lazy-details';
 import { LIVE_PIPELINE_LIMITS } from '../shared/live-pipeline-protocol';
 import type {
+  ChatMessage,
   DetailResult,
   InitialContextEstimate,
   LazyDetailRef,
@@ -58,6 +59,7 @@ import type { SdkModule, SdkSessionManager } from './sdk';
 import { normalizeDanglingTranscript } from './session-opened';
 import { buildPagedTranscriptWindow } from './transcript-window';
 import type { SessionEntryLike } from './transcript';
+import { mapTranscript } from './transcript';
 
 /** The coordinator remains the sole ownership authority. Exact-v3 browse
  * misses may project in an explicitly configured read-only helper; every
@@ -120,6 +122,13 @@ export class StaleColdSessionLeaseError extends Error {
   ) {
     super(`Cold session ownership changed before commit (${reason}): ${stamp.sessionPath}`);
     this.name = 'StaleColdSessionLeaseError';
+  }
+}
+
+class HotOwnedSessionHeaderChangedError extends Error {
+  constructor(sessionPath: string) {
+    super(`Hot-owned session is no longer a current v3 file: ${sessionPath}`);
+    this.name = 'HotOwnedSessionHeaderChangedError';
   }
 }
 
@@ -230,6 +239,45 @@ export class ColdSessionLeaseAuthority {
     if (lexicalReservation?.hideFromCatalog) return true;
     if (!this.hiddenReservationBasenameCounts.has(coldReservationBasenameKey(sessionPath))) return false;
     return this.pathReservations.get(this.canonicalPathKey(sessionPath))?.hideFromCatalog === true;
+  }
+
+  /** Stable read lease for a long-lived hot ownership fence (a session whose
+   * execution runtime currently owns the path). Hot fences reject cold
+   * mutation IO, but terminal subagent detail is durable-written before the
+   * terminal handoff and must remain readable: {@link ColdSessionStore.resolveDurableDetail}
+   * reads the historical record under this lease. Returns `undefined` when the
+   * path is not hot-fenced — including uncommitted mid-creation reservations —
+   * so the caller keeps its ordinary cold read semantics. Capturing never
+   * mutates ownership state. */
+  captureHotRead(sessionPath: string): ColdSessionOwnershipStamp | undefined {
+    const sessionPathKey = this.canonicalPathKey(sessionPath);
+    const reservation = this.pathReservations.get(sessionPathKey);
+    if (!reservation || reservation.hideFromCatalog) return undefined;
+    return {
+      coordinatorGeneration: this.currentCoordinatorGeneration,
+      sessionPath,
+      sessionPathKey,
+      ownershipRevision: this.ownershipRevisions.get(sessionPathKey) ?? 0,
+      fingerprint: this.fingerprint(sessionPath),
+    };
+  }
+
+  /** Recheck a {@link captureHotRead} lease. Ordinary hot appends legitimately
+   * move the durable fingerprint, so this fence asserts coordinator
+   * generation, canonical identity, and ownership revision only; fingerprint
+   * and reservation checks remain exclusively the cold read/write contract.
+   * An ownership transition (fence release, replacement, generation advance)
+   * still fails the read without ever mutating cold ownership itself. */
+  assertHotReadCurrent(stamp: ColdSessionOwnershipStamp): void {
+    if (stamp.coordinatorGeneration !== this.currentCoordinatorGeneration) {
+      throw new StaleColdSessionLeaseError('coordinator-generation', stamp);
+    }
+    if (this.canonicalPathKey(stamp.sessionPath) !== stamp.sessionPathKey) {
+      throw new StaleColdSessionLeaseError('session-path', stamp);
+    }
+    if ((this.ownershipRevisions.get(stamp.sessionPathKey) ?? 0) !== stamp.ownershipRevision) {
+      throw new StaleColdSessionLeaseError('ownership-revision', stamp);
+    }
   }
 
   /** Atomically reserve canonical paths in sorted key order. Validation happens
@@ -478,6 +526,17 @@ interface LoadedBrowseProjection {
   readonly stamp: ColdSessionOwnershipStamp;
 }
 
+/** Minimal hot-owned projection behind `resolveDurableDetail`: the mapped
+ *  durable transcript only, never the full browse snapshot projection
+ *  (transport compaction, session usage, context messages, summary stat).
+ *  Address resolution consumes exactly the transcript the cold path resolves
+ *  against, so results are bit-identical at a fraction of the allocation
+ *  cost. */
+interface HotOwnedTranscriptLoad {
+  readonly transcript: readonly ChatMessage[];
+  readonly stamp: ColdSessionOwnershipStamp;
+}
+
 interface ColdSessionCatalogPublicationStamp {
   readonly coordinatorGeneration: number;
   readonly authorityRevision: number;
@@ -508,6 +567,11 @@ export class ColdSessionStore {
   private readonly promotionGrants = new Map<string, { grant: SerializedColdSessionPromotionGrant; consumed: boolean }>();
   private readonly browseCache: ColdBrowseProjectionCache<SessionBrowseSnapshot>;
   private readonly browseLoads = new Map<string, Promise<LoadedBrowseProjection>>();
+  /** Single-flight for hot-owned transcript-only projection loads. Kept
+   *  separate from {@link ColdSessionStore.browseLoads}: hot detail resolution
+   *  joins transcript-only loads, never a full browse projection. */
+  private readonly hotTranscriptLoads = new Map<string, Promise<HotOwnedTranscriptLoad>>();
+  private readonly hotTranscriptCache: ColdBrowseProjectionCache<readonly ChatMessage[]>;
   private browseCacheGeneration: number;
 
   constructor(options: ColdSessionStoreOptions) {
@@ -527,6 +591,10 @@ export class ColdSessionStore {
     this.readAttempts = options.readAttempts ?? DEFAULT_READ_ATTEMPTS;
     this.browseHelper = options.browseHelper;
     this.browseCache = new ColdBrowseProjectionCache(
+      options.browseCacheMaxSourceBytes,
+      options.browseCacheMaxEntries,
+    );
+    this.hotTranscriptCache = new ColdBrowseProjectionCache(
       options.browseCacheMaxSourceBytes,
       options.browseCacheMaxEntries,
     );
@@ -565,6 +633,11 @@ export class ColdSessionStore {
    * part of the backend RPC contract. */
   getBrowseCacheStats(): ColdBrowseProjectionCacheStats {
     return this.browseCache.snapshotStats(this.browseLoads.size);
+  }
+
+  /** Process-local hot transcript cache counters for tests and perf attribution. */
+  getHotTranscriptCacheStats(): ColdBrowseProjectionCacheStats {
+    return this.hotTranscriptCache.snapshotStats(this.hotTranscriptLoads.size);
   }
 
   async list(liveSummaries: readonly SessionSummary[] = []): Promise<SessionSummary[]> {
@@ -671,12 +744,21 @@ export class ColdSessionStore {
    *  `detail.subscribe`: the terminal tool result (already written before the
    *  terminal handoff) is addressed by its stable tool-call id and producer
    *  lineage, and the caller segments it into exact pages. The generic bounded
-   *  `loadDetail` remains the single-frame path and is unchanged. */
+   *  `loadDetail` remains the single-frame path and is unchanged. A historical
+   *  terminal record of a currently hot-owned session is read under the
+   *  bounded hot-fence read lease below: the long-lived hot ownership fence
+   *  rejects cold mutation IO, but the terminal tool result is durable-written
+   *  before the terminal handoff and must stay readable while the worker owns
+   *  the parent path. The hot read projects the mapped transcript only — never
+   *  the full browse snapshot — and reuses the transcript across child details
+   *  while the durable fingerprint is exactly unchanged. */
   async resolveDurableDetail(
     sessionPath: string,
     address: LiveSubagentDetailAddress,
     durableRef?: LazyDetailRef,
   ): Promise<ResolvedDurableDetail> {
+    const hotOwned = await this.resolveDurableDetailFromHotOwnership(sessionPath, address, durableRef);
+    if (hotOwned) return hotOwned;
     const assisted = this.browseHelper?.resolveDurableDetail
       ? await this.tryHelperBrowse(sessionPath, async (helper, stamp) => (
         await helper.resolveDurableDetail!(stamp, address, durableRef)
@@ -703,6 +785,130 @@ export class ColdSessionStore {
         kind: 'tool-result' as const,
       };
     });
+  }
+
+  /** Bounded stable read of a hot-owned session's durable JSONL. The helper
+   *  path stays reserved for the exact-fingerprint cold fence; hot appends
+   *  legitimately move the fingerprint during the helper round-trip, so the
+   *  hot read performs one synchronous SDK open and fences generation and
+   *  ownership revision only. Any ownership transition abandons this route
+   *  rather than retrying the queued read against a replacement owner. */
+  private async resolveDurableDetailFromHotOwnership(
+    sessionPath: string,
+    address: LiveSubagentDetailAddress,
+    durableRef?: LazyDetailRef,
+  ): Promise<ResolvedDurableDetail | undefined> {
+    const stamp = this.leases.captureHotRead(sessionPath);
+    if (!stamp) return undefined;
+    // A hot-owned path is a committed current-v3 session (the worker opened
+    // it through the supported SDK). Never run migration semantics against a
+    // hot-owned file; a legacy header keeps the ordinary cold path's
+    // existing failure instead of writing under hot ownership.
+    if (!isCurrentColdSessionHeader(readColdSessionHeaderSync(sessionPath))) return undefined;
+    try {
+      const loaded = await this.getHotOwnedTranscript(sessionPath, stamp);
+      const resolution = resolveDurableDetailFromTranscript(loaded.transcript, sessionPath, address, durableRef);
+      if (resolution.status === 'not-found') {
+        throw new DurableDetailNotFoundError(resolution.message);
+      }
+      if (resolution.status === 'not-addressable') {
+        throw new DurableDetailNotAddressableError(resolution.message);
+      }
+      this.leases.assertHotReadCurrent(loaded.stamp);
+      return {
+        value: resolution.value,
+        sizeBytes: resolution.sizeBytes!,
+        messageId: resolution.messageId!,
+        toolCallId: resolution.toolCallId!,
+        kind: 'tool-result' as const,
+      };
+    } catch (error) {
+      if (error instanceof DurableDetailNotFoundError || error instanceof DurableDetailNotAddressableError) throw error;
+      if (error instanceof StaleColdSessionLeaseError || error instanceof HotOwnedSessionHeaderChangedError) {
+        // Continue through ordinary cold semantics. A replacement reservation
+        // will reject there before any SDK open or legacy-header migration.
+        return undefined;
+      }
+      throw error;
+    }
+  }
+
+  private async getHotOwnedTranscript(
+    sessionPath: string,
+    stamp: ColdSessionOwnershipStamp,
+  ): Promise<HotOwnedTranscriptLoad> {
+    this.resetBrowseCacheForGeneration();
+    // Hot detail resolution runs once per terminal child detail against the
+    // same hot-owned parent. An exact cache key (fingerprint, ownership
+    // revision, coordinator generation) means the durable file is
+    // stat-identical to the moment the cached transcript was mapped, so the
+    // mapping is identical and the SDK open is skipped. The header
+    // re-observation and the hot lease fences still run per call.
+    const cacheKey = coldBrowseCacheKey(stamp);
+    this.hotTranscriptCache.invalidatePath(stamp.sessionPathKey, cacheKey);
+    const cached = this.hotTranscriptCache.get(cacheKey);
+    if (cached) {
+      // The exact stat fingerprint already proves the mapped durable bytes
+      // (header included) are unchanged since the fenced fill; the header
+      // re-observation here keeps the hot-fence contract per call.
+      if (!isCurrentColdSessionHeader(readColdSessionHeaderSync(sessionPath))) {
+        throw new HotOwnedSessionHeaderChangedError(sessionPath);
+      }
+      this.leases.assertHotReadCurrent(stamp);
+      return { transcript: cached, stamp };
+    }
+    const flightKey = coldBrowseSingleflightKey(stamp);
+    const existing = this.hotTranscriptLoads.get(flightKey);
+    if (existing) {
+      this.browseCache.recordInflightJoin();
+      const joined = await existing;
+      this.leases.assertHotReadCurrent(joined.stamp);
+      return joined;
+    }
+    const loading = Promise.resolve().then(async () => await this.loadHotOwnedTranscript(sessionPath, stamp));
+    this.hotTranscriptLoads.set(flightKey, loading);
+    try {
+      const loaded = await loading;
+      this.leases.assertHotReadCurrent(loaded.stamp);
+      return loaded;
+    } finally {
+      if (this.hotTranscriptLoads.get(flightKey) === loading) this.hotTranscriptLoads.delete(flightKey);
+    }
+  }
+
+  private async loadHotOwnedTranscript(
+    sessionPath: string,
+    stamp: ColdSessionOwnershipStamp,
+  ): Promise<HotOwnedTranscriptLoad> {
+    // getHotOwnedTranscript deliberately defers this loader to a
+    // microtask. Recheck eligibility at the synchronous SDK-open boundary: the
+    // earlier v3 header/lease observation must not let a stale request cross
+    // into a replacement owner's session or trigger SDK migration.
+    if (!isCurrentColdSessionHeader(readColdSessionHeaderSync(sessionPath))) {
+      throw new HotOwnedSessionHeaderChangedError(sessionPath);
+    }
+    this.leases.assertHotReadCurrent(stamp);
+    const manager = this.sdk.SessionManager.open(sessionPath);
+    // Durable detail resolution consumes only the mapped durable transcript
+    // (`mapTranscript(branch)` is exactly what `buildDisplayTranscriptCache`
+    // projects into `browse.cache.transcript`). The rest of the full browse
+    // snapshot projection serves browse surfaces, never address resolution,
+    // so a hot parent is not re-projected per child detail.
+    const branch = (manager.getBranch?.() ?? []) as SessionEntryLike[];
+    const transcript = mapTranscript(branch);
+    const cacheKey = coldBrowseCacheKey(stamp);
+    const sourceBytes = coldSourceBytes(stamp.fingerprint, transcript);
+    // No await or callback may separate this final exact durable fence from
+    // cache insertion.
+    this.hotTranscriptCache.invalidatePath(stamp.sessionPathKey, cacheKey);
+    this.leases.assertHotReadCurrent(stamp);
+    this.hotTranscriptCache.set({
+      key: cacheKey,
+      sessionPathKey: stamp.sessionPathKey,
+      value: transcript,
+      sourceBytes,
+    });
+    return { transcript, stamp };
   }
 
   async loadDetail(sessionPath: string, ref: LazyDetailRef): Promise<DetailResult> {
@@ -1058,6 +1264,7 @@ export class ColdSessionStore {
     // bytes under the old durable identity.
     const sessionPathKey = stamp.sessionPathKey;
     this.browseCache.invalidatePath(sessionPathKey);
+    this.hotTranscriptCache.invalidatePath(sessionPathKey);
     // The local privacy/ownership fences above already make every helper entry
     // unreachable. Reclaim helper memory opportunistically without queuing this
     // user action behind an in-flight multi-second projection.
@@ -1304,6 +1511,7 @@ export class ColdSessionStore {
     const generation = this.leases.coordinatorGeneration;
     if (generation === this.browseCacheGeneration) return;
     this.browseCache.clear();
+    this.hotTranscriptCache.clear();
     this.browseCacheGeneration = generation;
   }
 
@@ -1524,7 +1732,7 @@ function coldBrowseSingleflightKey(stamp: ColdSessionOwnershipStamp): string {
   ]);
 }
 
-function coldSourceBytes(fingerprint: string, browse: SessionBrowseSnapshot): number {
+function coldSourceBytes(fingerprint: string, value: unknown): number {
   // The production fingerprint is dev:ino:size:mtimeNs:ctimeNs. Read the size
   // from that exact stat observation so cache weighting cannot race a second
   // file stat after the final durable fence.
@@ -1536,7 +1744,7 @@ function coldSourceBytes(fingerprint: string, browse: SessionBrowseSnapshot): nu
   }
   // Custom test fingerprint authorities may not encode source size. Their
   // projections are small; serialize only in that non-production fallback.
-  return Buffer.byteLength(JSON.stringify(browse), 'utf8');
+  return Buffer.byteLength(JSON.stringify(value), 'utf8');
 }
 
 interface ColdSessionHeaderEvidence {

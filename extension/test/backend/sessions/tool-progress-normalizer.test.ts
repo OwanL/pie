@@ -209,3 +209,36 @@ test('generic preview handles cyclic, bigint and throwing values without throwin
     assert.equal(isBoundedToolPreview(preview), true);
   }
 });
+
+test('long opaque provider tool-call IDs stay producer-addressable', () => {
+  // GitHub Copilot tool-call IDs carry a ~600-byte signature suffix; the
+  // normalizer must not truncate them below the shared provider bound or the
+  // worker-side exact lineage match fails and the child loses addressability.
+  const signedToolCallId = `gh-${'q'.repeat(592)}-sig`;
+  const preview = normalizeToolProgress('subagent', {
+    children: [{
+      id: 'child-1',
+      status: 'running',
+      childId: signedToolCallId,
+      attemptId: 'attempt-1',
+      liveAddressable: true,
+      lineage: [{ childId: signedToolCallId, spawningToolCallId: signedToolCallId, attemptId: 'attempt-1' }],
+    }],
+  }, undefined, {
+    sessionPath: 'C:/sessions/root.jsonl',
+    turnId: 'turn-1',
+    rootToolCallId: signedToolCallId,
+    rootAttemptId: 'root-attempt',
+  });
+  assert.equal(preview.kind, 'subagent');
+  if (preview.kind !== 'subagent') return;
+  assert.equal(preview.children.length, 1);
+  const child = preview.children[0];
+  assert.ok(child, 'one child is previewed');
+  assert.equal(child.childId?.length, signedToolCallId.length, 'child identity survives normalization');
+  assert.equal(child.detailAddress !== undefined, true, 'a 600-byte signed provider ID must stay addressable');
+  if (child.detailAddress) {
+    assert.equal(child.detailAddress.rootToolCallId, signedToolCallId);
+    assert.equal(child.detailAddress.lineage[0]?.childId, signedToolCallId);
+  }
+});

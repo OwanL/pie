@@ -590,7 +590,7 @@ export class BillableAccounting {
   observeAssistantTurnEnded(
     sessionPath: string,
     turnId: string,
-    durationMs: number,
+    _durationMs: number,
     usage?: AssistantUsage,
     status?: TurnThroughputStatus,
     billing?: { modelId?: string; provider?: string; occurredAt?: string; operationId?: string; durableEntryId?: string },
@@ -617,7 +617,6 @@ export class BillableAccounting {
         } : {}),
         ...(usage.reasoningTokens !== undefined ? { reasoningTokens: usage.reasoningTokens } : {}),
         ...(usage.reportedCostUsd !== undefined ? { reportedCostUsd: usage.reportedCostUsd } : {}),
-        startedAt: new Date(Math.max(0, Date.parse(endedAt) - Math.max(0, durationMs))).toISOString(),
         endedAt,
         provenance: usage.reportedCostUsd !== undefined ? 'exact' : undefined,
       }, {
@@ -642,7 +641,6 @@ export class BillableAccounting {
         provenance: 'unknown',
         instrumentationGap: true,
         instrumentationGapReason: 'The provider invocation ended without an assistant usage payload.',
-        startedAt: new Date(Math.max(0, Date.parse(endedAt) - Math.max(0, durationMs))).toISOString(),
         endedAt,
       }, {
         kind: retry ? 'retry' : 'conversation',
@@ -836,11 +834,10 @@ export class BillableAccounting {
       ...(sample.reportedCostUsd !== undefined ? { reportedCostUsd: sample.reportedCostUsd } : {}),
       ...(sample.parentOperationId ? { parentOperationId: sample.parentOperationId } : {}),
       endedAt: sample.occurredAt,
-      startedAt: sample.startedAt ?? (
-        validIso(sample.occurredAt) && Number.isFinite(sample.durationMs)
-          ? new Date(Math.max(0, Date.parse(sample.occurredAt) - sample.durationMs!)).toISOString()
-          : undefined
-      ),
+      // Duration is not an observed wall-clock endpoint. Keep missing starts
+      // unavailable for schedule eligibility instead of synthesizing one from
+      // occurredAt - durationMs.
+      startedAt: sample.startedAt,
       ...((sample.instrumentationGap || !channelsKnown) ? {
         instrumentationGap: true,
         instrumentationGapReason: sample.instrumentationGapReason
@@ -1381,10 +1378,8 @@ function pruningUsageSamples(messageId: string, occurredAt: string, details: unk
       const usageKnown = Object.values(tokenChannelPresence).every(Boolean);
       const sourceId = typeof invocation.invocationId === 'string' && invocation.invocationId.trim()
         ? invocation.invocationId : `skill-pruning:${messageId}:attempt:${index}`;
-      const startedAt = validIso(typeof invocation.startedAt === 'string' ? invocation.startedAt : undefined)
-        ?? occurredAt;
-      const endedAt = validIso(typeof invocation.endedAt === 'string' ? invocation.endedAt : undefined)
-        ?? occurredAt;
+      const startedAt = validIso(typeof invocation.startedAt === 'string' ? invocation.startedAt : undefined);
+      const endedAt = validIso(typeof invocation.endedAt === 'string' ? invocation.endedAt : undefined);
       const reportedCost = read('reportedCostUsd');
       return [{
         sourceId,
@@ -1403,8 +1398,8 @@ function pruningUsageSamples(messageId: string, occurredAt: string, details: unk
         ...(!usageKnown ? { instrumentationGapReason: 'The pruning provider invocation returned no usage.' } : {}),
         outcome: invocation.outcome === 'failed' || invocation.outcome === 'cancelled'
           ? invocation.outcome : 'succeeded',
-        startedAt,
-        endedAt,
+        ...(startedAt ? { startedAt } : {}),
+        ...(endedAt ? { endedAt } : {}),
       } satisfies SessionUsageSample];
     });
   }
@@ -1465,7 +1460,7 @@ function pruningUsageSamples(messageId: string, occurredAt: string, details: unk
       ? 'The pruning provider response omitted one or more token channels.'
       : 'The pruning prepass completed without provider usage.' } : {}),
     outcome: value.prepassError ? 'failed' : 'succeeded',
-    startedAt: occurredAt,
+    // This legacy aggregate has only result time, not a proven invocation start.
     endedAt: occurredAt,
   }];
 }

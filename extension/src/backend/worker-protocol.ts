@@ -5,6 +5,8 @@ import {
   isDetailPageRef,
   isLiveSubagentDetailAddress,
   isPatchOperations,
+  PROVIDER_EXECUTION_ID_MAX_BYTES,
+  PROVIDER_TOOL_CALL_ID_MAX_BYTES,
   type DetailCursor,
   type DetailErrorCode,
   type DetailPagePayload,
@@ -1664,7 +1666,10 @@ function validateDetailLazyRef(value: unknown): string | undefined {
   if (!boundedString(value.key, MAX_SESSION_PATH_BYTES) || value.kind !== 'tool-result' || value.source !== 'durable'
     || !boundedString(value.sessionPath, MAX_SESSION_PATH_BYTES) || !boundedString(value.messageId, MAX_ID_BYTES)
     || !isSafeNonNegativeInteger(value.sizeBytes) || typeof value.summary !== 'string' || typeof value.available !== 'boolean') return 'detail durableRef fields are invalid.';
-  for (const key of ['toolCallId', 'executionId'] as const) if (value[key] !== undefined && !boundedString(value[key], MAX_ID_BYTES)) return `detail durableRef.${key} is invalid.`;
+  for (const key of ['toolCallId', 'executionId'] as const) {
+    const maxBytes = key === 'toolCallId' ? PROVIDER_TOOL_CALL_ID_MAX_BYTES : PROVIDER_EXECUTION_ID_MAX_BYTES;
+    if (value[key] !== undefined && !boundedString(value[key], maxBytes)) return `detail durableRef.${key} is invalid.`;
+  }
   for (const key of ['partIndex', 'sourceRevision', 'childCount', 'lineCount'] as const) if (value[key] !== undefined && !isSafeNonNegativeInteger(value[key])) return `detail durableRef.${key} is invalid.`;
   return undefined;
 }

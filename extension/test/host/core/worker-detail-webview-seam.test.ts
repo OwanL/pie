@@ -25,15 +25,19 @@ import {
   type DetailStreamMessage,
 } from '../../../src/webview/panel/transcript/detail-subscription-store';
 
-const DETAIL_KEY = 'subagent:message-1:tool-1';
+// Providers may append opaque signed state to a tool-call identity. This small
+// transcript must still traverse every detail boundary without waiting for a
+// timeout, even though the identity and composed routing key exceed 512 bytes.
+const TOOL_ID = `call_small|${'signed-provider-state'.repeat(30)}`;
+const DETAIL_KEY = `subagent:${TOOL_ID}:0`;
 const RENDERER_ID = 'renderer-seam';
 const SESSION_PATH = 'C:\\workspace\\session.jsonl';
 const ADDRESS: LiveSubagentDetailAddress = {
   sessionPath: SESSION_PATH,
   turnId: 'turn-1',
-  rootToolCallId: 'tool-1',
+  rootToolCallId: TOOL_ID,
   rootAttemptId: 'root-attempt-1',
-  lineage: [{ childId: 'child-1', spawningToolCallId: 'tool-1', attemptId: 'child-attempt-1' }],
+  lineage: [{ childId: TOOL_ID, spawningToolCallId: TOOL_ID, attemptId: 'child-attempt-1' }],
 };
 const ROOT = {
   sessionPath: ADDRESS.sessionPath,

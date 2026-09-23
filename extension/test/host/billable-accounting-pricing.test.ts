@@ -107,28 +107,29 @@ const SCHEDULED_CATALOG = {
   },
 };
 
-/** Observe one assistant turn whose derived interval is
- *  `[occurredAt - durationMs, occurredAt]`. */
+/** Observe one assistant settlement with explicit interval endpoints. */
 function observeTurn(
   accounting: BillableAccounting,
   sessionPath: string,
   turnId: string,
+  startedAtIso: string,
   endedAtIso: string,
-  durationMs: number,
   usageOverrides: Record<string, unknown> = {},
   modelId = 'deepseek-scheduled',
 ): void {
-  accounting.observeAssistantTurnEnded(sessionPath, turnId, durationMs, {
+  accounting.observeAuxiliaryLlmUsage(sessionPath, {
+    kind: 'assistant_message',
+    sourceId: `assistant:${turnId}`,
+    modelId,
+    provider: 'ollama',
+    startedAt: startedAtIso,
+    occurredAt: endedAtIso,
     inputTokens: 4_000,
     outputTokens: 200,
     cacheReadTokens: 0,
     cacheWriteTokens: 0,
-    totalTokens: 4_200,
+    tokenChannelsKnown: true,
     ...usageOverrides,
-  }, undefined, {
-    modelId,
-    provider: 'ollama',
-    occurredAt: endedAtIso,
   });
 }
 
@@ -146,7 +147,7 @@ test('accounting prices a peak-window interval at the override rates', () => {
     writeFileSync(path.join(agentDir, 'models.json'), JSON.stringify(SCHEDULED_CATALOG));
     const accounting = accountingWithAgentDir(agentDir, temp);
     // Wednesday 12:00–13:00 UTC lies entirely inside the peak window.
-    observeTurn(accounting, '/sessions/peak.jsonl', 'turn-peak', '2026-09-23T13:00:00.000Z', 3_600_000);
+    observeTurn(accounting, '/sessions/peak.jsonl', 'turn-peak', '2026-09-23T12:00:00.000Z', '2026-09-23T13:00:00.000Z');
     const priced = conversationRecord(accounting, 'turn-peak');
     assert.ok(priced?.pricing);
     assert.equal(priced.pricing.rateSnapshot?.inputTokensUsdPerMillion, 0.3);
@@ -165,7 +166,7 @@ test('accounting prices off-peak weekday and weekend intervals at base rates', (
     writeFileSync(path.join(agentDir, 'models.json'), JSON.stringify(SCHEDULED_CATALOG));
     const accounting = accountingWithAgentDir(agentDir, temp);
     // Wednesday 19:00–20:00 UTC (outside the window).
-    observeTurn(accounting, '/sessions/offpeak.jsonl', 'turn-offpeak', '2026-09-23T20:00:00.000Z', 3_600_000);
+    observeTurn(accounting, '/sessions/offpeak.jsonl', 'turn-offpeak', '2026-09-23T19:00:00.000Z', '2026-09-23T20:00:00.000Z');
     const offpeak = conversationRecord(accounting, 'turn-offpeak');
     assert.ok(offpeak?.pricing);
     assert.equal(offpeak.pricing.rateSnapshot?.inputTokensUsdPerMillion, 0.15);
@@ -173,7 +174,7 @@ test('accounting prices off-peak weekday and weekend intervals at base rates', (
     assert.equal(offpeak.pricing.rateSnapshot?.cacheReadTokensUsdPerMillion, 0.003);
     // Saturday 13:00–14:00 UTC: weekend is entirely off-peak even inside the
     // clock window.
-    observeTurn(accounting, '/sessions/weekend.jsonl', 'turn-weekend', '2026-09-19T14:00:00.000Z', 3_600_000);
+    observeTurn(accounting, '/sessions/weekend.jsonl', 'turn-weekend', '2026-09-19T13:00:00.000Z', '2026-09-19T14:00:00.000Z');
     const weekend = conversationRecord(accounting, 'turn-weekend');
     assert.ok(weekend?.pricing);
     assert.equal(weekend.pricing.rateSnapshot?.inputTokensUsdPerMillion, 0.15);
@@ -191,7 +192,7 @@ test('accounting keeps band-crossing intervals explicitly unpriced', () => {
     writeFileSync(path.join(agentDir, 'models.json'), JSON.stringify(SCHEDULED_CATALOG));
     const accounting = accountingWithAgentDir(agentDir, temp);
     // Wednesday 11:30–12:30 UTC straddles the 12:00 window opening.
-    observeTurn(accounting, '/sessions/crossing.jsonl', 'turn-crossing', '2026-09-23T12:30:00.000Z', 3_600_000);
+    observeTurn(accounting, '/sessions/crossing.jsonl', 'turn-crossing', '2026-09-23T11:30:00.000Z', '2026-09-23T12:30:00.000Z');
     const record = conversationRecord(accounting, 'turn-crossing');
     assert.equal(record?.pricing, undefined);
   } finally {
@@ -218,11 +219,27 @@ test('accounting keeps scheduled intervals without reliable timestamps unpriced'
       outputTokens: 200,
       cacheReadTokens: 0,
       cacheWriteTokens: 0,
+      durationMs: 600_000,
       tokenChannelsKnown: true,
     });
     const record = accounting.exportRecords().find((entry) => entry.sourceId === 'aux-no-times');
     assert.ok(record);
     assert.equal(record.pricing, undefined);
+
+    accounting.observeAssistantTurnStarted('/sessions/turn-fallback.jsonl');
+    accounting.observeAssistantTurnEnded('/sessions/turn-fallback.jsonl', 'turn-fallback', 600_000, {
+      inputTokens: 4_000,
+      outputTokens: 200,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 4_200,
+    }, undefined, {
+      modelId: 'deepseek-scheduled',
+      provider: 'ollama',
+      occurredAt: '2026-09-23T13:00:00.000Z',
+    });
+    const turnFallback = accounting.exportRecords().find((entry) => entry.sourceId === 'assistant:turn-fallback');
+    assert.equal(turnFallback?.pricing, undefined);
     // The static model in the same shape still prices normally.
     const staticCatalog = {
       providers: {
@@ -253,6 +270,78 @@ test('accounting keeps scheduled intervals without reliable timestamps unpriced'
   }
 });
 
+test('assistant settlement prices only its observed terminal interval across a schedule boundary', () => {
+  const temp = tempDir();
+  const agentDir = mkdtempSync(path.join(tmpdir(), 'pie-accounting-pricing-terminal-'));
+  try {
+    writeFileSync(path.join(agentDir, 'models.json'), JSON.stringify(SCHEDULED_CATALOG));
+    const accounting = accountingWithAgentDir(agentDir, temp);
+    accounting.observeAuxiliaryLlmUsage('/sessions/terminal-crossing.jsonl', {
+      kind: 'assistant_message',
+      sourceId: 'assistant:terminal-crossing',
+      modelId: 'deepseek-scheduled',
+      provider: 'ollama',
+      startedAt: '2026-09-23T11:59:00.000Z',
+      occurredAt: '2026-09-23T12:01:00.000Z',
+      durationMs: 120_000,
+      inputTokens: 4_000,
+      outputTokens: 200,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      tokenChannelsKnown: true,
+    });
+    const record = accounting.exportRecords().find((entry) => entry.sourceId === 'assistant:terminal-crossing');
+    assert.equal(record?.startedAt, '2026-09-23T11:59:00.000Z');
+    assert.equal(record?.endedAt, '2026-09-23T12:01:00.000Z');
+    assert.equal(record?.pricing, undefined);
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+    rmSync(agentDir, { recursive: true, force: true });
+  }
+});
+
+test('aggregate pruning usage has no scheduled interval evidence but static pricing remains available', () => {
+  const temp = tempDir();
+  const agentDir = mkdtempSync(path.join(tmpdir(), 'pie-accounting-pricing-prepass-'));
+  try {
+    writeFileSync(path.join(agentDir, 'models.json'), JSON.stringify(SCHEDULED_CATALOG));
+    const accounting = accountingWithAgentDir(agentDir, temp);
+    const details = {
+      prepassModel: 'deepseek-scheduled',
+      prepassProvider: 'ollama',
+      prepassInputTokens: 4_000,
+      prepassOutputTokens: 200,
+      prepassCacheReadTokens: 0,
+      prepassCacheWriteTokens: 0,
+    };
+    accounting.observeSkillPruningUsage(
+      '/sessions/prepass.jsonl', 'prepass-scheduled', '2026-09-23T13:00:00.000Z', details,
+    );
+    const scheduled = accounting.exportRecords().find((entry) => entry.sourceId === 'skill-pruning:prepass-scheduled');
+    assert.equal(scheduled?.pricing, undefined);
+    accounting.observeSkillPruningUsage('/sessions/prepass-attempt.jsonl', 'prepass-attempt', '2026-09-23T13:00:00.000Z', {
+      ...details,
+      prepassInvocations: [{ invocationId: 'pruning-attempt', input: 4_000, output: 200, cacheRead: 0, cacheWrite: 0 }],
+    });
+    const attempt = accounting.exportRecords().find((entry) => entry.sourceId === 'pruning-attempt');
+    assert.equal(attempt?.pricing, undefined);
+
+    writeFileSync(path.join(agentDir, 'models.json'), JSON.stringify({
+      providers: { ollama: { models: [{ id: 'static-prepass', cost: { input: 0.1, output: 0.2, cacheRead: 0, cacheWrite: 0 } }] } },
+    }));
+    accounting.observeSkillPruningUsage('/sessions/prepass-static.jsonl', 'prepass-static', '2026-09-23T13:00:00.000Z', {
+      ...details,
+      prepassModel: 'static-prepass',
+    });
+    const staticRecord = accounting.exportRecords().find((entry) => entry.sourceId === 'skill-pruning:prepass-static');
+    assert.ok(staticRecord?.pricing);
+    assert.equal(staticRecord.pricing.rateSnapshot?.inputTokensUsdPerMillion, 0.1);
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+    rmSync(agentDir, { recursive: true, force: true });
+  }
+});
+
 test('accounting keeps unsupported cache-read usage unpriced and prices zero cache-read', () => {
   const temp = tempDir();
   const agentDir = mkdtempSync(path.join(tmpdir(), 'pie-accounting-pricing-cache-'));
@@ -260,13 +349,13 @@ test('accounting keeps unsupported cache-read usage unpriced and prices zero cac
     writeFileSync(path.join(agentDir, 'models.json'), JSON.stringify(SCHEDULED_CATALOG));
     const accounting = accountingWithAgentDir(agentDir, temp);
     // Positive cache-read usage on an unsupported-cache model: unpriced.
-    observeTurn(accounting, '/sessions/cache-used.jsonl', 'turn-cache-used', '2026-09-23T13:00:00.000Z', 3_600_000, {
+    observeTurn(accounting, '/sessions/cache-used.jsonl', 'turn-cache-used', '2026-09-23T12:00:00.000Z', '2026-09-23T13:00:00.000Z', {
       cacheReadTokens: 1_000,
     }, 'unsupported-cache');
     const used = conversationRecord(accounting, 'turn-cache-used');
     assert.equal(used?.pricing, undefined);
     // Zero cache-read usage still prices the base rates.
-    observeTurn(accounting, '/sessions/cache-free.jsonl', 'turn-cache-free', '2026-09-23T13:00:00.000Z', 3_600_000, {}, 'unsupported-cache');
+    observeTurn(accounting, '/sessions/cache-free.jsonl', 'turn-cache-free', '2026-09-23T12:00:00.000Z', '2026-09-23T13:00:00.000Z', {}, 'unsupported-cache');
     const free = conversationRecord(accounting, 'turn-cache-free');
     assert.ok(free?.pricing);
     assert.equal(free.pricing.rateSnapshot?.inputTokensUsdPerMillion, 0.06);

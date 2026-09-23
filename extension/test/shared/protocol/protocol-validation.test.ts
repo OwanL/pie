@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { validateHostToWebviewDetailMessage, validateWebviewToHostMessage } from '../../../src/shared/protocol-validation';
+import { DETAIL_REF_KEY_MAX_BYTES } from '../../../src/shared/protocol/subagent-detail';
 
 test('validateWebviewToHostMessage accepts the simple no-payload messages', () => {
   for (const type of ['ready', 'refreshState', 'requestSnapshot', 'openFilePicker', 'newSession', 'showLogs', 'openSettings', 'restartBackend']) {
@@ -181,7 +182,7 @@ test('validateWebviewToHostMessage validates Phase 5 detail subscription message
     'subscribe rejects an empty detailKey',
   );
   assert.equal(
-    validateWebviewToHostMessage({ ...valid, detailKey: 'x'.repeat(513) }).ok,
+    validateWebviewToHostMessage({ ...valid, detailKey: 'x'.repeat(DETAIL_REF_KEY_MAX_BYTES + 1) }).ok,
     false,
     'subscribe rejects an oversized detailKey',
   );
@@ -822,5 +823,28 @@ test('validateWebviewToHostMessage validates historyCompaction patches', () => {
     }).ok,
     false,
     'model profile with soft below minimum is rejected',
+  );
+});
+
+test('Phase 5 detail keys admit composite subagent keys beyond 512 bytes', () => {
+  // Real provider tool-call IDs (GitHub Copilot signed suffixes) make the
+  // webview-composed `subagent:${toolCallId}:${index}` key exceed 512 bytes
+  // while the address identities bound at the same provider limit.
+  const longToolCallId = 't'.repeat(600);
+  const address = {
+    sessionPath: '/a/session.jsonl', turnId: 'turn-1', rootToolCallId: longToolCallId, rootAttemptId: 'attempt-1',
+    lineage: [{ childId: 'c'.repeat(600), spawningToolCallId: 't'.repeat(600), attemptId: 'attempt-1' }],
+  };
+  const valid = { type: 'detail.subscribe', viewGeneration: 3, detailKey: `subagent:${longToolCallId}:0`, detailAttempt: 1, address };
+  assert.equal(validateWebviewToHostMessage(valid).ok, true, 'a composite key shaped like the live webview key must validate');
+  assert.equal(
+    validateWebviewToHostMessage({ type: 'detail.subscribe', viewGeneration: 3, detailKey: 'x'.repeat(DETAIL_REF_KEY_MAX_BYTES + 1), detailAttempt: 1, address }).ok,
+    false,
+    'detailKey above the shared composite bound is rejected',
+  );
+  assert.equal(
+    validateWebviewToHostMessage({ ...valid, address: { ...address, rootToolCallId: 't'.repeat(1025) } }).ok,
+    false,
+    'root tool-call ID above the provider bound is rejected',
   );
 });

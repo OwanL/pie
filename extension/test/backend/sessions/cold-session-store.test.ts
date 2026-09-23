@@ -588,6 +588,7 @@ test('cold durable-detail helper preserves fallback parity without coordinator r
             getSessionName: () => undefined,
             getCwd: () => h.root,
             getSessionId: () => 'helper-detail',
+            getEntries: () => [],
             buildSessionContext: () => ({ messages: [], thinkingLevel: 'medium', model: null }),
           }),
         },
@@ -704,6 +705,7 @@ test('oversized helper durable-detail responses fall back synchronously without 
               getSessionName: () => undefined,
               getCwd: () => h.root,
               getSessionId: () => 'helper-detail-oversized',
+              getEntries: () => [],
               buildSessionContext: () => ({ messages: [], thinkingLevel: 'medium', model: null }),
             };
           },
@@ -807,6 +809,395 @@ test('durable-detail helper fingerprint retries and generation fences do not cro
   }
 });
 
+function scoutRows(h: { root: string }, expectedValue: unknown) {
+  return [
+    userEntry('user', null, 'prompt'),
+    {
+      type: 'message', id: 'assistant', parentId: 'user', timestamp: '2026-08-15T00:00:02.000Z',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'toolCall', id: 'root-tool-call', name: 'subagent', arguments: {} }],
+        provider: 'mock', model: 'model-a', stopReason: 'stop', timestamp: 2,
+      },
+    },
+    {
+      type: 'message', id: 'tool-result', parentId: 'assistant', timestamp: '2026-08-15T00:00:03.000Z',
+      message: {
+        role: 'toolResult', toolCallId: 'root-tool-call',
+        details: { results: [expectedValue] }, timestamp: 3,
+      },
+    },
+  ];
+}
+
+async function makeHotScoutFixture(h: Awaited<ReturnType<typeof makeHarness>>) {
+  const sessionPath = path.join(h.sessionDir, 'hot-parent-scout.jsonl');
+  await writeJsonl(sessionPath, [header(h.root, 3, 'hot-parent-scout'), userEntry('user', null, 'prompt')]);
+  const address = {
+    sessionPath,
+    turnId: 'turn',
+    rootToolCallId: 'root-tool-call',
+    rootAttemptId: 'attempt',
+    lineage: [{ childId: 'child', spawningToolCallId: 'root-tool-call', attemptId: 'attempt' }],
+  } as const;
+  const expectedValue = { liveAddressable: true, lineage: address.lineage, payload: 'historical scout detail' };
+  return {
+    sessionPath,
+    address,
+    expectedValue,
+    expected: {
+      value: expectedValue,
+      sizeBytes: Buffer.byteLength(JSON.stringify(expectedValue), 'utf8'),
+      messageId: 'assistant',
+      toolCallId: 'root-tool-call',
+      kind: 'tool-result' as const,
+    },
+  };
+}
+
+function makeScoutStore(
+  h: Awaited<ReturnType<typeof makeHarness>>,
+  fixture: Awaited<ReturnType<typeof makeHotScoutFixture>>,
+  options: {
+    coordinatorGeneration?: number;
+    readAttempts?: number;
+    onOpen?: () => void;
+    onAfterStat?: () => void;
+    onGetBranch?: () => void;
+  } = {},
+) {
+  let opens = 0;
+  const store = new ColdSessionStore({
+    sdk: {
+      SessionManager: {
+        open: () => {
+          opens += 1;
+          options.onOpen?.();
+          return {
+            getBranch: () => {
+              options.onGetBranch?.();
+              return scoutRows(h, fixture.expectedValue);
+            },
+            getSessionName: () => undefined,
+            // openSessionBrowseSnapshot projects the summary after its durable
+            // stat, so this seam deterministically observes the read mid-flight.
+            getCwd: () => {
+              options.onAfterStat?.();
+              return h.root;
+            },
+            getSessionId: () => 'hot-parent-scout',
+            getEntries: () => [],
+            buildSessionContext: () => ({ messages: [], thinkingLevel: 'medium', model: null }),
+          };
+        },
+      },
+    } as any,
+    coordinatorGeneration: options.coordinatorGeneration ?? h.leases.coordinatorGeneration,
+    startupCwd: h.root,
+    agentDir: h.root,
+    sessionDir: h.sessionDir,
+    leaseAuthority: h.leases,
+    readAttempts: options.readAttempts,
+  });
+  return { store, opens: () => opens };
+}
+
+test('terminal scout detail resolves from the durable JSONL while the parent path is hot-fenced', async () => {
+  const h = await makeHarness();
+  try {
+    const fixture = await makeHotScoutFixture(h);
+    // Mirror `registerHot`: a long-lived catalog-visible hot ownership fence
+    // on the currently active parent session path.
+    const [hotToken] = h.leases.reserveCanonicalPaths(
+      [fixture.sessionPath],
+      'hot:active-worker',
+      { hideFromCatalog: false },
+    );
+
+    // Cold mutation IO stays rejected by the hot fence (unchanged contract).
+    await assert.rejects(
+      h.store.openSnapshot(fixture.sessionPath, browseOpenOptions),
+      (error) => error instanceof StaleColdSessionLeaseError && error.reason === 'path-reserved',
+    );
+
+    // The historical terminal scout card's durable fallback must resolve.
+    const { store } = makeScoutStore(h, fixture);
+    const result = await store.resolveDurableDetail(fixture.sessionPath, fixture.address);
+    assert.deepEqual(result, fixture.expected);
+  } finally {
+    await fs.rm(h.root, { recursive: true, force: true });
+  }
+});
+
+test('hot durable detail resolution projects only the transcript and reuses it across child details', async () => {
+  const h = await makeHarness();
+  try {
+    const fixture = await makeHotScoutFixture(h);
+    const [hotToken] = h.leases.reserveCanonicalPaths(
+      [fixture.sessionPath],
+      'hot:active-worker',
+      { hideFromCatalog: false },
+    );
+
+    let opens = 0;
+    const store = new ColdSessionStore({
+      sdk: {
+        SessionManager: {
+          open: () => {
+            opens += 1;
+            return {
+              // Detail resolution may only consume the parsed durable
+              // branch. Any other projection seam means the full browse
+              // snapshot was built for a detail resolution.
+              getBranch: () => scoutRows(h, fixture.expectedValue),
+            };
+          },
+        },
+      } as any,
+      coordinatorGeneration: h.leases.coordinatorGeneration,
+      startupCwd: h.root,
+      agentDir: h.root,
+      sessionDir: h.sessionDir,
+      leaseAuthority: h.leases,
+    });
+
+    const first = await store.resolveDurableDetail(fixture.sessionPath, fixture.address);
+    assert.deepEqual(first, fixture.expected);
+
+    // An exactly unchanged durable fingerprint (same stat identity) maps the
+    // identical transcript, so a repeat child detail does not re-run the
+    // supported SDK open nor rebuild any projection.
+    assert.deepEqual(
+      await store.resolveDurableDetail(fixture.sessionPath, fixture.address),
+      fixture.expected,
+    );
+    assert.equal(opens, 1, 'an unchanged durable fingerprint must not re-open the SDK session');
+
+    // A durable append moves the fingerprint: the next resolution re-opens
+    // through the supported SDK seam and still resolves exactly.
+    await fs.appendFile(
+      fixture.sessionPath,
+      `${JSON.stringify(userEntry('user-2', 'tool-result', 'follow-up'))}\n`,
+      'utf8',
+    );
+    assert.deepEqual(
+      await store.resolveDurableDetail(fixture.sessionPath, fixture.address),
+      fixture.expected,
+    );
+    assert.equal(opens, 2, 'a moved durable fingerprint must re-open instead of reusing the transcript');
+    h.leases.assertHotReadCurrent(
+      h.leases.captureHotRead(fixture.sessionPath)!,
+    );
+  } finally {
+    await fs.rm(h.root, { recursive: true, force: true });
+  }
+});
+
+test('ownership transfer before a queued hot detail load prevents SDK open under the replacement owner', async () => {
+  const h = await makeHarness();
+  try {
+    const fixture = await makeHotScoutFixture(h);
+    const [originalOwner] = h.leases.reserveCanonicalPaths(
+      [fixture.sessionPath],
+      'hot:original-owner',
+      { hideFromCatalog: false },
+    );
+    const { store, opens } = makeScoutStore(h, fixture);
+
+    // resolveDurableDetail captures the original hot lease and queues the
+    // projection load in a microtask. Transfer ownership before that load starts.
+    const pending = store.resolveDurableDetail(fixture.sessionPath, fixture.address);
+    h.leases.releaseCanonicalPaths([originalOwner]);
+    h.leases.reserveCanonicalPaths(
+      [fixture.sessionPath],
+      'hot:replacement-owner',
+      { hideFromCatalog: false },
+    );
+
+    await assert.rejects(
+      pending,
+      (error) => error instanceof StaleColdSessionLeaseError && error.reason === 'path-reserved',
+    );
+    assert.equal(opens(), 0, 'the stale deferred read must not open the SDK under its replacement owner');
+    assert.equal((await readJsonl(fixture.sessionPath))[0].version, 3);
+  } finally {
+    await fs.rm(h.root, { recursive: true, force: true });
+  }
+});
+
+test('hot detail rechecks the v3 header at the synchronous SDK-open boundary', async () => {
+  const h = await makeHarness();
+  try {
+    const fixture = await makeHotScoutFixture(h);
+    h.leases.reserveCanonicalPaths(
+      [fixture.sessionPath],
+      'hot:active-worker',
+      { hideFromCatalog: false },
+    );
+    const rows = await readJsonl(fixture.sessionPath);
+    rows[0] = header(h.root, 2, 'hot-parent-scout');
+    const { store, opens } = makeScoutStore(h, fixture, {
+      // Model SDK migration as a side effect of open: crossing the SDK seam
+      // rewrites the legacy header back to v3.
+      onOpen: () => {
+        const migratedRows = [...rows];
+        migratedRows[0] = header(h.root, 3, 'hot-parent-scout');
+        fsSync.writeFileSync(
+          fixture.sessionPath,
+          `${migratedRows.map((row) => JSON.stringify(row)).join('\n')}\n`,
+          'utf8',
+        );
+      },
+    });
+
+    const pending = store.resolveDurableDetail(fixture.sessionPath, fixture.address);
+    fsSync.writeFileSync(
+      fixture.sessionPath,
+      `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`,
+      'utf8',
+    );
+    await assert.rejects(
+      pending,
+      (error) => error instanceof StaleColdSessionLeaseError && error.reason === 'path-reserved',
+    );
+    assert.equal(opens(), 0, 'a non-v3 header must never reach the migrating SDK open');
+    assert.equal((await readJsonl(fixture.sessionPath))[0].version, 2, 'the hot-owned header was not migrated');
+  } finally {
+    await fs.rm(h.root, { recursive: true, force: true });
+  }
+});
+
+test('hot appends move the durable fingerprint without failing the hot durable detail read', async () => {
+  const h = await makeHarness();
+  try {
+    const fixture = await makeHotScoutFixture(h);
+    const [hotToken] = h.leases.reserveCanonicalPaths(
+      [fixture.sessionPath],
+      'hot:active-worker',
+      { hideFromCatalog: false },
+    );
+    let mutationInFlight = false;
+    const { store } = makeScoutStore(h, fixture, {
+      // getCwd is projected after the snapshot's durable stat: the hot worker
+      // appends ordinary durable history while the read is in flight, and
+      // ownership revision — not the moving fingerprint — is the fence.
+      onAfterStat: () => {
+        if (mutationInFlight) return;
+        mutationInFlight = true;
+        void fs.appendFile(
+          fixture.sessionPath,
+          `${JSON.stringify(userEntry('appended', 'user', 'hot append'))}\n`,
+          'utf8',
+        ).catch(() => undefined);
+      },
+    });
+    const stamp = h.leases.captureHotRead(fixture.sessionPath)!;
+    assert.deepEqual(await store.resolveDurableDetail(fixture.sessionPath, fixture.address), fixture.expected);
+    h.leases.assertHotReadCurrent(stamp);
+  } finally {
+    await fs.rm(h.root, { recursive: true, force: true });
+  }
+});
+
+test('a hot fence released mid-read recovers through the ordinary cold read path', async () => {
+  const h = await makeHarness();
+  try {
+    const fixture = await makeHotScoutFixture(h);
+    const [hotToken] = h.leases.reserveCanonicalPaths(
+      [fixture.sessionPath],
+      'hot:active-worker',
+      { hideFromCatalog: false },
+    );
+    let released = false;
+    const { store, opens } = makeScoutStore(h, fixture, {
+      // The transcript-only hot projection consumes the parsed branch, so
+      // releasing the fence here deterministically moves ownership mid-read.
+      // The cold retry re-projects too; release exactly once.
+      onGetBranch: () => {
+        if (released) return;
+        released = true;
+        h.leases.releaseCanonicalPaths([hotToken]);
+      },
+    });
+    assert.deepEqual(await store.resolveDurableDetail(fixture.sessionPath, fixture.address), fixture.expected);
+    assert.ok(opens() >= 2, 'the stale hot read retried through the cold path');
+  } finally {
+    await fs.rm(h.root, { recursive: true, force: true });
+  }
+});
+
+test('uncommitted mid-creation reservations still reject cold durable detail reads', async () => {
+  const h = await makeHarness();
+  try {
+    const fixture = await makeHotScoutFixture(h);
+    const [token] = h.leases.reserveCanonicalPaths([fixture.sessionPath], 'test-create');
+    const { store } = makeScoutStore(h, fixture);
+    await assert.rejects(
+      store.resolveDurableDetail(fixture.sessionPath, fixture.address),
+      (error) => error instanceof StaleColdSessionLeaseError && error.reason === 'path-reserved',
+    );
+    h.leases.releaseCanonicalPaths([token]);
+  } finally {
+    await fs.rm(h.root, { recursive: true, force: true });
+  }
+});
+
+test('hot-fence read leases stay read-only and recheck ownership at the final fence', async () => {
+  const h = await makeHarness();
+  try {
+    const fixture = await makeHotScoutFixture(h);
+    assert.equal(h.leases.captureHotRead(fixture.sessionPath), undefined, 'unreserved paths keep cold read semantics');
+    const [hiddenToken] = h.leases.reserveCanonicalPaths([fixture.sessionPath], 'test-create');
+    assert.equal(
+      h.leases.captureHotRead(fixture.sessionPath),
+      undefined,
+      'uncommitted mid-creation reservations are not hot reads',
+    );
+    h.leases.releaseCanonicalPaths([hiddenToken]);
+
+    const [hotToken] = h.leases.reserveCanonicalPaths(
+      [fixture.sessionPath],
+      'hot:active-worker',
+      { hideFromCatalog: false },
+    );
+    const stamp = h.leases.captureHotRead(fixture.sessionPath);
+    assert.ok(stamp, 'a long-lived hot fence permits a stable read lease');
+    assert.equal(stamp!.coordinatorGeneration, h.leases.coordinatorGeneration);
+    assert.equal(stamp!.sessionPath, fixture.sessionPath);
+
+    // Ordinary hot appends move the durable fingerprint without failing the read.
+    await fs.appendFile(
+      fixture.sessionPath,
+      `${JSON.stringify(userEntry('appended', 'user', 'hot append'))}\n`,
+      'utf8',
+    );
+    h.leases.assertHotReadCurrent(stamp!);
+
+    // An ownership transition still fails the read.
+    h.leases.releaseCanonicalPaths([hotToken]);
+    assert.throws(
+      () => h.leases.assertHotReadCurrent(stamp!),
+      (error) => error instanceof StaleColdSessionLeaseError && error.reason === 'ownership-revision',
+    );
+
+    h.leases.reserveCanonicalPaths(
+      [fixture.sessionPath],
+      'hot:next-worker',
+      { hideFromCatalog: false },
+    );
+    const next = h.leases.captureHotRead(fixture.sessionPath)!;
+    h.leases.advanceCoordinatorGeneration(8);
+    assert.throws(
+      () => h.leases.assertHotReadCurrent(next),
+      (error) => error instanceof StaleColdSessionLeaseError && error.reason === 'coordinator-generation',
+    );
+    // Retired stamps never revive: a generation advance cleared the fences.
+    assert.equal(h.leases.captureHotRead(fixture.sessionPath), undefined);
+  } finally {
+    await fs.rm(h.root, { recursive: true, force: true });
+  }
+});
+
 test('browse cache enforces LRU entry/source-byte bounds while retaining one current oversize session', async () => {
   const h = await makeHarness();
   try {
@@ -871,6 +1262,34 @@ test('fingerprint, ownership, generation, promotion, and forget fences make cach
     await observed.store.forget(sessionPath);
     assert.equal(observed.store.getBrowseCacheStats().entries, 0, 'forget eagerly purges privacy-sensitive bytes');
     await assert.rejects(fs.stat(sessionPath), (error: NodeJS.ErrnoException) => error.code === 'ENOENT');
+  } finally {
+    await fs.rm(h.root, { recursive: true, force: true });
+  }
+});
+
+test('forget eagerly purges the hot transcript cache', async () => {
+  const h = await makeHarness();
+  try {
+    const fixture = await makeHotScoutFixture(h);
+    const [hotToken] = h.leases.reserveCanonicalPaths(
+      [fixture.sessionPath],
+      'hot:active-worker',
+      { hideFromCatalog: false },
+    );
+    const { store } = makeScoutStore(h, fixture);
+    assert.deepEqual(
+      await store.resolveDurableDetail(fixture.sessionPath, fixture.address),
+      fixture.expected,
+    );
+    assert.equal(store.getHotTranscriptCacheStats().entries, 1, 'hot detail resolution populated the transcript cache');
+
+    h.leases.releaseCanonicalPaths([hotToken]);
+    await store.forget(fixture.sessionPath);
+
+    const stats = store.getHotTranscriptCacheStats();
+    assert.equal(stats.entries, 0, 'forget immediately purges private hot transcript bytes');
+    assert.equal(stats.currentSourceBytes, 0);
+    await assert.rejects(fs.stat(fixture.sessionPath), (error: NodeJS.ErrnoException) => error.code === 'ENOENT');
   } finally {
     await fs.rm(h.root, { recursive: true, force: true });
   }

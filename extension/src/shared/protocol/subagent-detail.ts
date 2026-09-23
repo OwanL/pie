@@ -84,6 +84,22 @@ export type CoordinatorToHostDetailMessage =
   | { kind: 'detail.error'; subscriptionId: string; code: DetailErrorCode; message: string; retryable: boolean; fence: BackendDetailFence };
 
 const ID_BYTES = 512;
+/** Opaque provider tool-call IDs are not UUID-sized: GitHub Copilot appends
+ *  ~600-byte signature suffixes to its tool-call IDs. Bound above the observed
+ *  providers with headroom instead of assuming 512-byte identities. */
+export const PROVIDER_TOOL_CALL_ID_MAX_BYTES = 1024;
+/** Composite execution identity `${attemptId}:${toolCallId}` (attemptId ≤
+ *  ID_BYTES, toolCallId ≤ PROVIDER_TOOL_CALL_ID_MAX_BYTES) plus separators. */
+export const PROVIDER_EXECUTION_ID_MAX_BYTES = 2048;
+/** Composite detail routing keys embed bounded session paths, message/entry
+ *  IDs, and opaque provider tool-call IDs:
+ *  - `subagent:${toolCallId}:${index}`
+ *  - `${source}:tool:${sessionPath}:${durableIdentity}:${toolCallId}:${revision}`
+ *  - `durable:subagent:${sessionPath}:${durableEntryId}:${rootToolCallId}`
+ *  Bounded above any legal composition (path ≤ 4 KiB at the ingress, message
+ *  /entry ID ≤ 512 B, tool-call ID ≤ 1 KiB, revision/index digits, and
+ *  separators) instead of trusting UUID-shaped keys. */
+export const DETAIL_REF_KEY_MAX_BYTES = 8192;
 const PATH_BYTES = 16 * 1024;
 const MESSAGE_BYTES = 64 * 1024;
 const MAX_LINEAGE = 64;
@@ -99,7 +115,7 @@ export function isLiveSubagentDetailAddress(value: unknown): value is LiveSubage
   if (!recordWithKeys(value, ['sessionPath', 'turnId', 'rootToolCallId', 'rootAttemptId', 'lineage'])) return false;
   if (!boundedString(value.sessionPath, PATH_BYTES)
     || !boundedString(value.turnId, ID_BYTES)
-    || !boundedString(value.rootToolCallId, ID_BYTES)
+    || !boundedString(value.rootToolCallId, PROVIDER_TOOL_CALL_ID_MAX_BYTES)
     || !boundedString(value.rootAttemptId, ID_BYTES)
     || !Array.isArray(value.lineage)
     || value.lineage.length === 0
@@ -107,8 +123,8 @@ export function isLiveSubagentDetailAddress(value: unknown): value is LiveSubage
   const childIds = new Set<string>();
   return value.lineage.every((identity) => {
     if (!recordWithKeys(identity, ['childId', 'spawningToolCallId', 'attemptId'])
-      || !boundedString(identity.childId, ID_BYTES)
-      || !boundedString(identity.spawningToolCallId, ID_BYTES)
+      || !boundedString(identity.childId, PROVIDER_TOOL_CALL_ID_MAX_BYTES)
+      || !boundedString(identity.spawningToolCallId, PROVIDER_TOOL_CALL_ID_MAX_BYTES)
       || !boundedString(identity.attemptId, ID_BYTES)
       || childIds.has(identity.childId)) return false;
     childIds.add(identity.childId);
@@ -242,7 +258,7 @@ function isLazyDetailRef(value: unknown): value is LazyDetailRef {
     && (value.source === 'durable' || value.source === 'live')
     && boundedString(value.sessionPath, PATH_BYTES) && boundedString(value.messageId, ID_BYTES)
     && nonNegativeInteger(value.sizeBytes) && typeof value.summary === 'string' && typeof value.available === 'boolean'
-    && optionalString(value.toolCallId) && optionalString(value.executionId)
+    && optionalBounded(value.toolCallId, PROVIDER_TOOL_CALL_ID_MAX_BYTES) && optionalBounded(value.executionId, PROVIDER_EXECUTION_ID_MAX_BYTES)
     && optionalNonNegative(value.partIndex) && optionalNonNegative(value.sourceRevision)
     && optionalNonNegative(value.childCount) && optionalNonNegative(value.lineCount);
 }
@@ -251,7 +267,7 @@ function validPathSegment(value: unknown): boolean {
   return typeof value === 'string' ? !FORBIDDEN_KEYS.has(value) && utf8ByteLength(value) <= ID_BYTES : nonNegativeInteger(value);
 }
 
-function optionalString(value: unknown): boolean { return value === undefined || boundedString(value, ID_BYTES); }
+function optionalBounded(value: unknown, bytes: number): boolean { return value === undefined || boundedString(value, bytes); }
 function optionalNonNegative(value: unknown): boolean { return value === undefined || nonNegativeInteger(value); }
 function positiveInteger(value: unknown): value is number { return typeof value === 'number' && Number.isSafeInteger(value) && value > 0; }
 function nonNegativeInteger(value: unknown): value is number { return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0; }

@@ -18,9 +18,12 @@ import {
 } from '../../../src/shared/protocol';
 import {
   clearDetailSubscriptionStore,
+  demandDetailValue,
   receiveDetailImperative,
   setDetailStoreContext,
+  sha256Hex,
 } from '../../../src/webview/panel/transcript/detail-subscription-store';
+import { retainSubagentDetailAddresses } from '../../../src/host/core/live-pipeline/subagent-detail-addresses';
 import {
   clearLazyDetailCache,
   setLazyDetailPostMessage,
@@ -41,6 +44,96 @@ beforeEach(() => {
     render(null, container);
     container.remove();
   };
+});
+
+test('an address promotion reaches a mounted expanded completed card', async () => {
+  const messages: WebviewToHostMessage[] = [];
+  const postMessage = (message: WebviewToHostMessage) => messages.push(message);
+  setLazyDetailPostMessage(postMessage);
+  setDetailStoreContext({
+    hostInstanceId: 'host-1', viewGeneration: 1, rendererId: 'renderer-1', rendererGeneration: 1, postMessage,
+  });
+
+  const lineage = [{ childId: 'child-1', spawningToolCallId: 'tool-1', attemptId: 'child-attempt-1' }];
+  const detailAddress: LiveSubagentDetailAddress = {
+    sessionPath: '/session.jsonl', turnId: 'turn-1', rootToolCallId: 'tool-1', rootAttemptId: 'root-attempt-1', lineage,
+  };
+  const detailRef: LazyDetailRef = {
+    key: 'durable:tool:/session.jsonl:tool-1', kind: 'tool-result', source: 'durable',
+    sessionPath: '/session.jsonl', messageId: 'assistant-1', toolCallId: 'tool-1',
+    sizeBytes: 100_000, summary: '1 subagent child', childCount: 1, available: true,
+  };
+  const child = {
+    agent: 'worker', task: 'inspect', exitCode: 0, messages: [],
+    childId: 'child-1', attemptId: 'child-attempt-1', lineage,
+  };
+  const baseToolCall = {
+    id: 'tool-1', name: 'subagent', input: { agent: 'worker', task: 'inspect' },
+    result: { details: { mode: 'single', results: [child] } },
+    status: 'completed' as const, seq: 7, detailRef,
+  };
+  const renderProps = {
+    prefs: { ...DEFAULT_CHAT_PREFS, autoExpandSubagentCalls: true },
+    workingDirectory: '/tmp', onOpenFile: () => undefined, onContextMenu: () => undefined,
+    renderToolCall: () => null,
+  };
+  const addressSource = {
+    details: {
+      results: [{ ...child, liveAddressable: true, detailAddress }],
+    },
+  };
+
+  await act(async () => {
+    render(h(ToolCallItem, { toolCall: baseToolCall, ...renderProps }), container);
+  });
+  assert.equal(container.querySelector('[aria-expanded="true"]') !== null, true, 'the card is already expanded');
+  assert.equal(messages.filter((message) => message.type === 'requestDetail').length, 1,
+    'before address promotion the expanded card is using its generic durable-detail lane');
+
+  const promotedResult = retainSubagentDetailAddresses(baseToolCall.result, addressSource);
+  assert.notEqual(promotedResult, baseToolCall.result, 'host terminal reconciliation promotes the producer address');
+  await act(async () => {
+    render(h(ToolCallItem, { toolCall: { ...baseToolCall, result: promotedResult }, ...renderProps }), container);
+  });
+
+  const subscribe = messages.find((message): message is Extract<WebviewToHostMessage, { type: 'detail.subscribe' }> =>
+    message.type === 'detail.subscribe');
+  assert.ok(subscribe, 'a mounted expanded card must subscribe when terminal reconciliation promotes its address');
+
+  const route = {
+    hostInstanceId: 'host-1', hostGeneration: 0, viewGeneration: subscribe.viewGeneration,
+    rendererId: 'renderer-1', rendererGeneration: 1, backendGeneration: 1, coordinatorGeneration: 1,
+    workerId: 'worker-1', workerGeneration: 1, detailKey: subscribe.detailKey,
+    detailAttempt: subscribe.detailAttempt, subscriptionId: 'subscription-1',
+  };
+  const serializedChild = JSON.stringify({
+    agent: 'worker', task: 'inspect', exitCode: 0, lineage,
+    messages: [{ role: 'assistant', content: [{ type: 'text', text: 'full child transcript' }] }],
+  });
+  const totalBytes = new TextEncoder().encode(serializedChild).byteLength;
+  const totalCodePoints = [...serializedChild].length;
+  const payload = {
+    kind: 'json-segment' as const, encoding: 'utf8-json' as const, segmentId: 'segment-0', semanticPath: [],
+    startByte: 0, endByte: totalBytes, totalBytes, startCodePoint: 0, endCodePoint: totalCodePoints,
+    totalCodePoints, text: serializedChild,
+  };
+  await act(async () => {
+    receiveDetailImperative({
+      type: 'detail.start', ...route, address: detailAddress, source: 'durable',
+      baselineRevision: 1, pageCount: 1, totalBytes, totalCodePoints,
+    });
+    receiveDetailImperative({
+      type: 'detail.page', ...route,
+      ref: { baselineRevision: 1, pageIndex: 0, pageCount: 1 }, payload,
+      payloadBytes: new TextEncoder().encode(JSON.stringify(payload)).byteLength,
+      checksum: sha256Hex(JSON.stringify(payload)),
+    });
+  });
+  const detail = demandDetailValue(subscribe.detailKey);
+  assert.equal(detail.status, 'ready', 'the promoted card assembles its page-backed transcript');
+  if (detail.status === 'ready') assert.deepEqual((detail.value as { messages: unknown[] }).messages, [
+    { role: 'assistant', content: [{ type: 'text', text: 'full child transcript' }] },
+  ]);
 });
 
 test('an addressable terminal subagent subscribes instead of issuing a generic detail request', async () => {

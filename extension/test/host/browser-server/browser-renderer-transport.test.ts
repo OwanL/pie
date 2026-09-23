@@ -273,6 +273,72 @@ test('ingress: a malformed identifiable detail request receives a scoped termina
   assert.equal(response.result.status, 'failure');
 });
 
+test('ingress: a legal long opaque provider detail key is routed, not dropped', () => {
+  const { socket, transport, registration, routed } = createHarness();
+  transport.start(registration.registration);
+  socket.emit('message', JSON.stringify({ type: 'ready', buildId: 'build-1', viewGeneration: 7 }), false);
+
+  // GitHub Copilot tool-call IDs carry a ~600-byte signature suffix; the
+  // webview-composed subagent detail key exceeds the old 512-byte bound.
+  const signedToolCallId = `gh-${'q'.repeat(592)}-sig`;
+  socket.emit('message', JSON.stringify({
+    type: 'requestDetail',
+    sessionPath: '/sessions/a',
+    clientCommandId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    ref: {
+      key: `subagent:${signedToolCallId}:0`,
+      kind: 'tool-result',
+      source: 'durable',
+      sessionPath: '/sessions/a',
+      messageId: 'm',
+      toolCallId: signedToolCallId,
+      sizeBytes: 10,
+      summary: 'summary',
+      available: true,
+    },
+  }), false);
+
+  assert.equal(routed.length, 2, 'hello-handshake ready plus the routed detail request');
+  assert.equal(routed[1]?.type, 'requestDetail');
+  assert.equal(socket.sent.length, 1, 'no terminal rejection is needed');
+});
+
+test('ingress: an over-bound detail key past the old 512-byte gate still gets a terminal rejection', () => {
+  const { socket, transport, registration, routed } = createHarness();
+  transport.start(registration.registration);
+  socket.emit('message', JSON.stringify({ type: 'ready', buildId: 'build-1', viewGeneration: 7 }), false);
+
+  // A composite subagent key above the old 512-byte bound (within the shared
+  // raised bound) that fails ingress on another closed-schema field must
+  // still settle the webview's bounded request lane with a key-scoped
+  // terminal rejection instead of leaving the exact-detail UI on a timeout.
+  socket.emit('message', JSON.stringify({
+    type: 'requestDetail',
+    sessionPath: '/sessions/a',
+    clientCommandId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    ref: {
+      key: `subagent:${'q'.repeat(592)}:0`,
+      kind: 'tool-result',
+      source: 'durable',
+      sessionPath: '/sessions/a',
+      messageId: 'm',
+      sizeBytes: 10,
+      summary: 'summary',
+      available: true,
+      unexpected: true, // fails ingress; the transport must still settle the card
+    },
+  }), false);
+
+  assert.equal(routed.length, 1, 'only the ready handshake is routed');
+  assert.equal(socket.sent.length, 2, 'hello plus one terminal rejection');
+  const response = JSON.parse(socket.sent[1] ?? '{}') as Extract<HostToWebviewMessage, { type: 'detailResult' }>;
+  assert.equal(response.type, 'detailResult');
+  assert.equal(response.result.status, 'failure');
+  assert.equal(typeof response.result.key, 'string');
+  assert.ok((response.result.key as string).startsWith('subagent:'));
+  assert.ok(Buffer.byteLength(response.result.key as string, 'utf8') > 512, 'the long signed key is echoed back');
+});
+
 test('ingress: the violation rate bound closes the socket with a typed reason', () => {
   const { socket, transport, registration, closed } = createHarness();
   transport.start(registration.registration);

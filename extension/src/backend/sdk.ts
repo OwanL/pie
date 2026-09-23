@@ -58,6 +58,7 @@ export interface SdkSessionEvent {
     | string;
   message?: {
     role?: 'user' | 'assistant' | 'toolResult' | 'custom';
+    timestamp?: string | number;
     content?: unknown;
     stopReason?: string;
     errorMessage?: string;

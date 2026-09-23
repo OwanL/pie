@@ -5,6 +5,7 @@ import type {
   ToolCall,
 } from './protocol/messages.js';
 import { deduplicateToolCallResultsForTransport } from './chat-message-parts.js';
+import { PROVIDER_TOOL_CALL_ID_MAX_BYTES } from './protocol/subagent-detail.js';
 import { getSubagentBillingEntries, hasNestedToolFailure } from './subagent-result.js';
 import { isRecord } from './type-guards.js';
 import { utf8ByteLength } from './utf8.js';
@@ -48,6 +49,23 @@ function boundedStart(value: unknown, maxChars: number): unknown {
 
 function boundedTail(value: unknown, maxChars: number): unknown {
   return typeof value === 'string' ? value.slice(-maxChars) : value;
+}
+
+/** Keep one producer lineage identity addressable: each opaque provider
+ *  tool-call ID is bounded individually at the shared provider limit so the
+ *  exact-match addressability chain survives compaction. */
+function compactLineageIdentity(value: unknown): unknown {
+  if (!isRecord(value)) return compactUnknownPreview(value, 256);
+  const identity: Record<string, unknown> = {};
+  for (const [key, maxChars] of [
+    ['childId', PROVIDER_TOOL_CALL_ID_MAX_BYTES],
+    ['spawningToolCallId', PROVIDER_TOOL_CALL_ID_MAX_BYTES],
+    ['attemptId', 512],
+  ] as const) {
+    const bounded = boundedStart(value[key], maxChars);
+    if (bounded !== undefined) identity[key] = bounded;
+  }
+  return identity;
 }
 
 function compactUnknownPreview(value: unknown, maxChars = SUBAGENT_PREVIEW_TEXT_CHARS): unknown {
@@ -223,9 +241,13 @@ function compactSubagentChild(value: unknown, recursionDepth = 0): Record<string
   const copy = (key: string, candidate: unknown = value[key]): void => {
     if (candidate !== undefined) child[key] = candidate;
   };
-  copy('childId', boundedStart(value.childId, 512));
+  copy('childId', boundedStart(value.childId, PROVIDER_TOOL_CALL_ID_MAX_BYTES));
   copy('attemptId', boundedStart(value.attemptId, 512));
-  copy('lineage', Array.isArray(value.lineage) ? value.lineage.slice(0, 64).map((item) => compactUnknownPreview(item, 1024)) : undefined);
+  // Lineage identities route page-backed detail addresses by exact producer
+  // ID equality; bound each opaque ID field individually instead of
+  // char-truncating the whole identity object (which silently breaks a real
+  // provider's ~600-byte signed tool-call IDs).
+  copy('lineage', Array.isArray(value.lineage) ? value.lineage.slice(0, 64).map(compactLineageIdentity) : undefined);
   copy('liveAddressable', value.liveAddressable === true);
   // The immutable live detail address (root identity + lineage) is small and
   // must survive the compact preview so an expanded card can open the page-backed
@@ -313,7 +335,7 @@ export function compactSubagentResultPreview(value: unknown, recursionDepth = 0)
     childId: child.childId,
     attemptId: child.attemptId,
     lineage: Array.isArray(child.lineage)
-      ? child.lineage.slice(0, 8).map((item) => compactUnknownPreview(item, 256))
+      ? child.lineage.slice(0, 8).map(compactLineageIdentity)
       : undefined,
     liveAddressable: child.liveAddressable,
     detailAddress: child.detailAddress,

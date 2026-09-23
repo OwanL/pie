@@ -331,6 +331,24 @@ test('Phase 5 private protocol accepts subscribe/unsubscribe/fetch and six close
   assert.equal(parseWorkerToCoordinatorFrame({ ...workerFrames[2], surprise: true }, expected).status, 'invalid');
 });
 
+test('Phase 5 durable refs carry long opaque provider tool IDs (GitHub Copilot signed suffixes)', () => {
+  const signedToolCallId = `gh-${'q'.repeat(592)}-sig`;
+  const durableRef = {
+    key: `durable:subagent:${base.leasePath}:entry-1:${signedToolCallId}`,
+    kind: 'tool-result', source: 'durable', sessionPath: base.leasePath,
+    messageId: 'entry-1', toolCallId: signedToolCallId, executionId: `attempt-1:${signedToolCallId}`,
+    sizeBytes: 4, summary: 'detail', available: true,
+  };
+  const terminal = { ...base, kind: 'detail.terminal', subscriptionId: 'subscription-1', revision: 2, durableRef };
+  assert.equal(parseWorkerToCoordinatorFrame(terminal, expected).status, 'accepted');
+  assert.equal(parseWorkerToCoordinatorFrame(
+    { ...terminal, durableRef: { ...durableRef, toolCallId: 'x'.repeat(1025) } }, expected,
+  ).status, 'invalid', 'tool-call ID above the provider bound is invalid');
+  assert.equal(parseWorkerToCoordinatorFrame(
+    { ...terminal, durableRef: { ...durableRef, executionId: `attempt-1:${'x'.repeat(2049)}` } }, expected,
+  ).status, 'invalid', 'composite execution ID above its bound is invalid');
+});
+
 test('Phase 4 identity rejects root alias drift and stale lease path or revision', () => {
   const frame = { ...base, kind: 'runtime.event', event: 'busy.changed', payload: { busy: true } };
   for (const changed of [

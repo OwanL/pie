@@ -29,6 +29,7 @@ import { WebSocket } from 'ws';
 import type { HostToWebviewMessage, RendererKind } from '../../shared/protocol';
 import { PIE_BUILD_ID, WEBVIEW_PROTOCOL_VERSION } from '../../shared/protocol';
 import { BROWSER_INGRESS_LIMITS, validateBrowserToHostMessage } from '../../shared/browser-ingress';
+import { DETAIL_REF_KEY_MAX_BYTES } from '../../shared/protocol/subagent-detail';
 import { appendPieLog } from '../util/pie-log';
 import type { RendererRegistration, RendererTransport } from '../renderers/types';
 import { BROWSER_SERVER_POLICY, evaluateSendGate, ViolationRateTracker } from './policy';
@@ -336,7 +337,8 @@ function detailRejectionForMalformedRequest(value: unknown): Extract<HostToWebvi
     || typeof message.ref !== 'object'
     || Array.isArray(message.ref)) return undefined;
   const key = (message.ref as Record<string, unknown>).key;
-  if (typeof key !== 'string' || key.length === 0 || Buffer.byteLength(key, 'utf8') > 512) return undefined;
+  if (typeof key !== 'string' || key.length === 0
+    || Buffer.byteLength(key, 'utf8') > DETAIL_REF_KEY_MAX_BYTES) return undefined;
   return {
     type: 'detailResult',
     result: {

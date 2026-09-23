@@ -109,6 +109,8 @@ interface SubagentEventMessage {
 	model?: string;
 	provider?: string;
 	errorMessage?: string;
+	/** SDK assistant-message creation time, reused unchanged at message_end; only
+	 * the message_start value is retained as the observed request start. */
 	timestamp?: number;
 	usage?: {
 		input?: number;
@@ -546,6 +548,7 @@ function recordAssistantMessage(
 	result: SingleResult,
 	msg: SubagentEventMessage,
 	turnStartMs: number | undefined,
+	terminalObservedAtMs: number,
 	providerForModel?: (modelId: string) => string | undefined,
 ): void {
 	const turnNumber = result.usage.turns + 1;
@@ -591,12 +594,11 @@ function recordAssistantMessage(
 	const observedStartedAtMs = typeof turnStartMs === "number" && Number.isFinite(turnStartMs) && turnStartMs >= 0
 		? turnStartMs
 		: undefined;
-	const observedCompletedAtMs = typeof msg.timestamp === "number" && Number.isFinite(msg.timestamp) && msg.timestamp >= 0
-		? msg.timestamp
-		: undefined;
-	const endedMs = observedCompletedAtMs !== undefined && observedCompletedAtMs > (observedStartedAtMs ?? 0)
-		? observedCompletedAtMs
-		: Date.now();
+	// The SDK message timestamp is created with the request's assistant message
+	// and is reused unchanged at message_end. Completion is the local wall-clock
+	// observation of that terminal event, never the message's creation timestamp.
+	const observedCompletedAtMs = terminalObservedAtMs;
+	const endedMs = terminalObservedAtMs;
 	const generationDurationMs =
 		observedStartedAtMs !== undefined && observedStartedAtMs > 0
 			? Math.max(0, endedMs - observedStartedAtMs)
@@ -967,12 +969,13 @@ function handleMessageEnd(
 	turnStartMs: number | undefined,
 	providerForModel?: (modelId: string) => string | undefined,
 ): void {
+	const terminalObservedAtMs = Date.now();
 	const msg = rawMessage as Message;
 	if (msg.role === "assistant" || msg.role === "toolResult") {
 		result.messages.push(msg);
 	}
 	if (msg.role === "assistant") {
-		recordAssistantMessage(result, rawMessage, turnStartMs, providerForModel);
+		recordAssistantMessage(result, rawMessage, turnStartMs, terminalObservedAtMs, providerForModel);
 		// Clear streaming text/reasoning once a complete assistant message is
 		// committed. (Only assistant messages produce text/thinking_delta events,
 		// so only reset on those.)

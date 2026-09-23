@@ -15,6 +15,10 @@ import {
   BROWSER_INGRESS_LIMITS,
   validateBrowserToHostMessage,
 } from '../../../src/shared/browser-ingress';
+import {
+  DETAIL_REF_KEY_MAX_BYTES,
+  PROVIDER_TOOL_CALL_ID_MAX_BYTES,
+} from '../../../src/shared/protocol/subagent-detail';
 import { compactDurableMessageDetails } from '../../../src/shared/lazy-details';
 import type { WebviewToHostMessage } from '../../../src/shared/protocol';
 
@@ -405,4 +409,58 @@ test('invalid frameBytes is rejected', () => {
   expectRejected(validSend(), -1);
   expectRejected(validSend(), 1.5);
   expectRejected(validSend(), Number.NaN);
+});
+
+// ─── Long opaque provider tool-call IDs and composite detail keys ───────────
+
+/** GitHub Copilot tool-call IDs carry a ~600-byte signature suffix; they are
+ *  opaque and far past UUID-shaped 256/512-byte assumptions. */
+const signedToolCallId = `gh-${'q'.repeat(592)}-sig`;
+
+function signedDetailRef() {
+  return {
+    key: `subagent:${signedToolCallId}:0`,
+    kind: 'tool-result',
+    source: 'durable',
+    sessionPath: '/sessions/a',
+    messageId: 'm',
+    toolCallId: signedToolCallId,
+    sizeBytes: 100,
+    summary: 'summary',
+    available: true,
+  };
+}
+
+function signedDetailAddress() {
+  return {
+    sessionPath: '/sessions/a',
+    turnId: 'turn-1',
+    rootToolCallId: signedToolCallId,
+    rootAttemptId: 'attempt-1',
+    lineage: [{ childId: signedToolCallId, spawningToolCallId: signedToolCallId, attemptId: 'attempt-1' }],
+  };
+}
+
+test('opaque provider tool-call IDs and composite detail keys pass ingress', () => {
+  expectOk({ type: 'requestDetail', sessionPath: '/sessions/a', ref: signedDetailRef(), clientCommandId: UUID });
+  expectOk({
+    type: 'detail.subscribe', viewGeneration: 3, detailAttempt: 1,
+    detailKey: `subagent:${signedToolCallId}:0`,
+    address: signedDetailAddress(),
+    clientCommandId: UUID,
+  });
+});
+
+test('detail ref key and provider tool-ID ingress bounds are exact', () => {
+  const base = {
+    kind: 'tool-result', source: 'durable', sessionPath: '/sessions/a', messageId: 'm',
+    summary: 'summary', available: true, sizeBytes: 1,
+  };
+  // `subagent:` + `:` + `0` = 11 bytes of fixed overhead around the tool ID.
+  const maxKey = `subagent:${'k'.repeat(DETAIL_REF_KEY_MAX_BYTES - 11)}:0`;
+  expectOk({ type: 'requestDetail', sessionPath: '/sessions/a', ref: { ...base, key: maxKey }, clientCommandId: UUID });
+  expectRejected({ type: 'requestDetail', sessionPath: '/sessions/a', ref: { ...base, key: `${maxKey}x` }, clientCommandId: UUID });
+  const maxToolCallId = 't'.repeat(PROVIDER_TOOL_CALL_ID_MAX_BYTES);
+  expectOk({ type: 'requestDetail', sessionPath: '/sessions/a', ref: { ...base, key: 'k', toolCallId: maxToolCallId }, clientCommandId: UUID });
+  expectRejected({ type: 'requestDetail', sessionPath: '/sessions/a', ref: { ...base, key: 'k', toolCallId: `${maxToolCallId}x` }, clientCommandId: UUID });
 });

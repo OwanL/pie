@@ -1083,10 +1083,10 @@ function areToolCallItemPropsEqual(previous: ToolCallItemProps, next: ToolCallIt
     return false;
   }
 
-  // Tool input is immutable after tool.started. Terminal results are immutable;
-  // live result/progress changes are represented by seq. Presence is still a
-  // barrier so an undefined-to-defined result cannot be hidden.
-  return left.id === right.id
+  // Tool input is immutable after tool.started. Live result/progress changes
+  // are represented by seq; terminal subagent address promotion is compared
+  // below. Presence still barriers undefined-to-defined result changes.
+  const stableLifecycle = left.id === right.id
     && left.name === right.name
     && left.status === right.status
     && left.argumentsText === right.argumentsText
@@ -1099,6 +1099,55 @@ function areToolCallItemPropsEqual(previous: ToolCallItemProps, next: ToolCallIt
     && left.durableEntryId === right.durableEntryId
     && left.detailRef?.key === right.detailRef?.key
     && (left.result === undefined) === (right.result === undefined);
+  if (!stableLifecycle) return false;
+  if (left.result === right.result || left.name !== 'subagent') return true;
+  // Terminal reconciliation may promote producer-owned subagent addresses
+  // without changing the immutable result's lifecycle revision or LazyDetailRef
+  // key. Compare only the bounded child-address projection here; re-rendering
+  // every structured-cloned result would defeat this memo barrier.
+  return subagentAddressSignature(left.result) === subagentAddressSignature(right.result);
+}
+
+function subagentAddressSignature(value: unknown): string {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return '[]';
+  const result = value as Record<string, unknown>;
+  const details = result.details && typeof result.details === 'object' && !Array.isArray(result.details)
+    ? result.details as Record<string, unknown>
+    : undefined;
+  const children = Array.isArray(result.results)
+    ? result.results
+    : Array.isArray(details?.results)
+      ? details.results
+      : result.kind === 'subagent' && Array.isArray(result.children)
+        ? result.children
+        : [];
+  return JSON.stringify(children.map((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+    const child = entry as Record<string, unknown>;
+    const lineage = (candidate: unknown): unknown => Array.isArray(candidate)
+      ? candidate.map((identity) => {
+          if (!identity || typeof identity !== 'object' || Array.isArray(identity)) return null;
+          const item = identity as Record<string, unknown>;
+          return [item.childId, item.spawningToolCallId, item.attemptId];
+        })
+      : null;
+    const address = child.detailAddress && typeof child.detailAddress === 'object' && !Array.isArray(child.detailAddress)
+      ? child.detailAddress as Record<string, unknown>
+      : undefined;
+    return [
+      child.childId,
+      child.attemptId,
+      child.liveAddressable === true,
+      lineage(child.lineage),
+      address ? [
+        address.sessionPath,
+        address.turnId,
+        address.rootToolCallId,
+        address.rootAttemptId,
+        lineage(address.lineage),
+      ] : null,
+    ];
+  }));
 }
 
 function ToolCallItemBody({
