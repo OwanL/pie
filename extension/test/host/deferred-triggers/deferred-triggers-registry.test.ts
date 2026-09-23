@@ -183,7 +183,14 @@ test('timer: an already-elapsed timer fires on start via setImmediate', async ()
   const past = new Date(Date.now() - 60_000).toISOString();
   register('t1', WATCHER, [{ kind: 'timer', ms: 1000 }], 'note', past);
   newRegistry();
-  await flushMicrotasks();
+  // Synchronize on the immediate queue itself instead of a short timer. If the
+  // test body resumes during the event loop's check phase, the registry's
+  // immediate only runs in the NEXT check phase — which the timers phase
+  // precedes — so a 10ms `flushMicrotasks` timer can fire first under CPU
+  // contention and observe nothing. A setImmediate chained after
+  // `newRegistry()` queues behind the registry's fire immediate in the same
+  // check phase, so it cannot resolve early.
+  await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(dispatched.length, 1);
   assert.match(sentTexts()[0], /timer elapsed after 1000ms/);
 });

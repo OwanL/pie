@@ -106,6 +106,42 @@ async function probeOwner(port: number): Promise<boolean> {
   return active !== undefined;
 }
 
+type OwnershipObservation = 'held' | 'released' | 'inconclusive';
+
+/**
+ * Observe the coordinator listener directly so a load-induced stall cannot be
+ * mistaken for a release: a valid `info` response is `held`; ECONNREFUSED (no
+ * listener) is definitive `released` evidence; a timeout is only
+ * `inconclusive` — the probe budget is an observation cost, not release
+ * evidence.
+ */
+async function observeOwnership(port: number, budgetMs: number): Promise<OwnershipObservation> {
+  return await new Promise((resolve) => {
+    const socket = net.createConnection({ host: '127.0.0.1', port });
+    let settled = false;
+    let buffer = '';
+    const finish = (observation: OwnershipObservation): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(observation);
+    };
+    const timer = setTimeout(() => finish('inconclusive'), budgetMs);
+    timer.unref?.();
+    socket.setEncoding('utf8');
+    socket.on('connect', () => socket.write(JSON.stringify({ type: 'probe' }) + '\n'));
+    socket.on('data', (chunk: string) => {
+      buffer += chunk;
+      if (buffer.includes('"type":"info"')) finish('held');
+    });
+    socket.on('error', (error: NodeJS.ErrnoException) => {
+      finish(error.code === 'ECONNREFUSED' ? 'released' : 'inconclusive');
+    });
+    socket.on('close', () => finish('inconclusive'));
+  });
+}
+
 test('owned standalone shutdown keeps ownership while the backend drain is pending and releases only after the stop confirms', { timeout: 20_000 }, async () => {
   const { port, ownership } = await acquireTestOwnership();
   try {
@@ -166,7 +202,7 @@ test('owned standalone shutdown fails closed: ownership is retained when the bac
 test('owned standalone graceful shutdown releases ownership only after the backend stop confirms', { timeout: 20_000 }, async () => {
   const { port, ownership } = await acquireTestOwnership();
   try {
-    const backend = createGatedBackend({ autoReleaseAfterMs: 120 });
+    const backend = createGatedBackend(); // the test releases the gate itself
     let browserServerStopped = false;
     const shutdownPromise = shutdownOwnedStandaloneHost({
       // Mirror HostRuntime.shutdown: the ordered teardown awaits backend.stop().
@@ -180,9 +216,25 @@ test('owned standalone graceful shutdown releases ownership only after the backe
       shutdownTimeoutMs: 10_000,
     });
 
-    await sleep(30);
-    assert.ok(await probeOwner(port),
-      'ownership must still be held while the graceful backend drain is in flight');
+    // runtime.shutdown() kicked the backend stop synchronously; the gate holds
+    // the drain open until the test has observed ownership and releases it, so
+    // the drain window is bounded by explicit synchronization rather than a
+    // wall-clock sleep.
+    assert.ok(backend.stopStarted(), 'the graceful runtime shutdown kicked the backend stop');
+
+    // Ownership must be held while the graceful backend drain is in flight. A
+    // probe that times out under load is an inconclusive observation, not
+    // release evidence, so inconclusive probes are retried while the gate
+    // keeps the drain open; only a definitive release fails the invariant.
+    for (;;) {
+      const observed = await observeOwnership(port, 500);
+      if (observed === 'held') break;
+      assert.notEqual(observed, 'released',
+        'machine-wide ownership must still be held while the graceful backend drain is in flight');
+      await sleep(25);
+    }
+
+    backend.releaseGate();
     await shutdownPromise;
     assert.ok(browserServerStopped, 'the browser server stop is awaited on the graceful path');
     assert.ok(backend.stopSettled(), 'the backend stop confirmed before the shutdown resolved');

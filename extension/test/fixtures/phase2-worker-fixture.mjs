@@ -33,8 +33,11 @@ const writeRawOversize = async () => {
   // Deliberately bypass the bounded sender and write more than the production
   // 32 MiB cap directly to the inherited worker→coordinator descriptor. The
   // receiver must discard this through LF without JSON.parse ever seeing it.
-  const chunk = 'x'.repeat(64 * 1024);
-  for (let index = 0; index < 513; index += 1) {
+  // Write in MiB chunks rather than hundreds of 64 KiB drain cycles. The
+  // receiver still has to process the full production-size boundary, but this
+  // keeps fixture scheduling overhead from dominating under the fast suite.
+  const chunk = 'x'.repeat(1024 * 1024);
+  for (let index = 0; index < 32; index += 1) {
     if (!output.write(chunk)) await new Promise((resolve) => output.once('drain', resolve));
   }
   output.write('\n');

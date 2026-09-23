@@ -87,7 +87,10 @@ async function withTempRoot<T>(callback: (root: string) => Promise<T>): Promise<
   }
 }
 
-test('acquires before requiring runtime code, reports updates, and releases after delegate deactivate', { timeout: 15_000 }, async () => withTempRoot(async (root) => {
+// This test exercises real runtime generation copy/verification and lease cleanup.
+// Under the full fast suite, the second publication alone took over 13 s, so keep
+// enough headroom here without changing the assertion or other test budgets.
+test('acquires before requiring runtime code, reports updates, and releases after delegate deactivate', { timeout: 45_000 }, async () => withTempRoot(async (root) => {
   const extensionDir = path.join(root, 'extension');
   await mkdir(extensionDir, { recursive: true });
   await writeFile(path.join(extensionDir, 'package.json'), `${JSON.stringify(IDENTITY)}\n`);
