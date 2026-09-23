@@ -21,6 +21,8 @@ This folder contains active design contracts, implementation plans, and operatio
 
 ## Active investigations
 
+- [Pie tool catalog and consolidation](../tools/README.md) — explicit tool ownership/context inventory, registration boundaries, completed first slice, and remaining migration steps.
+- [AGENT-SESSION-CONTROL.md](AGENT-SESSION-CONTROL.md) — agent-facing local session discovery, transcript paging, messaging, creation, and lifecycle close.
 - [AGENT-WORKFLOWS.md](AGENT-WORKFLOWS.md) — current-state and research findings for agent coordination, session-scoped change review, deferred work, and agent-created persistent sessions. Records confirmed design decisions and open questions; not an implemented contract.
 
 ## Implemented design references

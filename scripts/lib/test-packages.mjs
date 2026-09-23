@@ -11,10 +11,11 @@
 //  - scripts/test/package-registry-drift.test.mjs (fails when any runner or root
 //    package script diverges from this registry)
 //
-// The directory layout (`extension/`, `analysis/`, `extensions/<id>/`) is the
-// stable, low-drift identity anchor: each package owns exactly one top-level
-// directory. Everything else a runner needs — test cwd, tsx/tsc compiler
-// selection, batching and concurrency — is explicit metadata below so runner
+// The registered package directory is the stable, low-drift identity anchor:
+// each package owns exactly one directory. Most extension packages live under
+// `extensions/<id>/`; tools that join the extensions group from elsewhere use
+// explicit group metadata. Everything else a runner needs — test cwd, tsx/tsc
+// compiler, batching and concurrency — is explicit metadata below so runner
 // adapters never re-derive it locally.
 
 /**
@@ -24,10 +25,11 @@
  * @property {string} id Canonical package id (also the `--package` flag value).
  * @property {string} dir Repo-relative directory the package owns (forward slashes).
  * @property {string[]} [aliases] Additional accepted ids (e.g. `--package analytics`).
+ * @property {string[]} [groups] Explicit named group membership; otherwise extension packages
+ *   are included in the `extensions` group when their directory is under `extensions/`.
  * @property {string} [testCwd] Repo-relative cwd for test runs; absent = repo root.
- *   Only packages whose tooling lives in their own directory (extension/, analysis/)
- *   run tests from there; extensions/* and scripts run from the repo root because
- *   their testGlobs are repo-relative.
+ *   Set this only for packages that require a package-local test cwd; all other
+ *   package test globs are resolved from the repo root.
  * @property {string} [tsxConfig] Repo-relative tsconfig passed as tsx `--tsconfig`
  *   (packages that resolve the embedded pi SDK's nested typebox via path aliases).
  * @property {{ config: string, compiler: string }} [typecheck] Repo-relative project
@@ -101,8 +103,9 @@ export const PACKAGE_REGISTRY = [
   },
   {
     id: 'ask-user',
-    dir: 'extensions/ask-user',
-    typecheck: { config: 'extensions/ask-user/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
+    dir: 'tools/ask-user',
+    groups: ['extensions'],
+    typecheck: { config: 'tools/ask-user/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
     fastConcurrency: 3,
   },
   {
@@ -176,7 +179,9 @@ export const ALL_PACKAGE_IDS = PACKAGE_REGISTRY.map((entry) => entry.id);
  * @type {Record<string, string[]>}
  */
 export const PACKAGE_GROUPS = {
-  extensions: PACKAGE_REGISTRY.filter((entry) => entry.dir.startsWith('extensions/')).map((entry) => entry.id),
+  extensions: PACKAGE_REGISTRY.filter((entry) =>
+    entry.groups?.includes('extensions') ?? entry.dir.startsWith('extensions/'),
+  ).map((entry) => entry.id),
 };
 
 /**
@@ -303,11 +308,19 @@ const GLOBAL_INFRA_EXACT_PATHS = new Set([
   'package.json',
   'package-lock.json',
   '.node-version',
+  // Shared tool eligibility/assembly affects primary, child, and inventory runtimes.
+  'tools/index.ts',
+  'tools/backend.ts',
+  'tools/tsconfig.json',
 ]);
 
 const GLOBAL_INFRA_PREFIXES = [
   'scripts/lib/',
   'shared/',
+  // Discovery shims and backend tools cross package boundaries. Keep their
+  // integration coverage selected while the tool migration is incremental.
+  'extensions/ask-user/',
+  'tools/session-control/',
 ];
 
 /**

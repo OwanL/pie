@@ -14,6 +14,7 @@ test('fresh inventory binds resources, counts the unfiltered catalog, and dispos
   let promptCalls = 0;
   let turnDenied = false;
   let builtPromptOptions: any;
+  let backendTools: any[] = [];
   const inactiveSnippet = 'Inspect hidden capability inventory without activating it.';
   const inactiveGuideline = 'Use hidden_inventory only when it is recovered for a turn.';
   const session: any = {
@@ -41,6 +42,7 @@ test('fresh inventory binds resources, counts the unfiltered catalog, and dispos
         description: 'Inspect inactive inventory.',
         parameters: { type: 'object', properties: { query: { type: 'string' } } },
       },
+      ...backendTools,
     ],
     getToolDefinition: (name: string) => name === 'hidden_inventory'
       ? { promptSnippet: inactiveSnippet, promptGuidelines: [inactiveGuideline] }
@@ -58,11 +60,15 @@ test('fresh inventory binds resources, counts the unfiltered catalog, and dispos
       assert.equal(resources.agentsFiles.length, 1);
       return { cwd: '/workspace', agentDir: '/agent', modelRegistry: { find: () => session.model } };
     },
-    createAgentSessionFromServices: async () => ({ session }),
-    createAgentSessionRuntime: async () => ({
-      session,
-      dispose: async () => { disposed = true; },
-    }),
+    createAgentSessionFromServices: async (options: any) => {
+      backendTools = options.customTools;
+      assert.deepEqual(backendTools.map((tool) => tool.name), ['session_control']);
+      return { session };
+    },
+    createAgentSessionRuntime: async (factory: any, options: any) => {
+      await factory(options);
+      return { session, dispose: async () => { disposed = true; } };
+    },
     formatSkillsForPrompt: (skills: any[]) => `<available_skills>${skills.map((skill) => skill.name).join(',')}</available_skills>`,
   };
   const systemPromptModule: any = {
@@ -101,7 +107,7 @@ test('fresh inventory binds resources, counts the unfiltered catalog, and dispos
   assert.equal(promptCalls, 0, 'inventory never invokes the original AgentSession.prompt');
   assert.equal(turnDenied, true, 'extension-triggered turns are rejected before session_start');
   assert.equal(inventory.estimate.contextWindow, 200_000);
-  assert.deepEqual(builtPromptOptions.selectedTools, ['read', 'hidden_inventory']);
+  assert.deepEqual(builtPromptOptions.selectedTools, ['read', 'hidden_inventory', 'session_control']);
   const expectedPiePrompt = buildPieSystemPrompt(
     builtPromptOptions,
     systemPromptModule.buildSystemPrompt,
@@ -132,6 +138,7 @@ test('fresh inventory binds resources, counts the unfiltered catalog, and dispos
   assert.match(promptsById.get('harness')?.text ?? '', /^You are a coding assistant operating inside Pie/);
   assert.match(inventory.systemPrompts.find((entry) => entry.title.endsWith('AGENTS.md'))?.text ?? '', /Project instructions\./);
   assert.match(promptsById.get('tools')?.text ?? '', /Inspect inactive inventory\./);
+  assert.match(promptsById.get('tools')?.text ?? '', /session_control/);
   assert.match(promptsById.get('tools')?.text ?? '', /"query": \{/);
   assert.match(promptsById.get('skills')?.text ?? '', /debugging/);
   assert.equal(promptsById.get('provider')?.summary, 'mock');

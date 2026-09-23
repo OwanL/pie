@@ -8,7 +8,7 @@ import type {
   CoordinatorToWorkerResponseFrame,
   WorkerJsonObject,
   WorkerToCoordinatorRequestBody,
-} from './worker-protocol';
+} from '../../extension/src/backend/worker-protocol.js';
 
 const SESSION_PATH_MAX_LENGTH = 16 * 1024;
 const MESSAGE_MAX_LENGTH = 64 * 1024;

@@ -2,7 +2,10 @@
 
 Pie registers a worker-local `session_control` tool for agent turns. Its
 coordinator bridge is typed and identity-fenced; it does not expose a general
-worker RPC tunnel.
+worker RPC tunnel. The definition lives in [`tools/session-control/index.ts`](../tools/session-control/index.ts).
+The shared [`tools/backend.ts`](../tools/backend.ts) factory supplies it to primary
+runtimes and initial-context inventory; only the primary runtime receives the
+worker transport. In-memory subagents cannot use it.
 
 ## Actions
 

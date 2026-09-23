@@ -188,7 +188,7 @@
     "watch": "node ./scripts/build.mjs --watch",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "typecheck:ask-user": "tsc --noEmit -p ../extensions/ask-user/tsconfig.json",
+    "typecheck:ask-user": "tsc --noEmit -p ../tools/ask-user/tsconfig.json",
     "typecheck:cwd-skills": "tsc --noEmit -p ../extensions/cwd-skills/tsconfig.json",
     "typecheck:safeguard": "tsc --noEmit -p ../extensions/safeguard/tsconfig.json",
     "typecheck:skill-pruner": "tsc --noEmit -p ../extensions/skill-pruner/tsconfig.json",

@@ -18,7 +18,8 @@ Route to a specialized skill when the request matches one; this skill remains th
 | Path | Purpose |
 |---|---|
 | `extension/` | TypeScript VS Code extension: host, embedded Pi backend, Preact webview, and tests |
-| `extensions/` | Reusable Pi extensions/tools such as subagents, skill pruning, safeguards, computer-use, and playwright |
+| `tools/` | Explicit Pie-owned tool catalog and consolidated implementations; see [`tools/README.md`](../../tools/README.md) for migration status and registration boundaries |
+| `extensions/` | Pi discovery adapters, middleware, and tool implementations not yet migrated into `tools/` |
 | `agents/` | Specialized subagent definitions |
 | `skills/` | On-demand workflows, including this one |
 | `models.yaml` | Source of truth for providers, models, pricing, eligibility, concurrency, retry policy, and seed selections |

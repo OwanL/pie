@@ -9,7 +9,7 @@ import type { ExtensionAPI, Skill, ToolInfo } from "@earendil-works/pi-coding-ag
 import { clearPruningTrackingForTesting, flushLog, setLogPathForTesting } from "../logger.js";
 import { readKeptSkills, clearKeptSkills } from "../../../shared/pruned-skills.js";
 import type { PruningConfig } from "../types.js";
-import { runAsk } from "../../ask-user/src/ask.js";
+import { runAsk } from "../../../tools/ask-user/src/ask.js";
 import { installPieSystemPromptRebuildGuard } from "../../../shared/pie-harness-prompt.js";
 
 installSdkResolverForTests();

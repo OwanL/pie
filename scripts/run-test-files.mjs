@@ -5,11 +5,12 @@
 // the tightest dev loop: `node scripts/run-test-files.mjs extension/test/foo.test.ts
 // extensions/subagent/test/schema.test.ts`.
 //
-// Classification mirrors scripts/run-tests.mjs PACKAGE_CONFIGS:
+// Classification mirrors scripts/run-tests.mjs PACKAGE_CONFIGS and registry
+// testCwd metadata:
 //  - extension/      -> cwd extension/,         tsx = extension/node_modules/tsx
-//  - analysis/        -> cwd analysis/,         tsx = analysis/node_modules/tsx
-//  - scripts/test/  -> cwd repoRoot, tsx = node_modules/tsx (root)
-//  - extensions/<id>/ -> cwd repoRoot,          tsx = node_modules/tsx (root)
+//  - analysis/       -> cwd analysis/,          tsx = analysis/node_modules/tsx
+//  - scripts/test/   -> cwd repoRoot,            tsx = node_modules/tsx (root)
+//  - extensions/* and tools/ask-user/ -> cwd repoRoot, tsx = node_modules/tsx (root)
 //
 // Only packages with a registry `tsxConfig` (subagent, playwright,
 // computer-use, image-context-guard) pass `--tsconfig` (their tests resolve
@@ -97,23 +98,22 @@ export function normalizeRepoRelative(repoRoot, input) {
  * @param {string} repoRoot
  * @param {string} input - absolute or repo-relative test file path
  * @returns {{ id: string, cwd: string, tsxConfig?: string, tsxBin: string, repoRel: string, abs: string, relativeFilePath: string }}
- * @throws if the file is not under extension/, analysis/, either scripts test directory, or extensions/<id>/
+ * @throws if the file is not under a registered test-package directory
  */
 export function classifyTestFile(repoRoot, input) {
   const { repoRel, abs } = normalizeRepoRelative(repoRoot, input);
   const directive = PACKAGE_DIRECTIVES.find(({ dir }) => repoRel === dir || repoRel.startsWith(`${dir}/`));
   if (!directive) {
     throw new Error(
-      `Cannot classify test file "${repoRel}": not under extension/, analysis/, scripts/test/, or extensions/<id>/.`,
+      `Cannot classify test file "${repoRel}": not under a registered test-package directory.`,
     );
   }
-  const { id, dir } = directive;
-  // extensions/* and scripts run with cwd=repoRoot (their testGlobs are
-  // repo-relative); extension/ and analysis/ run with cwd=<dir> (their
-  // testGlobs are ./test/**).
-  const cwd = dir.startsWith('extensions/') || id === 'scripts'
-    ? repoRoot
-    : path.join(repoRoot, dir);
+  const { id } = directive;
+  // Repo-root packages declare no testCwd; only extension/ and analysis/ run
+  // with a package-local cwd. This also lets tools/ask-user remain in the
+  // extensions test group without pretending its tests live in extensions/.
+  const packageEntry = resolvePackageEntry(id);
+  const cwd = packageEntry?.testCwd ? path.join(repoRoot, packageEntry.testCwd) : repoRoot;
   const tsxConfig = resolvePackageEntry(id)?.tsxConfig;
   const tsxBin = resolveLocalTsx(cwd);
   const relativeFilePath = path.relative(cwd, abs).replace(/\\/g, '/');

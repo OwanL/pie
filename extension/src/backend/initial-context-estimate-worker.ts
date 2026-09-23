@@ -18,6 +18,7 @@ import type {
 import { loadSdk, loadSdkInternalModule } from './sdk';
 import type { SdkPatchIdentity } from './sdk-patch-barrier';
 import { createPieSystemPromptBuilder } from '../../../shared/pie-harness-prompt.js';
+import { createBackendTools } from '../../../tools/backend.js';
 import {
   buildSessionSystemPrompts,
   captureOriginalSystemPromptOptions,
@@ -128,6 +129,7 @@ async function collectInitialContextInventoryInsideBoundary(
       sessionManager,
       sessionStartEvent,
       model,
+      customTools: createBackendTools({ kind: 'inventory' }),
     }) as Record<string, unknown>;
     return { ...created, services };
   };

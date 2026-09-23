@@ -30,6 +30,8 @@ test('classifyFileToPackage maps a file under each package directory to its id',
   assert.equal(classifyFileToPackage('analysis/scripts/build-db.ts'), 'analysis');
   assert.equal(classifyFileToPackage('scripts/test/run-tests.test.mjs'), 'scripts');
   assert.equal(classifyFileToPackage('extensions/subagent/test/schema.test.ts'), 'subagent');
+  assert.equal(classifyFileToPackage('tools/ask-user/test/loader-shim.test.ts'), 'ask-user');
+  assert.equal(classifyFileToPackage('tools/ask-user/tsconfig.json'), 'ask-user');
   assert.equal(classifyFileToPackage('extensions/subagent/schema.ts'), 'subagent');
   assert.equal(classifyFileToPackage('extensions/cwd-skills/index.ts'), 'cwd-skills');
   assert.equal(classifyFileToPackage('extensions/copilot-model-discovery/test/copilot-models.test.ts'), 'copilot-model-discovery');
@@ -44,6 +46,8 @@ test('classifyFileToPackage does not confuse extension/ with extensions/', () =>
   // char after "extension": "/" vs "s").
   assert.equal(classifyFileToPackage('extensions/subagent/test/x.test.ts'), 'subagent');
   assert.notEqual(classifyFileToPackage('extensions/subagent/test/x.test.ts'), 'extension');
+  assert.equal(classifyFileToPackage('tools/ask-user/test/x.test.ts'), 'ask-user');
+  assert.notEqual(classifyFileToPackage('tools/ask-user/test/x.test.ts'), 'extension');
 });
 
 test('classifyFileToPackage returns null for non-package paths', () => {
@@ -69,6 +73,9 @@ test('isGlobalTestInfra recognises the test tooling and root config', () => {
     'package.json',
     'package-lock.json',
     '.node-version',
+    'tools/index.ts',
+    'tools/backend.ts',
+    'tools/tsconfig.json',
   ]) {
     assert.equal(isGlobalTestInfra(p), true, `${p} should be global`);
   }
@@ -76,6 +83,8 @@ test('isGlobalTestInfra recognises the test tooling and root config', () => {
   assert.equal(isGlobalTestInfra('scripts/lib/sdk-version.mjs'), true);
   assert.equal(isGlobalTestInfra('shared/pricing-core.ts'), true);
   assert.equal(isGlobalTestInfra('shared/subagent-context.ts'), true);
+  assert.equal(isGlobalTestInfra('extensions/ask-user/index.ts'), true);
+  assert.equal(isGlobalTestInfra('tools/session-control/index.ts'), true);
 });
 
 test('isGlobalTestInfra is false for per-package and unrelated paths', () => {
@@ -97,11 +106,12 @@ test('mapFilesToPackages maps package files and de-duplicates ids', () => {
     'extension/test/a.test.ts',
     'extension/src/backend/sdk.ts',     // same package, different file
     'extensions/subagent/test/schema.test.ts',
+    'tools/ask-user/test/loader-shim.test.ts',
     'analysis/test/pricing.test.ts',
     'scripts/test/git-environment.test.mjs',
   ]);
   assert.equal(plan.selectAll, false);
-  assert.deepEqual(plan.packageIds, ['analysis', 'extension', 'scripts', 'subagent']);
+  assert.deepEqual(plan.packageIds, ['analysis', 'ask-user', 'extension', 'scripts', 'subagent']);
 });
 
 test('mapFilesToPackages covers root maintenance scripts', () => {

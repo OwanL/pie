@@ -137,8 +137,12 @@ test('root package.json extension scripts are the group adapter and all ids stay
   // Group membership is registry-derived and the adapter expands it exactly.
   assert.deepEqual(
     PACKAGE_GROUPS.extensions,
-    PACKAGE_REGISTRY.filter((entry) => entry.dir.startsWith('extensions/')).map((entry) => entry.id),
+    PACKAGE_REGISTRY.filter((entry) =>
+      entry.groups?.includes('extensions') ?? entry.dir.startsWith('extensions/'),
+    ).map((entry) => entry.id),
   );
+  assert.equal(resolvePackageEntry('ask-user')?.dir, 'tools/ask-user');
+  assert.ok(PACKAGE_GROUPS.extensions.includes('ask-user'), 'tools/ask-user stays in the extensions group');
   const expectedTestFlags = PACKAGE_GROUPS.extensions.flatMap((id) => ['--package', id]);
   assert.deepEqual(buildRunnerInvocation('tests', ['extensions']).args, expectedTestFlags);
   const expectedProjectFlags = PACKAGE_GROUPS.extensions.flatMap((id) => ['--project', id]);

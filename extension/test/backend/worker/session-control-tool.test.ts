@@ -3,8 +3,9 @@ import test from 'node:test';
 
 import {
   createSessionControlTool,
+  SessionControlParameters,
   type SessionControlToolRequest,
-} from '../../../src/backend/session-control-tool';
+} from '../../../../tools/session-control';
 import type { CoordinatorToWorkerResponseFrame, WorkerToCoordinatorRequestBody } from '../../../src/backend/worker-protocol';
 
 type SessionControlResult = Extract<CoordinatorToWorkerResponseFrame, { kind: 'session.control.result' }>;
@@ -96,4 +97,28 @@ test('session_control forwards cancellation and rejects an invalid uncursoried p
     context(),
   );
   assert.equal('isError' in invalid && invalid.isError, true);
+});
+
+// Move regression: the relocated tool module keeps its public identity, schema,
+// and prompt guidance intact so the relocation stays behavior-neutral.
+test('session_control relocation preserves tool identity, schema, and guidance', () => {
+  const tool = createSessionControlTool(async () => response({ ok: true }));
+
+  assert.equal(tool.name, 'session_control');
+  assert.equal(tool.label, 'Session control');
+  assert.equal(tool.executionMode, 'sequential');
+  assert.equal(tool.parameters, SessionControlParameters);
+  assert.deepEqual(tool.promptGuidelines, [
+    'Only sessions in the current extension host\'s local catalog are addressable; do not guess paths from another window.',
+    'Use read direction latest for the first page, then pass the returned cursor with direction older or newer.',
+    'message uses ordinary send semantics: an idle target wakes and a busy target receives Pie\'s normal queued-send behavior.',
+    'close defaults to a reversible lifecycle close; pass delete:true only when the existing privacy/deletion behavior is intended.',
+    'create returns a durably agent-created cold session path; it opens as an ordinary background tab without changing the selected tab, and message can subsequently wake it and promote its isolated runtime.',
+  ]);
+
+  const properties = SessionControlParameters.properties as Record<string, { type?: string; enum?: string[] }>;
+  assert.deepEqual([...SessionControlParameters.required ?? []].sort(), ['action']);
+  assert.deepEqual(properties.action?.enum, ['list', 'create', 'read', 'message', 'close']);
+  assert.deepEqual(properties.direction?.enum, ['older', 'newer', 'latest']);
+  assert.deepEqual(Object.keys(properties).sort(), ['action', 'cursor', 'cwd', 'delete', 'direction', 'limit', 'sessionPath', 'text']);
 });

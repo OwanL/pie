@@ -7,6 +7,7 @@ A personal stack built around the [`pi` coding agent](https://www.npmjs.com/pack
 | Path | What it is | Distribution |
 |---|---|---|
 | [`extension/`](extension) | *pie* — VS Code sidebar extension that surfaces a `pi` agent as chat | Built and packaged locally from source |
+| [`tools/`](tools/README.md) | Explicit Pie-owned tool catalog and consolidated implementations (migration in progress) | Extension discovery adapters or backend-injected factories |
 | [`extensions/`](extensions) — e.g. [`subagent/`](extensions/subagent), [`cwd-skills/`](extensions/cwd-skills), [`skill-pruner/`](extensions/skill-pruner), [`safeguard/`](extensions/safeguard) | Reusable pi plugins (subagent delegation, cwd-scoped skill discovery, skill pruning, command safeguards, and more — see [`extensions/`](extensions) for the full set) | Loaded by `pi` via `settings.json` packages |
 | [`analysis/`](analysis) | Local DuckDB query workspace over legacy run-analytics exports/stores | Internal research tool |
 | [`agents/`](agents), [`skills/`](skills), [`APPEND_SYSTEM.md`](APPEND_SYSTEM.md), [`settings.json`](settings.json) | Maintainer's personal pi config | Reference / example only |

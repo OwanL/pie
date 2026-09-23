@@ -44,7 +44,7 @@ import { handleBackendRequest } from './request-handler';
 import type { ModelSettingsUnsetKey } from './request-handler-shared';
 import { buildSessionCapabilities, hasBillableSessionActivity } from './session-activity';
 import { createRuntimeFactory, ServiceLoadingGate } from './runtime-factory';
-import { createSessionControlTool } from './session-control-tool';
+import { createBackendTools } from '../../../tools/backend';
 import { subagentSettlementPricingResolver } from './subagent-settlement-pricing';
 import { handleSdkSessionEvent } from './session-event-handler';
 import {
@@ -671,9 +671,12 @@ export class WorkerRuntimeHost {
     const runtime = await this.sdk.createAgentSessionRuntime(
       createRuntimeFactory(this.sdk, authStorage, this.startupCwd, this.gate, {
         wrapSessionManager: (candidate) => this.fenceSessionManager(candidate),
-        customTools: () => [createSessionControlTool((body, signal) => (
-          this.options.server.requestFrame(body, 'session.control.result', undefined, 120_000, signal)
-        ))],
+        customTools: () => createBackendTools({
+          kind: 'primary',
+          requestSessionControl: (body, signal) => (
+            this.options.server.requestFrame(body, 'session.control.result', undefined, 120_000, signal)
+          ),
+        }),
       }),
       {
         cwd: guardedManager.getCwd() || this.startupCwd,
@@ -1450,9 +1453,12 @@ export class WorkerRuntimeHost {
     const runtime = await this.sdk.createAgentSessionRuntime(
       createRuntimeFactory(this.sdk, authStorage, this.startupCwd, this.gate, {
         wrapSessionManager: (candidate) => this.fenceSessionManager(candidate),
-        customTools: () => [createSessionControlTool((body, signal) => (
-          this.options.server.requestFrame(body, 'session.control.result', undefined, 120_000, signal)
-        ))],
+        customTools: () => createBackendTools({
+          kind: 'primary',
+          requestSessionControl: (body, signal) => (
+            this.options.server.requestFrame(body, 'session.control.result', undefined, 120_000, signal)
+          ),
+        }),
       }),
       {
         cwd: guardedManager.getCwd() || this.startupCwd,

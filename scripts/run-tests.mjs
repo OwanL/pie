@@ -83,8 +83,8 @@ const PACKAGE_TEST_METADATA = {
     // single TypeBox instance. See extensions/subagent/tsconfig.json.
   },
   'ask-user': {
-    testGlobs: ['extensions/ask-user/test/**/*.test.ts'],
-    coverageIncludes: ['extensions/ask-user/index.ts', 'extensions/ask-user/src/**/*.ts'],
+    testGlobs: ['tools/ask-user/test/**/*.test.ts'],
+    coverageIncludes: ['tools/ask-user/index.ts', 'tools/ask-user/src/**/*.ts'],
     thresholds: { lines: 100, branches: 100 },
   },
   'warm-bash': {

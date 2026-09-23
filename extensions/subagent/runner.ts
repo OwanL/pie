@@ -31,6 +31,7 @@ import { reportedUsageCost } from "./src/usage-evidence.js";
 import type { ModelRequirements, OnUpdateCallback, SingleResult, SubagentAttemptPhase, SubagentChildIdentity, SubagentDetails, SubagentProviderInvocationRecord, SubagentTurnThroughputSample, TokenChannelPresence } from "./types.js";
 import { createInvalidAgentResult } from "./validation.js";
 import { toErrorMessage } from "../../shared/error-message.js";
+import { unavailablePieToolNames } from "../../tools/index.js";
 import { installPieSystemPromptRebuildGuard, type PieSystemPromptOptions } from "../../shared/pie-harness-prompt.js";
 import { subagentContext } from "../../shared/subagent-context.js";
 import { readKeptSkills } from "../../shared/pruned-skills.js";
@@ -1247,10 +1248,9 @@ function reclaimOrphanedSignalListeners(before: Map<string, Set<Function>>): voi
  *  PIE_SUBAGENT_BUCKETS_JSON. Empty/unset → no user-configured tools dropped. */
 const SUBAGENT_DROP_TOOLS_ENV = "PIE_SUBAGENT_DROP_TOOLS_JSON";
 
-/** Wake tools are owned by resumable main sessions. In-memory children cannot
- *  be resumed by the host wake registry, so never expose these capabilities to
- *  a child even when the parent tool catalog contains them. */
-const UNSUPPORTED_SUBAGENT_TOOLS = new Set(["defer_trigger"]);
+/** Host lifecycle tools require a primary runtime. Enforce the shared catalog's
+ *  context eligibility even when a parent's selected tools name them. */
+const UNSUPPORTED_SUBAGENT_TOOLS = new Set(unavailablePieToolNames('subagent'));
 
 /** Reads the user-configured drop-tools list from the environment. Returns a
  *  Set for O(1) membership checks; empty when unset/invalid. */
