@@ -44,7 +44,7 @@ import type {
 import { toErrorMessage } from '../util/error-message';
 import { appendPieLog } from '../util/pie-log';
 import type { EffectResultEvent, CommandEvent } from './events';
-import type { FileDiffService } from './file-diff-service';
+import type { FileDiffServiceLike, FileDiffViewerLike } from './file-diff-service';
 import type { ChatPrefs, ComposerInput, McpServerInfo, PruningSettings, SessionTitlesSettings, ToolResultPruningSettings, ThinkingLevel } from '../../shared/protocol';
 import type { LiveSubagentDetailAddress, DetailCursor, DetailPageRef } from '../../shared/protocol/subagent-detail';
 import { RequestTimeoutError } from '../../shared/request-tracker';
@@ -102,6 +102,11 @@ export interface PostImperativeSink {
  *  accepts it and both real Promises and Thenables satisfy the type. */
 export interface ModalSink {
   showWarningModal(message: string, confirmChoice: string): PromiseLike<string | undefined>;
+}
+
+/** Host sink for the generic `OpenFile` effect. */
+export interface OpenFileSink {
+  openFile(path: string): Promise<void>;
 }
 
 export interface SessionServiceLike {
@@ -252,7 +257,12 @@ export interface EffectRunnerDeps {
     message: string;
     confirmChoice: string;
   }) => Promise<boolean>;
-  fileDiffService: FileDiffService;
+  /** Platform-neutral git/path/revert core. */
+  fileDiffService: FileDiffServiceLike;
+  /** Host viewer for changed-file diffs and editor opens. */
+  fileDiffViewer: FileDiffViewerLike;
+  /** Host sink for the generic path-opening effect. */
+  openFile: OpenFileSink;
   service: SessionServiceLike;
   statsService: StatsServiceLike;
   /** Called with each `*Result` event the runner produces. */
@@ -430,7 +440,7 @@ export class EffectRunner {
       ClearLastCompaction: (e) => this.handleClearLastCompaction(e),
       HydrateModel: (e) => this.handleHydrateModel(e),
       // ── Template rows (pure 1:1 effect → *Result). ──
-      FileDiff: this.templateRow({ resultKind: 'FileDiffResult', withSessionPath: true, call: (e, d) => d.fileDiffService.openFileDiff(e.sessionPath, e.filePath) }),
+      FileDiff: this.templateRow({ resultKind: 'FileDiffResult', withSessionPath: true, call: (e, d) => d.fileDiffViewer.openFileDiff(e.sessionPath, e.filePath) }),
       // FileRevert is a named handler: a browser source must confirm inline in
       // ITS renderer before the destructive revert runs (§9).
       FileRevert: (e) => this.handleFileRevert(e),
@@ -439,7 +449,7 @@ export class EffectRunner {
       JumpToLatestTranscript: this.templateRow({ resultKind: 'JumpToLatestTranscriptResult', withSessionPath: true, call: (e, d) => d.service.jumpToLatestTranscript(e.sessionPath) }),
       StartNewTask: this.templateRow({ resultKind: 'StartNewTaskResult', withSessionPath: false, call: (e, d) => { d.statsService.startNewTask(e.sessionPath); } }),
       ContinueTask: this.templateRow({ resultKind: 'ContinueTaskResult', withSessionPath: false, call: (e, d) => { d.statsService.continueTask(e.sessionPath); } }),
-      OpenFileInEditor: this.templateRow({ resultKind: 'OpenFileInEditorResult', withSessionPath: false, call: (e, d) => d.fileDiffService.openFileInEditor(e.sessionPath, e.filePath) }),
+      OpenFileInEditor: this.templateRow({ resultKind: 'OpenFileInEditorResult', withSessionPath: false, call: (e, d) => d.fileDiffViewer.openFileInEditor(e.sessionPath, e.filePath) }),
       SetPruningSettings: this.templateRow({ resultKind: 'SetPruningSettingsResult', withSessionPath: false, call: (e, d) => d.service.setPruningSettings(e.settings) }),
       SetToolResultPruningSettings: this.templateRow({ resultKind: 'SetToolResultPruningSettingsResult', withSessionPath: false, call: (e, d) => d.service.setToolResultPruningSettings(e.settings) }),
       SetSessionTitlesSettings: this.templateRow({ resultKind: 'SetSessionTitlesSettingsResult', withSessionPath: false, call: (e, d) => d.service.setSessionTitlesSettings(e.settings) }),
@@ -1200,14 +1210,12 @@ export class EffectRunner {
     this.deps.postImperative.postImperative(effect.imperativeMessage);
   }
 
-  /** `OpenFile` — dynamic `import('vscode')` → `vscode.open` command. NOT a
-   *  `deps.*` method (kept inline to avoid adding a sink that would break the
-   *  7 untyped test mocks). IIFE. Result `OpenFileResult` (NO `sessionPath`). */
+  /** `OpenFile` — delegate path opening to the host sink. IIFE. Result
+   *  `OpenFileResult` (NO `sessionPath`). */
   private handleOpenFile(effect: OpenFileEffect): void {
     void (async () => {
       try {
-        const vscode = await import('vscode');
-        await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(effect.path));
+        await this.deps.openFile.openFile(effect.path);
         this.deps.dispatch({ kind: 'OpenFileResult', corrId: effect.corrId, ok: true });
       } catch (err) {
         this.deps.dispatch({ kind: 'OpenFileResult', corrId: effect.corrId, ok: false, error: toErrorMessage(err) });

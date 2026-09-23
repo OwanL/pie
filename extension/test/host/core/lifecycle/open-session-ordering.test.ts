@@ -62,9 +62,8 @@ test('openSession mints the selection token before the reducer activates the ope
   };
 
   // timeout = 0 → armSelectionRequestTimeout is a no-op (no 60s timer leak).
-  const state = new SessionServiceState(context, backend, () => undefined, getArchState, dispatchArch, 0);
+  const state = new SessionServiceState(backend, () => undefined, getArchState, dispatchArch, 0);
   const tabs = new SessionTabActions({
-    context,
     scheduleRender: () => undefined,
     runObserver: NOOP_RUN_OBSERVER,
     state,
@@ -116,9 +115,9 @@ test('openSession selects an existing pending tab without opening its sentinel p
     if (event.kind === 'Command') commands.push(event.cmd.kind);
     archState = reducer(archState, event).state;
   };
-  const state = new SessionServiceState(context, backend, () => undefined, getArchState, dispatchArch, 0);
+  const state = new SessionServiceState(backend, () => undefined, getArchState, dispatchArch, 0);
   const tabs = new SessionTabActions({
-    context, scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER,
+    scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER,
     state, getArchState, dispatchArch,
   });
 
@@ -164,9 +163,9 @@ test('openSession -> backend session.open rejection -> handleSelectionFailure re
     for (const effect of result.effects) runner.run(effect);
   }
 
-  const state = new SessionServiceState(context, backend, () => undefined, getArchState, dispatchArch, 0);
+  const state = new SessionServiceState(backend, () => undefined, getArchState, dispatchArch, 0);
   const tabs = new SessionTabActions({
-    context, scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER,
+    scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER,
     state, getArchState, dispatchArch,
   });
 

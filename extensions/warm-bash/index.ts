@@ -32,6 +32,7 @@ import { probeGnuGrep } from "./src/auto-prune.js";
 import { logAutoPruneRewrite, logSessionSummary, flushLog, type WarmBashSessionSummary } from "./src/logger.js";
 import { WarmBashPool } from "./src/warm-pool.js";
 import { effectiveTimeout, parseDefaultTimeout } from "./src/timeout.js";
+import { BASH_DEFAULT_TIMEOUT, BASH_MAX_TIMEOUT, registerWarmBashTool } from "./src/tool-metadata.js";
 import type { BashOperations } from "./src/types.js";
 import { getSharedWarmBashState, installWarmBashProcessCleanup, type SharedPoolConfig } from "./src/shared-state.js";
 import { prependManagedBinDir, sanitizeProtoEnv } from "./src/managed-env.js";
@@ -94,9 +95,6 @@ function gnuGrepProbe(): boolean {
  *  The upstream SDK default is 600s, which lets a hung simple command block a
  *  session for 10 minutes. We default to 60s and allow up to 600s when the
  *  caller explicitly asks for a long-running command. */
-const BASH_DEFAULT_TIMEOUT = 60;
-const BASH_MAX_TIMEOUT = 600;
-
 function defaultTimeout(): number {
   return parseDefaultTimeout(process.env.PIE_BASH_DEFAULT_TIMEOUT, BASH_DEFAULT_TIMEOUT, BASH_MAX_TIMEOUT);
 }
@@ -325,27 +323,23 @@ export default function (pi: ExtensionAPI) {
     return tool;
   }
 
-  pi.registerTool({
-    ...baseBashTool,
-    async execute(toolCallId: string, params: { command: string; timeout?: number }, signal: AbortSignal | undefined, onUpdate: ((u: unknown) => void) | undefined, ctx: { cwd: string; sessionManager: { getSessionId: () => string } }) {
-      // When the extension is toggled off, skip the warm pool/fast-path layers
-      // and run the built-in fresh `bash -c` path directly.
-      if (isDisabledByToggle()) {
-        const effectiveParams = {
-          ...params,
-          timeout: effectiveTimeout({ timeout: params.timeout, defaultTimeout: defaultTimeout(), maxTimeout: BASH_MAX_TIMEOUT }),
-        };
-        return baseBashTool.execute(toolCallId, effectiveParams, signal, onUpdate);
-      }
-      const sessionId = ctx.sessionManager.getSessionId();
-      const tool = getTool(sessionId, ctx.cwd);
+  registerWarmBashTool(pi, baseBashTool, async (toolCallId: string, params: { command: string; timeout?: number }, signal: AbortSignal | undefined, onUpdate: ((u: unknown) => void) | undefined, ctx: { cwd: string; sessionManager: { getSessionId: () => string } }) => {
+    // When the extension is toggled off, skip the warm pool/fast-path layers
+    // and run the built-in fresh `bash -c` path directly.
+    if (isDisabledByToggle()) {
       const effectiveParams = {
         ...params,
         timeout: effectiveTimeout({ timeout: params.timeout, defaultTimeout: defaultTimeout(), maxTimeout: BASH_MAX_TIMEOUT }),
       };
-      return tool.execute(toolCallId, effectiveParams, signal, onUpdate);
-    },
-    // renderCall / renderResult intentionally omitted → built-in inherited.
+      return baseBashTool.execute(toolCallId, effectiveParams, signal, onUpdate);
+    }
+    const sessionId = ctx.sessionManager.getSessionId();
+    const tool = getTool(sessionId, ctx.cwd);
+    const effectiveParams = {
+      ...params,
+      timeout: effectiveTimeout({ timeout: params.timeout, defaultTimeout: defaultTimeout(), maxTimeout: BASH_MAX_TIMEOUT }),
+    };
+    return tool.execute(toolCallId, effectiveParams, signal, onUpdate);
   });
 
   pi.on("session_shutdown", async (_event: unknown, ctx: { sessionManager: { getSessionId: () => string } }) => {

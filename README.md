@@ -244,6 +244,47 @@ Full-runtime publication retains the current and prior generations plus leased g
 
 Keep **built**, **staged**, **loaded**, and **behavior verified** distinct. Staged files are not evidence that existing windows have loaded the update.
 
+### Run the standalone localhost UI
+
+After building the extension, start the standalone browser host on Windows:
+
+```cmd
+.\start-pie.bat
+```
+
+The launcher requires Windows PowerShell 5.1 and does not install or rebuild dependencies. It prompts for an **absolute workspace path**, then asks whether to enable trusted-LAN access (default **No**). The prompt always sends an explicit choice, so answering No disables LAN even if it was enabled in a prior run. You can pass `-AllowLan` to the launcher to opt in without the prompt. LAN access is unauthenticated and has no TLS: anyone who can reach the URL can execute Pie commands and read or modify files. Use it only on a trusted local network; internet/public access is unsupported. The launcher does not change firewall rules.
+
+The launcher requires the generated runtime first:
+
+```bash
+npm run extension:build
+```
+
+It launches the built `extension/out/standalone.js` entry and prints the actual localhost URL, normally `http://127.0.0.1:1997` (or an assigned fallback port). It does **not** open a browser; paste a printed URL into one. With no saved preference, it binds only to loopback. If LAN is enabled, Pie also prints usable private IPv4 LAN URLs; use one of those from another device on the same trusted network.
+
+For direct CLI use, `node extension/out/standalone.js --cwd <absolute-workspace-path> [--lan | --no-lan]` is supported; `--help` prints the options. An explicit LAN flag overrides and saves the preference before the server starts. Omitting both flags restores the saved preference (or loopback-only when no preference has been saved).
+
+For the VS Code host, set `pie.browserServer.allowLan` to `true` in User Settings and run `pie: Restart Browser Server` (or restart the extension host). The default remains `false`. The browser server accepts requests only from loopback or private IPv4 peers; Host and WebSocket Origin checks further require loopback or the exact private IPv4 addresses advertised by that running instance. Arbitrary hostnames/public addresses remain rejected, including clients that try to forge browser headers. LAN URLs are not advertised for public IPv4 interfaces.
+
+In VS Code, the composer's **Browser network access** popover also exposes a **Run browser server** switch (VS Code only). It persists the same application-scoped `pie.browserServer.enabled` global setting and starts/stops the shared localhost listener on demand, showing the actual listener status, URLs, pending change, and any failure. Turning it off does not close the sidebar; a browser renderer attached to the host must confirm before stopping because that stops its own connection. Standalone never offers the switch because the browser server is its only UI. The LAN toggle remains a saved preference and never implicitly starts a disabled listener.
+
+If another device cannot connect on Windows, manually add an inbound Windows Defender Firewall rule for TCP on the port Pie printed (normally `1997`), scoped to the **Private** profile and trusted local network. Do not enable the rule for Public networks. Pie never changes firewall settings automatically. If the configured port fell back, use the actual printed port in the rule.
+
+Press **Ctrl+C** to request graceful shutdown. If the 15-second supervisor deadline is exceeded, only Pie's private Windows Job is force-terminated. Closing the launcher console also cleans up that owned process tree through the Job's kill-on-close policy; it does not delete Pie's runtime data.
+
+Standalone uses the same `HostRuntime`, backend, browser server, session/transcript authorities, and active analytics authority as the VS Code composition. Its small host-storage document is workspace-scoped under the resolved data root and holds standalone equivalents of renderer/session-service preferences and tab checkpoints. The launcher prompt always applies its answer with a default of No; direct CLI startup restores the saved LAN preference unless `--lan` or `--no-lan` explicitly overrides and persists it. VS Code-specific file picking, settings, editor open/reveal, and file/diff actions are unavailable in standalone mode.
+
+### One active pie host per machine
+
+Pie enforces a single active host per machine across VS Code and standalone (VS Code takes priority), via an OS-owned exclusive loopback coordinator (fixed port `1996`, overridable with `PIE_HOST_COORDINATOR_PORT`). Ownership is the bound socket itself — the kernel grants it to exactly one starter and frees it when the owner dies, so there is no stale PID file and no process is ever killed by PID. The host acquires ownership before any runtime/backend startup and releases it only after shutdown has actually finished.
+
+- **Standalone** refuses to start while any host is active and prints an explicit terminal refusal (exit code 2). It started no runtime or backend.
+- **A second VS Code window** is refused with a visible notification; only the first window's pie runs.
+- **VS Code taking over from standalone** shows a progress notification, asks the standalone host to stop, waits a bounded time (`PIE_HOST_HANDOFF_TIMEOUT_MS`, default 30s), and starts only after the standalone released. On timeout pie fails closed and terminates nothing.
+- A standalone host that is asked to stop logs that VS Code requested the stop, shuts down gracefully, and retains saved sessions.
+
+Scope and limits: the coordinator is loopback-only (never reachable over LAN) and machine-global — a pie host under another local OS user session also occupies it, so a second user is refused rather than taking over. The graceful handoff request is unauthenticated local IPC, accepted within this single-user desktop scope. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ("Single active pie host per machine") for the contract.
+
 ### Query local analytics
 
 Named batch queries run against the retained local DuckDB workspace, which reads privacy-safe legacy run-analytics exports and storage stores:

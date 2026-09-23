@@ -1,6 +1,6 @@
 # Computer use
 
-Pie exposes one generic `computer` tool and a supporting `computer-use` skill for visible Windows applications. The implementation is application-neutral: there are no browser, Godot, VS Code, or site-specific branches.
+Pie exposes one generic `computer` tool for visible Windows applications. The implementation is application-neutral: there are no browser, Godot, VS Code, or site-specific branches.
 
 ## Selected implementation
 

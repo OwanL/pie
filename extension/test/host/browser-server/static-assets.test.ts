@@ -109,6 +109,7 @@ test('renderHtml(): nonce CSP, stable page metadata, and manifest URLs', async (
   });
 
   assert.match(html, /pie-transport" content="browser"/);
+  assert.match(html, /name="viewport" content="width=device-width, initial-scale=1\.0, interactive-widget=resizes-content"/);
   assert.match(html, /pie-ws-route" content="\/ws"/);
   assert.match(html, /pie-asset-version" content="[0-9a-f]{16}"/);
   assert.match(html, /assets\/panel-abc123\.js/);

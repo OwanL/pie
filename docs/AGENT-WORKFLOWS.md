@@ -54,8 +54,8 @@ Owners: [subagent reference](../extensions/subagent/README.md), [schema](../exte
 
 ### Session changes
 
-- Successful completed subagent results preserve nested transcripts, which the parent's JSONL-derived manifest scans for edits. A running child's changes are not available through this durable-result join yet.
-- The default `session_changes` invocation requires a persisted session path. A worker can inherit the tool but cannot use that default against its own in-memory session. Supplying a parent's path inspects the parent, not the child's current transcript.
+- Only successful, completed subagent tool results contribute file changes: the JSONL-derived manifest joins each subagent tool call with its durable result and skips calls whose result errored or has not completed. A running child's changes are not available through this durable-result join yet.
+- The default `session_changes` invocation reads the calling runtime session's live entries, including in-memory subagent sessions, so an inherited worker can self-review its own changes without a persisted session file; lightweight contexts without the runtime entry API fall back to the active persisted session file. Supplying an explicit `sessionPath` inspects that persisted session — e.g. a parent's — instead of the child's current transcript.
 - Arbitrary shell writes are not captured. Recognized shell deletions and edit/write-like calls are derived heuristically; this is not a filesystem mutation journal.
 - Focused diffs use Git baselines, not session-start file snapshots. Pre-existing hunks can therefore appear. Git worktree checks remain useful, and current tool guidance explicitly requests them separately.
 - Child-relative paths are accumulated against the parent session's cwd without preserving the child's different cwd. A historical trace confirms a parent rooted at `C:\dev` delegated to `C:\dev\repos\pie`, received paths such as `extension/src/backend/worker-frame-io.ts`, and got `no git baseline` from the focused diff. A subsequent repository-scoped Git diff supplied the missing patch. Later absolute parent edits produced separately spelled entries for the same file.

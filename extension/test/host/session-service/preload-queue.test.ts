@@ -109,7 +109,6 @@ function createState(paths: readonly string[], running: readonly string[] = []) 
     runEffects?.(result.effects);
   };
   const state = new SessionServiceState(
-    createExtensionContext(),
     backend as any,
     () => undefined,
     getArchState,
@@ -351,8 +350,7 @@ test('foreground selection removes a queued preload and is not blocked by an in-
   const selected = '/workspace/background-b.jsonl';
   const setup = createState([activePreload, selected]);
   const tabs = new SessionTabActions({
-    context: createExtensionContext(),
-    scheduleRender: () => undefined,
+        scheduleRender: () => undefined,
     runObserver: NOOP_RUN_OBSERVER,
     state: setup.state,
     getArchState: setup.getArchState,
@@ -392,8 +390,7 @@ test('selecting an in-flight preload path suppresses its stale payload', async (
   const selected = '/workspace/selected.jsonl';
   const setup = createState([selected]);
   const tabs = new SessionTabActions({
-    context: createExtensionContext(),
-    scheduleRender: () => undefined,
+        scheduleRender: () => undefined,
     runObserver: NOOP_RUN_OBSERVER,
     state: setup.state,
     getArchState: setup.getArchState,

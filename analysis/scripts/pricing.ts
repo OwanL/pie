@@ -24,13 +24,13 @@
  */
 import { loadHistoricalModelRecords, loadModelsJsonProviders } from './load-models.ts';
 
-import { parseModelPricing, pricingForPromptTokens } from '../../shared/pricing-core.js';
+import { parseModelPricing, pricingForPromptTokens, resolveApplicablePricing } from '../../shared/pricing-core.js';
 import type { ModelTokenPricing } from '../../shared/pricing-core.js';
 
 // Re-export the shared core under the original public names so existing
 // consumers (analysis/scripts/prepare.ts, analysis/test/pricing.test.ts) keep
 // working unchanged.
-export { parseModelPricing, pricingForPromptTokens } from '../../shared/pricing-core.js';
+export { parseModelPricing, pricingForPromptTokens, resolveApplicablePricing } from '../../shared/pricing-core.js';
 export type { ModelTokenPricing } from '../../shared/pricing-core.js';
 
 // Re-exported so existing imports of `resolveModelsJsonPath` from `./pricing.ts`
@@ -132,10 +132,19 @@ export function loadModelPricingMap(modelsJsonPath?: string, historyPath?: strin
   return map;
 }
 
-/** Compute USD cost for a token usage given a pricing record. */
-export function computeTokenCostUsd(usage: TokenUsageForCost, pricing: ModelTokenPricing): number {
+/** Compute USD cost for a token usage given a pricing record.
+ *
+ * Aggregate token math has no per-request interval, so scheduled (peak-window)
+ * pricing is never applicable here: `undefined` applicability means the caller
+ * must treat the cost as unknown instead of falling back to a static rate.
+ * Unsupported cache-read usage is likewise unpriced. */
+export function computeTokenCostUsd(usage: TokenUsageForCost, pricing: ModelTokenPricing): number | null {
+  const applicable = resolveApplicablePricing(pricing, {
+    cacheReadTokens: usage.cacheReadTokens,
+  });
+  if (!applicable) return null;
   const effective = pricingForPromptTokens(
-    pricing,
+    applicable,
     usage.inputTokens,
     usage.cacheReadTokens,
     usage.cacheWriteTokens,

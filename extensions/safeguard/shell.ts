@@ -104,6 +104,8 @@ export function parseShellInvocations(command: string): ShellInvocation[] {
 	let quote: "'" | '"' | undefined;
 	let escaped = false;
 	let atTokenStart = true;
+	let awaitingRedirectionTarget = false;
+	let discardingRedirectionTarget = false;
 
 	const pushToken = () => {
 		if (token.length > 0) tokens.push(token);
@@ -130,6 +132,34 @@ export function parseShellInvocations(command: string): ShellInvocation[] {
 
 	for (let index = 0; index < source.length; index += 1) {
 		const char = source[index] ?? "";
+
+		if (awaitingRedirectionTarget) {
+			if (/\s/.test(char) && char !== "\n") continue;
+			awaitingRedirectionTarget = false;
+			if (!/[;|&\n]/.test(char)) discardingRedirectionTarget = true;
+		}
+		if (discardingRedirectionTarget) {
+			if (escaped) {
+				escaped = false;
+				continue;
+			}
+			if (quote) {
+				if (char === quote) quote = undefined;
+				else if (char === "\\" && quote === '"') escaped = true;
+				continue;
+			}
+			if (char === "'" || char === '"') {
+				quote = char;
+				continue;
+			}
+			if (char === "\\") {
+				const next = source[index + 1] ?? "";
+				if (/\s|[\\'";|&#]/.test(next)) escaped = true;
+				continue;
+			}
+			if (!/\s|[;|&<>]/.test(char)) continue;
+			discardingRedirectionTarget = false;
+		}
 		if (escaped) {
 			token += char;
 			escaped = false;
@@ -155,6 +185,25 @@ export function parseShellInvocations(command: string): ShellInvocation[] {
 			if (/\s|[\\'";|&#]/.test(next)) escaped = true;
 			else token += char;
 			atTokenStart = false;
+			continue;
+		}
+		if (char === "&" && source[index + 1] === ">") {
+			pushToken();
+			index += 1;
+			while (source[index + 1] === ">") index += 1;
+			awaitingRedirectionTarget = true;
+			continue;
+		}
+		if (char === ">" || char === "<") {
+			if (/^\d+$/.test(token)) {
+				token = "";
+				atTokenStart = true;
+			} else {
+				pushToken();
+			}
+			while (source[index + 1] === ">" || source[index + 1] === "<") index += 1;
+			if (source[index + 1] === "&" || source[index + 1] === "|") index += 1;
+			awaitingRedirectionTarget = true;
 			continue;
 		}
 		if (char === "#" && atTokenStart) {
@@ -271,6 +320,8 @@ function isTemporaryDirectoryChild(target: string, cwd: string): boolean {
 }
 
 export function analyzeRecursiveRm(command: string, cwd: string): { action: "allow" | "block" | "prompt"; reason?: string } | null {
+	let foundRecursiveForceRm = false;
+	let prompted: { action: "prompt"; reason: string } | undefined;
 	for (const invocation of parseShellInvocations(command)) {
 		if (invocation.name !== "rm") continue;
 		let recursive = false;
@@ -292,13 +343,18 @@ export function analyzeRecursiveRm(command: string, cwd: string): { action: "all
 			targets.push(token);
 		}
 		if (!recursive || !force || targets.length === 0) continue;
+		foundRecursiveForceRm = true;
 		for (const target of targets) {
 			if (isRootDeleteTarget(target)) return { action: "block", reason: "Recursive force-delete on root (/)" };
 			if (!isUnderCwd(target, cwd) && !isTemporaryDirectoryChild(target, cwd)) {
-				return { action: "prompt", reason: "Recursive force-delete outside project directory" };
+				// Remember the prompt but keep scanning every rm invocation and
+				// target: a later root-delete hard block must dominate this
+				// earlier prompt (a confirmable prompt must never launder a
+				// catastrophic delete).
+				prompted ??= { action: "prompt", reason: "Recursive force-delete outside project directory" };
 			}
 		}
-		return { action: "allow" };
 	}
-	return null;
+	if (prompted) return prompted;
+	return foundRecursiveForceRm ? { action: "allow" } : null;
 }

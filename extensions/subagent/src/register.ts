@@ -51,8 +51,8 @@ function buildDescription(disabled = false): string {
 	// promptGuidelines and the bucket parameter schema respectively; do not
 	// duplicate them here.
 	const lines = [
-		"Delegate one concrete task to a specialized agent with isolated context.",
-		"Agents are discovered automatically from both user and project directories.",
+		"Delegate one concrete task to a specialized agent with isolated context; isolation is not sandboxing — the child shares the parent's process, filesystem, and credentials.",
+		"Agents are discovered automatically from both user and project directories, including project agents under an explicitly provided cwd.",
 	];
 
 	try {

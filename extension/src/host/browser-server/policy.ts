@@ -1,8 +1,8 @@
 /**
  * Browser server policy (browser server plan §5.3/§6.3/§4.1).
  *
- * Pure, hand-rolled validators and bounds for the loopback boundary: Host and
- * Origin checks (DNS-rebinding / foreign-origin defense), connection/payload
+ * Pure, hand-rolled validators and bounds for the browser-server boundary:
+ * Host and Origin checks (DNS-rebinding / foreign-origin defense), connection/payload
  * bounds, handshake bounds, and the pre-send socket gates. No dependencies;
  * everything here is deterministic and unit-testable without a socket.
  */
@@ -75,18 +75,83 @@ export function isValidLoopbackHostHeader(
 }
 
 /**
- * Validate the `Origin` header of a WebSocket upgrade (browser server plan
- * §6.3): accept only the EXACT served origin (`http://127.0.0.1:<port>`).
- * Missing, `null`, wildcard, extension-webview, and foreign origins are
- * rejected. The served HTML never uses `localhost` in scripts, so
- * `http://localhost:<port>` is also rejected (it is not the served origin).
+ * Validate Host against loopback or one of this host's exact private IPv4
+ * interface addresses. LAN acceptance is explicit and address-scoped: DNS
+ * names, public IPs, and arbitrary RFC1918 addresses are not accepted.
  */
-export function isValidWebSocketOrigin(originHeader: string | undefined, expectedPort: number): boolean {
+export function isValidBrowserHostHeader(
+  hostHeader: string | undefined,
+  expectedPort: number,
+  allowedLanAddresses: readonly string[] = [],
+): boolean {
+  if (isValidLoopbackHostHeader(hostHeader, expectedPort)) return true;
+  if (typeof hostHeader !== 'string' || hostHeader.length === 0 || hostHeader.length > 255) return false;
+  if (hostHeader.includes('/') || hostHeader.includes('\\') || hostHeader.includes('@')
+    || hostHeader.includes('?') || hostHeader.includes('#')) return false;
+  const colon = hostHeader.lastIndexOf(':');
+  if (colon <= 0) return false;
+  const host = hostHeader.slice(0, colon);
+  const port = hostHeader.slice(colon + 1);
+  return port === String(expectedPort)
+    && isLanIPv4Address(host)
+    && allowedLanAddresses.includes(host);
+}
+
+/** Whether an address is RFC1918 or IPv4 link-local (the supported LAN scope). */
+export function isLanIPv4Address(address: string): boolean {
+  const octets = parseIPv4Address(address);
+  if (!octets) return false;
+  const [first, second] = octets;
+  return first === 10
+    || (first === 172 && second >= 16 && second <= 31)
+    || (first === 192 && second === 168)
+    || (first === 169 && second === 254);
+}
+
+/**
+ * Restrict request sources as well as their browser-supplied Host/Origin
+ * headers. A wildcard-bound LAN listener must not accept public IPv4 clients
+ * that can forge those headers. IPv4-mapped addresses are normalized because
+ * Node may expose them for dual-stack sockets.
+ */
+export function isAllowedBrowserRemoteAddress(remoteAddress: string | undefined, allowLan: boolean): boolean {
+  if (!remoteAddress) return false;
+  if (remoteAddress === '::1') return true;
+  const address = remoteAddress.startsWith('::ffff:') ? remoteAddress.slice('::ffff:'.length) : remoteAddress;
+  const octets = parseIPv4Address(address);
+  if (!octets) return false;
+  if (octets[0] === 127) return true;
+  return allowLan && isLanIPv4Address(address);
+}
+
+function parseIPv4Address(address: string): number[] | null {
+  const parts = address.split('.');
+  if (parts.length !== 4 || parts.some((part) => !/^(0|[1-9][0-9]{0,2})$/u.test(part))) return null;
+  const octets = parts.map(Number);
+  return octets.some((octet) => octet < 0 || octet > 255) ? null : octets;
+}
+
+/**
+ * Validate the `Origin` header of a WebSocket upgrade (browser server plan
+ * §6.3): by default accept only the exact `http://127.0.0.1:<port>` origin.
+ * LAN mode additionally accepts exact private IPv4 interface origins supplied
+ * from this server's advertised URLs. Missing, `null`, wildcard,
+ * extension-webview, and foreign origins are rejected; `localhost` remains
+ * rejected because the served page uses the canonical 127.0.0.1 origin.
+ */
+export function isValidWebSocketOrigin(
+  originHeader: string | undefined,
+  expectedPort: number,
+  allowedLanAddresses: readonly string[] = [],
+): boolean {
   if (typeof originHeader !== 'string' || originHeader.length === 0) return false;
   if (originHeader.length > 512) return false;
   if (originHeader === 'null') return false;
-  // The served origin is exactly http://127.0.0.1:<port> — nothing else.
-  return originHeader === `http://127.0.0.1:${expectedPort}`;
+  // Keep the canonical loopback origin exact. Opted-in LAN pages additionally
+  // accept only the exact private IPv4 interface origin advertised by Pie.
+  if (originHeader === `http://127.0.0.1:${expectedPort}`) return true;
+  return allowedLanAddresses.some((address) => isLanIPv4Address(address)
+    && originHeader === `http://${address}:${expectedPort}`);
 }
 
 /** `origin` string for the served page (used for CSP `connect-src` too). */

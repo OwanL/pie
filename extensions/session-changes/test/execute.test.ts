@@ -34,6 +34,9 @@ test('tool metadata makes session-scoped review the default after file edits', (
   assert.match(firstDescriptionSentence, /current or specified Pi session after editing/);
   assert.match(firstDescriptionSentence, /session-scoped manifest/);
   assert.match(firstDescriptionSentence, /before workspace-wide Git checks/);
+  assert.ok(firstDescriptionSentence.length + 1 <= 180);
+  assert.match(tool.description, /successful completed subagent results, not running children/);
+  assert.match(tool.description, /not a complete filesystem mutation journal/);
   assert.match(tool.promptSnippet, /after file edits/);
   assert.ok(tool.promptGuidelines.some((guideline: string) => (
     guideline.includes('omit sessionPath')
@@ -47,6 +50,13 @@ test('tool metadata makes session-scoped review the default after file edits', (
     guideline.includes('git status/diff separately')
     && guideline.includes('pre-existing hunks')
   )));
+});
+
+test('schema pins diff path as required with minItems 1', () => {
+  const props = tool.parameters.properties;
+  assert.equal(props.path.minItems, 1, 'diff path must reject an empty array at schema-validation time');
+  assert.match(props.path.description, /required/i);
+  assert.match(props.action.description, /`path` is required/);
 });
 
 /** Build a temp session JSONL (well-formed) whose cwd is the temp dir and

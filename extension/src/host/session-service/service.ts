@@ -1,5 +1,3 @@
-import * as vscode from 'vscode';
-
 import { BackendClient } from '../backend/client';
 import { resolveChatPrefs, buildRuntimePrefsPayload } from '../../shared/protocol';
 import {
@@ -38,6 +36,7 @@ import type { LiveSubagentDetailAddress, DetailCursor, DetailPageRef } from '../
 import { DetailSubscriptionService } from './detail-subscriptions';
 import { PrivateSessionCleanup } from './private-session-cleanup';
 import type { AnalyticsBackendDescriptor } from '../../../../shared/analytics/activation.js';
+import type { HostDisposable, SessionHostPlatform } from './platform';
 
 /** Host-owned identities the detail subscription service fences its
  *  imperatives with: the current webview document generation and the current
@@ -66,7 +65,7 @@ const DETAIL_CACHE_MAX_BYTES = 64 * 1024 * 1024;
  * arch state. All session commands (create, open, close, send, interrupt, etc.) go
  * through this service.
  */
-export class SessionService implements vscode.Disposable {
+export class SessionService implements HostDisposable {
   private readonly state: SessionServiceState;
   private readonly events: SessionServiceEvents;
   /** Deferred-trigger registry: resumes a session when a registered condition
@@ -84,10 +83,10 @@ export class SessionService implements vscode.Disposable {
   private readonly detailEpochBySession = new Map<string, number>();
   private detailCacheBytes = 0;
   private detailGeneration = 0;
-  private readonly correlatedFailureSubscription: vscode.Disposable;
+  private readonly correlatedFailureSubscription: HostDisposable;
 
   constructor(
-    private readonly context: vscode.ExtensionContext,
+    private readonly platform: SessionHostPlatform,
     private readonly backend: BackendClient,
     private readonly scheduleRender: ScheduleRender,
     postImperative: PostImperative,
@@ -101,7 +100,7 @@ export class SessionService implements vscode.Disposable {
     this.getArchState = getArchState;
     this.dispatchArch = dispatchArch;
 
-    this.state = new SessionServiceState(context, backend, scheduleRender, getArchState, dispatchArch);
+    this.state = new SessionServiceState(backend, scheduleRender, getArchState, dispatchArch);
     this.privateSessionCleanup = new PrivateSessionCleanup({
       prepareForget: async (sessionPath) => {
         if (process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV] !== STORAGE_CUTOFF_AUTHORIZATION_VALUE) return;
@@ -152,7 +151,7 @@ export class SessionService implements vscode.Disposable {
       }),
       persistMarkers: (sessionPaths, removedSessionPaths = []) => {
         const removed = new Set(removedSessionPaths);
-        const stored = this.context.globalState.get<unknown[]>(PRIVATE_SESSION_PATHS_STORAGE_KEY)
+        const stored = this.platform.storage.get<unknown[]>(PRIVATE_SESSION_PATHS_STORAGE_KEY)
           ?.filter((sessionPath): sessionPath is string => typeof sessionPath === 'string' && sessionPath.length > 0)
           ?? [];
         // Merge with markers written by a concurrent ordinary tab checkpoint,
@@ -163,7 +162,7 @@ export class SessionService implements vscode.Disposable {
           ...sessionPaths,
           ...stored.filter((sessionPath) => !removed.has(sessionPath)),
         ])];
-        return Promise.resolve(this.context.globalState.update(PRIVATE_SESSION_PATHS_STORAGE_KEY, next));
+        return Promise.resolve(this.platform.storage.update(PRIVATE_SESSION_PATHS_STORAGE_KEY, next));
       },
       isBackendReady: () => this.getArchState().settings.backendReady,
       getBackendGeneration: () => this.backend.getGeneration(),
@@ -196,7 +195,7 @@ export class SessionService implements vscode.Disposable {
         })
       : { dispose: () => undefined };
     this.events = new SessionServiceEvents({
-      context,
+      platform: this.platform,
       scheduleRender,
       onSessionCompleted,
       runObserver,
@@ -207,7 +206,6 @@ export class SessionService implements vscode.Disposable {
       onDetailStream: (message) => this.detailSubscriptions.handleStream(message),
     });
     this.tabs = new SessionTabActions({
-      context,
       scheduleRender,
       runObserver,
       state: this.state,
@@ -220,7 +218,6 @@ export class SessionService implements vscode.Disposable {
       ),
     });
     this.messages = new SessionMessageActions({
-      context,
       backend,
       scheduleRender,
       state: this.state,
@@ -246,7 +243,7 @@ export class SessionService implements vscode.Disposable {
     // that would keep the test process alive.
     this.triggers.start();
     await startSessionBackend({
-      context: this.context,
+      platform: this.platform,
       backend: this.backend,
       scheduleRender: this.scheduleRender,
       events: this.events,
@@ -677,7 +674,7 @@ export class SessionService implements vscode.Disposable {
     await this.messages.hydrateModelState(sessionPath, metadata);
   }
 
-  normalizeAttachUris(uris: vscode.Uri[]): vscode.Uri[] {
+  normalizeAttachUris<T extends { scheme: string }>(uris: T[]): T[] {
     return this.messages.normalizeAttachUris(uris);
   }
 
@@ -717,7 +714,7 @@ export class SessionService implements vscode.Disposable {
     // NOT dispatch another SetPrefs Command here — that would recurse through
     // the reducer → EffectRunner → service.setPrefs → Command → ... and
     // overflow the stack.
-    await Promise.resolve(this.context.globalState.update(PREFS_STORAGE_KEY, merged));
+    await Promise.resolve(this.platform.storage.update(PREFS_STORAGE_KEY, merged));
 
     // Cold-start restore intentionally reduces preferences before the backend
     // is spawned. Persist them now, then let startup's authoritative full
@@ -807,8 +804,8 @@ export class SessionService implements vscode.Disposable {
 
   private createPruningSettingsStorage(): PruningSettingsStorage {
     return {
-      get: () => this.context.globalState.get<PruningSettings>(PRUNING_STORAGE_KEY),
-      update: (value) => this.context.globalState.update(PRUNING_STORAGE_KEY, value),
+      get: () => this.platform.storage.get<PruningSettings>(PRUNING_STORAGE_KEY),
+      update: (value) => this.platform.storage.update(PRUNING_STORAGE_KEY, value),
     };
   }
 
@@ -837,8 +834,8 @@ export class SessionService implements vscode.Disposable {
 
   private createToolResultPruningSettingsStorage(): ToolResultPruningSettingsStorage {
     return {
-      get: () => this.context.globalState.get<ToolResultPruningSettings>(TOOL_RESULT_PRUNING_STORAGE_KEY),
-      update: (value) => this.context.globalState.update(TOOL_RESULT_PRUNING_STORAGE_KEY, value),
+      get: () => this.platform.storage.get<ToolResultPruningSettings>(TOOL_RESULT_PRUNING_STORAGE_KEY),
+      update: (value) => this.platform.storage.update(TOOL_RESULT_PRUNING_STORAGE_KEY, value),
     };
   }
 
@@ -867,8 +864,8 @@ export class SessionService implements vscode.Disposable {
 
   private createSessionTitlesSettingsStorage(): SessionTitlesSettingsStorage {
     return {
-      get: () => this.context.globalState.get<SessionTitlesSettings>(SESSION_TITLES_STORAGE_KEY),
-      update: (value) => this.context.globalState.update(SESSION_TITLES_STORAGE_KEY, value),
+      get: () => this.platform.storage.get<SessionTitlesSettings>(SESSION_TITLES_STORAGE_KEY),
+      update: (value) => this.platform.storage.update(SESSION_TITLES_STORAGE_KEY, value),
     };
   }
 }

@@ -98,6 +98,33 @@
         "output": { "type": "number", "minimum": 0 },
         "cacheRead": { "type": "number", "minimum": 0 },
         "cacheWrite": { "type": "number", "minimum": 0 },
+        "cacheReadUnsupported": { "type": "boolean" },
+        "peak": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["weekdaysUtc", "startMinutesUtc", "endMinutesUtc", "override"],
+          "properties": {
+            "weekdaysUtc": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 7,
+              "items": { "type": "integer", "minimum": 0, "maximum": 6 }
+            },
+            "startMinutesUtc": { "type": "integer", "minimum": 0, "maximum": 1439 },
+            "endMinutesUtc": { "type": "integer", "minimum": 1, "maximum": 1440 },
+            "override": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["input", "output", "cacheRead", "cacheWrite"],
+              "properties": {
+                "input": { "type": "number", "minimum": 0 },
+                "output": { "type": "number", "minimum": 0 },
+                "cacheRead": { "type": "number", "minimum": 0 },
+                "cacheWrite": { "type": "number", "minimum": 0 }
+              }
+            }
+          }
+        },
         "tiers": {
           "type": "array",
           "items": {

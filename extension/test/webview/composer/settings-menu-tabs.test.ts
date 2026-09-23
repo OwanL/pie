@@ -1,4 +1,4 @@
-import test, { beforeEach } from 'node:test';
+import test, { afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { installDom } from '../../_helpers/dom';
@@ -17,10 +17,14 @@ let container: HTMLElement;
 beforeEach(() => {
   container = document.createElement('div');
   document.body.appendChild(container);
-  return () => {
-    render(null, container);
-    container.remove();
-  };
+});
+
+afterEach(() => {
+  render(null, container);
+  container.remove();
+  // The settings menu portals to document.body; remove any stray portaled
+  // instance so tests cannot observe a previous test's menu.
+  document.querySelectorAll('.toolbar-settings-menu').forEach((el) => el.remove());
 });
 
 function click(el: Element | null): void {
@@ -64,7 +68,7 @@ function mount(
 
 function openMenu() {
   act(() => { click(container.querySelector('.toolbar-settings-trigger')); });
-  const menu = container.querySelector('.toolbar-settings-menu');
+  const menu = document.body.querySelector('.toolbar-settings-menu');
   assert.ok(menu, 'settings menu should open on trigger click');
   return menu!;
 }
@@ -276,7 +280,7 @@ test('two rapid Escape presses clear search then close settings', () => {
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   });
 
-  assert.equal(container.querySelector('.toolbar-settings-menu'), null);
+  assert.equal(document.body.querySelector('.toolbar-settings-menu'), null);
   assert.equal(document.activeElement, container.querySelector('.toolbar-settings-trigger'));
 });
 

@@ -11,20 +11,18 @@ import { createInitialArchState } from '../../../../src/host/core/arch-state';
 import type { ArchState } from '../../../../src/host/core/arch-state';
 import type { FileChangeEntry } from '../../../../src/shared/protocol';
 
-// file-diff-service.ts does `import * as vscode from 'vscode'`, which tsx
-// transpiles to `require('vscode')`. There is no `vscode` runtime module under
-// node_modules in this repo (only @types/vscode), so we intercept the bare
-// 'vscode' specifier at the CJS loader and return an inline mock. The mock's
-// `workspace.workspaceFolders` is mutable so per-test cases can exercise both
-// the "fallback present" and "fallback absent" branches of resolveFileChangePath.
-// `commands.executeCommand` records every call so diff/open wiring tests can
-// inspect the URIs handed to `vscode.diff` (e.g. the baseline git ref).
+// The VS Code viewer adapter imports `vscode`, but there is no runtime module
+// under node_modules in this repo (only @types/vscode). Intercept the bare
+// specifier at the CJS loader and return an inline mock. The mock's
+// `workspace.workspaceFolders` is mutable so core path-resolution tests can
+// exercise both fallback branches. `commands.executeCommand` records calls so
+// viewer tests can inspect the URIs handed to `vscode.diff`.
 const capturedCommands: Array<{ cmd: string; args: unknown[] }> = [];
 const capturedWarnings: string[] = [];
 
 // A minimal Uri mock whose `with()` returns a fresh object carrying the
-// `scheme`/`query` patch — enough for FileDiffService.toGitUri / toEmptyDiffUri
-// to build `git://` diff URIs whose `query` the tests can parse.
+// `scheme`/`query` patch — enough for the viewer adapter to build `git://`
+// diff URIs whose query the tests can parse.
 function mockUri(p: string): Record<string, unknown> {
   const base: Record<string, unknown> = {
     fsPath: p,
@@ -61,23 +59,23 @@ const vscodeMock = {
 };
 // `Module._load` is an internal/undocumented hook (absent from @types/node),
 // so cast to a small typed shape. The patch is installed in `test.before` only
-// long enough to resolve `vscode` during the lazy import, then restored in a
+// long enough to resolve the adapter during its lazy import, then restored in a
 // `finally` (mirroring backend-client.test.ts's finally-scoped restore). The
 // immediate restore matters: node:test's top-level after hooks are GLOBAL under
 // --test-isolation=none, so a hook-only restore would leave the shim live for
-// the whole run and leak it into other files sharing the process. file-diff-
-// service captures its `vscode` binding at load time, so the shim is unneeded
-// once the import returns. A defensive `test.after` is kept as a backstop.
+// the whole run and leak it into other files sharing the process. A defensive
+// `test.after` is kept as a backstop.
 const NodeModule = Module as unknown as {
   _load: (request: string, ...rest: unknown[]) => unknown;
 };
 let origLoad: ((request: string, ...rest: unknown[]) => unknown) | undefined;
 
-// Imported lazily (after the vscode shim is in place) because the module
-// resolves `vscode` at load time. arch-state is pure (no vscode) so it is
-// imported statically above.
+// Imported lazily (after the vscode shim is in place) because the adapter
+// resolves `vscode` at load time. arch-state and the core service are pure, so
+// they are imported statically above or through the same lazy setup.
 let FileDiffService: typeof import('../../../../src/host/core/file-diff-service').FileDiffService;
-let EMPTY_DIFF_SCHEME: typeof import('../../../../src/host/core/file-diff-service').EMPTY_DIFF_SCHEME;
+let VscodeFileDiffViewer: typeof import('../../../../src/host/vscode/file-diff').VscodeFileDiffViewer;
+let EMPTY_DIFF_SCHEME: typeof import('../../../../src/host/vscode/file-diff').EMPTY_DIFF_SCHEME;
 
 test.before(async () => {
   origLoad = NodeModule._load.bind(NodeModule);
@@ -86,7 +84,8 @@ test.before(async () => {
     return origLoad!(request, ...rest);
   };
   try {
-    ({ FileDiffService, EMPTY_DIFF_SCHEME } = await import('../../../../src/host/core/file-diff-service'));
+    ({ FileDiffService } = await import('../../../../src/host/core/file-diff-service'));
+    ({ VscodeFileDiffViewer, EMPTY_DIFF_SCHEME } = await import('../../../../src/host/vscode/file-diff'));
   } finally {
     NodeModule._load = origLoad;
     origLoad = undefined;
@@ -123,6 +122,14 @@ function archStateWith(over: {
 
 function entry(pathStr: string, kind: FileChangeEntry['kind']): FileChangeEntry {
   return { path: pathStr, kind, toolCallId: 't', messageId: 'm', description: '', timestamp: '' };
+}
+
+async function openFileDiffWithViewer(
+  service: InstanceType<typeof FileDiffService>,
+  sessionPath: string,
+  filePath: string,
+): Promise<void> {
+  await new VscodeFileDiffViewer(service).openFileDiff(sessionPath, filePath);
 }
 
 // Clear captured vscode command calls between tests so wiring assertions
@@ -164,7 +171,13 @@ test('resolveFileChangePath prefers the session cwd over workspaceCwd', () => {
 test('resolveFileChangePath falls back to the first vscode workspace folder when nothing else is set', () => {
   vscodeMock.workspace.workspaceFolders = [{ uri: { fsPath: '/ws/root' } }];
   try {
-    const svc = new FileDiffService(() => archStateWith({ workspaceCwd: null }));
+    const svc = new FileDiffService(
+      () => archStateWith({ workspaceCwd: null }),
+      {
+        getWorkspaceCwd: () => vscodeMock.workspace.workspaceFolders?.[0]?.uri.fsPath,
+        showWarning: (message) => { capturedWarnings.push(message); },
+      },
+    );
     assert.equal(svc.resolveFileChangePath('s', 'rel/file.txt'), path.resolve('/ws/root', 'rel/file.txt'));
   } finally {
     vscodeMock.workspace.workspaceFolders = undefined;
@@ -374,7 +387,7 @@ integrationTest('openFileDiff diffs a committed agent change against the pre-cha
         fileChanges: { s: [entry('f.txt', 'modified')] },
       }),
     );
-    await svc.openFileDiff('s', 'f.txt');
+    await openFileDiffWithViewer(svc, 's', 'f.txt');
 
     const diffCall = capturedCommands.find((c) => c.cmd === 'vscode.diff');
     assert.ok(diffCall, 'vscode.diff was not invoked');
@@ -404,7 +417,7 @@ integrationTest('openFileDiff diffs a tracked created-kind file (an overwrite) a
         fileChanges: { s: [entry('created.txt', 'created')] },
       }),
     );
-    await svc.openFileDiff('s', 'created.txt');
+    await openFileDiffWithViewer(svc, 's', 'created.txt');
 
     const diffCall = capturedCommands.find((c) => c.cmd === 'vscode.diff');
     assert.ok(diffCall, 'vscode.diff was not invoked');
@@ -427,7 +440,7 @@ integrationTest('openFileDiff uses the empty diff for an untracked created file'
         fileChanges: { s: [entry('created.txt', 'created')] },
       }),
     );
-    await svc.openFileDiff('s', 'created.txt');
+    await openFileDiffWithViewer(svc, 's', 'created.txt');
 
     const diffCall = capturedCommands.find((c) => c.cmd === 'vscode.diff');
     assert.ok(diffCall, 'vscode.diff was not invoked');
@@ -445,7 +458,7 @@ integrationTest('openFileDiff does not open a dead URI when a created file no lo
       }),
     );
 
-    await svc.openFileDiff('s', 'missing.txt');
+    await openFileDiffWithViewer(svc, 's', 'missing.txt');
 
     assert.equal(capturedCommands.some((c) => c.cmd === 'vscode.diff'), false);
     assert.match(capturedWarnings[0] ?? '', /no longer exists on disk/i);
@@ -464,7 +477,7 @@ integrationTest('openFileDiff treats an existing modified file without a Git bas
       }),
     );
 
-    await svc.openFileDiff('s', 'f.txt');
+    await openFileDiffWithViewer(svc, 's', 'f.txt');
 
     const diffCall = capturedCommands.find((c) => c.cmd === 'vscode.diff');
     assert.ok(diffCall, 'vscode.diff was not invoked');
@@ -486,7 +499,7 @@ integrationTest('openFileDiff does not open a bogus Git URI for a deleted non-gi
       }),
     );
 
-    await svc.openFileDiff('s', 'deleted.txt');
+    await openFileDiffWithViewer(svc, 's', 'deleted.txt');
 
     assert.equal(capturedCommands.some((c) => c.cmd === 'vscode.diff'), false);
     assert.match(capturedWarnings[0] ?? '', /no Git baseline/i);
@@ -509,7 +522,7 @@ integrationTest('openFileDiff shows the Git baseline for a deleted committed fil
       }),
     );
 
-    await svc.openFileDiff('s', 'f.txt');
+    await openFileDiffWithViewer(svc, 's', 'f.txt');
 
     const diffCall = capturedCommands.find((c) => c.cmd === 'vscode.diff');
     assert.ok(diffCall, 'vscode.diff was not invoked');

@@ -60,6 +60,31 @@ test('schema enforces the discriminated union and strict fields', () => {
   }
 });
 
+test('key fields carry accurate field descriptions for model guidance', () => {
+  const properties = (playwrightSchema as { properties: Record<string, { description?: string }> }).properties;
+  const action = properties.action!.description!;
+  assert.match(action, /open starts a session/);
+  assert.match(action, /act \(requires input\)/);
+  assert.match(action, /run_code \(requires code\)/);
+  assert.match(action, /close \(requires scope\)/);
+  assert.match(action, /observe, act, and run_code require sessionId/);
+  assert.match(properties.sessionId!.description!, /open generates one when omitted/);
+  assert.match(properties.pageId!.description!, /Required for ref-targeted/);
+  assert.match(properties.actionTimeoutMs!.description!, /milliseconds/);
+  assert.match(properties.navigationTimeoutMs!.description!, /milliseconds/);
+  assert.match(properties.timeoutMs!.description!, /milliseconds/);
+  assert.match(properties.timeout!.description!, /milliseconds/);
+  assert.match(properties.scope!.description!, /Required for close/);
+  // run_code bindings must match the actual sidecar invocation: fn({page,
+  // context: session.primaryContext, helpers}) where helpers.writeArtifact is
+  // the only helper, plus the function-expression/async-body invocation forms.
+  const code = properties.code!.description!;
+  assert.match(code, /\{page, context, helpers\}/);
+  assert.match(code, /helpers\.writeArtifact/);
+  assert.match(code, /function expression/);
+  assert.match(code, /async body/);
+});
+
 test('schema caps unbounded string sizes', () => {
   assert.equal(validator.Check({ action: 'open', url: `https://e.test/${'a'.repeat(10 * 1024)}` }), false);
   assert.equal(validator.Check({ action: 'open', url: 'https://e.test/' + 'a'.repeat(100) }), true);

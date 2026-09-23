@@ -27,6 +27,7 @@
 import type { ComposerInput, ComposerInputDraft, WebviewToHostMessage } from '../../shared/protocol';
 import { isBrowserApplicationCommand } from '../../shared/browser-ingress';
 import { utf8ByteLength } from '../../shared/utf8';
+import { createUuidV4 } from '../../shared/uuid';
 
 /** In-memory capacity (last 32 entries). */
 export const PENDING_COMMAND_CAPACITY = 32;
@@ -133,7 +134,7 @@ class PendingCommandStore {
    *  (with the minted clientCommandId) or null when the store is full. */
   track(message: WebviewToHostMessage): { message: WebviewToHostMessage } | null {
     if (!isBrowserApplicationCommand(message.type)) return null;
-    const clientCommandId = crypto.randomUUID();
+    const clientCommandId = createUuidV4();
     const stamped = { ...message, clientCommandId } as WebviewToHostMessage;
     const entry: PendingCommandEntry = {
       clientCommandId,

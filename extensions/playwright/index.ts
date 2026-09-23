@@ -49,8 +49,9 @@ export default function registerPlaywright(pi: ExtensionAPI) {
     name: 'playwright',
     label: 'Playwright',
     description:
-      'Automate rendered web pages in an isolated, headless, Playwright-pinned Chromium: open pages, observe bounded AI accessibility snapshots with revision-checked [ref=eN] references, act (navigate/click/fill/type/press/select/check/hover/focus/upload/wait/tabs), run bounded Playwright run_code for uncommon APIs, export/import storage state, save downloads, and take explicit opt-in screenshots. '
-      + 'State is an isolated BrowserContext per playwright session inside a session-owned sidecar; the user\'s visible browsers are never attached or affected.',
+      'Automate rendered web pages in isolated headless Chromium: interact with DOM/JavaScript, inspect accessibility, and capture screenshots without touching visible browsers. '
+      + 'Open pages, observe bounded AI accessibility snapshots addressed by revision-checked [ref=eN] refs, act (navigate/click/fill/type/press/select/check/hover/focus/upload/wait/tabs), run bounded Playwright run_code for uncommon APIs, export/import storage state, save downloads, and take explicit opt-in screenshots. '
+      + 'State is an isolated BrowserContext per playwright session inside a session-owned sidecar.',
     promptSnippet: 'Operate rendered web pages in an isolated headless Chromium via revision-checked accessibility refs; observe first, screenshot only on request.',
     promptGuidelines: [
       'Prefer raw headless interfaces (HTTP, CLI, MCP) when rendered browser behavior is unnecessary; use playwright when work requires a DOM, JavaScript execution, accessibility state, or rendering; use computer only for browser chrome, native dialogs, or other surfaces outside the page boundary.',

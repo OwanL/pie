@@ -104,6 +104,7 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
   const previousSessionDir = process.env.PI_CODING_AGENT_SESSION_DIR;
   const previousDataRoot = process.env.PIE_DATA_DIR;
+  const previousEditorVersion = process.env.PIE_EDITOR_VERSION;
   delete process.env.PIE_TRUSTED_SDK_ROOT;
   const agentDir = path.resolve('/mock/agent');
   const dataRoot = path.join(agentDir, 'runtime-data');
@@ -119,28 +120,6 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
   let spawnOptions: cp.SpawnOptions | undefined;
   let spawnArgs: readonly string[] | undefined;
   moduleWithLoad._load = function patchedLoad(request: string, parent: unknown, isMain: boolean) {
-    if (request === 'vscode') {
-      return {
-        version: '1.102.3-test',
-        EventEmitter: class<TValue> {
-          private readonly emitter = new EventEmitter();
-
-          readonly event = (listener: (value: TValue) => void) => {
-            this.emitter.on('event', listener);
-            return { dispose: () => this.emitter.off('event', listener) };
-          };
-
-          fire(value: TValue): void {
-            this.emitter.emit('event', value);
-          }
-
-          dispose(): void {
-            this.emitter.removeAllListeners();
-          }
-        },
-      };
-    }
-
     if (request === 'node:child_process' || request === 'child_process') {
       return {
         ...cp,
@@ -156,7 +135,7 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
   };
 
   const { BackendClient } = await import('../../../src/host/backend/client');
-  const client = new BackendClient({ orphanReaper: noOrphans });
+  const client = new BackendClient({ editorVersion: '1.102.3-test', orphanReaper: noOrphans });
   try {
     const payload = await client.start({
       nodePath: '/mock/node',
@@ -175,6 +154,16 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
     assert.deepEqual(spawnOptions?.stdio, ['pipe', 'pipe', 'pipe', 'pipe']);
     assert.equal((spawnOptions?.env as NodeJS.ProcessEnv | undefined)?.PIE_EDITOR_VERSION, '1.102.3-test');
     assert.equal((spawnOptions?.env as NodeJS.ProcessEnv | undefined)?.PIE_TRUSTED_SDK_ROOT, undefined);
+
+    const observedEvents: string[] = [];
+    const eventSubscription = client.onEvent((event) => observedEvents.push(event.event));
+    fakeProc.stdout.write(JSON.stringify({ event: 'test.event', payload: {} }) + '\n');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(observedEvents, ['test.event']);
+    eventSubscription.dispose();
+    fakeProc.stdout.write(JSON.stringify({ event: 'test.event.after-dispose', payload: {} }) + '\n');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(observedEvents, ['test.event'], 'disposed event subscriptions stop receiving backend events');
     const spawnedEnv = spawnOptions?.env as NodeJS.ProcessEnv | undefined;
     assert.equal(spawnedEnv?.PI_CODING_AGENT_DIR, agentDir);
     assert.equal(spawnedEnv?.PI_CODING_AGENT_SESSION_DIR, path.join(agentDir, 'data/outcomes/sessions'));
@@ -183,6 +172,23 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
     assert.equal(spawnedEnv?.PIE_LEGACY_SESSION_SETTINGS_DIR, path.join(agentDir, 'data/outcomes/session-reviews'));
     assert.equal(spawnedEnv?.PIE_DATA_DIR, dataRoot);
     assert.equal(spawnedEnv?.PIE_CACHE_DIR, path.join(dataRoot, 'cache'));
+
+    // A standalone client must not inherit a stale editor marker from its
+    // parent process when no VS Code composition metadata is supplied.
+    process.env.PIE_EDITOR_VERSION = 'stale-vscode-version';
+    const standaloneProc = new DrainingChildProcess();
+    nextProc = standaloneProc as unknown as cp.ChildProcess;
+    const standaloneClient = new BackendClient({ orphanReaper: noOrphans });
+    await standaloneClient.start({
+      nodePath: '/mock/node',
+      backendPath: '/mock/backend.js',
+      sdkPath: '/mock/sdk',
+      cwd: '/mock/cwd',
+    });
+    assert.equal((spawnOptions?.env as NodeJS.ProcessEnv | undefined)?.PIE_EDITOR_VERSION, undefined);
+    const standaloneStop = standaloneClient.stop();
+    standaloneProc.releaseRequest();
+    await standaloneStop;
 
     const activation = {
       generationId: '2f6e2b1c-9d4a-4e7b-8c3f-1a2b3c4d5e6f',
@@ -349,5 +355,7 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
     else process.env.PI_CODING_AGENT_SESSION_DIR = previousSessionDir;
     if (previousDataRoot === undefined) delete process.env.PIE_DATA_DIR;
     else process.env.PIE_DATA_DIR = previousDataRoot;
+    if (previousEditorVersion === undefined) delete process.env.PIE_EDITOR_VERSION;
+    else process.env.PIE_EDITOR_VERSION = previousEditorVersion;
   }
 });

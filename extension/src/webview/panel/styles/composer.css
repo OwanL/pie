@@ -22,8 +22,6 @@
 }
 
 .composer-shell {
-  container-name: composer-shell;
-  container-type: inline-size;
   border-color: transparent;
   box-shadow: none;
 }
@@ -56,16 +54,54 @@
   flex: 1 1 auto;
   margin: 0;
   min-inline-size: 0;
-  border: 0;
-  padding: 0;
 }
 
 .composer-controls > * {
   flex: 0 0 auto;
 }
 
-.composer-controls .model-picker {
+.composer-pinned-controls {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  min-width: 0;
+  min-inline-size: 0;
+  margin: 0;
+  border: 0;
+  padding: 0;
+  gap: 2px;
+}
+
+.composer-pinned-controls > * {
+  flex: 0 0 auto;
+}
+
+/* Keep the selected model in the pinned group but let only its text label
+   yield width before the always-visible settings/reasoning controls do. */
+.composer-pinned-controls .model-picker {
+  flex: 0 0 auto;
+  width: max-content;
+  min-width: 0;
+  max-width: var(--composer-model-picker-max-width, 180px);
+}
+
+.composer-bottom-bar .composer-pinned-controls .model-picker-trigger {
+  width: 100%;
+  min-width: 0;
+  max-width: var(--composer-model-picker-max-width, 180px);
   flex: 0 1 auto;
+}
+
+.composer-toolbar-item {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  width: max-content;
+  max-width: 100%;
+  min-width: 0;
+  margin: 0;
+  border: 0;
+  padding: 0;
 }
 
 /* Blend resting controls into the input surface. Hover/open/focus rules below
@@ -128,6 +164,17 @@
   flex: 0 1 auto;
   margin-left: auto;
   justify-content: flex-end;
+}
+
+.composer-indicators > .composer-toolbar-item {
+  flex: 0 0 auto;
+}
+
+.composer-overflow-trigger {
+  flex: 0 0 26px;
+  width: 26px;
+  min-width: 26px;
+  height: 26px;
 }
 
 .composer-indicators .panel-chip-toolbar {
@@ -236,69 +283,29 @@
   color: var(--panel-danger);
 }
 
-/* The bottom bar now carries controls, indicators, and primary actions in one
-   row. Shed secondary indicators progressively before allowing the controls or
-   Send/Queue/Stop affordances to be squeezed. Context remains visible longest. */
-@container composer-shell (max-width: 760px) {
-  .session-cost-indicator {
-    display: none;
-  }
+/* The overflow panel reuses the shared picker surface and anchored positioning.
+   Keep it non-clipping so child controls can open their existing fixed menus. */
+.composer-toolbar-overflow-popover.picker-popover {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 4px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  visibility: hidden;
+  pointer-events: none;
 }
 
-@container composer-shell (max-width: 660px) {
-  .panel-chip-run-status {
-    display: none;
-  }
+.composer-toolbar-overflow-popover[aria-hidden="false"] {
+  visibility: visible;
+  pointer-events: auto;
 }
 
-@container composer-shell (max-width: 560px) {
-  .panel-chip-indicator-speed {
-    display: none;
-  }
-}
-
-@container composer-shell (max-width: 460px) {
-  .context-window-indicator {
-    display: none;
-  }
-}
-
-/* Preserve every control in very narrow sidebars. The icon actions stay on the
-   first row while they fit and wrap as a group only when the full busy-state
-   toolbar would otherwise overlap. */
-@container composer-shell (max-width: 380px) {
-  .composer-bottom-bar {
-    flex-wrap: wrap;
-    row-gap: 2px;
-  }
-
-  .composer-controls {
-    flex: 1 1 100%;
-    flex-wrap: wrap;
-    row-gap: 2px;
-  }
-
-  .composer-bottom-bar .model-picker-trigger {
-    min-width: 64px;
-    max-width: 120px;
-  }
-
-  .composer-bottom-bar .panel-chip-reasoning-select {
-    min-width: 52px;
-  }
-
-  .composer-actions {
-    margin-left: auto;
-    padding-left: 0;
-    border-left: 0;
-  }
-}
-
-@container composer-shell (max-width: 240px) {
-  .composer-controls {
-    flex-basis: 100%;
-    flex-wrap: wrap;
-  }
+.composer-toolbar-overflow-popover > .composer-toolbar-item {
+  flex: 0 0 auto;
+  max-width: 100%;
 }
 
 /* ── Settings flyout ─────────────────────────────────────────────────────── */
@@ -358,9 +365,10 @@
    clipped; vertical scrolling is delegated to the inner
    .toolbar-settings-menu-body wrapper below. */
 .toolbar-settings-menu {
-  position: absolute;
-  left: 0;
-  bottom: calc(100% + var(--panel-gap-md));
+  /* Fixed in viewport coordinates, positioned against the trigger by the
+     component (the composer controls row is a horizontal scroll container on
+     narrow layouts, and absolutely-positioned children would be clipped). */
+  position: fixed;
   z-index: 200;
   display: flex;
   flex-direction: column;
@@ -789,11 +797,17 @@
 }
 
 /* Muted footnote row inside settings lists (e.g. lossy-rule gating notes,
-   disabled-mode notes in SessionTitles / ToolResultPruner). */
+   disabled-mode notes in SessionTitles / ToolResultPruner). Notes carry the
+   .toolbar-settings-item class but hold a bare text node, so drop the item's
+   check+label grid — otherwise the text lands in the 14px first column and
+   wraps into an unusably narrow sliver. */
 .toolbar-settings-note {
+  display: block;
+  width: 100%;
   padding: 2px 8px;
   opacity: 0.6;
   font-size: 11px;
+  line-height: 1.35;
   cursor: default;
 }
 
@@ -1462,8 +1476,19 @@
    toolbar controls: active uses the standard foreground, inactive uses the
    muted foreground from the base trigger rule. */
 .privacy-mode-trigger.active,
-.autonomous-mode-trigger.active,
+.autonomous-mode-trigger.active {
+  border-color: transparent;
+  background: var(--panel-control-surface);
+  color: var(--panel-foreground);
+}
+
 .mcp-toggle-trigger.active {
+  border-color: transparent;
+  background: var(--panel-control-surface);
+  color: var(--panel-foreground);
+}
+
+.browser-server-trigger.active {
   border-color: transparent;
   background: var(--panel-control-surface);
   color: var(--panel-foreground);
@@ -1475,6 +1500,13 @@
 .autonomous-mode-trigger.active:focus-visible,
 .mcp-toggle-trigger.active:hover,
 .mcp-toggle-trigger.active:focus-visible {
+  border-color: var(--panel-border-subtle);
+  background: var(--panel-control-hover);
+  color: var(--panel-foreground);
+}
+
+.browser-server-trigger.active:hover,
+.browser-server-trigger.active:focus-visible {
   border-color: var(--panel-border-subtle);
   background: var(--panel-control-hover);
   color: var(--panel-foreground);
@@ -1661,6 +1693,275 @@
   margin-top: 1px;
 }
 
+/* ── Browser-server network access popover ─────────────────────────────── */
+.browser-server-menu {
+  position: relative;
+  display: inline-flex;
+}
+
+.browser-server-popover {
+  position: fixed;
+  z-index: 300;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: calc(100vw - 16px);
+  gap: 7px;
+  padding: 10px;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--panel-radius-lg);
+  background: color-mix(in srgb, var(--panel-overlay-surface) 95%, var(--panel-black));
+  box-shadow: var(--panel-shadow-overlay);
+  color: var(--panel-foreground);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  animation: picker-popover-in var(--panel-duration-instant) var(--panel-ease-out);
+  transform-origin: bottom left;
+}
+
+.browser-server-popover[data-placement="down"] {
+  transform-origin: top left;
+}
+
+.browser-server-popover-header,
+.browser-server-lan-control {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.browser-server-popover-title {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.browser-server-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--panel-muted);
+}
+
+.browser-server-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--panel-muted);
+}
+
+.browser-server-status.is-running .browser-server-status-dot {
+  background: var(--panel-success, #55a878);
+}
+
+.browser-server-connection-count,
+.browser-server-no-lan-url,
+.browser-server-disable-hint {
+  margin: 0;
+  color: var(--panel-muted);
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+
+.browser-server-access-state {
+  padding: 5px 7px;
+  border-radius: var(--panel-radius-sm);
+  background: var(--panel-control-surface);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.browser-server-url-row {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.browser-server-url-label {
+  color: var(--panel-muted);
+  font-size: 10px;
+}
+
+.browser-server-url-row code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--panel-foreground);
+  font-family: var(--panel-font-mono, monospace);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.browser-server-copy {
+  flex: 0 0 auto;
+  padding: 2px 5px;
+  border: 1px solid var(--panel-border-subtle);
+  border-radius: var(--panel-radius-sm);
+  background: transparent;
+  color: var(--panel-muted);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.browser-server-copy:hover,
+.browser-server-copy:focus-visible {
+  border-color: var(--panel-accent);
+  color: var(--panel-foreground);
+}
+
+.browser-server-lan-control {
+  padding-top: 7px;
+  border-top: 1px solid var(--panel-border);
+}
+
+/* The listener switch is the primary VS Code-only control; keep its divider
+   spacing identical to the LAN control so both rows read as one system. */
+.browser-server-enabled-control {
+  padding-bottom: 7px;
+}
+
+.browser-server-disconnect-confirm {
+  padding: 6px 7px;
+  border-radius: var(--panel-radius-sm);
+  background: color-mix(in srgb, var(--panel-warning, #c78b43) 14%, transparent);
+  border-left: 2px solid var(--panel-warning, #c78b43);
+  font-size: 10px;
+}
+
+.browser-server-disconnect-text {
+  margin: 0;
+  color: var(--panel-foreground);
+  line-height: 1.4;
+}
+
+.browser-server-disconnect-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 5px;
+}
+
+.browser-server-disconnect-confirm-button {
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--panel-warning, #c78b43) 45%, var(--panel-border));
+  border-radius: var(--panel-radius-sm);
+  background: color-mix(in srgb, var(--panel-warning, #c78b43) 22%, transparent);
+  color: var(--panel-foreground);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.browser-server-disconnect-confirm-button:hover,
+.browser-server-disconnect-confirm-button:focus-visible {
+  background: color-mix(in srgb, var(--panel-warning, #c78b43) 32%, transparent);
+}
+
+.browser-server-lan-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 2px;
+}
+
+.browser-server-lan-title {
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.browser-server-lan-description {
+  color: var(--panel-muted);
+  font-size: 10px;
+  line-height: 1.3;
+}
+
+.browser-server-lan-switch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 31px;
+  height: 18px;
+  padding: 2px;
+  border: 1px solid var(--panel-border-subtle);
+  border-radius: 999px;
+  background: var(--panel-control-surface);
+  cursor: pointer;
+  transition: background var(--status-chip-transition-duration) var(--panel-ease-out);
+}
+
+.browser-server-lan-switch > span {
+  display: block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--panel-muted);
+  transition: transform var(--status-chip-transition-duration) var(--panel-ease-out), background var(--status-chip-transition-duration) var(--panel-ease-out);
+}
+
+.browser-server-lan-switch[aria-checked="true"] {
+  border-color: var(--panel-accent);
+  background: var(--panel-accent);
+}
+
+.browser-server-lan-switch[aria-checked="true"] > span {
+  background: var(--panel-accent-contrast);
+  transform: translateX(12px);
+}
+
+.browser-server-lan-switch:focus-visible {
+  outline: 1px solid var(--panel-accent);
+  outline-offset: 2px;
+}
+
+.browser-server-lan-switch:disabled {
+  cursor: default;
+  opacity: .55;
+}
+
+.browser-server-feedback,
+.browser-server-copy-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--panel-muted);
+  font-size: 10.5px;
+}
+
+.browser-server-spinner {
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid var(--panel-border-subtle);
+  border-top-color: var(--panel-accent);
+  border-radius: 50%;
+  animation: panel-loading-wheel-spin .7s linear infinite;
+}
+
+.browser-server-error {
+  padding: 5px 7px;
+  border-radius: var(--panel-radius-sm);
+  background: color-mix(in srgb, var(--panel-danger, #cf5b5b) 14%, transparent);
+  color: var(--panel-danger, #cf5b5b);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.browser-server-disable-hint {
+  color: var(--panel-foreground);
+}
+
+.browser-server-warning {
+  margin: 0;
+  padding: 6px 7px;
+  border-left: 2px solid var(--panel-warning, #c78b43);
+  background: color-mix(in srgb, var(--panel-warning, #c78b43) 10%, transparent);
+  color: var(--panel-foreground);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
 /* ── MCP server list (toolbar dropdown + settings MCP tab) ───────────── */
 /* Per-server rows: separated from the global toggle by a hairline and given
    a slightly inset grid so the list reads as one group. */
@@ -1721,7 +2022,9 @@
 
 @media (forced-colors: active) {
   .system-prompt-toggle-trigger,
-  .system-prompt-toggle-dropdown {
+  .system-prompt-toggle-dropdown,
+  .browser-server-popover,
+  .browser-server-lan-switch {
     border-color: ButtonText;
   }
 }

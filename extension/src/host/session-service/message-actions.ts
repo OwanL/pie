@@ -1,4 +1,3 @@
-import * as vscode from 'vscode';
 import * as crypto from 'node:crypto';
 
 import { BackendClient } from '../backend/client';
@@ -40,7 +39,6 @@ interface InFlightHydration {
 }
 
 interface SessionMessageActionsOptions {
-  context: vscode.ExtensionContext;
   backend: BackendClient;
   scheduleRender: ScheduleRender;
   state: SessionServiceState;
@@ -50,7 +48,6 @@ interface SessionMessageActionsOptions {
 }
 
 export class SessionMessageActions {
-  private readonly context: vscode.ExtensionContext;
   private readonly backend: BackendClient;
   private readonly scheduleRender: ScheduleRender;
   private readonly state: SessionServiceState;
@@ -61,7 +58,6 @@ export class SessionMessageActions {
   private hydrationRevision = 0;
 
   constructor(options: SessionMessageActionsOptions) {
-    this.context = options.context;
     this.backend = options.backend;
     this.scheduleRender = options.scheduleRender;
     this.state = options.state;
@@ -70,7 +66,7 @@ export class SessionMessageActions {
     this.dispatchArch = options.dispatchArch;
   }
 
-  normalizeAttachUris(uris: vscode.Uri[]): vscode.Uri[] {
+  normalizeAttachUris<T extends { scheme: string }>(uris: T[]): T[] {
     return normalizeAttachUris(uris);
   }
 

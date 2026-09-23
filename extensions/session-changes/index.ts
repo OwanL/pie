@@ -169,7 +169,7 @@ export default function (pi: ExtensionAPI) {
     label: 'Session changes',
     // The separate git status/diff caveat and the pre-existing-hunks baseline
     // warning stay in promptGuidelines; do not duplicate them here.
-    description: 'Review files changed by the current or specified Pi session after editing, using a session-scoped manifest and focused diffs before workspace-wide Git checks; includes subagent edits.',
+    description: 'Review files changed by the current or specified Pi session after editing, using a session-scoped manifest and focused diffs before workspace-wide Git checks. Includes edits from successful completed subagent results, not running children; this is not a complete filesystem mutation journal.',
     promptSnippet: 'Review this session\'s changed-file manifest and focused diffs after file edits.',
     promptGuidelines: [
       'For the current runtime session, omit sessionPath so session_changes reads live entries (including in-memory sessions); pass sessionPath only to review another persisted session.',

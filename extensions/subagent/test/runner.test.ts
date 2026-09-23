@@ -412,6 +412,53 @@ test("runSingleAgent keeps SDK catalog estimates out of provider-reported cost",
 	assert.equal(result.providerInvocations?.[0]?.usage?.reportedCostUsd, undefined);
 });
 
+test("provider invocation timestamps omit synthesized endpoints", async () => {
+	const { sdk } = createFakeSdk({
+		onPrompt: async (emit) => {
+			emit({ type: "message_start", message: { role: "assistant" } });
+			emit({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "untimed" }],
+					usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 },
+					model: "session-model",
+					stopReason: "completed",
+				},
+			});
+		},
+	});
+
+	const result = await runFakeAgent(sdk);
+	assert.equal(result.providerInvocations?.[0]?.startedAt, undefined);
+	assert.equal(result.providerInvocations?.[0]?.completedAt, undefined);
+});
+
+test("provider invocation timestamps preserve observed SDK endpoints", async () => {
+	const startedAt = 1_800_000_000_000;
+	const completedAt = startedAt + 1_000;
+	const { sdk } = createFakeSdk({
+		onPrompt: async (emit) => {
+			emit({ type: "message_start", message: { role: "assistant", timestamp: startedAt } });
+			emit({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "timed" }],
+					usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 },
+					model: "session-model",
+					timestamp: completedAt,
+					stopReason: "completed",
+				},
+			});
+		},
+	});
+
+	const result = await runFakeAgent(sdk);
+	assert.equal(result.providerInvocations?.[0]?.startedAt, startedAt);
+	assert.equal(result.providerInvocations?.[0]?.completedAt, completedAt);
+});
+
 test("runSingleAgent preserves incomplete provider token channels as unknown", async () => {
 	const { sdk } = createFakeSdk({
 		onPrompt: async (emit) => {

@@ -87,6 +87,7 @@ export default defineConfig(({ mode }) => {
         rollupOptions: {
           input: {
             extension: path.join(srcDir, 'extension.ts'),
+            standalone: path.join(srcDir, 'standalone', 'index.ts'),
             backend: path.join(srcDir, 'backend', 'index.ts'),
             'worker-entry': path.join(srcDir, 'backend', 'worker-entry.ts'),
             // Spawned as separate worker scripts by the running host, so these

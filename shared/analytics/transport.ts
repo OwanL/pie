@@ -129,6 +129,35 @@ export interface AnalyticsTransportAcknowledgement {
   message?: string;
 }
 
+/** Catalog rates for one subagent provider settlement (USD per 1M tokens).
+ *  `catalogVersion` retains the immutable catalog content identity so the
+ *  recorder-side calculation stays historically reproducible. */
+export interface SubagentSettlementPricingRates {
+  inputUsdPerMillionTokens: number;
+  outputUsdPerMillionTokens: number;
+  cacheReadUsdPerMillionTokens: number;
+  cacheWriteUsdPerMillionTokens: number;
+  catalogVersion?: string;
+}
+
+export interface SubagentSettlementPricingRequest {
+  provider?: string;
+  model?: string;
+  usage: { input: number; output: number; cacheRead: number; cacheWrite: number };
+  /** Original observed provider-invocation timestamps (epoch ms). Scheduled
+   *  pricing is resolved only from these real endpoints — never synthesized;
+   *  absent/invalid endpoints keep time-variable-rate settlements unpriced. */
+  startedAtMs?: number;
+  endedAtMs?: number;
+}
+
+/** Resolve provider-qualified catalog rates for one subagent provider
+ *  settlement. `undefined` keeps the settlement explicitly unpriced; the
+ *  resolver must never fabricate a zero or a cost value. */
+export type SubagentSettlementPricingResolver = (
+  request: SubagentSettlementPricingRequest,
+) => SubagentSettlementPricingRates | undefined;
+
 export interface InstalledAnalyticsRuntimeBridge {
   generationId: string;
   captureSubject: AnalyticsCaptureSubject;
@@ -143,6 +172,9 @@ export interface InstalledAnalyticsRuntimeBridge {
   readFactAcknowledgement(generationId: string, stableOriginId: string): Int64Value | undefined;
   isDetailComplete(payloadId: string): boolean;
   releaseAcknowledgementInterest(generationId: string, stableOriginId: string, payloadId: string): void;
+  /** Host-owned catalog pricing resolver. Absence keeps subagent provider
+   *  settlements unpriced instead of inferring cost. */
+  priceSubagentSettlement?: SubagentSettlementPricingResolver;
 }
 
 export const ANALYTICS_RUNTIME_BRIDGE_KEY = Symbol.for('pie.analytics.runtime-bridge.v1');

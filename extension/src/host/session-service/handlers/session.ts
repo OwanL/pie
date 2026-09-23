@@ -1,4 +1,3 @@
-import * as vscode from 'vscode';
 import type { RunObserver } from '../../stats-service';
 import type { SessionServiceState } from '../state';
 import type { Event } from '../../core/events';
@@ -11,13 +10,13 @@ import type {
   OperationalErrorPayload,
   SessionListChangedPayload,
 } from '../../../shared/protocol';
-import { requestWindowAttention } from '../../sidebar/completion-notification';
 import { auditLog } from '../../util/audit.js';
 import { formatOperationalErrorDetail } from '../../../shared/operational-error-detail';
 import { createOperationalIncident, type OperationalIncident } from '../../../shared/incidents.js';
+import type { SessionHostPlatform } from '../platform';
 
 interface HandlerDeps {
-  context: vscode.ExtensionContext;
+  platform: SessionHostPlatform;
   dispatchArch: (event: Event) => void;
   runObserver: RunObserver;
   state: SessionServiceState;
@@ -89,11 +88,9 @@ export function onExtensionUIRequest(payload: ExtensionUIRequestPayload, deps: H
   }
   deps.dispatchArch({ kind: 'ExtensionUIRequest', sessionPath: payload.sessionPath || '', request: payload });
 
-  // Flash the VS Code window to draw the user's attention to the question.
-  requestWindowAttention(
-    vscode.env.appName,
-    vscode.workspace.name ?? vscode.workspace.workspaceFolders?.[0]?.name,
-  );
+  // Flash the host window to draw the user's attention to the question. The
+  // platform adapter owns the host-specific attention mechanism.
+  deps.platform.requestWindowAttention();
 
   deps.scheduleRender();
 }

@@ -1,7 +1,7 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'preact/hooks';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { createPortal } from 'preact/compat';
 import type { JSX } from 'preact';
 import { formatModelSpec, type ModelPickerEntry } from '../composer/model-list';
@@ -584,6 +584,10 @@ export function ModelPicker({
   dropdownDirection = 'up',
 }: ModelPickerProps) {
   const state = useModelPicker({ value, entries, onChange, dropdownDirection, compact });
+
+  useLayoutEffect(() => {
+    if (disabled) state.setOpen(false);
+  }, [disabled, state.setOpen]);
 
   const triggerClass = getTriggerClass(compact);
   const wrapperClass = getWrapperClass(compact);

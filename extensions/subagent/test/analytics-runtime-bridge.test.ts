@@ -40,6 +40,34 @@ test('runtime bridge derives the same canonical parent tool for session and pend
   }
 });
 
+test('runtime bridge forwards an installed settlement pricing resolver to the capture context', () => {
+  const host = globalThis as unknown as Record<PropertyKey, unknown>;
+  try {
+    const priceSubagentSettlement = () => ({
+      inputUsdPerMillionTokens: 0.075,
+      outputUsdPerMillionTokens: 0.25,
+      cacheReadUsdPerMillionTokens: 0.015,
+      cacheWriteUsdPerMillionTokens: 0,
+    });
+    host[ANALYTICS_RUNTIME_BRIDGE_KEY] = {
+      generationId: 'generation-pricing',
+      captureSubject: { kind: 'session', rootSessionId: 'root-pricing' },
+      producer: { buildId: 'build-1', processId: 1234, processGeneration: 'process-1' },
+      submitObservation: () => undefined,
+      submitDetail: () => undefined,
+      readFactAcknowledgement: () => undefined,
+      isDetailComplete: () => false,
+      releaseAcknowledgementInterest: () => undefined,
+      priceSubagentSettlement,
+    };
+    const resolved = resolveInstalledSubagentAnalyticsCapture();
+    assert.ok(resolved);
+    assert.equal(resolved.priceSettlement, priceSubagentSettlement);
+  } finally {
+    delete host[ANALYTICS_RUNTIME_BRIDGE_KEY];
+  }
+});
+
 test('runtime bridge rejects incomplete global bridge identities', () => {
   const host = globalThis as unknown as Record<PropertyKey, unknown>;
   try {

@@ -16,7 +16,7 @@ This folder contains active design contracts, implementation plans, and operatio
 
 ## Active plans (in progress)
 
-- [BROWSER_SERVER_PLAN.md](BROWSER_SERVER_PLAN.md) — staged plan to serve the existing Pie Preact UI from the VS Code extension host over a loopback HTTP/WebSocket server, with isolated per-renderer delivery and a later authenticated-internet ingress gate. Milestones 0–2 (loopback server, multi-renderer hub, fail-closed ingress, source-aware confirmations) are implemented; milestones 3–5 (resilience pass, browser-native file/diff/export, authenticated ingress) remain.
+- [BROWSER_SERVER_PLAN.md](BROWSER_SERVER_PLAN.md) — staged plan for the existing Pie Preact UI over loopback-default HTTP/WebSocket, with explicit unauthenticated trusted-LAN IPv4 opt-in, isolated per-renderer delivery, and a separate future authenticated-internet ingress gate. Milestones 0–2 and the standalone runtime extraction are implemented; milestones 3–5 (resilience pass, browser-native file/diff/export, authenticated ingress) remain. Standalone LAN access is opt-in and has no VS Code editor/file/diff integration.
 - [REPOSITORY_ORGANIZATION_PLAN.md](REPOSITORY_ORGANIZATION_PLAN.md) — proposed reorganization (moves not started): rename `extension/` to `vscode-extension/`, group backend and root shared modules by ownership, and group host analytics-control/aggregate-stats files. Includes file mappings, migration gates, and validation; execution waits for pending work to land.
 
 ## Active investigations

@@ -67,6 +67,7 @@ export default function registerComputerUse(pi: ExtensionAPI) {
     promptSnippet: 'Observe and operate visible applications with screenshot-relative coordinates or revision-scoped semantic references.',
     promptGuidelines: [
       'Use computer observe before acting; screenshot coordinates are target-relative by default, and semantic references are valid only for the latest observation revision.',
+      'Route in-page browser work (DOM, page content, forms, rendered web apps) to the playwright tool; use computer only for browser chrome, native dialogs, and other desktop surfaces outside the page boundary.',
       'Prefer an exact window session for safe application work; exact-window input safely reacquires and proves its PID/HWND when foreground was stolen. A desktop session is a global exception: observe immediately before every action and pass that revision, because input is refused if foreground changed.',
       'open and run_sequence accept optional screenshot/tree/state to perform an inline observation (initial or trailing) exactly like observe, combining target registration/execution with grounding in one call.',
       'For path launches, pass a native executable (.exe) or a bare name/shortcut that resolves to one; shell wrappers and scripts cannot be correlated by PID/HWND and are rejected with an actionable error.',

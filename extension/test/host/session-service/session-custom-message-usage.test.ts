@@ -1,5 +1,3 @@
-import '../../helpers/vscode-stub';
-
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
@@ -32,7 +30,7 @@ test('onCustomMessage forwards pruning-result usage details to RunObserver', () 
   };
 
   onCustomMessage(payload, {
-    context: {} as never,
+    platform: {} as never,
     dispatchArch: () => undefined,
     runObserver,
     state: { touchSessionTranscript: () => undefined } as never,
@@ -68,7 +66,7 @@ test('onCustomMessage does not forward unrelated custom messages as pruning usag
   };
 
   onCustomMessage(payload, {
-    context: {} as never,
+    platform: {} as never,
     dispatchArch: () => undefined,
     runObserver,
     state: { touchSessionTranscript: () => undefined } as never,
@@ -87,7 +85,7 @@ test('onExtensionUIRequest preserves notify severity instead of routing every no
   };
   const backendErrors: string[] = [];
   const deps = {
-    context: {} as never,
+    platform: {} as never,
     dispatchArch,
     runObserver: {
       ...NOOP_RUN_OBSERVER,

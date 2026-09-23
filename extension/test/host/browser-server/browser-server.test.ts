@@ -65,7 +65,7 @@ async function createHarness(overrides: Partial<BrowserServerOptions> = {}): Pro
   const routed: Array<{ msg: WebviewToHostMessage; context: RendererCommandContext }> = [];
   const server = new BrowserServer({
     hostInstanceId: 'shared-host-test',
-    getSettings: () => ({ enabled: true, port: 0, requirePreferredPort: false }),
+    getSettings: () => ({ enabled: true, port: 0, requirePreferredPort: false, allowLan: false }),
     getViewState: () => EMPTY_VIEW_STATE,
     getRunningSessionCount: () => 0,
     routeMessage: async (msg, context) => {
@@ -99,9 +99,9 @@ function getPort(server: BrowserServer): number {
   return state.port;
 }
 
-function httpGet(port: number, pathname: string, method = 'GET'): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: string }> {
+function httpGet(port: number, pathname: string, method = 'GET', hostHeader = `127.0.0.1:${port}`): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: string }> {
   return new Promise((resolve, reject) => {
-    const req = http.request({ host: '127.0.0.1', port, path: pathname, method }, (res) => {
+    const req = http.request({ host: '127.0.0.1', port, path: pathname, method, headers: { Host: hostHeader } }, (res) => {
       const chunks: Buffer[] = [];
       res.on('data', (chunk) => chunks.push(chunk as Buffer));
       res.on('end', () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks).toString('utf8') }));
@@ -168,7 +168,10 @@ test('start binds loopback and serves the HTML shell, health, and allowlisted as
   assert.equal(outcome.kind, 'started');
   if (outcome.kind !== 'started') return;
   const port = getPort(server);
-  assert.ok(outcome.url.startsWith('http://127.0.0.1:'), 'the URL is loopback-only');
+  assert.ok(outcome.url.startsWith('http://127.0.0.1:'), 'the primary URL remains loopback-only');
+  assert.equal(server.getState().bindAddress, '127.0.0.1');
+  assert.equal(server.getState().lanEnabled, false);
+  assert.deepEqual(server.getState().lanUrls, []);
 
   const page = await httpGet(port, '/');
   assert.equal(page.status, 200);
@@ -195,6 +198,8 @@ test('start binds loopback and serves the HTML shell, health, and allowlisted as
   assert.equal(dynamicChunk.status, 200);
   assert.match(dynamicChunk.headers['content-type'] ?? '', /javascript/);
 
+  const rejectedHost = await httpGet(port, '/', 'GET', `192.168.1.50:${port}`);
+  assert.equal(rejectedHost.status, 403, 'HTTP Host checks reject non-loopback addresses by default');
   const missing = await httpGet(port, '/assets/not-in-manifest.js');
   assert.equal(missing.status, 404);
   const traversal = await httpGet(port, '/assets/..%2f..%2fpackage.json');
@@ -204,6 +209,54 @@ test('start binds loopback and serves the HTML shell, health, and allowlisted as
   const post = await httpGet(port, '/', 'POST');
   assert.equal(post.status, 405);
 
+  await stop();
+});
+
+test('LAN opt-in binds IPv4 all interfaces and reports/accepts only advertised private IPv4 URLs', async () => {
+  const lanAddress = '192.168.1.44';
+  const { server, events, stop } = await createHarness({
+    getSettings: () => ({ enabled: true, port: 0, requirePreferredPort: false, allowLan: true }),
+    getLanIPv4Addresses: () => [lanAddress, '10.2.3.4', '203.0.113.5', '127.0.0.1'],
+  });
+  const outcome = await server.start();
+  assert.equal(outcome.kind, 'started');
+  if (outcome.kind !== 'started') return;
+  const port = getPort(server);
+  const state = server.getState();
+  assert.equal(state.bindAddress, '0.0.0.0');
+  assert.equal(state.lanEnabled, true);
+  assert.deepEqual(state.lanUrls, [
+    `http://10.2.3.4:${port}/`,
+    `http://${lanAddress}:${port}/`,
+  ]);
+  assert.deepEqual(events.find((event) => event.kind === 'started'), {
+    kind: 'started',
+    url: state.url,
+    preferred: true,
+    lanEnabled: true,
+    lanUrls: state.lanUrls,
+  });
+
+  const page = await httpGet(port, '/', 'GET', `${lanAddress}:${port}`);
+  assert.equal(page.status, 200);
+  assert.match(String(page.headers['content-security-policy'] ?? ''), new RegExp(`ws://${lanAddress}:${port}`));
+  assert.equal((await httpGet(port, '/health', 'GET', `192.168.1.45:${port}`)).status, 403);
+  assert.equal((await httpGet(port, '/', 'GET', `203.0.113.5:${port}`)).status, 403);
+
+  await assert.rejects(connectWs(port, {
+    host: `192.168.1.45:${port}`,
+    origin: `http://192.168.1.45:${port}`,
+  }), /Unexpected server response: 403/);
+  await assert.rejects(connectWs(port, {
+    host: `${lanAddress}:${port}`,
+    origin: `http://192.168.1.45:${port}`,
+  }), /Unexpected server response: 403/);
+  const lanSocket = await connectWs(port, {
+    host: `${lanAddress}:${port}`,
+    origin: `http://${lanAddress}:${port}`,
+  });
+  assert.equal((await lanSocket.next()).type, 'rendererHello');
+  lanSocket.close();
   await stop();
 });
 
@@ -247,7 +300,7 @@ test('an occupied preferred port falls back to an OS-assigned port (info-only)',
   const blockedPort = (blocker.address() as { port: number }).port;
 
   const { server, events, stop } = await createHarness({
-    getSettings: () => ({ enabled: true, port: blockedPort, requirePreferredPort: false }),
+    getSettings: () => ({ enabled: true, port: blockedPort, requirePreferredPort: false, allowLan: false }),
   });
   const outcome = await server.start();
   assert.equal(outcome.kind, 'started');
@@ -267,7 +320,7 @@ test('requirePreferredPort: an occupied preferred port is a terminal bind failur
   const blockedPort = (blocker.address() as { port: number }).port;
 
   const { server, events, stop } = await createHarness({
-    getSettings: () => ({ enabled: true, port: blockedPort, requirePreferredPort: true }),
+    getSettings: () => ({ enabled: true, port: blockedPort, requirePreferredPort: true, allowLan: false }),
   });
   const outcome = await server.start();
   assert.equal(outcome.kind, 'failed');
@@ -280,7 +333,7 @@ test('requirePreferredPort: an occupied preferred port is a terminal bind failur
 
 test('disabled settings produce a disabled outcome without binding', async () => {
   const { server, stop } = await createHarness({
-    getSettings: () => ({ enabled: false, port: 0, requirePreferredPort: false }),
+    getSettings: () => ({ enabled: false, port: 0, requirePreferredPort: false, allowLan: false }),
   });
   const outcome = await server.start();
   assert.equal(outcome.kind, 'disabled');
@@ -454,7 +507,7 @@ test('stop releases the port; restart rebinds atomically', async () => {
 
   // The port is free again: a fresh server binds the same preferred port.
   const second = new BrowserServer({
-    getSettings: () => ({ enabled: true, port, requirePreferredPort: false }),
+    getSettings: () => ({ enabled: true, port, requirePreferredPort: false, allowLan: false }),
     getViewState: () => EMPTY_VIEW_STATE,
     getRunningSessionCount: () => 0,
     routeMessage: async () => undefined,

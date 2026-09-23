@@ -17,9 +17,11 @@ test('parseModelPricing: missing cache fields default to 0', () => {
   assert.deepEqual(parsed, { input: 5, output: 30, cacheRead: 0, cacheWrite: 0 });
 });
 
-test('parseModelPricing: all fields missing → all zero (free/local model)', () => {
-  const parsed = parseModelPricing({});
-  assert.deepEqual(parsed, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+test('parseModelPricing: missing required input/output rates → undefined (unknown pricing, never free)', () => {
+  assert.equal(parseModelPricing({}), undefined);
+  assert.equal(parseModelPricing({ input: 3 }), undefined);
+  assert.equal(parseModelPricing({ output: 15 }), undefined);
+  assert.equal(parseModelPricing({ cacheRead: 0.3, cacheWrite: 0 }), undefined);
 });
 
 test('parseModelPricing: rejects non-object inputs safely (array, null, primitives)', () => {
@@ -57,4 +59,39 @@ test('parseModelPricing: non-finite rates (NaN/Infinity) rejected', () => {
 test('parseModelPricing: zero is a valid (free) rate, not rejected', () => {
   const parsed = parseModelPricing({ input: 0, output: 0 });
   assert.deepEqual(parsed, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+});
+
+test('parseModelPricing: advertised tier missing billable input/output → undefined (never a free tier)', () => {
+  assert.equal(
+    parseModelPricing({ input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1, tiers: [{ inputTokensAbove: 200000 }] }),
+    undefined,
+  );
+  assert.equal(
+    parseModelPricing({ input: 1, output: 2, tiers: [{ inputTokensAbove: 200000, input: 2 }] }),
+    undefined,
+  );
+  assert.equal(
+    parseModelPricing({ input: 1, output: 2, tiers: [{ inputTokensAbove: 200000, output: 3 }] }),
+    undefined,
+  );
+});
+
+test('parseModelPricing: optional inapplicable cache defaults are preserved on tiers', () => {
+  const parsed = parseModelPricing({
+    input: 1, output: 2, tiers: [{ inputTokensAbove: 200000, input: 2, output: 3 }],
+  });
+  assert.deepEqual(parsed, {
+    input: 1, output: 2, cacheRead: 0, cacheWrite: 0,
+    tiers: [{ inputTokensAbove: 200000, input: 2, output: 3, cacheRead: 0, cacheWrite: 0 }],
+  });
+});
+
+test('parseModelPricing: tier explicit zero rates are valid (free long-context tier)', () => {
+  const parsed = parseModelPricing({
+    input: 1, output: 2, tiers: [{ inputTokensAbove: 200000, input: 0, output: 0 }],
+  });
+  assert.deepEqual(parsed, {
+    input: 1, output: 2, cacheRead: 0, cacheWrite: 0,
+    tiers: [{ inputTokensAbove: 200000, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }],
+  });
 });

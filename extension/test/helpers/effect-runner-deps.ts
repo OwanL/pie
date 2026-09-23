@@ -3,18 +3,19 @@
  *
  * Goal: centralize every dep mock behind one type-checked factory so that a
  * newly-required method on `SessionServiceLike` / `StatsServiceLike` /
- * `FileDiffService` becomes a compile error here (and in every test that uses
- * the factory) instead of silently drifting in hand-built `as any` literals.
+ * the file-diff core/viewer interfaces becomes a compile error here (and in
+ * every test that uses the factory) instead of silently drifting in hand-built
+ * `as any` literals.
  *
  * The mock objects are typed directly against their interfaces — NO `as any`.
- * `fileDiffService` is typed against the `FileDiffService` class (all five
- * public methods are stubbed); `service` against `SessionServiceLike`;
+ * `fileDiffService` and `fileDiffViewer` are typed against their narrow
+ * platform-neutral interfaces; `service` against `SessionServiceLike`; and
  * `statsService` against `StatsServiceLike`.
  *
  * Tests that need custom behavior pass it through the `opts` hooks
  * (`backend`, `queues`, `serviceOverrides`, `dispatch`, `dispatchCommand`,
  * `dispatchEvent`, `requestImpl`, `modalChoice`, `sendTimerTimeoutMs`,
- * `timer`) rather than re-inlining an `as any` mock.
+ * `timer`, `openFile`) rather than re-inlining an `as any` mock.
  */
 import type {
   EffectRunnerDeps,
@@ -23,8 +24,9 @@ import type {
   SessionServiceLike,
   StatsServiceLike,
   TimerSink,
+  OpenFileSink,
 } from '../../src/host/core/effect-runner';
-import type { FileDiffService } from '../../src/host/core/file-diff-service';
+import type { FileDiffServiceLike, FileDiffViewerLike } from '../../src/host/core/file-diff-service';
 import type { EffectResultEvent, CommandEvent, Event } from '../../src/host/core/events';
 import type { ThinkingLevel } from '../../src/shared/protocol';
 import type { LiveSubagentDetailAddress, DetailCursor, DetailPageRef } from '../../src/shared/protocol/subagent-detail';
@@ -58,6 +60,8 @@ export interface MakeEffectRunnerDepsOpts {
   getSendTimerTimeoutMs?: () => number;
   /** Injectable timer sink (tests pass a fake to drive timers deterministically). */
   timer?: TimerSink;
+  /** Custom host sink for the generic OpenFile effect. */
+  openFile?: OpenFileSink;
   /** Inject a custom `BackendLike` (e.g. one shared with `SessionServiceState`). */
   backend?: BackendLike;
   /** Inject custom queues (e.g. the real serializing `state.enqueue*` queues). */
@@ -127,21 +131,14 @@ export function makeEffectRunnerDeps(opts: MakeEffectRunnerDepsOpts = {}): MakeE
     },
   };
 
-  // `FileDiffService` is a class with private members (`getArchState`,
-  // `toGitUri`, `toEmptyDiffUri`), so an object literal cannot be structurally
-  // assignable to it. We type the mock against `Pick<FileDiffService, ...>`
-  // for the three async methods the runner actually calls -- this catches
-  // *signature* drift on those methods (a renamed/retyped method becomes a
-  // compile error here) -- then narrow-cast to the full class type. This is a
-  // deliberate `as unknown as FileDiffService` (NOT `as any`): the mock object
-  // itself is fully type-checked against the real class signatures.
-  const fileDiffService: Pick<
-    FileDiffService,
-    'openFileDiff' | 'openFileInEditor' | 'revertFile'
-  > = {
+  // Keep the core and viewer mocks separate so the runner's host boundary is
+  // explicit and each interface remains independently type-checked.
+  const fileDiffService: FileDiffServiceLike = {
+    async revertFile(): Promise<void> {},
+  };
+  const fileDiffViewer: FileDiffViewerLike = {
     async openFileDiff(): Promise<void> {},
     async openFileInEditor(): Promise<void> {},
-    async revertFile(): Promise<void> {},
   };
 
   // Typed against `SessionServiceLike` — every method is present so a
@@ -231,7 +228,9 @@ export function makeEffectRunnerDeps(opts: MakeEffectRunnerDepsOpts = {}): MakeE
         return opts.modalChoice;
       },
     },
-    fileDiffService: fileDiffService as unknown as FileDiffService,
+    fileDiffService,
+    fileDiffViewer,
+    openFile: opts.openFile ?? { openFile: async () => undefined },
     service,
     statsService,
     dispatch: opts.dispatch ?? ((e) => events.push(e)),

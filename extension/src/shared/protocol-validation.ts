@@ -823,6 +823,14 @@ export function validateWebviewToHostMessage(
       if (typeof value.enabled !== 'boolean') return fail('setPrivacyMode: missing boolean `enabled`');
       return { ok: true, value: value as WebviewToHostMessage };
 
+    case 'setBrowserServerLanEnabled':
+      if (typeof value.enabled !== 'boolean') return fail('setBrowserServerLanEnabled: missing boolean `enabled`');
+      return { ok: true, value: value as WebviewToHostMessage };
+
+    case 'setBrowserServerEnabled':
+      if (typeof value.enabled !== 'boolean') return fail('setBrowserServerEnabled: missing boolean `enabled`');
+      return { ok: true, value: value as WebviewToHostMessage };
+
     case 'mcpListRequested':
       return { ok: true, value: value as WebviewToHostMessage };
 

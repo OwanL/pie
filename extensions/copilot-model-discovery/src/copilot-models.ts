@@ -49,20 +49,36 @@ function positiveInteger(value: unknown): number | undefined {
   return parsed !== undefined && Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
 
-function price(value: unknown): number {
-  // Copilot reports integer US cents per one million tokens.
-  return (finiteNumber(value) ?? 0) / 100;
+function price(value: unknown): number | undefined {
+  // Copilot reports integer US cents per one million tokens. A missing or
+  // malformed rate is unknown pricing, never a free model.
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value / 100 : undefined;
 }
 
-function rates(value: unknown) {
+interface CopilotRates {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
+
+function rates(value: unknown): CopilotRates | undefined {
   const source = record(value);
+  const input = price(source?.input_price);
+  const output = price(source?.output_price);
+  // Billable input/output rates are required; an absent or malformed rate
+  // means the billing record cannot price the model.
+  if (input === undefined || output === undefined) return undefined;
+  // Copilot omits or nulls cache prices where they do not apply. Absent or
+  // malformed optional cache rates default to 0 (inapplicable), while an
+  // explicit rate — including real 0 — is kept.
+  // API >= 2026-06-01 calls this cache_read_price. Keep the legacy alias for
+  // catalogs returned by older Copilot deployments.
   return {
-    input: price(source?.input_price),
-    output: price(source?.output_price),
-    // API >= 2026-06-01 calls this cache_read_price. Keep the legacy alias for
-    // catalogs returned by older Copilot deployments.
-    cacheRead: price(source?.cache_read_price ?? source?.cache_price),
-    cacheWrite: price(source?.cache_write_price),
+    input,
+    output,
+    cacheRead: price(source?.cache_read_price ?? source?.cache_price) ?? 0,
+    cacheWrite: price(source?.cache_write_price) ?? 0,
   };
 }
 
@@ -107,9 +123,17 @@ export function toDiscoveredCopilotModel(value: unknown): DiscoveredCopilotModel
   const supports = record(capabilities?.supports);
   const effortMap = thinkingMap(supports?.reasoning_effort);
   const api = chooseApi(item.vendor, item.supported_endpoints);
-  const defaultPricing = record(record(item.billing)?.token_prices)?.default;
-  const longPricing = record(record(item.billing)?.token_prices)?.long_context;
+  const tokenPrices = record(record(item.billing)?.token_prices);
+  const defaultPricing = record(tokenPrices?.default);
+  const longPricing = record(tokenPrices?.long_context);
   const defaultRates = rates(defaultPricing);
+  if (!defaultRates) {
+    // A picker-visible model without billable default input/output rates
+    // cannot be priced. Never normalize that into free pricing: reject the
+    // refresh so its transaction keeps the last known-good source and
+    // generated catalogs intact.
+    throw new Error(`Copilot model '${id}' has no billable default input/output token prices`);
+  }
   // Copilot exposes the account's normal context tier through the default
   // billing record. Pie deliberately stays on that smaller tier: it is ample
   // for the runtime's compact history and avoids silently opting into the
@@ -127,10 +151,15 @@ export function toDiscoveredCopilotModel(value: unknown): DiscoveredCopilotModel
   const defaultContextWindow = publishedDefaultContextWindow === undefined
     ? (maximumContextWindow ?? 128_000)
     : Math.min(publishedDefaultContextWindow, maximumContextWindow ?? publishedDefaultContextWindow);
-  const longRates = rates(longPricing);
 
   const cost: DiscoveredCopilotModel['cost'] = { ...defaultRates };
   if (longPricing) {
+    // An advertised extended tier must carry the same required billable rates;
+    // an incomplete tier is rejected, never defaulted to free.
+    const longRates = rates(longPricing);
+    if (!longRates) {
+      throw new Error(`Copilot model '${id}' has an advertised long-context tier without billable input/output token prices`);
+    }
     cost.tiers = [{ inputTokensAbove: defaultContextWindow, ...longRates }];
   }
 

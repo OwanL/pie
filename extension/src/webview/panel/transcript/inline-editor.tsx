@@ -13,6 +13,7 @@ import {
   hasClipboardFilePayload,
 } from '../file-drop';
 import { cx } from '../utils/cx';
+import { createUuidV4 } from '../../../shared/uuid';
 
 interface InlineEditorProps {
   initialText: string;
@@ -85,7 +86,7 @@ export function InlineEditor({ initialText, initialInputs, capturedHeight, onCon
     const { inputs: drafts, rejectedFiles } = await extractComposerInputs(dataTransfer, source);
     const materialized: ComposerInput[] = drafts.map((draft) => ({
       ...draft,
-      id: crypto.randomUUID(),
+      id: createUuidV4(),
     }) as ComposerInput);
     setInputs((prev) => [...prev, ...materialized]);
     setAttachmentError(formatComposerTransferError(rejectedFiles));

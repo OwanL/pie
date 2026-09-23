@@ -343,6 +343,38 @@ export interface McpServerInfo {
   disabled: boolean;
 }
 
+/** Host-authoritative browser-server state and configured LAN exposure. */
+export interface BrowserServerViewState {
+  running: boolean;
+  /** Actual loopback URL while the browser server is running. */
+  localUrl: string | null;
+  port: number | null;
+  /** Active browser renderers connected to the shared host runtime. */
+  clientCount: number;
+  /** LAN exposure of the current running server instance. */
+  lanEnabled: boolean;
+  /** Persisted LAN preference; may differ while a restart is pending or after failure. */
+  configuredLanEnabled: boolean;
+  /** Actual LAN URLs for the running server instance. */
+  lanUrls: string[];
+  changePending: boolean;
+  pendingLanEnabled: boolean | null;
+  /** Safe user-facing failure summary; diagnostic detail stays in the host log. */
+  changeError: string | null;
+  /** Persisted automatic-start preference (`pie.browserServer.enabled`).
+   *  Optional for legacy hosts; absent means the listener switch is unavailable. */
+  configuredEnabled?: boolean;
+  /** Requested enabled value while a listener start/stop change is pending
+   *  through the same serialized change queue as LAN changes. Null while the
+   *  pending change (if any) is a LAN change. */
+  pendingEnabled?: boolean | null;
+  /** Host capability: true only when the host composition owns a renderer
+   *  surface independent of the browser server (the VS Code sidebar), so the
+   *  listener can be stopped without orphaning every renderer. Standalone
+   *  hosts are browser-only and never set this; legacy hosts omit it. */
+  serverToggleAvailable?: boolean;
+}
+
 export interface ViewState {
   sessions: SessionSummary[];
   /** Omitted by legacy hosts. A present incomplete value means the visible
@@ -474,6 +506,8 @@ export interface ViewState {
    * catalog state supersede it; null means the fail-open estimate is absent. */
   initialContextEstimate: InitialContextEstimate | null;
   prefs: ChatPrefs;
+  /** Actual browser-server state plus the persisted LAN exposure preference. */
+  browserServer?: BrowserServerViewState;
   /** Configured MCP servers with their effective disabled state, discovered
    *  host-side from the adapter's config files (`~/.config/mcp/mcp.json`,
    *  `<agent dir>/mcp.json`, `.mcp.json`, `.pi/mcp.json`, …). The host fetches
@@ -844,6 +878,9 @@ type WebviewToHostMessagePayload =
    *  filesystem lifecycle this is durably reversible until first close; the
    *  host snapshot remains the UI source while that gate is inactive. */
   | { type: 'setPrivacyMode'; sessionPath: string; enabled: boolean }
+  /** Persist and immediately apply trusted-LAN browser-server exposure. */
+  | { type: 'setBrowserServerLanEnabled'; enabled: boolean }
+  | { type: 'setBrowserServerEnabled'; enabled: boolean }
   | { type: 'setPruningSettings'; settings: Partial<PruningSettings> }
   | { type: 'setToolResultPruningSettings'; settings: Partial<ToolResultPruningSettings> }
   | { type: 'setSessionTitlesSettings'; settings: Partial<SessionTitlesSettings> }

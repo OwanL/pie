@@ -93,7 +93,7 @@ test('handleSelectionFailure dispatches a PersistTabs Command (replaces the old 
   };
 
   // timeout = 0 → armSelectionRequestTimeout is a no-op (no 60s timer leak).
-  const state = new SessionServiceState(context, backend, () => undefined, getArchState, dispatchArch, 0);
+  const state = new SessionServiceState(backend, () => undefined, getArchState, dispatchArch, 0);
 
   // Simulate an open-session selection that fails: beginSelectionRequest
   // (wasOpenTab=false so handleSelectionFailure dispatches CloseTab), then

@@ -53,9 +53,8 @@ function createActions(
     events.push(event);
     archState = reducer(archState, event).state;
   };
-  const serviceState = new SessionServiceState(context(), backend, () => undefined, () => archState, dispatchArch, 0);
+  const serviceState = new SessionServiceState(backend, () => undefined, () => archState, dispatchArch, 0);
   const actions = new SessionMessageActions({
-    context: context(),
     backend,
     scheduleRender: () => undefined,
     state: serviceState,
@@ -118,9 +117,9 @@ test('settings and catalog hydration settle independently in either failure dire
       events.push(event);
       archState = reducer(archState, event).state;
     };
-    const serviceState = new SessionServiceState(context(), backend as any, () => undefined, () => archState, dispatchArch, 0);
+    const serviceState = new SessionServiceState(backend as any, () => undefined, () => archState, dispatchArch, 0);
     const actions = new SessionMessageActions({
-      context: context(), backend: backend as any, scheduleRender: () => undefined,
+      backend: backend as any, scheduleRender: () => undefined,
       state: serviceState, createNewSession: () => '', getArchState: () => archState, dispatchArch,
     });
 

@@ -1,10 +1,10 @@
 /**
  * Browser server types (browser server plan §6).
  *
- * The embedded loopback HTTP/WebSocket server that serves the compiled
- * webview UI to an ordinary browser. `PieExtension` owns the server; browser
- * sockets register into the shared `RendererHub` through
- * `BrowserRendererTransport`.
+ * The shared HTTP/WebSocket server that serves the compiled webview UI to an
+ * ordinary browser. It binds loopback by default and can expose private IPv4
+ * LAN interfaces only when explicitly opted in. Browser sockets register
+ * into the shared `RendererHub` through `BrowserRendererTransport`.
  */
 
 import type { RendererHub } from '../renderers/renderer-hub';
@@ -18,8 +18,10 @@ import type { InlineConfirmRequest } from './inline-confirmations';
 export interface BrowserServerSettings {
   /** Start automatically when Pie activates. */
   enabled: boolean;
-  /** Preferred loopback port (default 1997; valid range 1..65535). */
+  /** Preferred port (default 1997; valid range 1..65535). */
   port: number;
+  /** Bind IPv4 all-interfaces and advertise private LAN URLs only when opted in. */
+  allowLan: boolean;
   /** When true, fail instead of falling back if the preferred port is
    *  occupied. */
   requirePreferredPort: boolean;
@@ -36,6 +38,12 @@ export interface BrowserServerState {
   running: boolean;
   /** The ACTUAL loopback URL of this instance, or null while stopped. */
   url: string | null;
+  /** Bound IPv4 address (`127.0.0.1` by default, `0.0.0.0` when LAN is enabled). */
+  bindAddress: string | null;
+  /** Whether this running instance has trusted-LAN access enabled. */
+  lanEnabled: boolean;
+  /** Usable RFC1918/link-local LAN URLs; empty unless LAN is enabled. */
+  lanUrls: string[];
   port: number | null;
   clientCount: number;
   startedAt: number | null;
@@ -47,8 +55,8 @@ export interface BrowserServerState {
  *  failure produces a user notice; successful fallback binds are
  *  informational logs only. */
 export type BrowserServerLifecycleEvent =
-  | { kind: 'started'; url: string; preferred: boolean }
-  | { kind: 'fallback'; url: string }
+  | { kind: 'started'; url: string; preferred: boolean; lanEnabled: boolean; lanUrls: string[] }
+  | { kind: 'fallback'; url: string; lanEnabled: boolean; lanUrls: string[] }
   | { kind: 'bind-failed'; port: number; requirePreferredPort: boolean; error: string }
   | { kind: 'restarted'; url: string }
   | { kind: 'stopped'; reason: 'shutdown' | 'restart' | 'disabled' }
@@ -78,6 +86,8 @@ export interface BrowserServerOptions {
   iconPath?: string;
   /** Human-readable owner suffix for the served page title (workspace name). */
   titleSuffix?: string;
+  /** Optional network-interface seam, useful for deterministic tests. */
+  getLanIPv4Addresses?(): string[];
   /** Lifecycle outcome sink (logs + the single terminal-failure notice). */
   onLifecycle?(event: BrowserServerLifecycleEvent): void;
 }

@@ -9,11 +9,15 @@ import {
   type AnalyticsDetailSink,
   type AnalyticsExecutionFields,
   type AnalyticsObservation,
+  type AnalyticsPricingSnapshot,
   type AnalyticsProducerIdentity,
   type AnalyticsProviderCallFields,
   type AnalyticsSink,
   type Int64Value,
 } from '../../../shared/analytics/contracts.js';
+import type {
+  SubagentSettlementPricingResolver,
+} from '../../../shared/analytics/transport.js';
 import { redactSensitiveText, sanitizeAnalyticsDetail } from '../../../shared/sensitive-redaction.js';
 import type {
   SingleResult,
@@ -39,6 +43,11 @@ export interface SubagentAnalyticsCaptureContext {
   /** Host-injected mapping from the SDK tool-call ID to the canonical parent
    * tool entity. Absent keeps compatibility identity until P7 wiring. */
   resolveParentToolEntityId?: (toolCallId: string) => string;
+  /** Host-owned catalog pricing resolver. When it returns rates for a
+   * complete-channel settlement without reported cost, the fact carries an
+   * oracle-v1 pricing snapshot and the recorder calculates complete cost.
+   * Absent or unresolvable pricing keeps the settlement explicitly unpriced. */
+  priceSettlement?: SubagentSettlementPricingResolver;
 }
 
 export interface SubagentAnalyticsAttemptCaptureState {
@@ -202,6 +211,45 @@ function validTokenChannel(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0;
 }
 
+/** Catalog pricing snapshot for one settled provider invocation. Defined only
+ * when every token channel is known, no provider-reported cost exists, and the
+ * host resolver returns qualified rates; the recorder then calculates the
+ * complete cost from these rates. */
+function settlementPricingSnapshot(
+  context: SubagentAnalyticsCaptureContext,
+  invocation: SubagentProviderInvocationRecord,
+  completeChannels: boolean,
+  hasReportedCost: boolean,
+): AnalyticsPricingSnapshot | undefined {
+  if (!context.priceSettlement || !completeChannels || hasReportedCost) return undefined;
+  const usage = invocation.usage;
+  if (!usage) return undefined;
+  const rates = context.priceSettlement({
+    provider: invocation.provider,
+    model: invocation.model,
+    usage: {
+      input: usage.input ?? 0,
+      output: usage.output ?? 0,
+      cacheRead: usage.cacheRead ?? 0,
+      cacheWrite: usage.cacheWrite ?? 0,
+    },
+    // Original observed invocation timestamps: scheduled pricing resolves
+    // only from these real endpoints, never from synthesized timing.
+    startedAtMs: invocation.startedAt,
+    endedAtMs: invocation.completedAt,
+  });
+  if (!rates) return undefined;
+  return {
+    normalizationVersion: 'oracle-v1',
+    ...(rates.catalogVersion ? { catalogVersion: rates.catalogVersion } : {}),
+    currency: 'USD',
+    inputUsdPerMillionTokens: rates.inputUsdPerMillionTokens,
+    outputUsdPerMillionTokens: rates.outputUsdPerMillionTokens,
+    cacheReadUsdPerMillionTokens: rates.cacheReadUsdPerMillionTokens,
+    cacheWriteUsdPerMillionTokens: rates.cacheWriteUsdPerMillionTokens,
+  };
+}
+
 function providerObservation(
   context: SubagentAnalyticsCaptureContext,
   stableOriginId: string,
@@ -210,15 +258,18 @@ function providerObservation(
   parentToolCallId: string | undefined,
   invocation: SubagentProviderInvocationRecord,
   sourceSequence: number,
+  fallbackObservedAtMs: number,
 ): AnalyticsObservation<AnalyticsProviderCallFields> {
   const canonicalInvocationId = canonicalProviderInvocationId(stableOriginId, invocation.invocationId);
   invocation.canonicalInvocationId = canonicalInvocationId;
   const usage = invocation.usage;
+  const hasReportedCost = usage?.reportedCostUsd !== undefined || usage?.cost !== undefined;
   const completeChannels = usage !== undefined
     && validTokenChannel(usage.input)
     && validTokenChannel(usage.output)
     && validTokenChannel(usage.cacheRead)
     && validTokenChannel(usage.cacheWrite);
+  const pricing = settlementPricingSnapshot(context, invocation, completeChannels, hasReportedCost);
   const fields: AnalyticsProviderCallFields = {
     invocationId: canonicalInvocationId,
     sourceId: invocation.invocationId,
@@ -245,6 +296,7 @@ function providerObservation(
     ...(usage?.reportedCostUsd !== undefined
       ? { reportedCostUsd: usage.reportedCostUsd }
       : usage?.cost === undefined ? {} : { reportedCostUsd: usage.cost }),
+    ...(pricing ? { pricing } : {}),
     inputIncludesCache: false,
     outputIncludesReasoning: true,
     cacheChannelsOmittedAsZero: false,
@@ -257,7 +309,9 @@ function providerObservation(
     entityKind: 'providerCall',
     entityKey: canonicalInvocationId,
     observationKind: 'providerSettlement',
-    observedAtMs: invocation.completedAt,
+    // Observation ordering may use the terminal capture time, but pricing uses
+    // only the invocation's original optional endpoints above.
+    observedAtMs: invocation.completedAt ?? fallbackObservedAtMs,
     executionId,
     childId,
     parentToolCallId,
@@ -531,6 +585,7 @@ export function captureSubagentTerminalResult(
           parentToolEntityId,
           invocation,
           sequence,
+          observedEnd,
         ));
         lastSubmittedSequence = sequence;
         sequence += 1;

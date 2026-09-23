@@ -8,6 +8,7 @@ import './styles/index.css';
 
 import type { WebviewToHostMessage } from '../../shared/protocol';
 import { App } from './app';
+import { bindAppToVisualViewport } from './visual-viewport';
 import {
   isBenignResizeObserverError,
   isSuspenseThenable,
@@ -215,5 +216,6 @@ setWebviewLogSink(postMessage);
 
 const container = document.getElementById('app');
 if (container) {
+  bindAppToVisualViewport(container);
   render(<App adapter={adapter} />, container);
 }

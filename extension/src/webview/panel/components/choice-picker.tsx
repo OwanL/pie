@@ -3,7 +3,7 @@
 
 import { createPortal } from 'preact/compat';
 import type { JSX } from 'preact';
-import { useEffect, useId, useRef, useState } from 'preact/hooks';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'preact/hooks';
 
 import { CollapsibleChevron } from './chevron';
 import { Tooltip } from './tooltip';
@@ -40,6 +40,10 @@ export function ChoicePicker<T extends string>({
   const menuRef = useRef<HTMLDivElement>(null);
   const id = useId();
   const selectedIndex = Math.max(0, options.findIndex((option) => option.value === value));
+
+  useLayoutEffect(() => {
+    if (disabled) setOpen(false);
+  }, [disabled, setOpen]);
 
   useAnchoredOverlay({
     open,

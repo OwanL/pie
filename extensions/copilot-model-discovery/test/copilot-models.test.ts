@@ -122,6 +122,59 @@ test('supports legacy Copilot default-limit and cache-price field names', () => 
   assert.equal(model?.cost.tiers?.[0].cacheRead, 0.5);
 });
 
+test('rejects a selectable model without billable default input/output prices instead of writing free pricing', () => {
+  // The endpoint may omit billable rates for an account-visible model (for
+  // example one with no published token pricing). Discovery must never
+  // normalize that into a free model: the refresh is rejected so the locked
+  // transaction keeps the last known-good source and generated catalogs.
+  const billings: Array<Record<string, unknown> | undefined> = [
+    undefined,
+    {},
+    { token_prices: {} },
+    { token_prices: { default: {} } },
+    { token_prices: { default: { input_price: null, output_price: 1500 } } },
+    { token_prices: { default: { input_price: 250 } } },
+    { token_prices: { default: { output_price: 1500 } } },
+    { token_prices: { default: { input_price: '250', output_price: 1500 } } },
+    { token_prices: { default: { input_price: -250, output_price: 1500 } } },
+    { token_prices: { default: { input_price: Number.NaN, output_price: 1500 } } },
+  ];
+  for (const billing of billings) {
+    assert.throws(
+      () => toDiscoveredCopilotModel({ ...gpt56, billing }),
+      /billable default input\/output/,
+      `billing=${JSON.stringify(billing)} must not produce a free model`,
+    );
+  }
+});
+
+test('accepts an explicit zero Copilot price and preserves optional inapplicable cache defaults', () => {
+  const model = toDiscoveredCopilotModel({
+    ...gpt56,
+    billing: { token_prices: { default: { input_price: 0, output_price: 1500, cache_write_price: 0 } } },
+  });
+  assert.equal(model?.cost.input, 0);
+  assert.equal(model?.cost.output, 15);
+  assert.equal(model?.cost.cacheRead, 0);
+  assert.equal(model?.cost.cacheWrite, 0);
+  assert.equal(model?.cost.tiers, undefined);
+});
+
+test('rejects an advertised long-context tier without billable input/output prices', () => {
+  assert.throws(
+    () => toDiscoveredCopilotModel({
+      ...gpt56,
+      billing: {
+        token_prices: {
+          default: gpt56.billing.token_prices.default,
+          long_context: { cache_read_price: 50, cache_write_price: 625 },
+        },
+      },
+    }),
+    /long-context tier without billable input\/output/,
+  );
+});
+
 test('rejects an extended tier without a valid default context limit', () => {
   for (const contextMax of [undefined, 0, -1, Number.NaN, Number.POSITIVE_INFINITY, 272000.5, '272000']) {
     const tokenPrices = structuredClone(gpt56.billing.token_prices) as {

@@ -265,6 +265,43 @@ test('canonical settlement channel presence distinguishes zero from unknown', ()
   assert.equal(sample.reportedCostUsd, 0);
 });
 
+test('canonical public usage omits an incomplete calculated cost instead of showing it as known', () => {
+  const snapshot = sessionUsageSnapshotFromCanonicalSettlements([
+    settlement({
+      invocationId: 'partial-calculated-1',
+      reportedCostUsd: null,
+      calculatedCostUsd: 0.02,
+      calculatedCostComplete: false,
+      effectiveCostUsd: null,
+      effectiveCostSource: null,
+      effectiveCostCoverage: 'unknown',
+    }),
+    settlement({
+      invocationId: 'complete-calculated-1',
+      reportedCostUsd: null,
+      calculatedCostUsd: 0.03,
+      calculatedCostComplete: true,
+      effectiveCostUsd: 0.03,
+      effectiveCostSource: 'calculated',
+      effectiveCostCoverage: 'known',
+    }),
+  ]);
+  const bySource = new Map(snapshot.samples.map((sample) => [sample.sourceId, sample]));
+  // A durable row whose catalog calculation is incomplete must not publish its
+  // partial value through the public numeric protocol: session-usage consumers
+  // treat `calculatedCostUsd` as an authoritative cost total, so a partial
+  // value would be displayed as known API-equivalent cost.
+  const partial = bySource.get('partial-calculated-1');
+  assert.equal(partial?.calculatedCostUsd, undefined);
+  assert.equal(partial?.reportedCostUsd, undefined);
+  assert.equal(partial?.provenance, 'unpriced');
+  // A complete durable calculated cost keeps its public value and provenance.
+  const complete = bySource.get('complete-calculated-1');
+  assert.equal(complete?.calculatedCostUsd, 0.03);
+  assert.equal(complete?.provenance, 'estimated');
+  assert.equal(snapshot.unpricedInvocationCount, 1);
+});
+
 test('canonical public usage marks int64 values outside the numeric protocol range as unknown', () => {
   const exactInputTokens = (BigInt(Number.MAX_SAFE_INTEGER) + 1n).toString();
   const snapshot = sessionUsageSnapshotFromCanonicalSettlements([

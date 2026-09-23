@@ -1,10 +1,7 @@
 import * as path from 'node:path';
 import { readFileSync, statSync } from 'node:fs';
 
-import * as vscode from 'vscode';
-
 import { BackendClient } from '../backend/client';
-import { runtimeOutputDirectory } from '../runtime-location';
 import { buildRestoredSessionPlan, filterRestorableStoredTabs } from '../core/restored-session-plan';
 import { normalizeStoredTabPaths, normalizeStoredPinnedTabGroups } from '../../shared/tab-behavior';
 import { createCommandExecutor } from '../../shared/exec-command';
@@ -30,6 +27,7 @@ import { seedHistoryCompactionEnvironment } from './runtime-prefs-bootstrap';
 import type { AnalyticsBackendDescriptor } from '../../../../shared/analytics/activation.js';
 import type { ArchState } from '../core/arch-state';
 import type { Event } from '../core/events';
+import type { SessionHostPlatform } from './platform';
 
 const PREFS_STORAGE_KEY = 'chatPrefs';
 const SDK_PATH_CACHE_KEY = 'resolvedSdkPath';
@@ -52,7 +50,7 @@ function isPrivateSessionPathRestorable(sessionPath: string): boolean {
 }
 
 interface StartSessionBackendOptions {
-  context: vscode.ExtensionContext;
+  platform: SessionHostPlatform;
   backend: BackendClient;
   scheduleRender: () => void;
   events: SessionServiceEvents;
@@ -65,12 +63,12 @@ interface StartSessionBackendOptions {
   getAnalyticsBackendDescriptor?: () => AnalyticsBackendDescriptor | undefined;
 }
 
-function resolveWorkspaceCwd(): string {
-  return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+function resolveWorkspaceCwd(platform: SessionHostPlatform): string {
+  return platform.getWorkspaceCwd();
 }
 
 function applyStoredPrefs(options: StartSessionBackendOptions): void {
-  const storedPrefs = options.context.globalState.get<Partial<ChatPrefs>>(PREFS_STORAGE_KEY);
+  const storedPrefs = options.platform.storage.get<Partial<ChatPrefs>>(PREFS_STORAGE_KEY);
   if (storedPrefs) {
     // The SetPrefs Command reduces to a SetPrefsRpc effect; service.setPrefs
     // (the effect handler) resolves and persists the merged prefs. No separate
@@ -92,8 +90,8 @@ async function loadSessionTitlesSettingsFromService(options: StartSessionBackend
 }
 
 function computeRestorePlan(options: StartSessionBackendOptions) {
-  const storedRawTabs = options.context.globalState.get<unknown[]>('openTabPaths') ?? [];
-  const storedPrivate = (options.context.globalState.get<unknown[]>(PRIVATE_SESSION_PATHS_STORAGE_KEY) ?? [])
+  const storedRawTabs = options.platform.storage.get<unknown[]>('openTabPaths') ?? [];
+  const storedPrivate = (options.platform.storage.get<unknown[]>(PRIVATE_SESSION_PATHS_STORAGE_KEY) ?? [])
     .filter((value): value is string => typeof value === 'string' && value.length > 0);
   const privatePaths = new Set(storedPrivate);
   // Preserve the non-private tabs across transient restart/file-lock failures,
@@ -104,19 +102,19 @@ function computeRestorePlan(options: StartSessionBackendOptions) {
     storedRawTabs,
     (sessionPath) => !privatePaths.has(sessionPath) || isPrivateSessionPathRestorable(sessionPath),
   );
-  const preferredStartupPath = options.context.globalState.get<string>('activeSessionPath') ?? null;
+  const preferredStartupPath = options.platform.storage.get<string>('activeSessionPath') ?? null;
   // Pinned tabs are stored as a path list (no name enrichment). Normalize
   // defensively (accept legacy string/{path} forms, drop pending/dupes), then
   // drop any pinned path that didn't survive the open-tab restore so the
   // pinned ⊆ openTabPaths invariant holds.
-  const storedRawPinned = options.context.globalState.get<unknown[]>('pinnedTabPaths') ?? [];
+  const storedRawPinned = options.platform.storage.get<unknown[]>('pinnedTabPaths') ?? [];
   const storedPinned = normalizeStoredTabPaths(storedRawPinned);
   const restoredPinnedTabs = storedPinned.filter((p) => restoredTabs.includes(p));
   // Pinned groups are stored as nested path arrays. Normalize defensively
   // (drop non-array/non-string/pending/dup entries); the reducer reconciles
   // them against the restored pinned tabs (drops invalid members, dissolves
   // <2, restores contiguity) when OpenTabsChanged is dispatched.
-  const storedRawGroups = options.context.globalState.get<unknown>('pinnedTabGroups');
+  const storedRawGroups = options.platform.storage.get<unknown>('pinnedTabGroups');
   const storedGroups = normalizeStoredPinnedTabGroups(storedRawGroups);
   const restoredPrivate = storedPrivate.filter((sessionPath) => restoredTabs.includes(sessionPath));
   const restoredSessionPlan = buildRestoredSessionPlan(restoredTabs, preferredStartupPath);
@@ -169,20 +167,20 @@ function persistIfTabStateChanged(
     || reconciledGroups.some((g, i) =>
       g.length !== storedGroups[i].length || g.some((m, j) => m !== storedGroups[i][j]));
   if (tabsChanged) {
-    void Promise.resolve(options.context.globalState.update('openTabPaths', rawTabs)).catch((error) => {
+    void Promise.resolve(options.platform.storage.update('openTabPaths', rawTabs)).catch((error) => {
       appendPieLog('warn', 'startup', 'globalState.update failed for openTabPaths', { error: toErrorMessage(error) });
     });
-    void Promise.resolve(options.context.globalState.update('activeSessionPath', restoredStartupPath ?? undefined)).catch((error) => {
+    void Promise.resolve(options.platform.storage.update('activeSessionPath', restoredStartupPath ?? undefined)).catch((error) => {
       appendPieLog('warn', 'startup', 'globalState.update failed for activeSessionPath', { error: toErrorMessage(error) });
     });
   }
   if (pinnedChanged) {
-    void Promise.resolve(options.context.globalState.update('pinnedTabPaths', reconciledPinnedTabs)).catch((error) => {
+    void Promise.resolve(options.platform.storage.update('pinnedTabPaths', reconciledPinnedTabs)).catch((error) => {
       appendPieLog('warn', 'startup', 'globalState.update failed for pinnedTabPaths', { error: toErrorMessage(error) });
     });
   }
   if (groupsChanged) {
-    void Promise.resolve(options.context.globalState.update('pinnedTabGroups', reconciledGroups)).catch((error) => {
+    void Promise.resolve(options.platform.storage.update('pinnedTabGroups', reconciledGroups)).catch((error) => {
       appendPieLog('warn', 'startup', 'globalState.update failed for pinnedTabGroups', { error: toErrorMessage(error) });
     });
   }
@@ -211,8 +209,8 @@ function bootLogRestorePrepared(
  * locally), so resolution falls back to the extensionPath-relative candidate
  * then the globalState cache and `npm root -g`.
  */
-function readSdkLocalManifest(context: vscode.ExtensionContext): string | undefined {
-  const manifestPath = path.join(runtimeOutputDirectory(context), 'sdk-local-path.json');
+function readSdkLocalManifest(runtimeOutDir: string): string | undefined {
+  const manifestPath = path.join(runtimeOutDir, 'sdk-local-path.json');
   try {
     const parsed = JSON.parse(readFileSync(manifestPath, 'utf8')) as { sdkPath?: unknown };
     const sdkPath = typeof parsed.sdkPath === 'string' ? parsed.sdkPath.trim() : '';
@@ -224,16 +222,8 @@ function readSdkLocalManifest(context: vscode.ExtensionContext): string | undefi
 
 async function resolveAndCacheRuntimePaths(options: StartSessionBackendOptions): Promise<{ nodePath: string; sdkPath: string } | null> {
   try {
-    const config = vscode.workspace.getConfiguration('pie');
-    const rootConfig = vscode.workspace.getConfiguration();
-    const configuredNodePath =
-      config.get<string>('nodePath')?.trim()
-      || rootConfig.get<string>('piAssistant.nodePath')?.trim()
-      || undefined;
-    const configuredSdkPath =
-      config.get<string>('sdkPath')?.trim()
-      || rootConfig.get<string>('piAssistant.sdkPath')?.trim()
-      || undefined;
+    const configuredNodePath = options.platform.getSetting<string>('nodePath', 'nodePath');
+    const configuredSdkPath = options.platform.getSetting<string>('sdkPath', 'sdkPath');
     const envSdkPath = process.env.PI_SDK_PATH?.trim() || undefined;
     // Portable default: the SDK pinned as an extension `dependency` in this
     // checkout's node_modules. The build writes out/sdk-local-path.json with
@@ -241,16 +231,16 @@ async function resolveAndCacheRuntimePaths(options: StartSessionBackendOptions):
     // committed), so the synced install can still find the lockfile-pinned SDK
     // in the source tree. In Extension Development Host (extensionPath IS the
     // source dir) the extensionPath-relative candidate works directly.
-    const localCandidatePath = readSdkLocalManifest(options.context)
+    const localCandidatePath = readSdkLocalManifest(options.platform.getRuntimeOutputDirectory())
       ?? path.join(
-        options.context.extensionPath,
+        options.platform.extensionPath,
         'node_modules',
         '@earendil-works',
         'pi-coding-agent',
       );
     const shouldUseSdkCache = !configuredSdkPath && !envSdkPath;
     const cachedSdkPath = shouldUseSdkCache
-      ? options.context.globalState.get<string>(SDK_PATH_CACHE_KEY)
+      ? options.platform.storage.get<string>(SDK_PATH_CACHE_KEY)
       : undefined;
 
     const exec = createCommandExecutor();
@@ -283,7 +273,7 @@ async function resolveAndCacheRuntimePaths(options: StartSessionBackendOptions):
     // the cache/npm-root fallback. The local candidate is re-discovered
     // cheaply on every start and would go stale if the repo is relocated.
     if (shouldUseSdkCache && sdkPath !== localCandidatePath) {
-      void Promise.resolve(options.context.globalState.update(SDK_PATH_CACHE_KEY, sdkPath)).catch((error) => {
+      void Promise.resolve(options.platform.storage.update(SDK_PATH_CACHE_KEY, sdkPath)).catch((error) => {
         appendPieLog('warn', 'startup', 'globalState.update failed for resolvedSdkPath', { error: toErrorMessage(error) });
       });
     }
@@ -297,8 +287,8 @@ async function resolveAndCacheRuntimePaths(options: StartSessionBackendOptions):
   }
 }
 
-function setupInTreeAuthEnv(): void {
-  const allowInTreeAuth = vscode.workspace.getConfiguration('pie').get<boolean>('allowInTreeAuth', false);
+function setupInTreeAuthEnv(platform: SessionHostPlatform): void {
+  const allowInTreeAuth = platform.getSetting<boolean>('allowInTreeAuth') ?? false;
   if (allowInTreeAuth) {
     process.env.PIE_ALLOW_IN_TREE_AUTH = '1';
   } else {
@@ -328,11 +318,11 @@ function setupInTreeAuthEnv(): void {
  * so pie works even when both the setting and the env var are missing/stale.
  */
 function setupAgentDirEnv(options: StartSessionBackendOptions): void {
-  const configuredAgentDir = vscode.workspace.getConfiguration('pie').get<string>('agentDir', '').trim();
+  const configuredAgentDir = (options.platform.getSetting<string>('agentDir') ?? '').trim();
   const result = resolveAgentDir({
     configuredAgentDir,
     envAgentDir: process.env.PI_CODING_AGENT_DIR,
-    extensionPath: options.context.extensionPath,
+    extensionPath: options.platform.extensionPath,
   });
 
   if (result.agentDir) {
@@ -509,7 +499,7 @@ async function listAndOpenFirstSession(options: StartSessionBackendOptions): Pro
 export async function startSessionBackend(options: StartSessionBackendOptions): Promise<void> {
   options.state.resetRuntimeState();
 
-  const workspaceCwd = resolveWorkspaceCwd();
+  const workspaceCwd = resolveWorkspaceCwd(options.platform);
   const { dispatchArch } = options;
 
   dispatchArch({ kind: 'WorkspaceCwdChanged', workspaceCwd });
@@ -575,9 +565,9 @@ export async function startSessionBackend(options: StartSessionBackendOptions): 
   }
   const { nodePath, sdkPath } = paths;
 
-  const backendPath = path.join(runtimeOutputDirectory(options.context), 'backend.js');
+  const backendPath = path.join(options.platform.getRuntimeOutputDirectory(), 'backend.js');
   setupAgentDirEnv(options);
-  setupInTreeAuthEnv();
+  setupInTreeAuthEnv(options.platform);
   // The child inherits this before SDK load, closing the startup window where
   // automatic compaction could otherwise use pi's native defaults while the
   // runtimePrefs.set snapshot waits behind cold session restoration.

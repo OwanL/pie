@@ -72,6 +72,7 @@ test('valid application commands pass with a clientCommandId', () => {
   }, clientCommandId: UUID });
   expectOk({ type: 'retrySend', sessionPath: '/sessions/a', text: 'draft', localId: 'local-1', disablePruning: true, clientCommandId: UUID });
   expectOk({ type: 'mcpListRequested', clientCommandId: UUID });
+  expectOk({ type: 'setBrowserServerLanEnabled', enabled: true, clientCommandId: UUID });
   expectOk({ type: 'mcpSetServerEnabled', name: 'jira', enabled: false, clientCommandId: UUID });
   expectOk({ type: 'truncateAfter', sessionPath: '/sessions/a', messageId: 'durable-1', clientCommandId: UUID });
   expectOk({
@@ -173,6 +174,7 @@ test('unknown top-level fields are rejected', () => {
   expectRejected({ type: 'truncateAfter', sessionPath: '/sessions/a', messageId: 'm1', filePath: '/x', clientCommandId: UUID });
   expectRejected({ type: 'dissolvePinnedGroup', sourcePath: '/sessions/a', extra: true, clientCommandId: UUID });
   expectRejected({ type: 'unpinPinnedGroup', sourcePath: '/sessions/a', extra: true, clientCommandId: UUID });
+  expectRejected({ type: 'setBrowserServerLanEnabled', enabled: true, port: 1997, clientCommandId: UUID });
 });
 
 test('unknown nested fields are rejected', () => {
@@ -197,6 +199,7 @@ test('wrong types are rejected', () => {
   expectRejected({ type: 'rendererFocusChanged', focused: 1 });
   expectRejected({ type: 'commandStatusRequest', clientCommandId: 42 });
   expectRejected({ type: 'setPrefs', prefs: 'compact', clientCommandId: UUID });
+  expectRejected({ type: 'setBrowserServerLanEnabled', enabled: 'yes', clientCommandId: UUID });
   expectRejected({ type: 'extensionUiResponse', sessionPath: '/sessions/a', response: { id: 'req-1', confirmed: 'yes' }, clientCommandId: UUID });
   expectRejected({ type: 'log', level: 'info', scope: 's', message: 'm' });
   expectRejected({ type: 'send', sessionPath: '/sessions/a', text: 'x', clientCommandId: UUID, viewGeneration: -1 });

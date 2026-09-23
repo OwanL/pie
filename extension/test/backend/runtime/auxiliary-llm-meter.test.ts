@@ -217,6 +217,41 @@ test('automatic compaction failures emit one explicit gap and remain unmetered o
   assert.match(String(payloads[0]?.instrumentationGapReason), /no provider usage/);
 });
 
+test('aborted compaction and branch-summary invocations settle as cancelled, not failed', async () => {
+  const session = makeSession();
+  session.agent.streamFn = async () => ({ result: async () => { throw new Error('aborted'); } });
+  const payloads: Array<{ kind: string; outcome?: string; instrumentationGap?: boolean }> = [];
+  installAuxiliaryLlmMeter(
+    session,
+    '/session.jsonl',
+    (_event, payload) => payloads.push(payload as { kind: string }),
+    Date.now,
+    () => true,
+  );
+
+  // Aborted controller at call time → the stream failure is a cancellation.
+  session._compactionAbortController = { signal: { aborted: true } };
+  await assert.rejects((await session.agent.streamFn({ id: 'm', provider: 'p' })).result());
+  assert.equal(payloads[0]?.kind, 'history_compaction');
+  assert.equal(payloads[0]?.outcome, 'cancelled');
+  assert.equal(payloads[0]?.instrumentationGap, true);
+
+  // Same for a branch-summary attempt aborted mid-stream.
+  session._compactionAbortController = undefined;
+  session._branchSummaryAbortController = { signal: { aborted: true } };
+  await assert.rejects((await session.agent.streamFn({ id: 'm', provider: 'p' })).result());
+  assert.equal(payloads[1]?.kind, 'branch_summary');
+  assert.equal(payloads[1]?.outcome, 'cancelled');
+
+  // A controller whose signal never aborted (e.g. legacy plain-object stubs)
+  // keeps the failed classification.
+  session._branchSummaryAbortController = undefined;
+  session._compactionAbortController = {};
+  await assert.rejects((await session.agent.streamFn({ id: 'm', provider: 'p' })).result());
+  assert.equal(payloads[2]?.outcome, 'failed');
+  assert.equal(payloads.length, 3);
+});
+
 test('classifies branch summaries separately and ignores ordinary assistant streams', async () => {
   const session = makeSession();
   const kinds: string[] = [];

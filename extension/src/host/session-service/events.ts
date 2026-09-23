@@ -1,5 +1,3 @@
-import * as vscode from 'vscode';
-
 import { BackendClient } from '../backend/client';
 import type { RunObserver } from '../stats-service';
 import type {
@@ -15,6 +13,7 @@ import { canAcceptAgentSettlement } from '../core/reducer/session-handlers';
 import type { CoordinatorToHostDetailMessage } from '../../shared/protocol/subagent-detail';
 import { SessionServiceState } from './state';
 import type { DeferredTriggerRegistry } from '../deferred-triggers/registry';
+import type { SessionHostPlatform, HostDisposable } from './platform';
 import { onMessageDelta, onMessageThinking, onMessageToolCallDelta, onMessageStarted, onMessageFinished, onMessageAborted, onPreflightFailed, onQueuedDelivered, onRetryStarted, onRetryEnded, onRetryMeasured, onCompaction, onCompactionStarted, onAuxiliaryLlmUsage, reconcileServingModelConfig } from './handlers/streaming.js';
 import { onToolStarted, onToolFinished, onToolProgress } from './handlers/tools.js';
 import { onSessionListChanged, onCustomMessage, onExtensionUIRequest, onError, onOperationalError, onContextUsageChanged } from './handlers/session.js';
@@ -23,7 +22,7 @@ import { auditLog } from '../util/audit.js';
 import { isLivePipelineTraceEnabled, recordLivePipelineTrace } from '../util/live-pipeline-trace-runtime.js';
 
 interface SessionServiceEventsOptions {
-  context: vscode.ExtensionContext;
+  platform: SessionHostPlatform;
   scheduleRender: ScheduleRender;
   onSessionCompleted?: OnSessionCompleted;
   runObserver: RunObserver;
@@ -37,20 +36,20 @@ interface SessionServiceEventsOptions {
 }
 
 export class SessionServiceEvents {
-  private readonly context: vscode.ExtensionContext;
+  private readonly platform: SessionHostPlatform;
   private readonly scheduleRender: ScheduleRender;
   private readonly onSessionCompleted?: OnSessionCompleted;
   private readonly runObserver: RunObserver;
   private readonly state: SessionServiceState;
-  private eventDisposable?: vscode.Disposable;
-  private exitDisposable?: vscode.Disposable;
+  private eventDisposable?: HostDisposable;
+  private exitDisposable?: HostDisposable;
   private readonly dispatchArch: (event: Event) => void;
   private readonly getArchState: () => ArchState;
   private readonly triggers: DeferredTriggerRegistry;
   private readonly onDetailStream?: (message: CoordinatorToHostDetailMessage) => void;
 
   constructor(options: SessionServiceEventsOptions) {
-    this.context = options.context;
+    this.platform = options.platform;
     this.scheduleRender = options.scheduleRender;
     this.onSessionCompleted = options.onSessionCompleted;
     this.runObserver = options.runObserver;
@@ -65,7 +64,6 @@ export class SessionServiceEvents {
     const [eventDisposable, exitDisposable] = attachHandlers(
       backend,
       {
-        context: this.context,
         scheduleRender: this.scheduleRender,
         runObserver: this.runObserver,
         state: this.state,
@@ -82,7 +80,7 @@ export class SessionServiceEvents {
   }
 
   detach(): void {
-    const disposables: vscode.Disposable[] = [];
+    const disposables: HostDisposable[] = [];
     if (this.eventDisposable) disposables.push(this.eventDisposable);
     if (this.exitDisposable) disposables.push(this.exitDisposable);
     detachHandlers(disposables);
@@ -98,7 +96,6 @@ export class SessionServiceEvents {
         dispatchArch: this.dispatchArch,
         runObserver: this.runObserver,
         scheduleRender: this.scheduleRender,
-        context: this.context,
         state: this.state,
       },
     );
@@ -275,7 +272,6 @@ export class SessionServiceEvents {
         dispatchArch: this.dispatchArch,
         runObserver: this.runObserver,
         scheduleRender: this.scheduleRender,
-        context: this.context,
         onSessionCompleted: this.onSessionCompleted,
         state: this.state,
         triggers: this.triggers,
@@ -303,7 +299,7 @@ export class SessionServiceEvents {
 
   private getHandlerDeps() {
     return {
-      context: this.context,
+      platform: this.platform,
       getArchState: this.getArchState,
       dispatchArch: this.dispatchArch,
       runObserver: this.runObserver,

@@ -8,8 +8,11 @@ import test from 'node:test';
 
 import {
   BROWSER_SERVER_POLICY,
+  isAllowedBrowserRemoteAddress,
   evaluateSendGate,
+  isValidBrowserHostHeader,
   isValidLoopbackHostHeader,
+  isLanIPv4Address,
   isValidPort,
   isValidWebSocketOrigin,
   pageUrl,
@@ -38,7 +41,37 @@ test('Host header: exact loopback host:port accepted; everything else rejected',
   assert.equal(isValidLoopbackHostHeader('a'.repeat(300), 1997), false);
 });
 
-test('WebSocket Origin: only the exact served origin is accepted', () => {
+test('LAN peer, Host, and WebSocket Origin checks are limited to private IPv4', () => {
+  const allowed = ['192.168.1.10', '169.254.2.3'];
+  assert.equal(isLanIPv4Address('192.168.1.10'), true);
+  assert.equal(isLanIPv4Address('169.254.2.3'), true);
+  assert.equal(isLanIPv4Address('172.32.0.1'), false);
+  assert.equal(isLanIPv4Address('203.0.113.5'), false);
+  assert.equal(isLanIPv4Address('192.168.001.10'), false);
+
+  assert.equal(isAllowedBrowserRemoteAddress('127.0.0.1', false), true);
+  assert.equal(isAllowedBrowserRemoteAddress('::ffff:127.0.0.1', false), true);
+  assert.equal(isAllowedBrowserRemoteAddress('192.168.1.20', false), false);
+  assert.equal(isAllowedBrowserRemoteAddress('192.168.1.20', true), true);
+  assert.equal(isAllowedBrowserRemoteAddress('::ffff:10.1.2.3', true), true);
+  assert.equal(isAllowedBrowserRemoteAddress('203.0.113.5', true), false);
+  assert.equal(isAllowedBrowserRemoteAddress('fe80::1', true), false);
+
+  assert.equal(isValidBrowserHostHeader('127.0.0.1:1997', 1997, allowed), true);
+  assert.equal(isValidBrowserHostHeader('192.168.1.10:1997', 1997, allowed), true);
+  assert.equal(isValidBrowserHostHeader('192.168.1.11:1997', 1997, allowed), false);
+  assert.equal(isValidBrowserHostHeader('203.0.113.5:1997', 1997, ['203.0.113.5']), false);
+  assert.equal(isValidBrowserHostHeader('pie.local:1997', 1997, allowed), false);
+  assert.equal(isValidBrowserHostHeader('192.168.1.10:1998', 1997, allowed), false);
+  assert.equal(isValidBrowserHostHeader('192.168.1.10:01997', 1997, allowed), false);
+
+  assert.equal(isValidWebSocketOrigin('http://192.168.1.10:1997', 1997, allowed), true);
+  assert.equal(isValidWebSocketOrigin('http://192.168.1.11:1997', 1997, allowed), false);
+  assert.equal(isValidWebSocketOrigin('http://192.168.1.10:1998', 1997, allowed), false);
+  assert.equal(isValidWebSocketOrigin('https://192.168.1.10:1997', 1997, allowed), false);
+});
+
+test('WebSocket Origin: only the exact served origin is accepted by default', () => {
   assert.equal(isValidWebSocketOrigin('http://127.0.0.1:1997', 1997), true);
   assert.equal(isValidWebSocketOrigin('http://localhost:1997', 1997), false, 'the served HTML never uses localhost');
   assert.equal(isValidWebSocketOrigin('http://127.0.0.1:9999', 1997), false);

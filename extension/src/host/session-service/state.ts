@@ -1,5 +1,3 @@
-import * as vscode from 'vscode';
-
 import { BackendClient } from '../backend/client';
 import { assertInvariant, auditLog, bootLog } from '../util/audit';
 import { appendPieLog } from '../util/pie-log';
@@ -81,7 +79,6 @@ export class SessionServiceState {
   private readonly dispatchArch: (event: Event) => void;
 
   constructor(
-    private readonly context: vscode.ExtensionContext,
     private readonly backend: BackendClient,
     private readonly scheduleRender: ScheduleRender,
     getArchState: () => ArchState,

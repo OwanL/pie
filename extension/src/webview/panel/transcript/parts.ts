@@ -1,4 +1,5 @@
 import type { ChatMessage, ComposerInput, UserContentPart } from '../../../shared/protocol';
+import { createUuidV4 } from '../../../shared/uuid';
 
 export {
   appendAssistantTextPart,
@@ -48,7 +49,7 @@ export function userImagePartsToInputs(message: Pick<ChatMessage, 'userParts'>):
   return (message.userParts ?? [])
     .filter((part): part is Extract<UserContentPart, { kind: 'image' }> => part.kind === 'image')
     .map((part) => ({
-      id: crypto.randomUUID(),
+      id: createUuidV4(),
       kind: 'imageBlob' as const,
       mimeType: part.mimeType,
       name: part.name || 'image',

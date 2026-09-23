@@ -365,3 +365,13 @@ test('the session tab context menu is viewport-capped and scrolls tall dynamic g
   assert.match(rule, /max-height:\s*calc\(100vh - 8px\)/);
   assert.match(rule, /overflow-y:\s*auto/);
 });
+
+test('settings notes opt out of the toolbar-settings-item check+label grid', async () => {
+  const composerCss = await readStyleSource('composer.css');
+  const rule = composerCss.match(/\.toolbar-settings-note\s*\{([^}]*)\}/)?.[1] ?? '';
+  // Notes carry .toolbar-settings-item but hold a bare text node; if the
+  // item's 3-column grid applies, the text lands in the 14px check column
+  // and wraps into an unusably narrow sliver (observed at 320/390 widths).
+  assert.ok(rule, 'expected a .toolbar-settings-note rule in composer.css');
+  assert.match(rule, /display:\s*block/);
+});

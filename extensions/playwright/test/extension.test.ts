@@ -49,6 +49,22 @@ test('extension registers one sequential playwright tool and session-owned shutd
   assert.ok(handlers.has('session_shutdown'));
 });
 
+test('tool description leads with a standalone first sentence within the pruner cap', () => {
+  // The skill pruner keeps only the first sentence of a tool description when
+  // it fits the 180-char prepass cap (compactDescription in skill-pruner), so
+  // the leading sentence must stand alone and stay within the cap.
+  const description = registeredTool().description as string;
+  const boundary = description.indexOf('. ');
+  assert.ok(boundary > 0, 'description must contain a sentence boundary');
+  const firstSentence = description.slice(0, boundary + 1);
+  assert.ok(firstSentence.length <= 180, `first sentence is ${firstSentence.length} chars`);
+  assert.match(firstSentence, /web pages/);
+  assert.match(firstSentence, /Chromium/);
+  assert.match(firstSentence, /DOM\/JavaScript/);
+  assert.match(firstSentence, /accessibility/);
+  assert.match(firstSentence, /screenshots/);
+});
+
 test('repeated module evaluations install process teardown only once', () => {
   const exitBefore = process.listenerCount('exit');
   const beforeExitBefore = process.listenerCount('beforeExit');

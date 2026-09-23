@@ -1,7 +1,5 @@
 import * as crypto from 'node:crypto';
 
-import * as vscode from 'vscode';
-
 import { type RunObserver } from '../stats-service';
 import { auditLog, bootLog } from '../util/audit';
 import {
@@ -16,7 +14,6 @@ import type { Event } from '../core/events';
 import type { ArchState } from '../core/arch-state';
 
 interface SessionTabActionsOptions {
-  context: vscode.ExtensionContext;
   scheduleRender: ScheduleRender;
   runObserver: RunObserver;
   state: SessionServiceState;
@@ -30,7 +27,6 @@ interface SessionTabActionsOptions {
 }
 
 export class SessionTabActions {
-  private readonly context: vscode.ExtensionContext;
   private readonly scheduleRender: ScheduleRender;
   private readonly runObserver: RunObserver;
   private readonly state: SessionServiceState;
@@ -40,7 +36,6 @@ export class SessionTabActions {
   private visualTransitionEpoch = 0;
 
   constructor(options: SessionTabActionsOptions) {
-    this.context = options.context;
     this.scheduleRender = options.scheduleRender;
     this.runObserver = options.runObserver;
     this.state = options.state;

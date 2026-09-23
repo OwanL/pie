@@ -248,13 +248,14 @@ export class BrowserStaticAssets {
    * `rendererHello` on every accepted socket carries the live identity).
    * Returns the HTML plus the exact CSP header for the response.
    */
-  renderHtml(options: { wsRoute: string; port: number; titleSuffix?: string; faviconRoute?: string }): { html: string; csp: string } {
+  renderHtml(options: { wsRoute: string; port: number; wsHost?: string; titleSuffix?: string; faviconRoute?: string }): { html: string; csp: string } {
     if (!this.resolved) throw new Error('BrowserStaticAssets.load() is required before renderHtml().');
     const nonce = crypto.randomBytes(16).toString('hex');
     const entryUrl = toAssetUrl(this.resolved.entryPath, this.selectedAssetDir ?? this.assetDir);
     const styleTags = this.resolved.cssPaths
       .map((p) => `  <link href="${toAssetUrl(p, this.selectedAssetDir ?? this.assetDir)}" rel="stylesheet" nonce="${nonce}" />`)
       .join('\n');
+    const websocketHost = options.wsHost ?? `127.0.0.1:${options.port}`;
     const cspParts = [
       "default-src 'none'",
       `script-src 'nonce-${nonce}'`,
@@ -267,7 +268,9 @@ export class BrowserStaticAssets {
       "style-src 'self' 'unsafe-inline'",
       "img-src 'self' data:",
       "font-src 'self'",
-      `connect-src 'self' ws://127.0.0.1:${options.port}`,
+      // Host is validated against loopback or the opted-in interface list
+      // before this renderer is called; pin WebSocket CSP to this exact host.
+      `connect-src 'self' ws://${websocketHost}`,
       "frame-ancestors 'none'",
       "base-uri 'none'",
       "form-action 'none'",
@@ -288,7 +291,7 @@ export class BrowserStaticAssets {
 <head>
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy" content="${metaCsp}" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content" />
   <meta name="pie-asset-version" content="${this.resolved.assetVersion}" />
   <meta name="pie-transport" content="browser" />
   <meta name="pie-ws-route" content="${escapeHtmlAttribute(options.wsRoute)}" />

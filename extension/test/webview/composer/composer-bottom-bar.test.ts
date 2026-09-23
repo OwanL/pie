@@ -406,7 +406,7 @@ test('disconnected browser state disables queued, stop, and submit mutations', (
   assert.match(html, /data-action="queue"/);
 });
 
-test('composer bottom-bar CSS keeps compact hitboxes distinct and wraps at narrow widths', async () => {
+test('composer bottom-bar CSS allocates overflow without viewport breakpoints or horizontal scrolling', async () => {
   const css = await readFile(
     new URL('../../../src/webview/panel/styles/composer.css', import.meta.url),
     'utf8',
@@ -416,12 +416,13 @@ test('composer bottom-bar CSS keeps compact hitboxes distinct and wraps at narro
   assert.match(css, /\.composer-bottom-bar :is\([\s\S]*?background: transparent;/);
   assert.match(css, /\.composer-bottom-bar \.panel-chip-toolbar:hover,[\s\S]*?background: var\(--panel-control-hover\);/);
   assert.match(css, /overlapping[\s\S]*?inset: -1px;/);
-  assert.match(css, /@container composer-shell \(max-width: 380px\)[\s\S]*?flex-wrap: wrap;/);
-  assert.match(css, /@container composer-shell \(max-width: 380px\)[\s\S]*?\.composer-controls \{[\s\S]*?flex: 1 1 100%;[\s\S]*?flex-wrap: wrap;/);
-  assert.match(css, /@container composer-shell \(max-width: 240px\)[\s\S]*?flex-wrap: wrap;/);
-  assert.match(css, /\.subagent-provider-trigger\.has-disabled \{[\s\S]*?color: var\(--panel-muted\);/);
-  assert.match(css, /\.mcp-toggle-trigger\.active \{[\s\S]*?background: var\(--panel-control-surface\);[\s\S]*?color: var\(--panel-foreground\);/);
-  assert.match(css, /\.mcp-toggle-trigger\.active:focus-visible \{[\s\S]*?background: var\(--panel-control-hover\);[\s\S]*?color: var\(--panel-foreground\);/);
-  assert.match(css, /\.toolbar-settings-menu \{[\s\S]*?box-sizing: border-box;/);
+  // Actual row measurements drive compaction; no viewport/container breakpoint
+  // is allowed to hide indicators or leave the controls in a scroll strip.
+  assert.match(css, /\.composer-pinned-controls \.model-picker-trigger \{[\s\S]*?min-width: 0;[\s\S]*?max-width: 100%;/);
+  assert.match(css, /\.composer-toolbar-overflow-popover\.picker-popover \{[\s\S]*?visibility: hidden;/);
+  assert.doesNotMatch(css, /@container composer-shell/);
+  assert.doesNotMatch(css, /\.composer-controls \{[^}]*overflow-x: auto/);
+  // Existing menus and the overflow panel use fixed/anchored positioning.
+  assert.match(css, /\.toolbar-settings-menu \{[\s\S]*?position: fixed;[\s\S]*?box-sizing: border-box;/);
   assert.match(css, /@media \(max-width: 520px\)[\s\S]*?\.toolbar-settings-tabs \{[\s\S]*?overflow-x: auto;[\s\S]*?scrollbar-width: thin;/);
 });

@@ -251,6 +251,26 @@ describe('isSafe – scoped temp-directory cleanup', () => {
 		const { isSafe } = await loadSafeguard();
 		assert.equal(isSafe('rm -rf /tmp/pie-build /outside/project', { cwd: '/repo' }), false);
 	});
+
+	test('does not treat shell redirection operands as rm delete targets', async () => {
+		const { isSafe } = await loadSafeguard();
+		assert.equal(isSafe('rm -rf ./build 2>/dev/null', { cwd: '/repo' }), true);
+		assert.equal(isSafe('rm -rf /tmp/task 2>&1', { cwd: '/repo' }), true);
+		assert.equal(isSafe('rm -rf /tmp/task 2> /dev/null', { cwd: '/repo' }), true);
+		assert.equal(isSafe('rm -rf /tmp/task >/dev/null', { cwd: '/repo' }), true);
+	});
+
+	test('redirections do not hide root deletes or dangerous later commands', async () => {
+		const { isSafe } = await loadSafeguard();
+		assert.equal(isSafe('rm -rf / 2>/dev/null', { cwd: '/repo' }), false);
+		assert.equal(isSafe('rm -rf /tmp/pie-build && rm -rf /', { cwd: '/repo' }), false);
+		assert.equal(isSafe('rm -rf ./build 2>/dev/null && rm -rf /', { cwd: '/repo' }), false);
+	});
+
+	test('a temp-cleanup exemption does not hide a later outside-project rm', async () => {
+		const { isSafe } = await loadSafeguard();
+		assert.equal(isSafe('rm -rf /tmp/pie-build && rm -rf /outside/project', { cwd: '/repo' }), false);
+	});
 });
 
 // ─── CONFIRMED BUG: rm flag case sensitivity ─────────────────────────────────
@@ -328,6 +348,59 @@ describe('BUG: rm -rf /; semicolon bypass of hard-block', () => {
 	test('rm -rf /* should be hard-blocked (wildcard variant)', async () => {
 		const { isSafe } = await loadSafeguard();
 		assert.equal(isSafe('rm -rf /*'), false, 'rm -rf /*');
+	});
+});
+
+// ─── CONFIRMED BUG: early prompt return masks a later root-delete hard block ───
+// analyzeRecursiveRm returned on the FIRST outside-project target, so a later
+// `rm -rf /` in a separate invocation (or a later target of the same rm) only
+// reached the contextual prompt, which a UI confirm=true would allow through.
+// The hard block must dominate: analysis must accumulate across all rm
+// invocations and all targets before returning prompt.
+
+describe('BUG: later root delete must dominate an earlier outside-project prompt', () => {
+	test('rm -rf /outside; rm -rf / should be hard-blocked (separate invocations)', async () => {
+		const { isSafe } = await loadSafeguard();
+		assert.equal(isSafe('rm -rf /outside; rm -rf /', { cwd: '/repo' }), false, 'block must dominate prompt');
+	});
+
+	test('rm -rf /outside / should be hard-blocked (same rm, multiple targets)', async () => {
+		const { isSafe } = await loadSafeguard();
+		assert.equal(isSafe('rm -rf /outside /', { cwd: '/repo' }), false, 'block must dominate prompt within one rm');
+	});
+
+	test('UI confirm=true must not allow a hard block (separate invocations)', async () => {
+		const mod = await loadSafeguard();
+		const handler = registerToolCallHandler(mod);
+		// With UI + confirm=true, a *prompt* would return undefined (allow).
+		const { ctx } = makeCtx({ cwd: '/repo', hasUI: true, confirmResult: true });
+		const result = await handler({ toolName: 'bash', input: { command: 'rm -rf /outside; rm -rf /' } }, ctx);
+		assert.ok(result != null, 'later root delete must hard-block, not merely prompt');
+		assert.equal((result as any).block, true, 'must be a hard block even with confirm=true');
+		assert.match((result as any).reason ?? '', /root/i);
+	});
+
+	test('UI confirm=true must not allow a hard block (same rm, multiple targets)', async () => {
+		const mod = await loadSafeguard();
+		const handler = registerToolCallHandler(mod);
+		const { ctx } = makeCtx({ cwd: '/repo', hasUI: true, confirmResult: true });
+		const result = await handler({ toolName: 'bash', input: { command: 'rm -rf /outside /' } }, ctx);
+		assert.ok(result != null, 'later root target must hard-block, not merely prompt');
+		assert.equal((result as any).block, true, 'must be a hard block even with confirm=true');
+	});
+
+	test('outside-project prompt still fires when no root delete follows (accumulation, not first-match)', async () => {
+		const mod = await loadSafeguard();
+		const { ctx, confirmations } = makeCtx({ cwd: '/repo', hasUI: true, confirmResult: false });
+		const result = await mod.guardCommand('rm -rf /outside; rm -rf /inside', ctx);
+		assert.ok(result != null, 'outside-project prompt across separate invocations must survive accumulation');
+		assert.match(result?.reason ?? '', /outside project directory/i);
+		assert.equal(confirmations.length, 1);
+	});
+
+	test('outside-project prompt across targets still fires when no root delete follows', async () => {
+		const { isSafe } = await loadSafeguard();
+		assert.equal(isSafe('rm -rf /outside /inside', { cwd: '/repo' }), false, 'prompt must still be returned, not allow');
 	});
 });
 
@@ -1223,6 +1296,107 @@ describe('BUG: confirmation prompt must not time out — wait for user input', (
 		assert.equal(result?.block, true);
 		assert.match(result?.reason ?? '', /no UI for confirmation/);
 		assert.equal(confirmations.length, 0);
+	});
+});
+
+// ─── CONFIRMED BUG: autonomous mode opened an interactive confirmation ───────
+// While PIE_AUTONOMOUS_MODE=1, nobody is present to answer confirmations, so a
+// prompt-class command must be immediately blocked instead of calling
+// ctx.ui.confirm. Hard blocks and allowances are unchanged, and clearing the
+// flag restores the normal confirmation prompt.
+
+const AUTONOMOUS_ENV_KEY = 'PIE_AUTONOMOUS_MODE';
+
+async function withAutonomousMode<T>(enabled: boolean, run: () => Promise<T>): Promise<T> {
+	const previous = process.env[AUTONOMOUS_ENV_KEY];
+	process.env[AUTONOMOUS_ENV_KEY] = enabled ? '1' : undefined;
+	try {
+		return await run();
+	} finally {
+		if (previous === undefined) delete process.env[AUTONOMOUS_ENV_KEY];
+		else process.env[AUTONOMOUS_ENV_KEY] = previous;
+	}
+}
+
+describe('BUG: autonomous mode must block instead of confirming', () => {
+	test('bash prompt-class command is blocked immediately without any confirm dialog', async () => {
+		await withAutonomousMode(true, async () => {
+			const mod = await loadSafeguard();
+			const handler = registerToolCallHandler(mod);
+			// confirmResult=true: if the bug is present, the dialog opens and the
+			// command is silently allowed; the assertion also fails on the dialog.
+			const { ctx, confirmations } = makeCtx({ hasUI: true, confirmResult: true });
+			const result = (await handler({ toolName: 'bash', input: { command: 'sudo ls /root' } }, ctx)) as any;
+			assert.equal(result?.block, true, 'prompt-class command must be blocked in autonomous mode');
+			assert.match(result?.reason ?? '', /autonomous/i);
+			assert.equal(confirmations.length, 0, 'no confirmation may open in autonomous mode');
+		});
+	});
+
+	test('write prompt path is blocked immediately without any confirm dialog', async () => {
+		await withAutonomousMode(true, async () => {
+			const mod = await loadSafeguard();
+			const handler = registerToolCallHandler(mod);
+			const { ctx, confirmations } = makeCtx({ hasUI: true, confirmResult: true, cwd: '/repo' });
+			const result = (await handler(
+				{ toolName: 'edit', input: { path: '/home/user/.ssh/id_ed25519' } },
+				ctx,
+			)) as any;
+			assert.equal(result?.block, true, 'credential-file write must be blocked in autonomous mode');
+			assert.match(result?.reason ?? '', /autonomous/i);
+			assert.equal(confirmations.length, 0, 'no confirmation may open in autonomous mode');
+		});
+	});
+
+	test('safe commands remain allowed in autonomous mode', async () => {
+		await withAutonomousMode(true, async () => {
+			const mod = await loadSafeguard();
+			const handler = registerToolCallHandler(mod);
+			const { ctx, confirmations } = makeCtx({ hasUI: true, confirmResult: true, cwd: '/repo' });
+			assert.equal(await handler({ toolName: 'bash', input: { command: 'git status --short' } }, ctx), undefined);
+			assert.equal(
+				await handler({ toolName: 'write', input: { path: '/repo/src/main.ts' } }, ctx),
+				undefined,
+				'write inside the project must pass through',
+			);
+			assert.equal(confirmations.length, 0);
+		});
+	});
+
+	test('hard blocks are unchanged in autonomous mode', async () => {
+		await withAutonomousMode(true, async () => {
+			const mod = await loadSafeguard();
+			const handler = registerToolCallHandler(mod);
+			const { ctx } = makeCtx({ hasUI: true, confirmResult: true });
+			const result = (await handler({ toolName: 'bash', input: { command: 'rm -rf /' } }, ctx)) as any;
+			assert.equal(result?.block, true);
+			assert.match(result?.reason ?? '', /root/i);
+			const writeResult = (await handler(
+				{ toolName: 'write', input: { path: '/etc/passwd' } },
+				ctx,
+			)) as any;
+			assert.equal(writeResult?.block, true);
+			assert.match(writeResult?.reason ?? '', /passwd/);
+		});
+	});
+
+	test('clearing the flag restores the interactive confirmation prompt', async () => {
+		const mod = await loadSafeguard();
+		const handler = registerToolCallHandler(mod);
+
+		await withAutonomousMode(true, async () => {
+			const blocked = makeCtx({ hasUI: true, confirmResult: true });
+			const autonomousResult = (await handler({ toolName: 'bash', input: { command: 'sudo ls /root' } }, blocked.ctx)) as any;
+			assert.equal(autonomousResult?.block, true);
+			assert.equal(blocked.confirmations.length, 0);
+		});
+
+		await withAutonomousMode(false, async () => {
+			// hasUI + confirmResult=true: a confirmation opens and allows the command.
+			const allowed = makeCtx({ hasUI: true, confirmResult: true });
+			assert.equal(await handler({ toolName: 'bash', input: { command: 'sudo ls /root' } }, allowed.ctx), undefined);
+			assert.equal(allowed.confirmations.length, 1, 'confirmation dialog must be restored when autonomous mode is off');
+		});
 	});
 });
 

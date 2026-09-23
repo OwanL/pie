@@ -13,8 +13,8 @@ import { PROTOCOL_VERSION } from '../../../src/shared/protocol';
  * and reject that request with a descriptive error (snippet + stderr tail)
  * instead of letting it time out opaquely.
  *
- * Lives in its own file so the `vscode` / `child_process` mock + dynamic
- * `BackendClient` import are isolated to this process (each `node --test` file
+ * Lives in its own file so the `child_process` mock + dynamic `BackendClient`
+ * import are isolated to this process (each `node --test` file
  * runs in a separate process — no module-cache conflict with
  * `backend-client.test.ts`).
  */
@@ -57,36 +57,15 @@ class FakeChildProcess extends EventEmitter {
 }
 
 let lastFakeProc: FakeChildProcess;
-let uninstallVscodeMock: (() => void) | undefined;
+let uninstallChildProcessMock: (() => void) | undefined;
 
 let BackendClientCtor: typeof import('../../../src/host/backend/client').BackendClient;
 let extractRequestId: typeof import('../../../src/host/backend/client').extractRequestId;
 
-function installVscodeMock(): (() => void) | undefined {
+function installChildProcessMock(): (() => void) {
   const moduleWithLoad = Module as typeof Module & { _load: (...args: any[]) => unknown };
   const originalLoad = moduleWithLoad._load;
   moduleWithLoad._load = function patchedLoad(request: string, parent: unknown, isMain: boolean) {
-    if (request === 'vscode') {
-      return {
-        version: '1.102.3-test',
-        EventEmitter: class<TValue> {
-          private readonly emitter = new EventEmitter();
-
-          readonly event = (listener: (value: TValue) => void) => {
-            this.emitter.on('event', listener);
-            return { dispose: () => this.emitter.off('event', listener) };
-          };
-
-          fire(value: TValue): void {
-            this.emitter.emit('event', value);
-          }
-
-          dispose(): void {
-            this.emitter.removeAllListeners();
-          }
-        },
-      };
-    }
     if (request === 'node:child_process' || request === 'child_process') {
       return {
         ...cp,
@@ -107,14 +86,14 @@ function installVscodeMock(): (() => void) | undefined {
 }
 
 test.before(async () => {
-  uninstallVscodeMock = installVscodeMock();
+  uninstallChildProcessMock = installChildProcessMock();
   const { BackendClient, extractRequestId: extract } = await import('../../../src/host/backend/client');
   BackendClientCtor = BackendClient;
   extractRequestId = extract;
 });
 
 test.after(() => {
-  uninstallVscodeMock?.();
+  uninstallChildProcessMock?.();
 });
 
 async function startClient(): Promise<{ client: import('../../../src/host/backend/client').BackendClient; proc: FakeChildProcess }> {

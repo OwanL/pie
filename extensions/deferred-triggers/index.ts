@@ -145,10 +145,11 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: 'defer_trigger',
     label: 'Defer / resume',
-    description: 'Register, list, or cancel durable triggers that deliver a message to a session after a timer, user input, another session finishes, or a periodic predicate. Registration never ends this turn.',
+    description: 'Register, list, or cancel durable triggers that deliver a message to a session after a timer, user input, another session finishes, or a periodic predicate. Registration never ends this turn. All actions require the calling session\'s persisted JSONL path, so in-memory subagent sessions are not supported.',
     promptSnippet: 'Register an asynchronous condition and message for a session to receive later.',
     promptGuidelines: [
       'Use defer_trigger action register to persist a trigger and required message; registration does not end the current turn, so continue working or finish normally.',
+      'Every defer_trigger action requires the calling session\'s persisted JSONL path; in-memory subagent sessions cannot register, list, or cancel triggers.',
       'Use targetSession only with an explicitly persisted session path. The target must be open when delivery occurs; a closed or unavailable target is not redirected to the caller.',
       'Use defer_trigger action list or cancel to manage triggers created by the current session. On a wake, re-check the task and either complete it or register another trigger.',
       'Conditions in one registration use OR semantics. A command predicate exits 0 when satisfied and 1 when not yet satisfied; other exits are evaluation errors and are retried periodically.',

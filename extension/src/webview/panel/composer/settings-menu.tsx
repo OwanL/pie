@@ -2,6 +2,7 @@
 /** @jsxImportSource preact */
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { createPortal } from 'preact/compat';
 
 import { DEFAULT_SESSION_TITLES_SETTINGS, resolveHistoryCompactionSettings, type ChatPrefs, type ExtensionInfo, type McpServerInfo, type ModelInfo, type PruningCatalog, type PruningResult, type PruningSettings, type ProviderGateStats, type SessionTitlesSettings, type ThinkingLevel, type ToolResultPruningSettings } from '../../../shared/protocol';
 import { filterEnabledProviders, orderModelsForPicker, type ModelPickerEntry } from './model-list';
@@ -66,6 +67,8 @@ export {
 } from './settings-menu-helpers';
 
 export interface ComposerSettingsMenuProps {
+  /** False while transport/backend lifecycle work makes mutations unsafe. */
+  commandsAvailable?: boolean;
   prefs: ChatPrefs;
   mcpServers: McpServerInfo[];
   mcpServersStatus?: 'loading' | 'error' | 'ok';
@@ -664,7 +667,7 @@ function SettingsTabBody(props: SettingsTabBodyProps) {
   );
 }
 
-export function ComposerSettingsMenu({ prefs, mcpServers, mcpServersStatus, mcpPendingApply, pruningSettings, pruningCatalog, pruningResult, toolResultPruningSettings, sessionTitlesSettings = DEFAULT_SESSION_TITLES_SETTINGS, availableExtensions, availableModels, providerGateStats, activeContextWindow, activeModel, selectedModel, selectedProvider, selectedLevel, chatModelEntries, onModelChange, onSetPrefs, onMcpListRequested, onMcpSetServerEnabled, onSetPruningSettings, onSetToolResultPruningSettings, onSetSessionTitlesSettings = () => undefined }: ComposerSettingsMenuProps) {
+export function ComposerSettingsMenu({ commandsAvailable = true, prefs, mcpServers, mcpServersStatus, mcpPendingApply, pruningSettings, pruningCatalog, pruningResult, toolResultPruningSettings, sessionTitlesSettings = DEFAULT_SESSION_TITLES_SETTINGS, availableExtensions, availableModels, providerGateStats, activeContextWindow, activeModel, selectedModel, selectedProvider, selectedLevel, chatModelEntries, onModelChange, onSetPrefs, onMcpListRequested, onMcpSetServerEnabled, onSetPruningSettings, onSetToolResultPruningSettings, onSetSessionTitlesSettings = () => undefined }: ComposerSettingsMenuProps) {
   const skillCatalog = useMemo(
     () => computeKeepCatalog(
       pruningCatalog.skills,
@@ -709,6 +712,13 @@ export function ComposerSettingsMenu({ prefs, mcpServers, mcpServersStatus, mcpP
     setOpen(false);
     if (refocus) triggerRef.current?.focus();
   }, []);
+
+  useLayoutEffect(() => {
+    // The settings surface is portaled outside its toolbar fieldset. Close it
+    // when commands become unavailable so its native descendants cannot bypass
+    // the fieldset's disabled boundary.
+    if (!commandsAvailable && open) setOpen(false);
+  }, [commandsAvailable, open]);
 
   // Extract unique providers from available models, sorted alphabetically.
   const providers = useMemo(
@@ -772,6 +782,39 @@ export function ComposerSettingsMenu({ prefs, mcpServers, mcpServersStatus, mcpP
   // bottom-anchored, so its bottom edge is stable regardless of height, and
   // since the height no longer depends on content there's no need to
   // re-measure on tab/search changes.
+  // The menu is portaled to document.body (outside the composer controls row,
+  // which becomes a horizontal scroll container on narrow layouts) and
+  // positioned in viewport coordinates against the trigger.
+  useLayoutEffect(() => {
+    if (!open) return;
+    const trigger = triggerRef.current;
+    const menu = settingsMenuRef.current;
+    if (!trigger || !menu) return;
+    const position = () => {
+      const rect = trigger.getBoundingClientRect();
+      const width = menu.offsetWidth || 620;
+      const left = Math.min(
+        Math.max(8, rect.left),
+        Math.max(8, window.innerWidth - width - 8),
+      );
+      menu.style.left = `${left}px`;
+      menu.style.bottom = `${Math.max(0, window.innerHeight - rect.top + 6)}px`;
+    };
+    let frame = 0;
+    const schedule = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(position);
+    };
+    position();
+    window.addEventListener('resize', schedule);
+    window.addEventListener('scroll', schedule, true);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener('resize', schedule);
+      window.removeEventListener('scroll', schedule, true);
+    };
+  }, [open]);
+
   useLayoutEffect(() => {
     const el = settingsMenuRef.current;
     if (!open || !el) return;
@@ -802,7 +845,9 @@ export function ComposerSettingsMenu({ prefs, mcpServers, mcpServersStatus, mcpP
 
     const handlePointerDown = (event: MouseEvent) => {
       const target = event.target as Node;
-      if (menuRef.current && !menuRef.current.contains(target)) {
+      const insideMenu = menuRef.current?.contains(target)
+        || settingsMenuRef.current?.contains(target);
+      if (!insideMenu) {
         // The ModelPicker dropdown is portaled to document.body (to escape
         // this menu's scroll container), so it is no longer a DOM descendant
         // of the menu. Treat interaction with it as inside the menu so
@@ -877,6 +922,7 @@ export function ComposerSettingsMenu({ prefs, mcpServers, mcpServersStatus, mcpP
           aria-label="Settings"
           aria-haspopup="dialog"
           aria-expanded={open}
+          disabled={!commandsAvailable}
           onClick={() => (open ? closeMenu() : setOpen(true))}
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -886,7 +932,7 @@ export function ComposerSettingsMenu({ prefs, mcpServers, mcpServersStatus, mcpP
         </button>
       </Tooltip>
 
-      {open && (
+      {open && typeof document !== 'undefined' && createPortal(
         <div ref={settingsMenuRef} class="toolbar-settings-menu" role="dialog" aria-label="Settings">
           <div class="toolbar-settings-header">
             <span class="toolbar-settings-title">Settings</span>
@@ -993,7 +1039,8 @@ export function ComposerSettingsMenu({ prefs, mcpServers, mcpServersStatus, mcpP
             )}
           </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

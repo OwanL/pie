@@ -72,7 +72,7 @@ test('CloseSession reducer selects the next tab BEFORE the runner runs — fixin
 
   const context = createExtensionContext();
   const backend = { request: async () => ({}) } as any;
-  const state = new SessionServiceState(context, backend, () => undefined, getArchState, dispatchArch, 0);
+  const state = new SessionServiceState(backend, () => undefined, getArchState, dispatchArch, 0);
 
   // Dispatch the CloseSession Command directly (as the message-router does).
   dispatchArch({ kind: 'Command', cmd: { kind: 'CloseSession', corrId: 'c1', sessionPath: A } });
@@ -111,9 +111,9 @@ test('closeSession → runner host-side cleanup → CloseSessionResult{ok:true} 
     for (const effect of result.effects) runner.run(effect);
   }
 
-  const state = new SessionServiceState(context, backend, () => undefined, getArchState, dispatchArch, 0);
+  const state = new SessionServiceState(backend, () => undefined, getArchState, dispatchArch, 0);
   const tabs = new SessionTabActions({
-    context, scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER,
+    scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER,
     state, getArchState, dispatchArch,
   });
 
@@ -181,9 +181,9 @@ test('closeSession → recursive openSession(nextPath) when nextPath is NOT summ
     for (const effect of result.effects) runner.run(effect);
   }
 
-  const state = new SessionServiceState(context, backend, () => undefined, getArchState, dispatchArch, 0);
+  const state = new SessionServiceState(backend, () => undefined, getArchState, dispatchArch, 0);
   const tabs = new SessionTabActions({
-    context, scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER,
+    scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER,
     state, getArchState, dispatchArch,
   });
 

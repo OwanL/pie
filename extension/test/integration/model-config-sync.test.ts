@@ -177,6 +177,8 @@ test('every configured OpenAI Codex GPT model has pie-side token pricing', async
   ]);
   const expected = [
     'gpt-6-astra',
+    'gpt-6-sol',
+    'gpt-6-luna',
     'gpt-5.6-sol',
     'gpt-5.6-terra',
     'gpt-5.6-luna',

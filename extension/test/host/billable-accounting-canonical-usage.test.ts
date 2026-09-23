@@ -241,6 +241,61 @@ test('canonical subagent reconciliation routes mixed attempt capture status item
   }
 });
 
+test('canonical capture keeps declared-unknown channels unknown instead of fabricated zeros', () => {
+  const temp = tempDir();
+  try {
+    const captured: CanonicalProviderSettlement[] = [];
+    const accounting = accountingWithCapture(temp, 'submitted', captured);
+    // The subagent terminal sideband synthesizes zero stand-ins for omitted
+    // invocations and explicitly declares the channels unknown.
+    const omittedGapTool = {
+      id: 'omitted-gap-tool',
+      name: 'subagent',
+      input: {},
+      status: 'completed' as const,
+      result: {
+        billing: [{
+          path: '0',
+          model: 'model-a',
+          provider: 'provider-a',
+          occurredAt: '2026-01-01T00:00:00.000Z',
+          omittedInvocationCount: 1,
+          attempts: [{
+            attemptId: 'gap-attempt',
+            outcome: 'success',
+            providerResponseObserved: false,
+            analyticsCaptureReceipt: {
+              factStatus: 'disabled',
+              generationId: 'generation-gap',
+              stableOriginId: 'origin-gap',
+              executionId: 'execution-gap',
+              attemptId: 'gap-attempt',
+              terminalDetailPayloadId: 'detail-gap',
+              lastSubmittedSequence: 0,
+              terminalDetailComplete: false,
+            },
+          }],
+        }],
+      },
+    };
+    accounting.observeSubagentToolResult('/sessions/gap.jsonl', omittedGapTool);
+    // Both the attempt-gap and omitted-invocation evidence rows are captured.
+    assert.equal(captured.length, 2);
+    for (const sample of captured) {
+      assert.equal(sample.instrumentationGap, true);
+      assert.equal(sample.provenance, 'unknown');
+      // Missing usage channels are unknown, not zero: the canonical settlement
+      // must not present fabricated zero channels as complete usage.
+      assert.equal(sample.inputTokens, undefined);
+      assert.equal(sample.outputTokens, undefined);
+      assert.equal(sample.cacheReadTokens, undefined);
+      assert.equal(sample.cacheWriteTokens, undefined);
+    }
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
 test('rejected canonical capture is not projected and empty sessions stay honestly unknown', () => {
   const temp = tempDir();
   try {

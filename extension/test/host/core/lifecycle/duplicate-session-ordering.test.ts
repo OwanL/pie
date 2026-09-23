@@ -64,9 +64,8 @@ test('duplicateSession mints the selection token before the reducer activates th
   };
 
   // timeout = 0 → armSelectionRequestTimeout is a no-op (no 60s timer leak).
-  const state = new SessionServiceState(context, backend, () => undefined, getArchState, dispatchArch, 0);
+  const state = new SessionServiceState(backend, () => undefined, getArchState, dispatchArch, 0);
   const tabs = new SessionTabActions({
-    context,
     scheduleRender: () => undefined,
     runObserver: NOOP_RUN_OBSERVER,
     state,
@@ -125,7 +124,6 @@ test('a hidden timed-out duplicate accepts event-before-ack success without reop
     effects.push(...result.effects);
   };
   const state = new SessionServiceState(
-    context,
     { request: async () => ({}) } as any,
     () => undefined,
     getArchState,
@@ -133,7 +131,6 @@ test('a hidden timed-out duplicate accepts event-before-ack success without reop
     0,
   );
   const tabs = new SessionTabActions({
-    context,
     scheduleRender: () => undefined,
     runObserver,
     state,
@@ -161,7 +158,6 @@ test('a hidden timed-out duplicate accepts event-before-ack success without reop
     dispatchArch,
     runObserver,
     scheduleRender: () => undefined,
-    context,
     state,
   });
 
@@ -214,7 +210,6 @@ test('duplicate inheritance is captured when the RPC acknowledgement precedes se
     archState = reducer(archState, event).state;
   };
   const state = new SessionServiceState(
-    context,
     { request: async () => ({}) } as any,
     () => undefined,
     getArchState,
@@ -222,7 +217,7 @@ test('duplicate inheritance is captured when the RPC acknowledgement precedes se
     0,
   );
   const tabs = new SessionTabActions({
-    context, scheduleRender: () => undefined, runObserver, state, getArchState, dispatchArch,
+    scheduleRender: () => undefined, runObserver, state, getArchState, dispatchArch,
   });
   tabs.duplicateSession(sourcePath);
   const pendingPath = archState.sessions.activeSessionPath!;
@@ -247,7 +242,7 @@ test('duplicate inheritance is captured when the RPC acknowledgement precedes se
     busy: false,
     sessionUsage: { samples: [], branchId: 'copy-before-B' },
   }, {
-    getArchState, dispatchArch, runObserver, scheduleRender: () => undefined, context, state,
+    getArchState, dispatchArch, runObserver, scheduleRender: () => undefined, state,
   });
 
   assert.deepEqual(captures, [{
@@ -295,9 +290,9 @@ test('duplicateSession → backend session.duplicate rejection → handleSelecti
     for (const effect of result.effects) runner.run(effect);
   }
 
-  const state = new SessionServiceState(context, backend, () => undefined, getArchState, dispatchArch, 0);
+  const state = new SessionServiceState(backend, () => undefined, getArchState, dispatchArch, 0);
   const tabs = new SessionTabActions({
-    context, scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER,
+    scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER,
     state, getArchState, dispatchArch,
   });
 

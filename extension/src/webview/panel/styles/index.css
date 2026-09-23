@@ -376,9 +376,17 @@
   #app {
     display: flex;
     flex-direction: column;
-    height: 100vh;
-    height: 100dvh;
+    height: var(--panel-visible-viewport-height, 100vh);
+    height: var(--panel-visible-viewport-height, 100dvh);
     overflow: hidden;
+  }
+
+  /* The static document mount owns the viewport offset. AppBody also renders
+     an inner #app, so keep positioning off the shared ID rule to avoid
+     applying the visual-viewport pan twice. */
+  body > #app {
+    position: relative;
+    top: var(--panel-visible-viewport-offset-top, 0px);
   }
 
   ::-webkit-scrollbar {

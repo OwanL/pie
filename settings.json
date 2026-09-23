@@ -1,6 +1,6 @@
 {
   "defaultModel": "gpt-6-astra",
-  "defaultThinkingLevel": "low",
+  "defaultThinkingLevel": "medium",
   "defaultProvider": "openai-codex",
   "retry": {
     "enabled": true,
@@ -18,7 +18,7 @@
     "npm:pi-mcp-adapter@2.20.1"
   ],
   "pruning": {
-    "model": "gpt-5.6-luna",
+    "model": "gpt-6-luna",
     "provider": "github-copilot",
     "thinkingLevel": "low",
     "prepass": {

@@ -587,12 +587,18 @@ function recordAssistantMessage(
 	if (msg.stopReason) result.stopReason = msg.stopReason;
 	if (msg.errorMessage) result.errorMessage = msg.errorMessage;
 
-	const endedMs = typeof msg.timestamp === "number" && msg.timestamp > (turnStartMs ?? 0)
+	const observedStartedAtMs = typeof turnStartMs === "number" && Number.isFinite(turnStartMs) && turnStartMs >= 0
+		? turnStartMs
+		: undefined;
+	const observedCompletedAtMs = typeof msg.timestamp === "number" && Number.isFinite(msg.timestamp) && msg.timestamp >= 0
 		? msg.timestamp
+		: undefined;
+	const endedMs = observedCompletedAtMs !== undefined && observedCompletedAtMs > (observedStartedAtMs ?? 0)
+		? observedCompletedAtMs
 		: Date.now();
 	const generationDurationMs =
-		typeof turnStartMs === "number" && Number.isFinite(turnStartMs) && turnStartMs > 0
-			? Math.max(0, endedMs - turnStartMs)
+		observedStartedAtMs !== undefined && observedStartedAtMs > 0
+			? Math.max(0, endedMs - observedStartedAtMs)
 			: 0;
 	const providerUsage = usage ? {
 		...(input !== undefined ? { input } : {}),
@@ -607,8 +613,8 @@ function recordAssistantMessage(
 		...(result.model ? { model: result.model } : {}),
 		...(result.provider ? { provider: result.provider } : {}),
 		...(providerUsage ? { usage: providerUsage } : {}),
-		startedAt: typeof turnStartMs === 'number' && Number.isFinite(turnStartMs) ? turnStartMs : endedMs,
-		completedAt: endedMs,
+		...(observedStartedAtMs === undefined ? {} : { startedAt: observedStartedAtMs }),
+		...(observedCompletedAtMs === undefined ? {} : { completedAt: observedCompletedAtMs }),
 		outcome: msg.stopReason === 'aborted' ? 'aborted' : msg.errorMessage ? 'failure' : 'success',
 	};
 	result.providerInvocations = [...(result.providerInvocations ?? []), providerInvocation];
@@ -822,7 +828,10 @@ function subscribeToSession(
 		// its result or publish UI state after a retry has taken ownership.
 		if (!eventFence.accepting) return;
 		if (event.type === "message_start" && event.message?.role === "assistant") {
-			assistantMessageStartMs = event.message.timestamp ?? Date.now();
+			assistantMessageStartMs = typeof event.message.timestamp === "number"
+				&& Number.isFinite(event.message.timestamp) && event.message.timestamp >= 0
+				? event.message.timestamp
+				: undefined;
 			result.draftingToolCall = undefined;
 			return;
 		}

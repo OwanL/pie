@@ -8,6 +8,7 @@
 
 import { resolvePathForComparison, isUnderCwd } from "./paths";
 import { analyzeRecursiveRm, maskShellData, parseShellInvocations, stripHeredocBodies, type ShellInvocation } from "./shell";
+import { isAutonomousModeEnabled } from "../../shared/autonomous-mode.js";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 export const DEFAULT_BASH_TIMEOUT_SECONDS = 600;
@@ -217,6 +218,9 @@ function handleWritePath(targetPath: string, ctx: ExtensionContext) {
 }
 
 async function promptOrBlock(ctx: SafeguardContext, target: string, reason: string): Promise<{ block: true; reason: string } | undefined> {
+	// In autonomous mode nobody is available to confirm, so a confirmation-
+	// required operation is immediately refused instead of opening the dialog.
+	if (isAutonomousModeEnabled()) return { block: true, reason: `Safeguard: ${reason} (blocked in autonomous mode)` };
 	if (!ctx.hasUI) return { block: true, reason: `Safeguard: ${reason} (no UI for confirmation)` };
 	const truncated = target.length > 120 ? `${target.slice(0, 120)}…` : target;
 	try {

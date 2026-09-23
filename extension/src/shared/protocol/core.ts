@@ -41,8 +41,12 @@ export const SESSION_SNAPSHOT_TOO_LARGE_CODE = 'SESSION_SNAPSHOT_TOO_LARGE' as c
  *
  * v10: ViewState carries backend-authored per-session activity and continuation
  * capabilities; the renderer no longer classifies continuation from transcript.
+ *
+ * v11: ViewState carries host-global browser-server network state (actual
+ * listener, configured preference, pending/error status, and LAN URLs), and
+ * renderers can request a persisted live LAN exposure change.
  */
-export const WEBVIEW_PROTOCOL_VERSION = 10;
+export const WEBVIEW_PROTOCOL_VERSION = 11;
 
 export function assertProtocolVersion(peerLabel: string, protocolVersion: unknown): void {
   if (!Number.isInteger(protocolVersion)) {

@@ -3,6 +3,7 @@ import { readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
 
+import { applyJsonPatch } from '../../../src/shared/json-structural-patch';
 import {
   WorkerLiveDetailStore,
   reassembleDetailPages,
@@ -177,7 +178,93 @@ test('large live baseline drains through the bounded detail queue without a reba
     'an oversized baseline must not leave an unaccounted full snapshot retained');
 });
 
-test('source updates during an oversized baseline rebase only after every original page settles', async () => {
+test('continuous streaming delivers one stable oversized baseline with ordered deltas instead of a rebase loop', async () => {
+  const before = liveDetailSpools();
+  const emitted: DetailFrame[] = [];
+  const pending: Array<() => void> = [];
+  const listeners = new Set<() => void>();
+  const store = new WorkerLiveDetailStore({
+    emit: (frame, onSettled) => {
+      emitted.push(frame as DetailFrame);
+      if (onSettled) pending.push(() => onSettled({ status: 'sent' }));
+      return true;
+    },
+    onDrain: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    // Cheap injected budgets reproduce the oversized-transcript regime: the
+    // canonical value can never be retained in memory, so every producer
+    // update used to force a full rebase instead of continuing the stable
+    // live baseline it was delivered against.
+    budgets: { maxCanonicalBytes: 1_024, maxDeltaBytes: 4_096, maxPageBytes: 1_024 },
+  });
+  try {
+    let generation = 1;
+    const streamed = (suffix: string) => details(`stream ${suffix} ${'y'.repeat(1_800)}`, generation);
+    store.observe({ ...root, details: streamed('zero') });
+    store.subscribe('request-stream', 'subscription-stream', address, undefined, 1_024);
+    const start = emitted.find((frame): frame is Extract<DetailFrame, { kind: 'detail.start' }> => frame.kind === 'detail.start');
+    assert.ok(start && start.pageCount > 1, 'the oversized baseline spans several bounded pages');
+
+    const settle = async (): Promise<void> => {
+      pending.shift()?.();
+      for (const listener of listeners) listener();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    };
+
+    // Simulated continuous streaming: a producer update lands between every
+    // delivery step while the oversized baseline drains, exactly like a live
+    // transcript that keeps growing while its pages are queued.
+    const updatesDuringDelivery = 3;
+    let updates = 0;
+    while (emitted.filter((frame) => frame.kind === 'detail.page').length < start.pageCount) {
+      if (updates < updatesDuringDelivery) {
+        generation += 1;
+        updates += 1;
+        store.observe({ ...root, details: streamed(String(updates)) });
+      }
+      await settle();
+    }
+    // The final page settlement is where the deferred update must surface.
+    await settle();
+
+    assert.equal(emitted.some((frame) => frame.kind === 'detail.rebase'), false,
+      'continuous streaming must not starve the stable baseline in a rebase loop');
+    const deltas = emitted.filter((frame): frame is Extract<DetailFrame, { kind: 'detail.delta' }> => frame.kind === 'detail.delta');
+    assert.equal(deltas.length, 1, 'updates observed during delivery coalesce into one ordered delta');
+    assert.equal(deltas[0]!.baseRevision, start.baselineRevision);
+    assert.equal(deltas[0]!.revision, generation);
+
+    // Post-baseline streaming must continue on the same stable subscription.
+    generation += 1;
+    store.observe({ ...root, details: streamed('tail') });
+    const tail = emitted.at(-1);
+    assert.equal(tail?.kind, 'detail.delta', 'an update after completion is a delta, not a rebase');
+    if (tail?.kind === 'detail.delta') {
+      assert.equal(tail.baseRevision, deltas[0]!.revision, 'the delta chain is contiguous');
+      assert.equal(tail.revision, generation);
+    }
+
+    const pages = emitted.filter((frame): frame is Extract<DetailFrame, { kind: 'detail.page' }> => frame.kind === 'detail.page')
+      .map((frame) => ({ ref: frame.ref, payload: frame.payload, payloadBytes: frame.payloadBytes, checksum: frame.checksum }));
+    assert.equal(pages.length, start.pageCount, 'the original baseline finished intact');
+    let applied = applyJsonPatch(reassembleDetailPages(pages), deltas[0]!.operations);
+    assert.ok(applied.ok, `the first delta applies: ${applied.ok ? '' : applied.reason}`);
+    const tailDelta = tail as Extract<DetailFrame, { kind: 'detail.delta' }>;
+    applied = applyJsonPatch(applied.ok ? applied.value : null, tailDelta.operations);
+    assert.ok(applied.ok, `the tail delta applies: ${applied.ok ? '' : applied.reason}`);
+    assert.equal((applied.value as any).messages[0].content[0].text, `stream tail ${'y'.repeat(1_800)}`);
+
+    assert.equal(store.debugState().canonicalBytes, 0,
+      'an oversized live stream never retains an unaccounted canonical value');
+  } finally {
+    store.dispose();
+  }
+  assert.deepEqual(liveDetailSpools(), before, 'the spool-backed delta authority is released with the subscription');
+});
+
+test('source updates during an oversized baseline are delivered as one ordered delta after every original page settles', async () => {
   const emitted: DetailFrame[] = [];
   const pending: Array<{ settle: (value: { status: 'sent' }) => void }> = [];
   const listeners = new Set<() => void>();
@@ -218,11 +305,22 @@ test('source updates during an oversized baseline rebase only after every origin
   assert.equal((reassembleDetailPages(originalPages) as any).messages[0].content[0].text, beforeText,
     'the original Unicode baseline must remain byte-exact while updates are deferred');
   // The final page is only complete after its settlement callback, which is
-  // where the deferred rebase is flushed.
+  // where the deferred update is delivered as one ordered delta against the
+  // stable baseline the receiver just assembled.
   await settle();
-  assert.equal(emitted.at(-1)?.kind, 'detail.rebase');
   assert.equal(emitted.filter((frame) => frame.kind === 'detail.page').length, start!.pageCount,
-    'the immutable original baseline must finish before rebase');
+    'the immutable original baseline must finish before the deferred delta');
+  const delta = emitted.at(-1);
+  assert.equal(delta?.kind, 'detail.delta');
+  assert.equal(emitted.some((frame) => frame.kind === 'detail.rebase'), false,
+    'the stable baseline is continued with a delta instead of being rebased');
+  if (delta?.kind === 'detail.delta') {
+    assert.equal(delta.baseRevision, start!.baselineRevision);
+    assert.equal(delta.revision, 2);
+    const applied = applyJsonPatch(reassembleDetailPages(originalPages), delta.operations);
+    assert.ok(applied.ok, `the deferred delta applies: ${applied.ok ? '' : applied.reason}`);
+    assert.equal((applied.value as any).messages[0].content[0].text, 'after'.repeat(500));
+  }
 });
 
 test('terminal during an in-flight spooled baseline is ordered after the page and releases the spool without later pages', async () => {
@@ -358,7 +456,10 @@ test('above-budget snapshots use a private spool and release it on unsubscribe, 
   // The final page is emitted before its write settlement releases the spool.
   completed.pending.shift()?.();
   await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.deepEqual(liveDetailSpools(), before, 'completion removes the private spool');
+  assert.ok(liveDetailSpools().length > before.length,
+    'completion keeps the delivered spool as the zero-memory delta authority');
+  completed.store.dispose();
+  assert.deepEqual(liveDetailSpools(), before, 'dispose removes the retained delta authority spool');
 });
 
 test('global retention accounting charges in-memory baselines and spools later snapshots', () => {

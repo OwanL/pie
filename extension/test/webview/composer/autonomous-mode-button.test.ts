@@ -39,6 +39,7 @@ function mount(autonomousMode: boolean, onSetPrefs: (prefs: Partial<ChatPrefs>) 
       mcpSessionServers: [],
       mcpSessionPendingApply: false,
       onMcpSetServerEnabledForSession: () => undefined,
+      onSetBrowserServerLanEnabled: () => undefined,
       onSetSystemPromptToggles: () => undefined,
       onSetPruningSettings: () => undefined,
       onSetToolResultPruningSettings: () => undefined,

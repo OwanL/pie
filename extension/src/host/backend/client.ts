@@ -1,6 +1,5 @@
 import * as cp from 'node:child_process';
 import * as path from 'node:path';
-import * as vscode from 'vscode';
 
 import { attachJsonlLineReader, JSONL_MAX_LINE_BYTES, serializeJsonLine } from '../../shared/jsonl';
 import { resolvePieDataPaths } from '../../../../shared/pie-data-root';
@@ -46,12 +45,35 @@ export interface BackendStartOptions {
 }
 
 export interface BackendClientOptions {
+  /** VS Code supplies this at the composition root; standalone clients omit it. */
+  editorVersion?: string;
   /** Test/diagnostic override; production uses BACKEND_READY_TIMEOUT_MS. */
   readyTimeoutMs?: number;
   /** Test seam that prevents unit clients from enumerating machine processes. */
   orphanReaper?: () => Promise<OrphanReapResult>;
   /** Test/diagnostic override for backend stdout record bounds. */
   stdoutMaxLineBytes?: number;
+  /**
+   * Standalone Windows console isolation. The standalone launcher shares its
+   * console with this host process; a backend spawned into the same console
+   * receives console stop events (console-wide Ctrl+Break reaches every
+   * attached process, and Ctrl+C delivery additionally depends on per-process
+   * console-input mode), so backend and workers could be terminated by the
+   * launcher's Ctrl+C before the host's stdin-close graceful drain ran. When
+   * set, the Windows spawn adds `windowsHide` (CREATE_NO_WINDOW): the backend
+   * gets a private hidden console instead of the launcher console, so console
+   * stop events can no longer reach it or its descendants, while stdio and the
+   * fd-3 lifetime pipe, taskkill/tree termination, and kernel Job containment
+   * (children of an assigned process join the Job; no breakaway flags are set)
+   * are unchanged. `windowsHide` is preferred over `detached` because the
+   * detached DETACHED_PROCESS child has no console at all: its subprocesses
+   * with inherited stdio would allocate fresh visible console windows, whereas
+   * a hidden-console backend keeps them invisible-by-inheritance. Only Windows
+   * is isolated: POSIX standalone spawns keep their current process-group
+   * behavior, and the VS Code composition must leave this unset so its spawn
+   * options stay byte-identical.
+   */
+  standaloneConsoleIsolation?: boolean;
 }
 
 const ANALYTICS_DESCRIPTOR_KEYS = [
@@ -144,8 +166,9 @@ function utf8Tail(value: string, maxBytes: number): string {
 }
 
 /** Time to wait for the backend process to exit after SIGTERM before escalating
- *  to SIGKILL. */
-const STOP_KILL_TIMEOUT_MS = 5_000;
+ *  to SIGKILL. Exported so lifecycle callers budget their own confirmed-exit
+ *  waits (a resolved stop() is the only proof the backend is dead). */
+export const STOP_KILL_TIMEOUT_MS = 5_000;
 
 /**
  * A PATH-discovered Node executable may be a process-managing shim (for
@@ -240,11 +263,39 @@ const RPC_TIMEOUTS_MS: Record<string, number> = {
   'extension_ui.response': 10_000,
 };
 
-export class BackendClient implements vscode.Disposable {
-  private readonly correlatedFailures = new vscode.EventEmitter<CorrelatedBackendFailure>();
+export interface Disposable {
+  dispose(): void;
+}
+
+/** Small synchronous event source used by the backend boundary. It mirrors the
+ * subscription/disposal shape of the host event APIs without coupling this
+ * process client to a UI framework. */
+class EventEmitter<T> {
+  private readonly listeners = new Set<(value: T) => void>();
+  private disposed = false;
+
+  readonly event = (listener: (value: T) => void): Disposable => {
+    if (this.disposed) return { dispose: () => undefined };
+    this.listeners.add(listener);
+    return { dispose: () => this.listeners.delete(listener) };
+  };
+
+  fire(value: T): void {
+    if (this.disposed) return;
+    for (const listener of [...this.listeners]) listener(value);
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    this.listeners.clear();
+  }
+}
+
+export class BackendClient implements Disposable {
+  private readonly correlatedFailures = new EventEmitter<CorrelatedBackendFailure>();
   readonly onDidCorrelatedRequestFail = this.correlatedFailures.event;
-  private readonly events = new vscode.EventEmitter<EventEnvelope>();
-  private readonly exits = new vscode.EventEmitter<{ code: number | null; stderr: string }>();
+  private readonly events = new EventEmitter<EventEnvelope>();
+  private readonly exits = new EventEmitter<{ code: number | null; stderr: string }>();
   private readonly requests = new RequestTracker<ResponseEnvelope>();
   /** Exact correlated response observers for requests whose application-level
    * waiter may time out before the backend's destructive operation settles. */
@@ -351,7 +402,6 @@ export class BackendClient implements vscode.Disposable {
     // the backend tool reads `PIE_TRIGGERS_DIR` set here.
     const backendEnv: NodeJS.ProcessEnv = {
       ...process.env,
-      PIE_EDITOR_VERSION: vscode.version,
       PIE_DATA_DIR: dataPaths.rootDir,
       // P2c cache consumers use this internal absolute seam; package config,
       // auth, and SDK agent/session roots remain owned by their existing owners.
@@ -366,7 +416,11 @@ export class BackendClient implements vscode.Disposable {
     };
     // Do not leak blank/raw relative values through process.env: the child
     // receives only the normalized authority, or no override so SDK defaults
-    // remain intact.
+    // remain intact. A standalone client must not inherit a stale VS Code
+    // version and falsely identify its editor integration.
+    const editorVersion = this.options.editorVersion?.trim();
+    if (editorVersion) backendEnv.PIE_EDITOR_VERSION = editorVersion;
+    else delete backendEnv.PIE_EDITOR_VERSION;
     delete backendEnv.PI_CODING_AGENT_DIR;
     delete backendEnv.PI_CODING_AGENT_SESSION_DIR;
     if (agentDirEnv) backendEnv.PI_CODING_AGENT_DIR = agentDirEnv;
@@ -410,6 +464,16 @@ export class BackendClient implements vscode.Disposable {
         // drainage. The backend exits when the host side disappears.
         stdio: ['pipe', 'pipe', 'pipe', 'pipe'],
         shell: false,
+        // Standalone Windows console isolation: CREATE_NO_WINDOW gives the
+        // backend a private hidden console so launcher console stop events
+        // (Ctrl+C / Ctrl+Break) cannot terminate it or its workers before the
+        // host's stdin-close graceful drain. See
+        // BackendClientOptions.standaloneConsoleIsolation for why this is
+        // windowsHide rather than detached, and why it must never apply to the
+        // VS Code composition.
+        ...(process.platform === 'win32' && this.options.standaloneConsoleIsolation === true
+          ? { windowsHide: true as const }
+          : {}),
       },
     );
 

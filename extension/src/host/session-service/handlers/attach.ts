@@ -1,4 +1,3 @@
-import * as vscode from 'vscode';
 import type { RunObserver } from '../../stats-service';
 import type { ArchState } from '../../core/arch-state';
 import type { SessionServiceState } from '../state';
@@ -13,13 +12,13 @@ import { shouldFlashFinishedTab } from '../../sidebar/completion-notification';
 import { backendExitEvents, type InterruptedSessionActivity } from '../backend-exit-events.js';
 import { appendPieLog } from '../../util/pie-log.js';
 import type { DeferredTriggerRegistry } from '../../deferred-triggers/registry';
+import type { HostDisposable } from '../platform';
 
 export interface ApplySessionOpenedDeps {
   getArchState: () => ArchState;
   dispatchArch: (event: Event) => void;
   runObserver: RunObserver;
   scheduleRender: () => void;
-  context: vscode.ExtensionContext;
   state: SessionServiceState;
 }
 
@@ -400,7 +399,6 @@ export function handleBusyChangedPayload(
     dispatchArch: (event: Event) => void;
     runObserver: RunObserver;
     scheduleRender: () => void;
-    context: vscode.ExtensionContext;
     state: SessionServiceState;
     onSessionCompleted?: OnSessionCompleted;
     triggers: DeferredTriggerRegistry;
@@ -477,7 +475,6 @@ export function handleBusyChangedPayload(
 }
 
 interface AttachDeps {
-  context: vscode.ExtensionContext;
   scheduleRender: () => void;
   runObserver: RunObserver;
   state: SessionServiceState;
@@ -488,14 +485,14 @@ interface AttachDeps {
 
 export function attach(
   backend: {
-    onEvent: (handler: (event: EventEnvelope) => void) => vscode.Disposable;
-    onExit: (handler: (info: { code: number | null; stderr: string }) => void) => vscode.Disposable;
+    onEvent: (handler: (event: EventEnvelope) => void) => HostDisposable;
+    onExit: (handler: (info: { code: number | null; stderr: string }) => void) => HostDisposable;
   },
   deps: AttachDeps,
   handlers: {
     handleBackendEvent: (event: EventEnvelope) => void;
   },
-): vscode.Disposable[] {
+): HostDisposable[] {
   const eventDisposable = backend.onEvent((event: EventEnvelope) => {
     handlers.handleBackendEvent(event);
   });
@@ -547,7 +544,7 @@ export function attach(
   return [eventDisposable, exitDisposable];
 }
 
-export function detach(disposables: vscode.Disposable[]): void {
+export function detach(disposables: HostDisposable[]): void {
   for (const d of disposables) {
     d.dispose();
   }

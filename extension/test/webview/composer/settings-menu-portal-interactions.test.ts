@@ -1,4 +1,4 @@
-import test, { beforeEach } from 'node:test';
+import test, { afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { installDom } from '../../_helpers/dom';
@@ -16,11 +16,15 @@ let container: HTMLElement;
 beforeEach(() => {
   container = document.createElement('div');
   document.body.appendChild(container);
-  return () => {
-    render(null, container);
-    container.remove();
-    document.querySelectorAll('.model-picker-dropdown').forEach((el) => el.remove());
-  };
+});
+
+afterEach(() => {
+  render(null, container);
+  container.remove();
+  // The settings menu and ModelPicker portal to document.body; remove any
+  // stray portaled instance so tests cannot observe a previous test's menu.
+  document.querySelectorAll('.toolbar-settings-menu').forEach((el) => el.remove());
+  document.querySelectorAll('.model-picker-dropdown').forEach((el) => el.remove());
 });
 
 function click(el: Element | null): void {
@@ -69,8 +73,10 @@ function mount() {
 // prepass ModelPicker. Returns the portaled dropdown element.
 function openPrepassPicker(): HTMLElement {
   act(() => { click(container.querySelector('.toolbar-settings-trigger')); });
-  act(() => { click(container.querySelector('.toolbar-settings-tab[data-tab="models"]')); });
-  act(() => { click(container.querySelector('[aria-label="Pruning prepass model"]')); });
+  const menu = document.body.querySelector('.toolbar-settings-menu');
+  assert.ok(menu, 'settings menu should be portaled to the document');
+  act(() => { click(menu.querySelector('.toolbar-settings-tab[data-tab="models"]')); });
+  act(() => { click(document.querySelector('[aria-label="Pruning prepass model"]')); });
   const dropdown = document.querySelector('.model-picker-dropdown') as HTMLElement | null;
   assert.ok(dropdown, 'prepass ModelPicker dropdown should be portaled to the document');
   return dropdown!;
@@ -93,7 +99,7 @@ test('Escape closes only the ModelPicker, leaving the settings menu open', () =>
   });
 
   assert.ok(
-    container.querySelector('.toolbar-settings-menu'),
+    document.body.querySelector('.toolbar-settings-menu'),
     'settings menu should stay open after Escape closed only the picker',
   );
   assert.ok(
@@ -116,7 +122,7 @@ test('selecting a prepass model row keeps the settings menu open', () => {
   act(() => { click(rows[1]); });
 
   assert.ok(
-    container.querySelector('.toolbar-settings-menu'),
+    document.body.querySelector('.toolbar-settings-menu'),
     'settings menu should stay open after selecting a model row',
   );
   assert.ok(

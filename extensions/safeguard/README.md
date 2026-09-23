@@ -17,6 +17,8 @@ The policy intentionally favors precision:
 - **Default bash timeout** — applies a 600s default to `bash` calls without a positive finite timeout. Explicit timeouts are preserved.
 - **Hard blocks** — disk/volume destruction, root recursive deletion, boot/recovery tampering, reverse shells, remote-content-to-shell pipelines, fork bombs, and writes to core system paths.
 - **Prompts** — privilege escalation, recursive force-deletes outside the cwd, destructive service/firewall/account changes, system package removal, and writes to credential-bearing files outside the cwd. Concrete children of `/tmp`, `/var/tmp`, or the platform temp directory are treated as routine cleanup; platform temp aliases such as Windows short and long paths are recognized. Deleting a temp root or using a broad wildcard still prompts.
+- **Autonomous mode** — while `PIE_AUTONOMOUS_MODE=1` (see `shared/autonomous-mode.ts`), confirmation-required operations are immediately refused with a blocked tool result instead of opening the confirmation dialog, since nobody is present to answer. Allowances and hard blocks are unchanged; clearing the flag restores normal prompts.
+- **Redirection handling** — redirection operators (`>`, `<`, `>>`, `2>`, `2>&1`, `&>` and numbered variants) and their targets are parsed as shell data and excluded from command and `rm`-target analysis. This keeps routine forms such as `rm -rf ./build 2>/dev/null` from being misread (`2>/dev/null` as a delete target) or `git status > log.txt` from treating the redirect target as a command, while redirections can never hide a dangerous command elsewhere in the line.
 
 ## API
 

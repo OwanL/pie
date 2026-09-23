@@ -3,7 +3,6 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import Module from 'node:module';
 import { EventEmitter } from 'node:events';
 
 import { createInitialArchState } from '../../../src/host/core/arch-state';
@@ -16,65 +15,24 @@ import type { BackendClient as BackendClientType } from '../../../src/host/backe
 import { createOperationalIncident } from '../../../src/shared/incidents';
 import type { ChatPrefs } from '../../../src/shared/protocol';
 
-function installVscodeMock() {
-  const moduleWithLoad = Module as typeof Module & { _load: (...args: any[]) => unknown };
-  const originalLoad = moduleWithLoad._load;
-
-  class VSCodeEventEmitter<TValue> {
-    private readonly emitter = new EventEmitter();
-
-    readonly event = (listener: (value: TValue) => void) => {
-      this.emitter.on('event', listener);
-      return { dispose: () => this.emitter.off('event', listener) };
-    };
-
-    fire(value: TValue): void {
-      this.emitter.emit('event', value);
-    }
-
-    dispose(): void {
-      this.emitter.removeAllListeners();
-    }
-  }
-
-  moduleWithLoad._load = function patchedLoad(request: string, parent: unknown, isMain: boolean) {
-    if (request === 'vscode') {
-      return {
-        version: '1.102.3-test',
-        EventEmitter: VSCodeEventEmitter,
-        Uri: { file: (fsPath: string) => ({ fsPath }) },
-        window: {
-          showWarningMessage: async () => undefined,
-          showInformationMessage: async () => undefined,
-          showErrorMessage: async () => undefined,
-        },
-        workspace: {
-          workspaceFolders: undefined,
-          name: 'test-workspace',
-          getConfiguration: () => ({
-            get: () => undefined,
-          }),
-        },
-        commands: { executeCommand: async () => undefined },
-        env: { appName: 'test-app' },
-        Disposable: class { dispose() {} },
-      };
-    }
-    return originalLoad.call(this, request, parent, isMain);
-  };
-
-  return () => {
-    moduleWithLoad._load = originalLoad;
+function createPlatform(context: ReturnType<typeof createExtensionContext>) {
+  return {
+    storage: {
+      get: <T>(key: string) => (context.globalState as { get<T>(key: string): T | undefined }).get<T>(key),
+      update: async (key: string, value: unknown) => (context.globalState as { update(key: string, value: unknown): Promise<void> }).update(key, value),
+    },
+    extensionPath: '/test-extension',
+    getRuntimeOutputDirectory: () => '/test-out',
+    getWorkspaceCwd: () => '/test-workspace',
+    getSetting: () => undefined,
+    requestWindowAttention: () => undefined,
   };
 }
 
 let SessionServiceCtor: typeof SessionServiceType;
 let BackendClientCtor: typeof BackendClientType;
 
-let uninstallVscodeMock: (() => void) | undefined;
-
 test.before(async () => {
-  uninstallVscodeMock = installVscodeMock();
   const [{ SessionService }, { BackendClient }] = await Promise.all([
     import('../../../src/host/session-service/service'),
     import('../../../src/host/backend/client'),
@@ -116,7 +74,7 @@ function makeHarness(runObserver = NOOP_RUN_OBSERVER) {
   };
 
   const service = new SessionServiceCtor(
-    context,
+    createPlatform(context),
     backend,
     () => { /* scheduleRender */ },
     () => { /* postImperative */ },
@@ -404,7 +362,7 @@ test('backend generation failure rejects an undispatched deferred send and remov
     archState = reducer(archState, event).state;
   };
   const service = new SessionServiceCtor(
-    createExtensionContext(),
+    createPlatform(createExtensionContext()),
     new BackendClientCtor(),
     () => undefined,
     () => undefined,
@@ -444,7 +402,7 @@ test('private close does not reopen a deleted transcript when the final analytic
   const backendRequests: string[] = [];
   let privacyCalls = 0;
   const service = new SessionServiceCtor(
-    context,
+    createPlatform(context),
     { request: async (method: string) => { backendRequests.push(method); return {}; } } as any,
     () => undefined,
     () => undefined,
@@ -490,7 +448,7 @@ test('authorized private close transports the persisted create origin instead of
   const observerArguments: Array<[string | undefined, string | undefined]> = [];
   const requests: Array<{ method: string; params: unknown }> = [];
   const service = new SessionServiceCtor(
-    context,
+    createPlatform(context),
     {
       request: async (method: string, params: unknown) => {
         requests.push({ method, params });
@@ -539,7 +497,7 @@ test('private close retains its retry marker and reopens when backend deletion f
   const archState = createInitialArchState();
   const dispatched: Event[] = [];
   const service = new SessionServiceCtor(
-    context,
+    createPlatform(context),
     { request: async () => { throw new Error('delete failed'); } } as any,
     () => undefined,
     () => undefined,
@@ -621,7 +579,7 @@ test('restart waits for confirmed death before terminalizing an ambiguous send a
     order.push('stop-resolved');
   };
   const service = new SessionServiceCtor(
-    createExtensionContext(), backend, () => undefined, () => undefined,
+    createPlatform(createExtensionContext()), backend, () => undefined, () => undefined,
     dispatchArch, () => archState, undefined, NOOP_RUN_OBSERVER,
   );
   (service as unknown as { start(): Promise<void> }).start = async () => {
@@ -708,9 +666,4 @@ test('restart waits for confirmed death before terminalizing an ambiguous send a
     && event.operationId === 'send-operation').length, 0);
   assert.equal(dispatched.filter((event) => event.kind === 'CreateOperationFailed'
     && event.operationId === createOperationId && event.reason === 'backend-generation-ended').length, 1);
-});
-
-// Restore the real module loader after all tests so later tests are unaffected.
-test.after(() => {
-  uninstallVscodeMock?.();
 });

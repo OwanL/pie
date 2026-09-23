@@ -32,9 +32,9 @@ export interface SessionChangesParams {
    *  including in-memory sessions; lightweight contexts without that API fall
    *  back to `ctx.sessionManager.getSessionFile()`. */
   sessionPath?: string;
-  /** `diff`: one or more file paths to diff, as an array. Use `["path"]` for a
-   *  single file. Paths are relative to the session cwd as the `list` manifest
-   *  reports them. */
+  /** `diff`: required non-empty array of file paths to diff. Use `["path"]`
+   *  for a single file. Paths are relative to the session cwd as the `list`
+   *  manifest reports them. */
   path?: string[];
   /** `diff`: lines of surrounding diff context. Default `0` (changes-only);
    *  git still emits the enclosing function/section label in the `@@` hunk
@@ -51,7 +51,7 @@ export const sessionChangesSchema = {
       enum: ['list', 'diff'],
       description:
         "list: derive the set of files this session changed + per-file line churn as a compact TSV manifest. " +
-        'diff: emit a minified unified diff (default context=0, changes-only) for one or more files from the manifest.',
+        'diff: emit a minified unified diff (default context=0, changes-only) for one or more files from the manifest; `path` is required for this action.',
     },
     sessionPath: {
       type: 'string',
@@ -61,8 +61,9 @@ export const sessionChangesSchema = {
     path: {
       type: 'array',
       items: { type: 'string', minLength: 1 },
+      minItems: 1,
       maxItems: MAX_DIFF_PATHS,
-      description: 'diff: array of file paths from the list manifest, relative to the session cwd. Pass ["path"] for a single file.',
+      description: 'diff (required): array of file paths from the list manifest, relative to the session cwd. Pass ["path"] for a single file.',
     },
     context: {
       type: 'integer',

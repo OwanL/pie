@@ -10,6 +10,7 @@ import type {
   WebviewToHostMessage,
 } from '../../shared/protocol';
 import { createLocalMessageId } from '../../shared/local-message-id';
+import { createUuidV4 } from '../../shared/uuid';
 import type { TranscriptContextMenuType } from './chat-prefs';
 import type { ContextMenuState } from './components/context-menu';
 import { getContextMenuTrigger } from './components/useMenuTriggerAria';
@@ -48,6 +49,8 @@ export interface AppHandlers {
   handleMcpSetServerEnabled: (name: string, enabled: boolean) => void;
   handleMcpSetServerEnabledForSession: (name: string, enabled: boolean) => void;
   handleSetPrivacyMode: (enabled: boolean) => void;
+  handleSetBrowserServerLanEnabled: (enabled: boolean) => void;
+  handleSetBrowserServerEnabled: (enabled: boolean) => void;
   handleSetSystemPromptToggles: (disabledEntries: string[]) => void;
   handleSetPruningSettings: (partial: Partial<PruningSettings>) => void;
   handleSetToolResultPruningSettings: (partial: Partial<ToolResultPruningSettings>) => void;
@@ -150,7 +153,7 @@ export function useAppHandlers(
   const handleOpenFile = useCallback((path: string) => postMessage({ type: 'openFile', path }), [postMessage]);
   const handleNewSession = useCallback(() => postMessage({ type: 'newSession' }), [postMessage]);
   const handleCloseTab = useCallback((path: string) => postMessage({
-    type: 'closeSession', sessionPath: path, interactionId: crypto.randomUUID(),
+    type: 'closeSession', sessionPath: path, interactionId: createUuidV4(),
   }), [postMessage]);
   const handleDuplicateTab = useCallback((path: string) => postMessage({ type: 'duplicateSession', sessionPath: path }), [postMessage]);
   const handleTogglePinTab = useCallback((path: string) => postMessage({ type: 'togglePinTab', sessionPath: path }), [postMessage]);
@@ -192,6 +195,12 @@ export function useAppHandlers(
     if (!sessionPath) return;
     postMessage({ type: 'setPrivacyMode', sessionPath, enabled });
   }, [postMessage, activeSessionPathRef]);
+  const handleSetBrowserServerLanEnabled = useCallback((enabled: boolean) => {
+    postMessage({ type: 'setBrowserServerLanEnabled', enabled });
+  }, [postMessage]);
+  const handleSetBrowserServerEnabled = useCallback((enabled: boolean) => {
+    postMessage({ type: 'setBrowserServerEnabled', enabled });
+  }, [postMessage]);
   const handleSetSystemPromptToggles = useCallback((disabledEntries: string[]) => {
     const sessionPath = activeSessionPathRef.current;
     if (!sessionPath) return;
@@ -356,6 +365,8 @@ export function useAppHandlers(
       handleSetFileChangesExpanded,
       handleSetFileRead,
       handleOpenContextMenu,
+      handleSetBrowserServerLanEnabled,
+      handleSetBrowserServerEnabled,
 
     }),
     [
@@ -399,6 +410,8 @@ export function useAppHandlers(
       handleSetFileChangesExpanded,
       handleSetFileRead,
       handleOpenContextMenu,
+      handleSetBrowserServerLanEnabled,
+      handleSetBrowserServerEnabled,
     ],
   );
 }

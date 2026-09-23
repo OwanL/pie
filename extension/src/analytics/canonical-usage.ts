@@ -287,7 +287,15 @@ export function sessionUsageSnapshotFromCanonicalSettlements(
       cacheWriteTokens,
       ...(reasoningTokens !== undefined ? { reasoningTokens } : {}),
       ...(settlement.reportedCostUsd !== null ? { providerReportedCostUsd: settlement.reportedCostUsd } : {}),
-      ...(settlement.calculatedCostUsd !== null ? { calculatedCostUsd: settlement.calculatedCostUsd } : {}),
+      // Only a complete durable catalog calculation is published: the public
+      // protocol has no completeness flag for this channel, so consumers treat
+      // `calculatedCostUsd` as an authoritative total. An incomplete
+      // calculation stays explicitly unpriced in the snapshot (the exact
+      // decimal remains available in the canonical read model), matching the
+      // effective-cost semantics of the durable row.
+      ...(settlement.calculatedCostUsd !== null && settlement.calculatedCostComplete
+        ? { calculatedCostUsd: settlement.calculatedCostUsd }
+        : {}),
       providerTotalTokens,
       provenance,
       instrumentationGap,

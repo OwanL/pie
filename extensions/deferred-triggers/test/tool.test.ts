@@ -8,7 +8,7 @@ import registerDeferredTriggers from '../index.js';
 
 const TRIGGERS_DIR_ENV = 'PIE_TRIGGERS_DIR';
 
-type Tool = { name: string; execute: (...args: unknown[]) => Promise<unknown> };
+type Tool = { name: string; description: string; promptGuidelines: string[]; execute: (...args: unknown[]) => Promise<unknown> };
 type ToolResult = { isError: boolean; content: Array<{ text: string }>; details?: any };
 
 let tempDir: string;
@@ -26,7 +26,7 @@ afterEach(() => {
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
-function setup(): { tools: Record<string, Tool> } {
+function setup(): { tools: Record<string, Tool>; defs: Record<string, Tool> } {
   const tools: Record<string, Tool> = {};
   registerDeferredTriggers({
     registerTool(value: unknown) {
@@ -35,7 +35,7 @@ function setup(): { tools: Record<string, Tool> } {
     },
   } as never);
   assert.ok(tools.defer_trigger);
-  return { tools };
+  return { tools, defs: tools };
 }
 
 function context(session = 'session.jsonl', cwd = tempDir) {
@@ -51,6 +51,23 @@ function readSidecar(): any[] {
   if (!fs.existsSync(file)) return [];
   return fs.readFileSync(file, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
 }
+
+test('defer_trigger tool surface explains the persisted-session prerequisite concisely', () => {
+  const { defs } = setup();
+  const def = defs.defer_trigger;
+  // First sentence stays a concise relevance summary (permanent prompt budget).
+  const firstSentence = def.description.split('. ')[0];
+  assert.ok(firstSentence.length <= 180, `first description sentence must stay within 180 characters (got ${firstSentence.length})`);
+  assert.match(firstSentence, /Register, list, or cancel durable triggers/);
+  // The persisted-session prerequisite must be stated on the always-on surface.
+  assert.match(def.description, /persisted JSONL path/);
+  assert.match(def.description, /in-memory subagent sessions/);
+  assert.ok(def.promptGuidelines.some((guideline) => (
+    guideline.startsWith('Every defer_trigger action')
+    && guideline.includes('persisted JSONL path')
+    && guideline.includes('in-memory subagent sessions')
+  )));
+});
 
 test('defer_trigger registers a normalized wake without aborting the current turn', async () => {
   const { tools } = setup();

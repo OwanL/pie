@@ -32,6 +32,7 @@ function renderToolbar(overrides: Partial<Parameters<typeof ComposerToolbar>[0]>
     mcpSessionServers: [],
     mcpSessionPendingApply: false,
     onMcpSetServerEnabledForSession: () => {},
+    onSetBrowserServerLanEnabled: () => {},
     onSetSystemPromptToggles: () => {},
     onSetPruningSettings: () => {},
     onSetToolResultPruningSettings: () => {},
@@ -55,6 +56,27 @@ function renderToolbar(overrides: Partial<Parameters<typeof ComposerToolbar>[0]>
     ...overrides,
   }));
 }
+
+test('toolbar places an accessible browser-network control beside privacy mode', () => {
+  const html = renderToolbar({
+    browserServer: {
+      running: true,
+      localUrl: 'http://127.0.0.1:1997/',
+      port: 1997,
+      clientCount: 1,
+      lanEnabled: false,
+      configuredLanEnabled: false,
+      lanUrls: [],
+      changePending: false,
+      pendingLanEnabled: null,
+      changeError: null,
+    },
+  });
+  const privacy = html.indexOf('aria-label="Enable privacy mode');
+  const network = html.indexOf('aria-label="Browser network access"');
+  assert.ok(privacy >= 0 && network > privacy, 'the 26px network control follows privacy in the model-picker row');
+  assert.match(html, /aria-haspopup="dialog" aria-expanded="false"/);
+});
 
 test('toolbar keeps a provisional model picker usable without additive loading copy', () => {
   const html = renderToolbar({

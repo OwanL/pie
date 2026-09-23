@@ -3,7 +3,7 @@
 **Purpose:** Authoritative traceability record for every price written to `models.json`.
 Every non-zero cost field in `models.json` MUST have a corresponding row in this document.
 
-**Retrieval date:** 2026-09-13; broader OpenAI, GitHub Copilot, and Ollama refresh completed 2026-08-24
+**Retrieval date:** 2026-09-23 (latest pricing refresh; source-specific dates are noted by section)
 **Format:** All prices in USD per 1M tokens unless otherwise noted.
 
 ---
@@ -13,7 +13,7 @@ Every non-zero cost field in `models.json` MUST have a corresponding row in this
 For each model in `model-profiles.yaml`:
 - **GitHub Copilot models**: Token pricing sourced from official GitHub Copilot billing documentation. 1 AI credit = $0.01 USD.
 - **OpenAI Codex models**: Opportunity-cost rates sourced from the official [OpenAI model pricing](https://developers.openai.com/api/docs/models) pages. Codex is subscription-billed here, but these rates make its token use comparable with the other providers. Long-context tiers use OpenAI's published 272K threshold and request-wide multipliers; cache writes use the published 1.25x uncached-input rate.
-- **Ollama Cloud models**: Availability, IDs, modalities, and served context windows come from Ollama's live cloud catalog and local `/api/show` manifests. Kimi K3 and DeepSeek V4.1 Flash pricing is published directly by Ollama; other opportunity-cost rates come from the live [OpenRouter](https://openrouter.ai/api/v1/models) model API (`pricing.prompt` / `pricing.completion` / `pricing.input_cache_read`), converted from USD per token to USD per 1M tokens. These are comparison rates; Ollama bills individual plans through included usage and optional extra usage rather than charging every request at these rates.
+- **Ollama Cloud models**: Availability, IDs, modalities, and served context windows come from Ollama's live cloud catalog and local `/api/show` manifests. Exact models listed in [Ollama pricing](https://ollama.com/pricing) use its official per-million-token usage-credit rates; other models retain OpenRouter comparison rates from the live [OpenRouter](https://openrouter.ai/api/v1/models) model API (`pricing.prompt` / `pricing.completion` / `pricing.input_cache_read`), converted from USD per token to USD per 1M tokens. Time-variable Ollama rates (DeepSeek V4 peak/off-peak) are encoded as peak-window applicability metadata on the base off-peak rates, and published `-` cache-read tiers are marked `cacheReadUnsupported` — see the Ollama section below. Ollama bills individual plans through included usage and optional extra usage rather than charging every request at these rates.
 - **Umans models**: No longer active. Umans ended its coding subscriptions; the last configured metadata remains only in `historicalModels` for past-session attribution.
 - **Ollama Local models**: Free/local (no API cost).
 - **Grok models**: No official token pricing found; marked as unknown.
@@ -111,14 +111,16 @@ Cache write pricing is NOT published for Google Copilot models.
 ## OpenAI Codex Models
 
 **Source:** [OpenAI API pricing](https://developers.openai.com/api/docs/pricing)
-**Retrieval date:** 2026-09-05
+**Retrieval date:** 2026-09-23
 **Units:** USD per 1M tokens.
 
-The configured `openai-codex` provider uses a ChatGPT subscription, so these are opportunity-cost estimates rather than incremental charges to the subscription. Every configured GPT model has pie-side pricing so the picker and session indicator do not report it as unpriced. GPT-6 Astra's Codex context limit comes from pi.dev's live provider catalog; its rates come from OpenAI's official model page.
+The configured `openai-codex` provider uses a ChatGPT subscription, so these are opportunity-cost estimates rather than incremental charges to the subscription. Every configured GPT model has pie-side pricing so the picker and session indicator do not report it as unpriced. GPT-6 Codex context limits come from pi.dev's live provider catalog; rates come from OpenAI's official model pages.
 
 | Model ID | Input | Cached Input | Cache Write | Output | Long-context Input | Long-context Cached | Long-context Cache Write | Long-context Output | Confidence |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | gpt-6-astra | $10.00 | $1.00 | $12.50 | $50.00 | $20.00 | $2.00 | $25.00 | $75.00 | official |
+| gpt-6-sol | $2.00 | $0.20 | $2.50 | $10.00 | $4.00 | $0.40 | $5.00 | $15.00 | official |
+| gpt-6-luna | $0.10 | $0.01 | $0.125 | $0.50 | $0.20 | $0.02 | $0.25 | $0.75 | official |
 | gpt-5.6-sol | $4.00 | $0.40 | $5.00 | $20.00 | $8.00 | $0.80 | $10.00 | $30.00 | official |
 | gpt-5.6-terra | $2.00 | $0.20 | $2.50 | $12.00 | $4.00 | $0.40 | $5.00 | $18.00 | official |
 | gpt-5.6-luna | $0.20 | $0.02 | $0.25 | $1.20 | $0.40 | $0.04 | $0.50 | $1.80 | official |
@@ -133,37 +135,40 @@ The configured `openai-codex` provider uses a ChatGPT subscription, so these are
 
 ## Ollama Cloud Models
 
-**Source:** [OpenRouter `/api/v1/models`](https://openrouter.ai/api/v1/models) — live aggregator of upstream provider per-token rates.
-**Retrieval date:** 2026-08-24 for the broader catalog; 2026-08-27 for GLM 5.3 Flash
-**Confidence:** `official` for Kimi K3 and DeepSeek V4.1 Flash; `openrouter` for the remaining comparison rates
+**Sources:** [Ollama's official pricing table](https://ollama.com/pricing) and exact Ollama model library pages for listed models; [OpenRouter `/api/v1/models`](https://openrouter.ai/api/v1/models) for the remaining comparison rates.
+**Retrieval date:** 2026-09-23 for Ollama prices; 2026-08-24 for OpenRouter comparison rates
+**Confidence:** `official` for rates published by Ollama; `openrouter` for remaining comparison rates
 **Units:** USD per 1M tokens.
 
-`cacheRead` is populated where the source exposes a cached-input rate. `cacheWrite` is `0` unless a separate per-token cache-write price is published.
+For exact models listed in Ollama's pricing table, the `Input`, `Cached input`, and `Output` columns map directly to catalog `input`, `cacheRead`, and `output`; Ollama publishes no separate cache-write rate, so `cacheWrite` remains `0`. These are Ollama's pay-as-you-go usage-credit rates, not OpenRouter comparison estimates. OpenRouter rates remain comparison rates only where Ollama does not publish a matching model entry.
+
+**Time-dependent DeepSeek rates:** Ollama's pricing table publishes separate peak and off-peak rates for DeepSeek V4 models (weekday peak is 12:00–18:00 UTC; off-peak is outside those hours and all day on weekends, with peak exactly 2× off-peak). The catalog stores the official off-peak rates as base pricing plus a typed `peak` window (`weekdaysUtc` Monday–Friday, `startMinutesUtc` 720, `endMinutesUtc` 1080, 2× `override` rates). Pricing is applied only when both valid, closed evidence endpoints resolve to one half-open band (peak override or off-peak base). Thus, an interval ending exactly at a band boundary is unpriced when its completion anchor belongs to the adjacent band, while an instantaneous observation at the boundary follows `[start, end)` membership. Missing, invalid, or band-crossing evidence stays explicitly unpriced, and aggregate consumers without per-request intervals return unknown rather than falling back to one static rate. Ollama's pricing page does not specify whether billing keys on request start or end, so no synthesized timing evidence is ever constructed.
 
 | Model ID | Pricing source/model | Input | Output | Cache Read | Confidence | Ollama-served metadata |
 |---|---|---:|---:|---:|---|---|
-| kimi-k3:cloud | Ollama Kimi K3 page | $3.00 | $15.00 | $0.30 | official | 1M context; vision/tools/thinking; Pro/Max + extra usage |
-| deepseek-v4.1-flash:cloud | Ollama DeepSeek V4.1 Flash page and pricing | $0.150 | $0.600 | $0.003 | official | 1M context; vision/tools/thinking; Pro/Max + extra usage |
+| kimi-k3:cloud | Ollama [Kimi K3](https://ollama.com/library/kimi-k3) | $3.00 | $15.00 | $0.30 | official | 1M context; vision/tools/thinking; Pro/Max + extra usage |
+| deepseek-v4.1-flash:cloud | Ollama [DeepSeek V4.1 Flash](https://ollama.com/library/deepseek-v4.1-flash) (off-peak base) | $0.150 | $0.600 | $0.003 | official | Peak Mon–Fri 12:00–18:00 UTC exactly 2× ($0.30/$1.20/$0.006); priced only for intervals entirely within one band; 1M context; vision/tools/thinking; Pro/Max + extra usage |
 | deepseek-v4-flash:0731-cloud | deepseek/deepseek-v4-flash-0731 | $0.140 | $0.280 | $0.028 | openrouter | 1M served context; tools; none/high/max thinking |
 | deepseek-v4-pro:0813-cloud | deepseek/deepseek-v4-pro-0813 | $1.122 | $3.366 | $0.0374 | openrouter | 1M served context; tools; none/high/max thinking |
-| deepseek-v4-pro:cloud | deepseek/deepseek-v4-pro | $0.526176 | $1.052352 | $0.043848 | openrouter | 1M catalog context; tools/thinking |
-| deepseek-v4-flash:cloud | deepseek/deepseek-v4-flash | $0.0574 | $0.1148 | $0.01148 | openrouter | 1M served context; tools/thinking |
+| deepseek-v4-pro:cloud | Ollama [DeepSeek V4 Pro](https://ollama.com/library/deepseek-v4-pro) (off-peak base) | $0.660 | $1.980 | $0.022 | official | Peak Mon–Fri 12:00–18:00 UTC exactly 2× ($1.32/$3.96/$0.044); priced only for intervals entirely within one band; 1M catalog context; tools/thinking |
+| deepseek-v4-flash:cloud | Ollama [DeepSeek V4 Flash](https://ollama.com/library/deepseek-v4-flash) (off-peak base) | $0.220 | $0.660 | $0.007 | official | Peak Mon–Fri 12:00–18:00 UTC exactly 2× ($0.44/$1.32/$0.014); priced only for intervals entirely within one band; 1M served context; tools/thinking |
 | gemini-3-flash-preview:cloud | google/gemini-3-flash-preview | $0.500 | $3.000 | $0.050 | openrouter | Cache write $0.083333/1M; 1M served context; vision/tools/thinking |
-| gemma4:31b-cloud | google/gemma-4-31b-it | $0.100 | $0.340 | $0.100 | openrouter | 256K context; vision/tools/thinking |
-| glm-5.3-flash:cloud | z-ai/glm-5.3-flash | $0.075 | $0.250 | $0.015 | openrouter | 1M served context; 128K max output; vision/tools; low/high/max thinking |
-| glm-5.2:cloud | z-ai/glm-5.2 | $0.966 | $3.036 | $0.1932 | openrouter | 1M context; tools/thinking |
-| glm-5.1:cloud | z-ai/glm-5.1 | $0.966 | $3.036 | $0.1794 | openrouter | 198K context; tools/thinking |
-| gpt-oss:120b-cloud | openai/gpt-oss-120b | $0.037 | $0.170 | — | openrouter | 128K context; tools/thinking |
-| gpt-oss:20b-cloud | openai/gpt-oss-20b | $0.030 | $0.130 | $0.030 | openrouter | 128K context; tools/thinking; picker-ineligible |
-| kimi-k2.6:cloud | moonshotai/kimi-k2.6 | $0.950 | $4.000 | $0.160 | openrouter | 256K context; vision/tools/thinking |
-| kimi-k2.7-code:cloud | moonshotai/kimi-k2.7-code | $0.670 | $3.400 | $0.170 | openrouter | 256K context; vision/tools/thinking |
-| minimax-m2.7:cloud | minimax/minimax-m2.7 | $0.240 | $0.960 | $0.048 | openrouter | 192K served context; tools/thinking |
-| minimax-m3:cloud | minimax/minimax-m3 | $0.300 | $1.200 | $0.060 | openrouter | 512K served context; vision/tools/thinking |
-| mistral-large-3:675b-cloud | mistralai/mistral-large-2512 | $0.500 | $1.500 | $0.050 | openrouter | 256K context; vision/tools; no thinking |
-| nemotron-3-nano:30b-cloud | nvidia/nemotron-3-nano-30b-a3b | $0.050 | $0.200 | $0.030 | openrouter | 1M catalog context; tools/thinking |
-| nemotron-3-super:cloud | nvidia/nemotron-3-super-120b-a12b | $0.085 | $0.400 | — | openrouter | 256K served context; tools/thinking |
-| nemotron-3-ultra:cloud | nvidia/nemotron-3-ultra-550b-a55b | $0.600 | $3.600 | $0.200 | openrouter | 256K served context; tools/thinking |
-| qwen3.5:397b-cloud | qwen/qwen3.5-397b-a17b | $0.500 | $3.600 | $0.300 | openrouter | 256K context; vision/tools/thinking |
+| gemma4:31b-cloud | Ollama [Gemma 4](https://ollama.com/library/gemma4) | $0.140 | $0.400 | $0.050 | official | 256K context; vision/tools/thinking |
+| glm-5.3-flash:cloud | Ollama [GLM 5.3 Flash](https://ollama.com/library/glm-5.3-flash) | $0.150 | $0.500 | $0.030 | official | 1M served context; 128K max output; vision/tools; low/high/max thinking |
+| glm-5.2:cloud | Ollama [GLM 5.2](https://ollama.com/library/glm-5.2) | $1.400 | $4.400 | $0.260 | official | 1M context; tools/thinking |
+| glm-5.3:cloud | Ollama [GLM 5.3](https://ollama.com/library/glm-5.3) | $1.400 | $4.400 | $0.260 | official | 1M context; tools/thinking |
+| glm-5.1:cloud | Ollama [GLM 5.1](https://ollama.com/library/glm-5.1) | $1.000 | $3.200 | $0.200 | official | 198K context; tools/thinking |
+| gpt-oss:120b-cloud | Ollama [GPT OSS](https://ollama.com/library/gpt-oss) (120B) | $0.150 | $0.600 | $0.014 | official | 128K context; tools/thinking |
+| gpt-oss:20b-cloud | Ollama [GPT OSS](https://ollama.com/library/gpt-oss) (20B) | $0.070 | $0.300 | $0.035 | official | 128K context; tools/thinking; picker-ineligible |
+| kimi-k2.6:cloud | Ollama [Kimi K2.6](https://ollama.com/library/kimi-k2.6) | $0.950 | $4.000 | $0.160 | official | 256K context; vision/tools/thinking |
+| kimi-k2.7-code:cloud | Ollama [Kimi K2.7 Code](https://ollama.com/library/kimi-k2.7-code) | $0.950 | $4.000 | $0.190 | official | 256K context; vision/tools/thinking |
+| minimax-m2.7:cloud | Ollama [MiniMax M2.7](https://ollama.com/library/minimax-m2.7) | $0.300 | $1.200 | $0.060 | official | 192K served context; tools/thinking |
+| minimax-m3:cloud | Ollama [MiniMax M3](https://ollama.com/library/minimax-m3) | $0.600 | $2.400 | $0.120 | official | 512K served context; vision/tools/thinking |
+| mistral-large-3:675b-cloud | Ollama [Mistral Large 3](https://ollama.com/library/mistral-large-3) | $0.500 | $1.500 | — | official | 256K context; vision/tools; no thinking |
+| nemotron-3-nano:30b-cloud | Ollama [Nemotron 3 Nano](https://ollama.com/library/nemotron-3-nano) | $0.060 | $0.240 | — | official | No published cache-read tier (`-`, not zero): flagged `cacheReadUnsupported`, so positive cache-read usage stays unpriced while zero cache-read usage prices base; 1M catalog context; tools/thinking |
+| nemotron-3-super:cloud | Ollama [Nemotron 3 Super](https://ollama.com/library/nemotron-3-super) | $0.015 | $0.600 | $0.015 | official | 256K served context; tools/thinking |
+| nemotron-3-ultra:cloud | Ollama [Nemotron 3 Ultra](https://ollama.com/library/nemotron-3-ultra) | $0.100 | $3.000 | $0.100 | official | 256K served context; tools/thinking |
+| qwen3.5:397b-cloud | Ollama [Qwen 3.5](https://ollama.com/library/qwen3.5) (397B) | $0.600 | $3.600 | — | official | No published cache-read tier (`-`, not zero): flagged `cacheReadUnsupported`, so positive cache-read usage stays unpriced while zero cache-read usage prices base; 256K context; vision/tools/thinking |
 | qwen3.5:cloud | qwen/qwen3.5-plus-02-15 | $0.260 | $1.560 | — | openrouter | 256K context; vision/tools/thinking |
 
 Cache write is `$0` for active Ollama rows except `gemini-3-flash-preview:cloud`, whose OpenRouter source publishes `$0.0833333333333` per 1M tokens.
@@ -231,7 +236,7 @@ Models in `model-profiles.yaml` without pricing in this evidence document:
 |---|---|
 | grok-code-fast-1 | No official token pricing published by GitHub Copilot; cost remains unavailable until a real token rate is published. |
 
-No active Ollama Cloud model remains unpriced as of 2026-09-13. Kimi K3 and DeepSeek V4.1 Flash use Ollama's official rates; the remaining Ollama entries use current OpenRouter comparison rates.
+No active Ollama Cloud model remains unpriced as of 2026-09-23. Entries with an exact match in Ollama's official pricing table use Ollama rates; models without a matching published price retain OpenRouter comparison rates. DeepSeek V4 prices are time-dependent: the catalog carries official off-peak base rates plus the weekday 12:00–18:00 UTC peak schedule, and observations without applicable band evidence stay unpriced (see the Ollama section above). Models with an unpublished cache-read price (`-`) keep positive cache-read usage unpriced via `cacheReadUnsupported`.
 
 ---
 
@@ -251,6 +256,8 @@ No active Ollama Cloud model remains unpriced as of 2026-09-13. Kimi K3 and Deep
 12. **OpenAI GPT-5.6 Luna**: https://developers.openai.com/api/docs/models/gpt-5.6-luna
 13. **OpenAI ChatGPT/Codex rate card**: https://help.openai.com/en/articles/20001415-chatgpt-rate-card-enterprise-token-based-pricing
 14. **OpenAI GPT-6 Astra**: https://developers.openai.com/api/docs/models/gpt-6-astra
+15. **OpenAI GPT-6 Sol**: https://developers.openai.com/api/docs/models/gpt-6-sol
+16. **OpenAI GPT-6 Luna**: https://developers.openai.com/api/docs/models/gpt-6-luna
 
 ---
 
@@ -269,3 +276,6 @@ No active Ollama Cloud model remains unpriced as of 2026-09-13. Kimi K3 and Deep
 | 2026-08-27 | Added Ollama Cloud GLM 5.3 Flash availability and served metadata from Ollama's catalog plus local `/api/show`; added current `z-ai/glm-5.3-flash` OpenRouter comparison rates. |
 | 2026-09-05 | Added GPT-6 Astra using OpenAI's official token rates and pi.dev's live OpenAI Codex metadata. |
 | 2026-09-13 | Added Ollama Cloud DeepSeek V4.1 Flash using Ollama's official model metadata and cloud pricing. |
+| 2026-09-23 | Added GPT-6 Sol and GPT-6 Luna to the OpenAI Codex catalog using OpenAI's official model pricing and pi.dev's Codex metadata. |
+| 2026-09-23 | Refreshed active Ollama Cloud rates against Ollama's official pricing table and exact model library pages; retained OpenRouter comparison rates where Ollama publishes no matching price and documented the DeepSeek peak/off-peak static-pricing limitation. |
+| 2026-09-23 | Implemented bounded time-aware pricing applicability. The exact DeepSeek V4 models now carry official off-peak base rates (V4.1 Flash $0.15/$0.003/$0.60 unchanged; V4 Flash $0.22/$0.007/$0.66; V4 Pro $0.66/$0.022/$1.98, all replacing OpenRouter comparison rates) plus a typed weekday 12:00–18:00 UTC peak window at exactly 2×; pricing applies only when both valid, closed evidence endpoints resolve to one half-open band: a request ending at a band boundary is unknown if its completion anchor belongs to the adjacent band, while instantaneous boundary evidence follows `[start, end)` membership. Aggregate consumers without interval evidence stay unknown. Nemotron 3 Nano 30B and Qwen 3.5 397B (official cache price `-`) gained the `cacheReadUnsupported` flag: positive cache-read usage stays unpriced, zero cache-read usage prices base. Versioned DeepSeek aliases (`deepseek-v4-flash:0731-cloud`, `deepseek-v4-pro:0813-cloud`) retain their OpenRouter comparison rates. |

@@ -69,20 +69,6 @@ function installMocks(): () => void {
   const moduleWithLoad = Module as typeof Module & { _load: (...args: any[]) => unknown };
   const originalLoad = moduleWithLoad._load;
   moduleWithLoad._load = function patchedLoad(request: string, parent: unknown, isMain: boolean) {
-    if (request === 'vscode') {
-      return {
-        version: 'test',
-        EventEmitter: class<TValue> {
-          private readonly emitter = new EventEmitter();
-          readonly event = (listener: (value: TValue) => void) => {
-            this.emitter.on('event', listener);
-            return { dispose: () => this.emitter.off('event', listener) };
-          };
-          fire(value: TValue): void { this.emitter.emit('event', value); }
-          dispose(): void { this.emitter.removeAllListeners(); }
-        },
-      };
-    }
     if (request === 'node:child_process' || request === 'child_process') {
       return {
         ...cp,

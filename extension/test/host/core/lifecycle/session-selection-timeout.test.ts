@@ -99,7 +99,7 @@ test('selection timeout clears pending tab and surfaces a notice', async () => {
   const backend = { request: async () => undefined } as any;
   const context = createExtensionContext();
   let renderCount = 0;
-  const state = new SessionServiceState(context, backend, () => {
+  const state = new SessionServiceState(backend, () => {
     renderCount += 1;
   }, getArchState, dispatchArch, 15);
 
@@ -152,7 +152,7 @@ test('finishing a selection request cancels its timeout watchdog', async () => {
   const backend = { request: async () => undefined } as any;
   const context = createExtensionContext();
   let renderCount = 0;
-  const state = new SessionServiceState(context, backend, () => {
+  const state = new SessionServiceState(backend, () => {
     renderCount += 1;
   }, getArchState, dispatchArch, 15);
 
@@ -177,7 +177,6 @@ test('a superseded selection timeout cleans up silently without overwriting the 
     archState = result.state;
   };
   const state = new SessionServiceState(
-    createExtensionContext(),
     { request: async () => undefined } as any,
     () => undefined,
     getArchState,

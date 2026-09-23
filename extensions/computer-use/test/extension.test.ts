@@ -48,6 +48,56 @@ test('extension registers exactly one sequential computer tool and session-owned
   assert.ok(handlers.has('session_shutdown'));
 });
 
+test('tool description leads with a standalone first sentence within the pruner cap', () => {
+  // The skill pruner keeps only the first sentence of a tool description when
+  // it fits the 180-char prepass cap (compactDescription in skill-pruner), so
+  // the leading sentence must stand alone and stay within the cap.
+  const description = registeredTool().description as string;
+  const boundary = description.indexOf('. ');
+  assert.ok(boundary > 0, 'description must contain a sentence boundary');
+  const firstSentence = description.slice(0, boundary + 1);
+  assert.ok(firstSentence.length <= 180, `first sentence is ${firstSentence.length} chars`);
+  assert.match(firstSentence, /Windows desktop/);
+});
+
+test('prompt guidelines route in-page browser work to playwright', () => {
+  const tool = registeredTool();
+  const guidelines = tool.promptGuidelines as string[];
+  assert.ok(guidelines.some((line) => /playwright/i.test(line) && /in-page/i.test(line)));
+});
+
+test('computer schema fields document required actions and coordinate semantics', () => {
+  const tool = registeredTool();
+  const properties = tool.parameters.properties as Record<string, any>;
+  const action = properties.action.description as string;
+  assert.match(action, /open \(requires selector\)/);
+  assert.match(action, /act \(requires input\)/);
+  assert.match(action, /run_sequence \(requires exactly one of sequence or sequencePath\)/);
+  assert.match(action, /observe, act, run_sequence, and close require sessionId/);
+  assert.match(properties.revision.description, /target-relative x\/y coordinates/);
+  assert.match(properties.revision.description, /desktop-session input bound to the observed foreground/);
+  assert.match(properties.revision.description, /except wait, focus, release_all, key_up, and mouse_up/);
+  assert.match(properties.selector.properties.kind.description, /window_id requires windowId/);
+  const input = properties.input.properties;
+  assert.match(input.kind.description, /Per-kind required fields/);
+  assert.match(input.button.description, /click\/double_click\/drag\/mouse_down\/mouse_up/);
+  assert.doesNotMatch(input.button.description, /right_click/);
+  assert.match(input.target.properties.x.description, /latest observation screenshot frame/);
+  assert.match(input.target.properties.x.description, /window visible region for window targets, full display for desktop targets/);
+  assert.match(input.target.properties.scope.description, /desktop uses desktop-absolute/);
+  assert.match(input.target.properties.scope.description, /latest observation screenshot frame/);
+  assert.match(input.target.properties.ref.description, /Exactly one of ref or x\/y/);
+  for (const field of ['state', 'screenshot', 'tree']) {
+    assert.match(properties[field].description, /Defaults true for observe/);
+    assert.match(properties[field].description, /inline open\/run_sequence observations include it only when true \(unspecified flags are false\)/);
+  }
+  assert.match(properties.closeApplication.description, /only for a window target/);
+  assert.match(input.durationMs.description, /milliseconds/);
+  const sequenceActions = properties.sequence.properties.actions.items.properties;
+  assert.match(sequenceActions.atMs.description, /milliseconds/);
+  assert.match(sequenceActions.atMs.description, /nondecreasing/);
+});
+
 test('repeated module evaluations install process teardown only once', () => {
   // The pi loader re-evaluates the extension module on every session create; the
   // install-once flag must survive re-evaluation or exit/beforeExit listeners

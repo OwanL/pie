@@ -29,6 +29,8 @@ Existing subagent eligibility decisions are retained for models that remain avai
 
 Models owned by other providers are never changed or removed. Because model identity is `(provider, id)`, the same ID may exist under Copilot and another provider; reconciliation automatically provider-qualifies the corresponding `profileOrder` references.
 
+Token pricing is never silently treated as free. A picker-visible model whose billing record lacks billable default `input_price`/`output_price` rates — or whose advertised long-context tier lacks them — rejects the refresh so the last known-good catalog remains intact, exactly like an extended-tier model without a valid default boundary. Absent or non-applicable cache rates still default to `0`, and an explicit `0` price remains a valid free rate.
+
 If Copilot makes a retired model available again, reconciliation promotes that exact `(github-copilot, id)` identity back into the active catalog and removes its historical entry in the same locked transaction. Unrelated historical identities and their pricing metadata remain untouched, while the active entry receives current endpoint metadata and pricing.
 
 ## Failure handling

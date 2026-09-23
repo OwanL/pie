@@ -220,6 +220,9 @@ function toModelsJsonModel(m, includeId) {
         cacheRead: m.pricing.cacheRead,
         cacheWrite: m.pricing.cacheWrite,
         ...(m.pricing.tiers !== undefined ? { tiers: m.pricing.tiers } : {}),
+        ...(m.pricing.peak !== undefined ? { peak: m.pricing.peak } : {}),
+        ...(m.pricing.cacheReadUnsupported !== undefined
+          ? { cacheReadUnsupported: m.pricing.cacheReadUnsupported } : {}),
       };
     } else if (m[k] !== undefined) {
       obj[k] = m[k];
@@ -275,6 +278,9 @@ export function generatePricingHistoryJson(source) {
         cacheRead: m.pricing.cacheRead,
         cacheWrite: m.pricing.cacheWrite,
         ...(m.pricing.tiers !== undefined ? { tiers: m.pricing.tiers } : {}),
+        ...(m.pricing.peak !== undefined ? { peak: m.pricing.peak } : {}),
+        ...(m.pricing.cacheReadUnsupported !== undefined
+          ? { cacheReadUnsupported: m.pricing.cacheReadUnsupported } : {}),
       },
     };
     if (m.family !== undefined) entry.family = m.family;

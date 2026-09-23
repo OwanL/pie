@@ -155,7 +155,8 @@
         "pie.browserServer.enabled": {
           "type": "boolean",
           "default": true,
-          "description": "Start the loopback browser server (http://127.0.0.1:1997) automatically when pie activates. The listener binds 127.0.0.1 only and is unreachable on LAN interfaces."
+          "scope": "application",
+          "description": "Start the browser server automatically when pie activates, and control the listener from the Browser network access popover (VS Code only). By default it binds only to 127.0.0.1; LAN exposure requires pie.browserServer.allowLan."
         },
         "pie.browserServer.port": {
           "type": "number",
@@ -163,6 +164,12 @@
           "minimum": 1,
           "maximum": 65535,
           "description": "Preferred loopback port for the browser server. When occupied, an OS-assigned fallback port is used instead (unless `requirePreferredPort` is set)."
+        },
+        "pie.browserServer.allowLan": {
+          "type": "boolean",
+          "scope": "application",
+          "default": false,
+          "description": "Opt in to unauthenticated trusted-LAN access. Binds IPv4 all interfaces and advertises private LAN URLs; restricts peers to loopback/private IPv4 and validates Host/Origin against loopback or advertised private IPv4 values. Any reachable LAN user can execute commands and read or modify files. Use only on a trusted network; this does not support internet/public access and adds no authentication or TLS."
         },
         "pie.browserServer.requirePreferredPort": {
           "type": "boolean",

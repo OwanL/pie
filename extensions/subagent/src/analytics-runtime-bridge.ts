@@ -30,6 +30,9 @@ function installedBridge(): InstalledAnalyticsRuntimeBridge | undefined {
   const readFactAcknowledgement = value.readFactAcknowledgement;
   const isDetailComplete = value.isDetailComplete;
   const releaseAcknowledgementInterest = value.releaseAcknowledgementInterest;
+  const priceSubagentSettlement = typeof value.priceSubagentSettlement === 'function'
+    ? value.priceSubagentSettlement as InstalledAnalyticsRuntimeBridge['priceSubagentSettlement']
+    : undefined;
   return {
     generationId: value.generationId,
     captureSubject,
@@ -46,6 +49,7 @@ function installedBridge(): InstalledAnalyticsRuntimeBridge | undefined {
     releaseAcknowledgementInterest: (generationId, stableOriginId, payloadId) => {
       releaseAcknowledgementInterest(generationId, stableOriginId, payloadId);
     },
+    ...(priceSubagentSettlement ? { priceSubagentSettlement } : {}),
   };
 }
 
@@ -83,5 +87,8 @@ export function resolveInstalledSubagentAnalyticsCapture(): SubagentAnalyticsCap
       subjectIdentity(bridge.captureSubject),
       toolCallId,
     ),
+    ...(typeof bridge.priceSubagentSettlement === 'function'
+      ? { priceSettlement: bridge.priceSubagentSettlement }
+      : {}),
   };
 }

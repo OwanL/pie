@@ -2,21 +2,54 @@ import * as cp from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
-import * as vscode from 'vscode';
-
 import type { ArchState } from './reducer';
 import { resolveBaselineRef, isTrackedByGit } from '../../shared/git-baseline';
 
-export const EMPTY_DIFF_SCHEME = 'pie-empty-diff';
-
-export class EmptyDiffContentProvider implements vscode.TextDocumentContentProvider {
-  provideTextDocumentContent(): string {
-    return '';
-  }
+/** Narrow host capability needed by the platform-neutral file-change core. */
+export interface FileDiffPlatform {
+  /** Workspace fallback used when a session and ArchState have no cwd. */
+  getWorkspaceCwd(): string | undefined;
+  /** Revert failures are intentionally non-fatal, matching the existing UI. */
+  showWarning(message: string): void;
 }
 
-export class FileDiffService {
-  constructor(private readonly getArchState: () => ArchState) {}
+/** Core file-change operations consumed by the effect runner. */
+export interface FileDiffServiceLike {
+  revertFile(sessionPath: string, filePath: string): Promise<void>;
+}
+
+/** Read-only core surface needed by a changed-file viewer adapter. */
+export interface FileDiffCoreLike {
+  resolveFileChangePath(sessionPath: string, filePath: string): string;
+  getFileChangeKind(
+    sessionPath: string,
+    filePath: string,
+    resolvedPath: string,
+  ): 'created' | 'modified' | 'deleted';
+  resolveBaselineRef(resolvedPath: string): Promise<string>;
+}
+
+/** Viewer operations remain an adapter concern (VS Code, browser, etc.). */
+export interface FileDiffViewerLike {
+  openFileDiff(sessionPath: string, filePath: string): Promise<void>;
+  openFileInEditor(sessionPath: string, filePath: string): Promise<void>;
+}
+
+const DEFAULT_PLATFORM: FileDiffPlatform = {
+  getWorkspaceCwd: () => undefined,
+  showWarning: () => undefined,
+};
+
+/**
+ * Platform-neutral changed-file core. It owns ArchState path resolution and
+ * file-change classification plus the git baseline/revert behavior. Rendering
+ * a diff or opening an editor belongs to a host adapter, not this module.
+ */
+export class FileDiffService implements FileDiffServiceLike, FileDiffCoreLike {
+  constructor(
+    private readonly getArchState: () => ArchState,
+    private readonly platform: FileDiffPlatform = DEFAULT_PLATFORM,
+  ) {}
 
   resolveFileChangePath(sessionPath: string, filePath: string): string {
     if (path.isAbsolute(filePath)) {
@@ -30,7 +63,7 @@ export class FileDiffService {
     const basePath =
       sessionCwd ||
       archState.sessions.workspaceCwd ||
-      vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      this.platform.getWorkspaceCwd();
     return basePath ? path.resolve(basePath, filePath) : filePath;
   }
 
@@ -48,116 +81,14 @@ export class FileDiffService {
     return change?.kind ?? 'modified';
   }
 
-  private toGitUri(uri: vscode.Uri, ref: string): vscode.Uri {
-    return uri.with({
-      scheme: 'git',
-      query: JSON.stringify({ path: uri.fsPath, ref }),
-    });
-  }
-
-  private toEmptyDiffUri(uri: vscode.Uri): vscode.Uri {
-    return uri.with({
-      scheme: EMPTY_DIFF_SCHEME,
-      query: '',
-      fragment: '',
-    });
-  }
-
-  async openFileDiff(sessionPath: string, filePath: string): Promise<void> {
-    const resolvedPath = this.resolveFileChangePath(sessionPath, filePath);
-    const uri = vscode.Uri.file(resolvedPath);
-    let kind = this.getFileChangeKind(sessionPath, filePath, resolvedPath);
-    // A `created` kind is the derivation's best guess from the tool NAME
-    // (write/create) — it cannot prove the file is new. Verify the claim
-    // against git: a tracked file existed before the session, so an overwrite
-    // is a modification, not a creation. Only treat as created (diff vs
-    // empty) when the file is NOT git-tracked. This is the evidence check —
-    // we do not claim a file is definitely created when git shows it already
-    // existed.
-    if (kind === 'created' && await isTrackedByGit(resolvedPath)) {
-      kind = 'modified';
-    }
-    const emptyUri = this.toEmptyDiffUri(uri);
-    // Diff baseline: NOT a bare `HEAD`. The changed-files panel is derived
-    // from transcript tool calls, and pi agents commit their work after each
-    // task — so for any committed file `HEAD` already contains the agent's
-    // changes and a `HEAD`-vs-working-tree diff is empty (the "same file on
-    // both sides" bug). `resolveBaselineRef` walks the file's git history to
-    // the most recent commit whose content DIFFERS from the working tree —
-    // the pre-change baseline — falling back to `HEAD` when none is found.
-    const fileExists = await fs.access(resolvedPath).then(() => true, () => false);
-    const baselineRef =
-      kind === 'created' ? undefined : await this.resolveBaselineRef(resolvedPath);
-    // A non-HEAD ref came from the file's history and therefore contains a
-    // usable snapshot. HEAD is also usable when git still tracks the path.
-    // Without this guard, VS Code's git content provider receives a bogus
-    // `git:` URI for non-git/untracked files and renders "file was not found".
-    const hasGitBaseline = baselineRef !== undefined && (
-      baselineRef !== 'HEAD' || await isTrackedByGit(resolvedPath)
-    );
-
-    if (!fileExists && !hasGitBaseline) {
-      const reason = kind === 'deleted'
-        ? 'No Git baseline is available for this deleted file.'
-        : 'The file no longer exists on disk.';
-      void vscode.window.showWarningMessage(
-        `Cannot show agent changes for ${resolvedPath}. ${reason}`,
-      );
-      return;
-    }
-
-    if (!fileExists) {
-      void vscode.window.showWarningMessage(
-        `${resolvedPath} no longer exists on disk. Showing its last available Git version.`,
-      );
-    } else if (!hasGitBaseline && kind !== 'created') {
-      void vscode.window.showWarningMessage(
-        `No Git baseline is available for ${resolvedPath}. Showing the current file as newly created.`,
-      );
-    }
-
-    const originalUri = hasGitBaseline
-      ? this.toGitUri(uri, baselineRef)
-      : emptyUri;
-    const modifiedUri = fileExists ? uri : emptyUri;
-
-    await vscode.commands.executeCommand(
-      'vscode.diff',
-      originalUri,
-      modifiedUri,
-      `${path.basename(resolvedPath)} — agent changes`,
-      { preview: true },
-    );
-  }
-
   /**
    * Resolve the git ref to diff a changed file against — the pre-change
-   * baseline rather than a bare `HEAD`.
-   *
-   * Walks the file's git history (commits that touched it, newest first) and
-   * returns the most recent commit whose content DIFFERS from the working
-   * tree. For an uncommitted (dirty) change that is `HEAD` itself (current
-   * behaviour preserved); for a change the agent has since committed it is the
-   * commit just before the change — without this, `HEAD` already holds the
-   * agent's edits and the diff is empty.
-   *
-   * Known limitation: if the agent made several commits to the same file
-   * during a session and the working tree matches the latest of them, the
-   * baseline is the commit before the LAST change, so the diff shows only
-   * that final delta rather than the whole session's churn. Returns `'HEAD'`
-   * (no regression) when the file is untracked, git is unavailable, or the
-   * walk finds no differing commit.
+   * baseline rather than a bare `HEAD`. Kept as a method for host callers and
+   * the existing core contract; the implementation is shared with the other
+   * changed-file surfaces.
    */
-  /** Delegate to the shared pure-node baseline resolver (shared/git-baseline).
-   *  Kept as a method so host callers + the existing test (svc.resolveBaselineRef)
-   *  are unchanged after the extraction. */
   async resolveBaselineRef(resolvedPath: string): Promise<string> {
     return resolveBaselineRef(resolvedPath);
-  }
-
-  async openFileInEditor(sessionPath: string, filePath: string): Promise<void> {
-    const resolvedPath = this.resolveFileChangePath(sessionPath, filePath);
-    await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(resolvedPath), { preview: false });
   }
 
   async revertFile(sessionPath: string, filePath: string): Promise<void> {
@@ -185,7 +116,7 @@ export class FileDiffService {
       // Last resort: if the file still exists, warn the user.
       const exists = await fs.access(resolvedPath).then(() => true, () => false);
       if (exists) {
-        void vscode.window.showWarningMessage(
+        this.platform.showWarning(
           `Could not revert ${filePath}. The file may not be under source control.`,
         );
         return;

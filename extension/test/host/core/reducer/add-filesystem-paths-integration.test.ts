@@ -56,13 +56,13 @@ test('addFilesystemPaths attaches to the active session when one exists (no crea
 
   const context = createExtensionContext();
   const backend = { request: async () => ({}) } as any;
-  const state = new SessionServiceState(context, backend, () => undefined, getArchState, dispatchArch, 0);
+  const state = new SessionServiceState(backend, () => undefined, getArchState, dispatchArch, 0);
   const tabs = new SessionTabActions({
-    context, scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER,
+    scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER,
     state, getArchState, dispatchArch,
   });
   const messages = new SessionMessageActions({
-    context, backend, scheduleRender: () => undefined,
+    backend, scheduleRender: () => undefined,
     state, createNewSession: () => tabs.createNewSession(), getArchState, dispatchArch,
   });
 
@@ -105,13 +105,13 @@ test('addFilesystemPaths with no active session calls createNewSession() then at
 
   const context = createExtensionContext();
   const backend = { request: async () => ({}) } as any;
-  const state = new SessionServiceState(context, backend, () => undefined, getArchState, dispatchArch, 0);
+  const state = new SessionServiceState(backend, () => undefined, getArchState, dispatchArch, 0);
   const tabs = new SessionTabActions({
-    context, scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER,
+    scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER,
     state, getArchState, dispatchArch,
   });
   const messages = new SessionMessageActions({
-    context, backend, scheduleRender: () => undefined,
+    backend, scheduleRender: () => undefined,
     state, createNewSession: () => tabs.createNewSession(), getArchState, dispatchArch,
   });
 
@@ -167,13 +167,13 @@ test('addFilesystemPaths with no paths or invalid paths dispatches no Command', 
 
   const context = createExtensionContext();
   const backend = { request: async () => ({}) } as any;
-  const state = new SessionServiceState(context, backend, () => undefined, getArchState, dispatchArch, 0);
+  const state = new SessionServiceState(backend, () => undefined, getArchState, dispatchArch, 0);
   const tabs = new SessionTabActions({
-    context, scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER,
+    scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER,
     state, getArchState, dispatchArch,
   });
   const messages = new SessionMessageActions({
-    context, backend, scheduleRender: () => undefined,
+    backend, scheduleRender: () => undefined,
     state, createNewSession: () => tabs.createNewSession(), getArchState, dispatchArch,
   });
 

@@ -29,6 +29,7 @@ export interface BottomSectionProps {
   commandsAvailable?: boolean;
   activeSession: ViewState['activeSession'];
   privacyMode?: boolean;
+  browserServer?: ViewState['browserServer'];
   modelSettings: ViewState['modelSettings'];
   availableModels: ViewState['availableModels'];
   availableModelsStatus: ViewState['availableModelsStatus'];
@@ -68,7 +69,7 @@ export interface BottomSectionProps {
   compacting: boolean;
   /** Most recent completed compaction for the active session (transient chip). */
   lastCompaction: ViewState['lastCompactionBySession'][string];
-  handlers: Pick<AppHandlers, 'handleSend' | 'handleRetrySend' | 'handleInterrupt' | 'handleAddComposerInput' | 'handleRemoveComposerInput' | 'handleModelChange' | 'handleSetPrefs' | 'handleMcpListRequested' | 'handleMcpSetServerEnabled' | 'handleMcpSetServerEnabledForSession' | 'handleSetPrivacyMode' | 'handleSetSystemPromptToggles' | 'handleSetPruningSettings' | 'handleSetToolResultPruningSettings' | 'handleSetSessionTitlesSettings'>;
+  handlers: Pick<AppHandlers, 'handleSend' | 'handleRetrySend' | 'handleInterrupt' | 'handleAddComposerInput' | 'handleRemoveComposerInput' | 'handleModelChange' | 'handleSetPrefs' | 'handleMcpListRequested' | 'handleMcpSetServerEnabled' | 'handleMcpSetServerEnabledForSession' | 'handleSetPrivacyMode' | 'handleSetBrowserServerLanEnabled' | 'handleSetBrowserServerEnabled' | 'handleSetSystemPromptToggles' | 'handleSetPruningSettings' | 'handleSetToolResultPruningSettings' | 'handleSetSessionTitlesSettings'>;
 }
 
 export const BottomSection = memo(function BottomSection({
@@ -84,6 +85,7 @@ export const BottomSection = memo(function BottomSection({
   commandsAvailable = true,
   activeSession,
   privacyMode = false,
+  browserServer,
   modelSettings,
   availableModels,
   availableModelsStatus,
@@ -144,6 +146,7 @@ export const BottomSection = memo(function BottomSection({
         activeProvider={activeSession?.provider}
         activeThinkingLevel={activeSession?.thinkingLevel}
         privacyMode={privacyMode}
+        browserServer={browserServer}
         modelSettings={modelSettings}
         availableModels={availableModels}
         availableModelsStatus={availableModelsStatus}
@@ -189,6 +192,8 @@ export const BottomSection = memo(function BottomSection({
         onMcpSetServerEnabled={handlers.handleMcpSetServerEnabled}
         onMcpSetServerEnabledForSession={handlers.handleMcpSetServerEnabledForSession}
         onSetPrivacyMode={handlers.handleSetPrivacyMode}
+        onSetBrowserServerLanEnabled={handlers.handleSetBrowserServerLanEnabled}
+        onSetBrowserServerEnabled={handlers.handleSetBrowserServerEnabled}
         onSetSystemPromptToggles={handlers.handleSetSystemPromptToggles}
         onSetPruningSettings={handlers.handleSetPruningSettings}
         onSetToolResultPruningSettings={handlers.handleSetToolResultPruningSettings}

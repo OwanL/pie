@@ -1,9 +1,10 @@
 # Pie Browser Server Implementation Plan
 
-**Status:** in progress — Milestones 0–2 implemented (loopback server, multi-renderer hub, fail-closed browser ingress, shared client transport, source-aware confirmations); Milestones 3–5 remain (resilience/mobile pass, browser-native file/diff/export, authenticated internet ingress). Milestone 6 is explicitly optional.
-**Initial deployment:** the existing VS Code extension host on the user's PC
-**Initial network boundary:** loopback only (`127.0.0.1`)
-**Later deployment:** authenticated HTTPS ingress to the same loopback service
+**Status:** in progress — Milestones 0–2 implemented (loopback-default server, opt-in trusted-LAN access, multi-renderer hub, fail-closed browser ingress, shared client transport, source-aware confirmations); the standalone Node entry and platform extraction are also implemented. Milestones 3–5 remain (resilience/mobile pass, browser-native file/diff/export, authenticated internet ingress).
+**Embedded deployment:** the existing VS Code extension host on the user's PC
+**Standalone deployment:** the Windows `start-pie.bat` launcher and built Node entry, using the same application runtime
+**Initial network boundary:** loopback by default (`127.0.0.1`); explicit unauthenticated trusted-LAN opt-in binds IPv4 all interfaces
+**Later deployment:** authenticated HTTPS ingress is a separate future project; this LAN feature does not support or enable internet access
 
 ## 1. Goal
 
@@ -12,12 +13,14 @@ Serve Pie's existing Preact UI in an ordinary browser while retaining the curren
 When VS Code opens and Pie activates:
 
 1. Pie starts its existing backend and host state machine.
-2. Pie starts an embedded HTTP/WebSocket server on `127.0.0.1`, preferring port `1997` for the first active VS Code window and selecting a separate loopback port for another window when needed.
-3. The server's actual loopback URL serves the same compiled UI bundle used by the sidebar; Pie's browser commands always use that instance-specific URL.
+2. Pie starts an embedded HTTP/WebSocket server on `127.0.0.1` by default, preferring port `1997` for the first active VS Code window and selecting an OS-assigned loopback port when needed. An explicit trusted-LAN setting instead binds IPv4 all interfaces and advertises the machine's private IPv4 interface URLs.
+3. The server's actual localhost URL serves the same compiled UI bundle used by the sidebar; opted-in LAN URLs serve the same instance. Browser Host and WebSocket Origin checks remain restricted to loopback or the exact private IPv4 interface addresses advertised by that instance.
 4. The browser registers as another passive renderer of the existing host state.
 5. Closing/reloading the extension stops the listener and all browser connections.
 
-The first release is local-only. A later phase puts the loopback service behind authenticated HTTPS ingress, such as Cloudflare Tunnel + Access, without exposing a public listener from Pie itself.
+The service is local-only: loopback is the default, and opt-in LAN mode is unauthenticated and intended only for a trusted local network. A separate future project may consider authenticated HTTPS ingress; this feature adds no authentication, TLS, tunnel, firewall rule, or internet support.
+
+The embedded flow below describes the VS Code composition. The implemented standalone entry is a second local composition root: it starts the same `HostRuntime`, backend boundary, `BrowserServer`, and Preact build with a browser-only platform. It prints the actual loopback URL and, only after explicit opt-in, private IPv4 LAN URLs; it does not open a browser or add internet/public access or VS Code editor/file/diff capabilities.
 
 ## 2. Product contract
 
@@ -30,7 +33,7 @@ The first release is local-only. A later phase puts the loopback service behind 
 - Scroll, focus, caret, hover, open menus, and other allowlisted renderer-local state remain independent per surface.
 - A slow, hidden, disconnected, or broken browser must not delay sidebar rendering or agent execution, and vice versa.
 - Refreshing or reconnecting the browser recovers from a full snapshot and never starts a second backend or replays a tool.
-- The local server starts automatically with Pie, requires no setup, and binds only to loopback.
+- The local server starts automatically with Pie and binds only to loopback by default. Trusted-LAN access is a separate explicit opt-in, warns that reachable LAN users can execute commands and read or modify files, and advertises only private IPv4 interface URLs.
 - Commands provide discoverability:
   - `pie: Open in Browser`
   - `pie: Copy Browser URL`
@@ -53,15 +56,18 @@ The browser is initially a second view of the VS Code-hosted Pie instance, not a
 | Completion attention | At most one visible eligible renderer receives completion attention, chosen by the deterministic host-owned arbitration in §8.3; all hidden means no renderer sound/UI recipient. Desktop window flashing (`requestWindowAttention` in `host/sidebar/completion-notification.ts`) is a separate current-host policy |
 | Logs and exported files | Existing host behavior initially; browser-native download/viewing is a later capability |
 
+The table describes a browser attached to the VS Code-hosted runtime. Standalone mode uses the browser renderer but has no VS Code shell: file picking, opening or revealing files, opening diffs, and opening VS Code settings are unavailable and report that limitation instead of claiming success.
+
 Milestone 2 includes the minimum source-aware confirmation seam for model switches and destructive reverts. A later milestone adds browser-native read-only file and diff viewers, exports, and attachment selection; those enhancements are not prerequisites for proving the browser transport. The rows above are the MVP contract.
 
-### 2.3 Explicit non-goals for the local MVP
+### 2.3 Explicit non-goals for the embedded local MVP
 
-- Running Pie after VS Code is closed.
+- Running the **embedded VS Code-hosted** browser after VS Code is closed; the separate standalone Node entry is the implemented path for that use case.
+- Giving standalone mode VS Code-specific editor, file picker, settings, or file/diff integration.
 - Moving the host state machine or backend into the browser.
 - Exposing backend JSON-RPC, arbitrary filesystem HTTP endpoints, or generic command execution to the browser.
 - Independent active-session selection or independent host-owned composer state per renderer.
-- LAN binding, `0.0.0.0`, router port forwarding, TLS, or public internet exposure.
+- Public/internet exposure, router port forwarding, authentication/TLS, or tunnels. The separate `allowLan` opt-in is limited to private IPv4 interfaces, remains unauthenticated, and is only for trusted local networks.
 - Reimplementing the UI, changing its visual language, or introducing a second frontend build.
 - Full browser-based source editing.
 
@@ -69,19 +75,22 @@ Milestone 2 includes the minimum source-aware confirmation seam for model switch
 
 | Concern | Current owner | Reuse/change |
 |---|---|---|
-| Application authority | `extension/src/host/core/*` and `ArchState` | Reuse unchanged; browser commands still enter the reducer/effect path |
-| Backend execution | `extension/src/backend/*` via `host/backend/client.ts` | Reuse unchanged; never connect the browser directly |
+| Application authority | `extension/src/host/runtime/host-runtime.ts`, `host/core/*`, and `ArchState` | Shared by the VS Code and standalone compositions; browser commands still enter the reducer/effect path |
+| Backend execution | `extension/src/backend/*` via `host/backend/client.ts` | Shared runtime boundary; never connect the browser directly |
 | Projection | `host/core/projection.ts` | Reuse; one shared logical `ViewState` |
-| Snapshot delivery | `host/sidebar/state-delivery-controller.ts` | Reuse one independent instance per renderer; share one expensive projected/JSON-safe state body per logical render, then assemble each renderer's delivery envelope (§4.1) |
+| Snapshot delivery | `host/sidebar/state-delivery-controller.ts`, `host/renderers/`, and `host/browser-server/` | Per-renderer delivery remains isolated; share one expensive projected/JSON-safe state body per logical render, then assemble each renderer's delivery envelope (§4.1) |
 | Readiness/recovery | `readiness-probe.ts`, `state-applied-watchdog.ts` | Reuse policies with renderer-specific recovery adapters |
-| VS Code renderer | `host/sidebar/provider.ts` | Refactor into a VS Code adapter registered with a renderer hub |
+| VS Code adapter/renderer | `host/extension-host.ts`, `host/vscode/`, `host/sidebar/provider.ts` | Own VS Code commands, shell, sidebar transport, and editor/file/diff capabilities |
+| Standalone adapter | `standalone/index.ts`, `standalone/startup.ts`, `standalone/platform.ts`, `standalone/storage.ts` | Own Node startup, browser-only renderer, workspace host storage, and bounded shutdown; do not duplicate the application runtime |
 | Shared protocol | `shared/protocol/webview.ts` | Extend for renderer identity/visibility, command acknowledgement, and browser ingress bounds; bump `WEBVIEW_PROTOCOL_VERSION` in `shared/protocol/core.ts` |
-| UI entry | `webview/panel/panel.tsx` | Extract a transport bootstrap; retain one Preact application |
+| UI entry | `webview/panel/panel.tsx` | Shared transport/bootstrap entry; retain one Preact application |
 | UI adapter | `webview/panel/app.tsx` | Extend `AppAdapter` with inbound subscription/lifecycle methods |
 | Webview assets | `host/webview/assets.ts`, Vite manifest | Split generic manifest/HTML work from VS Code URI/CSP resolution |
 | Build output | `out/webview/panel/` | Serve the same hashed entry, CSS, chunks, and manifest over HTTP |
 
 The implementation must preserve the CQRS/Elm-style MVI contract: browser messages are renderer intents, not a second state authority.
+
+The target diagram below shows the embedded VS Code composition. The standalone composition removes the VS Code shell and supplies `HostRuntimePlatform` from `extension/src/standalone/platform.ts`; the runtime and browser server remain the same.
 
 ## 4. Target architecture
 
@@ -113,7 +122,7 @@ The implementation must preserve the CQRS/Elm-style MVI contract: browser messag
 
 ### 4.1 Renderer hub
 
-Introduce a host-owned `RendererHub` between `PieExtension` and renderer transports. It owns a registry of renderer sessions. Each renderer session owns:
+Introduce a host-owned `RendererHub` between the shared application runtime and renderer transports. It owns a registry of renderer sessions. Each renderer session owns:
 
 - an unguessable in-process `rendererId`;
 - renderer kind (`vscode` or `browser`);
@@ -140,7 +149,7 @@ interface RendererHub {
 
 The existing `ready`, `refreshState`, and `requestSnapshot` callbacks call `requestState()` for their source renderer only. Selection changes still mutate shared host state and fan out to all renderers, while `scheduleSelectionState()` preserves the current bounded fast path for the initiating interaction. VS Code-only reveal/focus behavior remains on the sidebar adapter rather than being generalized into the hub.
 
-`PieExtension.scheduleRender()` fans one projection change out to every renderer session. Each session builds and delivers its own renderer envelope at its own pace. No post/commit gate is shared across renderers.
+`HostRuntime.scheduleRender()` fans one projection change out to every renderer surface. Each session builds and delivers its own renderer envelope at its own pace. No post/commit gate is shared across renderers.
 
 **Host event-loop isolation.** Per-renderer delivery controllers isolate *delivery state*, but projection/normalization, envelope assembly, and `ws.send` still execute on the extension host event loop. The MVP therefore adds three host-side rules:
 
@@ -336,57 +345,59 @@ Declare settings in `extension/package.json` and read them through VS Code confi
 
 | Setting | Default | Initial behavior |
 |---|---:|---|
-| `pie.browserServer.enabled` | `true` | Start automatically when Pie activates |
+| `pie.browserServer.enabled` | `true` | Start automatically when Pie activates; application-scoped (machine-wide, like `allowLan`). Also owned by the VS Code-only Browser network access popover switch, which persists the same global setting and starts/stops the shared listener on demand. Standalone hosts never expose the switch: the browser server is their only UI. |
 | `pie.browserServer.port` | `1997` | Preferred loopback port; valid range `1..65535` |
+| `pie.browserServer.allowLan` | `false` | Explicitly bind IPv4 all interfaces for unauthenticated trusted-LAN access; only private IPv4 interface URLs are advertised/accepted |
 | `pie.browserServer.requirePreferredPort` | `false` | When true, fail instead of falling back if the preferred port is occupied |
 
-Do not add a bind-address setting initially. The service always binds `127.0.0.1`.
+Do not add a configurable bind address. The service binds `127.0.0.1` by default; `allowLan: true` is the only opt-in and binds IPv4 all interfaces (`0.0.0.0`). It has no auth/TLS and is not supported for public or internet exposure. The machine-wide single-host coordinator remains strictly loopback-only and is never affected by this setting.
 
-VS Code can run one Pie extension host per window. The first window normally owns the preferred port. If it is occupied and `requirePreferredPort` is false, another window binds an OS-assigned loopback port, records the actual URL in its service state, and its Open/Copy commands use only that URL. It must never open the preferred-port URL merely because another Pie window owns it. The served page title/bootstrap identifies the owning workspace, making accidental wrong-window attachment visible. The current `hostInstanceId` comes only from `rendererHello` and may be displayed from that live connection state; it is never baked into potentially stale HTML. For authenticated internet ingress, the chosen window uses `requirePreferredPort: true` and an explicitly configured stable port. Public-origin configuration is instance/workspace-scoped and carries the expected host/workspace identity; ownership and fail-closed behavior are specified in §10.3.
+VS Code can run one Pie extension host per window. The first window normally owns the preferred port. If it is occupied and `requirePreferredPort` is false, another window binds an OS-assigned port on the selected interface, records its localhost URL and any LAN URLs in service state, and its Open/Copy commands use only its own actual URL. It must never open the preferred-port URL merely because another Pie window owns it. The served page title/bootstrap identifies the owning workspace, making accidental wrong-window attachment visible. The current `hostInstanceId` comes only from `rendererHello` and may be displayed from that live connection state; it is never baked into potentially stale HTML. For authenticated internet ingress, the chosen window uses `requirePreferredPort: true` and an explicitly configured stable port. Public-origin configuration is instance/workspace-scoped and carries the expected host/workspace identity; ownership and fail-closed behavior are specified in §10.3.
 
 Lifecycle outcomes are explicit and deduplicated:
 
 - successful preferred-port startup: one informational log, no notice;
-- successful fallback bind: one informational log containing the actual loopback URL, no global notice;
+- successful fallback bind: one informational log containing the actual localhost and any advertised LAN URLs, no bind-failure notice;
 - strict `EADDRINUSE` or another bind failure: one error log and one actionable global notice;
 - successful command-driven restart: one informational log and command completion message;
 - ordinary shutdown: one debug/informational lifecycle log, no notice.
 
-`pie: Restart Browser Server` performs an atomic stop and re-reads current settings. If `enabled` is false, it leaves the server stopped and reports that the feature is disabled; otherwise it attempts a new bind. Port/enabled changes therefore do not require an extension reload. Open/Copy use only the service's recorded actual URL. When disabled they report how to enable the setting; after a failed bind they report the existing actionable failure and never open or copy a stale/preferred URL.
+`pie: Restart Browser Server` performs an atomic stop and re-reads current settings. If `enabled` is false, it leaves the server stopped and reports that the feature is disabled; otherwise it attempts a new bind. Port/enabled/allowLan changes therefore do not require an extension reload. Open/Copy use only the service's recorded actual URL; the Copy feedback also shows available LAN URLs. When disabled they report how to enable the setting; after a failed bind they report the existing actionable failure and never open or copy a stale/preferred URL.
 
 ### 6.3 Local security boundary
 
-Local mode is intentionally low-friction but must still prevent ordinary web-origin attacks against a command-capable loopback service:
+Loopback mode remains intentionally low-friction and must prevent ordinary web-origin attacks against a command-capable service. In opt-in LAN mode, access is limited to a trusted local network, with the same strict origin boundary:
 
-- listen only on `127.0.0.1`, never all interfaces;
-- validate `Host` against the canonical loopback host/port to reduce DNS-rebinding risk;
-- accept WebSocket upgrades only from the exact served origin;
-- reject missing, `null`, wildcard, foreign, and extension-webview origins on the browser endpoint;
+- default to `127.0.0.1`; only explicit `allowLan: true` binds IPv4 all interfaces;
+- validate the peer's remote IPv4 address as loopback or private IPv4 in LAN mode, so a public client cannot gain access by forging browser headers;
+- validate `Host` against loopback or an exact private IPv4 address assigned to this machine, always with the actual port; reject DNS names, public IPs, and arbitrary LAN addresses to reduce DNS-rebinding risk;
+- accept WebSocket upgrades only from the exact served loopback or advertised LAN origin;
+- reject missing, `null`, wildcard, foreign, unadvertised, and extension-webview origins on the browser endpoint;
 - use a server-created renderer ID and generation; never trust client identity;
 - expose no secrets in URL query parameters, logs, HTML, or health output;
 - apply connection/payload/rate bounds and strict protocol validation;
 - set CSP, clickjacking, sniffing, and referrer headers;
 - keep backend credentials and raw backend RPC entirely behind the host boundary.
 
-A separate bearer login is not required for the loopback-only milestone. A local process can already act with the user's authority; the browser-origin controls prevent remote websites from driving the loopback agent through a victim browser.
+A separate bearer login is not required for default loopback mode because a local process already acts with the user's authority. Opt-in LAN mode intentionally has no authentication or TLS: every user who can reach an advertised URL may drive Pie commands and access files with the host user's authority. The browser-origin controls prevent foreign web pages and DNS-rebinding hostnames from driving the service through a victim browser; they are not LAN-user authentication. Enable LAN access only on a trusted local network. Internet/public access remains unsupported.
 
 ## 7. Lifecycle and ownership
 
-`PieExtension` owns the browser server. Do not start a listener at module import time.
+`HostRuntime` owns the browser server in both compositions. `PieExtension` owns only the VS Code shell and supplies the VS Code platform/renderer adapter; `startStandalone()` owns the Node composition and supplies the browser-only platform. Do not start a listener at module import time.
 
 Recommended lifecycle:
 
-1. Construct the renderer hub and sidebar adapter during `PieExtension` construction.
-2. During `PieExtension.start()`, initialize the server after the host can build a valid initial `ViewState`. Backend readiness can remain a field in that state; the HTTP shell need not wait indefinitely for provider/backend startup.
+1. Construct the VS Code sidebar adapter and `HostRuntime`, or construct `HostRuntime` from the standalone platform after startup validation.
+2. During `HostRuntime.start()`, initialize the server after the host can build a valid initial `ViewState`. Backend readiness can remain a field in that state; the HTTP shell need not wait indefinitely for provider/backend startup.
 3. Keep the listener alive across an explicit backend restart. Browser renderers observe backend readiness/failure through normal host state.
-4. On extension shutdown:
+4. On host shutdown:
    - stop accepting HTTP/upgrades;
    - close tracked WebSocket clients;
    - close/await the HTTP server;
    - dispose renderer sessions/hub;
    - continue the existing service/backend shutdown order.
 5. Make start/stop idempotent and handle a delayed `listen()` completing after shutdown has begun.
-6. Never let an old extension generation retain the port or post into a replacement host.
+6. Never let an old host generation retain the port or post into a replacement host.
 
 Use `ws` as a direct extension runtime dependency and `@types/ws` as a development dependency. The Node build bundles runtime dependencies into `out/extension.js`; do not rely on the VSIX containing `node_modules`.
 
@@ -582,7 +593,7 @@ Through a TLS/auth reverse-proxy fixture, before real exposure:
 - Browser model-switch confirm and destructive confirmations render inline through the M2 source-aware seam in the initiating renderer; the host proceeds only on explicit confirm, and disconnect cancels the pending confirmation.
 - A lagging browser is coalesced to the latest snapshot and never queues an unbounded backlog; reducer/effect/backend dispatch continues while a browser socket is blocked.
 - Closing a VS Code window releases the port owned by that window.
-- The listener is unreachable on LAN interfaces.
+- The listener is unreachable on LAN interfaces by default; explicit `allowLan` opt-in binds IPv4 all interfaces but accepts only loopback/private IPv4 peers plus exact advertised private IPv4 Host/Origin values, rejecting public-source clients even if they forge headers.
 - Startup, fallback, conflict, restart, disabled-command, and shutdown paths each produce the lifecycle outcome specified in §6.2—successful fallback is info-log-only, while only a terminal bind/start failure produces a notice—without affecting backend execution.
 
 ### Milestone 3 — Resilience and mobile browser pass
@@ -635,11 +646,13 @@ Through a TLS/auth reverse-proxy fixture, before real exposure:
 - Revoked/expired access disconnects and cannot reconnect.
 - The two-window ownership test passes: only the owning window serves the public origin; a non-owning window fails closed.
 - The local loopback origin remains unauthenticated and functional while the public origin rejects unauthenticated traffic.
-- Pie itself still listens only on loopback.
+- Pie does not bind a public origin; only the separately documented trusted-LAN option may bind IPv4 all interfaces, without internet support.
 
-### Milestone 6 — Optional VS Code-independent host
+### Milestone 6 — Standalone localhost entry and runtime extraction (implemented)
 
-Only pursue if keeping VS Code open becomes a meaningful limitation. Extract VS Code-owned startup, persistence, configuration, modal, and file/diff capabilities behind host adapters and run the same renderer hub/backend client from a standalone Node entry point. This is intentionally deferred; the embedded server proves the UX and transport with much less risk.
+The platform-neutral application runtime is now shared by the VS Code adapter and a standalone Node composition. `extension/src/standalone/index.ts` validates the built runtime/dependencies, starts `HostRuntime` with the browser-only platform, prints the actual `127.0.0.1` URL, and installs bounded signal shutdown. `start-pie.bat` prompts for an absolute workspace path; its PowerShell supervisor validates the generated output (run `npm run extension:build` first when it is absent) and launches `extension/out/standalone.js --cwd <workspace>` inside a private kill-on-close Job.
+
+The standalone platform provides workspace-keyed host storage while sessions, transcripts, SDK configuration, and the active analytics authority remain on their existing shared authorities. It deliberately does not provide VS Code editor/file-picker/settings/file-diff actions. Its launcher prompts for LAN access with a default of No and passes the answer explicitly; direct CLI startup restores the saved preference unless `--lan` or `--no-lan` explicitly overrides and persists it before server startup. Opted-in LAN mode prints private IPv4 URLs and a warning, with no authentication/TLS or public/internet support. Ctrl+C gets a graceful shutdown attempt; the supervisor force-terminates only the owned Job after its deadline, and closing the console cleans up that Job without deleting runtime data.
 
 ## 12. Verification strategy
 
@@ -674,7 +687,9 @@ Add focused coverage under:
   - connection-status rendering;
   - existing app smoke/evidence ordering through both adapters.
 - `extension/test/host/browser-server/`:
-  - loopback-only bind;
+  - default loopback bind and explicit IPv4 all-interface LAN opt-in, with no coordinator exposure;
+  - default-disabled setting/standalone launcher opt-in and URL reporting;
+  - HTTP and WebSocket Host/Origin acceptance for exact loopback and advertised private IPv4 addresses only;
   - manifest/static route allowlist and traversal rejection;
   - CSP/security headers;
   - Host/Origin/upgrade rejection;
@@ -756,7 +771,7 @@ Any edit under `extension/src/` requires the extension build, which also syncs o
 | UI forks between sidebar and browser | One Vite entry and component tree; transport/bootstrap adapters only |
 | VS Code actions have surprising browser behavior | Capability table, source-aware notices, then typed browser-native adapters |
 | Loopback service becomes a CSRF/RCE surface | Loopback bind, Host/Origin/CSP validation, strict routes/protocol/bounds |
-| Public exposure arrives before authentication | Separate internet milestone and release gate; keep Pie loopback-only |
+| Internet/public exposure arrives before authentication | Do not support public access; LAN opt-in is limited to private IPv4 addresses and remains explicitly unauthenticated |
 | Server failure destabilizes Pie | Server is a disposable host service; only terminal bind/start failures surface notices, and no server failure blocks backend/sidebar startup or execution |
 | Multiple VS Code windows contend for one port | Preferred-port fallback is instance-specific; commands use the actual bound URL; stable public ingress requires explicit single-owner port configuration |
 | Browser reconnect keeps stale renderer generation | Each accepted socket begins with `rendererHello`; browser identity is in memory and replaced before `ready` |
@@ -773,7 +788,7 @@ Any edit under `extension/src/` requires the extension build, which also syncs o
 
 The local release is complete when:
 
-1. Pie automatically serves the existing UI on an instance-owned loopback URL while the extension is active, preferring `http://127.0.0.1:1997` for the first window.
+1. The embedded composition serves the existing UI on an instance-owned loopback URL while the extension is active, preferring `http://127.0.0.1:1997` for the first window; explicit trusted-LAN opt-in also reports private IPv4 URLs. The standalone launcher serves the same UI from its Node composition and reports localhost plus opt-in private IPv4 URLs.
 2. Open/Copy/Restart Browser Server commands work and always address the calling window's actual server instance.
 3. Multiple VS Code windows cannot silently attach a browser to the wrong host/workspace.
 4. The sidebar and browser use the same UI build and the same host/backend authority.
@@ -782,7 +797,7 @@ The local release is complete when:
 7. Reconnect obtains a fresh transport identity and refresh/reconnect never duplicate mutations or execution.
 8. Targeted detail, rejection, and capability feedback cannot leak to another renderer.
 9. A stalled or over-limit browser cannot block or await sidebar rendering, reducer/effect dispatch, backend RPC, or agent execution; blocked snapshots are dropped/coalesced under the §4.1 gates.
-10. The server has a strict loopback/Host/Origin/CSP/route/payload boundary.
+10. The server has a strict loopback-default/Host/Origin/CSP/route/payload boundary; LAN access is default-off, peer sources are private IPv4 only, and Host/Origin are pinned to advertised private IPv4 interface addresses.
 11. Browser-server failure cannot break the sidebar or backend.
 12. Contract, unit, integration, build, package, and manual acceptance gates pass.
 13. `STATE_CONTRACT.md`, `ARCHITECTURE.md`, extension settings/commands, and user setup documentation describe the shipped behavior.

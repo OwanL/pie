@@ -12,7 +12,7 @@
  */
 
 import type { ModelPricingRecord, ModelTokenPricing } from '../../backend/pricing';
-import { pricingForPromptTokens } from '../../../../shared/pricing-core.js';
+import { pricingForPromptTokens, resolveApplicablePricing } from '../../../../shared/pricing-core.js';
 import { resolvePricingCatalogKey, providerPrefixOf, stripProviderPrefix } from '../../shared/model-id';
 import type {
   AggregateDailyCost,
@@ -515,6 +515,19 @@ function costFromTokens(
   );
 }
 
+/** Aggregate pricing eligibility: this projection rolls many requests into
+ *  cumulative token counts with no per-request interval, so scheduled
+ *  (peak-window) pricing has no applicable band here and must stay unknown
+ *  rather than fall back to one static rate. Unsupported cache-read usage
+ *  also stays unpriced; zero cache-read usage still prices base. */
+function applicableAggregatePricing(
+  pricing: ModelTokenPricing | null,
+  counts: TokenCounts,
+): ModelTokenPricing | null {
+  if (!pricing) return null;
+  return resolveApplicablePricing(pricing, { cacheReadTokens: counts.cacheReadTokens }) ?? null;
+}
+
 function usageTotal(usage: TokenCounts): number {
   return usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
 }
@@ -667,12 +680,13 @@ function usageForModel(
   const attributedModel = canonicalModel(model, pricingMap);
   const attributedProvider = providerForModel(model, pricingMap, preferredProvider);
   const pricing = pricingForModel(attributedModel, pricingMap, attributedProvider);
+  const applicablePricing = applicableAggregatePricing(pricing, counts);
   const calculatedCost = allowCatalogPricing ? costFromTokens(
     counts.inputTokens,
     counts.outputTokens,
     counts.cacheReadTokens,
     counts.cacheWriteTokens,
-    pricing,
+    applicablePricing,
     !aggregateAcrossRequests,
   ) : 0;
   const validReportedCost = typeof reportedCostUsd === 'number'
@@ -688,7 +702,7 @@ function usageForModel(
     // Catalog pricing is only a fallback when the provider did not report cost.
     cost: validReportedCost ?? calculatedCost,
     costObserved: validReportedCost !== undefined
-      || (allowCatalogPricing && pricing !== null && usageTotal(counts) > 0),
+      || (allowCatalogPricing && applicablePricing !== null && usageTotal(counts) > 0),
   };
 }
 

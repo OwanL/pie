@@ -274,8 +274,10 @@ export interface SubagentProviderInvocationRecord {
 	provider?: string;
 	model?: string;
 	usage?: Partial<Pick<UsageStats, "input" | "output" | "cacheRead" | "cacheWrite" | "cost" | "reportedCostUsd">>;
-	startedAt: number;
-	completedAt: number;
+	/** Original observed endpoint; absent when the SDK did not provide it. */
+	startedAt?: number;
+	/** Original observed endpoint; absent when the SDK did not provide it. */
+	completedAt?: number;
 	outcome: "success" | "failure" | "aborted";
 }
 

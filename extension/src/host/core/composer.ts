@@ -1,7 +1,5 @@
 import * as path from 'node:path';
 
-import * as vscode from 'vscode';
-
 import { type RunObserver } from '../stats-service';
 import type {
   ComposerInput,
@@ -21,7 +19,13 @@ export { modelSupportsInputKind } from './model-capability';
 export type { GetArchState } from './model-capability';
 export type DispatchArchEvent = (event: Event) => void;
 
-export function normalizeAttachUris(uris: vscode.Uri[]): vscode.Uri[] {
+/** Structural URI contract: any host URI object exposing the scheme is
+ *  accepted so the composer stays runtime-free (tests pass plain objects). */
+interface AttachUriShape {
+  scheme: string;
+}
+
+export function normalizeAttachUris<T extends AttachUriShape>(uris: T[]): T[] {
   return uris.filter((uri) => uri.scheme === 'file');
 }
 

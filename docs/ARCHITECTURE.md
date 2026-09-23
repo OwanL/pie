@@ -2,13 +2,20 @@
 
 ## 1. System Overview
 
-pie is a VS Code extension that provides a chat interface to a local PI (Programming Intelligence) backend. Five process roles cooperate in isolated mode:
+pie provides a chat interface to a local PI (Programming Intelligence) backend. The application host has one platform-neutral runtime and two composition roots:
 
-- **PI coordinator** — a lightweight process communicating with the extension host over JSONL stdio. It owns cold durable browsing, settings/catalog authority, worker routing, and global provider-network admission; it never creates an `AgentSession` in isolated mode.
+- **Application runtime** — `HostRuntime` (`extension/src/host/runtime/host-runtime.ts`) owns application state, reducer/effect execution, session/backend lifecycle, the browser server (loopback by default, trusted-LAN IPv4 only by explicit opt-in), and analytics authority selection. It does not import `vscode`.
+- **VS Code adapter** — `PieExtension` and `extension/src/host/vscode/host-runtime-platform.ts` own the status bar, commands, sidebar provider, VS Code notifications, and editor/file/diff capabilities, then delegate application composition and lifecycle to `HostRuntime`.
+- **Standalone Node entry** — `extension/src/standalone/index.ts`, launched by `start-pie.bat` through its supervisor, composes the same `HostRuntime` with a browser-only platform and workspace-scoped host storage. It does not emulate or import VS Code.
+- **Renderers** — the shared Preact application is rendered either in the VS Code sidebar webview or in a browser served by the shared browser server.
+
+Both composition roots use the same application runtime, backend boundary, browser server, and UI build; standalone is not a second application implementation.
+
+The isolated backend beneath that host has three process roles:
+
+- **PI coordinator** — a lightweight process communicating with the host over JSONL stdio. It owns cold durable browsing, settings/catalog authority, worker routing, and global provider-network admission; it never creates an `AgentSession` in isolated mode.
 - **Cold browse helper** — one persistent, read-only child of the coordinator. It owns exact-v3 manager-free projection misses and their bounded in-memory LRU, returning only windowed public payloads; it never owns a write lease or `AgentSession`.
 - **Root workers** — one process per hot root. Each owns exactly one SDK runtime/session context, extensions/tools, live event translation, extension UI bridge, and the root's sole write lease.
-- **Extension host** — the VS Code extension process. Owns all application state, serializes mutations, and projects state to the webview.
-- **Webview** — a Preact single-page app rendered in a VS Code sidebar panel. Displays the chat UI and dispatches user intents back to the host.
 
 Isolated mode is the sole runtime path for every backend generation. The coordinator never creates an `AgentSession`; all hot session execution runs in per-root workers. There is no legacy in-process runtime and no runtime-mode flag — Git history is the rollback mechanism if a regression is discovered.
 
@@ -40,6 +47,19 @@ The host distinguishes intentional stops from unexpected, generation-tagged exit
 
 An explicit restart is a reducer-owned `backend.restart` operation and configuration commit boundary. Trusted ingress assigns stable identity/source/causality; the reducer projects backend unavailability first, records configuration drain and confirmed old-generation death, and settles exactly once with the replacement generation or typed failure. Effect execution only holds the opaque promise while it drains already-accepted model/reasoning/preference effects, closes coordinator stdin, waits for accepted requests to settle, and spawns the replacement. Settings updates use a PID-owned cross-process lock with dead-owner recovery, so forced termination cannot strand the replacement behind an orphaned lock.
 
+### Single active pie host per machine
+
+Exactly one pie host — the VS Code extension or the standalone Node entry, never both — is active per machine, with VS Code priority. The authority is an OS-owned exclusive listener on a fixed loopback port (`extension/src/host/coordinator/host-coordinator.ts`; default `1996`, `PIE_HOST_COORDINATOR_PORT` override). Ownership is the bound socket itself: the kernel grants `listen(127.0.0.1)` to exactly one racing starter and releases it when the owning process dies. There is no PID file to go stale, and no component ever kills a process by PID. Both composition roots acquire ownership BEFORE environment resolution/runtime/backend startup and hold it until shutdown has actually finished: the standalone entry releases in its shutdown `finally` after the backend drain, and `PieExtension` releases only after `runtime.shutdown()` completes. A failed startup aborts the handle immediately.
+
+Behavior per contender:
+
+- **Standalone**: one bounded attempt. Any active pie host (either kind) is a hard refusal with an explicit multi-line terminal message (exit code 2); nothing was started.
+- **Second VS Code window**: refused with a visible notification while the first window's pie keeps running.
+- **VS Code handoff from standalone**: a progress notification reports that a stop was requested; the standalone host receives one unauthenticated local `shutdown` request, logs that VS Code requested the stop, performs its own graceful shutdown (saved sessions are retained), and releases the port. VS Code visibly waits a bounded time (`PIE_HOST_HANDOFF_TIMEOUT_MS`, default 30s) and treats a fresh successful bind as the only release evidence; a timeout fails closed (`refused-handoff-timeout`) without terminating anything.
+- **Crash or foreign occupant**: a dead holder frees the port through the OS, so the next starter binds; an occupant that does not answer the pie probe (or a VS Code owner, which answers `rejected`) fails acquisition closed (`refused-port-unavailable` / plain refusal). Probe misses never widen into process inspection.
+
+Scope and limits: the coordinator is loopback-only (no LAN exposure) and machine-global across OS user sessions — a host under another local user also occupies it, so a second user is refused instead of taking over, and the graceful handoff request is unauthenticated local IPC accepted within this single-user supported-desktop scope. Concurrent startups are settled by bind atomicity (exactly one winner); no session-level locks, files, or live-process restarts are involved.
+
 ### Computer-use runtime isolation
 
 The generic `computer` pi extension adds a separate native sidecar boundary below the PI backend. Each durable pie session owns one lazy Node child that loads Cua Driver and NutJS and communicates through bounded JSONL; screenshots and sequence traces remain artifact files. Exact PID/HWND and foreground validation gates global physical input, while parent/child held-input ledgers provide cancellation, timeout, restart, close, and shutdown release barriers. The webview's ordinary tool-result renderer displays mixed text/image content; no computer-specific host state or transcript component is introduced. See [COMPUTER-USE.md](COMPUTER-USE.md) for the full contract and evidence.
@@ -50,9 +70,9 @@ The first-class `playwright` pi extension adds an independent rendered-page side
 
 ## 2. Architecture Pattern
 
-The system follows a **CQRS/Elm-style MVI** pattern. User actions and backend events are unified into a single `Event` type processed by a pure reducer. The reducer returns updated state plus effect descriptors. An effect runner executes side effects (RPCs, persistence, logging) and feeds results back as events. The webview is a passive renderer of projected state — it never mutates logic state directly.
+The system follows a **CQRS/Elm-style MVI** pattern. User actions and backend events are unified into a single `Event` type processed by a pure reducer. The reducer returns updated state plus effect descriptors. An effect runner executes side effects (RPCs, persistence, logging) and feeds results back as events. Each renderer is a passive renderer of projected state — it never mutates logic state directly.
 
-This pattern was chosen to eliminate the class of bugs caused by distributed mutable state across host and webview, ensure testability of all state transitions without I/O, and make streaming/optimistic-update interactions explicit and auditable.
+This pattern was chosen to eliminate the class of bugs caused by distributed mutable state across host and renderer, ensure testability of all state transitions without I/O, and make streaming/optimistic-update interactions explicit and auditable.
 
 See git history (commit `d581d83`) for historical context on the migration from Redux to this architecture.
 
@@ -62,8 +82,8 @@ See git history (commit `d581d83`) for historical context on the migration from 
 
 ```
                        ┌──────────────────────────────────────────┐
-  Webview Command  ──► │                                         │
-  Backend Event    ──► │   Reducer: (ArchState, Event)           │
+  Renderer Command ──► │                                         │
+  Backend Event     ──► │   Reducer: (ArchState, Event)           │
   EffectResult     ──► │      → { archState', effects: Effect[] } │
   Timer Msg        ──► │   (pure — no I/O, no Redux)             │
                        └──────────┬───────────────────────────────┘
@@ -77,7 +97,7 @@ See git history (commit `d581d83`) for historical context on the migration from 
        Per-session snapshot channel          - Notifications
                 │                           - Analytics export
                 ▼                           Results → Event
-       Webview mirror[sessionPath]
+       Renderer mirror[sessionPath]
                 │
                 ▼
        Render active session
@@ -91,7 +111,7 @@ See git history (commit `d581d83`) for historical context on the migration from 
 | EffectRunner façade | `extension/src/host/core/effect-runner.ts` |
 | Session-operation effect controller | `extension/src/host/core/session-operation-effect-controller.ts` |
 | Projection | `extension/src/host/core/projection.ts` |
-| Snapshot transport | `extension/src/host/sidebar/sync.ts`, `extension/src/host/sidebar/provider.ts` |
+| Snapshot transport | `extension/src/host/sidebar/sync.ts`, `extension/src/host/sidebar/provider.ts`, `extension/src/host/renderers/`, `extension/src/host/browser-server/` |
 | Backend event dispatch | `extension/src/host/core/event-dispatch.ts` |
 | Message router | `extension/src/host/core/message-router.ts` |
 
@@ -99,7 +119,7 @@ See git history (commit `d581d83`) for historical context on the migration from 
 
 ## 4. Key Concepts
 
-**Command** — an intent posted from the webview to the host. Carries `corrId` (correlation ID) and `sessionPath`. Defined in `extension/src/host/core/commands.ts`.
+**Command** — an intent posted from a renderer (the VS Code webview or a browser page) to the host. Carries `corrId` (correlation ID) and `sessionPath`. Defined in `extension/src/host/core/commands.ts`.
 
 **Event** — any input to the reducer: a wrapped Command, a backend streaming event (delta, tool call, message finished), or an EffectResult. Defined in `extension/src/host/core/events.ts`.
 
@@ -109,13 +129,13 @@ See git history (commit `d581d83`) for historical context on the migration from 
 
 **Operation registry** — `ArchState.operations`, a reducer-owned `Record` keyed by stable operation ID. It owns source and causal identity, session/branch and process generations when known, semantic phase, acknowledgement/commit evidence, bounded reconciliation, recovery, and one immutable terminal outcome for create/duplicate/open/close/restart/send/edit/interrupt/continue/manual-compact.
 
-**Projection** — the pure function `ArchState → ViewState` that computes what the webview should display. Located at `extension/src/host/core/projection.ts`.
+**Projection** — the pure function `ArchState → ViewState` that computes what a renderer should display. Located in `extension/src/host/core/projection.ts`.
 
 **LivePipelineState** — the sole host authority for active assistant text/reasoning, tool drafts/executions/previews, producer phase, sequence/checkpoint state, and extension-UI ownership. Durable `ArchState.transcript` contains completed/interrupted history only.
 
 **Snapshot** — a full compact `ViewState` used for normal rendering, initial load, and recovery. It projects durable history joined with `LivePipelineState`; no direct delta channel exists. Large tool/reasoning/subagent bodies are represented by retrieval metadata and delivered once, on explicit expansion, through a bounded detail-response path rather than repeated in snapshots.
 
-**Mirror** — the webview-side cache of `ViewState` per session. Managed in `extension/src/webview/panel/hooks/use-host-sync.ts`.
+**Mirror** — the renderer-side cache of `ViewState` per session. The shared implementation is managed in `extension/src/webview/panel/hooks/use-host-sync.ts`.
 
 **GlobalViewState / SessionViewState** — the ViewState is composed of global fields (session list, tabs, prefs) and per-session fields (transcript, busy, file changes). Both defined in `extension/src/shared/protocol.ts`.
 
@@ -125,7 +145,7 @@ See git history (commit `d581d83`) for historical context on the migration from 
 
 ### User sends a message
 
-1. Webview dispatches `{ type: 'send', sessionPath, text, localId }`.
+1. Renderer dispatches `{ type: 'send', sessionPath, text, localId }`.
 2. For non-empty text or composer inputs, the host wraps it as a `Send` Command with a fresh `corrId` + local message ID.
 3. Reducer inserts an optimistic user message into `state.pending[corrId]`, registers the stable operation/attempt, and returns a `SendRpc` effect.
 4. EffectRunner delegates the RPC to the session-operation effect controller, which routes it through the per-session operation queue and retains only opaque execution/correlation resources.
@@ -145,16 +165,16 @@ See git history (commit `d581d83`) for historical context on the migration from 
 
 ### Tab switching
 
-1. Webview dispatches `{ type: 'openSession', sessionPath }`.
+1. Renderer dispatches `{ type: 'openSession', sessionPath }`.
 2. The Command is dispatched to the reducer, which updates `ArchState.sessions.activePath`.
 3. Projection produces a ViewState for the new active session.
-4. Webview receives a snapshot for the new active session.
+4. The renderer receives a snapshot for the new active session.
 
 ### Extension-driven transcript mutation (pruning)
 
 1. Backend emits a custom message with `customType: "pruning-result"` and typed `customDetails`.
 2. Reducer processes it as a `MessageFinished` event, updating `ArchState.transcript`.
-3. Projection includes pruning data in ViewState; the webview renders the pruning banner from structured data (no regex parsing).
+3. Projection includes pruning data in ViewState; the renderer renders the pruning banner from structured data (no regex parsing).
 
 ---
 
@@ -210,9 +230,11 @@ See git history (commit `d581d83`) for historical context on the migration from 
   unavailable sidecar falls back to SDK discovery. Explicit resume/recovery
   paths remain migration-free.
 
-### Host ↔ Webview
+### Host ↔ Renderers
 
-- Unidirectional state flow: host → webview via snapshots; webview → host via message commands.
+The same one-way state contract applies to the VS Code sidebar webview and the browser renderer. `HostRuntime` owns the state and command/effect path; each composition supplies its renderer adapter and transport. The browser server remains loopback-only by default; its explicit LAN option does not change the separately loopback-only single-host coordinator.
+
+- Unidirectional state flow: host → renderer via snapshots; renderer → host via message commands.
 - Ordered assistant `ChatMessage.parts` are authoritative on this boundary. If
   they contain tool calls, the host omits the redundant legacy `toolCalls`
   mirror from the renderer projection; legacy-only messages keep it.
@@ -239,9 +261,9 @@ See [`docs/STATE_CONTRACT.md`](STATE_CONTRACT.md) for the full invariant set.
 |-------|--------------|
 | **ArchState** (reducer) | All application and semantic lifecycle state: sessions, transcripts, operation registry, phase/ack/commit/reconciliation/recovery, model settings, prefs, file changes, optimistic rollback state, and backend event routing |
 | **EffectRunner façade and delegated controllers** (opaque resources only) | Timer handles, abort controllers, promises/resolvers, cancellation tickets, correlation resources, and execution queues; never user-visible semantic phase or outcome |
-| **Webview** (local only) | Scroll position, focus/caret, hover, drag, animation, context menu position, protocol bookkeeping (revision refs), per-keystroke draft buffer |
+| **Renderers** (VS Code webview or browser page; local only) | Scroll position, focus/caret, hover, drag, animation, context menu position, protocol bookkeeping (revision refs), per-keystroke draft buffer |
 
-**Rule of thumb:** if you're unsure whether something is host state or webview state, it's host state.
+**Rule of thumb:** if you're unsure whether something is host state or renderer-local state, it's host state.
 
 State-shape constraint: all keyed collections in host state use `Record<string, T>` — never `Map`/`Set`.
 
@@ -258,7 +280,7 @@ Full allowlist of webview-local state: see `STATE_CONTRACT.md § Webview-Local S
 3. Handle in `extension/src/host/core/reducer.ts` — return state change + effects.
 4. If an RPC is needed, add Effect variant in `extension/src/host/core/effects.ts`.
 5. Add execution logic in `extension/src/host/core/effect-runner.ts`.
-6. Wire the webview message → Command conversion in `extension/src/host/core/message-router.ts`.
+6. Wire the renderer message → Command conversion in `extension/src/host/core/message-router.ts`.
 7. Add reducer unit test in `extension/test/`.
 
 ### Adding a new backend event type
@@ -272,7 +294,7 @@ Full allowlist of webview-local state: see `STATE_CONTRACT.md § Webview-Local S
 
 1. Add to the `ViewState` interface in `extension/src/shared/protocol.ts`.
 2. Populate in the projection function (`selectViewState`).
-3. Consume in webview components.
+3. Consume in renderer components.
 4. Update test ViewState literals in `extension/test/host/sidebar/sidebar-sync.test.ts` and `extension/test/shared/protocol/sync-contract.test.ts`.
 
 ### Adding a new Effect type
@@ -302,7 +324,7 @@ Under legacy authority, ledger, activity, run-history, checkpoint, privacy/forge
 
 1. **Reducer purity** — `(State, Event) → { state, effects }`. No I/O, no `Date.now()`, no randomness.
 2. **Single effect executor** — side effects only happen in the EffectRunner.
-3. **Webview passivity** — the webview dispatches Commands and applies snapshots. It never mutates logic state.
+3. **Renderer passivity** — each renderer dispatches Commands and applies snapshots. It never mutates logic state.
 4. **Session addressing** — every snapshot and session-scoped event carries `sessionPath`.
 5. **Operation conservation** — every accepted state-changing action has a stable reducer-owned operation identity and at most one immutable terminal outcome; transport acknowledgement is never completion.
 6. **Settlement correlation** — `agent.settled` must match operation/request/turn/attempt plus backend/worker generation when present; stale settlement cannot mutate newer work.
@@ -311,6 +333,7 @@ Under legacy authority, ledger, activity, run-history, checkpoint, privacy/forge
 9. **Record-only state** — `Record<string, T>` for keyed collections (no Map/Set in host state).
 10. **Serialized execution** — session RPCs are FIFO-ordered through the lifecycle + session queues, but queues are execution aids rather than lifecycle authority.
 11. **Accounting conservation** — one billable provider invocation maps to at most one immutable settlement record: a legacy ledger row (legacy authority) or a canonical settlement fact (canonical authority), never both. Missing usage is an explicit gap, never an inferred zero.
+12. **Single active host** — machine-wide pie host ownership is the OS-owned exclusive loopback coordinator listener, acquired before runtime/backend startup and held until shutdown finishes. A second host refuses (standalone, second VS Code window) or takes over only through a bounded graceful handoff; nothing is ever killed by PID and probe failures fail closed.
 
 See [`docs/STATE_CONTRACT.md`](STATE_CONTRACT.md) for additional invariants (snapshot recovery, cleanup, selection ownership).
 
@@ -322,7 +345,12 @@ See [`docs/STATE_CONTRACT.md`](STATE_CONTRACT.md) for additional invariants (sna
 |-----------|---------------|
 | `extension/src/host/core/` | Pure CQRS spine: reducer, effects, events, commands, projection, dispatch |
 | `extension/src/host/session-service/` | Backend client lifecycle, session startup, tab actions, message actions |
-| `extension/src/host/sidebar/` | Webview provider, sync state machine, hot reload |
+| `extension/src/host/runtime/` | Platform-neutral application runtime and host-platform seam |
+| `extension/src/host/vscode/` | VS Code notifications, editor/file/diff, workspace, and renderer adapters |
+| `extension/src/host/coordinator/` | OS-owned single-active-host authority: exclusive loopback listener, probe/graceful-handoff protocol, bounded takeover |
+| `extension/src/host/sidebar/` | VS Code webview provider, sync state machine, hot reload |
+| `extension/src/host/browser-server/` | Loopback HTTP/WebSocket server and browser renderer transport |
+| `extension/src/standalone/` | Standalone Node entry, startup validation, browser-only platform, and workspace host storage |
 | `extension/src/host/stats-service/` | Run/activity analytics tracking, legacy-authority persistence, query |
 | `extension/src/analytics/` | Canonical analytics: recorder/query helper supervisors, activation store, capture, read model |
 | `extension/src/host/billable-invocation-ledger/` | Immutable provider-invocation persistence and session/aggregate/export projections |

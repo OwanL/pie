@@ -230,6 +230,10 @@ export function Tooltip({
     }
 
     const trigger = triggerRef.current;
+    const overflowOwner = trigger?.closest<HTMLElement>('[data-composer-toolbar-overflow-owner]');
+    const overflowOwnerId = overflowOwner?.dataset.composerToolbarOverflowOwner;
+    if (overflowOwnerId) host.dataset.composerToolbarOverflowOwner = overflowOwnerId;
+    else delete host.dataset.composerToolbarOverflowOwner;
     const showRich = effectiveHasRich;
     const hostRole = showRich ? richRole : 'tooltip';
     host.setAttribute('role', hostRole);

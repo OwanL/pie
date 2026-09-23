@@ -1,4 +1,4 @@
-import test, { beforeEach } from 'node:test';
+import test, { afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { installDom } from '../../_helpers/dom';
@@ -15,11 +15,15 @@ let container: HTMLElement;
 beforeEach(() => {
   container = document.createElement('div');
   document.body.appendChild(container);
-  return () => {
-    render(null, container);
-    container.remove();
-    document.querySelectorAll('.model-picker-dropdown').forEach((el) => el.remove());
-  };
+});
+
+afterEach(() => {
+  render(null, container);
+  container.remove();
+  // The settings menu portals to document.body; remove any stray portaled
+  // instance so tests cannot observe a previous test's menu.
+  document.querySelectorAll('.toolbar-settings-menu').forEach((el) => el.remove());
+  document.querySelectorAll('.model-picker-dropdown').forEach((el) => el.remove());
 });
 
 function click(el: Element | null): void {
@@ -57,7 +61,7 @@ test('settings menu caps its height to the transcript vertical space', () => {
 
   act(() => { click(container.querySelector('.toolbar-settings-trigger')); });
 
-  const menu = container.querySelector('.toolbar-settings-menu') as HTMLElement;
+  const menu = document.body.querySelector('.toolbar-settings-menu') as HTMLElement;
   assert.ok(menu, 'settings menu should be open');
 
   menu.getBoundingClientRect = () => ({
@@ -104,7 +108,7 @@ test('settings menu keeps a fixed height when switching tabs', () => {
 
   act(() => { click(container.querySelector('.toolbar-settings-trigger')); });
 
-  const menu = container.querySelector('.toolbar-settings-menu') as HTMLElement;
+  const menu = document.body.querySelector('.toolbar-settings-menu') as HTMLElement;
   assert.ok(menu, 'settings menu should be open');
 
   // Generous available space so the fixed height isn't clamped by the viewport.

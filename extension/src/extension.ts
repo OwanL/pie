@@ -64,7 +64,7 @@ export function activate(context: vscode.ExtensionContext, runtime?: RuntimeLoca
   bootTraceSync('extension', 'activate.enter', {
     extensionMode: context.extensionMode,
   });
-  const extension = new PieExtension(context, new BackendClient());
+  const extension = new PieExtension(context, new BackendClient({ editorVersion: vscode.version }));
   extensionInstance = extension;
   extension.register();
   context.subscriptions.push(extension);

@@ -449,3 +449,68 @@ test('provider-qualified ids keep one bare model separate per provider across to
   );
   assert.equal(stats.lastRun!.provider, 'openai-codex', 'the latest run resolves its provider from the qualified id');
 });
+
+test('scheduled peak pricing stays unknown in aggregate rollups without interval evidence', () => {
+  const map = new Map([
+    ['deepseek-scheduled', [{
+      id: 'deepseek-scheduled',
+      provider: 'ollama',
+      pricing: {
+        input: 0.15, output: 0.6, cacheRead: 0.003, cacheWrite: 0,
+        peak: {
+          weekdaysUtc: [1, 2, 3, 4, 5],
+          startMinutesUtc: 720,
+          endMinutesUtc: 1080,
+          override: { input: 0.3, output: 1.2, cacheRead: 0.006, cacheWrite: 0 },
+        },
+      },
+    }]],
+  ]);
+  const snapshot = coerceRunSnapshot(run({
+    modelId: 'deepseek-scheduled', provider: 'ollama', inputTokens: 100_000,
+  }));
+  assert.ok(snapshot);
+  const stats = computeAggregateStats([snapshot], map, NOW, [], {}, 0);
+  // No interval evidence: unknown pricing, not a static-rate fallback.
+  assert.equal(stats.todayCost, 0);
+  assert.equal(stats.todayCostSeries.length, 0);
+  // Token attribution is unaffected.
+  assert.equal(stats.todayCostByProvider.find((entry) => entry.provider === 'ollama')?.inputTokens, 100_000);
+  // A static model under the same provider still prices normally.
+  const staticMap = new Map([
+    ['static-model', [{ id: 'static-model', provider: 'ollama', pricing: { input: 5, output: 0, cacheRead: 0, cacheWrite: 0 } }]],
+  ]);
+  const staticSnapshot = coerceRunSnapshot(run({
+    modelId: 'static-model', provider: 'ollama', inputTokens: 100_000,
+  }));
+  assert.ok(staticSnapshot);
+  const staticStats = computeAggregateStats([staticSnapshot], staticMap, NOW, [], {}, 0);
+  assert.equal(staticStats.todayCost, 0.5);
+});
+
+test('unsupported cache-read usage stays unpriced in aggregate rollups; zero cache-read prices base', () => {
+  const unsupported = {
+    id: 'nano',
+    provider: 'ollama',
+    pricing: { input: 0.06, output: 0.24, cacheRead: 0, cacheWrite: 0, cacheReadUnsupported: true },
+  };
+  // Positive cache-read tokens: no observed catalog cost.
+  const usedMap = new Map([['nano', [unsupported]]]);
+  const usedSnapshot = coerceRunSnapshot(run({
+    modelId: 'nano', provider: 'ollama',
+    inputTokens: 100_000, cacheReadTokens: 1_000,
+  }));
+  assert.ok(usedSnapshot);
+  const usedStats = computeAggregateStats([usedSnapshot], usedMap, NOW, [], {}, 0);
+  assert.equal(usedStats.todayCost, 0);
+  assert.equal(usedStats.todayCostSeries.length, 0);
+  // Zero cache-read tokens still price the base rates.
+  const freeSnapshot = coerceRunSnapshot(run({
+    modelId: 'nano', provider: 'ollama',
+    inputTokens: 1_000_000, cacheReadTokens: 0,
+  }));
+  assert.ok(freeSnapshot);
+  const freeStats = computeAggregateStats([freeSnapshot], usedMap, NOW, [], {}, 0);
+  assert.equal(freeStats.todayCost, 0.06);
+  assert.equal(freeStats.todayCostSeries.length > 0, true);
+});

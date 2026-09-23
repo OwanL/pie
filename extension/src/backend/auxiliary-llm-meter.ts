@@ -5,11 +5,32 @@ type StreamResult = { usage?: unknown };
 type StreamLike = { result?: (...args: unknown[]) => Promise<StreamResult> };
 type StreamFn = (model: unknown, ...args: unknown[]) => Promise<StreamLike>;
 
+type AbortControllerLike = { signal?: { aborted?: boolean } };
+
 interface MeterableSession {
   agent?: { streamFn?: StreamFn };
   _compactionAbortController?: unknown;
   _autoCompactionAbortController?: unknown;
   _branchSummaryAbortController?: unknown;
+}
+
+/** The abort controller governing this auxiliary call, sampled at call time.
+ *  Legacy/plain-object stubs (tests, older runtimes) carry no `signal`, which
+ *  keeps the failed classification. */
+function abortControllerFor(
+  meterable: MeterableSession,
+  kind: 'branch_summary' | 'history_compaction' | 'other',
+): AbortControllerLike | undefined {
+  if (kind === 'branch_summary') return meterable._branchSummaryAbortController as AbortControllerLike | undefined;
+  if (kind === 'history_compaction') {
+    return (meterable._autoCompactionAbortController
+      ?? meterable._compactionAbortController) as AbortControllerLike | undefined;
+  }
+  return undefined;
+}
+
+function settledOutcome(controller: AbortControllerLike | undefined): 'cancelled' | 'failed' {
+  return controller?.signal?.aborted === true ? 'cancelled' : 'failed';
 }
 
 function nonNegativeInt(value: unknown): number {
@@ -124,6 +145,10 @@ export function installAuxiliaryLlmMeter(
     const startedAt = now();
     const invocationSequence = kind ? ++sequence : 0;
     const sourceId = kind ? `${kind}:${startedAt}:${invocationSequence}` : '';
+    // Sample the governing controller before awaiting: the SDK may clear it
+    // between an abort and the wrapper's catch, and outcome evidence must not
+    // depend on that clearing order.
+    const abortController = kind ? abortControllerFor(meterable, kind) : undefined;
     let stream: StreamLike;
     try {
       stream = await original.call(this, model, ...args);
@@ -142,7 +167,7 @@ export function installAuxiliaryLlmMeter(
           cacheReadTokens: 0,
           cacheWriteTokens: 0,
           durationMs: Math.max(0, endedAt - startedAt),
-          outcome: 'failed',
+          outcome: settledOutcome(abortController),
           instrumentationGap: true,
           instrumentationGapReason: kind === 'other'
             ? 'The unexpected auxiliary provider request failed before exposing usage.'
@@ -213,7 +238,7 @@ export function installAuxiliaryLlmMeter(
                 cacheReadTokens: 0,
                 cacheWriteTokens: 0,
                 durationMs: Math.max(0, endedAt - startedAt),
-                outcome: 'failed',
+                outcome: settledOutcome(abortController),
                 instrumentationGap: true,
                 instrumentationGapReason: kind === 'other'
                   ? 'The unexpected auxiliary result failed before exposing usage.'

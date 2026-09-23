@@ -130,6 +130,8 @@ const MESSAGE_KEYS: Readonly<Record<string, readonly string[]>> = {
   mcpSetServerEnabled: ['type', 'name', 'enabled'],
   mcpSetServerEnabledForSession: ['type', 'sessionPath', 'name', 'enabled'],
   setPrivacyMode: ['type', 'sessionPath', 'enabled'],
+  setBrowserServerLanEnabled: ['type', 'enabled'],
+  setBrowserServerEnabled: ['type', 'enabled'],
   setPruningSettings: ['type', 'settings'],
   setToolResultPruningSettings: ['type', 'settings'],
   setSessionTitlesSettings: ['type', 'settings'],

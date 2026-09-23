@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { installDom } from '../_helpers/dom';
+installDom();
+
+import { h, render } from 'preact';
+import { act } from 'preact/test-utils';
+
 import type { HostDetailRoute, LiveSubagentDetailAddress, WebviewToHostMessage } from '../../src/shared/protocol';
 import type { DetailPagePayload } from '../../src/shared/protocol/subagent-detail';
 import type { JsonStructuralPatchOperation } from '../../src/shared/json-structural-patch';
@@ -8,6 +14,7 @@ import type { DetailStreamMessage } from '../../src/webview/panel/transcript/det
 import {
   clearDetailSubscriptionStore,
   closeDetailSubscription,
+  DETAIL_SUBSCRIPTION_LOAD_TIMEOUT_MS as DETAIL_LOAD_TIMEOUT_MS,
   demandDetailValue,
   getDetailStoreDebugState,
   openDetailSubscription,
@@ -17,6 +24,8 @@ import {
   setDetailStoreBudgets,
   setDetailStoreContext,
   sha256Hex,
+  useDetailSubscription,
+  type DetailSubscriptionHandle,
 } from '../../src/webview/panel/transcript/detail-subscription-store';
 
 const KEY = 'subagent:msg-1:tool-1';
@@ -197,6 +206,85 @@ function unsubscribePosts(posts: WebviewToHostMessage[]): Extract<WebviewToHostM
 
 function fetchPagesPosts(posts: WebviewToHostMessage[]): Extract<WebviewToHostMessage, { type: 'detail.fetchPages' }>[] {
   return posts.filter((post): post is Extract<WebviewToHostMessage, { type: 'detail.fetchPages' }> => post.type === 'detail.fetchPages');
+}
+
+function mountSubscriptionProbe(): {
+  host: HTMLElement;
+  get handle(): DetailSubscriptionHandle;
+  update: (expanded: boolean) => void;
+  unmount: () => void;
+} {
+  const host = document.createElement('div');
+  document.body.appendChild(host);
+  let handle: DetailSubscriptionHandle | undefined;
+  function Probe({ expanded }: { expanded: boolean }) {
+    handle = useDetailSubscription({ detailKey: KEY, address: ADDRESS, expanded });
+    const value = handle.value as Record<string, unknown> | null;
+    return h('div', null,
+      h('span', null, `${handle.status}:${handle.error?.message ?? ''}`),
+      value !== null ? h('span', null, `value:${String(value.task ?? '')}`) : null,
+      handle.error?.retryable ? h('button', { type: 'button', onClick: handle.retry }, 'Retry') : null,
+    );
+  }
+  const update = (expanded: boolean) => act(() => render(h(Probe, { expanded }), host));
+  update(true);
+  return {
+    host,
+    get handle() {
+      if (!handle) throw new Error('subscription hook has not rendered');
+      return handle;
+    },
+    update,
+    unmount: () => {
+      act(() => render(null, host));
+      host.remove();
+    },
+  };
+}
+
+function installFakeTimers(): {
+  advance: (ms: number) => void;
+  activeCount: () => number;
+  captureCallbacks: () => Array<() => void>;
+  restore: () => void;
+} {
+  interface FakeTimer { due: number; callback: () => void }
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const originalWindowSetTimeout = window.setTimeout;
+  const originalWindowClearTimeout = window.clearTimeout;
+  let now = 0;
+  let nextId = 0;
+  const timers = new Map<number, FakeTimer>();
+  const fakeSetTimeout = ((callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) => {
+    const id = ++nextId;
+    timers.set(id, { due: now + (delay ?? 0), callback: () => callback(...args) });
+    return id as unknown as ReturnType<typeof setTimeout>;
+  }) as typeof setTimeout;
+  const fakeClearTimeout = ((timer?: ReturnType<typeof setTimeout>) => {
+    timers.delete(Number(timer));
+  }) as typeof clearTimeout;
+  globalThis.setTimeout = window.setTimeout = fakeSetTimeout;
+  globalThis.clearTimeout = window.clearTimeout = fakeClearTimeout;
+  return {
+    advance(ms) {
+      now += ms;
+      for (;;) {
+        const next = [...timers.entries()].filter(([, timer]) => timer.due <= now).sort((a, b) => a[1].due - b[1].due)[0];
+        if (!next) return;
+        timers.delete(next[0]);
+        next[1].callback();
+      }
+    },
+    activeCount: () => timers.size,
+    captureCallbacks: () => [...timers.values()].map((timer) => timer.callback),
+    restore() {
+      globalThis.setTimeout = originalSetTimeout;
+      globalThis.clearTimeout = originalClearTimeout;
+      window.setTimeout = originalWindowSetTimeout;
+      window.clearTimeout = originalWindowClearTimeout;
+    },
+  };
 }
 
 test.beforeEach(() => {
@@ -633,19 +721,247 @@ test('renderer reconnect invalidates an owner even when the view generation is u
   assert.deepEqual(replacement.cursor, { revision: 1 });
 });
 
-test('a subscription rejected by the client transport does not leave a stuck owner', () => {
+test('a rejected subscribe reaches a retryable hook error and manual retry mints a fresh attempt', async () => {
+  const posts: WebviewToHostMessage[] = [];
   setDetailStoreContext({
     hostInstanceId: 'h1',
     viewGeneration: 1,
     rendererId: 'renderer-1',
     rendererGeneration: 1,
-    postMessage: () => false,
+    postMessage: (message) => {
+      posts.push(message);
+      return subscribePosts(posts).length > 1;
+    },
   });
+  const probe = mountSubscriptionProbe();
+  try {
+    assert.equal(probe.handle.status, 'error');
+    assert.equal(probe.handle.error?.code, 'UNAVAILABLE');
+    assert.equal(probe.handle.error?.retryable, true);
+    assert.match(probe.host.textContent ?? '', /error:.*transcript/i);
+    assert.equal(subscribePosts(posts).length, 1);
 
-  openDetailSubscription({ detailKey: KEY, address: ADDRESS });
+    const retry = probe.host.querySelector('button');
+    assert.equal(retry?.textContent, 'Retry');
+    act(() => retry?.click());
+    assert.equal(subscribePosts(posts).length, 2);
+    assert.equal(subscribePosts(posts)[1]?.detailAttempt, 2);
+    assert.equal(probe.handle.status, 'subscribing');
 
-  assert.equal(demandDetailValue(KEY).status, 'pending');
-  assert.equal(getDetailStoreDebugState().records, 0);
+    // The host answers attempt 2 with a fresh baseline: the hook must surface
+    // the actually-loaded transcript value, not merely stop at subscribing.
+    const replacement = makeStream(KEY, 'sub-2', childValue({ exitCode: 0, task: 'retry payload' }), 2, 1, 2);
+    act(() => {
+      receiveDetailImperative(streamStart(replacement));
+      receiveDetailImperative(streamPage(replacement, 0));
+      receiveDetailImperative(streamPage(replacement, 1));
+    });
+    assert.equal(probe.handle.status, 'active', 'attempt 2 loads to active');
+    assert.equal(probe.handle.error, null, 'a loaded baseline clears the prior error');
+    assert.equal((probe.handle.value as Record<string, unknown>).exitCode, 0);
+    assert.equal((probe.handle.value as Record<string, unknown>).task, 'retry payload');
+    assert.match(probe.host.textContent ?? '', /value:retry payload/, 'the rendered transcript shows the loaded value');
+    assert.equal(subscribePosts(posts).length, 2, 'a successful attempt 2 does not re-subscribe');
+  } finally {
+    probe.unmount();
+  }
+});
+
+test('a timed-out attempt recovers to a loaded value only through manual retry at the hook seam', async () => {
+  const timers = installFakeTimers();
+  const posts = install();
+  const probe = mountSubscriptionProbe();
+  try {
+    // Timeout: no start ever arrives for attempt 1.
+    await act(async () => timers.advance(DETAIL_LOAD_TIMEOUT_MS));
+    assert.equal(probe.handle.status, 'error');
+    assert.equal(probe.handle.error?.retryable, true);
+    assert.equal(unsubscribePosts(posts).length, 1, 'the timed-out host owner is released');
+    assert.equal(timers.activeCount(), 0);
+
+    const retry = probe.host.querySelector('button');
+    assert.equal(retry?.textContent, 'Retry');
+    act(() => retry?.click());
+    assert.equal(subscribePosts(posts).length, 2);
+    assert.equal(subscribePosts(posts)[1]?.detailAttempt, 2);
+    assert.equal(probe.handle.status, 'subscribing');
+
+    // Attempt 2 delivers a complete baseline and the hook renders its value.
+    const attempt2 = makeStream(KEY, 'sub-2', childValue({ exitCode: 0, task: 'after timeout' }), 2, 1, 2);
+    act(() => {
+      receiveDetailImperative(streamStart(attempt2));
+      receiveDetailImperative(streamPage(attempt2, 0));
+      receiveDetailImperative(streamPage(attempt2, 1));
+    });
+    assert.equal(probe.handle.status, 'active');
+    assert.equal(probe.handle.error, null);
+    assert.equal((probe.handle.value as Record<string, unknown>).exitCode, 0);
+    assert.equal((probe.handle.value as Record<string, unknown>).task, 'after timeout');
+    assert.match(probe.host.textContent ?? '', /value:after timeout/, 'the rendered transcript shows the recovered value');
+    assert.equal(unsubscribePosts(posts).length, 1, 'no spurious unsubscribe after the retry');
+    await act(async () => timers.advance(DETAIL_LOAD_TIMEOUT_MS * 3));
+    assert.equal(probe.handle.status, 'active', 'the recovered subscription has no pending deadline');
+    assert.equal(timers.activeCount(), 0);
+  } finally {
+    probe.unmount();
+    timers.restore();
+  }
+});
+
+test('a missing start times out to a retryable error without automatically resubscribing', async () => {
+  const timers = installFakeTimers();
+  const posts = install();
+  const probe = mountSubscriptionProbe();
+  try {
+    assert.equal(probe.handle.status, 'subscribing');
+    assert.equal(timers.activeCount(), 1);
+    await act(async () => timers.advance(DETAIL_LOAD_TIMEOUT_MS));
+    assert.equal(probe.handle.status, 'error');
+    assert.equal(probe.handle.error?.retryable, true);
+    assert.equal(subscribePosts(posts).length, 1, 'a timeout requires explicit user retry');
+    assert.equal(unsubscribePosts(posts).length, 1, 'timed-out host owner is released best-effort');
+    assert.equal(timers.activeCount(), 0);
+  } finally {
+    probe.unmount();
+    timers.restore();
+  }
+});
+
+test('a partial baseline gets a bounded inactivity deadline that advances with valid pages', async () => {
+  const timers = installFakeTimers();
+  const posts = install();
+  const probe = mountSubscriptionProbe();
+  try {
+    const stream = makeStream(KEY, 'sub-1', childValue(), 2, 1, 1);
+    await act(async () => receiveDetailImperative(streamStart(stream)));
+    await act(async () => timers.advance(DETAIL_LOAD_TIMEOUT_MS - 10_000));
+    await act(async () => receiveDetailImperative(streamPage(stream, 0)));
+    assert.equal(probe.handle.status, 'loading');
+
+    await act(async () => timers.advance(DETAIL_LOAD_TIMEOUT_MS - 1));
+    assert.equal(probe.handle.status, 'loading', 'a valid page resets the loading deadline');
+    await act(async () => timers.advance(1));
+    assert.equal(probe.handle.status, 'error');
+    assert.equal(probe.handle.error?.retryable, true);
+    assert.equal(subscribePosts(posts).length, 1, 'a stalled baseline is not retried automatically');
+    assert.equal(unsubscribePosts(posts).length, 1);
+  } finally {
+    probe.unmount();
+    timers.restore();
+  }
+});
+
+test('a rebase that never receives its replacement start becomes a manual-retry error', async () => {
+  const timers = installFakeTimers();
+  const posts = install();
+  const probe = mountSubscriptionProbe();
+  try {
+    const first = makeStream(KEY, 'sub-1', childValue(), 2, 1, 1);
+    await act(async () => {
+      receiveDetailImperative(streamStart(first));
+      receiveDetailImperative(streamPage(first, 0));
+      receiveDetailImperative(streamPage(first, 1));
+    });
+    assert.equal(probe.handle.status, 'active');
+
+    await act(async () => receiveDetailImperative({
+      type: 'detail.rebase', ...route('sub-1'), currentRevision: 1, reason: 'backpressure',
+    }));
+    assert.equal(probe.handle.status, 'subscribing');
+    assert.equal(subscribePosts(posts).length, 2);
+    assert.equal(subscribePosts(posts)[1]?.detailAttempt, 2);
+
+    await act(async () => timers.advance(DETAIL_LOAD_TIMEOUT_MS));
+    assert.equal(probe.handle.status, 'error');
+    assert.equal(probe.handle.error?.retryable, true);
+    assert.equal(subscribePosts(posts).length, 2, 'a rebase timeout does not start an automatic retry loop');
+  } finally {
+    probe.unmount();
+    timers.restore();
+  }
+});
+
+test('an evicted baseline page fetch that never returns is bounded by the loading deadline', async () => {
+  const timers = installFakeTimers();
+  const posts = install();
+  const keyB = 'subagent:msg-1:tool-b';
+  setDetailStoreBudgets({ maxGlobalPages: 2, maxGlobalBytes: 10_000_000, maxPagesPerSubscription: 2 });
+  try {
+    openDetailSubscription({ detailKey: KEY, address: ADDRESS });
+    const first = makeStream(KEY, 'sub-1', childValue(), 2, 1, 1);
+    receiveDetailImperative(streamStart(first));
+    receiveDetailImperative(streamPage(first, 0));
+    receiveDetailImperative(streamPage(first, 1));
+
+    openDetailSubscription({ detailKey: keyB, address: ADDRESS });
+    const second = makeStream(keyB, 'sub-2', childValue(), 2, 1, 2);
+    receiveDetailImperative(streamStart(second));
+    receiveDetailImperative(streamPage(second, 0));
+    receiveDetailImperative(streamPage(second, 1));
+
+    const probe = mountSubscriptionProbe();
+    try {
+      assert.equal(probe.handle.status, 'loading');
+      assert.equal(fetchPagesPosts(posts).length, 2);
+      await act(async () => timers.advance(DETAIL_LOAD_TIMEOUT_MS));
+      assert.equal(probe.handle.status, 'error');
+      assert.equal(probe.handle.error?.retryable, true);
+      assert.equal(unsubscribePosts(posts).length, 1);
+    } finally {
+      probe.unmount();
+    }
+  } finally {
+    timers.restore();
+  }
+});
+
+test('a successful baseline cancels its deadline and remains active through later live time', async () => {
+  const timers = installFakeTimers();
+  const posts = install();
+  const probe = mountSubscriptionProbe();
+  try {
+    const stream = makeStream(KEY, 'sub-1', childValue(), 2, 1, 1);
+    await act(async () => {
+      receiveDetailImperative(streamStart(stream));
+      receiveDetailImperative(streamPage(stream, 0));
+      receiveDetailImperative(streamPage(stream, 1));
+    });
+    assert.equal(probe.handle.status, 'active');
+    assert.equal(timers.activeCount(), 0, 'completed baseline leaves no loading deadline');
+
+    await act(async () => timers.advance(DETAIL_LOAD_TIMEOUT_MS * 3));
+    assert.equal(probe.handle.status, 'active', 'a healthy live subscription is not timed out');
+    assert.equal(unsubscribePosts(posts).length, 0);
+  } finally {
+    probe.unmount();
+    timers.restore();
+  }
+});
+
+test('stale timeout callbacks from a collapsed attempt cannot fail its re-expanded owner', () => {
+  const timers = installFakeTimers();
+  try {
+    const posts = install();
+    const probe = mountSubscriptionProbe();
+    const staleTimeout = timers.captureCallbacks()[0]!;
+    probe.update(false);
+    probe.update(true);
+    assert.equal(subscribePosts(posts).length, 2);
+    assert.equal(probe.handle.status, 'subscribing');
+
+    staleTimeout();
+    assert.equal(probe.handle.status, 'subscribing');
+    assert.equal(timers.activeCount(), 1, 'only the current attempt retains its own deadline');
+    probe.unmount();
+    assert.equal(timers.activeCount(), 0, 'unmount clears the current attempt deadline');
+    openDetailSubscription({ detailKey: KEY, address: ADDRESS });
+    assert.equal(timers.activeCount(), 1);
+    clearDetailSubscriptionStore();
+    assert.equal(timers.activeCount(), 0, 'store reset clears every pending deadline');
+  } finally {
+    clearDetailSubscriptionStore();
+    timers.restore();
+  }
 });
 
 test('receiveDetailImperative for an unknown or never-opened key is a no-op', () => {

@@ -2,6 +2,39 @@
 # Source of truth: models.yaml (repo root). Edit there and re-run sync.
 profiles:
   - provider: github-copilot
+    id: claude-opus-5.5
+    eligible: false
+    thinking:
+      - minimal
+      - low
+      - medium
+      - high
+      - xhigh
+      - max
+    disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
+  - provider: github-copilot
+    id: gpt-6-luna
+    eligible: false
+    thinking:
+      - minimal
+      - low
+      - medium
+      - high
+      - xhigh
+      - max
+    disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
+  - provider: github-copilot
+    id: gpt-6-sol
+    eligible: false
+    thinking:
+      - minimal
+      - low
+      - medium
+      - high
+      - xhigh
+      - max
+    disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
+  - provider: github-copilot
     id: grok-4.7
     eligible: false
     thinking:
@@ -194,6 +227,28 @@ profiles:
     disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
   - provider: openai-codex
     id: gpt-6-astra
+    eligible: true
+    thinking:
+      - minimal
+      - low
+      - medium
+      - high
+      - xhigh
+      - max
+    disabled_reason: null
+  - provider: openai-codex
+    id: gpt-6-sol
+    eligible: true
+    thinking:
+      - minimal
+      - low
+      - medium
+      - high
+      - xhigh
+      - max
+    disabled_reason: null
+  - provider: openai-codex
+    id: gpt-6-luna
     eligible: true
     thinking:
       - minimal

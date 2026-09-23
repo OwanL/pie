@@ -1,37 +1,47 @@
 /**
- * Embedded loopback HTTP/WebSocket browser server (browser server plan §6,
- * §7).
+ * Shared HTTP/WebSocket browser server (browser server plan §6, §7).
  *
- * Serves the compiled webview UI over `http://127.0.0.1:<port>` and accepts
- * browser renderer WebSockets at `/ws`. `PieExtension` owns the lifecycle:
- * start after the host can build a valid initial `ViewState`, stop on
- * shutdown; start/stop are idempotent, a delayed `listen()` completing after
- * shutdown began is closed immediately, and the listener binds loopback only.
+ * Serves the compiled webview UI at `http://127.0.0.1:<port>` by default and
+ * accepts browser renderer WebSockets at `/ws`. Explicit LAN opt-in binds
+ * IPv4 all interfaces and additionally accepts only exact private IPv4
+ * interface Hosts/Origins. The host composition owns lifecycle: start after
+ * the host can build a valid initial `ViewState`, stop on shutdown; start/stop
+ * are idempotent, and delayed binds completing after shutdown are closed.
  *
  * Port policy (§6.2): prefer the configured port (default 1997); when it is
- * occupied and `requirePreferredPort` is false, bind an OS-assigned loopback
- * port and record the ACTUAL URL. Terminal bind failures surface exactly one
- * lifecycle event (`bind-failed`); successful fallback binds are
+ * occupied and `requirePreferredPort` is false, bind an OS-assigned port on
+ * the selected interface and record the actual localhost and LAN URLs.
+ * Terminal bind failures surface exactly one lifecycle event (`bind-failed`);
+ * successful fallback binds are
  * informational (`fallback`).
  *
  * HTTP surface (§6.1): `GET /` (manifest-derived HTML shell with a strict
  * same-origin CSP), `GET /assets/<hashed-file>` (manifest allowlist only),
  * optional `GET /favicon.svg`, and `GET /health` (local readiness only). No
  * generic APIs, backend RPC routes, filesystem routes, uploads, or command
- * endpoints. Security (§6.3): loopback-only bind, Host/Origin validation on
- * upgrades, bounded client count, fail-closed ingress per socket (in the
- * transport), and no state in `/health` or logs.
+ * endpoints. Security (§6.3): loopback-only by default; LAN requests require
+ * a private IPv4 peer and exact Host/Origin values. Bounded client count,
+ * fail-closed ingress
+ * per socket (in the transport), and no state in `/health` or logs.
  */
 
 import * as http from 'node:http';
 import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
 
 import { WebSocketServer, type WebSocket } from 'ws';
 
 import type { RendererRegistration } from '../renderers/types';
 import { RendererHub } from '../renderers/renderer-hub';
 import type { HostToWebviewMessage } from '../../shared/protocol';
-import { BROWSER_SERVER_POLICY, isValidLoopbackHostHeader, isValidWebSocketOrigin, pageUrl } from './policy';
+import {
+  BROWSER_SERVER_POLICY,
+  isAllowedBrowserRemoteAddress,
+  isLanIPv4Address,
+  isValidBrowserHostHeader,
+  isValidWebSocketOrigin,
+  pageUrl,
+} from './policy';
 import { BrowserStaticAssets } from './static-assets';
 import { BrowserRendererTransport, BROWSER_CLOSE_REASONS } from './browser-renderer-transport';
 import { BrowserCommandGate } from './command-decision-ledger';
@@ -76,6 +86,9 @@ export class BrowserServer {
   private state: BrowserServerState = {
     running: false,
     url: null,
+    bindAddress: null,
+    lanEnabled: false,
+    lanUrls: [],
     port: null,
     clientCount: 0,
     startedAt: null,
@@ -85,6 +98,7 @@ export class BrowserServer {
   private stopPromise: Promise<void> | null = null;
   private stopRequested = false;
   private disposed = false;
+  private allowedLanAddresses: string[] = [];
 
   constructor(private readonly options: BrowserServerOptions) {
     this.clock = options.clock ?? SYSTEM_CLOCK;
@@ -190,11 +204,14 @@ export class BrowserServer {
     this.wss = new WebSocketServer({ noServer: true, maxPayload: BROWSER_SERVER_POLICY.maxFrameBytes });
     httpServer.on('upgrade', (req, socket, head) => this.handleUpgrade(req, socket, head));
 
-    // Preferred-port bind, then fallback to an OS-assigned loopback port.
+    // Preserve the loopback default. LAN mode is explicit and binds IPv4 all
+    // interfaces; Host/Origin validation below still accepts only loopback or
+    // this machine's private IPv4 interface addresses.
+    const bindAddress = settings.allowLan ? '0.0.0.0' : '127.0.0.1';
     let port: number;
     let preferred = true;
     try {
-      await this.listen(httpServer, settings.port, '127.0.0.1');
+      await this.listen(httpServer, settings.port, bindAddress);
       // 0 is the OS-assigned sentinel: the actual bound port must be read
       // back from the server, not taken from settings.
       port = settings.port === 0 ? this.actualPort(httpServer) : settings.port;
@@ -208,7 +225,7 @@ export class BrowserServer {
       if (code === 'EADDRINUSE' && !settings.requirePreferredPort) {
         preferred = false;
         try {
-          await this.listen(httpServer, 0, '127.0.0.1');
+          await this.listen(httpServer, 0, bindAddress);
           port = this.actualPort(httpServer);
         } catch (fallbackError) {
           return terminalFailure(fallbackError instanceof Error ? fallbackError.message : String(fallbackError));
@@ -228,16 +245,24 @@ export class BrowserServer {
     }
 
     const url = pageUrl(port);
+    const actualBindAddress = this.actualAddress(httpServer) ?? bindAddress;
+    this.allowedLanAddresses = settings.allowLan
+      ? this.readLanIPv4Addresses()
+      : [];
+    const lanUrls = this.allowedLanAddresses.map((address) => `http://${address}:${port}/`);
     this.state = {
       running: true,
       url,
+      bindAddress: actualBindAddress,
+      lanEnabled: settings.allowLan,
+      lanUrls,
       port,
       clientCount: 0,
       startedAt: this.clock.now(),
       preferred,
     };
-    if (preferred) this.emit({ kind: 'started', url, preferred: true });
-    else this.emit({ kind: 'fallback', url });
+    if (preferred) this.emit({ kind: 'started', url, preferred: true, lanEnabled: settings.allowLan, lanUrls });
+    else this.emit({ kind: 'fallback', url, lanEnabled: settings.allowLan, lanUrls });
     return { kind: 'started', url, port, preferred };
   }
 
@@ -251,7 +276,17 @@ export class BrowserServer {
     this.stopRequested = true;
     this.stopPromise = (async () => {
       const wasRunning = this.state.running;
-      this.state = { ...this.state, running: false, url: null, port: null, startedAt: null };
+      this.state = {
+        ...this.state,
+        running: false,
+        url: null,
+        bindAddress: null,
+        lanEnabled: false,
+        lanUrls: [],
+        port: null,
+        startedAt: null,
+      };
+      this.allowedLanAddresses = [];
       for (const rendererId of Object.keys(this.transports)) {
         this.confirmations.cancelForRenderer(rendererId);
       }
@@ -281,11 +316,12 @@ export class BrowserServer {
         ? raw.port
         : BROWSER_SERVER_POLICY.defaultPort,
       requirePreferredPort: raw.requirePreferredPort === true,
+      allowLan: raw.allowLan === true,
     };
   }
 
   getState(): BrowserServerState {
-    return { ...this.state, clientCount: Object.keys(this.transports).length };
+    return { ...this.state, lanUrls: [...this.state.lanUrls], clientCount: Object.keys(this.transports).length };
   }
 
   isRunning(): boolean {
@@ -304,6 +340,14 @@ export class BrowserServer {
 
   private async handleHttpRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     try {
+      const port = this.state.port;
+      if (port === null
+        || !isAllowedBrowserRemoteAddress(req.socket.remoteAddress, this.state.lanEnabled)
+        || !isValidBrowserHostHeader(req.headers.host, port, this.allowedLanAddresses)) {
+        res.writeHead(403, securityHeaders());
+        res.end();
+        return;
+      }
       const method = req.method ?? 'GET';
       if (method !== 'GET' && method !== 'HEAD') {
         res.writeHead(405, securityHeaders({ Allow: 'GET, HEAD' }));
@@ -330,7 +374,8 @@ export class BrowserServer {
         await this.staticAssets.load();
         const rendered = this.staticAssets.renderHtml({
           wsRoute: WS_ROUTE,
-          port: this.state.port ?? 0,
+          port,
+          wsHost: req.headers.host!,
           titleSuffix: this.options.titleSuffix,
           faviconRoute: this.options.iconPath ? FAVICON_ROUTE : undefined,
         });
@@ -404,12 +449,13 @@ export class BrowserServer {
       return;
     }
     const port = this.state.port ?? 0;
-    if (!isValidLoopbackHostHeader(req.headers.host, port)) {
+    if (!isAllowedBrowserRemoteAddress(req.socket.remoteAddress, this.state.lanEnabled)
+      || !isValidBrowserHostHeader(req.headers.host, port, this.allowedLanAddresses)) {
       socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
       socket.destroy();
       return;
     }
-    if (!isValidWebSocketOrigin(req.headers.origin, port)) {
+    if (!isValidWebSocketOrigin(req.headers.origin, port, this.allowedLanAddresses)) {
       socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
       socket.destroy();
       return;
@@ -473,9 +519,27 @@ export class BrowserServer {
     });
   }
 
+  private readLanIPv4Addresses(): string[] {
+    try {
+      const addresses = this.options.getLanIPv4Addresses?.()
+        ?? Object.values(os.networkInterfaces()).flatMap((entries) => entries ?? [])
+          .filter((entry) => !entry.internal && entry.family === 'IPv4')
+          .map((entry) => entry.address);
+      return [...new Set(addresses.filter(isLanIPv4Address))].sort();
+    } catch {
+      // Failure to enumerate interfaces must not break localhost service.
+      return [];
+    }
+  }
+
   private actualPort(server: http.Server): number {
     const address = server.address();
     return typeof address === 'object' && address !== null ? address.port : 0;
+  }
+
+  private actualAddress(server: http.Server): string | null {
+    const address = server.address();
+    return typeof address === 'object' && address !== null ? address.address : null;
   }
 
   private closeHttpServer(server: http.Server): Promise<void> {

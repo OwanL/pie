@@ -890,3 +890,36 @@ test('disposal deadline resolves an admitted detail whose writer callback never 
     await transport.dispose();
   }
 });
+
+test('worker transport exposes the settlement pricing resolver on the installed bridge', () => {
+  const transport = new AnalyticsWorkerTransport({
+    sendAnalyticsFrame: () => true,
+    requestAnalyticsSubjectRebind: async (captureSubject) => captureSubject,
+  }, {
+    generationId: 'generation-pricing',
+    captureSubject: { kind: 'session', rootSessionId: 'root-pricing' },
+    buildId: 'build-pricing',
+  }, 'worker-pricing:1', undefined, () => ({
+    inputUsdPerMillionTokens: 0.075,
+    outputUsdPerMillionTokens: 0.25,
+    cacheReadUsdPerMillionTokens: 0.015,
+    cacheWriteUsdPerMillionTokens: 0,
+  }));
+  transport.install();
+  try {
+    const bridge = (globalThis as unknown as Record<PropertyKey, unknown>)[ANALYTICS_RUNTIME_BRIDGE_KEY] as InstalledAnalyticsRuntimeBridge;
+    assert.equal(typeof bridge.priceSubagentSettlement, 'function');
+    assert.deepEqual(bridge.priceSubagentSettlement!({
+      provider: 'provider-a',
+      model: 'model-a',
+      usage: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+    }), {
+      inputUsdPerMillionTokens: 0.075,
+      outputUsdPerMillionTokens: 0.25,
+      cacheReadUsdPerMillionTokens: 0.015,
+      cacheWriteUsdPerMillionTokens: 0,
+    });
+  } finally {
+    transport.dispose();
+  }
+});

@@ -42,6 +42,9 @@ export const DETAIL_PAGE_LRU_MAX_BYTES = 64 * 1024 * 1024;
 export const DETAIL_PER_SUBSCRIPTION_MAX_PAGES = 32;
 export const DETAIL_SUBSCRIPTION_TOMBSTONE_MAX = 64;
 export const DETAIL_CURSOR_MAX_KEYS = 128;
+/** Inactivity bound while waiting for detail.start or a complete baseline. Valid
+ * stream progress restarts this deadline; active live subscriptions have none. */
+export const DETAIL_SUBSCRIPTION_LOAD_TIMEOUT_MS = 45_000;
 
 export interface DetailStoreBudgets {
   maxGlobalPages: number;
@@ -179,6 +182,7 @@ interface DetailSubscriptionRecord {
   error: DetailSubscriptionError | null;
   durableRef: LazyDetailRef | null;
   visible: boolean;
+  loadTimeout: ReturnType<typeof setTimeout> | null;
 }
 
 const records = new Map<string, DetailSubscriptionRecord>();
@@ -275,8 +279,10 @@ export function openDetailSubscription(options: {
     error: null,
     durableRef: null,
     visible: true,
+    loadTimeout: null,
   };
   records.set(detailKey, record);
+  armLoadDeadline(record);
   const cursor = options.cursor ?? cursorByKey.get(detailKey);
   const accepted = (context.postMessage as (message: WebviewToHostMessage) => boolean | void)({
     type: 'detail.subscribe',
@@ -287,8 +293,8 @@ export function openDetailSubscription(options: {
     ...(cursor !== undefined ? { cursor } : {}),
   });
   if (accepted === false) {
-    records.delete(detailKey);
-    discardRecord(record, false);
+    failSubscription(record, 'Unable to send the subagent transcript request. Retry to try again.', false);
+    return;
   }
   notifyKey(detailKey);
 }
@@ -412,6 +418,7 @@ export function receiveDetailImperative(message: DetailStreamMessage): void {
       record.totalCodePoints = message.totalCodePoints;
       record.revision = message.baselineRevision;
       record.error = null;
+      armLoadDeadline(record);
       // A fresh baseline invalidates any pages of a previous baseline.
       discardPages(record);
       record.missingIndexes.clear();
@@ -444,7 +451,10 @@ export function receiveDetailImperative(message: DetailStreamMessage): void {
       record.missingIndexes.delete(ref.pageIndex);
       fetchInFlight.delete(key);
       touchRecord(record);
+      if (record.pageIndexes.size === record.pageCount) clearLoadDeadline(record);
+      else armLoadDeadline(record);
       enforceBounds();
+      if (record.value === null && record.missingIndexes.size > 0) armLoadDeadline(record);
       notifyKey(record.detailKey);
       return;
     }
@@ -470,6 +480,7 @@ export function receiveDetailImperative(message: DetailStreamMessage): void {
       }
       record.value = applied.value;
       record.revision = message.revision;
+      clearLoadDeadline(record);
       touchRecord(record);
       if (assembledForDelta) enforceBounds();
       notifyKey(record.detailKey);
@@ -496,6 +507,7 @@ export function receiveDetailImperative(message: DetailStreamMessage): void {
         openDetailSubscription({ detailKey: record.detailKey, address: record.address });
         return;
       }
+      clearLoadDeadline(record);
       enforceBounds();
       notifyKey(record.detailKey);
       return;
@@ -547,15 +559,57 @@ function ensureRecordValue(record: DetailSubscriptionRecord): boolean {
 }
 
 function retireAndDiscard(record: DetailSubscriptionRecord): void {
+  clearLoadDeadline(record);
   if (record.route) tombstoneSubscriptionId(record.route.subscriptionId);
   record.route = null;
   discardPages(record);
   discardValue(record);
 }
 
+function armLoadDeadline(record: DetailSubscriptionRecord): void {
+  clearLoadDeadline(record);
+  if (record.phase === 'terminal' || record.phase === 'error' || record.value !== null) return;
+  const attempt = record.attempt;
+  record.loadTimeout = setTimeout(() => {
+    if (records.get(record.detailKey) !== record || record.attempt !== attempt) return;
+    record.loadTimeout = null;
+    failSubscription(record, 'Subagent transcript loading timed out. Retry to try again.', true);
+  }, DETAIL_SUBSCRIPTION_LOAD_TIMEOUT_MS);
+}
+
+function clearLoadDeadline(record: DetailSubscriptionRecord): void {
+  if (record.loadTimeout === null) return;
+  clearTimeout(record.loadTimeout);
+  record.loadTimeout = null;
+}
+
+function failSubscription(record: DetailSubscriptionRecord, message: string, releaseHostOwner: boolean): void {
+  if (records.get(record.detailKey) !== record || record.phase === 'error' || record.phase === 'terminal') return;
+  clearLoadDeadline(record);
+  if (releaseHostOwner) {
+    retireAndDiscard(record);
+  }
+  record.phase = 'error';
+  record.error = { code: 'UNAVAILABLE', message, retryable: true };
+  touchRecord(record);
+  if (releaseHostOwner) {
+    context.postMessage?.({
+      type: 'detail.unsubscribe',
+      viewGeneration: record.viewGeneration,
+      detailKey: record.detailKey,
+      detailAttempt: record.attempt,
+      reason: 'collapse',
+    });
+  }
+  notifyKey(record.detailKey);
+}
+
 function discardPages(record: DetailSubscriptionRecord): void {
   for (const index of record.pageIndexes) {
     pages.delete(pageKey(record.detailKey, record.baselineRevision, index));
+  }
+  for (const index of record.missingIndexes) {
+    fetchInFlight.delete(pageKey(record.detailKey, record.baselineRevision, index));
   }
   record.pageIndexes.clear();
   record.missingIndexes.clear();
@@ -568,6 +622,7 @@ function discardValue(record: DetailSubscriptionRecord): void {
 }
 
 function discardRecord(record: DetailSubscriptionRecord, tombstone: boolean): void {
+  clearLoadDeadline(record);
   if (tombstone && record.route) tombstoneSubscriptionId(record.route.subscriptionId);
   discardPages(record);
   discardValue(record);
@@ -808,6 +863,7 @@ export function demandDetailValue(detailKey: string): { status: 'ready'; value: 
   if (record.phase !== 'active') return { status: 'pending' };
   if (record.missingIndexes.size > 0) {
     dispatchMissingPageFetches(record);
+    if (record.loadTimeout === null) armLoadDeadline(record);
     return { status: 'pending' };
   }
   if (record.corruptIndexes.size > 0) {
@@ -828,6 +884,7 @@ export function demandDetailValue(detailKey: string): { status: 'ready'; value: 
     startRebase(record, 'gap', false);
     return { status: 'pending' };
   }
+  clearLoadDeadline(record);
   record.value = value;
   touchRecord(record);
   enforceBounds();
@@ -864,6 +921,19 @@ export function useDetailSubscription(options: {
   const addressKey = options.address ? JSON.stringify(options.address) : undefined;
   const detailKey = options.detailKey;
 
+  // Subscribe before the lifecycle effect opens the owner: opening may fail
+  // synchronously at the transport boundary and must still reach this hook.
+  useEffect(() => {
+    const subscriber = () => setVersion((value) => value + 1);
+    const subscribers = subscribersByKey.get(detailKey) ?? new Set<() => void>();
+    subscribers.add(subscriber);
+    subscribersByKey.set(detailKey, subscribers);
+    return () => {
+      subscribers.delete(subscriber);
+      if (subscribers.size === 0) subscribersByKey.delete(detailKey);
+    };
+  }, [detailKey]);
+
   useEffect(() => {
     if (options.expanded && options.address && contextViewGeneration > 0) {
       openDetailSubscription({ detailKey, address: options.address });
@@ -875,17 +945,6 @@ export function useDetailSubscription(options: {
   useEffect(() => {
     setDetailVisible(detailKey, options.expanded && !!options.address);
   }, [options.expanded, detailKey, addressKey]);
-
-  useEffect(() => {
-    const subscriber = () => setVersion((value) => value + 1);
-    const subscribers = subscribersByKey.get(detailKey) ?? new Set<() => void>();
-    subscribers.add(subscriber);
-    subscribersByKey.set(detailKey, subscribers);
-    return () => {
-      subscribers.delete(subscriber);
-      if (subscribers.size === 0) subscribersByKey.delete(detailKey);
-    };
-  }, [detailKey]);
 
   // Unmount (virtualization eviction, session switch, close-animation end):
   // discard the heavy key store and notify the host. Idempotent when the

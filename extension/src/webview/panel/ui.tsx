@@ -6,6 +6,7 @@ import { useCallback, useMemo, useRef } from 'preact/hooks';
 
 import type {
   ActiveRunSummary,
+  BrowserServerViewState,
   CanonicalActivityView,
   ChatMessage,
   ChatPrefs,
@@ -69,6 +70,7 @@ interface ComposerProps {
   activeProvider?: string;
   activeThinkingLevel?: ThinkingLevel;
   privacyMode?: boolean;
+  browserServer?: BrowserServerViewState;
   modelSettings: ModelSettings | null;
   availableModels: ModelInfo[];
   availableModelsStatus?: 'provisional' | 'loading' | 'authoritative';
@@ -124,6 +126,8 @@ interface ComposerProps {
   onMcpSetServerEnabled: (name: string, enabled: boolean) => void;
   onMcpSetServerEnabledForSession: (name: string, enabled: boolean) => void;
   onSetPrivacyMode?: (enabled: boolean) => void;
+  onSetBrowserServerLanEnabled?: (enabled: boolean) => void;
+  onSetBrowserServerEnabled?: (enabled: boolean) => void;
   /** Apply the complete disabled-entry set for the active session's system
    *  prompts. The backend re-emits `session.opened` to update the displayed
    *  entries + toggle state. */
@@ -152,6 +156,7 @@ function ComposerView({
   activeProvider,
   activeThinkingLevel,
   privacyMode = false,
+  browserServer,
   modelSettings,
   availableModels,
   availableModelsStatus = 'authoritative',
@@ -196,6 +201,8 @@ function ComposerView({
   onMcpSetServerEnabled,
   onMcpSetServerEnabledForSession,
   onSetPrivacyMode,
+  onSetBrowserServerLanEnabled,
+  onSetBrowserServerEnabled,
   onSetSystemPromptToggles,
   onSetPruningSettings,
   onSetToolResultPruningSettings,
@@ -446,6 +453,9 @@ function ComposerView({
             onMcpSetServerEnabledForSession={onMcpSetServerEnabledForSession}
             privacyMode={privacyMode}
             onSetPrivacyMode={onSetPrivacyMode}
+            browserServer={browserServer}
+            onSetBrowserServerLanEnabled={onSetBrowserServerLanEnabled}
+            onSetBrowserServerEnabled={onSetBrowserServerEnabled}
             onSetSystemPromptToggles={onSetSystemPromptToggles}
             systemPrompts={systemPrompts}
             onSetPruningSettings={onSetPruningSettings}

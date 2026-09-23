@@ -19,7 +19,12 @@ import type { AssistantUsage, AuxiliaryLlmUsagePayload, SessionUsageSnapshot, To
 import { BillableInvocationLedger } from '../billable-invocation-ledger/service';
 import { ActivityTimeline } from '../activity-timeline/service';
 import { loadModelPricing } from '../../backend/pricing';
-import { pricingForPromptTokens, type ModelTokenPricing } from '../../../../shared/pricing-core';
+import {
+  pricingForPromptTokens,
+  resolveApplicablePricing,
+  type ModelTokenPricing,
+  type PricingIntervalEvidence,
+} from '../../../../shared/pricing-core';
 import { resolvePricingCatalogKey } from '../../shared/model-id';
 import type { RunAnalyticsExportPayload } from '../run-analytics/query';
 import type { CanonicalProviderSettlement } from '../../analytics/canonical-capture.js';
@@ -657,8 +662,19 @@ export class BillableAccounting {
     sessionId: string | undefined,
     snapshot: SessionUsageSnapshot,
   ): void {
-    const existingRecords = this.invocationLedger
-      .projectSession(sessionId ? { sessionId } : { sessionPath }).records;
+    // Transcript-derived snapshots are a historical migration/rebuild input for
+    // the legacy authority only. Under canonical authority the contract forbids
+    // transcript reconstruction/backfill: the recorder owns settlements, and
+    // invocation identities are root-scoped, so re-deriving history here would
+    // not only recapture this session's settled work — a copied session would
+    // mint new settlements for inherited work under its own root. Live capture
+    // keeps its own seams (auxiliary settlements and the turn-ended fallback);
+    // branch bookkeeping below still scopes those live settlements.
+    const canonicalAuthority = this.deps.canonicalCapture !== undefined;
+    const existingRecords = canonicalAuthority
+      ? [] as BillableInvocationRecord[]
+      : this.invocationLedger
+        .projectSession(sessionId ? { sessionId } : { sessionPath }).records;
     const existingSourceIds = new Set(existingRecords.map((record) => record.sourceId));
     this.currentBranchSourcesBySession[sessionPath] = new Set(snapshot.samples.map((sample) => sample.sourceId));
     const entries = snapshot.branchEntryIds ?? [];
@@ -688,6 +704,7 @@ export class BillableAccounting {
     this.currentBranchEntriesBySession[sessionPath] = branchEntries;
     this.currentBranchLeafBySession[sessionPath] = snapshot.branchId;
     this.currentBranchDepthBySession[sessionPath] = entries.length > 0 ? entries.length : undefined;
+    if (canonicalAuthority) return;
     for (const sample of snapshot.samples) {
       // Retry classification is host-only and older transcripts contain
       // aggregate compatibility rows. Source identity prevents either from
@@ -771,11 +788,17 @@ export class BillableAccounting {
       & { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number };
   } {
     const declaredPresence = sample.tokenChannelPresence;
+    // An undeclared channel presence means "present" only when the sample does
+    // not explicitly declare its token channels unknown. Otherwise the
+    // normalized zero stand-ins are placeholders for missing channels and must
+    // not masquerade as known zeros (missing usage channels are unknown, not
+    // zero).
+    const presenceDefault = sample.tokenChannelsKnown !== false;
     const tokenChannelPresence = {
-      input: validTokenChannel(sample.inputTokens) && (declaredPresence?.input ?? true),
-      output: validTokenChannel(sample.outputTokens) && (declaredPresence?.output ?? true),
-      cacheRead: validTokenChannel(sample.cacheReadTokens) && (declaredPresence?.cacheRead ?? true),
-      cacheWrite: validTokenChannel(sample.cacheWriteTokens) && (declaredPresence?.cacheWrite ?? true),
+      input: validTokenChannel(sample.inputTokens) && (declaredPresence?.input ?? presenceDefault),
+      output: validTokenChannel(sample.outputTokens) && (declaredPresence?.output ?? presenceDefault),
+      cacheRead: validTokenChannel(sample.cacheReadTokens) && (declaredPresence?.cacheRead ?? presenceDefault),
+      cacheWrite: validTokenChannel(sample.cacheWriteTokens) && (declaredPresence?.cacheWrite ?? presenceDefault),
     };
     const channelsKnown = sample.tokenChannelsKnown !== false
       && Object.values(tokenChannelPresence).every(Boolean);
@@ -991,7 +1014,7 @@ export class BillableAccounting {
   private pricingFor(
     modelId: string | undefined,
     provider: string | undefined,
-    usage: Pick<SessionUsageSample, 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheWriteTokens'>,
+    usage: Pick<SessionUsageSample, 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheWriteTokens' | 'startedAt' | 'endedAt'>,
   ): BillableInvocationRecord['pricing'] {
     if (!modelId) return undefined;
     const agentDir = this.deps.getAgentDir();
@@ -1015,11 +1038,25 @@ export class BillableAccounting {
     }
     const key = resolvePricingCatalogKey(modelId, (candidate) => this.pricingCache!.map.has(candidate));
     const records = key ? this.pricingCache.map.get(key) : undefined;
-    const pricing = records?.find((record) => !provider || record.provider === provider)?.pricing
-      ?? (records?.length === 1 ? records[0]?.pricing : undefined);
+    // A matching provider wins; a unique record is unambiguous only when the
+    // provider dimension is absent. An explicitly named provider without a
+    // matching record stays unknown — never another provider's rate.
+    const pricing = provider
+      ? records?.find((record) => record.provider === provider)?.pricing
+      : records?.length === 1 ? records[0]?.pricing : undefined;
     if (!pricing) return undefined;
+    // Shared eligibility resolution with the original observed timestamps:
+    // scheduled (peak-window) pricing applies only when both interval
+    // endpoints are valid and the interval lies entirely within one band,
+    // and unsupported cache-read usage stays unpriced. Missing or
+    // band-crossing evidence keeps the record explicitly unpriced.
+    const band = resolveApplicablePricing(pricing, {
+      interval: evidenceInterval(usage.startedAt, usage.endedAt),
+      cacheReadTokens: usage.cacheReadTokens,
+    });
+    if (!band) return undefined;
     const effective = pricingForPromptTokens(
-      pricing,
+      band,
       usage.inputTokens,
       usage.cacheReadTokens,
       usage.cacheWriteTokens,
@@ -1080,11 +1117,17 @@ export class BillableAccounting {
       return { invocationId, appendedDurable: false, record: existing };
     }
     const declaredPresence = sample.tokenChannelPresence;
+    // An undeclared channel presence means "present" only when the sample does
+    // not explicitly declare its token channels unknown. Otherwise the
+    // normalized zero stand-ins are placeholders for missing channels and must
+    // not masquerade as known zeros (missing usage channels are unknown, not
+    // zero).
+    const presenceDefault = sample.tokenChannelsKnown !== false;
     const tokenChannelPresence = {
-      input: validTokenChannel(sample.inputTokens) && (declaredPresence?.input ?? true),
-      output: validTokenChannel(sample.outputTokens) && (declaredPresence?.output ?? true),
-      cacheRead: validTokenChannel(sample.cacheReadTokens) && (declaredPresence?.cacheRead ?? true),
-      cacheWrite: validTokenChannel(sample.cacheWriteTokens) && (declaredPresence?.cacheWrite ?? true),
+      input: validTokenChannel(sample.inputTokens) && (declaredPresence?.input ?? presenceDefault),
+      output: validTokenChannel(sample.outputTokens) && (declaredPresence?.output ?? presenceDefault),
+      cacheRead: validTokenChannel(sample.cacheReadTokens) && (declaredPresence?.cacheRead ?? presenceDefault),
+      cacheWrite: validTokenChannel(sample.cacheWriteTokens) && (declaredPresence?.cacheWrite ?? presenceDefault),
     };
     const channelsKnown = sample.tokenChannelsKnown !== false
       && Object.values(tokenChannelPresence).every(Boolean);
@@ -1254,6 +1297,23 @@ function validIso(value: string | undefined): string | undefined {
 function stableEvidenceTime(value: string | undefined): number {
   const parsed = value ? Date.parse(value) : Number.NaN;
   return Number.isFinite(parsed) && parsed >= 0 ? Math.trunc(parsed) : 0;
+}
+
+/** Evidence interval for pricing applicability, only when both observed
+ *  endpoints are valid timestamps. Missing or invalid times stay missing —
+ *  they are never repaired into synthesized timing evidence. */
+function evidenceInterval(
+  startedAt: string | undefined,
+  endedAt: string | undefined,
+): PricingIntervalEvidence | undefined {
+  if (!startedAt || !endedAt) return undefined;
+  const startedAtMs = Date.parse(startedAt);
+  const endedAtMs = Date.parse(endedAt);
+  if (!Number.isFinite(startedAtMs) || !Number.isFinite(endedAtMs)
+    || startedAtMs < 0 || endedAtMs < 0) {
+    return undefined;
+  }
+  return { startedAtMs, endedAtMs };
 }
 
 function normalizeInvocationTimes(

@@ -84,9 +84,8 @@ test('openSession selects an already-open hydrated tab without a backend lifecyc
   const backend = {
     request: async (method: string) => { backendRequests.push(method); },
   } as any;
-  const state = new SessionServiceState(context, backend, () => undefined, getArchState, dispatchArch, 0);
+  const state = new SessionServiceState(backend, () => undefined, getArchState, dispatchArch, 0);
   const tabs = new SessionTabActions({
-    context,
     scheduleRender: () => undefined,
     runObserver: NOOP_RUN_OBSERVER,
     state,
@@ -150,11 +149,10 @@ test('preloaded cold tab transitions notify the backend in visual order without 
   };
   const context = createExtensionContext();
   const backend = { request: async () => undefined } as any;
-  const state = new SessionServiceState(context, backend, () => undefined, getArchState, dispatchArch, 0);
+  const state = new SessionServiceState(backend, () => undefined, getArchState, dispatchArch, 0);
   state.markSessionSnapshotKnown(sessionB);
   state.markSessionSnapshotKnown(sessionC);
   const tabs = new SessionTabActions({
-    context,
     scheduleRender: () => undefined,
     runObserver: NOOP_RUN_OBSERVER,
     state,
@@ -195,11 +193,11 @@ test('view notification normalizes pending predecessors to null', () => {
   const getArchState = () => archState;
   const dispatchArch = (event: Event) => { archState = reducer(archState, event).state; };
   const context = createExtensionContext();
-  const state = new SessionServiceState(context, { request: async () => undefined } as any, () => undefined, getArchState, dispatchArch, 0);
+  const state = new SessionServiceState({ request: async () => undefined } as any, () => undefined, getArchState, dispatchArch, 0);
   state.markSessionSnapshotKnown(sessionB);
   const predecessors: Array<string | null> = [];
   const tabs = new SessionTabActions({
-    context, scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER,
+    scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER,
     state, getArchState, dispatchArch,
     notifySessionViewed: async (_path, predecessor) => { predecessors.push(predecessor); },
   });
@@ -224,10 +222,10 @@ test('view notification failure keeps local selection and surfaces only the curr
   const getArchState = () => archState;
   const dispatchArch = (event: Event) => { archState = reducer(archState, event).state; };
   const context = createExtensionContext();
-  const state = new SessionServiceState(context, { request: async () => undefined } as any, () => undefined, getArchState, dispatchArch, 0);
+  const state = new SessionServiceState({ request: async () => undefined } as any, () => undefined, getArchState, dispatchArch, 0);
   state.markSessionSnapshotKnown(sessionB);
   const tabs = new SessionTabActions({
-    context, scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER,
+    scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER,
     state, getArchState, dispatchArch,
     notifySessionViewed: async () => { throw new Error('backend unavailable'); },
   });
@@ -257,13 +255,13 @@ test('an older failed notification cannot surface after leaving and reselecting 
   const getArchState = () => archState;
   const dispatchArch = (event: Event) => { archState = reducer(archState, event).state; };
   const context = createExtensionContext();
-  const state = new SessionServiceState(context, { request: async () => undefined } as any, () => undefined, getArchState, dispatchArch, 0);
+  const state = new SessionServiceState({ request: async () => undefined } as any, () => undefined, getArchState, dispatchArch, 0);
   state.markSessionSnapshotKnown(a);
   state.markSessionSnapshotKnown(b);
   let rejectFirst!: (error: Error) => void;
   let call = 0;
   const tabs = new SessionTabActions({
-    context, scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER,
+    scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER,
     state, getArchState, dispatchArch,
     notifySessionViewed: async () => {
       call += 1;
@@ -297,11 +295,11 @@ test('create selection invalidates an older viewed-notification failure', async 
   const getArchState = () => archState;
   const dispatchArch = (event: Event) => { archState = reducer(archState, event).state; };
   const context = createExtensionContext();
-  const state = new SessionServiceState(context, { request: async () => undefined } as any, () => undefined, getArchState, dispatchArch, 0);
+  const state = new SessionServiceState({ request: async () => undefined } as any, () => undefined, getArchState, dispatchArch, 0);
   state.markSessionSnapshotKnown(b);
   let rejectViewed!: (error: Error) => void;
   const tabs = new SessionTabActions({
-    context, scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER,
+    scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER,
     state, getArchState, dispatchArch,
     notifySessionViewed: async () => await new Promise<void>((_resolve, reject) => { rejectViewed = reject; }),
   });
@@ -375,9 +373,8 @@ test('openSession serializes backend session.open requests through the lifecycle
   // serialization, not timeout behavior. An armed-but-uncleared 60s timer keeps the Node
   // process alive for a minute after the test, so the file-level test "fails" on the runner's
   // wait. Passing 0 makes armSelectionRequestTimeout() a no-op (no timer armed, nothing to leak).
-  const state = new SessionServiceState(context, backend, () => undefined, getArchState, dispatchArch, 0);
+  const state = new SessionServiceState(backend, () => undefined, getArchState, dispatchArch, 0);
   const tabs = new SessionTabActions({
-    context,
     scheduleRender: () => undefined,
     runObserver: NOOP_RUN_OBSERVER,
     state,
@@ -426,7 +423,6 @@ test('session operation queues fence continuations from an ended backend generat
   const context = createExtensionContext();
   const archState = createInitialArchState();
   const state = new SessionServiceState(
-    context,
     backend,
     () => undefined,
     () => archState,

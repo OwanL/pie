@@ -51,7 +51,7 @@ export const SubagentParams = Type.Object(
 		}),
 		task: Type.String({ description: "One concrete task to delegate to the agent" }),
 		userContext: UserContextSchema,
-		cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
+		cwd: Type.Optional(Type.String({ description: "Working directory for the agent process. Project agents under this directory are also discovered (defaults to the current session cwd)." })),
 		bucket: BucketSchema,
 		modelRequirements: ModelRequirementsSchema,
 	},

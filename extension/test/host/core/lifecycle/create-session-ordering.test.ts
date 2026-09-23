@@ -63,9 +63,8 @@ test('createNewSession mints the selection token before the reducer activates th
   };
 
   // timeout = 0 → armSelectionRequestTimeout is a no-op (no 60s timer leak).
-  const state = new SessionServiceState(context, backend, () => undefined, getArchState, dispatchArch, 0);
+  const state = new SessionServiceState(backend, () => undefined, getArchState, dispatchArch, 0);
   const tabs = new SessionTabActions({
-    context,
     scheduleRender: () => undefined,
     runObserver: NOOP_RUN_OBSERVER,
     state,
@@ -143,7 +142,7 @@ test('createNewSession mints the selection token before the reducer activates th
     modelSettings: { defaultModel: 'attempt-1-stale', defaultThinkingLevel: 'low' },
   }, {
     getArchState, dispatchArch, runObserver: NOOP_RUN_OBSERVER,
-    scheduleRender: () => undefined, context, state,
+    scheduleRender: () => undefined, state,
   });
   assert.equal(archState.settings.modelSettings?.defaultModel, 'newer-model');
   assert.equal(state.getSelectionRequest(capturedToken!), null, 'trailing publication settles the waiter');
@@ -174,9 +173,9 @@ test('late session.opened reconciles a timed-out create exactly once and a late 
     archState = result.state;
     dispatchedEffects.push(...result.effects);
   };
-  const state = new SessionServiceState(context, backend, () => undefined, getArchState, dispatchArch, 0);
+  const state = new SessionServiceState(backend, () => undefined, getArchState, dispatchArch, 0);
   const tabs = new SessionTabActions({
-    context, scheduleRender: () => undefined, runObserver: {
+    scheduleRender: () => undefined, runObserver: {
       ...NOOP_RUN_OBSERVER,
       replaceSessionPath: () => { replacements += 1; },
     }, state, getArchState, dispatchArch,
@@ -211,7 +210,7 @@ test('late session.opened reconciles a timed-out create exactly once and a late 
     getArchState, dispatchArch, runObserver: {
       ...NOOP_RUN_OBSERVER,
       replaceSessionPath: () => { replacements += 1; },
-    }, scheduleRender: () => undefined, context, state,
+    }, scheduleRender: () => undefined, state,
   };
   applySessionOpenedPayload(payload, deps);
   assert.equal(archState.operations[operationId!]?.terminal?.outcome, 'settled');
@@ -254,9 +253,9 @@ test('a hidden delayed create resolves late without reopening or focusing its ta
     archState = result.state;
     effects.push(...result.effects);
   };
-  const state = new SessionServiceState(context, { request: async () => ({}) } as any, () => undefined, getArchState, dispatchArch, 0);
+  const state = new SessionServiceState({ request: async () => ({}) } as any, () => undefined, getArchState, dispatchArch, 0);
   const tabs = new SessionTabActions({
-    context, scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER,
+    scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER,
     state, getArchState, dispatchArch,
   });
   const pendingPath = tabs.createNewSession();
@@ -280,7 +279,7 @@ test('a hidden delayed create resolves late without reopening or focusing its ta
     busy: false,
   }, {
     getArchState, dispatchArch, runObserver: NOOP_RUN_OBSERVER,
-    scheduleRender: () => undefined, context, state,
+    scheduleRender: () => undefined, state,
   });
   assert.equal(archState.operations[operationId!]?.terminal?.outcome, 'settled');
   assert.equal(archState.sessions.openTabPaths.includes(pendingPath), false);
@@ -354,9 +353,9 @@ test('backend-generation death is the definitive cleanup path for a delayed crea
     }
     archState = reducer(archState, event).state;
   };
-  const state = new SessionServiceState(context, { request: async () => ({}) } as any, () => undefined, getArchState, dispatchArch, 0);
+  const state = new SessionServiceState({ request: async () => ({}) } as any, () => undefined, getArchState, dispatchArch, 0);
   const tabs = new SessionTabActions({
-    context, scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER,
+    scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER,
     state, getArchState, dispatchArch,
   });
   const pendingPath = tabs.createNewSession();
@@ -371,7 +370,7 @@ test('backend-generation death is the definitive cleanup path for a delayed crea
 test('operational incidents are claimed once per backend generation', () => {
   let archState = createInitialArchState();
   const state = new SessionServiceState(
-    createExtensionContext(), { request: async () => ({}) } as any, () => undefined,
+    { request: async () => ({}) } as any, () => undefined,
     () => archState,
     (event) => { archState = reducer(archState, event).state; },
     0,
@@ -449,9 +448,9 @@ test('a backend failure merely mentioning timeout is definitive and restores pre
     for (const effect of result.effects) runner.run(effect);
   }
 
-  const state = new SessionServiceState(context, backend, () => undefined, getArchState, dispatchArch, 0);
+  const state = new SessionServiceState(backend, () => undefined, getArchState, dispatchArch, 0);
   const tabs = new SessionTabActions({
-    context, scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER,
+    scheduleRender: () => undefined, runObserver: NOOP_RUN_OBSERVER,
     state, getArchState, dispatchArch,
   });
 
@@ -502,7 +501,7 @@ test('SDK replacement publication atomically rekeys and activates the selected s
   const backend = { request: async () => ({}) } as any;
   const getArchState = () => archState;
   const dispatchArch = (event: Event): void => { archState = reducer(archState, event).state; };
-  const state = new SessionServiceState(context, backend, () => undefined, getArchState, dispatchArch, 0);
+  const state = new SessionServiceState(backend, () => undefined, getArchState, dispatchArch, 0);
 
   const payload: SessionOpenedPayload = {
     replacesSessionPath: source,
@@ -520,7 +519,6 @@ test('SDK replacement publication atomically rekeys and activates the selected s
     dispatchArch,
     runObserver: NOOP_RUN_OBSERVER,
     scheduleRender: () => undefined,
-    context,
     state,
   });
 
@@ -587,7 +585,6 @@ test('cold first-send session.opened preserves the optimistic transcript and inc
     archState = reducer(archState, event).state;
   };
   const state = new SessionServiceState(
-    context,
     { request: async () => ({}) } as any,
     () => undefined,
     getArchState,
@@ -617,7 +614,6 @@ test('cold first-send session.opened preserves the optimistic transcript and inc
     dispatchArch,
     runObserver: NOOP_RUN_OBSERVER,
     scheduleRender: () => undefined,
-    context,
     state,
   });
 

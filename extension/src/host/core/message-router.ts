@@ -1,16 +1,13 @@
 import * as crypto from 'node:crypto';
 
-import * as vscode from 'vscode';
-
 import type { WebviewToHostMessage, SessionSummary, ChatPrefs, DetailResult, LazyDetailRef, PruningSettings, SessionTitlesSettings, ToolResultPruningSettings, PruningMode, RendererCommandContext } from '../../shared/protocol';
 import type { Event } from './events';
 import type { ArchState } from './reducer';
 import { bootLog } from '../util/audit';
 import { appendPieError, appendPieLog, showPieLogs } from '../util/pie-log';
 import { buildOptimisticUserParts, buildPromptText } from './composer';
-import { resolveSettingsPath } from '../util/settings-path';
 import { NEW_SESSION_NAME } from '../../shared/session-name';
-import { operationSourceFromRenderer } from './operation-types.js';
+import { operationSourceFromRenderer, type SessionOperationSource } from './operation-types.js';
 
 /** Minimal sidebar provider surface the router needs. */
 export interface SidebarProviderLike {
@@ -25,6 +22,31 @@ export interface SidebarProviderLike {
    *  responses answer the INITIATING renderer, not the sidebar. */
   postImperativeToRenderer?(rendererId: string, msg: any): void;
 }
+
+/** Narrow host capabilities used by side-effect-only router actions. */
+export interface MessageRouterPlatform {
+  /** Show the host file picker and return selected filesystem paths. */
+  openFilePicker(): Promise<readonly string[] | undefined>;
+  /** Open the effective settings surface, including any host-specific fallback. */
+  openSettings(): Promise<void>;
+  /** Re-run the registered backend restart command for the originating source. */
+  restartBackend(source: SessionOperationSource): Promise<void>;
+  /** Persist and immediately apply host-level browser LAN exposure. */
+  setBrowserServerLanEnabled(enabled: boolean): Promise<void>;
+  /** Persist and immediately apply the host-level automatic-start preference
+   *  (`pie.browserServer.enabled`), starting or stopping the one shared
+   *  listener. Hosts whose only renderer surface is the browser server must
+   *  reject rather than stop the sole UI. */
+  setBrowserServerEnabled(enabled: boolean): Promise<void>;
+}
+
+const DEFAULT_PLATFORM: MessageRouterPlatform = {
+  openFilePicker: async () => undefined,
+  openSettings: async () => undefined,
+  restartBackend: async () => undefined,
+  setBrowserServerLanEnabled: async () => undefined,
+  setBrowserServerEnabled: async () => undefined,
+};
 
 /** Minimal session-service surface the router needs. */
 export interface SessionServiceLike {
@@ -90,6 +112,7 @@ export class MessageRouter {
     private readonly scheduleRender: () => void,
     private readonly deriveSessionNameFromTextFn: (text: string) => { name: string; isPlaceholder: boolean },
     private readonly isPendingTabPathFn: (path: string) => boolean,
+    private readonly platform: MessageRouterPlatform = DEFAULT_PLATFORM,
   ) {
   }
 
@@ -269,6 +292,12 @@ export class MessageRouter {
 
       case 'setPrivacyMode':
         return this.onSetPrivacyMode(msg as Extract<WebviewToHostMessage, { type: 'setPrivacyMode' }>, context);
+
+      case 'setBrowserServerLanEnabled':
+        return this.platform.setBrowserServerLanEnabled(msg.enabled);
+
+      case 'setBrowserServerEnabled':
+        return this.platform.setBrowserServerEnabled(msg.enabled);
 
       case 'setPruningSettings':
         return await this.onSetPruningSettings(msg as Extract<WebviewToHostMessage, { type: 'setPruningSettings' }>);
@@ -630,15 +659,9 @@ export class MessageRouter {
     // previous path dispatched the Command directly with sessionPath: undefined,
     // so the runner's legacy addFilesystemPaths had to resolve the session
     // inside the effect handler (re-entrant Command dispatch).
-    const uris = await vscode.window.showOpenDialog({
-      canSelectMany: true,
-      canSelectFiles: true,
-      canSelectFolders: true,
-      openLabel: 'Attach',
-      title: 'Attach file path(s) to message',
-    });
-    if (!uris || uris.length === 0) return;
-    await this.service.addFilesystemPaths(undefined, uris.map((u) => u.fsPath), 'picker');
+    const paths = await this.platform.openFilePicker();
+    if (!paths || paths.length === 0) return;
+    await this.service.addFilesystemPaths(undefined, [...paths], 'picker');
     this.sidebarProvider.postState();
   }
 
@@ -1358,28 +1381,15 @@ export class MessageRouter {
     appendPieLog(msg.level, 'webview', msg.message, msg.data);
   }
 
-  /** `openSettings` — open the pruning settings file (`settings.json` in
-   *  `PI_CODING_AGENT_DIR`) so the user can adjust `prepassTimeoutSec` / mode
-   *  after a timeout. Falls back to the VS Code Settings UI filtered to "pie"
-   *  when the settings file path cannot be resolved. */
+  /** `openSettings` — delegate to the host settings adapter. */
   private async onOpenSettings(): Promise<void> {
-    const settingsPath = resolveSettingsPath();
-    if (settingsPath) {
-      try {
-        const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(settingsPath));
-        await vscode.window.showTextDocument(doc);
-        return;
-      } catch (err) {
-        bootLog('webview', 'openSettings.openFileFailed', { settingsPath, error: String(err) });
-      }
-    }
-    await vscode.commands.executeCommand('workbench.action.openSettings', 'pie');
+    await this.platform.openSettings();
   }
 
-  /** `restartBackend` — re-run the registered `pie.restartBackend` command
-   *  after a backend-exit error. The command owns the full restart lifecycle. */
+  /** `restartBackend` — delegate to the host restart adapter. The command
+   *  owns the full restart lifecycle and receives the renderer source intact. */
   private async onRestartBackend(context?: RendererCommandContext): Promise<void> {
-    await vscode.commands.executeCommand('pie.restartBackend', operationSourceFromRenderer(context));
+    await this.platform.restartBackend(operationSourceFromRenderer(context));
   }
 
   /** `retrySend` — re-send the draft text (composer draft + inputs were

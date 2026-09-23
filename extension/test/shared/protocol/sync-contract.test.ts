@@ -33,7 +33,7 @@ test('runtime lease release stays behind awaited production backend shutdown', a
   // Bootstrap's executable delayed-deactivation tests cover lease retention.
   // Guard the production delegate too: Disposable.dispose() is fire-and-forget
   // and must not substitute for BackendClient.stop() at this lifecycle boundary.
-  const host = await readFile(new URL('../../../src/host/extension-host.ts', import.meta.url), 'utf8');
+  const host = await readFile(new URL('../../../src/host/runtime/host-runtime.ts', import.meta.url), 'utf8');
   const entry = await readFile(new URL('../../../src/extension.ts', import.meta.url), 'utf8');
   // Analytics ingress remains open while the backend drains. Its transport is
   // fenced from the finally block even when stop rejects, and only then may
@@ -48,6 +48,22 @@ test('runtime lease release stays behind awaited production backend shutdown', a
   assert.ok(backendDispose > transportShutdown, 'backend disposal must follow transport settlement');
   assert.ok(runtimeStop > backendDispose, 'analytics runtime stop must follow backend disposal');
   assert.match(entry, /await extension\?\.shutdown\(\)/u);
+});
+
+test('protocol v11 browser-server network state remains host-global and separates actual from configured intent', async () => {
+  const contract = await readFile(new URL('../../../../docs/STATE_CONTRACT.md', import.meta.url), 'utf8');
+  assert.match(contract, /Browser Server Network State \(Protocol v11\)/u);
+  assert.match(contract, /host-global authority for the one shared browser listener/u);
+  assert.match(contract, /`setBrowserServerLanEnabled` and `setBrowserServerEnabled` renderer commands/u);
+  assert.match(contract, /`lanEnabled` and `lanUrls` describe the currently running server instance/u);
+  assert.match(contract, /`configuredLanEnabled` is the persisted LAN preference/u);
+  assert.match(contract, /`configuredEnabled` is the persisted automatic-start preference/u);
+  assert.match(contract, /`pendingEnabled` exposes the requested start\/stop value/u);
+  assert.match(contract, /`changePending` plus `pendingLanEnabled`\/`pendingEnabled`/u);
+  assert.match(contract, /`changeError` is a safe user-facing failure summary/u);
+  assert.match(contract, /`serverToggleAvailable`/u);
+  assert.match(contract, /Standalone hosts[^.]*never set it[^.]*fail closed/u);
+  assert.match(contract, /must never implicitly start the server/u);
 });
 
 test('PROTOCOL_VERSION is a positive integer', () => {

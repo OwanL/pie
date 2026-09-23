@@ -45,6 +45,7 @@ import type { ModelSettingsUnsetKey } from './request-handler-shared';
 import { buildSessionCapabilities, hasBillableSessionActivity } from './session-activity';
 import { createRuntimeFactory, ServiceLoadingGate } from './runtime-factory';
 import { createSessionControlTool } from './session-control-tool';
+import { subagentSettlementPricingResolver } from './subagent-settlement-pricing';
 import { handleSdkSessionEvent } from './session-event-handler';
 import {
   buildSessionOpenedPayload as buildSessionOpenedPayloadHelper,
@@ -601,6 +602,7 @@ export class WorkerRuntimeHost {
         activation,
         `${this.options.owner.workerId}:${this.options.owner.workerGeneration}`,
         this.analyticsWriterAdmission,
+        subagentSettlementPricingResolver(this.agentDir),
       );
       this.analyticsTransport.install();
     }

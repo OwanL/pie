@@ -93,6 +93,18 @@ interface PendingTerminal {
   durableRef: LazyDetailRef;
 }
 
+/** Serialized authority for the last delivered state of a subscription whose
+ *  canonical value cannot be retained as parsed in-memory state. Oversized
+ *  content spools with zero memory charge, so a live transcript above the
+ *  retention budget keeps emitting cheap structural deltas against the stable
+ *  baseline the receiver already holds instead of rebasing on every update. */
+interface DeliveredDiffAuthority {
+  snapshot: SerializedSnapshot;
+  /** Bytes charged against the global in-memory retention budget. Spools have
+   * zero memory charge. */
+  memoryBytes: number;
+}
+
 interface SubscriptionRecord {
   subscriptionId: string;
   address: LiveSubagentDetailAddress;
@@ -107,6 +119,7 @@ interface SubscriptionRecord {
   rebaseRevision?: number;
   rebaseReason?: 'gap' | 'backpressure' | 'evicted';
   baseline?: BaselineDelivery;
+  deliveredDiff?: DeliveredDiffAuthority;
   pendingTerminal?: PendingTerminal;
   touchedAt: number;
 }
@@ -457,20 +470,28 @@ export class WorkerLiveDetailStore {
       this.flushRebase(subscription);
       return;
     }
-    this.releaseBaseline(subscription);
-    // Source changes are intentionally observed only after the immutable
-    // original baseline has drained. This is the handoff point at which the
-    // host can safely discard the old pages and request a current baseline.
-    if (subscription.needsRebase) {
-      this.flushRebase(subscription);
-      return;
-    }
     const source = this.sources.get(subscription.rootKey);
-    if (!source || source.revision !== baseline.revision) {
-      this.requireRebase(subscription, source?.revision ?? baseline.revision, source ? 'gap' : 'evicted');
+    if (!source) {
+      this.releaseBaseline(subscription);
+      this.requireRebase(subscription, baseline.revision, 'evicted');
       this.flushRebase(subscription);
       return;
     }
+    if (subscription.needsRebase || source.revision !== baseline.revision) {
+      // A source update raced the immutable baseline. Deliver the deferred
+      // change as one structural delta against the just-delivered snapshot so
+      // the receiver keeps its stable live baseline; a rebase is the bounded
+      // fallback when the delta path cannot represent the update.
+      if (this.completeBaselineWithDelta(subscription, baseline, source)) return;
+      this.releaseBaseline(subscription);
+      if (!subscription.needsRebase) this.requireRebase(subscription, source.revision, 'gap');
+      this.flushRebase(subscription);
+      return;
+    }
+    // Stable completion: no update raced the immutable baseline. Retain the
+    // content as the delta authority for later updates; an oversized value
+    // keeps the delivered snapshot as a zero-memory spool authority rather
+    // than invalidating the baseline the receiver just assembled.
     let canonical: CanonicalDetail | undefined;
     try {
       canonical = canonicalizeTarget(source.details, subscription.address);
@@ -479,6 +500,7 @@ export class WorkerLiveDetailStore {
       return;
     }
     if (!canonical) {
+      this.releaseBaseline(subscription);
       this.requireRebase(subscription, source.revision, 'gap');
       this.flushRebase(subscription);
       return;
@@ -486,7 +508,134 @@ export class WorkerLiveDetailStore {
     subscription.totalBytes = canonical.bytes;
     subscription.sourceFingerprint = canonical.fingerprint;
     subscription.touchedAt = Date.now();
-    this.retainCanonical(subscription, canonical);
+    if (canonical.bytes <= this.budgets.maxCanonicalBytes) {
+      this.releaseBaseline(subscription);
+      this.retainCanonical(subscription, canonical);
+      return;
+    }
+    this.transferBaselineToDiffAuthority(subscription, baseline);
+  }
+
+  /** Deliver the updates that raced the just-completed baseline as one ordered
+   *  structural delta against the delivered snapshot. Returns false when the
+   *  delta path cannot represent the update (unreadable snapshot, oversized
+   *  delta, or a rejected emission); the caller then flushes a rebase. */
+  private completeBaselineWithDelta(
+    subscription: SubscriptionRecord,
+    baseline: BaselineDelivery,
+    source: SourceRecord,
+  ): boolean {
+    let canonical: CanonicalDetail | undefined;
+    try {
+      canonical = canonicalizeTarget(source.details, subscription.address);
+    } catch {
+      return false;
+    }
+    if (!canonical) return false;
+    let previous: JsonSafeValue | undefined;
+    try {
+      previous = this.readSerializedSnapshot(baseline.snapshot);
+    } catch {
+      return false;
+    }
+    if (!previous || !isJsonSafeValue(previous)) return false;
+    let operations;
+    try {
+      operations = diffJsonValues(previous, canonical.value);
+    } catch {
+      return false;
+    }
+    if (operations.length > 0) {
+      const deltaBytes = Buffer.byteLength(JSON.stringify(operations), 'utf8');
+      if (deltaBytes > this.budgets.maxDeltaBytes) return false;
+      const emitted = this.options.emit({
+        kind: 'detail.delta', subscriptionId: subscription.subscriptionId,
+        baseRevision: subscription.revision, revision: source.revision, operations,
+      });
+      if (!emitted) return false;
+      subscription.revision = source.revision;
+    }
+    subscription.needsRebase = false;
+    subscription.rebaseRevision = undefined;
+    subscription.rebaseReason = undefined;
+    subscription.sourceFingerprint = canonical.fingerprint;
+    subscription.totalBytes = canonical.bytes;
+    subscription.touchedAt = Date.now();
+    if (canonical.bytes <= this.budgets.maxCanonicalBytes) {
+      this.releaseBaseline(subscription);
+      this.retainCanonical(subscription, canonical);
+      return true;
+    }
+    try {
+      this.transferBaselineToDiffAuthority(subscription, baseline, canonical);
+    } catch {
+      // The delivered authority must never go stale: without a fresh spool the
+      // next delta would compute against content the receiver already passed.
+      this.releaseBaseline(subscription);
+      this.releaseDeliveredDiffAuthority(subscription);
+      this.requireRebase(subscription, source.revision, 'evicted');
+      this.flushRebase(subscription);
+    }
+    return true;
+  }
+
+  /** Replace the just-delivered baseline snapshot with the zero-memory spool
+   *  authority for the delivered-plus-delta state. Spools never charge the
+   *  global canonical budget, so memory bounds are unchanged. */
+  private transferBaselineToDiffAuthority(
+    subscription: SubscriptionRecord,
+    baseline: BaselineDelivery,
+    canonical?: CanonicalDetail,
+  ): void {
+    const replacement = canonical ? createSpoolSnapshot(canonical.serialized) : undefined;
+    subscription.baseline = undefined;
+    try {
+      baseline.cursor.close();
+    } finally {
+      // With a replacement the delivered snapshot is stale and released;
+      // without one the delivered snapshot itself continues as the authority.
+      if (replacement) baseline.snapshot.cleanup();
+    }
+    let transferredBytes = 0;
+    if (replacement) {
+      this.canonicalBytes -= baseline.memoryBytes;
+    } else {
+      transferredBytes = baseline.memoryBytes;
+    }
+    baseline.memoryBytes = 0;
+    const previous = subscription.deliveredDiff;
+    subscription.deliveredDiff = replacement
+      ? { snapshot: replacement, memoryBytes: replacement.memoryBytes }
+      : { snapshot: baseline.snapshot, memoryBytes: transferredBytes };
+    if (previous) this.releaseDeliveredDiff(previous);
+  }
+
+  private releaseDeliveredDiff(diff: DeliveredDiffAuthority): void {
+    this.canonicalBytes -= diff.memoryBytes;
+    diff.memoryBytes = 0;
+    diff.snapshot.cleanup();
+  }
+
+  private releaseDeliveredDiffAuthority(subscription: SubscriptionRecord): void {
+    const diff = subscription.deliveredDiff;
+    if (!diff) return;
+    subscription.deliveredDiff = undefined;
+    this.releaseDeliveredDiff(diff);
+  }
+
+  private readSerializedSnapshot(snapshot: SerializedSnapshot): JsonSafeValue {
+    const reader = snapshot.openReader();
+    try {
+      const parts: string[] = [];
+      for (;;) {
+        const read = reader.read(64 * 1024);
+        if (read.count === 0) break;
+        parts.push(read.text);
+      }
+      return JSON.parse(parts.join('')) as JsonSafeValue;
+    } finally {
+      reader.close();
+    }
   }
 
   private finishPendingTerminal(subscription: SubscriptionRecord): void {
@@ -627,7 +776,7 @@ export class WorkerLiveDetailStore {
     }
     if (canonical.fingerprint && canonical.fingerprint === subscription.sourceFingerprint) return;
     if (!subscription.canonical) {
-      this.requireRebase(subscription, source.revision, 'evicted');
+      this.emitDeliveredDelta(subscription, source, canonical);
       return;
     }
     const operations = diffJsonValues(subscription.canonical, canonical.value);
@@ -655,6 +804,92 @@ export class WorkerLiveDetailStore {
     this.retainCanonical(subscription, canonical);
   }
 
+  /** Oversized subscription update: diff against the last delivered state,
+   *  which is retained as a spool-backed (zero memory charge) authority, so a
+   *  live transcript never starves in a rebase loop merely because its
+   *  canonical value exceeds the retention budget. A rebase stays the bounded
+   *  fallback when the delta cannot represent the update. */
+  private emitDeliveredDelta(
+    subscription: SubscriptionRecord,
+    source: SourceRecord,
+    canonical: CanonicalDetail,
+  ): void {
+    const diff = subscription.deliveredDiff;
+    if (!diff) {
+      this.requireRebase(subscription, source.revision, 'evicted');
+      return;
+    }
+    let previous: JsonSafeValue | undefined;
+    try {
+      previous = this.readSerializedSnapshot(diff.snapshot);
+    } catch {
+      previous = undefined;
+    }
+    if (!previous || !isJsonSafeValue(previous)) {
+      this.releaseDeliveredDiffAuthority(subscription);
+      this.requireRebase(subscription, source.revision, 'evicted');
+      this.flushRebase(subscription);
+      return;
+    }
+    let operations;
+    try {
+      operations = diffJsonValues(previous, canonical.value);
+    } catch {
+      this.requireRebase(subscription, source.revision, 'backpressure');
+      this.flushRebase(subscription);
+      return;
+    }
+    if (operations.length > 0) {
+      const deltaBytes = Buffer.byteLength(JSON.stringify(operations), 'utf8');
+      if (deltaBytes > this.budgets.maxDeltaBytes) {
+        this.requireRebase(subscription, source.revision, 'backpressure');
+        return;
+      }
+      const emitted = this.options.emit({
+        kind: 'detail.delta', subscriptionId: subscription.subscriptionId,
+        baseRevision: subscription.revision, revision: source.revision, operations,
+      });
+      if (!emitted) {
+        this.requireRebase(subscription, source.revision, 'backpressure');
+        return;
+      }
+      subscription.revision = source.revision;
+      subscription.sourceFingerprint = canonical.fingerprint;
+      subscription.totalBytes = canonical.bytes;
+      subscription.touchedAt = Date.now();
+      this.rotateDeliveredDiff(subscription, source, canonical);
+      return;
+    }
+    subscription.sourceFingerprint = canonical.fingerprint;
+  }
+
+  /** Rotate the diff authority after a delivered delta so the next update
+   *  computes against the state the receiver now holds. Oversized content
+   *  spools with zero memory charge; shrinking into the retention budget
+   *  returns to the parsed in-memory canonical window. */
+  private rotateDeliveredDiff(
+    subscription: SubscriptionRecord,
+    source: SourceRecord,
+    canonical: CanonicalDetail,
+  ): void {
+    if (canonical.bytes <= this.budgets.maxCanonicalBytes) {
+      this.retainCanonical(subscription, canonical);
+      if (subscription.canonical) return;
+    }
+    let snapshot: SerializedSnapshot;
+    try {
+      snapshot = createSpoolSnapshot(canonical.serialized);
+    } catch {
+      this.releaseDeliveredDiffAuthority(subscription);
+      this.requireRebase(subscription, source.revision, 'evicted');
+      this.flushRebase(subscription);
+      return;
+    }
+    const previous = subscription.deliveredDiff;
+    subscription.deliveredDiff = { snapshot, memoryBytes: snapshot.memoryBytes };
+    if (previous) this.releaseDeliveredDiff(previous);
+  }
+
   private retainCanonical(subscription: SubscriptionRecord, canonical: CanonicalDetail): void {
     this.canonicalBytes -= subscription.canonicalBytes;
     subscription.canonical = undefined;
@@ -674,6 +909,7 @@ export class WorkerLiveDetailStore {
       subscription.canonical = canonical.value;
       subscription.canonicalBytes = canonical.bytes;
       this.canonicalBytes += canonical.bytes;
+      this.releaseDeliveredDiffAuthority(subscription);
     }
   }
 
@@ -723,6 +959,7 @@ export class WorkerLiveDetailStore {
     const existing = this.subscriptions.get(subscriptionId);
     if (!existing) return;
     this.releaseBaseline(existing);
+    this.releaseDeliveredDiffAuthority(existing);
     this.canonicalBytes -= existing.canonicalBytes;
     this.subscriptions.delete(subscriptionId);
   }

@@ -22,6 +22,13 @@ test("SubagentParams exposes one required task shape without a reasoning overrid
 	assert.equal("agentScope" in props, false);
 });
 
+test("cwd guidance documents project-agent discovery and the session-cwd default", () => {
+	const description = (SubagentParams.properties as Record<string, any>).cwd.description as string;
+	assert.match(description, /Working directory for the agent process/);
+	assert.match(description, /Project agents under this directory are also discovered/);
+	assert.match(description, /defaults to the current session cwd/);
+});
+
 test("SubagentParams enum and default metadata remain intact", () => {
 	const props = SubagentParams.properties as Record<string, any>;
 	assert.deepEqual(props.bucket.enum, ["small", "medium", "frontier"]);

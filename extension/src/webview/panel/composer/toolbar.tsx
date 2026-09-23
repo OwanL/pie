@@ -1,7 +1,7 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import type { ChatPrefs, ExtensionInfo, LastCompactionSummary, McpServerInfo, ModelInfo, PruningCatalog, PruningResult, PruningSettings, ProviderGateStats, SessionTitlesSettings, SystemPromptEntry, ThinkingLevel, ToolResultPruningSettings } from '../../../shared/protocol';
+import type { BrowserServerViewState, ChatPrefs, ExtensionInfo, LastCompactionSummary, McpServerInfo, ModelInfo, PruningCatalog, PruningResult, PruningSettings, ProviderGateStats, SessionTitlesSettings, SystemPromptEntry, ThinkingLevel, ToolResultPruningSettings } from '../../../shared/protocol';
 import { THINKING_LEVEL_LABELS, THINKING_LEVEL_OPTIONS } from '../../../shared/thinking-level.js';
 import { isPendingTabPath } from '../../../shared/tab-behavior.js';
 
@@ -13,6 +13,7 @@ import { ChoicePicker } from '../components/choice-picker';
 import { ModelPicker } from '../components/model-picker';
 import { SystemPromptToggleMenu } from './system-prompt-toggle-menu';
 import { McpToggleMenu } from './mcp-toggle-menu';
+import { BrowserServerMenu } from './browser-server-menu';
 import { formatModelSpec, getModelThinkingLevels, orderModelsForPicker, parseModelSpec } from './model-list';
 import { ContextWindowBreakdownChart } from '../context-window/breakdown-chart';
 import type { ContextWindowBreakdown } from '../context-window/breakdown';
@@ -27,6 +28,7 @@ import { ComposerSettingsMenu } from './settings-menu';
 import { SubagentProviderMenu } from './subagent-provider-menu';
 import { CompactionButton } from './compaction-button';
 import { formatCompactTokens } from '../utils/format-tokens';
+import { ComposerToolbarOverflow, type ComposerToolbarItem } from './toolbar-overflow';
 
 /** "Compacted · freed N tokens" chip label. Falls back to a plain "Compacted"
  *  when the SDK did not report token metrics. */
@@ -76,6 +78,7 @@ interface ComposerToolbarProps {
   sessionTitlesSettings: SessionTitlesSettings;
   providerGateStats: ProviderGateStats;
   privacyMode?: boolean;
+  browserServer?: BrowserServerViewState;
   onSetPrefs: (prefs: Partial<ChatPrefs>) => void;
   mcpServers: McpServerInfo[];
   mcpServersStatus?: 'loading' | 'error' | 'ok';
@@ -86,6 +89,8 @@ interface ComposerToolbarProps {
   onMcpSetServerEnabled: (name: string, enabled: boolean) => void;
   onMcpSetServerEnabledForSession: (name: string, enabled: boolean) => void;
   onSetPrivacyMode?: (enabled: boolean) => void;
+  onSetBrowserServerLanEnabled?: (enabled: boolean) => void;
+  onSetBrowserServerEnabled?: (enabled: boolean) => void;
   onSetSystemPromptToggles: (disabledEntries: string[]) => void;
   onSetPruningSettings: (settings: Partial<PruningSettings>) => void;
   onSetToolResultPruningSettings: (settings: Partial<ToolResultPruningSettings>) => void;
@@ -127,6 +132,7 @@ export const ComposerToolbar = memo(function ComposerToolbar({
   sessionTitlesSettings,
   providerGateStats,
   privacyMode = false,
+  browserServer,
   onSetPrefs,
   mcpServers,
   mcpServersStatus,
@@ -137,6 +143,8 @@ export const ComposerToolbar = memo(function ComposerToolbar({
   onMcpSetServerEnabled,
   onMcpSetServerEnabledForSession,
   onSetPrivacyMode,
+  onSetBrowserServerLanEnabled,
+  onSetBrowserServerEnabled,
   onSetSystemPromptToggles,
   onSetPruningSettings,
   onSetToolResultPruningSettings,
@@ -190,60 +198,82 @@ export const ComposerToolbar = memo(function ComposerToolbar({
   const autonomousModeLabel = prefs.autonomousMode
     ? 'Autonomous mode on — ask_user is unavailable'
     : 'Enable autonomous mode — run without the ask_user tool';
-  return (
+  const pinnedControls = (
     <>
-      <fieldset class="composer-controls" disabled={!commandsAvailable} aria-disabled={!commandsAvailable}>
-        <ComposerSettingsMenu prefs={prefs} mcpServers={mcpServers} mcpServersStatus={mcpServersStatus} mcpPendingApply={mcpPendingApply} pruningSettings={pruningSettings} pruningCatalog={pruningCatalog} pruningResult={pruningResult} toolResultPruningSettings={toolResultPruningSettings} sessionTitlesSettings={sessionTitlesSettings} availableExtensions={availableExtensions} availableModels={availableModels} providerGateStats={providerGateStats} activeContextWindow={selectedModelEntry?.model.contextWindow} activeModel={{ provider: selectedProvider, id: selectedModel }} selectedModel={selectedModel} selectedProvider={selectedProvider} selectedLevel={selectedLevel} chatModelEntries={modelEntries} onModelChange={onModelChange} onSetPrefs={onSetPrefs} onMcpListRequested={onMcpListRequested} onMcpSetServerEnabled={onMcpSetServerEnabled} onSetPruningSettings={onSetPruningSettings} onSetSessionTitlesSettings={onSetSessionTitlesSettings} onSetToolResultPruningSettings={onSetToolResultPruningSettings} />
+      <ComposerSettingsMenu commandsAvailable={commandsAvailable} prefs={prefs} mcpServers={mcpServers} mcpServersStatus={mcpServersStatus} mcpPendingApply={mcpPendingApply} pruningSettings={pruningSettings} pruningCatalog={pruningCatalog} pruningResult={pruningResult} toolResultPruningSettings={toolResultPruningSettings} sessionTitlesSettings={sessionTitlesSettings} availableExtensions={availableExtensions} availableModels={availableModels} providerGateStats={providerGateStats} activeContextWindow={selectedModelEntry?.model.contextWindow} activeModel={{ provider: selectedProvider, id: selectedModel }} selectedModel={selectedModel} selectedProvider={selectedProvider} selectedLevel={selectedLevel} chatModelEntries={modelEntries} onModelChange={onModelChange} onSetPrefs={onSetPrefs} onMcpListRequested={onMcpListRequested} onMcpSetServerEnabled={onMcpSetServerEnabled} onSetPruningSettings={onSetPruningSettings} onSetSessionTitlesSettings={onSetSessionTitlesSettings} onSetToolResultPruningSettings={onSetToolResultPruningSettings} />
+      {filteredModels.length > 0 ? (
+        <ModelPicker
+          label={selectedModelLabel}
+          value={selectedProvider ? formatModelSpec({ provider: selectedProvider, id: selectedModel }) : selectedModel}
+          ariaLabel="Model"
+          title={selectedProviderDisabled ? 'Selected provider is disabled — select another model' : 'Select model'}
+          disabled={!commandsAvailable}
+          entries={modelEntries}
+          onChange={(spec) => {
+            // The picker emits the shared provider-qualified identity so the
+            // backend resolves the exact provider for duplicate model ids.
+            const { id, provider } = parseModelSpec(spec);
+            const model = availableModels.find((candidate) =>
+              candidate.id === id && (!provider || candidate.provider === provider));
+            const supported = getModelThinkingLevels(model);
+            const nextLevel = supported.includes(selectedLevel) ? selectedLevel : (supported[0] ?? 'off');
+            onModelChange(id, provider, nextLevel);
+          }}
+        />
+      ) : selectedModel ? (
+        <ToolbarChip label={selectedModel} tooltip={selectedModel} />
+      ) : null}
+      {supportsReasoning && selectedThinkingOptions.length > 0 && (
+        <ChoicePicker
+          value={selectedLevel}
+          label={THINKING_LEVEL_LABELS[selectedLevel]}
+          ariaLabel="Reasoning level"
+          title="Reasoning effort"
+          options={selectedThinkingOptions}
+          disabled={!commandsAvailable}
+          onChange={(level) => onModelChange(selectedModel, selectedProvider, level)}
+        />
+      )}
+    </>
+  );
 
-        {filteredModels.length > 0 ? (
-          <ModelPicker
-            label={selectedModelLabel}
-            value={selectedProvider ? formatModelSpec({ provider: selectedProvider, id: selectedModel }) : selectedModel}
-            ariaLabel="Model"
-            title={selectedProviderDisabled ? 'Selected provider is disabled — select another model' : 'Select model'}
-            entries={modelEntries}
-            onChange={(spec) => {
-              // The picker emits the shared provider-qualified identity so the
-              // backend resolves the exact provider for duplicate model ids.
-              const { id, provider } = parseModelSpec(spec);
-              const model = availableModels.find((candidate) =>
-                candidate.id === id && (!provider || candidate.provider === provider));
-              const supported = getModelThinkingLevels(model);
-              const nextLevel = supported.includes(selectedLevel) ? selectedLevel : (supported[0] ?? 'off');
-              onModelChange(id, provider, nextLevel);
-            }}
-          />
-        ) : selectedModel ? (
-          <ToolbarChip label={selectedModel} tooltip={selectedModel} />
-        ) : null}
-
-        {supportsReasoning && selectedThinkingOptions.length > 0 && (
-          <ChoicePicker
-            value={selectedLevel}
-            label={THINKING_LEVEL_LABELS[selectedLevel]}
-            ariaLabel="Reasoning level"
-            title="Reasoning effort"
-            options={selectedThinkingOptions}
-            onChange={(level) => onModelChange(selectedModel, selectedProvider, level)}
-          />
-        )}
-
+  const toolbarItems: ComposerToolbarItem[] = [
+    {
+      key: 'subagent-providers',
+      kind: 'control',
+      content: (
         <SubagentProviderMenu
           sessionPath={sessionPath}
           prefs={prefs}
           availableModels={availableModels}
           onSetPrefs={onSetPrefs}
         />
-
-        <SystemPromptToggleMenu sessionPath={sessionPath} prompts={systemPrompts} onSetToggles={onSetSystemPromptToggles} />
-
-        <McpToggleMenu prefs={prefs} mcpServers={mcpSessionServers} mcpServersStatus={mcpServersStatus} mcpPendingApply={mcpSessionPendingApply} onMcpListRequested={onMcpListRequested} onMcpSetServerEnabledForSession={onMcpSetServerEnabledForSession} />
-
+      ),
+    },
+    {
+      key: 'system-prompts',
+      kind: 'control',
+      content: <SystemPromptToggleMenu sessionPath={sessionPath} prompts={systemPrompts} onSetToggles={onSetSystemPromptToggles} />,
+    },
+    {
+      key: 'mcp',
+      kind: 'control',
+      content: <McpToggleMenu prefs={prefs} mcpServers={mcpSessionServers} mcpServersStatus={mcpServersStatus} mcpPendingApply={mcpSessionPendingApply} onMcpListRequested={onMcpListRequested} onMcpSetServerEnabledForSession={onMcpSetServerEnabledForSession} />,
+    },
+    {
+      key: 'compact-context',
+      kind: 'control',
+      content: (
         <CompactionButton
           availability={!sessionPath ? 'no-session' : compacting ? 'compacting' : !canCompact ? 'busy' : 'available'}
           onCompact={onCompact}
         />
-
+      ),
+    },
+    {
+      key: 'autonomous-mode',
+      kind: 'control',
+      content: (
         <button
           type="button"
           class={`system-prompt-toggle-trigger autonomous-mode-trigger${prefs.autonomousMode ? ' active' : ''}`}
@@ -261,7 +291,12 @@ export const ComposerToolbar = memo(function ComposerToolbar({
             <path d="M5 14h6" />
           </svg>
         </button>
-
+      ),
+    },
+    {
+      key: 'privacy-mode',
+      kind: 'control',
+      content: (
         <button
           type="button"
           class={`system-prompt-toggle-trigger privacy-mode-trigger${privacyMode ? ' active' : ''}`}
@@ -276,99 +311,127 @@ export const ComposerToolbar = memo(function ComposerToolbar({
             {privacyMode ? <path d="m5.2 8 1.8 1.8 3.8-4" /> : <path d="M5.5 8h5" />}
           </svg>
         </button>
-      </fieldset>
+      ),
+    },
+    {
+      key: 'browser-network',
+      kind: 'control',
+      content: (
+        <BrowserServerMenu
+          browserServer={browserServer}
+          commandsAvailable={commandsAvailable}
+          onSetLanEnabled={onSetBrowserServerLanEnabled ?? (() => undefined)}
+          onSetServerEnabled={onSetBrowserServerEnabled}
+        />
+      ),
+    },
+    ...(sessionCostIndicator && !prefs.hideSessionCost ? [{
+      key: 'session-cost',
+      kind: 'indicator' as const,
+      content: (
+        <ToolbarIndicatorChip
+          kind="cost"
+          ariaLabel={sessionCostIndicator.ariaLabel}
+          tooltip={sessionCostIndicator.tooltip}
+          tooltipNode={
+            <SessionCostTooltip
+              indicator={sessionCostIndicator}
+              canonicalActivity={canonicalActivitySummary ?? null}
+            />
+          }
+          richRole="region"
+          label={sessionCostIndicator.label}
+          freezeWhileVisible
+        />
+      ),
+    }] : []),
+    ...(tokenRateIndicator.label !== '—' && tokenRateIndicator.label && !prefs.hideTokenRate ? [{
+      key: 'token-rate',
+      kind: 'indicator' as const,
+      content: (
+        <ToolbarIndicatorChip
+          kind="speed"
+          state={tokenRateIndicator.paused ? 'paused' : null}
+          ariaLabel={tokenRateIndicator.ariaLabel}
+          tooltip={tokenRateIndicator.tooltip}
+          label={tokenRateIndicator.label}
+          freezeWhileVisible
+        />
+      ),
+    }] : []),
+    ...(workingTimeIndicator.label ? [{
+      key: 'working-time',
+      kind: 'indicator' as const,
+      content: (
+        <ToolbarIndicatorChip
+          kind="time"
+          ariaLabel={workingTimeIndicator.ariaLabel}
+          tooltip={workingTimeIndicator.tooltip}
+          tooltipNode={workingTimeIndicator.tooltipNode}
+          label={workingTimeIndicator.label}
+          freezeWhileVisible
+        />
+      ),
+    }] : []),
+    ...(runStatus && !prefs.hideRunStatus ? [{
+      key: 'run-status',
+      kind: 'indicator' as const,
+      content: <ToolbarRunStatusChip tone={runStatus.tone} tooltip={runStatus.title} label={runStatus.text} />,
+    }] : []),
+    ...(compacting && !prefs.hideRunStatus ? [{
+      key: 'compacting',
+      kind: 'indicator' as const,
+      content: (
+        <ToolbarChip
+          tone="accent"
+          role="status"
+          ariaLive="polite"
+          ariaLabel="Compacting conversation history"
+          tooltip="Summarizing older messages to free context. The conversation resumes when it finishes."
+          label={
+            <span class="compaction-chip-label">
+              <span class="compaction-chip-spinner" aria-hidden="true" />
+              Compacting…
+            </span>
+          }
+        />
+      ),
+    }] : []),
+    ...(lastCompaction && !prefs.hideRunStatus ? [{
+      key: 'last-compaction',
+      kind: 'indicator' as const,
+      content: (
+        <ToolbarChip
+          tone="success"
+          role="status"
+          ariaLive="polite"
+          ariaLabel={compactionChipAriaLabel(lastCompaction)}
+          tooltip={compactionChipTooltip(lastCompaction)}
+          label={compactionChipLabel(lastCompaction)}
+        />
+      ),
+    }] : []),
+    ...(contextIndicator?.label && contextBreakdown && !prefs.hideContextIndicator ? [{
+      key: 'context-window',
+      kind: 'indicator' as const,
+      content: (
+        <ToolbarIndicatorChip
+          kind="context"
+          severity={contextIndicator.severity}
+          ariaLabel={contextIndicator.ariaLabel}
+          tooltipNode={<ContextWindowBreakdownChart breakdown={contextBreakdown} />}
+          label={contextIndicator.label}
+          freezeWhileVisible
+        />
+      ),
+    }] : []),
+  ];
 
-      <div class="composer-indicators">
-        {/* Cumulative cost, then live stats; context window pinned rightmost. */}
-        {sessionCostIndicator && !prefs.hideSessionCost && (
-          <ToolbarIndicatorChip
-            kind="cost"
-            ariaLabel={sessionCostIndicator.ariaLabel}
-            tooltip={sessionCostIndicator.tooltip}
-            tooltipNode={
-              <SessionCostTooltip
-                indicator={sessionCostIndicator}
-                canonicalActivity={canonicalActivitySummary ?? null}
-              />
-            }
-            richRole="region"
-            label={sessionCostIndicator.label}
-            freezeWhileVisible
-          />
-        )}
-
-        {/* Live stats — throughput, then run state */}
-        {/* An em dash is the rate service's no-data sentinel. Keep the
-            placeholder out of the toolbar; a real rate, end-to-end rate, or
-            historical latency label still renders normally. */}
-        {tokenRateIndicator.label !== '—' && tokenRateIndicator.label && !prefs.hideTokenRate && (
-          <ToolbarIndicatorChip
-            kind="speed"
-            state={tokenRateIndicator.paused ? 'paused' : null}
-            ariaLabel={tokenRateIndicator.ariaLabel}
-            tooltip={tokenRateIndicator.tooltip}
-            label={tokenRateIndicator.label}
-            freezeWhileVisible
-          />
-        )}
-
-        {workingTimeIndicator.label && (
-          <ToolbarIndicatorChip
-            kind="time"
-            ariaLabel={workingTimeIndicator.ariaLabel}
-            tooltip={workingTimeIndicator.tooltip}
-            tooltipNode={workingTimeIndicator.tooltipNode}
-            label={workingTimeIndicator.label}
-            freezeWhileVisible
-          />
-        )}
-
-        {runStatus && !prefs.hideRunStatus && (
-          <ToolbarRunStatusChip
-            tone={runStatus.tone}
-            tooltip={runStatus.title}
-            label={runStatus.text}
-          />
-        )}
-
-        {compacting && !prefs.hideRunStatus && (
-          <ToolbarChip
-            tone="accent"
-            role="status"
-            ariaLive="polite"
-            ariaLabel="Compacting conversation history"
-            tooltip="Summarizing older messages to free context. The conversation resumes when it finishes."
-            label={
-              <span class="compaction-chip-label">
-                <span class="compaction-chip-spinner" aria-hidden="true" />
-                Compacting…
-              </span>
-            }
-          />
-        )}
-
-        {lastCompaction && !prefs.hideRunStatus && (
-          <ToolbarChip
-            tone="success"
-            role="status"
-            ariaLive="polite"
-            ariaLabel={compactionChipAriaLabel(lastCompaction)}
-            tooltip={compactionChipTooltip(lastCompaction)}
-            label={compactionChipLabel(lastCompaction)}
-          />
-        )}
-
-        {contextIndicator?.label && contextBreakdown && !prefs.hideContextIndicator && (
-          <ToolbarIndicatorChip
-            kind="context"
-            severity={contextIndicator.severity}
-            ariaLabel={contextIndicator.ariaLabel}
-            tooltipNode={<ContextWindowBreakdownChart breakdown={contextBreakdown} />}
-            label={contextIndicator.label}
-            freezeWhileVisible
-          />
-        )}
-      </div>
-    </>
+  return (
+    <ComposerToolbarOverflow
+      pinnedControls={pinnedControls}
+      items={toolbarItems}
+      commandsAvailable={commandsAvailable}
+    />
   );
 });

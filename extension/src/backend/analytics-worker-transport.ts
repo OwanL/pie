@@ -20,6 +20,7 @@ import {
   type AnalyticsTransportPacket,
   type AnalyticsTransportDetailStartPacket,
   type InstalledAnalyticsRuntimeBridge,
+  type SubagentSettlementPricingResolver,
 } from '../../../shared/analytics/transport.js';
 
 export interface WorkerAnalyticsActivation {
@@ -142,6 +143,7 @@ export class AnalyticsWorkerTransport {
     readonly activation: WorkerAnalyticsActivation,
     processGeneration: string,
     private readonly writerAdmission?: Pick<SessionLifecycleWriterAdmission, 'assertAdmitted'>,
+    pricingResolver?: SubagentSettlementPricingResolver,
   ) {
     this.captureSubject = activation.captureSubject;
     this.bridge = {
@@ -178,6 +180,7 @@ export class AnalyticsWorkerTransport {
         if (detailDelivery?.kind === 'detail') detailDelivery.retainAcknowledgement = false;
         this.detailDeliveriesByPayload.delete(payloadId);
       },
+      ...(pricingResolver ? { priceSubagentSettlement: pricingResolver } : {}),
     };
   }
 

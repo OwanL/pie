@@ -19,6 +19,11 @@ type AskModule = {
 
 type TypesModule = {
   CUSTOM_SENTINEL: string;
+  askUserSchema: {
+    type: string;
+    required: string[];
+    properties: Record<string, any>;
+  };
 };
 
 async function loadAsk(): Promise<AskModule & TypesModule> {
@@ -48,6 +53,20 @@ function makePort(opts: { selectResult?: string; inputResult?: string; toolCallI
   };
   return { port, calls, signal };
 }
+
+describe('askUserSchema', () => {
+  test('documents the empty-options free-form fallback without changing validation', async () => {
+    const { askUserSchema } = await loadAsk();
+    const props = askUserSchema.properties;
+    assert.equal(props.options.minItems, 0);
+    assert.match(props.options.description, /\[\] for a free-form question/);
+    assert.match(props.options.description, /even when allowCustom is false/);
+    // question stays a plain required string: the runtime never validates a
+    // non-empty question, so no minLength behavioral change is introduced here.
+    assert.equal(props.question.minLength, undefined);
+    assert.match(props.question.description, /never empty/);
+  });
+});
 
 describe('runAsk', () => {
   test('returns a preset option answer without opening the custom input prompt', async () => {

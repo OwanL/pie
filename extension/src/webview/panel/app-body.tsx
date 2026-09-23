@@ -318,6 +318,7 @@ export function AppBody({ adapter }: AppBodyProps) {
         commandsAvailable={connectionState === 'connected'}
         activeSession={viewState.activeSession}
         privacyMode={viewState.privacyMode}
+        browserServer={viewState.browserServer}
         modelSettings={viewState.modelSettings}
         availableModels={viewState.availableModels}
         availableModelsStatus={viewState.availableModelsStatus}

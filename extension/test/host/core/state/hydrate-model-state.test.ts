@@ -79,9 +79,8 @@ test('hydrateModelState skips ModelSettingsHydrated when backend settings alread
   const context = createExtensionContext();
   const models: ModelInfo[] = [{ id: 'umans-kimi-k2.7', provider: 'umans', name: 'Kimi K2.7', reasoning: true, inputKinds: ['text'] }];
   const backend = fakeBackend({ 'settings.get': modelSettings, 'models.list': models });
-  const state = new SessionServiceState(context, backend, () => undefined, getArchState, dispatchArch, 0);
+  const state = new SessionServiceState(backend, () => undefined, getArchState, dispatchArch, 0);
   const messages = new SessionMessageActions({
-    context,
     backend,
     scheduleRender: () => undefined,
     state,
@@ -132,9 +131,8 @@ test('hydrateModelState dispatches ModelSettingsHydrated (not SetModel) when glo
   const context = createExtensionContext();
   const models: ModelInfo[] = [{ id: 'umans-kimi-k2.7', provider: 'umans', name: 'Kimi K2.7', reasoning: true, inputKinds: ['text'] }];
   const backend = fakeBackend({ 'settings.get': backendSettings, 'models.list': models });
-  const state = new SessionServiceState(context, backend, () => undefined, getArchState, dispatchArch, 0);
+  const state = new SessionServiceState(backend, () => undefined, getArchState, dispatchArch, 0);
   const messages = new SessionMessageActions({
-    context,
     backend,
     scheduleRender: () => undefined,
     state,
@@ -197,9 +195,8 @@ test('hydrateModelState applies a known provider change for the same model witho
     id: 'gpt-5.5', provider: 'openai-codex', name: 'GPT-5.5', reasoning: true, inputKinds: ['text'],
   }];
   const backend = fakeBackend({ 'settings.get': backendSettings, 'models.list': models }, requestedMethods);
-  const state = new SessionServiceState(context, backend, () => undefined, getArchState, dispatchArch, 0);
+  const state = new SessionServiceState(backend, () => undefined, getArchState, dispatchArch, 0);
   const messages = new SessionMessageActions({
-    context,
     backend,
     scheduleRender: () => undefined,
     state,
@@ -262,9 +259,8 @@ test('hydrateModelState treats an omitted provider as legacy-compatible', async 
     id: 'gpt-5.5', provider: 'github-copilot', name: 'GPT-5.5', reasoning: true, inputKinds: ['text'],
   }];
   const backend = fakeBackend({ 'settings.get': backendSettings, 'models.list': models });
-  const state = new SessionServiceState(context, backend, () => undefined, getArchState, dispatchArch, 0);
+  const state = new SessionServiceState(backend, () => undefined, getArchState, dispatchArch, 0);
   const messages = new SessionMessageActions({
-    context,
     backend,
     scheduleRender: () => undefined,
     state,
@@ -305,9 +301,8 @@ test('hydrateModelState skips ModelSettingsHydrated when summary has no per-sess
   const context = createExtensionContext();
   const models: ModelInfo[] = [{ id: 'umans-kimi-k2.7', provider: 'umans', name: 'Kimi K2.7', reasoning: true, inputKinds: ['text'] }];
   const backend = fakeBackend({ 'settings.get': modelSettings, 'models.list': models });
-  const state = new SessionServiceState(context, backend, () => undefined, getArchState, dispatchArch, 0);
+  const state = new SessionServiceState(backend, () => undefined, getArchState, dispatchArch, 0);
   const messages = new SessionMessageActions({
-    context,
     backend,
     scheduleRender: () => undefined,
     state,
