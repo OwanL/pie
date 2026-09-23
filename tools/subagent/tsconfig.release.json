@@ -1,0 +1,17 @@
+{
+  "//": "Source-only release typecheck config for the subagent tool. Tests use tsconfig.json (runtime path aliases to the bundled pi SDK). baseUrl stays local to this config so the SDK alias paths resolve independently of the inherited extensions/tsconfig.base.json baseUrl.",
+  "extends": "../../extensions/tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM"],
+    "baseUrl": ".",
+    "paths": {
+      "@earendil-works/pi-coding-agent": ["../../extension/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts"],
+      "@mariozechner/pi-coding-agent": ["../../extension/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts"],
+      "@mariozechner/pi-ai": ["../../extension/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/index.d.ts"],
+      "@mariozechner/pi-agent-core": ["../../extension/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-agent-core/dist/index.d.ts"],
+      "@mariozechner/pi-tui": ["../../extension/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui/dist/index.d.ts"]
+    }
+  },
+  "include": ["./**/*.ts"],
+  "exclude": ["test", "node_modules"]
+}

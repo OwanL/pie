@@ -6,7 +6,7 @@ Implemented for Windows with Playwright `1.62.1`, Chromium revision `1234` (`151
 
 The capability consists of:
 
-- one pruneable Pi tool named `playwright` under `extensions/playwright/`;
+- one pruneable Pi tool named `playwright` implemented under `tools/playwright/` and discovered through the `extensions/playwright/index.ts` shim;
 - one lazy Playwright sidecar per durable Pie session;
 - one dedicated browser process and primary isolated `BrowserContext` per Playwright tool session.
 
@@ -300,7 +300,7 @@ Validation uses `INVALID_ARGUMENTS`; uncategorized backend action failures use `
 
 ## Install and version ownership
 
-`extensions/playwright/package.json` and its committed lockfile own the runtime dependencies independently of `extension/node_modules`:
+`extensions/playwright/package.json` and its committed lockfile own the runtime dependencies independently of `extension/node_modules`. The implementation lives under `tools/playwright/`, but dependency installation stays in the extension directory:
 
 - `playwright`: `1.62.1` exact;
 - `pngjs`: `7.0.0` exact.

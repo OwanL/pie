@@ -11,12 +11,12 @@
 //  - scripts/test/package-registry-drift.test.mjs (fails when any runner or root
 //    package script diverges from this registry)
 //
-// The registered package directory is the stable, low-drift identity anchor:
-// each package owns exactly one directory. Most extension packages live under
-// `extensions/<id>/`; tools that join the extensions group from elsewhere use
-// explicit group metadata. Everything else a runner needs — test cwd, tsx/tsc
-// compiler, batching and concurrency — is explicit metadata below so runner
-// adapters never re-derive it locally.
+// The registered package directory is the stable, low-drift identity anchor.
+// Most extension packages live under `extensions/<id>/`; migrated tools use
+// explicit group metadata. `ownedDirs` routes compatibility adapters and
+// extracted implementation files to their existing test owner. Everything else
+// a runner needs — test cwd, tsx/tsc compiler, batching and concurrency — is
+// explicit metadata below so runner adapters never re-derive it locally.
 
 /**
  * Registry entry for one testable package.
@@ -27,6 +27,8 @@
  * @property {string[]} [aliases] Additional accepted ids (e.g. `--package analytics`).
  * @property {string[]} [groups] Explicit named group membership; otherwise extension packages
  *   are included in the `extensions` group when their directory is under `extensions/`.
+ * @property {string[]} [ownedDirs] Additional repo-relative paths whose source changes
+ *   are classified and dependency-scanned as this package (e.g. a discovery shim).
  * @property {string} [testCwd] Repo-relative cwd for test runs; absent = repo root.
  *   Set this only for packages that require a package-local test cwd; all other
  *   package test globs are resolved from the repo root.
@@ -90,14 +92,17 @@ export const PACKAGE_REGISTRY = [
   {
     id: 'skill-pruner',
     dir: 'extensions/skill-pruner',
+    ownedDirs: ['tools/request-capability'],
     typecheck: { config: 'extensions/skill-pruner/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
     fastConcurrency: 3,
   },
   {
     id: 'subagent',
-    dir: 'extensions/subagent',
-    tsxConfig: 'extensions/subagent/tsconfig.json',
-    typecheck: { config: 'extensions/subagent/tsconfig.release.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
+    dir: 'tools/subagent',
+    groups: ['extensions'],
+    ownedDirs: ['extensions/subagent'],
+    tsxConfig: 'tools/subagent/tsconfig.json',
+    typecheck: { config: 'tools/subagent/tsconfig.release.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
     fastBatch: { batches: 4 },
     fastConcurrency: 4,
   },
@@ -105,13 +110,16 @@ export const PACKAGE_REGISTRY = [
     id: 'ask-user',
     dir: 'tools/ask-user',
     groups: ['extensions'],
+    ownedDirs: ['extensions/ask-user'],
     typecheck: { config: 'tools/ask-user/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
     fastConcurrency: 3,
   },
   {
     id: 'warm-bash',
-    dir: 'extensions/warm-bash',
-    typecheck: { config: 'extensions/warm-bash/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
+    dir: 'tools/warm-bash',
+    groups: ['extensions'],
+    ownedDirs: ['extensions/warm-bash'],
+    typecheck: { config: 'tools/warm-bash/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
     fastConcurrency: 3,
   },
   {
@@ -134,21 +142,27 @@ export const PACKAGE_REGISTRY = [
   },
   {
     id: 'deferred-triggers',
-    dir: 'extensions/deferred-triggers',
-    typecheck: { config: 'extensions/deferred-triggers/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
+    dir: 'tools/deferred-triggers',
+    groups: ['extensions'],
+    ownedDirs: ['extensions/deferred-triggers'],
+    typecheck: { config: 'tools/deferred-triggers/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
     fastConcurrency: 3,
   },
   {
     id: 'session-changes',
-    dir: 'extensions/session-changes',
-    typecheck: { config: 'extensions/session-changes/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
+    dir: 'tools/session-changes',
+    groups: ['extensions'],
+    ownedDirs: ['extensions/session-changes'],
+    typecheck: { config: 'tools/session-changes/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
     fastConcurrency: 3,
   },
   {
     id: 'computer-use',
-    dir: 'extensions/computer-use',
-    tsxConfig: 'extensions/computer-use/tsconfig.json',
-    typecheck: { config: 'extensions/computer-use/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
+    dir: 'tools/computer-use',
+    groups: ['extensions'],
+    ownedDirs: ['extensions/computer-use'],
+    tsxConfig: 'tools/computer-use/tsconfig.runtime.json',
+    typecheck: { config: 'tools/computer-use/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
     fastBatch: { batches: 3 },
     fastConcurrency: 2,
   },
@@ -161,9 +175,11 @@ export const PACKAGE_REGISTRY = [
   },
   {
     id: 'playwright',
-    dir: 'extensions/playwright',
-    tsxConfig: 'extensions/playwright/tsconfig.runtime.json',
-    typecheck: { config: 'extensions/playwright/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
+    dir: 'tools/playwright',
+    groups: ['extensions'],
+    ownedDirs: ['extensions/playwright'],
+    tsxConfig: 'tools/playwright/tsconfig.runtime.json',
+    typecheck: { config: 'tools/playwright/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
     fastBatch: { batches: 2 },
   },
 ];
@@ -275,14 +291,16 @@ export const TYPECHECK_PROJECTS = [
 ];
 
 /**
- * Package/directory pairs in registration order — the classification view of
- * the registry used by test-impact.mjs and run-test-files.mjs. Order is
- * irrelevant for classification: no directory is a prefix of another
- * (`extension/` vs `extensions/<id>/` differ at the char after `extension`).
+ * Package/directory pairs — the classification view of the registry used by
+ * test-impact.mjs and run-test-files.mjs. `ownedDirs` include compatibility
+ * adapters and implementation files whose tests remain with another package.
  * @typedef {{ id: string, dir: string }} PackageDirective
  * @type {PackageDirective[]}
  */
-export const PACKAGE_DIRECTIVES = PACKAGE_REGISTRY.map(({ id, dir }) => ({ id, dir }));
+export const PACKAGE_DIRECTIVES = PACKAGE_REGISTRY.flatMap(({ id, dir, ownedDirs = [] }) => [
+  { id, dir },
+  ...ownedDirs.map((ownedDir) => ({ id, dir: ownedDir })),
+]);
 
 /**
  * Repo-relative paths whose changes can affect the test run of MORE than one

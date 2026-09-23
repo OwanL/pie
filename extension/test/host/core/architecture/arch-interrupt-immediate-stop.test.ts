@@ -8,7 +8,7 @@
  * streaming events arriving during or after the retired abort are no-ops.
  *
  * The SDK/subagent cascade (parent abort → child aborts) is already covered by
- * `extensions/subagent/test/interrupt-hardening.test.ts`; this file owns the
+ * `tools/subagent/test/interrupt-hardening.test.ts`; this file owns the
  * host-side optimistic gap that makes the user SEE the interrupt immediately.
  */
 import test from 'node:test';

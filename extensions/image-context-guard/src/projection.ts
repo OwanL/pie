@@ -20,7 +20,7 @@
 
 import type { ContextEvent } from '@earendil-works/pi-coding-agent';
 
-import { projectComputerImageContext } from '../../computer-use/src/context.js';
+import { projectComputerImageContext } from '../../../tools/computer-use/src/context.js';
 import type { ResolvedImagePolicy } from './policy.js';
 
 type ContextMessage = ContextEvent['messages'][number];

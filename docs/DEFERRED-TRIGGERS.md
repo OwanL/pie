@@ -14,7 +14,7 @@ restart beyond what the current sidecar/registry implementation can recover.
 
 Runtime code:
 
-- tool: `extensions/deferred-triggers/` (backend process)
+- tool: `tools/deferred-triggers/` (backend process; `extensions/deferred-triggers/index.ts` is the discovery shim)
 - host registry + sidecar store: `extension/src/host/deferred-triggers/`
 - shared sidecar paths: `extension/src/shared/deferred-triggers-paths.ts`
 - protocol types: `extension/src/shared/protocol/deferred-triggers.ts`
@@ -143,10 +143,10 @@ it during a deferred-trigger wake but may prune it on an ordinary turn.
 
 Focused coverage includes:
 
-- `extensions/deferred-triggers/test/tool.test.ts` — required message,
+- `tools/deferred-triggers/test/tool.test.ts` — required message,
   non-aborting registration, default/explicit targets, command safeguard, and
   creator-scoped list/cancel.
-- `extensions/deferred-triggers/test/store.test.ts` — append/replay,
+- `tools/deferred-triggers/test/store.test.ts` — append/replay,
   cancellation, legacy note records, and OR-trigger state.
 - `extension/test/host/deferred-triggers/deferred-triggers-registry.test.ts` —
   target routing, real-input consumption, timers, retries, self-wake guard,
@@ -160,8 +160,8 @@ Run the focused tests with:
 
 ```bash
 npm run test:file -- \
-  extensions/deferred-triggers/test/store.test.ts \
-  extensions/deferred-triggers/test/tool.test.ts \
+  tools/deferred-triggers/test/store.test.ts \
+  tools/deferred-triggers/test/tool.test.ts \
   extension/test/host/deferred-triggers/deferred-triggers-store.test.ts \
   extension/test/host/deferred-triggers/deferred-triggers-registry.test.ts \
   extension/test/backend/transcript/transcript-deferred-trigger.test.ts

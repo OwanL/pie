@@ -39,7 +39,7 @@ Remediation completed and recorded as the operational reference in `docs/SUBAGEN
 - **REM-03** — bounded per-attempt retry analytics, provider-aware failover excluding configured provider models, structured `Retry-After` handling, and billable evidence for every dispatched attempt.
 - **REM-04** — token-rate activity classification distinguishing generating, tool-executing, and provider-waiting states.
 - **REM-06** — productive runs beyond a fixed wall-clock deadline, different-provider recovery, late-event fencing, orphan observability, and sibling preservation.
-- **Bug 1–3** — interrupt-hardening fixes for abort/teardown races covered by `extensions/subagent/test/interrupt-hardening.test.ts`.
+- **Bug 1–3** — interrupt-hardening fixes for abort/teardown races covered by `tools/subagent/test/interrupt-hardening.test.ts`.
 
 ## Stability architecture milestones
 

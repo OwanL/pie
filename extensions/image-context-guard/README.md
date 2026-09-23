@@ -16,8 +16,9 @@ subagent turns).
 The extension hooks the `context` event and, **non-destructively** (the deep
 copy pi hands the handler, never durable session history):
 
-1. **Computer newest-three bound (source-specific).** Reuses
-   `computer-use`'s `projectComputerImageContext` helper so the latest
+1. **Computer newest-three bound (source-specific).** Reuses the `computer`
+   tool's `projectComputerImageContext` helper (implemented in
+   `tools/computer-use/src/context.ts`) so the latest
    observation always wins over stale captures. This is the first pass.
 2. **Per-model total bound.** Traverses the resulting complete context
    newest-first and retains at most the active model's `maxImagesPerRequest`
@@ -90,6 +91,6 @@ the current provider-qualified model completely determine the projection.
 Disable via `PIE_EXTENSION_TOGGLES_JSON { "image-context-guard": false }`, the
 same global toggle `computer-use` / `tool-result-pruner` honor.
 
-See `extensions/subagent/README.md` for the complementary hard
+See `tools/subagent/README.md` for the complementary hard
 `modelRequirements.inputKinds=["image"]` delegation contract and
 `docs/COMPUTER-USE.md` for the source-specific screenshot bound.

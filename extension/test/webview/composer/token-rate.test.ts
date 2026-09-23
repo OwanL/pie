@@ -76,7 +76,7 @@ function subagentToolCall(
 /**
  * A parallel subagent call: ONE tool call with mode:'parallel' and one result
  * per task, all sharing the same toolCallId. This is the structure the subagent
- * extension actually emits (see extensions/subagent/src/modes.ts).
+ * extension actually emits (see tools/subagent/src/modes.ts).
  */
 function parallelSubagentToolCall(
   id: string,

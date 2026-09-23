@@ -6,8 +6,8 @@ import { deriveFileChangesFromTranscript } from '../../../../src/host/core/file-
 // Import the EXTENSION's JSONL adapter (option A's second traversal) — this is
 // what pins "shared logic, not shared value": the same per-tool-call core, two
 // traversal adapters (ChatMessage[] vs SessionEntry[]), must yield equal results.
-import { deriveFileChangesFromSessionEntries } from '../../../../../extensions/session-changes/src/session-jsonl';
-import type { FileChange } from '../../../../../extensions/session-changes/src/types';
+import { deriveFileChangesFromSessionEntries } from '../../../../../tools/session-changes/src/session-jsonl';
+import type { FileChange } from '../../../../../tools/session-changes/src/types';
 
 // ─── Equivalence: host (ChatMessage[]) vs extension (SessionEntry[]/JSONL) ──
 //

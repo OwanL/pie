@@ -17,7 +17,7 @@ test('selectProjects deduplicates requested projects', () => {
 test('subagent release config is a configured typecheck project', () => {
   const subagent = TYPECHECK_PROJECTS.find((project) => project.id === 'subagent');
   assert.ok(subagent, 'subagent must be a configured typecheck project');
-  assert.equal(subagent.config, 'extensions/subagent/tsconfig.release.json');
+  assert.equal(subagent.config, 'tools/subagent/tsconfig.release.json');
 });
 
 test('runWithConcurrency preserves order and limits active work', async () => {

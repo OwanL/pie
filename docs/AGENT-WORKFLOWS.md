@@ -50,7 +50,7 @@ Delivery to busy, explicitly stopped, closed, or unavailable recipients is not y
 - Delegation is task-only by default. `userContext: latest | all` adds user prompts and successful clarifications from the active branch, bounded to 12,000 characters. It does not copy parent findings, reasoning, or tool output.
 - Tool availability is agent-frontmatter driven with a configurable drop list. Workers are unrestricted by default; scout and reviewer have narrower tool sets. Skill selection and tool selection have different inheritance rules.
 
-Owners: [subagent reference](../extensions/subagent/README.md), [schema](../extensions/subagent/schema.ts), [runner](../extensions/subagent/runner.ts), [context handoff](../extensions/subagent/src/user-context.ts).
+Owners: [subagent reference](../tools/subagent/README.md), [schema](../tools/subagent/schema.ts), [runner](../tools/subagent/runner.ts), [context handoff](../tools/subagent/src/user-context.ts).
 
 ### Session changes
 
@@ -60,7 +60,7 @@ Owners: [subagent reference](../extensions/subagent/README.md), [schema](../exte
 - Focused diffs use Git baselines, not session-start file snapshots. Pre-existing hunks can therefore appear. Git worktree checks remain useful, and current tool guidance explicitly requests them separately.
 - Child-relative paths are accumulated against the parent session's cwd without preserving the child's different cwd. A historical trace confirms a parent rooted at `C:\dev` delegated to `C:\dev\repos\pie`, received paths such as `extension/src/backend/worker-frame-io.ts`, and got `no git baseline` from the focused diff. A subsequent repository-scoped Git diff supplied the missing patch. Later absolute parent edits produced separately spelled entries for the same file.
 
-Owners: [tool and guidance](../extensions/session-changes/index.ts), [JSONL derivation](../extensions/session-changes/src/session-jsonl.ts), [shared derivation](../extension/src/shared/file-change-derivation.ts).
+Owners: [tool and guidance](../tools/session-changes/index.ts), [JSONL derivation](../tools/session-changes/src/session-jsonl.ts), [shared derivation](../extension/src/shared/file-change-derivation.ts).
 
 Trace evidence: session `01a0bbd8-884b-71a7-9340-58b18b4a3df5`, entries `506a43b7`/`bcb8ddce` (worker dispatch/result), `6c17abbe` (manifest), `45ff7bbe` (missing patches), `6a986d13`/`2f900de0` (Git fallback), and `888211ab` (later manifest). A five-session convenience sample found four `session_changes` calls, no `defer_trigger` calls, and no shell-sleep polling. This does not establish prevalence or disprove the user's other observations.
 
@@ -73,7 +73,7 @@ Trace evidence: session `01a0bbd8-884b-71a7-9340-58b18b4a3df5`, entries `506a43b
 - Delivery is host-managed and currently requires an open target session. Closed or unavailable targets are not silently redirected; existing recovery and at-most-once dispatch behavior must be considered before promising independent background/restart support.
 - Short bounded process waits can reasonably remain shell operations. Longer monitoring needs an explicit wake-up primitive; replacing every shell sleep is not a goal.
 
-Owners: [contract](DEFERRED-TRIGGERS.md), [tool](../extensions/deferred-triggers/index.ts), [pruner](../extensions/skill-pruner/src/register.ts).
+Owners: [contract](DEFERRED-TRIGGERS.md), [tool](../tools/deferred-triggers/index.ts), [pruner](../extensions/skill-pruner/src/register.ts).
 
 ### Reusable session infrastructure and constraints
 
@@ -82,7 +82,7 @@ Owners: [contract](DEFERRED-TRIGGERS.md), [tool](../extensions/deferred-triggers
 - Some provider controls have per-session overrides. Autonomous mode is currently runtime-wide, not a durable per-session setting that can simply be copied.
 - Applying inherited model settings must not accidentally change global defaults. Durable creator relationships are separate from existing operation/analytics linkage.
 
-Owners: [host tab actions](../extension/src/host/session-service/tab-actions.ts), [session commands](../extension/src/host/core/reducer/command-session-handlers.ts), [creation ledger](../extension/src/backend/create-operation-ledger.ts), [model selection](../extensions/subagent/src/selection.ts), [settings types](../extension/src/shared/protocol/settings.ts).
+Owners: [host tab actions](../extension/src/host/session-service/tab-actions.ts), [session commands](../extension/src/host/core/reducer/command-session-handlers.ts), [creation ledger](../extension/src/backend/create-operation-ledger.ts), [model selection](../tools/subagent/src/selection.ts), [settings types](../extension/src/shared/protocol/settings.ts).
 
 ## Research and its limits
 

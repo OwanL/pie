@@ -11,7 +11,7 @@
 //   node scripts/sync-models.mjs --verbose # print what changed per file
 //
 // `yaml` and `ajv` are resolved from extension/node_modules (no root deps needed),
-// mirroring the lazy-resolve pattern in extensions/subagent/bucket-selector.ts.
+// mirroring the lazy-resolve pattern in tools/subagent/bucket-selector.ts.
 
 import { createRequire } from 'node:module';
 import { readFileSync, writeFileSync } from 'node:fs';

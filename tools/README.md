@@ -6,26 +6,50 @@ It is metadata-only: importing it must not initialize desktop/browser runtimes
 or load the SDK. Schemas, descriptions, and prompt guidance stay in the actual
 tool definitions, not duplicated in this catalog.
 
-## Current consolidation status
+## Layout
 
-- `ask_user`: implementation, schema, guidance, and unit tests live in
-  [`ask-user/`](ask-user/). `extensions/ask-user/index.ts` is only the SDK discovery
-  adapter. Its existing extension ID, toggle, and registration hooks are retained.
-- `session_control`: implementation lives in [`session-control/`](session-control/).
-  Its worker transport is injected by the backend; session management and IPC
-  remain backend-owned. Bridge/inventory integration tests remain under
-  `extension/test/` for this first slice. The extension project type-checks these
-  imports; `tools/tsconfig.json` also preserves its SDK aliases for bundlers
-  resolving source files outside `extension/`.
-- The other seven Pie-owned implementations remain at the paths explicitly
-  recorded in the catalog. They will move here in subsequent slices. Do not
-  infer consolidation is complete from the existence of this directory.
+All nine catalog tools are implemented under this tree:
 
-## Registration and availability
+- [`ask-user/`](ask-user/) — `ask_user`
+- [`warm-bash/`](warm-bash/) — `bash`
+- [`computer-use/`](computer-use/) — `computer`
+- [`deferred-triggers/`](deferred-triggers/) — `defer_trigger`
+- [`playwright/`](playwright/) — `playwright`
+- [`request-capability/`](request-capability/) — `request_capability`
+- [`session-changes/`](session-changes/) — `session_changes`
+- [`session-control/`](session-control/) — `session_control`
+- [`subagent/`](subagent/) — `subagent`
 
-The SDK still discovers extension adapters under `extensions/`. Moving an
-implementation does not create a second registration. Middleware such as
-skill pruning and safeguards remains in `extensions/`.
+`request_capability` is a deliberately stateless implementation
+([`request-capability/index.ts`](request-capability/index.ts)): pruning
+lifecycle state (hidden/loaded skills, pruned tools), pruning policy, and
+recovery telemetry remain owned by the `skill-pruner` extension and reach the
+tool through injected ports. The `extensions/skill-pruner` tools adapter
+constructs those ports from its own single-owner modules, so there is exactly
+one lifecycle state and no import cycle; pruning middleware itself stays in
+`extensions/`.
+
+`session_control` remains backend-registered: its worker transport is injected
+by the backend, while session management and IPC stay backend-owned. Bridge and
+inventory integration tests remain under `extension/test/`. The extension
+project type-checks these imports; `tools/tsconfig.json` also preserves SDK
+aliases for bundlers resolving source files outside `extension/`.
+
+## Registration and dependency ownership
+
+The SDK still discovers extension adapters under `extensions/`. Each moved
+tool's `extensions/<id>/index.ts` is a one-line discovery shim re-exporting the
+`tools/` implementation, so extension IDs, toggles, and registration hooks are
+unchanged and no second registration exists. Middleware such as skill pruning,
+safeguards, and image guarding remains in `extensions/`.
+
+Dependency ownership also stays with the original extension directories:
+`extensions/computer-use/` and `extensions/playwright/` keep their manifests,
+committed lockfiles, and `node_modules`, so pinned native/runtime packages and
+the Playwright Chromium install path are unchanged. Do not copy
+native/browser dependencies into the VSIX or move installation ownership as an
+incidental consequence of relocation. Minimal manifests under `tools/` preserve
+the moved sources' ESM module scope without creating new dependency owners.
 
 [`backend.ts`](backend.ts) assembles backend-dependent definitions for both
 primary runtimes and initial-context inventory. Inventory has identical
@@ -36,26 +60,19 @@ Eligibility is not visibility. Agent allowlists, configuration, runtime policy,
 and skill pruning still determine which eligible tools are active. This catalog
 is not a replacement for the SDK's runtime `getAllTools()`/active-tool catalog.
 
-SDK, web-access, and MCP implementations remain package-owned. Their integration
-entries identify default names and dynamic registration behavior; source code
-is not copied into this tree.
+SDK, web-access, and MCP implementations remain package-owned. Their
+integration entries identify default names and dynamic registration behavior;
+source code is not copied into this tree.
 
-## Remaining migration steps
+## Verification status
 
-1. Move bash, computer, defer-trigger, playwright, session-changes, and subagent
-   implementation/tests/configs here; preserve discovery IDs via thin adapters.
-2. Extract request-capability from skill-pruner without moving pruning policy or
-   duplicating its session-local lifecycle state.
-3. Update each moved tool's imports, test/typecheck routing, dependency install
-   paths, sidecar paths, and documentation in the same slice.
-4. Add loading-path completeness checks for extension registrations, including
-   real SDK discovery. Current checks pin catalog entries, moved discovery
-   adapter identity, backend primary/inventory parity, and child exclusions;
-   they do not yet prove every dynamically loaded extension matches the catalog.
+Checks pin catalog entries, discovery-adapter identity, backend primary/inventory
+parity, and child exclusions. The pinned SDK discovery test loads every catalog
+extension entry through its real adapter and verifies exactly one registration
+per expected tool. It does not execute desktop/browser tools or claim that
+external packages' dynamic registrations are fixed by this catalog.
 
-Preserve tool names, argument/result schemas, and execution behavior during
-moves. Schema redesign and broader visibility diagnostics are separate work.
+Preserve tool names, argument/result schemas, and execution behavior in this
+tree. Schema redesign and broader visibility diagnostics are separate work.
 The root tool tree follows Pie's existing external agent-directory source
-arrangement; backend imports are bundled by the extension build. Do not copy
-native/browser dependencies into the VSIX or change installation ownership as
-an incidental consequence of relocation.
+arrangement; backend imports are bundled by the extension build.

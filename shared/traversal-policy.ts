@@ -5,7 +5,7 @@
  * One source of truth for the protected-directory classes that broad agent
  * traversal must not enter by default. Consumers:
  *
- * - `extensions/warm-bash` builds recursive-`grep` `--exclude-dir` flags and
+ * - `tools/warm-bash` builds recursive-`grep` `--exclude-dir` flags and
  *   bare-`find` `-prune` expressions from {@link PROTECTED_DIRECTORIES}.
  * - `skills/codebase-maintenance/.ignore` is drift-checked against
  *   {@link PROTECTED_DIRECTORIES} by that skill's scanner regression tests

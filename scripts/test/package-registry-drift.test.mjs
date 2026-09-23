@@ -40,6 +40,9 @@ test('registry entries are well-formed and their directories exist', () => {
     assert.equal(dirs.has(entry.dir), false, `duplicate package dir: ${entry.dir}`);
     dirs.add(entry.dir);
     assert.ok(statSync(path.join(repoRoot, entry.dir)).isDirectory(), `missing package dir: ${entry.dir}`);
+    for (const ownedDir of entry.ownedDirs ?? []) {
+      assert.ok(statSync(path.join(repoRoot, ownedDir)).isDirectory(), `missing owned source dir: ${ownedDir}`);
+    }
     if (entry.tsxConfig) assert.ok(existsSync(path.join(repoRoot, entry.tsxConfig)), `missing tsxConfig: ${entry.tsxConfig}`);
     if (entry.typecheck) {
       assert.ok(existsSync(path.join(repoRoot, entry.typecheck.config)), `missing typecheck config: ${entry.typecheck.config}`);
@@ -55,7 +58,10 @@ test('registry entries are well-formed and their directories exist', () => {
     }
   }
   assert.deepEqual(ALL_PACKAGE_IDS, [...ids]);
-  assert.deepEqual(PACKAGE_DIRECTIVES, PACKAGE_REGISTRY.map(({ id, dir }) => ({ id, dir })));
+  assert.deepEqual(PACKAGE_DIRECTIVES, PACKAGE_REGISTRY.flatMap(({ id, dir, ownedDirs = [] }) => [
+    { id, dir },
+    ...ownedDirs.map((ownedDir) => ({ id, dir: ownedDir })),
+  ]));
 });
 
 test('run-tests.mjs PACKAGE_CONFIGS match the registry exactly (ids, order, aliases, cwd, tsx, batching, concurrency)', () => {
@@ -176,4 +182,7 @@ test('runner scripts and the group adapter stay classified as global test infras
     assert.equal(isGlobalTestInfra(script), true, `${script} must select all packages when changed`);
   }
   assert.equal(isGlobalTestInfra('scripts/lib/test-packages.mjs'), true);
+  for (const id of ['subagent', 'warm-bash', 'deferred-triggers', 'session-changes', 'computer-use', 'playwright']) {
+    assert.ok(PACKAGE_GROUPS.extensions.includes(id), `${id} remains in the extensions test/typecheck group`);
+  }
 });

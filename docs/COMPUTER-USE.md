@@ -4,7 +4,7 @@ Pie exposes one generic `computer` tool for visible Windows applications. The im
 
 ## Selected implementation
 
-Pinned dependencies live in `extensions/computer-use/package.json` and its lockfile:
+Pinned dependencies live in `extensions/computer-use/package.json` and its lockfile (the implementation lives under `tools/computer-use/`, but the dependency manifest, lockfile, and `node_modules` stay in the extension directory):
 
 - `@trycua/cua-driver@0.12.5` — discovery, accessibility observations, desktop capture, launch, primary focus, and lifecycle;
 - `@computer-use/nut-js@4.2.0` — foreground visible-region capture, generic focus fallback, and all physical keyboard/pointer delivery; a bounded built-in Win32 PID/HWND-validated fallback handles Windows foreground-lock cases left unresolved by both libraries;
@@ -14,7 +14,7 @@ Cua + NutJS was selected over Terminator `0.24.32` + NutJS. Both finalists passe
 
 ## Architecture and ownership
 
-`extensions/computer-use/index.ts` registers one sequential tool with five actions:
+`tools/computer-use/` implements one sequential tool with five actions, registered through the `extensions/computer-use/index.ts` discovery shim:
 
 - `open` — discover or launch an exact target; accepts optional `screenshot`/`tree`/`state` to perform the initial observation inline, exactly like `observe`;
 - `observe` — return pixels, optional accessibility data, target/revision state, and artifacts;

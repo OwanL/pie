@@ -453,7 +453,7 @@ export interface ToolResultPruningSourceEvent {
 }
 
 /** Raw warm-bash auto-prune rewrite event read from data/warm-bash.jsonl.
- *  Emitted by extensions/warm-bash for every transparent command rewrite
+ *  Emitted by tools/warm-bash for every transparent command rewrite
  *  (recursive grep / bare-path find). Point-in-time, joinable to a run by
  *  sessionPathHash + timestamp (same mechanism as pruning signals). */
 export interface WarmBashRewriteSourceEvent {

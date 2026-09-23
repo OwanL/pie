@@ -3,14 +3,14 @@
 // Run one or more repo-relative test files directly through the appropriate
 // LOCAL tsx with node:test, in fast mode (parallel files, no coverage). This is
 // the tightest dev loop: `node scripts/run-test-files.mjs extension/test/foo.test.ts
-// extensions/subagent/test/schema.test.ts`.
+// tools/subagent/test/schema.test.ts`.
 //
 // Classification mirrors scripts/run-tests.mjs PACKAGE_CONFIGS and registry
 // testCwd metadata:
 //  - extension/      -> cwd extension/,         tsx = extension/node_modules/tsx
 //  - analysis/       -> cwd analysis/,          tsx = analysis/node_modules/tsx
 //  - scripts/test/   -> cwd repoRoot,            tsx = node_modules/tsx (root)
-//  - extensions/* and tools/ask-user/ -> cwd repoRoot, tsx = node_modules/tsx (root)
+//  - extensions/* and tools/* -> cwd repoRoot, tsx = node_modules/tsx (root)
 //
 // Only packages with a registry `tsxConfig` (subagent, playwright,
 // computer-use, image-context-guard) pass `--tsconfig` (their tests resolve
@@ -211,14 +211,14 @@ function printHelp() {
     `Usage: node scripts/run-test-files.mjs <test-file>... [options]\n\n` +
       `Run specific test files through the appropriate local tsx with node:test\n` +
       `(fast mode: parallel files, no coverage). Classifies each path into\n` +
-      `extension/, analysis/, scripts/test/, or extensions/<id>/ and uses that package's local\n` +
-      `tsx; the subagent package additionally passes --tsconfig.\n\n` +
+      `extension/, analysis/, scripts/test/, extensions/<id>/, or tools/<id>/ and uses that package's local\n` +
+      `tsx; packages with SDK path aliases additionally pass --tsconfig.\n\n` +
       `Options:\n` +
       `  --help, -h   Show this help.\n` +
       `  --           Treat the rest of the args as file paths.\n\n` +
       `Examples:\n` +
       `  node scripts/run-test-files.mjs extension/test/webview/components/app-smoke.test.ts\n` +
-      `  node scripts/run-test-files.mjs extensions/subagent/test/schema.test.ts analysis/test/pricing.test.ts\n`,
+      `  node scripts/run-test-files.mjs tools/subagent/test/schema.test.ts analysis/test/pricing.test.ts\n`,
   );
 }
 

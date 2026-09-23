@@ -83,21 +83,24 @@ test('classifyTestFile keeps script tests repo-rooted like the scripts package g
   assert.match(fwd(d.tsxBin), /(^|\/)node_modules\/tsx\/dist\/cli\.mjs$/);
 });
 
-test('classifyTestFile classifies extensions/* files (cwd=repoRoot) and sets the subagent --tsconfig', () => {
-  const d = classifyTestFile(repoRoot, 'extensions/subagent/test/agents.test.ts');
+test('classifyTestFile classifies migrated tools (cwd=repoRoot) and sets the subagent --tsconfig', () => {
+  const d = classifyTestFile(repoRoot, 'tools/subagent/test/agents.test.ts');
   assert.equal(d.id, 'subagent');
   assert.equal(fwd(d.cwd), fwd(repoRoot));
-  assert.equal(d.tsxConfig, 'extensions/subagent/tsconfig.json');
-  assert.equal(d.relativeFilePath, 'extensions/subagent/test/agents.test.ts');
-  // extensions/* resolve the root tsx
+  assert.equal(d.tsxConfig, 'tools/subagent/tsconfig.json');
+  assert.equal(d.relativeFilePath, 'tools/subagent/test/agents.test.ts');
+  // tools/* resolve the root tsx
   assert.match(fwd(d.tsxBin), /(^|\/)node_modules\/tsx\/dist\/cli\.mjs$/);
-  assert.doesNotMatch(fwd(d.tsxBin), /extensions\/subagent/);
+  assert.doesNotMatch(fwd(d.tsxBin), /tools\/subagent/);
 });
 
 test('classifyTestFile applies package-specific tsconfig and leaves ordinary extensions unconfigured', () => {
-  const playwright = classifyTestFile(repoRoot, 'extensions/playwright/test/schema.test.ts');
+  const playwright = classifyTestFile(repoRoot, 'tools/playwright/test/schema.test.ts');
   assert.equal(playwright.id, 'playwright');
-  assert.equal(playwright.tsxConfig, 'extensions/playwright/tsconfig.runtime.json');
+  assert.equal(playwright.tsxConfig, 'tools/playwright/tsconfig.runtime.json');
+  const computerUse = classifyTestFile(repoRoot, 'tools/computer-use/test/protocol.test.ts');
+  assert.equal(computerUse.id, 'computer-use');
+  assert.equal(computerUse.tsxConfig, 'tools/computer-use/tsconfig.runtime.json');
   const ordinary = classifyTestFile(repoRoot, 'extensions/cwd-skills/test/cwd-skills-extension.test.ts');
   assert.equal(ordinary.id, 'cwd-skills');
   assert.equal(ordinary.tsxConfig, undefined);
@@ -112,13 +115,13 @@ test('classifyTestFile throws for unclassifiable paths', () => {
 test('groupFilesByPackage groups real files by package (sorted) and sets subagent tsxConfig', () => {
   const groups = groupFilesByPackage(repoRoot, [
     'extension/test/webview/components/app-smoke.test.ts',
-    'extensions/subagent/test/agents.test.ts',
+    'tools/subagent/test/agents.test.ts',
     'analysis/test/pricing.test.ts',
   ]);
   assert.deepEqual(groups.map((g) => g.id), ['analysis', 'extension', 'subagent']);
   const subagent = groups.find((g) => g.id === 'subagent');
-  assert.equal(subagent.tsxConfig, 'extensions/subagent/tsconfig.json');
-  assert.deepEqual(subagent.files, ['extensions/subagent/test/agents.test.ts']);
+  assert.equal(subagent.tsxConfig, 'tools/subagent/tsconfig.json');
+  assert.deepEqual(subagent.files, ['tools/subagent/test/agents.test.ts']);
   const ext = groups.find((g) => g.id === 'extension');
   assert.equal(ext.tsxConfig, undefined);
   assert.deepEqual(ext.files, ['test/webview/components/app-smoke.test.ts']);
@@ -178,15 +181,15 @@ test('buildTsxArgs is fast/no-coverage and prefixes --tsconfig before files', ()
   );
   assert.deepEqual(
     buildTsxArgs({
-      tsxConfig: 'extensions/subagent/tsconfig.json',
-      files: ['extensions/subagent/test/a.test.ts', 'extensions/subagent/test/b.test.ts'],
+      tsxConfig: 'tools/subagent/tsconfig.json',
+      files: ['tools/subagent/test/a.test.ts', 'tools/subagent/test/b.test.ts'],
     }),
     [
       '--test',
       '--test-force-exit',
-      '--tsconfig=extensions/subagent/tsconfig.json',
-      'extensions/subagent/test/a.test.ts',
-      'extensions/subagent/test/b.test.ts',
+      '--tsconfig=tools/subagent/tsconfig.json',
+      'tools/subagent/test/a.test.ts',
+      'tools/subagent/test/b.test.ts',
     ],
   );
   // no coverage flags ever

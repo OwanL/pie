@@ -2,7 +2,7 @@
 
 **Status:** Implemented operational reference. The core resilience model below is in place and covered by focused reliability suites; the remaining items are nonblocking optional follow-ups (see the end), not P0 gaps.
 
-**Scope:** `extensions/subagent/`, provider request lifecycle, queued messages, and operational analytics.
+**Scope:** `tools/subagent/` (discovered through the `extensions/subagent/index.ts` shim), provider request lifecycle, queued messages, and operational analytics.
 
 ## Origin
 
@@ -64,7 +64,7 @@ Deterministic fake-provider/SDK scenarios with injected clocks (no real-time sle
 | 11 | One hung child among successful siblings | `subagent-provider-resilience.test.ts` — a cancelled child preserves partial/completed `results[]`; `interrupt-hardening.test.ts` — parallel sibling abort settles each child locally |
 | 12 | Circuit open while another provider healthy | `provider-gate.test.ts` + `retry.test.ts` (provider exclusion) + `subagent-provider-resilience.test.ts` (different-provider recovery) |
 
-**Test files:** `extensions/subagent/test/{retry,settlement,interrupt-hardening,orphan-cleanup,provider-failure,provider-capacity,subagent-provider-resilience}.test.ts`, `extension/test/backend/models/provider-gate.test.ts`.
+**Test files:** `tools/subagent/test/{retry,settlement,interrupt-hardening,orphan-cleanup,provider-failure,provider-capacity,subagent-provider-resilience}.test.ts`, `extension/test/backend/models/provider-gate.test.ts`.
 
 ## Operational analytics
 
@@ -79,10 +79,10 @@ These are quality/telemetry refinements, not stability gaps; the resilience mode
 
 ## Relevant files
 
-- `extensions/subagent/runner.ts`, `src/execute.ts` — local terminal CAS, progress/attempt generation fencing, cancellation-driven settlement, and recursive projection instrumentation.
-- `extensions/subagent/src/{single,modes}.ts` — per-attempt orchestration, retry/failover, sibling aggregation.
-- `extensions/subagent/src/{retry,provider-failure,provider-capacity,cleanup}.ts` — backoff/`Retry-After`, classification, model exclusion, orphan registry.
-- `extensions/subagent/src/concurrency-limit.ts` — process-level permit ownership.
+- `tools/subagent/runner.ts`, `src/execute.ts` — local terminal CAS, progress/attempt generation fencing, cancellation-driven settlement, and recursive projection instrumentation.
+- `tools/subagent/src/{single,modes}.ts` — per-attempt orchestration, retry/failover, sibling aggregation.
+- `tools/subagent/src/{retry,provider-failure,provider-capacity,cleanup}.ts` — backoff/`Retry-After`, classification, model exclusion, orphan registry.
+- `tools/subagent/src/concurrency-limit.ts` — process-level permit ownership.
 - `extension/src/backend/provider-gate.ts` — shared provider admission/circuit/afterburn.
 - `extension/src/backend/session-event-handler.ts`, `extension/src/host/core/reducer/streaming-handlers.ts` — queued-message delivery and transcript reconciliation.
 - `extension/src/shared/subagent-result.ts` — transcript compatibility/fallback rendering (still useful for legacy results; new runtime results are complete without it).

@@ -65,12 +65,16 @@ const PACKAGE_TEST_METADATA = {
   },
   'skill-pruner': {
     testGlobs: ['extensions/skill-pruner/test/**/*.test.ts'],
-    coverageIncludes: ['extensions/skill-pruner/*.ts', 'extensions/skill-pruner/src/**/*.ts'],
+    coverageIncludes: [
+      'extensions/skill-pruner/*.ts',
+      'extensions/skill-pruner/src/**/*.ts',
+      'tools/request-capability/index.ts',
+    ],
     thresholds: { lines: 91, branches: 79 },
   },
   subagent: {
-    testGlobs: ['extensions/subagent/test/**/*.test.ts'],
-    coverageIncludes: ['extensions/subagent/*.ts', 'extensions/subagent/src/**/*.ts'],
+    testGlobs: ['tools/subagent/test/**/*.test.ts'],
+    coverageIncludes: ['tools/subagent/*.ts', 'tools/subagent/src/**/*.ts'],
     // Source-only coverage excludes the previously counted test files. Much of
     // runner.ts is real-SDK registration/session glue; keep its honest baseline
     // gated without restoring the inflated all-TypeScript metric.
@@ -80,7 +84,7 @@ const PACKAGE_TEST_METADATA = {
     // aliases that at runtime; plain tsx cannot resolve it (the SDK is nested
     // under pi-coding-agent's node_modules, never hoisted). This tsconfig's
     // `paths` alias those to the bundled copy so the schema test resolves a
-    // single TypeBox instance. See extensions/subagent/tsconfig.json.
+    // single TypeBox instance. See tools/subagent/tsconfig.json.
   },
   'ask-user': {
     testGlobs: ['tools/ask-user/test/**/*.test.ts'],
@@ -88,8 +92,8 @@ const PACKAGE_TEST_METADATA = {
     thresholds: { lines: 100, branches: 100 },
   },
   'warm-bash': {
-    testGlobs: ['extensions/warm-bash/test/**/*.test.ts'],
-    coverageIncludes: ['extensions/warm-bash/index.ts', 'extensions/warm-bash/src/**/*.ts'],
+    testGlobs: ['tools/warm-bash/test/**/*.test.ts'],
+    coverageIncludes: ['tools/warm-bash/index.ts', 'tools/warm-bash/src/**/*.ts'],
     // warm-pool tests spawn real bash and are environment-dependent; the
     // classifier (pure logic) carries the coverage backbone. Remaining branch
     // gaps are defensive empty catch blocks + the untestable cross-platform
@@ -117,16 +121,16 @@ const PACKAGE_TEST_METADATA = {
     thresholds: { lines: 92, branches: 80 },
   },
   'deferred-triggers': {
-    testGlobs: ['extensions/deferred-triggers/test/**/*.test.ts'],
-    coverageIncludes: ['extensions/deferred-triggers/index.ts', 'extensions/deferred-triggers/src/**/*.ts'],
+    testGlobs: ['tools/deferred-triggers/test/**/*.test.ts'],
+    coverageIncludes: ['tools/deferred-triggers/index.ts', 'tools/deferred-triggers/src/**/*.ts'],
     // store.ts (the op-log replay) is the unit-testable core; index.ts is
     // env-glue (registers the `defer_trigger` tool) and types.ts is the schema.
     // types-global.d.ts is ambient only.
     thresholds: { lines: 80, branches: 70 },
   },
   'session-changes': {
-    testGlobs: ['extensions/session-changes/test/**/*.test.ts'],
-    coverageIncludes: ['extensions/session-changes/index.ts', 'extensions/session-changes/src/**/*.ts'],
+    testGlobs: ['tools/session-changes/test/**/*.test.ts'],
+    coverageIncludes: ['tools/session-changes/index.ts', 'tools/session-changes/src/**/*.ts'],
     // session-jsonl.ts (the JSONL reader + toolCall↔toolResult join), render.ts
     // (TSV/minified-diff renderers), and diff.ts's pure minify/synthetic paths
     // are the unit-testable core; index.ts is env-glue (registers the
@@ -136,11 +140,12 @@ const PACKAGE_TEST_METADATA = {
     thresholds: { lines: 80, branches: 70 },
   },
   'computer-use': {
-    testGlobs: ['extensions/computer-use/test/**/*.test.ts'],
+    testGlobs: ['tools/computer-use/test/**/*.test.ts'],
     coverageIncludes: [
-      'extensions/computer-use/index.ts',
-      'extensions/computer-use/src/**/*.ts',
-      'extensions/computer-use/src/**/*.mjs',
+      'tools/computer-use/index.ts',
+      'tools/computer-use/dependency-owner.mjs',
+      'tools/computer-use/src/**/*.ts',
+      'tools/computer-use/src/**/*.mjs',
     ],
     thresholds: { lines: 80, branches: 60 },
   },
@@ -153,12 +158,13 @@ const PACKAGE_TEST_METADATA = {
     thresholds: { lines: 80, branches: 60 },
   },
   playwright: {
-    testGlobs: ['extensions/playwright/test/**/*.test.ts'],
-    coverageTestGlobs: ['extensions/playwright/test/coverage-suite.ts'],
+    testGlobs: ['tools/playwright/test/**/*.test.ts'],
+    coverageTestGlobs: ['tools/playwright/test/coverage-suite.ts'],
     coverageIncludes: [
-      'extensions/playwright/index.ts',
-      'extensions/playwright/src/**/*.ts',
-      'extensions/playwright/src/**/*.mjs',
+      'tools/playwright/index.ts',
+      'tools/playwright/dependency-owner.mjs',
+      'tools/playwright/src/**/*.ts',
+      'tools/playwright/src/**/*.mjs',
     ],
     thresholds: { lines: 80, branches: 60 },
   },
@@ -479,8 +485,10 @@ function summarizeCoverageFailures(config, coverage) {
 
 export function buildTestArgs(config, fast = false, testArgs = []) {
   // `--tsconfig` (when configured) tells tsx which tsconfig to use for module
-  // resolution / path aliases. Subagent and Playwright use this to resolve the
-  // embedded pi SDK's nested typebox/pi-ai to one pinned instance. It must
+  // resolution / path aliases. Subagent, Playwright, and Computer-Use use
+  // this to resolve the embedded pi SDK's nested typebox/pi-ai to one pinned
+  // instance (their `tsxConfig` points at a runtime-only tsconfig whose
+  // `paths` target JS builds, not the typecheck-only `.d.ts` aliases). It must
   // precede the positional test globs.
   const tsxConfigArgs = config.tsxConfig ? [`--tsconfig=${config.tsxConfig}`] : [];
   const collectCoverage = !fast && config.coverage !== false;
