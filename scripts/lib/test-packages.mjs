@@ -11,12 +11,19 @@
 //  - scripts/test/package-registry-drift.test.mjs (fails when any runner or root
 //    package script diverges from this registry)
 //
-// The registered package directory is the stable, low-drift identity anchor.
-// Most extension packages live under `extensions/<id>/`; migrated tools use
-// explicit group metadata. `ownedDirs` routes compatibility adapters and
-// extracted implementation files to their existing test owner. Everything else
-// a runner needs — test cwd, tsx/tsc compiler, batching and concurrency — is
-// explicit metadata below so runner adapters never re-derive it locally.
+// The registered package directory (`dir`) is the install/package owner: the
+// place that carries the package.json/lockfile and compiler selection. It is
+// deliberately distinct from the verification identity (`id`): routing of
+// source and test files uses the explicit `sourceRoots`/`testRoots` schema
+// below, which defaults to `dir` (+`ownedDirs`) and `<dir>/test` so the
+// current single-root layout keeps classifying identically. Distributed
+// future roots (see the repository organization plan) are declared per entry;
+// they route as soon as files appear, before or after their directory is
+// created. Most extension packages live under `extensions/<id>/`; migrated
+// tools use explicit group metadata. `ownedDirs` routes compatibility adapters
+// and extracted implementation files to their existing test owner. Everything
+// else a runner needs — test cwd, tsx/tsc compiler, batching and concurrency —
+// is explicit metadata below so runner adapters never re-derive it locally.
 
 /**
  * Registry entry for one testable package.
@@ -29,6 +36,17 @@
  *   are included in the `extensions` group when their directory is under `extensions/`.
  * @property {string[]} [ownedDirs] Additional repo-relative paths whose source changes
  *   are classified and dependency-scanned as this package (e.g. a discovery shim).
+ * @property {string[]} [sourceRoots] Additional repo-relative source roots routed to
+ *   this verification id (forward slashes). Additive on top of `dir` + `ownedDirs`;
+ *   `dir` remains the install/package owner and always routes. Declared planned
+ *   roots may be created by a later migration batch and route as soon as files
+ *   appear, so early declaration cannot silently select zero tests.
+ * @property {string[]} [testRoots] Additional repo-relative test-file roots routed to
+ *   this verification id. Additive on top of the default `<testDir>`; distributed
+ *   or cross-boundary test suites are declared here instead of being hidden under
+ *   the install owner directory.
+ * @property {string[]} [optionalTestRoots] Explicitly planned test roots that may
+ *   not exist yet. Only these roots may be skipped by fast batch runners.
  * @property {string} [testCwd] Repo-relative cwd for test runs; absent = repo root.
  *   Set this only for packages that require a package-local test cwd; all other
  *   package test globs are resolved from the repo root.
@@ -67,6 +85,13 @@ export const PACKAGE_REGISTRY = [
     dir: 'analysis',
     aliases: ['analytics'],
     testCwd: 'analysis',
+    // Planned distributed roots (migration batch B6): the retained analysis
+    // workspace moves under `analytics/analysis` while `analysis` stays the
+    // install/package owner until that batch lands. Both generations route to
+    // this verification id now; `analytics/analysis` has no files until B6.
+    sourceRoots: ['analytics/analysis'],
+    testRoots: ['analytics/analysis/test'],
+    optionalTestRoots: ['analytics/analysis/test'],
     typecheck: { config: 'analysis/tsconfig.json', compiler: 'analysis/node_modules/typescript/bin/tsc' },
     fastBatch: { batches: 4 },
     fastConcurrency: 2,
@@ -232,6 +257,38 @@ export function packageTestCwd(entry) {
 }
 
 /**
+ * Repo-relative source roots routed to a package's verification id, in
+ * classification-precedence order: the install/package owner dir first, then
+ * owned dirs, then any explicitly declared (planned or distributed) roots.
+ * For every currently registered package without explicit `sourceRoots` this
+ * is exactly `[dir, ...ownedDirs]`, so enumeration is unchanged.
+ * @param {PackageEntry} entry
+ * @returns {string[]}
+ */
+export function packageSourceRoots(entry) {
+  return [...new Set([entry.dir, ...(entry.ownedDirs ?? []), ...(entry.sourceRoots ?? [])])];
+}
+
+/**
+ * Repo-relative test-file roots routed to a package's verification id: the
+ * default `<testDir>` first, then any explicitly declared distributed roots.
+ * @param {PackageEntry} entry
+ * @returns {string[]}
+ */
+export function packageTestRoots(entry) {
+  return [...new Set([packageTestDir(entry), ...(entry.testRoots ?? [])])];
+}
+
+/**
+ * Repo-relative test roots explicitly allowed to be absent before a planned migration.
+ * @param {PackageEntry} entry
+ * @returns {string[]}
+ */
+export function packageOptionalTestRoots(entry) {
+  return [...new Set(entry.optionalTestRoots ?? [])];
+}
+
+/**
  * Repo-relative test-file root for a package (walked by the fast batch runner).
  * Defaults to `<dir>/test`; only `scripts` overrides it because its package
  * directory is itself the test directory.
@@ -246,13 +303,16 @@ export function packageTestDir(entry) {
  * Fast-batch metadata for run-fast-batched-tests.mjs, or null when the package
  * has no dedicated batch mode.
  * @param {PackageEntry} entry
- * @returns {{ mode: string, testDir: string, batches: number, tsxConfig: string | null, testCwd: string | null } | null}
+ * @returns {{ mode: string, testDir: string, testDirs: string[], optionalTestDirs: string[], batches: number, tsxConfig: string | null, testCwd: string | null } | null}
  */
 export function fastBatchMetadata(entry) {
   if (!entry.fastBatch) return null;
   return {
     mode: entry.id,
     testDir: packageTestDir(entry),
+    // Every routed test root is walked; only explicitly planned roots may be absent.
+    testDirs: packageTestRoots(entry),
+    optionalTestDirs: packageOptionalTestRoots(entry),
     batches: entry.fastBatch.batches,
     tsxConfig: entry.tsxConfig ?? null,
     testCwd: entry.testCwd ?? null,
@@ -292,15 +352,25 @@ export const TYPECHECK_PROJECTS = [
 
 /**
  * Package/directory pairs — the classification view of the registry used by
- * test-impact.mjs and run-test-files.mjs. `ownedDirs` include compatibility
- * adapters and implementation files whose tests remain with another package.
+ * test-impact.mjs and run-test-files.mjs. Built from every package's routed
+ * source roots (`dir` + `ownedDirs` + explicit `sourceRoots`) and test roots,
+ * in registration order with per-package de-duplication, so distributed and
+ * planned roots classify to their verification id like any package dir.
+ * `ownedDirs` include compatibility adapters and implementation files whose
+ * tests remain with another package.
  * @typedef {{ id: string, dir: string }} PackageDirective
  * @type {PackageDirective[]}
  */
-export const PACKAGE_DIRECTIVES = PACKAGE_REGISTRY.flatMap(({ id, dir, ownedDirs = [] }) => [
-  { id, dir },
-  ...ownedDirs.map((ownedDir) => ({ id, dir: ownedDir })),
-]);
+export const PACKAGE_DIRECTIVES = PACKAGE_REGISTRY.flatMap((entry) => {
+  const directives = [];
+  const seen = new Set();
+  for (const root of [...packageSourceRoots(entry), ...packageTestRoots(entry)]) {
+    if (seen.has(root)) continue;
+    seen.add(root);
+    directives.push({ id: entry.id, dir: root });
+  }
+  return directives;
+});
 
 /**
  * Repo-relative paths whose changes can affect the test run of MORE than one
@@ -331,6 +401,28 @@ const GLOBAL_INFRA_EXACT_PATHS = new Set([
   'tools/backend.ts',
   'tools/tsconfig.json',
 ]);
+
+/** File extensions treated as routable code for ownership checks. */
+const CODE_SOURCE_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.mjs', '.cjs', '.js', '.jsx'];
+
+/**
+ * True for a repo-relative code file that no package routes and that is not
+ * global test infrastructure. Such a file is "unknown ownership": affected-test
+ * routing must broaden verification (run everything) instead of silently
+ * selecting zero tests. Root maintenance scripts (`scripts/*.mjs`) are owned by
+ * the `scripts` package and never count as unknown.
+ * @param {string} filePath - repo-relative path with forward slashes
+ * @returns {boolean}
+ */
+export function isUnownedCodeSource(filePath) {
+  if (typeof filePath !== 'string' || filePath.length === 0) {
+    return false;
+  }
+  if (isGlobalTestInfra(filePath)) return false;
+  if (classifyFileToPackage(filePath)) return false;
+  if (filePath.startsWith('scripts/') && filePath.endsWith('.mjs')) return false;
+  return CODE_SOURCE_EXTENSIONS.some((extension) => filePath.endsWith(extension));
+}
 
 const GLOBAL_INFRA_PREFIXES = [
   'scripts/lib/',
@@ -379,15 +471,19 @@ export function isGlobalTestInfra(filePath) {
  *
  * If ANY file is global test-infrastructure/config, `selectAll` is true and
  * `packageIds` is the full set (caller should run all packages). Otherwise
- * `packageIds` is the sorted, de-duplicated set of affected package ids
- * (possibly empty if no changed file maps to a package).
+ * `packageIds` is the sorted, de-duplicated set of affected package ids.
+ * Changed code files under no registered root are unknown ownership: they
+ * set `selectAll` and are listed in `unowned` so verification broadens
+ * instead of silently selecting zero tests. Non-code paths (docs, settings,
+ * manifests outside packages) stay ignored.
  *
  * @param {Iterable<string>} files - repo-relative, forward-slash paths
- * @returns {{ selectAll: boolean, packageIds: string[] }}
+ * @returns {{ selectAll: boolean, packageIds: string[], unowned: string[] }}
  */
 export function mapFilesToPackages(files) {
   let selectAll = false;
   const ids = new Set();
+  const unowned = [];
   for (const file of files) {
     if (isGlobalTestInfra(file)) {
       selectAll = true;
@@ -401,10 +497,15 @@ export function mapFilesToPackages(files) {
       // are exercised by the scripts package. The cross-package test
       // runners and scripts/lib were already promoted to selectAll above.
       ids.add('scripts');
+    } else if (isUnownedCodeSource(file)) {
+      // Unknown ownership must broaden, never select zero tests.
+      selectAll = true;
+      unowned.push(file);
     }
   }
   return {
     selectAll,
     packageIds: [...ids].sort(),
+    unowned,
   };
 }

@@ -113,6 +113,54 @@ test('planAffectedTests selects direct dependents and falls back to the package 
   });
 });
 
+test('planAffectedTests routes deleted sources to their package without silent zero', async () => {
+  await withFixture(async (root) => {
+    // The file no longer exists on disk (git reports deletions by path), but
+    // its owning package must still be selected.
+    const plan = planAffectedTests(root, ['extension/src/deleted-in-worktree.ts']);
+    assert.equal(plan.mode, 'files');
+    assert.deepEqual(plan.testFiles, [
+      'extension/test/integration/model-config-sync.test.ts',
+      'extension/test/integration/model-profile-coverage.test.ts',
+      'extension/test/other.test.ts',
+      'extension/test/used.test.ts',
+    ]);
+    assert.ok(plan.reasons.some((reason) => reason.includes('deleted-in-worktree.ts')));
+  });
+});
+
+test('planAffectedTests merges rename old/new paths and never duplicates selections', async () => {
+  await withFixture(async (root) => {
+    // A rename reaches the runner as both the old and the new path; the old
+    // path no longer exists on disk while the new one is untracked.
+    const plan = planAffectedTests(root, ['extension/src/used.ts', 'extension/src/renamed.ts']);
+    assert.equal(plan.mode, 'files');
+    assert.deepEqual(plan.testFiles, [
+      'extension/test/integration/model-config-sync.test.ts',
+      'extension/test/integration/model-profile-coverage.test.ts',
+      'extension/test/other.test.ts',
+      'extension/test/used.test.ts',
+    ]);
+  });
+});
+
+test('planAffectedTests broadens to the full suite for unknown-ownership code files', async () => {
+  await withFixture(async (root) => {
+    // A code file under a not-yet-registered root must broaden, never select zero.
+    const unowned = planAffectedTests(root, ['harness/session-storage/new-store.ts']);
+    assert.equal(unowned.mode, 'full');
+    assert.deepEqual(unowned.testFiles, []);
+    assert.ok(unowned.reasons.some((reason) => reason.includes('harness/session-storage/new-store.ts')));
+
+    // Broadening dominates even alongside owned changes.
+    const mixed = planAffectedTests(root, ['extension/src/used.ts', 'application/backend/new-action.ts']);
+    assert.equal(mixed.mode, 'full');
+
+    // Non-code unknown paths keep the narrow behavior.
+    assert.deepEqual(planAffectedTests(root, ['docs/new-note.md']), { mode: 'none', testFiles: [], reasons: [] });
+  });
+});
+
 test('planAffectedTests selects a package for manifest changes and full suite for global infrastructure', async () => {
   await withFixture(async (root) => {
     assert.deepEqual(planAffectedTests(root, ['extension/package.json']).testFiles, [

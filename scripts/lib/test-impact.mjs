@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 
-import { PACKAGE_DIRECTIVES, classifyFileToPackage, isGlobalTestInfra } from './test-packages.mjs';
+import { PACKAGE_DIRECTIVES, classifyFileToPackage, isGlobalTestInfra, isUnownedCodeSource } from './test-packages.mjs';
 import { isProtectedDirectoryName } from './traversal-policy.mjs';
 
 const SOURCE_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.mjs', '.cjs', '.js', '.jsx', '.json', '.css', '.sql', '.yaml', '.yml'];
@@ -123,6 +123,9 @@ export function planAffectedTests(repoRoot, changedFiles) {
   const normalizedChanges = changedFiles.map(normalize);
   if (normalizedChanges.some(isGlobalTestInfra)) return { mode: 'full', testFiles: [], reasons: ['global test infrastructure changed'] };
 
+  // Walking every routed source/test root (PACKAGE_DIRECTIVES) keeps changed,
+  // untracked, renamed, and planned distributed roots enumerable; missing dirs
+  // (declared future roots) are skipped by walkFiles.
   const files = [];
   for (const { dir } of PACKAGE_DIRECTIVES) walkFiles(repoRoot, dir, files);
   walkFiles(repoRoot, 'scripts', files);
@@ -131,8 +134,19 @@ export function planAffectedTests(repoRoot, changedFiles) {
   const modelConfigChanged = normalizedChanges.some((file) => MODEL_CONFIG_PATHS.has(file));
   const windowsInstallerChanged = normalizedChanges.some((file) => WINDOWS_INSTALLER_PATHS.has(file));
   const relevantChanges = normalizedChanges.filter((file) => owningPackage(file) !== null);
-  if (relevantChanges.length === 0 && !modelConfigChanged && !windowsInstallerChanged) {
+  // Unknown ownership (a code file under no registered root — e.g. a moved or
+  // newly created distributed root) must broaden verification, never select
+  // zero tests.
+  const unownedChanges = normalizedChanges.filter((file) => isUnownedCodeSource(file));
+  if (relevantChanges.length === 0 && unownedChanges.length === 0 && !modelConfigChanged && !windowsInstallerChanged) {
     return { mode: 'none', testFiles: [], reasons: [] };
+  }
+  if (unownedChanges.length > 0) {
+    return {
+      mode: 'full',
+      testFiles: [],
+      reasons: [`unowned changed file(s) broaden verification to the full suite: ${unownedChanges.join(', ')}`],
+    };
   }
 
   const allForPackages = new Set(relevantChanges.filter((file) => PACKAGE_CONFIG.test(file)).map(owningPackage));

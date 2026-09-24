@@ -1,9 +1,10 @@
 # Repository organization migration progress
 
 **Status:** B0 (baseline, inventory and migration manifest) is complete after the
-review correction below; the manifest is exhaustive, validated, and collision-
-resolved. No source implementation or B1+ migration batch has started. The
-approved planning checkpoint is already committed; no push is authorized.
+review correction below. A preparatory B1 slice is now implemented but remains
+partial and does not meet B1 exit; see the appended checkpoint. No B2 relocation
+has occurred. The approved planning checkpoint is already committed; no push is
+authorized.
 
 Owned artifacts: `repository-organization-migration-manifest.json` (B0
 deliverable), `repository-organization-baseline-verification.md`, and this file.
@@ -23,23 +24,25 @@ All three have explicit `retain` records in the manifest.
   [repository-organization-baseline-verification.md](repository-organization-baseline-verification.md).
 - Opt-in browser/live/performance gates were not run; recorded as not exercised,
   not as passing.
-- Dirty working tree: `settings.json` `defaultThinkingLevel: "high" -> "medium"`
-  is a pre-existing user change — preserved, must not be committed or reverted
-  by migration batches. Disposition is recorded in the manifest baseline block.
+- At the B0 snapshot, `settings.json` had the user change
+  `defaultThinkingLevel: "high" -> "medium"`; that historical snapshot and its
+  preserve disposition remain recorded in the manifest. Current live user
+  fields have since changed; see the appended checkpoint and do not pin future
+  settings edits to the old `medium` value.
 
 ## Manifest
 
-- 1771 records = 1768 tracked-file records at the verification baseline + 3
-  explicit `retain` records for the new `docs/plans/` artifacts. Original B0
-  generation ran from OS temp (`%TEMP%\pie-b0-manifest-gen\`). The review
+- At B0, 1771 records = 1768 tracked-file records at the verification baseline
+  + 3 explicit `retain` records for the new `docs/plans/` artifacts. Original
+  B0 generation ran from OS temp (`%TEMP%\pie-b0-manifest-gen\`). The review
   correction updated the existing manifest in place and revalidated it against
   the Git tree and test registry; no generator/checker scripts or logs are in
-  the repo.
+  the repo. The current B1 checkpoint adds two owned source records (1773 total).
 - Coverage validation: exact bijection between `git ls-tree` at the verification
   baseline and record sources (0 missing, 0 extra tracked sources), plus the 3
   declared new docs.
-- Actions: 1639 move, 50 split, 11 consolidate, 71 retain. Every record has an
-  owner, batch (B0–B8), verification, and reason.
+- Baseline actions: 1639 move, 50 split, 11 consolidate, 71 retain. Every B0
+  record has an owner, batch (B0–B8), verification, and reason.
 - Test inventory: all 17 registry package classifications have explicit
   `trackedTestFilesByPackage` path arrays (696 files total), not just counts.
   The extension array is 538 files, including all 8 `.perf.ts` suites and the
@@ -165,7 +168,33 @@ artifact sign-off:
    once. The arrays strengthen the baseline inventory but are not execution
    evidence.
 
+## Integrated B1 preparation verification
+
+`npm test` selected the full fast suite after the routing changes and exited 0
+(2026-09-24). The recorder-supervisor timeout passed on automatic rerun; the
+extension summary still reported one cancelled test, as at baseline. This is
+not a pristine first-pass result or evidence for opt-in/live gates. No source
+relocation or publishing build was performed in this preparation slice.
+
 ## Git workflow (user-approved constraints)
 
 - Milestone commits are approved; push is not authorized.
 - The `settings.json` user change stays out of migration commits.
+
+## B1 partial checkpoint (2026-09-24)
+
+- `scripts/lib/package-resolution.mjs` and its proof suite are present. Six of
+  six tests passed, including the real TypeScript compiler, Vite, repository-local
+  tsx, and pinned SDK extension-loader paths. The eight multi-root routing files
+  listed in the manifest were updated; routing tests pass, including the fixes
+  for required roots, complete glob coverage, and nested cross-owner claims.
+- This is preparation only: package-resolution config/runtime callers are not
+  wired; RPC/renderer and host-adapter seams plus discovery/lifecycle tests
+  remain pending. B1 is not exit and no B2 files moved.
+- Manifest source coverage now has 1773 records: 1771 current tracked paths plus
+  the two explicit owned additions. The B0 `trackedTestFilesByPackage` arrays and
+  intentional collision resolutions are unchanged.
+- `settings.json` is now live user state (`defaultModel` gpt-6-astra →
+  gpt-6-luna; `defaultThinkingLevel` high → xhigh). Preserve the immutable B0
+  snapshot, exclude current/future user edits from migration, and do not restore
+  or pin the previous `medium` value.

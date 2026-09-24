@@ -45,6 +45,10 @@ const PACKAGE_TEST_METADATA = {
     // (scripts/) is unit-gated.
     coverageIncludes: ['scripts/**/*.ts'],
     thresholds: { lines: 95, branches: 78 },
+    // Registry-declared distributed test root `analytics/analysis/test` has no
+    // files until migration batch B6; when that batch lands it must also be
+    // added here (and to coverageIncludes) — the registry drift test fails if
+    // an existing test root is not covered by these globs.
   },
   scripts: {
     testGlobs: ['scripts/test/*.test.mjs'],

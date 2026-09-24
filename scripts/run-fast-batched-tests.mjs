@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -13,7 +14,8 @@ import {
   PACKAGE_REGISTRY,
   ROOT_BATCH_PACKAGE_IDS,
   fastBatchMetadata,
-  packageTestDir,
+  packageOptionalTestRoots,
+  packageTestRoots,
   resolvePackageEntry,
 } from './lib/test-packages.mjs';
 
@@ -22,8 +24,12 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 const reporter = pathToFileURL(path.join(repoRoot, 'scripts', 'test-reporter.mjs')).href;
 // The root fast-batch composition is registry-derived: every package that runs
 // from the repo root, needs no tsx path aliases, and has no dedicated batch mode.
-export const rootBatchDirs = ROOT_BATCH_PACKAGE_IDS
-  .map((id) => packageTestDir(resolvePackageEntry(id)));
+// All routed test roots are walked (de-duplicated); missing roots fail unless
+// the registry explicitly marks them as planned and optional.
+export const rootBatchDirs = [...new Set(ROOT_BATCH_PACKAGE_IDS
+  .flatMap((id) => packageTestRoots(resolvePackageEntry(id))))];
+const rootBatchOptionalDirs = [...new Set(ROOT_BATCH_PACKAGE_IDS
+  .flatMap((id) => packageOptionalTestRoots(resolvePackageEntry(id))))];
 
 /** Per-mode fast-batch plans, registry-derived (mode name = package id). */
 export const fastBatchDefinitions = Object.fromEntries(PACKAGE_REGISTRY
@@ -32,6 +38,8 @@ export const fastBatchDefinitions = Object.fromEntries(PACKAGE_REGISTRY
   .map(([id, metadata]) => [id, {
     cwd: metadata.testCwd ? path.join(repoRoot, metadata.testCwd) : repoRoot,
     dir: metadata.testDir,
+    dirs: metadata.testDirs,
+    optionalDirs: metadata.optionalTestDirs,
     batches: metadata.batches,
     tsxConfig: metadata.tsxConfig,
   }]));
@@ -93,10 +101,20 @@ function merge(results, durationMs) {
   return { summary: { success, counts, durationMs }, coverage: null, failures };
 }
 
+export function resolveExistingBatchRoots(relativeDirs, optionalDirs, root = repoRoot, directoryExists = existsSync) {
+  const optional = new Set(optionalDirs);
+  return relativeDirs.filter((relativeDir) => {
+    if (directoryExists(path.join(root, relativeDir))) return true;
+    if (optional.has(relativeDir)) return false;
+    throw new Error(`Required fast-batch test root is missing: ${relativeDir}`);
+  });
+}
+
 async function buildPlan(mode, tempDir) {
   if (mode === 'root') {
     const batches = [];
-    for (const [index, relativeDir] of rootBatchDirs.entries()) {
+    const presentDirs = resolveExistingBatchRoots(rootBatchDirs, rootBatchOptionalDirs);
+    for (const [index, relativeDir] of presentDirs.entries()) {
       const files = [];
       await walk(path.join(repoRoot, relativeDir), ['.test.ts', '.test.mjs'], files);
       files.sort();
@@ -108,7 +126,10 @@ async function buildPlan(mode, tempDir) {
   const definition = fastBatchDefinitions[mode];
   if (!definition) throw new Error(`Unknown fast batch mode: ${mode}`);
   const files = [];
-  await walk(path.join(repoRoot, definition.dir), ['.test.ts'], files);
+  const presentDirs = resolveExistingBatchRoots(definition.dirs, definition.optionalDirs);
+  for (const relativeDir of presentDirs) {
+    await walk(path.join(repoRoot, relativeDir), ['.test.ts'], files);
+  }
   files.sort();
 
   let ordinary = files;

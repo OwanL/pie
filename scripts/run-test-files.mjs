@@ -6,7 +6,8 @@
 // tools/subagent/test/schema.test.ts`.
 //
 // Classification mirrors scripts/run-tests.mjs PACKAGE_CONFIGS and registry
-// testCwd metadata:
+// testCwd metadata, routing over every registered source/test root (including
+// declared distributed future roots, which classify like any package dir):
 //  - extension/      -> cwd extension/,         tsx = extension/node_modules/tsx
 //  - analysis/       -> cwd analysis/,          tsx = analysis/node_modules/tsx
 //  - scripts/test/   -> cwd repoRoot,            tsx = node_modules/tsx (root)
@@ -105,7 +106,7 @@ export function classifyTestFile(repoRoot, input) {
   const directive = PACKAGE_DIRECTIVES.find(({ dir }) => repoRel === dir || repoRel.startsWith(`${dir}/`));
   if (!directive) {
     throw new Error(
-      `Cannot classify test file "${repoRel}": not under a registered test-package directory.`,
+      `Cannot classify test file "${repoRel}": not under a registered test-package source/test root.`,
     );
   }
   const { id } = directive;

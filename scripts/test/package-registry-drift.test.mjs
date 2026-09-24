@@ -6,7 +6,7 @@
 // the registry.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -18,18 +18,73 @@ import {
   ROOT_BATCH_PACKAGE_IDS,
   TYPECHECK_PROJECTS,
   fastBatchMetadata,
-  packageTestDir,
+  packageOptionalTestRoots,
+  packageSourceRoots,
+  packageTestRoots,
   resolvePackageEntry,
   typecheckProjectFor,
   isGlobalTestInfra,
 } from '../lib/test-packages.mjs';
 import { PACKAGE_CONFIGS } from '../run-tests.mjs';
-import { fastBatchDefinitions, rootBatchDirs } from '../run-fast-batched-tests.mjs';
+import { fastBatchDefinitions, resolveExistingBatchRoots, rootBatchDirs } from '../run-fast-batched-tests.mjs';
 import { buildRunnerInvocation } from '../run-package-group.mjs';
 import { classifyTestFile, inferRepoRoot } from '../run-test-files.mjs';
+import { isProtectedDirectoryName } from '../lib/traversal-policy.mjs';
 
 const repoRoot = inferRepoRoot();
 const fwd = (p) => p.replace(/\\/g, '/');
+
+function rootsOverlap(left, right) {
+  return left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
+}
+
+function assertNoCrossPackageRootOverlaps(entries) {
+  const claimedRoots = [];
+  for (const entry of entries) {
+    const roots = [...packageSourceRoots(entry), ...packageTestRoots(entry)];
+    for (const root of roots) {
+      const conflict = claimedRoots.find((claimed) => claimed.id !== entry.id && rootsOverlap(claimed.root, root));
+      assert.ok(!conflict, `conflicting package roots: ${conflict?.id}:${conflict?.root} overlaps ${entry.id}:${root}`);
+      claimedRoots.push({ id: entry.id, root });
+    }
+  }
+}
+
+function globMatchesFile(glob, cwd, absoluteFile) {
+  const pattern = glob.replace(/\\/g, '/').replace(/^\.\//u, '');
+  let expression = '^';
+  for (let index = 0; index < pattern.length; index += 1) {
+    const character = pattern[index];
+    if (character === '*' && pattern[index + 1] === '*') {
+      if (pattern[index + 2] === '/') {
+        expression += '(?:.*/)?';
+        index += 2;
+      } else {
+        expression += '.*';
+        index += 1;
+      }
+    } else if (character === '*') {
+      expression += '[^/]*';
+    } else if (character === '?') {
+      expression += '[^/]';
+    } else {
+      expression += character.replace(/[|\\{}()[\]^$+?.]/gu, '\\$&');
+    }
+  }
+  expression += '$';
+  const relative = fwd(path.relative(cwd, absoluteFile));
+  return new RegExp(expression, 'u').test(relative);
+}
+
+function enumerateTestFiles(directory, output = []) {
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    if (entry.isDirectory() && isProtectedDirectoryName(entry.name)) continue;
+    const absolute = path.join(directory, entry.name);
+    if (entry.isDirectory()) enumerateTestFiles(absolute, output);
+    else if (/\.(?:test|spec)\.[^.]+$/u.test(entry.name)) output.push(absolute);
+  }
+  return output;
+}
 
 test('registry entries are well-formed and their directories exist', () => {
   const ids = new Set();
@@ -58,10 +113,48 @@ test('registry entries are well-formed and their directories exist', () => {
     }
   }
   assert.deepEqual(ALL_PACKAGE_IDS, [...ids]);
-  assert.deepEqual(PACKAGE_DIRECTIVES, PACKAGE_REGISTRY.flatMap(({ id, dir, ownedDirs = [] }) => [
-    { id, dir },
-    ...ownedDirs.map((ownedDir) => ({ id, dir: ownedDir })),
-  ]));
+  assert.deepEqual(PACKAGE_DIRECTIVES, PACKAGE_REGISTRY.flatMap((entry) => {
+    const directives = [];
+    const seen = new Set();
+    for (const root of [...packageSourceRoots(entry), ...packageTestRoots(entry)]) {
+      if (seen.has(root)) continue;
+      seen.add(root);
+      directives.push({ id: entry.id, dir: root });
+    }
+    return directives;
+  }));
+  // Roots owned by different verification ids must not overlap: routing is
+  // first-match in registration order, so nested claims would misattribute files.
+  // Ancestor overlap within one id remains valid (for example package dir/test root).
+  assertNoCrossPackageRootOverlaps(PACKAGE_REGISTRY);
+  for (const entry of PACKAGE_REGISTRY) {
+    const optionalRoots = packageOptionalTestRoots(entry);
+    for (const optionalRoot of optionalRoots) {
+      assert.ok(packageTestRoots(entry).includes(optionalRoot), `${entry.id} optional root ${optionalRoot} must be a routed test root`);
+    }
+    // Every routed root of the entry must appear in the classification view.
+    const directiveRoots = new Set(PACKAGE_DIRECTIVES.filter(({ id }) => id === entry.id).map(({ dir }) => dir));
+    for (const root of [...packageSourceRoots(entry), ...packageTestRoots(entry)]) {
+      assert.ok(directiveRoots.has(root), `${entry.id} root ${root} must appear in PACKAGE_DIRECTIVES`);
+    }
+    assert.ok(packageSourceRoots(entry)[0] === entry.dir, `${entry.id} must keep its install-owner dir as the first routed source root`);
+  }
+  // Every test file currently enumerated under each existing routed test root
+  // must match a run-tests glob. Planned roots are checked once files land.
+  for (const entry of PACKAGE_REGISTRY) {
+    const config = PACKAGE_CONFIGS.find((candidate) => candidate.id === entry.id);
+    assert.ok(config, `${entry.id} must have run-tests metadata`);
+    for (const testRoot of packageTestRoots(entry)) {
+      const absoluteRoot = path.join(repoRoot, testRoot);
+      if (!existsSync(absoluteRoot)) continue;
+      for (const testFile of enumerateTestFiles(absoluteRoot)) {
+        assert.ok(
+          config.testGlobs.some((glob) => globMatchesFile(glob, config.cwd, testFile)),
+          `${entry.id} test file ${fwd(path.relative(repoRoot, testFile))} is not covered by any testGlob`,
+        );
+      }
+    }
+  }
 });
 
 test('run-tests.mjs PACKAGE_CONFIGS match the registry exactly (ids, order, aliases, cwd, tsx, batching, concurrency)', () => {
@@ -81,10 +174,33 @@ test('run-tests.mjs PACKAGE_CONFIGS match the registry exactly (ids, order, alia
   assert.ok(PACKAGE_CONFIGS.some((config) => config.id === 'analysis' && config.aliases?.includes('analytics')));
 });
 
+test('root ownership guard rejects nested roots across ids but allows same-owner ancestors', () => {
+  assert.doesNotThrow(() => assertNoCrossPackageRootOverlaps([
+    { id: 'owner', dir: 'package', testDir: 'package/test' },
+  ]));
+  assert.throws(() => assertNoCrossPackageRootOverlaps([
+    { id: 'parent', dir: 'package' },
+    { id: 'nested', dir: 'package/test' },
+  ]), /conflicting package roots/);
+});
+
+test('test glob coverage includes files under a root, not just a matching subfolder', () => {
+  const testFiles = [
+    path.join(repoRoot, 'extensions/example/test/unit/a.test.ts'),
+    path.join(repoRoot, 'extensions/example/test/integration/b.test.ts'),
+  ];
+  const partialGlob = 'extensions/example/test/unit/**/*.test.ts';
+  assert.equal(testFiles.every((file) => globMatchesFile(partialGlob, repoRoot, file)), false,
+    'a glob scoped to one subfolder must not claim full-root coverage');
+  const ancestorGlob = 'extensions/example/**/*.test.ts';
+  assert.equal(testFiles.every((file) => globMatchesFile(ancestorGlob, repoRoot, file)), true,
+    'a complete glob rooted at an ancestor must cover nested test files');
+});
+
 test('run-fast-batched-tests.mjs batch plans are registry-derived', () => {
   assert.deepEqual(
     rootBatchDirs,
-    ROOT_BATCH_PACKAGE_IDS.map((id) => packageTestDir(resolvePackageEntry(id))),
+    [...new Set(ROOT_BATCH_PACKAGE_IDS.flatMap((id) => packageTestRoots(resolvePackageEntry(id))))],
   );
   const expectedModes = Object.fromEntries(
     PACKAGE_REGISTRY
@@ -95,11 +211,29 @@ test('run-fast-batched-tests.mjs batch plans are registry-derived', () => {
   for (const [id, metadata] of Object.entries(expectedModes)) {
     const definition = fastBatchDefinitions[id];
     assert.equal(fwd(definition.dir), metadata.testDir, `${id} batch dir`);
+    assert.deepEqual(definition.dirs, metadata.testDirs, `${id} batch dirs must cover every routed test root`);
+    assert.deepEqual(definition.optionalDirs, metadata.optionalTestDirs, `${id} optional batch roots must come from the registry`);
+    assert.deepEqual(metadata.testDirs, packageTestRoots(resolvePackageEntry(id)), `${id} batch testDirs must come from the registry`);
+    assert.deepEqual(metadata.optionalTestDirs, packageOptionalTestRoots(resolvePackageEntry(id)), `${id} optional roots must come from the registry`);
     assert.equal(definition.batches, metadata.batches, `${id} batch count`);
     assert.equal(definition.tsxConfig, metadata.tsxConfig, `${id} batch tsxConfig`);
     const expectedCwd = metadata.testCwd ? path.join(repoRoot, metadata.testCwd) : repoRoot;
     assert.equal(fwd(definition.cwd), fwd(expectedCwd), `${id} batch cwd`);
   }
+});
+
+test('fast batch root resolution skips only explicit optional roots', () => {
+  const root = path.join(repoRoot, 'missing-root-fixture');
+  const exists = (absolute) => path.basename(absolute) === 'required';
+  assert.deepEqual(
+    resolveExistingBatchRoots(['required', 'planned'], ['planned'], root, exists),
+    ['required'],
+  );
+  assert.throws(
+    () => resolveExistingBatchRoots(['required', 'missing'], ['planned'], root, exists),
+    /Required fast-batch test root is missing: missing/,
+  );
+  assert.deepEqual(resolveExistingBatchRoots(['planned'], ['planned'], root, () => false), []);
 });
 
 test('run-typechecks.mjs projects cover shared plus every registry package with a TS project', () => {
@@ -127,11 +261,14 @@ test('run-typechecks.mjs projects cover shared plus every registry package with 
 
 test('run-test-files.mjs focused classification uses the registry tsxConfig and test cwd', () => {
   for (const entry of PACKAGE_REGISTRY) {
-    const descriptor = classifyTestFile(repoRoot, `${entry.dir}/test/sample.test.ts`);
-    assert.equal(descriptor.id, entry.id);
-    const expectedCwd = entry.testCwd ? path.join(repoRoot, entry.testCwd) : repoRoot;
-    assert.equal(fwd(descriptor.cwd), fwd(expectedCwd), `${entry.id} focused cwd`);
-    assert.equal(descriptor.tsxConfig, entry.tsxConfig, `${entry.id} focused tsxConfig must come from the registry`);
+    for (const testRoot of packageTestRoots(entry)) {
+      // Declared planned roots classify before their directory exists.
+      const descriptor = classifyTestFile(repoRoot, `${testRoot}/sample.test.ts`);
+      assert.equal(descriptor.id, entry.id);
+      const expectedCwd = entry.testCwd ? path.join(repoRoot, entry.testCwd) : repoRoot;
+      assert.equal(fwd(descriptor.cwd), fwd(expectedCwd), `${entry.id} focused cwd`);
+      assert.equal(descriptor.tsxConfig, entry.tsxConfig, `${entry.id} focused tsxConfig must come from the registry`);
+    }
   }
 });
 

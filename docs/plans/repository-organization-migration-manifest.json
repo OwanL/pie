@@ -29,6 +29,41 @@
    ]
   }
  },
+ "executionProgress": {
+  "checkpointDate": "2026-09-24",
+  "milestone": "B1",
+  "status": "partial-not-exit",
+  "scope": "Preparatory owner-relative package resolution and multi-root test routing only; no B2 relocations.",
+  "inventory": {
+   "currentTrackedSourcesCovered": 1771,
+   "ownedPostBaselineSources": [
+    "scripts/lib/package-resolution.mjs",
+    "scripts/test/package-resolution.test.mjs"
+   ],
+   "sourceRecordCount": 1773,
+   "validation": "Exact set: all current git ls-files paths plus these two owned additions; zero missing, extra, or duplicate source records. Baseline trackedTestFilesByPackage arrays remain unchanged and immutable."
+  },
+  "implemented": {
+   "packageResolution": "scripts/lib/package-resolution.mjs provides current/planned owner-relative roots and runtime, TypeScript, tsx, and Vite resolution proofs; 6/6 tests passed using the real compiler, Vite, repository-local tsx, and pinned SDK extension loader.",
+   "routingFiles": [
+    "scripts/lib/test-impact.mjs",
+    "scripts/lib/test-packages.mjs",
+    "scripts/run-fast-batched-tests.mjs",
+    "scripts/run-test-files.mjs",
+    "scripts/run-tests.mjs",
+    "scripts/test/package-registry-drift.test.mjs",
+    "scripts/test/test-impact.test.mjs",
+    "scripts/test/test-packages.test.mjs"
+   ],
+   "routingEvidence": "Routing script tests pass; required-root handling, full-root glob coverage, and nested cross-owner rejection are corrected."
+  },
+  "pending": [
+   "Package-resolution configs and runtime callers are not wired.",
+   "Harness RPC/renderer protocol and host-adapter seams remain pending.",
+   "Selector lifecycle/order/state-identity and resource-discovery tests remain pending; B1 exit criteria are not met."
+  ],
+  "settingsWorkingTree": "The B0 settings.json high-to-medium note is an immutable baseline snapshot. Current live user fields have since changed (defaultModel gpt-6-astra to gpt-6-luna; defaultThinkingLevel high to xhigh). Exclude ongoing settings edits from migration; do not restore or pin future edits to medium."
+ },
  "testEnumeration": {
   "source": "scripts/lib/test-packages.mjs PACKAGE_REGISTRY + scripts/run-tests.mjs PACKAGE_CONFIGS; registry testGlobs matched against git ls-files at the planning checkpoint, with explicit extension opt-in suites unioned by repo-relative path",
   "registryPackageIds": [
@@ -1648,7 +1683,7 @@
    "kind": "resolved-conflict"
   }
  ],
- "recordCount": 1771,
+ "recordCount": 1773,
  "records": [
   {
    "source": "extension/src/backend/analytics-worker-transport.ts",
@@ -21957,6 +21992,20 @@
    "reason": "This tracked helper already lives under its accepted script responsibility owner; retain its path and keep it as the single implementation."
   },
   {
+   "source": "scripts/lib/package-resolution.mjs",
+   "targets": [
+    "scripts/lib/package-resolution.mjs"
+   ],
+   "action": "retain",
+   "owner": "scripts/lib",
+   "batch": "B1",
+   "verification": [
+    "Run scripts/test/package-resolution.test.mjs through the root scripts test package.",
+    "Prove owner-relative current/planned roots, canonical SDK identity, and real TypeScript, Vite, tsx, and pinned SDK-loader resolution without cwd fallback."
+   ],
+   "reason": "New B1 preparatory helper for package-owner-relative resolution; retain its single authority under scripts/lib. Config and runtime callers are not yet wired."
+  },
+  {
    "source": "scripts/lib/pi-harness-env.mjs",
    "targets": [
     "scripts/lib/pi-harness-env.mjs"
@@ -22529,6 +22578,20 @@
     "Verify the suite still covers its source owner and is neither omitted nor run twice."
    ],
    "reason": "Move the script regression suite beside the responsibility it verifies; preserve root test-package identity and enumeration."
+  },
+  {
+   "source": "scripts/test/package-resolution.test.mjs",
+   "targets": [
+    "scripts/lib/test/package-resolution.test.mjs"
+   ],
+   "action": "move",
+   "owner": "scripts/lib",
+   "batch": "B8",
+   "verification": [
+    "Preserve root scripts-package enumeration and all six package-resolution proofs; run via repository wrappers.",
+    "Verify real compiler, Vite, local tsx, and pinned SDK extension-loader resolution from an isolated future source root."
+   ],
+   "reason": "New B1 package-resolution proof suite, currently kept at scripts/test/package-resolution.test.mjs; co-locate with the scripts/lib helper in the planned B8 test organization."
   },
   {
    "source": "scripts/test/pi-harness-env.test.mjs",
