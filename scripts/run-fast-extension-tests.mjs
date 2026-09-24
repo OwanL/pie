@@ -10,6 +10,7 @@ import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { withoutPiHarnessEnv } from './lib/pi-harness-env.mjs';
+import { createOwnerRequire, createTsconfigOverlay, resolveOwnerTsx, resolvePackageRoots } from './lib/package-resolution.mjs';
 import { isProtectedDirectoryName } from './lib/traversal-policy.mjs';
 import {
   accountTestFiles,
@@ -27,7 +28,8 @@ const extensionRoot = path.join(repoRoot, 'extension');
 const reporterSpecifier = process.env.PIE_TIMING_REPORTER
   ? pathToFileURL(process.env.PIE_TIMING_REPORTER).href
   : pathToFileURL(path.join(repoRoot, 'scripts', 'test-reporter.mjs')).href;
-const extensionRequire = createRequire(path.join(extensionRoot, 'package.json'));
+const ownerRoot = resolvePackageRoots().dependencyOwnerRoot;
+const ownerRequire = createOwnerRequire();
 
 // Measured per-file serial test costs (scripts/update-extension-test-costs.mjs)
 // drive load-balanced batch bucketing. Without the table, bucketing falls back
@@ -42,11 +44,11 @@ function loadCostTable() {
 }
 
 // pi packages (settings.json#packages) are installed into the gitignored
-// `npm/` workspace, not extension/node_modules. The extension imports them via
+// `npm/` workspace, not the application owner's node_modules. The extension imports them via
 // relative paths (e.g. `npm/node_modules/pi-mcp-adapter/config.ts`), and their
 // own bare dependencies (smol-toml, strip-json-comments, zod, ...) exist only
 // under npm/node_modules. `packages: 'external'` below would leave those bare
-// imports as runtime requires that resolve from the extension/node_modules
+// imports as runtime requires that resolve from the application owner's node_modules
 // symlink and fail. Bundle them instead; see `bundlePiPackageDeps`.
 const npmNodeModules = path.join(repoRoot, 'npm', 'node_modules');
 
@@ -230,6 +232,46 @@ export function recoverBundledFailureSourceFiles(failures, tempDir, sourceFiles)
   });
 }
 
+export function createPreserveSourceUrls(sourceRoot = repoRoot) {
+  return {
+    name: 'preserve-source-urls',
+    setup(esbuild) {
+      esbuild.onLoad({ filter: /\.[cm]?[jt]sx?$/ }, async ({ path: sourcePath }) => {
+        const relative = path.relative(sourceRoot, sourcePath);
+        const directories = relative.split(path.sep).slice(0, -1);
+        // scripts/build contains hand-written publication helpers, not build output.
+        const protectedDirectories = directories[0] === 'scripts' && directories[1] === 'build'
+          ? directories.slice(2) : directories;
+        if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`)
+          || path.isAbsolute(relative)
+          || protectedDirectories.some(isProtectedDirectoryName)) return null;
+        const source = await readFile(sourcePath, 'utf8');
+        return {
+          contents: source.replace(/import\.meta\.url/gu, JSON.stringify(pathToFileURL(sourcePath).href)),
+          loader: sourcePath.endsWith('.tsx') ? 'tsx'
+            : sourcePath.endsWith('.jsx') ? 'jsx'
+              : /\.[cm]?ts$/u.test(sourcePath) ? 'ts'
+                : 'js',
+        };
+      });
+    },
+  };
+}
+
+export async function withFastRunnerTempDirs(action, tempRoot = os.tmpdir()) {
+  let tempDir;
+  const traceDirs = [];
+  try {
+    tempDir = await mkdtemp(path.join(tempRoot, 'pie-extension-fast-'));
+    traceDirs.push(await mkdtemp(path.join(tempRoot, 'pie-extension-fast-traces-bundled-')));
+    traceDirs.push(await mkdtemp(path.join(tempRoot, 'pie-extension-fast-traces-unsafe-')));
+    return await action(tempDir, traceDirs);
+  } finally {
+    await Promise.all([...(tempDir ? [tempDir] : []), ...traceDirs]
+      .map((dir) => rm(dir, { recursive: true, force: true })));
+  }
+}
+
 function mergeReports(results, durationMs, tempDir, bundledSourceFiles, enumeratedFiles) {
   const counts = emptyCounts();
   const failures = [];
@@ -293,23 +335,14 @@ async function main() {
     else if (classification === 'scoped-batch') scopedBatchable.add(relativePath);
   }
 
-  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'pie-extension-fast-'));
   const costTable = loadCostTable();
-  const bundleSourcePath = (bundledFilePath) =>
-    path.relative(tempDir, bundledFilePath).replace(/\\/gu, '/').replace(/\.js$/u, '.ts');
-  // Fresh per-wave trace directories: every spawned test process inherits the
-  // wave's PIE_LIVE_PIPELINE_TRACE_DIR, so trace-writing tests (writer-trace,
-  // diagnostics-trace, request-handler, service-loading-gate) no longer append
-  // to the shared canonical %TEMP% file that accumulates across runs and
-  // rotates at 2 MiB mid-run — a rotation between a test's before/after read
-  // silently lost that test's records and flaked. A fresh dir stays far below
-  // the rotation threshold for the whole wave.
-  const traceDirs = [
-    await mkdtemp(path.join(os.tmpdir(), 'pie-extension-fast-traces-bundled-')),
-    await mkdtemp(path.join(os.tmpdir(), 'pie-extension-fast-traces-unsafe-')),
-  ];
-  let unsafeChild;
-  try {
+  // Fresh per-wave trace directories keep test traces separate from the
+  // shared canonical %TEMP% file. Allocate and remove them with the bundle dir.
+  await withFastRunnerTempDirs(async (tempDir, traceDirs) => {
+    const bundleSourcePath = (bundledFilePath) =>
+      path.relative(tempDir, bundledFilePath).replace(/\\/gu, '/').replace(/\.js$/u, '.ts');
+    let unsafeChild;
+    try {
     const standaloneSources = safe.filter((file) => !batchable.has(file) && !scopedBatchable.has(file));
     const standaloneBundles = standaloneSources
       .map((file) => path.join(tempDir, file.replace(/\.tsx?$/u, '.js')));
@@ -320,7 +353,10 @@ async function main() {
       unsafeSourceFiles,
       unsafeSourceFiles.map((file) => [file, file]),
     );
-    const tsxCli = path.join(extensionRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');
+    const tsxCli = resolveOwnerTsx();
+    const tsxOverlay = createTsconfigOverlay(path.join(ownerRoot, 'tsconfig.json'), {
+      directory: tempDir, includeOwnerDependencies: true,
+    });
     const reporterArg = `--test-reporter=${reporterSpecifier}`;
     const bundledArgs = ['--test', '--test-force-exit', '--test-concurrency=16', reporterArg];
     const isolatedArgs = ['--test', '--test-force-exit', '--test-concurrency=10', reporterArg];
@@ -328,7 +364,7 @@ async function main() {
     // wave, hiding both compiler and tsx startup latency.
     const unsafeRun = run(
       process.execPath,
-      [tsxCli, ...isolatedArgs, ...unsafe],
+      [tsxCli, `--tsconfig=${tsxOverlay.configPath}`, ...isolatedArgs, ...unsafe],
       extensionRoot,
       (child) => { unsafeChild = child; },
       {
@@ -337,31 +373,20 @@ async function main() {
       },
     );
 
-    const { build } = extensionRequire('esbuild');
-    const preserveSourceUrls = {
-      name: 'preserve-source-urls',
-      setup(esbuild) {
-        esbuild.onLoad({ filter: /\.[cm]?[jt]sx?$/ }, async ({ path: sourcePath }) => {
-          const source = await readFile(sourcePath, 'utf8');
-          return {
-            contents: source.replace(/import\.meta\.url/gu, JSON.stringify(pathToFileURL(sourcePath).href)),
-            loader: sourcePath.endsWith('.tsx') ? 'tsx'
-              : sourcePath.endsWith('.jsx') ? 'jsx'
-                : /\.[cm]?ts$/u.test(sourcePath) ? 'ts'
-                  : 'js',
-          };
-        });
-      },
-    };
+    const { build } = ownerRequire('esbuild');
     const bundlePiPackageDeps = {
       name: 'bundle-pi-package-deps',
       setup(esbuild) {
         // What a bundled test's runtime requires look like: temp bundles sit
-        // in %TEMP% with only a `node_modules` junction to the extension's
-        // top-level node_modules. Resolve from that anchor so we can tell
+        // in %TEMP% with only a `node_modules` junction to the application
+        // dependency owner's node_modules. Resolve from that anchor so we can tell
         // which bare imports the runtime will and will not find.
-        const bundleAnchorRequire = createRequire(path.join(extensionRoot, 'node_modules', '.pi-anchor.cjs'));
+        const bundleAnchorRequire = createRequire(path.join(ownerRoot, 'node_modules', '.pi-anchor.cjs'));
         esbuild.onResolve({ filter: /^[^./]/ }, (args) => {
+          // The owner overlay maps bare vite to an absolute dependency file.
+          // Keep Vite external: its own import.meta.url must resolve relative to
+          // its installed package, not to the temporary CJS test bundle.
+          if (args.path === 'vite') return { path: 'vite', external: true };
           // Leave node: builtins to esbuild's default (`packages: 'external'`)
           // handling.
           if (args.path.startsWith('node:')) return null;
@@ -401,7 +426,7 @@ async function main() {
               anchored = null;
             }
             if (anchored === resolved) return null; // runtime finds it via the junction: keep external
-            if (resolved.startsWith(path.join(extensionRoot, 'node_modules'))
+            if (resolved.startsWith(path.join(ownerRoot, 'node_modules'))
               || resolved.startsWith(npmNodeModules)) {
               return { path: resolved, external: false };
             }
@@ -416,18 +441,19 @@ async function main() {
       entryPoints: safe.map((file) => path.join(extensionRoot, file)),
       outdir: tempDir,
       outbase: extensionRoot,
+      tsconfig: tsxOverlay.configPath,
       entryNames: '[dir]/[name]',
       bundle: true,
       format: 'cjs',
       platform: 'node',
       packages: 'external',
-      plugins: [preserveSourceUrls, bundlePiPackageDeps],
+      plugins: [createPreserveSourceUrls(), bundlePiPackageDeps],
       // A bundled test is the process entry point. Disable application entry
       // guards so imported backend modules do not start the real server.
       define: { 'require.main': 'undefined' },
       logLevel: 'silent',
     });
-    await symlink(path.join(extensionRoot, 'node_modules'), path.join(tempDir, 'node_modules'), 'junction');
+    await symlink(path.join(ownerRoot, 'node_modules'), path.join(tempDir, 'node_modules'), 'junction');
 
     const compiledBatchFile = (file) => path.join(tempDir, file.replace(/\.tsx?$/u, '.js'));
     const bucketToBatch = (buckets, prefix) => Promise.all(buckets.map(async (files, index) => {
@@ -471,11 +497,10 @@ async function main() {
     );
     process.stdout.write(`${REPORT_PREFIX}${JSON.stringify(report)}\n`);
     if (!report.summary.success) process.exitCode = 1;
-  } finally {
-    if (unsafeChild?.exitCode === null && unsafeChild?.signalCode === null) unsafeChild.kill();
-    await rm(tempDir, { recursive: true, force: true });
-    await Promise.all(traceDirs.map((dir) => rm(dir, { recursive: true, force: true })));
-  }
+    } finally {
+      if (unsafeChild?.exitCode === null && unsafeChild?.signalCode === null) unsafeChild.kill();
+    }
+  });
 }
 
 const invokedDirectly = process.argv[1]

@@ -91,7 +91,7 @@ list entry would close that gap.
 pie is on pi 0.80.6. The adapter is pinned to **2.20.1**, the last release
 compatible with pi < 0.84 (`pi-ai` peer `*`). Adapter ≥ 2.21.0 requires pi ≥
 0.84.1 (agent plugins, `pi.mcp` package manifests, keyring token store, runtime
-`registerMcpServer`). Bumping the pi runtime in `extension/` unlocks the newer
+`registerMcpServer`). Bumping the pi runtime in the VS Code host package (`application/hosts/vscode/package.json`) unlocks the newer
 adapter line; until then stay on 2.20.1.
 
 ## Adding a server — the model
@@ -186,7 +186,7 @@ run this headless end-to-end check:
 PIE_REPO="$(node -p "require('node:path').resolve('.')")"
 cd ../local_utils/mcp-smoke
 PI_CODING_AGENT_DIR="$PIE_REPO" \
-  node "$PIE_REPO/extension/node_modules/@earendil-works/pi-coding-agent/dist/cli.js" \
+  node "$PIE_REPO/application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/dist/cli.js" \
   -p "Use the mcp tool: search for a tool containing 'echo', call it with 'mcp works', report the result."
 ```
 

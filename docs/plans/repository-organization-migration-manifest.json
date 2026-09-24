@@ -31,11 +31,11 @@
  },
  "executionProgress": {
   "checkpointDate": "2026-09-24",
-  "milestone": "B1",
-  "status": "complete; B2 not started",
-  "scope": "B1 preparation: owner-relative package resolution/Vite wiring, compiler and test-runtime tsx resolution integration, unbundled native-owner/YAML runtime resolution, multi-root test routing, host-neutral factory and capability/operation seams, canonical analytics branch-observation contract extraction, manifest inventory enforcement, and root/extension test-file accounting; no B2 relocations.",
+  "milestone": "B2",
+  "status": "B2 complete; exit accepted. B3 not started. 17 distribution/config/runtime/build-helper moves settled at their target paths",
+  "scope": "B2 exit-accepted checkpoint: the 17 tracked VS Code distribution/config/runtime assets and build helpers are at their target paths and recorded in currentLocations; locked npm ci installs ran at the new owner; the package gate (real VSIX, extracted entries, packaged isolated backend 2/2 with a minimal-settings fixture using no external packages) passed; the final full verification gate passed — model drift, all 17 typecheck projects, lint, and the non-publishing build, plus a settled-tree full npm run test:all rerun exiting 0 with 7/7 groups, 7,437 passed / 0 failed / 35 skipped (markdown-rendering initially failed and passed on a selective rerun, so the pass is not pristine); the required final extension:build passed with staged runtime generation b076b8b9034b1a20d3cdbdf2f5fbc22ada3944083856ac5874c713055a544af2 and renderer build ID 751a37955834f94abd94, staged only — not loaded/live, no installed-host restart. No source or test was relocated. B3 has not started.",
   "inventory": {
-   "currentTrackedSourcesCovered": 1778,
+   "baselineTrackedSourcesCovered": 1778,
    "ownedPostBaselineSources": [
     "extension/src/host/runtime/browser-server-seam.ts",
     "extension/src/shared/protocol/session-capability-facts.ts",
@@ -47,10 +47,16 @@
     "scripts/lib/package-resolution.d.mts",
     "scripts/test/repository-migration-inventory.test.mjs",
     "scripts/test/unbundled-owner-resolution.test.mjs",
-    "extension/test/build-identity.test.ts"
+    "extension/test/build-identity.test.ts",
+    "scripts/test/build-typecheck.test.mjs"
    ],
-   "sourceRecordCount": 1784,
-   "validation": "Exact set: all 1778 current git ls-files tracked paths plus these six explicitly owned relevant untracked additions; zero missing, extra, or duplicate source records. The canonical analytics branch-observation contract, the native-owner helper, the package-resolution declaration, and the three new regression suites (migration inventory enforcement, unbundled owner resolution, and build identity) each carry explicit records. Baseline trackedTestFilesByPackage arrays remain unchanged and immutable."
+   "sourceRecordCount": 1785,
+   "validation": "B1 snapshot: all 1778 tracked paths plus six explicitly owned relevant untracked additions had one source record each. The baseline trackedTestFilesByPackage arrays remain unchanged and immutable. Current B2 working-tree paths for settled moves are mapped separately by currentLocations; original source paths and baseline test identities are preserved. B2 addition: the new scripts/test/build-typecheck.test.mjs record brings the manifest to 1,785 source records; the only relevant untracked working-tree additions are the 11 declared current locations under application/hosts/vscode/ and this new record's source.",
+   "currentGitStatus": {
+    "recordedAt": "2026-09-24",
+    "head": "feb037ffa580873686fb0565bf2f6a2a4e2ff135",
+    "summary": "94 modified tracked files; the 17 settled moves appear as 11 working-tree deletions of VS Code host assets plus 6 staged extension/scripts -> scripts/build renames, all recorded in currentLocations; untracked additions are application/hosts/vscode/ (exactly the 11 declared current locations) and scripts/test/build-typecheck.test.mjs (new B2 record above). No further source or test relocation; user-owned settings.json edits remain excluded from migration."
+   }
   },
   "implemented": {
    "packageResolution": "scripts/lib/package-resolution.mjs provides current/planned owner-relative roots and runtime, TypeScript, tsx, and Vite resolution, plus resolveTypeScriptCompiler and createTsconfigOverlay. It is wired into both extension Vite build graphs, the typecheck wrapper (run-typechecks resolveProjectCompiler resolves each registry-declared compiler owner-relatively and accepts absolute future-root configs), and all three test wrappers (run-tests, run-test-files, run-fast-batched-tests), whose registry tsxConfig entries now run through generated OS-temp overlay configs that extend the checked-in base config and re-point exactly the declared aliases to explicit owner paths (helper-covered keys only; no new redirections, so test-time module hooks keep their interception set).",
@@ -58,7 +64,7 @@
    "testRuntimeEvidence": "All four tsxConfig packages pass through the integrated wrappers with generated overlays: subagent 623 passed/4 skipped, computer-use 141 passed/1 skipped, playwright 66 passed via run-fast-batched-tests.mjs; image-context-guard 26 passed via run-tests.mjs and run-test-files.mjs. A real tools/subagent/test/schema.test.ts run passes through the integrated run-test-files wrapper. The future-root tsx proof runs a fixture outside the repo through the integrated buildTsxArgs+runGroup surface with an overlay re-pointing deliberately unresolvable base targets to owner paths. Overlay generation preserves strict/include/exclude by extending the checked-in base and is guarded by drift tests.",
    "branchObservationContract": "Canonical AnalyticsBranchObservedPayload interface and isAnalyticsBranchObservedPayload guard extracted from extension/src/shared/protocol/sessions.ts and event-payloads.ts into shared/analytics/branch-observation.ts (planned analytics/contracts/branch-observation.ts). worker-protocol and host event-dispatch now import the canonical contract; the two old protocol files keep temporary compatibility re-exports explicitly marked for removal in B5/B6/B7 once old protocol imports retire, so the payload/guard split records no longer duplicate the contract. Focused regressions updated: worker-protocol.test.ts, worker-runtime-analytics-router.test.ts, and session-backend-event-dispatch.test.ts (34 tests passed together via run-test-files.mjs, 2026-09-24).",
    "unbundledRuntimeResolution": "§5.2 unbundled Node/Jiti runtime path now resolves owner-relatively from a future root: scripts/lib/native-owner.mjs owns native sidecar dependency owners (computer-use, playwright) and the tools/computer-use and tools/playwright dependency-owner callers are wired to it; catalog-sync consumes the application dependency owner's hoisted yaml module through createOwnerRequire (typed by the new scripts/lib/package-resolution.d.mts). scripts/test/unbundled-owner-resolution.test.mjs proves native owners, owner-hoisted yaml (single parser identity shared with catalog-sync), and pinned-SDK jiti loading of future-root extension shims from an OS-temp source root with no root-level node_modules (2 tests passed, 2026-09-24).",
-   "inventoryEnforcement": "scripts/test/repository-migration-inventory.test.mjs enforces this manifest against the exact git inventory: every tracked and relevant untracked file mapped, no stale sources, collisions only when documented in resolvedCollisions, explicit retain self-targets, protected top-level trees rejected, registry routing authority intact, and baseline test records retained or mapped. The regression suite passes against the current 1784-record manifest.",
+   "inventoryEnforcement": "scripts/test/repository-migration-inventory.test.mjs enforces current working-tree inventory against original source records plus explicit currentLocations: moved sources remain the identity, extant current paths are mapped, missing current paths fail, and unrelated tracked or relevant untracked files remain unmapped errors. Collision, retain, protected-tree, registry-routing, and baseline-test checks remain enforced. Current-location regressions pass (12/12 inventory tests); scripts suite passed 268 / 3 skipped (2026-09-24).",
    "runnerFileAccounting": "The shared test reporter and root/extension fast runners now account for enumerated versus executed test-file identities, detecting missing, unexpected, accidental duplicate, and enumerator-duplicate dispatch while distinguishing configured intentional reruns. Root batch enumeration and extension enumeration feed that accounting. Reviewer acceptance and the final full verification gate passed (2026-09-24). After a tiny accounting guard fix, the focused regressions (19 tests), the scripts suite (264 passed / 3 skipped), the real reporter direct-file regression, and the file-accounting exact-once checks (root 79, subagent 46, extension 498 files) all passed.",
    "selectorRegression": "The real pinned SDK DefaultResourceLoader discovers the checked-in skill-pruner root shim; its loaded selector and request_capability tool share one state identity through hide/recover, with audit completion verified. 59 selector/pruner tests passed.",
    "browserServerSeam": "HostRuntime now consumes a host-neutral BrowserServerService and platform factory contract from browser-server-seam.ts; concrete VS Code/standalone adapters construct BrowserServer and own asset paths. The factory contract is targeted separately under application/hosts/lib/platform-contracts/browser-server-seam.ts, not duplicated in the browser implementation target.",
@@ -75,13 +81,37 @@
     "scripts/test/test-packages.test.mjs"
    ],
    "routingEvidence": "Routing script tests pass; required-root handling, full-root glob coverage, and nested cross-owner rejection are corrected.",
-   "finalVerificationGate": "Final broad gate at the current integration (2026-09-24), run before the tiny accounting guard fix: model drift, typecheck (all 17 projects), lint, npm test 7/7 groups 7436 passed / 35 skipped with no failures, cancels, or reruns, and the non-publishing build passed."
+   "lockedInstalls": "Dependencies were installed via locked npm ci at the new package owner (application/hosts/vscode, including the pinned SDK copy); lock/pins were unchanged and the old protected dependency/output trees (extension/node_modules, extension/out, extension/runtime leftovers, analysis trees) were not moved or touched.",
+   "packageGate": "Package gate passed (2026-09-24): a real VSIX was produced and its extracted entries inspected against the required build files, and a packaged isolated backend check passed 2/2 using a fixture with minimal settings and no external packages.",
+   "sdkFreshPatch": "Low-risk SDK fresh-patch fix applied at the new owner with package-lock and version pins unchanged; the affected 42 backend/SDK-patch tests were repeated and passed (2026-09-24).",
+   "ownerBuildOverlayAndRunnerFixes": "New-owner clean build through the generated tsconfig overlay plus the Preact identity and fast-runner fixes passed focused regressions (2026-09-24); the build remains staged, not live.",
+   "relocationDisposition": "No source or test relocation in B2: application source and test files remain at their original paths, with source/test relocation mappings rebatched to their owning B7/B8 work. Builds are staged only — no loader activation and no installed-host restart. User-owned settings.json edits are excluded from migration and remain untouched.",
+   "finalVerificationGate": "Final broad gate at the current integration (2026-09-24): model drift, typecheck (all 17 projects), lint, and the non-publishing build passed; the earlier pre-accounting-guard-fix run also passed npm test 7/7 groups (7,436 passed / 35 skipped, no failures, cancels, or reruns). The concluding settled-tree full npm run test:all rerun exited 0 with 7/7 groups, 7,437 passed / 0 failed / 35 skipped; the markdown-rendering group initially failed and passed on a selective rerun, so the pass is not pristine. The required final extension:build also passed: staged runtime generation b076b8b9034b1a20d3cdbdf2f5fbc22ada3944083856ac5874c713055a544af2, renderer build ID 751a37955834f94abd94; staged only — not loaded/live, no installed-host restart."
   },
   "pending": [
-   "B1 exit is accepted; no B2 relocation is authorized, started, or recorded by this checkpoint.",
+   "B1 and B2 exits are accepted; B3 has not started. B2's final full verification gate passed on 2026-09-24, including the settled-tree full npm run test:all (7/7 groups, 7,437 passed / 0 failed / 35 skipped; markdown-rendering passed on selective rerun after an initial failure) and the required final extension:build with the staged, not-live runtime identity recorded in finalVerificationGate.",
    "Deep logger, analytics, and resource-move verification tests are deferred to their owning later batches and remain recorded in this manifest; no permanent test exceptions or skips exist or may be added."
   ],
   "settingsWorkingTree": "The B0 settings.json high-to-medium note is an immutable baseline snapshot. Current live user fields have since changed (defaultModel gpt-6-astra to gpt-6-luna; defaultThinkingLevel high to xhigh). Exclude ongoing settings edits from migration; do not restore or pin future edits to medium."
+ },
+ "currentLocations": {
+  "extension/.vscode/tasks.json": ["application/hosts/vscode/.vscode/tasks.json"],
+  "extension/.vscodeignore": ["application/hosts/vscode/.vscodeignore"],
+  "extension/eslint.config.mjs": ["application/hosts/vscode/eslint.config.mjs"],
+  "extension/media/icon.svg": ["application/hosts/vscode/media/icon.svg"],
+  "extension/package-lock.json": ["application/hosts/vscode/package-lock.json"],
+  "extension/package.json": ["application/hosts/vscode/package.json"],
+  "extension/playwright.config.ts": ["application/hosts/vscode/playwright.config.ts"],
+  "extension/runtime/bootstrap.cjs": ["application/hosts/vscode/runtime/bootstrap.cjs"],
+  "extension/runtime/runtime-generations.cjs": ["application/hosts/vscode/runtime/runtime-generations.cjs"],
+  "extension/scripts/build.mjs": ["scripts/build/build.mjs"],
+  "extension/scripts/publication.d.mts": ["scripts/build/publication.d.mts"],
+  "extension/scripts/publication.mjs": ["scripts/build/publication.mjs"],
+  "extension/scripts/publish-renderer.mjs": ["scripts/build/publish-renderer.mjs"],
+  "extension/scripts/runtime-publication.d.mts": ["scripts/build/runtime-publication.d.mts"],
+  "extension/scripts/runtime-publication.mjs": ["scripts/build/runtime-publication.mjs"],
+  "extension/tsconfig.json": ["application/hosts/vscode/tsconfig.json"],
+  "extension/vite.config.ts": ["application/hosts/vscode/vite.config.ts"]
  },
  "testEnumeration": {
   "source": "scripts/lib/test-packages.mjs PACKAGE_REGISTRY + scripts/run-tests.mjs PACKAGE_CONFIGS; registry testGlobs matched against git ls-files at the planning checkpoint, with explicit extension opt-in suites unioned by repo-relative path",
@@ -1702,7 +1732,7 @@
    "kind": "resolved-conflict"
   }
  ],
- "recordCount": 1784,
+ "recordCount": 1785,
  "records": [
   {
    "source": "extension/src/backend/analytics-worker-transport.ts",
@@ -4233,7 +4263,7 @@
    ],
    "action": "move",
    "owner": "scripts/build",
-   "batch": "B2",
+   "batch": "B8",
    "verification": [
     "Run focused tests via the registered target-owner test group.",
     "Typecheck/build relocated source roots and verify one test enumeration entry."
@@ -10281,7 +10311,7 @@
    ],
    "action": "move",
    "owner": "application/hosts/lib",
-   "batch": "B2",
+   "batch": "B7",
    "verification": [
     "focused owner tests",
     "typecheck/build for owning runtime"
@@ -10926,7 +10956,7 @@
    ],
    "action": "move",
    "owner": "application/hosts/lib",
-   "batch": "B2",
+   "batch": "B7",
    "verification": [
     "focused owner tests",
     "typecheck/build for owning runtime"
@@ -15950,7 +15980,7 @@
    ],
    "action": "move",
    "owner": "application/hosts/vscode",
-   "batch": "B2",
+   "batch": "B7",
    "verification": [
     "focused owner tests",
     "typecheck/build for owning runtime"
@@ -15992,7 +16022,7 @@
    ],
    "action": "move",
    "owner": "application/hosts/vscode",
-   "batch": "B2",
+   "batch": "B7",
    "verification": [
     "preserve exact test and opt-in/real-SDK status",
     "owner registry enumeration and focused verification"
@@ -16748,7 +16778,7 @@
    ],
    "action": "move",
    "owner": "application/hosts/lib",
-   "batch": "B2",
+   "batch": "B7",
    "verification": [
     "focused owner tests",
     "typecheck/build for owning runtime"
@@ -22358,7 +22388,7 @@
    ],
    "action": "move",
    "owner": "application/hosts/standalone/startup",
-   "batch": "B2",
+   "batch": "B7",
    "verification": [
     "Run launcher/supervisor integration tests with temporary paths and verify start/stop behavior.",
     "Confirm root launcher, doctor, installer, and SDK-version reader resolve the moved script without using cwd as a universal fallback."
@@ -22414,7 +22444,7 @@
    ],
    "action": "move",
    "owner": "scripts/diagnostics",
-   "batch": "B2",
+   "batch": "B8",
    "verification": [
     "Preserve test enumeration, logical package ID, skips, and opt-in classification; run via root test wrappers.",
     "Verify the suite still covers its source owner and is neither omitted nor run twice."
@@ -22428,7 +22458,7 @@
    ],
    "action": "move",
    "owner": "scripts/diagnostics",
-   "batch": "B2",
+   "batch": "B8",
    "verification": [
     "Preserve test enumeration, logical package ID, skips, and opt-in classification; run via root test wrappers.",
     "Verify the suite still covers its source owner and is neither omitted nor run twice."
@@ -22442,7 +22472,7 @@
    ],
    "action": "move",
    "owner": "scripts/diagnostics",
-   "batch": "B2",
+   "batch": "B8",
    "verification": [
     "Preserve test enumeration, logical package ID, skips, and opt-in classification; run via root test wrappers.",
     "Verify the suite still covers its source owner and is neither omitted nor run twice."
@@ -22456,7 +22486,7 @@
    ],
    "action": "move",
    "owner": "scripts/install",
-   "batch": "B2",
+   "batch": "B8",
    "verification": [
     "Preserve test enumeration, logical package ID, skips, and opt-in classification; run via root test wrappers.",
     "Verify the suite still covers its source owner and is neither omitted nor run twice."
@@ -22512,7 +22542,7 @@
    ],
    "action": "move",
    "owner": "scripts/install",
-   "batch": "B2",
+   "batch": "B8",
    "verification": [
     "Preserve test enumeration, logical package ID, skips, and opt-in classification; run via root test wrappers.",
     "Verify the suite still covers its source owner and is neither omitted nor run twice."
@@ -22526,7 +22556,7 @@
    ],
    "action": "move",
    "owner": "scripts/install",
-   "batch": "B2",
+   "batch": "B8",
    "verification": [
     "Preserve test enumeration, logical package ID, skips, and opt-in classification; run via root test wrappers.",
     "Verify the suite still covers its source owner and is neither omitted nor run twice."
@@ -22540,7 +22570,7 @@
    ],
    "action": "move",
    "owner": "scripts/install",
-   "batch": "B2",
+   "batch": "B8",
    "verification": [
     "Preserve test enumeration, logical package ID, skips, and opt-in classification; run via root test wrappers.",
     "Verify the suite still covers its source owner and is neither omitted nor run twice."
@@ -22554,7 +22584,7 @@
    ],
    "action": "move",
    "owner": "scripts/install",
-   "batch": "B2",
+   "batch": "B8",
    "verification": [
     "Preserve test enumeration, logical package ID, skips, and opt-in classification; run via root test wrappers.",
     "Verify the suite still covers its source owner and is neither omitted nor run twice."
@@ -22568,7 +22598,7 @@
    ],
    "action": "move",
    "owner": "scripts/install",
-   "batch": "B2",
+   "batch": "B8",
    "verification": [
     "Preserve test enumeration, logical package ID, skips, and opt-in classification; run via root test wrappers.",
     "Verify the suite still covers its source owner and is neither omitted nor run twice."
@@ -22582,7 +22612,7 @@
    ],
    "action": "move",
    "owner": "scripts/install",
-   "batch": "B2",
+   "batch": "B8",
    "verification": [
     "Preserve test enumeration, logical package ID, skips, and opt-in classification; run via root test wrappers.",
     "Verify the suite still covers its source owner and is neither omitted nor run twice."
@@ -22596,7 +22626,7 @@
    ],
    "action": "move",
    "owner": "scripts/install",
-   "batch": "B2",
+   "batch": "B8",
    "verification": [
     "Preserve test enumeration, logical package ID, skips, and opt-in classification; run via root test wrappers.",
     "Verify the suite still covers its source owner and is neither omitted nor run twice."
@@ -22610,7 +22640,7 @@
    ],
    "action": "move",
    "owner": "scripts/install",
-   "batch": "B2",
+   "batch": "B8",
    "verification": [
     "Preserve test enumeration, logical package ID, skips, and opt-in classification; run via root test wrappers.",
     "Verify the suite still covers its source owner and is neither omitted nor run twice."
@@ -22624,7 +22654,7 @@
    ],
    "action": "move",
    "owner": "scripts/install",
-   "batch": "B2",
+   "batch": "B8",
    "verification": [
     "Preserve test enumeration, logical package ID, skips, and opt-in classification; run via root test wrappers.",
     "Verify the suite still covers its source owner and is neither omitted nor run twice."
@@ -22638,7 +22668,7 @@
    ],
    "action": "move",
    "owner": "scripts/install",
-   "batch": "B2",
+   "batch": "B8",
    "verification": [
     "Preserve test enumeration, logical package ID, skips, and opt-in classification; run via root test wrappers.",
     "Verify the suite still covers its source owner and is neither omitted nor run twice."
@@ -22652,7 +22682,7 @@
    ],
    "action": "move",
    "owner": "scripts/install",
-   "batch": "B2",
+   "batch": "B8",
    "verification": [
     "Preserve test enumeration, logical package ID, skips, and opt-in classification; run via root test wrappers.",
     "Verify the suite still covers its source owner and is neither omitted nor run twice."
@@ -22666,7 +22696,7 @@
    ],
    "action": "move",
    "owner": "scripts/install",
-   "batch": "B2",
+   "batch": "B8",
    "verification": [
     "Preserve test enumeration, logical package ID, skips, and opt-in classification; run via root test wrappers.",
     "Verify the suite still covers its source owner and is neither omitted nor run twice."
@@ -22834,7 +22864,7 @@
    ],
    "action": "move",
    "owner": "application/hosts/standalone/startup",
-   "batch": "B2",
+   "batch": "B7",
    "verification": [
     "Preserve test enumeration, logical package ID, skips, and opt-in classification; run via root test wrappers.",
     "Verify the suite still covers its source owner and is neither omitted nor run twice."
@@ -27191,12 +27221,26 @@
    ],
    "action": "move",
    "owner": "scripts/build",
-   "batch": "B2",
+   "batch": "B8",
    "verification": [
     "Run via the registered target-owner test-routing group.",
     "Verify build identity watch inputs and emitted runtime identity remain aligned in both Vite graphs."
    ],
    "reason": "Build tooling regression for the shared build-identity plugin; co-locate with build tooling tests under scripts/build."
+  },
+  {
+   "source": "scripts/test/build-typecheck.test.mjs",
+   "targets": [
+    "scripts/build/test/build-typecheck.test.mjs"
+   ],
+   "action": "move",
+   "owner": "scripts/build",
+   "batch": "B8",
+   "verification": [
+    "Run via the registered target-owner test-routing group.",
+    "Prove the moved build entry's TypeScript preflight resolves old extension source through the owner overlay in a detached OS-temp fixture and still rejects type errors."
+   ],
+   "reason": "New B2 build-preflight regression suite for the relocated build orchestration (scripts/build/build.mjs TypeScript check over the old extension sources via the generated owner overlay, with the fixture compiling against owner-installed dependencies only); co-locate with build tooling tests under scripts/build."
   },
   {
    "source": "docs/plans/repository-organization-migration-manifest.json",

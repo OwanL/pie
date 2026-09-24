@@ -18,15 +18,18 @@ test.after(async () => { await cleanupPristineTemplate(); });
 
 test('coordinator rejects an already-patched runtime missing any quiescence abort seam', async () => {
   await withFixture(async ({ sdkPath, lockRoot }) => {
+    await ensureSdkPatchBarrier(sdkPath, { lockRoot });
     const runtimePath = path.join(sdkPath, 'dist', 'core', 'agent-session-runtime.js');
-    const changed = (await fs.readFile(runtimePath, 'utf8')).replace(
-      '        this.session.abortBash?.();\n',
-      '',
-    );
+    const patched = await fs.readFile(runtimePath, 'utf8');
+    const abortSeam = '        this.session.abortBash?.();\n';
+    assert.ok(patched.includes(abortSeam), 'fixture must contain the patched quiescence abort seam');
+    const changed = patched.replace(abortSeam, '');
     await fs.writeFile(runtimePath, changed, 'utf8');
 
+    // A distinct lock root forces a fresh coordinator check rather than reusing
+    // the already-resolved ensure promise for this SDK + lock identity.
     await assert.rejects(
-      ensureSdkPatchBarrier(sdkPath, { lockRoot }),
+      ensureSdkPatchBarrier(sdkPath, { lockRoot: `${lockRoot}-recheck` }),
       /SDK semantic fingerprint is unsupported for dist\/core\/agent-session-runtime\.js/,
     );
     assert.equal(await fs.readFile(runtimePath, 'utf8'), changed);

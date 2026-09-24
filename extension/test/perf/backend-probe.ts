@@ -19,14 +19,16 @@ import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
 
 export const HERE = dirname(fileURLToPath(import.meta.url));
-export const EXTENSION_ROOT = resolve(HERE, '..', '..');
-export const REPO_ROOT = resolve(EXTENSION_ROOT, '..');
+export const REPO_ROOT = resolve(HERE, '..', '..');
+// B2 distribution/package owner: built output and the pinned SDK's
+// node_modules live under application/hosts/vscode.
+export const DISTRIBUTION_ROOT = join(REPO_ROOT, 'application', 'hosts', 'vscode');
 export const DEFAULT_SESSION_DIR = join(REPO_ROOT, 'data', 'outcomes', 'sessions');
 export const SESSION_DIR = process.env.PIE_PERF_SESSION_DIR
   ? resolve(process.env.PIE_PERF_SESSION_DIR)
   : DEFAULT_SESSION_DIR;
-export const BACKEND_PATH = join(EXTENSION_ROOT, 'out', 'backend.js');
-export const SDK_PATH = join(EXTENSION_ROOT, 'node_modules', '@earendil-works', 'pi-coding-agent');
+export const BACKEND_PATH = join(DISTRIBUTION_ROOT, 'out', 'backend.js');
+export const SDK_PATH = join(DISTRIBUTION_ROOT, 'node_modules', '@earendil-works', 'pi-coding-agent');
 
 export const OP_TIMEOUT_MS: Record<string, number> = {
   'session.list': 300_000,

@@ -163,7 +163,7 @@ test('planAffectedTests broadens to the full suite for unknown-ownership code fi
 
 test('planAffectedTests selects a package for manifest changes and full suite for global infrastructure', async () => {
   await withFixture(async (root) => {
-    assert.deepEqual(planAffectedTests(root, ['extension/package.json']).testFiles, [
+    assert.deepEqual(planAffectedTests(root, ['application/hosts/vscode/package.json']).testFiles, [
       'extension/test/integration/model-config-sync.test.ts',
       'extension/test/integration/model-profile-coverage.test.ts',
       'extension/test/other.test.ts',

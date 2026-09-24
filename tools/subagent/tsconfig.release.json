@@ -5,11 +5,11 @@
     "lib": ["ES2022", "DOM"],
     "baseUrl": ".",
     "paths": {
-      "@earendil-works/pi-coding-agent": ["../../extension/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts"],
-      "@mariozechner/pi-coding-agent": ["../../extension/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts"],
-      "@mariozechner/pi-ai": ["../../extension/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/index.d.ts"],
-      "@mariozechner/pi-agent-core": ["../../extension/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-agent-core/dist/index.d.ts"],
-      "@mariozechner/pi-tui": ["../../extension/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui/dist/index.d.ts"]
+      "@earendil-works/pi-coding-agent": ["../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts"],
+      "@mariozechner/pi-coding-agent": ["../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts"],
+      "@mariozechner/pi-ai": ["../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/index.d.ts"],
+      "@mariozechner/pi-agent-core": ["../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-agent-core/dist/index.d.ts"],
+      "@mariozechner/pi-tui": ["../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui/dist/index.d.ts"]
     }
   },
   "include": ["./**/*.ts"],

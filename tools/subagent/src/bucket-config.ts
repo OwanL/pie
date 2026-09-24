@@ -166,23 +166,18 @@ function getYamlParse(): ((raw: string) => unknown) | undefined {
   try {
     candidates.push(
       createRequire(
-        new URL("../../../extension/package.json", import.meta.url),
+        new URL("../../../application/hosts/vscode/package.json", import.meta.url),
       ),
     );
   } catch {
-    // extension package not available in this environment
+    // application dependency owner not available in this environment
   }
-  try {
-    candidates.push(
-      createRequire(baseRequire.resolve("@mariozechner/pi-coding-agent/package.json")),
-    );
-  } catch {
+  for (const req of [...candidates]) {
     try {
-      candidates.push(
-        createRequire(baseRequire.resolve("@mariozechner/pi-coding-agent")),
-      );
+      candidates.push(createRequire(req.resolve("@earendil-works/pi-coding-agent")));
+      break;
     } catch {
-      // pi SDK not resolvable from this environment
+      // pi SDK not resolvable from this dependency owner
     }
   }
 

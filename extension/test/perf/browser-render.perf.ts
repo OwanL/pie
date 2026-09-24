@@ -26,12 +26,12 @@ import { execSync } from 'node:child_process';
 import { chromium, type Page } from '@playwright/test';
 import { WebSocketServer } from 'ws';
 
-import { EXTENSION_ROOT, HERE, REPO_ROOT } from './backend-probe';
+import { DISTRIBUTION_ROOT, HERE, REPO_ROOT } from './backend-probe';
 import { PIE_BUILD_ID, WEBVIEW_PROTOCOL_VERSION } from '../../src/shared/protocol';
 
 const PORT = Number(process.env.PIE_PERF_BROWSER_PORT ?? 1998);
 const DUMP_DIR = resolve(process.env.PIE_PERF_DUMP_DIR ?? join(process.env.TEMP ?? '/tmp', 'pie-envelopes'));
-const ASSETS_DIR = join(EXTENSION_ROOT, 'out', 'webview', 'panel');
+const ASSETS_DIR = join(DISTRIBUTION_ROOT, 'out', 'webview', 'panel');
 const SETTLE_WAIT_MS = 30_000;
 
 function fmtMs(ms: number): string {

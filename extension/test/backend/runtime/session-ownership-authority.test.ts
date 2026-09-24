@@ -23,8 +23,13 @@ import {
   StaleSessionWriteLeaseError,
 } from '../../../src/backend/session-ownership-authority';
 
-const extensionRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
-const pinnedSdkPath = path.join(extensionRoot, 'node_modules', '@earendil-works', 'pi-coding-agent');
+// The pinned SDK lives in the B2 distribution/package owner's node_modules
+// (application/hosts/vscode); extension/test remains the retained test root.
+const distributionRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..', '..', '..', '..', 'application', 'hosts', 'vscode',
+);
+const pinnedSdkPath = path.join(distributionRoot, 'node_modules', '@earendil-works', 'pi-coding-agent');
 
 interface PatchedSdkModules {
   SessionManager: any;
@@ -36,7 +41,7 @@ let modulesPromise: Promise<PatchedSdkModules> | undefined;
 async function patchedSdk(): Promise<PatchedSdkModules> {
   modulesPromise ??= (async () => {
     const previousTrustedRoot = process.env.PIE_TRUSTED_SDK_ROOT;
-    process.env.PIE_TRUSTED_SDK_ROOT = extensionRoot;
+    process.env.PIE_TRUSTED_SDK_ROOT = distributionRoot;
     try {
       await ensureSdkPatchBarrier(pinnedSdkPath);
     } finally {
@@ -59,7 +64,7 @@ function owner(workerId = 'worker-a', workerGeneration = 1): SdkWorkerOwnershipI
 }
 
 async function tempSessionRoot(): Promise<string> {
-  return await fs.mkdtemp(path.join(extensionRoot, '.pie-phase4-ownership-test-'));
+  return await fs.mkdtemp(path.join(distributionRoot, '.pie-phase4-ownership-test-'));
 }
 
 function intent(

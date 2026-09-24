@@ -75,7 +75,8 @@ test('SDK discovery loads every catalog extension tool once from its stable path
     // while retaining the real source paths for relative shim imports.
     const loaderPath = path.resolve(
       process.cwd(),
-      'node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js',
+      '..',
+      'application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js',
     );
     const loader = await import(pathToFileURL(loaderPath).href) as {
       discoverAndLoadExtensions(

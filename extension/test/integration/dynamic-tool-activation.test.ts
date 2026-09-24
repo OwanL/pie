@@ -132,7 +132,16 @@ test('setActiveTools inside a recovery tool exposes the recovered schema on the 
       },
     }));
 
-    const sdk = await loadSdk(path.resolve('node_modules/@earendil-works/pi-coding-agent')) as any;
+    const sdk = await loadSdk(path.resolve(
+      process.cwd(),
+      '..',
+      'application',
+      'hosts',
+      'vscode',
+      'node_modules',
+      '@earendil-works',
+      'pi-coding-agent',
+    )) as any;
     const authStorage = sdk.AuthStorage.create(path.join(agentDir, 'auth.json'));
     const modelRegistry = sdk.ModelRegistry.create(authStorage, path.join(agentDir, 'models.json'));
     const model = modelRegistry.find('mock-provider', 'mock-model');

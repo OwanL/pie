@@ -37,7 +37,9 @@ async function loadPinnedSystemPrompt(): Promise<{
 }> {
 	const modulePath = path.join(
 		process.cwd(),
-		"extension",
+		"application",
+		"hosts",
+		"vscode",
 		"node_modules",
 		"@earendil-works",
 		"pi-coding-agent",

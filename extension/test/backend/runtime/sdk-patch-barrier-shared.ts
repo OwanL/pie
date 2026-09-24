@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import * as path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -13,6 +14,9 @@ import {
   removeSdkPatchBarrierDirectory,
   resolveSdkPatchBarrierLockPath,
   validateSdkPatchBarrier,
+  reverseColdCreate,
+  reverseDurability,
+  reversePinnedRetryForFixture,
   type SdkPatchFixtureFingerprints,
   type SdkPatchIdentity,
 } from '../../../src/backend/sdk-patch-barrier';
@@ -25,6 +29,7 @@ import {
 import {
   SDK_SESSION_OWNERSHIP_MANAGER_PATCH_VERSION,
   reverseSdkSessionManagerOwnership,
+  reverseSdkSessionRuntimeOwnership,
 } from '../../../src/backend/sdk-session-ownership-patch';
 
 
@@ -77,8 +82,13 @@ const RETRYABLE = [
 `;
 
 export const RETRY_RELATIVE_PATH = 'node_modules/@earendil-works/pi-ai/dist/utils/retry.js';
-export const FIXTURE_MANAGER_SHA256 = 'c0dd3878ff943ea87fbd2010fe86fe5ddce5ef96290d4bc91ba7273e0329330a';
-export const FIXTURE_RUNTIME_SHA256 = '2a070a8e400d40eb5aef0bbf708e7c90b7cba08cffa4079bcebd17f88dd18f55';
+// Fixture baselines always describe the exact pristine pinned bytes, whether
+// the installed package has already been patched by another integration test.
+export const FIXTURE_MANAGER_SHA256 = '879e80cc6e2371e4b06887e6fb041c323ba4e86f7687bfdac6474c9f61486112';
+export const FIXTURE_RUNTIME_SHA256 = 'c00dc388caeb7f3c3ed1501a9387ad7f2a2013b3fe51253019cf62a945440ce7';
+const PINNED_DURABILITY_SHA256 = 'b2b3b0e2b95ff88290232da4117920a6fd0cceb06bb5d66bb8f120fc934644e7';
+const PINNED_RETRY_SHA256 = '2bb9127db55cff5f34cd71b280f975d5e2bb7e17adcf48259482f6f36c69c18e';
+const sha256 = (source: string): string => createHash('sha256').update(source).digest('hex');
 export const FIXTURE_DURABILITY_SHA256 = new Set([
   'f6d819ac0873d6c806a18126d7c26569b7b0f4bcf4cf5355470f1a331bb74b2a',
   '8b6302cfac26ca67bac8f5ab327ea2acfcbb43263cb10accea634ee7d5a6cad0',
@@ -96,12 +106,16 @@ export interface SdkFixture {
 }
 
 export const extensionRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
-export const pinnedSdkPath = path.join(extensionRoot, 'node_modules', '@earendil-works', 'pi-coding-agent');
+// Read the pinned SDK and tsx from the distribution owner; keep writable
+// fixture clones in OS temp so the installed dependency tree is untouched.
+export const distributionRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..', '..', '..', '..', 'application', 'hosts', 'vscode',
+);
+export const pinnedSdkPath = path.join(distributionRoot, 'node_modules', '@earendil-works', 'pi-coding-agent');
 
-// Building a fixture costs ~1s of filesystem work (657-file dist copy + patch
-// normalization) and every test needs its own mutable copy. Build the pristine
-// normalized variant once, then hardlink-clone per test and re-copy only the
-// four patch targets so test mutations never reach the template.
+// Build one normalized template, then hardlink-clone per test and privately
+// copy every mutable target. All clones live in OS temp, not the installed SDK.
 export let pristineTemplatePromise: Promise<string> | undefined;
 export let pristineTemplateRoot: string | undefined;
 
@@ -123,29 +137,31 @@ export async function createNormalizeSessionManager(distPath: string): Promise<v
     assert.ok(priorManager, 'the shared manager single-read patch must reverse exactly');
     fixtureManager = priorManager;
   }
-  for (
-    let layer = 0;
-    createHash('sha256').update(fixtureManager).digest('hex') !== FIXTURE_MANAGER_SHA256
-      && layer < SDK_SESSION_OWNERSHIP_MANAGER_PATCH_VERSION;
-    layer += 1
-  ) {
+  for (let layer = 0; sha256(fixtureManager) !== FIXTURE_MANAGER_SHA256
+      && layer < SDK_SESSION_OWNERSHIP_MANAGER_PATCH_VERSION; layer += 1) {
     const priorManager = reverseSdkSessionManagerOwnership(fixtureManager);
-    assert.ok(priorManager, 'the shared manager ownership patch must reverse exactly');
+    if (!priorManager) break; // ownership is gone; cold-create may still remain
     fixtureManager = priorManager;
   }
-  assert.equal(
-    createHash('sha256').update(fixtureManager).digest('hex'),
-    FIXTURE_MANAGER_SHA256,
-    'the shared manager must normalize to the exact supported fixture baseline',
-  );
+  if (sha256(fixtureManager) !== FIXTURE_MANAGER_SHA256) {
+    fixtureManager = reverseColdCreate(fixtureManager) ?? fixtureManager;
+  }
+  assert.equal(sha256(fixtureManager), FIXTURE_MANAGER_SHA256,
+    'the shared manager must normalize to the exact pinned pristine image');
   if (fixtureManager !== copiedManager) await fs.writeFile(managerPath, fixtureManager, 'utf8');
 }
 
+async function normalizeTarget(filePath: string, pristineHash: string, reverse: (source: string) => string | undefined): Promise<void> {
+  const source = await fs.readFile(filePath, 'utf8');
+  if (sha256(source) === pristineHash) return;
+  const pristine = reverse(source);
+  assert.ok(pristine, `the copied SDK patch must reverse exactly: ${filePath}`);
+  assert.equal(sha256(pristine), pristineHash, `unsupported copied SDK image: ${filePath}`);
+  await fs.writeFile(filePath, pristine, 'utf8');
+}
+
 export async function createPristineSdkTemplate(): Promise<string> {
-  // Keep the copied package beneath extension/ so Node resolves its ordinary
-  // hoisted dependencies from extension/node_modules and so hardlinks share
-  // the extension volume.
-  const root = await fs.mkdtemp(path.join(extensionRoot, '.pie-sdk-barrier-test-'));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-sdk-barrier-test-'));
   pristineTemplateRoot = path.join(root, 'sdk');
   await fs.cp(path.join(pinnedSdkPath, 'dist'), path.join(pristineTemplateRoot, 'dist'), { recursive: true });
   await fs.mkdir(path.join(pristineTemplateRoot, 'node_modules', '@earendil-works'), { recursive: true });
@@ -160,8 +176,9 @@ export async function createPristineSdkTemplate(): Promise<string> {
     'utf8',
   );
   await createNormalizeSessionManager(path.join(pristineTemplateRoot, 'dist'));
-  // The template package.json is hardlinked into fixtures it also must survive
-  // per-test rewrites, so start every clone from a private copy of it.
+  await normalizeTarget(path.join(pristineTemplateRoot, 'dist', 'core', 'agent-session-runtime.js'),
+    FIXTURE_RUNTIME_SHA256, reverseSdkSessionRuntimeOwnership);
+  // package.json is privately copied per fixture to allow version-rejection tests.
   return pristineTemplateRoot;
 }
 
@@ -170,7 +187,7 @@ export async function createSdkFixture(
   durabilitySource = DURABILITY_SOURCE,
 ): Promise<SdkFixture> {
   const template = await (pristineTemplatePromise ??= createPristineSdkTemplate());
-  const root = await fs.mkdtemp(path.join(extensionRoot, '.pie-sdk-barrier-test-'));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-sdk-barrier-test-'));
   const sdkPath = path.join(root, 'sdk');
   const lockRoot = path.join(root, 'locks');
   await cloneTreeByHardlink(
@@ -178,6 +195,9 @@ export async function createSdkFixture(
     sdkPath,
     CLONE_MUTABLE_TARGETS,
   );
+  // The SDK resolves hoisted packages through the distribution owner.
+  await fs.symlink(path.join(distributionRoot, 'node_modules'), path.join(root, 'node_modules'),
+    process.platform === 'win32' ? 'junction' : 'dir');
   await fs.writeFile(path.join(sdkPath, 'dist', 'core', 'agent-session.js'), durabilitySource, 'utf8');
   await fs.mkdir(path.join(sdkPath, path.dirname(RETRY_RELATIVE_PATH)), { recursive: true });
   await fs.writeFile(path.join(sdkPath, RETRY_RELATIVE_PATH), retrySource, 'utf8');
@@ -226,7 +246,7 @@ export async function withFixture(
 }
 
 export function runBarrierChild(fixture: SdkFixture): Promise<SdkPatchIdentity> {
-  const tsxCli = path.join(extensionRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');
+  const tsxCli = path.join(distributionRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');
   const childFixture = path.join(extensionRoot, 'test', 'fixtures', 'sdk-patch-barrier-child.ts');
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [
@@ -331,14 +351,13 @@ export async function runPinnedProductionFingerprintFixture(run: (sdkPath: strin
   // spawns, ~5s isolated and far worse under parallel load): the two-process
   // serialization test and the lock-takeover tests already cover cross-process
   // serialization and cleanup.
-  const root = await fs.mkdtemp(path.join(extensionRoot, '.pie-sdk-production-fingerprint-test-'));
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-sdk-production-fingerprint-test-'));
   const sdkPath = path.join(root, 'sdk');
   const previousTrustedRoot = process.env.PIE_TRUSTED_SDK_ROOT;
   const previousFixtureFingerprints = process.env.PIE_SDK_PATCH_FIXTURE_FINGERPRINTS;
   try {
-    // Keep every barrier-owned dist target private. A newly introduced patch
-    // layer can otherwise turn a previously final hardlink into a write target
-    // and mutate the shared pinned install while this fixture is running.
+    // Keep every barrier-owned dist target private. A new patch layer must
+    // never turn a shared hardlink into a write target in the installed SDK.
     await cloneTreeByHardlink(
       path.join(pinnedSdkPath, 'dist'),
       path.join(sdkPath, 'dist'),
@@ -351,6 +370,12 @@ export async function runPinnedProductionFingerprintFixture(run: (sdkPath: strin
     const retryPath = path.join('node_modules', '@earendil-works', 'pi-ai', 'dist', 'utils', 'retry.js');
     await fs.mkdir(path.join(sdkPath, path.dirname(retryPath)), { recursive: true });
     await fs.copyFile(path.join(pinnedSdkPath, retryPath), path.join(sdkPath, retryPath));
+    await createNormalizeSessionManager(path.join(sdkPath, 'dist'));
+    await normalizeTarget(path.join(sdkPath, 'dist', 'core', 'agent-session-runtime.js'),
+      FIXTURE_RUNTIME_SHA256, reverseSdkSessionRuntimeOwnership);
+    await normalizeTarget(path.join(sdkPath, 'dist', 'core', 'agent-session.js'),
+      PINNED_DURABILITY_SHA256, reverseDurability);
+    await normalizeTarget(path.join(sdkPath, retryPath), PINNED_RETRY_SHA256, reversePinnedRetryForFixture);
     await fs.writeFile(path.join(sdkPath, 'package.json'), JSON.stringify({ version: '0.80.6' }), 'utf8');
     await run(sdkPath, root);
   } finally {

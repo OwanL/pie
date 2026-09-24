@@ -7,10 +7,12 @@ import * as url from 'node:url';
 // The shared resolver is JavaScript-only and intentionally has no production
 // TypeScript dependency. Keep the config seam typed at its use site.
 // @ts-expect-error The repository build helper is an ESM .mjs module without a declaration file.
-import { createViteAliases } from '../scripts/lib/package-resolution.mjs';
+import { createViteAliases } from '../../../scripts/lib/package-resolution.mjs';
 
 const rootDir = path.dirname(url.fileURLToPath(import.meta.url));
-const srcDir = path.join(rootDir, 'src');
+const repoDir = path.resolve(rootDir, '../../..');
+const srcDir = path.join(repoDir, 'extension', 'src');
+const testDir = path.join(repoDir, 'extension', 'test');
 const outDir = path.join(rootDir, 'out');
 
 /**
@@ -20,7 +22,7 @@ const outDir = path.join(rootDir, 'out');
  * keeps its owner-installed files and subpaths. Native tools keep their own
  * sidecar owners and stay unaliased.
  */
-const packageAliases = createViteAliases();
+const packageAliases = createViteAliases({ layout: 'planned' });
 
 const webviewOutDir = path.join(outDir, 'webview', 'panel');
 const BUILD_ID_SENTINEL = '__PIE_COMPILED_BUILD_ID_REPLACE__';
@@ -36,14 +38,22 @@ function sourceFiles(directory: string): string[] {
 
 /** Deterministic across the separately-started node and webview builds. */
 function buildIdentityInputs(identityRoot = rootDir): string[] {
+  // The explicit root parameter remains a fixture seam; production hashes
+  // source at the repository root while emitting under the package owner.
+  const production = identityRoot === rootDir;
+  const sourceRoot = production ? srcDir : path.join(identityRoot, 'src');
+  const helperRoot = production ? repoDir : path.dirname(identityRoot);
+  const buildHelpers = path.join(helperRoot, 'scripts', 'build');
   return [
-    ...sourceFiles(path.join(identityRoot, 'src')),
+    ...sourceFiles(sourceRoot),
+    ...(production ? sourceFiles(path.join(repoDir, 'shared')) : []),
+    ...(production ? sourceFiles(path.join(identityRoot, 'runtime')) : []),
+    ...(production && fs.existsSync(buildHelpers) ? sourceFiles(buildHelpers) : []),
     path.join(identityRoot, 'package.json'),
     path.join(identityRoot, 'package-lock.json'),
     path.join(identityRoot, 'tsconfig.json'),
     path.join(identityRoot, 'vite.config.ts'),
-    // This imported config helper lives outside extension/src but controls package aliases.
-    path.join(identityRoot, '..', 'scripts', 'lib', 'package-resolution.mjs'),
+    path.join(helperRoot, 'scripts', 'lib', 'package-resolution.mjs'),
   ].filter((input) => fs.existsSync(input)).sort((left, right) => left.localeCompare(right));
 }
 
@@ -113,7 +123,7 @@ export default defineConfig(({ mode }) => {
             'analytics-query-worker': path.join(srcDir, 'analytics', 'query-worker-entry.ts'),
             'cold-browse-helper-entry': path.join(srcDir, 'backend', 'cold-browse-helper-entry.ts'),
             'initial-context-estimate-worker': path.join(srcDir, 'backend', 'initial-context-estimate-worker.ts'),
-            'phase4-worker-command-extension': path.join(rootDir, 'test', 'fixtures', 'phase4-worker-command-extension.ts'),
+            'phase4-worker-command-extension': path.join(testDir, 'fixtures', 'phase4-worker-command-extension.ts'),
           },
           output: {
             entryFileNames: '[name].js',

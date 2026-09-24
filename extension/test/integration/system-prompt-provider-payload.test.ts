@@ -102,7 +102,7 @@ test('real SDK raw picker state omits both system message and tool schemas', {
       },
     }));
 
-    const sdkPath = path.resolve('node_modules/@earendil-works/pi-coding-agent');
+    const sdkPath = path.resolve(process.cwd(), '..', 'application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent');
     const sdk = await loadSdk(sdkPath);
     const authStorage = sdk.AuthStorage.create(path.join(agentDir, 'auth.json'));
     const services = await sdk.createAgentSessionServices({ cwd, agentDir, authStorage }) as any;
@@ -201,7 +201,7 @@ test('real SDK provider payload carries Pie ownership, dynamic guidance, and the
       },
     }));
 
-    const sdkPath = path.resolve('node_modules/@earendil-works/pi-coding-agent');
+    const sdkPath = path.resolve(process.cwd(), '..', 'application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent');
     const sdk = await loadSdk(sdkPath);
     const sdkPrompt = await loadPinnedSystemPrompt(sdkPath);
     const authStorage = sdk.AuthStorage.create(path.join(agentDir, 'auth.json'));

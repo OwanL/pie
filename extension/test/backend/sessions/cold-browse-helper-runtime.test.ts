@@ -4,6 +4,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { isParentProcessAlive, startParentProcessWatchdog } from '../../../src/backend/cold-browse-helper-entry';
 import { readColdBrowseFingerprintSync, type ColdBrowseHelperFence } from '../../../src/backend/cold-browse-helper-protocol';
@@ -53,8 +54,19 @@ test('helper owns a manager-free projection cache and fences changes around ever
   try {
     const sessionPath = path.join(root, 'session.jsonl');
     await writeRows(sessionPath, [header(root), user('one', 'one')]);
-    const sdkPath = path.join(process.cwd(), 'node_modules', '@earendil-works', 'pi-coding-agent');
-    const sdk = await loadSdk(sdkPath, { mode: 'cold-coordinator' });
+    // The SDK is owned by the distribution package, not extension/ after the
+    // package move. Trust this pinned install only for the fixture load.
+    const sdkPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)),
+      '../../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent');
+    const previousTrustedRoot = process.env.PIE_TRUSTED_SDK_ROOT;
+    let sdk: Awaited<ReturnType<typeof loadSdk>>;
+    try {
+      process.env.PIE_TRUSTED_SDK_ROOT = sdkPath;
+      sdk = await loadSdk(sdkPath, { mode: 'cold-coordinator' });
+    } finally {
+      if (previousTrustedRoot === undefined) delete process.env.PIE_TRUSTED_SDK_ROOT;
+      else process.env.PIE_TRUSTED_SDK_ROOT = previousTrustedRoot;
+    }
     let opens = 0;
     const runtime = new ColdBrowseHelperRuntime({
       sdk: {
@@ -115,6 +127,7 @@ test('helper byte-fits pages before IPC and preserves a typed required-row overf
       SessionManager: {
         open: () => ({
           getBranch: () => branch,
+          getEntries: () => branch,
           getSessionName: () => undefined,
           getCwd: () => root,
           getSessionId: () => 'helper-runtime',
@@ -190,6 +203,7 @@ test('helper durable-detail resolution matches the pure durable address and refu
       SessionManager: {
         open: () => ({
           getBranch: () => branch,
+          getEntries: () => branch,
           getSessionName: () => undefined,
           getCwd: () => root,
           getSessionId: () => 'helper-detail',
@@ -212,21 +226,23 @@ test('helper durable-detail resolution matches the pure durable address and refu
     });
     runtime.dispose();
 
+    const oversizedBranch = [{
+      ...branch[0],
+    }, {
+      ...branch[1],
+    }, {
+      ...branch[2],
+      message: {
+        ...branch[2]!.message,
+        details: { results: [{ ...target, payload: 'x'.repeat(2_000) }] },
+      },
+    }];
     const oversizedRuntime = new ColdBrowseHelperRuntime({
       sdk: {
         SessionManager: {
           open: () => ({
-            getBranch: () => [{
-              ...branch[0],
-            }, {
-              ...branch[1],
-            }, {
-              ...branch[2],
-              message: {
-                ...branch[2]!.message,
-                details: { results: [{ ...target, payload: 'x'.repeat(2_000) }] },
-              },
-            }],
+            getEntries: () => oversizedBranch,
+            getBranch: () => oversizedBranch,
             getSessionName: () => undefined,
             getCwd: () => root,
             getSessionId: () => 'helper-detail-oversized',
@@ -282,6 +298,7 @@ test('helper rejects a file changed by SessionManager.open before publishing its
             fsSync.appendFileSync(openedPath, `${JSON.stringify(user('new', 'new'))}\n`, 'utf8');
             return {
               getBranch: () => originalRows.slice(1),
+              getEntries: () => originalRows.slice(1),
               getSessionName: () => undefined,
               getCwd: () => root,
               getSessionId: () => 'helper-runtime',

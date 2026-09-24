@@ -4,7 +4,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 
 const jitiUrl = pathToFileURL(fileURLToPath(
-	new URL("../../../extension/node_modules/jiti/lib/jiti-static.mjs", import.meta.url),
+	new URL("../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/node_modules/jiti/lib/jiti-static.mjs", import.meta.url),
 )).href;
 const runnerPath = fileURLToPath(new URL("../runner.ts", import.meta.url));
 

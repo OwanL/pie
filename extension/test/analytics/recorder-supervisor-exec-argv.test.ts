@@ -4,7 +4,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 const parentFlagsScript = fileURLToPath(new URL('./fixtures/recorder-supervisor-parent-flags.mjs', import.meta.url));
-const tsxLoader = new URL('../../node_modules/tsx/dist/loader.mjs', import.meta.url).href;
+const tsxLoader = new URL('../../../application/hosts/vscode/node_modules/tsx/dist/loader.mjs', import.meta.url).href;
 
 test('dedicated analytics helpers do not inherit arbitrary parent Node flags', { timeout: 30_000 }, async () => {
   const child = spawn(process.execPath, ['--trace-warnings', `--import=${tsxLoader}`, parentFlagsScript], {

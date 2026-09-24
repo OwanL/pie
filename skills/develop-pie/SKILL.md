@@ -85,7 +85,7 @@ npm run doctor                              # non-destructive installation/confi
 Extension-only loop:
 
 ```bash
-cd extension
+cd application/hosts/vscode
 npm run build            # validate + stage runtime + renderer publish
 npm run build:validate   # compile/validate only
 npm run publish:renderer # publish existing renderer output
@@ -111,14 +111,14 @@ Choose focused tests while iterating, then run checks proportionate to the chang
 
 ### Pi runtime documentation (locked local version)
 
-For Pi API work, use the topic that owns the API being changed. [Pi's README](../../extension/node_modules/@earendil-works/pi-coding-agent/README.md) provides an overview when needed:
+For Pi API work, use the topic that owns the API being changed. [Pi's README](../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/README.md) provides an overview when needed:
 
-- [extensions](../../extension/node_modules/@earendil-works/pi-coding-agent/docs/extensions.md) and [extension examples](../../extension/node_modules/@earendil-works/pi-coding-agent/examples/extensions/)
-- [skills](../../extension/node_modules/@earendil-works/pi-coding-agent/docs/skills.md)
-- [SDK](../../extension/node_modules/@earendil-works/pi-coding-agent/docs/sdk.md) and [SDK examples](../../extension/node_modules/@earendil-works/pi-coding-agent/examples/sdk/)
-- [RPC protocol](../../extension/node_modules/@earendil-works/pi-coding-agent/docs/rpc.md)
-- [custom providers](../../extension/node_modules/@earendil-works/pi-coding-agent/docs/custom-provider.md) and [models](../../extension/node_modules/@earendil-works/pi-coding-agent/docs/models.md)
-- [settings](../../extension/node_modules/@earendil-works/pi-coding-agent/docs/settings.md), [packages](../../extension/node_modules/@earendil-works/pi-coding-agent/docs/packages.md), and [prompt templates](../../extension/node_modules/@earendil-works/pi-coding-agent/docs/prompt-templates.md)
-- [TUI](../../extension/node_modules/@earendil-works/pi-coding-agent/docs/tui.md) and [keybindings](../../extension/node_modules/@earendil-works/pi-coding-agent/docs/keybindings.md)
+- [extensions](../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/docs/extensions.md) and [extension examples](../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/examples/extensions/)
+- [skills](../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/docs/skills.md)
+- [SDK](../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/docs/sdk.md) and [SDK examples](../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/examples/sdk/)
+- [RPC protocol](../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/docs/rpc.md)
+- [custom providers](../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/docs/custom-provider.md) and [models](../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/docs/models.md)
+- [settings](../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/docs/settings.md), [packages](../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/docs/packages.md), and [prompt templates](../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/docs/prompt-templates.md)
+- [TUI](../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/docs/tui.md) and [keybindings](../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/docs/keybindings.md)
 
-These checked-out docs match the runtime pinned by `extension/package-lock.json`; prefer them over assumptions based on another Pi release. The upstream landing page is [pi.dev](https://pi.dev/).
+These checked-out docs match the runtime pinned by `application/hosts/vscode/package-lock.json`; prefer them over assumptions based on another Pi release. The upstream landing page is [pi.dev](https://pi.dev/).

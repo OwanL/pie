@@ -30,7 +30,7 @@ if (process.versions.node !== nodeVersion) throw new Error(`Node ${nodeVersion} 
 const npm = spawn("npm", ["--version"], { encoding: "utf8" });
 if (npm.stdout.trim() !== npmVersion) throw new Error(`npm ${npmVersion} required; found ${npm.stdout.trim() || "unavailable"}`);
 
-// Root npm ci runs the postinstall hook, which installs the locked extension
+// Root npm ci runs the postinstall hook, which installs the locked VS Code host
 // and analysis dependency trees (including build/test devDependencies).
 run("npm", ["ci", "--include=dev"]);
 run("npm", ["install", "-g", `@earendil-works/pi-coding-agent@${piVersion}`]);
@@ -38,5 +38,5 @@ for (const source of readConfiguredPackageSources(path.join(repoRoot, "settings.
   run("pi", ["install", source]);
 }
 run(process.execPath, ["scripts/sync-models.mjs", "--check"]);
-run("npm", ["run", "build"], `${repoRoot}/extension`);
+run("npm", ["run", "build"], `${repoRoot}/application/hosts/vscode`);
 run(process.execPath, ["scripts/doctor.mjs", "--skip-model-check"]);

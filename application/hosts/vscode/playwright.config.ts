@@ -7,7 +7,7 @@ const outputDir = process.env.PIE_PLAYWRIGHT_OUTPUT_DIR
   : path.resolve(__dirname, 'test-results', 'browser');
 
 export default defineConfig({
-  testDir: './test/browser',
+  testDir: '../../../extension/test/browser',
   testMatch: '**/*.pw.ts',
   outputDir,
   fullyParallel: false,

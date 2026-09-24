@@ -446,7 +446,7 @@ restate or re-own it.
   on a grep-family invocation AND shape-confirm of `path:line:content`), `pipeline.ts` (guards + lossless-then-lossy
   orchestration, profile-gated), `tokenize.ts`, `types-global.d.ts`, `test/`
   (rules, lossy-rules, pipeline, config, index, logger).
-- Wired into `extension/package.json` (`typecheck:tool-result-pruner`),
+- Wired into `application/hosts/vscode/package.json` (`typecheck:tool-result-pruner`),
   root `package.json` (`extensions:typecheck` / `extensions:test`), and
   `scripts/run-tests.mjs` (package `tool-result-pruner`, 98% lines gate).
 - `settings.json` carries the default `toolResultPruning` block

@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import { existsSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { resolveSdkModule } from '../lib/package-resolution.mjs';
 
-import { loadSkills } from '../../extension/node_modules/@earendil-works/pi-coding-agent/dist/index.js';
+const { loadSkills } = await import(pathToFileURL(resolveSdkModule('@earendil-works/pi-coding-agent')).href);
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const skillsDir = path.join(repoRoot, 'skills');

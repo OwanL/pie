@@ -2,7 +2,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const repoRoot = path.resolve(process.argv[2] ?? process.cwd());
-const hostEntry = path.join(repoRoot, 'extension', 'node_modules', '@earendil-works', 'pi-coding-agent', 'dist', 'core', 'extensions', 'loader.js');
+const hostEntry = path.join(repoRoot, 'application', 'hosts', 'vscode', 'node_modules', '@earendil-works', 'pi-coding-agent', 'dist', 'core', 'extensions', 'loader.js');
 const { loadExtensions } = await import(pathToFileURL(hostEntry).href) as {
   loadExtensions(paths: string[], cwd: string): Promise<any>;
 };

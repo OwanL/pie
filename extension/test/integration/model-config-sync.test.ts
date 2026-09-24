@@ -10,9 +10,10 @@ import { tmpdir } from 'node:os';
 // tsx compiles .ts test files to CJS where __dirname is available.
 declare const __dirname: string;
 
-// Resolve the `yaml` package from the extension's node_modules (no root deps).
+// Resolve the `yaml` package from the VS Code host package owner's
+// node_modules (application/hosts/vscode; no root deps).
 const requireFromExtension = createRequire(
-  pathToFileURL(path.join(__dirname, '..', '..', 'package.json')).href,
+  pathToFileURL(path.join(__dirname, '..', '..', '..', 'application', 'hosts', 'vscode', 'package.json')).href,
 );
 const YAML: { parse: (raw: string) => unknown } = requireFromExtension('yaml');
 

@@ -1,7 +1,7 @@
 // Shared toolchain verification for the Windows installer.
 //
 // Node, npm, and the global `pi` CLI are pinned by `.node-version`,
-// `package.json#packageManager`, and the extension lockfile respectively. The
+// `package.json#packageManager`, and the VS Code host lockfile respectively. The
 // version-reading helpers live in scripts/toolchain.mjs (shared with doctor.mjs);
 // this module owns the comparison and installation-decision logic.
 //

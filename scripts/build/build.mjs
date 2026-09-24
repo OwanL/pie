@@ -3,15 +3,17 @@ import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 
 import {
   findCompatibleInstalledExtensionDir,
   publishRendererGeneration,
 } from './publication.mjs';
 import { hasRuntimeBootstrap, installRuntimeBootstrap, publishRuntimeGeneration, resolveRuntimeGeneration } from './runtime-publication.mjs';
+import { createTsconfigOverlay, resolveOwnerModule, resolvePackageRoots, resolveTypeScriptCompiler } from '../lib/package-resolution.mjs';
 
-const rootDir = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
+// The distribution root follows the planned package layout: the VS Code host
+// package and its dependency owner live under application/hosts/vscode.
+const { distributionRoot: rootDir } = resolvePackageRoots('planned');
 const outDir = path.join(rootDir, 'out');
 
 const watchMode = process.argv.includes('--watch');
@@ -107,7 +109,7 @@ async function publishToInstalledExtension() {
   // let the startup loader select it on the next natural extension activation.
   await verifyCoordinatedBuildIdentity();
   if (watchMode && !skipTypecheck) {
-    await waitForChild(spawnLocalCli(tscCli, ['--noEmit', '--project', 'tsconfig.json'], 'Validating runtime publication'), 'TypeScript check');
+    await runTypecheck('Validating runtime publication');
   }
   const pkg = JSON.parse(await readFile(path.join(rootDir, 'package.json'), 'utf8'));
   const extDir = await resolveCompatibleInstalledExtension(pkg);
@@ -144,8 +146,8 @@ function scheduleRendererPublication() {
   }, 120);
 }
 
-const viteCli = path.join(rootDir, 'node_modules', 'vite', 'bin', 'vite.js');
-const tscCli = path.join(rootDir, 'node_modules', 'typescript', 'bin', 'tsc');
+const viteCli = path.join(path.dirname(resolveOwnerModule('vite/package.json', { layout: 'planned' })), 'bin', 'vite.js');
+const tscCli = resolveTypeScriptCompiler({ layout: 'planned' });
 
 function spawnLocalCli(cli, args, label) {
   console.log(`[build] ${label}...`);
@@ -178,8 +180,32 @@ function runViteWatch(mode) {
   return spawnLocalCli(viteCli, args, `Starting Vite watch (${mode ?? 'webview'})`);
 }
 
+function createBuildTypecheckOverlay() {
+  return createTsconfigOverlay(path.join(rootDir, 'tsconfig.json'), {
+    layout: 'planned', typescript: true, includeOwnerDependencies: true,
+  });
+}
+
+async function runTypecheck(label) {
+  const overlay = createBuildTypecheckOverlay();
+  try {
+    await waitForChild(spawnLocalCli(tscCli, ['--noEmit', '--project', overlay.configPath], label), 'TypeScript check');
+  } finally {
+    overlay.dispose();
+  }
+}
+
 function runTypecheckWatch() {
-  return spawnLocalCli(tscCli, ['--noEmit', '--project', 'tsconfig.json', '--watch', '--preserveWatchOutput'], 'Starting TypeScript watch');
+  const overlay = createBuildTypecheckOverlay();
+  try {
+    const child = spawnLocalCli(tscCli, ['--noEmit', '--project', overlay.configPath, '--watch', '--preserveWatchOutput'], 'Starting TypeScript watch');
+    child.once('close', () => overlay.dispose());
+    child.once('error', () => overlay.dispose());
+    return child;
+  } catch (error) {
+    overlay.dispose();
+    throw error;
+  }
 }
 
 function createBuiltOutputWatcher() {
@@ -203,7 +229,7 @@ async function typecheck() {
   if (skipTypecheck) return;
 
   try {
-    await waitForChild(spawnLocalCli(tscCli, ['--noEmit', '--project', 'tsconfig.json'], 'Running TypeScript check'), 'TypeScript check');
+    await runTypecheck('Running TypeScript check');
   } catch (error) {
     console.error(`\n[build] TypeScript errors detected — fix before building.\n${error instanceof Error ? error.message : String(error)}`);
     console.error('[build] Use --skip-typecheck to bypass (not recommended).');

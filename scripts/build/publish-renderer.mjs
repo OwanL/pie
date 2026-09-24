@@ -1,7 +1,6 @@
 import { readFile, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import {
   compareNodeBundles,
@@ -9,8 +8,11 @@ import {
   publishRendererGeneration,
 } from './publication.mjs';
 import { hasRuntimeBootstrap, resolveRuntimeGeneration } from './runtime-publication.mjs';
+import { resolvePackageRoots } from '../lib/package-resolution.mjs';
 
-const rootDir = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
+// The distribution root follows the planned package layout under
+// application/hosts/vscode.
+const { distributionRoot: rootDir } = resolvePackageRoots('planned');
 const outDir = path.join(rootDir, 'out');
 const panelDir = path.join(outDir, 'webview', 'panel');
 const [pkg, hostBuildId, rendererBuildId] = await Promise.all([

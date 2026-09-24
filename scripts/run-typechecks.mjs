@@ -11,7 +11,7 @@ import {
   watchChildProcess,
   withProcessTreeIsolation,
 } from './lib/process-watchdog.mjs';
-import { resolveTypeScriptCompiler } from './lib/package-resolution.mjs';
+import { createTsconfigOverlay, resolveTypeScriptCompiler } from './lib/package-resolution.mjs';
 import { TYPECHECK_PROJECTS } from './lib/test-packages.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -93,11 +93,15 @@ export function resolveProjectCompiler(project, projectRoot = repoRoot) {
 
 function runProject(project, signal) {
   const started = performance.now();
+  const configPath = path.isAbsolute(project.config) ? project.config : path.join(repoRoot, project.config);
+  const overlay = project.id === 'extension'
+    ? createTsconfigOverlay(configPath, { typescript: true, includeOwnerDependencies: true })
+    : null;
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [
       resolveProjectCompiler(project),
       '--noEmit',
-      '--project', path.isAbsolute(project.config) ? project.config : path.join(repoRoot, project.config),
+      '--project', overlay?.configPath ?? configPath,
       '--incremental',
       '--tsBuildInfoFile', path.join(repoRoot, 'node_modules', '.cache', 'typecheck', `${project.id}.tsbuildinfo`),
     ], withProcessTreeIsolation({ cwd: repoRoot, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }));
@@ -116,10 +120,12 @@ function runProject(project, signal) {
     child.stderr.on('data', (chunk) => { output += chunk; });
     child.on('error', async (error) => {
       await watchdog.settle().catch(() => {});
+      overlay?.dispose();
       resolve({ project, code: 1, output: String(error), durationMs: performance.now() - started });
     });
     child.on('close', async (code) => {
       const cleanup = await watchdog.settle().catch(() => ({ gone: false }));
+      overlay?.dispose();
       resolve({
         project,
         code: watchdog.timedOut || watchdog.aborted || !cleanup.gone ? 1 : (code ?? 1),

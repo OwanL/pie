@@ -341,7 +341,7 @@ Extract generic manifest loading, entry discovery, asset hashing, and HTML metad
 
 ### 6.2 Local configuration
 
-Declare settings in `extension/package.json` and read them through VS Code configuration:
+Declare settings in `application/hosts/vscode/package.json` and read them through VS Code configuration:
 
 | Setting | Default | Initial behavior |
 |---|---:|---|
@@ -650,7 +650,7 @@ Through a TLS/auth reverse-proxy fixture, before real exposure:
 
 ### Milestone 6 — Standalone localhost entry and runtime extraction (implemented)
 
-The platform-neutral application runtime is now shared by the VS Code adapter and a standalone Node composition. `extension/src/standalone/index.ts` validates the built runtime/dependencies, starts `HostRuntime` with the browser-only platform, prints the actual `127.0.0.1` URL, and installs bounded signal shutdown. `start-pie.bat` prompts for an absolute workspace path; its PowerShell supervisor validates the generated output (run `npm run extension:build` first when it is absent) and launches `extension/out/standalone.js --cwd <workspace>` inside a private kill-on-close Job.
+The platform-neutral application runtime is now shared by the VS Code adapter and a standalone Node composition. `extension/src/standalone/index.ts` validates the built runtime/dependencies, starts `HostRuntime` with the browser-only platform, prints the actual `127.0.0.1` URL, and installs bounded signal shutdown. `start-pie.bat` prompts for an absolute workspace path; its PowerShell supervisor validates the generated output (run `npm run extension:build` first when it is absent) and launches `application/hosts/vscode/out/standalone.js --cwd <workspace>` inside a private kill-on-close Job.
 
 The standalone platform provides workspace-keyed host storage while sessions, transcripts, SDK configuration, and the active analytics authority remain on their existing shared authorities. It deliberately does not provide VS Code editor/file-picker/settings/file-diff actions. Its launcher prompts for LAN access with a default of No and passes the answer explicitly; direct CLI startup restores the saved preference unless `--lan` or `--no-lan` explicitly overrides and persists it before server startup. Opted-in LAN mode prints private IPv4 URLs and a warning, with no authentication/TLS or public/internet support. Ctrl+C gets a graceful shutdown attempt; the supervisor force-terminates only the owned Job after its deadline, and closing the console cleans up that Job without deleting runtime data.
 

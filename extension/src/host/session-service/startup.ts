@@ -205,9 +205,8 @@ function bootLogRestorePrepared(
 /**
  * Read the build-generated `out/sdk-local-path.json` pointing at the SDK
  * pinned in this checkout's `node_modules`. Returns undefined when the
- * manifest is absent (e.g. build not yet run, or the SDK isn't installed
- * locally), so resolution falls back to the extensionPath-relative candidate
- * then the globalState cache and `npm root -g`.
+ * manifest is absent (or stale after a checkout move), resolution tries the
+ * loaded package's own dependency, then the globalState cache and `npm root -g`.
  */
 function readSdkLocalManifest(runtimeOutDir: string): string | undefined {
   const manifestPath = path.join(runtimeOutDir, 'sdk-local-path.json');
@@ -225,19 +224,13 @@ async function resolveAndCacheRuntimePaths(options: StartSessionBackendOptions):
     const configuredNodePath = options.platform.getSetting<string>('nodePath', 'nodePath');
     const configuredSdkPath = options.platform.getSetting<string>('sdkPath', 'sdkPath');
     const envSdkPath = process.env.PI_SDK_PATH?.trim() || undefined;
-    // Portable default: the SDK pinned as an extension `dependency` in this
-    // checkout's node_modules. The build writes out/sdk-local-path.json with
-    // the absolute source node_modules path (regenerated per-machine, never
-    // committed), so the synced install can still find the lockfile-pinned SDK
-    // in the source tree. In Extension Development Host (extensionPath IS the
-    // source dir) the extensionPath-relative candidate works directly.
-    const localCandidatePath = readSdkLocalManifest(options.platform.getRuntimeOutputDirectory())
-      ?? path.join(
-        options.platform.extensionPath,
-        'node_modules',
-        '@earendil-works',
-        'pi-coding-agent',
-      );
+    // The build manifest points at the checkout's distribution dependency;
+    // a packaged install (or dev host) can also own the SDK locally. A stale
+    // checkout manifest must not mask a valid installed package dependency.
+    const localCandidatePath = readSdkLocalManifest(options.platform.getRuntimeOutputDirectory());
+    const packageCandidatePath = path.join(
+      options.platform.extensionPath, 'node_modules', '@earendil-works', 'pi-coding-agent',
+    );
     const shouldUseSdkCache = !configuredSdkPath && !envSdkPath;
     const cachedSdkPath = shouldUseSdkCache
       ? options.platform.storage.get<string>(SDK_PATH_CACHE_KEY)
@@ -248,6 +241,7 @@ async function resolveAndCacheRuntimePaths(options: StartSessionBackendOptions):
       configuredPath: configuredSdkPath,
       cachedPath: cachedSdkPath,
       localCandidatePath,
+      localCandidatePaths: [packageCandidatePath],
       env: process.env as NodeJS.ProcessEnv,
       exec,
     });
@@ -269,10 +263,9 @@ async function resolveAndCacheRuntimePaths(options: StartSessionBackendOptions):
           configuredPath: configuredNodePath,
           env: process.env as NodeJS.ProcessEnv,
         });
-    // Only persist the resolved path when we actually had to discover it via
-    // the cache/npm-root fallback. The local candidate is re-discovered
-    // cheaply on every start and would go stale if the repo is relocated.
-    if (shouldUseSdkCache && sdkPath !== localCandidatePath) {
+    // The local candidates are re-discovered on every start; never cache a
+    // checkout path that would go stale when the package or repo is relocated.
+    if (shouldUseSdkCache && sdkPath !== localCandidatePath && sdkPath !== packageCandidatePath) {
       void Promise.resolve(options.platform.storage.update(SDK_PATH_CACHE_KEY, sdkPath)).catch((error) => {
         appendPieLog('warn', 'startup', 'globalState.update failed for resolvedSdkPath', { error: toErrorMessage(error) });
       });
@@ -303,7 +296,7 @@ function setupInTreeAuthEnv(platform: SessionHostPlatform): void {
  * settings.json, models.json, and auth.json are read from.
  *
  * Candidates (pie.agentDir setting, PI_CODING_AGENT_DIR env var, and the
- * dir above the extension package) are VALIDATED: a dir is only trusted if
+ * known checkout agent root) are VALIDATED: a dir is only trusted if
  * it actually contains settings.json. This is what makes the recurring
  * "custom provider missing" failure self-healing: a STALE pie.agentDir
  * pointing at a path from another machine (or after a repo relocation) used
@@ -313,9 +306,8 @@ function setupInTreeAuthEnv(platform: SessionHostPlatform): void {
  * error. Now stale candidates are rejected (logged) and resolution falls
  * through to a valid dir instead of clobbering a good env var.
  *
- * `extensionPath` is the loaded extension's install dir; its parent is the
- * repo root in the standard checkout layout, used as a last-resort fallback
- * so pie works even when both the setting and the env var are missing/stale.
+ * `extensionPath` identifies a checkout only in a known source package layout.
+ * An installed extension does not imply an agent dir in its parent directory.
  */
 function setupAgentDirEnv(options: StartSessionBackendOptions): void {
   const configuredAgentDir = (options.platform.getSetting<string>('agentDir') ?? '').trim();
@@ -349,7 +341,7 @@ function setupAgentDirEnv(options: StartSessionBackendOptions): void {
   if (settingRejected && result.source !== 'setting') {
     const sourceLabel =
       result.source === 'env' ? 'the PI_CODING_AGENT_DIR env var'
-      : result.source === 'extension-relative' ? 'the extension\'s parent dir'
+      : result.source === 'extension-relative' ? 'the checkout agent dir'
       : 'a fallback';
     options.dispatchArch({
       kind: 'NoticeShown',

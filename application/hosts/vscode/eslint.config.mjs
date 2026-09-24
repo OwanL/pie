@@ -5,15 +5,15 @@ import tseslint from 'typescript-eslint';
 export default tseslint.config(
   {
     ignores: [
-      'node_modules/**',
-      'out/**',
-      '.tmp/**',
-      '.pie-sdk-*/**',
-      '*.vsix',
+      '**/node_modules/**',
+      'application/hosts/vscode/out/**',
+      'application/hosts/vscode/.tmp/**',
+      'application/hosts/vscode/.pie-sdk-*/**',
+      'application/hosts/vscode/*.vsix',
     ],
   },
   {
-    files: ['**/*.{js,mjs,cjs}'],
+    files: ['application/hosts/vscode/**/*.{js,mjs,cjs}'],
     extends: [js.configs.recommended],
     languageOptions: {
       ecmaVersion: 'latest',
@@ -24,7 +24,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ['**/*.{ts,tsx,cts,mts}'],
+    files: ['application/hosts/vscode/**/*.{ts,tsx,cts,mts}', 'extension/{src,test}/**/*.{ts,tsx,cts,mts}'],
     extends: [js.configs.recommended, ...tseslint.configs.recommended],
     languageOptions: {
       ecmaVersion: 'latest',
@@ -54,7 +54,7 @@ export default tseslint.config(
   },
 
   {
-    files: ['test/**/*.{ts,tsx,cts,mts}'],
+    files: ['extension/test/**/*.{ts,tsx,cts,mts}'],
     rules: {
       '@typescript-eslint/no-unused-vars': 'off',
     },
@@ -65,7 +65,7 @@ export default tseslint.config(
   // (./events, ./effects, ./commands) and from ../../shared/. Never from
   // store/, session-service/, sidebar/, or extension-host.
   {
-    files: ['src/host/core/**/*.ts'],
+    files: ['extension/src/host/core/**/*.ts'],
     rules: {
       'no-restricted-imports': ['error', {
         patterns: [
@@ -82,7 +82,7 @@ export default tseslint.config(
   // The transcript-slice receives pre-resolved data from the effect executor.
   // It must never import the arch reducer, events, or effects directly.
   {
-    files: ['src/host/store/**/*.ts'],
+    files: ['extension/src/host/store/**/*.ts'],
     rules: {
       'no-restricted-imports': ['error', {
         patterns: [
@@ -98,7 +98,7 @@ export default tseslint.config(
   // The webview may only import from shared/ (protocol types). It must never
   // reach into any host-side module.
   {
-    files: ['src/webview/**/*.{ts,tsx}'],
+    files: ['extension/src/webview/**/*.{ts,tsx}'],
     rules: {
       'no-restricted-imports': ['error', {
         patterns: [
@@ -113,9 +113,9 @@ export default tseslint.config(
   // code. These suppress the exact type errors that cause runtime render crashes.
   {
     files: [
-      'src/shared/**/*.ts',
-      'src/host/store/index.ts',
-      'src/webview/panel/hooks/use-host-sync.ts',
+      'extension/src/shared/**/*.ts',
+      'extension/src/host/store/index.ts',
+      'extension/src/webview/panel/hooks/use-host-sync.ts',
     ],
     rules: {
       '@typescript-eslint/no-explicit-any': 'error',

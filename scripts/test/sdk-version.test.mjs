@@ -1,6 +1,6 @@
 // Focused unit tests for scripts/lib/sdk-version.mjs: version-coercion and
 // lockfile-reading helpers used by bootstrap.mjs, doctor.mjs, and install.bat
-// to pin the global `pi` CLI to the extension's locked SDK.
+// to pin the global `pi` CLI to the VS Code host's locked SDK.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
@@ -45,7 +45,7 @@ test('gte matches the documented boundary behavior', () => {
   assert.equal(gte('^24.16.0', '24.16.0'), true);
 });
 
-test('readPinnedSdkVersion returns the exact locked SDK version from extension/package-lock.json', () => {
+test('readPinnedSdkVersion returns the exact locked SDK version from application/hosts/vscode/package-lock.json', () => {
   const v = readPinnedSdkVersion(repoRoot);
   assert.match(v, /^\d+\.\d+\.\d+$/);
   // The audit pins 0.80.6; the lockfile currently resolves to exactly that.
@@ -62,6 +62,6 @@ test('readDeclaredSdkRange returns the package.json range (^x.y.z)', () => {
 test('readPinnedSdkVersion throws a clear error for a missing lockfile', () => {
   assert.throws(
     () => readPinnedSdkVersion(path.join(repoRoot, 'scripts')),
-    /Could not read extension lockfile/,
+    /Could not read VS Code host lockfile/,
   );
 });

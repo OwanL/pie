@@ -15,7 +15,7 @@ import {
 } from './lib/process-watchdog.mjs';
 import { withoutGitRepositoryEnv } from './lib/git-environment.mjs';
 import { withoutPiHarnessEnv } from './lib/pi-harness-env.mjs';
-import { createTsconfigOverlay } from './lib/package-resolution.mjs';
+import { createTsconfigOverlay, resolveOwnerTsx } from './lib/package-resolution.mjs';
 import { PACKAGE_REGISTRY, ROOT_BATCH_PACKAGE_IDS } from './lib/test-packages.mjs';
 import { resolveLocalTsx } from './run-test-files.mjs';
 
@@ -616,7 +616,7 @@ async function runPackage(config, fast = false, integration = false, testArgs = 
   // the raw repo-relative path; dedicated fast-batch modes overlay inside
   // their own runner. The overlay is disposed after the run in all paths.
   const tsxOverlay = !useFastRunner && config.tsxConfig
-    ? createTsconfigOverlay(path.join(repoRoot, config.tsxConfig))
+    ? createTsconfigOverlay(path.join(repoRoot, config.tsxConfig), { includeOwnerDependencies: config.id === 'extension' })
     : null;
   // Invoke the package-local tsx CLI directly rather than routing through npx
   // and a platform shell. This preserves regexes/spaces in forwarded node:test
@@ -626,7 +626,7 @@ async function runPackage(config, fast = false, integration = false, testArgs = 
     const args = useFastRunner ? [] : buildTestArgs(tsxOverlay ? { ...config, tsxConfig: tsxOverlay.configPath } : config, fast, testArgs);
     rawResult = await runChildProcess(
       process.execPath,
-      useFastRunner ? [fastRunner, ...fastRunnerArgs] : [resolveLocalTsx(config.cwd), ...args],
+      useFastRunner ? [fastRunner, ...fastRunnerArgs] : [config.id === 'extension' ? resolveOwnerTsx() : resolveLocalTsx(config.cwd), ...args],
       config.cwd,
       signal,
       integration ? { PIE_RUN_INTEGRATION_TESTS: '1' } : {},

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { Compile } from '../../../extension/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox/build/compile/index.mjs';
+import { Compile } from '../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox/build/compile/index.mjs';
 
 import { playwrightSchema } from '../src/schema.js';
 

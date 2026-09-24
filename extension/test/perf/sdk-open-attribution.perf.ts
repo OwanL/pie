@@ -20,11 +20,13 @@ import { performance } from 'node:perf_hooks';
 import { execSync } from 'node:child_process';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const EXTENSION_ROOT = resolve(HERE, '..', '..');
-const REPO_ROOT = resolve(EXTENSION_ROOT, '..');
+const REPO_ROOT = resolve(HERE, '..', '..');
+// B2 distribution/package owner: the pinned SDK's node_modules moved to
+// application/hosts/vscode.
+const DISTRIBUTION_ROOT = join(REPO_ROOT, 'application', 'hosts', 'vscode');
 const DEFAULT_SESSION_DIR = join(REPO_ROOT, 'data', 'outcomes', 'sessions');
 const SESSION_DIR = process.env.PIE_PERF_SESSION_DIR ? resolve(process.env.PIE_PERF_SESSION_DIR) : DEFAULT_SESSION_DIR;
-const SDK_PATH = join(EXTENSION_ROOT, 'node_modules', '@earendil-works', 'pi-coding-agent');
+const SDK_PATH = join(DISTRIBUTION_ROOT, 'node_modules', '@earendil-works', 'pi-coding-agent');
 
 async function loadSdk(): Promise<typeof import('@earendil-works/pi-coding-agent')> {
   const sdk = await import(pathToFileURL(join(SDK_PATH, 'dist', 'index.js')).href);

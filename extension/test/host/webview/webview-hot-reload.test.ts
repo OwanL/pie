@@ -14,7 +14,7 @@ import {
   formatNodeBundleStatus,
   publishRendererGeneration,
   resolvePublishedRendererGeneration,
-} from '../../../scripts/publication.mjs';
+} from '../../../../scripts/build/publication.mjs';
 import { BrowserStaticAssets } from '../../../src/host/browser-server/static-assets';
 import { isHotReloadAssetFileName } from '../../../src/host/webview/hot-reload';
 import { resolvePublishedWebviewDir } from '../../../src/host/webview/published-generations';

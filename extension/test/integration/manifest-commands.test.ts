@@ -4,7 +4,7 @@ import test from 'node:test';
 
 test('package manifest exposes the export run analytics command for keybindings and automation', async () => {
   const manifest = JSON.parse(
-    await fs.readFile(new URL('../../package.json', import.meta.url), 'utf8'),
+    await fs.readFile(new URL('../../../application/hosts/vscode/package.json', import.meta.url), 'utf8'),
   ) as {
     activationEvents?: string[];
     contributes?: {
@@ -20,7 +20,7 @@ test('package manifest exposes the export run analytics command for keybindings 
 
 test('trusted-LAN browser-server setting is explicit and off by default', async () => {
   const manifest = JSON.parse(
-    await fs.readFile(new URL('../../package.json', import.meta.url), 'utf8'),
+    await fs.readFile(new URL('../../../application/hosts/vscode/package.json', import.meta.url), 'utf8'),
   ) as {
     contributes?: {
       configuration?: { properties?: Record<string, { type?: string; default?: unknown; description?: string; scope?: string }> };
@@ -35,7 +35,7 @@ test('trusted-LAN browser-server setting is explicit and off by default', async 
 
 test('browser-server automatic-start setting is application-scoped and documents the popover switch', async () => {
   const manifest = JSON.parse(
-    await fs.readFile(new URL('../../package.json', import.meta.url), 'utf8'),
+    await fs.readFile(new URL('../../../application/hosts/vscode/package.json', import.meta.url), 'utf8'),
   ) as {
     contributes?: {
       configuration?: { properties?: Record<string, { type?: string; default?: unknown; description?: string; scope?: string }> };

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -306,15 +307,14 @@ const DURABILITY_PATCH_SOURCE = `
 let pinnedDistTemplatePromise: Promise<string> | undefined;
 let pinnedDistTemplateRoot: string | undefined;
 
-async function pinnedSdkDistTemplate(extensionRoot: string): Promise<string> {
-  // The 657-file dist copy costs ~1s; build it once and hardlink-clone per
-  // fixture. The template lives under extension/ so links share the volume.
+async function pinnedSdkDistTemplate(distributionRoot: string): Promise<string> {
+  // Build one private dist template in OS temp, then clone it per fixture.
   if (!pinnedDistTemplatePromise) {
     pinnedDistTemplatePromise = fs.mkdtemp(
-      path.join(extensionRoot, '.pie-sdk-contract-template-'),
+      path.join(os.tmpdir(), 'pie-sdk-contract-template-'),
     ).then(async (templateRoot) => {
       await fs.cp(
-        path.join(extensionRoot, 'node_modules', '@earendil-works', 'pi-coding-agent', 'dist'),
+        path.join(distributionRoot, 'node_modules', '@earendil-works', 'pi-coding-agent', 'dist'),
         path.join(templateRoot, 'dist'),
         { recursive: true },
       );
@@ -329,15 +329,24 @@ test.after(async () => {
 });
 
 async function withSdkDir(files: Record<string, string>, run: (sdkDir: string) => Promise<void>): Promise<void> {
-  const extensionRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
-  const sdkDir = await fs.mkdtemp(path.join(extensionRoot, '.pie-sdk-contract-test-'));
+  // Keep mutable SDK clones in OS temp. Link only hoisted dependencies from
+  // the distribution owner; never write to its installed SDK.
+  const distributionRoot = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    '..', '..', '..', '..', 'application', 'hosts', 'vscode',
+  );
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-sdk-contract-test-'));
+  const sdkDir = path.join(root, 'sdk');
+  await fs.mkdir(sdkDir);
+  await fs.symlink(path.join(distributionRoot, 'node_modules'), path.join(root, 'node_modules'),
+    process.platform === 'win32' ? 'junction' : 'dir');
   const previousTrustedRoot = process.env.PIE_TRUSTED_SDK_ROOT;
   const previousFixtureFingerprints = process.env.PIE_SDK_PATCH_FIXTURE_FINGERPRINTS;
   process.env.PIE_TRUSTED_SDK_ROOT = sdkDir;
   try {
     const requiresBarrier = !!files['dist/index.js'] || !!files['dist/config.js'];
     if (requiresBarrier) {
-      await cloneTreeByHardlink(await pinnedSdkDistTemplate(extensionRoot), sdkDir, [
+      await cloneTreeByHardlink(await pinnedSdkDistTemplate(distributionRoot), sdkDir, [
         ...Object.keys(files),
         // The barrier may rewrite any patch target; keep the shared template
         // pristine by private-copying everything a test or patch touches.
@@ -348,7 +357,7 @@ async function withSdkDir(files: Record<string, string>, run: (sdkDir: string) =
       ]);
       await fs.mkdir(path.join(sdkDir, 'node_modules', '@earendil-works'), { recursive: true });
       await fs.symlink(
-        path.join(extensionRoot, 'node_modules', '@earendil-works', 'pi-coding-agent', 'node_modules', '@earendil-works', 'pi-agent-core'),
+        path.join(distributionRoot, 'node_modules', '@earendil-works', 'pi-coding-agent', 'node_modules', '@earendil-works', 'pi-agent-core'),
         path.join(sdkDir, 'node_modules', '@earendil-works', 'pi-agent-core'),
         process.platform === 'win32' ? 'junction' : 'dir',
       );
@@ -387,7 +396,7 @@ async function withSdkDir(files: Record<string, string>, run: (sdkDir: string) =
     else process.env.PIE_TRUSTED_SDK_ROOT = previousTrustedRoot;
     if (previousFixtureFingerprints === undefined) delete process.env.PIE_SDK_PATCH_FIXTURE_FINGERPRINTS;
     else process.env.PIE_SDK_PATCH_FIXTURE_FINGERPRINTS = previousFixtureFingerprints;
-    await fs.rm(sdkDir, { recursive: true, force: true });
+    await fs.rm(root, { recursive: true, force: true });
   }
 }
 

@@ -9,7 +9,7 @@ const npmInvocation = (args, cwd, stdio) => {
   return spawnSync(command, commandArgs, { cwd, stdio });
 };
 
-for (const directory of ["extension", "analysis", "extensions/computer-use", "extensions/playwright"]) {
+for (const directory of ["application/hosts/vscode", "analysis", "extensions/computer-use", "extensions/playwright"]) {
   const cwd = `${repoRoot}/${directory}`;
   const installed = npmInvocation(["ls", "--depth=0", "--include=dev"], cwd, "ignore");
   if (installed.status === 0) {

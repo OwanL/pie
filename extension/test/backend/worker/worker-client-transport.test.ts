@@ -16,7 +16,7 @@ import { WORKER_IPC_VERSION } from '../../../src/backend/worker-protocol';
 const fixture = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../fixtures/phase2-worker-fixture.mjs');
 const sdkPatchIdentity = {
   identityVersion: SDK_PATCH_IDENTITY_VERSION,
-  sdkPath: path.resolve('extension/node_modules/@earendil-works/pi-coding-agent'),
+  sdkPath: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..', 'application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent'),
   sdkVersion: 'fixture',
   terminalDurability: { patchVersion: 1, relativePath: 'dist/core/agent-session.js', sha256: 'a'.repeat(64) },
   retryClassifier: { patchVersion: 1, relativePath: 'dist/utils/retry.js', sha256: 'b'.repeat(64) },

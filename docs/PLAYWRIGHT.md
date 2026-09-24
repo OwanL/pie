@@ -300,7 +300,7 @@ Validation uses `INVALID_ARGUMENTS`; uncategorized backend action failures use `
 
 ## Install and version ownership
 
-`extensions/playwright/package.json` and its committed lockfile own the runtime dependencies independently of `extension/node_modules`. The implementation lives under `tools/playwright/`, but dependency installation stays in the extension directory:
+`extensions/playwright/package.json` and its committed lockfile own the runtime dependencies independently of `application/hosts/vscode/node_modules`. The implementation lives under `tools/playwright/`, and dependency installation stays with its own `extensions/playwright/` owner:
 
 - `playwright`: `1.62.1` exact;
 - `pngjs`: `7.0.0` exact.

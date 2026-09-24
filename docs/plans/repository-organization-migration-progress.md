@@ -1,34 +1,24 @@
 # Repository organization migration progress
 
-**Status:** B0 is complete and B1 is **complete / exit accepted** (2026-09-24). B2 is **not started**; no relocation is authorized or recorded. This checkpoint is documentation-only and leaves existing source, settings, and Git state untouched (no commit, push, stash, or reset).
+**Status (2026-09-24):** B0, B1, and B2 are complete / exit accepted. **B3 has not started.** Seventeen tracked distribution/config/runtime assets and build helpers have settled at their target paths with locked npm ci installs at the new owner, the package gate passed, and the final full verification gate passed. Application source and test files remain at their original paths.
 
 ## Durable references
 
-- [Migration plan](../REPOSITORY_ORGANIZATION_PLAN.md) — scope, boundaries, and batch exit criteria.
-- [Manifest](repository-organization-migration-manifest.json) — full source/target inventory, ownership decisions, exact baseline test-path arrays, collision resolutions, and detailed B1 implementation evidence.
-- [B0 baseline verification](repository-organization-baseline-verification.md) — exact commands, counts, rerun details, and limitations.
+- [Migration plan](../REPOSITORY_ORGANIZATION_PLAN.md) — scope and batch exit criteria.
+- [Manifest](repository-organization-migration-manifest.json) — original source identities, targets, current locations, immutable baseline test enumeration, and verification evidence.
+- [B0 baseline verification](repository-organization-baseline-verification.md) — baseline commands, counts, reruns, and limitations.
 
-## Current inventory and decision
+## Inventory and identity
 
-- The manifest maps 1,778 current tracked paths and six relevant untracked additions (1,784 source records total). Its baseline `trackedTestFilesByPackage` arrays remain unchanged: 17 package classifications, 696 paths (including the opt-in extension paths as documented there). These static arrays are inventory, not run-derived exact-once evidence.
-- `extension/test/build-identity.test.ts` maps to `scripts/build/test/build-identity.test.ts` under the build tooling owner.
-- `scripts/test/run-tests.test.mjs` was inspected and is an existing tracked file: it is in the baseline `scripts` array and carries an explicit manifest record (`scripts/verification/test/run-tests.test.mjs`). All six new working-tree files already have explicit manifest records, so no manifest coverage additions were needed.
-- Root and extension fast-runner per-file accounting is **accepted**: after a tiny accounting guard fix, the focused regressions (19 tests), the scripts suite (264 passed / 3 skipped), the real reporter direct-file regression, and the file-accounting exact-once checks (root 79, subagent 46, extension 498 files) all passed.
-- B1 requirements are fulfilled per the gap audit: representative compiler/Vite/tsx/Node/real-SDK resolution, native owners, test enumeration enforcement, the neutral browser port plus inert capability contract, selector discovered identity, and the inventory itself. B1 is marked complete; no B2 relocation has occurred.
+- The manifest retains its 1,785 original source records and baseline `trackedTestFilesByPackage` arrays (17 classifications, 696 paths). The 17 settled moves are recorded separately in `currentLocations`; source records and baseline test identities are unchanged. The new `scripts/test/build-typecheck.test.mjs` B2 regression is recorded (owner `scripts/build`, B8 target), and the current 2026-09-24 git status is recorded in the manifest inventory.
+- Source/test relocation mappings previously assigned to B2 are rebatched to their owning B7/B8 work; source ownership for shared runtime/build identity is B7. No source or test was relocated as part of this checkpoint.
+- The inventory validator uses extant tracked and relevant untracked working-tree paths, plus exact declared current paths for moved assets omitted by generic ignore rules. It maps only explicit current locations, still rejects missing current files and unrelated unmapped files, and preserves registry-routing, collision, retain, protected-tree, and baseline-test checks. The focused inventory suite passed 12/12; the scripts suite passed 268 with 3 existing skips.
+- B1 remains accepted. Its final gate was model drift, all 17 typecheck projects, lint, `npm test` (7/7 groups; 7,436 passed / 35 skipped), and non-publishing build. The detailed B1 implementation evidence remains in the manifest.
 
-## Final verification gate
+## B2 complete — exit accepted
 
-- Final broad gate at the current integration, run before the tiny accounting guard fix: model drift, typecheck (all 17 projects), lint, npm test 7/7 groups 7436 passed / 35 skipped with no failures, cancels, or reruns, and the non-publishing build passed. After the guard fix, only the focused/scripts re-verification listed above was rerun.
+Implemented at the new owner, recorded in the manifest's `implemented` section: locked npm ci installs at `application/hosts/vscode/` (lock/pins unchanged; old protected dependency/output trees untouched); package gate passed — real VSIX produced, extracted entries inspected, and a packaged isolated backend check passed 2/2 after a minimal-settings fixture with no external packages; a low-risk SDK fresh-patch fix with lock/pins unchanged and 42 affected tests repeated; new-owner clean build through the generated overlay plus Preact identity and fast-runner fixes passed focused regressions. No source or test relocation (rebatched to B7/B8); host builds are staged and renderer assets published, with no loader activation or installed-host restart; user-owned `settings.json` edits are excluded from migration.
 
-## Deferred tests — no permanent exceptions
+Final verification gate passed (2026-09-24): model drift, all 17 typecheck projects, lint, and the non-publishing build passed; the settled-tree full `npm run test:all` rerun exited 0 with 7/7 groups, 7,437 passed / 0 failed / 35 skipped. The markdown-rendering group initially failed and passed on a selective rerun, so the pass is not pristine. The required final `extension:build` passed with staged runtime generation `b076b8b9034b1a20d3cdbdf2f5fbc22ada3944083856ac5874c713055a544af2` and renderer build ID `751a37955834f94abd94`; the host runtime is staged for the next normal restart and renderer assets are published. Loaded behavior has not been verified; no installed-host restart was forced. The focused inventory suite passed 12/12 after the last `currentLocations` mapping resolved the earlier inventory race; the full suite is not failing.
 
-- Deep logger, analytics, and resource-move verification tests are deferred to their owning later batches and remain recorded in the manifest; no permanent skips or exemptions were added, and none may be.
-
-## Evidence and limitations
-
-- B0 verification passed at `6255f52b4387ee0fc8add6be649c2f5385e63849`; the detailed record is linked above. It passed with reruns after transient parallel-wave failures, and the extension summary retained one cancelled test. Opt-in browser/live/performance suites were not run. The baseline run did not expose an exhaustive file-dispatch count.
-- Existing focused B1 evidence and its caveats are in the manifest. A staged extension build is **not loaded/live**, no restart was performed, and its exact staged generation identity was not checked. Do not treat build success as live behavior verification.
-- The B0 `settings.json` high-to-medium entry is historical only. Exclude `settings.json` and ongoing user settings changes from migration; preserve current user state.
-- One low-risk projection correction was user-authorized: backend-supplied `primaryOperation` is suppressed at projection while wire validation and reducer storage remain unchanged; only a live reducer-owned operation is surfaced. Focused tests, typecheck, and build passed for that correction; the final broad gate above was subsequently run at the integrated state.
-
-**Next:** B2 may only begin as a separately authorized slice with its own checkpoint and gate; no commit, push, or B2 relocation is part of this checkpoint.
+B0 verification passed with reruns after transient parallel-wave failures. Opt-in browser/live/performance suites were not run. The recorded staged build is not live verification. Preserve the current user-owned `settings.json`; its B0 value is historical only. Milestone commits on master are user-approved; pushing is not authorized.

@@ -25,8 +25,8 @@ type BootstrapFactory = (overrides?: Record<string, unknown>) => {
 };
 
 const require = createRequire(import.meta.url);
-const runtime = require('../../../runtime/runtime-generations.cjs') as RuntimeApi;
-const bootstrapModule = require('../../../runtime/bootstrap.cjs') as {
+const runtime = require('../../../../application/hosts/vscode/runtime/runtime-generations.cjs') as RuntimeApi;
+const bootstrapModule = require('../../../../application/hosts/vscode/runtime/bootstrap.cjs') as {
   createBootstrap: BootstrapFactory;
   LAST_LOADED_MARKER_KEY: string;
   UPDATED_PROGRESS_TITLE: string;

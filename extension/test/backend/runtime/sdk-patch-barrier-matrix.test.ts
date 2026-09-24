@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import {
@@ -15,31 +16,24 @@ import {
 } from '../../../src/backend/sdk-patch-barrier';
 import {
   hasSdkSessionOpenSingleReadMarkers,
-  transformSdkSessionOpenSingleRead,
 } from '../../../src/backend/sdk-session-open-patch';
 import {
   reverseSdkSessionManagerOwnership,
-  transformSdkSessionManagerOwnership,
 } from '../../../src/backend/sdk-session-ownership-patch';
 test.after(async () => { await cleanupPristineTemplate(); });
 
 test('coordinator upgrades the exact supported v3 manager image to v4 and validates it', async () => {
   await withFixture(async ({ sdkPath, lockRoot }) => {
     const managerPath = path.join(sdkPath, 'dist', 'core', 'session-manager.js');
-    const v2Source = await fs.readFile(managerPath, 'utf8');
-    const v4 = transformSdkSessionManagerOwnership(v2Source);
-    assert.equal(v4.result, 'patched');
-    const v3Source = reverseSdkSessionManagerOwnership(v4.source);
+    await ensureSdkPatchBarrier(sdkPath, { lockRoot });
+    const v4Source = await fs.readFile(managerPath, 'utf8');
+    const v3Source = reverseSdkSessionManagerOwnership(v4Source);
     assert.ok(v3Source, 'the current manager transform must reverse exactly to v3');
-    const deployedV3 = transformSdkSessionOpenSingleRead(v3Source);
-    assert.equal(deployedV3.result, 'patched');
-    await fs.writeFile(managerPath, deployedV3.source, 'utf8');
+    await fs.writeFile(managerPath, v3Source, 'utf8');
 
-    const identity = await ensureSdkPatchBarrier(sdkPath, { lockRoot });
+    const identity = await ensureSdkPatchBarrier(sdkPath, { lockRoot: path.join(lockRoot, 'upgrade') });
     assert.equal(identity.sessionOwnershipAdapter.patchVersion, 4);
-    const expectedV4 = transformSdkSessionOpenSingleRead(v4.source);
-    assert.equal(expectedV4.result, 'patched');
-    assert.equal(await fs.readFile(managerPath, 'utf8'), expectedV4.source);
+    assert.equal(await fs.readFile(managerPath, 'utf8'), v4Source);
     await validateSdkPatchBarrier(sdkPath, identity);
   });
 });
@@ -67,10 +61,12 @@ test('coordinator fails closed without touching other targets when the pinned cr
     const sessionManagerPath = path.join(sdkPath, 'dist', 'core', 'session-manager.js');
     const agentSessionPath = path.join(sdkPath, 'dist', 'core', 'agent-session.js');
     const retryPath = path.join(sdkPath, RETRY_RELATIVE_PATH);
-    const changed = (await fs.readFile(sessionManagerPath, 'utf8')).replace(
-      'const manager = new SessionManager(cwd, dir, undefined, true, options);',
-      'const manager = makeSessionManager(cwd, dir, options);',
+    const original = await fs.readFile(sessionManagerPath, 'utf8');
+    const changed = original.replace(
+      'return new SessionManager(cwd, dir, undefined, true, options);',
+      'return makeSessionManager(cwd, dir, options);',
     );
+    assert.notEqual(changed, original);
     await fs.writeFile(sessionManagerPath, changed, 'utf8');
     const beforeAgent = await fs.readFile(agentSessionPath, 'utf8');
     const beforeRetry = await fs.readFile(retryPath, 'utf8');
@@ -88,14 +84,15 @@ test('coordinator fails closed without touching other targets when the pinned cr
 test('coordinator rejects an already-patched manager missing any required write-lease seam', async () => {
   await withFixture(async ({ sdkPath, lockRoot }) => {
     const sessionManagerPath = path.join(sdkPath, 'dist', 'core', 'session-manager.js');
-    const changed = (await fs.readFile(sessionManagerPath, 'utf8')).replace(
-      '        this._assertPieWriteLease("_persist");\n',
-      '',
-    );
+    await ensureSdkPatchBarrier(sdkPath, { lockRoot });
+    const original = await fs.readFile(sessionManagerPath, 'utf8');
+    const changed = original.replace('        return this._runPieWriteMutation("_persist", () => {',
+      '        return this._runPieWriteMutation("other", () => {');
+    assert.notEqual(changed, original);
     await fs.writeFile(sessionManagerPath, changed, 'utf8');
 
     await assert.rejects(
-      ensureSdkPatchBarrier(sdkPath, { lockRoot }),
+      ensureSdkPatchBarrier(sdkPath, { lockRoot: path.join(lockRoot, 'recheck') }),
       /SDK semantic fingerprint is unsupported for dist\/core\/session-manager\.js/,
     );
     assert.equal(await fs.readFile(sessionManagerPath, 'utf8'), changed);
@@ -105,22 +102,52 @@ test('coordinator rejects an already-patched manager missing any required write-
 test('coordinator rejects an already-patched runtime with weakened same-directory import ownership', async () => {
   await withFixture(async ({ sdkPath, lockRoot }) => {
     const runtimePath = path.join(sdkPath, 'dist', 'core', 'agent-session-runtime.js');
-    const changed = (await fs.readFile(runtimePath, 'utf8')).replace(
+    await ensureSdkPatchBarrier(sdkPath, { lockRoot });
+    const original = await fs.readFile(runtimePath, 'utf8');
+    const changed = original.replace(
       'prepare: async (canonicalPath) => importAlreadyAtDestination',
       'prepare: async (canonicalPath) => selfReopen',
     );
+    assert.notEqual(changed, original);
     await fs.writeFile(runtimePath, changed, 'utf8');
 
     await assert.rejects(
-      ensureSdkPatchBarrier(sdkPath, { lockRoot }),
+      ensureSdkPatchBarrier(sdkPath, { lockRoot: path.join(lockRoot, 'recheck') }),
       /SDK semantic fingerprint is unsupported for dist\/core\/agent-session-runtime\.js/,
     );
     assert.equal(await fs.readFile(runtimePath, 'utf8'), changed);
   });
 });
 
+test('fresh pinned production 0.80.6 clone patches, validates, and remains idempotent', async () => {
+  await runPinnedProductionFingerprintFixture(async (sdkPath, root) => {
+    process.env.PIE_TRUSTED_SDK_ROOT = root;
+    delete process.env.PIE_SDK_PATCH_FIXTURE_FINGERPRINTS;
+    const lockRoot = path.join(root, 'locks');
+    const managerPath = path.join(sdkPath, 'dist', 'core', 'session-manager.js');
+    assert.equal(
+      createHash('sha256').update(await fs.readFile(managerPath)).digest('hex'),
+      '879e80cc6e2371e4b06887e6fb041c323ba4e86f7687bfdac6474c9f61486112',
+      'production clone must start at the pinned pristine manager image',
+    );
+    const identity = await ensureSdkPatchBarrier(sdkPath, { lockRoot });
+    const patched = await fs.readFile(managerPath, 'utf8');
+    assert.equal(createHash('sha256').update(patched).digest('hex'),
+      '39af403e353734e42ec4852550d2fa0d90869d36d7ee60f856e637f324856c6f',
+      'fresh patch must match the retained canonical installed manager exactly');
+    assert.match(patched, /this\._runPieWriteMutation\("activatePiePrepared\.create", \(\) => persistCreatedSessionHeader\(this\)\)/u);
+    await validateSdkPatchBarrier(sdkPath, identity);
+    const repeated = await ensureSdkPatchBarrier(sdkPath, { lockRoot: path.join(root, 'idempotence-locks') });
+    assert.deepEqual(repeated, identity);
+    assert.equal(await fs.readFile(managerPath, 'utf8'), patched);
+  });
+});
+
 test('pinned production 0.80.6 rejects marker-preserving reordered code by exact reversible fingerprint', async () => {
   await runPinnedProductionFingerprintFixture(async (sdkPath, root) => {
+    process.env.PIE_TRUSTED_SDK_ROOT = root;
+    delete process.env.PIE_SDK_PATCH_FIXTURE_FINGERPRINTS;
+    await ensureSdkPatchBarrier(sdkPath, { lockRoot: path.join(root, 'locks') });
     const runtimePath = path.join(sdkPath, 'dist', 'core', 'agent-session-runtime.js');
     const changed = (await fs.readFile(runtimePath, 'utf8')).replace(
       '        this.session.abortCompaction?.();\n        this.session.abortBranchSummary?.();',
@@ -133,7 +160,7 @@ test('pinned production 0.80.6 rejects marker-preserving reordered code by exact
     delete process.env.PIE_SDK_PATCH_FIXTURE_FINGERPRINTS;
 
     await assert.rejects(
-      ensureSdkPatchBarrier(sdkPath, { lockRoot: path.join(root, 'locks') }),
+      ensureSdkPatchBarrier(sdkPath, { lockRoot: path.join(root, 'recheck') }),
       /SDK semantic fingerprint is unsupported for dist\/core\/agent-session-runtime\.js/,
     );
     assert.equal(await fs.readFile(runtimePath, 'utf8'), changed);
@@ -143,15 +170,18 @@ test('pinned production 0.80.6 rejects marker-preserving reordered code by exact
 test('coordinator rejects marker-preserving weakened ownership code by exact semantic fingerprint', async () => {
   await withFixture(async ({ sdkPath, lockRoot }) => {
     const managerPath = path.join(sdkPath, 'dist', 'core', 'session-manager.js');
-    const changed = (await fs.readFile(managerPath, 'utf8')).replace(
-      '        this._assertPieWriteLease("_persist");',
-      '        if (false) this._assertPieWriteLease("_persist");',
+    await ensureSdkPatchBarrier(sdkPath, { lockRoot });
+    const original = await fs.readFile(managerPath, 'utf8');
+    const changed = original.replace(
+      '        return this._runPieWriteMutation("_persist", () => {',
+      '        if (false) this._runPieWriteMutation("_persist", () => {});\n        return this._runPieWriteMutation("other", () => {',
     );
-    assert.match(changed, /this\._assertPieWriteLease\("_persist"\)/u, 'legacy marker remains present');
+    assert.notEqual(changed, original);
+    assert.match(changed, /this\._runPieWriteMutation\("_persist"/u, 'marker remains present');
     await fs.writeFile(managerPath, changed, 'utf8');
 
     await assert.rejects(
-      ensureSdkPatchBarrier(sdkPath, { lockRoot }),
+      ensureSdkPatchBarrier(sdkPath, { lockRoot: path.join(lockRoot, 'recheck') }),
       /SDK semantic fingerprint is unsupported for dist\/core\/session-manager\.js/,
     );
     assert.equal(await fs.readFile(managerPath, 'utf8'), changed);

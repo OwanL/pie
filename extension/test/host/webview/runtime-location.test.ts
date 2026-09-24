@@ -6,8 +6,8 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { configureRuntimeLocation, runtimeOutputDirectory, runtimeRendererSelection } from '../../../src/host/runtime-location';
 import { resolvePublishedWebviewDir } from '../../../src/host/webview/published-generations';
 import { BrowserStaticAssets } from '../../../src/host/browser-server/static-assets';
-import { publishRendererGeneration } from '../../../scripts/publication.mjs';
-import { hasRuntimeBootstrap, installRuntimeBootstrap } from '../../../scripts/runtime-publication.mjs';
+import { publishRendererGeneration } from '../../../../scripts/build/publication.mjs';
+import { hasRuntimeBootstrap, installRuntimeBootstrap } from '../../../../scripts/build/runtime-publication.mjs';
 
 const identity = { publisher: 'pie', name: 'pie', version: '0.3.0' };
 

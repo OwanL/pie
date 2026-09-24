@@ -46,10 +46,10 @@ const npm = run("npm", ["--version"]);
 const actualNpm = npm.stdout?.trim() ?? "";
 npm.status === 0 && actualNpm === pinnedNpm ? ok(`npm ${pinnedNpm}`) : fail(`npm ${actualNpm || "unavailable"}; expected ${pinnedNpm}`);
 
-for (const relative of ["package-lock.json", "extension/package-lock.json", "analysis/package-lock.json"]) {
+for (const relative of ["package-lock.json", "application/hosts/vscode/package-lock.json", "analysis/package-lock.json"]) {
   fs.existsSync(path.join(repoRoot, relative)) ? ok(`${relative} present`) : fail(`${relative} missing`);
 }
-for (const relative of [".", "extension", "analysis"]) {
+for (const relative of [".", "application/hosts/vscode", "analysis"]) {
   const result = run("npm", ["ls", "--depth=0", "--include=dev"], path.join(repoRoot, relative));
   result.status === 0
     ? ok(`${relative === "." ? "root" : relative} dependencies installed`)

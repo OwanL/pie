@@ -217,22 +217,22 @@ del "%PACKAGE_SOURCES_FILE%" >nul 2>nul
 REM --- build, package, and install the pie VSCode extension ----------------
 echo.
 echo ==^> Building pie VSCode extension
-set "EXTENSION_DIR=%REPO_ROOT%\extension"
+set "VSCODE_HOST_DIR=%REPO_ROOT%\application\hosts\vscode"
 set "EXT_FAILED=0"
 pushd "%REPO_ROOT%"
 call npm ci --include=dev || set "EXT_FAILED=1"
 if "%EXT_FAILED%"=="1" ( popd & echo ==^> npm ci failed for the repository dependency trees & goto :ext_failed )
-pushd "%EXTENSION_DIR%"
+pushd "%VSCODE_HOST_DIR%"
 call npm run build || set "EXT_FAILED=1"
-if "%EXT_FAILED%"=="1" ( popd & popd & echo ==^> build failed in extension/ & goto :ext_failed )
+if "%EXT_FAILED%"=="1" ( popd & popd & echo ==^> build failed in application\hosts\vscode\ & goto :ext_failed )
 call npm run package || set "EXT_FAILED=1"
 popd
 popd
-if "%EXT_FAILED%"=="1" ( echo ==^> vsce package failed in extension/ & goto :ext_failed )
+if "%EXT_FAILED%"=="1" ( echo ==^> vsce package failed in application\hosts\vscode\ & goto :ext_failed )
 
 set "VSIX="
 set "VSIX_NAME="
-for /f "delims=" %%F in ('dir /b /o-d "%EXTENSION_DIR%\pie-*.vsix" 2^>nul') do ( set "VSIX=%EXTENSION_DIR%\%%F" & set "VSIX_NAME=%%F" & goto :vsix_found )
+for /f "delims=" %%F in ('dir /b /o-d "%VSCODE_HOST_DIR%\pie-*.vsix" 2^>nul') do ( set "VSIX=%VSCODE_HOST_DIR%\%%F" & set "VSIX_NAME=%%F" & goto :vsix_found )
 :vsix_found
 if not defined VSIX (
   echo ==^> WARN: No .vsix found after packaging - check vsce output above

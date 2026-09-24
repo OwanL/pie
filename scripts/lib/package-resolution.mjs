@@ -13,8 +13,8 @@ const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url))
  */
 export const PACKAGE_LAYOUTS = Object.freeze({
   current: Object.freeze({
-    distribution: ['extension'],
-    dependencies: ['extension'],
+    distribution: ['application', 'hosts', 'vscode'],
+    dependencies: ['application', 'hosts', 'vscode'],
   }),
   planned: Object.freeze({
     distribution: ['application', 'hosts', 'vscode'],
@@ -117,7 +117,7 @@ export function resolveOwnerModule(specifier, options = {}) {
   return createOwnerRequire(options).resolve(specifier);
 }
 
-function packageInfoAt(root, packageName, conditions = ['import', 'require', 'default']) {
+function packageInfoAt(root, packageName, conditions = ['import', 'require', 'default'], { allowEntryless = false } = {}) {
   const absoluteRoot = path.resolve(root);
   const manifestPath = path.join(absoluteRoot, 'package.json');
   if (!existsSync(manifestPath)) {
@@ -131,19 +131,19 @@ function packageInfoAt(root, packageName, conditions = ['import', 'require', 'de
     ? exportValueForCondition(manifest.exports['.'] ?? manifest.exports, conditions)
     : undefined;
   const entryTarget = rootTarget ?? manifest.module ?? manifest.main ?? manifest.types;
-  if (typeof entryTarget !== 'string') {
+  if (typeof entryTarget !== 'string' && !allowEntryless) {
     throw new Error(`No resolvable package entry for ${packageName} in ${manifestPath}`);
   }
   return Object.freeze({
     name: packageName,
-    entry: path.resolve(absoluteRoot, entryTarget),
+    entry: typeof entryTarget === 'string' ? path.resolve(absoluteRoot, entryTarget) : undefined,
     root: absoluteRoot,
     manifest,
   });
 }
 
-function packageInfoFromOwner(ownerRoot, packageName) {
-  return packageInfoAt(path.join(ownerRoot, 'node_modules', ...packageName.split('/')), packageName);
+function packageInfoFromOwner(ownerRoot, packageName, options) {
+  return packageInfoAt(path.join(ownerRoot, 'node_modules', ...packageName.split('/')), packageName, undefined, options);
 }
 
 /**
@@ -184,6 +184,11 @@ export function createSdkRequire(options = {}) {
  */
 export function resolveTypeScriptCompiler(options = {}) {
   return createOwnerRequire(options).resolve('typescript/bin/tsc');
+}
+
+/** Resolve the test CLI from the application dependency owner, not source ancestry. */
+export function resolveOwnerTsx(options = {}) {
+  return path.join(resolveOwnerRoot(options), 'node_modules', 'tsx', 'dist', 'cli.mjs');
 }
 
 /** Resolve a runtime module from the selected SDK's own dependency graph. */
@@ -265,8 +270,10 @@ function typeVersionTarget(manifest, subpath) {
 function exportMappings(packageInfo, packageName, conditions) {
   const mappings = [];
   const exports = packageInfo.manifest.exports;
-  if (exports && typeof exports === 'object' && !Array.isArray(exports)) {
-    for (const [exportKey, exportValue] of Object.entries(exports)) {
+  if (typeof exports === 'string' || (exports && typeof exports === 'object' && !Array.isArray(exports))) {
+    const entries = typeof exports === 'string' || !Object.keys(exports).some((key) => key.startsWith('.'))
+      ? [['.', exports]] : Object.entries(exports);
+    for (const [exportKey, exportValue] of entries) {
       const suffix = exportKey === '.' ? '' : exportKey.slice(2);
       const typeFallback = conditions.includes('types')
         ? (suffix ? typeVersionTarget(packageInfo.manifest, suffix) : packageInfo.manifest.types)
@@ -282,11 +289,17 @@ function exportMappings(packageInfo, packageName, conditions) {
       });
     }
   }
-  if (mappings.length === 0) {
+  if (mappings.length === 0 && !exports) {
     const entry = conditions.includes('types')
       ? packageInfo.manifest.types ?? packageInfo.manifest.module ?? packageInfo.manifest.main
       : packageInfo.manifest.module ?? packageInfo.manifest.main;
     if (entry) mappings.push({ key: packageName, replacement: path.resolve(packageInfo.root, entry) });
+    else if (existsSync(path.join(packageInfo.root, 'index.js'))) {
+      // Node's implicit root, with an adjacent declaration for compiler overlays.
+      const declaration = path.join(packageInfo.root, 'index.d.ts');
+      mappings.push({ key: packageName, replacement: conditions.includes('types') && existsSync(declaration)
+        ? declaration : path.join(packageInfo.root, 'index.js') });
+    }
   }
   return mappings;
 }
@@ -334,15 +347,16 @@ export function createTypeScriptResolution(options = {}) {
 
 /**
  * Runtime module aliases for tsx configs. Unlike compiler paths, targets use
- * executable import/require exports so fixtures outside the package tree do
- * not depend on ancestor node_modules lookup.
+ * executable exports so fixtures outside the package tree do not depend on
+ * ancestor node_modules lookup. Preact uses require exports throughout the
+ * test graph so mixed tsx/Node module conditions cannot split its singleton.
  */
 export function createTsxResolution(options = {}) {
   const ownerRoot = resolveOwnerRoot(options);
   const preact = packageInfoFromOwner(ownerRoot, 'preact');
   const paths = {};
-  const addPackageMappings = (packageName, packageInfo) => {
-    for (const mapping of exportMappings(packageInfo, packageName, ['import', 'require', 'default'])) {
+  const addPackageMappings = (packageName, packageInfo, conditions = ['import', 'require', 'default']) => {
+    for (const mapping of exportMappings(packageInfo, packageName, conditions)) {
       paths[mapping.key] = [mapping.replacement];
     }
   };
@@ -352,11 +366,55 @@ export function createTsxResolution(options = {}) {
   const { packages } = resolveSdkPackages(options);
   addPackageMappings('typebox', packages.typebox);
   addPackageMappings('@sinclair/typebox', packages.typebox);
-  addPackageMappings('preact', preact);
+  addPackageMappings('preact', preact, ['require', 'default']);
   return Object.freeze({
     baseUrl: ownerRoot,
     paths: Object.freeze(paths),
   });
+}
+
+// Node's Preact import and require exports each install their own hooks/options
+// singleton. Tests execute both transpiled CJS and ESM through tsx; pin the
+// whole Preact test graph to the owner's require exports, including consumers
+// which import Preact internally (render-to-string and testing-library/preact).
+const PREACT_RUNTIME_PACKAGES = new Set(['preact', 'preact-render-to-string', '@testing-library/preact']);
+
+function runtimeConditionsForPackage(name, conditions) {
+  return !conditions.includes('types') && PREACT_RUNTIME_PACKAGES.has(name)
+    ? ['require', 'default'] : conditions;
+}
+
+function ownerDependencyPaths(options, conditions) {
+  const ownerRoot = resolveOwnerRoot(options);
+  const manifest = JSON.parse(readFileSync(path.join(ownerRoot, 'package.json'), 'utf8'));
+  const paths = {};
+  for (const name of new Set([
+    ...Object.keys(manifest.dependencies ?? {}),
+    ...Object.keys(manifest.devDependencies ?? {}),
+  ])) {
+    // SDK identities must come from the pinned private graph, never a hoisted copy.
+    if (isSdkIdentitySpecifier(name)) continue;
+    // Owner dependency enumeration includes config-only packages without an entry.
+    // Still require the installed manifest; SDK identity resolution remains strict.
+    const packageInfo = packageInfoFromOwner(ownerRoot, name, { allowEntryless: true });
+    const typechecking = conditions.includes('types');
+    const declarationPackage = path.join(ownerRoot, 'node_modules', '@types', ...name.replace(/^@/, '').replace('/', '__').split('/'));
+    for (const mapping of exportMappings(packageInfo, name, runtimeConditionsForPackage(name, conditions))) {
+      // TS does not walk back from absolute paths aliases to discover a
+      // package's @types sibling. Give untyped owner packages their installed
+      // declaration entry, and prefer adjacent declarations over JS exports.
+      const declaration = mapping.replacement.replace(/\.(?:mjs|cjs|js)$/u, '.d.ts');
+      paths[mapping.key] = [typechecking && mapping.key === name && existsSync(path.join(declarationPackage, 'index.d.ts'))
+        ? path.join(declarationPackage, 'index.d.ts')
+        : typechecking && (existsSync(declaration) || mapping.replacement.includes('*')) ? declaration
+          : mapping.replacement];
+    }
+    // Packages without export maps may still expose subpaths.
+    if (!packageInfo.manifest.exports) {
+      paths[`${name}/*`] = [path.join(packageInfo.root, '*')];
+    }
+  }
+  return paths;
 }
 
 function readTsconfigJson(configPath) {
@@ -381,10 +439,10 @@ function overlayPathsFromBase(declaredPaths, helperPaths, pathsBase) {
 }
 
 /**
- * Get the effective baseUrl, including one inherited through `extends`, while
- * avoiding a directory walk for config `include` globs.
+ * Get the effective paths and their declaring base (including `extends`),
+ * without walking config `include` globs.
  */
-function effectiveTsconfigBaseUrl(configPath, options) {
+function effectiveTsconfigOptions(configPath, options) {
   const typescript = createOwnerRequire(options)('typescript');
   const parsed = typescript.getParsedCommandLineOfConfigFile(configPath, {}, {
     ...typescript.sys,
@@ -393,7 +451,7 @@ function effectiveTsconfigBaseUrl(configPath, options) {
       throw new Error(typescript.flattenDiagnosticMessageText(diagnostic.messageText, '\n'));
     },
   });
-  return parsed?.options.baseUrl;
+  return parsed?.options;
 }
 
 /**
@@ -408,12 +466,15 @@ function effectiveTsconfigBaseUrl(configPath, options) {
  * spellings, the TypeBox spellings, and Preact become explicit absolute
  * paths under the dependency owner), and any specifier the helper does not
  * model keeps its base target anchored to the original config semantics. No
- * new aliases are added, so test-time module hooks keep intercepting exactly
- * the specifiers the checked-in config redirects, and future roots get
- * explicit owner paths without duplicated static alias entries.
+ * new aliases are added by default, so test-time module hooks keep intercepting
+ * exactly the specifiers the checked-in config redirects. For extension source
+ * still outside its package owner, `includeOwnerDependencies` additionally maps
+ * every owner dependency and SDK/Preact subpath to the owner (including the
+ * compiler's declaration exports when `typescript` is true). The runtime
+ * Preact dependency closure selects require exports consistently.
  *
- * A base config without its own `paths` produces a passthrough overlay
- * (inherited aliases stay untouched). When `options.directory` is supplied
+ * A base config without its own `paths` produces a passthrough overlay unless
+ * owner dependencies were explicitly requested. When `options.directory` is supplied
  * the overlay is written there and the caller owns cleanup (the fast batch
  * runner writes into its existing temp directory); otherwise a private
  * OS-temp directory is created and `dispose()` removes it again.
@@ -428,17 +489,43 @@ export function createTsconfigOverlay(baseConfigPath, options = {}) {
     ? mkdtempSync(path.join(os.tmpdir(), 'pie-tsx-overlay-'))
     : resolveAbsoluteRoot(options.directory, 'directory');
   const declaredPaths = readTsconfigJson(absoluteBase).compilerOptions?.paths;
-  const overlayPaths = declaredPaths
-    ? overlayPathsFromBase(
-      declaredPaths,
-      createTsxResolution(options).paths,
-      effectiveTsconfigBaseUrl(absoluteBase, options) ?? path.dirname(absoluteBase),
-    )
+  const helperPaths = options.typescript ? createTypeScriptResolution(options).paths : createTsxResolution(options).paths;
+  const effectiveOptions = declaredPaths || options.includeOwnerDependencies
+    ? effectiveTsconfigOptions(absoluteBase, options) : undefined;
+  const basePaths = options.includeOwnerDependencies ? effectiveOptions?.paths ?? declaredPaths : declaredPaths;
+  const overlayPaths = basePaths || options.includeOwnerDependencies
+    ? {
+      ...(options.includeOwnerDependencies ? ownerDependencyPaths(options, options.typescript
+        ? ['types', 'import', 'default', 'require'] : ['import', 'require', 'default']) : {}),
+      ...overlayPathsFromBase(
+        basePaths ?? {},
+        helperPaths,
+        effectiveOptions?.baseUrl ?? effectiveOptions?.pathsBasePath ?? path.dirname(absoluteBase),
+      ),
+      ...(options.includeOwnerDependencies ? helperPaths : {}),
+    }
+    : undefined;
+  // TS resolves `types` references from the config/source ancestry, not from
+  // compilerOptions.paths. Detached source and temp overlays need the owner's
+  // @types explicitly; vite/client is a package subpath rather than an @types
+  // package, so only configs which request it also need the owner module root.
+  // Keep inherited typeRoots (already absolute after TS parses `extends`) and
+  // leave the inherited `types` list unchanged.
+  const ownerModules = path.join(resolveOwnerRoot(options), 'node_modules');
+  const typeRoots = options.includeOwnerDependencies && options.typescript
+    ? [...new Set([
+      ...(effectiveOptions?.typeRoots ?? []).map((root) => path.normalize(root)),
+      path.join(ownerModules, '@types'),
+      ...(effectiveOptions?.types?.includes('vite/client') ? [ownerModules] : []),
+    ])]
     : undefined;
   const configPath = path.join(directory, 'tsconfig.overlay.json');
   writeFileSync(configPath, JSON.stringify({
     extends: absoluteBase,
-    ...(overlayPaths ? { compilerOptions: { paths: overlayPaths } } : {}),
+    ...(overlayPaths || typeRoots ? { compilerOptions: {
+      ...(overlayPaths ? { paths: overlayPaths } : {}),
+      ...(typeRoots ? { typeRoots } : {}),
+    } } : {}),
   }, null, 2));
   let disposed = false;
   return Object.freeze({

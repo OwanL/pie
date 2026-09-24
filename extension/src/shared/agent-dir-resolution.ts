@@ -27,11 +27,9 @@ export interface ResolveAgentDirOptions {
   configuredAgentDir?: string;
   /** Value of `process.env.PI_CODING_AGENT_DIR` (set by the installer at User scope). */
   envAgentDir?: string;
-  /**
-   * Optional fallback used only when no candidate validates. Pass the dir the
-   * extension package was loaded from (`extensionPath/..`) so a co-located
-   * `models.json` (checkout root) still resolves without any setting at all.
-   */
+  /** Explicit checkout agent/config root, used only after setting and env. */
+  checkoutRoot?: string;
+  /** Loaded package directory; used to identify known checkout layouts only. */
   extensionPath?: string;
   /** fs.exists stand-in, injectable for tests. Defaults to node:fs existsSync. */
   exists?: (filePath: string) => boolean;
@@ -101,13 +99,30 @@ function buildRejection(
  * Candidate priority:
  *   1. `pie.agentDir` VS Code setting (validated — must contain settings.json)
  *   2. `PI_CODING_AGENT_DIR` env var (validated)
- *   3. `<extensionPath>/..` (checkout root, validated) — recovers the co-located
- *      repo layout even when both the setting and env var are unset/stale.
+ *   3. Explicit checkout root (or the known checkout package layout), validated.
+ *      Installed extension directories do not imply a checkout at their parent.
  *
  * Unlike the previous behavior, a STALE `pie.agentDir` no longer silently
  * clobbers a correct env var: if the setting's path doesn't validate, it is
  * rejected (recorded) and the env var is tried next.
  */
+export function checkoutAgentRoot(extensionPath: string): string | undefined {
+  const packageRoot = path.resolve(extensionPath);
+  // Only known source package layouts imply an agent/config root. An installed
+  // VS Code extension lives under ~/.vscode/extensions and must use setting/env.
+  if (path.basename(packageRoot) === 'extension') {
+    return path.dirname(packageRoot);
+  }
+  const hostsRoot = path.dirname(packageRoot);
+  const applicationRoot = path.dirname(hostsRoot);
+  if (path.basename(packageRoot) === 'vscode'
+      && path.basename(hostsRoot) === 'hosts'
+      && path.basename(applicationRoot) === 'application') {
+    return path.dirname(applicationRoot);
+  }
+  return undefined;
+}
+
 export function resolveAgentDir(options: ResolveAgentDirOptions): ResolvedAgentDir {
   const exists = options.exists ?? defaultExists;
   const rejections: AgentDirRejection[] = [];
@@ -130,13 +145,15 @@ export function resolveAgentDir(options: ResolveAgentDirOptions): ResolvedAgentD
     rejections.push(buildRejection('env', envDir, exists));
   }
 
-  // 3. extension-relative fallback (repo root co-located with the extension)
-  if (options.extensionPath) {
-    const relative = path.resolve(options.extensionPath, '..');
-    if (isValidAgentDir(relative, exists)) {
-      return { agentDir: relative, source: 'extension-relative', rejections };
+  // 3. Explicit checkout root, or a root derived only from a known source layout.
+  const checkoutRoot = options.checkoutRoot
+    ?? (options.extensionPath ? checkoutAgentRoot(options.extensionPath) : undefined);
+  if (checkoutRoot) {
+    const candidate = path.resolve(checkoutRoot);
+    if (isValidAgentDir(candidate, exists)) {
+      return { agentDir: candidate, source: 'extension-relative', rejections };
     }
-    rejections.push(buildRejection('extension-relative', relative, exists));
+    rejections.push(buildRejection('extension-relative', candidate, exists));
   }
 
   return { agentDir: '', source: 'none', rejections };

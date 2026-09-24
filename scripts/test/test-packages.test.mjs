@@ -26,8 +26,9 @@ test('PACKAGE_DIRECTIVES covers package dirs, owned dirs, and routed test roots'
   ];
   assert.deepEqual(ALL_PACKAGE_IDS, expected);
   // 17 package dirs + 8 owned/adapter dirs + 16 nested default test roots
-  // (scripts' test root equals its dir) + 2 declared analysis distributed roots.
-  assert.equal(PACKAGE_DIRECTIVES.length, 43, 'routing view covers dirs, owned dirs, test roots, and declared distributed roots');
+  // (scripts' test root equals its dir) + 2 declared analysis distributed roots
+  // + the extension's separate source root (its test root overlaps that source).
+  assert.equal(PACKAGE_DIRECTIVES.length, 44, 'routing view covers dirs, owned dirs, test roots, and declared distributed roots');
 });
 
 test('source/test root defaults keep single-root enumeration identical', () => {
@@ -144,8 +145,8 @@ test('isGlobalTestInfra recognises the test tooling and root config', () => {
 
 test('isGlobalTestInfra is false for per-package and unrelated paths', () => {
   // per-package config stays per-package (not global)
-  assert.equal(isGlobalTestInfra('extension/package.json'), false);
-  assert.equal(isGlobalTestInfra('extension/tsconfig.json'), false);
+  assert.equal(isGlobalTestInfra('application/hosts/vscode/package.json'), false);
+  assert.equal(isGlobalTestInfra('extension/src/backend/tsconfig.json'), false);
   assert.equal(isGlobalTestInfra('tools/subagent/tsconfig.json'), false);
   assert.equal(isGlobalTestInfra('extensions/subagent/index.ts'), false);
   assert.equal(isGlobalTestInfra('tools/request-capability/index.ts'), false);

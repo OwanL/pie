@@ -6,7 +6,8 @@ A personal stack built around the [`pi` coding agent](https://www.npmjs.com/pack
 
 | Path | What it is | Distribution |
 |---|---|---|
-| [`extension/`](extension) | *pie* — VS Code sidebar extension that surfaces a `pi` agent as chat | Built and packaged locally from source |
+| [`extension/src/`](extension/src), [`extension/test/`](extension/test) | *pie* VS Code extension source and tests | Built and packaged locally |
+| [`application/hosts/vscode/`](application/hosts/vscode) | VS Code distribution package, toolchain, runtime assets, and package-owned configuration; build orchestration lives in [`scripts/build/`](scripts/build) | Build and packaging owner |
 | [`tools/`](tools/README.md) | Explicit Pie-owned tool catalog and the implementations of all nine catalog tools | Extension discovery adapters or backend-injected factories |
 | [`extensions/`](extensions) — e.g. [`skill-pruner/`](extensions/skill-pruner), [`safeguard/`](extensions/safeguard), [`cwd-skills/`](extensions/cwd-skills), [`image-context-guard/`](extensions/image-context-guard) | Pi discovery adapters and middleware (cwd-scoped skill discovery, skill pruning, command safeguards, image guarding, and more — see [`extensions/`](extensions) for the full set); tool implementations live under [`tools/`](tools/README.md) | Loaded by `pi` via `settings.json` packages |
 | [`analysis/`](analysis) | Local DuckDB query workspace over legacy run-analytics exports/stores | Internal research tool |
@@ -32,7 +33,7 @@ Pie is currently developed and tested on Windows only. Other operating systems m
 - npm **11.13.0**, pinned by `packageManager` in `package.json`
 - VS Code, for interactive extension work
 
-The installer pins the optional standalone `pi` CLI to the exact SDK version resolved by `extension/package-lock.json`. The VS Code backend always prefers that repo-local locked SDK, so a global package upgrade cannot silently change it.
+The installer pins the optional standalone `pi` CLI to the exact SDK version resolved by `application/hosts/vscode/package-lock.json`. The VS Code backend always prefers that repo-local locked SDK, so a global package upgrade cannot silently change it.
 
 ## Install
 
@@ -48,7 +49,7 @@ The installer is idempotent and safe to re-run. On each run it:
 
 1. **Sets `PI_CODING_AGENT_DIR`** to the repo root as a Windows User environment variable so the `pi` CLI reads `settings.json` and `models.json` from here.
 2. **Pins `PI_CODING_AGENT_SESSION_DIR`** to this checkout's `data/outcomes/sessions/` so standalone `pi` writes session JSONL to the repo-local store even when launched outside the checkout.
-3. **Pins `pi`** ([`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)) globally to the exact version in `extension/package-lock.json`, then restores each configured package source with `pi install` without self-updating the CLI.
+3. **Pins `pi`** ([`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)) globally to the exact version in `application/hosts/vscode/package-lock.json`, then restores each configured package source with `pi install` without self-updating the CLI.
 4. **Relocates `auth.json`** out of the working tree into `%LOCALAPPDATA%\pie\` and sets `PI_CODING_AGENT_AUTH_DIR`.
 5. **Merges split-brain auth** — if a *new* in-tree `auth.json` appears after relocation (from running `pi` in a shell without `PI_CODING_AGENT_AUTH_DIR`), the installer merges its credentials into the secure location and removes the in-tree copy.
 6. **Writes `pie.agentDir`** to VS Code User settings so the extension host forwards the correct config dir to the backend, even before VS Code picks up the new User env vars (which only happens on a full restart, not a window reload).
@@ -131,13 +132,13 @@ This happens when `pi` was run in a shell that didn't inherit `PI_CODING_AGENT_A
 
 **Cause:** The SDK is installed under a path not in the `isPathAllowed` allowlist.
 
-**Fix:** The extension host derives `PIE_TRUSTED_SDK_ROOT` from the resolved `sdkPath` and passes it to the backend, and the repo-local pinned SDK (`extension/node_modules/@earendil-works/pi-coding-agent`) is trusted by construction. If overriding with a custom SDK location, set `pie.sdkPath` in VS Code *User* settings (or the `PI_SDK_PATH` env var) to the SDK package directory — avoid committing an absolute `pie.sdkPath` to the tracked `.vscode/settings.json`, since it is machine-specific and breaks other machines on pull.
+**Fix:** The extension host derives `PIE_TRUSTED_SDK_ROOT` from the resolved `sdkPath` and passes it to the backend, and the repo-local pinned SDK (`application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent`) is trusted by construction. If overriding with a custom SDK location, set `pie.sdkPath` in VS Code *User* settings (or the `PI_SDK_PATH` env var) to the SDK package directory — avoid committing an absolute `pie.sdkPath` to the tracked `.vscode/settings.json`, since it is machine-specific and breaks other machines on pull.
 
 ### SDK version drift / backend breaks after a pull
 
 **Cause:** The extension backend previously loaded whatever `@earendil-works/pi-coding-agent` `npm root -g` resolved, so a `npm i -g` upgrade (or a different version on another machine) could silently swap the SDK out from under the backend.
 
-**Fix:** The SDK is now a pinned `extension/package.json` dependency. From the repository root, run `npm ci`; its postinstall restores the locked dependency trees, including the exact SDK version under `extension/node_modules/`. The backend resolves that copy first.
+**Fix:** The SDK is now a pinned `application/hosts/vscode/package.json` dependency. From the repository root, run `npm ci`; its postinstall restores the locked dependency trees, including the exact SDK version under `application/hosts/vscode/node_modules/`. The backend resolves that copy first.
 
 ### `pi` command not found after install
 
@@ -164,7 +165,7 @@ For a deterministic dependency/build refresh after pulling, first close all VS C
 npm run bootstrap
 ```
 
-This runs a root `npm ci`; its `postinstall` automatically installs the locked `extension/` and `analysis/` dependency trees (including build/test dependencies such as jsdom). It then installs the locked pi CLI, restores pi packages without updating the CLI, checks generated model files, builds the extension, and runs the doctor. For a non-destructive check:
+This runs a root `npm ci`; its `postinstall` automatically installs the locked `application/hosts/vscode/` and `analysis/` dependency trees (including build/test dependencies such as jsdom). It then installs the locked pi CLI, restores pi packages without updating the CLI, checks generated model files, builds the extension, and runs the doctor. For a non-destructive check:
 
 ```bash
 npm run doctor
@@ -212,7 +213,7 @@ Test and typecheck children have a 20-minute watchdog that kills the complete pr
 From a fresh checkout, install every dependency tree once from the repository root:
 
 ```bash
-npm ci                             # also installs extension/ and analysis/ via postinstall
+npm ci                             # also installs application/hosts/vscode/ and analysis/ via postinstall
 npm run extension:build            # validate + stage runtime + publish renderer
 npm run extension:build:validate   # compile/validate without publishing
 npm run extension:activate         # one-time startup loader setup or upgrade
@@ -222,7 +223,7 @@ npm run extension:package          # produce a .vsix when needed
 For an extension-only refresh after dependencies are already installed:
 
 ```bash
-cd extension
+cd application/hosts/vscode
 npm run build      # compile/validate + publish one renderer generation
 ```
 
@@ -261,9 +262,9 @@ The launcher requires the generated runtime first:
 npm run extension:build
 ```
 
-It launches the built `extension/out/standalone.js` entry and prints the actual localhost URL, normally `http://127.0.0.1:1997` (or an assigned fallback port). It does **not** open a browser; paste a printed URL into one. With no saved preference, it binds only to loopback. If LAN is enabled, Pie also prints usable private IPv4 LAN URLs; use one of those from another device on the same trusted network.
+It launches the built `application/hosts/vscode/out/standalone.js` entry and prints the actual localhost URL, normally `http://127.0.0.1:1997` (or an assigned fallback port). It does **not** open a browser; paste a printed URL into one. With no saved preference, it binds only to loopback. If LAN is enabled, Pie also prints usable private IPv4 LAN URLs; use one of those from another device on the same trusted network.
 
-For direct CLI use, `node extension/out/standalone.js --cwd <absolute-workspace-path> [--lan | --no-lan]` is supported; `--help` prints the options. An explicit LAN flag overrides and saves the preference before the server starts. Omitting both flags restores the saved preference (or loopback-only when no preference has been saved).
+For direct CLI use, `node application/hosts/vscode/out/standalone.js --cwd <absolute-workspace-path> [--lan | --no-lan]` is supported; `--help` prints the options. An explicit LAN flag overrides and saves the preference before the server starts. Omitting both flags restores the saved preference (or loopback-only when no preference has been saved).
 
 For the VS Code host, set `pie.browserServer.allowLan` to `true` in User Settings and run `pie: Restart Browser Server` (or restart the extension host). The default remains `false`. The browser server accepts requests only from loopback or private IPv4 peers; Host and WebSocket Origin checks further require loopback or the exact private IPv4 addresses advertised by that running instance. Arbitrary hostnames/public addresses remain rejected, including clients that try to forge browser headers. LAN URLs are not advertised for public IPv4 interfaces.
 

@@ -8,7 +8,7 @@
 // Classification mirrors scripts/run-tests.mjs PACKAGE_CONFIGS and registry
 // testCwd metadata, routing over every registered source/test root (including
 // declared distributed future roots, which classify like any package dir):
-//  - extension/      -> cwd extension/,         tsx = extension/node_modules/tsx
+//  - extension/      -> cwd extension/,         tsx = application/hosts/vscode/node_modules/tsx
 //  - analysis/       -> cwd analysis/,          tsx = analysis/node_modules/tsx
 //  - scripts/test/   -> cwd repoRoot,            tsx = node_modules/tsx (root)
 //  - extensions/* and tools/* -> cwd repoRoot, tsx = node_modules/tsx (root)
@@ -28,7 +28,7 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { createTsconfigOverlay } from './lib/package-resolution.mjs';
+import { createTsconfigOverlay, resolveOwnerTsx } from './lib/package-resolution.mjs';
 import { PACKAGE_DIRECTIVES, resolvePackageEntry } from './lib/test-packages.mjs';
 import { withoutGitRepositoryEnv } from './lib/git-environment.mjs';
 import { withoutPiHarnessEnv } from './lib/pi-harness-env.mjs';
@@ -117,7 +117,7 @@ export function classifyTestFile(repoRoot, input) {
   const packageEntry = resolvePackageEntry(id);
   const cwd = packageEntry?.testCwd ? path.join(repoRoot, packageEntry.testCwd) : repoRoot;
   const tsxConfig = resolvePackageEntry(id)?.tsxConfig;
-  const tsxBin = resolveLocalTsx(cwd);
+  const tsxBin = id === 'extension' ? resolveOwnerTsx({ repositoryRoot: repoRoot }) : resolveLocalTsx(cwd);
   const relativeFilePath = path.relative(cwd, abs).replace(/\\/g, '/');
   return { id, cwd, tsxConfig, tsxBin, repoRel, abs, relativeFilePath };
 }
@@ -299,7 +299,9 @@ async function main() {
   try {
     for (const group of groups) {
       if (!group.tsxConfig) continue;
-      overlays.set(group.id, createTsconfigOverlay(path.join(repoRoot, group.tsxConfig)));
+      overlays.set(group.id, createTsconfigOverlay(path.join(repoRoot, group.tsxConfig), {
+        includeOwnerDependencies: group.id === 'extension',
+      }));
     }
     await Promise.all(groups.map(async (group) => {
       const overlay = overlays.get(group.id);

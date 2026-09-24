@@ -25,7 +25,7 @@ type RuntimeApi = {
 
 const require = createRequire(import.meta.url);
 const execFileAsync = promisify(execFile);
-const runtimeModulePath = fileURLToPath(new URL('../../../runtime/runtime-generations.cjs', import.meta.url));
+const runtimeModulePath = fileURLToPath(new URL('../../../../application/hosts/vscode/runtime/runtime-generations.cjs', import.meta.url));
 const runtime = require(runtimeModulePath) as RuntimeApi;
 const IDENTITY: Identity = { publisher: 'pie', name: 'pie', version: '0.3.0' };
 const BUILD_ID = '0123456789abcdef0123';

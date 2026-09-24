@@ -8,14 +8,18 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 const execFileAsync = promisify(execFile);
-const extensionRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
+// The extension source/test roots remain at extension/ for now, but the
+// package/toolchain owner (manifest, configs, node_modules, runtime assets)
+// moved to application/hosts/vscode in the B2 relocation.
+const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..');
+const extensionRoot = path.join(repositoryRoot, 'application', 'hosts', 'vscode');
 
 test('node build and package allowlist declare the stable worker entry artifact', async () => {
   const vite = await fs.readFile(path.join(extensionRoot, 'vite.config.ts'), 'utf8');
   const vscodeIgnore = await fs.readFile(path.join(extensionRoot, '.vscodeignore'), 'utf8');
   assert.match(vite, /['"]worker-entry['"]:\s*path\.join\(srcDir, ['"]backend['"], ['"]worker-entry\.ts['"]\)/);
   assert.match(vite, /['"]cold-browse-helper-entry['"]:\s*path\.join\(srcDir, ['"]backend['"], ['"]cold-browse-helper-entry\.ts['"]\)/);
-  assert.match(vite, /['"]phase4-worker-command-extension['"]:\s*path\.join\(rootDir, ['"]test['"], ['"]fixtures['"], ['"]phase4-worker-command-extension\.ts['"]\)/);
+  assert.match(vite, /['"]phase4-worker-command-extension['"]:\s*path\.join\(testDir, ['"]fixtures['"], ['"]phase4-worker-command-extension\.ts['"]\)/);
   assert.match(vite, /entryFileNames:\s*['"]\[name\]\.js['"]/);
   // ws's optional native deps must stay runtime requires: Vite stubs
   // unresolvable optional peer deps with empty objects, which defeats ws's
@@ -69,11 +73,19 @@ test('packaged isolated backend drives public message.send extension commands th
     const commandResultPath = path.join(temp, 'phase4-extension-command-result.json');
     const commandTracePath = path.join(temp, 'phase4-extension-command-trace.jsonl');
     await fs.mkdir(agentDir, { recursive: true });
-    const settings = JSON.parse(await fs.readFile(path.resolve(extensionRoot, '..', 'settings.json'), 'utf8')) as Record<string, unknown>;
-    settings.extensions = [commandExtension];
+    // Do not inherit the user's settings: packages can trigger installs on worker
+    // startup, and other discovered resources can change command dispatch.
+    const settings = {
+      extensions: [commandExtension],
+      packages: [],
+      skills: [],
+      prompts: [],
+      themes: [],
+      enableInstallTelemetry: false,
+    };
     await Promise.all([
       fs.writeFile(path.join(agentDir, 'settings.json'), `${JSON.stringify(settings, null, 2)}\n`),
-      fs.copyFile(path.resolve(extensionRoot, '..', 'models.json'), path.join(agentDir, 'models.json')),
+      fs.copyFile(path.resolve(repositoryRoot, 'models.json'), path.join(agentDir, 'models.json')),
       fs.writeFile(path.join(agentDir, 'auth.json'), '{}\n'),
     ]);
     const child = spawn(process.execPath, [
@@ -88,9 +100,14 @@ test('packaged isolated backend drives public message.send extension commands th
         ...process.env,
         PIE_PHASE2_PACKAGE_SMOKE: '1',
         PIE_PROVIDER_TRAFFIC_LOG: '0',
+        PI_OFFLINE: '1',
         PIE_PHASE4_EXTENSION_FIXTURE_RESULT: commandResultPath,
         PIE_PHASE4_EXTENSION_FIXTURE_TRACE: commandTracePath,
         PI_CODING_AGENT_DIR: agentDir,
+        // The isolated VSIX resolves its SDK from the new dependency owner,
+        // not from the retired extension tree. Trust only that fixture owner.
+        PIE_TRUSTED_SDK_ROOT: path.join(extensionRoot, 'node_modules'),
+        PIE_DATA_DIR: path.join(temp, 'data'),
         PI_CODING_AGENT_AUTH_DIR: path.join(temp, 'auth'),
         PI_CODING_AGENT_SESSION_DIR: path.join(temp, 'sessions'),
       },

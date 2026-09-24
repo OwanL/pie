@@ -17,7 +17,7 @@ This folder contains active design contracts, implementation plans, and operatio
 ## Active plans (in progress)
 
 - [BROWSER_SERVER_PLAN.md](BROWSER_SERVER_PLAN.md) — staged plan for the existing Pie Preact UI over loopback-default HTTP/WebSocket, with explicit unauthenticated trusted-LAN IPv4 opt-in, isolated per-renderer delivery, and a separate future authenticated-internet ingress gate. Milestones 0–2 and the standalone runtime extraction are implemented; milestones 3–5 (resilience pass, browser-native file/diff/export, authenticated ingress) remain. Standalone LAN access is opt-in and has no VS Code editor/file/diff integration.
-- [REPOSITORY_ORGANIZATION_PLAN.md](REPOSITORY_ORGANIZATION_PLAN.md) — accepted target organization and migration handoff: complete responsibility tree, dependency/ownership rules, source-family mappings, discovery/package compatibility, B0–B8 execution batches, validation and rollback. Migration has not started; the executing agent first verifies the live inventory and dependency-resolution prerequisites.
+- [REPOSITORY_ORGANIZATION_PLAN.md](REPOSITORY_ORGANIZATION_PLAN.md) — accepted target organization and migration handoff: complete responsibility tree, dependency/ownership rules, source-family mappings, discovery/package compatibility, B0–B8 execution batches, validation and rollback. B0–B2 are complete / exit accepted; B2 settled 17 distribution/config/runtime/build-helper moves, while source and test files remain at their original paths. See the [migration progress checkpoint](plans/repository-organization-migration-progress.md).
 
 ## Active investigations
 

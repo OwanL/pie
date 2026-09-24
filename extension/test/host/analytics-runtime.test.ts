@@ -56,7 +56,7 @@ async function writeManifest(stateDir: string, manifest: unknown): Promise<void>
 test('canonical runtime reaches readiness with real recorder and query workers', { timeout: 30_000 }, async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'pie-analytics-runtime-real-'));
   const stateDir = path.join(root, 'state');
-  const loaderUrl = new URL('../../node_modules/tsx/dist/loader.mjs', import.meta.url).href;
+  const loaderUrl = new URL('../../../application/hosts/vscode/node_modules/tsx/dist/loader.mjs', import.meta.url).href;
   const workerPath = (kind: 'recorder' | 'query'): string => {
     const target = path.join(root, `${kind}-worker.mjs`);
     const sourceUrl = new URL(`../../src/analytics/${kind}-worker-entry.ts`, import.meta.url).href;

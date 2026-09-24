@@ -1,8 +1,8 @@
-// Pure helpers for reading the pi SDK pin from the extension lockfile and
+// Pure helpers for reading the pi SDK pin from the VS Code host lockfile and
 // comparing semver-ish versions. Shared by scripts/bootstrap.mjs,
 // scripts/doctor.mjs, and the Windows installer through its Node helper.
 //
-// The extension lock is the source of truth for the SDK the pie backend loads;
+// The application/hosts/vscode lock is the source of truth for the SDK the pie backend loads;
 // the global `pi` CLI is pinned to that same exact version so a `npm i -g`
 // upgrade (or a different version on another machine) cannot silently swap
 // the SDK out from under the backend. See README.md → "SDK version drift".
@@ -15,18 +15,18 @@ import { pathToFileURL } from 'node:url';
 export const SDK_PACKAGE = '@earendil-works/pi-coding-agent';
 
 /**
- * Read the exact version of the pi SDK that the extension lock pins.
+ * Read the exact version of the pi SDK that the VS Code host lock pins.
  * @param {string} repoRoot - absolute path to the repo root
  * @returns {string} e.g. "0.80.6"
  * @throws if the lockfile or package entry is missing/malformed
  */
 export function readPinnedSdkVersion(repoRoot) {
-  const lockPath = path.join(repoRoot, 'extension', 'package-lock.json');
+  const lockPath = path.join(repoRoot, 'application', 'hosts', 'vscode', 'package-lock.json');
   let lock;
   try {
     lock = JSON.parse(readFileSync(lockPath, 'utf8'));
   } catch (err) {
-    throw new Error(`Could not read extension lockfile (${lockPath}): ${err.message}`);
+    throw new Error(`Could not read VS Code host lockfile (${lockPath}): ${err.message}`);
   }
 
   // npm v3 lockfile shape: packages["node_modules/@earendil-works/pi-coding-agent"].version
@@ -42,18 +42,18 @@ export function readPinnedSdkVersion(repoRoot) {
   }
 
   throw new Error(
-    `${SDK_PACKAGE} not found in extension lockfile (${lockPath}). Run \`npm install\` in extension/ first.`,
+    `${SDK_PACKAGE} not found in VS Code host lockfile (${lockPath}). Run \`npm install\` in application/hosts/vscode/ first.`,
   );
 }
 
 /**
- * Read the declared (range) dependency from extension/package.json, e.g. "^0.80.6".
+ * Read the declared (range) dependency from application/hosts/vscode/package.json, e.g. "^0.80.6".
  * Used by doctor to surface declared-vs-locked drift.
  * @param {string} repoRoot
  * @returns {string | null}
  */
 export function readDeclaredSdkRange(repoRoot) {
-  const pkgPath = path.join(repoRoot, 'extension', 'package.json');
+  const pkgPath = path.join(repoRoot, 'application', 'hosts', 'vscode', 'package.json');
   let pkg;
   try {
     pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));

@@ -13,7 +13,7 @@ import { SqliteAnalyticsRecorder } from '../../src/analytics/sqlite-recorder.js'
 const workerScript = fileURLToPath(new URL('./fixtures/query-client-worker.cjs', import.meta.url));
 const sqliteQueryWorkerScript = fileURLToPath(new URL('../../src/analytics/query-worker-entry.ts', import.meta.url));
 const sqliteQueryWorkerExecArgv = [
-  `--import=${new URL('../../node_modules/tsx/dist/loader.mjs', import.meta.url).href}`,
+  `--import=${new URL('../../../application/hosts/vscode/node_modules/tsx/dist/loader.mjs', import.meta.url).href}`,
 ];
 
 test('query client reports one immutable identity through authoritative worker exit', async () => {

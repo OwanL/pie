@@ -125,13 +125,14 @@ async function resolveDependencies(
 ): Promise<StandaloneDependencyPaths> {
   const exec = createCommandExecutor();
   const configuredSdkPath = process.env.PI_SDK_PATH?.trim() || undefined;
-  const localCandidatePath = readSdkManifestPath(runtimeOutputDirectory)
-    ?? path.join(extensionPath, 'node_modules', '@earendil-works', 'pi-coding-agent');
+  const localCandidatePath = readSdkManifestPath(runtimeOutputDirectory);
+  const packageCandidatePath = path.join(extensionPath, 'node_modules', '@earendil-works', 'pi-coding-agent');
   let sdkPath: string;
   try {
     sdkPath = await resolveSdkPath({
       configuredPath: configuredSdkPath,
       localCandidatePath,
+      localCandidatePaths: [packageCandidatePath],
       env: process.env as NodeJS.ProcessEnv,
       exec,
     });
@@ -160,7 +161,6 @@ async function resolveDependencies(
   }
 
   const resolvedAgentDir: ResolvedAgentDir = resolveAgentDir({
-    configuredAgentDir: process.env.PI_CODING_AGENT_DIR,
     envAgentDir: process.env.PI_CODING_AGENT_DIR,
     extensionPath,
   });
@@ -210,8 +210,9 @@ export function validateStandaloneRuntimeIdentity(environment: Pick<StandaloneEn
 /**
  * Resolve and validate everything the standalone process owns before creating
  * HostRuntime.  The dependency resolver follows the same SDK/node/agent
- * precedence as the VS Code startup path, but uses the current checkout's
- * pinned SDK and the launching Node executable as portable defaults.
+ * precedence as the VS Code startup path, but uses the build-manifest SDK
+ * or the loaded package's dependency and the launching Node executable as
+ * portable defaults.
  */
 export async function resolveStandaloneEnvironment(
   options: ResolveStandaloneEnvironmentOptions,

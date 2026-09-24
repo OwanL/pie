@@ -10,7 +10,7 @@
 //   node scripts/sync-models.mjs --check   # dry-run: exit 1 if any derived file would change
 //   node scripts/sync-models.mjs --verbose # print what changed per file
 //
-// `yaml` and `ajv` are resolved from extension/node_modules (no root deps needed),
+// `yaml` and `ajv` are resolved from application/hosts/vscode/node_modules (no root deps needed),
 // mirroring the lazy-resolve pattern in tools/subagent/bucket-selector.ts.
 
 import { createRequire } from 'node:module';
@@ -26,15 +26,15 @@ export function repoRoot() {
   return path.resolve(fileURLToPath(import.meta.url), '..', '..');
 }
 
-// --- lazy dependency resolution (yaml + ajv from extension/node_modules) ----
+// --- lazy dependency resolution (yaml + ajv from application/hosts/vscode/node_modules) ----
 
 function buildResolver() {
   const baseRequire = createRequire(import.meta.url);
   const candidates = [baseRequire];
   try {
-    candidates.push(createRequire(new URL('../extension/package.json', import.meta.url)));
+    candidates.push(createRequire(new URL('../application/hosts/vscode/package.json', import.meta.url)));
   } catch {
-    // extension package not resolvable from this environment
+    // VS Code host package not resolvable from this environment
   }
   return candidates;
 }
@@ -48,7 +48,7 @@ function resolveDep(name) {
     }
   }
   throw new Error(
-    `Could not resolve "${name}" — run "npm install" in extension/ (yaml and ajv are direct devDependencies of the extension).`,
+    `Could not resolve "${name}" — run "npm install" in application/hosts/vscode/ (yaml and ajv are direct devDependencies of the VS Code host).`,
   );
 }
 

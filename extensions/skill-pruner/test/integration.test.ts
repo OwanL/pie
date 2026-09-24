@@ -1036,7 +1036,7 @@ test("actual SDK hook chain applies tools before skills, preserves foreign prose
 
 		const runnerModulePath = path.join(
 			process.cwd(),
-			"extension", "node_modules", "@earendil-works", "pi-coding-agent",
+			"application", "hosts", "vscode", "node_modules", "@earendil-works", "pi-coding-agent",
 			"dist", "core", "extensions", "runner.js",
 		);
 		const { ExtensionRunner } = await import(pathToFileURL(runnerModulePath).href) as { ExtensionRunner: new (...args: any[]) => any };
@@ -1211,7 +1211,7 @@ test("pinned SDK discovery loads the root shim with one shared selector and reco
 	}) as typeof fetch;
 
 	try {
-		const sdkRoot = path.join(process.cwd(), "extension", "node_modules", "@earendil-works", "pi-coding-agent", "dist");
+		const sdkRoot = path.join(process.cwd(), "application", "hosts", "vscode", "node_modules", "@earendil-works", "pi-coding-agent", "dist");
 		const sdk = await import(pathToFileURL(path.join(sdkRoot, "index.js")).href) as any;
 		const settingsManager = sdk.SettingsManager.inMemory({
 			extensions: ["!**", "+extensions/skill-pruner/index.ts"],

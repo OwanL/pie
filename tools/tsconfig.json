@@ -1,5 +1,5 @@
 {
-  "extends": "../extension/tsconfig.json",
+  "extends": "../application/hosts/vscode/tsconfig.json",
   "compilerOptions": {
     "incremental": false
   },

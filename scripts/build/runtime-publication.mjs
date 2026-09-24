@@ -2,10 +2,12 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import runtime from '../runtime/runtime-generations.cjs';
+import runtime from '../../application/hosts/vscode/runtime/runtime-generations.cjs';
 
 export const { publishRuntimeGeneration, resolveRuntimeGeneration } = runtime;
-const bootstrapSource = fileURLToPath(new URL('../runtime/', import.meta.url));
+// The runtime bootstrap assets moved with the host package owner (planned
+// distribution root application/hosts/vscode).
+const bootstrapSource = fileURLToPath(new URL('../../application/hosts/vscode/runtime/', import.meta.url));
 const bootstrapFiles = ['bootstrap.cjs', 'runtime-generations.cjs'];
 
 export async function hasRuntimeBootstrap(extensionDir) {

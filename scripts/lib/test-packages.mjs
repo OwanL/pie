@@ -75,9 +75,13 @@
 export const PACKAGE_REGISTRY = [
   {
     id: 'extension',
-    dir: 'extension',
+    dir: 'application/hosts/vscode',
+    sourceRoots: ['extension'],
+    testRoots: ['extension/test'],
+    testDir: 'extension/test',
     testCwd: 'extension',
-    typecheck: { config: 'extension/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
+    tsxConfig: 'application/hosts/vscode/tsconfig.json',
+    typecheck: { config: 'application/hosts/vscode/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
     fastConcurrency: 8,
   },
   {
@@ -105,20 +109,20 @@ export const PACKAGE_REGISTRY = [
   {
     id: 'cwd-skills',
     dir: 'extensions/cwd-skills',
-    typecheck: { config: 'extensions/cwd-skills/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
+    typecheck: { config: 'extensions/cwd-skills/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
     fastConcurrency: 3,
   },
   {
     id: 'safeguard',
     dir: 'extensions/safeguard',
-    typecheck: { config: 'extensions/safeguard/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
+    typecheck: { config: 'extensions/safeguard/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
     fastConcurrency: 3,
   },
   {
     id: 'skill-pruner',
     dir: 'extensions/skill-pruner',
     ownedDirs: ['tools/request-capability'],
-    typecheck: { config: 'extensions/skill-pruner/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
+    typecheck: { config: 'extensions/skill-pruner/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
     fastConcurrency: 3,
   },
   {
@@ -127,7 +131,7 @@ export const PACKAGE_REGISTRY = [
     groups: ['extensions'],
     ownedDirs: ['extensions/subagent'],
     tsxConfig: 'tools/subagent/tsconfig.json',
-    typecheck: { config: 'tools/subagent/tsconfig.release.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
+    typecheck: { config: 'tools/subagent/tsconfig.release.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
     fastBatch: { batches: 4 },
     fastConcurrency: 4,
   },
@@ -136,7 +140,7 @@ export const PACKAGE_REGISTRY = [
     dir: 'tools/ask-user',
     groups: ['extensions'],
     ownedDirs: ['extensions/ask-user'],
-    typecheck: { config: 'tools/ask-user/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
+    typecheck: { config: 'tools/ask-user/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
     fastConcurrency: 3,
   },
   {
@@ -144,25 +148,25 @@ export const PACKAGE_REGISTRY = [
     dir: 'tools/warm-bash',
     groups: ['extensions'],
     ownedDirs: ['extensions/warm-bash'],
-    typecheck: { config: 'tools/warm-bash/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
+    typecheck: { config: 'tools/warm-bash/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
     fastConcurrency: 3,
   },
   {
     id: 'copilot-model-discovery',
     dir: 'extensions/copilot-model-discovery',
-    typecheck: { config: 'extensions/copilot-model-discovery/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
+    typecheck: { config: 'extensions/copilot-model-discovery/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
     fastConcurrency: 3,
   },
   {
     id: 'web-access-guard',
     dir: 'extensions/web-access-guard',
-    typecheck: { config: 'extensions/web-access-guard/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
+    typecheck: { config: 'extensions/web-access-guard/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
     fastConcurrency: 3,
   },
   {
     id: 'tool-result-pruner',
     dir: 'extensions/tool-result-pruner',
-    typecheck: { config: 'extensions/tool-result-pruner/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
+    typecheck: { config: 'extensions/tool-result-pruner/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
     fastConcurrency: 3,
   },
   {
@@ -170,7 +174,7 @@ export const PACKAGE_REGISTRY = [
     dir: 'tools/deferred-triggers',
     groups: ['extensions'],
     ownedDirs: ['extensions/deferred-triggers'],
-    typecheck: { config: 'tools/deferred-triggers/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
+    typecheck: { config: 'tools/deferred-triggers/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
     fastConcurrency: 3,
   },
   {
@@ -178,7 +182,7 @@ export const PACKAGE_REGISTRY = [
     dir: 'tools/session-changes',
     groups: ['extensions'],
     ownedDirs: ['extensions/session-changes'],
-    typecheck: { config: 'tools/session-changes/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
+    typecheck: { config: 'tools/session-changes/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
     fastConcurrency: 3,
   },
   {
@@ -187,7 +191,7 @@ export const PACKAGE_REGISTRY = [
     groups: ['extensions'],
     ownedDirs: ['extensions/computer-use'],
     tsxConfig: 'tools/computer-use/tsconfig.runtime.json',
-    typecheck: { config: 'tools/computer-use/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
+    typecheck: { config: 'tools/computer-use/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
     fastBatch: { batches: 3 },
     fastConcurrency: 2,
   },
@@ -195,7 +199,7 @@ export const PACKAGE_REGISTRY = [
     id: 'image-context-guard',
     dir: 'extensions/image-context-guard',
     tsxConfig: 'extensions/image-context-guard/tsconfig.json',
-    typecheck: { config: 'extensions/image-context-guard/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
+    typecheck: { config: 'extensions/image-context-guard/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
     fastConcurrency: 1,
   },
   {
@@ -204,7 +208,7 @@ export const PACKAGE_REGISTRY = [
     groups: ['extensions'],
     ownedDirs: ['extensions/playwright'],
     tsxConfig: 'tools/playwright/tsconfig.runtime.json',
-    typecheck: { config: 'tools/playwright/tsconfig.json', compiler: 'extension/node_modules/typescript/bin/tsc' },
+    typecheck: { config: 'tools/playwright/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
     fastBatch: { batches: 2 },
   },
 ];
@@ -339,7 +343,7 @@ export function typecheckProjectFor(entry) {
 export const SHARED_TYPECHECK_PROJECT = {
   id: 'shared',
   config: 'shared/tsconfig.json',
-  compiler: 'extension/node_modules/typescript/bin/tsc',
+  compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc',
 };
 
 /** Full typecheck project list in canonical order (shared first). */
@@ -400,6 +404,7 @@ const GLOBAL_INFRA_EXACT_PATHS = new Set([
   'tools/index.ts',
   'tools/backend.ts',
   'tools/tsconfig.json',
+  'application/hosts/vscode/tsconfig.json',
 ]);
 
 /** File extensions treated as routable code for ownership checks. */

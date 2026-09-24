@@ -27,14 +27,14 @@ export interface ResolveSdkPathOptions extends CommonOptions {
   configuredPath?: string;
   cachedPath?: string;
   /**
-   * Repo-local candidate: the SDK installed as a pinned `dependencies` entry
-   * of the extension (i.e. `<extension>/node_modules/@earendil-works/pi-coding-agent`).
-   * Tried after explicit overrides (setting + env) but BEFORE the globalState
-   * cache and `npm root -g`, so the SDK version is locked to the extension's
-   * package-lock.json — cross-machine reproducible via `npm ci` and immune to
-   * a `npm i -g` upgrade silently swapping the SDK out from under the backend.
+   * Pinned SDK candidate (build-manifest path in the checkout or a package-local
+   * install). Tried after explicit overrides (setting + env) but before the
+   * globalState cache and `npm root -g`. The package owner is
+   * `application/hosts/vscode`, while an installed extension has its own root.
    */
   localCandidatePath?: string;
+  /** Additional package-root candidates, in priority order (e.g. build manifest then installed package). */
+  localCandidatePaths?: readonly string[];
   exec: CommandExecutor;
 }
 
@@ -297,8 +297,8 @@ export function resolveNodePath(options: ResolveNodePathOptions): string {
  * Candidate priority:
  *   1. `configuredPath` (`pie.sdkPath` setting — explicit override; validated)
  *   2. `PI_SDK_PATH` env var (explicit override; validated)
- *   3. `localCandidatePath` — the SDK pinned as an extension `dependency`
- *      (`<extension>/node_modules/@earendil-works/pi-coding-agent`); validated.
+ *   3. `localCandidatePath`, then `localCandidatePaths` — pinned build-manifest
+ *      SDK followed by the loaded package's own dependency; each validated.
  *      This is the portable default: version-locked by package-lock.json, so
  *      `git pull` + `npm ci` reproduces the exact SDK on every machine.
  *   4. `cachedPath` (globalState cache from a previous start, unless it points
@@ -324,10 +324,12 @@ export async function resolveSdkPath(options: ResolveSdkPathOptions): Promise<st
     return envPath;
   }
 
-  // 3. Repo-local pinned dependency (preferred over cache + npm root -g).
-  const localCandidate = options.localCandidatePath;
-  if (localCandidate && isValidSdkPath(localCandidate, exists)) {
-    return localCandidate;
+  // 3. Pinned build-manifest SDK, then the loaded package's own dependency.
+  // A stale manifest must not suppress an installed/package-local SDK.
+  for (const candidate of [options.localCandidatePath, ...(options.localCandidatePaths ?? [])]) {
+    if (candidate && isValidSdkPath(candidate, exists)) {
+      return candidate;
+    }
   }
 
   if (

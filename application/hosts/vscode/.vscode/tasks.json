@@ -4,7 +4,7 @@
 		{
 			"label": "test proxy-service-notice",
 			"type": "shell",
-			"command": "npx tsx --test test/proxy-service-notice.test.ts",
+			"command": "node ../../../scripts/run-test-files.mjs extension/test/proxy-service-notice.test.ts",
 			"args": [],
 			"problemMatcher": [
 				"$tsc"

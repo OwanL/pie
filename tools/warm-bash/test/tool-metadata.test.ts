@@ -8,7 +8,7 @@ import { registerWarmBashTool } from '../src/tool-metadata.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const sdkEntry = path.resolve(
   __dirname,
-  '../../../extension/node_modules/@earendil-works/pi-coding-agent/dist/index.js',
+  '../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/dist/index.js',
 );
 
 type ToolDefinition = {

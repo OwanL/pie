@@ -43,7 +43,7 @@ test('runWithConcurrency preserves order and limits active work', async () => {
 });
 
 test('resolveProjectCompiler resolves the registry-declared compiler owner-relatively', (t) => {
-  const extensionTsc = resolveProjectCompiler({ compiler: 'extension/node_modules/typescript/bin/tsc' });
+  const extensionTsc = resolveProjectCompiler({ compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' });
   assert.equal(extensionTsc, resolveTypeScriptCompiler());
   assert.equal(path.isAbsolute(extensionTsc), true);
   assert.equal(
@@ -72,7 +72,7 @@ test('resolveProjectCompiler resolves the registry-declared compiler owner-relat
   // if they do not provide TypeScript instead of falling back to another copy.
   assert.throws(() => resolveProjectCompiler({ compiler: '' }), /non-empty path/);
   assert.throws(
-    () => resolveProjectCompiler({ compiler: 'extension/node_modules/typescript/tsc' }),
+    () => resolveProjectCompiler({ compiler: 'application/hosts/vscode/node_modules/typescript/tsc' }),
     /must end with/,
   );
   assert.throws(

@@ -113,7 +113,7 @@ npm run test:file -- extension/test/integration/model-config-sync.test.ts
 If `extension/src/` was changed for provider-specific runtime behavior, also run the required extension build:
 
 ```bash
-cd extension
+cd application/hosts/vscode
 npm run build
 ```
 

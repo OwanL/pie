@@ -386,7 +386,7 @@ function replaceExactlyOnce(source: string, needle: string, replacement: string)
   return source.slice(0, first) + replacement + source.slice(first + needle.length);
 }
 
-function reverseDurability(source: string): string | undefined {
+export function reverseDurability(source: string): string | undefined {
   let reversed = source;
   if (reversed.includes(MALFORMED_TERMINAL_REPLACEMENT)) {
     const withoutMalformedGuard = replaceExactlyOnce(
@@ -421,7 +421,7 @@ function reverseDurability(source: string): string | undefined {
   return reversed;
 }
 
-function reverseColdCreate(source: string): string | undefined {
+export function reverseColdCreate(source: string): string | undefined {
   let reversed = source;
   const replacements: ReadonlyArray<readonly [string, string]> = [
     [COLD_CREATE_IMPORT_NEEDLE, COLD_CREATE_IMPORT_REPLACEMENT],
@@ -465,6 +465,10 @@ function reverseSessionManagerPatchStack(
     if (sha256(current) === pristine) return current;
   }
   return reverseColdCreate(current);
+}
+
+export function reversePinnedRetryForFixture(source: string): string | undefined {
+  return reverseRetry(source, RETRY_CANDIDATES[0]!);
 }
 
 function reverseRetry(source: string, candidate: RetryPatchCandidate): string | undefined {

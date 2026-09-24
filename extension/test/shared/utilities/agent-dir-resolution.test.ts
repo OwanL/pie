@@ -59,18 +59,18 @@ test('falls back to the env var when the stale setting points at a missing path'
 test('a setting dir that exists but lacks settings.json is rejected as missing-settings-json', () => {
   // The candidate dir is present (stat says directory) but has no settings.json.
   const present = new Set<string>(['/empty/dir']); // dir but no settings.json
-  // env also invalid so we fall through to extension-relative
+  // env also invalid so we fall through to the known checkout package layout.
   for (const p of dirWith('/repo/root')) present.add(p);
 
   const result = resolveAgentDir({
     configuredAgentDir: '/empty/dir',
     envAgentDir: '/also/invalid',
-    extensionPath: '/repo/root/extension',
+    extensionPath: '/repo/root/application/hosts/vscode',
     exists: makeExists(present),
   });
 
-  // The extension-relative fallback resolves to the OS absolute parent.
-  assert.equal(result.agentDir, path.resolve('/repo/root/extension', '..'));
+  // The known checkout package layout resolves to the OS absolute repo root.
+  assert.equal(result.agentDir, path.resolve('/repo/root'));
   assert.equal(result.source, 'extension-relative');
   const settingRej = result.rejections.find((r) => r.source === 'setting');
   assert.equal(settingRej?.candidate, '/empty/dir');
@@ -83,11 +83,11 @@ test('recovers via extension-relative fallback when both setting and env are sta
   const result = resolveAgentDir({
     configuredAgentDir: '/gone/setting',
     envAgentDir: '/gone/env',
-    extensionPath: '/checkout/root/extension',
+    extensionPath: '/checkout/root/application/hosts/vscode',
     exists: makeExists(present),
   });
 
-  assert.equal(result.agentDir, path.resolve('/checkout/root/extension', '..'));
+  assert.equal(result.agentDir, path.resolve('/checkout/root'));
   assert.equal(result.source, 'extension-relative');
   assert.equal(result.rejections.length, 2);
   // Both prior candidates recorded as rejected.
@@ -100,7 +100,7 @@ test('returns empty source=none when no candidate validates, with all rejections
   const result = resolveAgentDir({
     configuredAgentDir: '/gone/setting',
     envAgentDir: '/gone/env',
-    extensionPath: '/gone/ext',
+    extensionPath: '/gone/application/hosts/vscode',
     exists: () => false,
   });
 
@@ -128,13 +128,40 @@ test('uses extension-relative when no setting or env is configured', () => {
   const result = resolveAgentDir({
     configuredAgentDir: undefined,
     envAgentDir: undefined,
-    extensionPath: '/repo/extension',
+    extensionPath: '/repo/application/hosts/vscode',
     exists: makeExists(present),
   });
 
-  assert.equal(result.agentDir, path.resolve('/repo/extension', '..'));
+  assert.equal(result.agentDir, path.resolve('/repo'));
   assert.equal(result.source, 'extension-relative');
   assert.deepEqual(result.rejections, []);
+});
+
+test('an installed extension does not infer an agent dir from its parent', () => {
+  const present = dirWith('/installed/extensions');
+  const result = resolveAgentDir({
+    extensionPath: '/installed/extensions/pie-sidebar-1.0.0',
+    exists: makeExists(present),
+  });
+
+  assert.equal(result.agentDir, '');
+  assert.equal(result.source, 'none');
+  assert.deepEqual(result.rejections, []);
+});
+
+test('an explicit checkout root is tried after stale setting and env even for installed packages', () => {
+  const present = dirWith('/checkout/root');
+  const result = resolveAgentDir({
+    configuredAgentDir: '/gone/setting',
+    envAgentDir: '/gone/env',
+    checkoutRoot: '/checkout/root',
+    extensionPath: '/installed/extensions/pie-sidebar-1.0.0',
+    exists: makeExists(present),
+  });
+
+  assert.equal(result.agentDir, path.resolve('/checkout/root'));
+  assert.equal(result.source, 'extension-relative');
+  assert.deepEqual(result.rejections.map((rejection) => rejection.source), ['setting', 'env']);
 });
 
 test('whitespace-only configuredAgentDir is ignored (treated as unset)', () => {

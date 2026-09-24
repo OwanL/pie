@@ -29,14 +29,14 @@ const RUN_REAL_SDK_TESTS = process.env.PIE_RUN_INTEGRATION_TESTS === '1';
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const SDK_ENTRY = path.join(
   REPO_ROOT,
-  'extension/node_modules/@earendil-works/pi-coding-agent/dist/index.js',
+  'application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/dist/index.js',
 );
 const WORKER_SCRIPT = fileURLToPath(new URL(
   '../../../extension/test/analytics/fixtures/production-recorder-worker.mjs',
   import.meta.url,
 ));
 const WORKER_EXEC_ARGV = [
-  `--import=${new URL('../../../extension/node_modules/tsx/dist/loader.mjs', import.meta.url).href}`,
+  `--import=${new URL('../../../application/hosts/vscode/node_modules/tsx/dist/loader.mjs', import.meta.url).href}`,
 ];
 
 const ENV_KEYS = [

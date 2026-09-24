@@ -24,7 +24,7 @@ import {
 
 const workerScript = fileURLToPath(new URL('../../src/analytics/query-worker-entry.ts', import.meta.url));
 const execArgv = [
-  `--import=${new URL('../../node_modules/tsx/dist/loader.mjs', import.meta.url).href}`,
+  `--import=${new URL('../../../application/hosts/vscode/node_modules/tsx/dist/loader.mjs', import.meta.url).href}`,
 ];
 
 function settlementObservation(options: {

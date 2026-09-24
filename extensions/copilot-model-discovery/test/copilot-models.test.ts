@@ -5,7 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { parse } from '../../../extension/node_modules/yaml/dist/index.js';
+import { parse } from '../../../application/hosts/vscode/node_modules/yaml/dist/index.js';
 
 import { withCatalogLock } from '../src/catalog-lock.js';
 import { CopilotCatalogRefreshCoordinator } from '../src/catalog-refresh.js';

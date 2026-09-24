@@ -460,13 +460,6 @@ const MANAGER_REPLACEMENTS_V2: ReadonlyArray<readonly [string, string]> = [
   ...MANAGER_SEAM_REPLACEMENTS_V3,
 ];
 
-const MANAGER_REPLACEMENTS: ReadonlyArray<readonly [string, string]> = [
-  [MANAGER_IMPORT_V2, MANAGER_IMPORT_REPLACEMENT],
-  [MANAGER_HELPER_ANCHOR, MANAGER_HELPER_REPLACEMENT],
-  [MANAGER_METHODS_ANCHOR, MANAGER_METHODS_REPLACEMENT],
-  ...MANAGER_SEAM_REPLACEMENTS,
-];
-
 const MANAGER_V2_TO_V3_REPLACEMENTS: ReadonlyArray<readonly [string, string]> = [
   [MANAGER_IMPORT_V2, MANAGER_IMPORT_REPLACEMENT],
   [MANAGER_HELPER_REPLACEMENT_V2, MANAGER_HELPER_REPLACEMENT],
@@ -1176,13 +1169,20 @@ export function transformSdkSessionManagerOwnership(source: string): {
     return { result: 'unsupported-shape', source };
   }
   let transformed = source;
-  for (const [needle, replacement] of MANAGER_REPLACEMENTS) {
+  // Build the exact v2 image first, then use the same v2→v3→v4 seam
+  // upgrades as installed older managers. A separate fresh v4 replacement
+  // drifted from the upgrade path and omitted the prepared-create write lock.
+  for (const [needle, replacement] of MANAGER_REPLACEMENTS_V2) {
     const next = replaceExactlyOnce(transformed, needle, replacement);
     if (next === undefined) return { result: 'unsupported-shape', source };
     transformed = next;
   }
-  return hasAll(transformed, SDK_SESSION_MANAGER_OWNERSHIP_MARKERS)
-    ? { result: 'patched', source: transformed }
+  if (!hasAll(transformed, SDK_SESSION_MANAGER_OWNERSHIP_V2_MARKERS)) {
+    return { result: 'unsupported-shape', source };
+  }
+  const upgraded = transformSdkSessionManagerOwnership(transformed);
+  return upgraded.result !== 'unsupported-shape' && hasAll(upgraded.source, SDK_SESSION_MANAGER_OWNERSHIP_MARKERS)
+    ? { result: 'patched', source: upgraded.source }
     : { result: 'unsupported-shape', source };
 }
 

@@ -11,9 +11,9 @@
     "types": ["node"],
     "baseUrl": ".",
     "paths": {
-      "@mariozechner/pi-ai": ["../../extension/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/index.js"],
-      "typebox": ["../../extension/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox/build/index.mjs"],
-      "typebox/value": ["../../extension/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox/build/value/index.mjs"]
+      "@mariozechner/pi-ai": ["../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/index.js"],
+      "typebox": ["../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox/build/index.mjs"],
+      "typebox/value": ["../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox/build/value/index.mjs"]
     }
   },
   "include": ["./**/*.ts"],

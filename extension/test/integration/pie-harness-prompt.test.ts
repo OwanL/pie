@@ -31,6 +31,10 @@ async function loadSdkPrompt(): Promise<{
 }> {
   const modulePath = path.join(
     process.cwd(),
+    '..',
+    'application',
+    'hosts',
+    'vscode',
     'node_modules',
     '@earendil-works',
     'pi-coding-agent',

@@ -269,7 +269,7 @@ async function createMatrixFixture(dir: string, providerPort: number): Promise<{
 
 async function buildTestOwnedBackendArtifact(dir: string): Promise<string> {
   const artifactDir = path.join(dir, 'backend-artifact');
-  const viteCli = repoPath('extension', 'node_modules', 'vite', 'bin', 'vite.js');
+  const viteCli = repoPath('application', 'hosts', 'vscode', 'node_modules', 'vite', 'bin', 'vite.js');
   if (!(await exists(viteCli))) {
     throw new Error(
       `Phase 6 crash matrix needs the local Vite build tool at ${viteCli}. ` +
@@ -277,7 +277,7 @@ async function buildTestOwnedBackendArtifact(dir: string): Promise<string> {
     );
   }
   const result = spawnSync(process.execPath, [viteCli, 'build', '--mode', 'node', '--outDir', artifactDir, '--emptyOutDir'], {
-    cwd: repoPath('extension'),
+    cwd: repoPath('application', 'hosts', 'vscode'),
     encoding: 'utf8',
     timeout: STARTUP_DEADLINE_MS,
     windowsHide: true,
@@ -303,7 +303,7 @@ async function buildTestOwnedBackendArtifact(dir: string): Promise<string> {
 }
 
 function startBackend(dir: string, fixture: Awaited<ReturnType<typeof createMatrixFixture>>, backendPath: string): BackendHarness {
-  const sdkPath = repoPath('extension', 'node_modules', '@earendil-works', 'pi-coding-agent');
+  const sdkPath = repoPath('application', 'hosts', 'vscode', 'node_modules', '@earendil-works', 'pi-coding-agent');
   assert.ok(path.isAbsolute(backendPath));
   const child = spawn(process.execPath, [backendPath, '--sdkPath', sdkPath, '--cwd', fixture.workspaceA], {
     cwd: fixture.workspaceA,

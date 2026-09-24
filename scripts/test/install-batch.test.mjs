@@ -117,7 +117,8 @@ test('full install runs end-to-end against a temp repo with mocked setx/npm/pi/c
   try {
     // --- temp repo skeleton ---
     const tRepo = path.join(tmp, 'repo');
-    mkdirSync(path.join(tRepo, 'extension'), { recursive: true });
+    const hostDir = path.join(tRepo, 'application', 'hosts', 'vscode');
+    mkdirSync(hostDir, { recursive: true });
     mkdirSync(path.join(tRepo, 'scripts', 'install', 'lib'), { recursive: true });
     mkdirSync(path.join(tRepo, 'scripts', 'lib'), { recursive: true });
     cpSync(installBat, path.join(tRepo, 'install.bat'));
@@ -130,7 +131,7 @@ test('full install runs end-to-end against a temp repo with mocked setx/npm/pi/c
     writeFileSync(path.join(tRepo, '.node-version'), `${process.versions.node}\n`);
     writeFileSync(path.join(tRepo, 'package.json'), JSON.stringify({ packageManager: 'npm@9.9.9' }));
     writeFileSync(
-      path.join(tRepo, 'extension', 'package-lock.json'),
+      path.join(hostDir, 'package-lock.json'),
       JSON.stringify({ packages: { 'node_modules/@earendil-works/pi-coding-agent': { version: '9.9.9' } } }),
     );
     writeFileSync(path.join(tRepo, 'settings.json'), JSON.stringify({
@@ -139,7 +140,7 @@ test('full install runs end-to-end against a temp repo with mocked setx/npm/pi/c
     }));
     // Pre-create a vsix so the discovery + code --install-extension path runs
     // (the build shims do not produce one).
-    writeFileSync(path.join(tRepo, 'extension', 'pie-9.9.9.vsix'), '');
+    writeFileSync(path.join(hostDir, 'pie-9.9.9.vsix'), '');
 
     // --- shims (no-op + log) ---
     const shims = path.join(tmp, 'shims');

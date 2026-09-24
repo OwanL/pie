@@ -28,7 +28,7 @@ import { SQLITE_NATIVE_BUSY_TIMEOUT_MS } from '../../src/analytics/sqlite-lock-r
 const workerScript = fileURLToPath(new URL('./fixtures/recorder-supervisor-worker.cjs', import.meta.url));
 const lifecycleWorkerScript = fileURLToPath(new URL('./fixtures/recorder-supervisor-lifecycle-worker.cjs', import.meta.url));
 const sqliteWorkerScript = fileURLToPath(new URL('./fixtures/production-recorder-worker.mjs', import.meta.url));
-const sqliteWorkerExecArgv = [`--import=${new URL('../../node_modules/tsx/dist/loader.mjs', import.meta.url).href}`];
+const sqliteWorkerExecArgv = [`--import=${new URL('../../../application/hosts/vscode/node_modules/tsx/dist/loader.mjs', import.meta.url).href}`];
 const memorySpyWorkerScript = fileURLToPath(new URL('./fixtures/recorder-memory-spy-worker.mjs', import.meta.url));
 const { DatabaseSync } = createRequire(process.execPath)('node:sqlite') as {
   DatabaseSync: new (location: string, options?: { timeout?: number }) => {

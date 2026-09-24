@@ -366,7 +366,7 @@ test('registry tsx configs run through generated owner-relative overlays', () =>
 });
 
 test('typecheck compiler selection agrees with the owner-relative helper resolution', () => {
-  assert.equal(resolveTypeScriptCompiler(), path.join(repoRoot, 'extension/node_modules/typescript/bin/tsc'));
+  assert.equal(resolveTypeScriptCompiler(), path.join(repoRoot, 'application/hosts/vscode/node_modules/typescript/bin/tsc'));
   assert.equal(
     resolveTypeScriptCompiler({ dependencyOwnerRoot: path.join(repoRoot, 'analysis') }),
     path.join(repoRoot, 'analysis/node_modules/typescript/bin/tsc'),

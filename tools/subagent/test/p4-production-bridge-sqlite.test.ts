@@ -37,7 +37,7 @@ const workerScript = fileURLToPath(new URL(
   import.meta.url,
 ));
 const workerExecArgv = [
-  `--import=${new URL('../../../extension/node_modules/tsx/dist/loader.mjs', import.meta.url).href}`,
+  `--import=${new URL('../../../application/hosts/vscode/node_modules/tsx/dist/loader.mjs', import.meta.url).href}`,
 ];
 
 const generationId = 'p4-production-bridge-generation';

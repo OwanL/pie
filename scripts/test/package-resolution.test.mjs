@@ -79,8 +79,8 @@ test('resolves current and planned package roots explicitly, and pins the SDK ne
   const current = resolvePackageRoots('current');
   const planned = resolvePackageRoots('planned');
   assert.equal(current.repositoryRoot, repoRoot);
-  assert.equal(current.distributionRoot, path.join(repoRoot, 'extension'));
-  assert.equal(current.dependencyOwnerRoot, path.join(repoRoot, 'extension'));
+  assert.equal(current.distributionRoot, path.join(repoRoot, 'application', 'hosts', 'vscode'));
+  assert.equal(current.dependencyOwnerRoot, path.join(repoRoot, 'application', 'hosts', 'vscode'));
   assert.equal(planned.distributionRoot, path.join(repoRoot, 'application', 'hosts', 'vscode'));
   assert.equal(planned.dependencyOwnerRoot, path.join(repoRoot, 'application', 'hosts', 'vscode'));
   assert.throws(() => resolvePackageRoots('current', { repositoryRoot: '.' }), /absolute path/);
@@ -186,7 +186,7 @@ void [schema, element, component, types];
   const [result] = await runWithConcurrency([{
     id: 'package-resolution-compiler-proof',
     config: configPath,
-    compiler: 'extension/node_modules/typescript/bin/tsc',
+    compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc',
   }], 1);
   assert.equal(result.code, 0, result.output);
 });
@@ -309,6 +309,70 @@ test('future-root tsx overlay resolves one owner identity', () => {
   assert.equal(code, 0);
 });
 
+test('detached source and a Preact-consuming dependency share the owner require graph', { timeout: 120_000 }, async (t) => {
+  const { fixtureRoot, sourceRoot } = makeFixture(t);
+  const fakeOwner = path.join(fixtureRoot, 'owner');
+  const modules = path.join(fakeOwner, 'node_modules');
+  mkdirSync(modules, { recursive: true });
+  for (const name of ['@earendil-works/pi-coding-agent', 'preact', 'preact-render-to-string', 'typescript']) {
+    const target = path.join(modules, ...name.split('/'));
+    mkdirSync(path.dirname(target), { recursive: true });
+    symlinkSync(path.join(ownerRoot, 'node_modules', ...name.split('/')), target,
+      process.platform === 'win32' ? 'junction' : 'dir');
+  }
+  const library = path.join(modules, '@testing-library', 'preact');
+  mkdirSync(library, { recursive: true });
+  writeFileSync(path.join(library, 'package.json'), JSON.stringify({
+    name: '@testing-library/preact',
+    exports: { './hooks': { import: './hooks.mjs', require: './hooks.cjs' } },
+  }));
+  writeFileSync(path.join(library, 'hooks.cjs'), `
+const preact = require('preact');
+const hooks = require('preact/hooks');
+module.exports = { ownerOptions: preact.options, useState: hooks.useState };
+`);
+  writeFileSync(path.join(library, 'hooks.mjs'), "throw new Error('dual-package ESM branch split the Preact hooks identity');\n");
+  writeFileSync(path.join(fakeOwner, 'package.json'), JSON.stringify({ dependencies: {
+    preact: '*', 'preact-render-to-string': '*', '@testing-library/preact': '*',
+  } }));
+  const base = writeTsConfig(sourceRoot, { types: [] });
+  const sourcePath = path.join(sourceRoot, 'preact-owner-proof.tsx');
+  // DOM support comes from the new owner, not an old extension install or
+  // a node_modules ancestor of the detached source.
+  const domEntry = createOwnerRequire({ dependencyOwnerRoot: ownerRoot }).resolve('happy-dom');
+  writeFileSync(sourcePath, `
+import test from 'node:test';
+import { Window } from ${JSON.stringify(pathToFileURL(domEntry).href)};
+const window = new Window();
+globalThis.document = window.document;
+import assert from 'node:assert/strict';
+import { h, options, render } from 'preact';
+import { useState } from 'preact/hooks';
+import { act } from 'preact/test-utils';
+import renderToString from 'preact-render-to-string';
+import { ownerOptions, useState as libraryUseState } from '@testing-library/preact/hooks';
+test('dependency and detached component use the same Preact singleton', () => {
+  assert.equal(ownerOptions, options);
+  assert.equal(libraryUseState, useState);
+  const element = document.createElement('div');
+  function Component() { const [value] = libraryUseState('shared'); return h('span', null, value); }
+  act(() => render(h(Component, {}), element));
+  assert.equal(element.textContent, 'shared');
+  assert.equal(renderToString(h(Component, {})), '<span>shared</span>');
+});
+`);
+  const overlay = createTsconfigOverlay(base, { dependencyOwnerRoot: fakeOwner, includeOwnerDependencies: true });
+  t.after(() => overlay.dispose());
+  const paths = JSON.parse(readFileSync(overlay.configPath, 'utf8')).compilerOptions.paths;
+  const fakeRequire = createOwnerRequire({ dependencyOwnerRoot: fakeOwner });
+  for (const specifier of ['preact', 'preact/hooks', 'preact/test-utils', 'preact-render-to-string', '@testing-library/preact/hooks']) {
+    assert.equal(realpathSync(paths[specifier][0]), realpathSync(fakeRequire.resolve(specifier)), `${specifier} uses the require export`);
+  }
+  assert.equal(existsSync(path.join(sourceRoot, 'node_modules')), false);
+  const group = { id: 'detached-preact-proof', cwd: sourceRoot, tsxBin: tsxCli, tsxConfig: overlay.configPath, files: [path.basename(sourcePath)] };
+  assert.equal(await runGroup(group, buildTsxArgs(group)), 0);
+});
+
 test('the pinned SDK extension loader resolves both Pi spellings to one nested pi-ai identity from a future root', { timeout: 120_000 }, async (t) => {
   const { sourceRoot } = makeFixture(t);
   const extensionPath = path.join(sourceRoot, 'sdk-loader-proof.ts');
@@ -342,7 +406,7 @@ export default (pi: ExtensionAPI) => {
 
 test('the extension Vite build graphs consume helper-derived owner aliases, not hardcoded nested paths', { timeout: 120_000 }, async () => {
   const vite = await import(pathToFileURL(viteNodeEntry).href);
-  const extensionConfigPath = path.join(repoRoot, 'extension', 'vite.config.ts');
+  const extensionConfigPath = path.join(currentRoots.distributionRoot, 'vite.config.ts');
   const nodeResolved = await vite.resolveConfig({ configFile: extensionConfigPath }, 'build', 'node');
   const webviewResolved = await vite.resolveConfig({ configFile: extensionConfigPath }, 'build', 'production');
 
@@ -469,6 +533,105 @@ test('createTsconfigOverlay preserves no-baseUrl relative paths through inherite
   });
   assert.equal(result.error, undefined, result.error?.message);
   assert.equal(result.status, 0, [result.stdout, result.stderr].filter(Boolean).join('\n'));
+});
+
+test('owner dependency overlay resolves entry-less globals from a future root without changing inherited aliases or native owners', { timeout: 120_000 }, (t) => {
+  const { sourceRoot } = makeFixture(t);
+  const configDirectory = path.join(sourceRoot, 'configs');
+  mkdirSync(configDirectory, { recursive: true });
+  const baseConfigPath = writeTsConfig(sourceRoot, {});
+  const inheritedPath = path.join(configDirectory, 'inherited.json');
+  writeFileSync(inheritedPath, JSON.stringify({
+    extends: baseConfigPath,
+    compilerOptions: { types: [], paths: { 'local-alias': ['../local.ts'] } },
+  }));
+  const localPath = path.join(sourceRoot, 'local.ts');
+  writeFileSync(localPath, 'export const local: string = "ok";\n');
+  writeFileSync(path.join(sourceRoot, 'proof.ts'), "import globals from 'globals';\nimport { local } from 'local-alias';\nvoid [globals, local];\n");
+  const overlay = createTsconfigOverlay(inheritedPath, { dependencyOwnerRoot: ownerRoot, includeOwnerDependencies: true, typescript: true });
+  t.after(() => overlay.dispose());
+  const generated = JSON.parse(readFileSync(overlay.configPath, 'utf8'));
+  const paths = generated.compilerOptions.paths;
+  assert.equal(generated.compilerOptions.types, undefined, 'inherited types: [] must stay explicit');
+  assert.deepEqual(generated.compilerOptions.typeRoots, [path.join(ownerRoot, 'node_modules', '@types')],
+    'do not expose all package types when vite/client is not requested');
+  assert.equal(paths.globals[0], path.join(ownerRoot, 'node_modules', 'globals', 'index.d.ts'));
+  assert.deepEqual(paths['local-alias'], [localPath]);
+  for (const name of ['computer-use', 'playwright', 'vscode', 'node:fs']) {
+    assert.equal(paths[name], undefined, `${name} belongs to its native owner`);
+  }
+  runNode([tscCli, '--project', overlay.configPath, '--pretty', 'false'], sourceRoot);
+});
+
+test('owner dependency overlay resolves inherited node, vscode, and vite/client types for detached source', { timeout: 120_000 }, (t) => {
+  const { sourceRoot } = makeFixture(t);
+  const extraTypes = path.join(sourceRoot, 'extra-types');
+  mkdirSync(path.join(extraTypes, 'local-global'), { recursive: true });
+  writeFileSync(path.join(extraTypes, 'local-global', 'index.d.ts'), 'declare const localGlobal: string;\n');
+  writeFileSync(path.join(sourceRoot, 'proof.ts'), `
+import type { ExtensionContext } from 'vscode';
+import type { ReadStream } from 'node:fs';
+import { WebSocket } from 'ws';
+import { encode } from 'gpt-tokenizer/encoding/cl100k_base';
+import { Window } from 'happy-dom';
+declare const context: ExtensionContext;
+declare const stream: ReadStream;
+void [context, stream, import.meta.env.MODE, localGlobal, WebSocket, encode, Window];
+`);
+  const inherited = path.join(sourceRoot, 'inherited.json');
+  writeFileSync(inherited, JSON.stringify({
+    compilerOptions: { typeRoots: ['./extra-types'], types: ['local-global', 'node', 'vscode', 'vite/client'] },
+  }));
+  const configPath = path.join(sourceRoot, 'tsconfig.json');
+  writeFileSync(configPath, JSON.stringify({
+    extends: './inherited.json',
+    compilerOptions: { target: 'ES2022', module: 'ESNext', moduleResolution: 'Bundler', noEmit: true, strict: true, skipLibCheck: true },
+    include: ['./proof.ts'],
+  }));
+  const overlay = createTsconfigOverlay(configPath, { dependencyOwnerRoot: ownerRoot, includeOwnerDependencies: true, typescript: true });
+  t.after(() => overlay.dispose());
+  const generated = JSON.parse(readFileSync(overlay.configPath, 'utf8'));
+  assert.equal(generated.compilerOptions.types, undefined, 'do not replace inherited explicit types');
+  assert.ok(generated.compilerOptions.typeRoots.includes(extraTypes), 'preserve inherited type roots');
+  assert.ok(generated.compilerOptions.typeRoots.includes(path.join(ownerRoot, 'node_modules', '@types')));
+  assert.ok(generated.compilerOptions.typeRoots.includes(path.join(ownerRoot, 'node_modules')), 'vite/client is a package subpath');
+  assert.equal(generated.compilerOptions.paths.ws[0], path.join(ownerRoot, 'node_modules', '@types', 'ws', 'index.d.ts'));
+  assert.equal(generated.compilerOptions.paths['gpt-tokenizer/*'][0], path.join(ownerRoot, 'node_modules', 'gpt-tokenizer', 'esm', '*.d.ts'));
+  runNode([tscCli, '--project', overlay.configPath, '--pretty', 'false'], sourceRoot);
+});
+
+test('owner dependency overlay validates installed manifests but does not invent roots for config-only or subpath-only packages', (t) => {
+  const { fixtureRoot, sourceRoot } = makeFixture(t);
+  const fakeOwner = path.join(fixtureRoot, 'owner');
+  const modules = path.join(fakeOwner, 'node_modules');
+  mkdirSync(modules, { recursive: true });
+  for (const name of ['@earendil-works/pi-coding-agent', 'preact', 'typescript']) {
+    const from = path.join(ownerRoot, 'node_modules', ...name.split('/'));
+    const to = path.join(modules, ...name.split('/'));
+    mkdirSync(path.dirname(to), { recursive: true });
+    symlinkSync(from, to, process.platform === 'win32' ? 'junction' : 'dir');
+  }
+  const packageAt = (name, manifest) => {
+    const directory = path.join(modules, name);
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(path.join(directory, 'package.json'), JSON.stringify({ name, ...manifest }));
+    return directory;
+  };
+  packageAt('config-only', {});
+  const subpath = packageAt('subpath-only', { main: './missing.js', exports: { './feature': './feature.js' } });
+  writeFileSync(path.join(subpath, 'feature.js'), 'module.exports = 1;\n');
+  const ownerManifest = path.join(fakeOwner, 'package.json');
+  writeFileSync(ownerManifest, JSON.stringify({ dependencies: { 'config-only': '1', 'subpath-only': '1' } }));
+  const base = writeTsConfig(sourceRoot, {});
+  const makeOverlay = () => createTsconfigOverlay(base, { dependencyOwnerRoot: fakeOwner, includeOwnerDependencies: true });
+  const overlay = makeOverlay();
+  t.after(() => overlay.dispose());
+  const paths = JSON.parse(readFileSync(overlay.configPath, 'utf8')).compilerOptions.paths;
+  assert.equal(paths['config-only'], undefined);
+  assert.equal(paths['subpath-only'], undefined);
+  assert.deepEqual(paths['subpath-only/feature'], [path.join(subpath, 'feature.js')]);
+  writeFileSync(ownerManifest, JSON.stringify({ dependencies: { missing: '1' } }));
+  assert.throws(makeOverlay, /Expected missing package manifest/);
 });
 
 test('createTsconfigOverlay passes through base configs without their own paths', (t) => {

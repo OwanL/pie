@@ -2,14 +2,13 @@
 // (docs/REPOSITORY_ORGANIZATION_PLAN.md §B0/B1, manifest
 // docs/plans/repository-organization-migration-manifest.json).
 //
-// Validates that the migration manifest still covers the exact repository
-// inventory it was built from:
-//  - every tracked file and every relevant untracked source/config/docs file
-//    has a manifest record (fails on unmapped files; new own files are
-//    reported clearly as pending parent mapping, never exempted silently and
-//    never fixed by mutating the manifest from this test);
-//  - every manifest record source still exists (fails on files deleted or
-//    renamed away without a matching record for the new path);
+// Validates that the migration manifest still covers the current working-tree
+// inventory while preserving its original source identities:
+//  - every extant tracked file and every relevant untracked source/config/docs
+//    file is either a record source or an explicitly declared current location
+//    (new files are reported, never exempted or self-mapped by this test);
+//  - each record source or one of its declared current locations exists; moved
+//    sources without an extant current location fail;
 //  - target collisions are only allowed when documented in resolvedCollisions
 //    (fails on unintended collisions);
 //  - explicit `retain` records keep a single self-target (retain exception),
@@ -20,9 +19,9 @@
 //    scripts/lib/test-packages.mjs (sole routing authority): unknown code
 //    ownership fails here instead of silently classifying zero files.
 //
-// The current migration is a provisional old layout plus planned future
-// targets: this test asserts mapping integrity only and must NOT assert the
-// B8 target structure (files are not expected to exist at their targets yet).
+// The manifest preserves original source identities and planned targets. For
+// settled moves, `currentLocations` maps those original sources to extant
+// working-tree paths. Other planned targets are not required to exist yet.
 //
 // Enumeration is Git-aware (`git ls-files`); no protected tree is traversed.
 // Untracked relevance filters to source/config/docs extensions and drops
@@ -32,7 +31,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -100,16 +99,32 @@ export function isRelevantUntrackedFile(relativePath) {
 }
 
 /**
- * Collect the migration inventory: all tracked files plus relevant untracked
- * files, as sorted repo-relative forward-slash path lists.
+ * Collect the migration inventory: extant tracked files plus relevant
+ * untracked files, as sorted repo-relative forward-slash path lists.
  * @returns {{ tracked: string[], untracked: string[] }}
  */
 export function collectMigrationInventory() {
-  const tracked = listGitFiles(['ls-files', '-z']).sort();
-  const untracked = listGitFiles(['ls-files', '--others', '--exclude-standard', '-z'])
-    .filter(isRelevantUntrackedFile)
+  // `git ls-files` includes paths deleted from the working tree. Exclude those
+  // so the validator can distinguish original source identities from current
+  // locations recorded for settled moves.
+  const tracked = listGitFiles(['ls-files', '-z'])
+    .filter((file) => existsSync(path.join(repoRoot, file)))
     .sort();
-  return { tracked, untracked };
+  const untracked = new Set(listGitFiles(['ls-files', '--others', '--exclude-standard', '-z'])
+    .filter(isRelevantUntrackedFile));
+  // Some explicitly moved package assets (for example .vscodeignore and the
+  // VS Code icon) are ignored by generic untracked relevance rules. Include
+  // only their exact manifest-declared current paths; this is not a tree scan
+  // or an exemption for unrelated ignored/unmapped files.
+  for (const locations of Object.values(loadMigrationManifest().currentLocations ?? {})) {
+    if (!Array.isArray(locations)) continue;
+    for (const location of locations) {
+      if (typeof location === 'string' && !tracked.includes(location) && existsSync(path.join(repoRoot, location))) {
+        untracked.add(location);
+      }
+    }
+  }
+  return { tracked, untracked: [...untracked].sort() };
 }
 
 /**
@@ -141,6 +156,7 @@ function syntheticManifest(records, resolvedCollisions = [], trackedTestFilesByP
     recordCount: records.length,
     records,
     resolvedCollisions,
+    currentLocations: {},
     testEnumeration: {
       registryPackageIds: [...ALL_PACKAGE_IDS],
       trackedTestFilesByPackage,
@@ -200,16 +216,54 @@ export function validateMigrationInventory(manifest, inventory) {
     }
   }
 
+  // --- settled current locations --------------------------------------------
+  const currentLocationOwners = new Map();
+  const currentLocations = manifest.currentLocations ?? {};
+  const validCurrentLocations = currentLocations && typeof currentLocations === 'object' && !Array.isArray(currentLocations);
+  if (!validCurrentLocations) {
+    add('current-location-integrity', 'currentLocations must be an object keyed by original record source');
+  } else {
+    for (const [source, locations] of Object.entries(currentLocations)) {
+      if (!recordSources.has(source)) {
+        add('current-location-integrity', `currentLocations source has no manifest record: ${source}`);
+      }
+      if (!Array.isArray(locations) || locations.length === 0 || locations.some((location) => typeof location !== 'string' || location.length === 0)) {
+        add('current-location-integrity', `currentLocations for ${source} must be a non-empty array of non-empty paths`);
+        continue;
+      }
+      for (const location of locations) {
+        const protectedLocation = isTopLevelProtected(location);
+        if (protectedLocation) {
+          add('current-location-integrity', `current location sits under a protected top-level tree: ${location}`);
+        }
+        if (recordSources.has(source) && !protectedLocation) {
+          const owner = currentLocationOwners.get(location);
+          if (owner) {
+            add('current-location-collision', `current location ${location} is claimed by both ${owner} and ${source}`);
+          } else {
+            currentLocationOwners.set(location, source);
+          }
+        }
+        if (!inventorySet.has(location)) {
+          add('stale-current-location', `settled current location is absent from the working-tree inventory: ${source} -> ${location}`);
+        }
+      }
+      if (inventorySet.has(source) && !locations.includes(source)) {
+        add('duplicate-current-source', `original source and settled current location both exist: ${source} -> ${locations.join(', ')}`);
+      }
+    }
+  }
+
   // --- coverage: unmapped inventory files -----------------------------------
   const unmappedFiles = [];
   for (const file of inventory.tracked) {
-    if (!recordSources.has(file)) {
+    if (!recordSources.has(file) && !currentLocationOwners.has(file)) {
       unmappedFiles.push(file);
       add('unmapped-tracked', `tracked file has no manifest record: ${file}`);
     }
   }
   for (const file of inventory.untracked) {
-    if (!recordSources.has(file)) {
+    if (!recordSources.has(file) && !currentLocationOwners.has(file)) {
       unmappedFiles.push(file);
       add('unmapped-untracked', `relevant untracked file has no manifest record: ${file}`);
     }
@@ -217,8 +271,9 @@ export function validateMigrationInventory(manifest, inventory) {
 
   // --- stale sources (deleted / renamed away without a record) ---------------
   for (const source of recordSources) {
-    if (!inventorySet.has(source)) {
-      add('stale-source', `manifest record source is absent from the inventory (deleted or renamed without a record for the new path): ${source}`);
+    const current = validCurrentLocations ? currentLocations[source] ?? [] : [];
+    if (!inventorySet.has(source) && !(Array.isArray(current) && current.some((location) => inventorySet.has(location)))) {
+      add('stale-source', `manifest record source and all declared current locations are absent from the inventory: ${source}`);
     }
   }
 
@@ -329,8 +384,11 @@ export function validateMigrationInventory(manifest, inventory) {
 
   // --- unknown code ownership (fail/broaden, never zero) ---------------------
   for (const file of [...inventory.tracked, ...inventory.untracked]) {
-    if (isUnownedCodeSource(file)) {
-      add('unknown-ownership', `code file under no registered root (must broaden verification and be mapped, not silently zero-classified): ${file}`);
+    // A settled location inherits the routing identity of its original source;
+    // this keeps test ownership stable without exempting unrelated new paths.
+    const routingIdentity = currentLocationOwners.get(file) ?? file;
+    if (isUnownedCodeSource(routingIdentity)) {
+      add('unknown-ownership', `code file under no registered root (must broaden verification, not silently zero-classify): ${file}${routingIdentity !== file ? ` (original source: ${routingIdentity})` : ''}`);
     }
   }
 
@@ -404,6 +462,43 @@ test('synthetic: deleted record source is reported as stale', () => {
   });
   assert.equal(result.ok, false);
   assert.ok(result.problems.some((p) => p.check === 'stale-source' && p.detail.includes('extension/src/gone.ts')));
+});
+
+test('synthetic: explicit current location accounts for a moved source without suppressing unmapped files', () => {
+  const manifest = syntheticManifest([
+    syntheticRecord({ targets: ['extension/src/current-feature.ts'], owner: 'extension' }),
+  ]);
+  manifest.currentLocations = {
+    'extension/src/feature.ts': ['extension/src/current-feature.ts'],
+  };
+
+  const moved = validateMigrationInventory(manifest, {
+    tracked: [],
+    untracked: ['extension/src/current-feature.ts'],
+  });
+  assert.equal(moved.ok, true, formatProblems(moved));
+
+  const withUnmapped = validateMigrationInventory(manifest, {
+    tracked: [],
+    untracked: ['extension/src/current-feature.ts', 'extension/src/unmapped.ts'],
+  });
+  assert.equal(withUnmapped.ok, false);
+  assert.deepEqual(withUnmapped.unmappedFiles, ['extension/src/unmapped.ts']);
+
+  const missingCurrent = validateMigrationInventory(manifest, { tracked: [], untracked: [] });
+  assert.ok(missingCurrent.problems.some((p) => p.check === 'stale-current-location'));
+  assert.ok(missingCurrent.problems.some((p) => p.check === 'stale-source'));
+
+  const orphanMapping = syntheticManifest([syntheticRecord()]);
+  orphanMapping.currentLocations = {
+    'extension/src/no-record.ts': ['extension/src/unmapped.ts'],
+  };
+  const orphanResult = validateMigrationInventory(orphanMapping, {
+    tracked: ['extension/src/feature.ts'],
+    untracked: ['extension/src/unmapped.ts'],
+  });
+  assert.ok(orphanResult.problems.some((p) => p.check === 'current-location-integrity'));
+  assert.ok(orphanResult.problems.some((p) => p.check === 'unmapped-untracked'));
 });
 
 test('synthetic: rename without a record flags both the stale old path and the unmapped new path', () => {
@@ -489,16 +584,19 @@ test('synthetic: baseline test record must be retained or mapped', () => {
   });
   assert.equal(retainedResult.ok, true);
 
-  // Mapped: the baseline path is absent from the inventory (moved away) but is
-  // explicitly carried as a record source by the manifest.
+  // Mapped: the baseline identity remains its original record source while
+  // the actual test file is represented at its declared current location.
   const mapped = syntheticManifest(
     [syntheticRecord(), syntheticRecord({ source: 'old/test/location.test.mjs', targets: ['harness/test/location.test.mjs'] })],
     [],
     { scripts: ['old/test/location.test.mjs'] },
   );
+  mapped.currentLocations = {
+    'old/test/location.test.mjs': ['extension/test/location.test.mjs'],
+  };
   const mappedResult = validateMigrationInventory(mapped, {
     tracked: ['extension/src/feature.ts'],
-    untracked: [],
+    untracked: ['extension/test/location.test.mjs'],
   });
   assert.equal(mappedResult.problems.filter((p) => p.check === 'baseline-test-record').length, 0);
 

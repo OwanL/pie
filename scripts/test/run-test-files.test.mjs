@@ -27,8 +27,8 @@ test('inferRepoRoot resolves to the pie repo root', () => {
 });
 
 test('resolveLocalTsx finds the package-local tsx cli for each cwd', () => {
-  // extension and analysis ship their own tsx; extensions/* use the root one.
-  assert.match(fwd(resolveLocalTsx(path.join(repoRoot, 'extension'))), /extension\/node_modules\/tsx\/dist\/cli\.mjs$/);
+  // The host owns extension test dependencies; analysis ships its own tsx, extensions/* use root.
+  assert.match(fwd(resolveLocalTsx(path.join(repoRoot, 'application', 'hosts', 'vscode'))), /application\/hosts\/vscode\/node_modules\/tsx\/dist\/cli\.mjs$/);
   assert.match(fwd(resolveLocalTsx(path.join(repoRoot, 'analysis'))), /analysis\/node_modules\/tsx\/dist\/cli\.mjs$/);
   assert.match(fwd(resolveLocalTsx(repoRoot)), /(^|\/)node_modules\/tsx\/dist\/cli\.mjs$/);
 });
@@ -57,14 +57,14 @@ test('normalizeRepoRelative rejects paths outside the repo', () => {
   assert.throws(() => normalizeRepoRelative(repoRoot, '../outside-file.ts'), /outside the repo/);
 });
 
-test('classifyTestFile classifies extension files (cwd=extension/, no tsxConfig)', () => {
+test('classifyTestFile classifies extension files (source/test cwd remains extension/, host-owned tsxConfig)', () => {
   const d = classifyTestFile(repoRoot, 'extension/test/webview/components/app-smoke.test.ts');
   assert.equal(d.id, 'extension');
   assert.equal(fwd(d.cwd), fwd(path.join(repoRoot, 'extension')));
-  assert.equal(d.tsxConfig, undefined);
+  assert.equal(d.tsxConfig, 'application/hosts/vscode/tsconfig.json');
   assert.equal(d.repoRel, 'extension/test/webview/components/app-smoke.test.ts');
   assert.equal(d.relativeFilePath, 'test/webview/components/app-smoke.test.ts');
-  assert.match(fwd(d.tsxBin), /extension\/node_modules\/tsx\/dist\/cli\.mjs$/);
+  assert.match(fwd(d.tsxBin), /application\/hosts\/vscode\/node_modules\/tsx\/dist\/cli\.mjs$/);
 });
 
 test('classifyTestFile classifies analysis files (cwd=analysis/)', () => {
@@ -123,7 +123,7 @@ test('groupFilesByPackage groups real files by package (sorted) and sets subagen
   assert.equal(subagent.tsxConfig, 'tools/subagent/tsconfig.json');
   assert.deepEqual(subagent.files, ['tools/subagent/test/agents.test.ts']);
   const ext = groups.find((g) => g.id === 'extension');
-  assert.equal(ext.tsxConfig, undefined);
+  assert.equal(ext.tsxConfig, 'application/hosts/vscode/tsconfig.json');
   assert.deepEqual(ext.files, ['test/webview/components/app-smoke.test.ts']);
 });
 

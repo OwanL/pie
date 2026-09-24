@@ -44,12 +44,20 @@ data/proxy/
 # Note: keep lockfiles (package-lock.json, yarn.lock, pnpm-lock.yaml) tracked
 
 # Package build artifacts
+# Legacy extension-local output paths remain ignored for existing local checkouts.
 /extension/out/
 /extension/pie-runtime/
 /extension/pie-bootstrap/
 /extension/qualitas-report.json
 /extension/.qualitas.config.js
 /extension/src/-
+# VS Code host distribution/dependency outputs (source and test roots stay under /extension).
+/application/hosts/vscode/node_modules/
+/application/hosts/vscode/out/
+/application/hosts/vscode/pie-runtime/
+/application/hosts/vscode/pie-bootstrap/
+/application/hosts/vscode/qualitas-report.json
+/application/hosts/vscode/.qualitas.config.js
 /analysis/site/dist/
 *.vsix
 
@@ -116,3 +124,6 @@ NUL
 # Temporary test dirs under extension/ (may survive interrupted runs)
 /extension/.pie-sdk-*/
 /extension/.pie-phase4-*/
+# Temporary SDK/test dirs under the relocated VS Code host owner.
+/application/hosts/vscode/.pie-sdk-*/
+/application/hosts/vscode/.pie-phase4-*/
