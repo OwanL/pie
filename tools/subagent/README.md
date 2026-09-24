@@ -50,7 +50,7 @@ remains its scope.
 
 Agents are discovered automatically from both locations:
 
-- **User agents** (`~/.pi/agent/agents/`)
+- **User/global agents** (`<agent-dir>/harness/agent-instructions/agents/` in the Pie checkout/installed config; B3 relocated the authored definitions from the previous `<agent-dir>/agents/` location)
 - **Project agents** (`agents/`, project root)
 
 Starting an agent does not require confirmation. Agent invocation is routine orchestration; any tool calls the child makes remain subject to the same action-level safeguards as the parent, so dangerous operations can still be blocked or confirmed at the point of risk.

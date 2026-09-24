@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { mkdtemp, rm } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
-import type { AgentConfig } from "../agents.js";
+import type { AgentConfig } from "../../../harness/agent-instructions/agent-discovery/agents.js";
 import { buildPieSystemPrompt, type PieSystemPromptOptions } from "../../../shared/pie-harness-prompt.js";
 import { runSingleAgent, subagentRuntime } from "../runner.js";
 import { compactSingleResult } from "../src/result-compaction.js";

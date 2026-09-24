@@ -4,7 +4,7 @@
  * removed; use sibling subagent tool calls or later turns instead.
  */
 import type { ToolContext } from "./tool-context.js";
-import type { AgentConfig } from "../agents.js";
+import type { AgentConfig } from "../../../harness/agent-instructions/agent-discovery/agents.js";
 import type { OnUpdateCallback, SingleResult, SubagentDetails } from "../types.js";
 import type { SubagentRuntimeContext } from "../runner.js";
 import type { SelectionContext } from "./selection.js";

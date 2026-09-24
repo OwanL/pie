@@ -11,7 +11,7 @@ A personal stack built around the [`pi` coding agent](https://www.npmjs.com/pack
 | [`tools/`](tools/README.md) | Explicit Pie-owned tool catalog and the implementations of all nine catalog tools | Extension discovery adapters or backend-injected factories |
 | [`extensions/`](extensions) — e.g. [`skill-pruner/`](extensions/skill-pruner), [`safeguard/`](extensions/safeguard), [`cwd-skills/`](extensions/cwd-skills), [`image-context-guard/`](extensions/image-context-guard) | Pi discovery adapters and middleware (cwd-scoped skill discovery, skill pruning, command safeguards, image guarding, and more — see [`extensions/`](extensions) for the full set); tool implementations live under [`tools/`](tools/README.md) | Loaded by `pi` via `settings.json` packages |
 | [`analysis/`](analysis) | Local DuckDB query workspace over legacy run-analytics exports/stores | Internal research tool |
-| [`agents/`](agents), [`skills/`](skills), [`APPEND_SYSTEM.md`](APPEND_SYSTEM.md), [`settings.json`](settings.json) | Maintainer's personal pi config | Reference / example only |
+| [`harness/agent-instructions/`](harness/agent-instructions) — authored [`agents/`](harness/agent-instructions/agents), [`skills/`](harness/agent-instructions/skills), with [`APPEND_SYSTEM.md`](APPEND_SYSTEM.md) at the repo root, [`settings.json`](settings.json) | Maintainer's personal pi config | Reference / example only |
 | [`data/`](data), [`auth.json`](#) | Local runtime/auth data | Local-only; excluded from the portable config |
 | [`docs/`](docs) | Design contracts and plans; start at [`docs/INDEX.md`](docs/INDEX.md) | Internal |
 
@@ -299,7 +299,7 @@ npm run analytics:query -- --name core_runs
 
 Other analytics helpers from the repo root: `analytics:typecheck`, `analytics:test`, and `analytics:validate`.
 
-Runtime usage/cost questions are answered from the canonical SQLite store instead (see [Persistence and storage](#persistence-and-storage) and the [query-analytics skill](skills/query-analytics/SKILL.md)); the DuckDB workspace never reads or writes it.
+Runtime usage/cost questions are answered from the canonical SQLite store instead (see [Persistence and storage](#persistence-and-storage) and the [query-analytics skill](harness/agent-instructions/skills/query-analytics/SKILL.md)); the DuckDB workspace never reads or writes it.
 
 ## Persistence and storage
 
@@ -328,10 +328,10 @@ The backend logs resolved storage paths on startup via the `backend.ready` event
 ## More docs
 
 - [AGENTS.md](AGENTS.md) — global agent traversal and shell conventions
-- [develop-pie skill](skills/develop-pie/SKILL.md) — Pie-specific working conventions, commands, and architecture references
+- [develop-pie skill](harness/agent-instructions/skills/develop-pie/SKILL.md) — Pie-specific working conventions, commands, and architecture references
 - [docs/INDEX.md](docs/INDEX.md) — curated index of design docs and plans
 - [docs/STATE_CONTRACT.md](docs/STATE_CONTRACT.md) — authoritative host ↔ webview sync contract
 - [docs/ANALYTICS_IMPLEMENTATION_CONTRACT.md](docs/ANALYTICS_IMPLEMENTATION_CONTRACT.md) — analytics authority, data root, privacy and gated storage-cutoff contract
-- [query-analytics skill](skills/query-analytics/SKILL.md) — querying the canonical analytics store
+- [query-analytics skill](harness/agent-instructions/skills/query-analytics/SKILL.md) — querying the canonical analytics store
 - [extension/README.md](extension/README.md) — extension design philosophy
 - [analysis/README.md](analysis/README.md) — local DuckDB analytics workspace

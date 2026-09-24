@@ -4,7 +4,7 @@ This file loads globally because the Pie checkout is also Pi's configuration dir
 Follow the target repository's own instructions for its development workflow.
 
 For work on Pie itself or its Pi-based configuration, read the
-[develop-pie skill](skills/develop-pie/SKILL.md) (relative to this file) for repository
+[develop-pie skill](harness/agent-instructions/skills/develop-pie/SKILL.md) (relative to this file) for repository
 conventions, commands, and architecture references. Do not load it for unrelated
 repository work merely because Pie is the active harness.
 

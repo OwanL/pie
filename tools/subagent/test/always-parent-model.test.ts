@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { resolveModel, readAlwaysParentModel, type SelectionContext } from "../src/execute.js";
-import type { AgentConfig } from "../agents.js";
+import type { AgentConfig } from "../../../harness/agent-instructions/agent-discovery/agents.js";
 import { installProviderCapacityBridge } from "../../../shared/provider-capacity-bridge.js";
 
 const SUBAGENT_ALWAYS_PARENT_MODEL_ENV = "PIE_SUBAGENT_ALWAYS_PARENT_MODEL";

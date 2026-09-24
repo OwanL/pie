@@ -18,7 +18,7 @@ import {
 	type NestedAllowedBuckets,
 } from "../bucket-selector.js";
 import { resolveModel, type SelectionContext } from "../src/execute.js";
-import type { AgentConfig } from "../agents.js";
+import type { AgentConfig } from "../../../harness/agent-instructions/agent-discovery/agents.js";
 
 const ENV_KEYS = [NESTED_ALLOWED_BUCKETS_ENV] as const;
 const snapshot: Record<string, string | undefined> = {};

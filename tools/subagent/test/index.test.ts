@@ -18,7 +18,7 @@ import * as path from "node:path";
 import { execute, validateSubagentParams } from "../src/execute.js";
 import { subagentRuntime } from "../runner.js";
 import { MAX_DEPTH } from "../src/helpers.js";
-import type { AgentConfig } from "../agents.js";
+import type { AgentConfig } from "../../../harness/agent-instructions/agent-discovery/agents.js";
 
 const ENV_KEYS = ["PIE_SUBAGENT_MAX_DEPTH", "PIE_SUBAGENT_MAX_TREE_SESSIONS"] as const;
 const envSnapshot: Record<string, string | undefined> = {};

@@ -13,7 +13,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { runSingleAgent } from "../runner.js";
 import { OrphanCleanupRegistry, type CleanupScheduler } from "../src/cleanup.js";
-import type { AgentConfig } from "../agents.js";
+import type { AgentConfig } from "../../../harness/agent-instructions/agent-discovery/agents.js";
 
 // ---------------------------------------------------------------------------
 // Helpers

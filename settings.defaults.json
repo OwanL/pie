@@ -17,6 +17,9 @@
     "npm:pi-web-access@0.27.0",
     "npm:pi-mcp-adapter@2.20.1"
   ],
+  "skills": [
+    "harness/agent-instructions/skills"
+  ],
   "pruning": {
     "model": "gpt-5-mini",
     "provider": "github-copilot",

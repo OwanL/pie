@@ -44,9 +44,11 @@ function buildIdentityInputs(identityRoot = rootDir): string[] {
   const sourceRoot = production ? srcDir : path.join(identityRoot, 'src');
   const helperRoot = production ? repoDir : path.dirname(identityRoot);
   const buildHelpers = path.join(helperRoot, 'scripts', 'build');
+  const harnessInstructions = path.join(repoDir, 'harness', 'agent-instructions');
   return [
     ...sourceFiles(sourceRoot),
     ...(production ? sourceFiles(path.join(repoDir, 'shared')) : []),
+    ...(production && fs.existsSync(harnessInstructions) ? sourceFiles(harnessInstructions) : []),
     ...(production ? sourceFiles(path.join(identityRoot, 'runtime')) : []),
     ...(production && fs.existsSync(buildHelpers) ? sourceFiles(buildHelpers) : []),
     path.join(identityRoot, 'package.json'),

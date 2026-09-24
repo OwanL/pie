@@ -106,7 +106,7 @@ if (!(globalThis as { __PIE_INTERRUPT_HOOK_REGISTERED__?: boolean }).__PIE_INTER
 // ---------------------------------------------------------------------------
 
 const agentDir = mkdtempSync(path.join(tmpdir(), "interrupt-agents-"));
-const agentsSubdir = path.join(agentDir, "agents");
+const agentsSubdir = path.join(agentDir, "harness", "agent-instructions", "agents");
 mkdirSync(agentsSubdir, { recursive: true });
 writeFileSync(
 	path.join(agentsSubdir, "worker.md"),

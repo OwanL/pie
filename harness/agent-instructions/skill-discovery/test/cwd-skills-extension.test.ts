@@ -11,7 +11,7 @@
  * The assertions below lock in the fixed behavior and guard future refactors.
  */
 
-import test, { describe, it, before, beforeEach, afterEach } from 'node:test';
+import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import { existsSync, symlinkSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';

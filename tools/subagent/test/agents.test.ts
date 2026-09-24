@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { formatAgentList, parseBucket, type AgentConfig } from "../agents.js";
+import { formatAgentList, parseBucket, type AgentConfig } from "../../../harness/agent-instructions/agent-discovery/agents.js";
 
 // ============================================================
 // bucket parsing — INPUT TESTS
@@ -179,7 +179,7 @@ test("AgentDiscoveryResult: projectAgentsDir can be a non-null path", () => {
 // We import dynamically to handle the dependency gracefully.
 
 test("loadAgentsFromDir: non-existent directory returns empty array", async () => {
-	const { discoverAgents } = await import("../agents.js");
+	const { discoverAgents } = await import("../../../harness/agent-instructions/agent-discovery/agents.js");
 	// Use a non-existent dir via project scope
 	const tmpDir = path.join(os.tmpdir(), `pi-agent-test-nonexistent-${Date.now()}`);
 	// Ensure it doesn't exist
@@ -191,7 +191,7 @@ test("loadAgentsFromDir: non-existent directory returns empty array", async () =
 });
 
 test("loadAgentsFromDir: empty agents/ directory returns empty array", async (t) => {
-	const { discoverAgents } = await import("../agents.js");
+	const { discoverAgents } = await import("../../../harness/agent-instructions/agent-discovery/agents.js");
 	const tmpDir = path.join(os.tmpdir(), `pi-agent-test-empty-${Date.now()}`);
 	const agentsDir = path.join(tmpDir, "agents");
 	fs.mkdirSync(agentsDir, { recursive: true });
@@ -203,7 +203,7 @@ test("loadAgentsFromDir: empty agents/ directory returns empty array", async (t)
 });
 
 test("loadAgentsFromDir: discovers valid .md agent files", async (t) => {
-	const { discoverAgents } = await import("../agents.js");
+	const { discoverAgents } = await import("../../../harness/agent-instructions/agent-discovery/agents.js");
 	const tmpDir = path.join(os.tmpdir(), `pi-agent-test-valid-${Date.now()}`);
 	const agentsDir = path.join(tmpDir, "agents");
 	fs.mkdirSync(agentsDir, { recursive: true });
@@ -228,7 +228,7 @@ You are a test worker.
 });
 
 test("loadAgentsFromDir: skips .md files without required frontmatter", async (t) => {
-	const { discoverAgents } = await import("../agents.js");
+	const { discoverAgents } = await import("../../../harness/agent-instructions/agent-discovery/agents.js");
 	const tmpDir = path.join(os.tmpdir(), `pi-agent-test-skip-${Date.now()}`);
 	const agentsDir = path.join(tmpDir, "agents");
 	fs.mkdirSync(agentsDir, { recursive: true });
@@ -262,7 +262,7 @@ body
 });
 
 test("loadAgentsFromDir: handles non-.md files being ignored", async (t) => {
-	const { discoverAgents } = await import("../agents.js");
+	const { discoverAgents } = await import("../../../harness/agent-instructions/agent-discovery/agents.js");
 	const tmpDir = path.join(os.tmpdir(), `pi-agent-test-ext-${Date.now()}`);
 	const agentsDir = path.join(tmpDir, "agents");
 	fs.mkdirSync(agentsDir, { recursive: true });
@@ -284,7 +284,7 @@ body
 });
 
 test("loadAgentsFromDir: handles symlinks to agent files", async (t) => {
-	const { discoverAgents } = await import("../agents.js");
+	const { discoverAgents } = await import("../../../harness/agent-instructions/agent-discovery/agents.js");
 	const tmpDir = path.join(os.tmpdir(), `pi-agent-test-symlink-${Date.now()}`);
 	const agentsDir = path.join(tmpDir, "agents");
 	fs.mkdirSync(agentsDir, { recursive: true });
@@ -314,7 +314,7 @@ body
 });
 
 test("loadAgentsFromDir: handles unreadable files gracefully", async (t) => {
-	const { discoverAgents } = await import("../agents.js");
+	const { discoverAgents } = await import("../../../harness/agent-instructions/agent-discovery/agents.js");
 	const tmpDir = path.join(os.tmpdir(), `pi-agent-test-unreadable-${Date.now()}`);
 	const agentsDir = path.join(tmpDir, "agents");
 	fs.mkdirSync(agentsDir, { recursive: true });
@@ -337,7 +337,7 @@ body
 });
 
 test("loadAgentsFromDir: readdirSync failure returns empty array", async (t) => {
-	const { discoverAgents } = await import("../agents.js");
+	const { discoverAgents } = await import("../../../harness/agent-instructions/agent-discovery/agents.js");
 	const tmpDir = path.join(os.tmpdir(), `pi-agent-test-readdir-fail-${Date.now()}`);
 	fs.mkdirSync(tmpDir, { recursive: true });
 	// Make `<agentDir>/agents` a FILE rather than a directory: existsSync passes
@@ -359,7 +359,7 @@ test("loadAgentsFromDir: readdirSync failure returns empty array", async (t) => 
 // ============================================================
 
 test("discoverAgents: 'both' scope lets project agents override user agents with the same name", async (t) => {
-	const { discoverAgents } = await import("../agents.js");
+	const { discoverAgents } = await import("../../../harness/agent-instructions/agent-discovery/agents.js");
 	// Control the user-agent directory via PI_CODING_AGENT_DIR so we can place a
 	// user-level "worker" and assert the project-level one overrides it.
 	const userDir = path.join(os.tmpdir(), `pi-agent-test-both-user-${Date.now()}`);
@@ -396,7 +396,7 @@ body
 });
 
 test("discoverAgents: 'user' scope ignores project agents entirely", async (t) => {
-	const { discoverAgents } = await import("../agents.js");
+	const { discoverAgents } = await import("../../../harness/agent-instructions/agent-discovery/agents.js");
 	const tmpDir = path.join(os.tmpdir(), `pi-agent-test-user-scope-${Date.now()}`);
 	const agentsDir = path.join(tmpDir, "agents");
 	fs.mkdirSync(agentsDir, { recursive: true });
@@ -415,7 +415,7 @@ body
 });
 
 test("discoverAgents: 'project' scope ignores user agents entirely", async (t) => {
-	const { discoverAgents } = await import("../agents.js");
+	const { discoverAgents } = await import("../../../harness/agent-instructions/agent-discovery/agents.js");
 	const tmpDir = path.join(os.tmpdir(), `pi-agent-test-proj-scope-${Date.now()}`);
 	const agentsDir = path.join(tmpDir, "agents");
 	fs.mkdirSync(agentsDir, { recursive: true });
@@ -439,7 +439,7 @@ body
 // ============================================================
 
 test("findNearestProjectAgentsDir: returns null when no agents/ found", async () => {
-	const { discoverAgents } = await import("../agents.js");
+	const { discoverAgents } = await import("../../../harness/agent-instructions/agent-discovery/agents.js");
 	const tmpDir = path.join(os.tmpdir(), `pi-agent-test-no-dir-${Date.now()}`);
 	fs.mkdirSync(tmpDir, { recursive: true });
 
@@ -449,7 +449,7 @@ test("findNearestProjectAgentsDir: returns null when no agents/ found", async ()
 });
 
 test("findNearestProjectAgentsDir: finds agents/ in current dir", async (t) => {
-	const { discoverAgents } = await import("../agents.js");
+	const { discoverAgents } = await import("../../../harness/agent-instructions/agent-discovery/agents.js");
 	const tmpDir = path.join(os.tmpdir(), `pi-agent-test-current-${Date.now()}`);
 	const agentsDir = path.join(tmpDir, "agents");
 	fs.mkdirSync(agentsDir, { recursive: true });
@@ -461,7 +461,7 @@ test("findNearestProjectAgentsDir: finds agents/ in current dir", async (t) => {
 });
 
 test("findNearestProjectAgentsDir: finds agents/ in parent dir", async (t) => {
-	const { discoverAgents } = await import("../agents.js");
+	const { discoverAgents } = await import("../../../harness/agent-instructions/agent-discovery/agents.js");
 	const tmpDir = path.join(os.tmpdir(), `pi-agent-test-parent-${Date.now()}`);
 	const agentsDir = path.join(tmpDir, "agents");
 	fs.mkdirSync(agentsDir, { recursive: true });
@@ -487,7 +487,7 @@ test("findNearestProjectAgentsDir: finds agents/ in parent dir", async (t) => {
 // must surface its agents. This is the multi-repo workspace scenario.
 
 test("discoverAgents: array cwd lets a nested project's agents be found from a parent workspace root", async (t) => {
-	const { discoverAgents } = await import("../agents.js");
+	const { discoverAgents } = await import("../../../harness/agent-instructions/agent-discovery/agents.js");
 	const workspaceDir = path.join(os.tmpdir(), `pi-agent-test-ws-${Date.now()}`);
 	fs.mkdirSync(workspaceDir, { recursive: true });
 	const projectDir = path.join(workspaceDir, "pie");
@@ -508,7 +508,7 @@ test("discoverAgents: array cwd lets a nested project's agents be found from a p
 });
 
 test("discoverAgents: array cwd dedupes the same agents/ dir reached via two cwds", async (t) => {
-	const { discoverAgents } = await import("../agents.js");
+	const { discoverAgents } = await import("../../../harness/agent-instructions/agent-discovery/agents.js");
 	const projectDir = path.join(os.tmpdir(), `pi-agent-test-dedup-${Date.now()}`);
 	const agentsDir = path.join(projectDir, "agents");
 	fs.mkdirSync(agentsDir, { recursive: true });
@@ -523,7 +523,7 @@ test("discoverAgents: array cwd dedupes the same agents/ dir reached via two cwd
 });
 
 test("discoverAgents: with multiple distinct project dirs, first cwd's nearest dir wins", async (t) => {
-	const { discoverAgents } = await import("../agents.js");
+	const { discoverAgents } = await import("../../../harness/agent-instructions/agent-discovery/agents.js");
 	const root = path.join(os.tmpdir(), `pi-agent-test-multidir-${Date.now()}`);
 	const projA = path.join(root, "a");
 	const projB = path.join(root, "b");
@@ -543,7 +543,7 @@ test("discoverAgents: with multiple distinct project dirs, first cwd's nearest d
 });
 
 test("discoverAgents: string cwd still works (backward compatible)", async (t) => {
-	const { discoverAgents } = await import("../agents.js");
+	const { discoverAgents } = await import("../../../harness/agent-instructions/agent-discovery/agents.js");
 	const tmpDir = path.join(os.tmpdir(), `pi-agent-test-strcwd-${Date.now()}`);
 	const agentsDir = path.join(tmpDir, "agents");
 	fs.mkdirSync(agentsDir, { recursive: true });
@@ -557,7 +557,7 @@ test("discoverAgents: string cwd still works (backward compatible)", async (t) =
 });
 
 test("loadAgentsFromDir: ignores legacy thinkingLevel frontmatter while parsing bucket", async (t) => {
-	const { discoverAgents } = await import("../agents.js");
+	const { discoverAgents } = await import("../../../harness/agent-instructions/agent-discovery/agents.js");
 	const tmpDir = path.join(os.tmpdir(), `pi-agent-test-bucket-${Date.now()}`);
 	const agentsDir = path.join(tmpDir, "agents");
 	fs.mkdirSync(agentsDir, { recursive: true });
@@ -579,7 +579,7 @@ body
 });
 
 test("loadAgentsFromDir: invalid bucket is ignored", async (t) => {
-	const { discoverAgents } = await import("../agents.js");
+	const { discoverAgents } = await import("../../../harness/agent-instructions/agent-discovery/agents.js");
 	const tmpDir = path.join(os.tmpdir(), `pi-agent-test-badbucket-${Date.now()}`);
 	const agentsDir = path.join(tmpDir, "agents");
 	fs.mkdirSync(agentsDir, { recursive: true });
@@ -599,7 +599,7 @@ body
 });
 
 test("loadAgentsFromDir: an explicit empty canSpawn list blocks all delegation", async (t) => {
-	const { discoverAgents } = await import("../agents.js");
+	const { discoverAgents } = await import("../../../harness/agent-instructions/agent-discovery/agents.js");
 	const tmpDir = path.join(os.tmpdir(), `pi-agent-test-empty-can-spawn-${Date.now()}`);
 	const agentsDir = path.join(tmpDir, "agents");
 	fs.mkdirSync(agentsDir, { recursive: true });
@@ -623,7 +623,7 @@ body
 });
 
 test("loadAgentsFromDir: explicit empty tools string remains a zero-tool allowlist", async (t) => {
-	const { discoverAgents } = await import("../agents.js");
+	const { discoverAgents } = await import("../../../harness/agent-instructions/agent-discovery/agents.js");
 	const tmpDir = path.join(os.tmpdir(), `pi-agent-test-empty-tools-${Date.now()}`);
 	const agentsDir = path.join(tmpDir, "agents");
 	fs.mkdirSync(agentsDir, { recursive: true });
@@ -644,7 +644,7 @@ body
 });
 
 test("loadAgentsFromDir: whitespace-only tools remains a zero-tool allowlist", async (t) => {
-	const { discoverAgents } = await import("../agents.js");
+	const { discoverAgents } = await import("../../../harness/agent-instructions/agent-discovery/agents.js");
 	const tmpDir = path.join(os.tmpdir(), `pi-agent-test-ws-tools-${Date.now()}`);
 	const agentsDir = path.join(tmpDir, "agents");
 	fs.mkdirSync(agentsDir, { recursive: true });

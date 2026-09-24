@@ -24,7 +24,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ['application/hosts/vscode/**/*.{ts,tsx,cts,mts}', 'extension/{src,test}/**/*.{ts,tsx,cts,mts}'],
+    files: ['application/hosts/vscode/**/*.{ts,tsx,cts,mts}', 'extension/{src,test}/**/*.{ts,tsx,cts,mts}', 'harness/agent-instructions/**/*.{ts,tsx,cts,mts}'],
     extends: [js.configs.recommended, ...tseslint.configs.recommended],
     languageOptions: {
       ecmaVersion: 'latest',

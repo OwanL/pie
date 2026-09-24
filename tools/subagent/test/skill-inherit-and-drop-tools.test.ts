@@ -12,7 +12,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { Model, ModelRegistry } from "@mariozechner/pi-coding-agent";
 import { runSingleAgent, subagentRuntime } from "../runner.js";
-import type { AgentConfig } from "../agents.js";
+import type { AgentConfig } from "../../../harness/agent-instructions/agent-discovery/agents.js";
 import { recordKeptSkills, clearKeptSkills, readKeptSkills } from "../../../shared/pruned-skills.js";
 
 interface CapturingState {

@@ -13,7 +13,7 @@
  * imports either of them, so there is no cycle.
  */
 
-import type { AgentConfig } from "../agents.js";
+import type { AgentConfig } from "../../../harness/agent-instructions/agent-discovery/agents.js";
 import type { ModelRequirements, SingleResult } from "../types.js";
 import {
 	type ThinkingLevel,

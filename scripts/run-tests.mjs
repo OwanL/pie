@@ -59,8 +59,8 @@ const PACKAGE_TEST_METADATA = {
     coverage: false,
   },
   'cwd-skills': {
-    testGlobs: ['extensions/cwd-skills/test/**/*.test.ts'],
-    coverageIncludes: ['extensions/cwd-skills/index.ts'],
+    testGlobs: ['harness/agent-instructions/skill-discovery/test/**/*.test.ts'],
+    coverageIncludes: ['harness/agent-instructions/skill-discovery/index.ts'],
     thresholds: { lines: 95, branches: 95 },
   },
   safeguard: {

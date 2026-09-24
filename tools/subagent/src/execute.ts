@@ -10,7 +10,7 @@ import { realRetryClock, type RetryClock, zeroUsage } from "./retry.js";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { readKeptSkills } from "../../../shared/pruned-skills.js";
-import { type AgentConfig, type AgentScope, discoverAgents } from "../agents.js";
+import { type AgentConfig, type AgentScope, discoverAgents } from "../../../harness/agent-instructions/agent-discovery/agents.js";
 import {
 	readRuntimeContext,
 	consumeTreeSlot,
@@ -413,9 +413,10 @@ export async function execute(
 	// which may sit ABOVE the actual project (e.g. a multi-repo workspace whose
 	// `agents/` lives in a subdirectory). Include each per-task `cwd` so a caller
 	// can point at a nested project root and have its agents discovered.
-	// CONFIG_ROOT (this repo) is included as a stable fallback so project agents
-	// are discoverable even when the session cwd has no `agents/` dir and
-	// PI_CODING_AGENT_DIR is unset (e.g. a session launched from System32).
+	// CONFIG_ROOT (this repo) is included as a stable walk-up anchor. Since the
+	// B3 authored-resource relocation, this repo's own agent definitions load
+	// from the user/global loader (<agentDir>/harness/agent-instructions/agents);
+	// generic project `agents/` walk-up from the session cwd is unchanged.
 	const discoveryCwds = [ctx.cwd, CONFIG_ROOT];
 	if (params.cwd) discoveryCwds.push(params.cwd);
 	const discovery = discoverAgents(discoveryCwds, DEFAULT_AGENT_SCOPE);

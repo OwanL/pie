@@ -368,5 +368,5 @@ See [`docs/STATE_CONTRACT.md`](STATE_CONTRACT.md) for additional invariants (sna
 - [`docs/STATE_CONTRACT_IMPLEMENTATION.md`](STATE_CONTRACT_IMPLEMENTATION.md) — transport/protocol mechanics, byte budgets, and file mappings behind those invariants
 - [`docs/STATE_CONTRACT_HISTORY.md`](STATE_CONTRACT_HISTORY.md) — completed remediation chronology
 - [`docs/internal/ARCH-OVERVIEW.md`](internal/ARCH-OVERVIEW.md) — concise file map and glossary
-- [develop-pie skill](../skills/develop-pie/SKILL.md) — Pie-specific conventions, test commands, and build instructions
+- [develop-pie skill](../harness/agent-instructions/skills/develop-pie/SKILL.md) — Pie-specific conventions, test commands, and build instructions
 - Git history (commit `d581d83`) — original migration plan

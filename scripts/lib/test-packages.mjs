@@ -76,7 +76,7 @@ export const PACKAGE_REGISTRY = [
   {
     id: 'extension',
     dir: 'application/hosts/vscode',
-    sourceRoots: ['extension'],
+    sourceRoots: ['extension', 'harness/agent-instructions/prompt-assembly'],
     testRoots: ['extension/test'],
     testDir: 'extension/test',
     testCwd: 'extension',
@@ -109,7 +109,12 @@ export const PACKAGE_REGISTRY = [
   {
     id: 'cwd-skills',
     dir: 'extensions/cwd-skills',
-    typecheck: { config: 'extensions/cwd-skills/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
+    // B3: the implementation, tests, and typecheck project moved to
+    // harness/agent-instructions/skill-discovery; the stable root SDK entry
+    // stays in extensions/cwd-skills as a thin adapter.
+    ownedDirs: ['harness/agent-instructions/skill-discovery'],
+    testDir: 'harness/agent-instructions/skill-discovery/test',
+    typecheck: { config: 'harness/agent-instructions/skill-discovery/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
     fastConcurrency: 3,
   },
   {
@@ -129,7 +134,7 @@ export const PACKAGE_REGISTRY = [
     id: 'subagent',
     dir: 'tools/subagent',
     groups: ['extensions'],
-    ownedDirs: ['extensions/subagent'],
+    ownedDirs: ['extensions/subagent', 'harness/agent-instructions/agent-discovery'],
     tsxConfig: 'tools/subagent/tsconfig.json',
     typecheck: { config: 'tools/subagent/tsconfig.release.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
     fastBatch: { batches: 4 },

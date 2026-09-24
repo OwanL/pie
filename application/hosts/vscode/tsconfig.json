@@ -24,6 +24,6 @@
       "@earendil-works/pi-coding-agent": ["./node_modules/@earendil-works/pi-coding-agent"]
     }
   },
-  "include": ["../../../extension/src/**/*", "../../../extension/test/**/*", "vite.config.ts", "../../../scripts/build/**/*.mjs"],
+  "include": ["../../../extension/src/**/*", "../../../extension/test/**/*", "../../../harness/agent-instructions/**/*", "vite.config.ts", "../../../scripts/build/**/*.mjs"],
   "exclude": ["node_modules", "out"]
 }

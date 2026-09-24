@@ -5,7 +5,7 @@
 > architecture decision, and durability verification.
 >
 > One of three **context-lean layers** in this stack (see the [develop-pie skill's
-> context-lean terminology](../skills/develop-pie/SKILL.md#context-lean-terminology)):
+> context-lean terminology](../harness/agent-instructions/skills/develop-pie/SKILL.md#context-lean-terminology)):
 > **history compaction** (pi — LLM-summarize old messages; past),
 > **skill pruning** (pie `skill-pruner` — drop skills/tools from the catalog;
 > prepass), **tool-result pruning** (this — prune a tool result's bytes;

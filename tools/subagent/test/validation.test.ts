@@ -17,7 +17,7 @@ import {
 	formatAvailableAgents,
 	summarizeInvalidAgentResults,
 } from "../validation.js";
-import type { AgentConfig } from "../agents.js";
+import type { AgentConfig } from "../../../harness/agent-instructions/agent-discovery/agents.js";
 
 // --- Fixtures ---
 

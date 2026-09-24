@@ -19,7 +19,7 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { discoverAgents } from "../agents.js";
+import { discoverAgents } from "../../../harness/agent-instructions/agent-discovery/agents.js";
 import { SubagentParams, prepareSubagentArguments } from "../schema.js";
 import { renderSubagentCall, renderSubagentResult } from "../render.js";
 import { execute } from "./execute.js";

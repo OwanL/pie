@@ -69,7 +69,7 @@ test('Pie base uses the approved static wording and preserves live SDK tool sect
   assert.ok(result.includes(`Available tools:\n- read: ${dynamicSnippet}`));
   assert.ok(result.includes(`Tool guidance:\n- ${dynamicGuideline}`));
   assert.ok(result.includes('Harness documentation\nConsult harness documentation only when the task concerns Pie or its underlying Pi runtime.'));
-  assert.ok(result.includes('- For Pie development or configuration, load: C:/pie/skills/develop-pie/SKILL.md'));
+  assert.ok(result.includes('- For Pie development or configuration, load: C:/pie/harness/agent-instructions/skills/develop-pie/SKILL.md'));
   assert.ok(result.includes('Read the full normative contract when changing its invariants.'));
   assert.ok(result.includes('Stop when the relevant requirements and constraints are understood.'));
   assert.doesNotMatch(result, /Read relevant (?:documents|docs) completely/u);

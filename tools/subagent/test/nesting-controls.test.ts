@@ -6,6 +6,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { subagentRuntime, getMaxDepth, getMaxTreeSessions, consumeTreeSlot, DEFAULT_MAX_DEPTH, DEFAULT_MAX_TREE_SESSIONS } from "../runner.js";
 import { disallowedByCanSpawn, execute, resolveTreeSubagentProviderToggles } from "../src/execute.js";
 import { MAX_DEPTH } from "../src/helpers.js";
@@ -22,11 +24,19 @@ const ENV_KEYS = [
 	"PIE_SUBAGENT_PROVIDER_DEFAULTS_JSON",
 	"PIE_SUBAGENT_PROVIDER_TOGGLES_BY_SESSION_JSON",
 	SUBAGENT_BUCKET_CAN_SPAWN_ENV,
+	// B3 relocated the authored agent definitions to
+	// <agent-dir>/harness/agent-instructions/agents; tests that exercise
+	// discovery-driven execution pin the agent dir to this repo instead of
+	// inheriting an unrelated machine/global agent dir.
+	"PI_CODING_AGENT_DIR",
 ] as const;
 const snapshot: Record<string, string | undefined> = {};
 
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+
 test.before(() => {
 	for (const key of ENV_KEYS) snapshot[key] = process.env[key];
+	process.env.PI_CODING_AGENT_DIR = REPO_ROOT;
 });
 test.after(() => {
 	for (const key of ENV_KEYS) {

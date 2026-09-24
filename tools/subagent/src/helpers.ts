@@ -2,7 +2,7 @@
  * Helper utilities for the subagent extension.
  */
 
-import type { AgentScope } from "../agents.js";
+import type { AgentScope } from "../../../harness/agent-instructions/agent-discovery/agents.js";
 import type { SingleResult, SubagentDetails } from "../types.js";
 
 /** Cap on sub-agent sessions spawned within a single subagent tool call (one reply). */

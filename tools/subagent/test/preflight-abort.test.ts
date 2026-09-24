@@ -12,7 +12,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { inflightSemaphore, Semaphore } from "../src/concurrency-limit.js";
 import { runSingleAgent } from "../runner.js";
-import type { AgentConfig } from "../agents.js";
+import type { AgentConfig } from "../../../harness/agent-instructions/agent-discovery/agents.js";
 
 // ---- helpers (mirror execution-paths.test.ts shapes) ------------------------
 

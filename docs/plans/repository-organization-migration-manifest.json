@@ -31,9 +31,10 @@
  },
  "executionProgress": {
   "checkpointDate": "2026-09-24",
-  "milestone": "B2",
-  "status": "B2 complete; exit accepted. B3 not started. 17 distribution/config/runtime/build-helper moves settled at their target paths",
-  "scope": "B2 exit-accepted checkpoint: the 17 tracked VS Code distribution/config/runtime assets and build helpers are at their target paths and recorded in currentLocations; locked npm ci installs ran at the new owner; the package gate (real VSIX, extracted entries, packaged isolated backend 2/2 with a minimal-settings fixture using no external packages) passed; the final full verification gate passed — model drift, all 17 typecheck projects, lint, and the non-publishing build, plus a settled-tree full npm run test:all rerun exiting 0 with 7/7 groups, 7,437 passed / 0 failed / 35 skipped (markdown-rendering initially failed and passed on a selective rerun, so the pass is not pristine); the required final extension:build passed with staged runtime generation b076b8b9034b1a20d3cdbdf2f5fbc22ada3944083856ac5874c713055a544af2 and renderer build ID 751a37955834f94abd94, staged only — not loaded/live, no installed-host restart. No source or test was relocated. B3 has not started.",
+  "acceptanceDate": "2026-09-25",
+  "milestone": "B3",
+  "status": "B3 complete / exit accepted (2026-09-25): all plan B3 gates were met by the recorded verification results and the B3 milestone is committed. B2 complete / exit accepted.",
+  "scope": "B3 authored skill/agent bundle relocation implemented (not exit-accepted): all nine tracked Pie skill bundles, the three authored agent definitions, the subagent agent-discovery loader, the cwd-skills implementation, and the three prompt-assembly modules moved to harness/agent-instructions per manifest targets; settings.json and settings.defaults.json gained the global `skills` array entry `harness/agent-instructions/skills`; root AGENTS.md and APPEND_SYSTEM.md kept; live documentation and prompt links updated; real pinned-SDK discovery verified through the SettingsManager→PackageManager→loadSkills pipeline. Temporary compatibility re-export shims remain at three retired old paths with explicit removal owners. No pushes, loader activation, or host restarts. Exit acceptance: the plan-required B3 gates (real SDK load/reload, global/project precedence and exclusions, tool package resources, cold inventory, hot worker and subagent discovery; identical catalog/precedence, no double prompt injection, no bundle fragmentation) were each met by the results recorded in implemented.b3VerificationGate, and the B3 milestone commit followed. Staged-not-live remains a recorded limitation, not an unmet gate.",
   "inventory": {
    "baselineTrackedSourcesCovered": 1778,
    "ownedPostBaselineSources": [
@@ -50,12 +51,13 @@
     "extension/test/build-identity.test.ts",
     "scripts/test/build-typecheck.test.mjs"
    ],
-   "sourceRecordCount": 1785,
+   "sourceRecordCount": 1786,
    "validation": "B1 snapshot: all 1778 tracked paths plus six explicitly owned relevant untracked additions had one source record each. The baseline trackedTestFilesByPackage arrays remain unchanged and immutable. Current B2 working-tree paths for settled moves are mapped separately by currentLocations; original source paths and baseline test identities are preserved. B2 addition: the new scripts/test/build-typecheck.test.mjs record brings the manifest to 1,785 source records; the only relevant untracked working-tree additions are the 11 declared current locations under application/hosts/vscode/ and this new record's source.",
    "currentGitStatus": {
     "recordedAt": "2026-09-24",
-    "head": "feb037ffa580873686fb0565bf2f6a2a4e2ff135",
-    "summary": "94 modified tracked files; the 17 settled moves appear as 11 working-tree deletions of VS Code host assets plus 6 staged extension/scripts -> scripts/build renames, all recorded in currentLocations; untracked additions are application/hosts/vscode/ (exactly the 11 declared current locations) and scripts/test/build-typecheck.test.mjs (new B2 record above). No further source or test relocation; user-owned settings.json edits remain excluded from migration."
+    "note": "Snapshot at B3 working-tree completion, before the B3 milestone commit; the commit landed all 41 settled moves, migration-owned settings skills entries, routing, tests, docs, and plan artifacts on top of ea74351f, excluding user-owned settings.json field values.",
+    "head": "ea74351f (B2 commit) — B3 work in the working tree, uncommitted",
+    "summary": "B3 settled moves appear as 41 git renames (3 agent definitions, 9 skill bundles / 41 files total including the cwd-skills implementation set, the subagent agent-discovery loader, and the three prompt-assembly modules), recorded in currentLocations; the three prompt-assembly originals and the retained cwd-skills entry remain as thin compatibility shims at their record-source paths; extensions/cwd-skills keeps only its stable SDK entry; user-owned settings.json edits are excluded from migration except the migration-owned `skills` array entry added by B3."
    }
   },
   "implemented": {
@@ -86,32 +88,215 @@
    "sdkFreshPatch": "Low-risk SDK fresh-patch fix applied at the new owner with package-lock and version pins unchanged; the affected 42 backend/SDK-patch tests were repeated and passed (2026-09-24).",
    "ownerBuildOverlayAndRunnerFixes": "New-owner clean build through the generated tsconfig overlay plus the Preact identity and fast-runner fixes passed focused regressions (2026-09-24); the build remains staged, not live.",
    "relocationDisposition": "No source or test relocation in B2: application source and test files remain at their original paths, with source/test relocation mappings rebatched to their owning B7/B8 work. Builds are staged only — no loader activation and no installed-host restart. User-owned settings.json edits are excluded from migration and remain untouched.",
-   "finalVerificationGate": "Final broad gate at the current integration (2026-09-24): model drift, typecheck (all 17 projects), lint, and the non-publishing build passed; the earlier pre-accounting-guard-fix run also passed npm test 7/7 groups (7,436 passed / 35 skipped, no failures, cancels, or reruns). The concluding settled-tree full npm run test:all rerun exited 0 with 7/7 groups, 7,437 passed / 0 failed / 35 skipped; the markdown-rendering group initially failed and passed on a selective rerun, so the pass is not pristine. The required final extension:build also passed: staged runtime generation b076b8b9034b1a20d3cdbdf2f5fbc22ada3944083856ac5874c713055a544af2, renderer build ID 751a37955834f94abd94; staged only — not loaded/live, no installed-host restart."
+   "finalVerificationGate": "Final broad gate at the current integration (2026-09-24): model drift, typecheck (all 17 projects), lint, and the non-publishing build passed; the earlier pre-accounting-guard-fix run also passed npm test 7/7 groups (7,436 passed / 35 skipped, no failures, cancels, or reruns). The concluding settled-tree full npm run test:all rerun exited 0 with 7/7 groups, 7,437 passed / 0 failed / 35 skipped; the markdown-rendering group initially failed and passed on a selective rerun, so the pass is not pristine. The required final extension:build also passed: staged runtime generation b076b8b9034b1a20d3cdbdf2f5fbc22ada3944083856ac5874c713055a544af2, renderer build ID 751a37955834f94abd94; staged only — not loaded/live, no installed-host restart.",
+   "b3AuthoredResources": {
+    "moves": "All nine tracked skill bundles moved intact to harness/agent-instructions/skills/<name>/** (including codebase-maintenance Python scripts/tests and .ignore, pie-logs Python, and collaborative-development references); agents/{reviewer,scout,worker}.md moved to harness/agent-instructions/agents/; tools/subagent/agents.ts moved to harness/agent-instructions/agent-discovery/agents.ts (user/global loader now resolves <agentDir>/harness/agent-instructions/agents while generic project `agents/` walk-up and project-over-user precedence are unchanged); extensions/cwd-skills implementation, README, test, and tsconfig moved to harness/agent-instructions/skill-discovery with the stable root extensions/cwd-skills/index.ts rewritten as a thin delegating adapter; shared/pie-harness-prompt.ts, extension/src/backend/system-prompts.ts, and extension/src/backend/context-files.ts moved to harness/agent-instructions/prompt-assembly/ with temporary re-export shims at the old paths (removal owners: shared/ shim retires with the shared/ root in B8; extension/src/backend shims retire with that root in B5/B7; no tools/subagent shim was used — its six importers point directly at the canonical loader).",
+    "settings": "settings.json and settings.defaults.json gained `skills: [\"harness/agent-instructions/skills\"]` (agent-dir-relative, merged with existing fields per the SDK override semantics: plain array entries load paths and do not disable auto-discovered skills). User-owned settings.json fields are otherwise untouched. No prompts directory or fake prompt was created; APPEND_SYSTEM.md and AGENTS.md remain at the repository root as the SDK conventional entries.",
+    "promptAndDocs": "pie-harness-prompt.ts harness-documentation path constant updated to <agentDir>/harness/agent-instructions/skills/develop-pie/SKILL.md and its integration test expectation updated; develop-pie SKILL.md relative links re-based to the new depth (verified resolvable); codebase-maintenance traversal-policy drift check path updated (HERE.parents[3]); live navigation links updated in AGENTS.md, README.md, docs/INDEX.md, docs/ARCHITECTURE.md, docs/ANALYTICS_IMPLEMENTATION_CONTRACT.md, docs/TOOL-RESULT-PRUNING.md, and tools/subagent/README.md (docs/internal/centralized-model-config.md row left as a historical record).",
+    "buildAndRouting": "Extension tsconfig include and vite build-identity inputs extended to harness/agent-instructions/**; eslint scope and the extension lint script cover harness/agent-instructions; harness/agent-instructions/package.json module-type marker added so the relocated ESM prompt module keeps ESM detection under the shared typecheck project; test registry updated (cwd-skills dir/ownedDirs/testDir/typecheck to skill-discovery, extension sourceRoots += prompt-assembly, subagent ownedDirs += agent-discovery, run-tests globs/coverageIncludes updated, vscode package.json typecheck:cwd-skills path updated); subagent global-agent fixtures (settlement, interrupt-hardening, nesting-controls) updated to the relocated user/global agents location without changing generic project-directory rules; subagent importers consume the one loader from its canonical location.",
+    "discoveryVerification": "Real pinned-SDK discovery tests pass: scripts/test/skills-loader.test.mjs discovers all nine relocated bundles through loadSkills and, separately, through the real DefaultResourceLoader (SettingsManager → PackageManager → loadSkills) using an isolated temp agent dir whose settings.json registers harness/agent-instructions/skills agent-dir-relative, asserting zero diagnostics, no duplicate bundles, all nine bundles discovered, and a stable catalog after reload; the tracked settings files are asserted to carry the same entry. The pinned SDK has no separate agent-definition loader; Pie's relocated loader is verified by the subagent suite (agents.test.ts against the canonical location; nesting-controls/settlement/interrupt-hardening global-agent fixtures updated). cwd-skills suite passes against the moved implementation with the root adapter retained.",
+    "shimsPolicy": "Temporary compatibility re-exports exist at exactly three paths (shared/pie-harness-prompt.ts, extension/src/backend/system-prompts.ts, extension/src/backend/context-files.ts) plus the retained in-place cwd-skills adapter; each is marked for removal with its retired-root batch and no duplicate implementation or state exists. A permanent discovery exception applies only to the extensions/<id> root entries.",
+    "settingsUserFields": "Current live user fields as of 2026-09-24: defaultModel gpt-6-astra, defaultThinkingLevel low. The only migration-owned settings.json change in B3 is the added `skills` array; all user-owned fields are preserved."
+   },
+   "b3VerificationGate": {
+    "affectedSuites": "Focused/affected runs passed during implementation: pinned-SDK discovery suite (2/2), cwd-skills suite (moved test against the moved implementation; 3 existing skips preserved), subagent package (623 passed / 4 skipped), extension integration prompt-assembly suites, context-files/backend-system-prompts/worker-subagent-policy suites, and the routing/registry/inventory script suites (including the updated PACKAGE_DIRECTIVES count 47 and the moved test-root classification assertions). The retained cwd-skills adapter additionally loads through the pinned SDK's real jiti extension loader (scripts/test/unbundled-owner-resolution.test.mjs B3 case): exactly one resources_discover handler registered via the moved implementation, with the adapter verified as a thin delegating entry.",
+    "fullSuite": "Full settled-tree npm run test:all exited 0 with 7/7 groups, 7,439 passed / 0 failed / 35 skipped (2026-09-24). The markdown-rendering extension test passed on rerun after an initial failure — the same pre-existing flake recorded for B2 — so the pass is not pristine.",
+    "typecheckAndLint": "npm run typecheck passed all 17 projects (shared project covers the relocated prompt module through the shared shim; extension project includes harness/agent-instructions/**); npm run lint passed with the lint script extended to harness/agent-instructions (one moved cwd-skills test import tightened to satisfy the now-covered scope).",
+    "build": "Required non-publishing extension:build passed after the B3 changes: staged complete runtime generation 2f2f394dc5239e78d307586042416a4251097e3a13e6c9917c7d3971f2a3b580, coordinated renderer build ID 97b6f767b4235ae179d6, published renderer generation. Staged only — no loader activation and no installed-host restart; the newly staged runtime loads on the next normal VS Code restart, and running sessions keep their existing build.",
+    "liveBoundary": "Loaded behavior has not been verified: the currently loaded backend keeps the pre-B3 subagent loader and prompt documentation path until that restart, while settings-driven skills discovery follows the updated settings.json on the same restart. No restart was forced. Concrete observed staged-not-live evidence (2026-09-25, recorded in stagedNotLiveObservation): pre-B3 subagent discovery at the repository-root cwd reports no agents after the relocation, while discovery from a nested harness/agent-instructions cwd works through project-directory discovery."
+   }
   },
   "pending": [
-   "B1 and B2 exits are accepted; B3 has not started. B2's final full verification gate passed on 2026-09-24, including the settled-tree full npm run test:all (7/7 groups, 7,437 passed / 0 failed / 35 skipped; markdown-rendering passed on selective rerun after an initial failure) and the required final extension:build with the staged, not-live runtime identity recorded in finalVerificationGate.",
-   "Deep logger, analytics, and resource-move verification tests are deferred to their owning later batches and remain recorded in this manifest; no permanent test exceptions or skips exist or may be added."
+   "B1, B2, and B3 exits are accepted. B2's final full verification gate passed on 2026-09-24, including the settled-tree full npm run test:all (7/7 groups, 7,437 passed / 0 failed / 35 skipped; markdown-rendering passed on selective rerun after an initial failure) and the required final extension:build with the staged, not-live runtime identity recorded in finalVerificationGate.",
+   "Deep logger, analytics, and resource-move verification tests are deferred to their owning later batches and remain recorded in this manifest; no permanent test exceptions or skips exist or may be added.",
+   "B3 verification gates are recorded in b3VerificationGate and the exit is accepted; the milestone is committed. Loaded/live behavior remains unverified by policy: no installed-host restart was forced, so the currently loaded backend still runs the pre-B3 subagent loader and prompt documentation path until the newly staged runtime (generation 2f2f394dc5239e78d307586042416a4251097e3a13e6c9917c7d3971f2a3b580) loads on the next normal restart; settings-driven skills discovery follows the updated settings.json on that restart. No permanent test exceptions or skips exist or may be added.",
+   "Remaining B3 follow-ups recorded deliberately: the temporary compatibility re-export shims (shared/pie-harness-prompt.ts; extension/src/backend/{system-prompts,context-files}.ts) retire with their owning roots (B8, B5/B7); docs/internal/centralized-model-config.md retains a historical skills/develop-pie path reference; docs/REPOSITORY_ORGANIZATION_PLAN.md path examples are historical planning text until the plan moves in B8."
   ],
-  "settingsWorkingTree": "The B0 settings.json high-to-medium note is an immutable baseline snapshot. Current live user fields have since changed (defaultModel gpt-6-astra to gpt-6-luna; defaultThinkingLevel high to xhigh). Exclude ongoing settings edits from migration; do not restore or pin future edits to medium."
+  "settingsWorkingTree": "The B0 settings.json high-to-medium note is an immutable baseline snapshot. Corrected live user-field evidence (2026-09-25): defaultModel gpt-6-astra (unchanged from the tracked baseline), defaultThinkingLevel low (the pre-existing user working-tree change; the B0 snapshot's medium value is historical), and pruning.model gpt-6-luna. The prior 'gpt-6-luna defaultModel / xhigh thinking' wording was a review misreading of the pruning block. User fields are preserved unchanged by the migration; the only migration-owned settings.json change is the added skills array, and the working tree keeps the user values as-is. Exclude ongoing settings edits from migration; do not restore or pin future edits."
+ },
+ "stagedNotLiveObservation": {
+  "recordedAt": "2026-09-25",
+  "observation": "Concrete staged-not-live evidence after the relocation, with no restart or activation forced: the pre-B3 loaded runtime's subagent discovery run at the repository-root cwd reports no agents because <agentDir>/agents no longer exists (agents/{reviewer,scout,worker}.md now live only at harness/agent-instructions/agents), while a session whose cwd is nested at harness/agent-instructions discovers the same three agent definitions through normal project-directory discovery. This is a transient pre-restart state of the loaded build only: the staged B3 runtime resolves the relocated user/global agent path, and both the relocated loader and settings-driven skills discovery activate on the next normal VS Code restart. Not a plan B3 gate failure: B3's discovery gates are process-level (fresh/reloaded test processes), and all of them passed."
  },
  "currentLocations": {
-  "extension/.vscode/tasks.json": ["application/hosts/vscode/.vscode/tasks.json"],
-  "extension/.vscodeignore": ["application/hosts/vscode/.vscodeignore"],
-  "extension/eslint.config.mjs": ["application/hosts/vscode/eslint.config.mjs"],
-  "extension/media/icon.svg": ["application/hosts/vscode/media/icon.svg"],
-  "extension/package-lock.json": ["application/hosts/vscode/package-lock.json"],
-  "extension/package.json": ["application/hosts/vscode/package.json"],
-  "extension/playwright.config.ts": ["application/hosts/vscode/playwright.config.ts"],
-  "extension/runtime/bootstrap.cjs": ["application/hosts/vscode/runtime/bootstrap.cjs"],
-  "extension/runtime/runtime-generations.cjs": ["application/hosts/vscode/runtime/runtime-generations.cjs"],
-  "extension/scripts/build.mjs": ["scripts/build/build.mjs"],
-  "extension/scripts/publication.d.mts": ["scripts/build/publication.d.mts"],
-  "extension/scripts/publication.mjs": ["scripts/build/publication.mjs"],
-  "extension/scripts/publish-renderer.mjs": ["scripts/build/publish-renderer.mjs"],
-  "extension/scripts/runtime-publication.d.mts": ["scripts/build/runtime-publication.d.mts"],
-  "extension/scripts/runtime-publication.mjs": ["scripts/build/runtime-publication.mjs"],
-  "extension/tsconfig.json": ["application/hosts/vscode/tsconfig.json"],
-  "extension/vite.config.ts": ["application/hosts/vscode/vite.config.ts"]
+  "extension/.vscode/tasks.json": [
+   "application/hosts/vscode/.vscode/tasks.json"
+  ],
+  "extension/.vscodeignore": [
+   "application/hosts/vscode/.vscodeignore"
+  ],
+  "extension/eslint.config.mjs": [
+   "application/hosts/vscode/eslint.config.mjs"
+  ],
+  "extension/media/icon.svg": [
+   "application/hosts/vscode/media/icon.svg"
+  ],
+  "extension/package-lock.json": [
+   "application/hosts/vscode/package-lock.json"
+  ],
+  "extension/package.json": [
+   "application/hosts/vscode/package.json"
+  ],
+  "extension/playwright.config.ts": [
+   "application/hosts/vscode/playwright.config.ts"
+  ],
+  "extension/runtime/bootstrap.cjs": [
+   "application/hosts/vscode/runtime/bootstrap.cjs"
+  ],
+  "extension/runtime/runtime-generations.cjs": [
+   "application/hosts/vscode/runtime/runtime-generations.cjs"
+  ],
+  "extension/scripts/build.mjs": [
+   "scripts/build/build.mjs"
+  ],
+  "extension/scripts/publication.d.mts": [
+   "scripts/build/publication.d.mts"
+  ],
+  "extension/scripts/publication.mjs": [
+   "scripts/build/publication.mjs"
+  ],
+  "extension/scripts/publish-renderer.mjs": [
+   "scripts/build/publish-renderer.mjs"
+  ],
+  "extension/scripts/runtime-publication.d.mts": [
+   "scripts/build/runtime-publication.d.mts"
+  ],
+  "extension/scripts/runtime-publication.mjs": [
+   "scripts/build/runtime-publication.mjs"
+  ],
+  "extension/tsconfig.json": [
+   "application/hosts/vscode/tsconfig.json"
+  ],
+  "extension/vite.config.ts": [
+   "application/hosts/vscode/vite.config.ts"
+  ],
+  "agents/reviewer.md": [
+   "harness/agent-instructions/agents/reviewer.md"
+  ],
+  "agents/scout.md": [
+   "harness/agent-instructions/agents/scout.md"
+  ],
+  "agents/worker.md": [
+   "harness/agent-instructions/agents/worker.md"
+  ],
+  "extensions/cwd-skills/README.md": [
+   "harness/agent-instructions/skill-discovery/README.md"
+  ],
+  "extensions/cwd-skills/test/cwd-skills-extension.test.ts": [
+   "harness/agent-instructions/skill-discovery/test/cwd-skills-extension.test.ts"
+  ],
+  "extensions/cwd-skills/tsconfig.json": [
+   "harness/agent-instructions/skill-discovery/tsconfig.json"
+  ],
+  "skills/add-provider/SKILL.md": [
+   "harness/agent-instructions/skills/add-provider/SKILL.md"
+  ],
+  "skills/check-ui/SKILL.md": [
+   "harness/agent-instructions/skills/check-ui/SKILL.md"
+  ],
+  "skills/codebase-maintenance/.ignore": [
+   "harness/agent-instructions/skills/codebase-maintenance/.ignore"
+  ],
+  "skills/codebase-maintenance/SKILL.md": [
+   "harness/agent-instructions/skills/codebase-maintenance/SKILL.md"
+  ],
+  "skills/codebase-maintenance/analyze_complexity.py": [
+   "harness/agent-instructions/skills/codebase-maintenance/analyze_complexity.py"
+  ],
+  "skills/codebase-maintenance/detect_smells.py": [
+   "harness/agent-instructions/skills/codebase-maintenance/detect_smells.py"
+  ],
+  "skills/codebase-maintenance/find_dead_code.py": [
+   "harness/agent-instructions/skills/codebase-maintenance/find_dead_code.py"
+  ],
+  "skills/codebase-maintenance/find_duplicates.py": [
+   "harness/agent-instructions/skills/codebase-maintenance/find_duplicates.py"
+  ],
+  "skills/codebase-maintenance/find_large_files.py": [
+   "harness/agent-instructions/skills/codebase-maintenance/find_large_files.py"
+  ],
+  "skills/codebase-maintenance/find_markdown_drift.py": [
+   "harness/agent-instructions/skills/codebase-maintenance/find_markdown_drift.py"
+  ],
+  "skills/codebase-maintenance/test_find_markdown_drift.py": [
+   "harness/agent-instructions/skills/codebase-maintenance/test_find_markdown_drift.py"
+  ],
+  "skills/codebase-maintenance/test_scanner_regressions.py": [
+   "harness/agent-instructions/skills/codebase-maintenance/test_scanner_regressions.py"
+  ],
+  "skills/collaborative-development/SKILL.md": [
+   "harness/agent-instructions/skills/collaborative-development/SKILL.md"
+  ],
+  "skills/collaborative-development/references/change-scope.md": [
+   "harness/agent-instructions/skills/collaborative-development/references/change-scope.md"
+  ],
+  "skills/collaborative-development/references/github.md": [
+   "harness/agent-instructions/skills/collaborative-development/references/github.md"
+  ],
+  "skills/collaborative-development/references/jira.md": [
+   "harness/agent-instructions/skills/collaborative-development/references/jira.md"
+  ],
+  "skills/collaborative-development/references/pr-readiness.md": [
+   "harness/agent-instructions/skills/collaborative-development/references/pr-readiness.md"
+  ],
+  "skills/collaborative-development/references/pr-review.md": [
+   "harness/agent-instructions/skills/collaborative-development/references/pr-review.md"
+  ],
+  "skills/collaborative-development/references/task-kickoff.md": [
+   "harness/agent-instructions/skills/collaborative-development/references/task-kickoff.md"
+  ],
+  "skills/collaborative-development/references/team-conventions.md": [
+   "harness/agent-instructions/skills/collaborative-development/references/team-conventions.md"
+  ],
+  "skills/collaborative-development/references/worklog-template.md": [
+   "harness/agent-instructions/skills/collaborative-development/references/worklog-template.md"
+  ],
+  "skills/develop-pie/SKILL.md": [
+   "harness/agent-instructions/skills/develop-pie/SKILL.md"
+  ],
+  "skills/diagnose/SKILL.md": [
+   "harness/agent-instructions/skills/diagnose/SKILL.md"
+  ],
+  "skills/grill-with-docs/DECISION-FORMAT.md": [
+   "harness/agent-instructions/skills/grill-with-docs/DECISION-FORMAT.md"
+  ],
+  "skills/grill-with-docs/DOC-FORMAT.md": [
+   "harness/agent-instructions/skills/grill-with-docs/DOC-FORMAT.md"
+  ],
+  "skills/grill-with-docs/SKILL.md": [
+   "harness/agent-instructions/skills/grill-with-docs/SKILL.md"
+  ],
+  "skills/pie-logs/SKILL.md": [
+   "harness/agent-instructions/skills/pie-logs/SKILL.md"
+  ],
+  "skills/pie-logs/pi_logs.py": [
+   "harness/agent-instructions/skills/pie-logs/pi_logs.py"
+  ],
+  "skills/pie-logs/test_pi_logs.py": [
+   "harness/agent-instructions/skills/pie-logs/test_pi_logs.py"
+  ],
+  "skills/query-analytics/SKILL.md": [
+   "harness/agent-instructions/skills/query-analytics/SKILL.md"
+  ],
+  "tools/subagent/agents.ts": [
+   "harness/agent-instructions/agent-discovery/agents.ts"
+  ],
+  "shared/pie-harness-prompt.ts": [
+   "shared/pie-harness-prompt.ts",
+   "harness/agent-instructions/prompt-assembly/pie-harness-prompt.ts"
+  ],
+  "extension/src/backend/context-files.ts": [
+   "extension/src/backend/context-files.ts",
+   "harness/agent-instructions/prompt-assembly/context-files.ts"
+  ],
+  "extension/src/backend/system-prompts.ts": [
+   "extension/src/backend/system-prompts.ts",
+   "harness/agent-instructions/prompt-assembly/system-prompts.ts"
+  ],
+  "extensions/cwd-skills/index.ts": [
+   "extensions/cwd-skills/index.ts",
+   "harness/agent-instructions/skill-discovery/index.ts"
+  ]
  },
  "testEnumeration": {
   "source": "scripts/lib/test-packages.mjs PACKAGE_REGISTRY + scripts/run-tests.mjs PACKAGE_CONFIGS; registry testGlobs matched against git ls-files at the planning checkpoint, with explicit extension opt-in suites unioned by repo-relative path",
@@ -1732,7 +1917,7 @@
    "kind": "resolved-conflict"
   }
  ],
- "recordCount": 1785,
+ "recordCount": 1786,
  "records": [
   {
    "source": "extension/src/backend/analytics-worker-transport.ts",
@@ -27280,6 +27465,19 @@
     "Baseline evidence reference; relocated with the plan and progress doc at B8."
    ],
    "reason": "Own B0 baseline-verification evidence document; retained until the B8 documentation batch."
+  },
+  {
+   "source": "harness/agent-instructions/package.json",
+   "targets": [
+    "harness/agent-instructions/package.json"
+   ],
+   "action": "retain",
+   "owner": "harness/agent-instructions",
+   "batch": "B3",
+   "verification": [
+    "Keep the module-type marker minimal and verify the relocated ESM TypeScript resources still typecheck through the extension project and load through tsx/jiti consumers."
+   ],
+   "reason": "New B3 module-type marker so the authored resources relocated out of shared/ keep ESM module-format detection (the previous shared/package.json type:module scope no longer covers pie-harness-prompt after its B3 move)."
   }
  ]
 }

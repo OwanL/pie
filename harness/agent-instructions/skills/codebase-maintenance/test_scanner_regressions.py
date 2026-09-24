@@ -62,7 +62,7 @@ class TraversalPolicyDriftTests(unittest.TestCase):
     stay aligned. The policy module is parsed directly so the check follows
     the source of truth instead of a mirrored copy."""
 
-    POLICY_PATH = HERE.parent.parent / "shared" / "traversal-policy.ts"
+    POLICY_PATH = HERE.parents[3] / "shared" / "traversal-policy.ts"
 
     def _protected_dirs(self) -> list[str]:
         text = self.POLICY_PATH.read_text(encoding="utf-8")

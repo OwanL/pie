@@ -101,7 +101,7 @@ test('classifyTestFile applies package-specific tsconfig and leaves ordinary ext
   const computerUse = classifyTestFile(repoRoot, 'tools/computer-use/test/protocol.test.ts');
   assert.equal(computerUse.id, 'computer-use');
   assert.equal(computerUse.tsxConfig, 'tools/computer-use/tsconfig.runtime.json');
-  const ordinary = classifyTestFile(repoRoot, 'extensions/cwd-skills/test/cwd-skills-extension.test.ts');
+  const ordinary = classifyTestFile(repoRoot, 'harness/agent-instructions/skill-discovery/test/cwd-skills-extension.test.ts');
   assert.equal(ordinary.id, 'cwd-skills');
   assert.equal(ordinary.tsxConfig, undefined);
 });

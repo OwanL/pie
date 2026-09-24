@@ -43,6 +43,17 @@ function getAgentDir(): string {
 	return path.join(os.homedir(), ".pi", "agent");
 }
 
+/**
+ * User/global agent definitions moved with the B3 authored-resource
+ * relocation: repository/global agent definitions live under
+ * `<agentDir>/harness/agent-instructions/agents` instead of the previous
+ * `<agentDir>/agents`. Project discovery still walks up for a generic
+ * project-local `agents/` directory unchanged.
+ */
+function getUserAgentsDir(): string {
+	return path.join(getAgentDir(), "harness", "agent-instructions", "agents");
+}
+
 function parseFrontmatter<T extends Record<string, string>>(content: string): { frontmatter: T; body: string } {
 	if (!content.startsWith("---")) {
 		return { frontmatter: {} as T, body: content };
@@ -192,7 +203,7 @@ export function discoverAgents(searchCwds: string | string[], scope: AgentScope)
 	const cwds = Array.isArray(searchCwds)
 		? Array.from(new Set(searchCwds.filter((c): c is string => typeof c === "string" && c.length > 0)))
 		: [searchCwds];
-	const userDir = path.join(getAgentDir(), "agents");
+	const userDir = getUserAgentsDir();
 
 	const userAgents = scope === "project" ? [] : loadAgentsFromDir(userDir, "user");
 

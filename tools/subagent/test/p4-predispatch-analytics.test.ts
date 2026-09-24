@@ -9,7 +9,7 @@ import {
   readSubagentAnalyticsAttemptState,
 } from '../src/analytics-capture.js';
 import { subagentRuntime } from '../runner.js';
-import type { AgentConfig } from '../agents.js';
+import type { AgentConfig } from '../../../harness/agent-instructions/agent-discovery/agents.js';
 import type { SelectionContext } from '../src/selection.js';
 import type { AnalyticsObservation } from '../../../shared/analytics/contracts.js';
 import { createAnalyticsFactPacket } from '../../../shared/analytics/transport.js';

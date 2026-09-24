@@ -25,10 +25,12 @@ test('PACKAGE_DIRECTIVES covers package dirs, owned dirs, and routed test roots'
     'image-context-guard', 'playwright',
   ];
   assert.deepEqual(ALL_PACKAGE_IDS, expected);
-  // 17 package dirs + 8 owned/adapter dirs + 16 nested default test roots
+  // 17 package dirs + 10 owned/adapter dirs + 16 nested default test roots
   // (scripts' test root equals its dir) + 2 declared analysis distributed roots
-  // + the extension's separate source root (its test root overlaps that source).
-  assert.equal(PACKAGE_DIRECTIVES.length, 44, 'routing view covers dirs, owned dirs, test roots, and declared distributed roots');
+  // + the extension's separate source roots (its test root overlaps those
+  // sources; B3 added the prompt-assembly relocation root) + the subagent
+  // agent-discovery owned dir from B3.
+  assert.equal(PACKAGE_DIRECTIVES.length, 47, 'routing view covers dirs, owned dirs, test roots, and declared distributed roots');
 });
 
 test('source/test root defaults keep single-root enumeration identical', () => {
@@ -56,6 +58,18 @@ test('analysis declares its planned distributed roots without dropping current o
   // Root integration suites and other packages' roots must not leak in.
   assert.equal(classifyFileToPackage('test/integration/example.test.ts'), null);
   assert.equal(classifyFileToPackage('analytics/other/file.ts'), null);
+});
+
+test('B3 authored-resource relocations route to their verification owners', () => {
+  // The prompt-assembly root is verified with the extension package; agent
+  // discovery routes with the subagent tool; skill discovery with cwd-skills.
+  assert.equal(classifyFileToPackage('harness/agent-instructions/prompt-assembly/system-prompts.ts'), 'extension');
+  assert.equal(classifyFileToPackage('harness/agent-instructions/prompt-assembly/pie-harness-prompt.ts'), 'extension');
+  assert.equal(classifyFileToPackage('harness/agent-instructions/agent-discovery/agents.ts'), 'subagent');
+  assert.equal(classifyFileToPackage('harness/agent-instructions/skill-discovery/index.ts'), 'cwd-skills');
+  assert.equal(classifyFileToPackage('harness/agent-instructions/skill-discovery/test/cwd-skills-extension.test.ts'), 'cwd-skills');
+  // The stable root discovery adapter keeps its package identity.
+  assert.equal(classifyFileToPackage('extensions/cwd-skills/index.ts'), 'cwd-skills');
 });
 
 test('routed test roots classify focused test files to their verification id', () => {

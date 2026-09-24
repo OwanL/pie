@@ -131,7 +131,7 @@ class FakeClock implements RetryClock {
 // ---------------------------------------------------------------------------
 
 const agentDir = mkdtempSync(path.join(tmpdir(), "settlement-agents-"));
-const agentsSubdir = path.join(agentDir, "agents");
+const agentsSubdir = path.join(agentDir, "harness", "agent-instructions", "agents");
 mkdirSync(agentsSubdir, { recursive: true });
 writeFileSync(
 	path.join(agentsSubdir, "worker.md"),

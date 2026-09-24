@@ -6,7 +6,7 @@ import * as path from "node:path";
 import { runSingleAgent, subagentRuntime } from "../runner.js";
 import { captureSubagentTerminalResult } from "../src/analytics-capture.js";
 import { parseModelPricing, resolveApplicablePricing } from "../../../shared/pricing-core.js";
-import type { AgentConfig } from "../agents.js";
+import type { AgentConfig } from "../../../harness/agent-instructions/agent-discovery/agents.js";
 
 function makeAgent(overrides: Partial<AgentConfig> = {}): AgentConfig {
 	return {

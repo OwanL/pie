@@ -23,7 +23,7 @@ import { resolveExecutionModel } from "../model-resolution.js";
 import { compactSingleResult } from "../src/result-compaction.js";
 import { executeSingleTask } from "../src/single.js";
 import { resetFairSelectionBags } from "../bucket-selector.js";
-import type { AgentConfig } from "../agents.js";
+import type { AgentConfig } from "../../../harness/agent-instructions/agent-discovery/agents.js";
 import type { ModelRequirements, SingleResult, SubagentDetails } from "../types.js";
 
 const IMAGE_REQ: ModelRequirements = { inputKinds: ["image"] };

@@ -1,30 +1,11 @@
-import { existsSync, statSync } from 'node:fs';
-import { isAbsolute, join } from 'node:path';
+/**
+ * Stable SDK discovery adapter for the `cwd-skills` extension (B3).
+ *
+ * The implementation moved to
+ * `harness/agent-instructions/skill-discovery/index.ts`; this root entry keeps
+ * the stable extension ID and discovery registration. It must remain a thin
+ * adapter that delegates to the canonical implementation only.
+ */
+import discoverCwdSkills from '../../harness/agent-instructions/skill-discovery/index.js';
 
-import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
-
-export default function (pi: ExtensionAPI) {
-  pi.on('resources_discover', async (event) => {
-    const cwd = typeof event.cwd === 'string' ? event.cwd.trim() : '';
-    if (!cwd || !isAbsolute(cwd)) {
-      return {};
-    }
-
-    const skillsDir = join(cwd, 'skills');
-    if (!existsSync(skillsDir)) {
-      return {};
-    }
-
-    try {
-      if (!statSync(skillsDir).isDirectory()) {
-        return {};
-      }
-    } catch {
-      return {};
-    }
-
-    return {
-      skillPaths: [skillsDir],
-    };
-  });
-}
+export default discoverCwdSkills;

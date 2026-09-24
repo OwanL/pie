@@ -147,3 +147,33 @@ export default (pi: ExtensionAPI) => pi.registerCommand('unbundled-alias-proof',
   // Loading the shims only registers tools; no backend, browser, desktop, or
   // native input action is invoked by this proof.
 });
+
+test('the retained cwd-skills SDK adapter loads through the real extension loader and delegates to the moved implementation', async (t) => {
+  // B3 gate for the retain record: the stable root extensions/cwd-skills/index.ts
+  // entry must load through the pinned SDK's own jiti extension loader and stay
+  // a thin adapter whose implementation lives at
+  // harness/agent-instructions/skill-discovery/index.ts (registered exactly one
+  // resources_discover hook, no second implementation).
+  const loaderPath = path.join(sdkPackages.sdk.root, 'dist', 'core', 'extensions', 'loader.js');
+  const loader = await import(pathToFileURL(loaderPath).href);
+  const adapterPath = path.join(repositoryRoot, 'extensions', 'cwd-skills', 'index.ts');
+  const result = await loader.loadExtensions([adapterPath], repositoryRoot);
+  assert.deepEqual(result.errors, []);
+  assert.equal(result.extensions.length, 1);
+  const extension = result.extensions[0];
+  assert.equal(extension.resolvedPath, path.resolve(adapterPath));
+  assert.deepEqual([...extension.tools.keys()], []);
+  // One registered hook, owned by the canonical skill-discovery implementation.
+  const handlers = extension.handlers.get('resources_discover') ?? [];
+  assert.equal(handlers.length, 1);
+  const implementation = readFileSync(
+    path.join(repositoryRoot, 'harness', 'agent-instructions', 'skill-discovery', 'index.ts'),
+    'utf8',
+  );
+  assert.match(implementation, /resources_discover/);
+  assert.equal(
+    readFileSync(adapterPath, 'utf8').includes("skill-discovery/index.js"),
+    true,
+    'the root entry stays a thin delegating adapter',
+  );
+});

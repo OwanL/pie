@@ -6,7 +6,7 @@ evidence that any gate has been activated.
 
 [STATE_CONTRACT.md](STATE_CONTRACT.md) remains authoritative for host ↔ webview state sync, and
 [ARCHITECTURE.md](ARCHITECTURE.md) for the surrounding system. Query-level semantics live in
-[`skills/query-analytics/SKILL.md`](../skills/query-analytics/SKILL.md).
+[`skills/query-analytics/SKILL.md`](../harness/agent-instructions/skills/query-analytics/SKILL.md).
 
 ## 1. Authority
 
@@ -137,7 +137,7 @@ publish only completed coherent root reads and carry explicit fresh/stale/unknow
 refreshing/error metadata. Catch-up is bounded under sustained revision changes; same-root stale
 reads remain visibly stale, while deletion/privacy/identity fences remain fail-closed. Field-level semantics,
 scopes, coverage, and example SQL belong to
-[`skills/query-analytics/SKILL.md`](../skills/query-analytics/SKILL.md).
+[`skills/query-analytics/SKILL.md`](../harness/agent-instructions/skills/query-analytics/SKILL.md).
 
 ## 6. Retained local analysis tooling
 

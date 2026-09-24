@@ -14,7 +14,7 @@ import type {
   AnalyticsTransportPacket,
 } from '../../../shared/analytics/transport.js';
 import { canonicalAnalyticsToolEntityId } from '../../../shared/analytics/transport.js';
-import type { AgentConfig } from '../agents.js';
+import type { AgentConfig } from '../../../harness/agent-instructions/agent-discovery/agents.js';
 import { executeSingleTask } from '../src/single.js';
 import type { SelectionContext } from '../src/selection.js';
 import { sanitizeAnalyticsDetail } from '../../../shared/sensitive-redaction.js';
