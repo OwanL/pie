@@ -125,55 +125,35 @@ export interface BackendReadyPayload {
   analyticsActivation?: import('../../../../shared/analytics/activation.js').AnalyticsBackendDescriptor;
 }
 
-export type SessionPrimaryOperationKind =
-  | 'session.create'
-  | 'session.duplicate'
-  | 'session.open'
-  | 'session.close'
-  | 'backend.restart'
-  | 'message.send'
-  | 'message.edit'
-  | 'message.interrupt'
-  | 'message.continue'
-  | 'message.compact';
-export type SessionPrimaryOperationPhase =
-  | 'awaiting-acceptance'
-  | 'draining'
-  | 'awaiting-old-generation-death'
-  | 'awaiting-commit'
-  | 'ambiguous';
-export type SessionOperationRecoveryAction = 'retry' | 'restart-backend' | 'reconcile' | null;
+// ── Capability/operation protocol seam (repository-organization plan §3.2) ──
+// The inert backend capability facts and the application operation projection
+// types are canonical in their own modules; backend producers consume only the
+// facts contract. These old-layout re-exports keep the established
+// `shared/protocol` import paths stable and are TEMPORARY: remove them when
+// this DTO module splits relocate in batches B5/B7 (see the migration
+// manifest). Do not add new definitions here.
+export type { SessionCapabilityFacts } from './session-capability-facts.js';
+export type {
+  SessionCapabilities,
+  SessionOperationRecoveryAction,
+  SessionPrimaryOperation,
+  SessionPrimaryOperationKind,
+  SessionPrimaryOperationPhase,
+} from './session-operation-projection.js';
 
-/** Compact projection of reducer-owned operation truth. The backend continues
- * to own billable activity; it does not originate this host-only projection. */
-export type SessionPrimaryOperation = Record<string, string | number | boolean | null> & {
-  operationId: string;
-  kind: SessionPrimaryOperationKind;
-  phase: SessionPrimaryOperationPhase;
-  attempt: number;
-  committed: boolean;
-  recovery: SessionOperationRecoveryAction;
-};
-
-export interface SessionCapabilities {
-  /** True while provider, retry, compaction, queued continuation, bash/tool, or
-   * another backend-exposed billable window can still run automatically. */
-  billableActivity: boolean;
-  canContinue: boolean;
-  canInterrupt: boolean;
-  canCompact: boolean;
-  /** Current non-terminal reducer-owned operation, when one controls the path. */
-  primaryOperation?: SessionPrimaryOperation;
-}
+// Backend events publish only the inert facts contract; the host projects the
+// optional `primaryOperation` overlay before the webview ever sees a DTO.
+import type { SessionCapabilityFacts } from './session-capability-facts.js';
 
 export interface SessionOpenedPayload {
   session: SessionSummary;
   transcript: ChatMessage[];
   transcriptWindow: TranscriptWindow;
   busy: boolean;
-  /** Backend-classified capabilities from the complete live/durable session,
-   * independent of the bounded transcript window transported to the host. */
-  capabilities?: SessionCapabilities;
+  /** Backend-classified capability facts from the complete live/durable
+   * session, independent of the bounded transcript window transported to the
+   * host. The backend never originates the host `primaryOperation` overlay. */
+  capabilities?: SessionCapabilityFacts;
   /** Whether the backend has materialized the execution runtime for this
    * session. Cold durable browsing explicitly reports false; hot snapshots
    * report true. Omission is accepted only for legacy peers and means ready. */
@@ -399,7 +379,8 @@ export interface MessageAbortedPayload {
 
 export interface AgentSettledPayload {
   sessionPath: string;
-  capabilities: SessionCapabilities;
+  /** Backend-classified inert capability facts (no host operation overlay). */
+  capabilities: SessionCapabilityFacts;
   /** Epoch milliseconds sampled at the backend's agent_settled boundary. */
   occurredAt?: number;
   /** Epoch milliseconds when the backend observed the execution settle. */
@@ -416,7 +397,8 @@ export interface AgentSettledPayload {
 export interface BusyChangedPayload {
   sessionPath: string;
   busy: boolean;
-  capabilities?: SessionCapabilities;
+  /** Backend-classified inert capability facts (no host operation overlay). */
+  capabilities?: SessionCapabilityFacts;
   /**
    * Monotonic per-session sequence number. The host drops out-of-order events
    * for a session (e.g. a stale `busy=false` arriving after an optimistic set).

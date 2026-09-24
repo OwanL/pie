@@ -1,4 +1,5 @@
 import * as crypto from 'node:crypto';
+import * as path from 'node:path';
 
 import * as vscode from 'vscode';
 
@@ -7,6 +8,7 @@ import { buildWorkspaceAnalyticsId } from '../run-analytics/storage';
 import { requestWindowAttention } from '../sidebar/completion-notification';
 import type { SessionHostPlatform } from '../session-service/platform';
 import { selectRuntimeSetting } from '../session-service/platform';
+import { BrowserServer } from '../browser-server/browser-server';
 import { readBrowserServerSettings } from '../browser-server/settings';
 import type { RuntimeGenerationIdentity } from '../analytics-handoff-discovery';
 import type { FileDiffCoreLike, FileDiffViewerLike } from '../core/file-diff-service';
@@ -138,6 +140,13 @@ export function createVscodeHostRuntimePlatform(
   const sessionPlatform = createSessionHostPlatform(context);
   return {
     ...sessionPlatform,
+    createBrowserServer: (options) => new BrowserServer({
+      ...options,
+      assetDir: path.join(context.extensionPath, 'out', 'webview', 'panel'),
+      rendererSelection: runtimeRendererSelection(context),
+      iconPath: path.join(context.extensionPath, 'media', 'icon.svg'),
+      titleSuffix: vscode.workspace.name ?? undefined,
+    }),
     renderer,
     notifications: {
       showWarningMessage: (message) => { void vscode.window.showWarningMessage(message); },
@@ -195,8 +204,6 @@ export function createVscodeHostRuntimePlatform(
     },
     supportsBrowserServerToggle: true,
     getWorkspaceFolderPath: () => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
-    getRendererSelection: () => runtimeRendererSelection(context),
-    getWorkspaceName: () => vscode.workspace.name ?? undefined,
     getExperimentAssignment: () => {
       const configured = vscode.workspace
         .getConfiguration('pie')

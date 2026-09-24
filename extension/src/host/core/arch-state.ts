@@ -44,7 +44,7 @@ import type {
   InlineEditDraft,
   LastCompactionSummary,
   OperationalIncident,
-  SessionCapabilities,
+  SessionCapabilityFacts,
   ThinkingLevel,
 } from '../../shared/protocol';
 import type { NoticeKind } from '../../shared/error-mapping.js';
@@ -128,8 +128,10 @@ export interface SessionsState {
   pinnedTabGroups: string[][];
   /** Session paths with any backend-authoritative billable activity. */
   runningSessionPaths: string[];
-  /** Backend/host-authoritative capabilities keyed by durable session path. */
-  capabilitiesBySession: Record<string, SessionCapabilities>;
+  /** Backend-classified capability facts keyed by durable session path. The
+   * host reducer stores only the inert facts; the `primaryOperation` overlay
+   * is applied by the pure projection, never stored here. */
+  capabilitiesBySession: Record<string, SessionCapabilityFacts>;
   /** Exact latest correlated settlement lineage retained after live/current-turn
    * records clear, so an older terminal from the same worker cannot restore
    * stale capabilities. */

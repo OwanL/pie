@@ -33,6 +33,7 @@ import type {
   PruningResult,
   RetryStatus,
   SessionCapabilities,
+  SessionCapabilityFacts,
   SessionSummary,
   SystemPromptEntry,
   TranscriptWindow,
@@ -64,13 +65,41 @@ import type {
 
 // ─── Empty sentinels (stable references keep downstream shallow-equals cheap) ─
 
-/** Merge the global effective MCP list with one session's overrides. A
- *  session override only affects servers present in the global list; an
- *  override for an unknown name is ignored (stale rows die silently). */
+/** Inert capability facts used when a session has an operation but no stored
+ *  backend facts yet. Four canonical facts only — never an operation. */
+const EMPTY_CAPABILITY_FACTS: SessionCapabilityFacts = {
+  billableActivity: false,
+  canContinue: false,
+  canInterrupt: false,
+  canCompact: false,
+};
+
+/** Project exactly the four canonical backend facts. Event validation accepts
+ *  an optional `primaryOperation` overlay on capability payloads (wire
+ *  acceptance), but the backend never originates the host operation phase
+ *  (STATE_CONTRACT § Authoritative Session Activity and Capabilities); the
+ *  reducer stores payloads verbatim, so any injected overlay must be stripped
+ *  here instead of rejecting whole events. `primaryOperation` is added below
+ *  by the reducer-owned operation overlay only. */
+function canonicalCapabilityFacts(facts: SessionCapabilityFacts): SessionCapabilities {
+  return {
+    billableActivity: facts.billableActivity,
+    canContinue: facts.canContinue,
+    canInterrupt: facts.canInterrupt,
+    canCompact: facts.canCompact,
+  };
+}
+
 export function projectSessionCapabilities(
   state: ArchState,
 ): Record<string, SessionCapabilities> {
-  const projected: Record<string, SessionCapabilities> = { ...state.sessions.capabilitiesBySession };
+  const projected: Record<string, SessionCapabilities> = {};
+  for (const [sessionPath, facts] of Object.entries(state.sessions.capabilitiesBySession)) {
+    projected[sessionPath] = canonicalCapabilityFacts(facts);
+  }
+  // Only canonical backend facts are projected above, regardless of any
+  // optional operation field carried by the accepted event payload. Overlay
+  // the reducer's non-terminal operation into the renderer DTO below.
   const primaryBySession: Record<string, (typeof state.operations)[string]> = {};
   const priority = (kind: (typeof state.operations)[string]['kind']): number =>
     kind === 'message.interrupt' ? 3 : kind === 'message.edit' ? 2 : kind.startsWith('message.') ? 1 : 0;
@@ -88,12 +117,7 @@ export function projectSessionCapabilities(
     // Re-narrow after the per-session selection map; settled operations were
     // excluded above but their declared registry type still includes the phase.
     if (operation.phase === 'settled') continue;
-    const base = projected[sessionPath] ?? {
-      billableActivity: false,
-      canContinue: false,
-      canInterrupt: false,
-      canCompact: false,
-    };
+    const base: SessionCapabilityFacts = projected[sessionPath] ?? EMPTY_CAPABILITY_FACTS;
     const executionOperation = operation.kind.startsWith('message.');
     projected[sessionPath] = {
       ...base,
@@ -113,6 +137,9 @@ export function projectSessionCapabilities(
   return projected;
 }
 
+/** Merge the global effective MCP list with one session's overrides. A
+ *  session override only affects servers present in the global list; an
+ *  override for an unknown name is ignored (stale rows die silently). */
 export function mergeSessionMcpServers(
   globalServers: readonly { name: string; disabled: boolean }[],
   overrides: Record<string, boolean> | undefined,

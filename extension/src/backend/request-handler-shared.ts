@@ -189,7 +189,7 @@ export interface BackendRequestHandlerDeps {
   emitBusyChanged(
     context: SessionContext,
     busy: boolean,
-    capabilities?: import('../shared/protocol').SessionCapabilities,
+    capabilities?: import('../shared/protocol/session-capability-facts.js').SessionCapabilityFacts,
   ): void;
   emitContextUsageChanged(context: SessionContext): void;
   emitSessionListChanged(liveSummaries?: readonly SessionSummary[]): Promise<void>;

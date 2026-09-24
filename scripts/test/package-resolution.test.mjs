@@ -22,6 +22,7 @@ const ownerRoot = currentRoots.dependencyOwnerRoot;
 const tsxCli = path.join(ownerRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');
 const tscCli = path.join(ownerRoot, 'node_modules', 'typescript', 'bin', 'tsc');
 const viteCli = path.join(ownerRoot, 'node_modules', 'vite', 'bin', 'vite.js');
+const viteNodeEntry = path.join(ownerRoot, 'node_modules', 'vite', 'dist', 'node', 'index.js');
 
 function makeFixture(t) {
   const fixtureRoot = mkdtempSync(path.join(os.tmpdir(), 'pie-package-resolution-'));
@@ -153,6 +154,7 @@ import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import type { ExtensionAPI as LegacyExtensionAPI } from '@mariozechner/pi-coding-agent';
 import type { Model } from '@earendil-works/pi-ai';
 import type { Model as LegacyModel } from '@mariozechner/pi-ai';
+import type { Text as PiTuiText } from '@earendil-works/pi-tui';
 import { Type } from 'typebox';
 import { Type as LegacyType } from '@sinclair/typebox';
 import { useState } from 'preact/hooks';
@@ -166,10 +168,13 @@ const component = () => {
   const [value] = useState('resolved');
   return createElement('div', null, value, sameTypebox ? 'same' : 'different');
 };
-const types: [ExtensionAPI, LegacyExtensionAPI, Model<any>, LegacyModel<any>] | undefined = undefined;
+const types: [ExtensionAPI, LegacyExtensionAPI, Model<any>, LegacyModel<any>, PiTuiText] | undefined = undefined;
 void [schema, element, component, types];
 `);
-  const configPath = writeTsConfig(sourceRoot, createTypeScriptResolution({ dependencyOwnerRoot: ownerRoot }));
+  const typeResolution = createTypeScriptResolution({ dependencyOwnerRoot: ownerRoot });
+  const piTuiRoot = path.join(ownerRoot, 'node_modules', '@earendil-works', 'pi-coding-agent', 'node_modules', '@earendil-works', 'pi-tui');
+  assert.equal(typeResolution.paths['@earendil-works/pi-tui'][0], path.join(piTuiRoot, 'dist', 'index.d.ts'));
+  const configPath = writeTsConfig(sourceRoot, typeResolution);
   const result = spawnSync(process.execPath, [tscCli, '--project', configPath, '--pretty', 'false'], {
     cwd: sourceRoot,
     encoding: 'utf8',
@@ -180,9 +185,14 @@ void [schema, element, component, types];
   assert.equal(result.status, 0, [result.stdout, result.stderr].filter(Boolean).join('\n'));
 });
 
-test('the real Vite bundler consumes owner aliases for Preact JSX and subpaths from a future source root', { timeout: 120_000 }, (t) => {
+test('the real Vite bundler consumes owner aliases and SSR resolves runtime pi-tui from a future source root', { timeout: 120_000 }, async (t) => {
   const { fixtureRoot, sourceRoot } = makeFixture(t);
   const sourcePath = path.join(sourceRoot, 'bundle-proof.tsx');
+  const runtimeSourcePath = path.join(sourceRoot, 'vite-runtime-proof.ts');
+  writeFileSync(runtimeSourcePath, `
+import { Text as PiTuiText } from '@earendil-works/pi-tui';
+export const piTuiText = PiTuiText;
+`);
   writeFileSync(sourcePath, `
 import { h } from 'preact';
 import { createElement } from 'preact/compat';
@@ -207,6 +217,22 @@ export default {
 };
 `);
   runNode([viteCli, 'build', sourceRoot, '--config', configPath, '--logLevel', 'error'], sourceRoot);
+  const vite = await import(pathToFileURL(viteNodeEntry).href);
+  const runtimeOutputPath = path.join(fixtureRoot, 'vite-runtime-out');
+  await vite.build({
+    configFile: false,
+    root: sourceRoot,
+    resolve: { alias: createViteAliases({ dependencyOwnerRoot: ownerRoot }) },
+    build: {
+      target: 'node22',
+      ssr: runtimeSourcePath,
+      outDir: runtimeOutputPath,
+      emptyOutDir: true,
+    },
+  });
+  const runtimeEntry = path.join(runtimeOutputPath, 'vite-runtime-proof.mjs');
+  const runtimeProof = await import(pathToFileURL(runtimeEntry).href);
+  assert.equal(typeof runtimeProof.piTuiText, 'function');
   const outputFiles = [];
   const walk = (directory) => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
@@ -227,12 +253,14 @@ import { Type } from '@earendil-works/pi-ai';
 import { Type as LegacyType } from '@mariozechner/pi-ai';
 import { Type as Typebox } from 'typebox';
 import { Type as SinclairType } from '@sinclair/typebox';
+import { Text as PiTuiText } from '@earendil-works/pi-tui';
 import { useState } from 'preact/hooks';
 import { jsx } from 'preact/jsx-runtime';
 console.log(JSON.stringify({
   samePiIdentity: Type.Object === LegacyType.Object,
   sameTypeboxIdentity: Typebox.Object === SinclairType.Object,
   preact: typeof useState === 'function' && typeof jsx === 'function',
+  piTui: typeof PiTuiText === 'function',
 }));
 `);
   const configPath = writeTsConfig(sourceRoot, {
@@ -246,6 +274,7 @@ console.log(JSON.stringify({
     samePiIdentity: true,
     sameTypeboxIdentity: true,
     preact: true,
+    piTui: true,
   });
 });
 
@@ -278,4 +307,43 @@ export default (pi: ExtensionAPI) => {
   assert.deepEqual(result.errors, []);
   assert.equal(result.extensions.length, 1);
   assert.equal(result.extensions[0].commands.get('package-resolution-proof').description, 'true,true,true,true,true');
+});
+
+test('the extension Vite build graphs consume helper-derived owner aliases, not hardcoded nested paths', { timeout: 120_000 }, async () => {
+  const vite = await import(pathToFileURL(viteNodeEntry).href);
+  const extensionConfigPath = path.join(repoRoot, 'extension', 'vite.config.ts');
+  const nodeResolved = await vite.resolveConfig({ configFile: extensionConfigPath }, 'build', 'node');
+  const webviewResolved = await vite.resolveConfig({ configFile: extensionConfigPath }, 'build', 'production');
+
+  // Both build graphs resolve to the identical helper-derived alias set.
+  const describeAliases = (resolved) => JSON.stringify(resolved.resolve.alias.map((alias) => [String(alias.find), alias.replacement]));
+  assert.equal(describeAliases(nodeResolved), describeAliases(webviewResolved));
+  const aliases = nodeResolved.resolve.alias;
+  const findFor = (specifier) => aliases.find((alias) => (typeof alias.find === 'string' ? alias.find === specifier : alias.find.test(specifier)));
+
+  // The source-root alias is preserved alongside package aliases.
+  assert.equal(findFor('@shared').replacement, path.join(repoRoot, 'extension', 'src', 'shared'));
+
+  // Current and legacy Pi spellings rewrite into the canonical nested SDK
+  // graph, including wildcard subpaths.
+  const nestedPiAi = path.join(ownerRoot, 'node_modules', '@earendil-works', 'pi-coding-agent', 'node_modules', '@earendil-works', 'pi-ai', 'dist');
+  assert.equal(findFor('@earendil-works/pi-ai').replacement, path.join(nestedPiAi, 'index.js'));
+  assert.equal(findFor('@mariozechner/pi-ai').replacement, path.join(nestedPiAi, 'index.js'));
+  const legacyProviders = findFor('@mariozechner/pi-ai/providers/all');
+  assert.ok(legacyProviders.find instanceof RegExp);
+  assert.equal(legacyProviders.replacement.replace('$1', 'all'), path.join(nestedPiAi, 'providers', 'all.js'));
+
+  // TypeBox spellings share the SDK's nested identity; Preact keeps its
+  // owner-installed files and subpaths.
+  const nestedTypebox = path.join(ownerRoot, 'node_modules', '@earendil-works', 'pi-coding-agent', 'node_modules', 'typebox');
+  assert.equal(findFor('typebox').replacement, findFor('@sinclair/typebox').replacement);
+  assert.ok(findFor('typebox').replacement.startsWith(nestedTypebox));
+  assert.ok(findFor('preact').replacement.startsWith(path.join(ownerRoot, 'node_modules', 'preact', 'dist')));
+  assert.ok(findFor('preact/hooks').replacement.startsWith(path.join(ownerRoot, 'node_modules', 'preact', 'hooks', 'dist')));
+
+  // No alias redirects `vscode`, node builtins, optional native deps, or the
+  // native tool sidecar owners; they keep their own resolution.
+  for (const specifier of ['vscode', 'node:fs', 'bufferutil', 'utf-8-validate', 'computer-use', 'playwright']) {
+    assert.equal(findFor(specifier), undefined, `${specifier} must stay unaliased`);
+  }
 });

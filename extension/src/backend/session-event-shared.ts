@@ -51,7 +51,7 @@ export interface BackendSessionEventHandlerDeps {
   emitBusyChanged(
     context: SessionContext,
     busy: boolean,
-    capabilities?: import('../shared/protocol').SessionCapabilities,
+    capabilities?: import('../shared/protocol/session-capability-facts.js').SessionCapabilityFacts,
   ): void;
   emitContextUsageChanged(context: SessionContext, postCompactionEstimatedTokens?: number): void;
   emitSessionOpened(sessionPath: string, selectionToken?: string): Promise<void>;

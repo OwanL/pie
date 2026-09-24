@@ -1,4 +1,7 @@
-import type { SessionCapabilities } from '../shared/protocol';
+// Backend capability producers publish the canonical inert facts contract
+// only (repository-organization plan §3.2); the host-owned operation overlay
+// is projected exclusively in `host/core/projection.ts`.
+import type { SessionCapabilityFacts } from '../shared/protocol/session-capability-facts.js';
 import { classifyInterruptedContinuationTail } from './sdk';
 import type { SessionContext } from './server-types';
 
@@ -32,7 +35,7 @@ export function hasBillableSessionActivity(
 export function buildSessionCapabilities(
   context: Pick<SessionContext, 'activeRequest' | 'manualCompactionRequest' | 'pendingExtensionCommand' | 'retired' | 'session'>,
   overrides: SessionActivityOverrides = {},
-): SessionCapabilities {
+): SessionCapabilityFacts {
   const billableActivity = hasBillableSessionActivity(context, overrides);
   return {
     billableActivity,
@@ -49,7 +52,7 @@ export function buildSessionCapabilities(
 export function buildIdleSessionCapabilities(
   messages: unknown,
   contextWindow?: number,
-): SessionCapabilities {
+): SessionCapabilityFacts {
   return {
     billableActivity: false,
     canInterrupt: false,
@@ -58,7 +61,7 @@ export function buildIdleSessionCapabilities(
   };
 }
 
-export const SETTLED_SESSION_CAPABILITIES: SessionCapabilities = Object.freeze({
+export const SETTLED_SESSION_CAPABILITIES: SessionCapabilityFacts = Object.freeze({
   billableActivity: false,
   canInterrupt: false,
   canCompact: true,

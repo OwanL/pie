@@ -1,10 +1,10 @@
 # Repository organization migration progress
 
 **Status:** B0 (baseline, inventory and migration manifest) is complete after the
-review correction below. A preparatory B1 slice is now implemented but remains
-partial and does not meet B1 exit; see the appended checkpoint. No B2 relocation
-has occurred. The approved planning checkpoint is already committed; no push is
-authorized.
+review correction below. The current B1 preparation slice is implemented but
+remains partial and does not meet B1 exit; see the latest appended checkpoint.
+No B2 relocation has occurred. The approved planning checkpoint is already
+committed; no push is authorized.
 
 Owned artifacts: `repository-organization-migration-manifest.json` (B0
 deliverable), `repository-organization-baseline-verification.md`, and this file.
@@ -37,7 +37,8 @@ All three have explicit `retain` records in the manifest.
   B0 generation ran from OS temp (`%TEMP%\pie-b0-manifest-gen\`). The review
   correction updated the existing manifest in place and revalidated it against
   the Git tree and test registry; no generator/checker scripts or logs are in
-  the repo. The current B1 checkpoint adds two owned source records (1773 total).
+  the repo. The earlier B1 checkpoint added two owned source records (1773 total);
+  the current checkpoint adds five explicitly inventoried files (1778 total).
 - Coverage validation: exact bijection between `git ls-tree` at the verification
   baseline and record sources (0 missing, 0 extra tracked sources), plus the 3
   declared new docs.
@@ -181,20 +182,72 @@ relocation or publishing build was performed in this preparation slice.
 - Milestone commits are approved; push is not authorized.
 - The `settings.json` user change stays out of migration commits.
 
-## B1 partial checkpoint (2026-09-24)
+## Earlier B1 preparation checkpoint (2026-09-24)
 
-- `scripts/lib/package-resolution.mjs` and its proof suite are present. Six of
+- `scripts/lib/package-resolution.mjs` and its proof suite were present. Six of
   six tests passed, including the real TypeScript compiler, Vite, repository-local
   tsx, and pinned SDK extension-loader paths. The eight multi-root routing files
-  listed in the manifest were updated; routing tests pass, including the fixes
+  listed in the manifest were updated; routing tests passed, including the fixes
   for required roots, complete glob coverage, and nested cross-owner claims.
-- This is preparation only: package-resolution config/runtime callers are not
-  wired; RPC/renderer and host-adapter seams plus discovery/lifecycle tests
-  remain pending. B1 is not exit and no B2 files moved.
-- Manifest source coverage now has 1773 records: 1771 current tracked paths plus
-  the two explicit owned additions. The B0 `trackedTestFilesByPackage` arrays and
-  intentional collision resolutions are unchanged.
-- `settings.json` is now live user state (`defaultModel` gpt-6-astra →
-  gpt-6-luna; `defaultThinkingLevel` high → xhigh). Preserve the immutable B0
-  snapshot, exclude current/future user edits from migration, and do not restore
-  or pin the previous `medium` value.
+- This was preparation only; package configs/runtime callers, protocol and
+  host-adapter seams, and discovery/lifecycle proofs were pending. B1 was not
+  exit and no B2 files moved.
+- Manifest source coverage at that checkpoint was 1773 records: 1771 current
+  tracked paths plus two explicit owned additions. The B0
+  `trackedTestFilesByPackage` arrays and intentional collision resolutions
+  remained unchanged.
+- `settings.json` is live user state (`defaultModel` gpt-6-astra → gpt-6-luna;
+  `defaultThinkingLevel` high → xhigh). Preserve the immutable B0 snapshot,
+  exclude current/future user edits from migration, and do not restore or pin
+  the previous `medium` value.
+
+## Current B1 preparation checkpoint (2026-09-24)
+
+- Owner-relative package resolution is now wired into both extension Vite build
+  graphs through `extension/vite.config.ts` and the shared helper. Seven resolver
+  tests passed, including the real TypeScript compiler, Vite client and SSR
+  graphs, repository-local tsx, the pinned SDK extension loader, and runtime
+  `pi-tui` resolution from an isolated future source root. Compiler and
+  test-runtime resolution integration beyond this Vite wiring is still pending.
+- The real pinned SDK `DefaultResourceLoader` regression discovers the checked-in
+  skill-pruner root shim, invokes its loaded selector, then invokes the loaded
+  `request_capability` tool and proves hide/recover share one selector state.
+  The recovery audit completed before temporary fixture cleanup. The selector/
+  skill-pruner suite passed 59 tests.
+- The browser-server boundary now has a host-neutral service/factory contract.
+  `HostRuntime` depends on `BrowserServerService`; concrete VS Code and
+  standalone adapters construct `BrowserServer` and retain ownership of asset,
+  icon, renderer-selection, and title paths. The canonical contracts target
+  `application/hosts/lib/platform-contracts/browser-server-seam.ts`, distinct
+  from the concrete browser factory/implementation targets.
+- The protocol boundary now separates inert `SessionCapabilityFacts` (harness
+  RPC owner) from application `SessionCapabilities` and reducer operation types.
+  Backend producers consume facts only; the host projection alone joins the
+  operation overlay. The capability-seam suite passed 5 tests.
+- **User-approved low-risk correctness fix:** wire validation still accepts
+  optional `primaryOperation` data and reducer storage remains verbatim, but
+  pure projection now strips any backend-supplied operation overlay. Only a
+  current non-terminal reducer-owned operation is projected. Three focused
+  suppression tests passed. Typecheck and extension build passed after this
+  correction. The build is staged, not live; exact staged generation identity
+  was not checked.
+- Focused evidence: resolver 7/7, host runtime 14, selector/pruner 59,
+  capability seam 5, and projection suppression 3 passed. The full fast suite
+  passed (7,403 passed) before the suppression fix, with a rerun caveat; it was
+  not rerun after that fix. Do not treat the focused/post-fix typecheck and
+  build evidence as a post-fix full-suite pass or as live behavior verification.
+- Manifest inventory now has 1778 records: all 1773 current tracked paths plus
+  five explicitly owned untracked source/test additions. The two earlier
+  package-resolution additions are now included among the tracked paths. Exact
+  coverage validation found zero missing tracked sources, zero unrecorded
+  untracked sources, and zero duplicate source records. The five new records
+  cover the browser-server seam, capability facts, operation projection, and
+  both boundary regression tests. The immutable B0 per-package test-path
+  enumeration remains unchanged (696 paths). All 10 multi-source target paths
+  remain covered by the existing 13 collision-resolution records; no new target
+  collision is introduced, and each newly added canonical target is unique.
+- B1 remains partial until compiler/test-runtime resolution integration, all
+  remaining discovery/seam work, and the full inventory/dispatch gates are
+  proved. No B2 relocation has occurred. Only these planning documents changed;
+  no source/settings files or Git metadata/index changes were made. No stash/reset
+  was used.

@@ -6,6 +6,7 @@ import {
   buildSessionCapabilities,
   hasBillableSessionActivity,
 } from '../../../src/backend/session-activity';
+import type { SessionCapabilityFacts } from '../../../src/shared/protocol/session-capability-facts';
 import type { SessionContext } from '../../../src/backend/server-types';
 
 function contextWith(sessionOverrides: Record<string, unknown> = {}, contextOverrides: Record<string, unknown> = {}): SessionContext {
@@ -66,4 +67,16 @@ test('idle continuation classification uses the supplied complete backend contex
     { role: 'user', content: 'delivered but not answered' },
   ];
   assert.equal(buildIdleSessionCapabilities(completeContext).canContinue, true);
+});
+
+test('backend capability producers publish only inert facts, never the host operation overlay', () => {
+  const capabilities = buildSessionCapabilities(contextWith());
+  const facts: SessionCapabilityFacts = capabilities;
+  assert.deepEqual(facts, {
+    billableActivity: false,
+    canContinue: false,
+    canInterrupt: false,
+    canCompact: true,
+  });
+  assert.equal('primaryOperation' in capabilities, false);
 });

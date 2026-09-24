@@ -1197,7 +1197,7 @@ export class WorkerRuntimeHost {
   private emitBusyChanged(
     context: SessionContext,
     busy = hasBillableSessionActivity(context),
-    suppliedCapabilities?: import('../shared/protocol').SessionCapabilities,
+    suppliedCapabilities?: import('../shared/protocol/session-capability-facts.js').SessionCapabilityFacts,
   ): void {
     context.busySeq += 1;
     const current = suppliedCapabilities ?? buildSessionCapabilities(context);

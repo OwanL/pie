@@ -4,10 +4,23 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as url from 'node:url';
+// The shared resolver is JavaScript-only and intentionally has no production
+// TypeScript dependency. Keep the config seam typed at its use site.
+// @ts-expect-error The repository build helper is an ESM .mjs module without a declaration file.
+import { createViteAliases } from '../scripts/lib/package-resolution.mjs';
 
 const rootDir = path.dirname(url.fileURLToPath(import.meta.url));
 const srcDir = path.join(rootDir, 'src');
 const outDir = path.join(rootDir, 'out');
+
+/**
+ * Package imports resolve through the explicit dependency owner, never the
+ * config's working directory: current and legacy Pi spellings map to the SDK's
+ * nested graph (including the private pi-ai/TypeBox identity), and Preact
+ * keeps its owner-installed files and subpaths. Native tools keep their own
+ * sidecar owners and stay unaliased.
+ */
+const packageAliases = createViteAliases();
 
 const webviewOutDir = path.join(outDir, 'webview', 'panel');
 const BUILD_ID_SENTINEL = '__PIE_COMPILED_BUILD_ID_REPLACE__';
@@ -118,10 +131,10 @@ export default defineConfig(({ mode }) => {
         noExternal: true,
       },
       resolve: {
-        alias: {
-          '@shared': path.join(srcDir, 'shared'),
-          '@mariozechner/pi-ai': path.join(rootDir, 'node_modules', '@earendil-works', 'pi-coding-agent', 'node_modules', '@earendil-works', 'pi-ai'),
-        },
+        alias: [
+          { find: '@shared', replacement: path.join(srcDir, 'shared') },
+          ...packageAliases,
+        ],
       },
     };
   }
@@ -157,10 +170,10 @@ export default defineConfig(({ mode }) => {
       },
     },
     resolve: {
-      alias: {
-        '@shared': path.join(srcDir, 'shared'),
-        '@mariozechner/pi-ai': path.join(rootDir, 'node_modules', '@earendil-works', 'pi-coding-agent', 'node_modules', '@earendil-works', 'pi-ai'),
-      },
+      alias: [
+        { find: '@shared', replacement: path.join(srcDir, 'shared') },
+        ...packageAliases,
+      ],
     },
   };
 });

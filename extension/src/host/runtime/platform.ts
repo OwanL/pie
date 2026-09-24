@@ -14,7 +14,11 @@
 
 import type { HostToWebviewMessage } from '../../shared/protocol';
 import type { RuntimeGenerationIdentity } from '../analytics-handoff-discovery';
-import type { BrowserServerSettings } from '../browser-server/types';
+import type {
+  BrowserServerService,
+  BrowserServerSettings,
+  HostRuntimeBrowserServerOptions,
+} from './browser-server-seam';
 import type { FileDiffCoreLike, FileDiffViewerLike } from '../core/file-diff-service';
 import type { SessionHostPlatform } from '../session-service/platform';
 
@@ -74,6 +78,11 @@ export interface HostEditorCapabilities {
  * window-dependent reads stay lazy so adapters always reflect current state.
  */
 export interface HostRuntimePlatform extends SessionHostPlatform {
+  /** Construct the shared browser service with concrete-host asset locations.
+   *  The factory options and returned lifecycle port are the host-neutral
+   *  seam in {@link ./browser-server-seam.ts}; the concrete class is
+   *  constructed and named only by the VS Code/standalone adapters. */
+  createBrowserServer(options: HostRuntimeBrowserServerOptions): BrowserServerService;
   /** Renderer surface this runtime publishes state and imperatives to. */
   readonly renderer: HostRendererSurface;
   /** Host shell notifications (window messages + focus state). */
@@ -108,11 +117,6 @@ export interface HostRuntimePlatform extends SessionHostPlatform {
    *  The changed-file core's original VS Code wiring had no cwd fallback, so
    *  this narrower read is kept separate from {@link getWorkspaceCwd}. */
   getWorkspaceFolderPath(): string | undefined;
-  /** Staged renderer selection for the browser server (fallbackDir +
-   *  live-publication `notBefore` gate). */
-  getRendererSelection(): { fallbackDir: string; notBefore: number };
-  /** Human-readable owner suffix for the served page title (workspace name). */
-  getWorkspaceName(): string | undefined;
   /** Current experiment assignment override, or null (config-backed). */
   getExperimentAssignment(): string | null;
   /** Reload the host window so the extension host is reconstructed (the

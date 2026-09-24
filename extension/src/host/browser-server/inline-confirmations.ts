@@ -13,16 +13,12 @@
 import * as crypto from 'node:crypto';
 
 import type { HostToWebviewMessage } from '../../shared/protocol';
+import type { InlineConfirmRequest } from '../runtime/browser-server-seam';
+
+export type { InlineConfirmRequest };
 
 /** Default time bound for a pending inline confirmation. */
 export const INLINE_CONFIRM_TIMEOUT_MS = 2 * 60 * 1000;
-
-export interface InlineConfirmRequest {
-  kind: 'model-switch' | 'destructive-revert';
-  sessionPath?: string;
-  message: string;
-  confirmChoice: string;
-}
 
 export interface InlineConfirmationServiceOptions {
   /** Post a targeted imperative to one renderer (hub.postImperative). */

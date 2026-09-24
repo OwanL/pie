@@ -50,6 +50,7 @@ import type {
   BrowserClock,
   BrowserServerLifecycleEvent,
   BrowserServerOptions,
+  BrowserServerService,
   BrowserServerSettings,
   BrowserServerStartOutcome,
   BrowserServerState,
@@ -65,7 +66,7 @@ const SYSTEM_CLOCK: BrowserClock = {
   clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
 
-export class BrowserServer {
+export class BrowserServer implements BrowserServerService {
   private httpServer: http.Server | null = null;
   private wss: WebSocketServer | null = null;
   private readonly staticAssets: BrowserStaticAssets;

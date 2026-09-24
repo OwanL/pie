@@ -5,7 +5,7 @@ import type { Writable } from 'node:stream';
 import type { HostToWebviewMessage } from '../shared/protocol';
 import type { PieDataRootPaths } from '../../../shared/pie-data-root';
 import type { RuntimeGenerationIdentity } from '../host/analytics-handoff-discovery';
-import type { BrowserServer } from '../host/browser-server/browser-server';
+import { BrowserServer } from '../host/browser-server/browser-server';
 import type { BrowserServerSettings } from '../host/browser-server/types';
 import type { FileDiffCoreLike, FileDiffViewerLike } from '../host/core/file-diff-service';
 import type {
@@ -179,6 +179,16 @@ export function createStandaloneHostRuntimePlatform(
   };
 
   return {
+    createBrowserServer: (serverOptions) => new BrowserServer({
+      ...serverOptions,
+      assetDir: path.join(options.extensionPath, 'out', 'webview', 'panel'),
+      rendererSelection: {
+        fallbackDir: path.join(options.runtimeOutputDirectory, 'webview', 'panel'),
+        notBefore: 0,
+      },
+      iconPath: path.join(options.extensionPath, 'media', 'icon.svg'),
+      titleSuffix: path.basename(options.workspaceCwd),
+    }),
     storage,
     extensionPath: options.extensionPath,
     getRuntimeOutputDirectory: () => options.runtimeOutputDirectory,
@@ -224,11 +234,6 @@ export function createStandaloneHostRuntimePlatform(
       throw new Error('Standalone mode serves its only UI through the browser server; the listener cannot be stopped.');
     },
     getWorkspaceFolderPath: () => options.workspaceCwd,
-    getRendererSelection: () => ({
-      fallbackDir: path.join(options.runtimeOutputDirectory, 'webview', 'panel'),
-      notBefore: 0,
-    }),
-    getWorkspaceName: () => path.basename(options.workspaceCwd),
     getExperimentAssignment: () => process.env.PIE_EXPERIMENT_ASSIGNMENT?.trim() || null,
     reloadWindow: () => {
       throw new Error('Controlled analytics restart is unavailable in standalone mode.');

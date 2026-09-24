@@ -6,13 +6,15 @@ import { MessageRouter } from '../core/message-router';
 
 import { getDataOutcomesRootPath } from '../run-analytics/storage';
 import type { BackendClient } from '../backend/client';
+import type {
+  BrowserServerLifecycleEvent,
+  BrowserServerService,
+} from './browser-server-seam';
 import {
   shouldShowCompletionNotification,
   type SessionCompletionEvent,
 } from '../sidebar/completion-notification';
-import { BrowserServer } from '../browser-server/browser-server';
 import { compactRendererViewState } from '../renderers/renderer-view-state';
-import type { BrowserServerLifecycleEvent } from '../browser-server/types';
 import type { BrowserServerViewState } from '../../shared/protocol/webview';
 import { SessionService } from '../session-service';
 import type { HostRuntimePlatform, HostRuntimeHooks } from './platform';
@@ -89,8 +91,8 @@ const MAX_CANONICAL_ACTIVITY_VIEW_SESSIONS = 32;
  * Platform-neutral application composition and lifecycle for the pie host.
  *
  * Owns the CQRS spine (arch state, reducer dispatch, the single effect
- * runner), the session service, the browser server, the analytics authority
- * seams (runtime, transport, handoff), and the backend start/restart/shutdown
+ * runner), the session service, browser-server lifecycle, the analytics
+ * authority seams (runtime, transport, handoff), and backend start/restart/shutdown
  * lifecycle — with the exact ordering, source identity, and analytics
  * activation/handoff behavior of the previous VS Code composition. Host
  * environment differences (window notifications, editor opens, workspace
@@ -110,8 +112,10 @@ export class HostRuntime {
   readonly service: SessionService;
   /** Loopback browser server (browser server plan §6/§7). Started in
    *  `start()` after the host can build a valid initial `ViewState`, stopped
-   *  in `shutdown()` before the service/backend order. */
-  readonly browserServer: BrowserServer;
+   *  in `shutdown()` before the service/backend order. The field is the
+   *  host-neutral {@link BrowserServerService} seam; only the concrete host
+   *  adapters name and construct the `BrowserServer` implementation. */
+  readonly browserServer: BrowserServerService;
   /** Canonical/legacy analytics accounting authority seam. */
   readonly statsService: StatsServicePort;
 
@@ -639,7 +643,7 @@ export class HostRuntime {
       },
     );
 
-    this.browserServer = new BrowserServer({
+    this.browserServer = this.platform.createBrowserServer({
       hostInstanceId: this.platform.renderer.getHostInstanceId(),
       getSettings: () => this.platform.getBrowserServerSettings(),
       getViewState: () => this.buildViewState(),
@@ -647,10 +651,6 @@ export class HostRuntime {
       routeMessage: (msg, context) => this.messageRouter.handle(msg, context),
       onRendererInvalidated: (rendererId, rendererGeneration) =>
         this.service.unsubscribeRendererDetails(rendererId, rendererGeneration),
-      assetDir: path.join(this.platform.extensionPath, 'out', 'webview', 'panel'),
-      rendererSelection: this.platform.getRendererSelection(),
-      iconPath: path.join(this.platform.extensionPath, 'media', 'icon.svg'),
-      titleSuffix: this.platform.getWorkspaceName(),
       onLifecycle: (event) => this.handleBrowserServerLifecycle(event),
     });
 

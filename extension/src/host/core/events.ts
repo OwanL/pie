@@ -38,7 +38,7 @@ import type {
   McpServerInfo,
   CompactionOutcome,
   CompactionReason,
-  SessionCapabilities,
+  SessionCapabilityFacts,
   OperationalIncident,
 } from '../../shared/protocol';
 
@@ -539,7 +539,8 @@ export interface MessageFinishedEvent {
 export interface AgentSettledEvent {
   kind: 'AgentSettled';
   sessionPath: string;
-  capabilities: SessionCapabilities;
+  /** Backend-classified inert capability facts (no host operation overlay). */
+  capabilities: SessionCapabilityFacts;
   operationId?: string;
   requestId?: string;
   turnId?: string;
@@ -555,7 +556,8 @@ export interface BusyChangedEvent {
   kind: 'BusyChanged';
   sessionPath: string;
   running: boolean;
-  capabilities?: SessionCapabilities;
+  /** Backend-classified inert capability facts (no host operation overlay). */
+  capabilities?: SessionCapabilityFacts;
 }
 
 /** Emitted when a history-compaction (`/compact`) LLM call starts. The backend

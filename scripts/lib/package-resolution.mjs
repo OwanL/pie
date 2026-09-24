@@ -271,7 +271,9 @@ function exportMappings(packageInfo, packageName, conditions) {
     }
   }
   if (mappings.length === 0) {
-    const entry = packageInfo.manifest.types ?? packageInfo.manifest.module ?? packageInfo.manifest.main;
+    const entry = conditions.includes('types')
+      ? packageInfo.manifest.types ?? packageInfo.manifest.module ?? packageInfo.manifest.main
+      : packageInfo.manifest.module ?? packageInfo.manifest.main;
     if (entry) mappings.push({ key: packageName, replacement: path.resolve(packageInfo.root, entry) });
   }
   return mappings;

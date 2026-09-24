@@ -33,18 +33,25 @@
   "checkpointDate": "2026-09-24",
   "milestone": "B1",
   "status": "partial-not-exit",
-  "scope": "Preparatory owner-relative package resolution and multi-root test routing only; no B2 relocations.",
+  "scope": "B1 preparation: owner-relative package resolution/Vite wiring, multi-root test routing, host-neutral factory and capability/operation seams, and their focused regressions; no B2 relocations.",
   "inventory": {
-   "currentTrackedSourcesCovered": 1771,
+   "currentTrackedSourcesCovered": 1773,
    "ownedPostBaselineSources": [
-    "scripts/lib/package-resolution.mjs",
-    "scripts/test/package-resolution.test.mjs"
+    "extension/src/host/runtime/browser-server-seam.ts",
+    "extension/src/shared/protocol/session-capability-facts.ts",
+    "extension/src/shared/protocol/session-operation-projection.ts",
+    "extension/test/shared/protocol/capability-seam.test.ts",
+    "extension/test/host/core/architecture/capability-projection-overlay-suppression.test.ts"
    ],
-   "sourceRecordCount": 1773,
-   "validation": "Exact set: all current git ls-files paths plus these two owned additions; zero missing, extra, or duplicate source records. Baseline trackedTestFilesByPackage arrays remain unchanged and immutable."
+   "sourceRecordCount": 1778,
+   "validation": "Exact set: all 1773 current git ls-files paths plus these five explicitly owned untracked additions; zero missing, extra, or duplicate source records. The two earlier package-resolution additions are now among the tracked paths. Baseline trackedTestFilesByPackage arrays remain unchanged and immutable."
   },
   "implemented": {
-   "packageResolution": "scripts/lib/package-resolution.mjs provides current/planned owner-relative roots and runtime, TypeScript, tsx, and Vite resolution proofs; 6/6 tests passed using the real compiler, Vite, repository-local tsx, and pinned SDK extension loader.",
+   "packageResolution": "scripts/lib/package-resolution.mjs provides current/planned owner-relative roots and runtime, TypeScript, tsx, and Vite resolution proofs; 7/7 tests passed, including real TypeScript, Vite, repository-local tsx, pinned SDK extension-loader, and real SSR pi-tui runtime-resolution coverage. The helper-derived aliases are now wired into both extension Vite build graphs via extension/vite.config.ts.",
+   "selectorRegression": "The real pinned SDK DefaultResourceLoader discovers the checked-in skill-pruner root shim; its loaded selector and request_capability tool share one state identity through hide/recover, with audit completion verified. 59 selector/pruner tests passed.",
+   "browserServerSeam": "HostRuntime now consumes a host-neutral BrowserServerService and platform factory contract from browser-server-seam.ts; concrete VS Code/standalone adapters construct BrowserServer and own asset paths. The factory contract is targeted separately under application/hosts/lib/platform-contracts/browser-server-seam.ts, not duplicated in the browser implementation target.",
+   "capabilityOperationSeam": "Backend capability producers consume inert SessionCapabilityFacts; reducer-owned operation types and renderer SessionCapabilities live in session-operation-projection.ts, and only the host projection joins the operation overlay. Five capability-seam tests passed.",
+   "projectionSuppression": "User-approved low-risk correctness fix: preserve accepted wire payloads and reducer storage semantics, but strip any backend-supplied primaryOperation during projection so only a live reducer-owned operation can surface. Three suppression tests passed; typecheck and extension build passed after this fix. Build is staged, not live; exact staged generation identity was not checked.",
    "routingFiles": [
     "scripts/lib/test-impact.mjs",
     "scripts/lib/test-packages.mjs",
@@ -58,9 +65,9 @@
    "routingEvidence": "Routing script tests pass; required-root handling, full-root glob coverage, and nested cross-owner rejection are corrected."
   },
   "pending": [
-   "Package-resolution configs and runtime callers are not wired.",
-   "Harness RPC/renderer protocol and host-adapter seams remain pending.",
-   "Selector lifecycle/order/state-identity and resource-discovery tests remain pending; B1 exit criteria are not met."
+   "Complete package compiler and test-runtime resolution integration beyond the now-wired extension Vite graphs; prove current and planned owner-relative resolution in all relevant configs/callers.",
+   "Finish remaining RPC/renderer and host-adapter seams and the full discovery, lifecycle/order/state-identity, and resource-discovery gates.",
+   "B1 remains partial: these remaining integration and inventory gates have not been proved; no B2 relocation is authorized by this checkpoint."
   ],
   "settingsWorkingTree": "The B0 settings.json high-to-medium note is an immutable baseline snapshot. Current live user fields have since changed (defaultModel gpt-6-astra to gpt-6-luna; defaultThinkingLevel high to xhigh). Exclude ongoing settings edits from migration; do not restore or pin future edits to medium."
  },
@@ -1683,7 +1690,7 @@
    "kind": "resolved-conflict"
   }
  ],
- "recordCount": 1773,
+ "recordCount": 1778,
  "records": [
   {
    "source": "extension/src/backend/analytics-worker-transport.ts",
@@ -4737,6 +4744,21 @@
    "reason": "Resolves installed runtime output dir + renderer selection from the VS Code extension context (RuntimeLocation, configureRuntimeLocation, runtimeOutputDirectory, runtimeRendererSelection); loader-compatibility concern living in the documented target runtime dir."
   },
   {
+   "source": "extension/src/host/runtime/browser-server-seam.ts",
+   "targets": [
+    "application/hosts/lib/platform-contracts/browser-server-seam.ts"
+   ],
+   "action": "move",
+   "owner": "application.hosts.platform-contracts",
+   "batch": "B1",
+   "verification": [
+    "platform-contracts closure check: pure browser-safe contracts; no concrete browser-server, Node, or VS Code imports",
+    "host-runtime suite proves injected BrowserServerService factory and lifecycle contract",
+    "canonical settings/lifecycle/inline-confirmation/factory/service shapes are defined once; browser domain re-exports rather than mirrors"
+   ],
+   "reason": "Host-neutral BrowserServerService lifecycle port, factory options, and browser-server settings/lifecycle contracts used by shared HostRuntime and implemented/constructed only by concrete hosts. Separate from application/hosts/browser/http/browser-server-factory.ts (concrete adapter target) and from browser domain implementation/types."
+  },
+  {
    "source": "extension/src/host/runtime/host-runtime.ts",
    "targets": [
     "application/backend/composition/host-runtime.ts",
@@ -4746,13 +4768,13 @@
    "owner": "application.backend.composition + application.hosts.browser",
    "batch": "B7",
    "verification": [
-    "host-runtime test passes with BrowserServer construction injected (no direct browser-server import from composition)",
+    "host-runtime suite proves the runtime uses an injected BrowserServerService factory and does not import or construct the concrete server",
     "architecture check: application/backend/composition has no import of application/hosts concrete adapters",
     "single-active-host coordination + host priority/handoff preserved (host-coordinator + host-runtime suites)",
     "typecheck/lint/registry updated",
     "MessageRouterPlatform.showLogs delegates through HostRuntimePlatform; shared composition has no concrete VS Code logger import"
    ],
-   "reason": "Split per plan 4.2 + 3.2. Application composition -> application/backend/composition/host-runtime.ts: shared runtime orchestration (BackendClient, SessionService, analytics runtime/transport/handoff control + writer fence + controlled-restart driver composition, shared host lifecycle). Concrete-host construction seam -> application/hosts/browser/http/browser-server-factory.ts: the direct import/construction of BrowserServer (from ../browser-server/browser-server) extracted as an injected adapter so composition never constructs a concrete host server. Route the message-router show-logs effect through the host platform capability rather than importing a concrete output-channel implementation."
+   "reason": "Split per plan 4.2 + 3.2. Application composition -> application/backend/composition/host-runtime.ts: shared runtime orchestration (BackendClient, SessionService, analytics runtime/transport/handoff control + writer fence + controlled-restart driver composition, shared host lifecycle). Concrete-host construction remains behind the browser host adapter target application/hosts/browser/http/browser-server-factory.ts; its host-neutral BrowserServerService/factory contract is a distinct canonical module at application/hosts/lib/platform-contracts/browser-server-seam.ts (owned by the new browser-server-seam.ts source record), avoiding a duplicate contract or target collision. Route message-router show-logs through the host platform capability rather than a concrete output-channel implementation."
   },
   {
    "source": "extension/src/host/runtime/platform.ts",
@@ -4768,7 +4790,7 @@
     "typecheck/lint scope updated",
     "the show-logs capability is a host-neutral injected platform port; no VS Code type or runtime import enters the contract"
    ],
-   "reason": "HostRendererSurface/HostRuntimeStatus and host platform interface types with type-only imports -> shared platform contracts (pure interfaces only). Include the host show-logs capability as an injected operation so the application backend does not depend on the concrete VS Code logger adapter."
+   "reason": "HostRendererSurface/HostRuntimeStatus and host platform interface types with type-only imports -> shared platform contracts (pure interfaces only). Include host show-logs and browser-server factory capabilities as injected operations so application composition does not depend on concrete VS Code/browser implementations. The browser-server contract itself has its own canonical platform-contracts target; this platform.ts target remains distinct."
   },
   {
    "source": "extension/src/host/session-service/index.ts",
@@ -5237,7 +5259,7 @@
     "typecheck + lint scope (tsconfig includes / eslint roots / Vite compile entries) cover application/hosts/browser/types.ts",
     "loopback default + explicit trusted-LAN opt-in + host/origin protections asserted by browser-server suites"
    ],
-   "reason": "Mapped per plan 4.2 responsibility rules to application/hosts/browser/types.ts."
+   "reason": "Browser-domain concrete construction options and renderer-hub types move to application/hosts/browser/types.ts. Canonical BrowserServerSettings, lifecycle/state shapes, and host-neutral factory/service contracts are owned separately by application/hosts/lib/platform-contracts/browser-server-seam.ts; this browser types target re-exports those bindings and must not redeclare them."
   },
   {
    "source": "extension/src/host/core/arch-state.ts",
@@ -7929,6 +7951,20 @@
     "reducer purity / one effect-runner facade / reducer-owned operation lifecycle invariants asserted"
    ],
    "reason": "Unit/component test for the application.backend.conversation-state responsibility (mirrors application/backend/test/conversation-state/architecture implementation); moves with the responsibility it tests per plan 6."
+  },
+  {
+   "source": "extension/test/host/core/architecture/capability-projection-overlay-suppression.test.ts",
+   "targets": [
+    "application/backend/test/conversation-state/architecture/capability-projection-overlay-suppression.test.ts"
+   ],
+   "action": "move",
+   "owner": "application.backend.conversation-state",
+   "batch": "B1",
+   "verification": [
+    "three focused tests prove accepted/stored backend primaryOperation data is stripped, live reducer operation remains authoritative, and settled operations do not resurrect an injected overlay",
+    "typecheck and extension build pass after the low-risk projection correction"
+   ],
+   "reason": "Application pure-projection regression test for the boundary between backend facts and the reducer-owned operation overlay; it moves with the conversation-state projection, not the RPC facts contract."
   },
   {
    "source": "extension/test/host/core/detail-routing-seam.test.ts",
@@ -10718,19 +10754,50 @@
    "reason": "Model picker/context view shapes are app protocol, distinct from provider catalog policy."
   },
   {
+   "source": "extension/src/shared/protocol/session-capability-facts.ts",
+   "targets": [
+    "harness/agent-processes/lib/rpc/session-capability-facts.ts"
+   ],
+   "action": "move",
+   "owner": "harness.agent-processes.lib.rpc",
+   "batch": "B1",
+   "verification": [
+    "capability-seam tests prove the contract has exactly the four inert facts and no operation overlay/imports",
+    "backend capability producers import facts directly and never import SessionCapabilities or operation projections",
+    "worker/session capability events preserve the JSON wire shape"
+   ],
+   "reason": "Canonical backend-owned inert capability facts contract shared by backend producers and session RPC payloads. Kept separate from the application-owned renderer operation overlay and its DTO."
+  },
+  {
+   "source": "extension/src/shared/protocol/session-operation-projection.ts",
+   "targets": [
+    "application/lib/protocol/session-operation-projection.ts"
+   ],
+   "action": "move",
+   "owner": "application.lib.protocol",
+   "batch": "B1",
+   "verification": [
+    "capability-seam tests prove this is the only host-owned operation overlay contract and it depends only on inert facts",
+    "projection suppression tests prove backend payload overlays cannot replace reducer-owned operation truth",
+    "wire DTO shape remains unchanged after pure host projection"
+   ],
+   "reason": "Canonical application-owned reducer operation kinds/phases and the renderer SessionCapabilities DTO. It depends on the separate harness-owned SessionCapabilityFacts contract and is overlaid only by host projection."
+  },
+  {
    "source": "extension/src/shared/protocol/sessions.ts",
    "targets": [
     "application/lib/protocol/sessions.ts",
     "harness/agent-processes/lib/rpc/session-events.ts"
    ],
    "action": "split",
-   "owner": "renderer/session operation projections and worker/session RPC DTOs",
+   "owner": "renderer session protocol DTOs and worker/session RPC DTOs",
    "batch": "B1",
    "verification": [
     "focused owner tests",
-    "boundary/import checks for named owners"
+    "boundary/import checks for named owners",
+    "remove temporary sessions.ts compatibility re-exports in B5/B7 after all importers move; verify no duplicate canonical type owners"
    ],
-   "reason": "Separate renderer projection/reducer fields from backend capabilities, worker events, and RPC payloads."
+   "reason": "Split session envelopes and payloads: app protocol DTOs -> application/lib/protocol/sessions.ts; worker/session RPC event DTOs -> harness/agent-processes/lib/rpc/session-events.ts. Canonical inert facts and host operation projection types are separate records/targets (session-capability-facts.ts -> harness/agent-processes/lib/rpc/session-capability-facts.ts; session-operation-projection.ts -> application/lib/protocol/session-operation-projection.ts), so this split does not duplicate either extracted contract. Old-layout re-exports in extension/src/shared/protocol/sessions.ts are temporary import-compatibility shims and are removed in B5/B7 after importers move."
   },
   {
    "source": "extension/src/shared/protocol/settings.ts",
@@ -16270,6 +16337,20 @@
    "reason": "Protocol test follows directly exercised owner."
   },
   {
+   "source": "extension/test/shared/protocol/capability-seam.test.ts",
+   "targets": [
+    "test/integration/capability-seam.test.ts"
+   ],
+   "action": "move",
+   "owner": "harness/agent-processes/lib/rpc; application/lib/protocol; application/backend/conversation-state",
+   "batch": "B1",
+   "verification": [
+    "five focused tests verify the inert facts module, one-way operation-type dependency, backend producer imports, and projection-only join",
+    "cross-owner integration route is enumerated exactly once"
+   ],
+   "reason": "Cross-owner architecture guard for the harness capability-facts RPC contract, application operation projection types, and host join; keep one integration test rather than duplicate it under either unit-test owner."
+  },
+  {
    "source": "extension/test/shared/protocol/browser-ingress.test.ts",
    "targets": [
     "application/lib/validation/test/browser-ingress.test.ts"
@@ -18994,10 +19075,10 @@
    "owner": "application/hosts/vscode",
    "batch": "B2",
    "verification": [
-    "focused owner tests",
-    "typecheck/build for owning runtime"
+    "focused package-resolution regression proves helper-derived aliases are consumed by both extension Vite build graphs",
+    "typecheck/build for owning runtime; flat entries and renderer output shape remain unchanged"
    ],
-   "reason": "Bundler config preserves flat entries and renderer output shape."
+   "reason": "Bundler config preserves flat entries and renderer output shape while resolving packages through owner-derived aliases from scripts/lib/package-resolution.mjs."
   },
   {
    "source": ".gitattributes",
@@ -20984,7 +21065,7 @@
    "batch": "B4",
    "verification": [
     "Preserve test enumeration, suite ID, skips, and opt-in/live classification in the owner registry; run via root test wrapper.",
-    "Verify the real stable extension adapter reaches the tested canonical implementation."
+    "Real pinned SDK DefaultResourceLoader discovers the checked-in root shim and proves selector/recovery state identity through hide/recover; preserve the actual SDK discovery regression."
    ],
    "reason": "Move implementation-local material from the discovery shell into harness/tool-and-skill-selection; keep only the stable SDK discovery entry and any root-owned package/dependency metadata in extensions/."
   },
@@ -22588,8 +22669,8 @@
    "owner": "scripts/lib",
    "batch": "B8",
    "verification": [
-    "Preserve root scripts-package enumeration and all six package-resolution proofs; run via repository wrappers.",
-    "Verify real compiler, Vite, local tsx, and pinned SDK extension-loader resolution from an isolated future source root."
+    "Preserve root scripts-package enumeration and all seven package-resolution proofs; run via repository wrappers.",
+    "Verify real compiler, Vite client/SSR, local tsx, and pinned SDK extension-loader resolution from an isolated future source root, including runtime pi-tui."
    ],
    "reason": "New B1 package-resolution proof suite, currently kept at scripts/test/package-resolution.test.mjs; co-locate with the scripts/lib helper in the planned B8 test organization."
   },
