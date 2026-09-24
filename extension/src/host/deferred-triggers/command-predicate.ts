@@ -6,7 +6,7 @@ import {
   MAX_COMMAND_TIMEOUT_MS,
   type CommandPredicateExecutionResult,
   type CommandTrigger,
-} from '../../../../shared/wake-conditions';
+} from '../../../../harness/tools/deferred-triggers/wake-conditions';
 
 /** Keep predicate diagnostics useful without allowing command output to become a
  * host-side memory or renderer payload sink. stdout and stderr are captured only

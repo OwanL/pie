@@ -7,7 +7,7 @@ import type { DeferredTriggerView, TriggerKind, TriggerSpec } from '../../shared
 import {
   validateWakeConditions,
   type CommandTrigger,
-} from '../../../../shared/wake-conditions';
+} from '../../../../harness/tools/deferred-triggers/wake-conditions';
 
 export type { TriggerKind, TriggerSpec };
 export type { CommandTrigger };

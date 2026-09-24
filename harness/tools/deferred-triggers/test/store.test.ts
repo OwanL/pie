@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import test, { afterEach, beforeEach } from 'node:test';
 
-import { appendTriggerOp, listActiveForSession, readTriggerOps, replayTriggers } from '../src/store.js';
+import { appendTriggerOp, listActiveForSession, readTriggerOps, replayTriggers } from '../store.js';
 
 /**
  * store.ts unit tests: the op log round-trips through the sidecar and the

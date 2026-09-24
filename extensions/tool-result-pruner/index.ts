@@ -60,10 +60,10 @@ import { randomBytes } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { isExtensionDisabledByToggle, loadConfig } from "./config.js";
-import { recordPruning } from "./logger.js";
-import { runPipeline } from "./pipeline.js";
-import { reapPrunedRawStashes, reapSessionStashes } from "./reaper.js";
+import { isExtensionDisabledByToggle, loadConfig } from "../../harness/tools/result-processing/config.js";
+import { recordPruning } from "../../harness/tools/result-processing/logger.js";
+import { runPipeline } from "../../harness/tools/result-processing/pipeline.js";
+import { reapPrunedRawStashes, reapSessionStashes } from "../../harness/tools/result-processing/reaper.js";
 import { countTokens } from "../../shared/tokenize.js";
 
 function getSessionId(ctx: unknown): string {

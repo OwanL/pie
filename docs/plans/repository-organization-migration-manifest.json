@@ -33,8 +33,8 @@
   "checkpointDate": "2026-09-25",
   "acceptanceDate": "2026-09-25",
   "milestone": "B4",
-  "status": "B0–B3 complete / exit accepted; B4 partial (ask-user relocation only; no B4 exit claimed).",
-  "partialBatch": "Moved only the seven manifest-owned ask-user tool paths to harness/tools/ask-user. Updated the retained extensions/ask-user adapter, imports, catalog, test/typecheck routing (including retired-source rename/delete identity), owner docs, and actual pinned-SDK discovery assertion. Verification passed: ask-user tests (12), typecheck, routing (19), registry drift (12), inventory (12), skill-pruner integration (59), and pinned-SDK tool catalog (4; exactly one ask_user registration). No other tool, selector, or middleware migration is included.",
+  "status": "B0–B3 complete / exit accepted; B4 partial (ask-user; result-processing/execution-safety/deferred-triggers/session-changes middleware and tool relocation; no B4 exit claimed).",
+  "partialBatch": "B4 partial, two checkpoints: (1) ask-user (7 paths, committed 887bde12); (2) this working-tree checkpoint moved 46 more manifest-owned paths: the tool-result-pruner middleware to harness/tools/result-processing (18 incl. its settings-merge test), the safeguard implementation and the canonical traversal policy to harness/tools/execution-safety (6), the deferred-triggers tool and shared/wake-conditions to harness/tools/deferred-triggers (10 incl. its wake-conditions test), and the session-changes tool to harness/tools/session-changes (12). Retained extensions adapters (tool-result-pruner, safeguard index, deferred-triggers, session-changes) stay in place with updated imports; catalog sourcePaths for defer_trigger/session_changes updated; test/typecheck routing (test-packages, run-tests, host package typecheck scripts), package/registry/inventory tests, tools/README, docs links, AGENTS.md traversal-policy reference, and the codebase-maintenance skill drift-check path updated. Also repaired the B3 left-behind subagent type imports (tools/subagent/{render,runner,types,validation}.ts now import harness/agent-instructions/agent-discovery/agents.js) found by the 17-project typecheck gate. Verified: owner tests (result-processing 8 files, execution-safety, deferred-triggers 3, session-changes 4), extension host tests (deferred-triggers, session-changes-equivalence, pie-harness-prompt, tool-catalog with real SDK discovery), warm-bash auto-prune, subagent user-context, registry drift, test routing, typecheck all 17 projects. Remaining B4 move records: 238 (subagent 83, computer-use 43, playwright 35, warm-bash 32, tool-and-skill-selection 29 plus the pruning.ts split, catalog 3, session-control 2, model-providers copilot-headers 2, web-access-guard package-integrations 4, mcp-config 1, request-capability 1).",
   "scope": "B3 authored skill/agent bundle relocation implemented (not exit-accepted): all nine tracked Pie skill bundles, the three authored agent definitions, the subagent agent-discovery loader, the cwd-skills implementation, and the three prompt-assembly modules moved to harness/agent-instructions per manifest targets; settings.json and settings.defaults.json gained the global `skills` array entry `harness/agent-instructions/skills`; root AGENTS.md and APPEND_SYSTEM.md kept; live documentation and prompt links updated; real pinned-SDK discovery verified through the SettingsManager→PackageManager→loadSkills pipeline. Temporary compatibility re-export shims remain at three retired old paths with explicit removal owners. No pushes, loader activation, or host restarts. Exit acceptance: the plan-required B3 gates (real SDK load/reload, global/project precedence and exclusions, tool package resources, cold inventory, hot worker and subagent discovery; identical catalog/precedence, no double prompt injection, no bundle fragmentation) were each met by the results recorded in implemented.b3VerificationGate, and the B3 milestone commit followed. Staged-not-live remains a recorded limitation, not an unmet gate.",
   "inventory": {
    "baselineTrackedSourcesCovered": 1778,
@@ -105,6 +105,16 @@
     "typecheckAndLint": "npm run typecheck passed all 17 projects (shared project covers the relocated prompt module through the shared shim; extension project includes harness/agent-instructions/**); npm run lint passed with the lint script extended to harness/agent-instructions (one moved cwd-skills test import tightened to satisfy the now-covered scope).",
     "build": "Required non-publishing extension:build passed after the B3 changes: staged complete runtime generation 2f2f394dc5239e78d307586042416a4251097e3a13e6c9917c7d3971f2a3b580, coordinated renderer build ID 97b6f767b4235ae179d6, published renderer generation. Staged only — no loader activation and no installed-host restart; the newly staged runtime loads on the next normal VS Code restart, and running sessions keep their existing build.",
     "liveBoundary": "Loaded behavior has not been verified: the backend was expected to keep the pre-B3 subagent loader and prompt documentation path until that restart; a subsequent user report is recorded in userReportedB3Restart, while settings-driven skills discovery follows the updated settings.json on the same restart. No restart was forced. Concrete observed staged-not-live evidence (2026-09-25, recorded in stagedNotLiveObservation): pre-B3 subagent discovery at the repository-root cwd reports no agents after the relocation, while discovery from a nested harness/agent-instructions cwd works through project-directory discovery."
+   },
+   "b4Checkpoint2VerificationGate": {
+    "recordedAt": "2026-09-25",
+    "affectedSuites": "Owner suites passed after the moves: harness/tools/result-processing (8 test files incl. the moved settings-merge test), harness/tools/execution-safety (safeguard extension suite), harness/tools/deferred-triggers (store/tool/wake-conditions), harness/tools/session-changes (4 files; one pre-existing integration skip preserved), tools/computer-use artifact-result (its cross-tool pipeline import retargeted to the moved owner), tools/warm-bash auto-prune (canonical policy import retargeted), tools/subagent user-context, and extension host suites (deferred-triggers registry/store, session-changes equivalence, pie-harness-prompt). The pinned-SDK tool-catalog test (4) passed: real SDK discovery loads every catalog tool exactly once from its stable retained adapter path, including the relocated defer_trigger/session_changes implementations.",
+    "routingAndInventory": "scripts/test/package-registry-drift.test.mjs (12), scripts/test/test-packages.test.mjs (19, with PACKAGE_DIRECTIVES count now 52 and retired tools/<id> identities routed), scripts/test/repository-migration-inventory.test.mjs (12), scripts/test/test-impact.test.mjs — all pass with the updated registry, run-tests configs, and 46 new currentLocations entries.",
+    "fullSuite": "npm test (affected) exited with 7/7 groups, 7,440 passed / 0 failed / 35 skipped. The deferred-triggers process-race test flaked once per run and passed on rerun inside the runner (same pre-existing process-race flake class recorded for B2/B3 markdown-rendering); the pass is not pristine on that subtest.",
+    "typecheckAndLint": "npm run typecheck passed all 17 projects; this gate surfaced and fixed the B3 left-behind tools/subagent ./agents.js type imports. npm run lint passed.",
+    "build": "Required non-publishing extension:build passed after the B4 checkpoint: staged complete runtime generation 6e8a492e090abaa57146e90b4af550136b6e2cdb6fd999c7f6585732772be5c5, coordinated host/webview identity a1d0d235dd85d3b116c0, published renderer generation. Staged only — no loader activation and no installed-host restart.",
+    "liveBoundary": "Loaded behavior is not verified: the currently loaded backend keeps its pre-checkpoint bundled middleware until the next normal restart, which will load the staged runtime above. No restart was forced and none is required by the checkpoint.",
+    "b3RegressionFix": "tools/subagent/{render,runner,types,validation}.ts imported the removed ./agents.js type module after B3; they now import ../../../harness/agent-instructions/agent-discovery/agents.js (type-only; runner.ts needed only the type). Found by the 17-project typecheck gate."
    }
   },
   "pending": [
@@ -323,6 +333,144 @@
   ],
   "tools/ask-user/tsconfig.json": [
    "harness/tools/ask-user/tsconfig.json"
+  ],
+  "extensions/tool-result-pruner/config.ts": [
+   "harness/tools/result-processing/config.ts"
+  ],
+  "extensions/tool-result-pruner/logger.ts": [
+   "harness/tools/result-processing/logger.ts"
+  ],
+  "extensions/tool-result-pruner/lossy-rules.ts": [
+   "harness/tools/result-processing/lossy-rules.ts"
+  ],
+  "extensions/tool-result-pruner/pipeline.ts": [
+   "harness/tools/result-processing/pipeline.ts"
+  ],
+  "extensions/tool-result-pruner/reaper.ts": [
+   "harness/tools/result-processing/reaper.ts"
+  ],
+  "extensions/tool-result-pruner/rules.ts": [
+   "harness/tools/result-processing/rules.ts"
+  ],
+  "extensions/tool-result-pruner/types.ts": [
+   "harness/tools/result-processing/types.ts"
+  ],
+  "extensions/tool-result-pruner/types-global.d.ts": [
+   "harness/tools/result-processing/types-global.d.ts"
+  ],
+  "extensions/tool-result-pruner/tsconfig.json": [
+   "harness/tools/result-processing/tsconfig.json"
+  ],
+  "extensions/tool-result-pruner/README.md": [
+   "harness/tools/result-processing/README.md"
+  ],
+  "extensions/tool-result-pruner/test/config.test.ts": [
+   "harness/tools/result-processing/test/config.test.ts"
+  ],
+  "extensions/tool-result-pruner/test/index.test.ts": [
+   "harness/tools/result-processing/test/index.test.ts"
+  ],
+  "extensions/tool-result-pruner/test/logger.test.ts": [
+   "harness/tools/result-processing/test/logger.test.ts"
+  ],
+  "extensions/tool-result-pruner/test/lossy-rules.test.ts": [
+   "harness/tools/result-processing/test/lossy-rules.test.ts"
+  ],
+  "extensions/tool-result-pruner/test/pipeline.test.ts": [
+   "harness/tools/result-processing/test/pipeline.test.ts"
+  ],
+  "extensions/tool-result-pruner/test/reaper.test.ts": [
+   "harness/tools/result-processing/test/reaper.test.ts"
+  ],
+  "extensions/tool-result-pruner/test/rules.test.ts": [
+   "harness/tools/result-processing/test/rules.test.ts"
+  ],
+  "extension/test/shared/protocol/tool-result-pruning-settings-merge.test.ts": [
+   "harness/tools/result-processing/test/settings-merge.test.ts"
+  ],
+  "extensions/safeguard/paths.ts": [
+   "harness/tools/execution-safety/paths.ts"
+  ],
+  "extensions/safeguard/shell.ts": [
+   "harness/tools/execution-safety/shell.ts"
+  ],
+  "extensions/safeguard/README.md": [
+   "harness/tools/execution-safety/README.md"
+  ],
+  "extensions/safeguard/tsconfig.json": [
+   "harness/tools/execution-safety/tsconfig.json"
+  ],
+  "extensions/safeguard/test/safeguard-extension.test.ts": [
+   "harness/tools/execution-safety/test/safeguard-extension.test.ts"
+  ],
+  "shared/traversal-policy.ts": [
+   "harness/tools/execution-safety/traversal-policy.ts"
+  ],
+  "tools/deferred-triggers/index.ts": [
+   "harness/tools/deferred-triggers/index.ts"
+  ],
+  "tools/deferred-triggers/package.json": [
+   "harness/tools/deferred-triggers/package.json"
+  ],
+  "tools/deferred-triggers/tsconfig.json": [
+   "harness/tools/deferred-triggers/tsconfig.json"
+  ],
+  "tools/deferred-triggers/types-global.d.ts": [
+   "harness/tools/deferred-triggers/types-global.d.ts"
+  ],
+  "tools/deferred-triggers/src/store.ts": [
+   "harness/tools/deferred-triggers/store.ts"
+  ],
+  "tools/deferred-triggers/src/types.ts": [
+   "harness/tools/deferred-triggers/types.ts"
+  ],
+  "tools/deferred-triggers/test/store.test.ts": [
+   "harness/tools/deferred-triggers/test/store.test.ts"
+  ],
+  "tools/deferred-triggers/test/tool.test.ts": [
+   "harness/tools/deferred-triggers/test/tool.test.ts"
+  ],
+  "extension/test/shared/wake-conditions.test.ts": [
+   "harness/tools/deferred-triggers/test/wake-conditions.test.ts"
+  ],
+  "shared/wake-conditions.ts": [
+   "harness/tools/deferred-triggers/wake-conditions.ts"
+  ],
+  "tools/session-changes/index.ts": [
+   "harness/tools/session-changes/index.ts"
+  ],
+  "tools/session-changes/package.json": [
+   "harness/tools/session-changes/package.json"
+  ],
+  "tools/session-changes/tsconfig.json": [
+   "harness/tools/session-changes/tsconfig.json"
+  ],
+  "tools/session-changes/types-global.d.ts": [
+   "harness/tools/session-changes/types-global.d.ts"
+  ],
+  "tools/session-changes/src/diff.ts": [
+   "harness/tools/session-changes/diff.ts"
+  ],
+  "tools/session-changes/src/render.ts": [
+   "harness/tools/session-changes/render.ts"
+  ],
+  "tools/session-changes/src/session-jsonl.ts": [
+   "harness/tools/session-changes/session-jsonl.ts"
+  ],
+  "tools/session-changes/src/types.ts": [
+   "harness/tools/session-changes/types.ts"
+  ],
+  "tools/session-changes/test/diff.test.ts": [
+   "harness/tools/session-changes/test/diff.test.ts"
+  ],
+  "tools/session-changes/test/execute.test.ts": [
+   "harness/tools/session-changes/test/execute.test.ts"
+  ],
+  "tools/session-changes/test/render.test.ts": [
+   "harness/tools/session-changes/test/render.test.ts"
+  ],
+  "tools/session-changes/test/session-jsonl.test.ts": [
+   "harness/tools/session-changes/test/session-jsonl.test.ts"
   ]
  },
  "testEnumeration": {

@@ -7,7 +7,7 @@ import * as path from 'node:path';
 import { promisify } from 'node:util';
 
 import listTool from '../index';
-import registerDiscoveryShim from '../../../extensions/session-changes/index.js';
+import registerDiscoveryShim from '../../../../extensions/session-changes/index.js';
 
 // Drive the ACTUAL tool's `execute` (via a fake pi.registerTool) so the
 // env-glue layer — `sessionPath` defaulting, path-array validation,

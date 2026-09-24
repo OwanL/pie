@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-import type { CommandTrigger } from '../../../../shared/wake-conditions';
+import type { CommandTrigger } from '../../../../harness/tools/deferred-triggers/wake-conditions';
 import {
   checkProcessOwnerLiveness,
   type CheckClaimOwnerLiveness,

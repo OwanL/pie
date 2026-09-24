@@ -8,7 +8,7 @@ import {
   parseCommandPredicateResult,
   type CommandPredicateExecutionResult,
   type CommandTrigger,
-} from '../../../../shared/wake-conditions';
+} from '../../../../harness/tools/deferred-triggers/wake-conditions';
 import {
   createCommandPredicateRunner,
   type CommandPredicateRunner,

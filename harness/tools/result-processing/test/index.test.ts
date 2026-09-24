@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, readdirSy
 import { tmpdir } from 'node:os';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const indexUrl = pathToFileURL(path.resolve(__dirname, '../index.ts')).href;
+const indexUrl = pathToFileURL(path.resolve(__dirname, '../../../../extensions/tool-result-pruner/index.ts')).href;
 const configUrl = pathToFileURL(path.resolve(__dirname, '../config.ts')).href;
 const loggerUrl = pathToFileURL(path.resolve(__dirname, '../logger.ts')).href;
 

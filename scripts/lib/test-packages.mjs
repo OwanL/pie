@@ -119,8 +119,13 @@ export const PACKAGE_REGISTRY = [
   },
   {
     id: 'safeguard',
-    dir: 'extensions/safeguard',
-    typecheck: { config: 'extensions/safeguard/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
+    dir: 'harness/tools/execution-safety',
+    groups: ['extensions'],
+    // B4: middleware implementation moved to harness/tools/execution-safety
+    // (with the canonical traversal policy); the stable root SDK entry stays
+    // in extensions/safeguard as a thin adapter.
+    ownedDirs: ['extensions/safeguard'],
+    typecheck: { config: 'harness/tools/execution-safety/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
     fastConcurrency: 3,
   },
   {
@@ -172,24 +177,34 @@ export const PACKAGE_REGISTRY = [
   },
   {
     id: 'tool-result-pruner',
-    dir: 'extensions/tool-result-pruner',
-    typecheck: { config: 'extensions/tool-result-pruner/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
+    dir: 'harness/tools/result-processing',
+    groups: ['extensions'],
+    // B4: middleware implementation moved to harness/tools/result-processing;
+    // the stable root SDK entry stays in extensions/tool-result-pruner.
+    ownedDirs: ['extensions/tool-result-pruner'],
+    typecheck: { config: 'harness/tools/result-processing/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
     fastConcurrency: 3,
   },
   {
     id: 'deferred-triggers',
-    dir: 'tools/deferred-triggers',
+    dir: 'harness/tools/deferred-triggers',
     groups: ['extensions'],
-    ownedDirs: ['extensions/deferred-triggers'],
-    typecheck: { config: 'tools/deferred-triggers/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
+    // Keep the retired source identity routable for rename/delete diffs; the
+    // active owner is harness/tools/deferred-triggers and the SDK adapter
+    // stays in extensions/deferred-triggers.
+    ownedDirs: ['extensions/deferred-triggers', 'tools/deferred-triggers'],
+    typecheck: { config: 'harness/tools/deferred-triggers/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
     fastConcurrency: 3,
   },
   {
     id: 'session-changes',
-    dir: 'tools/session-changes',
+    dir: 'harness/tools/session-changes',
     groups: ['extensions'],
-    ownedDirs: ['extensions/session-changes'],
-    typecheck: { config: 'tools/session-changes/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
+    // Keep the retired source identity routable for rename/delete diffs; the
+    // active owner is harness/tools/session-changes and the SDK adapter
+    // stays in extensions/session-changes.
+    ownedDirs: ['extensions/session-changes', 'tools/session-changes'],
+    typecheck: { config: 'harness/tools/session-changes/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
     fastConcurrency: 3,
   },
   {

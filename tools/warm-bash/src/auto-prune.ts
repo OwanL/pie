@@ -11,7 +11,7 @@
  * It is an APPROXIMATION of rg, not exact parity: rg derives its excludes
  * dynamically from each repo's actual .gitignore (nested files, global excludes,
  * etc.), while this uses the canonical protected-directory policy from
- * shared/traversal-policy.ts (plus the static trade-offs described there). The two diverge in
+ * harness/tools/execution-safety/traversal-policy.ts (plus the static trade-offs described there). The two diverge in
  * both directions — e.g. twin-api's .gitignore also lists typings/ .grunt
  * boulder_components (not here), while this list adds .venv/.turbo/.moon for other
  * workspace repos. Deriving the list from .gitignore at rewrite time would defeat
@@ -49,7 +49,7 @@ import {
   PROTECTED_DIRECTORY_NAMES,
   PROTECTED_DIRECTORY_REF,
   referencesProtectedDirectory,
-} from "../../../shared/traversal-policy.js";
+} from "../../../harness/tools/execution-safety/traversal-policy.js";
 import { QUOTED, TOKEN, HEREDOC, unquote } from "./classifier.js";
 
 /** Options for {@link rewriteForPrune}. */
@@ -59,7 +59,7 @@ export interface PruneOpts {
 }
 
 /** Prune/exclude directories come from the canonical traversal-safety policy
- *  (shared/traversal-policy.ts): dependencies, version control, generated/build
+ *  (harness/tools/execution-safety/traversal-policy.ts): dependencies, version control, generated/build
  *  output, caches, coverage, runtime data, sessions, logs, packaged artifacts,
  *  and temporary SDK trees. One policy, three consumers (warm-bash,
  *  codebase-maintenance .ignore drift checks, subagent prompts). */

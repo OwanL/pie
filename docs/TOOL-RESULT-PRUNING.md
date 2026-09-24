@@ -375,7 +375,7 @@ restate or re-own it.
 2. **MVP scope -- RESOLVED & SHIPPED (lossless + lossy tiers):** the
    lossless tier (ANSI strip, trailing-whitespace trim, blank-run collapse,
    JSON minify) and the lossy-recoverable tier (`ls -l` → names, `git log` →
-   oneline, grep/rg → path-grouped) are all implemented in `extensions/tool-result-pruner/`.
+   oneline, grep/rg → path-grouped) are all implemented in `harness/tools/result-processing/`.
    `RuleResult` gained its `marker` field; the pipeline gained lossy
    orchestration (profile-gated, per-rule-toggled, lossless-before-lossy) and
    returns `meta.recallRules`/`meta.markers`/`meta.losslessText`; `index.ts`
@@ -396,7 +396,7 @@ restate or re-own it.
    ps`/`kubectl`/`df`) and stack-trace dedupe — fiddlier shape detection.
 3. **Measurement — RESOLVED & SHIPPED:** per-pruned-result before/after token
    counts + which rules fired are written to `data/tool-result-pruning.jsonl`
-   by `extensions/tool-result-pruner/logger.ts`, and ingested end-to-end by the
+   by `harness/tools/result-processing/logger.ts`, and ingested end-to-end by the
    analysis pipeline (`ToolResultPruningSourceEvent` -> `PreparedToolResultPruningRow`
    -> DuckDB `tool_result_pruning` table). The retained rows support local SQL
    comparisons by rule and tool; the lossy tier will use this evidence to decide
@@ -407,7 +407,7 @@ restate or re-own it.
    block in `settings.json`,
    sibling to `pruning` (do not overload that flag). Individual rule toggles
    (`ansi`, `whitespace`, `blankRun`, `jsonMinify`, `lsLong`, `gitLog`,
-   `grepGroup`) are defaulted in code (`extensions/tool-result-pruner/config.ts`)
+   `grepGroup`) are defaulted in code (`harness/tools/result-processing/config.ts`)
    and may be overridden via an optional `rules` object. Tier-1 (lossless) always on
    by default; each rule independently toggleable. Tier-2 will be
    profile-selectable (`default` runs lossy; `security` keeps
@@ -434,7 +434,9 @@ restate or re-own it.
 
 ### Implementation status
 
-- `extensions/tool-result-pruner/` — lossless **and** lossy tiers. Files:
+- `harness/tools/result-processing/` behind the retained
+  `extensions/tool-result-pruner/index.ts` SDK adapter — lossless **and** lossy
+  tiers. Implementation files:
   `index.ts` (registers `pi.on("tool_result")`; recall stash + fidelity marker
   + `details.pruning` + net-savings gate + `pruningBadge` noise gate),
   `config.ts` (cached loader + toggle + per-rule parse), `types.ts`
@@ -444,14 +446,14 @@ restate or re-own it.
   `lossy-rules.ts` (`ls-long`, `git-log`, `grep-group`; args-as-signal detection, diff-option
   exclusions for `git log`; `grep-group` is the hybrid exception — args-gate
   on a grep-family invocation AND shape-confirm of `path:line:content`), `pipeline.ts` (guards + lossless-then-lossy
-  orchestration, profile-gated), `tokenize.ts`, `types-global.d.ts`, `test/`
+  orchestration, profile-gated), `tokenize.ts` (shared/), `types-global.d.ts`, `test/`
   (rules, lossy-rules, pipeline, config, index, logger).
 - Wired into `application/hosts/vscode/package.json` (`typecheck:tool-result-pruner`),
   root `package.json` (`extensions:typecheck` / `extensions:test`), and
   `scripts/run-tests.mjs` (package `tool-result-pruner`, 98% lines gate).
 - `settings.json` carries the default `toolResultPruning` block
   (`{ enabled, profile }`); per-rule defaults live in
-  `extensions/tool-result-pruner/config.ts` and are only present in settings
+  `harness/tools/result-processing/config.ts` and are only present in settings
   when explicitly overridden.
 - Settings UI: mirrors the skill-pruner settings flow — host persistence
   (`tool-result-pruning-settings{,-persistence}.ts`), service set/load, arch

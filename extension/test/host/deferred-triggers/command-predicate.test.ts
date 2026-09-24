@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import test from 'node:test';
 
-import { parseCommandPredicateResult } from '../../../../shared/wake-conditions';
+import { parseCommandPredicateResult } from '../../../../harness/tools/deferred-triggers/wake-conditions';
 import {
   createCommandPredicateRunner,
   resolveCommandPredicateShell,

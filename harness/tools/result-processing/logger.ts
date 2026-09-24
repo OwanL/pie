@@ -12,10 +12,10 @@
 // shipping and whether any starved the agent.
 
 import path from "node:path";
-import { JsonlWriter } from "../../shared/jsonl-writer.js";
+import { JsonlWriter } from "../../../shared/jsonl-writer.js";
 
-/** Root of the pi-config repo, resolved from this extension's known position. */
-const CONFIG_ROOT = path.resolve(import.meta.dirname, "..", "..");
+/** Root of the pi-config repo, resolved from this implementation's known position. */
+const CONFIG_ROOT = path.resolve(import.meta.dirname, "..", "..", "..");
 
 const writer = new JsonlWriter({
   defaultLogPath: path.join(CONFIG_ROOT, "data", "tool-result-pruning.jsonl"),

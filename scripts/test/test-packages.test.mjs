@@ -25,13 +25,14 @@ test('PACKAGE_DIRECTIVES covers package dirs, owned dirs, and routed test roots'
     'image-context-guard', 'playwright',
   ];
   assert.deepEqual(ALL_PACKAGE_IDS, expected);
-  // 17 package dirs + 10 owned/adapter dirs + 16 nested default test roots
+  // 17 package dirs + 14 owned/adapter dirs + 16 nested default test roots
   // (scripts' test root equals its dir) + 2 declared analysis distributed roots
   // + the extension's separate source roots (its test root overlaps those
   // sources; B3 added the prompt-assembly relocation root) + the subagent
-  // agent-discovery owned dir from B3, and the ask-user retired source identity
-  // retained for rename/delete routing in B4.
-  assert.equal(PACKAGE_DIRECTIVES.length, 48, 'routing view covers dirs, owned dirs, test roots, and declared distributed roots');
+  // agent-discovery owned dir from B3, the ask-user retired source identity
+  // retained for rename/delete routing in B4, and the B4 retired
+  // tools/deferred-triggers + tools/session-changes identities.
+  assert.equal(PACKAGE_DIRECTIVES.length, 52, 'routing view covers dirs, owned dirs, test roots, and declared distributed roots');
 });
 
 test('source/test root defaults keep single-root enumeration identical', () => {
@@ -99,7 +100,14 @@ test('classifyFileToPackage maps a file under each package directory to its id',
   assert.equal(classifyFileToPackage('extensions/cwd-skills/index.ts'), 'cwd-skills');
   assert.equal(classifyFileToPackage('extensions/copilot-model-discovery/test/copilot-models.test.ts'), 'copilot-model-discovery');
   assert.equal(classifyFileToPackage('tools/session-changes/test/render.test.ts'), 'session-changes');
+  assert.equal(classifyFileToPackage('harness/tools/session-changes/test/render.test.ts'), 'session-changes');
   assert.equal(classifyFileToPackage('tools/deferred-triggers/test/store.test.ts'), 'deferred-triggers');
+  assert.equal(classifyFileToPackage('harness/tools/deferred-triggers/test/store.test.ts'), 'deferred-triggers');
+  assert.equal(classifyFileToPackage('harness/tools/result-processing/test/rules.test.ts'), 'tool-result-pruner');
+  assert.equal(classifyFileToPackage('extensions/tool-result-pruner/index.ts'), 'tool-result-pruner');
+  assert.equal(classifyFileToPackage('harness/tools/execution-safety/test/safeguard-extension.test.ts'), 'safeguard');
+  assert.equal(classifyFileToPackage('extensions/safeguard/index.ts'), 'safeguard');
+  assert.equal(classifyFileToPackage('harness/tools/execution-safety/traversal-policy.ts'), 'safeguard');
   assert.equal(classifyFileToPackage('tools/computer-use/test/schema.test.ts'), 'computer-use');
   assert.equal(classifyFileToPackage('tools/warm-bash/test/classifier.test.ts'), 'warm-bash');
   assert.equal(classifyFileToPackage('tools/playwright/test/schema.test.ts'), 'playwright');

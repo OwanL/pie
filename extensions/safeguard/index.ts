@@ -6,8 +6,8 @@
  * checks are prompts; only catastrophic operations are hard-blocked.
  */
 
-import { resolvePathForComparison, isUnderCwd } from "./paths";
-import { analyzeRecursiveRm, maskShellData, parseShellInvocations, stripHeredocBodies, type ShellInvocation } from "./shell";
+import { resolvePathForComparison, isUnderCwd } from "../../harness/tools/execution-safety/paths.js";
+import { analyzeRecursiveRm, maskShellData, parseShellInvocations, stripHeredocBodies, type ShellInvocation } from "../../harness/tools/execution-safety/shell.js";
 import { isAutonomousModeEnabled } from "../../shared/autonomous-mode.js";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 

@@ -3,11 +3,11 @@ import * as path from 'node:path';
 
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
-import { guardCommand } from '../../extensions/safeguard/index.js';
-import { validateWakeConditions } from '../../shared/wake-conditions.js';
-import { deferTriggerSchema } from './src/types.js';
-import type { ActiveTrigger, DeferTriggerParams, TriggerSpec } from './src/types.js';
-import { appendTriggerOp, listActiveForSession } from './src/store.js';
+import { guardCommand } from '../../../extensions/safeguard/index.js';
+import { validateWakeConditions } from './wake-conditions.js';
+import { deferTriggerSchema } from './types.js';
+import type { ActiveTrigger, DeferTriggerParams, TriggerSpec } from './types.js';
+import { appendTriggerOp, listActiveForSession } from './store.js';
 
 /** Honor the host's per-extension toggle (PIE_EXTENSION_TOGGLES_JSON, keyed by
  * extension id). Mirrors skill-pruner's toggle handling. */

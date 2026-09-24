@@ -7,7 +7,7 @@
 
 import { getMarkdownTheme } from "@mariozechner/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
-import type { AgentScope } from "./agents.js";
+import type { AgentScope } from "../../harness/agent-instructions/agent-discovery/agents.js";
 import { formatSelectionInfo, formatToolCall, formatUsageStats, getDisplayItems, getFinalOutput } from "./formatting.js";
 import { COLLAPSED_ITEM_COUNT, TASK_PREVIEW_LONG, TASK_PREVIEW_SHORT, type DisplayItem, type SingleResult, type SubagentDetails } from "./types.js";
 

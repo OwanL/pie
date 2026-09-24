@@ -12,7 +12,7 @@ import {
   mergeToolResultPruningSettings,
   DEFAULT_TOOL_RESULT_PRUNING_SETTINGS,
   type ToolResultPruningSettings,
-} from '../../../src/shared/protocol';
+} from '../../../../extension/src/shared/protocol';
 
 const base: ToolResultPruningSettings = {
   ...DEFAULT_TOOL_RESULT_PRUNING_SETTINGS,

@@ -18,7 +18,7 @@ import type {
   CommandTrigger,
   TriggerKind,
   TriggerSpec,
-} from '../../../../shared/wake-conditions';
+} from '../../../../harness/tools/deferred-triggers/wake-conditions';
 
 export type { CommandTrigger, TriggerKind, TriggerSpec };
 

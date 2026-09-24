@@ -5,7 +5,7 @@
 
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { Message } from "@mariozechner/pi-ai";
-import type { AgentScope } from "./agents.js";
+import type { AgentScope } from "../../harness/agent-instructions/agent-discovery/agents.js";
 import type { ThinkingLevel } from "./bucket-selector.js";
 
 export const COLLAPSED_ITEM_COUNT = 10;

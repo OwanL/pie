@@ -19,7 +19,7 @@ import {
   contextFileEntryId,
   installSystemPromptToggleRebuildGuard,
 } from '../../src/backend/system-prompts';
-import { TRAVERSAL_POLICY_PROMPT } from '../../../shared/traversal-policy.js';
+import { TRAVERSAL_POLICY_PROMPT } from '../../../harness/tools/execution-safety/traversal-policy.js';
 
 const piIntro = 'You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.';
 const pieIntro = 'You are a coding assistant operating inside Pie, a development harness built on the Pi runtime. Pie provides project-aware guidance, specialized agents, dynamically available tools and skills, and session workflows.';

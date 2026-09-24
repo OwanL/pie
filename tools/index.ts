@@ -18,10 +18,10 @@ export const PIE_TOOLS: readonly PieToolEntry[] = [
   { name: 'ask_user', sourcePath: 'harness/tools/ask-user/index.ts', registration: { kind: 'extension', extensionId: 'ask-user', entryPath: 'extensions/ask-user/index.ts' }, contexts: ['primary', 'subagent', 'inventory'] },
   { name: 'bash', sourcePath: 'tools/warm-bash/index.ts', registration: { kind: 'extension', extensionId: 'warm-bash', entryPath: 'extensions/warm-bash/index.ts' }, contexts: ['primary', 'subagent', 'inventory'] },
   { name: 'computer', sourcePath: 'tools/computer-use/index.ts', registration: { kind: 'extension', extensionId: 'computer-use', entryPath: 'extensions/computer-use/index.ts' }, contexts: ['primary', 'subagent', 'inventory'] },
-  { name: 'defer_trigger', sourcePath: 'tools/deferred-triggers/index.ts', registration: { kind: 'extension', extensionId: 'deferred-triggers', entryPath: 'extensions/deferred-triggers/index.ts' }, contexts: ['primary', 'inventory'] },
+  { name: 'defer_trigger', sourcePath: 'harness/tools/deferred-triggers/index.ts', registration: { kind: 'extension', extensionId: 'deferred-triggers', entryPath: 'extensions/deferred-triggers/index.ts' }, contexts: ['primary', 'inventory'] },
   { name: 'playwright', sourcePath: 'tools/playwright/index.ts', registration: { kind: 'extension', extensionId: 'playwright', entryPath: 'extensions/playwright/index.ts' }, contexts: ['primary', 'subagent', 'inventory'] },
   { name: 'request_capability', sourcePath: 'tools/request-capability/index.ts', registration: { kind: 'extension', extensionId: 'skill-pruner', entryPath: 'extensions/skill-pruner/index.ts' }, contexts: ['primary', 'subagent', 'inventory'] },
-  { name: 'session_changes', sourcePath: 'tools/session-changes/index.ts', registration: { kind: 'extension', extensionId: 'session-changes', entryPath: 'extensions/session-changes/index.ts' }, contexts: ['primary', 'subagent', 'inventory'] },
+  { name: 'session_changes', sourcePath: 'harness/tools/session-changes/index.ts', registration: { kind: 'extension', extensionId: 'session-changes', entryPath: 'extensions/session-changes/index.ts' }, contexts: ['primary', 'subagent', 'inventory'] },
   { name: 'session_control', sourcePath: 'tools/session-control/index.ts', registration: { kind: 'backend' }, contexts: ['primary', 'inventory'] },
   { name: 'subagent', sourcePath: 'tools/subagent/src/register.ts', registration: { kind: 'extension', extensionId: 'subagent', entryPath: 'extensions/subagent/index.ts' }, contexts: ['primary', 'subagent', 'inventory'] },
 ];

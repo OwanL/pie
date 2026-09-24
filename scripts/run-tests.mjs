@@ -64,8 +64,8 @@ const PACKAGE_TEST_METADATA = {
     thresholds: { lines: 95, branches: 95 },
   },
   safeguard: {
-    testGlobs: ['extensions/safeguard/test/**/*.test.ts'],
-    coverageIncludes: ['extensions/safeguard/*.ts'],
+    testGlobs: ['harness/tools/execution-safety/test/**/*.test.ts'],
+    coverageIncludes: ['extensions/safeguard/index.ts', 'harness/tools/execution-safety/*.ts'],
     thresholds: { lines: 85, branches: 80 },
   },
   'skill-pruner': {
@@ -118,24 +118,24 @@ const PACKAGE_TEST_METADATA = {
     thresholds: { lines: 82, branches: 78 },
   },
   'tool-result-pruner': {
-    testGlobs: ['extensions/tool-result-pruner/test/**/*.test.ts'],
-    coverageIncludes: ['extensions/tool-result-pruner/*.ts'],
+    testGlobs: ['harness/tools/result-processing/test/**/*.test.ts'],
+    coverageIncludes: ['extensions/tool-result-pruner/index.ts', 'harness/tools/result-processing/*.ts'],
     // MVP: the lossless rules + pipeline guards are pure functions; the
     // index.ts factory is env-glue (registers a pi.on handler) and is not
     // unit-testable without the pi runtime. Types-global.d.ts is ambient only.
     thresholds: { lines: 92, branches: 80 },
   },
   'deferred-triggers': {
-    testGlobs: ['tools/deferred-triggers/test/**/*.test.ts'],
-    coverageIncludes: ['tools/deferred-triggers/index.ts', 'tools/deferred-triggers/src/**/*.ts'],
+    testGlobs: ['harness/tools/deferred-triggers/test/**/*.test.ts'],
+    coverageIncludes: ['harness/tools/deferred-triggers/index.ts', 'harness/tools/deferred-triggers/store.ts', 'harness/tools/deferred-triggers/types.ts'],
     // store.ts (the op-log replay) is the unit-testable core; index.ts is
     // env-glue (registers the `defer_trigger` tool) and types.ts is the schema.
     // types-global.d.ts is ambient only.
     thresholds: { lines: 80, branches: 70 },
   },
   'session-changes': {
-    testGlobs: ['tools/session-changes/test/**/*.test.ts'],
-    coverageIncludes: ['tools/session-changes/index.ts', 'tools/session-changes/src/**/*.ts'],
+    testGlobs: ['harness/tools/session-changes/test/**/*.test.ts'],
+    coverageIncludes: ['harness/tools/session-changes/index.ts', 'harness/tools/session-changes/*.ts'],
     // session-jsonl.ts (the JSONL reader + toolCall↔toolResult join), render.ts
     // (TSV/minified-diff renderers), and diff.ts's pure minify/synthetic paths
     // are the unit-testable core; index.ts is env-glue (registers the

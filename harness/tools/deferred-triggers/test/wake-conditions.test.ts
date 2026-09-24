@@ -9,7 +9,7 @@ import {
   MIN_COMMAND_INTERVAL_MS,
   parseCommandPredicateResult,
   validateWakeConditions,
-} from '../../../shared/wake-conditions.js';
+} from '../wake-conditions.js';
 
 test('command wake conditions apply defaults and resolve cwd at registration', () => {
   const registrationCwd = path.join(process.cwd(), 'project');

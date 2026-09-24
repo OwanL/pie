@@ -1,5 +1,5 @@
 import type { ToolContext } from "./tool-context.js";
-import { TRAVERSAL_POLICY_PROMPT } from "../../../shared/traversal-policy.js";
+import { TRAVERSAL_POLICY_PROMPT } from "../../../harness/tools/execution-safety/traversal-policy.js";
 
 export type UserContextMode = "latest" | "all";
 export type ParentSessionManager = ToolContext["sessionManager"];
@@ -78,7 +78,7 @@ export function buildParentUserContext(
 /** Build the sole user turn sent to the isolated child session.
  *
  * Every task prompt embeds the canonical traversal-safety policy paragraph
- * (shared/traversal-policy.ts) so root agents and subagents receive the same
+ * (harness/tools/execution-safety/traversal-policy.ts) so root agents and subagents receive the same
  * protected-directory policy without depending on agent memory or repo docs
  * (STABILITY-ARCHITECTURE-PLAN §7.7). */
 export function formatSubagentPrompt(task: string, parentUserContext?: string): string {

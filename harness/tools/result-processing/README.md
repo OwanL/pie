@@ -2,13 +2,13 @@
 
 Deterministic middleware that prunes tool **output bytes** before they enter the
 model's context. One of three context-lean layers in this stack
-(see `AGENTS.md` § Context-lean layers):
+(see the root `AGENTS.md` § Context-lean terminology layers):
 
 - **history compaction** — pi; LLM-summarize old messages; past
 - **skill pruning** — `skill-pruner`; drop skills/tools from the catalog; prepass
 - **tool-result pruning** — **this extension**; prune a tool result's bytes; per-result
 
-Design and prior art: [`docs/TOOL-RESULT-PRUNING.md`](../../docs/TOOL-RESULT-PRUNING.md).
+Design and prior art: [`docs/TOOL-RESULT-PRUNING.md`](../../../docs/TOOL-RESULT-PRUNING.md).
 
 ## What it does
 

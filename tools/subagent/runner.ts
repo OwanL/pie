@@ -20,7 +20,7 @@ import type {
 	Skill,
 } from "@mariozechner/pi-coding-agent";
 
-import type { AgentConfig } from "./agents.js";
+import type { AgentConfig } from "../../harness/agent-instructions/agent-discovery/agents.js";
 import { textContent } from "./src/text-content.js";
 import { formatSubagentPrompt, type UserContextMode } from "./src/user-context.js";
 import { getFinalOutput } from "./formatting.js";

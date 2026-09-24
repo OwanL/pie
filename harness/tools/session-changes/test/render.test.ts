@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { renderList, minifyDiff, syntheticCreatedDiff, renderDiffs } from '../src/render';
-import type { FileChange } from '../src/types';
-import type { DiffOutput } from '../src/diff';
+import { renderList, minifyDiff, syntheticCreatedDiff, renderDiffs } from '../render';
+import type { FileChange } from '../types';
+import type { DiffOutput } from '../diff';
 
 function change(path: string, kind: FileChange['kind'], additions = 0, deletions = 0): FileChange {
   return { path, kind, toolCallId: 't', messageId: 'm', description: '', timestamp: '', additions, deletions };

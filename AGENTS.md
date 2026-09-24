@@ -14,7 +14,7 @@ repository work merely because Pie is the active harness.
 Traversal safety: dependency, version-control, generated/build, cache, coverage, runtime-data (e.g. data/), session, log, packaged-artifact, and temporary-SDK trees are protected. Never traverse them with broad recursive searches (`grep -r`, bare `find .`) or unscoped directory walks; known protected directories are pruned automatically, and the rest are simply very large. To inspect a protected path deliberately, read an exact file, scope the search to that path, or use a Git-aware tool (rg). Do not widen a search to work around an empty result.
 <!-- canonical-traversal-policy:end -->
 
-This block is drift-checked against `shared/traversal-policy.ts` in the Pie checkout.
+This block is drift-checked against `harness/tools/execution-safety/traversal-policy.ts` in the Pie checkout.
 
 ## Shell and paths
 

@@ -38,6 +38,10 @@ test('SDK discovery loads every catalog extension tool once from its stable path
   for (const entry of PIE_TOOLS) {
     if (entry.name === 'ask_user') {
       assert.equal(entry.sourcePath, 'harness/tools/ask-user/index.ts');
+    } else if (entry.name === 'defer_trigger') {
+      assert.equal(entry.sourcePath, 'harness/tools/deferred-triggers/index.ts');
+    } else if (entry.name === 'session_changes') {
+      assert.equal(entry.sourcePath, 'harness/tools/session-changes/index.ts');
     } else {
       assert.ok(entry.sourcePath.startsWith('tools/'), `${entry.name} source must remain under tools/`);
     }

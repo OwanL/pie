@@ -25,7 +25,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-import { validateWakeConditions } from '../../../shared/wake-conditions.js';
+import { validateWakeConditions } from './wake-conditions.js';
 import type { ActiveTrigger, TriggerOp, TriggerSpec } from './types.js';
 
 const TRIGGERS_DIR_ENV = 'PIE_TRIGGERS_DIR';

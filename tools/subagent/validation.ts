@@ -3,7 +3,7 @@
  * `index.ts` — behaviour-preserving.
  */
 
-import type { AgentConfig, AgentScope } from "./agents.js";
+import type { AgentConfig, AgentScope } from "../../harness/agent-instructions/agent-discovery/agents.js";
 import { AGENT_SCOPE_VALUES, type SingleResult } from "./types.js";
 
 export function formatAvailableAgents(agents: AgentConfig[]): string {

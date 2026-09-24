@@ -10,7 +10,7 @@ import { findTestBash } from './test-shell.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const autoPruneUrl = pathToFileURL(path.resolve(__dirname, '../src/auto-prune.ts')).href;
 const opsUrl = pathToFileURL(path.resolve(__dirname, '../src/operations.ts')).href;
-const policyUrl = pathToFileURL(path.resolve(__dirname, '../../../shared/traversal-policy.ts')).href;
+const policyUrl = pathToFileURL(path.resolve(__dirname, '../../../harness/tools/execution-safety/traversal-policy.ts')).href;
 
 type Rewrite = (command: string, opts: { gnuGrepProbe: () => boolean }) => string;
 
@@ -41,7 +41,7 @@ async function loadOps(): Promise<CreateOps> {
   return m.createWarmBashOperations as unknown as CreateOps;
 }
 
-type Policy = typeof import('../../../shared/traversal-policy.js');
+type Policy = typeof import('../../../harness/tools/execution-safety/traversal-policy.js');
 
 async function loadPolicy(): Promise<Policy> {
   return await import(policyUrl) as Policy;
@@ -131,7 +131,7 @@ describe('warm-bash auto-prune: grep rule', () => {
   });
 });
 
-describe('warm-bash auto-prune: canonical traversal policy (shared/traversal-policy.ts)', () => {
+describe('warm-bash auto-prune: canonical traversal policy (harness/tools/execution-safety/traversal-policy.ts)', () => {
   let rewrite: Rewrite;
   test.before(async () => { rewrite = await loadRewrite(); });
 

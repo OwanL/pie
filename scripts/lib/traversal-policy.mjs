@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
  * simple `dir: "..."` data literals instead of maintaining another exclusion
  * list. The adapter fails closed when the policy shape drifts.
  */
-const policyPath = fileURLToPath(new URL('../../shared/traversal-policy.ts', import.meta.url));
+const policyPath = fileURLToPath(new URL('../../harness/tools/execution-safety/traversal-policy.ts', import.meta.url));
 const policySource = readFileSync(policyPath, 'utf8');
 const PROTECTED_CLASSES = new Set([
   'dependencies', 'version-control', 'generated-build', 'caches', 'coverage',

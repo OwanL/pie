@@ -57,12 +57,12 @@ class IgnoreTests(unittest.TestCase):
 
 class TraversalPolicyDriftTests(unittest.TestCase):
     """Drift check: the canonical protected-directory policy
-    (shared/traversal-policy.ts, STABILITY-ARCHITECTURE-PLAN §7.7) must be
+    (harness/tools/execution-safety/traversal-policy.ts, STABILITY-ARCHITECTURE-PLAN §7.7) must be
     covered by this skill's .ignore so maintenance scans and shell traversal
     stay aligned. The policy module is parsed directly so the check follows
     the source of truth instead of a mirrored copy."""
 
-    POLICY_PATH = HERE.parents[3] / "shared" / "traversal-policy.ts"
+    POLICY_PATH = HERE.parents[3] / "harness" / "tools" / "execution-safety" / "traversal-policy.ts"
 
     def _protected_dirs(self) -> list[str]:
         text = self.POLICY_PATH.read_text(encoding="utf-8")
@@ -111,7 +111,7 @@ class TraversalPolicyDriftTests(unittest.TestCase):
             missing,
             [],
             ".ignore is missing entries for canonical protected directories; "
-            "add them (see shared/traversal-policy.ts)",
+            "add them (see harness/tools/execution-safety/traversal-policy.ts)",
         )
 
 

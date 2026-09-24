@@ -5,7 +5,7 @@ import * as path from 'node:path';
 import test, { afterEach, beforeEach } from 'node:test';
 
 import registerDeferredTriggers from '../index.js';
-import registerDiscoveryShim from '../../../extensions/deferred-triggers/index.js';
+import registerDiscoveryShim from '../../../../extensions/deferred-triggers/index.js';
 
 const TRIGGERS_DIR_ENV = 'PIE_TRIGGERS_DIR';
 

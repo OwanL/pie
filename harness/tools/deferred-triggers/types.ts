@@ -10,7 +10,7 @@ import type {
   TriggerKind,
   TriggerSpec,
   TriggerSpecInput,
-} from '../../../shared/wake-conditions.js';
+} from './wake-conditions.js';
 
 export type { TriggerKind, TriggerSpec, TriggerSpecInput };
 

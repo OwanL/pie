@@ -5,7 +5,7 @@ import {
   reapTempFiles,
   type ReapOptions,
   type ReapResult,
-} from "../../shared/temp-file-reaper.js";
+} from "../../../shared/temp-file-reaper.js";
 
 /**
  * Reaper for the tool-result-pruner's recall stashes (audit item P1-7).

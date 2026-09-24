@@ -9,8 +9,8 @@ import {
   parseSessionEntriesChanges,
   parseSessionFileChanges,
   readSessionCwd,
-} from '../src/session-jsonl';
-import type { FileChange } from '../src/types';
+} from '../session-jsonl';
+import type { FileChange } from '../types';
 
 // Helpers to build JSONL-shaped entries concisely.
 function header(cwd = '/proj'): Record<string, unknown> {

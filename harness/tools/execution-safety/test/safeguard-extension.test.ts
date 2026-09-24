@@ -16,7 +16,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const safeguardModuleUrl = pathToFileURL(path.resolve(__dirname, '../index.ts')).href;
+const safeguardModuleUrl = pathToFileURL(path.resolve(__dirname, '../../../../extensions/safeguard/index.ts')).href;
 
 type ToolCallHandler = (event: any, ctx: any) => Promise<unknown>;
 type SafeguardModule = {

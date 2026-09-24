@@ -2,14 +2,14 @@ import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
 import * as path from 'node:path';
 
-import { MAX_DIFF_PATHS, sessionChangesSchema } from './src/types.js';
-import type { SessionChangesParams, FileChange } from './src/types.js';
-import { parseSessionEntriesChanges, parseSessionFileChanges } from './src/session-jsonl.js';
-import type { ParsedSession, SessionEntryLike } from './src/session-jsonl.js';
-import { renderList, renderDiffs } from './src/render.js';
-import { computeFileDiff } from './src/diff.js';
-import type { DiffOutput, DiffKind } from './src/diff.js';
-import { canonicalFilePath } from '../../extension/src/shared/file-path.js';
+import { MAX_DIFF_PATHS, sessionChangesSchema } from './types.js';
+import type { SessionChangesParams, FileChange } from './types.js';
+import { parseSessionEntriesChanges, parseSessionFileChanges } from './session-jsonl.js';
+import type { ParsedSession, SessionEntryLike } from './session-jsonl.js';
+import { renderList, renderDiffs } from './render.js';
+import { computeFileDiff } from './diff.js';
+import type { DiffOutput, DiffKind } from './diff.js';
+import { canonicalFilePath } from '../../../extension/src/shared/file-path.js';
 
 /** Honor the host's per-extension toggle (PIE_EXTENSION_TOGGLES_JSON, keyed by
  *  extension id). Mirrors session-reviewer's isExtensionDisabledByToggle so the

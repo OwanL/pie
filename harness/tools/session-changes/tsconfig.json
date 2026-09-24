@@ -19,6 +19,6 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["index.ts", "src/**/*.ts", "test/**/*.ts", "types-global.d.ts"],
+  "include": ["index.ts", "*.ts", "test/**/*.ts", "types-global.d.ts"],
   "exclude": ["node_modules"]
 }

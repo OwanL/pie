@@ -8,17 +8,18 @@ tool definitions, not duplicated in this catalog.
 
 ## Layout
 
-Eight catalog tools are implemented under this tree. The `ask_user` implementation
-is in [`harness/tools/ask-user/`](../harness/tools/ask-user/) behind the same root
-extension adapter; this relocation is recorded in the B4 migration manifest.
+Six catalog tools remain implemented under this tree. The `ask_user`,
+`defer_trigger`, and `session_changes` implementations are under
+[`harness/tools/`](../harness/tools/) behind the same root extension adapters;
+these relocations are recorded in the B4 migration manifest.
 
 - [`harness/tools/ask-user/`](../harness/tools/ask-user/) — `ask_user`
 - [`warm-bash/`](warm-bash/) — `bash`
 - [`computer-use/`](computer-use/) — `computer`
-- [`deferred-triggers/`](deferred-triggers/) — `defer_trigger`
+- [`harness/tools/deferred-triggers/`](../harness/tools/deferred-triggers/) — `defer_trigger`
 - [`playwright/`](playwright/) — `playwright`
 - [`request-capability/`](request-capability/) — `request_capability`
-- [`session-changes/`](session-changes/) — `session_changes`
+- [`harness/tools/session-changes/`](../harness/tools/session-changes/) — `session_changes`
 - [`session-control/`](session-control/) — `session_control`
 - [`subagent/`](subagent/) — `subagent`
 
@@ -43,8 +44,10 @@ The SDK still discovers extension adapters under `extensions/`. Each moved
 tool's `extensions/<id>/index.ts` is a one-line discovery shim re-exporting its
 owner implementation (under `tools/` or `harness/tools/`), so extension IDs,
 toggles, and registration hooks are unchanged and no second registration exists.
-Middleware such as skill pruning, safeguards, and image guarding remains in
-`extensions/`.
+Middleware relocation is in progress: the tool-result pruner lives in
+`harness/tools/result-processing/` and the safeguard implementation in
+`harness/tools/execution-safety/`, each behind its retained `extensions/<id>`
+adapter; skill pruning and image guarding remain in `extensions/`.
 
 Dependency ownership also stays with the original extension directories:
 `extensions/computer-use/` and `extensions/playwright/` keep their manifests,

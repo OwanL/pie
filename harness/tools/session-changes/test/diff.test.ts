@@ -6,7 +6,7 @@ import * as path from 'node:path';
 import test from 'node:test';
 import { promisify } from 'node:util';
 
-import { computeFileDiff, type DiffDependencies, type DiffInput } from '../src/diff';
+import { computeFileDiff, type DiffDependencies, type DiffInput } from '../diff';
 
 const integrationTest = process.env.PIE_RUN_INTEGRATION_TESTS === '1' ? test : test.skip;
 const execFileP = promisify(execFile);

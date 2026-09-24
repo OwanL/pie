@@ -14,7 +14,7 @@ restart beyond what the current sidecar/registry implementation can recover.
 
 Runtime code:
 
-- tool: `tools/deferred-triggers/` (backend process; `extensions/deferred-triggers/index.ts` is the discovery shim)
+- tool: `harness/tools/deferred-triggers/` (backend process; `extensions/deferred-triggers/index.ts` is the discovery shim)
 - host registry + sidecar store: `extension/src/host/deferred-triggers/`
 - shared sidecar paths: `extension/src/shared/deferred-triggers-paths.ts`
 - protocol types: `extension/src/shared/protocol/deferred-triggers.ts`
