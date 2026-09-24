@@ -30,10 +30,11 @@
   }
  },
  "executionProgress": {
-  "checkpointDate": "2026-09-24",
+  "checkpointDate": "2026-09-25",
   "acceptanceDate": "2026-09-25",
-  "milestone": "B3",
-  "status": "B3 complete / exit accepted (2026-09-25): all plan B3 gates were met by the recorded verification results and the B3 milestone is committed. B2 complete / exit accepted.",
+  "milestone": "B4",
+  "status": "B0–B3 complete / exit accepted; B4 partial (ask-user relocation only; no B4 exit claimed).",
+  "partialBatch": "Moved only the seven manifest-owned ask-user tool paths to harness/tools/ask-user. Updated the retained extensions/ask-user adapter, imports, catalog, test/typecheck routing (including retired-source rename/delete identity), owner docs, and actual pinned-SDK discovery assertion. Verification passed: ask-user tests (12), typecheck, routing (19), registry drift (12), inventory (12), skill-pruner integration (59), and pinned-SDK tool catalog (4; exactly one ask_user registration). No other tool, selector, or middleware migration is included.",
   "scope": "B3 authored skill/agent bundle relocation implemented (not exit-accepted): all nine tracked Pie skill bundles, the three authored agent definitions, the subagent agent-discovery loader, the cwd-skills implementation, and the three prompt-assembly modules moved to harness/agent-instructions per manifest targets; settings.json and settings.defaults.json gained the global `skills` array entry `harness/agent-instructions/skills`; root AGENTS.md and APPEND_SYSTEM.md kept; live documentation and prompt links updated; real pinned-SDK discovery verified through the SettingsManager→PackageManager→loadSkills pipeline. Temporary compatibility re-export shims remain at three retired old paths with explicit removal owners. No pushes, loader activation, or host restarts. Exit acceptance: the plan-required B3 gates (real SDK load/reload, global/project precedence and exclusions, tool package resources, cold inventory, hot worker and subagent discovery; identical catalog/precedence, no double prompt injection, no bundle fragmentation) were each met by the results recorded in implemented.b3VerificationGate, and the B3 milestone commit followed. Staged-not-live remains a recorded limitation, not an unmet gate.",
   "inventory": {
    "baselineTrackedSourcesCovered": 1778,
@@ -103,13 +104,13 @@
     "fullSuite": "Full settled-tree npm run test:all exited 0 with 7/7 groups, 7,439 passed / 0 failed / 35 skipped (2026-09-24). The markdown-rendering extension test passed on rerun after an initial failure — the same pre-existing flake recorded for B2 — so the pass is not pristine.",
     "typecheckAndLint": "npm run typecheck passed all 17 projects (shared project covers the relocated prompt module through the shared shim; extension project includes harness/agent-instructions/**); npm run lint passed with the lint script extended to harness/agent-instructions (one moved cwd-skills test import tightened to satisfy the now-covered scope).",
     "build": "Required non-publishing extension:build passed after the B3 changes: staged complete runtime generation 2f2f394dc5239e78d307586042416a4251097e3a13e6c9917c7d3971f2a3b580, coordinated renderer build ID 97b6f767b4235ae179d6, published renderer generation. Staged only — no loader activation and no installed-host restart; the newly staged runtime loads on the next normal VS Code restart, and running sessions keep their existing build.",
-    "liveBoundary": "Loaded behavior has not been verified: the currently loaded backend keeps the pre-B3 subagent loader and prompt documentation path until that restart, while settings-driven skills discovery follows the updated settings.json on the same restart. No restart was forced. Concrete observed staged-not-live evidence (2026-09-25, recorded in stagedNotLiveObservation): pre-B3 subagent discovery at the repository-root cwd reports no agents after the relocation, while discovery from a nested harness/agent-instructions cwd works through project-directory discovery."
+    "liveBoundary": "Loaded behavior has not been verified: the backend was expected to keep the pre-B3 subagent loader and prompt documentation path until that restart; a subsequent user report is recorded in userReportedB3Restart, while settings-driven skills discovery follows the updated settings.json on the same restart. No restart was forced. Concrete observed staged-not-live evidence (2026-09-25, recorded in stagedNotLiveObservation): pre-B3 subagent discovery at the repository-root cwd reports no agents after the relocation, while discovery from a nested harness/agent-instructions cwd works through project-directory discovery."
    }
   },
   "pending": [
    "B1, B2, and B3 exits are accepted. B2's final full verification gate passed on 2026-09-24, including the settled-tree full npm run test:all (7/7 groups, 7,437 passed / 0 failed / 35 skipped; markdown-rendering passed on selective rerun after an initial failure) and the required final extension:build with the staged, not-live runtime identity recorded in finalVerificationGate.",
    "Deep logger, analytics, and resource-move verification tests are deferred to their owning later batches and remain recorded in this manifest; no permanent test exceptions or skips exist or may be added.",
-   "B3 verification gates are recorded in b3VerificationGate and the exit is accepted; the milestone is committed. Loaded/live behavior remains unverified by policy: no installed-host restart was forced, so the currently loaded backend still runs the pre-B3 subagent loader and prompt documentation path until the newly staged runtime (generation 2f2f394dc5239e78d307586042416a4251097e3a13e6c9917c7d3971f2a3b580) loads on the next normal restart; settings-driven skills discovery follows the updated settings.json on that restart. No permanent test exceptions or skips exist or may be added.",
+   "B3 verification gates are recorded in b3VerificationGate and the exit is accepted; the milestone is committed. Loaded/live behavior was unverified at this original checkpoint: no installed-host restart was forced, and staged-not-live evidence records the pre-restart state. The user subsequently reports a successful normal restart and repository-root agent invocation (see userReportedB3Restart); this report was not independently checked by this worker. No restart was performed by this worker, and current loaded-runtime status is not asserted. No permanent test exceptions or skips exist or may be added.",
    "Remaining B3 follow-ups recorded deliberately: the temporary compatibility re-export shims (shared/pie-harness-prompt.ts; extension/src/backend/{system-prompts,context-files}.ts) retire with their owning roots (B8, B5/B7); docs/internal/centralized-model-config.md retains a historical skills/develop-pie path reference; docs/REPOSITORY_ORGANIZATION_PLAN.md path examples are historical planning text until the plan moves in B8."
   ],
   "settingsWorkingTree": "The B0 settings.json high-to-medium note is an immutable baseline snapshot. Corrected live user-field evidence (2026-09-25): defaultModel gpt-6-astra (unchanged from the tracked baseline), defaultThinkingLevel low (the pre-existing user working-tree change; the B0 snapshot's medium value is historical), and pruning.model gpt-6-luna. The prior 'gpt-6-luna defaultModel / xhigh thinking' wording was a review misreading of the pruning block. User fields are preserved unchanged by the migration; the only migration-owned settings.json change is the added skills array, and the working tree keeps the user values as-is. Exclude ongoing settings edits from migration; do not restore or pin future edits."
@@ -117,6 +118,11 @@
  "stagedNotLiveObservation": {
   "recordedAt": "2026-09-25",
   "observation": "Concrete staged-not-live evidence after the relocation, with no restart or activation forced: the pre-B3 loaded runtime's subagent discovery run at the repository-root cwd reports no agents because <agentDir>/agents no longer exists (agents/{reviewer,scout,worker}.md now live only at harness/agent-instructions/agents), while a session whose cwd is nested at harness/agent-instructions discovers the same three agent definitions through normal project-directory discovery. This is a transient pre-restart state of the loaded build only: the staged B3 runtime resolves the relocated user/global agent path, and both the relocated loader and settings-driven skills discovery activate on the next normal VS Code restart. Not a plan B3 gate failure: B3's discovery gates are process-level (fresh/reloaded test processes), and all of them passed."
+ },
+ "userReportedB3Restart": {
+  "recordedAt": "2026-09-25",
+  "source": "User report",
+  "observation": "The user reports a successful normal restart after B3 and an agent invocation from the repository-root cwd that found the agents. This supersedes the staged-not-live prediction for the user's observed environment, but was not independently reproduced by this worker. No restart or activation was performed as part of this task."
  },
  "currentLocations": {
   "extension/.vscode/tasks.json": [
@@ -296,6 +302,27 @@
   "extensions/cwd-skills/index.ts": [
    "extensions/cwd-skills/index.ts",
    "harness/agent-instructions/skill-discovery/index.ts"
+  ],
+  "tools/ask-user/index.ts": [
+   "harness/tools/ask-user/index.ts"
+  ],
+  "tools/ask-user/src/ask.ts": [
+   "harness/tools/ask-user/ask.ts"
+  ],
+  "tools/ask-user/src/types.ts": [
+   "harness/tools/ask-user/types.ts"
+  ],
+  "tools/ask-user/test/ask.test.ts": [
+   "harness/tools/ask-user/test/ask.test.ts"
+  ],
+  "tools/ask-user/test/autonomous-mode.test.ts": [
+   "harness/tools/ask-user/test/autonomous-mode.test.ts"
+  ],
+  "tools/ask-user/test/loader-shim.test.ts": [
+   "harness/tools/ask-user/test/loader-shim.test.ts"
+  ],
+  "tools/ask-user/tsconfig.json": [
+   "harness/tools/ask-user/tsconfig.json"
   ]
  },
  "testEnumeration": {

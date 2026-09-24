@@ -142,10 +142,12 @@ export const PACKAGE_REGISTRY = [
   },
   {
     id: 'ask-user',
-    dir: 'tools/ask-user',
+    dir: 'harness/tools/ask-user',
     groups: ['extensions'],
-    ownedDirs: ['extensions/ask-user'],
-    typecheck: { config: 'tools/ask-user/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
+    // Keep the retired source identity routable for rename/delete diffs; the
+    // active owner is harness/tools/ask-user and the SDK adapter stays in extensions/.
+    ownedDirs: ['extensions/ask-user', 'tools/ask-user'],
+    typecheck: { config: 'harness/tools/ask-user/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
     fastConcurrency: 3,
   },
   {

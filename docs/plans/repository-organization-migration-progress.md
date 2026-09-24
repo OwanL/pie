@@ -1,6 +1,6 @@
 # Repository organization migration progress
 
-**Status (2026-09-25):** B0, B1, B2, and B3 are complete / exit accepted. B3's plan-required gates were each met by the recorded verification results and the B3 milestone is committed. B2 is recorded at commit ea74351f.
+**Status (2026-09-25):** B0, B1, B2, and B3 are complete / exit accepted; B4 is partial (ask-user relocation only; no B4 exit claimed). B3's plan-required gates were each met by the recorded verification results and the B3 milestone is committed. B2 is recorded at commit ea74351f.
 
 ## B3 complete — exit accepted
 
@@ -38,3 +38,9 @@ Implemented at the new owner, recorded in the manifest's `implemented` section: 
 Final verification gate passed (2026-09-24): model drift, all 17 typecheck projects, lint, and the non-publishing build passed; the settled-tree full `npm run test:all` rerun exited 0 with 7/7 groups, 7,437 passed / 0 failed / 35 skipped. The markdown-rendering group initially failed and passed on a selective rerun, so the pass is not pristine. The required final `extension:build` passed with staged runtime generation `b076b8b9034b1a20d3cdbdf2f5fbc22ada3944083856ac5874c713055a544af2` and renderer build ID `751a37955834f94abd94`; the host runtime is staged for the next normal restart and renderer assets are published. Loaded behavior has not been verified; no installed-host restart was forced. The focused inventory suite passed 12/12 after the last `currentLocations` mapping resolved the earlier inventory race; the full suite is not failing.
 
 B0 verification passed with reruns after transient parallel-wave failures. Opt-in browser/live/performance suites were not run. The recorded staged build is not live verification. Preserve the current user-owned `settings.json`; its B0 value is historical only. Milestone commits on master are user-approved; pushing is not authorized.
+
+## B3 user-reported follow-up and B4 partial
+
+The earlier staged-not-live observation records the state before restart. The user subsequently reported a successful normal restart after B3 and an agent invocation from the repository-root cwd that found the relocated agents. This is user-reported evidence, not independently reproduced by this worker; no restart or activation was performed in this task.
+
+Only the seven manifest-listed ask-user paths moved from `tools/ask-user/` to `harness/tools/ask-user/` (implementation, tests, and tsconfig). The stable `extensions/ask-user/` adapter and package metadata remain at the root. Catalog/imports, owner test/typecheck routing, docs, and manifest current locations are updated. Verification passed: ask-user owner tests (12), ask-user typecheck, package-routing tests (19), registry drift (12), migration inventory (12), skill-pruner integration (59), and the pinned-SDK tool-catalog test (4), which loaded the retained adapter and asserted exactly one `ask_user` registration. No other tool, selector, or middleware migration is included. B4 remains partial until its remaining gates are completed.

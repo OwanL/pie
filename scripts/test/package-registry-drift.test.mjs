@@ -286,8 +286,8 @@ test('root package.json extension scripts are the group adapter and all ids stay
       entry.groups?.includes('extensions') ?? entry.dir.startsWith('extensions/'),
     ).map((entry) => entry.id),
   );
-  assert.equal(resolvePackageEntry('ask-user')?.dir, 'tools/ask-user');
-  assert.ok(PACKAGE_GROUPS.extensions.includes('ask-user'), 'tools/ask-user stays in the extensions group');
+  assert.equal(resolvePackageEntry('ask-user')?.dir, 'harness/tools/ask-user');
+  assert.ok(PACKAGE_GROUPS.extensions.includes('ask-user'), 'ask-user stays in the extensions group');
   const expectedTestFlags = PACKAGE_GROUPS.extensions.flatMap((id) => ['--package', id]);
   assert.deepEqual(buildRunnerInvocation('tests', ['extensions']).args, expectedTestFlags);
   const expectedProjectFlags = PACKAGE_GROUPS.extensions.flatMap((id) => ['--project', id]);

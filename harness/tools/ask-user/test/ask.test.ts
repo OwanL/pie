@@ -4,8 +4,8 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const askModuleUrl = pathToFileURL(path.resolve(__dirname, '../src/ask.ts')).href;
-const typesModuleUrl = pathToFileURL(path.resolve(__dirname, '../src/types.ts')).href;
+const askModuleUrl = pathToFileURL(path.resolve(__dirname, '../ask.ts')).href;
+const typesModuleUrl = pathToFileURL(path.resolve(__dirname, '../types.ts')).href;
 
 type AskResult = {
   content: Array<{ type: 'text'; text: string }>;

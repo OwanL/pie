@@ -36,7 +36,11 @@ test('SDK discovery loads every catalog extension tool once from its stable path
   const expectedExtensionPaths = extensionEntries.map((entry) => path.resolve(repoRoot, entry.registration.entryPath));
 
   for (const entry of PIE_TOOLS) {
-    assert.ok(entry.sourcePath.startsWith('tools/'), `${entry.name} source must remain under tools/`);
+    if (entry.name === 'ask_user') {
+      assert.equal(entry.sourcePath, 'harness/tools/ask-user/index.ts');
+    } else {
+      assert.ok(entry.sourcePath.startsWith('tools/'), `${entry.name} source must remain under tools/`);
+    }
     assert.deepEqual(Object.keys(entry).sort(), ['contexts', 'name', 'registration', 'sourcePath']);
     assert.deepEqual(Object.keys(entry.registration).sort(), entry.registration.kind === 'extension'
       ? ['entryPath', 'extensionId', 'kind']

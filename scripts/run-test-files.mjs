@@ -112,8 +112,8 @@ export function classifyTestFile(repoRoot, input) {
   }
   const { id } = directive;
   // Repo-root packages declare no testCwd; only extension/ and analysis/ run
-  // with a package-local cwd. This also lets tools/ask-user remain in the
-  // extensions test group without pretending its tests live in extensions/.
+  // with a package-local cwd. This also lets harness/tools/ask-user remain in
+  // the extensions test group without pretending its tests live in extensions/.
   const packageEntry = resolvePackageEntry(id);
   const cwd = packageEntry?.testCwd ? path.join(repoRoot, packageEntry.testCwd) : repoRoot;
   const tsxConfig = resolvePackageEntry(id)?.tsxConfig;

@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
-import { runAsk } from './src/ask.js';
-import { askUserSchema } from './src/types.js';
-import { ASK_USER_TOOL_NAME, isAutonomousModeEnabled } from '../../shared/autonomous-mode.js';
+import { runAsk } from './ask.js';
+import { askUserSchema } from './types.js';
+import { ASK_USER_TOOL_NAME, isAutonomousModeEnabled } from '../../../shared/autonomous-mode.js';
 
 /** Honor the host's per-extension toggle (PIE_EXTENSION_TOGGLES_JSON, keyed by
  *  extension id). Mirrors skill-pruner's isExtensionDisabledByToggle so the
@@ -64,7 +64,7 @@ export default function (pi: ExtensionAPI) {
           isError: true as const,
         };
       }
-      return runAsk(params, { ui: ctx.ui as import('./src/ask.js').AskPort['ui'], signal, toolCallId });
+      return runAsk(params, { ui: ctx.ui as import('./ask.js').AskPort['ui'], signal, toolCallId });
     },
   });
 }

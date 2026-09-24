@@ -188,7 +188,7 @@
     "watch": "node ../../../scripts/build/build.mjs --watch",
     "lint": "cd ../../.. && node application/hosts/vscode/node_modules/eslint/bin/eslint.js --config application/hosts/vscode/eslint.config.mjs application/hosts/vscode extension/src extension/test harness/agent-instructions",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "typecheck:ask-user": "tsc --noEmit -p ../../../tools/ask-user/tsconfig.json",
+    "typecheck:ask-user": "tsc --noEmit -p ../../../harness/tools/ask-user/tsconfig.json",
     "typecheck:cwd-skills": "tsc --noEmit -p ../../../../harness/agent-instructions/skill-discovery/tsconfig.json",
     "typecheck:safeguard": "tsc --noEmit -p ../../../extensions/safeguard/tsconfig.json",
     "typecheck:skill-pruner": "tsc --noEmit -p ../../../extensions/skill-pruner/tsconfig.json",

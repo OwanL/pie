@@ -15,7 +15,7 @@ export interface PieToolEntry {
 }
 
 export const PIE_TOOLS: readonly PieToolEntry[] = [
-  { name: 'ask_user', sourcePath: 'tools/ask-user/index.ts', registration: { kind: 'extension', extensionId: 'ask-user', entryPath: 'extensions/ask-user/index.ts' }, contexts: ['primary', 'subagent', 'inventory'] },
+  { name: 'ask_user', sourcePath: 'harness/tools/ask-user/index.ts', registration: { kind: 'extension', extensionId: 'ask-user', entryPath: 'extensions/ask-user/index.ts' }, contexts: ['primary', 'subagent', 'inventory'] },
   { name: 'bash', sourcePath: 'tools/warm-bash/index.ts', registration: { kind: 'extension', extensionId: 'warm-bash', entryPath: 'extensions/warm-bash/index.ts' }, contexts: ['primary', 'subagent', 'inventory'] },
   { name: 'computer', sourcePath: 'tools/computer-use/index.ts', registration: { kind: 'extension', extensionId: 'computer-use', entryPath: 'extensions/computer-use/index.ts' }, contexts: ['primary', 'subagent', 'inventory'] },
   { name: 'defer_trigger', sourcePath: 'tools/deferred-triggers/index.ts', registration: { kind: 'extension', extensionId: 'deferred-triggers', entryPath: 'extensions/deferred-triggers/index.ts' }, contexts: ['primary', 'inventory'] },

@@ -29,8 +29,9 @@ test('PACKAGE_DIRECTIVES covers package dirs, owned dirs, and routed test roots'
   // (scripts' test root equals its dir) + 2 declared analysis distributed roots
   // + the extension's separate source roots (its test root overlaps those
   // sources; B3 added the prompt-assembly relocation root) + the subagent
-  // agent-discovery owned dir from B3.
-  assert.equal(PACKAGE_DIRECTIVES.length, 47, 'routing view covers dirs, owned dirs, test roots, and declared distributed roots');
+  // agent-discovery owned dir from B3, and the ask-user retired source identity
+  // retained for rename/delete routing in B4.
+  assert.equal(PACKAGE_DIRECTIVES.length, 48, 'routing view covers dirs, owned dirs, test roots, and declared distributed roots');
 });
 
 test('source/test root defaults keep single-root enumeration identical', () => {
@@ -90,8 +91,9 @@ test('classifyFileToPackage maps a file under each package directory to its id',
   assert.equal(classifyFileToPackage('scripts/test/run-tests.test.mjs'), 'scripts');
   assert.equal(classifyFileToPackage('tools/subagent/test/schema.test.ts'), 'subagent');
   assert.equal(classifyFileToPackage('extensions/subagent/index.ts'), 'subagent');
+  assert.equal(classifyFileToPackage('harness/tools/ask-user/test/loader-shim.test.ts'), 'ask-user');
+  assert.equal(classifyFileToPackage('harness/tools/ask-user/tsconfig.json'), 'ask-user');
   assert.equal(classifyFileToPackage('tools/ask-user/test/loader-shim.test.ts'), 'ask-user');
-  assert.equal(classifyFileToPackage('tools/ask-user/tsconfig.json'), 'ask-user');
   assert.equal(classifyFileToPackage('tools/subagent/schema.ts'), 'subagent');
   assert.equal(classifyFileToPackage('tools/request-capability/index.ts'), 'skill-pruner');
   assert.equal(classifyFileToPackage('extensions/cwd-skills/index.ts'), 'cwd-skills');
@@ -116,8 +118,8 @@ test('every migrated discovery adapter remains assigned to its tool tests', () =
 test('classifyFileToPackage distinguishes extension, tool, and legacy adapter paths', () => {
   assert.equal(classifyFileToPackage('tools/subagent/test/x.test.ts'), 'subagent');
   assert.notEqual(classifyFileToPackage('tools/subagent/test/x.test.ts'), 'extension');
-  assert.equal(classifyFileToPackage('tools/ask-user/test/x.test.ts'), 'ask-user');
-  assert.notEqual(classifyFileToPackage('tools/ask-user/test/x.test.ts'), 'extension');
+  assert.equal(classifyFileToPackage('harness/tools/ask-user/test/x.test.ts'), 'ask-user');
+  assert.notEqual(classifyFileToPackage('harness/tools/ask-user/test/x.test.ts'), 'extension');
 });
 
 test('classifyFileToPackage returns null for non-package paths', () => {
@@ -178,7 +180,7 @@ test('mapFilesToPackages maps package files and de-duplicates ids', () => {
     'extension/test/a.test.ts',
     'extension/src/backend/sdk.ts',     // same package, different file
     'tools/subagent/test/schema.test.ts',
-    'tools/ask-user/test/loader-shim.test.ts',
+    'harness/tools/ask-user/test/loader-shim.test.ts',
     'analysis/test/pricing.test.ts',
     'scripts/test/git-environment.test.mjs',
   ]);

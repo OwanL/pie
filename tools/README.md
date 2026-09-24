@@ -8,9 +8,11 @@ tool definitions, not duplicated in this catalog.
 
 ## Layout
 
-All nine catalog tools are implemented under this tree:
+Eight catalog tools are implemented under this tree. The `ask_user` implementation
+is in [`harness/tools/ask-user/`](../harness/tools/ask-user/) behind the same root
+extension adapter; this relocation is recorded in the B4 migration manifest.
 
-- [`ask-user/`](ask-user/) — `ask_user`
+- [`harness/tools/ask-user/`](../harness/tools/ask-user/) — `ask_user`
 - [`warm-bash/`](warm-bash/) — `bash`
 - [`computer-use/`](computer-use/) — `computer`
 - [`deferred-triggers/`](deferred-triggers/) — `defer_trigger`
@@ -38,10 +40,11 @@ aliases for bundlers resolving source files outside `extension/`.
 ## Registration and dependency ownership
 
 The SDK still discovers extension adapters under `extensions/`. Each moved
-tool's `extensions/<id>/index.ts` is a one-line discovery shim re-exporting the
-`tools/` implementation, so extension IDs, toggles, and registration hooks are
-unchanged and no second registration exists. Middleware such as skill pruning,
-safeguards, and image guarding remains in `extensions/`.
+tool's `extensions/<id>/index.ts` is a one-line discovery shim re-exporting its
+owner implementation (under `tools/` or `harness/tools/`), so extension IDs,
+toggles, and registration hooks are unchanged and no second registration exists.
+Middleware such as skill pruning, safeguards, and image guarding remains in
+`extensions/`.
 
 Dependency ownership also stays with the original extension directories:
 `extensions/computer-use/` and `extensions/playwright/` keep their manifests,
