@@ -17,7 +17,7 @@ This folder contains active design contracts, implementation plans, and operatio
 ## Active plans (in progress)
 
 - [BROWSER_SERVER_PLAN.md](BROWSER_SERVER_PLAN.md) — staged plan for the existing Pie Preact UI over loopback-default HTTP/WebSocket, with explicit unauthenticated trusted-LAN IPv4 opt-in, isolated per-renderer delivery, and a separate future authenticated-internet ingress gate. Milestones 0–2 and the standalone runtime extraction are implemented; milestones 3–5 (resilience pass, browser-native file/diff/export, authenticated ingress) remain. Standalone LAN access is opt-in and has no VS Code editor/file/diff integration.
-- [REPOSITORY_ORGANIZATION_PLAN.md](REPOSITORY_ORGANIZATION_PLAN.md) — proposed reorganization (moves not started): rename `extension/` to `vscode-extension/`, group backend and root shared modules by ownership, and group host analytics-control/aggregate-stats files. Includes file mappings, migration gates, and validation; execution waits for pending work to land.
+- [REPOSITORY_ORGANIZATION_PLAN.md](REPOSITORY_ORGANIZATION_PLAN.md) — accepted target organization and migration handoff: complete responsibility tree, dependency/ownership rules, source-family mappings, discovery/package compatibility, B0–B8 execution batches, validation and rollback. Migration has not started; the executing agent first verifies the live inventory and dependency-resolution prerequisites.
 
 ## Active investigations
 
@@ -41,6 +41,7 @@ This folder contains active design contracts, implementation plans, and operatio
 
 ## Reference / informational
 
+- [internal/repository-organization-navigation-study-2026-09-24.md](internal/repository-organization-navigation-study-2026-09-24.md) — completed qualitative study of 25 fresh synthetic navigation/placement probes, including protocol exceptions, negative outcomes, and limits. Evidence informs the organization plan; it is not a controlled benchmark or validated migration.
 - [internal/centralized-model-config.md](internal/centralized-model-config.md) — design rationale for centralizing model config into `models.yaml` + the `sync-models` codegen. **Implemented**; see `README.md` (Model Configuration) for authoritative usage and the [develop-pie skill's model configuration guidance](../skills/develop-pie/SKILL.md#model-configuration). Kept as the "why" record.
 - [internal/ollama-pro-cloud-models-ranked.md](internal/ollama-pro-cloud-models-ranked.md) — model evaluation notes.
 - [internal/model-token-pricing-sources.md](internal/model-token-pricing-sources.md) — **authoritative evidence ledger** for all real token pricing in `models.json`. Every non-zero cost field traces back to a row here.
