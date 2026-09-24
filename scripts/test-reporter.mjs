@@ -1,6 +1,124 @@
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
 const REPORT_PREFIX = '__PI_TEST_SUMMARY__';
+export const TEST_FILE_MARKER = '__PI_TEST_FILE__:';
+export const TEST_FILE_ACCOUNTING_ENV = 'PIE_TEST_FILE_ACCOUNTING_CONTEXT';
+
+export function normalizeTestFileIdentity(value) {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  const resolved = path.resolve(value).replace(/\\/gu, '/');
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+export function accountTestFiles(enumeratedFiles, executedFiles, intentionalReruns = []) {
+  const expected = new Map();
+  const displayPaths = new Map();
+  const enumeratedDuplicates = [];
+  for (const file of enumeratedFiles) {
+    const identity = normalizeTestFileIdentity(file);
+    if (!identity) throw new TypeError('Enumerated test-file paths must be non-empty strings');
+    if (expected.has(identity)) enumeratedDuplicates.push(displayPaths.get(identity));
+    else {
+      expected.set(identity, 1);
+      displayPaths.set(identity, file);
+    }
+  }
+
+  const rerunCounts = new Map();
+  const orphanedReruns = [];
+  for (const file of intentionalReruns) {
+    const identity = normalizeTestFileIdentity(file);
+    if (!identity) throw new TypeError('Intentional rerun paths must be non-empty strings');
+    if (!expected.has(identity)) orphanedReruns.push(file);
+    else expected.set(identity, expected.get(identity) + 1);
+    rerunCounts.set(identity, (rerunCounts.get(identity) ?? 0) + 1);
+  }
+
+  const actual = new Map();
+  for (const file of executedFiles) {
+    const identity = normalizeTestFileIdentity(file);
+    if (!identity) throw new TypeError('Executed test-file paths must be non-empty strings');
+    actual.set(identity, (actual.get(identity) ?? 0) + 1);
+    if (!displayPaths.has(identity)) displayPaths.set(identity, file);
+  }
+
+  const missing = [];
+  const duplicates = [];
+  const unexpected = [];
+  const intentional = [];
+  for (const [identity, count] of expected) {
+    const file = displayPaths.get(identity);
+    const executions = actual.get(identity) ?? 0;
+    if (executions < count) missing.push({ file, expected: count, executed: executions });
+    if (executions > count) duplicates.push({ file, expected: count, executed: executions });
+    const allowedReruns = rerunCounts.get(identity) ?? 0;
+    if (allowedReruns > 0) {
+      intentional.push({ file, expected: allowedReruns, executed: Math.min(allowedReruns, Math.max(0, executions - 1)) });
+    }
+  }
+  for (const [identity, executions] of actual) {
+    if (!expected.has(identity)) unexpected.push({ file: displayPaths.get(identity), executed: executions });
+  }
+
+  return {
+    success: enumeratedDuplicates.length === 0 && missing.length === 0 && duplicates.length === 0
+      && unexpected.length === 0 && orphanedReruns.length === 0,
+    enumerated: enumeratedFiles.length,
+    executed: executedFiles.length,
+    executedFiles,
+    missing,
+    duplicates,
+    unexpected,
+    enumeratedDuplicates,
+    intentionalReruns: intentional,
+    orphanedReruns,
+  };
+}
+
+export function summarizeTestFileAccounting(accounting) {
+  const { executedFiles, ...summary } = accounting;
+  return summary;
+}
+
+export function readTestFileAccountingContext(env = process.env) {
+  const contextPath = env[TEST_FILE_ACCOUNTING_ENV];
+  if (!contextPath) return null;
+  const context = JSON.parse(readFileSync(contextPath, 'utf8'));
+  if (!Array.isArray(context.expectedFiles) || !Array.isArray(context.intentionalReruns ?? [])) {
+    throw new TypeError('Invalid test-file accounting context');
+  }
+  return context;
+}
+
+export function createTestFileExecutionCollector(context) {
+  if (!context) return null;
+  const executedFiles = [];
+  const directFiles = new Map(Object.entries(context.directFiles ?? {})
+    .map(([inputPath, sourceFile]) => [normalizeTestFileIdentity(inputPath), sourceFile]));
+  const ignoredFiles = new Set((context.ignoredFiles ?? []).map(normalizeTestFileIdentity));
+  return {
+    observe(event) {
+      if (event.type === 'test:start' && typeof event.data?.name === 'string'
+        && event.data.name.startsWith(TEST_FILE_MARKER)) {
+        executedFiles.push(event.data.name.slice(TEST_FILE_MARKER.length));
+      } else if (event.type === 'test:complete' && event.data?.nesting === 0
+        && typeof event.data?.file === 'string'
+        && normalizeTestFileIdentity(event.data.name) === normalizeTestFileIdentity(event.data.file)) {
+        // Node's harness completes one top-level test named after each input
+        // file, even when its tests fail. Per-file summaries are not guaranteed
+        // by every runner; nested tests/suites must not count as file runs.
+        const identity = normalizeTestFileIdentity(event.data.file);
+        const sourceFile = directFiles.get(identity);
+        if (sourceFile) executedFiles.push(sourceFile);
+        else if (!ignoredFiles.has(identity)) executedFiles.push(event.data.file);
+      }
+    },
+    report() {
+      return accountTestFiles(context.expectedFiles, executedFiles, context.intentionalReruns ?? []);
+    },
+  };
+}
 
 function normalizeSummary(summary) {
   if (!summary || typeof summary !== 'object') {
@@ -198,10 +316,12 @@ function finalizeFailures(failures) {
 export default async function* reporter(source) {
   const failures = [];
   const fileSummaries = [];
+  const fileCollector = createTestFileExecutionCollector(readTestFileAccountingContext());
   let globalSummary = null;
   let coverage = null;
 
   for await (const event of source) {
+    fileCollector?.observe(event);
     switch (event.type) {
       case 'test:fail':
         failures.push(normalizeFailure(event.data));
@@ -222,10 +342,25 @@ export default async function* reporter(source) {
   }
 
   const summary = globalSummary ?? aggregateFileSummaries(fileSummaries);
+  const fileAccounting = fileCollector?.report() ?? null;
+  if (fileAccounting && !fileAccounting.success) {
+    if (summary) summary.success = false;
+    failures.push({
+      name: 'test-file accounting mismatch',
+      file: null,
+      line: null,
+      column: null,
+      durationMs: 0,
+      failureType: null,
+      code: null,
+      message: JSON.stringify(summarizeTestFileAccounting(fileAccounting)),
+    });
+  }
   const report = {
     summary,
     coverage,
     failures: finalizeFailures(failures),
+    ...(fileAccounting ? { fileAccounting } : {}),
   };
 
   yield `${REPORT_PREFIX}${JSON.stringify(report)}\n`;

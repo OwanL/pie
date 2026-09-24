@@ -1,6 +1,5 @@
 import type {
   AgentSettledPayload,
-  AnalyticsBranchObservedPayload,
   AuxiliaryLlmUsagePayload,
   BusyChangedPayload,
   CompactionPayload,
@@ -28,10 +27,13 @@ import type {
   ToolProgressPayload,
   ToolStartedPayload,
 } from '../../shared/protocol';
+import {
+  isAnalyticsBranchObservedPayload,
+  type AnalyticsBranchObservedPayload,
+} from '../../../../shared/analytics/branch-observation.js';
 import { ANALYTICS_ROUTE_CLOSED_EVENT } from '../../../../shared/analytics/transport.js';
 import {
   isAgentSettledPayload,
-  isAnalyticsBranchObservedPayload,
   isAuxiliaryLlmUsagePayload,
   isBusyChangedPayload,
   isCompactionPayload,

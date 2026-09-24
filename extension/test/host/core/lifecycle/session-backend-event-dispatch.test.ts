@@ -97,15 +97,30 @@ test('dispatchSessionBackendEvent accepts exact branch ancestry and drops malfor
     observedAt: 1_800_000_000_100,
   };
   dispatchSessionBackendEvent({ event: 'analytics.branch', payload }, handlers);
+  const { parentEntryId: _parentEntryId, ...withoutParent } = payload;
+  dispatchSessionBackendEvent({ event: 'analytics.branch', payload: withoutParent }, handlers);
+  dispatchSessionBackendEvent({ event: 'analytics.branch', payload: { ...payload, parentEntryId: null } }, handlers);
   dispatchSessionBackendEvent({
     event: 'analytics.branch',
     payload: { ...payload, parentEntryId: 12 },
   }, handlers);
   dispatchSessionBackendEvent({
     event: 'analytics.branch',
+    payload: { ...payload, entryId: 'entry\0B' },
+  }, handlers);
+  dispatchSessionBackendEvent({
+    event: 'analytics.branch',
     payload: { ...payload, selectedEntryId: undefined },
   }, handlers);
-  assert.deepEqual(calls, [{ name: 'analytics.branch', payload }]);
+  dispatchSessionBackendEvent({
+    event: 'analytics.branch',
+    payload: { ...payload, observedAt: Number.NEGATIVE_INFINITY },
+  }, handlers);
+  assert.deepEqual(calls, [
+    { name: 'analytics.branch', payload },
+    { name: 'analytics.branch', payload: withoutParent },
+    { name: 'analytics.branch', payload: { ...payload, parentEntryId: null } },
+  ]);
 });
 
 test('dispatchSessionBackendEvent routes authoritative agent settlement capabilities', () => {

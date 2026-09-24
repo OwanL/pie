@@ -4,7 +4,7 @@ import test from 'node:test';
 import { SDK_PATCH_IDENTITY_VERSION } from '../../../src/backend/sdk-patch-barrier';
 import { deriveAnalyticsIdempotencyKey, type AnalyticsObservation } from '../../../../shared/analytics/contracts.js';
 import { createAnalyticsFactPacket } from '../../../../shared/analytics/transport.js';
-import type { AnalyticsBranchObservedPayload } from '../../../src/shared/protocol/sessions.js';
+import type { AnalyticsBranchObservedPayload } from '../../../../shared/analytics/branch-observation.js';
 import {
   WORKER_IPC_MAX_FRAME_BYTES,
   WORKER_IPC_MAX_ORDINARY_FRAME_BYTES,
@@ -385,7 +385,11 @@ test('worker IPC carries the durable analytics branch shape through draft and de
 
   for (const malformed of [
     { ...payload, entryId: '' },
+    { ...payload, entryId: 'entry\0B' },
+    { ...payload, parentEntryId: '' },
     { ...payload, parentEntryId: 7 },
+    { ...payload, selectedEntryId: 'entry\0B' },
+    { ...payload, observedAt: Number.NaN },
     { ...payload, observedAt: Number.POSITIVE_INFINITY },
     { ...payload, unexpected: true },
     (() => { const { selectedEntryId: _selected, ...missing } = payload; return missing; })(),
@@ -393,6 +397,15 @@ test('worker IPC carries the durable analytics branch shape through draft and de
     const result = parseWorkerToCoordinatorFrame({ ...frame, payload: malformed }, expected);
     assert.equal(result.status, 'invalid');
     if (result.status === 'invalid') assert.match(result.detail, /analytics\.branch/);
+  }
+
+  const { parentEntryId: _parentEntryId, ...withoutParent } = payload;
+  for (const optionalParentPayload of [withoutParent, { ...payload, parentEntryId: null }]) {
+    const optionalParentFrame = { ...frame, payload: optionalParentPayload };
+    const optionalParentDraft = { ...optionalParentFrame } as Record<string, unknown>;
+    delete optionalParentDraft.seq;
+    assert.equal(validateWorkerIpcFrameDraft(optionalParentDraft), undefined);
+    assert.equal(parseWorkerToCoordinatorFrame(optionalParentFrame, expected).status, 'accepted');
   }
 });
 

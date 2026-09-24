@@ -15,6 +15,7 @@ import {
 } from './lib/process-watchdog.mjs';
 import { withoutGitRepositoryEnv } from './lib/git-environment.mjs';
 import { withoutPiHarnessEnv } from './lib/pi-harness-env.mjs';
+import { createTsconfigOverlay } from './lib/package-resolution.mjs';
 import { PACKAGE_REGISTRY, ROOT_BATCH_PACKAGE_IDS } from './lib/test-packages.mjs';
 import { resolveLocalTsx } from './run-test-files.mjs';
 
@@ -610,22 +611,35 @@ async function runPackage(config, fast = false, integration = false, testArgs = 
   const useFastRunner = fast && (config.fastRunner || config.fastBatchMode) && testArgs.length === 0;
   const fastRunner = config.fastRunner ?? path.join(repoRoot, 'scripts', 'run-fast-batched-tests.mjs');
   const fastRunnerArgs = config.fastBatchMode ? [config.fastBatchMode] : [];
-  const args = useFastRunner ? [] : buildTestArgs(config, fast, testArgs);
+  // Packages with a registry tsxConfig run through a generated overlay config
+  // (owner-relative aliases extending the checked-in base tsconfig) instead of
+  // the raw repo-relative path; dedicated fast-batch modes overlay inside
+  // their own runner. The overlay is disposed after the run in all paths.
+  const tsxOverlay = !useFastRunner && config.tsxConfig
+    ? createTsconfigOverlay(path.join(repoRoot, config.tsxConfig))
+    : null;
   // Invoke the package-local tsx CLI directly rather than routing through npx
   // and a platform shell. This preserves regexes/spaces in forwarded node:test
   // arguments and avoids command-resolution differences between cwd/shells.
-  const rawResult = await runChildProcess(
-    process.execPath,
-    useFastRunner ? [fastRunner, ...fastRunnerArgs] : [resolveLocalTsx(config.cwd), ...args],
-    config.cwd,
-    signal,
-    integration ? { PIE_RUN_INTEGRATION_TESTS: '1' } : {},
-    config.id === 'extension' || integration,
-  );
+  let rawResult;
+  try {
+    const args = useFastRunner ? [] : buildTestArgs(tsxOverlay ? { ...config, tsxConfig: tsxOverlay.configPath } : config, fast, testArgs);
+    rawResult = await runChildProcess(
+      process.execPath,
+      useFastRunner ? [fastRunner, ...fastRunnerArgs] : [resolveLocalTsx(config.cwd), ...args],
+      config.cwd,
+      signal,
+      integration ? { PIE_RUN_INTEGRATION_TESTS: '1' } : {},
+      config.id === 'extension' || integration,
+    );
+  } finally {
+    tsxOverlay?.dispose();
+  }
   const report = parseReporterOutput(rawResult.stdout, rawResult.stderr);
   const summary = report?.summary ?? null;
   const coverage = report?.coverage ?? null;
   const failures = report?.failures ?? [];
+  const fileAccounting = report?.fileAccounting ?? null;
   const coverageFailures = fast ? [] : summarizeCoverageFailures(config, coverage);
 
   const hasTestFailures = Boolean(summary && (!summary.success || (summary.counts?.failed ?? 0) > 0 || failures.length > 0));
@@ -638,6 +652,7 @@ async function runPackage(config, fast = false, integration = false, testArgs = 
     summary,
     coverage,
     failures,
+    fileAccounting,
     coverageFailures,
     passed,
     hasInfrastructureFailure,
@@ -721,7 +736,19 @@ function aggregateCounts(results) {
  * keeps the original failure (with its diagnostics) — this never masks a real
  * regression, it only absorbs load-induced noise.
  */
-async function attemptFlakyRerun(result, fast, integration, testArgs, signal) {
+export async function attemptFlakyRerun(result, fast, integration, testArgs, signal, rerunFiles = runFailedFiles) {
+  // The reporter (including the batched runner's aggregate) treats missing or
+  // duplicate test-file dispatch as a failure independent of test assertions.
+  // A selective rerun can only validate attributed tests, not the original
+  // package's file enumeration, so it must not clear that failure.
+  const accountingMismatch = result.fileAccounting?.success === false
+    || result.failures.some((failure) => failure.name === 'test-file accounting mismatch'
+      || failure.name === 'aggregate test-file accounting mismatch');
+  if (accountingMismatch) {
+    console.log(`✖ ${result.config.id}: original test-file accounting mismatch — flaky rerun skipped; original failure stands.`);
+    return result;
+  }
+
   const failedFiles = [...new Set(
     result.failures
       .map((failure) => failure.file)
@@ -747,7 +774,7 @@ async function attemptFlakyRerun(result, fast, integration, testArgs, signal) {
     return result;
   }
 
-  const rerun = await runFailedFiles(failedFiles, signal);
+  const rerun = await rerunFiles(failedFiles, signal);
   if (rerun.passed) {
     console.log(`⚠ ${result.config.id}: ${failedFiles.length} failing test file(s) (${failedFiles.join(', ')}) passed on rerun — treated as flaky, not cached.`);
     for (const failure of result.failures) console.log(indent(formatFailureDetails(failure), '    '));

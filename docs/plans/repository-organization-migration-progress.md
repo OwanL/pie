@@ -1,253 +1,34 @@
 # Repository organization migration progress
 
-**Status:** B0 (baseline, inventory and migration manifest) is complete after the
-review correction below. The current B1 preparation slice is implemented but
-remains partial and does not meet B1 exit; see the latest appended checkpoint.
-No B2 relocation has occurred. The approved planning checkpoint is already
-committed; no push is authorized.
+**Status:** B0 is complete and B1 is **complete / exit accepted** (2026-09-24). B2 is **not started**; no relocation is authorized or recorded. This checkpoint is documentation-only and leaves existing source, settings, and Git state untouched (no commit, push, stash, or reset).
 
-Owned artifacts: `repository-organization-migration-manifest.json` (B0
-deliverable), `repository-organization-baseline-verification.md`, and this file.
-All three have explicit `retain` records in the manifest.
+## Durable references
 
-## Baseline (evidence)
+- [Migration plan](../REPOSITORY_ORGANIZATION_PLAN.md) — scope, boundaries, and batch exit criteria.
+- [Manifest](repository-organization-migration-manifest.json) — full source/target inventory, ownership decisions, exact baseline test-path arrays, collision resolutions, and detailed B1 implementation evidence.
+- [B0 baseline verification](repository-organization-baseline-verification.md) — exact commands, counts, rerun details, and limitations.
 
-- Original/source inspected baseline: `78e5c0d7c446bb3c42dff6ac4751a89fdebec69d`.
-- Approved planning checkpoint and verification baseline:
-  `6255f52b4387ee0fc8add6be649c2f5385e63849`. The primary checkout is at this
-  checkpoint; it is the commit for which B0 verification was recorded.
-- Baseline verification passed at the checkpoint (`sync-models --check`,
-  `typecheck`, `lint`, `test:all`, `extension:build:validate` all exit 0).
-  **Truthful caveat:** the baseline passed with reruns, not a pristine first
-  pass — two groups had transient parallel-wave failures (four extension files,
-  one Playwright file) that passed on the runner's rerun; details in
-  [repository-organization-baseline-verification.md](repository-organization-baseline-verification.md).
-- Opt-in browser/live/performance gates were not run; recorded as not exercised,
-  not as passing.
-- At the B0 snapshot, `settings.json` had the user change
-  `defaultThinkingLevel: "high" -> "medium"`; that historical snapshot and its
-  preserve disposition remain recorded in the manifest. Current live user
-  fields have since changed; see the appended checkpoint and do not pin future
-  settings edits to the old `medium` value.
+## Current inventory and decision
 
-## Manifest
+- The manifest maps 1,778 current tracked paths and six relevant untracked additions (1,784 source records total). Its baseline `trackedTestFilesByPackage` arrays remain unchanged: 17 package classifications, 696 paths (including the opt-in extension paths as documented there). These static arrays are inventory, not run-derived exact-once evidence.
+- `extension/test/build-identity.test.ts` maps to `scripts/build/test/build-identity.test.ts` under the build tooling owner.
+- `scripts/test/run-tests.test.mjs` was inspected and is an existing tracked file: it is in the baseline `scripts` array and carries an explicit manifest record (`scripts/verification/test/run-tests.test.mjs`). All six new working-tree files already have explicit manifest records, so no manifest coverage additions were needed.
+- Root and extension fast-runner per-file accounting is **accepted**: after a tiny accounting guard fix, the focused regressions (19 tests), the scripts suite (264 passed / 3 skipped), the real reporter direct-file regression, and the file-accounting exact-once checks (root 79, subagent 46, extension 498 files) all passed.
+- B1 requirements are fulfilled per the gap audit: representative compiler/Vite/tsx/Node/real-SDK resolution, native owners, test enumeration enforcement, the neutral browser port plus inert capability contract, selector discovered identity, and the inventory itself. B1 is marked complete; no B2 relocation has occurred.
 
-- At B0, 1771 records = 1768 tracked-file records at the verification baseline
-  + 3 explicit `retain` records for the new `docs/plans/` artifacts. Original
-  B0 generation ran from OS temp (`%TEMP%\pie-b0-manifest-gen\`). The review
-  correction updated the existing manifest in place and revalidated it against
-  the Git tree and test registry; no generator/checker scripts or logs are in
-  the repo. The earlier B1 checkpoint added two owned source records (1773 total);
-  the current checkpoint adds five explicitly inventoried files (1778 total).
-- Coverage validation: exact bijection between `git ls-tree` at the verification
-  baseline and record sources (0 missing, 0 extra tracked sources), plus the 3
-  declared new docs.
-- Baseline actions: 1639 move, 50 split, 11 consolidate, 71 retain. Every B0
-  record has an owner, batch (B0–B8), verification, and reason.
-- Test inventory: all 17 registry package classifications have explicit
-  `trackedTestFilesByPackage` path arrays (696 files total), not just counts.
-  The extension array is 538 files, including all 8 `.perf.ts` suites and the
-  `.e2e.ts` suite previously omitted; `computer-use` is corrected to 11.
-  Registry globs and opt-in suite paths are kept distinct, with overlap noted.
-- Collisions: 10 multi-source target paths are explained by 13 resolution
-  records; no unintended or unexplained target collisions remain. The false
-  application transcript-window merge is removed, and the logger's core and
-  VS Code adapter targets are explicitly resolved.
-- No generated, dependency, runtime-data, or packaged-artifact path is a record
-  source or target (path checks; sources are tracked files plus the three owned
-  B0 documents).
+## Final verification gate
 
-## B0 review correction (2026-09-24)
+- Final broad gate at the current integration, run before the tiny accounting guard fix: model drift, typecheck (all 17 projects), lint, npm test 7/7 groups 7436 passed / 35 skipped with no failures, cancels, or reruns, and the non-publishing build passed. After the guard fix, only the focused/scripts re-verification listed above was rerun.
 
-Review found and corrected four manifest/progress inaccuracies before B0
-artifact sign-off:
+## Deferred tests — no permanent exceptions
 
-- **Transcript budget ownership:** inspection found
-  `TRANSCRIPT_WINDOW_BUDGETS` in `extension/src/shared/transcript-window.ts` is
-  imported by backend transcript slicing, host paging and culling, and the
-  frontend top/bottom gap rows. The constants are not part of the application
-  paging implementation. The manifest now assigns one inert,
-  browser-safe contract (`harness/session-storage/transcripts/transcript-window-contract.ts`)
-  and an `application/lib/protocol/transcript-window.ts` re-export of that same
-  binding for the frontend. Snapshot fitting remains harness-owned; paging
-  remains application-owned. There is no copied constant or dependency-rule
-  exception, and the former application transcript-window collision was false.
-- **Logger boundary:** the inspected logger uses Node filesystem/OS APIs and
-  concretely couples to VS Code types plus lazy `require('vscode')` for native
-  OutputChannels and `showPieLogs`. The manifest now splits the one
-  host-neutral logger core (`lib/structured-logging/pie-logger.ts`) from an
-  injected concrete VS Code adapter
-  (`application/hosts/vscode/logging/pie-logger-adapter.ts`); VS Code host
-  composition wires the adapter and backend show-log requests use a host port.
-  The root logger has no permanent VS Code exception and logger state/sinks are
-  not duplicated.
-- **Test coverage inventory:** registry-based path enumeration corrected the
-  extension count from 529 to 538 and `computer-use` from 12 to 11. Explicit
-  per-package path arrays now let B1 compare routes by file, not just counts.
-- **Commit terminology:** the source-inspection baseline is 78e5c0d; the
-  approved planning checkpoint and B0 verification baseline are both
-  6255f52b4387ee0fc8add6be649c2f5385e63849. The approved checkpoint exists;
-  progress therefore does not claim there have been no commits overall.
+- Deep logger, analytics, and resource-move verification tests are deferred to their owning later batches and remain recorded in the manifest; no permanent skips or exemptions were added, and none may be.
 
-## Resolutions made by source inspection (not renaming)
+## Evidence and limitations
 
-- **error-message / sensitive-redaction helpers:** `shared/error-message.ts`
-  and `shared/sensitive-redaction.ts` are canonical implementations; the
-  `extension/src/shared/*` and `extension/src/host/util/error-message.ts` files
-  are 3–4 line re-export shims. Single survivors:
-  `lib/structured-logging/error-message.ts` (host shard's separate
-  `lib/error-message.ts` leaf retargeted away) and
-  `lib/sensitive-data/sensitive-redaction.ts`.
-- **live-pipeline trace helpers:** canonical schema + Node store are imported by
-  both harness backend and application host runtime, so
-  `application/backend/agent-connection/` (extension-other shard's choice)
-  would force a forbidden harness→application import. Survivors:
-  `lib/structured-logging/live-pipeline-trace.ts` and
-  `.../live-pipeline-trace-store.ts`; host-process runtime singleton retargeted
-  to `application/backend/agent-connection/live-pipeline-trace-runtime.ts`
-  (host-only importers); backend runtime unchanged in
-  `harness/agent-processes/coordinator/`.
-- **backend session-lifecycle-store:** the shared-store seam is explicit: one
-  SQLite database, one schema version, one coordinator writer-admission
-  authority. `harness/session-storage/lifecycle/` owns database identity/schema
-  and session-lifecycle APIs; `analytics/authority/` owns the host-registry +
-  writer-fence/lease/admission API surface as a narrow adapter over the same
-  store. No second store, schema, or authority change.
-- **host private-session-cleanup (medium confidence):** all deletion/privacy
-  effects are injected ports and the only importer is
-  `session-service/service.ts` → retargeted to
-  `application/backend/session-actions/private-session-cleanup.ts` as the
-  application-side orchestrator over the harness lifecycle cleanup port.
-- **stats-service run-state-manager (medium confidence):** mutates
-  `SessionRunState` via `getArchState`/`dispatchArchEvent`; consumers read state.
-  Confirmed `application/backend/conversation-state/`.
-- **aggregate-pricing-cache:** loads `loadModelPricing` from backend/pricing
-  plus pricing-history into a stat-signature catalog; confirmed
-  `harness/model-providers/pricing/` per plan §3.2.
-- **shared/tsconfig vs tools/tsconfig:** `shared/tsconfig.json` dissolves (its
-  sources disperse to owners; no third tsconfig). Survivors:
-  `application/hosts/vscode/tsconfig.json` (moved extension package tsconfig)
-  and `harness/tools/tsconfig.json` (moved `tools/tsconfig.json`, the surviving
-  base).
-- **transcript-window split:** lossless snapshot bounds remain in
-  `harness/session-storage/transcripts/snapshot-boundary.ts`; one inert
-  `TRANSCRIPT_WINDOW_BUDGETS` contract is harness-owned and re-exported through
-  application protocol for browser use. The application windowing algorithm
-  does not absorb the constants.
-- **pie logger split:** host-neutral Node logging implementation remains in
-  `lib/structured-logging/`; VS Code OutputChannel creation and `showPieLogs`
-  behavior belong to the injected VS Code host adapter. No `vscode` import or
-  require is permitted in the root logger.
+- B0 verification passed at `6255f52b4387ee0fc8add6be649c2f5385e63849`; the detailed record is linked above. It passed with reruns after transient parallel-wave failures, and the extension summary retained one cancelled test. Opt-in browser/live/performance suites were not run. The baseline run did not expose an exhaustive file-dispatch count.
+- Existing focused B1 evidence and its caveats are in the manifest. A staged extension build is **not loaded/live**, no restart was performed, and its exact staged generation identity was not checked. Do not treat build success as live behavior verification.
+- The B0 `settings.json` high-to-medium entry is historical only. Exclude `settings.json` and ongoing user settings changes from migration; preserve current user state.
+- One low-risk projection correction was user-authorized: backend-supplied `primaryOperation` is suppressed at projection while wire validation and reducer storage remain unchanged; only a live reducer-owned operation is surfaced. Focused tests, typecheck, and build passed for that correction; the final broad gate above was subsequently run at the integrated state.
 
-## Enumeration sources (all from the actual checkpoint tree)
-
-- Test enumeration imported the real `scripts/lib/test-packages.mjs`
-  `PACKAGE_REGISTRY` and `scripts/run-tests.mjs` package test globs, then
-  matched them against tracked paths at the planning checkpoint. The exact
-  per-package arrays are preserved in the manifest. Extension opt-in browser
-  (`.pw.ts`), performance (`.perf.ts`) and large-detail e2e (`.e2e.ts`) suite
-  paths remain explicitly enumerated; overlapping default `.test.ts` suites
-  and the `backend-probe.ts` helper are not double-counted as additional tests.
-  Baseline `test:all` output reports test-case outcomes but no discovered file
-  count (Windows limitation in the baseline doc), so this is static tracked-file
-  evidence, not a run-derived count.
-- Package/lock owners, host bundle entries (extension, standalone, backend,
-  worker-entry, analytics-recorder-worker, analytics-query-worker,
-  cold-browse-helper-entry, initial-context-estimate-worker,
-  phase4-worker-command-extension), renderer manifest contract, VS Code
-  identities (`pie.sessionsView`, publisher/name/main `./runtime/bootstrap.cjs`),
-  the stable nine-tool catalog names/registrations, extension IDs, nine Pie
-  skill bundles, and agent definitions were extracted from the actual
-  `package.json`/`vite.config.ts`/`build.mjs`/`tools/index.ts`/tree state.
-
-## Open items (non-blocking for B0 exit)
-
-1. The session-lifecycle-store seam is a documented disposition; adapter
-   extraction is B5/B6 implementation work with its own verification.
-2. B1 should make run-level test enumeration compare the explicit path arrays
-   with actual multi-root dispatch and prove every enumerated file runs exactly
-   once. The arrays strengthen the baseline inventory but are not execution
-   evidence.
-
-## Integrated B1 preparation verification
-
-`npm test` selected the full fast suite after the routing changes and exited 0
-(2026-09-24). The recorder-supervisor timeout passed on automatic rerun; the
-extension summary still reported one cancelled test, as at baseline. This is
-not a pristine first-pass result or evidence for opt-in/live gates. No source
-relocation or publishing build was performed in this preparation slice.
-
-## Git workflow (user-approved constraints)
-
-- Milestone commits are approved; push is not authorized.
-- The `settings.json` user change stays out of migration commits.
-
-## Earlier B1 preparation checkpoint (2026-09-24)
-
-- `scripts/lib/package-resolution.mjs` and its proof suite were present. Six of
-  six tests passed, including the real TypeScript compiler, Vite, repository-local
-  tsx, and pinned SDK extension-loader paths. The eight multi-root routing files
-  listed in the manifest were updated; routing tests passed, including the fixes
-  for required roots, complete glob coverage, and nested cross-owner claims.
-- This was preparation only; package configs/runtime callers, protocol and
-  host-adapter seams, and discovery/lifecycle proofs were pending. B1 was not
-  exit and no B2 files moved.
-- Manifest source coverage at that checkpoint was 1773 records: 1771 current
-  tracked paths plus two explicit owned additions. The B0
-  `trackedTestFilesByPackage` arrays and intentional collision resolutions
-  remained unchanged.
-- `settings.json` is live user state (`defaultModel` gpt-6-astra → gpt-6-luna;
-  `defaultThinkingLevel` high → xhigh). Preserve the immutable B0 snapshot,
-  exclude current/future user edits from migration, and do not restore or pin
-  the previous `medium` value.
-
-## Current B1 preparation checkpoint (2026-09-24)
-
-- Owner-relative package resolution is now wired into both extension Vite build
-  graphs through `extension/vite.config.ts` and the shared helper. Seven resolver
-  tests passed, including the real TypeScript compiler, Vite client and SSR
-  graphs, repository-local tsx, the pinned SDK extension loader, and runtime
-  `pi-tui` resolution from an isolated future source root. Compiler and
-  test-runtime resolution integration beyond this Vite wiring is still pending.
-- The real pinned SDK `DefaultResourceLoader` regression discovers the checked-in
-  skill-pruner root shim, invokes its loaded selector, then invokes the loaded
-  `request_capability` tool and proves hide/recover share one selector state.
-  The recovery audit completed before temporary fixture cleanup. The selector/
-  skill-pruner suite passed 59 tests.
-- The browser-server boundary now has a host-neutral service/factory contract.
-  `HostRuntime` depends on `BrowserServerService`; concrete VS Code and
-  standalone adapters construct `BrowserServer` and retain ownership of asset,
-  icon, renderer-selection, and title paths. The canonical contracts target
-  `application/hosts/lib/platform-contracts/browser-server-seam.ts`, distinct
-  from the concrete browser factory/implementation targets.
-- The protocol boundary now separates inert `SessionCapabilityFacts` (harness
-  RPC owner) from application `SessionCapabilities` and reducer operation types.
-  Backend producers consume facts only; the host projection alone joins the
-  operation overlay. The capability-seam suite passed 5 tests.
-- **User-approved low-risk correctness fix:** wire validation still accepts
-  optional `primaryOperation` data and reducer storage remains verbatim, but
-  pure projection now strips any backend-supplied operation overlay. Only a
-  current non-terminal reducer-owned operation is projected. Three focused
-  suppression tests passed. Typecheck and extension build passed after this
-  correction. The build is staged, not live; exact staged generation identity
-  was not checked.
-- Focused evidence: resolver 7/7, host runtime 14, selector/pruner 59,
-  capability seam 5, and projection suppression 3 passed. The full fast suite
-  passed (7,403 passed) before the suppression fix, with a rerun caveat; it was
-  not rerun after that fix. Do not treat the focused/post-fix typecheck and
-  build evidence as a post-fix full-suite pass or as live behavior verification.
-- Manifest inventory now has 1778 records: all 1773 current tracked paths plus
-  five explicitly owned untracked source/test additions. The two earlier
-  package-resolution additions are now included among the tracked paths. Exact
-  coverage validation found zero missing tracked sources, zero unrecorded
-  untracked sources, and zero duplicate source records. The five new records
-  cover the browser-server seam, capability facts, operation projection, and
-  both boundary regression tests. The immutable B0 per-package test-path
-  enumeration remains unchanged (696 paths). All 10 multi-source target paths
-  remain covered by the existing 13 collision-resolution records; no new target
-  collision is introduced, and each newly added canonical target is unique.
-- B1 remains partial until compiler/test-runtime resolution integration, all
-  remaining discovery/seam work, and the full inventory/dispatch gates are
-  proved. No B2 relocation has occurred. Only these planning documents changed;
-  no source/settings files or Git metadata/index changes were made. No stash/reset
-  was used.
+**Next:** B2 may only begin as a separately authorized slice with its own checkpoint and gate; no commit, push, or B2 relocation is part of this checkpoint.

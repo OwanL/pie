@@ -11,6 +11,13 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { withoutPiHarnessEnv } from './lib/pi-harness-env.mjs';
 import { isProtectedDirectoryName } from './lib/traversal-policy.mjs';
+import {
+  accountTestFiles,
+  normalizeTestFileIdentity,
+  summarizeTestFileAccounting,
+  TEST_FILE_ACCOUNTING_ENV,
+  TEST_FILE_MARKER,
+} from './test-reporter.mjs';
 
 const REPORT_PREFIX = '__PI_TEST_SUMMARY__';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -137,6 +144,20 @@ function emptyCounts() {
   return { tests: 0, failed: 0, passed: 0, cancelled: 0, skipped: 0, todo: 0, topLevel: 0, suites: 0 };
 }
 
+async function writeAccountingContext(tempDir, name, expectedFiles, directFiles = [], ignoredFiles = []) {
+  const contextPath = path.join(tempDir, `file-accounting-${name}.json`);
+  const directFileMap = Object.fromEntries(directFiles.map(([inputPath, sourceFile]) => [
+    normalizeTestFileIdentity(inputPath), path.resolve(sourceFile),
+  ]));
+  await writeFile(contextPath, JSON.stringify({
+    expectedFiles: expectedFiles.map((file) => path.resolve(file)),
+    directFiles: directFileMap,
+    ignoredFiles: ignoredFiles.map((file) => path.resolve(file)),
+    intentionalReruns: [],
+  }), 'utf8');
+  return contextPath;
+}
+
 function stableBucketIndex(file, bucketCount) {
   let hash = 2166136261;
   for (let index = 0; index < file.length; index += 1) {
@@ -209,9 +230,10 @@ export function recoverBundledFailureSourceFiles(failures, tempDir, sourceFiles)
   });
 }
 
-function mergeReports(results, durationMs, tempDir, bundledSourceFiles) {
+function mergeReports(results, durationMs, tempDir, bundledSourceFiles, enumeratedFiles) {
   const counts = emptyCounts();
   const failures = [];
+  const executedFiles = [];
   let success = true;
   for (const result of results) {
     const report = parseReport(`${result.stdout}\n${result.stderr}`);
@@ -222,6 +244,9 @@ function mergeReports(results, durationMs, tempDir, bundledSourceFiles) {
       tempDir,
       bundledSourceFiles,
     ));
+    if (Array.isArray(report?.fileAccounting?.executedFiles)) executedFiles.push(...report.fileAccounting.executedFiles);
+    else success = false;
+    if (report?.fileAccounting && !report.fileAccounting.success) success = false;
     if (!report) {
       failures.push({
         name: 'fast extension test subprocess failed without a summary',
@@ -229,8 +254,21 @@ function mergeReports(results, durationMs, tempDir, bundledSourceFiles) {
       });
     }
   }
+  const fileAccounting = accountTestFiles(enumeratedFiles, executedFiles);
+  if (!fileAccounting.success) {
+    success = false;
+    failures.push({
+      name: 'aggregate extension test-file accounting mismatch',
+      message: JSON.stringify(summarizeTestFileAccounting(fileAccounting)),
+    });
+  }
   if (counts.failed > 0 || counts.cancelled > 0 || failures.length > 0) success = false;
-  return { summary: { success, counts, durationMs }, coverage: null, failures };
+  return {
+    summary: { success, counts, durationMs },
+    coverage: null,
+    failures,
+    fileAccounting: summarizeTestFileAccounting(fileAccounting),
+  };
 }
 
 async function main() {
@@ -272,6 +310,16 @@ async function main() {
   ];
   let unsafeChild;
   try {
+    const standaloneSources = safe.filter((file) => !batchable.has(file) && !scopedBatchable.has(file));
+    const standaloneBundles = standaloneSources
+      .map((file) => path.join(tempDir, file.replace(/\.tsx?$/u, '.js')));
+    const unsafeSourceFiles = unsafe.map((file) => path.join(extensionRoot, file));
+    const unsafeAccountingContext = await writeAccountingContext(
+      tempDir,
+      'unsafe',
+      unsafeSourceFiles,
+      unsafeSourceFiles.map((file) => [file, file]),
+    );
     const tsxCli = path.join(extensionRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');
     const reporterArg = `--test-reporter=${reporterSpecifier}`;
     const bundledArgs = ['--test', '--test-force-exit', '--test-concurrency=16', reporterArg];
@@ -283,7 +331,10 @@ async function main() {
       [tsxCli, ...isolatedArgs, ...unsafe],
       extensionRoot,
       (child) => { unsafeChild = child; },
-      { PIE_LIVE_PIPELINE_TRACE_DIR: traceDirs[1] },
+      {
+        PIE_LIVE_PIPELINE_TRACE_DIR: traceDirs[1],
+        [TEST_FILE_ACCOUNTING_ENV]: unsafeAccountingContext,
+      },
     );
 
     const { build } = extensionRequire('esbuild');
@@ -378,31 +429,46 @@ async function main() {
     });
     await symlink(path.join(extensionRoot, 'node_modules'), path.join(tempDir, 'node_modules'), 'junction');
 
-    const standaloneBundles = safe
-      .filter((file) => !batchable.has(file) && !scopedBatchable.has(file))
-      .map((file) => path.join(tempDir, file.replace(/\.tsx?$/u, '.js')));
-    const compiledBatchFiles = (files) =>
-      files.map((file) => path.join(tempDir, file.replace(/\.tsx?$/u, '.js')));
+    const compiledBatchFile = (file) => path.join(tempDir, file.replace(/\.tsx?$/u, '.js'));
     const bucketToBatch = (buckets, prefix) => Promise.all(buckets.map(async (files, index) => {
       const batchPath = path.join(tempDir, `${prefix}-${index}.mjs`);
-      const suites = compiledBatchFiles(files).map((file) =>
-        `describe(${JSON.stringify(file)}, { concurrency: false }, async () => { await import(${JSON.stringify(pathToFileURL(file).href)}); });`);
+      const suites = files.map((sourceFile) => {
+        const compiledFile = compiledBatchFile(sourceFile);
+        const sourcePath = path.join(extensionRoot, sourceFile);
+        return `describe(${JSON.stringify(`${TEST_FILE_MARKER}${sourcePath}`)}, { concurrency: false }, async () => { await import(${JSON.stringify(pathToFileURL(compiledFile).href)}); });`;
+      });
       await writeFile(batchPath, `import { describe } from 'node:test';\n${suites.join('\n')}`, 'utf8');
       return batchPath;
     }));
     const batchFiles = await bucketToBatch(balancedBuckets([...batchable], costTable), 'bundle-batch');
     const scopedBatchFiles = await bucketToBatch(balancedBuckets([...scopedBatchable], costTable), 'scoped-bundle-batch');
     const bundledFiles = [...standaloneBundles, ...batchFiles, ...scopedBatchFiles];
+    const bundledAccountingContext = await writeAccountingContext(
+      tempDir,
+      'bundled',
+      safe.map((file) => path.join(extensionRoot, file)),
+      standaloneBundles.map((bundle, index) => [bundle, path.join(extensionRoot, standaloneSources[index])]),
+      [...batchFiles, ...scopedBatchFiles],
+    );
 
     if (costTable) {
       const weight = (file) => costTable[file.replace(/\\/gu, '/')] ?? 0;
       bundledFiles.sort((a, b) => weight(bundleSourcePath(b)) - weight(bundleSourcePath(a)));
     }
     const results = await Promise.all([
-      run(process.execPath, [...bundledArgs, ...bundledFiles], extensionRoot, undefined, { PIE_LIVE_PIPELINE_TRACE_DIR: traceDirs[0] }),
+      run(process.execPath, [...bundledArgs, ...bundledFiles], extensionRoot, undefined, {
+        PIE_LIVE_PIPELINE_TRACE_DIR: traceDirs[0],
+        [TEST_FILE_ACCOUNTING_ENV]: bundledAccountingContext,
+      }),
       unsafeRun,
     ]);
-    const report = mergeReports(results, performance.now() - startedAt, tempDir, safe);
+    const report = mergeReports(
+      results,
+      performance.now() - startedAt,
+      tempDir,
+      safe,
+      [...safe, ...unsafe].map((file) => path.join(extensionRoot, file)),
+    );
     process.stdout.write(`${REPORT_PREFIX}${JSON.stringify(report)}\n`);
     if (!report.summary.success) process.exitCode = 1;
   } finally {

@@ -28,6 +28,7 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createTsconfigOverlay } from './lib/package-resolution.mjs';
 import { PACKAGE_DIRECTIVES, resolvePackageEntry } from './lib/test-packages.mjs';
 import { withoutGitRepositoryEnv } from './lib/git-environment.mjs';
 import { withoutPiHarnessEnv } from './lib/pi-harness-env.mjs';
@@ -225,12 +226,15 @@ function printHelp() {
 
 /**
  * Spawn `node <tsxBin> <args>` with inherited stdio so output streams live.
+ * Exported for the integrated future-root proof tests: registry classification
+ * stays repo-bound, but group execution is the shared runner surface that
+ * generated overlay configs flow through.
  * @param {{ tsxBin: string, cwd: string }} group
  * @param {string[]} args
  * @param {AbortSignal} [signal]
  * @returns {Promise<number>} exit code
  */
-function runGroup(group, args, signal) {
+export function runGroup(group, args, signal) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [group.tsxBin, ...args], withProcessTreeIsolation({
       cwd: group.cwd,
@@ -284,12 +288,22 @@ async function main() {
     return;
   }
 
+  // Packages with registry tsxConfig entries run through generated overlay
+  // configs (owner-relative aliases over the checked-in base config) instead
+  // of the raw repo-relative config path. Overlays are private OS-temp files
+  // and are always disposed after the run.
+  const overlays = new Map();
   const processAbort = abortOnProcessSignals();
   const failures = [];
   let completedGroups = 0;
   try {
+    for (const group of groups) {
+      if (!group.tsxConfig) continue;
+      overlays.set(group.id, createTsconfigOverlay(path.join(repoRoot, group.tsxConfig)));
+    }
     await Promise.all(groups.map(async (group) => {
-      const args = buildTsxArgs(group);
+      const overlay = overlays.get(group.id);
+      const args = buildTsxArgs(overlay ? { ...group, tsxConfig: overlay.configPath } : group);
       const fileWord = group.files.length === 1 ? 'file' : 'files';
       console.log(`\n▶ ${group.id} (${group.files.length} ${fileWord})`);
       const code = await runGroup(group, args, processAbort.signal);
@@ -303,6 +317,7 @@ async function main() {
     }));
   } finally {
     processAbort.dispose();
+    for (const overlay of overlays.values()) overlay.dispose();
   }
 
   console.log('');

@@ -1,4 +1,4 @@
-import { createRequire } from 'node:module';
+import { createNativeOwnerRequire } from '../../scripts/lib/native-owner.mjs';
 
 // Browser/runtime packages remain installed and locked by extensions/playwright.
-export const requirePlaywrightDependency = createRequire(new URL('../../extensions/playwright/package.json', import.meta.url));
+export const requirePlaywrightDependency = createNativeOwnerRequire('playwright');

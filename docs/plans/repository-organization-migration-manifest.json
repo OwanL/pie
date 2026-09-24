@@ -32,22 +32,34 @@
  "executionProgress": {
   "checkpointDate": "2026-09-24",
   "milestone": "B1",
-  "status": "partial-not-exit",
-  "scope": "B1 preparation: owner-relative package resolution/Vite wiring, multi-root test routing, host-neutral factory and capability/operation seams, and their focused regressions; no B2 relocations.",
+  "status": "complete; B2 not started",
+  "scope": "B1 preparation: owner-relative package resolution/Vite wiring, compiler and test-runtime tsx resolution integration, unbundled native-owner/YAML runtime resolution, multi-root test routing, host-neutral factory and capability/operation seams, canonical analytics branch-observation contract extraction, manifest inventory enforcement, and root/extension test-file accounting; no B2 relocations.",
   "inventory": {
-   "currentTrackedSourcesCovered": 1773,
+   "currentTrackedSourcesCovered": 1778,
    "ownedPostBaselineSources": [
     "extension/src/host/runtime/browser-server-seam.ts",
     "extension/src/shared/protocol/session-capability-facts.ts",
     "extension/src/shared/protocol/session-operation-projection.ts",
     "extension/test/shared/protocol/capability-seam.test.ts",
-    "extension/test/host/core/architecture/capability-projection-overlay-suppression.test.ts"
+    "extension/test/host/core/architecture/capability-projection-overlay-suppression.test.ts",
+    "shared/analytics/branch-observation.ts",
+    "scripts/lib/native-owner.mjs",
+    "scripts/lib/package-resolution.d.mts",
+    "scripts/test/repository-migration-inventory.test.mjs",
+    "scripts/test/unbundled-owner-resolution.test.mjs",
+    "extension/test/build-identity.test.ts"
    ],
-   "sourceRecordCount": 1778,
-   "validation": "Exact set: all 1773 current git ls-files paths plus these five explicitly owned untracked additions; zero missing, extra, or duplicate source records. The two earlier package-resolution additions are now among the tracked paths. Baseline trackedTestFilesByPackage arrays remain unchanged and immutable."
+   "sourceRecordCount": 1784,
+   "validation": "Exact set: all 1778 current git ls-files tracked paths plus these six explicitly owned relevant untracked additions; zero missing, extra, or duplicate source records. The canonical analytics branch-observation contract, the native-owner helper, the package-resolution declaration, and the three new regression suites (migration inventory enforcement, unbundled owner resolution, and build identity) each carry explicit records. Baseline trackedTestFilesByPackage arrays remain unchanged and immutable."
   },
   "implemented": {
-   "packageResolution": "scripts/lib/package-resolution.mjs provides current/planned owner-relative roots and runtime, TypeScript, tsx, and Vite resolution proofs; 7/7 tests passed, including real TypeScript, Vite, repository-local tsx, pinned SDK extension-loader, and real SSR pi-tui runtime-resolution coverage. The helper-derived aliases are now wired into both extension Vite build graphs via extension/vite.config.ts.",
+   "packageResolution": "scripts/lib/package-resolution.mjs provides current/planned owner-relative roots and runtime, TypeScript, tsx, and Vite resolution, plus resolveTypeScriptCompiler and createTsconfigOverlay. It is wired into both extension Vite build graphs, the typecheck wrapper (run-typechecks resolveProjectCompiler resolves each registry-declared compiler owner-relatively and accepts absolute future-root configs), and all three test wrappers (run-tests, run-test-files, run-fast-batched-tests), whose registry tsxConfig entries now run through generated OS-temp overlay configs that extend the checked-in base config and re-point exactly the declared aliases to explicit owner paths (helper-covered keys only; no new redirections, so test-time module hooks keep their interception set).",
+   "compilerIntegrationEvidence": "Full scripts/run-typechecks.mjs run passed all 17 projects with helper-resolved compilers (2026-09-24). The future-root compiler proof runs real tsc through the integrated runWithConcurrency/runProject caller against a generated owner-relative config at an OS-temp source root: both Pi spellings, TypeBox spellings, Preact subpaths, and owner typeRoots resolve.",
+   "testRuntimeEvidence": "All four tsxConfig packages pass through the integrated wrappers with generated overlays: subagent 623 passed/4 skipped, computer-use 141 passed/1 skipped, playwright 66 passed via run-fast-batched-tests.mjs; image-context-guard 26 passed via run-tests.mjs and run-test-files.mjs. A real tools/subagent/test/schema.test.ts run passes through the integrated run-test-files wrapper. The future-root tsx proof runs a fixture outside the repo through the integrated buildTsxArgs+runGroup surface with an overlay re-pointing deliberately unresolvable base targets to owner paths. Overlay generation preserves strict/include/exclude by extending the checked-in base and is guarded by drift tests.",
+   "branchObservationContract": "Canonical AnalyticsBranchObservedPayload interface and isAnalyticsBranchObservedPayload guard extracted from extension/src/shared/protocol/sessions.ts and event-payloads.ts into shared/analytics/branch-observation.ts (planned analytics/contracts/branch-observation.ts). worker-protocol and host event-dispatch now import the canonical contract; the two old protocol files keep temporary compatibility re-exports explicitly marked for removal in B5/B6/B7 once old protocol imports retire, so the payload/guard split records no longer duplicate the contract. Focused regressions updated: worker-protocol.test.ts, worker-runtime-analytics-router.test.ts, and session-backend-event-dispatch.test.ts (34 tests passed together via run-test-files.mjs, 2026-09-24).",
+   "unbundledRuntimeResolution": "§5.2 unbundled Node/Jiti runtime path now resolves owner-relatively from a future root: scripts/lib/native-owner.mjs owns native sidecar dependency owners (computer-use, playwright) and the tools/computer-use and tools/playwright dependency-owner callers are wired to it; catalog-sync consumes the application dependency owner's hoisted yaml module through createOwnerRequire (typed by the new scripts/lib/package-resolution.d.mts). scripts/test/unbundled-owner-resolution.test.mjs proves native owners, owner-hoisted yaml (single parser identity shared with catalog-sync), and pinned-SDK jiti loading of future-root extension shims from an OS-temp source root with no root-level node_modules (2 tests passed, 2026-09-24).",
+   "inventoryEnforcement": "scripts/test/repository-migration-inventory.test.mjs enforces this manifest against the exact git inventory: every tracked and relevant untracked file mapped, no stale sources, collisions only when documented in resolvedCollisions, explicit retain self-targets, protected top-level trees rejected, registry routing authority intact, and baseline test records retained or mapped. The regression suite passes against the current 1784-record manifest.",
+   "runnerFileAccounting": "The shared test reporter and root/extension fast runners now account for enumerated versus executed test-file identities, detecting missing, unexpected, accidental duplicate, and enumerator-duplicate dispatch while distinguishing configured intentional reruns. Root batch enumeration and extension enumeration feed that accounting. Reviewer acceptance and the final full verification gate passed (2026-09-24). After a tiny accounting guard fix, the focused regressions (19 tests), the scripts suite (264 passed / 3 skipped), the real reporter direct-file regression, and the file-accounting exact-once checks (root 79, subagent 46, extension 498 files) all passed.",
    "selectorRegression": "The real pinned SDK DefaultResourceLoader discovers the checked-in skill-pruner root shim; its loaded selector and request_capability tool share one state identity through hide/recover, with audit completion verified. 59 selector/pruner tests passed.",
    "browserServerSeam": "HostRuntime now consumes a host-neutral BrowserServerService and platform factory contract from browser-server-seam.ts; concrete VS Code/standalone adapters construct BrowserServer and own asset paths. The factory contract is targeted separately under application/hosts/lib/platform-contracts/browser-server-seam.ts, not duplicated in the browser implementation target.",
    "capabilityOperationSeam": "Backend capability producers consume inert SessionCapabilityFacts; reducer-owned operation types and renderer SessionCapabilities live in session-operation-projection.ts, and only the host projection joins the operation overlay. Five capability-seam tests passed.",
@@ -62,12 +74,12 @@
     "scripts/test/test-impact.test.mjs",
     "scripts/test/test-packages.test.mjs"
    ],
-   "routingEvidence": "Routing script tests pass; required-root handling, full-root glob coverage, and nested cross-owner rejection are corrected."
+   "routingEvidence": "Routing script tests pass; required-root handling, full-root glob coverage, and nested cross-owner rejection are corrected.",
+   "finalVerificationGate": "Final broad gate at the current integration (2026-09-24), run before the tiny accounting guard fix: model drift, typecheck (all 17 projects), lint, npm test 7/7 groups 7436 passed / 35 skipped with no failures, cancels, or reruns, and the non-publishing build passed."
   },
   "pending": [
-   "Complete package compiler and test-runtime resolution integration beyond the now-wired extension Vite graphs; prove current and planned owner-relative resolution in all relevant configs/callers.",
-   "Finish remaining RPC/renderer and host-adapter seams and the full discovery, lifecycle/order/state-identity, and resource-discovery gates.",
-   "B1 remains partial: these remaining integration and inventory gates have not been proved; no B2 relocation is authorized by this checkpoint."
+   "B1 exit is accepted; no B2 relocation is authorized, started, or recorded by this checkpoint.",
+   "Deep logger, analytics, and resource-move verification tests are deferred to their owning later batches and remain recorded in this manifest; no permanent test exceptions or skips exist or may be added."
   ],
   "settingsWorkingTree": "The B0 settings.json high-to-medium note is an immutable baseline snapshot. Current live user fields have since changed (defaultModel gpt-6-astra to gpt-6-luna; defaultThinkingLevel high to xhigh). Exclude ongoing settings edits from migration; do not restore or pin future edits to medium."
  },
@@ -1690,7 +1702,7 @@
    "kind": "resolved-conflict"
   }
  ],
- "recordCount": 1778,
+ "recordCount": 1784,
  "records": [
   {
    "source": "extension/src/backend/analytics-worker-transport.ts",
@@ -10705,9 +10717,10 @@
    "batch": "B1",
    "verification": [
     "focused owner tests",
-    "boundary/import checks for named owners"
+    "boundary/import checks for named owners",
+    "remove temporary event-payloads.ts compatibility re-exports in B5/B6/B7 after old protocol imports retire; verify no duplicate canonical guard owner"
    ],
-   "reason": "Most guards validate worker events; renderer payload validation must remain browser-safe."
+   "reason": "Most guards validate worker events; renderer payload validation must remain browser-safe. The analytics branch-observation guard is now the canonical shared/analytics/branch-observation.ts contract (analytics/contracts/branch-observation.ts), so this split no longer owns or duplicates it; the old-layout guard re-export in extension/src/shared/protocol/event-payloads.ts is a temporary compatibility shim removed in B5/B6/B7."
   },
   {
    "source": "extension/src/shared/protocol/index.ts",
@@ -10795,9 +10808,9 @@
    "verification": [
     "focused owner tests",
     "boundary/import checks for named owners",
-    "remove temporary sessions.ts compatibility re-exports in B5/B7 after all importers move; verify no duplicate canonical type owners"
+    "remove temporary sessions.ts compatibility re-exports in B5/B6/B7 after all importers move; verify no duplicate canonical type owners"
    ],
-   "reason": "Split session envelopes and payloads: app protocol DTOs -> application/lib/protocol/sessions.ts; worker/session RPC event DTOs -> harness/agent-processes/lib/rpc/session-events.ts. Canonical inert facts and host operation projection types are separate records/targets (session-capability-facts.ts -> harness/agent-processes/lib/rpc/session-capability-facts.ts; session-operation-projection.ts -> application/lib/protocol/session-operation-projection.ts), so this split does not duplicate either extracted contract. Old-layout re-exports in extension/src/shared/protocol/sessions.ts are temporary import-compatibility shims and are removed in B5/B7 after importers move."
+   "reason": "Split session envelopes and payloads: app protocol DTOs -> application/lib/protocol/sessions.ts; worker/session RPC event DTOs -> harness/agent-processes/lib/rpc/session-events.ts. Canonical inert facts and host operation projection types are separate records/targets (session-capability-facts.ts -> harness/agent-processes/lib/rpc/session-capability-facts.ts; session-operation-projection.ts -> application/lib/protocol/session-operation-projection.ts), and the analytics branch-observation payload type is the separate canonical shared/analytics/branch-observation.ts contract, so this split does not duplicate any extracted contract. Old-layout re-exports in extension/src/shared/protocol/sessions.ts are temporary import-compatibility shims and are removed in B5/B6/B7 after importers move."
   },
   {
    "source": "extension/src/shared/protocol/settings.ts",
@@ -22073,6 +22086,34 @@
    "reason": "This tracked helper already lives under its accepted script responsibility owner; retain its path and keep it as the single implementation."
   },
   {
+   "source": "scripts/lib/native-owner.mjs",
+   "targets": [
+    "scripts/lib/native-owner.mjs"
+   ],
+   "action": "retain",
+   "owner": "scripts/lib",
+   "batch": "B1",
+   "verification": [
+    "Run scripts/test/unbundled-owner-resolution.test.mjs through the root scripts test package.",
+    "Prove native dependency owners (computer-use, playwright) resolve from an absolute repository root without cwd fallback and from an isolated future source root."
+   ],
+   "reason": "New B1 helper for native sidecar dependency-owner resolution (resolveNativeOwnerRoot/resolveNativeOwnerPath/createNativeOwnerRequire); retain its single authority under scripts/lib. The tools/computer-use and tools/playwright dependency-owner callers are wired through it."
+  },
+  {
+   "source": "scripts/lib/package-resolution.d.mts",
+   "targets": [
+    "scripts/lib/package-resolution.d.mts"
+   ],
+   "action": "retain",
+   "owner": "scripts/lib",
+   "batch": "B1",
+   "verification": [
+    "Run the scripts package typecheck so the createOwnerRequire declaration stays consistent with the implementation it types.",
+    "Keep the declaration file beside its implementation as the single typing authority for owner-relative require resolution."
+   ],
+   "reason": "TypeScript declaration for the package-resolution helper's createOwnerRequire surface; retain beside the implementation under scripts/lib."
+  },
+  {
    "source": "scripts/lib/package-resolution.mjs",
    "targets": [
     "scripts/lib/package-resolution.mjs"
@@ -22084,7 +22125,7 @@
     "Run scripts/test/package-resolution.test.mjs through the root scripts test package.",
     "Prove owner-relative current/planned roots, canonical SDK identity, and real TypeScript, Vite, tsx, and pinned SDK-loader resolution without cwd fallback."
    ],
-   "reason": "New B1 preparatory helper for package-owner-relative resolution; retain its single authority under scripts/lib. Config and runtime callers are not yet wired."
+   "reason": "New B1 preparatory helper for package-owner-relative resolution; retain its single authority under scripts/lib. Compiler selection (run-typechecks), test-runtime tsx config selection (run-tests/run-test-files/run-fast-batched-tests), the extension Vite graphs, and the unbundled native-owner/YAML runtime path (catalog-sync, typed by package-resolution.d.mts) are wired through it; remaining §5.2 callers were verified representative per the B1 gap audit recorded in executionProgress."
   },
   {
    "source": "scripts/lib/pi-harness-env.mjs",
@@ -22703,6 +22744,20 @@
    "reason": "Move the script regression suite beside the responsibility it verifies; preserve root test-package identity and enumeration."
   },
   {
+   "source": "scripts/test/repository-migration-inventory.test.mjs",
+   "targets": [
+    "scripts/verification/test/repository-migration-inventory.test.mjs"
+   ],
+   "action": "move",
+   "owner": "scripts/verification",
+   "batch": "B8",
+   "verification": [
+    "Preserve test enumeration, logical package ID, skips, and opt-in classification; run via root test wrappers.",
+    "Verify the suite still covers its source owner and is neither omitted nor run twice."
+   ],
+   "reason": "New B1 inventory-enforcement regression suite for this migration manifest (exact tracked/relevant-untracked coverage, stale sources, documented collisions, retain disposition, protected trees, and registry routing authority); co-locate with the verification drift guards in the planned B8 test organization."
+  },
+  {
    "source": "scripts/test/run-test-files.test.mjs",
    "targets": [
     "scripts/verification/test/run-test-files.test.mjs"
@@ -22843,6 +22898,20 @@
    "reason": "Move the script regression suite beside the responsibility it verifies; preserve root test-package identity and enumeration."
   },
   {
+   "source": "scripts/test/unbundled-owner-resolution.test.mjs",
+   "targets": [
+    "scripts/lib/test/unbundled-owner-resolution.test.mjs"
+   ],
+   "action": "move",
+   "owner": "scripts/lib",
+   "batch": "B8",
+   "verification": [
+    "Preserve root scripts-package enumeration and the future-root native-owner/YAML/SDK-loader proofs; run via repository wrappers.",
+    "Verify native dependency owners and the owner-hoisted yaml module resolve from an isolated future source root without a root-level node_modules install."
+   ],
+   "reason": "New B1 unbundled runtime-resolution proof suite for §5.2 (native owners, owner-hoisted yaml, and pinned-SDK jiti extension loading from a future root); co-locate with the scripts/lib helpers in the planned B8 test organization."
+  },
+  {
    "source": "scripts/toolchain.mjs",
    "targets": [
     "scripts/install/toolchain.mjs"
@@ -22911,6 +22980,20 @@
     "Verify wire schemas/protocol versions remain unchanged and legacy/canonical authority boundaries are not merged."
    ],
    "reason": "Move canonical analytics authority activation policy to the analytics authority owner."
+  },
+  {
+   "source": "shared/analytics/branch-observation.ts",
+   "targets": [
+    "analytics/contracts/branch-observation.ts"
+   ],
+   "action": "move",
+   "owner": "analytics/contracts",
+   "batch": "B6",
+   "verification": [
+    "Run analytics contract, authority, recorder/query, and transport compatibility suites as appropriate.",
+    "Verify the JSON-safe payload/guard contract stays the single canonical analytics branch-observation owner; old protocol re-exports remain temporary compatibility shims until their B5/B6/B7 removal."
+   ],
+   "reason": "Canonical durable SDK entry-ancestry observation payload type and runtime guard extracted from the old protocol split targets (extension/src/shared/protocol/sessions.ts and event-payloads.ts); worker RPC and host event dispatch import this contract, so those payload/guard split records no longer duplicate it."
   },
   {
    "source": "shared/analytics/contracts.ts",
@@ -27100,6 +27183,20 @@
     "Run root registry/typecheck checks and audit references to this configuration."
    ],
    "reason": "Move this tool implementation, fixture, local test, or source-owner metadata to its responsibility-specific harness/tools/warm-bash owner; preserve the existing tool ID and dependency boundary."
+  },
+  {
+   "source": "extension/test/build-identity.test.ts",
+   "targets": [
+    "scripts/build/test/build-identity.test.ts"
+   ],
+   "action": "move",
+   "owner": "scripts/build",
+   "batch": "B2",
+   "verification": [
+    "Run via the registered target-owner test-routing group.",
+    "Verify build identity watch inputs and emitted runtime identity remain aligned in both Vite graphs."
+   ],
+   "reason": "Build tooling regression for the shared build-identity plugin; co-locate with build tooling tests under scripts/build."
   },
   {
    "source": "docs/plans/repository-organization-migration-manifest.json",

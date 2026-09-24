@@ -18,6 +18,14 @@ import {
   packageTestRoots,
   resolvePackageEntry,
 } from './lib/test-packages.mjs';
+import { createTsconfigOverlay } from './lib/package-resolution.mjs';
+import {
+  accountTestFiles,
+  normalizeTestFileIdentity,
+  summarizeTestFileAccounting,
+  TEST_FILE_ACCOUNTING_ENV,
+  TEST_FILE_MARKER,
+} from './test-reporter.mjs';
 
 const REPORT_PREFIX = '__PI_TEST_SUMMARY__';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -55,17 +63,17 @@ async function walk(directory, extensions, output) {
 
 async function writeBatch(tempDir, index, files) {
   const suites = files.map((file) =>
-    `describe(${JSON.stringify(file)}, { concurrency: false }, async () => { await import(${JSON.stringify(pathToFileURL(file).href)}); });`);
+    `describe(${JSON.stringify(`${TEST_FILE_MARKER}${path.resolve(file)}`)}, { concurrency: false }, async () => { await import(${JSON.stringify(pathToFileURL(file).href)}); });`);
   const batchPath = path.join(tempDir, `batch-${index}.mts`);
   await writeFile(batchPath, `import { describe } from 'node:test';\n${suites.join('\n')}`, 'utf8');
   return batchPath;
 }
 
-function run(command, args, cwd) {
+function run(command, args, cwd, extraEnv = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
-      env: withoutPiHarnessEnv({ ...process.env, FORCE_COLOR: '0' }),
+      env: withoutPiHarnessEnv({ ...process.env, FORCE_COLOR: '0', ...extraEnv }),
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     });
@@ -86,19 +94,50 @@ function parseReport(result) {
   return line ? JSON.parse(line.slice(REPORT_PREFIX.length)) : null;
 }
 
-function merge(results, durationMs) {
+function merge(results, durationMs, enumeratedFiles, intentionalReruns = []) {
   const counts = { tests: 0, failed: 0, passed: 0, cancelled: 0, skipped: 0, todo: 0, topLevel: 0, suites: 0 };
   const failures = [];
+  const executedFiles = [];
   let success = true;
   for (const result of results) {
     const report = parseReport(result);
     if (!report || result.code !== 0 || result.signal !== null) success = false;
     for (const key of Object.keys(counts)) counts[key] += report?.summary?.counts?.[key] ?? 0;
     failures.push(...(report?.failures ?? []));
+    if (Array.isArray(report?.fileAccounting?.executedFiles)) executedFiles.push(...report.fileAccounting.executedFiles);
+    else success = false;
+    if (report?.fileAccounting && !report.fileAccounting.success) success = false;
     if (!report) failures.push({ name: 'batched test subprocess failed', message: (result.stderr || result.stdout).trim() });
   }
+  const fileAccounting = accountTestFiles(enumeratedFiles, executedFiles, intentionalReruns);
+  if (!fileAccounting.success) {
+    success = false;
+    failures.push({
+      name: 'aggregate test-file accounting mismatch',
+      message: JSON.stringify(summarizeTestFileAccounting(fileAccounting)),
+    });
+  }
   if (counts.failed > 0 || counts.cancelled > 0 || failures.length > 0) success = false;
-  return { summary: { success, counts, durationMs }, coverage: null, failures };
+  return {
+    summary: { success, counts, durationMs },
+    coverage: null,
+    failures,
+    fileAccounting: summarizeTestFileAccounting(fileAccounting),
+  };
+}
+
+async function writeAccountingContext(tempDir, name, expectedFiles, directFiles = [], ignoredFiles = []) {
+  const contextPath = path.join(tempDir, `file-accounting-${name}.json`);
+  const directFileMap = Object.fromEntries(directFiles.map((file) => [
+    normalizeTestFileIdentity(file), path.resolve(file),
+  ]));
+  await writeFile(contextPath, JSON.stringify({
+    expectedFiles: expectedFiles.map((file) => path.resolve(file)),
+    directFiles: directFileMap,
+    ignoredFiles: ignoredFiles.map((file) => path.resolve(file)),
+    intentionalReruns: [],
+  }), 'utf8');
+  return contextPath;
 }
 
 export function resolveExistingBatchRoots(relativeDirs, optionalDirs, root = repoRoot, directoryExists = existsSync) {
@@ -113,22 +152,42 @@ export function resolveExistingBatchRoots(relativeDirs, optionalDirs, root = rep
 async function buildPlan(mode, tempDir) {
   if (mode === 'root') {
     const batches = [];
+    const enumerated = new Set();
     const presentDirs = resolveExistingBatchRoots(rootBatchDirs, rootBatchOptionalDirs);
     for (const [index, relativeDir] of presentDirs.entries()) {
-      const files = [];
-      await walk(path.join(repoRoot, relativeDir), ['.test.ts', '.test.mjs'], files);
-      files.sort();
+      const discovered = [];
+      await walk(path.join(repoRoot, relativeDir), ['.test.ts', '.test.mjs'], discovered);
+      const files = discovered.filter((file) => {
+        if (enumerated.has(normalizeTestFileIdentity(file))) return false;
+        enumerated.add(normalizeTestFileIdentity(file));
+        return true;
+      }).sort();
       batches.push(await writeBatch(tempDir, index, files));
     }
-    return { cwd: repoRoot, batches, tsxConfig: null, forceExitFiles: [] };
+    return {
+      cwd: repoRoot,
+      batches,
+      tsxConfig: null,
+      forceExitFiles: [],
+      directFiles: [],
+      expectedFiles: [...enumerated].sort(),
+    };
   }
 
   const definition = fastBatchDefinitions[mode];
   if (!definition) throw new Error(`Unknown fast batch mode: ${mode}`);
   const files = [];
+  const enumerated = new Set();
   const presentDirs = resolveExistingBatchRoots(definition.dirs, definition.optionalDirs);
   for (const relativeDir of presentDirs) {
-    await walk(path.join(repoRoot, relativeDir), ['.test.ts'], files);
+    const discovered = [];
+    await walk(path.join(repoRoot, relativeDir), ['.test.ts'], discovered);
+    for (const file of discovered) {
+      const identity = normalizeTestFileIdentity(file);
+      if (enumerated.has(identity)) continue;
+      enumerated.add(identity);
+      files.push(file);
+    }
   }
   files.sort();
 
@@ -149,7 +208,14 @@ async function buildPlan(mode, tempDir) {
   const buckets = Array.from({ length: definition.batches }, () => []);
   ordinary.forEach((file, index) => buckets[index % buckets.length].push(file));
   const batches = await Promise.all(buckets.map((bucket, index) => writeBatch(tempDir, index, bucket)));
-  return { cwd: definition.cwd, batches: [...batches, ...individual], tsxConfig: definition.tsxConfig, forceExitFiles };
+  return {
+    cwd: definition.cwd,
+    batches: [...batches, ...individual],
+    tsxConfig: definition.tsxConfig,
+    forceExitFiles,
+    directFiles: individual,
+    expectedFiles: files,
+  };
 }
 
 async function main() {
@@ -159,15 +225,43 @@ async function main() {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), `pie-${mode}-tests-`));
   try {
     const plan = await buildPlan(mode, tempDir);
+    // Registry-declared tsx configs run through a generated overlay (owner-
+    // relative aliases extending the checked-in base config) written into the
+    // same temp directory the batch files already live in; main() removes it.
+    const tsxOverlay = plan.tsxConfig
+      ? createTsconfigOverlay(path.join(repoRoot, plan.tsxConfig), { directory: tempDir })
+      : null;
     const tsxCli = path.join(plan.cwd, 'node_modules', 'tsx', 'dist', 'cli.mjs');
-    const configArgs = plan.tsxConfig ? [`--tsconfig=${plan.tsxConfig}`] : [];
+    const configArgs = tsxOverlay ? [`--tsconfig=${tsxOverlay.configPath}`] : [];
     const common = [tsxCli, '--test', ...configArgs, `--test-reporter=${reporter}`];
-    const runs = [run(process.execPath, [...common, `--test-concurrency=${plan.batches.length}`, ...plan.batches], plan.cwd)];
+    const forced = new Set(plan.forceExitFiles.map(normalizeTestFileIdentity));
+    const primaryExpectedFiles = plan.expectedFiles.filter((file) => !forced.has(normalizeTestFileIdentity(file)));
+    const directFileIdentities = new Set(plan.directFiles.map(normalizeTestFileIdentity));
+    const primaryWrappers = plan.batches.filter((file) => !directFileIdentities.has(normalizeTestFileIdentity(file)));
+    const primaryContext = await writeAccountingContext(
+      tempDir,
+      'primary',
+      primaryExpectedFiles,
+      plan.directFiles,
+      primaryWrappers,
+    );
+    const runs = [run(
+      process.execPath,
+      [...common, `--test-concurrency=${plan.batches.length}`, ...plan.batches],
+      plan.cwd,
+      { [TEST_FILE_ACCOUNTING_ENV]: primaryContext },
+    )];
     if (plan.forceExitFiles.length > 0) {
-      runs.push(run(process.execPath, [...common, '--test-force-exit', ...plan.forceExitFiles], plan.cwd));
+      const forceExitContext = await writeAccountingContext(tempDir, 'force-exit', plan.forceExitFiles, plan.forceExitFiles);
+      runs.push(run(
+        process.execPath,
+        [...common, '--test-force-exit', ...plan.forceExitFiles],
+        plan.cwd,
+        { [TEST_FILE_ACCOUNTING_ENV]: forceExitContext },
+      ));
     }
     const results = await Promise.all(runs);
-    const report = merge(results, performance.now() - startedAt);
+    const report = merge(results, performance.now() - startedAt, plan.expectedFiles);
     process.stdout.write(`${REPORT_PREFIX}${JSON.stringify(report)}\n`);
     if (!report.summary.success) process.exitCode = 1;
   } finally {

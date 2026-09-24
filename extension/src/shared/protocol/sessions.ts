@@ -633,15 +633,8 @@ export interface AuxiliaryLlmUsagePayload {
   instrumentationGapReason?: string;
 }
 
-/** Durable SDK entry ancestry observed only after the entry was persisted.
- * This is accounting metadata; it is not a transcript/UI payload. */
-export interface AnalyticsBranchObservedPayload {
-  sessionPath: string;
-  entryId: string;
-  parentEntryId?: string | null;
-  selectedEntryId: string;
-  observedAt: number;
-}
+/** Temporary compatibility export; remove in B5/B6/B7 once old protocol imports are retired. */
+export type { AnalyticsBranchObservedPayload } from '../../../../shared/analytics/branch-observation.js';
 
 /** Operational (non-fatal) backend condition that the user should be made
  *  aware of without it being a hard request failure. One remaining

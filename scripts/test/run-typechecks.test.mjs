@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
-import { parseArgs, runWithConcurrency, selectProjects, TYPECHECK_PROJECTS } from '../run-typechecks.mjs';
+import { parseArgs, resolveProjectCompiler, runWithConcurrency, selectProjects, TYPECHECK_PROJECTS } from '../run-typechecks.mjs';
+import { resolveTypeScriptCompiler } from '../lib/package-resolution.mjs';
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
 test('parseArgs accepts repeatable projects and concurrency', () => {
   assert.deepEqual(parseArgs(['--project', 'extension', '--project=shared', '--concurrency', '2']), {
@@ -33,4 +40,43 @@ test('runWithConcurrency preserves order and limits active work', async () => {
   });
   assert.deepEqual(results, ['a', 'b', 'c']);
   assert.equal(peak, 2);
+});
+
+test('resolveProjectCompiler resolves the registry-declared compiler owner-relatively', (t) => {
+  const extensionTsc = resolveProjectCompiler({ compiler: 'extension/node_modules/typescript/bin/tsc' });
+  assert.equal(extensionTsc, resolveTypeScriptCompiler());
+  assert.equal(path.isAbsolute(extensionTsc), true);
+  assert.equal(
+    resolveProjectCompiler({ compiler: 'analysis/node_modules/typescript/bin/tsc' }),
+    resolveTypeScriptCompiler({ dependencyOwnerRoot: path.join(repoRoot, 'analysis') }),
+  );
+
+  // Absolute declarations (future-root proof projects) pass through unchanged.
+  const absolute = path.join(os.tmpdir(), 'pie-tsc-proof', 'tsc');
+  assert.equal(resolveProjectCompiler({ compiler: absolute }), absolute);
+
+  // The owner is the complete path before the explicit compiler suffix, not
+  // just the first directory component (future planned owner is nested).
+  const fixtureRoot = mkdtempSync(path.join(os.tmpdir(), 'pie-nested-tsc-owner-'));
+  t.after(() => rmSync(fixtureRoot, { recursive: true, force: true }));
+  const nestedCompiler = path.join(fixtureRoot, 'application', 'hosts', 'vscode', 'node_modules', 'typescript', 'bin', 'tsc');
+  mkdirSync(path.dirname(nestedCompiler), { recursive: true });
+  writeFileSync(path.join(path.dirname(path.dirname(nestedCompiler)), 'package.json'), JSON.stringify({ name: 'typescript', version: '0.0.0-fixture' }));
+  writeFileSync(nestedCompiler, '');
+  assert.equal(
+    resolveProjectCompiler({ compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' }, fixtureRoot),
+    nestedCompiler,
+  );
+
+  // Invalid declarations fail validation, and valid owners still fail loudly
+  // if they do not provide TypeScript instead of falling back to another copy.
+  assert.throws(() => resolveProjectCompiler({ compiler: '' }), /non-empty path/);
+  assert.throws(
+    () => resolveProjectCompiler({ compiler: 'extension/node_modules/typescript/tsc' }),
+    /must end with/,
+  );
+  assert.throws(
+    () => resolveProjectCompiler({ compiler: 'docs/node_modules/typescript/bin/tsc' }),
+    /Cannot find module|Cannot find package|typescript/,
+  );
 });

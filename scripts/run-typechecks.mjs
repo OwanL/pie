@@ -11,6 +11,7 @@ import {
   watchChildProcess,
   withProcessTreeIsolation,
 } from './lib/process-watchdog.mjs';
+import { resolveTypeScriptCompiler } from './lib/package-resolution.mjs';
 import { TYPECHECK_PROJECTS } from './lib/test-packages.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -58,13 +59,45 @@ export function selectProjects(ids) {
   });
 }
 
+/**
+ * Resolve a registry-declared compiler to an absolute binary path.
+ *
+ * The registry keeps the `<owner>/node_modules/typescript/bin/tsc` selection
+ * as the routing authority for which project uses which compiler owner;
+ * this derives the owner root from that declaration and resolves the binary
+ * owner-relatively through the shared package-resolution helper, so planned
+ * layouts re-point by updating registry data only. Absolute declarations
+ * (future-root proof projects) pass through unchanged.
+ */
+export function resolveProjectCompiler(project, projectRoot = repoRoot) {
+  if (typeof project.compiler !== 'string' || project.compiler.length === 0) {
+    throw new Error('Typecheck compiler must be a non-empty path');
+  }
+  if (path.isAbsolute(project.compiler)) return project.compiler;
+  const compilerSuffix = '/node_modules/typescript/bin/tsc';
+  const declaration = project.compiler.replace(/\\/gu, '/');
+  const suffixIndex = declaration.lastIndexOf(compilerSuffix);
+  if (suffixIndex < 0 || suffixIndex + compilerSuffix.length !== declaration.length) {
+    throw new Error(`Typecheck compiler must end with "${compilerSuffix}": ${project.compiler}`);
+  }
+
+  const absoluteProjectRoot = path.resolve(projectRoot);
+  const ownerPath = declaration.slice(0, suffixIndex);
+  const ownerRoot = path.resolve(absoluteProjectRoot, ownerPath);
+  const relativeOwner = path.relative(absoluteProjectRoot, ownerRoot);
+  if (relativeOwner === '..' || relativeOwner.startsWith(`..${path.sep}`) || path.isAbsolute(relativeOwner)) {
+    throw new Error(`Typecheck compiler owner must stay within the project root: ${project.compiler}`);
+  }
+  return resolveTypeScriptCompiler({ dependencyOwnerRoot: ownerRoot });
+}
+
 function runProject(project, signal) {
   const started = performance.now();
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [
-      path.join(repoRoot, project.compiler),
+      resolveProjectCompiler(project),
       '--noEmit',
-      '--project', path.join(repoRoot, project.config),
+      '--project', path.isAbsolute(project.config) ? project.config : path.join(repoRoot, project.config),
       '--incremental',
       '--tsBuildInfoFile', path.join(repoRoot, 'node_modules', '.cache', 'typecheck', `${project.id}.tsbuildinfo`),
     ], withProcessTreeIsolation({ cwd: repoRoot, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }));

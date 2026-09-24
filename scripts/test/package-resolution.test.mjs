@@ -7,6 +7,7 @@ import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   createOwnerRequire,
+  createTsconfigOverlay,
   createTypeScriptResolution,
   createTsxResolution,
   createViteAliases,
@@ -14,7 +15,10 @@ import {
   resolvePackageRoots,
   resolveSdkModule,
   resolveSdkPackages,
+  resolveTypeScriptCompiler,
 } from '../lib/package-resolution.mjs';
+import { runWithConcurrency } from '../run-typechecks.mjs';
+import { buildTsxArgs, runGroup } from '../run-test-files.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const currentRoots = resolvePackageRoots('current');
@@ -146,7 +150,7 @@ test('resolveOwnerModule forces canonical SDK identity even when the owner hoist
   assert.equal(resolveOwnerModule('preact', fixtureOptions), path.join(competitors.preact, 'index.js'));
 });
 
-test('the real TypeScript compiler resolves future TSX roots, owner type roots, Pi aliases, and Preact subpaths', { timeout: 120_000 }, (t) => {
+test('the real TypeScript compiler resolves future TSX roots, owner type roots, Pi aliases, and Preact subpaths through the integrated typecheck caller', { timeout: 120_000 }, async (t) => {
   const { sourceRoot } = makeFixture(t);
   const sourcePath = path.join(sourceRoot, 'compiler-proof.tsx');
   writeFileSync(sourcePath, `
@@ -175,14 +179,16 @@ void [schema, element, component, types];
   const piTuiRoot = path.join(ownerRoot, 'node_modules', '@earendil-works', 'pi-coding-agent', 'node_modules', '@earendil-works', 'pi-tui');
   assert.equal(typeResolution.paths['@earendil-works/pi-tui'][0], path.join(piTuiRoot, 'dist', 'index.d.ts'));
   const configPath = writeTsConfig(sourceRoot, typeResolution);
-  const result = spawnSync(process.execPath, [tscCli, '--project', configPath, '--pretty', 'false'], {
-    cwd: sourceRoot,
-    encoding: 'utf8',
-    timeout: 120_000,
-    windowsHide: true,
-  });
-  assert.equal(result.error, undefined, result.error?.message);
-  assert.equal(result.status, 0, [result.stdout, result.stderr].filter(Boolean).join('\n'));
+  // The future-root proof exercises the integrated typecheck caller (the same
+  // runWithConcurrency/runProject surface scripts/run-typechecks.mjs uses for
+  // registry projects), including its helper-resolved compiler selection and
+  // absolute-config seam — not a hand-rolled tsc spawn.
+  const [result] = await runWithConcurrency([{
+    id: 'package-resolution-compiler-proof',
+    config: configPath,
+    compiler: 'extension/node_modules/typescript/bin/tsc',
+  }], 1);
+  assert.equal(result.code, 0, result.output);
 });
 
 test('the real Vite bundler consumes owner aliases and SSR resolves runtime pi-tui from a future source root', { timeout: 120_000 }, async (t) => {
@@ -245,10 +251,12 @@ export default {
   assert.ok(outputFiles.some((file) => file.endsWith('.js') && statSync(file).size > 0));
 });
 
-test('the repository-local tsx CLI resolves runtime aliases without npx or fixture ancestry', { timeout: 120_000 }, (t) => {
+test('the integrated tsx runner resolves owner-relative overlay aliases for a future root without npx or fixture ancestry', { timeout: 120_000 }, async (t) => {
   const { sourceRoot } = makeFixture(t);
   const sourcePath = path.join(sourceRoot, 'tsx-proof.ts');
   writeFileSync(sourcePath, `
+import test from 'node:test';
+import assert from 'node:assert/strict';
 import { Type } from '@earendil-works/pi-ai';
 import { Type as LegacyType } from '@mariozechner/pi-ai';
 import { Type as Typebox } from 'typebox';
@@ -256,26 +264,49 @@ import { Type as SinclairType } from '@sinclair/typebox';
 import { Text as PiTuiText } from '@earendil-works/pi-tui';
 import { useState } from 'preact/hooks';
 import { jsx } from 'preact/jsx-runtime';
-console.log(JSON.stringify({
-  samePiIdentity: Type.Object === LegacyType.Object,
-  sameTypeboxIdentity: Typebox.Object === SinclairType.Object,
-  preact: typeof useState === 'function' && typeof jsx === 'function',
-  piTui: typeof PiTuiText === 'function',
-}));
+test('future-root tsx overlay resolves one owner identity', () => {
+  assert.equal(Type.Object, LegacyType.Object);
+  assert.equal(Typebox.Object, SinclairType.Object);
+  assert.equal(typeof useState, 'function');
+  assert.equal(typeof jsx, 'function');
+  assert.equal(typeof PiTuiText, 'function');
+});
 `);
-  const configPath = writeTsConfig(sourceRoot, {
-    ...createTsxResolution({ dependencyOwnerRoot: ownerRoot }),
+  // The fixture base config declares the redirection set with deliberately
+  // unresolvable placeholder targets; the generated overlay re-points exactly
+  // those keys to explicit owner paths (no duplicated static aliases, no new
+  // redirections) while strict/include/exclude stay inherited from the base.
+  const placeholder = './does-not-resolve/index.mjs';
+  const baseConfigPath = writeTsConfig(sourceRoot, {
     jsx: 'react-jsx',
     jsxImportSource: 'preact',
+    paths: Object.fromEntries([
+      ['@earendil-works/pi-ai', [placeholder]],
+      ['@mariozechner/pi-ai', [placeholder]],
+      ['typebox', [placeholder]],
+      ['@sinclair/typebox', [placeholder]],
+      ['@earendil-works/pi-tui', [placeholder]],
+      ['preact/hooks', [placeholder]],
+    ]),
   });
+  const overlay = createTsconfigOverlay(baseConfigPath, { dependencyOwnerRoot: ownerRoot });
+  t.after(() => overlay.dispose());
+  const overlayConfig = JSON.parse(readFileSync(overlay.configPath, 'utf8'));
+  assert.equal(overlayConfig.extends, baseConfigPath);
+  assert.equal(overlayConfig.compilerOptions.strict, undefined);
+  assert.equal(overlayConfig.compilerOptions.include, undefined);
+  for (const specifier of ['@earendil-works/pi-ai', '@mariozechner/pi-ai', 'typebox', '@sinclair/typebox', '@earendil-works/pi-tui', 'preact/hooks']) {
+    const [target] = overlayConfig.compilerOptions.paths[specifier];
+    assert.ok(path.isAbsolute(target), `${specifier} must have an explicit absolute owner path`);
+    assert.ok(target.startsWith(ownerRoot), `${specifier} must resolve under the dependency owner`);
+  }
+
   assert.equal(existsSync(tsxCli), true);
-  const output = runNode([tsxCli, '--tsconfig', configPath, sourcePath], sourceRoot);
-  assert.deepEqual(JSON.parse(output), {
-    samePiIdentity: true,
-    sameTypeboxIdentity: true,
-    preact: true,
-    piTui: true,
-  });
+  // Run through the integrated focused-test runner surface (buildTsxArgs +
+  // runGroup), exactly the path scripts/run-test-files.mjs executes.
+  const group = { id: 'future-root-tsx-proof', cwd: sourceRoot, tsxBin: tsxCli, tsxConfig: overlay.configPath, files: ['tsx-proof.ts'] };
+  const code = await runGroup(group, buildTsxArgs(group));
+  assert.equal(code, 0);
 });
 
 test('the pinned SDK extension loader resolves both Pi spellings to one nested pi-ai identity from a future root', { timeout: 120_000 }, async (t) => {
@@ -346,4 +377,122 @@ test('the extension Vite build graphs consume helper-derived owner aliases, not 
   for (const specifier of ['vscode', 'node:fs', 'bufferutil', 'utf-8-validate', 'computer-use', 'playwright']) {
     assert.equal(findFor(specifier), undefined, `${specifier} must stay unaliased`);
   }
+});
+
+
+test('createTsconfigOverlay preserves the base redirection set and inherits compiler options', (t) => {
+  const { sourceRoot } = makeFixture(t);
+  const placeholder = './does-not-resolve/index.mjs';
+  const baseConfigPath = writeTsConfig(sourceRoot, {
+    paths: {
+      '@mariozechner/pi-ai': [placeholder],
+      '@earendil-works/pi-coding-agent': [placeholder],
+      'typebox/value': [placeholder],
+      'custom-tool-alias': [placeholder],
+    },
+  });
+  const overlay = createTsconfigOverlay(baseConfigPath, { dependencyOwnerRoot: ownerRoot });
+  t.after(() => overlay.dispose());
+  const parsed = JSON.parse(readFileSync(overlay.configPath, 'utf8'));
+
+  // Base config semantics are inherited, never duplicated or weakened.
+  assert.equal(parsed.extends, baseConfigPath);
+  assert.equal(parsed.compilerOptions.strict, undefined);
+  assert.equal(parsed.compilerOptions.include, undefined);
+  assert.equal(parsed.compilerOptions.exclude, undefined);
+
+  // Helper-covered specifiers are re-pointed to explicit absolute owner paths.
+  const paths = parsed.compilerOptions.paths;
+  assert.equal(Object.keys(paths).length, 4, 'overlay must not add aliases the base does not declare');
+  assert.equal(paths['@mariozechner/pi-ai'][0],
+    path.join(ownerRoot, 'node_modules', '@earendil-works', 'pi-coding-agent', 'node_modules', '@earendil-works', 'pi-ai', 'dist', 'index.js'));
+  assert.equal(paths['typebox/value'][0],
+    path.join(ownerRoot, 'node_modules', '@earendil-works', 'pi-coding-agent', 'node_modules', 'typebox', 'build', 'value', 'index.mjs'));
+  assert.equal(paths['@earendil-works/pi-coding-agent'][0],
+    path.join(ownerRoot, 'node_modules', '@earendil-works', 'pi-coding-agent', 'dist', 'index.js'));
+
+  // Specifiers outside the helper's model keep their base target semantics;
+  // no-baseUrl paths are anchored to the declaring config, not the temp overlay.
+  assert.deepEqual(paths['custom-tool-alias'], [path.resolve(sourceRoot, placeholder)]);
+
+  // Dispose removes the private temp directory and its config.
+  const overlayDirectory = overlay.directory;
+  overlay.dispose();
+  assert.equal(existsSync(overlayDirectory), false);
+});
+
+test('createTsconfigOverlay preserves no-baseUrl relative paths through inherited configs', { timeout: 120_000 }, (t) => {
+  const { sourceRoot } = makeFixture(t);
+  const configDirectory = path.join(sourceRoot, 'configs');
+  const customModule = path.join(sourceRoot, 'local', 'custom.ts');
+  mkdirSync(configDirectory, { recursive: true });
+  mkdirSync(path.dirname(customModule), { recursive: true });
+  writeFileSync(customModule, 'export const marker: string = \'resolved from declaring config\';\n');
+  writeFileSync(path.join(sourceRoot, 'overlay-input.ts'), "import { marker } from 'custom-tool-alias';\nvoid marker;\n");
+
+  const sharedConfigPath = path.join(sourceRoot, 'tsconfig.shared.json');
+  writeFileSync(sharedConfigPath, JSON.stringify({
+    compilerOptions: {
+      target: 'ES2022',
+      module: 'NodeNext',
+      moduleResolution: 'NodeNext',
+      strict: true,
+      skipLibCheck: true,
+      noEmit: true,
+    },
+  }, null, 2));
+  const baseConfigPath = path.join(configDirectory, 'tsconfig.json');
+  writeFileSync(baseConfigPath, JSON.stringify({
+    extends: '../tsconfig.shared.json',
+    compilerOptions: {
+      paths: {
+        'custom-tool-alias': ['../local/custom.ts'],
+        '@mariozechner/pi-ai': ['./unused-placeholder.ts'],
+      },
+    },
+    include: ['../overlay-input.ts'],
+  }, null, 2));
+
+  const overlay = createTsconfigOverlay(baseConfigPath, { dependencyOwnerRoot: ownerRoot });
+  t.after(() => overlay.dispose());
+  const parsed = JSON.parse(readFileSync(overlay.configPath, 'utf8'));
+  assert.equal(parsed.extends, baseConfigPath);
+  assert.equal(parsed.compilerOptions.baseUrl, undefined, 'overlay must not introduce baseUrl semantics');
+  assert.deepEqual(parsed.compilerOptions.paths['custom-tool-alias'], [customModule]);
+  assert.deepEqual(Object.keys(parsed.compilerOptions.paths).sort(), ['@mariozechner/pi-ai', 'custom-tool-alias']);
+
+  const result = spawnSync(process.execPath, [tscCli, '--project', overlay.configPath, '--pretty', 'false'], {
+    cwd: sourceRoot,
+    encoding: 'utf8',
+    timeout: 120_000,
+    windowsHide: true,
+  });
+  assert.equal(result.error, undefined, result.error?.message);
+  assert.equal(result.status, 0, [result.stdout, result.stderr].filter(Boolean).join('\n'));
+});
+
+test('createTsconfigOverlay passes through base configs without their own paths', (t) => {
+  const { sourceRoot } = makeFixture(t);
+  const baseConfigPath = writeTsConfig(sourceRoot, {});
+  const overlay = createTsconfigOverlay(baseConfigPath, { dependencyOwnerRoot: ownerRoot });
+  t.after(() => overlay.dispose());
+  const parsed = JSON.parse(readFileSync(overlay.configPath, 'utf8'));
+  assert.equal(parsed.extends, baseConfigPath);
+  assert.equal(parsed.compilerOptions, undefined);
+  assert.throws(() => createTsconfigOverlay(path.join(sourceRoot, 'missing.json')), /Base tsconfig for overlay does not exist/);
+});
+
+test('the integrated run-test-files wrapper keeps current-layout tsxConfig package runs green', { timeout: 120_000 }, async (t) => {
+  // Old layout stays operational: the full integrated wrapper (registry
+  // classification -> generated overlay -> package-local tsx) runs a real
+  // registered test that depends on the redirected nested SDK identity.
+  const { spawnSync } = await import('node:child_process');
+  const result = spawnSync(process.execPath, ['scripts/run-test-files.mjs', 'tools/subagent/test/schema.test.ts'], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    timeout: 120_000,
+    windowsHide: true,
+  });
+  assert.equal(result.status, 0, [result.stdout, result.stderr].filter(Boolean).join('\n'));
+  assert.match(result.stdout, /Summary: 1\/1 packages passed/);
 });

@@ -35,20 +35,22 @@ function sourceFiles(directory: string): string[] {
 }
 
 /** Deterministic across the separately-started node and webview builds. */
-function buildIdentityInputs(): string[] {
+function buildIdentityInputs(identityRoot = rootDir): string[] {
   return [
-    ...sourceFiles(srcDir),
-    path.join(rootDir, 'package.json'),
-    path.join(rootDir, 'package-lock.json'),
-    path.join(rootDir, 'tsconfig.json'),
-    path.join(rootDir, 'vite.config.ts'),
+    ...sourceFiles(path.join(identityRoot, 'src')),
+    path.join(identityRoot, 'package.json'),
+    path.join(identityRoot, 'package-lock.json'),
+    path.join(identityRoot, 'tsconfig.json'),
+    path.join(identityRoot, 'vite.config.ts'),
+    // This imported config helper lives outside extension/src but controls package aliases.
+    path.join(identityRoot, '..', 'scripts', 'lib', 'package-resolution.mjs'),
   ].filter((input) => fs.existsSync(input)).sort((left, right) => left.localeCompare(right));
 }
 
-function computeBuildId(): string {
+function computeBuildId(inputs = buildIdentityInputs(), identityRoot = rootDir): string {
   const hash = crypto.createHash('sha256');
-  for (const input of buildIdentityInputs()) {
-    hash.update(path.relative(rootDir, input).replaceAll('\\', '/'));
+  for (const input of inputs) {
+    hash.update(path.relative(identityRoot, input).replaceAll('\\', '/'));
     hash.update('\0');
     hash.update(fs.readFileSync(input));
     hash.update('\0');
@@ -63,13 +65,14 @@ function computeBuildId(): string {
  * identity input set also makes both bundle graphs rebuild together, even when
  * a changed file is exclusive to the other graph.
  */
-function buildIdentityPlugin(): Plugin {
+export function createBuildIdentityPlugin(identityRoot = rootDir): Plugin {
   let buildId = '';
   return {
     name: 'pie-build-identity',
     buildStart() {
-      buildId = computeBuildId();
-      for (const input of buildIdentityInputs()) this.addWatchFile(input);
+      const inputs = buildIdentityInputs(identityRoot);
+      buildId = computeBuildId(inputs, identityRoot);
+      for (const input of inputs) this.addWatchFile(input);
     },
     renderChunk(code) {
       const replaced = code.replaceAll(BUILD_ID_SENTINEL, buildId);
@@ -90,7 +93,7 @@ export default defineConfig(({ mode }) => {
       root: srcDir,
       publicDir: false,
       define,
-      plugins: [buildIdentityPlugin()],
+      plugins: [createBuildIdentityPlugin()],
       build: {
         target: 'node20',
         outDir,
@@ -143,7 +146,7 @@ export default defineConfig(({ mode }) => {
     root: srcDir,
     publicDir: false,
     define,
-    plugins: [buildIdentityPlugin()],
+    plugins: [createBuildIdentityPlugin()],
     build: {
       target: 'es2022',
       outDir: webviewOutDir,

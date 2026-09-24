@@ -1,4 +1,5 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
@@ -174,6 +175,17 @@ export function createSdkRequire(options = {}) {
   return resolveSdkPackages(options).sdkRequire;
 }
 
+/**
+ * Absolute path of the dependency owner's TypeScript compiler entry. Registry
+ * typecheck projects keep declaring which owner provides the compiler; this
+ * helper owns the owner-relative resolution of the binary itself so callers
+ * never re-derive `node_modules` depth from process.cwd() or repo-relative
+ * string concatenation.
+ */
+export function resolveTypeScriptCompiler(options = {}) {
+  return createOwnerRequire(options).resolve('typescript/bin/tsc');
+}
+
 /** Resolve a runtime module from the selected SDK's own dependency graph. */
 function resolvePackageExport(packageInfo, suffix, conditions = ['import', 'require', 'default']) {
   const exports = packageInfo.manifest.exports;
@@ -344,6 +356,99 @@ export function createTsxResolution(options = {}) {
   return Object.freeze({
     baseUrl: ownerRoot,
     paths: Object.freeze(paths),
+  });
+}
+
+function readTsconfigJson(configPath) {
+  return JSON.parse(readFileSync(configPath, 'utf8'));
+}
+
+/**
+ * Overlay paths keep the base redirection set: helper-derived absolute
+ * targets where the helper covers the specifier, and otherwise targets
+ * resolved against the same baseUrl (or declaring config directory) as the
+ * checked-in config. Never introduces keys the base config does not declare.
+ */
+function overlayPathsFromBase(declaredPaths, helperPaths, pathsBase) {
+  const paths = {};
+  for (const [key, targets] of Object.entries(declaredPaths)) {
+    const helperTargets = helperPaths[key];
+    paths[key] = helperTargets
+      ? [...helperTargets]
+      : targets.map((target) => path.isAbsolute(target) ? target : path.resolve(pathsBase, target));
+  }
+  return paths;
+}
+
+/**
+ * Get the effective baseUrl, including one inherited through `extends`, while
+ * avoiding a directory walk for config `include` globs.
+ */
+function effectiveTsconfigBaseUrl(configPath, options) {
+  const typescript = createOwnerRequire(options)('typescript');
+  const parsed = typescript.getParsedCommandLineOfConfigFile(configPath, {}, {
+    ...typescript.sys,
+    readDirectory: () => [],
+    onUnRecoverableConfigFileDiagnostic: (diagnostic) => {
+      throw new Error(typescript.flattenDiagnosticMessageText(diagnostic.messageText, '\n'));
+    },
+  });
+  return parsed?.options.baseUrl;
+}
+
+/**
+ * Generate a temporary tsconfig overlay for a tsx test run.
+ *
+ * The overlay `extends` the registry-declared base config, so strict mode,
+ * include/exclude, module settings, and every other checked-in compiler
+ * option keep their original meaning (relative config values retain the
+ * declaring config's directory/baseUrl semantics). Its `compilerOptions.paths`
+ * preserve the base config's redirection set exactly: each declared alias is
+ * re-pointed through the helper-derived owner-relative runtime resolution (both Pi
+ * spellings, the TypeBox spellings, and Preact become explicit absolute
+ * paths under the dependency owner), and any specifier the helper does not
+ * model keeps its base target anchored to the original config semantics. No
+ * new aliases are added, so test-time module hooks keep intercepting exactly
+ * the specifiers the checked-in config redirects, and future roots get
+ * explicit owner paths without duplicated static alias entries.
+ *
+ * A base config without its own `paths` produces a passthrough overlay
+ * (inherited aliases stay untouched). When `options.directory` is supplied
+ * the overlay is written there and the caller owns cleanup (the fast batch
+ * runner writes into its existing temp directory); otherwise a private
+ * OS-temp directory is created and `dispose()` removes it again.
+ */
+export function createTsconfigOverlay(baseConfigPath, options = {}) {
+  const absoluteBase = resolveAbsoluteRoot(baseConfigPath, 'baseConfigPath');
+  if (!existsSync(absoluteBase)) {
+    throw new Error(`Base tsconfig for overlay does not exist: ${absoluteBase}`);
+  }
+  const ownsDirectory = options.directory === undefined;
+  const directory = ownsDirectory
+    ? mkdtempSync(path.join(os.tmpdir(), 'pie-tsx-overlay-'))
+    : resolveAbsoluteRoot(options.directory, 'directory');
+  const declaredPaths = readTsconfigJson(absoluteBase).compilerOptions?.paths;
+  const overlayPaths = declaredPaths
+    ? overlayPathsFromBase(
+      declaredPaths,
+      createTsxResolution(options).paths,
+      effectiveTsconfigBaseUrl(absoluteBase, options) ?? path.dirname(absoluteBase),
+    )
+    : undefined;
+  const configPath = path.join(directory, 'tsconfig.overlay.json');
+  writeFileSync(configPath, JSON.stringify({
+    extends: absoluteBase,
+    ...(overlayPaths ? { compilerOptions: { paths: overlayPaths } } : {}),
+  }, null, 2));
+  let disposed = false;
+  return Object.freeze({
+    configPath,
+    directory,
+    dispose() {
+      if (!ownsDirectory || disposed) return;
+      disposed = true;
+      rmSync(directory, { recursive: true, force: true });
+    },
   });
 }
 

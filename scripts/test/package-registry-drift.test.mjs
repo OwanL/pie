@@ -29,6 +29,8 @@ import { PACKAGE_CONFIGS } from '../run-tests.mjs';
 import { fastBatchDefinitions, resolveExistingBatchRoots, rootBatchDirs } from '../run-fast-batched-tests.mjs';
 import { buildRunnerInvocation } from '../run-package-group.mjs';
 import { classifyTestFile, inferRepoRoot } from '../run-test-files.mjs';
+import { createTsconfigOverlay, resolvePackageRoots, resolveTypeScriptCompiler } from '../lib/package-resolution.mjs';
+import { resolveProjectCompiler } from '../run-typechecks.mjs';
 import { isProtectedDirectoryName } from '../lib/traversal-policy.mjs';
 
 const repoRoot = inferRepoRoot();
@@ -321,5 +323,55 @@ test('runner scripts and the group adapter stay classified as global test infras
   assert.equal(isGlobalTestInfra('scripts/lib/test-packages.mjs'), true);
   for (const id of ['subagent', 'warm-bash', 'deferred-triggers', 'session-changes', 'computer-use', 'playwright']) {
     assert.ok(PACKAGE_GROUPS.extensions.includes(id), `${id} remains in the extensions test/typecheck group`);
+  }
+});
+
+test('registry tsx configs run through generated owner-relative overlays', () => {
+  const ownerRoot = resolvePackageRoots('current').dependencyOwnerRoot;
+  const tsxConfigEntries = PACKAGE_REGISTRY.filter((entry) => entry.tsxConfig);
+  assert.ok(tsxConfigEntries.length >= 4, 'expected the tsxConfig packages to stay registered');
+  for (const entry of tsxConfigEntries) {
+    const baseConfig = JSON.parse(readFileSync(path.join(repoRoot, entry.tsxConfig), 'utf8'));
+    const overlay = createTsconfigOverlay(path.join(repoRoot, entry.tsxConfig));
+    try {
+      const parsed = JSON.parse(readFileSync(overlay.configPath, 'utf8'));
+      assert.equal(parsed.extends, path.join(repoRoot, entry.tsxConfig), `${entry.id} overlay must extend the registry config`);
+      // strict/include/exclude stay inherited from the checked-in base config.
+      assert.equal(parsed.compilerOptions?.strict, undefined, `${entry.id} overlay must not duplicate strict`);
+      assert.equal(parsed.compilerOptions?.include, undefined, `${entry.id} overlay must not duplicate include`);
+      assert.equal(parsed.compilerOptions?.exclude, undefined, `${entry.id} overlay must not duplicate exclude`);
+      const overlayPaths = parsed.compilerOptions?.paths ?? {};
+      const basePaths = baseConfig.compilerOptions?.paths ?? {};
+      // The overlay preserves the base redirection set exactly: every declared
+      // alias keeps a redirection, helper-covered keys re-point to explicit
+      // absolute owner paths, everything else stays verbatim, and no new
+      // aliases appear (test-time module hooks keep their interception set).
+      assert.deepEqual(Object.keys(overlayPaths).sort(), Object.keys(basePaths).sort(), `${entry.id} overlay redirection set`);
+      for (const [specifier, targets] of Object.entries(basePaths)) {
+        const overlayTargets = overlayPaths[specifier];
+        if (path.isAbsolute(overlayTargets[0] ?? '')) {
+          assert.ok(overlayTargets[0].startsWith(ownerRoot), `${entry.id}:${specifier} must resolve under the dependency owner`);
+        } else {
+          assert.deepEqual(overlayTargets, targets, `${entry.id}:${specifier} must keep its base target verbatim`);
+        }
+      }
+      for (const spelling of ['@earendil-works/pi-ai', '@mariozechner/pi-ai', 'typebox']) {
+        if (!basePaths[spelling]) continue;
+        assert.ok(overlayPaths[spelling]?.[0]?.startsWith(ownerRoot), `${entry.id}:${spelling} must resolve under the dependency owner`);
+      }
+    } finally {
+      overlay.dispose();
+    }
+  }
+});
+
+test('typecheck compiler selection agrees with the owner-relative helper resolution', () => {
+  assert.equal(resolveTypeScriptCompiler(), path.join(repoRoot, 'extension/node_modules/typescript/bin/tsc'));
+  assert.equal(
+    resolveTypeScriptCompiler({ dependencyOwnerRoot: path.join(repoRoot, 'analysis') }),
+    path.join(repoRoot, 'analysis/node_modules/typescript/bin/tsc'),
+  );
+  for (const project of TYPECHECK_PROJECTS) {
+    assert.equal(resolveProjectCompiler(project), path.join(repoRoot, project.compiler), `compiler for ${project.id}`);
   }
 });

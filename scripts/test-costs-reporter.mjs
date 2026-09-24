@@ -4,12 +4,20 @@ import { appendFileSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
+import {
+  createTestFileExecutionCollector,
+  readTestFileAccountingContext,
+  summarizeTestFileAccounting,
+} from './test-reporter.mjs';
+
 const out = `${process.env.TIMING_OUTPUT ?? path.join(os.tmpdir(), 'pie-test-timings.jsonl')}.${process.pid}`;
 const startedAt = performance.now();
 
 export default async function* consume(iterable) {
   const tests = [];
+  const fileCollector = createTestFileExecutionCollector(readTestFileAccountingContext());
   for await (const event of iterable) {
+    fileCollector?.observe(event);
     if (event.type === 'test:pass' || event.type === 'test:fail') {
       tests.push({
         name: event.data.name,
@@ -21,9 +29,15 @@ export default async function* consume(iterable) {
   }
   appendFileSync(out, `${JSON.stringify({ type: 'global', durationMs: performance.now() - startedAt, tests })}\n`);
   const failed = tests.filter((t) => t.failed);
+  const fileAccounting = fileCollector?.report() ?? null;
+  const accountingFailure = fileAccounting && !fileAccounting.success;
   process.stdout.write(`__PI_TEST_SUMMARY__${JSON.stringify({
-    summary: { success: failed.length === 0, counts: { tests: tests.length, failed: failed.length, passed: tests.length - failed.length, cancelled: 0, skipped: 0, todo: 0, topLevel: 0, suites: 0 }, durationMs: performance.now() - startedAt },
+    summary: { success: failed.length === 0 && !accountingFailure, counts: { tests: tests.length, failed: failed.length, passed: tests.length - failed.length, cancelled: 0, skipped: 0, todo: 0, topLevel: 0, suites: 0 }, durationMs: performance.now() - startedAt },
     coverage: null,
-    failures: failed.map((t) => ({ name: t.name, file: t.file, message: 'failed' })),
+    failures: [
+      ...failed.map((t) => ({ name: t.name, file: t.file, message: 'failed' })),
+      ...(accountingFailure ? [{ name: 'test-file accounting mismatch', message: JSON.stringify(summarizeTestFileAccounting(fileAccounting)) }] : []),
+    ],
+    ...(fileAccounting ? { fileAccounting } : {}),
   })}\n`);
 }

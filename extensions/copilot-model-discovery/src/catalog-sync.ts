@@ -1,4 +1,7 @@
-import { parseDocument } from '../../../extension/node_modules/yaml/dist/index.js';
+import { createOwnerRequire } from '../../../scripts/lib/package-resolution.mjs';
+
+// Keep catalog YAML on the application dependency owner's hoisted package.
+const { parseDocument } = createOwnerRequire()('yaml');
 
 import type { DiscoveredCopilotModel } from './copilot-models.js';
 

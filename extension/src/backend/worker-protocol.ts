@@ -16,7 +16,6 @@ import {
 } from '../shared/protocol/subagent-detail.js';
 import type { JsonStructuralPatchOperation } from '../shared/json-structural-patch.js';
 import type { LazyDetailRef } from '../shared/protocol/messages.js';
-import type { AnalyticsBranchObservedPayload } from '../shared/protocol/sessions.js';
 import type {
   SdkSessionOwnershipReservation,
   SdkSessionReplacementIntent,
@@ -32,7 +31,10 @@ import {
   type AnalyticsTransportPacket,
 } from '../../../shared/analytics/transport.js';
 import type { AnalyticsCaptureSubject } from '../../../shared/analytics/contracts.js';
-import { isAnalyticsBranchObservedPayload } from '../shared/protocol/event-payloads.js';
+import {
+  isAnalyticsBranchObservedPayload,
+  type AnalyticsBranchObservedPayload,
+} from '../../../shared/analytics/branch-observation.js';
 
 /** Private coordinator/worker protocol. It is intentionally independent from the public RPC protocol. */
 /** v2 adds the typed `analytics.branch` runtime event. */

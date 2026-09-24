@@ -3,7 +3,7 @@ import test from 'node:test';
 
 import { ANALYTICS_SCHEMA_VERSION, deriveAnalyticsIdempotencyKey, type AnalyticsObservation } from '../../../../shared/analytics/contracts.js';
 import { ANALYTICS_ROUTE_CLOSED_EVENT, createAnalyticsFactPacket } from '../../../../shared/analytics/transport.js';
-import type { AnalyticsBranchObservedPayload } from '../../../src/shared/protocol/sessions.js';
+import type { AnalyticsBranchObservedPayload } from '../../../../shared/analytics/branch-observation.js';
 import { WORKER_IPC_VERSION, parseWorkerToCoordinatorFrame } from '../../../src/backend/worker-protocol.js';
 import { WorkerRuntimeRouter } from '../../../src/backend/worker-runtime-router.js';
 

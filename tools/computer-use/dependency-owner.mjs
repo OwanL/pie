@@ -1,5 +1,9 @@
-import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
+
+import { createNativeOwnerRequire, resolveNativeOwnerPath } from '../../scripts/lib/native-owner.mjs';
 
 // Native runtime packages remain installed and locked by extensions/computer-use.
-export const requireComputerUseDependency = createRequire(new URL('../../extensions/computer-use/package.json', import.meta.url));
-export const cuaDriverEntry = new URL('../../extensions/computer-use/node_modules/@trycua/cua-driver/dist/index.js', import.meta.url);
+export const requireComputerUseDependency = createNativeOwnerRequire('computer-use');
+export const cuaDriverEntry = pathToFileURL(resolveNativeOwnerPath('computer-use', [
+  'node_modules', '@trycua', 'cua-driver', 'dist', 'index.js',
+]));

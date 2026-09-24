@@ -22,7 +22,6 @@
 
 import type {
   AgentSettledPayload,
-  AnalyticsBranchObservedPayload,
   AuxiliaryLlmUsagePayload,
   BusyChangedPayload,
   CompactionPayload,
@@ -52,6 +51,9 @@ import type { ExtensionUIRequestPayload } from './webview.js';
 import type { ContextWindowUsage } from './models.js';
 import { isToolPreview } from '../live-pipeline-protocol.js';
 import { isFiniteNumber } from '../type-guards.js';
+
+/** Temporary compatibility export; remove in B5/B6/B7 once old protocol imports are retired. */
+export { isAnalyticsBranchObservedPayload } from '../../../../shared/analytics/branch-observation.js';
 
 // ─── shared primitives ───────────────────────────────────────────────────────
 
@@ -600,19 +602,6 @@ export function isAuxiliaryLlmUsagePayload(value: unknown): value is AuxiliaryLl
       || value.outcome === 'cancelled' || value.outcome === 'unknown')
     && (value.instrumentationGap === undefined || typeof value.instrumentationGap === 'boolean')
     && isOptionalString(value.instrumentationGapReason)
-  );
-}
-
-export function isAnalyticsBranchObservedPayload(value: unknown): value is AnalyticsBranchObservedPayload {
-  return (
-    isObject(value)
-    && isString(value.sessionPath)
-    && value.sessionPath.length > 0
-    && isString(value.entryId) && value.entryId.length > 0 && !value.entryId.includes('\0')
-    && (value.parentEntryId === undefined || value.parentEntryId === null
-      || (isString(value.parentEntryId) && value.parentEntryId.length > 0 && !value.parentEntryId.includes('\0')))
-    && isString(value.selectedEntryId) && value.selectedEntryId.length > 0 && !value.selectedEntryId.includes('\0')
-    && isFiniteNumber(value.observedAt)
   );
 }
 
