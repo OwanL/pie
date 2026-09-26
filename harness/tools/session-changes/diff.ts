@@ -21,7 +21,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-import { execGit, resolveBaselineRef, isTrackedByGit } from '../../../extension/src/shared/git-baseline.js';
+import { execGit, resolveBaselineRef, isTrackedByGit } from '../../../lib/file-changes/git-baseline.js';
 import { minifyDiff, syntheticCreatedDiff } from './render.js';
 
 export type DiffKind = 'created' | 'modified' | 'deleted';

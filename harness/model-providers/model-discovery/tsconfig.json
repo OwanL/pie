@@ -1,0 +1,12 @@
+{
+  "extends": "../../../extensions/tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM"]
+  },
+  "include": [
+    "index.ts",
+    "*.ts",
+    "test/**/*.ts",
+    "../../../extensions/copilot-model-discovery/index.ts"
+  ]
+}

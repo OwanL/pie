@@ -1,0 +1,135 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+import { mapTranscript, type SessionEntryLike } from '../transcript';
+
+/** The wake-up text the `DeferredTriggerRegistry` injects on fire. */
+function wakeUpText(reason: string, message = 'do the thing'): string {
+  return (
+    `[deferred trigger fired: ${reason}]\n\n` +
+    'A deferred trigger you registered fired. Re-evaluate your pending task and either complete it now or call `defer_trigger` with action `register` again to keep waiting.\n\n' +
+    `Task message:\n${message}`
+  );
+}
+
+function userEntry(id: string, text: string): SessionEntryLike {
+  return {
+    id,
+    timestamp: '2026-01-01T00:00:00.000Z',
+    type: 'message',
+    message: { role: 'user', content: text },
+  };
+}
+
+function legacyDeferredWaitEntries(resultText: string, isError = false): SessionEntryLike[] {
+  return [
+    {
+      id: 'assistant-tool',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      type: 'message',
+      message: {
+        role: 'assistant',
+        stopReason: 'toolUse',
+        content: [{
+          type: 'toolCall',
+          id: 'defer-call',
+          name: 'defer_trigger',
+          arguments: { action: 'register' },
+        }],
+      },
+    },
+    {
+      id: 'defer-result',
+      timestamp: '2026-01-01T00:00:01.000Z',
+      type: 'message',
+      message: {
+        role: 'toolResult',
+        toolCallId: 'defer-call',
+        toolName: 'defer_trigger',
+        isError,
+        content: [{ type: 'text', text: resultText }],
+      },
+    },
+    {
+      id: 'intentional-abort',
+      timestamp: '2026-01-01T00:00:02.000Z',
+      type: 'message',
+      message: {
+        role: 'assistant',
+        stopReason: 'aborted',
+        errorMessage: 'Request was aborted.',
+        content: [],
+      },
+    },
+  ];
+}
+
+test('mapTranscript re-derives the deferred-trigger tag from the wake-up text prefix on reload', () => {
+  const entries: SessionEntryLike[] = [userEntry('u-1', wakeUpText('timer elapsed after 30000ms'))];
+  const [msg] = mapTranscript(entries);
+  assert.equal(msg.role, 'user');
+  assert.equal(msg.customType, 'deferred-trigger');
+  assert.deepEqual(msg.customDetails, { reason: 'timer elapsed after 30000ms' });
+});
+
+test('mapTranscript parses the reason up to the closing bracket', () => {
+  const entries: SessionEntryLike[] = [
+    userEntry('u-1', wakeUpText('session finished (any open session)')),
+  ];
+  const [msg] = mapTranscript(entries);
+  assert.equal(msg.customType, 'deferred-trigger');
+  assert.deepEqual(msg.customDetails, { reason: 'session finished (any open session)' });
+});
+
+test('mapTranscript leaves a plain typed user message untagged', () => {
+  const entries: SessionEntryLike[] = [userEntry('u-1', 'hello, please help')];
+  const [msg] = mapTranscript(entries);
+  assert.equal(msg.customType, undefined);
+  assert.equal(msg.customDetails, undefined);
+});
+
+test('mapTranscript does not mis-tag a message that merely mentions the prefix mid-text', () => {
+  const entries: SessionEntryLike[] = [
+    userEntry('u-1', 'I saw [deferred trigger fired: timer elapsed after 30000ms] in the logs'),
+  ];
+  const [msg] = mapTranscript(entries);
+  // Only a message that STARTS with the prefix is tagged — an inline mention
+  // is a real user message.
+  assert.equal(msg.customType, undefined);
+});
+
+test('mapTranscript repairs the intentional abort persisted by legacy deferred waits', () => {
+  const result = [
+    'Registered deferred trigger trigger-1:',
+    '',
+    'Your turn will end now; you will be resumed automatically when the trigger fires.',
+  ].join('\n');
+  const [message] = mapTranscript(legacyDeferredWaitEntries(result));
+
+  assert.equal(message.role, 'assistant');
+  assert.equal(message.status, 'completed');
+  assert.equal(message.errorDetail, undefined);
+  assert.equal(message.toolCalls?.[0]?.name, 'defer_trigger');
+  assert.equal(message.toolCalls?.[0]?.status, 'completed');
+});
+
+test('mapTranscript does not repair a new non-aborting registration result', () => {
+  const result = [
+    'Registered deferred trigger trigger-1:',
+    '  target: target.jsonl',
+    '  message: Your turn will end now; you will be resumed automatically when the trigger fires.',
+  ].join('\n');
+  const [message] = mapTranscript(legacyDeferredWaitEntries(result));
+  assert.equal(message.status, 'interrupted');
+});
+
+test('mapTranscript preserves genuine and failed deferred-trigger aborts as interrupted', () => {
+  const successfulButUnrelated = mapTranscript(legacyDeferredWaitEntries('Registered something else'))[0];
+  assert.equal(successfulButUnrelated.status, 'interrupted');
+
+  const matchingFailure = mapTranscript(legacyDeferredWaitEntries(
+    'Registered deferred trigger trigger-1:\n\nYour turn will end now; you will be resumed automatically when the trigger fires.',
+    true,
+  ))[0];
+  assert.equal(matchingFailure.status, 'interrupted');
+});

@@ -1,0 +1,1013 @@
+import type { ToolCall } from '../lib/rpc/message-contract.js';
+import type { LiveSubagentDetailAddress, SubagentChildIdentity } from '../lib/rpc/subagent-detail';
+import { isLiveSubagentDetailAddress } from '../lib/rpc/subagent-detail';
+import type {
+  SubagentBillingAttempt,
+  SubagentBillingEntry,
+  SubagentBillingInvocation,
+  SubagentBillingUsage,
+} from '../lib/rpc/live-pipeline.js';
+import type { LifecycleValueSource, SubagentAttemptPhase, SubagentAttemptSample } from '../../../analytics/contracts/legacy-run-analytics-contracts.js';
+import { isRecord } from '../../../lib/validation/type-guards';
+
+/**
+ * Subagent result parsing — pure extraction of the {@link SubagentResult}
+ * structure (and its per-task {@link SubagentSingleResult} entries) from a
+ * `subagent` tool call's raw `result`/`input` fields.
+ *
+ * Lives in `shared/` because it is consumed by BOTH the webview (rendering
+ * subagent cards) and the host-side token-rate measurement (counting output
+ * tokens of running subagents). It is pure data shaping — no preact, no DOM,
+ * no I/O — so it is safe to run in the extension host.
+ *
+ * The raw shape comes from the `subagent` extension: new calls carry one
+ * compacted child in `results[]`; legacy stored parallel/chain calls may carry
+ * several. The renderable extraction normalizes the two result-field
+ * shapes (`{ results }` and `{ details: { results } }`), infers a running
+ * status for results that lack one, and synthesizes a placeholder when a
+ * running call has not yet produced any result.
+ */
+
+export interface RawContentPart {
+  type: string;
+  text?: string;
+  thinking?: string;
+  id?: string;
+  name?: string;
+  arguments?: unknown;
+  result?: unknown;
+}
+
+export interface RawMessage {
+  role: 'user' | 'assistant' | 'toolResult';
+  content?: string | RawContentPart[];
+  timestamp?: number;
+  toolCallId?: string;
+  details?: unknown;
+  isError?: boolean;
+}
+
+export interface SubagentUsageSummary {
+  /** Cumulative input tokens consumed by this sub-agent session. */
+  input?: number;
+  /** Cumulative output tokens consumed by this sub-agent session. */
+  output?: number;
+  /** Cumulative cache-read tokens consumed by this sub-agent session. */
+  cacheRead?: number;
+  /** Cumulative cache-write tokens consumed by this sub-agent session. */
+  cacheWrite?: number;
+  /** True only when every provider token channel in the aggregate was observed. */
+  tokenChannelsKnown?: boolean;
+  /** Per-channel evidence retained when one or more channels were omitted. */
+  tokenChannelPresence?: {
+    input: boolean;
+    output: boolean;
+    cacheRead: boolean;
+    cacheWrite: boolean;
+  };
+  /** Context occupied by the most recent provider turn. */
+  contextTokens?: number;
+  /** Cumulative attributed cost in provider billing units (normally USD).
+   *  Present only when at least one provider turn reported a numeric cost
+   *  total; absent — never an invented zero — when no cost evidence exists
+   *  (pre-dispatch failures, synthetic results, or event shapes without a
+   *  cost block). Display treats a projected zero as non-evidence. */
+  cost?: number;
+  /** Explicit provider/invoice billing evidence, when present. */
+  reportedCostUsd?: number;
+  providerReportedCostUsd?: number;
+  /** Completed assistant turns in this child session. */
+  turns?: number;
+}
+
+export interface SubagentSingleResult {
+  agent: string;
+  task: string;
+  /** Producer-issued logical child identity (page-backed detail addressing). */
+  childId?: string;
+  /** Effective working directory used by this child session. */
+  cwd?: string;
+  /** Complete root-to-target producer lineage. Legacy durable results without
+   *  this field may render, but are explicitly not live-addressable. */
+  lineage?: SubagentChildIdentity[];
+  /** True when the producer stamped a stable addressable identity. */
+  liveAddressable?: boolean;
+  /** Immutable producer-owned address for the page-backed detail
+   *  subscription. Absent for legacy/durable refs that cannot own live
+   *  deltas; those keep the generic one-shot detail path. */
+  detailAddress?: LiveSubagentDetailAddress;
+  /** Parent-context mode requested for this delegation. */
+  parentUserContextMode?: 'latest' | 'all';
+  /** Exact bounded parent-context packet inserted into the child prompt. */
+  parentUserContext?: string;
+  /** Producer/transport marker retained when child messages are compacted. */
+  hasNestedToolFailure?: boolean;
+  /** `-1` while the subagent is still running. */
+  exitCode: number;
+  messages: RawMessage[];
+  /** Bounded terminal answer stored outside compacted child messages. */
+  finalOutput?: string;
+  transcriptCompacted?: boolean;
+  fileChanges?: Array<{
+    path: string;
+    kind: 'created' | 'modified' | 'deleted';
+    description?: string;
+    additions?: number;
+    deletions?: number;
+  }>;
+  /** The model the subagent session actually ran with. */
+  model?: string;
+  /** Provider that owns the selected model. */
+  provider?: string;
+  /** Maximum context window of the selected model. */
+  contextWindow?: number;
+  stderr?: string;
+  stopReason?: string;
+  errorMessage?: string;
+  /** Tool names currently executing inside this subagent run. */
+  runningTools?: string[];
+  /** Live child lifecycle diagnostics emitted by the subagent extension. */
+  activityPhase?: 'queued' | 'preparing' | 'waiting_provider' | 'streaming' | 'running_tool' | 'retry_wait' | 'completed' | 'failed' | 'cancelled' | 'orphaned_cleanup';
+  activityDetail?: string;
+  activitySince?: number;
+  /** Stable child lifecycle bounds for total elapsed-time display. */
+  startedAt?: number;
+  completedAt?: number;
+  lastProgressAt?: number;
+  /** The model chosen for this run. */
+  selectedModel?: string;
+  /** Thinking level applied to this run. */
+  thinkingLevel?: string;
+  /** Top-K candidate models. */
+  selectionPool?: string[];
+  /** Number of model retries before success. */
+  retryCount?: number;
+  /** True when the producer recovered by selecting a fallback model. */
+  fallback?: boolean;
+  /** Model attempt that failed before a later attempt recovered or settled. */
+  failedModel?: string;
+  /** Producer-labelled terminal failure category. */
+  failureClass?: string;
+  /** Terminal model-attempt diagnostics emitted by the subagent extension. */
+  attemptRecords?: unknown[];
+  /** Streaming text from the current in-progress assistant turn. */
+  streamingText?: string;
+  /** Streaming reasoning (thinking) from the current in-progress assistant
+   *  turn. Captures `thinking_delta` events so the collapsed preview can show
+   *  live reasoning before reply text arrives (instead of a generic
+   *  "Generating…" placeholder). Cleared when the assistant message commits. */
+  streamingReasoning?: string;
+  /** True while the subagent's model is actively generating the in-progress
+   *  assistant turn (first delta received, message not yet ended). Drives the
+   *  host token-rate clock so it advances through stalls + reasoning streams but
+   *  pauses during the subagent's tool calls / between turns / pre-first-token. */
+  streaming?: boolean;
+  /** Cumulative estimated output tokens for this child and nested descendants.
+   * Kept independently from renderable transcript content so rate measurement
+   * remains cheap and monotonic during long recursive runs. */
+  cumulativeOutputTokens?: number;
+  /** Per-turn throughput observations from this subagent session, forwarded to
+   *  the parent run snapshot for historical tok/s attribution. */
+  turnThroughputSamples?: { endedAt: string; outputTokens: number; generationDurationMs: number; status: string; modelId?: string; provider?: string }[];
+  /** Cumulative token usage consumed by this sub-agent session, surfaced from
+   *  the raw `toolCall.result` so the parent run can attribute subagent cost.
+   *  Absent when the subagent extension did not report usage (e.g. it failed
+   *  before producing any, or predates the field). */
+  usage?: SubagentUsageSummary;
+}
+
+export interface SubagentResult {
+  mode: 'single' | 'parallel' | 'chain';
+  results: SubagentSingleResult[];
+}
+
+export function isSubagentSingleResultRunning(result: SubagentSingleResult): boolean {
+  // exitCode is the lifecycle source of truth. runningTools is only activity
+  // detail and may be stale when a nested tool never emits execution_end after
+  // an abort/provider failure.
+  return result.exitCode === -1;
+}
+
+export function isSubagentSingleResultInterrupted(result: SubagentSingleResult): boolean {
+  return result.stopReason === 'aborted' || result.activityPhase === 'cancelled';
+}
+
+/**
+ * A failed nested tool call is not, by itself, a terminal failure of the
+ * enclosing subagent. The child may still recover, report a useful answer, or
+ * be settled independently by the producer. Use only explicit tool-result
+ * error markers (and nested subagent terminal failures) when deciding whether
+ * an outer failed tool status came from a nested call.
+ */
+export function hasNestedToolFailure(result: {
+  messages?: unknown[];
+  hasNestedToolFailure?: unknown;
+}): boolean {
+  if (result.hasNestedToolFailure === true) return true;
+
+  function visitDetails(value: unknown, depth: number): boolean {
+    if (depth > 8 || !isRecord(value)) return false;
+    const details = isRecord(value.details) ? value.details : value;
+    if (!Array.isArray(details.results)) return false;
+    return details.results.some((entry) => {
+      if (!isRecord(entry)) return false;
+      if (entry.hasNestedToolFailure === true) return true;
+      const exitCode = entry.exitCode;
+      if (typeof exitCode === 'number' && Number.isFinite(exitCode) && exitCode !== -1 && exitCode !== 0) return true;
+      if (entry.stopReason === 'error' || entry.stopReason === 'aborted') return true;
+      return Array.isArray(entry.messages)
+        && entry.messages.some((message) => isRecord(message) && nestedMessageHasFailure(message, depth + 1));
+    });
+  }
+
+  function nestedMessageHasFailure(message: Record<string, unknown>, depth: number): boolean {
+    const isToolResult = message.role === 'toolResult' || typeof message.toolCallId === 'string';
+    if (isToolResult && message.isError === true) return true;
+    if (visitDetails(message.details, depth)) return true;
+    if (!Array.isArray(message.content)) return false;
+    return message.content.some((part) => {
+      if (!isRecord(part)) return false;
+      if (isToolResult && part.isError === true) return true;
+      if (!isRecord(part.result)) return false;
+      return part.result.isError === true || visitDetails(part.result, depth + 1);
+    });
+  }
+
+  return (Array.isArray(result.messages) ? result.messages : [])
+    .some((message) => isRecord(message) && nestedMessageHasFailure(message, 0));
+}
+
+function isSubagentSingleResultFailed(result: SubagentSingleResult): boolean {
+  if (isSubagentSingleResultRunning(result)) {
+    return false;
+  }
+
+  return result.exitCode !== 0 || result.stopReason === 'error' || result.stopReason === 'aborted';
+}
+
+function nonEmptyText(value: string | undefined): string | undefined {
+  const text = value?.trim();
+  return text ? text : undefined;
+}
+
+function subagentSingleResultFallbackMarkdown(result: SubagentSingleResult): string {
+  if (!isSubagentSingleResultFailed(result)) {
+    return nonEmptyText(result.finalOutput) ?? '(no output)';
+  }
+
+  const detail = nonEmptyText(result.errorMessage) ?? nonEmptyText(result.stderr);
+  const failureLabel =
+    result.stopReason === 'aborted' ? 'Aborted'
+    : result.stopReason === 'error' ? 'Error'
+    : result.exitCode > 0 ? `Exit code ${result.exitCode}`
+    : 'Failed';
+
+  return detail ? `${failureLabel}: ${detail}` : `${failureLabel}: agent failed before producing any output.`;
+}
+
+function placeholderSingleResult(
+  agent: unknown,
+  task: unknown,
+  activity: Pick<SubagentSingleResult, 'activityPhase' | 'activityDetail'> = {
+    activityPhase: 'preparing',
+    activityDetail: 'waiting for subagent runtime status',
+  },
+): SubagentSingleResult | undefined {
+  const agentName = typeof agent === 'string' ? agent.trim() : '';
+  const taskText = typeof task === 'string' ? task.trim() : '';
+  if (!agentName || !taskText) {
+    return undefined;
+  }
+
+  return {
+    agent: agentName,
+    task: taskText,
+    exitCode: -1,
+    messages: [],
+    ...activity,
+  };
+}
+
+function synthesizeRenderableSubagentResult(input: unknown): SubagentResult | undefined {
+  if (!isRecord(input)) {
+    return undefined;
+  }
+
+  const single = placeholderSingleResult(input.agent, input.task);
+  if (single) {
+    return {
+      mode: 'single',
+      results: [single],
+    };
+  }
+
+  if (Array.isArray(input.tasks)) {
+    const results = input.tasks
+      .map((task) => (isRecord(task) ? placeholderSingleResult(
+        task.agent,
+        task.task,
+        { activityPhase: 'queued', activityDetail: 'waiting for parallel task dispatch' },
+      ) : undefined))
+      .filter((task): task is SubagentSingleResult => Boolean(task));
+
+    if (results.length > 0) {
+      return {
+        mode: 'parallel',
+        results,
+      };
+    }
+  }
+
+  if (Array.isArray(input.chain) && input.chain.length > 0) {
+    const firstStep = input.chain[0];
+    const result = isRecord(firstStep) ? placeholderSingleResult(firstStep.agent, firstStep.task) : undefined;
+    if (result) {
+      return {
+        mode: 'chain',
+        results: [result],
+      };
+    }
+  }
+
+  return undefined;
+}
+
+function terminalResultMessage(rawResult: unknown): string | undefined {
+  if (!isRecord(rawResult)) return undefined;
+  const content = rawResult.content;
+  if (typeof content === 'string') return nonEmptyText(content);
+  if (!Array.isArray(content)) return undefined;
+
+  const text = content
+    .map((part) => (isRecord(part) && typeof part.text === 'string' ? part.text.trim() : ''))
+    .filter(Boolean)
+    .join('\n');
+  return nonEmptyText(text);
+}
+
+/** A pre-dispatch or compatibility-path failure can legitimately finish with
+ * `details.results: []`. Falling back to the generic tool card hides every
+ * requested child, which makes the failed delegation appear to have vanished.
+ * Reconstruct the child cards from the immutable tool input and stamp the
+ * terminal tool error onto each placeholder. */
+function synthesizeTerminalSubagentResult(input: unknown, rawResult: unknown): SubagentResult | undefined {
+  const synthesized = synthesizeRenderableSubagentResult(input);
+  if (!synthesized) return undefined;
+
+  const errorMessage = terminalResultMessage(rawResult)
+    ?? 'Subagent failed before reporting child results.';
+  return {
+    ...synthesized,
+    results: synthesized.results.map((result) => ({
+      ...result,
+      exitCode: 1,
+      stopReason: 'error',
+      errorMessage,
+    })),
+  };
+}
+
+function normalizeRenderableSubagentResult(
+  result: SubagentResult,
+  toolStatus: ToolCall['status'],
+): SubagentResult {
+  if (toolStatus !== 'running') {
+    return {
+      ...result,
+      results: result.results.map((current) => {
+        const wasStillRunning = current.exitCode === -1;
+        const interrupted = isSubagentSingleResultInterrupted(current);
+        const nestedToolFailure = hasNestedToolFailure(current);
+        const terminalExitCode = wasStillRunning
+          ? (toolStatus === 'failed' && nestedToolFailure ? -1 : toolStatus === 'completed' ? 0 : 1)
+          : current.exitCode;
+        const hadLiveState = current.streaming === true || (current.runningTools?.length ?? 0) > 0;
+        if (!wasStillRunning && !hadLiveState) return current;
+
+        return {
+          ...current,
+          exitCode: terminalExitCode,
+          runningTools: [],
+          streaming: false,
+          ...(wasStillRunning && terminalExitCode !== -1 && toolStatus === 'failed' && !current.stopReason
+            ? { stopReason: interrupted ? 'aborted' : 'error' }
+            : {}),
+          activityPhase: interrupted
+            ? 'cancelled'
+            : terminalExitCode === -1
+              ? current.activityPhase
+              : terminalExitCode !== 0
+                ? 'failed'
+                : 'completed',
+        };
+      }),
+    };
+  }
+
+  // A child's explicit exitCode owns its lifecycle independently of the
+  // still-running parent tool. This matters for parallel/chain calls, where a
+  // completed child must settle visually while its siblings continue. Missing
+  // child progress is handled by synthesized placeholders above; do not turn a
+  // reported exitCode 0 back into a running result based on transcript shape or
+  // stale runningTools activity detail.
+  return result;
+}
+
+function parseRenderableSubagentResult(value: unknown): SubagentResult | undefined {
+  if (!isRecord(value) || !Array.isArray(value.results) || value.results.length === 0) {
+    return undefined;
+  }
+
+  const validResults = value.results.every((candidate) => isRecord(candidate)
+    && typeof candidate.agent === 'string'
+    && candidate.agent.trim().length > 0
+    && typeof candidate.task === 'string'
+    && candidate.task.trim().length > 0
+    && typeof candidate.exitCode === 'number'
+    && Number.isFinite(candidate.exitCode)
+    && Array.isArray(candidate.messages));
+  if (!validResults) return undefined;
+
+  if (value.mode === 'single' || value.mode === 'parallel' || value.mode === 'chain') {
+    return value as unknown as SubagentResult;
+  }
+  if (value.mode !== undefined) return undefined;
+
+  // Historical terminal results predate the explicit mode field. Preserve
+  // those real child transcripts instead of falling through to a synthesized
+  // failure, while still requiring the complete child-result signature above.
+  return {
+    ...value,
+    mode: value.results.length > 1 ? 'parallel' : 'single',
+    results: value.results as SubagentSingleResult[],
+  };
+}
+
+/**
+ * Return the raw child-result entries used by accounting consumers.
+ *
+ * Billing data can outlive (or be more compact than) the render payload: a
+ * persisted subagent result may retain model/usage/attempt records while
+ * omitting UI-only fields such as `task`, `exitCode`, or `messages`. Do not use
+ * the stricter render parser for accounting, or valid historical cost samples
+ * disappear merely because their child transcript was compacted.
+ */
+export function getSubagentResultEntries(rawResult: unknown): Record<string, unknown>[] {
+  if (!isRecord(rawResult)) return [];
+  const direct = Array.isArray(rawResult.results)
+    ? rawResult.results
+    : isRecord(rawResult.details) && Array.isArray(rawResult.details.results)
+      ? rawResult.details.results
+      : rawResult.kind === 'subagent' && Array.isArray(rawResult.children)
+        ? rawResult.children
+        : [];
+  return direct.filter((entry): entry is Record<string, unknown> => isRecord(entry));
+}
+
+const MAX_SUBAGENT_BILLING_ENTRIES = 512;
+const MAX_SUBAGENT_BILLING_ATTEMPTS = 8;
+
+function billingUsage(value: unknown): SubagentBillingUsage | undefined {
+  if (!isRecord(value)) return undefined;
+  const input = finiteNonNegative(value.input);
+  const output = finiteNonNegative(value.output);
+  const cacheRead = finiteNonNegative(value.cacheRead);
+  const cacheWrite = finiteNonNegative(value.cacheWrite);
+  const providerReportedCostUsd = nonNegativeCost(value.providerReportedCostUsd);
+  const reportedCostUsd = providerReportedCostUsd ?? nonNegativeCost(value.reportedCostUsd);
+  const legacyCost = nonNegativeCost(value.cost);
+  const cost = reportedCostUsd ?? legacyCost;
+  const totalTokens = finiteNonNegative(value.totalTokens);
+  const turns = finiteNonNegative(value.turns);
+  const declaredPresence = isRecord(value.tokenChannelPresence) ? value.tokenChannelPresence : undefined;
+  const declaredIncomplete = value.tokenChannelsKnown === false;
+  const channelPresent = (raw: number | null, key: 'input' | 'output' | 'cacheRead' | 'cacheWrite'): boolean => {
+    if (raw === null) return false;
+    if (declaredPresence && typeof declaredPresence[key] === 'boolean') return declaredPresence[key] as boolean;
+    return !declaredIncomplete;
+  };
+  const tokenChannelPresence = {
+    input: channelPresent(input, 'input'),
+    output: channelPresent(output, 'output'),
+    cacheRead: channelPresent(cacheRead, 'cacheRead'),
+    cacheWrite: channelPresent(cacheWrite, 'cacheWrite'),
+  };
+  const tokenChannelsKnown = !declaredIncomplete && Object.values(tokenChannelPresence).every(Boolean);
+  const hasEvidence = input !== null || output !== null || cacheRead !== null || cacheWrite !== null
+    || totalTokens !== null || cost !== null;
+  // An observed but empty usage object is still an instrumentation gap. Keep
+  // it as zero-valued incomplete usage instead of dropping an exact cost or
+  // hiding the provider response from the ledger.
+  return {
+    input: input ?? 0,
+    output: output ?? 0,
+    cacheRead: cacheRead ?? 0,
+    cacheWrite: cacheWrite ?? 0,
+    ...(totalTokens === null ? {} : { totalTokens }),
+    ...(turns === null ? {} : { turns }),
+    ...(!tokenChannelsKnown ? { tokenChannelsKnown: false, tokenChannelPresence } : {}),
+    ...(cost === null ? {} : { cost }),
+    ...(reportedCostUsd === null ? {} : { reportedCostUsd }),
+    ...(providerReportedCostUsd === null ? {} : { providerReportedCostUsd }),
+    ...(!hasEvidence ? { tokenChannelsKnown: false, tokenChannelPresence: {
+      input: false, output: false, cacheRead: false, cacheWrite: false,
+    } } : {}),
+  };
+}
+
+function billingAttempt(value: unknown, index: number): SubagentBillingAttempt | undefined {
+  if (!isRecord(value)) return undefined;
+  const usage = billingUsage(value.usage);
+  const attemptId = typeof value.attemptId === 'string' && value.attemptId.trim()
+    ? value.attemptId.trim()
+    : String(index);
+  return {
+    attemptId,
+    ...(typeof value.model === 'string' && value.model ? { model: value.model } : {}),
+    ...(typeof value.provider === 'string' && value.provider ? { provider: value.provider } : {}),
+    ...(usage ? { usage } : {}),
+    ...(typeof value.providerResponseObserved === 'boolean'
+      ? { providerResponseObserved: value.providerResponseObserved } : {}),
+    ...(value.outcome === 'success' || value.outcome === 'failure' || value.outcome === 'aborted'
+      ? { outcome: value.outcome } : {}),
+    ...(finiteNonNegative(value.startedAt) !== null ? { startedAt: finiteNonNegative(value.startedAt)! } : {}),
+    ...(finiteNonNegative(value.completedAt) !== null ? { completedAt: finiteNonNegative(value.completedAt)! } : {}),
+    ...(billingCaptureReceipt(value.analyticsCaptureReceipt)
+      ? { analyticsCaptureReceipt: billingCaptureReceipt(value.analyticsCaptureReceipt) }
+      : {}),
+  };
+}
+
+function billingInvocation(value: unknown, index: number): SubagentBillingInvocation | undefined {
+  if (!isRecord(value)) return undefined;
+  const attempt = billingAttempt(value, index);
+  if (!attempt) return undefined;
+  const invocationId = typeof value.invocationId === 'string' && value.invocationId.trim()
+    ? value.invocationId.trim() : `${attempt.attemptId}:provider:${index}`;
+  return {
+    ...attempt,
+    invocationId,
+    ...(typeof value.canonicalInvocationId === 'string' && value.canonicalInvocationId.trim()
+      ? { canonicalInvocationId: value.canonicalInvocationId.trim() }
+      : {}),
+  };
+}
+
+function billingCaptureReceipt(value: unknown): SubagentBillingAttempt['analyticsCaptureReceipt'] {
+  if (!isRecord(value)
+    || (value.factStatus !== 'disabled' && value.factStatus !== 'submitted' && value.factStatus !== 'rejected')
+    || typeof value.generationId !== 'string' || !value.generationId
+    || typeof value.stableOriginId !== 'string' || !value.stableOriginId
+    || typeof value.executionId !== 'string' || !value.executionId
+    || typeof value.attemptId !== 'string' || !value.attemptId
+    || typeof value.terminalDetailPayloadId !== 'string' || !value.terminalDetailPayloadId
+    || !Number.isSafeInteger(value.lastSubmittedSequence) || (value.lastSubmittedSequence as number) < 0
+    || typeof value.terminalDetailComplete !== 'boolean'
+    || (value.lastAcknowledgedSequence !== undefined
+      && !(typeof value.lastAcknowledgedSequence === 'number'
+        && Number.isSafeInteger(value.lastAcknowledgedSequence)
+        && value.lastAcknowledgedSequence >= 0)
+      && !(typeof value.lastAcknowledgedSequence === 'string'
+        && /^(0|[1-9]\d*)$/.test(value.lastAcknowledgedSequence)))) {
+    return undefined;
+  }
+  return {
+    factStatus: value.factStatus,
+    generationId: value.generationId,
+    stableOriginId: value.stableOriginId,
+    executionId: value.executionId,
+    attemptId: value.attemptId,
+    terminalDetailPayloadId: value.terminalDetailPayloadId,
+    lastSubmittedSequence: value.lastSubmittedSequence as number,
+    ...(value.lastAcknowledgedSequence === undefined
+      ? {}
+      : { lastAcknowledgedSequence: value.lastAcknowledgedSequence as number | string }),
+    terminalDetailComplete: value.terminalDetailComplete,
+  };
+}
+
+function billingOccurredAt(result: Record<string, unknown>): number | undefined {
+  let latestEndedAt: number | undefined;
+  if (Array.isArray(result.turnThroughputSamples)) {
+    // Do not spread an untrusted, potentially long child-turn history into
+    // Math.max(). V8 rejects large argument lists with RangeError, and this
+    // runs while building the compact lazy-detail preview for every renderer
+    // snapshot; one long nested-agent result must not abort all state delivery.
+    for (const sample of result.turnThroughputSamples) {
+      if (!isRecord(sample) || typeof sample.endedAt !== 'string') continue;
+      const parsed = Date.parse(sample.endedAt);
+      if (!Number.isNaN(parsed) && (latestEndedAt === undefined || parsed > latestEndedAt)) {
+        latestEndedAt = parsed;
+      }
+    }
+  }
+  if (latestEndedAt !== undefined) return latestEndedAt;
+  return typeof result.completedAt === 'number' && Number.isFinite(result.completedAt) && result.completedAt >= 0
+    ? result.completedAt
+    : undefined;
+}
+
+function coerceBillingEntry(value: unknown): SubagentBillingEntry | undefined {
+  if (!isRecord(value) || typeof value.path !== 'string') return undefined;
+  const usage = billingUsage(value.usage);
+  const attempts = Array.isArray(value.attempts)
+    ? value.attempts.slice(0, MAX_SUBAGENT_BILLING_ATTEMPTS)
+      .map(billingAttempt)
+      .filter((attempt): attempt is SubagentBillingAttempt => !!attempt)
+    : [];
+  const rawInvocations = Array.isArray(value.invocations) ? value.invocations : [];
+  const invocations = rawInvocations.slice(0, MAX_SUBAGENT_BILLING_ATTEMPTS * 16)
+    .map(billingInvocation)
+    .filter((invocation): invocation is SubagentBillingInvocation => !!invocation);
+  const explicitOmitted = Math.trunc(finiteNonNegative(value.omittedInvocationCount) ?? 0);
+  const omittedInvocationCount = explicitOmitted
+    + Math.max(0, rawInvocations.length - invocations.length);
+  if (!usage && attempts.length === 0 && invocations.length === 0 && omittedInvocationCount === 0) return undefined;
+  return {
+    path: value.path,
+    ...(typeof value.model === 'string' && value.model ? { model: value.model } : {}),
+    ...(typeof value.selectedModel === 'string' && value.selectedModel ? { selectedModel: value.selectedModel } : {}),
+    ...(typeof value.provider === 'string' && value.provider ? { provider: value.provider } : {}),
+    ...(typeof value.occurredAt === 'number' && Number.isFinite(value.occurredAt) && value.occurredAt >= 0
+      ? { occurredAt: value.occurredAt }
+      : {}),
+    ...(usage ? { usage } : {}),
+    ...(attempts.length > 0 ? { attempts } : {}),
+    ...(invocations.length > 0 ? { invocations } : {}),
+    ...(omittedInvocationCount > 0 ? { omittedInvocationCount } : {}),
+  };
+}
+
+const MAX_SUBAGENT_BILLING_INVOCATION_RECORDS = 64;
+
+function boundBillingInvocations(entries: readonly SubagentBillingEntry[]): SubagentBillingEntry[] {
+  let remaining = MAX_SUBAGENT_BILLING_INVOCATION_RECORDS;
+  return entries.map((entry) => {
+    const invocations = entry.invocations ?? [];
+    const retained = invocations.slice(0, remaining);
+    remaining -= retained.length;
+    const omittedInvocationCount = (entry.omittedInvocationCount ?? 0)
+      + Math.max(0, invocations.length - retained.length);
+    return {
+      ...entry,
+      ...(retained.length > 0 ? { invocations: retained } : { invocations: undefined }),
+      ...(omittedInvocationCount > 0 ? { omittedInvocationCount } : {}),
+    };
+  });
+}
+
+/** Flatten recursive subagent billing into a compact terminal-only sideband.
+ * The ordinary live preview remains bounded to recent child UI state; this
+ * preserves exact evidence up to the transport budget and one explicit gap
+ * count for every observable response omitted beyond that budget. */
+export function getSubagentBillingEntries(rawResult: unknown): SubagentBillingEntry[] {
+  if (!isRecord(rawResult)) return [];
+  if (Array.isArray(rawResult.billing)) {
+    return boundBillingInvocations(rawResult.billing.slice(0, MAX_SUBAGENT_BILLING_ENTRIES)
+      .map(coerceBillingEntry)
+      .filter((entry): entry is SubagentBillingEntry => !!entry));
+  }
+
+  const entries: SubagentBillingEntry[] = [];
+  const seen = new Set<object>();
+  const visit = (results: unknown[], prefix: string, depth: number): void => {
+    if (depth > 8 || entries.length >= MAX_SUBAGENT_BILLING_ENTRIES) return;
+    for (const [index, value] of results.entries()) {
+      if (!isRecord(value) || seen.has(value)) continue;
+      seen.add(value);
+      const path = `${prefix}${index}`;
+      const usage = billingUsage(value.usage);
+      const attempts = Array.isArray(value.attemptRecords)
+          ? value.attemptRecords.slice(0, MAX_SUBAGENT_BILLING_ATTEMPTS)
+            .map(billingAttempt)
+            .filter((attempt): attempt is SubagentBillingAttempt => !!attempt)
+          : [];
+      const rawInvocations = Array.isArray(value.providerInvocations) ? value.providerInvocations : [];
+      const invocations = rawInvocations.slice(0, MAX_SUBAGENT_BILLING_ATTEMPTS * 16)
+        .map(billingInvocation)
+        .filter((invocation): invocation is SubagentBillingInvocation => !!invocation);
+      const omittedInvocationCount = Math.max(0, rawInvocations.length - invocations.length);
+      if (usage || attempts.length > 0 || invocations.length > 0 || omittedInvocationCount > 0) {
+        entries.push({
+          path,
+          ...(typeof value.model === 'string' && value.model ? { model: value.model } : {}),
+          ...(typeof value.selectedModel === 'string' && value.selectedModel ? { selectedModel: value.selectedModel } : {}),
+          ...(typeof value.provider === 'string' && value.provider ? { provider: value.provider } : {}),
+          ...(billingOccurredAt(value) !== undefined ? { occurredAt: billingOccurredAt(value) } : {}),
+          ...(usage ? { usage } : {}),
+          ...(attempts.length > 0 ? { attempts } : {}),
+          ...(invocations.length > 0 ? { invocations } : {}),
+          ...(omittedInvocationCount > 0 ? { omittedInvocationCount } : {}),
+        });
+      }
+      if (!Array.isArray(value.messages)) continue;
+      for (const message of value.messages) {
+        if (!isRecord(message) || message.role !== 'toolResult' || message.toolName !== 'subagent') continue;
+        const nested = getSubagentResultEntries(message.details);
+        if (nested.length > 0) visit(nested, `${path}.`, depth + 1);
+      }
+    }
+  };
+  visit(getSubagentResultEntries(rawResult), '', 0);
+  return boundBillingInvocations(entries);
+}
+
+function normalizeRenderableFileChanges(value: unknown): SubagentSingleResult['fileChanges'] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const changes: NonNullable<SubagentSingleResult['fileChanges']> = [];
+  for (const candidate of value.slice(0, 64)) {
+    if (!isRecord(candidate) || typeof candidate.path !== 'string' || !candidate.path.trim()) continue;
+    if (candidate.kind !== 'created' && candidate.kind !== 'modified' && candidate.kind !== 'deleted') continue;
+    const additions = typeof candidate.additions === 'number' && Number.isFinite(candidate.additions) && candidate.additions >= 0
+      ? Math.trunc(candidate.additions) : undefined;
+    const deletions = typeof candidate.deletions === 'number' && Number.isFinite(candidate.deletions) && candidate.deletions >= 0
+      ? Math.trunc(candidate.deletions) : undefined;
+    changes.push({
+      path: candidate.path.slice(0, 2 * 1024),
+      kind: candidate.kind,
+      ...(typeof candidate.description === 'string' ? { description: candidate.description.slice(0, 1024) } : {}),
+      ...(additions !== undefined ? { additions } : {}),
+      ...(deletions !== undefined ? { deletions } : {}),
+    });
+  }
+  return changes.length > 0 ? changes : undefined;
+}
+
+export function getRenderableSubagentResult(rawResult: unknown): SubagentResult | undefined {
+  const raw = rawResult as { kind?: unknown; mode?: unknown; children?: unknown; details?: unknown; results?: unknown } | undefined;
+
+  // Protocol-v4 live state carries a typed, bounded subagent preview rather
+  // than the extension's unbounded raw partial. Rehydrate the render model so
+  // the running child reply/activity stays visible before tool.finished.
+  if (raw?.kind === 'subagent' && Array.isArray(raw.children) && raw.children.length > 0) {
+    const mode: SubagentResult['mode'] = raw.mode === 'parallel' || raw.mode === 'chain' ? raw.mode : 'single';
+    const results = raw.children.flatMap((candidate): SubagentSingleResult[] => {
+      if (!isRecord(candidate)) return [];
+      const id = typeof candidate.id === 'string' ? candidate.id : 'subagent';
+      const agent = typeof candidate.agent === 'string' ? candidate.agent : id;
+      const task = typeof candidate.task === 'string'
+        ? candidate.task
+        : typeof candidate.summary === 'string' ? candidate.summary : 'Delegated task';
+      const phase = typeof candidate.phase === 'string' ? candidate.phase : 'running';
+      const explicitExit = typeof candidate.exitCode === 'number' ? candidate.exitCode : undefined;
+      const exitCode = explicitExit ?? (phase === 'completed' ? 0 : phase === 'failed' || phase === 'cancelled' ? 1 : -1);
+      const summary = typeof candidate.summary === 'string' ? candidate.summary : undefined;
+      const streamingText = typeof candidate.streamingText === 'string' ? candidate.streamingText : undefined;
+      const lineage = Array.isArray(candidate.lineage)
+        ? candidate.lineage.filter((entry): entry is SubagentChildIdentity => {
+          return !!entry && typeof entry === 'object'
+            && typeof entry.childId === 'string'
+            && typeof entry.spawningToolCallId === 'string'
+            && typeof entry.attemptId === 'string';
+        })
+        : undefined;
+      const detailAddress = candidate.detailAddress !== undefined && isLiveSubagentDetailAddress(candidate.detailAddress)
+        ? candidate.detailAddress
+        : undefined;
+      const messages: RawMessage[] = summary && !streamingText
+        ? [{ role: 'assistant', content: [{ type: 'text', text: summary }] }]
+        : [];
+      const fileChanges = normalizeRenderableFileChanges(candidate.fileChanges);
+      return [{
+        agent,
+        task,
+        exitCode,
+        messages,
+        ...(lineage && lineage.length > 0 ? { lineage } : {}),
+        ...(candidate.liveAddressable === true ? { liveAddressable: true as const } : {}),
+        ...(detailAddress ? { detailAddress } : {}),
+        ...(typeof candidate.cwd === 'string' ? { cwd: candidate.cwd.slice(0, 2 * 1024) } : {}),
+        ...(candidate.parentUserContextMode === 'latest' || candidate.parentUserContextMode === 'all'
+          ? { parentUserContextMode: candidate.parentUserContextMode }
+          : {}),
+        ...(typeof candidate.parentUserContext === 'string'
+          ? { parentUserContext: candidate.parentUserContext.slice(0, 12_000) } : {}),
+        ...(candidate.hasNestedToolFailure === true ? { hasNestedToolFailure: true } : {}),
+        ...(fileChanges ? { fileChanges } : {}),
+        ...(typeof candidate.model === 'string' ? { model: candidate.model } : {}),
+        ...(typeof candidate.selectedModel === 'string' ? { selectedModel: candidate.selectedModel } : {}),
+        ...(typeof candidate.provider === 'string' ? { provider: candidate.provider } : {}),
+        ...(typeof candidate.thinkingLevel === 'string' ? { thinkingLevel: candidate.thinkingLevel } : {}),
+        ...(typeof candidate.activityDetail === 'string' ? { activityDetail: candidate.activityDetail } : {}),
+        ...(typeof candidate.activitySince === 'number' ? { activitySince: candidate.activitySince } : {}),
+        ...(typeof candidate.startedAt === 'number' ? { startedAt: candidate.startedAt } : {}),
+        ...(typeof candidate.completedAt === 'number' ? { completedAt: candidate.completedAt } : {}),
+        ...(typeof candidate.lastProgressAt === 'number' ? { lastProgressAt: candidate.lastProgressAt } : {}),
+        ...(typeof candidate.streaming === 'boolean' ? { streaming: candidate.streaming } : {}),
+        ...(streamingText ? { streamingText } : {}),
+        ...(typeof candidate.streamingReasoning === 'string' ? { streamingReasoning: candidate.streamingReasoning } : {}),
+        ...(typeof candidate.cumulativeOutputTokens === 'number' && Number.isFinite(candidate.cumulativeOutputTokens)
+          ? { cumulativeOutputTokens: candidate.cumulativeOutputTokens }
+          : {}),
+        ...(Array.isArray(candidate.runningTools)
+          ? { runningTools: candidate.runningTools.filter((tool): tool is string => typeof tool === 'string') }
+          : {}),
+        ...(Array.isArray(candidate.messages) ? { messages: candidate.messages as RawMessage[] } : {}),
+        ...(typeof candidate.finalOutput === 'string' ? { finalOutput: candidate.finalOutput } : {}),
+        ...(typeof candidate.transcriptCompacted === 'boolean' ? { transcriptCompacted: candidate.transcriptCompacted } : {}),
+        ...(typeof candidate.contextWindow === 'number' ? { contextWindow: candidate.contextWindow } : {}),
+        ...(isRecord(candidate.usage) ? { usage: candidate.usage as unknown as SubagentUsageSummary } : {}),
+        ...(Array.isArray(candidate.selectionPool) ? { selectionPool: candidate.selectionPool.filter((model): model is string => typeof model === 'string') } : {}),
+        ...(typeof candidate.retryCount === 'number' ? { retryCount: candidate.retryCount } : {}),
+        ...(typeof candidate.fallback === 'boolean' ? { fallback: candidate.fallback } : {}),
+        ...(typeof candidate.failedModel === 'string' ? { failedModel: candidate.failedModel } : {}),
+        ...(typeof candidate.failureClass === 'string' ? { failureClass: candidate.failureClass } : {}),
+        ...(Array.isArray(candidate.turnThroughputSamples)
+          ? { turnThroughputSamples: candidate.turnThroughputSamples.slice(-8).filter((sample): sample is NonNullable<SubagentSingleResult['turnThroughputSamples']>[number] => {
+            if (!isRecord(sample) || typeof sample.endedAt !== 'string') return false;
+            return typeof sample.outputTokens === 'number' && Number.isFinite(sample.outputTokens)
+              && typeof sample.generationDurationMs === 'number' && Number.isFinite(sample.generationDurationMs)
+              && typeof sample.status === 'string';
+          }) }
+          : {}),
+        ...(typeof candidate.stopReason === 'string' ? { stopReason: candidate.stopReason } : {}),
+        ...(typeof candidate.errorMessage === 'string' ? { errorMessage: candidate.errorMessage } : {}),
+        ...(typeof candidate.stderr === 'string' ? { stderr: candidate.stderr } : {}),
+        activityPhase: phase === 'cancelled'
+          ? 'cancelled'
+          : phase === 'failed' ? 'failed'
+          : phase === 'completed' ? 'completed'
+          : phase === 'queued' ? 'queued'
+          : 'streaming',
+      }];
+    });
+    if (results.length > 0) return { mode, results };
+  }
+
+  const direct = parseRenderableSubagentResult(raw);
+  if (direct) return direct;
+
+  const nested = parseRenderableSubagentResult(raw?.details);
+  if (nested) return nested;
+
+  return undefined;
+}
+
+/**
+ * Safely parse the bounded terminal attempt records emitted by the subagent
+ * extension. This deliberately reads the raw terminal payload rather than the
+ * renderable cast above: analytics must reject malformed extension data instead
+ * of letting it become a zero-valued lifecycle observation.
+ */
+export function getTerminalSubagentAttemptSamplesFromToolCall(
+  toolCall: Pick<ToolCall, 'id' | 'result' | 'status'>,
+): { samples: SubagentAttemptSample[]; coverageComplete: boolean } {
+  if (!toolCall.id || toolCall.status === 'running' || !isRecord(toolCall.result)) {
+    return { samples: [], coverageComplete: false };
+  }
+  const direct = Array.isArray(toolCall.result.results)
+    ? toolCall.result.results
+    : isRecord(toolCall.result.details) && Array.isArray(toolCall.result.details.results)
+      ? toolCall.result.details.results
+      : [];
+  const samples: SubagentAttemptSample[] = [];
+  const seen = new Set<string>();
+  let coverageComplete = direct.length > 0;
+  const seenResults = new Set<object>();
+  const visitResults = (results: unknown[], path: string, depth: number): void => {
+    if (depth > 8) return;
+    for (const [resultIndex, result] of results.entries()) {
+      if (!isRecord(result)) {
+        coverageComplete = false;
+        continue;
+      }
+      if (seenResults.has(result)) continue;
+      seenResults.add(result);
+      const resultPath = `${path}${resultIndex}`;
+      if (!Array.isArray(result.attemptRecords) || result.attemptRecords.length === 0) {
+        coverageComplete = false;
+      } else for (const [retryIndex, record] of result.attemptRecords.entries()) {
+        if (!isRecord(record) || typeof record.attemptId !== 'string' || !record.attemptId.trim()
+          || (record.outcome !== 'success' && record.outcome !== 'failure' && record.outcome !== 'aborted')) {
+          coverageComplete = false;
+          continue;
+        }
+        const attemptId = record.attemptId.trim();
+        const sourceId = `${toolCall.id}:${resultPath}:${attemptId}`;
+        if (seen.has(sourceId)) continue;
+        seen.add(sourceId);
+        const startedAt = finiteNonNegative(record.startedAt);
+        const completedAt = finiteNonNegative(record.completedAt);
+        const measuredDuration = startedAt !== null && completedAt !== null && completedAt >= startedAt
+          ? completedAt - startedAt
+          : null;
+        // Reserved for a future extension producer. An estimate is accepted only
+        // when explicitly labelled; no parent/tool duration is used as a proxy.
+        const estimatedDuration = measuredDuration === null ? finiteNonNegative(record.estimatedDurationMs) : null;
+        const backoffMs = finiteNonNegative(record.backoffMs);
+        const phaseDurationsMs = parsePhaseDurations(record.phaseDurationsMs);
+        const attemptSettlementOutcome = nonEmptyUnknownString(record.attemptSettlementOutcome);
+        const cleanupOutcome = nonEmptyUnknownString(record.cleanupOutcome);
+        samples.push({
+          sourceId,
+          attemptId,
+          retryIndex,
+          provider: nonEmptyUnknownString(record.provider),
+          model: nonEmptyUnknownString(record.model),
+          outcome: record.outcome,
+          failureClass: nonEmptyUnknownString(record.failureClass),
+          replaySafety: nonEmptyUnknownString(record.replaySafety),
+          durationMs: measuredDuration ?? estimatedDuration,
+          durationSource: lifecycleSource(measuredDuration, estimatedDuration, 'measured'),
+          backoffMs,
+          backoffSource: backoffMs === null ? 'unknown' : 'reported',
+          phaseDurationsMs,
+          phaseDurationsSource: phaseDurationsMs === null ? 'unknown' : 'measured',
+          attemptSettlementOutcome: attemptSettlementOutcome ?? null,
+          attemptSettlementSource: attemptSettlementOutcome ? 'reported' : 'unknown',
+          parentSettlementSource: 'unknown',
+          cleanupOutcome: cleanupOutcome ?? null,
+          cleanupSource: cleanupOutcome ? 'reported' : 'unknown',
+        });
+      }
+      if (!Array.isArray(result.messages)) continue;
+      for (const message of result.messages) {
+        if (!isRecord(message) || message.role !== 'toolResult' || message.toolName !== 'subagent') continue;
+        if (isRecord(message.details) && Array.isArray(message.details.results)) {
+          visitResults(message.details.results, `${resultPath}.`, depth + 1);
+        }
+      }
+    }
+  };
+  visitResults(direct, '', 0);
+  return { samples, coverageComplete };
+}
+
+const ATTEMPT_PHASES: readonly SubagentAttemptPhase[] = [
+  'queued', 'preparing', 'waiting_provider', 'streaming', 'running_tool', 'orphaned_cleanup',
+];
+
+/** Accept only the fixed, finite producer map. retry_wait is intentionally not
+ * accepted because retry.ts reports its backoff separately. */
+function parsePhaseDurations(value: unknown): Partial<Record<SubagentAttemptPhase, number>> | null {
+  if (!isRecord(value)) return null;
+  const keys = Object.keys(value);
+  if (keys.length === 0 || keys.some((key) => !ATTEMPT_PHASES.includes(key as SubagentAttemptPhase))) return null;
+  const parsed: Partial<Record<SubagentAttemptPhase, number>> = {};
+  for (const phase of ATTEMPT_PHASES) {
+    if (!(phase in value)) continue;
+    const duration = finiteNonNegative(value[phase]);
+    if (duration === null) return null;
+    parsed[phase] = duration;
+  }
+  return parsed;
+}
+
+function finiteNonNegative(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER ? Math.trunc(value) : null;
+}
+
+function nonNegativeCost(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function nonEmptyUnknownString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function lifecycleSource(
+  measured: number | null,
+  estimated: number | null,
+  measuredSource: LifecycleValueSource,
+): LifecycleValueSource {
+  return measured !== null ? measuredSource : estimated !== null ? 'estimated' : 'unknown';
+}
+
+export function getRenderableSubagentResultFromToolCall(
+  toolCall: Pick<ToolCall, 'input' | 'result' | 'status' | 'detailRef'> & Partial<Pick<ToolCall, 'name'>>,
+): SubagentResult | undefined {
+  // Tool-result `details` is an open extension namespace. A different tool may
+  // legitimately return `{ details: { results: [...] } }`; never infer
+  // subagent ownership from that generic property name alone.
+  if (toolCall.name !== undefined && toolCall.name !== 'subagent') return undefined;
+
+  const renderableResult = getRenderableSubagentResult(toolCall.result);
+  if (renderableResult) {
+    return normalizeRenderableSubagentResult(renderableResult, toolCall.status);
+  }
+
+  if (toolCall.status === 'running' || toolCall.detailRef) {
+    // Large subagent results are omitted from ordinary snapshots. Keep their
+    // purpose-built card mounted from the first paint while the full detail is
+    // fetched, rather than briefly degrading to the generic tool row. Normalize
+    // the placeholder so terminal lazy calls cannot be counted as still running.
+    const synthesized = synthesizeRenderableSubagentResult(toolCall.input);
+    return synthesized ? normalizeRenderableSubagentResult(synthesized, toolCall.status) : undefined;
+  }
+
+  // Terminal calls with empty/missing child results are not successful empty
+  // runs: legacy or pre-dispatch failures can end before per-child details are
+  // available. Keep the delegation visible and actionable instead of
+  // collapsing it into an opaque generic tool row.
+  if (toolCall.result !== undefined) {
+    return synthesizeTerminalSubagentResult(toolCall.input, toolCall.result);
+  }
+
+  return undefined;
+}
+
+export {
+  isSubagentSingleResultFailed,
+  nonEmptyText,
+  subagentSingleResultFallbackMarkdown,
+};

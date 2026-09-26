@@ -1,6 +1,6 @@
 import * as path from 'node:path';
 
-import type { SdkContextFile } from '../../../extension/src/backend/sdk';
+import type { SdkContextFile } from '../../agent-processes/lib/sdk-integration/sdk';
 
 export interface PreparedContextFile {
   path: string;

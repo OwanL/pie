@@ -5,7 +5,7 @@ import {
   reapTempFiles,
   type ReapOptions,
   type ReapResult,
-} from "../../../shared/temp-file-reaper.js";
+} from "../../../lib/temporary-files/temp-file-reaper.js";
 
 /**
  * Reaper for the tool-result-pruner's recall stashes (audit item P1-7).
@@ -24,7 +24,7 @@ import {
  *      from older builds, sessions whose id could not be resolved).
  *
  * Both are best-effort, never-throwing. The age + total-size eviction algorithm
- * is shared via `shared/temp-file-reaper.ts` (same algorithm the VS Code
+ * is shared via `lib/temporary-files/temp-file-reaper.ts` (same algorithm the VS Code
  * extension host uses for SDK temp logs); `reapPrunedRawStashes` selects the
  * `pruned-raw-` prefix + `.txt` suffix. Session-scoped cleanup is unique to this
  * extension and stays here.

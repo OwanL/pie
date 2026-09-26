@@ -5,9 +5,9 @@
 #
 # Do NOT edit the derived files directly:
 #   models.json, model-profiles.yaml, settings.json
-# They are regenerated from this file by scripts/sync-models.mjs.
+# They are regenerated from this file by scripts/model-config/sync-models.mjs.
 #
-# Field flow (see docs/internal/centralized-model-config.md §4):
+# Field flow (see docs/operations/centralized-model-config.md §4):
 #   pricing:{input,output,cacheRead,cacheWrite} -> models.json cost:{...} (USD/M-token)
 #   disabledReason        -> model-profiles.yaml disabled_reason (snake_case)
 #   eligible/thinking     -> model-profiles.yaml
@@ -1931,8 +1931,8 @@ providers:
 # cost derivation and family/provider attribution keep working for past runs.
 #
 # These entries are NOT added to `profileOrder` or the active picker — they are
-# read-only pricing/attribution metadata. `scripts/sync-models.mjs` emits them
-# to `analysis/model-pricing-history.json`, which the analysis pricing/family
+# read-only pricing/attribution metadata. `scripts/model-config/sync-models.mjs` emits them
+# to `analytics/analysis/model-pricing-history.json`, which the analysis pricing/family
 # loaders merge as a fallback: active provider-specific pricing always wins;
 # historical entries only fill identities missing from the active catalog.
 #

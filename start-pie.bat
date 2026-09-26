@@ -9,6 +9,6 @@ if not exist "%PIE_POWERSHELL%" (
   endlocal & exit /b 1
 )
 
-"%PIE_POWERSHELL%" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\start-pie-supervisor.ps1" %*
+"%PIE_POWERSHELL%" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0application\hosts\standalone\startup\start-pie-supervisor.ps1" %*
 set "PIE_EXIT=%ERRORLEVEL%"
 endlocal & exit /b %PIE_EXIT%

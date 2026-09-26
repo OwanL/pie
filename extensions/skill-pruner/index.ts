@@ -1,5 +1,5 @@
-import { __setPromptTemplate as __setPruningPromptTemplate } from "./llm-scorer.js";
-import type { CompleteSimpleFn } from "./llm-scorer.js";
+import { __setPromptTemplate as __setPruningPromptTemplate } from "../../harness/tool-and-skill-selection/prepass/llm-scorer.js";
+import type { CompleteSimpleFn } from "../../harness/tool-and-skill-selection/prepass/llm-scorer.js";
 import type { Skill, ToolInfo } from "@earendil-works/pi-coding-agent";
 import {
 	setConfigOverrideForTesting,
@@ -13,23 +13,19 @@ import {
 	recordPrunedTools,
 	clearCapabilityStateForTesting,
 	clearPrunedToolsForTesting,
-} from "./src/state.js";
-import register from "./src/register.js";
-import { clearPrepassCacheForTesting, setPrepassCacheNowForTesting } from "./src/prepass-cache.js";
-import {
-	clonePruningConfig,
-	ensureCopilotHeaders,
-	COPILOT_IDE_HEADERS,
-	SKILLS_BLOCK_RE,
-	MIN_PROMPT_LENGTH,
-} from "./src/pruning.js";
+} from "../../harness/tool-and-skill-selection/state/selector-state.js";
+import register from "../../harness/tool-and-skill-selection/lifecycle/register.js";
+import { clearPrepassCacheForTesting, setPrepassCacheNowForTesting } from "../../harness/tool-and-skill-selection/state/prepass-cache.js";
+import { clonePruningConfig } from "../../harness/tool-and-skill-selection/lifecycle/pruning-lifecycle.js";
+import { SKILLS_BLOCK_RE, MIN_PROMPT_LENGTH } from "../../harness/agent-instructions/skill-selection/skill-policy.js";
+import { ensureCopilotHeaders, COPILOT_IDE_HEADERS } from "../../harness/model-providers/authentication/copilot-headers.js";
 
 export default register;
 export { SKILLS_BLOCK_RE, MIN_PROMPT_LENGTH };
 export { getHiddenSkills, recordHiddenSkills, recordPrunedTools, clearCapabilityStateForTesting, clearPrepassCacheForTesting, setPrepassCacheNowForTesting };
 
 // Test seams: setters exported from state module
-export function setConfigForTesting(nextConfig: import("./types.js").PruningConfig | null): void {
+export function setConfigForTesting(nextConfig: import("../../harness/tool-and-skill-selection/settings/config-types.js").PruningConfig | null): void {
 	setConfigOverrideForTesting(nextConfig ? clonePruningConfig(nextConfig) : null);
 }
 

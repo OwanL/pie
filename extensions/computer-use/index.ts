@@ -1,2 +1,2 @@
-// Keep Pi discovery and extension identity stable while implementation lives under tools/.
-export { default } from '../../tools/computer-use/index.js';
+// Keep Pi discovery and extension identity stable while implementation lives under harness/tools/.
+export { default } from '../../harness/tools/computer-use/index.js';

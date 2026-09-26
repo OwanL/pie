@@ -23,8 +23,8 @@ If an optional document is absent, proceed with available conventions. Update th
 
 When the user uses a term that conflicts with the language established in the
 repository's architecture/design docs or `AGENTS.md`/`CONTEXT.md`, call it out
-immediately. In pie, this includes `docs/ARCHITECTURE.md` and
-`docs/STATE_CONTRACT.md`: "Your architecture doc defines the pattern as
+immediately. In pie, this includes `docs/architecture/ARCHITECTURE.md` and
+`docs/contracts/STATE_CONTRACT.md`: "Your architecture doc defines the pattern as
 'CQRS-shaped Elm/MVI', but you seem to be describing something different — which is
 it?"
 

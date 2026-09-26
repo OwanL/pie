@@ -493,13 +493,14 @@ export function createTsconfigOverlay(baseConfigPath, options = {}) {
   const effectiveOptions = declaredPaths || options.includeOwnerDependencies
     ? effectiveTsconfigOptions(absoluteBase, options) : undefined;
   const basePaths = options.includeOwnerDependencies ? effectiveOptions?.paths ?? declaredPaths : declaredPaths;
+  const ownerPaths = options.includeOwnerDependencies ? ownerDependencyPaths(options, options.typescript
+    ? ['types', 'import', 'default', 'require'] : ['import', 'require', 'default']) : {};
   const overlayPaths = basePaths || options.includeOwnerDependencies
     ? {
-      ...(options.includeOwnerDependencies ? ownerDependencyPaths(options, options.typescript
-        ? ['types', 'import', 'default', 'require'] : ['import', 'require', 'default']) : {}),
+      ...ownerPaths,
       ...overlayPathsFromBase(
         basePaths ?? {},
-        helperPaths,
+        { ...ownerPaths, ...helperPaths },
         effectiveOptions?.baseUrl ?? effectiveOptions?.pathsBasePath ?? path.dirname(absoluteBase),
       ),
       ...(options.includeOwnerDependencies ? helperPaths : {}),
@@ -545,10 +546,11 @@ export function createTsconfigOverlay(baseConfigPath, options = {}) {
  */
 export function createViteAliases(options = {}) {
   const ownerRoot = resolveOwnerRoot(options);
+  const conditions = options.conditions ?? ['browser', 'import', 'default', 'require'];
   const preact = packageInfoFromOwner(ownerRoot, 'preact');
   const aliases = [];
   const addPackageMappings = (packageName, packageInfo) => {
-    for (const mapping of exportMappings(packageInfo, packageName, ['browser', 'import', 'default', 'require'])) {
+    for (const mapping of exportMappings(packageInfo, packageName, conditions)) {
       aliases.push(mapping.find
         ? { find: mapping.find, replacement: mapping.replacement.replaceAll('*', '$1') }
         : { find: mapping.key, replacement: mapping.replacement });
@@ -561,6 +563,24 @@ export function createViteAliases(options = {}) {
   addPackageMappings('typebox', packages.typebox);
   addPackageMappings('@sinclair/typebox', packages.typebox);
   addPackageMappings('preact', preact);
+  // Relocated source roots cannot resolve packages by node_modules ancestry.
+  // Alias the direct owner dependencies (runtime and build/test packages) from
+  // the host manifest, while leaving SDK identities and native sidecar owners
+  // on their existing resolution paths.
+  const ownerManifest = JSON.parse(readFileSync(path.join(ownerRoot, 'package.json'), 'utf8'));
+  for (const name of new Set([
+    ...Object.keys(ownerManifest.dependencies ?? {}),
+    ...Object.keys(ownerManifest.devDependencies ?? {}),
+  ])) {
+    if (name === 'preact' || name === 'tailwindcss' || isSdkIdentitySpecifier(name)) continue;
+    addPackageMappings(name, packageInfoFromOwner(ownerRoot, name, { allowEntryless: true }));
+  }
+  // The relocated frontend stylesheet cannot resolve the package owner's CSS
+  // through source ancestry; alias Tailwind's style export, not its JS entry.
+  const tailwindcss = packageInfoFromOwner(ownerRoot, 'tailwindcss');
+  for (const mapping of exportMappings(tailwindcss, 'tailwindcss', ['style'])) {
+    aliases.push({ find: mapping.key, replacement: mapping.replacement });
+  }
   aliases.sort((left, right) => String(right.find).length - String(left.find).length);
   return aliases;
 }

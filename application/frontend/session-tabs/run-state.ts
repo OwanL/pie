@@ -1,0 +1,69 @@
+import type { ActiveRunSummary } from '../../lib/protocol/index.js';
+
+export type SessionTabRunAction = 'startNewTask' | 'continueTask';
+
+export interface SessionTabRunMenuItem {
+  action: SessionTabRunAction;
+  label: string;
+}
+
+export interface ComposerRunStatus {
+  text: string;
+  tone: 'open' | 'pending-score' | 'subtle';
+  title: string;
+}
+
+export interface ComposerRunControls {
+  status: ComposerRunStatus | null;
+}
+
+export function getSessionTabRunMenuItems(runSummary: ActiveRunSummary | null): SessionTabRunMenuItem[] {
+  if (!runSummary) {
+    return [];
+  }
+
+  switch (runSummary.status) {
+    case 'open':
+      return [
+        { action: 'startNewTask', label: 'Start new task' },
+      ];
+    case 'closed':
+      return [
+        { action: 'continueTask', label: 'Continue task' },
+        { action: 'startNewTask', label: 'Start new task' },
+      ];
+    default:
+      return [];
+  }
+}
+
+export function getComposerRunControls(runSummary: ActiveRunSummary | null): ComposerRunControls {
+  if (!runSummary) {
+    return { status: null };
+  }
+
+  switch (runSummary.status) {
+    case 'open':
+      return {
+        status: runSummary.nextSendStartsNewTask
+          ? {
+              text: 'New task queued',
+              tone: 'subtle',
+              title: 'The next send will close the current run and start a new task group.',
+            }
+          : null,
+      };
+    case 'closed':
+      return {
+        status: runSummary.nextSendStartsNewTask
+          ? {
+              text: 'New task queued',
+              tone: 'subtle',
+              title: 'The next send will start a new task group after this completed run.',
+            }
+          : null,
+      };
+    default:
+      return { status: null };
+  }
+}

@@ -1,0 +1,508 @@
+/**
+ * Pins the renderer's defensive ViewState contract exported by
+ * extension/src/webview/panel/state-validator.ts (`validateViewState`).
+ *
+ * The host → webview boundary must not silently render stale/broken UI, so
+ * validateViewState returns violation strings for missing/mistyped critical
+ * ViewState fields. These tests pin every critical field's missing/undefined
+ * branch, wrong-type branch, and the all-valid happy path.
+ */
+
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+import type { ViewState } from '../../../lib/protocol/webview.js';
+import { validateViewState } from '../../../lib/validation/view-state';
+
+/**
+ * Build a minimal ViewState object whose every CRITICAL_FIELD has a value of
+ * the correct type. The validator only inspects the nested critical paths, so
+ * we cast an `unknown` partial through `as unknown as ViewState` to satisfy TS
+ * without constructing the full type.
+ */
+function validState(): ViewState {
+  return {
+    pruningSettings: {
+      mode: 'auto',
+      skillAlwaysKeep: ['skill-a'],
+      toolAlwaysKeep: ['tool-a'],
+      model: 'claude-sonnet-4',
+      provider: 'anthropic',
+    },
+    toolResultPruningSettings: {
+      enabled: true,
+      profile: 'default',
+      rules: {},
+    },
+    sessionTitlesSettings: {
+      enabled: true,
+      provider: 'ollama',
+      model: 'deepseek-v4-flash:0731-cloud',
+      thinkingLevel: 'off',
+      timeoutSec: 15,
+    },
+    pruningCatalog: {
+      skills: [],
+      tools: [],
+    },
+    prefs: {},
+    transcript: [],
+    sessions: [],
+    openTabPaths: [],
+    sessionCapabilitiesBySession: {},
+    generatingTitleSessionPaths: [],
+    systemPrompts: [],
+    availableModels: [],
+    availableModelsStatus: 'authoritative',
+    availableExtensions: [],
+    aggregateStats: {},
+    workingTimeBySession: {},
+    fileChanges: [],
+    readFilePaths: [],
+    pendingComposerInputs: [],
+  } as unknown as ViewState;
+}
+
+// Mirror the source's CRITICAL_FIELDS so each per-field test stays in lockstep
+// with the validator's iteration order.
+const CRITICAL_FIELDS: Array<{ path: string; type: string }> = [
+  { path: 'pruningSettings.mode', type: 'string' },
+  { path: 'pruningSettings.skillAlwaysKeep', type: 'array' },
+  { path: 'pruningSettings.toolAlwaysKeep', type: 'array' },
+  { path: 'pruningSettings.model', type: 'string' },
+  { path: 'pruningSettings.provider', type: 'string' },
+  { path: 'toolResultPruningSettings.enabled', type: 'boolean' },
+  { path: 'toolResultPruningSettings.profile', type: 'string' },
+  { path: 'toolResultPruningSettings.rules', type: 'object' },
+  { path: 'sessionTitlesSettings.enabled', type: 'boolean' },
+  { path: 'sessionTitlesSettings.provider', type: 'string' },
+  { path: 'sessionTitlesSettings.model', type: 'string' },
+  { path: 'sessionTitlesSettings.thinkingLevel', type: 'string' },
+  { path: 'sessionTitlesSettings.timeoutSec', type: 'number' },
+  { path: 'pruningCatalog.skills', type: 'array' },
+  { path: 'pruningCatalog.tools', type: 'array' },
+  { path: 'prefs', type: 'object' },
+  { path: 'transcript', type: 'array' },
+  { path: 'sessions', type: 'array' },
+  { path: 'openTabPaths', type: 'array' },
+  { path: 'sessionCapabilitiesBySession', type: 'object' },
+  { path: 'generatingTitleSessionPaths', type: 'array' },
+  { path: 'systemPrompts', type: 'array' },
+  { path: 'availableModels', type: 'array' },
+  { path: 'availableModelsStatus', type: 'string' },
+  { path: 'availableExtensions', type: 'array' },
+  { path: 'aggregateStats', type: 'object' },
+  { path: 'workingTimeBySession', type: 'object' },
+  { path: 'fileChanges', type: 'array' },
+  { path: 'readFilePaths', type: 'array' },
+  { path: 'pendingComposerInputs', type: 'array' },
+];
+
+/** Set a nested dotted path on a shallow-cloned object tree to `value`. */
+function withField(state: ViewState, path: string, value: unknown): ViewState {
+  const clone = structuredClone(state) as any;
+  const parts = path.split('.');
+  let cur = clone;
+  for (let i = 0; i < parts.length - 1; i++) {
+    cur = cur[parts[i]];
+  }
+  cur[parts[parts.length - 1]] = value;
+  return clone as ViewState;
+}
+
+/** A wrong-type value for a given expected type. */
+function wrongValueFor(type: string): unknown {
+  switch (type) {
+    case 'string': return ['not', 'a', 'string']; // array where string expected
+    case 'number': return 'not-a-number';
+    case 'boolean': return 'not-a-boolean';
+    case 'array': return 'not-an-array';
+    case 'object': return 42; // primitive where object expected
+    default: return 'wrong';
+  }
+}
+
+test('a fully-valid ViewState returns no violations', () => {
+  assert.deepEqual(validateViewState(validState()), []);
+});
+
+for (const spec of CRITICAL_FIELDS) {
+  test(`undefined ${spec.path} → exactly one violation naming the path and 'undefined'`, () => {
+    const state = withField(validState(), spec.path, undefined);
+    const violations = validateViewState(state);
+    assert.equal(violations.length, 1, `expected exactly one violation for ${spec.path}, got ${JSON.stringify(violations)}`);
+    const msg = violations[0];
+    assert.ok(msg.includes(`ViewState.${spec.path}`), `violation must name path 'ViewState.${spec.path}': ${msg}`);
+    assert.ok(msg.includes('undefined'), `violation must mention 'undefined': ${msg}`);
+    assert.ok(msg.includes(`expected ${spec.type}`), `violation must mention expected type '${spec.type}': ${msg}`);
+  });
+
+  test(`null ${spec.path} → exactly one violation naming the path and 'null'`, () => {
+    const state = withField(validState(), spec.path, null);
+    const violations = validateViewState(state);
+    assert.equal(violations.length, 1, `expected exactly one violation for ${spec.path}, got ${JSON.stringify(violations)}`);
+    const msg = violations[0];
+    assert.ok(msg.includes(`ViewState.${spec.path}`), `violation must name path 'ViewState.${spec.path}': ${msg}`);
+    assert.ok(msg.includes('null'), `violation must mention 'null': ${msg}`);
+    assert.ok(msg.includes(`expected ${spec.type}`), `violation must mention expected type '${spec.type}': ${msg}`);
+  });
+
+  test(`wrong-type ${spec.path} → violation naming the path and expected type '${spec.type}'`, () => {
+    const state = withField(validState(), spec.path, wrongValueFor(spec.type));
+    const violations = validateViewState(state);
+    // For wrong-type, only this field should be invalid (all others stay valid).
+    assert.equal(violations.length, 1, `expected exactly one violation for ${spec.path}, got ${JSON.stringify(violations)}`);
+    const msg = violations[0];
+    assert.ok(msg.includes(`ViewState.${spec.path}`), `violation must name path 'ViewState.${spec.path}': ${msg}`);
+    assert.ok(msg.includes(`expected ${spec.type}`), `violation must mention expected type '${spec.type}': ${msg}`);
+    assert.ok(msg.includes('wrong type'), `violation must say 'wrong type': ${msg}`);
+  });
+}
+
+test('session capabilities accept every lifecycle kind and non-terminal phase projection', () => {
+  const kinds = [
+    'session.create', 'session.duplicate', 'session.open', 'session.close', 'backend.restart',
+    'message.send', 'message.edit', 'message.interrupt', 'message.continue', 'message.compact',
+  ] as const;
+  const phases = [
+    'awaiting-acceptance', 'draining', 'awaiting-old-generation-death', 'awaiting-commit', 'ambiguous',
+  ] as const;
+  for (const kind of kinds) {
+    for (const phase of phases) {
+      const state = validState();
+      state.sessionCapabilitiesBySession = {
+        '/pending': {
+          billableActivity: false,
+          canContinue: false,
+          canInterrupt: false,
+          canCompact: false,
+          primaryOperation: {
+            operationId: 'operation-1',
+            kind,
+            phase,
+            attempt: 2,
+            committed: false,
+            recovery: 'retry',
+          },
+        },
+      };
+      assert.deepEqual(validateViewState(state), [], `${kind}:${phase}`);
+    }
+  }
+});
+
+test('session capabilities reject malformed primary operation projections', () => {
+  const state = validState() as unknown as Record<string, unknown>;
+  state.sessionCapabilitiesBySession = {
+    '/pending': {
+      billableActivity: false,
+      canContinue: false,
+      canInterrupt: false,
+      canCompact: false,
+      primaryOperation: {
+        operationId: 'operation-1',
+        kind: 'session.create',
+        phase: 'ambiguous',
+        attempt: 0,
+        committed: false,
+        recovery: 'unsafe-duplicate',
+      },
+    },
+  };
+  assert.deepEqual(
+    validateViewState(state as unknown as ViewState),
+    ['ViewState.sessionCapabilitiesBySession[/pending].primaryOperation is invalid'],
+  );
+});
+
+test('multiple violations at once are all returned in CRITICAL_FIELDS iteration order', () => {
+  let state: ViewState = validState();
+  state = withField(state, 'pruningSettings.mode', undefined) as ViewState;
+  state = withField(state, 'transcript', null) as ViewState;
+  state = withField(state, 'sessions', 'not-an-array') as ViewState;
+  state = withField(state, 'aggregateStats', 42) as ViewState;
+  const violations = validateViewState(state);
+  assert.equal(violations.length, 4, `expected 4 violations, got ${JSON.stringify(violations)}`);
+  // Order follows CRITICAL_FIELDS iteration: mode < transcript < sessions < aggregateStats.
+  assert.ok(violations[0].includes('ViewState.pruningSettings.mode'));
+  assert.ok(violations[1].includes('ViewState.transcript'));
+  assert.ok(violations[2].includes('ViewState.sessions'));
+  assert.ok(violations[3].includes('ViewState.aggregateStats'));
+});
+
+test('violation strings include the dotted ViewState. path and the expected type token', () => {
+  const state = withField(validState(), 'toolResultPruningSettings.enabled', 'not-a-boolean');
+  const violations = validateViewState(state);
+  assert.equal(violations.length, 1);
+  assert.match(
+    violations[0],
+    /^ViewState\.toolResultPruningSettings\.enabled has wrong type: got string, expected boolean$/,
+    `violation string shape drifted: ${violations[0]}`,
+  );
+});
+
+// ── Optional canonical activity/facet fields ───────────────────────────────
+//
+// The host omits these fields entirely under legacy analytics authority, so
+// absence must stay violation-free; presence is structurally validated.
+
+function canonicalCoverage(): Record<string, unknown> {
+  return {
+    databaseSchemaVersion: 12,
+    projectionRevision: '41',
+    snapshotWatermark: '39',
+    generationIds: ['generation-a'],
+    generationIdsTruncated: false,
+    pendingDetailCoverage: {
+      deliveryHistoryCoverage: 'complete',
+      completeDetailWatermark: '38',
+      retainedDetailLogicalBytes: '100',
+      retainedDetailStoredBytes: '80',
+    },
+    truncation: { rowLimit: false, byteLimit: false, cellLimit: false },
+  };
+}
+
+function canonicalActivityCounts(): Record<string, number> {
+  return {
+    spanCount: 10,
+    observedCount: 8,
+    estimatedCount: 1,
+    unknownCount: 1,
+    measuredKnownCount: 9,
+    measuredUnknownCount: 1,
+    measuredTotalMs: 186_120,
+  };
+}
+
+function canonicalActivityProjection(scope: Record<string, unknown> = { kind: 'session', rootSessionId: 'root-a' }): Record<string, unknown> {
+  return {
+    revision: '41',
+    scope,
+    kinds: [{ activityKind: 'tool', ...canonicalActivityCounts() }],
+    totals: canonicalActivityCounts(),
+    truncated: false,
+    coverage: canonicalCoverage(),
+  };
+}
+
+function canonicalToolFacetProjection(scope: Record<string, unknown> = { kind: 'session', rootSessionId: 'root-a' }): Record<string, unknown> {
+  return {
+    revision: '41',
+    scope,
+    facets: [{
+      generationId: 'generation-a',
+      facetId: 'facet-a',
+      toolCallId: 'tool-a',
+      rootSessionId: 'root-a',
+      commands: ['git status'],
+      cwd: '/workspace',
+      observedPaths: ['src/a.ts'],
+      attemptedAddedLines: 3,
+      attemptedRemovedLines: 0,
+      verification: 'unverified',
+    }],
+    truncated: false,
+    coverage: canonicalCoverage(),
+  };
+}
+
+function canonicalSessionEntry(sessionPath: string): Record<string, unknown> {
+  return {
+    sessionPath,
+    revision: '41',
+    scope: { kind: 'session', rootSessionId: 'root-a' },
+    activity: {
+      authority: 'canonical',
+      scope: { kind: 'session', rootSessionId: 'root-a' },
+      revision: '41',
+      coverage: canonicalCoverage(),
+      truncated: false,
+      projection: canonicalActivityProjection(),
+    },
+    toolFacets: {
+      authority: 'canonical',
+      scope: { kind: 'session', rootSessionId: 'root-a' },
+      revision: '41',
+      coverage: canonicalCoverage(),
+      truncated: false,
+      projection: canonicalToolFacetProjection(),
+    },
+  };
+}
+
+function withCanonicalFields(state: ViewState, mutate: (canonical: Record<string, unknown>) => void): ViewState {
+  const canonical: Record<string, unknown> = {
+    canonicalActivityGlobal: {
+      sessionPath: null,
+      revision: '41',
+      scope: { kind: 'global' },
+      activity: {
+        authority: 'canonical',
+        scope: { kind: 'global' },
+        revision: '41',
+        coverage: canonicalCoverage(),
+        truncated: false,
+        projection: canonicalActivityProjection({ kind: 'global' }),
+      },
+      toolFacets: {
+        authority: 'canonical',
+        scope: { kind: 'global' },
+        revision: '41',
+        coverage: canonicalCoverage(),
+        truncated: false,
+        projection: canonicalToolFacetProjection({ kind: 'global' }),
+      },
+    },
+    canonicalActivityBySession: { '/sessions/a.jsonl': canonicalSessionEntry('/sessions/a.jsonl') },
+    canonicalActivityBySessionTruncated: false,
+  };
+  mutate(canonical);
+  return { ...state, ...canonical } as unknown as ViewState;
+}
+
+test('legacy ViewState without canonical fields stays violation-free', () => {
+  assert.deepEqual(validateViewState(validState()), []);
+});
+
+test('well-formed canonical activity fields pass validation', () => {
+  assert.deepEqual(validateViewState(withCanonicalFields(validState(), () => { /* valid */ })), []);
+});
+
+test('unknown-authority canonical reads must keep null projection/revision/coverage/truncation', () => {
+  const state = withCanonicalFields(validState(), (canonical) => {
+    const entry = (canonical.canonicalActivityBySession as Record<string, Record<string, unknown>>)['/sessions/a.jsonl'];
+    entry.activity = {
+      authority: 'unknown',
+      scope: { kind: 'session', rootSessionId: 'root-a' },
+      projection: canonicalActivityProjection(),
+      revision: null,
+      coverage: null,
+      truncated: null,
+    };
+  });
+  const violations = validateViewState(state);
+  assert.ok(violations.some((v) => v.includes("ViewState.canonicalActivityBySession[/sessions/a.jsonl].activity.projection must be null when authority is 'unknown'")), violations.join(' | '));
+});
+
+test('session entries must match their address key and carry root-session scope', () => {
+  const state = withCanonicalFields(validState(), (canonical) => {
+    const bySession = canonical.canonicalActivityBySession as Record<string, unknown>;
+    bySession['/sessions/other.jsonl'] = canonicalSessionEntry('/sessions/a.jsonl');
+  });
+  const violations = validateViewState(state);
+  assert.ok(violations.some((v) => v.includes('ViewState.canonicalActivityBySession[/sessions/other.jsonl].sessionPath does not match its address key')), violations.join(' | '));
+});
+
+test('global entry must be explicitly global with a null session path', () => {
+  const state = withCanonicalFields(validState(), (canonical) => {
+    (canonical.canonicalActivityGlobal as Record<string, unknown>).scope = { kind: 'session', rootSessionId: 'root-a' };
+  });
+  const violations = validateViewState(state);
+  assert.ok(violations.some((v) => v.includes('ViewState.canonicalActivityGlobal.scope must be explicitly global')), violations.join(' | '));
+});
+
+test('non-finite projection totals are violations', () => {
+  const state = withCanonicalFields(validState(), (canonical) => {
+    const entry = (canonical.canonicalActivityBySession as Record<string, Record<string, unknown>>)['/sessions/a.jsonl'];
+    ((entry.activity as Record<string, unknown>).projection as Record<string, unknown>).totals = {
+      ...canonicalActivityCounts(),
+      measuredTotalMs: Number.POSITIVE_INFINITY,
+    };
+  });
+  const violations = validateViewState(state);
+  assert.ok(violations.some((v) => v.includes('.totals.measuredTotalMs is not a nonnegative finite duration')), violations.join(' | '));
+});
+
+test('fractional measured work (a REAL duration) is not a violation; negative is', () => {
+  const fractionalState = withCanonicalFields(validState(), (canonical) => {
+    const entry = (canonical.canonicalActivityBySession as Record<string, Record<string, unknown>>)['/sessions/a.jsonl'];
+    ((entry.activity as Record<string, unknown>).projection as Record<string, unknown>).totals = {
+      ...canonicalActivityCounts(),
+      measuredTotalMs: 186_120.5,
+    };
+  });
+  assert.deepEqual(validateViewState(fractionalState), []);
+
+  const negativeState = withCanonicalFields(validState(), (canonical) => {
+    const entry = (canonical.canonicalActivityBySession as Record<string, Record<string, unknown>>)['/sessions/a.jsonl'];
+    ((entry.activity as Record<string, unknown>).projection as Record<string, unknown>).totals = {
+      ...canonicalActivityCounts(),
+      measuredTotalMs: -1,
+    };
+  });
+  const violations = validateViewState(negativeState);
+  assert.ok(violations.some((v) => v.includes('.totals.measuredTotalMs is not a nonnegative finite duration')), violations.join(' | '));
+});
+
+test('negative, fractional, and non-integer canonical counts are violations', () => {
+  const state = withCanonicalFields(validState(), (canonical) => {
+    const entry = (canonical.canonicalActivityBySession as Record<string, Record<string, unknown>>)['/sessions/a.jsonl'];
+    ((entry.activity as Record<string, unknown>).projection as Record<string, unknown>).totals = {
+      ...canonicalActivityCounts(),
+      spanCount: -2,
+      observedCount: 1.5,
+    };
+  });
+  const violations = validateViewState(state);
+  assert.ok(violations.some((v) => v.includes('.totals.spanCount is not a nonnegative safe-integer count')), violations.join(' | '));
+  assert.ok(violations.some((v) => v.includes('.totals.observedCount is not a nonnegative safe-integer count')), violations.join(' | '));
+});
+
+test('negative and fractional attempted line counts are violations', () => {
+  const state = withCanonicalFields(validState(), (canonical) => {
+    const entry = (canonical.canonicalActivityBySession as Record<string, Record<string, unknown>>)['/sessions/a.jsonl'];
+    const facets = ((entry.toolFacets as Record<string, unknown>).projection as Record<string, unknown>).facets as Array<Record<string, unknown>>;
+    facets[0].attemptedAddedLines = -3;
+    facets[0].attemptedRemovedLines = 2.5;
+  });
+  const violations = validateViewState(state);
+  assert.ok(violations.some((v) => v.includes('.facets[0].attemptedAddedLines is not a nonnegative integer line count or null')), violations.join(' | '));
+  assert.ok(violations.some((v) => v.includes('.facets[0].attemptedRemovedLines is not a nonnegative integer line count or null')), violations.join(' | '));
+});
+
+test('oversized int64 decimal line counts are valid — no arbitrary digit cap', () => {
+  const state = withCanonicalFields(validState(), (canonical) => {
+    const entry = (canonical.canonicalActivityBySession as Record<string, Record<string, unknown>>)['/sessions/a.jsonl'];
+    const facets = ((entry.toolFacets as Record<string, unknown>).projection as Record<string, unknown>).facets as Array<Record<string, unknown>>;
+    facets[0].attemptedAddedLines = '120000000000000000000';
+    facets[0].attemptedRemovedLines = '9007199254740993';
+  });
+  assert.deepEqual(validateViewState(state), []);
+});
+
+test('a session entry cannot host a global-labelled nested projection', () => {
+  const state = withCanonicalFields(validState(), (canonical) => {
+    const entry = (canonical.canonicalActivityBySession as Record<string, Record<string, unknown>>)['/sessions/a.jsonl'];
+    (entry.activity as Record<string, unknown>).scope = { kind: 'global' };
+    ((entry.toolFacets as Record<string, unknown>).projection as Record<string, unknown>).scope = { kind: 'session', rootSessionId: 'root-other' };
+  });
+  const violations = validateViewState(state);
+  assert.ok(violations.some((v) => v.includes('.activity.scope does not match the entry scope')), violations.join(' | '));
+  assert.ok(violations.some((v) => v.includes('.toolFacets.projection scope does not match the entry scope')), violations.join(' | '));
+});
+
+test('kind rows that are not objects are violations, not crashes', () => {
+  const state = withCanonicalFields(validState(), (canonical) => {
+    const entry = (canonical.canonicalActivityBySession as Record<string, Record<string, unknown>>)['/sessions/a.jsonl'];
+    ((entry.activity as Record<string, unknown>).projection as Record<string, unknown>).kinds = [null];
+  });
+  const violations = validateViewState(state);
+  assert.ok(violations.some((v) => v.includes('.projection.kinds[0] is not an object')), violations.join(' | '));
+});
+
+test('canonicalActivityBySessionTruncated must be a boolean when present', () => {
+  const state = withCanonicalFields(validState(), (canonical) => {
+    canonical.canonicalActivityBySessionTruncated = 'yes';
+  });
+  const violations = validateViewState(state);
+  assert.deepEqual(violations, ['ViewState.canonicalActivityBySessionTruncated is not a boolean']);
+});
+
+test('completely malformed canonical entries are violations, not crashes', () => {
+  const state = withCanonicalFields(validState(), (canonical) => {
+    (canonical.canonicalActivityBySession as Record<string, unknown>)['/sessions/broken.jsonl'] = null;
+  });
+  const violations = validateViewState(state);
+  assert.ok(violations.some((v) => v.includes('ViewState.canonicalActivityBySession[/sessions/broken.jsonl] is not an object')), violations.join(' | '));
+});

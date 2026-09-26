@@ -1,4 +1,4 @@
-// The pruning pipeline. See docs/TOOL-RESULT-PRUNING.md §7.
+// The pruning pipeline. See docs/contracts/TOOL-RESULT-PRUNING.md §7.
 //
 // Guards (§7.4, all enforced here before any rule runs):
 //   - errors pass unfiltered (`event.isError`)

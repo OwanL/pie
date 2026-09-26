@@ -1,0 +1,494 @@
+import { open, opendir } from 'node:fs/promises';
+import path from 'node:path';
+
+import type {
+  AnalyticsHostPage,
+  AnalyticsHostRecord,
+} from './session-lifecycle-writer-store.js';
+import type { SessionLifecycleStore } from '../../harness/session-storage/lifecycle/session-lifecycle-store.js';
+import {
+  readProcessCensus,
+  type BackendProcessOwnerEvidence,
+  type ProcessOwnerReadResult,
+} from './process-census.js';
+
+const RUNTIME_SCHEMA = 1;
+const MAX_LEASE_FILES = 512;
+const MAX_LEASE_BYTES = 16 * 1024;
+const MAX_REGISTRY_HOSTS = 512;
+const MAX_REGISTRY_PAGE = 64;
+const LEASE_FILE_PATTERN = /^([0-9a-f]{64})-(\d+)-([0-9a-f]{32})\.json$/u;
+
+export interface RuntimeGenerationIdentity {
+  publisher: string;
+  name: string;
+  version: string;
+}
+
+export interface RuntimeLeaseEvidence {
+  /** Filename only; the lease payload is never returned or logged. */
+  leaseFileName: string;
+  runtimeGeneration: string;
+  processId: number;
+  /** This is the lease write timestamp, not process birth time. */
+  leaseCreatedAtMs: number;
+  identity: RuntimeGenerationIdentity;
+}
+
+export type AnalyticsDiscoveryReasonCode =
+  | 'registry-unavailable'
+  | 'registry-page-truncated'
+  | 'registry-page-invalid-cursor'
+  | 'runtime-lease-directory-unavailable'
+  | 'runtime-lease-list-truncated'
+  | 'runtime-lease-invalid'
+  | 'runtime-lease-identity-mismatch'
+  | 'process-census-unavailable'
+  | 'process-census-truncated'
+  | 'process-birth-unavailable'
+  | 'host-state-stopping'
+  | 'host-state-unsupported'
+  | 'host-state-stopped'
+  | 'host-process-missing'
+  | 'host-process-ambiguous'
+  | 'host-runtime-lease-missing'
+  | 'host-runtime-lease-ambiguous'
+  | 'runtime-lease-process-missing'
+  | 'runtime-lease-process-unregistered'
+  | 'runtime-lease-birth-after-lease-write'
+  | 'host-backend-owner-missing'
+  | 'host-backend-owner-ambiguous'
+  | 'backend-owner-unregistered'
+  | 'backend-process-birth-unavailable'
+  | 'backend-process-before-host'
+  | 'backend-analytics-descriptor-missing'
+  | 'backend-analytics-host-mismatch'
+  | 'backend-analytics-generation-unavailable'
+  | 'backend-analytics-generation-mismatch'
+  | 'backend-owner-identity-invalid'
+  | 'backend-process-ambiguous'
+  | 'process-pid-ambiguous';
+
+export interface AnalyticsDiscoveryReason {
+  code: AnalyticsDiscoveryReasonCode;
+  hostInstanceId?: string;
+  processId?: number;
+  runtimeGeneration?: string;
+}
+
+export interface RuntimeLeaseReadResult {
+  leases: readonly RuntimeLeaseEvidence[];
+  complete: boolean;
+  reasons: readonly AnalyticsDiscoveryReason[];
+}
+
+export interface AnalyticsHostDiscoveryRecord {
+  hostInstanceId: string;
+  processId: number;
+  state: AnalyticsHostRecord['state'];
+  status: 'reconciled' | 'unsupported' | 'unknown';
+  runtimeGeneration?: string;
+  backendProcessId?: number;
+  backendGeneration?: number;
+  reasons: readonly AnalyticsDiscoveryReason[];
+}
+
+export interface AnalyticsHostDiscoveryOptions {
+  workspaceId: string;
+  /** Existing lifecycle authority; discovery never opens a second registry. */
+  registry: Pick<SessionLifecycleStore, 'listAnalyticsHosts'>;
+  /** `<extension>/pie-runtime`, owned by runtime-generations.cjs. */
+  runtimeRootPath: string;
+  runtimeIdentity: RuntimeGenerationIdentity;
+  /** Active analytics generation, when canonical authority has one. The
+   * registry's `generationId` is the host process generation and must not be
+   * compared with this activation generation. */
+  analyticsGenerationId?: string;
+  /** True only when the caller has proved from the activation store that no
+   * canonical analytics authority exists yet (first-ever activation). A
+   * backend without the canonical analytics descriptor is then legitimate;
+   * every other host/backend owner and process identity check still applies,
+   * and a descriptor that is present remains unreconcilable. */
+  allowAbsentAnalyticsDescriptor?: boolean;
+  readRuntimeLeases?: () => Promise<RuntimeLeaseReadResult>;
+  readProcessOwners?: () => Promise<ProcessOwnerReadResult>;
+  /** Terminal rows are retained as durable history. A post-restart or later
+   * handoff may explicitly reconcile only current registered hosts, while any
+   * live process/lease/backend belonging to a terminal row still remains an
+   * unregistered-owner blocker. */
+  ignoreStoppedHosts?: boolean;
+}
+
+export interface AnalyticsHostDiscoveryResult {
+  workspaceId: string;
+  observedAtMs: number;
+  registryComplete: boolean;
+  runtimeLeasesComplete: boolean;
+  processOwnersComplete: boolean;
+  hosts: readonly AnalyticsHostDiscoveryRecord[];
+  unregisteredRuntimeLeases: readonly RuntimeLeaseEvidence[];
+  unregisteredBackendOwners: readonly BackendProcessOwnerEvidence[];
+  reasons: readonly AnalyticsDiscoveryReason[];
+  /** A proof result for a future producer; this module does not activate it. */
+  complete: boolean;
+}
+
+function reason(code: AnalyticsDiscoveryReasonCode, details: Partial<AnalyticsDiscoveryReason> = {}): AnalyticsDiscoveryReason {
+  return { code, ...details };
+}
+
+function isPositivePid(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+}
+
+function boundedIdentity(value: unknown): RuntimeGenerationIdentity | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const candidate = value as Record<string, unknown>;
+  if (typeof candidate.publisher !== 'string' || candidate.publisher.length === 0 || candidate.publisher.length > 512
+    || typeof candidate.name !== 'string' || candidate.name.length === 0 || candidate.name.length > 512
+    || typeof candidate.version !== 'string' || candidate.version.length === 0 || candidate.version.length > 512
+    || /[\\/\0]/u.test(candidate.publisher) || /[\\/\0]/u.test(candidate.name)
+    || /[\\/\0]/u.test(candidate.version)) return undefined;
+  return { publisher: candidate.publisher, name: candidate.name, version: candidate.version };
+}
+
+function sameRuntimeIdentity(left: RuntimeGenerationIdentity, right: RuntimeGenerationIdentity): boolean {
+  return left.publisher === right.publisher && left.name === right.name && left.version === right.version;
+}
+
+function duplicateProcessIds<T>(
+  entries: readonly T[],
+  processIdOf: (entry: T) => number,
+): Set<number> {
+  const seen = new Set<number>();
+  const duplicates = new Set<number>();
+  for (const entry of entries) {
+    const processId = processIdOf(entry);
+    if (seen.has(processId)) duplicates.add(processId);
+    else seen.add(processId);
+  }
+  return duplicates;
+}
+
+/** Read the runtime-generations lease directory without mutating it. */
+export async function readRuntimeLeaseEvidence(
+  runtimeRootPath: string,
+  expectedIdentity: RuntimeGenerationIdentity,
+): Promise<RuntimeLeaseReadResult> {
+  const leasesPath = path.join(path.resolve(runtimeRootPath), 'leases');
+  const leaseNames: string[] = [];
+  let directory;
+  try {
+    directory = await opendir(leasesPath);
+    for await (const entry of directory) {
+      if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+      if (leaseNames.length >= MAX_LEASE_FILES) break;
+      leaseNames.push(entry.name);
+    }
+  } catch {
+    return {
+      leases: [],
+      complete: false,
+      reasons: [reason('runtime-lease-directory-unavailable')],
+    };
+  } finally {
+    await directory?.close().catch(() => undefined);
+  }
+  const reasons: AnalyticsDiscoveryReason[] = [];
+  // An iterator cannot report a count beyond the cap without reading the next
+  // entry; probe only one extra entry so a giant directory is never collected
+  // into an unbounded array.
+  let entryCountBeyondCap = false;
+  try {
+    const probe = await opendir(leasesPath);
+    let seen = 0;
+    for await (const entry of probe) {
+      if (entry.isFile() && entry.name.endsWith('.json')) {
+        seen += 1;
+        if (seen > MAX_LEASE_FILES) {
+          entryCountBeyondCap = true;
+          break;
+        }
+      }
+    }
+    await probe.close().catch(() => undefined);
+  } catch {
+    entryCountBeyondCap = true;
+  }
+  if (entryCountBeyondCap) reasons.push(reason('runtime-lease-list-truncated'));
+  const leases: RuntimeLeaseEvidence[] = [];
+  for (const leaseFileName of leaseNames) {
+    const match = LEASE_FILE_PATTERN.exec(leaseFileName);
+    // Staging files and unrelated metadata are not leases owned by the
+    // runtime API; only a lease-shaped JSON file is evidence to reconcile.
+    if (!match) continue;
+    const runtimeGeneration = match[1]!;
+    const processId = Number(match[2]);
+    let file;
+    try {
+      file = await open(path.join(leasesPath, leaseFileName), 'r');
+      const bytes = Buffer.allocUnsafe(MAX_LEASE_BYTES + 1);
+      const { bytesRead } = await file.read(bytes, 0, bytes.length, 0);
+      const size = (await file.stat()).size;
+      if (bytesRead > MAX_LEASE_BYTES || size > MAX_LEASE_BYTES) throw new Error('lease exceeds bound');
+      const contents = bytes.subarray(0, bytesRead).toString('utf8');
+      const parsed = JSON.parse(contents) as Record<string, unknown>;
+      const identity = boundedIdentity(parsed.identity);
+      const leaseCreatedAtMs = parsed.createdAt;
+      if (parsed.schema !== RUNTIME_SCHEMA || !identity
+        || parsed.generation !== runtimeGeneration || !isPositivePid(parsed.pid)
+        || parsed.pid !== processId || typeof leaseCreatedAtMs !== 'number'
+        || !Number.isSafeInteger(leaseCreatedAtMs) || leaseCreatedAtMs <= 0) {
+        reasons.push(reason('runtime-lease-invalid', { processId, runtimeGeneration }));
+        continue;
+      }
+      if (!sameRuntimeIdentity(identity, expectedIdentity)) {
+        reasons.push(reason('runtime-lease-identity-mismatch', { processId, runtimeGeneration }));
+      }
+      leases.push({
+        leaseFileName,
+        runtimeGeneration,
+        processId,
+        leaseCreatedAtMs,
+        identity,
+      });
+    } catch {
+      reasons.push(reason('runtime-lease-invalid', { processId, runtimeGeneration }));
+    } finally {
+      await file?.close().catch(() => undefined);
+    }
+  }
+  return { leases, complete: reasons.length === 0, reasons };
+}
+
+async function readHostRegistry(
+  registry: Pick<SessionLifecycleStore, 'listAnalyticsHosts'>,
+  workspaceId: string,
+): Promise<{ hosts: readonly AnalyticsHostRecord[]; complete: boolean; reasons: readonly AnalyticsDiscoveryReason[] }> {
+  const hosts: AnalyticsHostRecord[] = [];
+  const reasons: AnalyticsDiscoveryReason[] = [];
+  let cursor: string | undefined;
+  let previousCursor: string | undefined;
+  try {
+    for (;;) {
+      const page: AnalyticsHostPage = registry.listAnalyticsHosts(workspaceId, {
+        limit: MAX_REGISTRY_PAGE,
+        ...(cursor ? { cursor } : {}),
+      });
+      for (const host of page.hosts) {
+        if (host.workspaceId !== workspaceId || (hosts.at(-1)?.hostInstanceId ?? '') >= host.hostInstanceId) {
+          reasons.push(reason('registry-page-invalid-cursor', { hostInstanceId: host.hostInstanceId }));
+          return { hosts, complete: false, reasons };
+        }
+        hosts.push(host);
+      }
+      if (!page.truncated) break;
+      if (!page.nextCursor || page.nextCursor === previousCursor || hosts.length >= MAX_REGISTRY_HOSTS) {
+        reasons.push(reason('registry-page-truncated'));
+        return { hosts, complete: false, reasons };
+      }
+      previousCursor = page.nextCursor;
+      cursor = page.nextCursor;
+    }
+  } catch {
+    reasons.push(reason('registry-unavailable'));
+    return { hosts, complete: false, reasons };
+  }
+  return { hosts, complete: true, reasons };
+}
+
+function dedupeReasons(reasons: readonly AnalyticsDiscoveryReason[]): AnalyticsDiscoveryReason[] {
+  const seen = new Set<string>();
+  return reasons.filter((entry) => {
+    const key = JSON.stringify(entry);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/**
+ * Reconcile the existing host registry with runtime leases and the OS process
+ * census. This is a read-only proof helper. It never changes registry state
+ * or stops a process, and its result is non-authorizing.
+ */
+export async function discoverAnalyticsHostWriters(
+  options: AnalyticsHostDiscoveryOptions,
+): Promise<AnalyticsHostDiscoveryResult> {
+  const registryResult = await readHostRegistry(options.registry, options.workspaceId);
+  const hosts = options.ignoreStoppedHosts
+    ? registryResult.hosts.filter((host) => host.state !== 'stopped')
+    : registryResult.hosts;
+  const [leaseResult, processResult] = await Promise.all([
+    options.readRuntimeLeases
+      ? options.readRuntimeLeases()
+      : readRuntimeLeaseEvidence(options.runtimeRootPath, options.runtimeIdentity),
+    options.readProcessOwners ? options.readProcessOwners() : readProcessCensus(),
+  ]);
+  const reasons: AnalyticsDiscoveryReason[] = [
+    ...registryResult.reasons,
+    ...leaseResult.reasons,
+    ...processResult.reasons,
+  ];
+  const ambiguousHostPids = duplicateProcessIds(hosts, (entry) => entry.processId);
+  for (const processId of ambiguousHostPids) {
+    reasons.push(reason('host-process-ambiguous', { processId }));
+  }
+  const hostsByPid = new Map<number, AnalyticsHostRecord>();
+  for (const host of hosts) {
+    if (!ambiguousHostPids.has(host.processId)) hostsByPid.set(host.processId, host);
+  }
+  const leasesByPid = new Map<number, RuntimeLeaseEvidence[]>();
+  for (const lease of leaseResult.leases) {
+    if (!sameRuntimeIdentity(lease.identity, options.runtimeIdentity)) {
+      reasons.push(reason('runtime-lease-identity-mismatch', {
+        processId: lease.processId, runtimeGeneration: lease.runtimeGeneration,
+      }));
+      continue;
+    }
+    const existing = leasesByPid.get(lease.processId) ?? [];
+    existing.push(lease);
+    leasesByPid.set(lease.processId, existing);
+    if (!hostsByPid.has(lease.processId)) {
+      reasons.push(reason('runtime-lease-process-unregistered', {
+        processId: lease.processId, runtimeGeneration: lease.runtimeGeneration,
+      }));
+    }
+  }
+  const ambiguousProcessPids = duplicateProcessIds(processResult.processes, (entry) => entry.processId);
+  for (const processId of ambiguousProcessPids) {
+    reasons.push(reason('process-pid-ambiguous', { processId }));
+  }
+  const processesByPid = new Map(
+    processResult.processes
+      .filter((entry) => !ambiguousProcessPids.has(entry.processId))
+      .map((entry) => [entry.processId, entry] as const),
+  );
+  const ambiguousBackendPids = duplicateProcessIds(
+    processResult.backendOwners,
+    (entry) => entry.backendProcessId,
+  );
+  const ambiguousBackendPidsByHost = new Map<number, Set<number>>();
+  for (const backend of processResult.backendOwners) {
+    if (!ambiguousBackendPids.has(backend.backendProcessId)) continue;
+    const processIds = ambiguousBackendPidsByHost.get(backend.hostProcessId) ?? new Set<number>();
+    processIds.add(backend.backendProcessId);
+    ambiguousBackendPidsByHost.set(backend.hostProcessId, processIds);
+  }
+  for (const processId of ambiguousBackendPids) {
+    reasons.push(reason('backend-process-ambiguous', { processId }));
+  }
+  const backendsByHostPid = new Map<number, BackendProcessOwnerEvidence[]>();
+  for (const backend of processResult.backendOwners) {
+    if (ambiguousBackendPids.has(backend.backendProcessId)) continue;
+    const existing = backendsByHostPid.get(backend.hostProcessId) ?? [];
+    existing.push(backend);
+    backendsByHostPid.set(backend.hostProcessId, existing);
+    if (!hostsByPid.has(backend.hostProcessId)) {
+      reasons.push(reason('backend-owner-unregistered', {
+        processId: backend.backendProcessId,
+      }));
+    }
+  }
+  const records: AnalyticsHostDiscoveryRecord[] = [];
+  for (const host of hosts) {
+    const hostReasons: AnalyticsDiscoveryReason[] = [];
+    const addHostReason = (entry: AnalyticsDiscoveryReason): void => {
+      hostReasons.push({ ...entry, hostInstanceId: host.hostInstanceId });
+      reasons.push({ ...entry, hostInstanceId: host.hostInstanceId });
+    };
+    if (host.state === 'stopping') addHostReason(reason('host-state-stopping'));
+    if (host.state === 'unsupported') addHostReason(reason('host-state-unsupported'));
+    if (host.state === 'stopped') addHostReason(reason('host-state-stopped'));
+    if (ambiguousHostPids.has(host.processId)) {
+      addHostReason(reason('host-process-ambiguous', { processId: host.processId }));
+    }
+
+    const process = processesByPid.get(host.processId);
+    if (ambiguousProcessPids.has(host.processId)) {
+      addHostReason(reason('process-pid-ambiguous', { processId: host.processId }));
+    } else if (!process) addHostReason(reason('host-process-missing', { processId: host.processId }));
+    else if (process.processCreatedAtMs === null) addHostReason(reason('process-birth-unavailable', { processId: host.processId }));
+
+    const leases = leasesByPid.get(host.processId) ?? [];
+    if (leases.length === 0) addHostReason(reason('host-runtime-lease-missing', { processId: host.processId }));
+    if (leases.length > 1) addHostReason(reason('host-runtime-lease-ambiguous', { processId: host.processId }));
+    const lease = leases.length === 1 ? leases[0] : undefined;
+    if (lease && process?.processCreatedAtMs !== null && process?.processCreatedAtMs !== undefined
+      && process.processCreatedAtMs > lease.leaseCreatedAtMs) {
+      addHostReason(reason('runtime-lease-birth-after-lease-write', {
+        processId: host.processId, runtimeGeneration: lease.runtimeGeneration,
+      }));
+    }
+
+    const backends = backendsByHostPid.get(host.processId) ?? [];
+    const ambiguousBackendIds = ambiguousBackendPidsByHost.get(host.processId) ?? new Set<number>();
+    for (const processId of ambiguousBackendIds) {
+      addHostReason(reason('backend-process-ambiguous', { processId }));
+    }
+    if (backends.length === 0 && ambiguousBackendIds.size === 0) {
+      addHostReason(reason('host-backend-owner-missing', { processId: host.processId }));
+    }
+    if (backends.length > 1) addHostReason(reason('host-backend-owner-ambiguous', { processId: host.processId }));
+    const backend = backends.length === 1 ? backends[0] : undefined;
+    if (backend) {
+      if (backend.backendCreatedAtMs === null || backend.hostCreatedAtMs === null) {
+        addHostReason(reason('backend-process-birth-unavailable', { processId: backend.backendProcessId }));
+      } else if (backend.backendCreatedAtMs < backend.hostCreatedAtMs) {
+        addHostReason(reason('backend-process-before-host', { processId: backend.backendProcessId }));
+      }
+      if (!backend.analyticsHostInstanceId || !backend.analyticsGenerationId) {
+        // First-ever activation: no canonical authority exists to reconcile a
+        // descriptor against, so its absence is legitimate. This is the only
+        // waived check; process, lease, and backend-owner identity evidence
+        // above are still fully required.
+        if (options.allowAbsentAnalyticsDescriptor !== true) {
+          addHostReason(reason('backend-analytics-descriptor-missing', { processId: backend.backendProcessId }));
+        }
+      } else {
+        if (backend.analyticsHostInstanceId !== host.hostInstanceId) {
+          addHostReason(reason('backend-analytics-host-mismatch', { processId: backend.backendProcessId }));
+        }
+        if (!options.analyticsGenerationId) {
+          addHostReason(reason('backend-analytics-generation-unavailable', { processId: backend.backendProcessId }));
+        } else if (backend.analyticsGenerationId !== options.analyticsGenerationId) {
+          addHostReason(reason('backend-analytics-generation-mismatch', { processId: backend.backendProcessId }));
+        }
+      }
+    }
+    const status = hostReasons.length === 0
+      ? 'reconciled'
+      : host.state === 'stopped' || host.state === 'unsupported' ? 'unsupported' : 'unknown';
+    records.push({
+      hostInstanceId: host.hostInstanceId,
+      processId: host.processId,
+      state: host.state,
+      status,
+      ...(lease ? { runtimeGeneration: lease.runtimeGeneration } : {}),
+      ...(backend ? {
+        backendProcessId: backend.backendProcessId,
+        backendGeneration: backend.backendGeneration,
+      } : {}),
+      reasons: dedupeReasons(hostReasons),
+    });
+  }
+
+  const unregisteredRuntimeLeases = leaseResult.leases.filter((lease) => {
+    return sameRuntimeIdentity(lease.identity, options.runtimeIdentity) && !hostsByPid.has(lease.processId);
+  });
+  const unregisteredBackendOwners = processResult.backendOwners.filter((backend) => !hostsByPid.has(backend.hostProcessId));
+  const allReasons = dedupeReasons(reasons);
+  return {
+    workspaceId: options.workspaceId,
+    observedAtMs: Date.now(),
+    registryComplete: registryResult.complete,
+    runtimeLeasesComplete: leaseResult.complete,
+    processOwnersComplete: processResult.complete,
+    hosts: records,
+    unregisteredRuntimeLeases,
+    unregisteredBackendOwners,
+    reasons: allReasons,
+    complete: registryResult.complete && leaseResult.complete && processResult.complete
+      && allReasons.length === 0,
+  };
+}

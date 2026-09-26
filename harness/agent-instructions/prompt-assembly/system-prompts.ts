@@ -1,9 +1,9 @@
-import type { SystemPromptEntry } from '../../../extension/src/shared/protocol';
-import { ASK_USER_TOOL_NAME } from '../../../shared/autonomous-mode.js';
-import { SUBAGENT_TOOL_NAME } from '../../../shared/subagent-provider-policy.js';
+import type { SystemPromptEntry } from '../../agent-processes/lib/rpc/session-events.js';
+import { ASK_USER_TOOL_NAME } from '../../tools/catalog/tool-names.js';
+import { SUBAGENT_TOOL_NAME } from '../../model-providers/retry-and-failover/subagent-provider-policy.js';
 import { contextFilePathKey, prepareContextFiles } from './context-files';
-import type { ActiveModelInfo } from '../../../extension/src/backend/session-metadata';
-import type { SdkBuildSystemPromptOptions, SdkContextFile, SdkSkill, SdkToolInfo } from '../../../extension/src/backend/sdk';
+import type { ActiveModelInfo } from '../../model-providers/catalog/model-catalog';
+import type { SdkBuildSystemPromptOptions, SdkContextFile, SdkSkill, SdkToolInfo } from '../../agent-processes/lib/sdk-integration/sdk';
 
 /** Maximum characters for system prompt and tool description summaries. */
 const SUMMARY_MAX_LENGTH = 80;

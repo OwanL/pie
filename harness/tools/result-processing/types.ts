@@ -1,6 +1,6 @@
 // Internal types for the tool-result-pruner extension.
 //
-// See docs/TOOL-RESULT-PRUNING.md for the design. The pipeline includes both
+// See docs/contracts/TOOL-RESULT-PRUNING.md for the design. The pipeline includes both
 // the lossless tier (ANSI strip, trailing-whitespace trim, blank-run collapse,
 // JSON minify) and lossy-recoverable rules backed by the recall stash.
 

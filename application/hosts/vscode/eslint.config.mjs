@@ -24,7 +24,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ['application/hosts/vscode/**/*.{ts,tsx,cts,mts}', 'extension/{src,test}/**/*.{ts,tsx,cts,mts}', 'harness/agent-instructions/**/*.{ts,tsx,cts,mts}'],
+    files: ['application/hosts/vscode/**/*.{ts,tsx,cts,mts}', 'extension/{src,test}/**/*.{ts,tsx,cts,mts}', 'application/{frontend,backend,hosts,lib}/**/*.{ts,tsx,cts,mts}', 'harness/agent-instructions/**/*.{ts,tsx,cts,mts}', 'harness/tool-and-skill-selection/**/*.{ts,tsx,cts,mts}', 'harness/tools/**/*.{ts,tsx,cts,mts}', 'harness/model-providers/**/*.{ts,tsx,cts,mts}', 'harness/session-storage/**/*.{ts,tsx,cts,mts}', 'harness/agent-processes/**/*.{ts,tsx,cts,mts}', 'test/integration/**/*.{ts,tsx,cts,mts}', 'analytics/**/*.{ts,tsx,cts,mts}'],
     extends: [js.configs.recommended, ...tseslint.configs.recommended],
     languageOptions: {
       ecmaVersion: 'latest',
@@ -54,7 +54,7 @@ export default tseslint.config(
   },
 
   {
-    files: ['extension/test/**/*.{ts,tsx,cts,mts}'],
+    files: ['extension/test/**/*.{ts,tsx,cts,mts}', 'application/frontend/test/**/*.{ts,tsx,cts,mts}', 'application/backend/test/**/*.{ts,tsx,cts,mts}', 'application/backend/*/test/**/*.{ts,tsx,cts,mts}', 'application/hosts/*/test/**/*.{ts,tsx,cts,mts}', 'application/hosts/**/test/**/*.{ts,tsx,cts,mts}', 'application/lib/*/test/**/*.{ts,tsx,cts,mts}', 'application/lib/**/test/**/*.{ts,tsx,cts,mts}'],
     rules: {
       '@typescript-eslint/no-unused-vars': 'off',
     },
@@ -65,7 +65,7 @@ export default tseslint.config(
   // (./events, ./effects, ./commands) and from ../../shared/. Never from
   // store/, session-service/, sidebar/, or extension-host.
   {
-    files: ['extension/src/host/core/**/*.ts'],
+    files: ['extension/src/host/core/**/*.ts', 'application/backend/conversation-state/**/*.ts'],
     rules: {
       'no-restricted-imports': ['error', {
         patterns: [
@@ -94,15 +94,15 @@ export default tseslint.config(
     },
   },
 
-  // ─── Architectural boundary: webview/ is passive ────────────────────────
-  // The webview may only import from shared/ (protocol types). It must never
-  // reach into any host-side module.
+  // ─── Architectural boundary: frontend/ is passive ──────────────────────
+  // The webview frontend may only import from application/lib and residual
+  // shared facades. It must never reach into host-side modules.
   {
-    files: ['extension/src/webview/**/*.{ts,tsx}'],
+    files: ['application/frontend/**/*.{ts,tsx}'],
     rules: {
       'no-restricted-imports': ['error', {
         patterns: [
-          { group: ['**/host/*', '**/host/**'], message: 'webview/ must not import host-side code — it is a passive renderer of projected state.' },
+          { group: ['**/host/*', '**/host/**'], message: 'frontend/ must not import host-side code — it is a passive renderer of projected state.' },
         ],
       }],
     },
@@ -114,8 +114,10 @@ export default tseslint.config(
   {
     files: [
       'extension/src/shared/**/*.ts',
+      'application/lib/protocol/**/*.ts',
+      'application/lib/validation/**/*.ts',
       'extension/src/host/store/index.ts',
-      'extension/src/webview/panel/hooks/use-host-sync.ts',
+      'application/frontend/lib/hooks/use-host-sync.ts',
     ],
     rules: {
       '@typescript-eslint/no-explicit-any': 'error',

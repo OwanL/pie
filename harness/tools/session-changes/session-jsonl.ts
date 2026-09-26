@@ -4,7 +4,7 @@
  *
  * Re-derives file changes from either the current runtime entries or an
  * explicitly requested session JSONL through the SAME per-tool-call core the
- * host uses (shared/file-change-derivation). Runtime entries are preferred for
+ * host uses (lib/file-changes/derivation). Runtime entries are preferred for
  * default self-review so in-memory sessions and the latest unsaved entries are
  * visible; the JSONL path remains available for explicit review and lightweight
  * contexts without the runtime entry API.
@@ -42,7 +42,7 @@ import {
   deriveFileChangesFromToolCall,
   deriveFileChangesFromSubagentResult,
   accumulateFileChange,
-} from '../../../extension/src/shared/file-change-derivation.js';
+} from '../../../lib/file-changes/derivation.js';
 
 // ─── Minimal structural types for the JSONL entries we read ────────────────
 //

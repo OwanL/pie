@@ -1,6 +1,6 @@
 # Decision Record Format
 
-When a grilling session produces a decision worth recording, add it to `docs/` — either in an existing doc (ARCHITECTURE.md, STATE_CONTRACT.md) if it fits, or as a new file if it's a standalone concern.
+When a grilling session produces a decision worth recording, add it to `docs/` — either in an existing doc (`docs/architecture/ARCHITECTURE.md`, `docs/contracts/STATE_CONTRACT.md`) if it fits, or as a new file in the category identified by `docs/INDEX.md`.
 
 ## Template
 
@@ -21,7 +21,7 @@ Only include these when they add genuine value. Most records won't need them.
 
 ## Where to put it
 
-- **Fits an existing doc** (ARCHITECTURE.md, STATE_CONTRACT.md) → add it there under the relevant section
+- **Fits an existing doc** (`docs/architecture/ARCHITECTURE.md`, `docs/contracts/STATE_CONTRACT.md`) → add it there under the relevant section
 - **Standalone concern** → create a new file in `docs/` with a descriptive name (e.g. `PRUNING-DESIGN.md`)
 - **Convention or terminology** → add it to `AGENTS.md`
 

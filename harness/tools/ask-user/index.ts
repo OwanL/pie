@@ -1,7 +1,8 @@
 import type { ExtensionAPI } from '@mariozechner/pi-coding-agent';
 import { runAsk } from './ask.js';
 import { askUserSchema } from './types.js';
-import { ASK_USER_TOOL_NAME, isAutonomousModeEnabled } from '../../../shared/autonomous-mode.js';
+import { ASK_USER_TOOL_NAME } from '../catalog/tool-names.js';
+import { isAutonomousModeEnabled } from '../../tool-and-skill-selection/settings/autonomous-mode.js';
 
 /** Honor the host's per-extension toggle (PIE_EXTENSION_TOGGLES_JSON, keyed by
  *  extension id). Mirrors skill-pruner's isExtensionDisabledByToggle so the

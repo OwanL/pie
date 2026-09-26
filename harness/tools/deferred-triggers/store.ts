@@ -25,11 +25,9 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
+import { TRIGGERS_DIR_ENV, TRIGGERS_FILE } from './sidecar-contract.js';
 import { validateWakeConditions } from './wake-conditions.js';
 import type { ActiveTrigger, TriggerOp, TriggerSpec } from './types.js';
-
-const TRIGGERS_DIR_ENV = 'PIE_TRIGGERS_DIR';
-const TRIGGERS_FILE = 'triggers.jsonl';
 
 function getTriggersFilePath(): string | undefined {
   const dir = process.env[TRIGGERS_DIR_ENV]?.trim();

@@ -8,7 +8,7 @@
 
 import { resolvePathForComparison, isUnderCwd } from "../../harness/tools/execution-safety/paths.js";
 import { analyzeRecursiveRm, maskShellData, parseShellInvocations, stripHeredocBodies, type ShellInvocation } from "../../harness/tools/execution-safety/shell.js";
-import { isAutonomousModeEnabled } from "../../shared/autonomous-mode.js";
+import { isAutonomousModeEnabled } from "../../harness/tool-and-skill-selection/settings/autonomous-mode.js";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 export const DEFAULT_BASH_TIMEOUT_SECONDS = 600;

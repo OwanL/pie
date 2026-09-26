@@ -1,2 +1,2 @@
-// Keep Pi discovery and extension identity stable while implementation lives under tools/.
-export { default } from '../../tools/playwright/index.js';
+// Keep Pi discovery and extension identity stable while implementation lives under harness/tools/.
+export { default } from '../../harness/tools/playwright/index.js';

@@ -1,5 +1,5 @@
 // Pure-ish git helper: collect repo-relative changed/untracked file paths.
-// Shared by scripts/run-affected-tests.mjs (the live `npm test` / `test:changed`
+// Shared by scripts/verification/run-affected-tests.mjs (the live `npm test` / `test:changed`
 // entry point) so the git-diff logic lives in one tested lib module rather than
 // a bespoke CLI wrapper.
 

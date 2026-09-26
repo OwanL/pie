@@ -33,8 +33,8 @@
 import type { ContextEvent, ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { getAgentDir } from '@earendil-works/pi-coding-agent';
 
-import { projectContextHandler } from './src/handler.js';
-import { loadImagePolicy } from './src/policy.js';
+import { projectContextHandler } from '../../harness/model-providers/request-validation/handler.js';
+import { loadImagePolicy } from '../../harness/model-providers/request-validation/policy.js';
 
 function disabled(): boolean {
   const raw = process.env['PIE_EXTENSION_TOGGLES_JSON'];

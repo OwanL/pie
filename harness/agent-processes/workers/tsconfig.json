@@ -1,0 +1,25 @@
+{
+  "//": "Test/tsx config for the agent-processes workers owner. The session-opened payload builder reaches `yaml` through the backend session-metadata → subagent-profiles chain, whose dependency is installed only under application/hosts/vscode; these paths alias tsx at that same copy. Typecheck uses tsconfig.release.json.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": false,
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": ["node"],
+    "baseUrl": ".",
+    "paths": {
+      "@earendil-works/pi-ai": ["../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/index.js"],
+      "@mariozechner/pi-ai": ["../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/index.js"],
+      "@earendil-works/pi-coding-agent": ["../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/dist/index.js"],
+      "@mariozechner/pi-coding-agent": ["../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/dist/index.js"],
+      "yaml": ["../../../application/hosts/vscode/node_modules/yaml/dist/index.js"]
+    }
+  },
+  "include": ["./**/*.ts"],
+  "exclude": ["node_modules"]
+}

@@ -1,0 +1,2086 @@
+import * as fsSync from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+
+import {
+  createPieSystemPromptBuilder,
+  installPieSystemPromptRebuildGuard,
+} from '../../agent-instructions/prompt-assembly/pie-harness-prompt.js';
+import {
+  EXTENSION_TOGGLES_ENV,
+  PROVIDER_TOGGLES_ENV,
+  SUBAGENT_PROVIDER_DEFAULTS_ENV,
+  SUBAGENT_PROVIDER_TOGGLES_ENV,
+  SUBAGENT_ROUTE_AROUND_SATURATED_PROVIDERS_ENV,
+  SUBAGENT_FALLBACK_ON_PROVIDER_FAILURE_ENV,
+  SUBAGENT_BUCKETS_ENV,
+  NESTED_ALLOWED_BUCKETS_ENV,
+  SUBAGENT_BUCKET_CAN_SPAWN_ENV,
+} from '../lib/rpc/settings.js';
+import { HISTORY_COMPACTION_ENV } from '../../session-storage/settings/history-compaction.js';
+import type { DetailResult, LazyDetailRef, ChatMessage } from '../lib/rpc/message-contract.js';
+import type { ModelInfo, ModelSettings } from '../../model-providers/catalog/model-contract.js';
+import type { RequestEnvelope } from '../lib/rpc/wire.js';
+import type { SessionOpenedPayload, TranscriptPageDirection, TranscriptPagePayload } from '../lib/rpc/session-events.js';
+import { deduplicateToolCallResultsForTransport } from '../../session-storage/transcripts/message-parts.js';
+import { createOperationalIncident } from '../lib/rpc/incident-payload.js';
+import {
+  STORAGE_CUTOFF_AUTHORIZATION_ENV,
+  STORAGE_CUTOFF_AUTHORIZATION_VALUE,
+} from '../../../analytics/authority/storage-cutoff-authorization.js';
+import { compactDurableMessageForTransport, findDurableDetail } from '../../session-storage/transcripts/lazy-details';
+import { LIVE_PIPELINE_LIMITS } from '../lib/rpc/live-pipeline.js';
+import { deriveContextUsageEvidenceFromBranch } from '../../session-storage/transcripts/context-usage';
+import { projectRegistryModels, resolveActiveModel } from '../../model-providers/catalog/model-catalog';
+import { ExtensionUIBridge } from './extension-ui-bridge';
+import { installAuxiliaryLlmMeter } from './auxiliary-llm-meter';
+import { handleBackendRequest } from '../coordinator/request-handler.js';
+import type { ModelSettingsUnsetKey } from '../coordinator/request-handler-shared.js';
+import { buildSessionCapabilities, hasBillableSessionActivity } from './session-activity';
+import { createRuntimeFactory, ServiceLoadingGate } from './runtime-factory';
+import { createBackendTools } from '../coordinator/backend-tools.js';
+import { subagentSettlementPricingResolver } from '../../model-providers/pricing/subagent-settlement-pricing';
+import { handleSdkSessionEvent } from './session-event-handler';
+import {
+  buildSessionOpenedPayload as buildSessionOpenedPayloadHelper,
+  ensureDisplayTranscriptCache,
+} from './session-opened.ts';
+import { normalizeDanglingTranscript } from '../../session-storage/transcripts/normalize-dangling-transcript.ts';
+import { AUTONOMOUS_MODE_ENV } from '../../tool-and-skill-selection/settings/autonomous-mode.js';
+import { ASK_USER_TOOL_NAME } from '../../tools/catalog/tool-names.js';
+import { buildPagedTranscriptWindow } from '../../session-storage/transcripts/transcript-window';
+import type {
+  SdkModule,
+  SdkSessionEvent,
+  SdkSessionOwnershipAdapter,
+  SdkSessionOwnershipReservation,
+  SdkSystemPromptModule,
+  SdkSessionReplacementIntent,
+  SdkSessionTransferAuthorization,
+  SdkSessionWriteLease,
+  SdkWorkerOwnershipIdentity,
+} from '../lib/sdk-integration/sdk';
+import { loadSdk, loadSdkInternalModule } from '../lib/sdk-integration/sdk';
+import type { SdkPatchIdentity } from '../lib/sdk-integration/sdk-patch-barrier';
+import type { SessionContext, SessionContextCreationReason, SessionPromptState } from '../coordinator/server-types.js';
+import {
+  createSessionManagerFence,
+  createSessionManagerFenceRegistry,
+  type MutableSdkSessionManager,
+  type SessionManagerFence,
+} from '../../session-storage/ownership/session-manager-fence';
+import { ProviderGate } from '../../model-providers/concurrency/provider-gate';
+import { readSystemPromptTogglesForSession, writeSystemPromptTogglesForSession } from '../../session-storage/settings/session-settings-store';
+import {
+  buildSessionSystemPrompts,
+  buildToggledSystemPrompt,
+  captureOriginalSystemPromptOptions,
+  installAutonomousModeToolGuard,
+  installMcpToolGuard,
+  installSubagentPolicyToolGuard,
+  installSystemPromptToggleRebuildGuard,
+  installSystemPromptToolToggleGuard,
+  markDisabledEntries,
+  MCP_TOOL_NAMES,
+  normalizePromptText,
+  subagentPolicyActiveToolUpdate,
+  TOOLS_ENTRY_ID,
+} from '../../agent-instructions/prompt-assembly/system-prompts';
+import type { DetailCursor, DetailPageRef, LiveSubagentDetailAddress } from '../lib/rpc/subagent-detail.js';
+import type { WorkerRuntimeOperation, WorkerJsonObject, WorkerJsonValue } from '../lib/rpc/worker-protocol.js';
+import { WORKER_IPC_MAX_ORDINARY_FRAME_BYTES } from '../lib/rpc/worker-protocol.js';
+import { WORKER_IPC_DEFAULT_LIFECYCLE_QUEUE_BYTES } from '../lib/rpc/worker-frame-io.js';
+import { WorkerServer } from '../lib/rpc/worker-server.js';
+import { installWorkerProviderNetworkLease } from './worker-provider-network-lease';
+import { WorkerLiveDetailStore } from './worker-live-detail-store';
+import {
+  observeProviderIncidents,
+  providerIncidentCode,
+  type ProviderIncident,
+} from '../../model-providers/traffic-observation/provider-incident';
+import { observeProviderTransport, type ProviderTransportObservation } from '../../model-providers/traffic-observation/provider-progress-bus';
+import { resolvePieDataPaths } from '../../../lib/data-root/pie-data-root.js';
+import {
+  SUBAGENT_TOOL_NAME,
+  subagentProvidersAllDisabled,
+} from '../../model-providers/retry-and-failover/subagent-provider-policy.js';
+import {
+  createSessionLifecycleWriterAdmission,
+  type SessionLifecycleWriterAdmission,
+} from '../../../analytics/authority/session-lifecycle-writer-store.js';
+import { SessionLifecycleStore } from '../../session-storage/lifecycle/session-lifecycle-store.js';
+import { SessionFilesystemMutationBarrier } from '../../session-storage/lifecycle/session-filesystem-lifecycle.js';
+import {
+  AnalyticsWorkerTransport,
+  type AnalyticsTransportDisposalReport,
+  type WorkerAnalyticsActivation,
+} from './analytics-worker-transport.js';
+
+export interface WorkerRuntimePromotionPayload {
+  sdkPath: string;
+  agentDir: string;
+  startupCwd: string;
+  sessionDir: string;
+  sessionPath: string;
+  creationReason: 'new' | 'resume';
+  writeLease: WorkerJsonObject;
+  openedPayload: WorkerJsonObject;
+  modelSettings: WorkerJsonObject;
+  analytics?: WorkerAnalyticsActivation;
+}
+
+export interface WorkerRuntimeHostOptions {
+  server: WorkerServer;
+  owner: SdkWorkerOwnershipIdentity;
+  patchIdentity: SdkPatchIdentity;
+}
+
+/**
+ * Wire headroom reserved for the frame identity fields that surround the
+ * terminal message projection (frame base, event wrapper, live-pipeline
+ * envelope). The projection budget is the ordinary-frame ceiling minus this
+ * margin, so a bounded `turn.terminal` can never be rejected by the writer.
+ */
+const WORKER_IPC_TERMINAL_MESSAGE_MARGIN = 24 * 1024;
+const WORKER_IPC_TERMINAL_MESSAGE_BUDGET =
+  WORKER_IPC_MAX_ORDINARY_FRAME_BYTES - WORKER_IPC_TERMINAL_MESSAGE_MARGIN;
+/** Same ceiling headroom for a single text/reasoning delta envelope. */
+const WORKER_IPC_DELTA_BUDGET = WORKER_IPC_TERMINAL_MESSAGE_BUDGET;
+/**
+ * Budget for a `message.finished` terminal message projected onto the worker
+ * IPC lifecycle lane. The lane reserves 2 MiB; a single frame may exceed the
+ * lane's reserved capacity only when the lane is otherwise empty, but a
+ * pathological message (e.g. a huge subagent tool result) can still be
+ * rejected and kill the worker. Reserve headroom for the frame identity +
+ * event wrapper so the bounded message always fits.
+ */
+const WORKER_IPC_LIFECYCLE_MESSAGE_MARGIN = 24 * 1024;
+const WORKER_IPC_LIFECYCLE_MESSAGE_BUDGET =
+  WORKER_IPC_DEFAULT_LIFECYCLE_QUEUE_BYTES - WORKER_IPC_LIFECYCLE_MESSAGE_MARGIN;
+
+/**
+ * Focused per-root execution owner. It deliberately does not embed or start a
+ * BackendServer: one host owns exactly one SDK runtime, SessionContext,
+ * subscription, ExtensionUIBridge, live accumulator state, and command FIFO.
+ */
+type SessionManagerFenceRecord = {
+  manager: MutableSdkSessionManager;
+  fence: SessionManagerFence;
+  unregister: () => void;
+};
+
+export class WorkerRuntimeHost {
+  private sdk?: SdkModule;
+  private context?: SessionContext;
+  private promotion?: Promise<void>;
+  private disposed = false;
+  private commandTail = Promise.resolve();
+  private extensionIncidentSequence = 0;
+  private settings: ModelSettings = { defaultModel: '', defaultThinkingLevel: 'high' };
+  private openedPayload?: SessionOpenedPayload;
+  /** A coordinator-owned duplicate publishes the destination only after its
+   * create ledger has recorded the durable path. Suppress the SDK rebind's
+   * ordinary replacement event so it cannot incorrectly replace the source
+   * tab before that publication. */
+  private suppressNextReplacementOpened = false;
+  private agentDir = '';
+  private startupCwd = '';
+  private sessionDir = '';
+  private uninstallNetworkLease?: () => void;
+  private stopProviderIncidentObserver?: () => void;
+  private stopProviderProgressObserver?: () => void;
+  private readonly providerAttemptOwners = new Map<string, {
+    requestId: string;
+    turnSequence: number;
+    retryId?: string;
+  }>();
+  private currentLease?: SdkSessionWriteLease;
+  private readonly syncRevisions = new Map<string, number>();
+  private readonly syncPayloads = new Map<string, WorkerJsonObject>();
+  private syncedAuthPath?: string;
+  private syncedAuthFingerprint?: string;
+  /** Configured catalog authority snapshot consumed from coordinator sync. */
+  private syncedCatalogModels?: ModelInfo[];
+  private readonly committedAuthorizations = new Map<string, SdkSessionTransferAuthorization>();
+  private readonly gate = new ServiceLoadingGate();
+  private systemPromptModule?: Promise<SdkSystemPromptModule>;
+  private autonomousMode = false;
+  private mcpEnabled = true;
+  /** Effective all-unchecked subagent provider policy for the hosted session:
+   *  true while every provider in the session's toggle surface is unchecked
+   *  (the webview's "don't use subagents" signal). */
+  private subagentPolicyDisabled = false;
+  private readonly detailStore: WorkerLiveDetailStore;
+  private lifecycleStore?: SessionLifecycleStore;
+  private analyticsWriterAdmission?: SessionLifecycleWriterAdmission;
+  private lifecycleBarrier?: SessionFilesystemMutationBarrier;
+  private lifecycleSessionsRoot?: string;
+  private analyticsTransport?: AnalyticsWorkerTransport;
+  private disposalPromise?: Promise<AnalyticsTransportDisposalReport | undefined>;
+  /** Every SDK manager in this worker is admitted through this registry. It is
+   * revoked before runtime disposal so replacement/retired managers fail
+   * closed even if a late SDK callback still holds their object. */
+  private readonly sessionManagerFenceRegistry = createSessionManagerFenceRegistry();
+  private readonly sessionManagerFenceRecords = new WeakMap<object, SessionManagerFenceRecord>();
+
+  constructor(private readonly options: WorkerRuntimeHostOptions) {
+    this.detailStore = new WorkerLiveDetailStore({
+      emit: (frame, onSettled) => this.options.server.sendDetailFrame(frame, onSettled),
+      onDrain: (listener) => this.options.server.onDetailDrain(listener),
+    });
+  }
+
+  subscribeDetail(requestId: string, subscriptionId: string, address: LiveSubagentDetailAddress, cursor: DetailCursor | undefined, maxPageBytes: number): void {
+    this.detailStore.subscribe(requestId, subscriptionId, address, cursor, maxPageBytes);
+  }
+
+  unsubscribeDetail(requestId: string, subscriptionId: string): void {
+    this.detailStore.unsubscribe(requestId, subscriptionId);
+  }
+
+  fetchDetail(requestId: string, subscriptionId: string, address: LiveSubagentDetailAddress, ref: DetailPageRef, maxPageBytes: number): void {
+    this.detailStore.fetch(requestId, subscriptionId, address, ref, maxPageBytes);
+  }
+
+  acknowledgeAnalytics(value: unknown): void {
+    this.analyticsTransport?.acknowledge(value);
+  }
+
+  applySync(domain: string, revision: number, payload: WorkerJsonObject): void {
+    const current = this.syncRevisions.get(domain) ?? 0;
+    if (!Number.isSafeInteger(revision) || revision <= current) throw new Error(`Stale worker sync revision for ${domain}.`);
+    this.syncRevisions.set(domain, revision);
+    this.syncPayloads.set(domain, payload);
+    if (domain === 'settings' && payload.values && typeof payload.values === 'object' && !Array.isArray(payload.values)) {
+      // Settings snapshots are complete model-settings values. Replace rather
+      // than merge so an authoritative provider deletion cannot resurrect the
+      // worker's older provider from local state.
+      this.settings = modelSettingsFromWorkerObject(payload.values);
+    } else if (domain === 'catalog' && Array.isArray(payload.models)) {
+      // Consume the configured catalog authority snapshot. It is the fallback
+      // for `models.list` when the runtime registry is unavailable; the
+      // coordinator remains the authority and never replaces it with the
+      // worker's runtime discovery reports.
+      this.syncedCatalogModels = payload.models as unknown as ModelInfo[];
+    } else if (domain === 'auth') {
+      if (typeof payload.authPath !== 'string' || typeof payload.fingerprint !== 'string') throw new Error('Invalid auth sync payload.');
+      this.syncedAuthPath = payload.authPath;
+      this.syncedAuthFingerprint = payload.fingerprint;
+    } else if (domain === 'runtimePrefs' && payload.values && typeof payload.values === 'object' && !Array.isArray(payload.values)) {
+      this.applyRuntimePrefs(payload.values as WorkerJsonObject);
+    } else if (domain === 'providerPolicy' && payload.providers && typeof payload.providers === 'object' && !Array.isArray(payload.providers)) {
+      ProviderGate.getInstance()?.applyUserOverrides(payload.providers as never);
+    }
+  }
+
+  async promote(payload: WorkerRuntimePromotionPayload): Promise<void> {
+    if (this.disposed) throw new Error('Worker runtime host is disposed.');
+    if (this.promotion) return await this.promotion;
+    this.promotion = this.promoteOnce(payload);
+    return await this.promotion;
+  }
+
+  command(operation: WorkerRuntimeOperation, payload: WorkerJsonObject, publicRequestId: string): Promise<WorkerJsonValue> {
+    if (operation === 'session.managerFence') {
+      // This is a control-plane fence, not a session command. Revoke before
+      // joining the ordinary FIFO so a long provider command cannot keep new
+      // persistence mutations admissible while the authenticated host waits.
+      this.sessionManagerFenceRegistry.revoke();
+      const params = (payload.params && typeof payload.params === 'object' && !Array.isArray(payload.params))
+        ? payload.params
+        : payload;
+      const timeoutMs = typeof params.timeoutMs === 'number' ? params.timeoutMs : undefined;
+      return this.sessionManagerFenceRegistry.waitForIdle(timeoutMs).then((activeWriterCount) => {
+        if (activeWriterCount !== 0) throw new Error(`Session manager writers did not drain (${activeWriterCount} remain).`);
+        return asWorkerJson({ admissionRevoked: true, writersDrained: true, activeWriterCount: 0 });
+      });
+    }
+    const owned = this.commandTail.then(async () => {
+      if (!this.context || !this.sdk) throw new Error('Worker runtime is not promoted.');
+      const params = (payload.params && typeof payload.params === 'object' && !Array.isArray(payload.params))
+        ? payload.params
+        : payload;
+      if (operation === 'test.extensionCommand') {
+        if (process.env.PIE_PHASE2_PACKAGE_SMOKE !== '1' || typeof params.command !== 'string') {
+          throw new Error('Extension command dispatch is available only to the packaged worker smoke.');
+        }
+        await this.context.session.prompt(params.command, { source: 'rpc' });
+        return asWorkerJson({ sessionPath: this.context.sessionPath });
+      }
+      if (operation === 'session.duplicateHot') {
+        const sourceSessionPath = typeof params.sessionPath === 'string' ? params.sessionPath : undefined;
+        if (!sourceSessionPath || !sameSessionPath(sourceSessionPath, this.context.sessionPath)) {
+          throw new Error('Hot duplicate source does not match the worker lease.');
+        }
+        const sourceContext = this.context;
+        const sourcePath = sourceContext.sessionPath;
+        const duplicate = async () => {
+          const branch = sourceContext.session.sessionManager.getBranch();
+          const leaf = branch.at(-1) as { id?: unknown } | undefined;
+          this.suppressNextReplacementOpened = true;
+          try {
+            const result = typeof leaf?.id === 'string'
+              ? await sourceContext.runtime.fork?.(leaf.id, { position: 'at' })
+              : await sourceContext.runtime.newSession?.({ parentSession: sourcePath });
+            if (!result || result.cancelled) throw new Error('Hot session duplicate was cancelled before commit.');
+            const destinationContext = this.context;
+            if (!destinationContext || sameSessionPath(destinationContext.sessionPath, sourcePath)) {
+              throw new Error('Hot session duplicate did not activate its destination.');
+            }
+            return asWorkerJson({ sessionPath: destinationContext.sessionPath });
+          } finally {
+            this.suppressNextReplacementOpened = false;
+          }
+        };
+        const sourceSessionId = sourceContext.session.sessionManager.getSessionId?.();
+        return this.lifecycleBarrier && typeof sourceSessionId === 'string' && sourceSessionId
+          ? await this.lifecycleBarrier.runWriteMutationAsync(sourceSessionId, 'session.duplicateHot', duplicate)
+          : await this.withAnalyticsWriterAdmission(duplicate);
+      }
+      if (operation === 'session.snapshot') {
+        const sessionPath = typeof params.sessionPath === 'string' ? params.sessionPath : undefined;
+        if (!sessionPath || !sameSessionPath(sessionPath, this.context.sessionPath)) {
+          throw new Error('Hot snapshot path does not match the worker lease.');
+        }
+        const transcript = params.transcript === 'skip' || params.transcript === 'tail'
+          ? params.transcript
+          : undefined;
+        const opened = await this.buildOpenedPayload(
+          sessionPath,
+          typeof params.selectionToken === 'string' ? params.selectionToken : undefined,
+          typeof params.operationId === 'string' ? params.operationId : undefined,
+          Number.isSafeInteger(params.operationAttempt) ? params.operationAttempt as number : undefined,
+          transcript,
+        );
+        // The preceding duplicate rebind temporarily records replacement
+        // ancestry in the worker cache. The coordinator publishes this as a
+        // sibling tab, so all later worker refreshes must inherit the duplicate
+        // operation metadata rather than replaying `replacesSessionPath`.
+        this.openedPayload = opened;
+        return asWorkerJson(opened);
+      }
+      return asWorkerJson(await handleBackendRequest(this.requestDeps(), {
+        id: publicRequestId,
+        method: operation,
+        params,
+      } as RequestEnvelope));
+    });
+    this.commandTail = owned.then(() => undefined, () => undefined);
+    return owned;
+  }
+
+  async interrupt(): Promise<{ interrupted: boolean; settled?: boolean; alreadyStopped?: boolean }> {
+    const context = this.context;
+    if (!context) return { interrupted: false, alreadyStopped: true };
+    const running = hasBillableSessionActivity(context);
+    const interruptedRequest = context.activeRequest;
+    const interruptedExtensionCommand = context.pendingExtensionCommand;
+    context.uiBridge?.cancelAll();
+    context.session.clearQueue();
+    for (const [index, operationId] of (context.queuedOperationIds ?? []).entries()) {
+      if (!operationId) continue;
+      context.sendOperationLedger?.markFailed(
+        operationId,
+        'MESSAGE_SEND_QUEUE_CLEARED',
+        'The queued message was cancelled by Stop before delivery.',
+        'cancelled',
+      );
+      this.emit('message.aborted', {
+        requestId: `queued:${operationId}`,
+        operationId,
+        ...(context.queuedOperationAttempts?.[index] !== undefined
+          ? { operationAttempt: context.queuedOperationAttempts[index] } : {}),
+        sessionPath: context.sessionPath,
+        ...(context.queuedLocalIds?.[index] ? { localId: context.queuedLocalIds[index] } : {}),
+        outcome: 'cancelled',
+        userInitiated: true,
+        reason: 'The queued message was cancelled by Stop before delivery.',
+      });
+    }
+    context.queuedLocalIds = [];
+    context.queuedOperationIds = [];
+    context.queuedOperationAttempts = [];
+    if (!running) return { interrupted: false, alreadyStopped: true };
+    if (context.manualCompactionRequest) context.manualCompactionRequest.cancelled = true;
+    if (context.activeRequest) context.activeRequest.aborted = true;
+    context.session.abortCompaction?.();
+    context.session.abortBranchSummary?.();
+    context.session.abortBash?.();
+    context.session.abortRetry?.();
+    await context.session.abort();
+    // Some SDK adapters resolve abort without producing agent_end for a slash
+    // command that never started an agent turn. Close that still-owned early
+    // ack locally; normal agent turns remain on the SDK event lifecycle.
+    if (interruptedExtensionCommand
+      && context.pendingExtensionCommand === interruptedExtensionCommand
+      && (!interruptedRequest || context.activeRequest === interruptedRequest)
+      && (!interruptedRequest
+        || (interruptedRequest.messageIndex === 0
+          && !interruptedRequest.lastAssistantMessageId
+          && !interruptedRequest.currentMessageId))) {
+      if (interruptedRequest) {
+        interruptedRequest.pendingDurableToolTerminals?.clear();
+      }
+      context.sendOperationLedger?.markFailed(
+        interruptedRequest?.operationId,
+        'MESSAGE_OPERATION_CANCELLED',
+        'The message operation was interrupted before starting an agent turn.',
+        'cancelled',
+      );
+      this.emit('message.aborted', {
+        requestId: interruptedExtensionCommand.requestId,
+        ...(interruptedRequest?.operationId ? { operationId: interruptedRequest.operationId } : {}),
+        sessionPath: interruptedExtensionCommand.sessionPath,
+        outcome: 'cancelled',
+        userInitiated: true,
+        reason: 'Extension command was interrupted before starting an agent turn.',
+      });
+      context.pendingExtensionCommand = undefined;
+      context.activeRequest = undefined;
+      this.emitBusyChanged(context, false);
+    }
+    // Some provider/compaction abort paths settle without a final agent_end.
+    // Match the public interrupt reconciliation so a re-armed continuation
+    // request cannot remain attached to an otherwise-idle isolated worker.
+    const reconcileOwnedIdleRequest = () => {
+      if (!interruptedRequest
+          || context.activeRequest !== interruptedRequest
+          || hasBillableSessionActivity({ ...context, activeRequest: undefined })) return;
+      const preCommit = interruptedRequest.messageIndex === 0
+        && !interruptedRequest.lastAssistantMessageId
+        && !interruptedRequest.currentMessageId
+        && interruptedRequest.semanticStarted !== true;
+      if (preCommit && interruptedRequest.operationId) {
+        context.sendOperationLedger?.markFailed(
+          interruptedRequest.operationId,
+          'MESSAGE_OPERATION_CANCELLED',
+          'The message operation was cancelled by Stop before it started.',
+          'cancelled',
+        );
+        interruptedRequest.terminalWithoutMessageEmitted = true;
+        this.emit('message.aborted', {
+          requestId: interruptedRequest.id,
+          operationId: interruptedRequest.operationId,
+          ...(interruptedRequest.operationAttempt !== undefined ? { operationAttempt: interruptedRequest.operationAttempt } : {}),
+          sessionPath: context.sessionPath,
+          outcome: 'cancelled',
+          userInitiated: true,
+          reason: 'The send was cancelled by Stop before it started.',
+        });
+      } else if (interruptedRequest.semanticStarted === true) {
+        this.emit('message.aborted', {
+          requestId: interruptedRequest.id,
+          ...(interruptedRequest.operationId ? { operationId: interruptedRequest.operationId } : {}),
+          ...(interruptedRequest.operationAttempt !== undefined ? { operationAttempt: interruptedRequest.operationAttempt } : {}),
+          sessionPath: context.sessionPath,
+          messageId: interruptedRequest.lastAssistantMessageId
+            ?? interruptedRequest.currentMessageId
+            ?? interruptedRequest.liveTurnAccumulator?.checkpoint().turn.canonicalMessageId
+            ?? `${interruptedRequest.id}:1`,
+          userInitiated: true,
+        });
+      }
+      interruptedRequest.pendingDurableToolTerminals?.clear();
+      context.activeRequest = undefined;
+      this.emitBusyChanged(context, false);
+    };
+    reconcileOwnedIdleRequest();
+    // `session.abort()` may resolve before the SDK publishes terminal lifecycle
+    // state. Keep the priority response open while any billable window remains;
+    // the coordinator owns the single bounded cooperative grace and will
+    // force-kill this worker if the complete classifier never becomes idle.
+    while (!this.disposed && this.context === context && hasBillableSessionActivity(context)) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 10);
+        timer.unref?.();
+      });
+      reconcileOwnedIdleRequest();
+    }
+    if (this.disposed || this.context !== context) {
+      return { interrupted: true, settled: false };
+    }
+    return { interrupted: true, settled: true };
+  }
+
+  async dispose(): Promise<AnalyticsTransportDisposalReport | undefined> {
+    if (this.disposalPromise) return await this.disposalPromise;
+    this.disposalPromise = this.disposeOnce();
+    return await this.disposalPromise;
+  }
+
+  private async disposeOnce(): Promise<AnalyticsTransportDisposalReport | undefined> {
+    this.disposed = true;
+    // Revoke every manager before any async shutdown work. The SDK lease
+    // revocation below remains the cross-process ownership boundary; this
+    // registry closes the in-process persistence boundary first.
+    this.sessionManagerFenceRegistry.revoke();
+    this.gate.dispose();
+    // Fence the process-global producer bridge before disposing the SDK. The
+    // transport waits for already-admitted fact/detail writer callbacks and
+    // emits any ordered detail abort before worker-server queues the shutdown
+    // response. A timed-out report is retained by the lifecycle caller as an
+    // explicit incomplete handoff; a stream write is never treated as a
+    // recorder-durable acknowledgement.
+    const analyticsTransport = this.analyticsTransport;
+    this.analyticsTransport = undefined;
+    const analyticsDisposalPromise = analyticsTransport?.dispose() ?? Promise.resolve(undefined);
+    const analyticsDisposalReport = await analyticsDisposalPromise;
+    const context = this.context;
+    this.context = undefined;
+    if (context) {
+      context.retired = true;
+      context.uiBridge?.dispose();
+      context.unsubscribe();
+      context.session.sessionManager.revokePieWriteLease?.();
+      await context.runtime.dispose();
+    }
+    this.detailStore.dispose();
+    this.stopProviderProgressObserver?.();
+    this.stopProviderProgressObserver = undefined;
+    this.providerAttemptOwners.clear();
+    this.stopProviderIncidentObserver?.();
+    this.stopProviderIncidentObserver = undefined;
+    ProviderGate.uninstall();
+    this.uninstallNetworkLease?.();
+    this.uninstallNetworkLease = undefined;
+    this.lifecycleStore?.close();
+    this.lifecycleStore = undefined;
+    this.analyticsWriterAdmission = undefined;
+    this.lifecycleBarrier = undefined;
+    return analyticsDisposalReport;
+  }
+
+  private async promoteOnce(payload: WorkerRuntimePromotionPayload): Promise<void> {
+    this.assertPromotionPayload(payload);
+    this.agentDir = payload.agentDir;
+    this.startupCwd = payload.startupCwd;
+    this.sessionDir = payload.sessionDir;
+    this.settings = {
+      ...(payload.modelSettings as unknown as ModelSettings),
+      ...this.settings,
+    };
+    this.openedPayload = payload.openedPayload as unknown as SessionOpenedPayload;
+    this.currentLease = payload.writeLease as unknown as SdkSessionWriteLease;
+
+    const dataPaths = resolvePieDataPaths({ agentDir: this.agentDir });
+    const writerAdmission = payload.analytics?.writerAdmission;
+    if (writerAdmission) {
+      if (path.resolve(writerAdmission.stateDir) !== path.resolve(dataPaths.stateDir)) {
+        throw new Error('Worker analytics writer admission state directory does not match the runtime data root.');
+      }
+      this.lifecycleStore = new SessionLifecycleStore(
+        path.join(writerAdmission.stateDir, 'session-lifecycle.sqlite'),
+      );
+      this.analyticsWriterAdmission = createSessionLifecycleWriterAdmission(
+        this.lifecycleStore,
+        writerAdmission.identity,
+      );
+    } else if (process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV] === STORAGE_CUTOFF_AUTHORIZATION_VALUE) {
+      this.lifecycleStore = new SessionLifecycleStore(path.join(dataPaths.stateDir, 'session-lifecycle.sqlite'));
+    }
+    if (process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV] === STORAGE_CUTOFF_AUTHORIZATION_VALUE) {
+      if (!this.lifecycleStore) {
+        this.lifecycleStore = new SessionLifecycleStore(path.join(dataPaths.stateDir, 'session-lifecycle.sqlite'));
+      }
+      this.lifecycleBarrier = new SessionFilesystemMutationBarrier({
+        store: this.lifecycleStore,
+        lockRoot: path.join(dataPaths.stateDir, 'session-mutation-locks'),
+        writerAdmission: this.analyticsWriterAdmission,
+      });
+      this.lifecycleSessionsRoot = dataPaths.sessionsDir;
+    }
+
+    if (payload.analytics) {
+      const activation = payload.analytics;
+      this.analyticsTransport = new AnalyticsWorkerTransport(
+        this.options.server,
+        activation,
+        `${this.options.owner.workerId}:${this.options.owner.workerGeneration}`,
+        this.analyticsWriterAdmission,
+        subagentSettlementPricingResolver(this.agentDir),
+      );
+      this.analyticsTransport.install();
+    }
+
+    this.uninstallNetworkLease = installWorkerProviderNetworkLease({
+      acquire: async (requestId, request) => {
+        const response = await this.options.server.requestFrame(
+          { kind: 'provider.acquire', request },
+          'provider.granted',
+          requestId,
+        );
+        return {
+          leaseId: response.lease.leaseId,
+          headerWaitMs: response.lease.headerWaitMs,
+          streamIdleTimeoutMs: response.lease.streamIdleTimeoutMs,
+        };
+      },
+      cancel: async (targetRequestId, reason) => {
+        await this.options.server.requestFrame(
+          { kind: 'provider.cancel', targetRequestId, reason },
+          'provider.cancelAck',
+        );
+      },
+      observe: (leaseId, observation) => {
+        this.options.server.sendFrame({ kind: 'provider.observation', leaseId, observation });
+      },
+      release: async (leaseId, outcome) => {
+        await this.options.server.requestFrame({ kind: 'provider.release', leaseId, outcome }, 'provider.released');
+      },
+    }, () => ({
+      sessionId: this.context?.session.sessionManager.getSessionId?.(),
+      provider: this.context?.activeRequest?.provider ?? this.context?.session.model?.provider,
+      model: this.context?.activeRequest?.modelId ?? this.context?.session.model?.id,
+      turnId: this.context?.activeRequest?.id,
+    }), {
+      resolveProvider: (url, fallbackProvider) => this.resolveNetworkProvider(url, fallbackProvider),
+    });
+
+    this.sdk = await loadSdk(payload.sdkPath, { mode: 'worker', patchIdentity: this.options.patchIdentity });
+    // Isolated workers perform provider I/O but never install an independent
+    // ProviderGate admission/circuit. The coordinator lease above is the sole
+    // cross-worker capacity and circuit authority.
+    const syncedRuntimePrefs = this.syncPayloads.get('runtimePrefs')?.values;
+    if (syncedRuntimePrefs && typeof syncedRuntimePrefs === 'object' && !Array.isArray(syncedRuntimePrefs)) {
+      this.applyRuntimePrefs(syncedRuntimePrefs as WorkerJsonObject);
+    }
+    const syncedProviderPolicy = this.syncPayloads.get('providerPolicy')?.providers;
+    if (syncedProviderPolicy && typeof syncedProviderPolicy === 'object' && !Array.isArray(syncedProviderPolicy)) {
+      ProviderGate.getInstance()?.applyUserOverrides(syncedProviderPolicy as never);
+    }
+    const authPath = this.syncedAuthPath ?? resolveAuthPath(this.agentDir);
+    await fs.mkdir(path.dirname(authPath), { recursive: true });
+    if (this.syncedAuthFingerprint && this.syncedAuthFingerprint !== 'startup-unavailable') {
+      const fingerprint = await fs.stat(authPath)
+        .then((stat) => `${stat.size}:${stat.mtimeMs}`)
+        .catch(() => 'missing');
+      if (fingerprint !== this.syncedAuthFingerprint) throw new Error('Authoritative auth revision changed during worker promotion.');
+    }
+    const authStorage = this.sdk.AuthStorage.create(authPath);
+    // Open with the exact canonical spelling carried by the lease. The pinned
+    // SDK's fail-closed shape check intentionally compares path.resolve()
+    // spellings before it delegates to the adapter (important on Windows 8.3
+    // temp paths), so reopening the non-canonical grant alias would fail.
+    const manager = this.sdk.SessionManager.open(this.currentLease.canonicalSessionPath);
+    const guardedManager = this.fenceSessionManager(manager);
+    const runtime = await this.sdk.createAgentSessionRuntime(
+      createRuntimeFactory(this.sdk, authStorage, this.startupCwd, this.gate, {
+        wrapSessionManager: (candidate) => this.fenceSessionManager(candidate),
+        customTools: () => createBackendTools({
+          kind: 'primary',
+          requestSessionControl: (body, signal) => (
+            this.options.server.requestFrame(body, 'session.control.result', undefined, 120_000, signal)
+          ),
+        }),
+      }),
+      {
+        cwd: guardedManager.getCwd() || this.startupCwd,
+        agentDir: this.agentDir,
+        sessionManager: guardedManager,
+        ownershipAdapter: this.createOwnershipAdapter(),
+        writeLease: this.currentLease,
+        sessionStartEvent: { type: 'session_start', reason: payload.creationReason },
+      },
+    );
+    const session = runtime.session;
+    const sessionPath = session.sessionFile ?? session.sessionManager.getSessionFile();
+    if (!sessionPath || !sameSessionPath(sessionPath, this.currentLease.canonicalSessionPath)) {
+      await runtime.dispose();
+      throw new Error('Promoted runtime path does not match its coordinator write lease.');
+    }
+    const context: SessionContext = {
+      runtime,
+      session,
+      sessionPath,
+      sessionOwnershipEpoch: 0,
+      unsubscribe: () => undefined,
+      busySeq: 0,
+    };
+    this.context = context;
+    this.installProviderProgressBridge();
+    this.installProviderIncidentBridge();
+    runtime.setRebindSession?.(async (replacement) => {
+      await this.bindSession(context, replacement);
+      if (!this.suppressNextReplacementOpened) {
+        this.emit('session.opened', { ...this.openedPayload, runtimeReady: true });
+      }
+    });
+    await this.bindSession(context, session);
+
+    // This publication is sequenced before runtime.ready. The router waits for
+    // runtime.ready before dispatching the initiating command, therefore the
+    // host observes runtime-hydrated session.opened before any stream event.
+    this.emit('session.opened', { ...this.openedPayload, runtimeReady: true });
+    this.reportRuntimeCatalog();
+  }
+
+  private async bindSession(context: SessionContext, session: SessionContext['session']): Promise<void> {
+    const previousSession = context.session;
+    const previousSessionPath = context.sessionPath;
+    const previousSessionOwnershipEpoch = context.sessionOwnershipEpoch ?? 0;
+    const previousActiveRequest = context.activeRequest;
+    const pendingExtensionCommand = context.pendingExtensionCommand;
+    const pendingExtensionCommandOwned = pendingExtensionCommand?.session === previousSession
+      && pendingExtensionCommand.sessionPath === previousSessionPath
+      && pendingExtensionCommand.sessionOwnershipEpoch === previousSessionOwnershipEpoch;
+    const nextManager = this.fenceSessionManager(session.sessionManager);
+    const nextFence = this.sessionManagerFenceRecords.get(nextManager as object)?.fence;
+    if (!nextFence) throw new Error('Replacement session manager fence was not installed.');
+    const previousManager = previousSession.sessionManager;
+    const previousFence = context.sessionManagerFence;
+    if (previousFence && previousFence !== nextFence) {
+      // Revoke before changing the context binding. Late callbacks may retain
+      // the source manager even after the SDK has handed us its replacement.
+      previousFence.invalidate();
+      const unsettled = await previousFence.waitForIdle();
+      if (unsettled > 0) throw new Error('Retired session manager mutations did not drain.');
+      this.releaseSessionManagerFence(previousManager);
+    }
+    session.sessionManager = nextManager;
+    context.sessionManagerFence = nextFence;
+    const sessionPath = session.sessionFile ?? nextManager.getSessionFile();
+    if (!sessionPath) throw new Error('Replacement session did not expose a path.');
+    // A replacement can be initiated by an extension command before the SDK
+    // emits agent_end/message_start. Close the source's busy window while its
+    // path still identifies the source; otherwise the replacement's later
+    // callbacks can leave an unmatched busy=true on the source path.
+    if (hasBillableSessionActivity({
+      ...context,
+      activeRequest: previousActiveRequest,
+      pendingExtensionCommand: pendingExtensionCommandOwned ? pendingExtensionCommand : undefined,
+      session: previousSession,
+    })) {
+      this.emitBusyChanged(context, false);
+    }
+    // The public message.send already acknowledged this request, but the
+    // replacement itself prevents the source prompt from ever reaching an
+    // agent message_start. Close that host-side promoted send on the source
+    // path; late preflight/final callbacks are fenced by the epoch below.
+    if (pendingExtensionCommandOwned && (!previousActiveRequest
+      || (previousActiveRequest.messageIndex === 0
+        && !previousActiveRequest.lastAssistantMessageId
+        && !previousActiveRequest.currentMessageId))) {
+      context.sendOperationLedger?.markFailed(previousActiveRequest?.operationId, 'MESSAGE_SEND_PRECOMMIT_FAILED', 'Extension command replaced the session before starting an agent turn.');
+      this.emit('preflight.failed', {
+        requestId: pendingExtensionCommand!.requestId,
+        ...(previousActiveRequest?.operationId ? { operationId: previousActiveRequest.operationId } : {}),
+        ...(previousActiveRequest?.operationAttempt !== undefined
+          ? { operationAttempt: previousActiveRequest.operationAttempt } : {}),
+        sessionPath: previousSessionPath,
+        error: 'Extension command replaced the session before starting an agent turn.',
+      });
+      context.pendingExtensionCommand = undefined;
+    }
+    if (pendingExtensionCommandOwned) context.pendingExtensionCommand = undefined;
+    context.sessionOwnershipEpoch = previousSessionOwnershipEpoch + 1;
+    try { context.unsubscribe(); } catch { /* initial placeholder or old subscription */ }
+    try { context.uiBridge?.dispose(); } catch { /* old session UI is no longer authoritative */ }
+    context.activeRequest?.pendingDurableToolTerminals?.clear();
+    context.session = session;
+    context.sessionPath = sessionPath;
+    context.activeRequest = undefined;
+    context.manualCompactionRequest = undefined;
+    context.overflowRecoveryCandidate = undefined;
+    if (!sameSessionPath(previousSessionPath, sessionPath)) {
+      context.busySeq = 0;
+      context.lastContextUsage = undefined;
+      context.postCompactionEstimatedTokens = undefined;
+      context.compactionStartedAt = undefined;
+    }
+    context.queuedLocalIds = [];
+    context.queuedOperationIds = [];
+    context.queuedOperationAttempts = [];
+    context.terminalLiveTurn = undefined;
+    context.autonomousModeAskUserWasActive = undefined;
+    context.systemPromptToolsBeforeDisable = undefined;
+    context.displayTranscriptCache = undefined;
+    const persistedPromptToggles = await readSystemPromptTogglesForSession(sessionPath);
+    context.systemPromptDisabledEntries = [];
+    const promptState = session as typeof session & SessionPromptState;
+    const { buildSystemPrompt } = await this.getSystemPromptModule();
+    // Install Pie's shared base-prompt wrapper before the existing toggle
+    // guard. The latter must rebuild from the same Pie builder so picker
+    // changes cannot briefly restore the upstream Pi prompt.
+    installPieSystemPromptRebuildGuard(promptState, this.agentDir);
+    if (typeof promptState._rebuildSystemPrompt === 'function') {
+      const pieBuildSystemPrompt = createPieSystemPromptBuilder(buildSystemPrompt, this.agentDir);
+      installSystemPromptToggleRebuildGuard(promptState, () => context.systemPromptDisabledEntries ?? [], pieBuildSystemPrompt);
+    }
+    installSystemPromptToolToggleGuard(session, () => context.systemPromptDisabledEntries ?? []);
+    installAutonomousModeToolGuard(session, () => this.autonomousMode);
+    installMcpToolGuard(session, () => this.mcpEnabled);
+    installSubagentPolicyToolGuard(session, () => this.subagentPolicyDisabled);
+    if (persistedPromptToggles.length > 0) {
+      await this.applySystemPromptToggles(context, persistedPromptToggles);
+    }
+    if (this.autonomousMode) this.applyAutonomousModeToContext(context, true);
+    const uiBridge = new ExtensionUIBridge(sessionPath, (event, eventPayload) => this.emit(event, eventPayload));
+    context.uiBridge = uiBridge;
+    const { newSession, fork, switchSession } = context.runtime;
+    if (!newSession || !fork || !switchSession) {
+      throw new Error('Worker runtime does not expose the complete extension command replacement surface.');
+    }
+    await session.bindExtensions({
+      uiContext: uiBridge,
+      mode: 'rpc',
+      commandContextActions: {
+        waitForIdle: () => session.waitForIdle(),
+        newSession: async (options) => newSession.call(context.runtime, options),
+        fork: async (entryId, options) => {
+          const result = await fork.call(context.runtime, entryId, options);
+          return { cancelled: result.cancelled };
+        },
+        navigateTree: async (targetId, options) => {
+          const result = await session.navigateTree(targetId, {
+            summarize: options?.summarize,
+            customInstructions: options?.customInstructions,
+            replaceInstructions: options?.replaceInstructions,
+            label: options?.label,
+          });
+          return { cancelled: result.cancelled };
+        },
+        switchSession: async (targetSessionPath, options) => (
+          switchSession.call(context.runtime, targetSessionPath, options)
+        ),
+        reload: async () => { await session.reload(); },
+      },
+      // The embedded backend has no process-level extension shutdown command;
+      // preserve the existing worker lifecycle owner rather than letting an
+      // extension tear down only its SessionContext behind the coordinator.
+      shutdownHandler: () => undefined,
+      onError: (error) => {
+        const active = context.activeRequest;
+        const occurrence = ++this.extensionIncidentSequence;
+        const identity = `extension-error:${this.options.owner.workerId}:${context.sessionPath}:${error.extensionPath}:${error.event}:${occurrence}`;
+        this.emit('operational-error', createOperationalIncident({
+          incidentId: identity,
+          dedupeKey: identity,
+          code: 'EXTENSION_ERROR',
+          message: `${error.extensionPath} (${error.event}): ${error.error}`,
+          detail: `Extension path: ${error.extensionPath}\nEvent: ${error.event}\nError: ${error.error}`,
+          sessionPath: context.sessionPath,
+          ...(active?.operationId ? { operationId: active.operationId } : {}),
+          ...(active?.id ? { requestId: active.id } : {}),
+          ...(active?.liveTurnAccumulator ? { turnId: active.liveTurnAccumulator.turnId } : {}),
+          ...(active?.currentMessageId ?? active?.lastAssistantMessageId
+            ? { messageId: active.currentMessageId ?? active.lastAssistantMessageId }
+            : {}),
+          severity: 'error',
+          certainty: 'definitive',
+          phase: 'extension',
+          recovery: { showLogs: true },
+        }));
+      },
+    });
+    installAuxiliaryLlmMeter(
+      session,
+      sessionPath,
+      (event, eventPayload) => this.emit(event, eventPayload),
+      Date.now,
+      () => context.activeRequest != null,
+    );
+    context.unsubscribe = session.subscribe((event: SdkSessionEvent) => this.handleSessionEvent(context, event));
+    // The adapter's registerTool auto-activates its tools (bypassing the
+    // setActiveTools guard), so re-apply the disabled state after extension
+    // bind and again at every turn start.
+    if (!this.mcpEnabled) this.enforceMcpToolsDisabled(context);
+    this.applySubagentProviderPolicy(context, { force: true });
+    if (this.openedPayload) {
+      const previous = this.openedPayload;
+      const replacementSource = previousSessionPath && !sameSessionPath(previousSessionPath, sessionPath)
+        ? previousSessionPath
+        : undefined;
+      this.openedPayload = await this.buildOpenedPayload(
+        sessionPath,
+        replacementSource ? undefined : previous.selectionToken,
+        replacementSource ? undefined : previous.operationId,
+        replacementSource ? undefined : previous.operationAttempt,
+      );
+      if (replacementSource) {
+        this.openedPayload = { ...this.openedPayload, replacesSessionPath: replacementSource };
+      }
+      if (this.analyticsTransport) {
+        const analyticsSessionId = this.openedPayload.session.sessionId?.trim();
+        if (!analyticsSessionId || analyticsSessionId.includes('\0')) {
+          this.analyticsTransport.disableCaptureSubject();
+        } else {
+          this.analyticsTransport.rebindCaptureSubject({ kind: 'session', rootSessionId: analyticsSessionId });
+        }
+      }
+    }
+  }
+
+  private createOwnershipAdapter(): SdkSessionOwnershipAdapter {
+    return {
+      reserveReplacement: async (intent: SdkSessionReplacementIntent): Promise<SdkSessionOwnershipReservation> => {
+        const response = await this.options.server.requestFrame({ kind: 'ownership.reserve', intent }, 'ownership.reserved');
+        return response.reservation;
+      },
+      abortPrecommit: async (reservation, reason) => {
+        await this.options.server.requestFrame({ kind: 'ownership.abort', reservation, reason }, 'ownership.aborted');
+      },
+      commitTransfer: async (reservation, sourceLease) => {
+        const response = await this.options.server.requestFrame(
+          { kind: 'ownership.commit', reservation, sourceLease },
+          'ownership.committed',
+        );
+        this.committedAuthorizations.set(response.authorization.authorizationId, response.authorization);
+        this.currentLease = response.authorization.destinationLease;
+        this.options.server.updateLeaseIdentity(
+          response.authorization.destinationLease.canonicalSessionPath,
+          response.authorization.destinationLease.ownershipRevision,
+        );
+        return response.authorization;
+      },
+      consumeTransferAuthorization: async (authorization, canonicalDestinationPath) => {
+        const cached = this.committedAuthorizations.get(authorization.authorizationId);
+        if (!cached || cached.nonce !== authorization.nonce
+          || cached.canonicalDestinationPath !== canonicalDestinationPath) {
+          throw new Error('Replacement transfer authorization is stale or was not coordinator-committed.');
+        }
+        const response = await this.options.server.requestFrame(
+          { kind: 'ownership.consume', authorization: cached, canonicalDestinationPath },
+          'ownership.consumed',
+        );
+        if (response.authorizationId !== authorization.authorizationId
+          || response.lease.nonce !== cached.destinationLease.nonce) {
+          throw new Error('Coordinator ownership-consume acknowledgement did not match the committed transfer.');
+        }
+        this.committedAuthorizations.delete(authorization.authorizationId);
+        return response.lease;
+      },
+      assertWriteLease: (lease, canonicalPath) => {
+        if (!this.currentLease || lease.nonce !== this.currentLease.nonce
+          || !sameSessionPath(canonicalPath, this.currentLease.canonicalSessionPath)) {
+          throw new Error(`Stale worker session write lease for ${canonicalPath}.`);
+        }
+      },
+      runWriteMutation: (lease, canonicalPath, seam, sessionId, mutation) => {
+        if (!this.currentLease || lease.nonce !== this.currentLease.nonce
+          || !sameSessionPath(canonicalPath, this.currentLease.canonicalSessionPath)) {
+          throw new Error(`Stale worker session write lease for ${canonicalPath}.`);
+        }
+        if (!this.lifecycleStore || !this.lifecycleBarrier || !this.lifecycleSessionsRoot) {
+          return this.withAnalyticsWriterAdmission(mutation);
+        }
+        const relativePath = path.relative(this.lifecycleSessionsRoot, canonicalPath);
+        if (!relativePath || relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+          throw new Error(`Storage-cutoff worker path is outside the canonical sessions root: ${canonicalPath}`);
+        }
+        this.lifecycleStore.registerTranscript(sessionId, relativePath, Date.now());
+        return this.lifecycleBarrier.runWriteMutation(sessionId, seam, () => {
+          const result = mutation();
+          if (fsSync.existsSync(canonicalPath)
+            && !this.lifecycleStore!.listArtifacts(sessionId).some((artifact) => artifact.artifactId === 'transcript')) {
+            this.lifecycleStore!.registerArtifact({
+              sessionId,
+              artifactId: 'transcript',
+              kind: 'transcript',
+              locationKind: 'root_relative',
+              location: relativePath,
+              rootName: 'sessions',
+            }, Date.now());
+          }
+          return result;
+        });
+      },
+      runtimeReady: async (lease, canonicalPath) => {
+        const response = await this.options.server.requestFrame(
+          { kind: 'ownership.runtimeReady', lease, canonicalPath },
+          'ownership.runtimeReadyAck',
+        );
+        if (response.ownershipRevision !== lease.ownershipRevision) throw new Error('Ownership runtime-ready revision mismatch.');
+        // bindSession owns the public context-path transition after the SDK has
+        // installed the replacement session. Advancing it here would erase the
+        // source identity needed for replacesSessionPath and opened ordering.
+      },
+      failClosed: async (error): Promise<never> => {
+        const terminal = error instanceof Error ? error : new Error(String(error));
+        this.options.server.failRuntime(terminal);
+        await this.dispose().catch(() => undefined);
+        throw terminal;
+      },
+    };
+  }
+
+  private handleSessionEvent(context: SessionContext, event: SdkSessionEvent): void {
+    if (this.disposed || context.retired) return;
+    // The adapter can re-register its tools between turns (config changes via
+    // /mcp commands); registerTool auto-activates them, so re-apply the MCP
+    // disabled state at the start of every turn.
+    if (event.type === 'turn_start') {
+      this.enforceMcpToolsDisabled(context);
+      this.enforceSubagentPolicyDisabled(context);
+    }
+    handleSdkSessionEvent({
+      emit: (name, payload) => this.emit(name, payload),
+      backendGeneration: this.options.owner.coordinatorGeneration,
+      workerGeneration: this.options.owner.workerGeneration,
+      emitBusyChanged: (owner, busy, capabilities) => this.emitBusyChanged(owner, busy, capabilities),
+      emitContextUsageChanged: (owner, estimated) => this.emitContextUsageChanged(owner, estimated),
+      emitSessionOpened: async (sessionPath) => this.emitRefreshedSessionOpened(sessionPath),
+      emitSessionListChanged: async () => undefined,
+      observeSubagentDetail: (root, details) => this.detailStore.observe({ ...root, details }),
+      terminalizeSubagentDetail: (root, durableEntryId) => this.detailStore.terminal(root, durableEntryId),
+    }, context, event);
+  }
+
+  /** Bridge fetch-layer incidents into the active isolated runtime. This used
+   * to live in BackendServer when sessions executed in the coordinator. Once
+   * provider I/O moved to workers, leaving the observer there made the
+   * structured incident path inert and reduced UI errors back to generic
+   * "Connection error" / retry symptoms. */
+  private installProviderIncidentBridge(): void {
+    if (this.stopProviderIncidentObserver) return;
+    this.stopProviderIncidentObserver = observeProviderIncidents((incident) => {
+      this.handleProviderIncident(incident);
+    });
+  }
+
+  /** Restore the provider-progress ownership bridge that moved out of the
+   * coordinator with the SDK runtime. Queue observations drive the truthful
+   * live phase and durable per-turn latency fields used by the UI/analytics. */
+  private installProviderProgressBridge(): void {
+    if (this.stopProviderProgressObserver) return;
+    this.stopProviderProgressObserver = observeProviderTransport((observation) => {
+      this.handleProviderProgress(observation);
+    });
+  }
+
+  private handleProviderProgress(observation: ProviderTransportObservation): void {
+    const context = this.context;
+    const active = context?.activeRequest;
+    if (!context || !active) return;
+    if (context.session.sessionManager.getSessionId?.() !== observation.sessionId) return;
+
+    let owner = this.providerAttemptOwners.get(observation.attemptId);
+    if (!owner && (observation.kind === 'gate_queue' || observation.kind === 'gate_acquired')
+      && active.providerTurnSequence !== undefined) {
+      owner = {
+        requestId: active.id,
+        turnSequence: active.providerTurnSequence,
+        retryId: active.retryTiming?.retryId,
+      };
+      this.providerAttemptOwners.set(observation.attemptId, owner);
+    }
+    const ownsCurrentRequest = owner?.requestId === active.id;
+    if (owner && ownsCurrentRequest) {
+      if (observation.kind === 'gate_queue' || observation.kind === 'gate_acquired'
+        || observation.kind === 'headers_wait' || observation.kind === 'headers_received') {
+        active.providerNetworkPendingAttemptId = observation.attemptId;
+        active.providerNetworkPending = true;
+      } else if ((observation.kind === 'raw_chunk' || observation.kind === 'gate_rejected'
+        || observation.kind === 'transport_terminal' || observation.kind === 'transport_error')
+        && active.providerNetworkPendingAttemptId === observation.attemptId) {
+        active.providerNetworkPending = false;
+        active.providerNetworkPendingAttemptId = undefined;
+      }
+      if (owner.retryId !== undefined
+        && active.retryTiming?.retryId === owner.retryId
+        && active.retryTiming.providerAttemptStartedAt === undefined
+        && (observation.kind === 'gate_queue' || observation.kind === 'gate_acquired')) {
+        // Stamp the wall anchor and its paired same-process monotonic sample
+        // together so the retry wait can be measured jump-safe.
+        active.retryTiming.providerAttemptStartedAt = observation.occurredAt;
+        active.retryTiming.providerAttemptStartedMonotonicMs = performance.now();
+      }
+      if (observation.kind === 'gate_acquired'
+        && typeof observation.queueDurationMs === 'number'
+        && Number.isFinite(observation.queueDurationMs)) {
+        const queueByTurn = active.providerQueueByTurn ?? new Map();
+        const previous = queueByTurn.get(owner.turnSequence) ?? { durationMs: 0, attemptCount: 0 };
+        queueByTurn.set(owner.turnSequence, {
+          durationMs: previous.durationMs + Math.max(0, Math.trunc(observation.queueDurationMs)),
+          attemptCount: previous.attemptCount + 1,
+        });
+        active.providerQueueByTurn = queueByTurn;
+      }
+    }
+
+    if (observation.kind === 'gate_rejected'
+      || observation.kind === 'transport_terminal' || observation.kind === 'transport_error') {
+      this.providerAttemptOwners.delete(observation.attemptId);
+    }
+
+    const accumulator = ownsCurrentRequest ? active.liveTurnAccumulator : undefined;
+    if (!accumulator || accumulator.currentSeq <= 0) return;
+    if (observation.kind === 'gate_queue') {
+      this.emit('live.semantic', accumulator.observe(
+        { kind: 'turn.phase', phase: 'queued' },
+        observation.occurredAt,
+      ));
+    } else if (observation.kind === 'headers_wait' || observation.kind === 'headers_received') {
+      this.emit('live.semantic', accumulator.observe(
+        { kind: 'turn.phase', phase: 'waiting_provider' },
+        observation.occurredAt,
+      ));
+    }
+  }
+
+  private handleProviderIncident(incident: ProviderIncident): void {
+    const context = this.context;
+    const active = context?.activeRequest;
+    if (!context || !active) return;
+    const sessionId = context.session.sessionManager.getSessionId?.();
+    if (!sessionId || sessionId !== incident.sessionId) return;
+
+    active.latestProviderIncident = incident;
+    active.lastProviderErrorForDiagnostics = incident.userMessage;
+    const noticeKey = [
+      incident.kind,
+      incident.providerHost,
+      incident.status ?? '',
+      incident.retryAt ?? '',
+    ].join(':');
+    const emitted = active.providerIncidentNoticeKeys ?? new Set<string>();
+    active.providerIncidentNoticeKeys = emitted;
+    const providerDedupeKey = `provider:${active.id}:${noticeKey}`;
+    active.latestProviderIncidentDedupeKey = providerDedupeKey;
+    if (!emitted.has(noticeKey)) {
+      emitted.add(noticeKey);
+      this.emit('operational-error', createOperationalIncident({
+        incidentId: `provider:${active.id}:${noticeKey}`,
+        dedupeKey: providerDedupeKey,
+        code: providerIncidentCode(incident.kind),
+        message: incident.userMessage,
+        detail: incident.detail,
+        sessionPath: context.sessionPath,
+        ...(active.operationId ? { operationId: active.operationId } : {}),
+        requestId: active.id,
+        ...(active.liveTurnAccumulator ? { turnId: active.liveTurnAccumulator.turnId } : {}),
+        ...(active.currentMessageId ?? active.lastAssistantMessageId
+          ? { messageId: active.currentMessageId ?? active.lastAssistantMessageId }
+          : {}),
+        severity: 'error',
+        certainty: incident.kind === 'quota_exhausted' ? 'definitive' : 'ambiguous',
+        phase: incident.kind === 'transport_timeout' || incident.kind === 'transport_error' ? 'transport' : 'provider',
+        recovery: { showLogs: true },
+      }));
+    }
+  }
+
+  /**
+   * Publish an authoritative `session.opened` refresh. The promotion payload is
+   * a point-in-time snapshot — replaying it (at `agent_end`, interrupt, or
+   * post-compaction) republishes the transcript as it looked when the runtime
+   * was promoted, which for a freshly created session is EMPTY. The host is
+   * idle by then (`busy` and `runningSessionPaths` both cleared), so it applies
+   * that stale snapshot as authoritative and the transcript disappears.
+   * Rebuild instead, and refresh the cache so later replays are current.
+   */
+  private async emitRefreshedSessionOpened(sessionPath: string): Promise<void> {
+    const previous = this.openedPayload;
+    try {
+      // Same envelope as the cached payload (selection/operation identifiers,
+      // replacement source) — only the transcript and metadata are refreshed.
+      const rebuilt = await this.buildOpenedPayload(
+        sessionPath,
+        previous?.selectionToken,
+        previous?.operationId,
+        previous?.operationAttempt,
+      );
+      this.openedPayload = previous?.replacesSessionPath
+        ? { ...rebuilt, replacesSessionPath: previous.replacesSessionPath }
+        : rebuilt;
+    } catch {
+      // Cross-session rejection (a rebind raced this refresh): fall back to the
+      // cached payload rather than dropping the refresh entirely.
+    }
+    this.emit('session.opened', { ...this.openedPayload, runtimeReady: true });
+  }
+
+  private emitBusyChanged(
+    context: SessionContext,
+    busy = hasBillableSessionActivity(context),
+    suppliedCapabilities?: import('../lib/rpc/session-capability-facts.js').SessionCapabilityFacts,
+  ): void {
+    context.busySeq += 1;
+    const current = suppliedCapabilities ?? buildSessionCapabilities(context);
+    const capabilities = current.billableActivity === busy
+      ? current
+      : {
+          ...current,
+          billableActivity: busy,
+          canInterrupt: busy,
+          canCompact: !busy,
+          canContinue: !busy && current.canContinue,
+        };
+    this.emit('busy.changed', {
+      sessionPath: context.sessionPath,
+      busy,
+      capabilities,
+      seq: context.busySeq,
+    });
+  }
+
+  private emitContextUsageChanged(context: SessionContext, estimated?: number): void {
+    if (estimated !== undefined) context.postCompactionEstimatedTokens = estimated;
+    const contextWindow = context.session.model?.contextWindow;
+    const evidence = contextWindow
+      ? deriveContextUsageEvidenceFromBranch(context.session.sessionManager.getBranch(), contextWindow)
+      : undefined;
+    const measured = evidence?.usage;
+    const next = measured ?? (contextWindow && context.postCompactionEstimatedTokens !== undefined
+      ? {
+          tokens: context.postCompactionEstimatedTokens,
+          contextWindow,
+          percent: Math.min(100, Math.max(0, context.postCompactionEstimatedTokens / contextWindow * 100)),
+        }
+      : null);
+    context.lastContextUsage = next;
+    this.emit('contextUsage.changed', {
+      sessionPath: context.sessionPath,
+      contextUsage: next,
+      observationId: randomUUID(),
+      observedAt: Date.now(),
+      source: evidence ? (evidence.promptFootprintTokens !== null ? 'provider' : 'unknown')
+        : next ? 'postCompactionEstimate' : 'unknown',
+      canonicalInputTokens: evidence ? evidence.promptFootprintTokens : next?.tokens ?? null,
+      modelId: context.session.model?.id,
+      provider: context.session.model?.provider,
+    });
+  }
+
+  private emit(event: string, payload?: unknown): void {
+    // The accumulator allows terminal messages up to its 30 MiB checkpoint
+    // ceiling (the legacy monolithic JSONL record budget). The worker's
+    // ordinary IPC frames are capped at 256 KiB, so outbound live semantics
+    // are projected onto the wire budget here; the durable session remains
+    // lossless and detailRefs keep every large body retrievable.
+    if (event === 'live.semantic') {
+      const bounded = boundLiveSemanticPayload(payload);
+      if (bounded === undefined) return; // dropped delta: host recovers via checkpoint rebase
+      payload = bounded;
+    }
+    // `message.finished` rides the lifecycle lane (2 MiB reserved capacity)
+    // and carries the full terminal `ChatMessage`. A pathological message
+    // (e.g. a huge subagent tool result) can exceed that lane and be rejected,
+    // killing the worker. Project the message onto the lifecycle budget so the
+    // frame always fits; the durable session remains the complete authority.
+    if (event === 'message.finished') {
+      const envelope = payload as { requestId?: unknown; sessionPath?: unknown; message?: unknown };
+      if (envelope && typeof envelope === 'object' && envelope.message
+        && typeof envelope.message === 'object' && !Array.isArray(envelope.message)) {
+        const sessionPath = typeof envelope.sessionPath === 'string' ? envelope.sessionPath : '';
+        payload = {
+          ...envelope,
+          message: compactDurableMessageForTransport(
+            envelope.message as ChatMessage,
+            sessionPath,
+            WORKER_IPC_LIFECYCLE_MESSAGE_BUDGET,
+          ),
+        };
+      }
+    }
+    const body = asWorkerJsonObject(payload ?? {});
+    if (event === 'live.semantic') {
+      // The one recoverable ordinary-lane event: a capacity or oversize
+      // enqueue rejection is dropped, the accumulator's semantic sequence
+      // keeps its gap, and the host checkpoint rebase is the authority that
+      // recovers the lost content. invalid/unavailable rejections and
+      // asynchronous write failures stay fatal, as does every other event.
+      this.options.server.sendLiveSemanticFrame(body);
+      return;
+    }
+    this.options.server.sendFrame({
+      kind: 'runtime.event',
+      event: event as never,
+      payload: body,
+    });
+  }
+
+  private requestDeps(): Parameters<typeof handleBackendRequest>[0] {
+    const sdk = this.sdk!;
+    const context = this.context!;
+    return {
+      sdkPath: this.options.patchIdentity.sdkPath,
+      backendGeneration: this.options.owner.coordinatorGeneration,
+      agentDir: this.agentDir,
+      startupCwd: this.startupCwd,
+      sessionDir: this.sessionDir,
+      sdk,
+      getSessionContext: (sessionPath) => sessionPath && sameSessionPath(sessionPath, context.sessionPath) ? context : undefined,
+      createSessionContext: (manager, reason) => this.createSessionContext(manager, reason),
+      ensureSessionContext: async (sessionPath) => {
+        if (!sameSessionPath(sessionPath, context.sessionPath)) throw new Error('Cross-session worker command rejected.');
+        return context;
+      },
+      isSessionTransitionPending: () => false,
+      // Priority interruption and fail-closed disposal can revoke this owner
+      // while a queued command is crossing an async transition wait. Fence the
+      // exact context again at the final synchronous SDK mutation boundary.
+      isSessionContextCurrent: (sessionPath, candidate) => this.context === candidate
+        && candidate === context
+        && !candidate.retired
+        && candidate.recoveryPromise === undefined
+        && sameSessionPath(sessionPath, candidate.sessionPath),
+      setViewedSessionPath: () => undefined,
+      buildSessionOpenedPayload: async (sessionPath, selectionToken, transcript, transport, operationId, operationAttempt) => (
+        this.buildOpenedPayload(sessionPath, selectionToken, operationId, operationAttempt, transcript, transport)
+      ),
+      applySystemPromptToggles: async (sessionPath, disabledEntries) => {
+        if (!sameSessionPath(sessionPath, context.sessionPath)) throw new Error('Cross-session prompt toggle rejected.');
+        await this.applySystemPromptToggles(context, disabledEntries);
+      },
+      setAutonomousMode: (enabled) => this.setAutonomousMode(enabled),
+      loadTranscriptPage: async (sessionPath, direction, loadedStart, loadedEnd) => (
+        this.loadTranscriptPage(context, sessionPath, direction, loadedStart, loadedEnd)
+      ),
+      loadDetail: async (sessionPath, ref) => this.loadDetail(context, sessionPath, ref),
+      emit: (event, payload) => this.emit(event, payload),
+      emitBusyChanged: (owner, busy, capabilities) => this.emitBusyChanged(owner, busy, capabilities),
+      emitContextUsageChanged: (owner) => this.emitContextUsageChanged(owner),
+      emitSessionListChanged: async () => undefined,
+      listSessions: async () => this.openedPayload ? [this.openedPayload.session] : [],
+      listAvailableModels: () => this.availableModels(),
+      readModelSettings: async () => ({ ...this.settings }),
+      writeModelSettings: async (updates) => {
+        // The coordinator is the sole persistence/revision authority. Apply
+        // locally only after its correlated acknowledgement, so failed writes
+        // cannot leave this worker ahead of future workers/settings.get.
+        const mutation = serializeModelSettingsUpdates(updates);
+        const response = await this.options.server.requestFrame({
+          kind: 'settings.mutate',
+          updates: mutation.updates,
+          ...(mutation.unset.length > 0 ? { unset: mutation.unset } : {}),
+        }, 'settings.authoritative');
+        this.settings = modelSettingsFromWorkerObject(response.values);
+        return { ...this.settings };
+      },
+      writeModelSettingsIfCurrent: async (expected, updates, unset) => {
+        const mutation = serializeModelSettingsUpdates(updates, unset);
+        const response = await this.options.server.requestFrame({
+          kind: 'settings.mutate',
+          updates: mutation.updates,
+          ...(mutation.unset.length > 0 ? { unset: mutation.unset } : {}),
+          expected: modelSettingsToWorkerObject(expected),
+        }, 'settings.authoritative');
+        this.settings = modelSettingsFromWorkerObject(response.values);
+        return response.applied !== false;
+      },
+      retireSessionRuntime: async (sessionPath, reason) => {
+        if (!sameSessionPath(sessionPath, context.sessionPath)) return false;
+        this.options.server.failRuntime(new Error(reason));
+        return true;
+      },
+      suppressRequestTrace: true,
+    };
+  }
+
+  private async loadTranscriptPage(
+    context: SessionContext,
+    sessionPath: string,
+    direction: TranscriptPageDirection,
+    loadedStart?: number,
+    loadedEnd?: number,
+  ): Promise<TranscriptPagePayload> {
+    if (!sameSessionPath(sessionPath, context.sessionPath)) throw new Error('Cross-session transcript page rejected.');
+    const page = buildPagedTranscriptWindow(ensureDisplayTranscriptCache(context), {
+      direction, loadedStart, loadedEnd,
+      pinnedMessageId: context.activeRequest?.currentMessageId ?? context.activeRequest?.lastAssistantMessageId,
+    });
+    const busy = hasBillableSessionActivity(context);
+    return {
+      sessionPath: context.sessionPath,
+      transcript: (busy ? page.transcript : normalizeDanglingTranscript(page.transcript))
+        .map(deduplicateToolCallResultsForTransport),
+      transcriptWindow: page.transcriptWindow,
+      busy,
+    };
+  }
+
+  private async loadDetail(context: SessionContext, sessionPath: string, ref: LazyDetailRef): Promise<DetailResult> {
+    if (!sameSessionPath(sessionPath, context.sessionPath)) throw new Error('Cross-session detail request rejected.');
+    if (ref.source !== 'durable') {
+      return { sessionPath: context.sessionPath, key: ref.key, status: 'unavailable', message: 'Live detail is owned by the extension host.' };
+    }
+    const found = findDurableDetail(ensureDisplayTranscriptCache(context).transcript, ref);
+    if (found.status === 'unavailable') return { sessionPath: context.sessionPath, key: ref.key, status: 'unavailable', message: 'The durable detail is no longer available.' };
+    if (found.sizeBytes > LIVE_PIPELINE_LIMITS.previewBytes) return { sessionPath: context.sessionPath, key: ref.key, status: 'unavailable', message: 'The detail exceeds the supported retrieval size.' };
+    if (found.sizeBytes !== ref.sizeBytes) return { sessionPath: context.sessionPath, key: ref.key, status: 'stale', message: 'The durable detail changed; refresh and retry.' };
+    return { sessionPath: context.sessionPath, key: ref.key, status: 'loaded', value: found.value, sizeBytes: found.sizeBytes };
+  }
+
+  private fenceSessionManager(manager: import('../lib/sdk-integration/sdk').SdkSessionManager): MutableSdkSessionManager {
+    const existing = this.sessionManagerFenceRecords.get(manager as object);
+    if (existing) return existing.manager;
+    const guarded = createSessionManagerFence(manager, {
+      admission: this.analyticsWriterAdmission,
+      onUnexpectedAdmissionFailure: (error) => {
+        const terminal = error instanceof Error ? error : new Error(String(error));
+        this.options.server.failRuntime(terminal);
+        // The SDK invokes its event listeners synchronously and does not own
+        // rejected callback promises. Dispose at this host boundary instead
+        // of throwing back into that callback.
+        void this.dispose().catch(() => undefined);
+      },
+    });
+    const record: SessionManagerFenceRecord = {
+      manager: guarded.manager,
+      fence: guarded.fence,
+      unregister: () => undefined,
+    };
+    record.unregister = this.sessionManagerFenceRegistry.register(record.fence);
+    this.sessionManagerFenceRecords.set(manager as object, record);
+    this.sessionManagerFenceRecords.set(record.manager as object, record);
+    return record.manager;
+  }
+
+  private releaseSessionManagerFence(manager: import('../lib/sdk-integration/sdk').SdkSessionManager): void {
+    const record = this.sessionManagerFenceRecords.get(manager as object);
+    if (!record) return;
+    record.unregister();
+    this.sessionManagerFenceRecords.delete(manager as object);
+    this.sessionManagerFenceRecords.delete(record.manager as object);
+  }
+
+  private async createSessionContext(
+    manager: import('../lib/sdk-integration/sdk').SdkSessionManager,
+    reason: SessionContextCreationReason,
+  ): Promise<SessionContext> {
+    if (!this.sdk || !this.currentLease) throw new Error('Worker runtime is not promoted.');
+    const guardedManager = this.fenceSessionManager(manager);
+    const managerPath = guardedManager.getSessionFile();
+    if (!managerPath || !sameSessionPath(managerPath, this.currentLease.canonicalSessionPath)) {
+      throw new Error('Runtime context manager does not match the current write lease.');
+    }
+    const authStorage = this.sdk.AuthStorage.create(this.syncedAuthPath ?? resolveAuthPath(this.agentDir));
+    const runtime = await this.sdk.createAgentSessionRuntime(
+      createRuntimeFactory(this.sdk, authStorage, this.startupCwd, this.gate, {
+        wrapSessionManager: (candidate) => this.fenceSessionManager(candidate),
+        customTools: () => createBackendTools({
+          kind: 'primary',
+          requestSessionControl: (body, signal) => (
+            this.options.server.requestFrame(body, 'session.control.result', undefined, 120_000, signal)
+          ),
+        }),
+      }),
+      {
+        cwd: guardedManager.getCwd() || this.startupCwd,
+        agentDir: this.agentDir,
+        sessionManager: guardedManager,
+        ownershipAdapter: this.createOwnershipAdapter(),
+        writeLease: this.currentLease,
+        sessionStartEvent: { type: 'session_start', reason },
+      },
+    );
+    const context: SessionContext = {
+      runtime,
+      session: runtime.session,
+      sessionPath: managerPath,
+      sessionOwnershipEpoch: 0,
+      unsubscribe: () => undefined,
+      busySeq: 0,
+    };
+    this.context = context;
+    this.installProviderProgressBridge();
+    this.installProviderIncidentBridge();
+    runtime.setRebindSession?.(async (replacement) => {
+      await this.bindSession(context, replacement);
+      if (!this.suppressNextReplacementOpened) {
+        this.emit('session.opened', { ...this.openedPayload, runtimeReady: true });
+      }
+    });
+    await this.bindSession(context, runtime.session);
+    return context;
+  }
+
+  private async readHarnessSystemPrompt(context: SessionContext): Promise<string | undefined> {
+    const promptState = context.session as typeof context.session & SessionPromptState;
+    const options = promptState._baseSystemPromptOptions;
+    if (options) {
+      try {
+        const { buildSystemPrompt } = await this.getSystemPromptModule();
+        const pieBuildSystemPrompt = createPieSystemPromptBuilder(buildSystemPrompt, this.agentDir);
+        const rebuilt = normalizePromptText(pieBuildSystemPrompt({
+          cwd: options.cwd,
+          selectedTools: options.selectedTools,
+          toolSnippets: options.toolSnippets,
+          promptGuidelines: options.promptGuidelines,
+        }));
+        if (rebuilt) return rebuilt;
+      } catch { /* fall back to the runtime's current base prompt */ }
+    }
+    return normalizePromptText(promptState._baseSystemPrompt);
+  }
+
+  private async buildSystemPrompts(
+    context: SessionContext,
+    harnessPromptOverride?: string,
+  ): Promise<import('../lib/rpc/session-events.js').SystemPromptEntry[]> {
+    const promptState = context.session as typeof context.session & SessionPromptState;
+    captureOriginalSystemPromptOptions(promptState);
+    const promptOptions = promptState._originalSystemPromptOptions ?? promptState._baseSystemPromptOptions;
+    const harnessPrompt = harnessPromptOverride ?? await this.readHarnessSystemPrompt(context);
+    const tools = context.session.getAllTools?.() ?? [];
+    return buildSessionSystemPrompts({
+      harnessPrompt,
+      promptOptions,
+      formatSkillsForPrompt: this.sdk?.formatSkillsForPrompt,
+      tools,
+      activeProvider: resolveActiveModel(context),
+      disabledEntries: context.systemPromptDisabledEntries,
+    });
+  }
+
+  private async buildOpenedPayload(
+    sessionPath: string,
+    selectionToken?: string,
+    operationId?: string,
+    operationAttempt?: number,
+    transcript: import('../lib/rpc/session-events.js').TranscriptMode = 'tail',
+    transport?: import('../../session-storage/transcripts/snapshot-boundary.js').SessionSnapshotTransport,
+  ): Promise<SessionOpenedPayload> {
+    const context = this.context;
+    if (!context || !sameSessionPath(sessionPath, context.sessionPath)) {
+      throw new Error(`Cross-session snapshot rejected: ${sessionPath}`);
+    }
+    return await buildSessionOpenedPayloadHelper(sessionPath, {
+      getContextUsage: (owner) => owner.lastContextUsage ?? undefined,
+      readHarnessSystemPrompt: (owner) => this.readHarnessSystemPrompt(owner),
+      buildSystemPrompts: (owner, harnessPrompt) => this.buildSystemPrompts(owner, harnessPrompt),
+      readModelSettings: async () => ({ ...this.settings }),
+      getPinnedStreamingMessageId: (owner) => owner.activeRequest?.currentMessageId
+        ?? owner.activeRequest?.lastAssistantMessageId,
+      getSessionContext: (candidate) => sameSessionPath(candidate, context.sessionPath) ? context : undefined,
+      agentDir: this.agentDir,
+      startupCwd: this.startupCwd,
+    }, selectionToken, transcript, transport, operationId, operationAttempt);
+  }
+
+  private applyRuntimePrefs(values: WorkerJsonObject): void {
+    const jsonEnv: Array<[string, string]> = [
+      ['providerToggles', PROVIDER_TOGGLES_ENV],
+      ['subagentProviderDefaults', SUBAGENT_PROVIDER_DEFAULTS_ENV],
+      ['subagentProviderTogglesBySession', SUBAGENT_PROVIDER_TOGGLES_ENV],
+      ['extensionToggles', EXTENSION_TOGGLES_ENV],
+      ['historyCompaction', HISTORY_COMPACTION_ENV],
+      ['subagentBuckets', SUBAGENT_BUCKETS_ENV],
+      ['subagentNestedAllowedBuckets', NESTED_ALLOWED_BUCKETS_ENV],
+      ['subagentBucketCanSpawn', SUBAGENT_BUCKET_CAN_SPAWN_ENV],
+      ['subagentDropTools', 'PIE_SUBAGENT_DROP_TOOLS_JSON'],
+    ];
+    for (const [key, env] of jsonEnv) {
+      if (values[key] !== undefined) process.env[env] = JSON.stringify(values[key]);
+    }
+    const booleanEnv: Array<[string, string]> = [
+      ['subagentAlwaysParentModel', 'PIE_SUBAGENT_ALWAYS_PARENT_MODEL'],
+      ['subagentRouteAroundSaturatedProviders', SUBAGENT_ROUTE_AROUND_SATURATED_PROVIDERS_ENV],
+      ['subagentFallbackOnProviderFailure', SUBAGENT_FALLBACK_ON_PROVIDER_FAILURE_ENV],
+      ['bashFastPath', 'PIE_BASH_FAST_PATH'],
+    ];
+    for (const [key, env] of booleanEnv) {
+      if (typeof values[key] === 'boolean') process.env[env] = values[key] ? '1' : '0';
+    }
+    const scalarEnv: Array<[string, string]> = [
+      ['subagentMaxDepth', 'PIE_SUBAGENT_MAX_DEPTH'],
+      ['subagentMaxTreeSessions', 'PIE_SUBAGENT_MAX_TREE_SESSIONS'],
+      ['subagentMaxInflight', 'PIE_SUBAGENT_MAX_INFLIGHT'],
+      ['bashWarmPoolSize', 'PIE_BASH_WARM_POOL'],
+      ['bashWarmupTimeoutMs', 'PIE_BASH_WARMUP_TIMEOUT_MS'],
+      ['bashDefaultTimeout', 'PIE_BASH_DEFAULT_TIMEOUT'],
+      ['bashShellPath', 'PIE_SHELL'],
+    ];
+    for (const [key, env] of scalarEnv) {
+      if (typeof values[key] === 'string' || typeof values[key] === 'number') process.env[env] = String(values[key]);
+    }
+    if (this.context
+      && (values.subagentProviderDefaults !== undefined
+        || values.subagentProviderTogglesBySession !== undefined
+        || values.subagentBuckets !== undefined)) {
+      this.applySubagentProviderPolicy(this.context);
+    }
+    if (typeof values.autonomousMode === 'boolean') {
+      process.env[AUTONOMOUS_MODE_ENV] = values.autonomousMode ? '1' : '0';
+      this.setAutonomousMode(values.autonomousMode);
+    }
+    if (typeof values.mcpEnabled === 'boolean') {
+      process.env['PIE_MCP_ENABLED'] = values.mcpEnabled ? '1' : '0';
+      this.setMcpEnabled(values.mcpEnabled);
+    }
+    if (values.providerConcurrency && typeof values.providerConcurrency === 'object'
+      && !Array.isArray(values.providerConcurrency)) {
+      ProviderGate.getInstance()?.applyUserOverrides(values.providerConcurrency as never);
+    }
+  }
+
+  private setAutonomousMode(enabled: boolean): void {
+    if (this.autonomousMode === enabled) return;
+    this.autonomousMode = enabled;
+    if (this.context) this.applyAutonomousModeToContext(this.context, enabled);
+  }
+
+  private applyAutonomousModeToContext(context: SessionContext, enabled: boolean): void {
+    const active = context.session.getActiveToolNames?.()
+      ?? context.session.getAllTools?.().map((tool) => tool.name)
+      ?? [];
+    if (enabled) {
+      if (context.autonomousModeAskUserWasActive !== undefined) return;
+      context.autonomousModeAskUserWasActive = active.includes(ASK_USER_TOOL_NAME);
+      if (context.autonomousModeAskUserWasActive) {
+        context.session.setActiveToolsByName?.(active.filter((name) => name !== ASK_USER_TOOL_NAME));
+      }
+      return;
+    }
+    if (context.autonomousModeAskUserWasActive && !active.includes(ASK_USER_TOOL_NAME)) {
+      context.session.setActiveToolsByName?.([...active, ASK_USER_TOOL_NAME]);
+    }
+    context.autonomousModeAskUserWasActive = undefined;
+  }
+
+  private setMcpEnabled(enabled: boolean): void {
+    if (this.mcpEnabled === enabled) return;
+    this.mcpEnabled = enabled;
+    if (this.context) this.applyMcpEnabledToContext(this.context, enabled);
+  }
+
+  private applyMcpEnabledToContext(context: SessionContext, enabled: boolean): void {
+    const active = context.session.getActiveToolNames?.()
+      ?? context.session.getAllTools?.().map((tool) => tool.name)
+      ?? [];
+    if (!enabled) {
+      if (context.mcpToolsWereActive !== undefined) return;
+      context.mcpToolsWereActive = active.filter((name) => (MCP_TOOL_NAMES as readonly string[]).includes(name));
+      if (context.mcpToolsWereActive.length > 0) {
+        context.session.setActiveToolsByName?.(active.filter((name) => !(MCP_TOOL_NAMES as readonly string[]).includes(name)));
+      }
+      return;
+    }
+    if (context.mcpToolsWereActive && context.mcpToolsWereActive.length > 0) {
+      context.session.setActiveToolsByName?.([...active, ...context.mcpToolsWereActive]);
+    }
+    context.mcpToolsWereActive = undefined;
+  }
+
+  /** Re-apply the disabled state after the adapter re-registers its tools
+   *  (registerTool auto-activates new tools, bypassing the setActiveTools
+   *  guard). Called after extension bind and at every turn start. */
+  private enforceMcpToolsDisabled(context: SessionContext): void {
+    if (this.mcpEnabled) return;
+    const active = context.session.getActiveToolNames?.()
+      ?? context.session.getAllTools?.().map((tool) => tool.name)
+      ?? [];
+    const mcpActive = active.filter((name) => (MCP_TOOL_NAMES as readonly string[]).includes(name));
+    if (mcpActive.length === 0) return;
+    context.mcpToolsWereActive = [...new Set([...(context.mcpToolsWereActive ?? []), ...mcpActive])];
+    context.session.setActiveToolsByName?.(active.filter((name) => !(MCP_TOOL_NAMES as readonly string[]).includes(name)));
+  }
+
+  /** Effective per-session subagent provider policy for the hosted session:
+   *  true when every provider on the toggle surface (subagent buckets,
+   *  provider defaults, this session's per-session overrides) is unchecked —
+   *  the webview's "don't use subagents" signal. An unspecified/empty surface
+   *  keeps subagents enabled. Preferences arrive through the runtimePrefs
+   *  env mirrors; the session's overrides are resolved against the hosted
+   *  session path with the backend's canonical path identity. */
+  private computeSubagentPolicyDisabled(context: SessionContext): boolean {
+    return subagentProvidersAllDisabled({
+      buckets: parseJsonEnv(process.env[SUBAGENT_BUCKETS_ENV]),
+      defaults: parseJsonEnv(process.env[SUBAGENT_PROVIDER_DEFAULTS_ENV]),
+      sessionToggles: resolveSessionProviderToggles(
+        parseJsonEnv(process.env[SUBAGENT_PROVIDER_TOGGLES_ENV]),
+        context.sessionPath,
+      ),
+      availableModels: this.availableModels(),
+    });
+  }
+
+  /** Apply the effective subagent provider policy to the session's active
+   *  tool set: remove the subagent tool while every provider is unchecked and
+   *  restore it (registered but inactive) when any provider is re-enabled.
+   *  `force` runs the update even when the computed policy is unchanged —
+   *  used at bind, where a replacement session may carry a stale active set,
+   *  and after a Tools-entry restore, where a policy flip during the
+   *  Tools-disabled window could not move the active set. */
+  private applySubagentProviderPolicy(context: SessionContext, options: { force?: boolean } = {}): void {
+    const disabled = this.computeSubagentPolicyDisabled(context);
+    const previous = this.subagentPolicyDisabled;
+    this.subagentPolicyDisabled = disabled;
+    if (!options.force && disabled === previous) return;
+    const active = context.session.getActiveToolNames?.()
+      ?? context.session.getAllTools?.().map((tool) => tool.name)
+      ?? [];
+    const registered = context.session.getAllTools?.().map((tool) => tool.name) ?? [];
+    const next = subagentPolicyActiveToolUpdate(active, registered, disabled);
+    if (next) context.session.setActiveToolsByName?.(next);
+  }
+
+  /** Turn-start re-enforcement: the subagent extension's registerTool
+   *  auto-activates its tool (bypassing the setActiveTools guard), so re-apply
+   *  the all-unchecked removal at the start of every turn, mirroring the MCP
+   *  disabled-state enforcement. */
+  private enforceSubagentPolicyDisabled(context: SessionContext): void {
+    if (!this.subagentPolicyDisabled) return;
+    const active = context.session.getActiveToolNames?.()
+      ?? context.session.getAllTools?.().map((tool) => tool.name)
+      ?? [];
+    if (!active.includes(SUBAGENT_TOOL_NAME)) return;
+    context.session.setActiveToolsByName?.(active.filter((name) => name !== SUBAGENT_TOOL_NAME));
+  }
+
+  private withAnalyticsWriterAdmission<T>(operation: () => T): T {
+    const releaseAdmission = this.analyticsWriterAdmission?.acquire();
+    let released = false;
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      releaseAdmission?.();
+    };
+    try {
+      const result = operation();
+      if (result && typeof (result as { then?: unknown }).then === 'function') {
+        return Promise.resolve(result).finally(release) as T;
+      }
+      release();
+      return result;
+    } catch (error) {
+      release();
+      throw error;
+    }
+  }
+
+  private async applySystemPromptToggles(context: SessionContext, disabledEntries: readonly string[]): Promise<void> {
+    const next = [...new Set(disabledEntries)];
+    const promptState = context.session as typeof context.session & SessionPromptState;
+    captureOriginalSystemPromptOptions(promptState);
+    const source = promptState._originalSystemPromptOptions ?? promptState._baseSystemPromptOptions;
+    if (source) {
+      const { buildSystemPrompt } = await this.getSystemPromptModule();
+      const pieBuildSystemPrompt = createPieSystemPromptBuilder(buildSystemPrompt, this.agentDir);
+      const toggled = buildToggledSystemPrompt(source, next, pieBuildSystemPrompt);
+      promptState._baseSystemPrompt = toggled.prompt;
+      promptState._baseSystemPromptOptions = toggled.options;
+    }
+    const disablingTools = next.includes(TOOLS_ENTRY_ID);
+    const wasDisablingTools = context.systemPromptDisabledEntries?.includes(TOOLS_ENTRY_ID) === true;
+    // Publish the new disabled-entry set before any tool-activation call. The
+    // Tools guard is authoritative while the entry is disabled; once the entry
+    // is re-enabled, the host's own restore below must pass through it instead
+    // of being coerced to an empty set by the stale disabled state.
+    context.systemPromptDisabledEntries = next;
+    if (disablingTools && !wasDisablingTools) {
+      context.systemPromptToolsBeforeDisable = context.session.getActiveToolNames?.()
+        ?? context.session.getAllTools?.().map((tool) => tool.name)
+        ?? [];
+      context.session.setActiveToolsByName?.([]);
+    } else if (!disablingTools && wasDisablingTools) {
+      context.session.setActiveToolsByName?.(context.systemPromptToolsBeforeDisable ?? []);
+      context.systemPromptToolsBeforeDisable = undefined;
+      // The saved snapshot predates any subagent-provider-policy flip made
+      // while Tools was disabled, and a policy restore issued during that
+      // window was (correctly) filtered by the Tools-disabled guard. Re-apply
+      // the policy over the restored set: an enabled policy restores the
+      // registered-but-inactive subagent tool, a disabled policy keeps it
+      // pruned. `force` is required because a policy flip during the filtered
+      // window already moved the policy field without being able to move the
+      // active set.
+      this.applySubagentProviderPolicy(context, { force: true });
+    }
+    const persistPromptToggles = () => writeSystemPromptTogglesForSession(context.sessionPath, next);
+    const sessionId = context.session.sessionManager.getSessionId?.();
+    if (this.lifecycleBarrier && typeof sessionId === 'string' && sessionId) {
+      await this.lifecycleBarrier.runWriteMutationAsync(sessionId, 'system-prompt-toggles', async () => (
+        await this.lifecycleBarrier!.runAdministrativeAsync(
+          '__aggregate_session_prompt_settings__', 'system-prompt-toggles.aggregate', persistPromptToggles,
+        )
+      ));
+    } else {
+      await this.withAnalyticsWriterAdmission(persistPromptToggles);
+    }
+    if (this.openedPayload?.systemPrompts) {
+      this.openedPayload = {
+        ...this.openedPayload,
+        systemPrompts: markDisabledEntries(
+          this.openedPayload.systemPrompts.map((entry) => ({ ...entry, disabled: false })),
+          new Set(next),
+        ),
+      };
+    }
+  }
+
+  private getSystemPromptModule(): Promise<SdkSystemPromptModule> {
+    this.systemPromptModule ??= loadSdkInternalModule<SdkSystemPromptModule>(
+      this.options.patchIdentity.sdkPath,
+      path.join('core', 'system-prompt.js'),
+      { mode: 'worker', patchIdentity: this.options.patchIdentity },
+    );
+    return this.systemPromptModule;
+  }
+
+  private availableModels(): ModelInfo[] {
+    let models: ModelInfo[] = [];
+    let registryWasRead = false;
+    try {
+      const registry = this.context?.runtime.services.modelRegistry;
+      if (registry) {
+        registryWasRead = true;
+        // Use the same projection as the coordinator. The previous worker-local
+        // mapper dropped thinkingLevels and subagent.pricing, which made every
+        // promoted session lose exact reasoning options, picker prices, and the
+        // pricing resolver used by session cost tracking.
+        models = projectRegistryModels(registry.getAvailable(), this.agentDir);
+      }
+    } catch {
+      registryWasRead = false;
+      models = [];
+    }
+    // Use the coordinator snapshot only when no runtime registry could be read.
+    // A successfully read empty registry is authoritative (for example, no
+    // configured credentials) and must not expose unavailable fallback models.
+    if (!registryWasRead && this.syncedCatalogModels !== undefined) return this.syncedCatalogModels;
+    return models;
+  }
+
+  private resolveNetworkProvider(url: string, fallbackProvider?: string): string | undefined {
+    const providers = this.syncPayloads.get('providerPolicy')?.providers;
+    if (!providers || typeof providers !== 'object' || Array.isArray(providers)) return fallbackProvider;
+    let target: URL;
+    try { target = new URL(url); } catch { return fallbackProvider; }
+    let best: { provider: string; length: number } | undefined;
+    const consider = (provider: string, prefix: unknown): void => {
+      if (typeof prefix !== 'string') return;
+      let base: URL;
+      try { base = new URL(prefix); } catch { return; }
+      if (target.origin !== base.origin) return;
+      const basePath = base.pathname.replace(/\/+$/, '') || '/';
+      const targetPath = target.pathname;
+      const pathMatches = basePath === '/'
+        || targetPath === basePath
+        || targetPath.startsWith(`${basePath}/`);
+      if (!pathMatches || basePath.length <= (best?.length ?? -1)) return;
+      best = { provider, length: basePath.length };
+    };
+    for (const [provider, rawPolicy] of Object.entries(providers)) {
+      if (!rawPolicy || typeof rawPolicy !== 'object' || Array.isArray(rawPolicy)) continue;
+      const policy = rawPolicy as WorkerJsonObject;
+      const prefixes = [
+        ...(typeof policy.baseUrl === 'string' ? [policy.baseUrl] : []),
+        ...(Array.isArray(policy.baseUrls)
+          ? policy.baseUrls.filter((value): value is string => typeof value === 'string')
+          : []),
+      ];
+      for (const prefix of prefixes) {
+        consider(provider, prefix);
+      }
+    }
+    // Built-in/OAuth providers (notably GitHub Copilot enterprise) receive
+    // their effective URL from the live SDK registry rather than models.json.
+    // Consult that worker-local authority too, but only for providers present
+    // in the coordinator policy so an unrelated model URL cannot create an
+    // accidental default-capacity pool.
+    try {
+      const registry = this.context?.runtime.services.modelRegistry;
+      const configuredProviders = new Set(Object.keys(providers));
+      const models = [
+        ...(registry?.getAll?.() ?? []),
+        ...(registry?.getAvailable() ?? []),
+      ];
+      for (const model of models) {
+        if (!configuredProviders.has(model.provider)) continue;
+        consider(model.provider, model.baseUrl);
+      }
+    } catch {
+      // Policy prefixes and root-session identity remain safe fallbacks when
+      // the runtime registry is unavailable during startup or refresh.
+    }
+    return best?.provider ?? fallbackProvider;
+  }
+
+  /** Report runtime-discovered models to the coordinator without replacing its
+   * configured catalog authority. Fire-and-forget; a rejected frame is
+   * retried on the next command/event cycle via the promotion report. */
+  private reportRuntimeCatalog(): void {
+    try {
+      const models = asWorkerJson(this.availableModels());
+      this.options.server.sendRuntimeReportFrame({ models });
+    } catch {
+      // The report is best-effort telemetry; never fail promotion for it.
+    }
+  }
+
+  private assertPromotionPayload(payload: WorkerRuntimePromotionPayload): void {
+    for (const key of ['sdkPath', 'agentDir', 'startupCwd', 'sessionDir', 'sessionPath', 'creationReason'] as const) {
+      if (typeof payload[key] !== 'string' || payload[key].length === 0) throw new Error(`Invalid runtime promotion ${key}.`);
+    }
+    if (!payload.writeLease || typeof payload.writeLease !== 'object' || Array.isArray(payload.writeLease)) throw new Error('Invalid runtime promotion writeLease.');
+    if (!payload.openedPayload || typeof payload.openedPayload !== 'object' || Array.isArray(payload.openedPayload)) throw new Error('Invalid runtime promotion openedPayload.');
+    if (payload.analytics !== undefined) {
+      const analytics = payload.analytics;
+      if (!analytics || typeof analytics !== 'object' || Array.isArray(analytics)
+        || typeof analytics.generationId !== 'string' || analytics.generationId.length === 0
+        || typeof analytics.buildId !== 'string' || analytics.buildId.length === 0
+        || (analytics.workspaceId !== undefined
+          && (typeof analytics.workspaceId !== 'string' || analytics.workspaceId.length === 0))
+        || !analytics.captureSubject || typeof analytics.captureSubject !== 'object'
+        || Array.isArray(analytics.captureSubject)) {
+        throw new Error('Invalid runtime promotion analytics activation.');
+      }
+      const subject = analytics.captureSubject as { kind?: unknown; rootSessionId?: unknown; operationId?: unknown; hostId?: unknown };
+      if (subject.kind === 'session' && (typeof subject.rootSessionId !== 'string' || subject.rootSessionId.length === 0)) {
+        throw new Error('Invalid runtime promotion analytics session subject.');
+      }
+      if (subject.kind === 'pendingCreate' && (typeof subject.operationId !== 'string' || subject.operationId.length === 0)) {
+        throw new Error('Invalid runtime promotion analytics pending-create subject.');
+      }
+      if (subject.kind === 'host' && (typeof subject.hostId !== 'string' || subject.hostId.length === 0)) {
+        throw new Error('Invalid runtime promotion analytics host subject.');
+      }
+      if (subject.kind !== 'session' && subject.kind !== 'pendingCreate' && subject.kind !== 'host') {
+        throw new Error('Invalid runtime promotion analytics subject kind.');
+      }
+      const writerAdmission = analytics.writerAdmission;
+      if (writerAdmission !== undefined) {
+        if (!writerAdmission || typeof writerAdmission !== 'object' || Array.isArray(writerAdmission)
+          || typeof writerAdmission.stateDir !== 'string' || writerAdmission.stateDir.length === 0
+          || writerAdmission.stateDir.length > 4_096 || writerAdmission.stateDir.includes('\u0000')
+          || !writerAdmission.identity || typeof writerAdmission.identity !== 'object'
+          || Array.isArray(writerAdmission.identity)) {
+          throw new Error('Invalid runtime promotion analytics writer admission.');
+        }
+        const identity = writerAdmission.identity;
+        for (const key of ['hostInstanceId', 'workspaceId', 'generationId', 'buildId'] as const) {
+          const value = identity[key];
+          if (typeof value !== 'string' || value.length === 0 || value.length > 512 || value.includes('\u0000')) {
+            throw new Error(`Invalid runtime promotion analytics writer identity ${key}.`);
+          }
+        }
+        if (!Number.isSafeInteger(identity.processId) || identity.processId <= 0) {
+          throw new Error('Invalid runtime promotion analytics writer identity processId.');
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Project one live.semantic payload onto the worker IPC ordinary-frame
+ * ceiling. Returns `undefined` when the envelope must not be sent at all
+ * (the host detects the resulting seq gap and recovers the full content
+ * through the checkpoint rebase path).
+ */
+function boundLiveSemanticPayload(payload: unknown): unknown {
+  if (!payload || typeof payload !== 'object') return payload;
+  const envelope = payload as { kind?: unknown; delta?: unknown; sessionPath?: unknown; durableMessage?: unknown };
+  if (envelope.kind === 'turn.terminal') {
+    const durableMessage = envelope.durableMessage as ChatMessage;
+    const sessionPath = typeof envelope.sessionPath === 'string' ? envelope.sessionPath : '';
+    return {
+      ...envelope,
+      durableMessage: compactDurableMessageForTransport(
+        durableMessage,
+        sessionPath,
+        WORKER_IPC_TERMINAL_MESSAGE_BUDGET,
+      ),
+    };
+  }
+  if (envelope.kind === 'turn.text' || envelope.kind === 'turn.reasoning') {
+    // A single delta must fit the ordinary-frame ceiling with the envelope
+    // overhead. The accumulator's turn caps allow a part up to 512 KiB (its
+    // legacy JSONL-record budget); a provider emitting one giant update
+    // cannot ride the worker wire, so the envelope is dropped and the host
+    // recovers through the seq-gap checkpoint rebase path.
+    if (typeof envelope.delta === 'string'
+      && Buffer.byteLength(envelope.delta, 'utf8') > WORKER_IPC_DELTA_BUDGET) {
+      return undefined;
+    }
+  }
+  return payload;
+}
+
+function sameSessionPath(left: string, right: string): boolean {
+  const canonical = (value: string): string => {
+    const absolute = path.resolve(value);
+    let resolved = absolute;
+    try { resolved = fsSync.realpathSync.native(absolute); } catch { /* destination may not exist yet */ }
+    const normalized = path.normalize(resolved);
+    return process.platform === 'win32' ? normalized.toLocaleLowerCase('en-US') : normalized;
+  };
+  return canonical(left) === canonical(right);
+}
+
+/** Parse a mirrored runtime-prefs JSON environment value. Returns undefined
+ *  for unset/malformed values so the policy computation treats them as
+ *  unspecified instead of silently disabling subagents. */
+function parseJsonEnv(raw: string | undefined): Record<string, unknown> | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+    return parsed as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Resolve one session's provider-toggle record from the mirrored
+ *  by-session map, matching the hosted session path with the backend's
+ *  canonical path identity (the mirrors may spell the same session with
+ *  different drive-letter casing or separators). */
+function resolveSessionProviderToggles(
+  value: unknown,
+  sessionPath: string,
+): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    if (sameSessionPath(key, sessionPath)) return entry as Record<string, unknown>;
+  }
+  return undefined;
+}
+
+function resolveAuthPath(agentDir: string): string {
+  const authDir = process.env.PI_CODING_AGENT_AUTH_DIR?.trim();
+  return authDir ? path.resolve(authDir, 'auth.json') : path.resolve(agentDir, 'auth.json');
+}
+
+function modelSettingsFromWorkerObject(value: WorkerJsonObject): ModelSettings {
+  const settings: ModelSettings = {
+    defaultModel: typeof value.defaultModel === 'string' ? value.defaultModel : '',
+    defaultThinkingLevel: typeof value.defaultThinkingLevel === 'string'
+      ? value.defaultThinkingLevel as ModelSettings['defaultThinkingLevel']
+      : 'high',
+  };
+  if (typeof value.defaultProvider === 'string' && value.defaultProvider.length > 0) {
+    settings.defaultProvider = value.defaultProvider;
+  }
+  return settings;
+}
+
+function modelSettingsToWorkerObject(settings: ModelSettings): WorkerJsonObject {
+  return asWorkerJsonObject({
+    defaultModel: settings.defaultModel,
+    defaultThinkingLevel: settings.defaultThinkingLevel,
+    defaultProvider: settings.defaultProvider ?? null,
+  });
+}
+
+function serializeModelSettingsUpdates(
+  updates: Partial<ModelSettings>,
+  unset: readonly ModelSettingsUnsetKey[] = [],
+): { updates: WorkerJsonObject; unset: ModelSettingsUnsetKey[] } {
+  const source = { ...(updates as Record<string, unknown>) };
+  const explicitUnset = new Set<ModelSettingsUnsetKey>(unset);
+  // Absence means "leave the provider unchanged"; only an own property with
+  // an undefined/null value is an explicit deletion request.
+  if (Object.prototype.hasOwnProperty.call(source, 'defaultProvider')
+    && (source.defaultProvider === undefined || source.defaultProvider === null)) {
+    delete source.defaultProvider;
+    explicitUnset.add('defaultProvider');
+  }
+  return {
+    updates: asWorkerJsonObject(source),
+    unset: [...explicitUnset],
+  };
+}
+
+function asWorkerJson(value: unknown): WorkerJsonValue {
+  return JSON.parse(JSON.stringify(value ?? null)) as WorkerJsonValue;
+}
+
+function asWorkerJsonObject(value: unknown): WorkerJsonObject {
+  const normalized = asWorkerJson(value);
+  return normalized && typeof normalized === 'object' && !Array.isArray(normalized)
+    ? normalized as WorkerJsonObject
+    : { value: normalized };
+}

@@ -6,7 +6,7 @@
  *
  * Hooks the `tool_result` event and rewrites `content` in place — the rewrite
  * is durable (it replaces the stored toolResult message; see
- * docs/TOOL-RESULT-PRUNING.md §6 for the verified persistence chain) and
+ * docs/contracts/TOOL-RESULT-PRUNING.md §6 for the verified persistence chain) and
  * cache-safe (only new results are touched, never stored history).
  *
  * Two tiers (§7.2):
@@ -64,7 +64,7 @@ import { isExtensionDisabledByToggle, loadConfig } from "../../harness/tools/res
 import { recordPruning } from "../../harness/tools/result-processing/logger.js";
 import { runPipeline } from "../../harness/tools/result-processing/pipeline.js";
 import { reapPrunedRawStashes, reapSessionStashes } from "../../harness/tools/result-processing/reaper.js";
-import { countTokens } from "../../shared/tokenize.js";
+import { countTokens } from "../../lib/tokenization.js";
 
 function getSessionId(ctx: unknown): string {
   const ctxObj = ctx as Record<string, unknown> | undefined;

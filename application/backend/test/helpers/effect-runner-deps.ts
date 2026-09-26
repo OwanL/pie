@@ -1,0 +1,245 @@
+/**
+ * Canonical typed factory for `EffectRunnerDeps` test mocks.
+ *
+ * Goal: centralize every dep mock behind one type-checked factory so that a
+ * newly-required method on `SessionServiceLike` / `StatsServiceLike` /
+ * the file-diff core/viewer interfaces becomes a compile error here (and in
+ * every test that uses the factory) instead of silently drifting in hand-built
+ * `as any` literals.
+ *
+ * The mock objects are typed directly against their interfaces — NO `as any`.
+ * `fileDiffService` and `fileDiffViewer` are typed against their narrow
+ * platform-neutral interfaces; `service` against `SessionServiceLike`; and
+ * `statsService` against `StatsServiceLike`.
+ *
+ * Tests that need custom behavior pass it through the `opts` hooks
+ * (`backend`, `queues`, `serviceOverrides`, `dispatch`, `dispatchCommand`,
+ * `dispatchEvent`, `requestImpl`, `modalChoice`, `sendTimerTimeoutMs`,
+ * `timer`, `openFile`) rather than re-inlining an `as any` mock.
+ */
+import type {
+  EffectRunnerDeps,
+  BackendLike,
+  QueueRouter,
+  SessionServiceLike,
+  StatsServiceLike,
+  TimerSink,
+  OpenFileSink,
+} from '../../conversation-state/effects/effect-runner';
+import type { FileDiffServiceLike, FileDiffViewerLike } from '../../file-changes/file-diff-service';
+import type { EffectResultEvent, CommandEvent, Event } from '../../conversation-state/events';
+import type { ThinkingLevel } from '../../../lib/protocol/index.js';
+import type { LiveSubagentDetailAddress, DetailCursor, DetailPageRef } from '../../../../harness/agent-processes/lib/rpc/subagent-detail';
+import type { RequestOptions } from '../../agent-connection/request-tracker';
+
+export type Call =
+  | { kind: 'lifecycle' }
+  | { kind: 'session'; sessionPath: string }
+  | { kind: 'request'; method: string; params: unknown }
+  | { kind: 'persistTabs'; openTabPaths: string[]; active: string | null; pinnedTabPaths: string[]; pinnedTabGroups: string[][] }
+  | { kind: 'log'; level: string; message: string }
+  | { kind: 'showWarningModal'; message: string; confirmChoice: string }
+  | { kind: 'bumpEpoch'; sessionPath: string }
+  | { kind: 'onModelConfigChanged'; sessionPath: string; modelId: string; thinkingLevel: string; provider?: string }
+  | { kind: 'handleSelectionFailure'; token: string; notice: string }
+  | { kind: 'applySessionOpened'; payload: unknown }
+  | { kind: 'subscribeDetail'; subscriptionId: string; viewGeneration: number; detailKey: string; detailAttempt: number; address: LiveSubagentDetailAddress; cursor?: DetailCursor }
+  | { kind: 'unsubscribeDetail'; viewGeneration: number; detailKey: string; detailAttempt: number; reason: 'collapse' | 'unmount' | 'session-change' }
+  | { kind: 'fetchDetailPages'; viewGeneration: number; detailKey: string; detailAttempt: number; ref: DetailPageRef };
+
+export interface MakeEffectRunnerDepsOpts {
+  /** Custom request implementation. Ignored when `backend` is supplied. */
+  requestImpl?: (method: string) => Promise<unknown>;
+  /** Resolved choice for `modal.showWarningModal` (undefined = dismissal). */
+  modalChoice?: string | undefined;
+  /** Override the send-timer budget (default 120s). The send-timer owns the
+   *  post-ack, pre-commit phase; on fire it dispatches PreflightFailed. */
+  sendTimerTimeoutMs?: number;
+  /** Dynamic send-timer budget (prepass-aware production wiring); takes
+   *  precedence over `sendTimerTimeoutMs`. Used to test the getter path. */
+  getSendTimerTimeoutMs?: () => number;
+  /** Injectable timer sink (tests pass a fake to drive timers deterministically). */
+  timer?: TimerSink;
+  /** Custom host sink for the generic OpenFile effect. */
+  openFile?: OpenFileSink;
+  /** Inject a custom `BackendLike` (e.g. one shared with `SessionServiceState`). */
+  backend?: BackendLike;
+  /** Inject custom queues (e.g. the real serializing `state.enqueue*` queues). */
+  queues?: QueueRouter;
+  /** Per-method `SessionServiceLike` overrides applied over the no-op stubs
+   *  (e.g. delegate `closeSession` / `handleSelectionFailure` to the host). */
+  serviceOverrides?: Partial<SessionServiceLike>;
+  /** Custom `dispatch` for `*Result` events. Defaults to pushing to `events`. */
+  dispatch?: (event: EffectResultEvent) => void;
+  /** Custom `dispatchCommand`. Defaults to pushing to `commands`. */
+  dispatchCommand?: (event: CommandEvent) => void;
+  /** Custom `dispatchEvent` for non-result/non-command Events. Defaults to no-op. */
+  dispatchEvent?: (event: Event) => void;
+}
+
+export interface MakeEffectRunnerDepsResult {
+  deps: EffectRunnerDeps;
+  calls: Call[];
+  events: EffectResultEvent[];
+  commands: CommandEvent[];
+}
+
+export function makeEffectRunnerDeps(opts: MakeEffectRunnerDepsOpts = {}): MakeEffectRunnerDepsResult {
+  const calls: Call[] = [];
+  const events: EffectResultEvent[] = [];
+  const commands: CommandEvent[] = [];
+
+  const backend: BackendLike = opts.backend ?? {
+    request<T = unknown>(method: string, params?: unknown, options?: RequestOptions): Promise<T> {
+      calls.push({ kind: 'request', method, params });
+      const sig = options?.signal;
+      // Signal-aware: a hanging requestImpl rejects when the signal aborts, so
+      // the effect-runner's abortInFlightSend can cancel an in-flight
+      // message.send in tests. Without a signal, delegates to requestImpl (or
+      // resolves {} by default — the original behavior). Options are NOT
+      // recorded on the Call (existing assertions deepEqual {method,params}).
+      if (!opts.requestImpl && !sig) return Promise.resolve({} as T);
+      return new Promise<T>((resolve, reject) => {
+        let settled = false;
+        const onAbort = (): void => {
+          if (settled) return;
+          settled = true;
+          reject(new Error(`Request ${method} was cancelled.`));
+        };
+        if (sig) {
+          if (sig.aborted) { settled = true; reject(new Error(`Request ${method} was cancelled.`)); return; }
+          sig.addEventListener('abort', onAbort);
+        }
+        if (opts.requestImpl) {
+          Promise.resolve(opts.requestImpl(method)).then(
+            (v) => { if (settled) return; settled = true; if (sig) sig.removeEventListener('abort', onAbort); resolve(v as T); },
+            (e) => { if (settled) return; settled = true; if (sig) sig.removeEventListener('abort', onAbort); reject(e); },
+          );
+        }
+      });
+    },
+  };
+
+  const queues: QueueRouter = opts.queues ?? {
+    async enqueueLifecycle<T>(task: () => Promise<T>): Promise<T> {
+      calls.push({ kind: 'lifecycle' });
+      return task();
+    },
+    async enqueueSessionOperation<T>(sessionPath: string, task: () => Promise<T>): Promise<T> {
+      calls.push({ kind: 'session', sessionPath });
+      return task();
+    },
+  };
+
+  // Keep the core and viewer mocks separate so the runner's host boundary is
+  // explicit and each interface remains independently type-checked.
+  const fileDiffService: FileDiffServiceLike = {
+    async revertFile(): Promise<void> {},
+  };
+  const fileDiffViewer: FileDiffViewerLike = {
+    async openFileDiff(): Promise<void> {},
+    async openFileInEditor(): Promise<void> {},
+  };
+
+  // Typed against `SessionServiceLike` — every method is present so a
+  // newly-required method becomes a compile error here. Per-method overrides
+  // are applied via `Object.assign` so they stay type-checked against the
+  // interface too.
+  const service: SessionServiceLike = {
+    async hydrateModelState() {},
+    async setPrefs() {},
+    async mcpList() {
+      return { servers: [] };
+    },
+    async mcpSetServerEnabled() {
+      return { servers: [], changed: false };
+    },
+    async mcpSetSessionServerEnabled() {
+      return { recycled: false, overrides: {} };
+    },
+    async setSystemPromptToggles() {},
+    subscribeDetail(options: {
+      subscriptionId: string;
+      viewGeneration: number;
+      detailKey: string;
+      detailAttempt: number;
+      address: LiveSubagentDetailAddress;
+      cursor?: DetailCursor;
+    }) {
+      calls.push({ kind: 'subscribeDetail', ...options });
+    },
+    unsubscribeDetail(options: { viewGeneration: number; detailKey: string; detailAttempt: number; reason: 'collapse' | 'unmount' | 'session-change' }) {
+      calls.push({ kind: 'unsubscribeDetail', ...options });
+    },
+    fetchDetailPages(options: { viewGeneration: number; detailKey: string; detailAttempt: number; ref: DetailPageRef }) {
+      calls.push({ kind: 'fetchDetailPages', ...options });
+    },
+    bumpSessionDataEpoch(sessionPath: string) {
+      calls.push({ kind: 'bumpEpoch', sessionPath });
+    },
+    onModelConfigChanged(sessionPath: string, modelId: string, thinkingLevel: ThinkingLevel, provider?: string) {
+      calls.push({ kind: 'onModelConfigChanged', sessionPath, modelId, thinkingLevel, ...(provider ? { provider } : {}) });
+    },
+    suppressNextCompletionNotificationFor() {},
+    async loadOlderTranscript() {},
+    async loadNewerTranscript() {},
+    async jumpToLatestTranscript() {},
+    async closeSession() {},
+    async setPruningSettings() {},
+    async setToolResultPruningSettings() {},
+    async setSessionTitlesSettings() {},
+    handleSelectionFailure(token: string, notice: string) {
+      calls.push({ kind: 'handleSelectionFailure', token, notice });
+    },
+    getOpenTranscriptMode() {
+      return 'tail' as const;
+    },
+  };
+  if (opts.serviceOverrides) {
+    Object.assign(service, opts.serviceOverrides);
+  }
+
+  // Typed against `StatsServiceLike` — every method present, no `as any`.
+  const statsService: StatsServiceLike = {
+    prepareForSend() {},
+    onTruncatedAfter() {},
+    onMessageEdited() {},
+    startNewTask() {},
+    continueTask() {},
+  };
+
+  const deps: EffectRunnerDeps = {
+    backend,
+    queues,
+    tabs: {
+      async persistTabs(openTabPaths: string[], active: string | null, pinnedTabPaths: string[], pinnedTabGroups: string[][]) {
+        calls.push({ kind: 'persistTabs', openTabPaths, active, pinnedTabPaths, pinnedTabGroups });
+      },
+    },
+    log: {
+      log(level: string, message: string) {
+        calls.push({ kind: 'log', level, message });
+      },
+    },
+    postImperative: { postImperative() {} },
+    modal: {
+      async showWarningModal(message: string, confirmChoice: string) {
+        calls.push({ kind: 'showWarningModal', message, confirmChoice });
+        return opts.modalChoice;
+      },
+    },
+    fileDiffService,
+    fileDiffViewer,
+    openFile: opts.openFile ?? { openFile: async () => undefined },
+    service,
+    statsService,
+    dispatch: opts.dispatch ?? ((e) => events.push(e)),
+    dispatchCommand: opts.dispatchCommand ?? ((cmd) => commands.push(cmd)),
+    dispatchEvent: opts.dispatchEvent ?? (() => {}),
+    sendTimerTimeoutMs: opts.sendTimerTimeoutMs,
+    getSendTimerTimeoutMs: opts.getSendTimerTimeoutMs,
+    timer: opts.timer,
+  };
+
+  return { deps, calls, events, commands };
+}

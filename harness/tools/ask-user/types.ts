@@ -1,4 +1,4 @@
-export { CUSTOM_SENTINEL } from '../../../extension/src/shared/ask-user-sentinel.js';
+export const CUSTOM_SENTINEL = '✎ Write my own answer…';
 
 export const askUserSchema = {
   type: 'object',

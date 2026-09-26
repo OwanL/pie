@@ -1,0 +1,358 @@
+/**
+ * Shared types for the subagent extension. Extracted from `index.ts` purely
+ * to bound that file's size — no behaviour changes.
+ */
+
+import type { AgentToolResult } from "@mariozechner/pi-agent-core";
+import type { Message } from "@mariozechner/pi-ai";
+import type { AgentScope } from "../../agent-instructions/agent-discovery/agents.js";
+import type { ThinkingLevel } from "./bucket-selector.js";
+
+export const COLLAPSED_ITEM_COUNT = 10;
+export const MAX_MODEL_RETRIES = 5;
+/** Max characters shown when previewing a task description in chain/parallel renderCall. */
+export const TASK_PREVIEW_SHORT = 40;
+/** Max characters shown when previewing a task description in single-mode renderCall. */
+export const TASK_PREVIEW_LONG = 60;
+export const AGENT_SCOPE_VALUES = new Set<AgentScope>(["user", "project", "both"]);
+
+/** Optional hard model requirements on a subagent call. Absent or empty
+ *  preserves current selection behaviour. The object form leaves room for
+ *  future model constraints without adding one-off tool flags; this initial
+ *  schema adds only image-input support. */
+export interface ModelRequirements {
+	/** Required runtime input kinds the serving model must accept. `['image']`
+	 *  restricts selection to provider-qualified models whose runtime `input`
+	 *  includes `image`; text-only models, buckets, and fallbacks are never
+	 *  chosen for the child. */
+	inputKinds?: Array<"image">;
+}
+
+export interface TokenChannelPresence {
+	input: boolean;
+	output: boolean;
+	cacheRead: boolean;
+	cacheWrite: boolean;
+}
+
+export interface UsageStats {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	/** True only when every provider token channel in the aggregate was observed. */
+	tokenChannelsKnown?: boolean;
+	/** Per-channel evidence retained when one or more channels were omitted. */
+	tokenChannelPresence?: TokenChannelPresence;
+	/** Cumulative provider-reported cost. Present only when at least one
+	 *  provider turn supplied explicit billing evidence; absent — never an
+	 *  invented zero or SDK catalog estimate — when no such evidence exists. */
+	cost?: number;
+	/** Canonical spelling of the explicit provider-reported total. `cost` is
+	 *  retained as the compact legacy wire alias. */
+	reportedCostUsd?: number;
+	contextTokens: number;
+	turns: number;
+}
+
+export interface SubagentTurnThroughputSample {
+	/** ISO timestamp of the runner's local wall-clock observation of `message_end`. */
+	endedAt: string;
+	/** Output tokens reported for this turn. */
+	outputTokens: number;
+	/** Wall-clock generation time for this turn in ms (tool-execution excluded). */
+	generationDurationMs: number;
+	/** Terminal status of the turn. */
+	status: 'completed' | 'error' | 'interrupted';
+	/** The model this turn ran on. */
+	modelId?: string;
+	/** The provider that served this turn. */
+	provider?: string;
+}
+
+/** Attempt phases with producer-owned elapsed-time evidence. `retry_wait` is
+ * intentionally excluded: retry backoff is reported separately per attempt. */
+export type SubagentAttemptPhase = "queued" | "preparing" | "waiting_provider" | "streaming" | "running_tool" | "orphaned_cleanup";
+
+export interface SubagentChildIdentity {
+	childId: string;
+	spawningToolCallId: string;
+	attemptId: string;
+}
+
+export interface SingleResult {
+	/** Producer-issued logical child identity. Stable across display reordering. */
+	childId?: string;
+	/** Complete root-to-target producer lineage. Legacy durable results without
+	 * this field may render, but are explicitly not live-addressable. */
+	lineage?: SubagentChildIdentity[];
+	liveAddressable?: boolean;
+	agent: string;
+	agentSource: "user" | "project" | "unknown";
+	task: string;
+	/** Effective working directory used to create this child session. Legacy
+	 * results may omit it; consumers should use the owning call input cwd, then
+	 * the parent cwd, when reconstructing those results. */
+	cwd?: string;
+	/** Parent-context mode requested for this delegation. Kept on the result so
+	 * the parent UI can make the handoff visible instead of hiding it in the
+	 * isolated child prompt. */
+	parentUserContextMode?: "latest" | "all";
+	/** Exact bounded parent-context packet inserted into the child prompt,
+	 * including its [User prompt] / [Recorded clarification] source markers. */
+	parentUserContext?: string;
+	/** Retained when the child transcript is compacted so a nested tool failure
+	 * remains distinguishable from a child/provider terminal failure. */
+	hasNestedToolFailure?: boolean;
+	exitCode: number;
+	messages: Message[];
+	/** Bounded terminal answer kept separately so durable transcript compaction
+	 * can remove duplicate final prose from messages without degrading the UI. */
+	finalOutput?: string;
+	/** True when the durable parent-facing transcript has been compacted. */
+	transcriptCompacted?: boolean;
+	/** Compact modifying-tool summary used by host/session_changes after verbose
+	 * write/edit payloads are removed from the durable child transcript. */
+	fileChanges?: Array<{
+		path: string;
+		kind: "created" | "modified" | "deleted";
+		description: string;
+		additions?: number;
+		deletions?: number;
+	}>;
+	stderr: string;
+	usage: UsageStats;
+	/** The model the subagent session actually ran with. */
+	model?: string;
+	/** Provider that owns the selected model. Kept separate from `model` because
+	 * model ids are not guaranteed to include a provider prefix. */
+	provider?: string;
+	/** Provider-agnostic family of the effective runtime model. Declared catalog
+	 * metadata wins; the effective model id is the deterministic fallback, then
+	 * `unknown` when no runtime model is observable. */
+	family?: string;
+	/** SHA-256 (lowercase hex) of the exact delegated `task` input. */
+	promptHash?: string;
+	/** Bucket requested by the tool call (or agent/default resolution), before
+	 * availability and nested-policy downgrades. */
+	requestedBucket?: string;
+	/** Whether the effective bucket differs from the requested bucket, including
+	 * a nested-policy fallback with no allowed bucket. */
+	bucketDowngraded?: boolean;
+	/** Tool-call id in the immediate parent session that dispatched this child. */
+	parentToolCallId?: string;
+	/** Maximum context window of the selected model. Paired with
+	 * `usage.contextTokens` for per-child context telemetry in the parent UI. */
+	contextWindow?: number;
+	stopReason?: string;
+	errorMessage?: string;
+	/** Streaming text accumulated from in-progress assistant turn, available while running. */
+	streamingText?: string;
+	/** Streaming reasoning (thinking) accumulated from the in-progress assistant
+	 *  turn, available while running. Mirrors {@link streamingText} but captures
+	 *  `thinking_delta` events so the parent UI can preview live reasoning before
+	 *  any reply text has arrived (the gap that previously surfaced as a generic
+	 *  "Generating…" placeholder). Cleared on `message_end` alongside
+	 *  {@link streamingText}. */
+	streamingReasoning?: string;
+	/** In-progress tool-call output from the current assistant turn. Captured
+	 * from toolcall_start/toolcall_delta events and cleared on message_end so the
+	 * host can include generated tool names/arguments in the modern live counter. */
+	draftingToolCall?: {
+		id: string;
+		name: string;
+		argumentsText: string;
+	};
+	/** True while the subagent's model is actively generating output for the
+	 *  in-progress assistant turn (set on the first text, thinking, or tool-call
+	 *  draft event; cleared on `message_end`). The host's token-rate clock reads
+	 *  this to keep advancing through mid-stream stalls, reasoning-only streams,
+	 *  and tool-call argument drafting while PAUSING during tool execution,
+	 *  between turns, and before the first token — mirroring the main session's
+	 *  clock semantics. Without
+	 *  it the clock used a sticky "has ever produced" predicate that kept
+	 *  advancing (collapsing the rate to 0) while a nested scout sat in
+	 *  read/grep/bash calls. */
+	streaming?: boolean;
+	/**
+	 * Per-turn throughput observations recorded from this subagent session.
+	 * Forwarded into the parent run's snapshot so historical tok/s includes
+	 * subagent work, attributed to the model the subagent actually ran on.
+	 */
+	turnThroughputSamples?: SubagentTurnThroughputSample[];
+	step?: number;
+	/** Tool names currently executing in this subagent (cleared when tool finishes). */
+	runningTools?: string[];
+	/** Current lifecycle phase while the child is running. This deliberately
+	 * remains in partial tool-result details so the parent UI can distinguish a
+	 * provider wait from useful streaming/tool work or a local queue. */
+	activityPhase?: "queued" | "preparing" | "waiting_provider" | "streaming" | "running_tool" | "retry_wait" | "completed" | "failed" | "cancelled" | "orphaned_cleanup";
+	/** Human-readable detail for the current phase (for example the active tool). */
+	activityDetail?: string;
+	/** Epoch milliseconds at which this phase began. */
+	activitySince?: number;
+	/** Wall-clock lifecycle bounds used for stable total elapsed time in the
+	 * collapsed parent header. Unlike activitySince, startedAt never resets when
+	 * the child changes phase. */
+	startedAt?: number;
+	completedAt?: number;
+	/** Accumulated elapsed time in observed attempt phases. Only terminal
+	 * attempt records consume this bounded, producer-owned evidence. */
+	phaseDurationsMs?: Partial<Record<SubagentAttemptPhase, number>>;
+	/** Monotonically increasing per-child progress sequence. Incremented only for
+	 * credible child activity, allowing parents to distinguish real work from
+	 * duplicate `onUpdate` snapshots without relying on wall-clock timestamps. */
+	progressGeneration?: number;
+	/** Epoch milliseconds at which credible progress was last observed. Kept
+	 * for display/diagnostics; the {@link progressGeneration} sequence fences
+	 * duplicate snapshots. */
+	lastProgressAt?: number;
+	/** The model spec chosen by bucket selection. Canonical `provider/id` for
+	 * qualified bucket entries; a bare id for legacy entries/fallbacks. */
+	selectedModel?: string;
+	/** Thinking level applied to this run. */
+	thinkingLevel?: ThinkingLevel;
+	/** Bucket used for selection ("small", "medium", "frontier"). */
+	bucket?: string;
+	/** The model specs that were candidates in the selected bucket. */
+	selectionPool?: string[];
+	/** Whether the active model fallback was used. */
+	fallback?: boolean;
+	/** Model that failed before this result was retried with a different model. */
+	failedModel?: string;
+	/** How many fallback attempts were made before this result (0 = first try). */
+	retryCount?: number;
+	/** Classified provider/SDK failure metadata. Model failover is permitted only
+	 * when the class is transient and replaying the turn is side-effect-safe. */
+	failureClass?: "transport" | "timeout" | "rate_limit" | "server_error" | "auth" | "abort" | "unknown";
+	retryable?: boolean;
+	replaySafety?: "safe" | "partial_output" | "tool_side_effect" | "terminal";
+	retryAfterMs?: number;
+	/** Diagnostic when a requested model could not be resolved and execution fell back. */
+	modelResolutionDiagnostic?: string;
+	/** Diagnostic when a nested subagent's requested bucket was not allowed and
+	 *  was downgraded (or fell back to the active model) under the nested-bucket cap. */
+	bucketDowngradeReason?: string;
+	/** Requested hard model requirements for this delegation (e.g. image input).
+	 *  Absent when the call made no requirement. Retained on running, terminal,
+	 *  retried, and compacted results as provenance. */
+	requestedModelRequirements?: ModelRequirements;
+	/** Whether the resolved effective model satisfies
+	 *  {@link SingleResult.requestedModelRequirements}. Undefined when no
+	 *  requirement was made. `true` when an active requirement was satisfied.
+	 *  `false` (with {@link SingleResult.requirementDiagnostic}) when selection
+	 *  failed before dispatching a child session. */
+	modelRequirementsSatisfied?: boolean;
+	/** Bounded diagnostic when a requested model requirement could not be
+	 *  satisfied and selection failed before dispatching a child session. */
+	requirementDiagnostic?: string;
+	/** Stable identity for this dispatched model attempt, shared with the orphan cleanup registry. */
+	attemptId?: string;
+	/** Result of the nonwaiting rich-detail ownership handoff. `rejected` is an
+	 * explicit capture gap and never means the attempt failed to execute. */
+	analyticsCaptureStatus?: "disabled" | "submitted" | "rejected";
+	/** Sanitized visible reason for a rejected ownership handoff. Analytics
+	 * failure never changes the attempt's execution outcome. */
+	analyticsCaptureError?: string;
+	/** Bounded producer fact/detail handoff receipt. Submitted means queue
+	 * ownership only; acknowledgement fields are present solely when observed
+	 * from the recorder before the terminal result was sealed. */
+	analyticsCaptureReceipt?: SubagentAnalyticsCaptureReceipt;
+	/** Bounded per-attempt analytics for this subagent dispatch (success + failed retries). */
+	attemptRecords?: SubagentAttemptRecord[];
+	/** One record per observable child provider response. Unlike aggregate usage,
+	 * absent channels stay absent so no-usage responses become explicit gaps. */
+	providerInvocations?: SubagentProviderInvocationRecord[];
+}
+
+export interface SubagentProviderInvocationRecord {
+	invocationId: string;
+	/** Canonical recorder identity minted by the child producer. A parent
+	 * terminal adapter must preserve this value and never hash a replacement. */
+	canonicalInvocationId?: string;
+	attemptId: string;
+	provider?: string;
+	model?: string;
+	usage?: Partial<Pick<UsageStats, "input" | "output" | "cacheRead" | "cacheWrite" | "cost" | "reportedCostUsd">>;
+	/** SDK assistant-message timestamp observed at `message_start`; absent when not provided. */
+	startedAt?: number;
+	/** Runner's local wall-clock observation of `message_end`, not the SDK message timestamp. */
+	completedAt?: number;
+	outcome: "success" | "failure" | "aborted";
+}
+
+export interface SubagentAnalyticsCaptureReceipt {
+	factStatus: "disabled" | "submitted" | "rejected";
+	generationId: string;
+	stableOriginId: string;
+	executionId: string;
+	attemptId: string;
+	terminalDetailPayloadId: string;
+	lastSubmittedSequence: number;
+	lastAcknowledgedSequence?: number | string;
+	terminalDetailComplete: boolean;
+	/** Provider requests observed at the SDK's supported pre-request hook before
+	 * the terminal result existed. A synchronous submission failure is sealed as
+	 * rejected so terminal reconciliation cannot later present the attempt as a
+	 * complete producer handoff. Adapter-internal HTTP retries remain unknown. */
+	predispatch?: {
+		factStatus: "disabled" | "submitted" | "rejected";
+		providerRequestCount: number;
+		providerRequestIds: string[];
+		lastSubmittedSequence: number;
+		internalRetryCoverage: "unknown";
+	};
+}
+
+/** Per-attempt analytics persisted on the final subagent result. */
+export interface SubagentAttemptRecord {
+	/** Stable identity for this attempt, shared with the orphan cleanup registry. */
+	attemptId: string;
+	/** Provider that owned the attempted model. */
+	provider?: string;
+	/** Model id used for this attempt. */
+	model?: string;
+	/** Whether this dispatched attempt produced at least one observable provider response. */
+	providerResponseObserved?: boolean;
+	/** Usage attributed to this individual attempt (not tree-cumulative). */
+	usage?: UsageStats;
+	/** Epoch milliseconds when the attempt started. */
+	startedAt?: number;
+	/** Epoch milliseconds when the attempt ended. */
+	completedAt?: number;
+	/** Terminal classification of this attempt. */
+	outcome: "success" | "failure" | "aborted";
+	/** Classified provider/SDK failure metadata, when the attempt failed. */
+	failureClass?: SingleResult["failureClass"];
+	/** Replay-safety observation at attempt end. */
+	replaySafety?: SingleResult["replaySafety"];
+	/** Backoff delay applied before dispatching this attempt (0 for the first attempt).
+	 * This is intentionally separate from phaseDurationsMs: retry_wait must not
+	 * be counted both as elapsed phase time and retry backoff. */
+	backoffMs?: number;
+	/** Bounded producer-measured duration for each entered execution phase. */
+	phaseDurationsMs?: Partial<Record<SubagentAttemptPhase, number>>;
+	/** Terminal stop/activity outcome for this attempt, not the parent tool-call
+	 * settlement source (which this producer does not observe). */
+	attemptSettlementOutcome?: string;
+	/** Cleanup telemetry outcome when known; absence means telemetry unavailable,
+	 * not that this ordinary attempt was orphaned. */
+	cleanupOutcome?: string;
+	analyticsCaptureReceipt?: SubagentAnalyticsCaptureReceipt;
+}
+
+export interface SubagentDetails {
+	mode: "single" | "parallel" | "chain";
+	agentScope: AgentScope;
+	projectAgentsDir: string | null;
+	results: SingleResult[];
+}
+
+export type DisplayItem =
+	| { type: "text"; text: string }
+	| { type: "toolCall"; name: string; args: Record<string, any> };
+
+/** Subagent tool result, including the optional `isError` hint the pi runner uses. */
+export type SubagentResult = AgentToolResult<SubagentDetails> & { isError?: boolean };
+
+export type OnUpdateCallback = (partial: AgentToolResult<SubagentDetails>) => void;

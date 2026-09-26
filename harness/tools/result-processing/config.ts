@@ -11,7 +11,7 @@
 
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
-import { parseJsonOrThrow, toErrorMessage } from "../../../shared/error-message.js";
+import { parseJsonOrThrow, toErrorMessage } from "../../../lib/structured-logging/error-message.js";
 import { DEFAULT_CONFIG, DEFAULT_RULE_TOGGLES, RULE_KEY_BY_NAME, VALID_PROFILES, type Profile, type ToolResultPruningConfig } from "./types.js";
 
 /** Root of the pi-config repo, resolved from this implementation's known position. */

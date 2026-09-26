@@ -1,0 +1,25 @@
+{
+  "//": "Typecheck gate for this harness storage owner. `module: preserve` + `moduleResolution: bundler` allow `import.meta` and `.js`-extension imports without a package.json \"type\": \"module\". Sources import the still-settled extension/src shared/backend modules by relative path until their own B5/B7 records relocate them.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": false,
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": ["node"],
+    "lib": ["ES2022"],
+    "baseUrl": ".",
+    "paths": {
+      "yaml": ["../../../application/hosts/vscode/node_modules/yaml"],
+      "@earendil-works/pi-ai": ["../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai"],
+      "@mariozechner/pi-ai": ["../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai"],
+      "@earendil-works/pi-coding-agent": ["../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent"]
+    }
+  },
+  "include": ["./**/*.ts"],
+  "exclude": ["node_modules"]
+}

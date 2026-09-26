@@ -8,7 +8,7 @@ model's context. One of three context-lean layers in this stack
 - **skill pruning** — `skill-pruner`; drop skills/tools from the catalog; prepass
 - **tool-result pruning** — **this extension**; prune a tool result's bytes; per-result
 
-Design and prior art: [`docs/TOOL-RESULT-PRUNING.md`](../../../docs/TOOL-RESULT-PRUNING.md).
+Design and prior art: [`docs/contracts/TOOL-RESULT-PRUNING.md`](../../../docs/contracts/TOOL-RESULT-PRUNING.md).
 
 ## What it does
 

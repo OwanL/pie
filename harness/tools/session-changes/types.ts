@@ -4,26 +4,16 @@
  * Mirrors `session_review`'s one-tool/action-discriminated-union shape: a
  * single `session_changes` tool with `action: 'list' | 'diff'`. The two actions
  * are the same domain (session changes) and `diff` takes a `path` returned by
- * `list`. Types are defined locally (not imported from pie's protocol barrel)
- * so the extension stays decoupled from the host build — they mirror the JSON
- * shapes the tool reads from the session JSONL.
+ * `list`. File-change facts use the neutral JSON-safe owner,
+ *  so the extension stays decoupled from the application protocol barrel.
+ *  The JSONL adapter maps stored entries onto this canonical shape.
  */
 
 export type SessionChangesAction = 'list' | 'diff';
 export const MAX_DIFF_PATHS = 20;
 
-/** A derived file change (mirrors pie's FileChangeEntry — re-typed locally to
- *  avoid coupling this extension to the host protocol barrel). */
-export interface FileChange {
-  path: string;
-  kind: 'created' | 'modified' | 'deleted';
-  toolCallId: string;
-  messageId: string;
-  description: string;
-  timestamp: string;
-  additions?: number;
-  deletions?: number;
-}
+/** Canonical file-change fact shape, also re-exported by the app protocol. */
+export type { FileChangeEntry as FileChange } from '../../../lib/file-changes/types.js';
 
 export interface SessionChangesParams {
   action: SessionChangesAction;

@@ -10,7 +10,7 @@
 // prints a dry-run report). This makes the shared verifier safe to invoke in
 // tests and in a "doctor/install dry-run" without mutating user state.
 
-import { readPinnedNodeVersion, readPinnedNpmVersion, readPinnedPiVersion } from '../../toolchain.mjs';
+import { readPinnedNodeVersion, readPinnedNpmVersion, readPinnedPiVersion } from '../toolchain.mjs';
 
 /**
  * Read all three pinned versions for a repo.

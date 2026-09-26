@@ -6,14 +6,15 @@ A personal stack built around the [`pi` coding agent](https://www.npmjs.com/pack
 
 | Path | What it is | Distribution |
 |---|---|---|
-| [`extension/src/`](extension/src), [`extension/test/`](extension/test) | *pie* VS Code extension source and tests | Built and packaged locally |
+| [`application/`](application), [`analytics/`](analytics), [`harness/`](harness), [`lib/`](lib), [`test/integration/`](test/integration) | *pie* host/backend/frontend and domain runtime owners; tests are colocated with their packages, with cross-owner gates under `test/integration/` | Build and VS Code packaging live under [`application/hosts/vscode/`](application/hosts/vscode) |
 | [`application/hosts/vscode/`](application/hosts/vscode) | VS Code distribution package, toolchain, runtime assets, and package-owned configuration; build orchestration lives in [`scripts/build/`](scripts/build) | Build and packaging owner |
-| [`tools/`](tools/README.md) | Explicit Pie-owned tool catalog and the implementations of all nine catalog tools | Extension discovery adapters or backend-injected factories |
-| [`extensions/`](extensions) — e.g. [`skill-pruner/`](extensions/skill-pruner), [`safeguard/`](extensions/safeguard), [`cwd-skills/`](extensions/cwd-skills), [`image-context-guard/`](extensions/image-context-guard) | Pi discovery adapters and middleware (cwd-scoped skill discovery, skill pruning, command safeguards, image guarding, and more — see [`extensions/`](extensions) for the full set); tool implementations live under [`tools/`](tools/README.md) | Loaded by `pi` via `settings.json` packages |
-| [`analysis/`](analysis) | Local DuckDB query workspace over legacy run-analytics exports/stores | Internal research tool |
-| [`harness/agent-instructions/`](harness/agent-instructions) — authored [`agents/`](harness/agent-instructions/agents), [`skills/`](harness/agent-instructions/skills), with [`APPEND_SYSTEM.md`](APPEND_SYSTEM.md) at the repo root, [`settings.json`](settings.json) | Maintainer's personal pi config | Reference / example only |
+| [`harness/tools/`](harness/tools/README.md) | Explicit Pie-owned tool catalog, tool implementations, and package integrations | Extension discovery adapters or backend-injected factories; backend composition lives in [`harness/agent-processes/coordinator/backend-tools.ts`](harness/agent-processes/coordinator/backend-tools.ts) |
+| [`harness/session-storage/`](harness/session-storage), [`harness/model-providers/`](harness/model-providers), [`harness/agent-processes/`](harness/agent-processes) | Owner packages for session persistence, provider catalogs/policies, and agent-process workers/helpers; cross-owner integration gates remain under [`test/integration/`](test/integration) | Internal runtime and test owners during the B5 organization migration |
+| [`extensions/`](extensions) — e.g. [`skill-pruner/`](extensions/skill-pruner), [`safeguard/`](extensions/safeguard), [`cwd-skills/`](extensions/cwd-skills), [`image-context-guard/`](extensions/image-context-guard) | Pi discovery adapters and middleware; the skill-pruner implementation lives in [`harness/tool-and-skill-selection/`](harness/tool-and-skill-selection) | Loaded by `pi` via `settings.json` packages |
+| [`analytics/analysis/`](analytics/analysis) | Retained local DuckDB query workspace over legacy run-analytics exports/stores | Internal research tool |
+| [`harness/agent-instructions/`](harness/agent-instructions) — authored [`agents/`](harness/agent-instructions/agents), [`skills/`](harness/agent-instructions/skills), with [`APPEND_SYSTEM.md`](APPEND_SYSTEM.md) at the repo root, [`settings.json`](settings.json) | Maintainer's personal pi config; selector policy/state is in [`harness/tool-and-skill-selection/`](harness/tool-and-skill-selection) | Reference / example only |
 | [`data/`](data), [`auth.json`](#) | Local runtime/auth data | Local-only; excluded from the portable config |
-| [`docs/`](docs) | Design contracts and plans; start at [`docs/INDEX.md`](docs/INDEX.md) | Internal |
+| [`docs/`](docs) | Categorized architecture, contracts, plans, operations, and research; start at [`docs/INDEX.md`](docs/INDEX.md) | Internal |
 
 ## Goals
 
@@ -165,7 +166,7 @@ For a deterministic dependency/build refresh after pulling, first close all VS C
 npm run bootstrap
 ```
 
-This runs a root `npm ci`; its `postinstall` automatically installs the locked `application/hosts/vscode/` and `analysis/` dependency trees (including build/test dependencies such as jsdom). It then installs the locked pi CLI, restores pi packages without updating the CLI, checks generated model files, builds the extension, and runs the doctor. For a non-destructive check:
+This runs a root `npm ci`; its `postinstall` automatically installs the locked `application/hosts/vscode/` and `analytics/analysis/` dependency trees (including build/test dependencies such as jsdom). It then installs the locked pi CLI, restores pi packages without updating the CLI, checks generated model files, builds the extension, and runs the doctor. For a non-destructive check:
 
 ```bash
 npm run doctor
@@ -186,7 +187,7 @@ Run the canonical wrappers from the repository root:
 npm test
 
 # focused test file(s) while iterating; pass multiple paths if needed
-npm run test:file -- extension/test/path/to/test.ts
+npm run test:file -- application/backend/test/path/to/test.ts
 
 # full fast suite and opt-in integration suite
 npm run test:all
@@ -213,7 +214,7 @@ Test and typecheck children have a 20-minute watchdog that kills the complete pr
 From a fresh checkout, install every dependency tree once from the repository root:
 
 ```bash
-npm ci                             # also installs application/hosts/vscode/ and analysis/ via postinstall
+npm ci                             # also installs application/hosts/vscode/ and analytics/analysis/ via postinstall
 npm run extension:build            # validate + stage runtime + publish renderer
 npm run extension:build:validate   # compile/validate without publishing
 npm run extension:activate         # one-time startup loader setup or upgrade
@@ -285,7 +286,7 @@ Pie enforces a single active host per machine across VS Code and standalone (VS 
 - **VS Code taking over from standalone** shows a progress notification, asks the standalone host to stop, waits a bounded time (`PIE_HOST_HANDOFF_TIMEOUT_MS`, default 30s), and starts only after the standalone released. On timeout pie fails closed and terminates nothing.
 - A standalone host that is asked to stop logs that VS Code requested the stop, shuts down gracefully, and retains saved sessions.
 
-Scope and limits: the coordinator is loopback-only (never reachable over LAN) and machine-global — a pie host under another local OS user session also occupies it, so a second user is refused rather than taking over. The graceful handoff request is unauthenticated local IPC, accepted within this single-user desktop scope. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ("Single active pie host per machine") for the contract.
+Scope and limits: the coordinator is loopback-only (never reachable over LAN) and machine-global — a pie host under another local OS user session also occupies it, so a second user is refused rather than taking over. The graceful handoff request is unauthenticated local IPC, accepted within this single-user desktop scope. See [docs/architecture/ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md) ("Single active pie host per machine") for the contract.
 
 ### Query local analytics
 
@@ -303,7 +304,7 @@ Runtime usage/cost questions are answered from the canonical SQLite store instea
 
 ## Persistence and storage
 
-Pie has one OS-local runtime-data root, resolved from `PIE_DATA_DIR` or the platform default, holding `analytics/`, `sessions/`, `artifacts/`, `state/`, and `cache/`. See [docs/ANALYTICS_IMPLEMENTATION_CONTRACT.md](docs/ANALYTICS_IMPLEMENTATION_CONTRACT.md) for the layout and the authority rules.
+Pie has one OS-local runtime-data root, resolved from `PIE_DATA_DIR` or the platform default, holding `analytics/`, `sessions/`, `artifacts/`, `state/`, and `cache/`. See [docs/contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md](docs/contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md) for the layout and the authority rules.
 
 - Analytics have two authorities, and only one is active at a time: the legacy owners (`data/outcomes/<workspace-id>/` run analytics plus the workspace billable-invocation ledger and activity timeline) stay authoritative whenever the resolved state directory records no active canonical generation — no manifest, or a validated candidate/ready manifest. With a validated active generation, capture goes exclusively to `<data-root>/analytics/analytics.sqlite` and the legacy ledger is not written at all — never a dual-write, and no import of old analytics into the canonical store. A malformed or inconsistent activation state fails startup closed instead of falling back to legacy.
 - Privacy mode means delete on explicit session close: capture stays available while the session is open, and closing a private session deletes its captured analytics. Under legacy authority, privacy instead suppresses run analytics and scrubs existing records.
@@ -330,8 +331,8 @@ The backend logs resolved storage paths on startup via the `backend.ready` event
 - [AGENTS.md](AGENTS.md) — global agent traversal and shell conventions
 - [develop-pie skill](harness/agent-instructions/skills/develop-pie/SKILL.md) — Pie-specific working conventions, commands, and architecture references
 - [docs/INDEX.md](docs/INDEX.md) — curated index of design docs and plans
-- [docs/STATE_CONTRACT.md](docs/STATE_CONTRACT.md) — authoritative host ↔ webview sync contract
-- [docs/ANALYTICS_IMPLEMENTATION_CONTRACT.md](docs/ANALYTICS_IMPLEMENTATION_CONTRACT.md) — analytics authority, data root, privacy and gated storage-cutoff contract
+- [docs/contracts/STATE_CONTRACT.md](docs/contracts/STATE_CONTRACT.md) — authoritative host ↔ webview sync contract
+- [docs/contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md](docs/contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md) — analytics authority, data root, privacy and gated storage-cutoff contract
 - [query-analytics skill](harness/agent-instructions/skills/query-analytics/SKILL.md) — querying the canonical analytics store
-- [extension/README.md](extension/README.md) — extension design philosophy
-- [analysis/README.md](analysis/README.md) — local DuckDB analytics workspace
+- [UI design philosophy](docs/architecture/UI-DESIGN-PHILOSOPHY.md) and [GUI development](docs/operations/GUI-DEVELOPMENT.md)
+- [analytics/analysis/README.md](analytics/analysis/README.md) — local DuckDB analytics workspace

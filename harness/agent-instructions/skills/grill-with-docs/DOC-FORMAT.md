@@ -23,7 +23,7 @@ Rules:
 - **Only include terms specific to this project.** General programming concepts don't belong. Before adding a term, ask: is this a concept unique to this project, or a general programming concept? Only the former belongs.
 - **Group terms under subheadings** when natural clusters emerge.
 
-### docs/ARCHITECTURE.md — system overview and patterns
+### docs/architecture/ARCHITECTURE.md — system overview and patterns
 
 Add or update architectural concepts, module boundaries, and design patterns here. This is the "how the system fits together" file.
 
@@ -34,7 +34,7 @@ When updating:
 - Update the relevant section — don't create a parallel description
 - Keep diagrams and flow descriptions consistent with the code
 
-### docs/STATE_CONTRACT.md — state management rules
+### docs/contracts/STATE_CONTRACT.md — state management rules
 
 Add or update protocol rules, mutation constraints, and session-scoped behaviour here. This is the "what guarantees the state system upholds" file.
 
@@ -46,6 +46,6 @@ When updating:
 
 ### New docs in docs/
 
-If a decision doesn't fit into an existing doc, create a new file in `docs/`. Name it descriptively (e.g., `MODEL-SCORING.md`, `PRUNING-DESIGN.md`). Existing examples: `STATE_CONTRACT.md` and `ARCHITECTURE.md`.
+If a decision doesn't fit into an existing doc, use `docs/INDEX.md` to choose the right category directory before creating a new file. Name it descriptively (e.g., `MODEL-SCORING.md`, `PRUNING-DESIGN.md`). Existing examples: `docs/contracts/STATE_CONTRACT.md` and `docs/architecture/ARCHITECTURE.md`.
 
 Follow the existing naming convention — either UPPER-CASE-With-Dashes.md or lower-case-with-dashes.md, matching the prevailing style in the directory.

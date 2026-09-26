@@ -1,54 +1,58 @@
 # Documentation index
 
-This folder contains active design contracts, implementation plans, and operational references. Use this index instead of scanning the directory.
+`docs/` is organized by purpose. Use this index rather than scanning the directory.
 
-## Active design contracts (read first)
+## Architecture
 
-- [ARCHITECTURE.md](ARCHITECTURE.md) — **primary architecture reference**. System overview, pattern explanation, data flow scenarios, extension-point recipes, and invariants. Start here.
-- [STATE_CONTRACT.md](STATE_CONTRACT.md) — authoritative normative rules for host ↔ webview state sync, session lifecycle, and accounting. Any change here requires matching tests in `extension/test/` (see `sync-contract.test.ts`).
-- [STATE_CONTRACT_IMPLEMENTATION.md](STATE_CONTRACT_IMPLEMENTATION.md) — non-normative mechanics behind the state contract: transport/protocol internals, byte budgets, thresholds, and file mappings. Not pinned by tests.
-- [STATE_CONTRACT_HISTORY.md](STATE_CONTRACT_HISTORY.md) — completed remediation chronology (retired Brief/Phase/REM/Bug/FIX labels) and documentation-structure decisions.
-- [internal/ARCH-OVERVIEW.md](internal/ARCH-OVERVIEW.md) — concise developer-onboarding file map. Spine file locations, glossary table, and "where to make changes" quick-reference.
+- [ARCHITECTURE.md](architecture/ARCHITECTURE.md) — **primary architecture reference**: system overview, data flow, extension points, and invariants. Start here.
+- [ARCH-OVERVIEW.md](architecture/ARCH-OVERVIEW.md) — concise developer-onboarding file map, glossary, and “where to make changes” guide.
+- [STATE_CONTRACT_IMPLEMENTATION.md](architecture/STATE_CONTRACT_IMPLEMENTATION.md) — non-normative mechanics behind the state contract: transport/protocol internals, byte budgets, thresholds, and file mappings. Not pinned by tests.
+- [UI-DESIGN-PHILOSOPHY.md](architecture/UI-DESIGN-PHILOSOPHY.md) — UI goals, interaction principles, and component map.
 
-## Active design contracts (analytics and storage)
+## Contracts
 
-- [ANALYTICS_IMPLEMENTATION_CONTRACT.md](ANALYTICS_IMPLEMENTATION_CONTRACT.md) — living contract for the implemented analytics authority switch (legacy vs canonical activation), the OS-local data root, the exclusive-capture rule, delete-on-close privacy, the read-only query surface, retained `analysis/` tooling, and the gated `PIE_STORAGE_CUTOFF_AUTHORIZATION` session-storage cutoff. Activation status is not recorded here.
+- [STATE_CONTRACT.md](contracts/STATE_CONTRACT.md) — authoritative normative rules for host ↔ webview state sync, session lifecycle, and accounting. Contract changes require matching tests under the registered integration test roots.
+- [ANALYTICS_IMPLEMENTATION_CONTRACT.md](contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md) — living contract for analytics authority, the OS-local data root, exclusive capture, privacy, read-only queries, retained `analytics/analysis/` tooling, and the gated `PIE_STORAGE_CUTOFF_AUTHORIZATION` cutoff. Activation status is not recorded here.
+- [AGENT-SESSION-CONTROL.md](contracts/AGENT-SESSION-CONTROL.md) — local session discovery, transcript paging, messaging, creation, and lifecycle close.
+- [DEFERRED-TRIGGERS.md](contracts/DEFERRED-TRIGGERS.md) — behavior and compatibility contract for `defer_trigger` and its host-side registry.
+- [SESSION-TITLES.md](contracts/SESSION-TITLES.md) — behavior, settings, worker contract, validation, and host-owned lifecycle for optional asynchronous LLM session titles.
+- [STATE_CONTRACT_HISTORY.md](contracts/STATE_CONTRACT_HISTORY.md) — completed remediation chronology and documentation-structure decisions; historical, not pinned by tests.
+- [SUBAGENT_PROVIDER_RESILIENCE.md](contracts/SUBAGENT_PROVIDER_RESILIENCE.md) — operational reference for subagent/provider resilience and queued-message delivery.
+- [TOOL-RESULT-PRUNING.md](contracts/TOOL-RESULT-PRUNING.md) — deterministic `tool_result` middleware contract. History compaction, skill pruning, and tool-result pruning remain distinct.
+- [ANALYTICS-UI-AND-AUTHORITY.md](contracts/ANALYTICS-UI-AND-AUTHORITY.md) — concise retained note on legacy analytics UI visibility and authority behavior; the analytics implementation contract is authoritative.
 
-## Active plans (in progress)
+## Plans
 
-- [BROWSER_SERVER_PLAN.md](BROWSER_SERVER_PLAN.md) — staged plan for the existing Pie Preact UI over loopback-default HTTP/WebSocket, with explicit unauthenticated trusted-LAN IPv4 opt-in, isolated per-renderer delivery, and a separate future authenticated-internet ingress gate. Milestones 0–2 and the standalone runtime extraction are implemented; milestones 3–5 (resilience pass, browser-native file/diff/export, authenticated ingress) remain. Standalone LAN access is opt-in and has no VS Code editor/file/diff integration.
-- [REPOSITORY_ORGANIZATION_PLAN.md](REPOSITORY_ORGANIZATION_PLAN.md) — accepted target organization and migration handoff: complete responsibility tree, dependency/ownership rules, source-family mappings, discovery/package compatibility, B0–B8 execution batches, validation and rollback. B0–B2 are complete / exit accepted; B2 settled 17 distribution/config/runtime/build-helper moves, while source and test files remain at their original paths. See the [migration progress checkpoint](plans/repository-organization-migration-progress.md).
+- [BROWSER_SERVER_PLAN.md](plans/BROWSER_SERVER_PLAN.md) — staged plan for the existing Pie Preact UI over loopback-default HTTP/WebSocket, explicit unauthenticated trusted-LAN IPv4 opt-in, isolated per-renderer delivery, and separately gated future authenticated-internet ingress. Milestones 0–2 and standalone runtime extraction are implemented; milestones 3–5 remain.
+- [REPOSITORY_ORGANIZATION_PLAN.md](plans/REPOSITORY_ORGANIZATION_PLAN.md) — completed B0–B8 target-organization and migration acceptance record; final post-fix verification is complete in the working tree. No restart/live deployment or commit/push is claimed. See the [migration progress checkpoint](plans/repository-organization-migration-progress.md).
+- [Migration baseline verification](plans/repository-organization-baseline-verification.md) — original pre-migration verification evidence and limitations.
 
-## Active investigations
+## Operations
 
-- [Pie tool catalog and consolidation](../tools/README.md) — explicit tool ownership/context inventory and registration boundaries; the implementations of all nine catalog tools live under `tools/`, with `extensions/<id>/index.ts` discovery shims and `extensions/computer-use` / `extensions/playwright` keeping dependency manifests and lockfiles.
-- [AGENT-SESSION-CONTROL.md](AGENT-SESSION-CONTROL.md) — agent-facing local session discovery, transcript paging, messaging, creation, and lifecycle close.
-- [AGENT-WORKFLOWS.md](AGENT-WORKFLOWS.md) — current-state and research findings for agent coordination, session-scoped change review, deferred work, and agent-created persistent sessions. Records confirmed design decisions and open questions; not an implemented contract.
+- [AGENT-WORKFLOWS.md](operations/AGENT-WORKFLOWS.md) — current-state and research findings for agent coordination, session-scoped change review, deferred work, and persistent sessions; not an implemented contract.
+- [COMPUTER-USE.md](operations/COMPUTER-USE.md) — selected dependencies, isolated runtime architecture, tool/coordinate/lifecycle contracts, acceptance evidence, verification, and known limitations.
+- [GUI-DEVELOPMENT.md](operations/GUI-DEVELOPMENT.md) — local GUI build/watch/reload workflow.
+- [MCP.md](operations/MCP.md) — MCP support, configuration scopes, adding servers, security notes, version pin, and headless verification.
+- [PLAYWRIGHT.md](operations/PLAYWRIGHT.md) — implemented headless-browser contract, runtime architecture, accessibility refs, artifact bounds, recovery, and known limits.
+- [centralized-model-config.md](operations/centralized-model-config.md) — historical rationale for centralizing model configuration. The active usage instructions are in the root README and the [develop-pie skill](../harness/agent-instructions/skills/develop-pie/SKILL.md#model-configuration).
 
-## Implemented design references
+## Research and history
 
-- [SUBAGENT_PROVIDER_RESILIENCE.md](SUBAGENT_PROVIDER_RESILIENCE.md) — operational reference for the implemented subagent/provider resilience model: settlement without elapsed-time force settlement (local terminal CAS, explicit cancellation, provider bounds, generation fencing, bounded detached cleanup), provider retry/failover/circuit breaking, and correlated queued-message FIFO delivery. Remaining queued-message dwell UX and finer producer telemetry are nonblocking optional follow-ups.
-- [SESSION-TITLES.md](SESSION-TITLES.md) — behavior, settings, worker contract, validation, and host-owned lifecycle for optional asynchronous LLM session titles.
-- [DEFERRED-TRIGGERS.md](DEFERRED-TRIGGERS.md) — design and behavioral contract for the `defer_trigger` tool and its host-side registry: a session registers an asynchronous condition (timer / user input / another session finishing / command predicate) and required message without aborting its turn; an open target may receive a wake-up when it fires. Runtime code lives in `harness/tools/deferred-triggers/` (tool; `extensions/deferred-triggers/index.ts` is the discovery shim), `extension/src/host/deferred-triggers/` (registry + sidecar store), and the status-strip webview menu.
-- [TOOL-RESULT-PRUNING.md](TOOL-RESULT-PRUNING.md) — design and contract for the deterministic `tool_result` middleware (strip ANSI, minify JSON, prune permission columns, collapse blank lines) before results enter context. One of three context-lean layers (history compaction / skill pruning / tool-result pruning — see the [develop-pie skill's context-lean terminology](../harness/agent-instructions/skills/develop-pie/SKILL.md#context-lean-terminology)). Runtime code lives in `harness/tools/result-processing/` behind the retained `extensions/tool-result-pruner/index.ts` adapter; the document remains the behavioral reference and records future lossy/recall considerations.
-- [MCP.md](MCP.md) — operational reference for MCP support (via the pinned `pi-mcp-adapter` pi package): the proxy-tool/lazy-server model, config scopes and precedence, how to add a server (Jira current setup), security notes, version pin vs the pi runtime, and the headless verification harness.
+- [repository-organization-navigation-study-2026-09-24.md](research/repository-organization-navigation-study-2026-09-24.md) — qualitative study of 25 synthetic navigation/placement probes, including negative outcomes and limits. It is not a controlled benchmark, validated migration, or superiority claim.
+- [analytics-cost-audit-2026-09-23.md](research/analytics-cost-audit-2026-09-23.md) — historical pricing audit.
+- [HISTORY-COMPACTION-REAL-SESSION-EVALUATION-2026-07-19.md](research/HISTORY-COMPACTION-REAL-SESSION-EVALUATION-2026-07-19.md) — historical evaluation notes.
+- [model-token-pricing-sources.md](research/model-token-pricing-sources.md) — authoritative evidence ledger for real token pricing in `models.json`.
+- [ollama-pro-cloud-models-ranked.md](research/ollama-pro-cloud-models-ranked.md) — model evaluation notes.
+- [2026-07-16.md](research/2026-07-16.md) — retained historical report.
+- [IDEAS.md](research/IDEAS.md) — unstructured brain-dump, not a roadmap; items are candidates for evaluation, not commitments.
 
-## Operational references
+## Other active references
 
-- `harness/agent-instructions/skills/query-analytics/SKILL.md` — agent-facing canonical analytics query contract: the normalized `analytics/analytics.sqlite` store, `analytics_provider_usage_v1` view, bounded read-only schema/query/detail/storage commands, int64-as-decimal-string rule, explicit truncation/cancellation/coverage metadata, owning-root scope and timezone/missingness semantics, and the no-legacy-fallback rule. The store exists only under canonical analytics authority; the skill must not be read as evidence that authority is active.
-- [COMPUTER-USE.md](COMPUTER-USE.md) — selected dependencies, isolated runtime architecture, tool/coordinate/lifecycle contracts, acceptance evidence, verification commands, and known limitations for the generic Windows `computer` tool and skill.
-- [PLAYWRIGHT.md](PLAYWRIGHT.md) — implemented contract, isolated headless runtime architecture, revision-scoped accessibility refs, artifact/output bounds, lifecycle recovery, acceptance evidence, and known limits for the first-class `playwright` tool and skill.
-
-## Reference / informational
-
-- [internal/repository-organization-navigation-study-2026-09-24.md](internal/repository-organization-navigation-study-2026-09-24.md) — completed qualitative study of 25 fresh synthetic navigation/placement probes, including protocol exceptions, negative outcomes, and limits. Evidence informs the organization plan; it is not a controlled benchmark or validated migration.
-- [internal/centralized-model-config.md](internal/centralized-model-config.md) — design rationale for centralizing model config into `models.yaml` + the `sync-models` codegen. **Implemented**; see `README.md` (Model Configuration) for authoritative usage and the [develop-pie skill's model configuration guidance](../harness/agent-instructions/skills/develop-pie/SKILL.md#model-configuration). Kept as the "why" record.
-- [internal/ollama-pro-cloud-models-ranked.md](internal/ollama-pro-cloud-models-ranked.md) — model evaluation notes.
-- [internal/model-token-pricing-sources.md](internal/model-token-pricing-sources.md) — **authoritative evidence ledger** for all real token pricing in `models.json`. Every non-zero cost field traces back to a row here.
-- [IDEAS.md](IDEAS.md) — unstructured brain-dump. Not a roadmap. Items here are candidates for evaluation, not commitments.
+- [Pie tool catalog and consolidation](../harness/tools/README.md) — explicit tool ownership/context inventory and registration boundaries. Implementations live under `harness/tools/`; coordinator composition lives under `harness/agent-processes/coordinator/`; stable `extensions/<id>/index.ts` discovery shims remain; native dependency owners remain under `extensions/computer-use/` and `extensions/playwright/`.
+- [query-analytics skill](../harness/agent-instructions/skills/query-analytics/SKILL.md) — agent-facing canonical analytics query contract. The store exists only under canonical analytics authority; the skill is not evidence that authority is active.
 
 ## Conventions
 
-- A doc named `*_PLAN.md` under `docs/` describes work that is **either in progress or not yet started**. Remove it when the work completes and update this index.
-- Plans under `docs/internal/` are status reports or implementation notes, not user-facing contracts.
-- The only files downstream code may depend on (via tests pinning invariants) are `STATE_CONTRACT.md` (normative) and the runtime evidence it names. `STATE_CONTRACT_IMPLEMENTATION.md` and `STATE_CONTRACT_HISTORY.md` are supporting references and must never be pinned.
+- Plans live under `docs/plans/` and describe work in progress or not yet started; completed migration plans may be retained as linked closeout records.
+- Architecture, contracts, operations, plans, and research live in their corresponding category directories. Historical records retain their original claims and evidence semantics; do not promote them into current contracts.
+- The only documentation whose invariants may be pinned by downstream code/tests is [STATE_CONTRACT.md](contracts/STATE_CONTRACT.md) plus its named runtime evidence. [STATE_CONTRACT_IMPLEMENTATION.md](architecture/STATE_CONTRACT_IMPLEMENTATION.md) and [STATE_CONTRACT_HISTORY.md](contracts/STATE_CONTRACT_HISTORY.md) are supporting references and must never be pinned.

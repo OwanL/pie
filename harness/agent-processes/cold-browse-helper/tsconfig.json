@@ -1,0 +1,25 @@
+{
+  "extends": "../../../extensions/tsconfig.base.json",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": false,
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": ["node"],
+    "lib": ["ES2022"],
+    "baseUrl": ".",
+    "paths": {
+      "yaml": ["../../../application/hosts/vscode/node_modules/yaml"],
+      "@earendil-works/pi-ai": ["../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai"],
+      "@mariozechner/pi-ai": ["../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai"],
+      "@earendil-works/pi-coding-agent": ["../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent"]
+    }
+  },
+  "include": ["./**/*.ts"],
+  "exclude": ["node_modules"]
+}

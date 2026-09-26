@@ -1,0 +1,27 @@
+export interface TranscriptWindowBudgets {
+  /** Initial tail rows loaded on open/preload/create. */
+  tailCount: number;
+  /** Rows requested per older/newer page fetch. */
+  pageSize: number;
+  /** Hard cap for rows kept in an active loaded window. */
+  maxLoadedCount: number;
+  /** Tail rows retained for inactive sessions before hard eviction. */
+  inactiveTailCount: number;
+  /** Inactive session transcript eviction TTL in milliseconds. */
+  inactiveTtlMs: number;
+}
+
+/**
+ * Central transcript windowing budgets used by backend slicing, host culling,
+ * and webview paging behavior.
+ */
+export const TRANSCRIPT_WINDOW_BUDGETS: TranscriptWindowBudgets = {
+  // Keep initial open/preload payloads lean while making deep history quick to
+  // traverse. A 120-row page reaches the longest observed session in at most
+  // 18 actions without raising the 240-row in-memory cap.
+  tailCount: 60,
+  pageSize: 120,
+  maxLoadedCount: 240,
+  inactiveTailCount: 40,
+  inactiveTtlMs: 2 * 60 * 1000,
+};

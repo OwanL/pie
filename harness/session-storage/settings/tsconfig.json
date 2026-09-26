@@ -1,0 +1,21 @@
+{
+  "//": "Test/tsx config for the session-storage settings owner. Tests exercise the mcp config/override RPC seams through the backend request-handler chain, which reaches `yaml` only through the pi runtime's dependency owner (installed under application/hosts/vscode); these paths alias tsx at that same copy. Typecheck uses tsconfig.release.json (source-only, no test roots).",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": false,
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": ["node"],
+    "baseUrl": ".",
+    "paths": {
+      "yaml": ["../../../application/hosts/vscode/node_modules/yaml/dist/index.js"]
+    }
+  },
+  "include": ["./**/*.ts"],
+  "exclude": ["node_modules"]
+}

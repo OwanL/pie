@@ -9,7 +9,7 @@ import type { ParsedSession, SessionEntryLike } from './session-jsonl.js';
 import { renderList, renderDiffs } from './render.js';
 import { computeFileDiff } from './diff.js';
 import type { DiffOutput, DiffKind } from './diff.js';
-import { canonicalFilePath } from '../../../extension/src/shared/file-path.js';
+import { canonicalFilePath } from '../../../lib/file-changes/file-path.js';
 
 /** Honor the host's per-extension toggle (PIE_EXTENSION_TOGGLES_JSON, keyed by
  *  extension id). Mirrors session-reviewer's isExtensionDisabledByToggle so the

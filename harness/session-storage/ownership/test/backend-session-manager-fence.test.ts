@@ -1,0 +1,251 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+
+import {
+  createSessionManagerFence,
+  createSessionManagerFenceRegistry,
+  FENCED_ENTRY_ID,
+} from '../session-manager-fence';
+import type { MutableSdkSessionManager } from '../session-manager-fence';
+
+type Call = { method: string; args: unknown[] };
+
+function createMockManager(): MutableSdkSessionManager & Record<string, unknown> {
+  const calls: Call[] = [];
+  return {
+    getCwd: () => '/repo',
+    getSessionFile: () => '/repo/session.jsonl',
+    getSessionName: () => 'test',
+    getBranch: () => [],
+    getEntries: () => [],
+    appendMessage: (message: unknown) => {
+      calls.push({ method: 'appendMessage', args: [message] });
+      return 'msg-1';
+    },
+    appendCustomMessageEntry: (customType: unknown, content: unknown, display: unknown, details: unknown) => {
+      calls.push({ method: 'appendCustomMessageEntry', args: [customType, content, display, details] });
+      return 'custom-1';
+    },
+    appendCustomEntry: (customType: unknown, data: unknown) => {
+      calls.push({ method: 'appendCustomEntry', args: [customType, data] });
+      return 'entry-1';
+    },
+    appendPieModelSettingsChange: (...args: unknown[]) => {
+      calls.push({ method: 'appendPieModelSettingsChange', args });
+      return { modelChangeId: 'model-1' };
+    },
+    branch: (branchFromId: unknown) => {
+      calls.push({ method: 'branch', args: [branchFromId] });
+    },
+    resetLeaf: () => {
+      calls.push({ method: 'resetLeaf', args: [] });
+    },
+    createBranchedSession: (leafId: unknown) => {
+      calls.push({ method: 'createBranchedSession', args: [leafId] });
+      return '/repo/branched.jsonl';
+    },
+    _persist: (entry: unknown) => {
+      calls.push({ method: '_persist', args: [entry] });
+    },
+    calls,
+  } as unknown as MutableSdkSessionManager & Record<string, unknown>;
+}
+
+test('read APIs pass through to the underlying manager', () => {
+  const manager = createMockManager();
+  const { manager: wrapped } = createSessionManagerFence(manager);
+
+  assert.equal(wrapped.getCwd(), '/repo');
+  assert.equal(wrapped.getSessionFile(), '/repo/session.jsonl');
+  assert.equal(wrapped.getSessionName(), 'test');
+  assert.deepEqual(wrapped.getBranch(), []);
+  assert.deepEqual(wrapped.getEntries(), []);
+});
+
+test('mutation methods delegate before invalidation', () => {
+  const manager = createMockManager();
+  const { manager: wrapped } = createSessionManagerFence(manager);
+
+  assert.equal(wrapped.appendMessage({ role: 'user' }), 'msg-1');
+  assert.equal(wrapped.appendCustomMessageEntry('type', 'content', true, {}), 'custom-1');
+  assert.equal(wrapped.appendCustomEntry('type', {}), 'entry-1');
+  assert.deepEqual(wrapped.appendPieModelSettingsChange?.('provider', 'model', 'high'), { modelChangeId: 'model-1' });
+  wrapped.branch('root');
+  wrapped.resetLeaf();
+  assert.equal(wrapped.createBranchedSession('leaf-1'), '/repo/branched.jsonl');
+  wrapped._persist({ type: 'message' });
+
+  assert.deepEqual(manager.calls as Call[], [
+    { method: 'appendMessage', args: [{ role: 'user' }] },
+    { method: 'appendCustomMessageEntry', args: ['type', 'content', true, {}] },
+    { method: 'appendCustomEntry', args: ['type', {}] },
+    { method: 'appendPieModelSettingsChange', args: ['provider', 'model', 'high'] },
+    { method: 'branch', args: ['root'] },
+    { method: 'resetLeaf', args: [] },
+    { method: 'createBranchedSession', args: ['leaf-1'] },
+    { method: '_persist', args: [{ type: 'message' }] },
+  ]);
+});
+
+test('unexpected admission failures surface instead of becoming fenced success', () => {
+  const manager = createMockManager();
+  const admissionError = new Error('writer admission failed unexpectedly');
+  const { manager: wrapped } = createSessionManagerFence(manager, {
+    admission: {
+      acquire: () => { throw admissionError; },
+    },
+  });
+
+  assert.throws(
+    () => wrapped.appendMessage({ role: 'assistant', content: 'reply' }),
+    (error) => error === admissionError,
+  );
+  assert.deepEqual(manager.calls as Call[], []);
+});
+
+test('unexpected admission failures can be handed to an owning fail-closed boundary', () => {
+  const manager = createMockManager();
+  const admissionError = new Error('writer admission failed unexpectedly');
+  const observed: unknown[] = [];
+  const { manager: wrapped } = createSessionManagerFence(manager, {
+    admission: {
+      acquire: () => { throw admissionError; },
+    },
+    onUnexpectedAdmissionFailure: (error) => observed.push(error),
+  });
+
+  assert.equal(wrapped.appendMessage({ role: 'assistant', content: 'reply' }), FENCED_ENTRY_ID);
+  assert.deepEqual(observed, [admissionError]);
+  assert.deepEqual(manager.calls as Call[], []);
+});
+
+test('admission failure after revocation remains a fenced no-op', () => {
+  const manager = createMockManager();
+  const admissionError = new Error('writer was revoked during admission');
+  const invalidation: { run: () => void } = { run: () => undefined };
+  const guarded = createSessionManagerFence(manager, {
+    admission: {
+      acquire: () => {
+        invalidation.run();
+        throw admissionError;
+      },
+    },
+  });
+  invalidation.run = guarded.fence.invalidate;
+
+  assert.equal(guarded.manager.appendMessage({ role: 'assistant', content: 'reply' }), FENCED_ENTRY_ID);
+  assert.deepEqual(manager.calls as Call[], []);
+});
+
+test('mutation methods are no-ops after invalidation', () => {
+  const manager = createMockManager();
+  const { manager: wrapped, fence } = createSessionManagerFence(manager);
+
+  fence.invalidate();
+
+  assert.equal(wrapped.appendMessage({ role: 'user' }), FENCED_ENTRY_ID);
+  assert.equal(wrapped.appendCustomMessageEntry('type', 'content', true, {}), FENCED_ENTRY_ID);
+  assert.equal(wrapped.appendCustomEntry('type', {}), FENCED_ENTRY_ID);
+  assert.equal(wrapped.appendPieModelSettingsChange?.('provider', 'model', 'high'), undefined);
+  assert.equal(wrapped.branch('root'), undefined);
+  assert.equal(wrapped.resetLeaf(), undefined);
+  assert.equal(wrapped.createBranchedSession('leaf-1'), undefined);
+  assert.equal(wrapped._persist({ type: 'message' }), undefined);
+
+  assert.deepEqual(manager.calls as Call[], []);
+});
+
+test('an admitted async mutation drains while retired writes fail closed', async () => {
+  const manager = createMockManager();
+  let releasePersist!: () => void;
+  manager._persist = async () => await new Promise<void>((resolve) => {
+    releasePersist = resolve;
+  });
+  const { manager: wrapped, fence } = createSessionManagerFence(manager);
+
+  const pending = wrapped._persist({ type: 'message' });
+  assert.equal(fence.activeMutationCount(), 1);
+  fence.invalidate();
+  assert.equal(wrapped.appendMessage({ role: 'user' }), FENCED_ENTRY_ID);
+  assert.equal(await fence.waitForIdle(0), 1);
+
+  releasePersist();
+  await pending;
+  assert.equal(await fence.waitForIdle(), 0);
+  assert.equal(fence.activeMutationCount(), 0);
+});
+
+test('ownership-lease revocation also retires the wrapped manager', () => {
+  const manager = createMockManager();
+  let revoked = 0;
+  manager.revokePieWriteLease = () => { revoked += 1; };
+  const { manager: wrapped, fence } = createSessionManagerFence(manager);
+
+  wrapped.revokePieWriteLease?.();
+
+  assert.equal(revoked, 1);
+  assert.equal(fence.isInvalidated(), true);
+  assert.equal(wrapped.appendMessage({ role: 'user' }), FENCED_ENTRY_ID);
+});
+
+test('registry revocation rejects writes from every retired manager', () => {
+  const registry = createSessionManagerFenceRegistry();
+  const managerA = createMockManager();
+  const managerB = createMockManager();
+  const fencedA = createSessionManagerFence(managerA);
+  const fencedB = createSessionManagerFence(managerB);
+  registry.register(fencedA.fence);
+  registry.register(fencedB.fence);
+
+  registry.revoke();
+
+  assert.equal(fencedA.manager.appendMessage({ role: 'user' }), FENCED_ENTRY_ID);
+  assert.equal(fencedB.manager.appendMessage({ role: 'user' }), FENCED_ENTRY_ID);
+  assert.equal(registry.activeMutationCount(), 0);
+});
+
+test('read APIs still work after invalidation', () => {
+  const manager = createMockManager();
+  const { manager: wrapped, fence } = createSessionManagerFence(manager);
+
+  fence.invalidate();
+
+  assert.equal(wrapped.getCwd(), '/repo');
+  assert.equal(wrapped.getSessionFile(), '/repo/session.jsonl');
+  assert.deepEqual(wrapped.getBranch(), []);
+});
+
+test('invalidation is idempotent', () => {
+  const manager = createMockManager();
+  const { fence } = createSessionManagerFence(manager);
+
+  fence.invalidate();
+  fence.invalidate();
+  fence.invalidate();
+
+  assert.equal(fence.isInvalidated(), true);
+});
+
+test('independent fences do not affect each other', () => {
+  const managerA = createMockManager();
+  const managerB = createMockManager();
+  const { manager: wrappedA, fence: fenceA } = createSessionManagerFence(managerA);
+  const { manager: wrappedB, fence: fenceB } = createSessionManagerFence(managerB);
+
+  fenceA.invalidate();
+
+  assert.equal(fenceA.isInvalidated(), true);
+  assert.equal(fenceB.isInvalidated(), false);
+  assert.equal(wrappedA.appendMessage({ role: 'user' }), FENCED_ENTRY_ID);
+  assert.equal(wrappedB.appendMessage({ role: 'user' }), 'msg-1');
+});
+
+test('unknown properties pass through unchanged', () => {
+  const manager = createMockManager();
+  manager.customField = 'custom-value';
+  const { manager: wrapped, fence } = createSessionManagerFence(manager);
+
+  assert.equal(wrapped.customField, 'custom-value');
+  fence.invalidate();
+  assert.equal(wrapped.customField, 'custom-value');
+});

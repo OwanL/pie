@@ -5,7 +5,7 @@ description: Use when the user asks to register a direct API provider, custom Op
 
 # Add a Provider
 
-`models.yaml` is the single source of truth for providers and model metadata in this repo. `npm run sync-models` validates it and regenerates every derived surface: `models.json`, `model-profiles.yaml`, model-owned fields in `settings.json` (model picker seeds and retry config; existing chat/pruning selections are user-owned and preserved), and `analysis/model-pricing-history.json` (pricing/attribution metadata for retired or superseded models, consumed by the analytics loaders — not part of the live picker).
+`models.yaml` is the single source of truth for providers and model metadata in this repo. `npm run sync-models` validates it and regenerates every derived surface: `models.json`, `model-profiles.yaml`, model-owned fields in `settings.json` (model picker seeds and retry config; existing chat/pruning selections are user-owned and preserved), and `analytics/analysis/model-pricing-history.json` (pricing/attribution metadata for retired or superseded models, consumed by the analytics loaders — not part of the live picker).
 
 Do not edit any of those generated files directly. The old LiteLLM `settings.json.proxy` workflow no longer exists; providers route directly to their upstream endpoint and concurrency is enforced by the host-side provider gate.
 
@@ -107,7 +107,7 @@ npm run sync-models -- --check
 Run the focused model-config test through the root wrapper (never invoke `npx tsx` directly):
 
 ```bash
-npm run test:file -- extension/test/integration/model-config-sync.test.ts
+npm run test:file -- scripts/model-config/test/model-config-sync.test.ts
 ```
 
 If `extension/src/` was changed for provider-specific runtime behavior, also run the required extension build:
@@ -122,7 +122,7 @@ Verify:
 - generated config has no drift (`npm run sync-models -- --check`)
 - the provider and models appear in `models.json` with the expected endpoint and metadata: full discovered Copilot models are under `models[]`, while only user-authored `overrideOnly` records are under `modelOverrides`
 - `model-profiles.yaml` contains every new model in the intended order
-- `analysis/model-pricing-history.json` mirrors the final catalog's pricing for retired entries
+- `analytics/analysis/model-pricing-history.json` mirrors the final catalog's pricing for retired entries
 - `settings.json` retains user-owned defaults and contains no legacy provider routing block
 - with auth configured, a minimal model request succeeds without exposing the key
 

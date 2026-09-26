@@ -1,0 +1,33 @@
+{
+  "extends": "../extensions/tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM"],
+    "jsx": "react-jsx",
+    "jsxImportSource": "preact",
+    "baseUrl": ".",
+    "paths": {
+      "immer": ["../application/hosts/vscode/node_modules/immer"],
+      "preact": ["../application/hosts/vscode/node_modules/preact"],
+      "preact-render-to-string": ["../application/hosts/vscode/node_modules/preact-render-to-string"],
+      "yaml": ["../application/hosts/vscode/node_modules/yaml"],
+      "@earendil-works/pi-ai": ["../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai"],
+      "@mariozechner/pi-ai": ["../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai"],
+      "@earendil-works/pi-coding-agent": ["../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent"]
+    }
+  },
+  "include": [
+    "authority/**/*.ts",
+    "capture/**/*.ts",
+    "contracts/**/*.ts",
+    "projections/**/*.ts",
+    "queries/**/*.ts",
+    "recording/**/*.ts",
+    "storage/**/*.ts",
+    "usage-accounting/**/*.ts",
+    "test/**/*.ts",
+    "../application/backend/composition/analytics-runtime.ts",
+    "../application/backend/composition/controlled-restart-driver.ts",
+    "../application/backend/test/composition/analytics-runtime.test.ts"
+  ],
+  "exclude": ["node_modules", "analysis"]
+}

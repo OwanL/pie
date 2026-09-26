@@ -1,0 +1,13 @@
+{
+  "//": "Source-only release typecheck config for the session-storage settings owner. Tests use tsconfig.json (runtime path alias for the yaml dependency owner). baseUrl stays local so alias paths resolve independently.",
+  "extends": "../../../extensions/tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM"],
+    "baseUrl": ".",
+    "paths": {
+      "yaml": ["../../../application/hosts/vscode/node_modules/yaml/dist/index.d.ts"]
+    }
+  },
+  "include": ["./**/*.ts"],
+  "exclude": ["test", "node_modules"]
+}

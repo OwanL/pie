@@ -104,10 +104,10 @@ REM --- settings.json#sessionDir rewrite + global outcomes migration ----------
 REM  Preserve reviews and run analytics alongside transcripts when repairing a
 REM  displaced session authority. Derived exports/open checkpoints are rebuilt.
 if defined PROCESS_SESSION_DIR (
-  node "%REPO_ROOT%\scripts\migrate-outcomes-store.mjs" --source-session-dir "%PROCESS_SESSION_DIR%" --dest "%REPO_ROOT%\data\outcomes" || goto :error
+  node "%REPO_ROOT%\scripts\migrations\migrate-outcomes-store.mjs" --source-session-dir "%PROCESS_SESSION_DIR%" --dest "%REPO_ROOT%\data\outcomes" || goto :error
 )
 if defined EXISTING_SESSION_DIR if /i not "%EXISTING_SESSION_DIR%"=="%PROCESS_SESSION_DIR%" (
-  node "%REPO_ROOT%\scripts\migrate-outcomes-store.mjs" --source-session-dir "%EXISTING_SESSION_DIR%" --dest "%REPO_ROOT%\data\outcomes" || goto :error
+  node "%REPO_ROOT%\scripts\migrations\migrate-outcomes-store.mjs" --source-session-dir "%EXISTING_SESSION_DIR%" --dest "%REPO_ROOT%\data\outcomes" || goto :error
 )
 REM  Batch cannot parse/rewrite JSON; the shared runner owns legacy transcript
 REM  migration and the canonical settings.json rewrite.
@@ -258,11 +258,11 @@ REM process environment. Reconcile displaced authorities once more; merging is
 REM append-only and idempotent. Doctor detects any writes made after this pass.
 if defined PROCESS_SESSION_DIR (
   echo ==^> Finalizing process-level displaced outcomes after extension installation
-  node "%REPO_ROOT%\scripts\migrate-outcomes-store.mjs" --source-session-dir "%PROCESS_SESSION_DIR%" --dest "%REPO_ROOT%\data\outcomes" || goto :error
+  node "%REPO_ROOT%\scripts\migrations\migrate-outcomes-store.mjs" --source-session-dir "%PROCESS_SESSION_DIR%" --dest "%REPO_ROOT%\data\outcomes" || goto :error
 )
 if defined EXISTING_SESSION_DIR if /i not "%EXISTING_SESSION_DIR%"=="%PROCESS_SESSION_DIR%" (
   echo ==^> Finalizing user-level displaced outcomes after extension installation
-  node "%REPO_ROOT%\scripts\migrate-outcomes-store.mjs" --source-session-dir "%EXISTING_SESSION_DIR%" --dest "%REPO_ROOT%\data\outcomes" || goto :error
+  node "%REPO_ROOT%\scripts\migrations\migrate-outcomes-store.mjs" --source-session-dir "%EXISTING_SESSION_DIR%" --dest "%REPO_ROOT%\data\outcomes" || goto :error
 )
 
 echo.

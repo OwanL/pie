@@ -2,17 +2,17 @@
 //
 // Appends one JSONL event per pruned tool result to `data/tool-result-pruning.jsonl`.
 // The rotating, serialized async write infrastructure is shared via
-// `shared/jsonl-writer.ts` (JsonlWriter); this module defines the event shape
+// `lib/structured-logging/jsonl-writer.ts` (JsonlWriter); this module defines the event shape
 // and recording API.
 //
-// The analysis pipeline (analysis/scripts/source.ts readToolResultPruningLog)
+// The analysis pipeline (analytics/analysis/scripts/source.ts readToolResultPruningLog)
 // ingests this file. Each event records which rules fired and the before/after
 // token counts, so §9.3 ("instrument before/after token counts per rule") is
 // answered per-result — the foundation for deciding which lossy rules are worth
 // shipping and whether any starved the agent.
 
 import path from "node:path";
-import { JsonlWriter } from "../../../shared/jsonl-writer.js";
+import { JsonlWriter } from "../../../lib/structured-logging/jsonl-writer.js";
 
 /** Root of the pi-config repo, resolved from this implementation's known position. */
 const CONFIG_ROOT = path.resolve(import.meta.dirname, "..", "..", "..");

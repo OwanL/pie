@@ -1,0 +1,17 @@
+{
+  "//": "Source-only release typecheck config for the agent-processes workers owner. Tests use tsconfig.json (runtime path alias for the yaml dependency owner).",
+  "extends": "../../../extensions/tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM"],
+    "baseUrl": ".",
+    "paths": {
+      "@earendil-works/pi-ai": ["../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/index.d.ts"],
+      "@mariozechner/pi-ai": ["../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/index.d.ts"],
+      "@earendil-works/pi-coding-agent": ["../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts"],
+      "@mariozechner/pi-coding-agent": ["../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts"],
+      "yaml": ["../../../application/hosts/vscode/node_modules/yaml/dist/index.d.ts"]
+    }
+  },
+  "include": ["./**/*.ts"],
+  "exclude": ["test", "node_modules"]
+}

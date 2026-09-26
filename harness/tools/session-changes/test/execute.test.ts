@@ -6,7 +6,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 
-import listTool from '../index';
+import listTool from '..';
 import registerDiscoveryShim from '../../../../extensions/session-changes/index.js';
 
 // Drive the ACTUAL tool's `execute` (via a fake pi.registerTool) so the

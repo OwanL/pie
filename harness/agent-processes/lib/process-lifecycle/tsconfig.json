@@ -1,0 +1,13 @@
+{
+  "extends": "../../../../extensions/tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@earendil-works/pi-coding-agent": ["../../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts"],
+      "@mariozechner/pi-coding-agent": ["../../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts"]
+    }
+  },
+  "include": ["./**/*.ts"],
+  "exclude": ["node_modules"]
+}

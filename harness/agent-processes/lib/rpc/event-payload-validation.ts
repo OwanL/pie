@@ -1,0 +1,603 @@
+/**
+ * Per-event payload type guards for the backend → host stdio boundary.
+ *
+ * The backend emits `EventEnvelope` lines over stdout; `isEventEnvelope` (in
+ * `./core.ts`) only checks the outer envelope shape (`'event' in value`), leaving
+ * `payload` as `unknown`. Historically `dispatchSessionBackendEvent` cast each
+ * payload with `as XPayload`, propagating any malformed payload unchecked. These
+ * guards validate the REQUIRED fields of each payload at the seam so the
+ * dispatcher can warn+drop corrupt data instead of cast-and-hope.
+ *
+ * Thoroughness contract (mirrors `protocol-validation.ts`):
+ *   - REQUIRED primitive fields (string/number/boolean) are checked strictly.
+ *   - REQUIRED nested object fields are checked to be objects with their own
+ *     required primitives shallowly verified.
+ *   - OPTIONAL fields are NOT required; an absent optional field is valid.
+ *   - terminal `input`/`result` fields remain opaque durable values. Live tool
+ *     progress is instead validated as the closed, bounded `ToolPreview` union.
+ *
+ * Behavior: well-formed payloads pass unchanged; malformed payloads fail the
+ * guard and the caller drops them with a loud `console.warn`.
+ */
+
+import type {
+  AgentSettledPayload,
+  AuxiliaryLlmUsagePayload,
+  BusyChangedPayload,
+  CompactionPayload,
+  CompactionStartedPayload,
+  ContextUsageChangedPayload,
+  ContextWindowUsage,
+  CustomMessagePayload,
+  ErrorPayload,
+  MessageAbortedPayload,
+  MessageDeltaPayload,
+  MessageFinishedPayload,
+  MessageStartedPayload,
+  MessageThinkingPayload,
+  MessageToolCallDeltaPayload,
+  OperationalErrorPayload,
+  PreflightFailedPayload,
+  QueuedDeliveredPayload,
+  RetryEndedPayload,
+  RetryMeasuredPayload,
+  RetryStartedPayload,
+  SessionListChangedPayload,
+  SessionOpenedPayload,
+  ToolFinishedPayload,
+  ToolProgressPayload,
+  ToolStartedPayload,
+} from './session-events.js';
+import type { ExtensionUIRequestPayload } from './extension-ui.js';
+import { isToolPreview } from './live-pipeline.js';
+import { isFiniteNumber } from '../../../../lib/validation/type-guards.js';
+
+// ─── shared primitives ───────────────────────────────────────────────────────
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isString(value: unknown): value is string {
+  return typeof value === 'string';
+}
+
+function isBoolean(value: unknown): value is boolean {
+  return typeof value === 'boolean';
+}
+
+function isOptionalString(value: unknown): value is string | undefined {
+  return value === undefined || typeof value === 'string';
+}
+
+function isOptionalBoolean(value: unknown): value is boolean | undefined {
+  return value === undefined || typeof value === 'boolean';
+}
+
+function isOptionalFiniteNumber(value: unknown): value is number | undefined {
+  return value === undefined || (typeof value === 'number' && Number.isFinite(value));
+}
+
+function isOptionalSessionCatalogProgress(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isObject(value)
+    || !isBoolean(value.complete)
+    || !Number.isInteger(value.processed)
+    || (value.total !== undefined && !Number.isInteger(value.total))) {
+    return false;
+  }
+  const processed = value.processed as number;
+  const total = value.total as number | undefined;
+  return processed >= 0
+    && (total === undefined || (total >= 0 && processed <= total));
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((v) => typeof v === 'string');
+}
+
+// ─── nested shared shapes ────────────────────────────────────────────────────
+
+function isSessionSummary(value: unknown): value is Record<string, unknown> {
+  return (
+    isObject(value)
+    && isString(value.path)
+    && isString(value.name)
+    && isString(value.cwd)
+    && isString(value.modifiedAt)
+    && isFiniteNumber(value.messageCount)
+    && (value.agentCreated === undefined || isBoolean(value.agentCreated))
+  );
+}
+
+function isTranscriptWindow(value: unknown): value is Record<string, unknown> {
+  return (
+    isObject(value)
+    && isFiniteNumber(value.totalCount)
+    && isFiniteNumber(value.loadedStart)
+    && isFiniteNumber(value.loadedEnd)
+    && isBoolean(value.hasOlder)
+    && isBoolean(value.hasNewer)
+    && isBoolean(value.isPartial)
+    && isBoolean(value.hasUserMessages)
+  );
+}
+
+function isChatMessage(value: unknown): boolean {
+  return (
+    isObject(value)
+    && isString(value.id)
+    && isString(value.role)
+    && isString(value.createdAt)
+    && isString(value.markdown)
+    && isString(value.status)
+  );
+}
+
+function isChatMessageArray(value: unknown): boolean {
+  return Array.isArray(value) && value.every(isChatMessage);
+}
+
+function isContextWindowUsage(value: unknown): value is ContextWindowUsage {
+  return (
+    isObject(value)
+    && (value.tokens === null || typeof value.tokens === 'number')
+    && isFiniteNumber(value.contextWindow)
+    && (value.percent === null || typeof value.percent === 'number')
+  );
+}
+
+function isOptionalInitialContextEstimate(value: unknown): boolean {
+  return value === undefined || (
+    isObject(value)
+    && Number.isSafeInteger(value.tokens)
+    && (value.tokens as number) >= 0
+    && Number.isSafeInteger(value.contextWindow)
+    && (value.contextWindow as number) > 0
+  );
+}
+
+function isOptionalLiveTurnRecoveryIdentity(value: unknown): boolean {
+  return value === undefined || (
+    isObject(value)
+    && isString(value.turnId)
+    && value.turnId.length > 0
+    && isString(value.attemptId)
+    && value.attemptId.length > 0
+  );
+}
+
+function isOptionalSnapshotUnavailable(value: unknown): boolean {
+  return value === undefined || (
+    isObject(value)
+    && value.code === 'SESSION_SNAPSHOT_TOO_LARGE'
+    && isString(value.message)
+    && value.message.length > 0
+  );
+}
+
+// ─── per-event payload guards ────────────────────────────────────────────────
+
+function isSessionCapabilityFacts(value: unknown): boolean {
+  return isObject(value)
+    && !('primaryOperation' in value)
+    && isBoolean(value.billableActivity)
+    && isBoolean(value.canContinue)
+    && isBoolean(value.canInterrupt)
+    && isBoolean(value.canCompact);
+}
+
+export function isSessionOpenedPayload(value: unknown): value is SessionOpenedPayload {
+  return (
+    isObject(value)
+    && isSessionSummary(value.session)
+    && isChatMessageArray(value.transcript)
+    && isTranscriptWindow(value.transcriptWindow)
+    && isBoolean(value.busy)
+    && isSessionCapabilityFacts(value.capabilities)
+    && (value.runtimeReady === undefined || isBoolean(value.runtimeReady))
+    && (value.systemPromptDisabledEntries === undefined
+      || (Array.isArray(value.systemPromptDisabledEntries)
+        && value.systemPromptDisabledEntries.every(isString)))
+    && isOptionalInitialContextEstimate(value.initialContextEstimate)
+    && isOptionalLiveTurnRecoveryIdentity(value.liveTurnRecoveryIdentity)
+    && isOptionalSnapshotUnavailable(value.snapshotUnavailable)
+    && isOptionalBoolean(value.agentCreated)
+    && isOptionalString(value.operationId)
+    && (value.operationAttempt === undefined
+      || (Number.isInteger(value.operationAttempt) && (value.operationAttempt as number) >= 1))
+    && (value.workerGeneration === undefined
+      || (Number.isInteger(value.workerGeneration) && (value.workerGeneration as number) >= 1))
+  );
+}
+
+export function isSessionListChangedPayload(value: unknown): value is SessionListChangedPayload {
+  return (
+    isObject(value)
+    && Array.isArray(value.sessions)
+    && value.sessions.every(isSessionSummary)
+    && isOptionalString(value.activeSessionPath)
+    && isOptionalSessionCatalogProgress(value.sessionCatalogProgress)
+  );
+}
+
+export function isMessageStartedPayload(value: unknown): value is MessageStartedPayload {
+  return (
+    isObject(value)
+    && isString(value.requestId)
+    && isOptionalString(value.operationId)
+    && (value.operationAttempt === undefined || (typeof value.operationAttempt === 'number' && Number.isInteger(value.operationAttempt) && value.operationAttempt >= 1))
+    && isString(value.messageId)
+    && isString(value.sessionPath)
+    && isOptionalString(value.modelId)
+    && isOptionalString(value.provider)
+  );
+}
+
+export function isMessageDeltaPayload(value: unknown): value is MessageDeltaPayload {
+  return (
+    isObject(value)
+    && isString(value.requestId)
+    && isString(value.sessionPath)
+    && isString(value.messageId)
+    && isString(value.delta)
+  );
+}
+
+export function isMessageThinkingPayload(value: unknown): value is MessageThinkingPayload {
+  return (
+    isObject(value)
+    && isString(value.requestId)
+    && isString(value.sessionPath)
+    && isString(value.messageId)
+    && isString(value.thinking)
+  );
+}
+
+export function isMessageToolCallDeltaPayload(value: unknown): value is MessageToolCallDeltaPayload {
+  return (
+    isObject(value)
+    && isString(value.requestId)
+    && isString(value.sessionPath)
+    && isString(value.messageId)
+    && isString(value.toolCallId)
+    && isString(value.name)
+    && isString(value.delta)
+  );
+}
+
+export function isMessageFinishedPayload(value: unknown): value is MessageFinishedPayload {
+  return (
+    isObject(value)
+    && isString(value.requestId)
+    && isOptionalString(value.operationId)
+    && (value.operationAttempt === undefined || (typeof value.operationAttempt === 'number' && Number.isInteger(value.operationAttempt) && value.operationAttempt >= 1))
+    && isString(value.sessionPath)
+    && isChatMessage(value.message)
+  );
+}
+
+export function isMessageAbortedPayload(value: unknown): value is MessageAbortedPayload {
+  return (
+    isObject(value)
+    && isString(value.requestId)
+    && isOptionalString(value.operationId)
+    && (value.operationAttempt === undefined || (typeof value.operationAttempt === 'number' && Number.isInteger(value.operationAttempt) && value.operationAttempt >= 1))
+    && isString(value.sessionPath)
+    && isOptionalString(value.messageId)
+    && isOptionalString(value.localId)
+    && (value.outcome === undefined || value.outcome === 'cancelled' || value.outcome === 'superseded' || value.outcome === 'failed')
+    && isOptionalString(value.incidentId)
+    && isOptionalBoolean(value.userInitiated)
+    && isOptionalString(value.reason)
+  );
+}
+
+export function isCustomMessagePayload(value: unknown): value is CustomMessagePayload {
+  return (
+    isObject(value)
+    && isString(value.requestId)
+    && isOptionalString(value.operationId)
+    && isString(value.sessionPath)
+    && isChatMessage(value.message)
+  );
+}
+
+export function isToolStartedPayload(value: unknown): value is ToolStartedPayload {
+  return (
+    isObject(value)
+    && isString(value.requestId)
+    && isString(value.sessionPath)
+    && isString(value.messageId)
+    && isString(value.toolCallId)
+    && isString(value.name)
+    && isFiniteNumber(value.startedAt)
+    && (value.parallelGroupId === undefined || isString(value.parallelGroupId))
+  );
+}
+
+export function isToolFinishedPayload(value: unknown): value is ToolFinishedPayload {
+  return (
+    isObject(value)
+    && isString(value.requestId)
+    && isString(value.sessionPath)
+    && isString(value.messageId)
+    && isString(value.toolCallId)
+    && (value.name === undefined || isString(value.name))
+    && (value.status === 'completed' || value.status === 'failed')
+    && isOptionalFiniteNumber(value.startedAt)
+    && isOptionalFiniteNumber(value.endedAt)
+    && isOptionalFiniteNumber(value.durationMs)
+    && (value.durationClockDomain === undefined || value.durationClockDomain === 'monotonic-same-process')
+    && (value.parallelGroupId === undefined || isString(value.parallelGroupId))
+    && (value.durableEntryId === undefined || isString(value.durableEntryId))
+    && (value.canonicalLive === undefined || typeof value.canonicalLive === 'boolean')
+  );
+}
+
+export function isToolProgressPayload(value: unknown): value is ToolProgressPayload {
+  return (
+    isObject(value)
+    && isString(value.requestId)
+    && isString(value.sessionPath)
+    && isString(value.messageId)
+    && isString(value.toolCallId)
+    && isToolPreview(value.preview)
+  );
+}
+
+export function isAgentSettledPayload(value: unknown): value is AgentSettledPayload {
+  return isObject(value)
+    && isString(value.sessionPath)
+    && isSessionCapabilityFacts(value.capabilities)
+    && isOptionalFiniteNumber(value.occurredAt)
+    && isOptionalFiniteNumber(value.endedAt)
+    && (value.operationId === undefined || isString(value.operationId))
+    && (value.requestId === undefined || isString(value.requestId))
+    && (value.turnId === undefined || isString(value.turnId))
+    && (value.attemptId === undefined || isString(value.attemptId))
+    && (value.operationAttempt === undefined || (Number.isSafeInteger(value.operationAttempt) && (value.operationAttempt as number) > 0))
+    && (value.backendGeneration === undefined || (Number.isSafeInteger(value.backendGeneration) && (value.backendGeneration as number) > 0))
+    && (value.workerGeneration === undefined || (Number.isSafeInteger(value.workerGeneration) && (value.workerGeneration as number) > 0));
+}
+
+export function isBusyChangedPayload(value: unknown): value is BusyChangedPayload {
+  return (
+    isObject(value)
+    && isString(value.sessionPath)
+    && isBoolean(value.busy)
+    && isSessionCapabilityFacts(value.capabilities)
+    && isOptionalFiniteNumber(value.seq)
+  );
+}
+
+export function isContextUsageChangedPayload(value: unknown): value is ContextUsageChangedPayload {
+  return (
+    isObject(value)
+    && isString(value.sessionPath)
+    && (value.contextUsage === null || isContextWindowUsage(value.contextUsage))
+    && isOptionalString(value.observationId)
+    && isOptionalFiniteNumber(value.observedAt)
+    && (value.source === undefined || value.source === 'provider' || value.source === 'postCompactionEstimate' || value.source === 'unknown')
+    && (value.canonicalInputTokens === null || isOptionalFiniteNumber(value.canonicalInputTokens))
+    && isOptionalString(value.modelId)
+    && isOptionalString(value.provider)
+  );
+}
+
+export function isExtensionUIRequestPayload(value: unknown): value is ExtensionUIRequestPayload {
+  if (
+    !isObject(value)
+    || !isString(value.id)
+    || !isString(value.sessionPath)
+    || !isOptionalString(value.extensionId)
+    || !isOptionalString(value.subagentCallId)
+    || !isOptionalString(value.toolCallId)
+    || (value.timeout !== undefined && (!isFiniteNumber(value.timeout) || value.timeout <= 0))
+  ) {
+    return false;
+  }
+  switch (value.method) {
+    case 'confirm':
+      return isString(value.title) && isString(value.message);
+    case 'select':
+      return isString(value.title) && isStringArray(value.options);
+    case 'input':
+      return isString(value.title) && isOptionalString(value.placeholder);
+    case 'notify':
+      return (
+        isString(value.message)
+        && (
+          value.notifyType === undefined
+          || value.notifyType === 'info'
+          || value.notifyType === 'warning'
+          || value.notifyType === 'error'
+        )
+      );
+    default:
+      return false;
+  }
+}
+
+function isIncidentSeverity(value: unknown): boolean {
+  return value === 'info' || value === 'warning' || value === 'error';
+}
+
+function isIncidentCertainty(value: unknown): boolean {
+  return value === 'definitive' || value === 'ambiguous' || value === 'recovered';
+}
+
+function isIncidentPhase(value: unknown): boolean {
+  return value === 'acceptance' || value === 'preflight' || value === 'provider'
+    || value === 'retry' || value === 'tool' || value === 'settlement'
+    || value === 'recovery' || value === 'transport' || value === 'runtime'
+    || value === 'extension';
+}
+
+function isIncidentRecovery(value: unknown): boolean {
+  return isObject(value)
+    && typeof value.retry === 'boolean'
+    && typeof value.restart === 'boolean'
+    && typeof value.showLogs === 'boolean';
+}
+
+export function isErrorPayload(value: unknown): value is ErrorPayload {
+  return (
+    isObject(value)
+    && isString(value.code)
+    && isString(value.message)
+    && isOptionalString(value.incidentId)
+    && isOptionalString(value.dedupeKey)
+    && isOptionalString(value.sessionPath)
+    && isOptionalString(value.operationId)
+    && isOptionalString(value.requestId)
+    && isOptionalString(value.turnId)
+    && isOptionalString(value.messageId)
+    && (value.severity === undefined || isIncidentSeverity(value.severity))
+    && (value.certainty === undefined || isIncidentCertainty(value.certainty))
+    && (value.phase === undefined || isIncidentPhase(value.phase))
+    && isOptionalString(value.detail)
+    && (value.recovery === undefined || isIncidentRecovery(value.recovery))
+  );
+}
+
+export function isPreflightFailedPayload(value: unknown): value is PreflightFailedPayload {
+  return (
+    isObject(value)
+    && isString(value.requestId)
+    && isOptionalString(value.operationId)
+    && (value.operationAttempt === undefined
+      || (Number.isSafeInteger(value.operationAttempt) && (value.operationAttempt as number) > 0))
+    && isString(value.sessionPath)
+    && isString(value.error)
+  );
+}
+
+export function isQueuedDeliveredPayload(value: unknown): value is QueuedDeliveredPayload {
+  return (
+    isObject(value)
+    && isString(value.sessionPath)
+    && isString(value.text)
+    && isOptionalString(value.operationId)
+    && (value.operationAttempt === undefined
+      || (Number.isSafeInteger(value.operationAttempt) && (value.operationAttempt as number) > 0))
+    && isOptionalString(value.localId)
+  );
+}
+
+export function isRetryStartedPayload(value: unknown): value is RetryStartedPayload {
+  return (
+    isObject(value)
+    && isString(value.sessionPath)
+    && isFiniteNumber(value.attempt)
+    && isFiniteNumber(value.maxAttempts)
+    && isFiniteNumber(value.delayMs)
+    && isString(value.errorMessage)
+    && isOptionalString(value.requestId)
+    && isOptionalString(value.retryId)
+    && isOptionalFiniteNumber(value.startedAt)
+  );
+}
+
+export function isRetryEndedPayload(value: unknown): value is RetryEndedPayload {
+  return (
+    isObject(value)
+    && isString(value.sessionPath)
+    && isBoolean(value.success)
+    && isFiniteNumber(value.attempt)
+    && isOptionalString(value.finalError)
+  );
+}
+
+export function isRetryMeasuredPayload(value: unknown): value is RetryMeasuredPayload {
+  return (
+    isObject(value)
+    && isString(value.sessionPath)
+    && isString(value.requestId)
+    && isString(value.retryId)
+    && isOptionalString(value.operationId)
+    && isOptionalFiniteNumber(value.startedAt)
+    && isOptionalFiniteNumber(value.providerAttemptStartedAt)
+    && isOptionalFiniteNumber(value.endedAt)
+    && isOptionalFiniteNumber(value.measuredDelayMs)
+    && isFiniteNumber(value.durationMs)
+    && (value.durationClockDomain === undefined
+      || value.durationClockDomain === 'monotonic-same-process')
+  );
+}
+
+export function isCompactionStartedPayload(value: unknown): value is CompactionStartedPayload {
+  return (
+    isObject(value)
+    && isString(value.sessionPath)
+    && isOptionalString(value.operationId)
+    && (value.operationAttempt === undefined || (typeof value.operationAttempt === 'number' && Number.isInteger(value.operationAttempt) && value.operationAttempt >= 1))
+  );
+}
+
+export function isCompactionPayload(value: unknown): value is CompactionPayload {
+  return (
+    isObject(value)
+    && isString(value.sessionPath)
+    && isOptionalString(value.operationId)
+    && (value.operationAttempt === undefined || (typeof value.operationAttempt === 'number' && Number.isInteger(value.operationAttempt) && value.operationAttempt >= 1))
+    && (value.reason === undefined || value.reason === 'manual' || value.reason === 'threshold' || value.reason === 'overflow')
+    && (value.outcome === 'succeeded' || value.outcome === 'failed' || value.outcome === 'aborted')
+    && isOptionalFiniteNumber(value.occurredAt)
+    && isOptionalFiniteNumber(value.tokensBefore)
+    && isOptionalFiniteNumber(value.estimatedTokensAfter)
+  );
+}
+
+export function isAuxiliaryLlmUsagePayload(value: unknown): value is AuxiliaryLlmUsagePayload {
+  return (
+    isObject(value)
+    && isString(value.sessionPath)
+    && (value.kind === 'assistant_message' || value.kind === 'history_compaction'
+      || value.kind === 'branch_summary' || value.kind === 'session_title' || value.kind === 'other')
+    && isString(value.sourceId)
+    && isOptionalString(value.provisionalMessageId)
+    && isString(value.occurredAt)
+    && isOptionalString(value.modelId)
+    && isOptionalString(value.provider)
+    && isOptionalString(value.parentOperationId)
+    && isOptionalFiniteNumber(value.inputTokens)
+    && isOptionalFiniteNumber(value.outputTokens)
+    && isOptionalFiniteNumber(value.cacheReadTokens)
+    && isOptionalFiniteNumber(value.cacheWriteTokens)
+    && isOptionalFiniteNumber(value.providerTotalTokens)
+    && isOptionalBoolean(value.tokenChannelsKnown)
+    && (value.tokenChannelPresence === undefined || (isObject(value.tokenChannelPresence)
+      && isBoolean(value.tokenChannelPresence.input)
+      && isBoolean(value.tokenChannelPresence.output)
+      && isBoolean(value.tokenChannelPresence.cacheRead)
+      && isBoolean(value.tokenChannelPresence.cacheWrite)))
+    && isOptionalFiniteNumber(value.reportedCostUsd)
+    && isOptionalFiniteNumber(value.durationMs)
+    && isOptionalString(value.startedAt)
+    && (value.outcome === undefined || value.outcome === 'succeeded' || value.outcome === 'failed'
+      || value.outcome === 'cancelled' || value.outcome === 'unknown')
+    && (value.instrumentationGap === undefined || typeof value.instrumentationGap === 'boolean')
+    && isOptionalString(value.instrumentationGapReason)
+  );
+}
+
+export function isOperationalErrorPayload(value: unknown): value is OperationalErrorPayload {
+  return (
+    isObject(value)
+    && isString(value.incidentId)
+    && isString(value.dedupeKey)
+    && isString(value.sessionPath)
+    && isOptionalString(value.operationId)
+    && isOptionalString(value.requestId)
+    && isOptionalString(value.turnId)
+    && isOptionalString(value.messageId)
+    && isIncidentSeverity(value.severity)
+    && isIncidentCertainty(value.certainty)
+    && isIncidentPhase(value.phase)
+    && isString(value.code)
+    && isString(value.message)
+    && isOptionalString(value.detail)
+    && isIncidentRecovery(value.recovery)
+  );
+}

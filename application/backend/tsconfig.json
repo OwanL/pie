@@ -1,0 +1,51 @@
+{
+  "//": "Typecheck gate for the application backend owners (B7). `module: preserve` + `moduleResolution: bundler` allow `import.meta` and `.js`-extension imports. Backend sources use their application owners and the canonical application/lib/protocol and harness RPC contracts. Analytics-owned analytics-views sources/tests and the composition analytics-runtime test stay typechecked by analytics/tsconfig.json.",
+  "compilerOptions": {
+    "target": "ES2021",
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": false,
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "incremental": true,
+    "tsBuildInfoFile": "../hosts/vscode/node_modules/.cache/typecheck/application-backend.tsbuildinfo",
+    "types": ["node", "vscode"],
+    "typeRoots": ["../hosts/vscode/node_modules/@types"],
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "baseUrl": ".",
+    "paths": {
+      "yaml": ["../hosts/vscode/node_modules/yaml"],
+      "immer": ["../hosts/vscode/node_modules/immer"],
+      "preact": ["../hosts/vscode/node_modules/preact"],
+      "preact-render-to-string": ["../hosts/vscode/node_modules/preact-render-to-string"],
+      "@earendil-works/pi-ai": ["../hosts/vscode/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai"],
+      "@mariozechner/pi-ai": ["../hosts/vscode/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai"],
+      "@earendil-works/pi-coding-agent": ["../hosts/vscode/node_modules/@earendil-works/pi-coding-agent"],
+      "@mariozechner/pi-coding-agent": ["../hosts/vscode/node_modules/@earendil-works/pi-coding-agent"]
+    }
+  },
+  "include": [
+    "conversation-state/**/*.ts",
+    "session-actions/**/*.ts",
+    "agent-connection/**/*.ts",
+    "deferred-triggers/**/*.ts",
+    "settings/**/*.ts",
+    "file-changes/**/*.ts",
+    "transcript-delivery/**/*.ts",
+    "test/conversation-state/**/*.ts",
+    "test/session-actions/**/*.ts",
+    "test/agent-connection/**/*.ts",
+    "test/deferred-triggers/**/*.ts",
+    "test/settings/**/*.ts",
+    "test/file-changes/**/*.ts",
+    "test/transcript-delivery/**/*.ts",
+    "test/helpers/**/*.ts",
+    "composition/host-runtime.test.ts",
+    "composition/completion-notification.test.ts",
+    "../lib/validation/**/*.ts"
+  ],
+  "exclude": ["node_modules"]
+}

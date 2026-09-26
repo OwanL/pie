@@ -1,0 +1,244 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+
+import { isBoundedToolPreview, normalizeToolProgress } from '../tool-progress-normalizer';
+import { estimateTextTokens } from '../../../../lib/token-estimation';
+
+test('tool progress adapters emit typed bounded previews', () => {
+  const command = normalizeToolProgress('bash', { command: 'npm test', output: 'x'.repeat(20_000) });
+  assert.equal(command.kind, 'command');
+  assert.equal(isBoundedToolPreview(command), true);
+  if (command.kind === 'command') {
+    assert.equal(command.commandSummary, 'npm test');
+    assert.equal(command.outputTail?.length, 8_192);
+    assert.equal(command.omittedChars, 11_808);
+  }
+
+  const question = normalizeToolProgress('ask_user', { question: 'Choose', options: ['a', 'b'] });
+  assert.deepEqual(question, { kind: 'question', promptSummary: 'Choose', optionCount: 2 });
+});
+
+test('subagent previews retain every sibling but remove recursive transcript bodies', () => {
+  const children = Array.from({ length: 40 }, (_, index) => ({
+    id: `child-${index}`,
+    status: index % 2 === 0 ? 'completed' : 'running',
+    summary: 's'.repeat(2_000),
+    messages: [{ role: 'assistant', content: 'must cross intact' }],
+  }));
+  const preview = normalizeToolProgress('subagent', { children });
+  assert.equal(preview.kind, 'subagent');
+  assert.equal(isBoundedToolPreview(preview), true);
+  if (preview.kind === 'subagent') {
+    assert.equal(preview.children.length, 40);
+    assert.equal(preview.omittedChildren, 0);
+    assert.equal(JSON.stringify(preview).includes('must cross intact'), false);
+    assert.ok(preview.children.every((child) => child.liveAddressable === false));
+  }
+});
+
+test('subagent previews understand the real details.results progress shape', () => {
+  const preview = normalizeToolProgress('subagent', {
+    details: {
+      mode: 'single',
+      results: [{
+        agent: 'worker', task: 'inspect the queue', exitCode: -1,
+        parentUserContextMode: 'latest',
+        parentUserContext: '[User prompt]\nKeep the queue fair.\n\n[Recorded clarification]\nQuestion: Preserve order?\nAnswer: Yes',
+        model: 'provider/model', provider: 'provider', thinkingLevel: 'high',
+        contextWindow: 200000, usage: { input: 1200, output: 300, cacheRead: 50, cacheWrite: 0, contextTokens: 1550, cost: 0.02, turns: 2 },
+        retryCount: 1, fallback: true, failedModel: 'provider/old-model', failureClass: 'rate_limit',
+        turnThroughputSamples: [{ endedAt: '2026-01-01T00:00:02.000Z', outputTokens: 300, generationDurationMs: 1500, status: 'completed', modelId: 'provider/model', provider: 'provider' }],
+        startedAt: 1000, activitySince: 1100,
+        activityPhase: 'streaming', activityDetail: 'replying',
+        streaming: true, streamingText: 'The child reply is visible while running.',
+        messages: [{ role: 'assistant', content: [{ type: 'thinking', thinking: 'live reasoning' }] }],
+      }],
+    },
+  });
+  assert.equal(preview.kind, 'subagent');
+  assert.equal(isBoundedToolPreview(preview), true);
+  if (preview.kind === 'subagent') {
+    assert.equal(preview.children.length, 1);
+    assert.equal(preview.children[0]?.agent, 'worker');
+    assert.equal(preview.children[0]?.model, 'provider/model');
+    assert.equal(preview.children[0]?.thinkingLevel, 'high');
+    assert.equal(preview.children[0]?.parentUserContextMode, 'latest');
+    assert.match(preview.children[0]?.parentUserContext ?? '', /Keep the queue fair/);
+    assert.equal(preview.children[0]?.streamingText, 'The child reply is visible while running.');
+    assert.equal(preview.children[0]?.usage?.input, 1200);
+    assert.equal(preview.children[0]?.retryCount, 1);
+    assert.equal(preview.children[0]?.fallback, true);
+    assert.equal(preview.children[0]?.failedModel, 'provider/old-model');
+    assert.equal(preview.children[0]?.failureClass, 'rate_limit');
+    assert.equal(preview.children[0]?.turnThroughputSamples?.[0]?.outputTokens, 300);
+    assert.equal(preview.children[0]?.contextWindow, 200000);
+    assert.equal(preview.children[0]?.startedAt, 1000);
+    assert.equal(preview.children[0]?.messages, undefined);
+    assert.equal(preview.children[0]?.liveAddressable, false, 'legacy identity is display-only');
+  }
+});
+
+test('producer identity yields a live address while synthesized legacy identity remains non-addressable', () => {
+  const identity = { childId: 'child-1', spawningToolCallId: 'tool-1', attemptId: 'attempt-1' };
+  const preview = normalizeToolProgress('subagent', { details: { results: [{
+    ...identity, lineage: [identity], liveAddressable: true,
+    agent: 'worker', task: 'work', exitCode: -1, messages: [],
+  }] } }, undefined, {
+    sessionPath: 'C:/sessions/root.jsonl', turnId: 'turn-1', rootToolCallId: 'tool-1', rootAttemptId: 'root-attempt',
+  });
+  assert.equal(preview.kind, 'subagent');
+  if (preview.kind === 'subagent') {
+    assert.equal(preview.children[0]?.liveAddressable, true);
+    assert.deepEqual(preview.children[0]?.detailAddress?.lineage, [identity]);
+  }
+});
+
+test('subagent previews retain bounded streaming text plus a cumulative counter including nested descendants', () => {
+  const longStream = 'The quick brown fox jumps over the lazy dog. '.repeat(1_000);
+  const preview = normalizeToolProgress('subagent', {
+    details: {
+      results: [{
+        agent: 'worker', task: 'long task', exitCode: -1, streaming: true,
+        usage: { output: 120 },
+        streamingText: longStream,
+        messages: [{
+          role: 'assistant',
+          content: [{
+            type: 'toolCall', name: 'subagent',
+            result: { details: { results: [{
+              agent: 'scout', task: 'nested', exitCode: -1,
+              usage: { output: 40 }, streamingText: 'nested reply', messages: [],
+            }] } },
+          }],
+        }],
+      }],
+    },
+  });
+
+  assert.equal(preview.kind, 'subagent');
+  if (preview.kind === 'subagent') {
+    const child = preview.children[0]!;
+    assert.equal(child.streamingText, longStream.slice(-8_192), 'collapsed live output is a bounded tail');
+    assert.ok(
+      (child.cumulativeOutputTokens ?? 0) > 10_000,
+      'counter reflects the complete stream plus nested output, not only the bounded visible tail',
+    );
+  }
+});
+
+test('modern subagent counters include the in-progress tool-call draft', () => {
+  const argumentsText = '{"command":"npm test"}';
+  const preview = normalizeToolProgress('subagent', {
+    details: {
+      results: [{
+        agent: 'worker', task: 'test', exitCode: -1, streaming: true,
+        usage: { output: 120 },
+        draftingToolCall: { id: 'tool-1', name: 'bash', argumentsText },
+      }],
+    },
+  });
+
+  assert.equal(preview.kind, 'subagent');
+  if (preview.kind === 'subagent') {
+    const child = preview.children[0]!;
+    assert.equal(
+      child.cumulativeOutputTokens,
+      120 + estimateTextTokens('bash') + estimateTextTokens(argumentsText),
+    );
+    assert.deepEqual(child.usage, { output: 120 });
+    assert.equal((child.usage as Record<string, unknown>).input, undefined, 'missing usage channels stay unknown instead of becoming zero');
+  }
+});
+
+test('unchanged modern subagent revision reuses its compact normalized preview', () => {
+  const child = {
+    attemptId: 'attempt-cache-1', progressGeneration: 7,
+    agent: 'worker', task: 'large task', exitCode: -1,
+    messages: Array.from({ length: 200 }, (_, index) => ({
+      role: 'assistant', content: [{ type: 'text', text: `${index}:${'x'.repeat(2_000)}` }],
+    })),
+  };
+  const first = normalizeToolProgress('subagent', { details: { mode: 'single', results: [child] } });
+  const duplicate = normalizeToolProgress('subagent', { details: { mode: 'single', results: [child] } });
+  assert.equal(duplicate, first, 'duplicate generation skips recursive JSON-safe cloning');
+
+  const advanced = normalizeToolProgress('subagent', {
+    details: { mode: 'single', results: [{ ...child, progressGeneration: 8 }] },
+  });
+  assert.notEqual(advanced, first, 'a new generation invalidates the normalization cache');
+});
+
+test('ordinary-lane counters prove recursive transcript bodies were not traversed and survive cache reuse', () => {
+  const nested = {
+    agent: 'leaf', attemptId: 'leaf-1', progressGeneration: 1, messages: [
+      { role: 'assistant', content: [{ type: 'text', text: 'leaf answer' }] },
+      { role: 'toolResult', toolName: 'read', content: [{ type: 'text', text: 'done' }] },
+    ],
+  };
+  const middle = {
+    agent: 'middle', attemptId: 'middle-1', progressGeneration: 1, messages: [{
+      role: 'toolResult', toolName: 'subagent', details: { mode: 'single', results: [nested] },
+    }],
+  };
+  const outer = {
+    agent: 'outer', attemptId: 'outer-1', progressGeneration: 1, messages: [{
+      role: 'toolResult', toolName: 'subagent', details: { mode: 'single', results: [middle] },
+    }],
+  };
+  const first = { childCount: 0, messageCount: 0, maxRecursiveDepth: 0 };
+  const preview = normalizeToolProgress('subagent', { details: { mode: 'single', results: [outer] } }, first);
+  assert.deepEqual(first, { childCount: 1, messageCount: 0, maxRecursiveDepth: 1, available: true });
+
+  const cached = { childCount: 0, messageCount: 0, maxRecursiveDepth: 0 };
+  assert.equal(
+    normalizeToolProgress('subagent', { details: { mode: 'single', results: [outer] } }, cached),
+    preview,
+  );
+  assert.deepEqual(cached, first, 'cached normalization reuses counters maintained by the original traversal');
+});
+
+test('generic preview handles cyclic, bigint and throwing values without throwing', () => {
+  const cyclic: Record<string, unknown> = { count: 10n };
+  cyclic.self = cyclic;
+  const throwing = {};
+  Object.defineProperty(throwing, 'bad', { enumerable: true, get: () => { throw new Error('nope'); } });
+
+  for (const value of [cyclic, throwing]) {
+    const preview = normalizeToolProgress('custom-tool', value);
+    assert.equal(preview.kind, 'generic');
+    assert.equal(isBoundedToolPreview(preview), true);
+  }
+});
+
+test('long opaque provider tool-call IDs stay producer-addressable', () => {
+  // GitHub Copilot tool-call IDs carry a ~600-byte signature suffix; the
+  // normalizer must not truncate them below the shared provider bound or the
+  // worker-side exact lineage match fails and the child loses addressability.
+  const signedToolCallId = `gh-${'q'.repeat(592)}-sig`;
+  const preview = normalizeToolProgress('subagent', {
+    children: [{
+      id: 'child-1',
+      status: 'running',
+      childId: signedToolCallId,
+      attemptId: 'attempt-1',
+      liveAddressable: true,
+      lineage: [{ childId: signedToolCallId, spawningToolCallId: signedToolCallId, attemptId: 'attempt-1' }],
+    }],
+  }, undefined, {
+    sessionPath: 'C:/sessions/root.jsonl',
+    turnId: 'turn-1',
+    rootToolCallId: signedToolCallId,
+    rootAttemptId: 'root-attempt',
+  });
+  assert.equal(preview.kind, 'subagent');
+  if (preview.kind !== 'subagent') return;
+  assert.equal(preview.children.length, 1);
+  const child = preview.children[0];
+  assert.ok(child, 'one child is previewed');
+  assert.equal(child.childId?.length, signedToolCallId.length, 'child identity survives normalization');
+  assert.equal(child.detailAddress !== undefined, true, 'a 600-byte signed provider ID must stay addressable');
+  if (child.detailAddress) {
+    assert.equal(child.detailAddress.rootToolCallId, signedToolCallId);
+    assert.equal(child.detailAddress.lineage[0]?.childId, signedToolCallId);
+  }
+});

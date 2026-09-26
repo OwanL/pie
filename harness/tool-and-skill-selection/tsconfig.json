@@ -1,0 +1,27 @@
+{
+  // Bundler resolution supports import.meta and .js imports without changing
+  // package type. Runtime-provided peers are stubbed in types-global.d.ts.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": false,
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": [
+    "./**/*.ts",
+    "../../extensions/skill-pruner/index.ts",
+    "../../model-providers/authentication/copilot-headers.ts",
+    "../../agent-instructions/skill-selection/skill-policy.ts",
+    "../../tools/selection/tool-policy.ts",
+    "../../tools/catalog/tool-names.ts",
+    "../../tools/request-capability/index.ts",
+    "../../test/integration/dynamic-tool-activation.test.ts"
+  ],
+  "exclude": ["node_modules"]
+}

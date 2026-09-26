@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 
 import { PACKAGE_DIRECTIVES, classifyFileToPackage, isGlobalTestInfra, isUnownedCodeSource } from './test-packages.mjs';
@@ -10,11 +10,11 @@ const TEST_FILE = /(?:\.test\.(?:ts|tsx|mts|mjs|js)|\.spec\.(?:ts|tsx|mts|mjs|js
 const PACKAGE_CONFIG = /(?:^|\/)(?:package(?:-lock)?\.json|tsconfig(?:\.[^/]*)?\.json)$/u;
 const MODEL_CONFIG_PATHS = new Set(['models.yaml', 'models.json', 'model-profiles.yaml', 'models.schema.json', 'settings.json']);
 const MODEL_CONFIG_TESTS = [
-  'extension/test/integration/model-config-sync.test.ts',
-  'extension/test/integration/model-profile-coverage.test.ts',
+  'scripts/model-config/test/model-config-sync.test.ts',
+  'harness/model-providers/catalog/test/model-profile-coverage.test.ts',
 ];
 const WINDOWS_INSTALLER_PATHS = new Set(['install.bat', '.gitattributes']);
-const WINDOWS_INSTALLER_TESTS = ['scripts/test/install-batch.test.mjs'];
+const WINDOWS_INSTALLER_TESTS = ['scripts/install/test/install-batch.test.mjs'];
 
 function normalize(value) {
   return value.replace(/\\/gu, '/');
@@ -23,6 +23,10 @@ function normalize(value) {
 function walkFiles(repoRoot, relativeDir, output) {
   const absoluteDir = path.join(repoRoot, relativeDir);
   if (!existsSync(absoluteDir)) return;
+  if (!statSync(absoluteDir).isDirectory()) {
+    if (SCAN_EXTENSIONS.has(path.extname(relativeDir))) output.push(normalize(relativeDir));
+    return;
+  }
   for (const entry of readdirSync(absoluteDir, { withFileTypes: true })) {
     if (entry.isDirectory() && isProtectedDirectoryName(entry.name)) continue;
     const relativePath = normalize(path.posix.join(relativeDir, entry.name));

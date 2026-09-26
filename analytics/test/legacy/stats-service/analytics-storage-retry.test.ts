@@ -1,0 +1,246 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import test from 'node:test';
+
+import { RunAnalyticsStorage } from '../../../legacy/stats-service/storage';
+import {
+  RUN_ANALYTICS_SCHEMA_VERSION,
+  type RunSnapshot,
+} from '../../../legacy/run-analytics/types.js';
+import { serializeJsonLine } from '../../../../harness/agent-processes/lib/rpc/jsonl.js';
+import { workspaceHash } from '../../../legacy/stats-service/helpers.js';
+
+const FIXED_DATE = new Date('2026-01-01T00:00:00.000Z');
+
+function errno(code: string): NodeJS.ErrnoException {
+  return Object.assign(new Error(code), { code });
+}
+
+function noTimer(): ReturnType<typeof setTimeout> {
+  return { unref: () => undefined } as unknown as ReturnType<typeof setTimeout>;
+}
+
+/** Minimal run shape that passes coerceRunSnapshot (rollups default in the coercer). */
+function bareRun(runId: string): Record<string, unknown> {
+  return {
+    sessionPath: `/session/${runId}`,
+    runId,
+    taskGroupId: `task-${runId}`,
+    status: 'closed',
+    startedAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:10:00.000Z',
+    mixedModelConfig: false,
+    sendCount: 1,
+    assistantTurnCount: 1,
+    assistantTurnDurationMs: 1000,
+    interruptedCount: 0,
+    messageEditCount: 0,
+    truncatedAfterCount: 0,
+    filesystemPathRefCount: 1,
+    imageInputCount: 0,
+    imageInputBytes: 0,
+    unsupportedInputCount: 0,
+    backendErrorCodes: [],
+    inputKindsUsed: [],
+  };
+}
+
+function snapshotEnvelope(runId: string): string {
+  return serializeJsonLine({
+    schemaVersion: RUN_ANALYTICS_SCHEMA_VERSION,
+    kind: 'run_snapshot',
+    recordedAt: '2026-01-01T00:00:00.000Z',
+    run: bareRun(runId),
+  });
+}
+
+async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-storage-retry-'));
+  try {
+    await run(dir);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+}
+
+test('appendHistoryChunk retries a transient EBUSY then appends the snapshot', async () => {
+  await withTempDir(async (tempDir) => {
+    const outcomesRoot = path.join(tempDir, 'data', 'outcomes');
+    let appendAttempts = 0;
+    const appendedChunks: string[] = [];
+    const appendFile = (async (_file: unknown, data: unknown) => {
+      appendAttempts += 1;
+      if (appendAttempts === 1) throw errno('EBUSY');
+      appendedChunks.push(String(data));
+    }) as typeof fs.appendFile;
+
+    const storage = new RunAnalyticsStorage({
+      dataOutcomesRootPath: outcomesRoot,
+      workspaceId: 'append-retry-workspace',
+      now: () => FIXED_DATE,
+      serializeSessions: () => ({}),
+      appendFile,
+      retryDelay: async () => undefined,
+      autoExportSetTimeout: () => noTimer(),
+    });
+
+    await storage.start();
+    const snapshot = { runId: 'run-append-retry' } as RunSnapshot;
+    storage.schedulePersist(snapshot);
+    await storage.flush();
+
+    assert.equal(appendAttempts, 2, 'append retried once after the transient EBUSY');
+    assert.equal(appendedChunks.length, 1, 'exactly one chunk reached the (fake) file');
+    assert.ok(appendedChunks[0]!.includes('run-append-retry'), 'the appended chunk carries the snapshot runId');
+    assert.equal(storage.getPersistError(), null, 'a recovered append records no persist error');
+  });
+});
+
+test('appendHistoryChunk surfaces a persistent transient error after exhausting retries', async () => {
+  await withTempDir(async (tempDir) => {
+    const outcomesRoot = path.join(tempDir, 'data', 'outcomes');
+    let appendAttempts = 0;
+    const appendFile = (async () => {
+      appendAttempts += 1;
+      throw errno('EACCES');
+    }) as typeof fs.appendFile;
+
+    const storage = new RunAnalyticsStorage({
+      dataOutcomesRootPath: outcomesRoot,
+      workspaceId: 'append-exhaust-workspace',
+      now: () => FIXED_DATE,
+      serializeSessions: () => ({}),
+      appendFile,
+      retryDelay: async () => undefined,
+      autoExportSetTimeout: () => noTimer(),
+    });
+
+    await storage.start();
+    const snapshot = { runId: 'run-append-exhaust' } as RunSnapshot;
+    storage.schedulePersist(snapshot);
+    await storage.flush();
+
+    // default schedule is 5 delays → 6 total attempts before the error surfaces
+    assert.equal(appendAttempts, 6, 'the bounded retry budget is exhausted before surfacing');
+    const recorded = storage.getPersistError();
+    assert.ok(recorded, 'the exhausted transient error is recorded as a persist failure');
+    assert.ok(recorded!.message.includes('EACCES'), 'the surfaced error carries the errno code');
+  });
+});
+
+test('pruneJsonlFile retries a transient EBUSY on the retention read then prunes', async () => {
+  await withTempDir(async (tempDir) => {
+    const outcomesRoot = path.join(tempDir, 'data', 'outcomes');
+    const seededRaw = snapshotEnvelope('r1') + snapshotEnvelope('r2');
+    let readAttempts = 0;
+    const readFile = (async () => {
+      readAttempts += 1;
+      if (readAttempts === 1) throw errno('EBUSY');
+      return seededRaw;
+    }) as unknown as typeof fs.readFile;
+
+    const storage = new RunAnalyticsStorage({
+      dataOutcomesRootPath: outcomesRoot,
+      workspaceId: 'prune-read-retry-workspace',
+      now: () => FIXED_DATE,
+      serializeSessions: () => ({}),
+      maxRunHistoryEntries: 1, // two seeded records exceed the limit → prune reads
+      maxRunHistoryBytes: 5_000_000,
+      readFile,
+      retryDelay: async () => undefined,
+      autoExportSetTimeout: () => noTimer(),
+    });
+
+    await storage.start();
+    const filePath = path.join(storage.getStorageDir(), 'run-snapshots.jsonl');
+    await fs.writeFile(filePath, seededRaw, 'utf8');
+
+    // schedulePersist() with no snapshot runs the checkpoint + retention pass
+    // (and no append), so the only read of the JSONL is the prune read.
+    storage.schedulePersist();
+    await storage.flush();
+
+    assert.equal(readAttempts, 2, 'prune read retried once after the transient EBUSY');
+    assert.equal(storage.getPersistError(), null, 'a recovered prune read records no persist error');
+
+    const raw = await fs.readFile(filePath, 'utf8');
+    const kept = raw.split(/\r?\n/).filter((line) => line.trim().length > 0);
+    assert.equal(kept.length, 1, 'prune kept only the newest record after the retried read');
+    assert.equal(JSON.parse(kept[0]!).run.runId, 'r2');
+  });
+});
+
+test('start continues when legacy migration cannot atomically replace snapshots', async () => {
+  await withTempDir(async (tempDir) => {
+    const outcomesRoot = path.join(tempDir, 'data', 'outcomes');
+    const legacyRoot = path.join(tempDir, 'legacy');
+    const workspaceId = 'migration-replace-workspace';
+    const hash = workspaceHash(workspaceId);
+    const storageDir = path.join(outcomesRoot, hash);
+    const legacyStorageDir = path.join(legacyRoot, 'runs', hash);
+    await fs.mkdir(storageDir, { recursive: true });
+    await fs.mkdir(legacyStorageDir, { recursive: true });
+    await fs.writeFile(path.join(storageDir, 'run-snapshots.jsonl'), '{"source":"current"}\n', 'utf8');
+    await fs.writeFile(path.join(legacyStorageDir, 'run-snapshots.jsonl'), '{"source":"legacy"}\n', 'utf8');
+
+    let atomicWriteAttempts = 0;
+    const storage = new RunAnalyticsStorage({
+      dataOutcomesRootPath: outcomesRoot,
+      legacyUsageDataRootPath: legacyRoot,
+      workspaceId,
+      now: () => FIXED_DATE,
+      serializeSessions: () => ({}),
+      atomicWriteText: async () => {
+        atomicWriteAttempts += 1;
+        throw errno('EPERM');
+      },
+      autoExportSetTimeout: () => noTimer(),
+    });
+
+    await assert.doesNotReject(storage.start());
+
+    assert.equal(atomicWriteAttempts, 1, 'legacy migration attempted the atomic replacement');
+    assert.ok(storage.getPersistError()?.message.includes('EPERM'), 'the migration failure is recorded');
+    assert.equal(
+      await fs.readFile(path.join(storageDir, 'run-snapshots.jsonl'), 'utf8'),
+      '{"source":"current"}\n',
+      'the canonical file remains intact after the failed migration',
+    );
+  });
+});
+
+test('derived auto-export contention retries quietly before surfacing a persistent failure', async () => {
+  await withTempDir(async (tempDir) => {
+    const surfaced: Array<{ message: string; at: string }> = [];
+    const storage = new RunAnalyticsStorage({
+      dataOutcomesRootPath: path.join(tempDir, 'data', 'outcomes'),
+      workspaceId: 'quiet-auto-export-retry-workspace',
+      now: () => FIXED_DATE,
+      serializeSessions: () => ({}),
+      onPersistError: (error) => surfaced.push(error),
+      autoExportNoticeAfterFailures: 3,
+      autoExportSetTimeout: () => noTimer(),
+    });
+
+    await storage.start();
+    (storage as unknown as { writeAutoExport(): Promise<void> }).writeAutoExport = async () => {
+      throw errno('EPERM');
+    };
+    const internals = storage as unknown as {
+      autoExportDirtyVersion: number;
+      queueAutoExport(force: boolean, failOnError?: boolean): Promise<void>;
+    };
+    internals.autoExportDirtyVersion = 1;
+
+    await internals.queueAutoExport(false);
+    await internals.queueAutoExport(false);
+    assert.equal(storage.getPersistError(), null, 'brief derived-export contention stays recoverable and quiet');
+    assert.equal(surfaced.length, 0, 'no user warning is emitted during the quiet retry window');
+
+    await internals.queueAutoExport(false);
+    assert.match(storage.getPersistError()?.message ?? '', /EPERM/u);
+    assert.equal(surfaced.length, 1, 'persistent contention eventually surfaces exactly once');
+  });
+});

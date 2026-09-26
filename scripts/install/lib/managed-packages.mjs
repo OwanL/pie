@@ -3,7 +3,7 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
-import { classifyManagedPackageSources, MANAGED_PACKAGE_REQUIREMENTS, managedPackageRoot, managedRequiredFileCandidates, resolveManagedCacheTargets } from '../../../shared/managed-package-contract.mjs';
+import { classifyManagedPackageSources, MANAGED_PACKAGE_REQUIREMENTS, managedPackageRoot, managedRequiredFileCandidates, resolveManagedCacheTargets } from '../../../lib/managed-packages/managed-package-contract.mjs';
 
 function requirementFor(name) {
   const result = MANAGED_PACKAGE_REQUIREMENTS.find((entry) => entry.name === name);

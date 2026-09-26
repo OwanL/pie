@@ -1,0 +1,3005 @@
+import * as fs from 'node:fs';
+import { createHash } from 'node:crypto';
+import * as path from 'node:path';
+
+import type { ModelSettings } from '../../model-providers/catalog/model-contract.js';
+import type { RequestEnvelope } from '../lib/rpc/wire.js';
+import type { SessionOpenedPayload } from '../lib/rpc/session-events.js';
+import type { ModelSettingsUnsetKey } from './request-handler-shared';
+import type {
+  CoordinatorToHostDetailMessage,
+  HostToCoordinatorDetailMessage,
+  LiveSubagentDetailAddress,
+} from '../lib/rpc/subagent-detail.js';
+import type { ColdSessionStore, SerializedColdSessionPromotionGrant } from '../../session-storage/lifecycle/cold-session-store';
+import {
+  CoordinatorProviderNetworkLeaseAuthority,
+  type CoordinatorProviderNetworkLease,
+} from '../../model-providers/concurrency/coordinator-provider-network-lease.js';
+import { ExtensionUiOwnerRegistry } from './extension-ui-owner-registry';
+import {
+  SessionOwnershipAuthority,
+  SessionOwnershipConflictError,
+  StaleSessionWriteLeaseError,
+} from '../../session-storage/ownership/session-ownership-authority';
+import type { SdkSessionWriteLease, SdkWorkerOwnershipIdentity } from '../lib/sdk-integration/sdk';
+import type { AnalyticsWriterIdentity } from '../../../analytics/authority/session-lifecycle-writer-store.js';
+import type { SupervisedWorker, WorkerSupervisor } from '../lib/process-lifecycle/worker-supervisor.js';
+import {
+  WorkerRequestEnqueueError,
+  WorkerRequestTimeoutError,
+  type WorkerClientScheduler,
+  type WorkerClientSnapshot,
+} from '../lib/rpc/worker-client.js';
+import { createOperationalIncident } from '../lib/rpc/incident-payload.js';
+import { backendDebug, backendError, backendInfo, backendWarn } from '../../../lib/structured-logging/backend-log.js';
+import { BackendError } from './server-io.js';
+import { SETTLED_SESSION_CAPABILITIES } from '../workers/session-activity';
+import type {
+  WorkerJsonObject,
+  WorkerJsonValue,
+  WorkerRuntimeOperation,
+  WorkerSessionControlFrame,
+  WorkerSyncDomain,
+  WorkerToCoordinatorFrame,
+} from '../lib/rpc/worker-protocol.js';
+import {
+  ANALYTICS_ROUTE_CLOSED_EVENT,
+  sameAnalyticsCaptureSubject,
+  type AnalyticsTransportAcknowledgement,
+  type AnalyticsTransportIngressEnvelope,
+  type AnalyticsTransportRouteClosedPayload,
+} from '../../../analytics/contracts/transport.js';
+
+export type WorkerRuntimeRouteState =
+  | { state: 'cold'; rootSessionPath: string }
+  | { state: 'promoting'; rootSessionPath: string; promotion: Promise<HotWorkerRoute> }
+  | HotWorkerRoute
+  | WorkerRuntimeTransitionRoute
+  | { state: 'retiring'; rootSessionPath: string; owner: SdkWorkerOwnershipIdentity; retirement: Promise<void> };
+
+export interface WorkerRuntimeTransitionRoute {
+  state: 'transitioning';
+  rootSessionPath: string;
+  transitionKey: string;
+  owner: SdkWorkerOwnershipIdentity;
+  completion: Promise<unknown>;
+  source: HotWorkerRoute;
+  promoted?: HotWorkerRoute;
+  retireStarted: boolean;
+  retired: boolean;
+  cancelled: boolean;
+  /** A promoted-route cleanup that is in flight or cannot confirm/process the
+   *  full ownership release leaves this transition fenced; its route must not
+   *  settle hot or cold while the old authority is ambiguous. */
+  cleanupPending: boolean;
+  cleanupFailed: boolean;
+  recoveryStops: Map<string, Promise<void>>;
+}
+
+export interface WorkerRuntimeTransitionControl {
+  interrupt(reason: string): Promise<{ soft: boolean }>;
+  retire(reason: string): Promise<void>;
+  promote(sessionPath: string): Promise<HotWorkerRoute>;
+  /** Dispatch to the replacement while the public path remains fenced by this
+   * transition. Used by compound mutations so no unrelated command can enter
+   * between runtime promotion and their final replacement send. */
+  routePromoted(request: RequestEnvelope): Promise<WorkerJsonValue>;
+  /** Fail the compound mutation after a priority interrupt has taken ownership. */
+  assertActive(): void;
+}
+
+export class SessionTransitionInProgressError extends BackendError {
+  constructor(sessionPath: string) {
+    super('SESSION_TRANSITION_IN_PROGRESS', `Session transition is already in progress for ${sessionPath}.`);
+    this.name = 'SessionTransitionInProgressError';
+  }
+}
+
+export interface HotWorkerRoute {
+  state: 'hot';
+  /** Current public route root; advances atomically after SDK replacement. */
+  rootSessionPath: string;
+  /** Immutable process/protocol root assigned at spawn. */
+  workerRootSessionPath: string;
+  currentLeasePath: string;
+  currentLeaseRevision: number;
+  /** Source path retained briefly so terminal events emitted during a session
+   *  replacement can still settle the superseded public send after rekeying. */
+  previousLeasePath?: string;
+  owner: SdkWorkerOwnershipIdentity;
+  worker: SupervisedWorker;
+  analyticsCaptureSubject?: AnalyticsTransportIngressEnvelope['packet']['captureSubject'];
+  analyticsPendingDeliveries?: Map<string, {
+    route: AnalyticsTransportIngressEnvelope['route'];
+    captureSubject: AnalyticsTransportIngressEnvelope['packet']['captureSubject'];
+    retainedBytes: number;
+  }>;
+  analyticsPendingBytes?: number;
+  checkpoint: {
+    busySeq: number;
+    requestId?: string;
+    operationId?: string;
+    operationAttempt?: number;
+    turnId?: string;
+    attemptId?: string;
+    terminalRequestId?: string;
+    terminalOperationId?: string;
+    terminalOperationAttempt?: number;
+    terminalTurnId?: string;
+    terminalAttemptId?: string;
+    preflightOnly?: boolean;
+    messageId?: string;
+    tools: Array<{ requestId: string; messageId: string; toolCallId: string; name?: string; input?: WorkerJsonValue; startedAt?: number; parallelGroupId?: string }>;
+    /** Last observed context usage (bounded). */
+    usage?: { tokens: number; contextWindow: number; percent: number };
+    /** Last durability-confirmed session entry identity (bounded). */
+    durableWatermark?: string;
+  };
+}
+
+export interface WorkerRuntimeCheckpointManifest {
+  busySeq: number;
+  requestId?: string;
+  tools: Array<{ requestId: string; messageId: string; toolCallId: string; name?: string; startedAt?: number }>;
+  usage?: { tokens: number; contextWindow: number; percent: number };
+  durableWatermark?: string;
+  detailManifest?: Array<{ subscriptionId: string; state: string; revision: number; pageCount: number }>;
+}
+
+export interface WorkerRuntimePromotionSnapshot {
+  openedPayload: SessionOpenedPayload;
+  modelSettings: ModelSettings;
+  agentDir: string;
+  startupCwd: string;
+  sessionDir: string;
+  sdkPath: string;
+  creationReason?: 'new' | 'resume';
+  /** Exact durable handle path. Never substitute the caller's alias. */
+  exactSessionPath?: string;
+  /** Transactional retained-manager settlement hooks. */
+  commitPromotion?: () => void;
+  abortPromotion?: () => void;
+  authPath?: string;
+  authFingerprint?: string;
+  runtimePrefs?: Record<string, WorkerJsonValue>;
+  providerPolicy?: Record<string, WorkerJsonValue>;
+}
+
+type WorkerDetailStreamFrame = Extract<WorkerToCoordinatorFrame, {
+  kind: 'detail.page' | 'detail.delta' | 'detail.rebase' | 'detail.terminal' | 'detail.error';
+}>;
+
+interface DetailSubscriptionOwner {
+  address: LiveSubagentDetailAddress;
+  route: HotWorkerRoute;
+  state: 'subscribing' | 'active' | 'closing' | 'rebasing' | 'terminal';
+  revision: number;
+  baselineRevision: number;
+  pageCount: number;
+  nextPageIndex: number;
+  /** WorkerClient can resolve detail.start and dispatch following frames from
+   * the same IPC chunk before subscribeDetail's await continuation runs. Keep
+   * those frames ordered until the start binds the baseline owner. */
+  preStartFrames: WorkerDetailStreamFrame[];
+}
+
+export interface WorkerSessionControlOutcome {
+  result: WorkerJsonValue;
+  /** Lifecycle deletion can retire the source worker. The response is sent
+   * first, then this callback runs so a tool closing its own session still
+   * receives its correlated acknowledgement. */
+  afterResponse?: () => void | Promise<void>;
+}
+
+export interface WorkerRuntimeRouterOptions {
+  supervisor: WorkerSupervisor;
+  /** Host-authoritative backend/coordinator generation; defaults to 1 only for legacy tests. */
+  coordinatorGeneration?: number;
+  coldStore: ColdSessionStore;
+  ownership: SessionOwnershipAuthority;
+  providerLeases?: CoordinatorProviderNetworkLeaseAuthority;
+  buildPromotionSnapshot(sessionPath: string): Promise<WorkerRuntimePromotionSnapshot>;
+  writeModelSettings?(updates: Partial<ModelSettings>): Promise<ModelSettings>;
+  writeModelSettingsIfCurrent?(
+    expected: ModelSettings,
+    updates: Partial<ModelSettings>,
+    unset?: readonly ModelSettingsUnsetKey[],
+  ): Promise<boolean>;
+  readModelSettings?(): Promise<ModelSettings>;
+  readRuntimePrefs?(): WorkerJsonObject;
+  /** A sync acknowledgement is a small, priority-path control response. Keep
+   *  it independently bounded from the much larger runtime promotion budget. */
+  syncAckTimeoutMs?: number;
+  /** Reloadable live broadcasts get more headroom than startup fences so
+   * a transiently CPU-bound active turn is not retired by the 5s detector. */
+  broadcastSyncAckTimeoutMs?: number;
+  runtimeReadyTimeoutMs?: number;
+  scheduler?: WorkerClientScheduler;
+  emit(event: string, payload?: unknown): void;
+  /** Handle the narrowly scoped worker-originated agent session-control
+   * request after the route identity fence has accepted its frame. */
+  onSessionControl?: (
+    frame: WorkerSessionControlFrame,
+    source: { sessionPath: string; rootSessionPath: string; owner: SdkWorkerOwnershipIdentity },
+  ) => Promise<WorkerSessionControlOutcome>;
+  /** Inactive until the P7 manifest owner supplies one immutable generation. */
+  analyticsActivation?: {
+    generationId: string;
+    workspaceId?: string;
+    buildId: string;
+  };
+  /** Durable host identity/path supplied to each isolated worker so its SDK
+   * manager and ownership adapter acquire the same lifecycle admission lease
+   * as coordinator-side session writers. */
+  analyticsWriterAdmission?: {
+    stateDir: string;
+    identity: AnalyticsWriterIdentity;
+  };
+  /** Closed imperative stream; detail pages never enter ViewState. */
+  emitDetail?(message: CoordinatorToHostDetailMessage): void;
+  onSessionReplaced?: (sourcePath: string, destinationPath: string) => void;
+  onRouteChanged?: (state: WorkerRuntimeRouteState) => void;
+}
+
+class UnconfirmedWorkerExitError extends Error {
+  constructor(message: string, readonly owner: SdkWorkerOwnershipIdentity) {
+    super(message);
+    this.name = 'UnconfirmedWorkerExitError';
+  }
+}
+
+class OperationDeadlineError extends Error {
+  constructor(message: string, readonly timeoutMs: number) {
+    super(`${message} within ${timeoutMs} ms.`);
+    this.name = 'OperationDeadlineError';
+  }
+}
+
+type SyncDomain = WorkerSyncDomain;
+
+interface WorkerSyncState {
+  revision: number;
+  /** Exact latest operation, retaining rejection for joiners. */
+  completion: Promise<void>;
+  /** Rejection-neutral sequencing tail so a failed revision cannot poison all
+   *  later authoritative updates for this worker/domain. */
+  tail: Promise<void>;
+}
+
+interface WorkerSyncSettlement {
+  worker: SupervisedWorker;
+  domain: SyncDomain;
+  revision: number;
+  completion: Promise<void>;
+}
+
+const DEFAULT_SYNC_ACK_TIMEOUT_MS = 5_000;
+const DEFAULT_BROADCAST_SYNC_ACK_TIMEOUT_MS = 30_000;
+const DEFAULT_RUNTIME_READY_TIMEOUT_MS = 120_000;
+const SYNC_SLOW_ACK_DIAGNOSTIC_MS = 250;
+const MAX_REPORTED_UNEXPECTED_WORKERS = 1_024;
+const LIVE_SYNC_RETRY_DELAYS_MS = [1_000, 5_000, 15_000, 30_000] as const;
+
+/** Describe the exit status of a confirmed worker exit without fabricating
+ *  either field: a `null` code/signal means the OS reported none, and an
+ *  absent pair means no confirmed exit was observed at all. */
+function describeWorkerExitEvidence(snapshot: WorkerClientSnapshot): string | undefined {
+  if (snapshot.exitCode === undefined && snapshot.exitSignal === undefined) return undefined;
+  if (snapshot.exitCode === null && snapshot.exitSignal === null) {
+    return 'the operating system reported no exit code or signal';
+  }
+  const observed = [
+    snapshot.exitCode !== null && snapshot.exitCode !== undefined ? `exit code ${snapshot.exitCode}` : undefined,
+    snapshot.exitSignal ? `signal ${snapshot.exitSignal}` : undefined,
+  ].filter((part): part is string => typeof part === 'string').join(' + ');
+  return observed.length > 0 ? observed : undefined;
+}
+
+const defaultRouterScheduler: WorkerClientScheduler = {
+  now: () => Date.now(),
+  setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+  clearTimeout: (timer) => clearTimeout(timer),
+};
+
+const HOT_OPERATIONS: ReadonlySet<string> = new Set<WorkerRuntimeOperation>([
+  'session.open',
+  'session.preload',
+  'session.loadTranscriptPage',
+  'session.loadDetail',
+  'session.truncateAfter',
+  'session.title.generate',
+  'models.list',
+  'liveTurn.checkpoint',
+  'message.send',
+  'operation.status',
+  'message.continue',
+  'message.compact',
+  'message.clearQueue',
+  'message.replaceQueue',
+  'extension_ui.response',
+  'settings.set',
+  'systemPromptToggles.set',
+  'test.extensionCommand',
+]);
+
+/** Coordinator owner for cold→promoting→hot→retiring routing. */
+export class WorkerRuntimeRouter {
+  private readonly roots = new Map<string, WorkerRuntimeRouteState>();
+  private readonly currentPaths = new Map<string, HotWorkerRoute>();
+  private readonly workersById = new Map<string, HotWorkerRoute>();
+  /** Per-path cancellation generation for commands waiting on a runtime
+   * transition, retirement, or cold promotion. Stop advances it synchronously so
+   * an earlier command cannot enter the eventual owner after cancellation. */
+  private readonly operationCancellationGenerations = new Map<string, number>();
+  private readonly providerLeases: CoordinatorProviderNetworkLeaseAuthority;
+  private readonly syncRevisions: Record<SyncDomain, number> = {
+    settings: 1,
+    catalog: 1,
+    auth: 1,
+    runtimePrefs: 1,
+    providerPolicy: 1,
+  };
+  private readonly syncPayloads: Partial<Record<SyncDomain, WorkerJsonObject>> = {};
+  private readonly workerSyncRevisions = new WeakMap<SupervisedWorker, Partial<Record<SyncDomain, number>>>();
+  private readonly workerSyncStates = new WeakMap<SupervisedWorker, Partial<Record<SyncDomain, WorkerSyncState>>>();
+  /** A live-sync deadline is evidence of delayed control traffic, not worker
+   * death. Retain one latest-wins retry per worker/domain so an active turn is
+   * never destroyed merely because its acknowledgement arrived slowly. */
+  private readonly liveSyncRetryTimers = new Map<
+    SupervisedWorker,
+    Partial<Record<SyncDomain, ReturnType<WorkerClientScheduler['setTimeout']>>>
+  >();
+  private readonly liveSyncRetryAttempts = new WeakMap<
+    SupervisedWorker,
+    Partial<Record<SyncDomain, number>>
+  >();
+  private syncTail = Promise.resolve();
+  private readonly scheduler: WorkerClientScheduler;
+  private readonly syncAckTimeoutMs: number;
+  private readonly broadcastSyncAckTimeoutMs: number;
+  private readonly runtimeReadyTimeoutMs: number;
+  private providerPolicy: WorkerJsonObject = {};
+  private disposed = false;
+  /** Once the authenticated host writer fence closes, no cold session may
+   * promote a new manager in this coordinator generation. Existing workers
+   * are fenced through their own registries by `fenceSessionManagers()`. */
+  private writerFenceRevoked = false;
+  private readonly detailSubscriptions = new Map<string, DetailSubscriptionOwner>();
+  private readonly extensionUiOwners = new ExtensionUiOwnerRegistry();
+  /** Unexpected worker loss can be observed first by a failed coordinator
+   * sync and again by the supervisor's eventual exited callback. Terminalize
+   * the bounded live checkpoint only once for that exact route generation. */
+  private readonly reconciledInterruptedRoutes = new WeakSet<HotWorkerRoute>();
+  /** A sync rejection and the resulting process exit describe one worker-loss
+   * incident. Whichever path publishes it first suppresses later duplicates. */
+  private readonly reportedUnexpectedWorkerKeys = new Set<string>();
+  /** Confirmed exit evidence is owned by the worker generation, not by the
+   * route or UI incident lifecycle. This guard keeps the evidence record
+   * exact-once when sync failure and exit callbacks race. */
+  private readonly reportedConfirmedExitKeys = new Set<string>();
+  /** Generations deliberately stopped by the router retain their classification
+   * until the late confirmed-exit callback arrives, even if the route is gone. */
+  private readonly intentionalWorkerStopKeys = new Set<string>();
+  /** Public busy sequencing belongs to the coordinator generation, not an
+   *  individual worker. A cold->hot re-promotion creates a new process whose
+   *  SDK-local counter starts at zero; forwarding that raw counter makes the
+   *  host reject the new worker's terminal busy=false as stale. Keep one
+   *  monotonic sequence per durable path for this coordinator lifetime. */
+  private readonly publicBusySeqByPath = new Map<string, number>();
+  /** Bounded per-worker runtime discovery reports; never replaces the configured catalog authority. */
+  private readonly reportedRuntimeCatalogs = new Map<string, { reportedAt: number; models: unknown[] }>();
+  private readonly pendingProviderAcquires = new Map<string, HotWorkerRoute>();
+  /** Generation fence for idempotent message mutations. Retained for the
+   * coordinator lifetime so a retry/status query can never move to a
+   * replacement worker with an empty generation-scoped ledger. */
+  private readonly messageOperationOwners = new Map<string, SdkWorkerOwnershipIdentity>();
+  private authPath?: string;
+  private authFingerprint?: string;
+
+  constructor(private readonly options: WorkerRuntimeRouterOptions) {
+    this.providerLeases = options.providerLeases ?? new CoordinatorProviderNetworkLeaseAuthority();
+    this.scheduler = options.scheduler ?? defaultRouterScheduler;
+    this.syncAckTimeoutMs = options.syncAckTimeoutMs ?? DEFAULT_SYNC_ACK_TIMEOUT_MS;
+    this.broadcastSyncAckTimeoutMs = options.broadcastSyncAckTimeoutMs
+      ?? (options.syncAckTimeoutMs === undefined
+        ? DEFAULT_BROADCAST_SYNC_ACK_TIMEOUT_MS
+        : this.syncAckTimeoutMs);
+    this.runtimeReadyTimeoutMs = options.runtimeReadyTimeoutMs ?? DEFAULT_RUNTIME_READY_TIMEOUT_MS;
+    if (!Number.isSafeInteger(this.syncAckTimeoutMs) || this.syncAckTimeoutMs <= 0) {
+      throw new Error('syncAckTimeoutMs must be a positive safe integer.');
+    }
+    if (!Number.isSafeInteger(this.broadcastSyncAckTimeoutMs) || this.broadcastSyncAckTimeoutMs <= 0) {
+      throw new Error('broadcastSyncAckTimeoutMs must be a positive safe integer.');
+    }
+    if (!Number.isSafeInteger(this.runtimeReadyTimeoutMs) || this.runtimeReadyTimeoutMs <= 0) {
+      throw new Error('runtimeReadyTimeoutMs must be a positive safe integer.');
+    }
+  }
+
+  static isHotOperation(method: string): method is WorkerRuntimeOperation {
+    return HOT_OPERATIONS.has(method);
+  }
+
+  getRoute(sessionPath: string): WorkerRuntimeRouteState {
+    return this.roots.get(routeKey(sessionPath))
+      ?? this.currentPaths.get(routeKey(sessionPath))
+      ?? { state: 'cold', rootSessionPath: sessionPath };
+  }
+
+  hasHotOwner(sessionPath: string): boolean {
+    const route = this.currentPaths.get(routeKey(sessionPath));
+    return !!route && route.state === 'hot'
+      && this.roots.get(routeKey(route.rootSessionPath)) === route;
+  }
+
+  hasMessageOperationOwner(operationId: string): boolean {
+    return this.messageOperationOwners.has(operationId);
+  }
+
+  operationCancellationGeneration(sessionPath: string): number {
+    return this.operationCancellationGenerations.get(routeKey(sessionPath)) ?? 0;
+  }
+
+  cancelPendingRuntimeOperations(sessionPath: string): boolean {
+    const route = this.getRoute(sessionPath);
+    const state = route.state;
+    if (state !== 'promoting' && state !== 'retiring' && state !== 'transitioning') return false;
+    if (route.state === 'transitioning') route.cancelled = true;
+    const key = routeKey(sessionPath);
+    this.operationCancellationGenerations.set(
+      key,
+      this.operationCancellationGeneration(sessionPath) + 1,
+    );
+    return true;
+  }
+
+  async route(
+    request: RequestEnvelope,
+    expectedCancellationGeneration?: number,
+  ): Promise<WorkerJsonValue> {
+    return await this.routeCommand(request, true, expectedCancellationGeneration);
+  }
+
+  async routeExisting(request: RequestEnvelope): Promise<WorkerJsonValue> {
+    return await this.routeCommand(request, false);
+  }
+
+  /** Revoke every currently promoted worker's manager admission. The
+   * coordinator flag closes the cold-promotion race before the worker IPC
+   * drain begins; each worker registry then invalidates and drains its own
+   * synchronous persistence boundary. */
+  async fenceSessionManagers(timeoutMs = 2_000): Promise<void> {
+    if (this.disposed) throw new Error('Worker runtime router is disposed.');
+    this.writerFenceRevoked = true;
+    const workers = [...new Set(this.workersById.values())];
+    await Promise.all(workers.map(async (route) => {
+      const response = await route.worker.client.requestFrame!({
+        kind: 'runtime.command',
+        operation: 'session.managerFence',
+        payload: asWorkerJsonObject({ publicRequestId: 'writer-fence', params: { timeoutMs } }),
+      }, 'response');
+      if (!response.ok) throw new BackendError(response.error.code, response.error.message);
+      const payload = response.result.kind === 'runtime.command'
+        ? response.result.payload
+        : undefined;
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+        || payload.activeWriterCount !== 0
+        || payload.admissionRevoked !== true
+        || payload.writersDrained !== true) {
+        throw new Error(`Worker ${route.owner.workerId} returned an invalid session-manager fence acknowledgement.`);
+      }
+    }));
+  }
+
+  /** Duplicate through the sole hot owner without moving the public
+   * create-operation ledger into the worker generation. The SDK replacement
+   * transfers this worker to the fork while the source becomes cold. */
+  async duplicateHotSession(
+    sourceSessionPath: string,
+    params: WorkerJsonObject,
+    publicRequestId: string,
+  ): Promise<{ sessionPath: string }> {
+    const hot = this.requireHot(sourceSessionPath);
+    this.assertCurrentOwner(hot, sourceSessionPath);
+    const response = await hot.worker.client.requestFrame!({
+      kind: 'runtime.command',
+      operation: 'session.duplicateHot',
+      payload: asWorkerJsonObject({ params, publicRequestId }),
+    }, 'response');
+    if (!response.ok) throw new BackendError(response.error.code, response.error.message);
+    if (response.result.kind !== 'runtime.command') {
+      throw new Error(`Hot session duplicate returned the wrong response for ${sourceSessionPath}.`);
+    }
+    const result = response.result.payload;
+    if (!result || typeof result !== 'object' || Array.isArray(result)
+      || typeof result.sessionPath !== 'string') {
+      throw new Error(`Hot session duplicate returned an invalid result for ${sourceSessionPath}.`);
+    }
+    return { sessionPath: result.sessionPath };
+  }
+
+  /** Build an immutable snapshot inside the sole hot owner. Used after a hot
+   * duplicate transfer and by idempotent re-publication of its destination. */
+  async buildHotSessionOpenedPayload(
+    sessionPath: string,
+    params: WorkerJsonObject,
+    publicRequestId: string,
+  ): Promise<SessionOpenedPayload> {
+    const hot = this.requireHot(sessionPath);
+    this.assertCurrentOwner(hot, sessionPath);
+    const response = await hot.worker.client.requestFrame!({
+      kind: 'runtime.command',
+      operation: 'session.snapshot',
+      payload: asWorkerJsonObject({ params, publicRequestId }),
+    }, 'response');
+    if (!response.ok) throw new BackendError(response.error.code, response.error.message);
+    if (response.result.kind !== 'runtime.command'
+      || !response.result.payload
+      || typeof response.result.payload !== 'object'
+      || Array.isArray(response.result.payload)) {
+      throw new Error(`Hot session snapshot returned an invalid result for ${sessionPath}.`);
+    }
+    return response.result.payload as unknown as SessionOpenedPayload;
+  }
+
+  async subscribeDetail(message: Extract<HostToCoordinatorDetailMessage, { kind: 'detail.subscribe' }>): Promise<void> {
+    if (this.detailSubscriptions.has(message.subscriptionId)) throw new Error('Detail subscription identity is already owned.');
+    const route = this.requireHot(message.address.sessionPath);
+    this.assertDetailAddressOwner(route, message.address);
+    const owner: DetailSubscriptionOwner = {
+      address: cloneDetailAddress(message.address), route, state: 'subscribing',
+      revision: 0, baselineRevision: 0, pageCount: 0, nextPageIndex: 0,
+      preStartFrames: [],
+    };
+    this.detailSubscriptions.set(message.subscriptionId, owner);
+    try {
+      const start = await route.worker.client.requestFrame!({
+        kind: 'detail.subscribe', subscriptionId: message.subscriptionId, address: message.address,
+        ...(message.cursor ? { cursor: message.cursor } : {}), maxPageBytes: message.maxPageBytes,
+      }, 'detail.start');
+      if (!this.isCurrent(route) || this.detailSubscriptions.get(message.subscriptionId) !== owner
+        || owner.state !== 'subscribing' || !sameDetailAddress(start.address, message.address)) {
+        throw new Error('Detail start owner changed before acknowledgement.');
+      }
+      owner.state = 'active';
+      owner.revision = start.baselineRevision;
+      owner.baselineRevision = start.baselineRevision;
+      owner.pageCount = start.pageCount;
+      owner.nextPageIndex = 0;
+      this.forwardDetail(route, {
+        kind: 'detail.start', subscriptionId: message.subscriptionId, address: cloneDetailAddress(start.address),
+        source: start.source, baselineRevision: start.baselineRevision, pageCount: start.pageCount,
+        totalBytes: start.totalBytes, totalCodePoints: start.totalCodePoints, fence: this.detailFence(route),
+      });
+      this.flushPreStartDetailFrames(message.subscriptionId, owner, route);
+    } catch (error) {
+      owner.preStartFrames.length = 0;
+      this.detailSubscriptions.delete(message.subscriptionId);
+      throw error;
+    }
+  }
+
+  async unsubscribeDetail(message: Extract<HostToCoordinatorDetailMessage, { kind: 'detail.unsubscribe' }>): Promise<void> {
+    const owner = this.detailSubscriptions.get(message.subscriptionId);
+    if (!owner) return;
+    owner.state = 'closing';
+    owner.preStartFrames.length = 0;
+    try {
+      await owner.route.worker.client.requestFrame!({
+        kind: 'detail.unsubscribe', subscriptionId: message.subscriptionId,
+      }, 'detail.unsubscribed');
+    } finally {
+      if (this.detailSubscriptions.get(message.subscriptionId) === owner) this.detailSubscriptions.delete(message.subscriptionId);
+    }
+  }
+
+  fetchDetail(message: Extract<HostToCoordinatorDetailMessage, { kind: 'detail.fetch' }>): void {
+    const owner = this.detailSubscriptions.get(message.subscriptionId);
+    if (!owner || owner.state !== 'active' || !sameDetailAddress(owner.address, message.address)) {
+      throw new Error('Detail fetch does not match the active subscription owner.');
+    }
+    this.assertDetailAddressOwner(owner.route, message.address);
+    if (message.ref.baselineRevision !== owner.baselineRevision || message.ref.pageCount !== owner.pageCount) {
+      throw new Error('Detail fetch ref does not match the active baseline manifest.');
+    }
+    const sent = owner.route.worker.client.sendFrame?.({
+      kind: 'detail.fetch', requestId: message.requestId, subscriptionId: message.subscriptionId,
+      address: message.address, ref: message.ref, maxPageBytes: message.maxPageBytes,
+    });
+    if (!sent) throw new Error('Detail fetch could not be queued to its owning worker.');
+  }
+
+  private flushPreStartDetailFrames(subscriptionId: string, owner: DetailSubscriptionOwner, route: HotWorkerRoute): void {
+    while (owner.preStartFrames.length > 0) {
+      const frames = owner.preStartFrames.splice(0);
+      for (const frame of frames) {
+        if (this.detailSubscriptions.get(subscriptionId) !== owner) return;
+        this.handleDetailFrame(route, frame);
+      }
+    }
+  }
+
+  private async routeCommand(
+    request: RequestEnvelope,
+    promoteIfCold: boolean,
+    expectedCancellationGeneration?: number,
+  ): Promise<WorkerJsonValue> {
+    if (!WorkerRuntimeRouter.isHotOperation(request.method)) {
+      throw new Error(`Operation ${request.method} is not a worker-runtime command.`);
+    }
+    const sessionPath = readSessionPath(request.params);
+    const operationCancellationGeneration = expectedCancellationGeneration
+      ?? this.operationCancellationGeneration(sessionPath);
+    const hot = promoteIfCold ? await this.promote(sessionPath) : this.requireHot(sessionPath);
+    if (promoteIfCold
+      && this.operationCancellationGeneration(sessionPath) !== operationCancellationGeneration) {
+      throw new BackendError(
+        'SESSION_OPERATION_CANCELLED',
+        'The pending session operation was interrupted before runtime promotion completed.',
+      );
+    }
+    this.assertCurrentOwner(hot, sessionPath);
+    return await this.dispatchRuntimeCommand(hot, request);
+  }
+
+  private async dispatchRuntimeCommand(
+    hot: HotWorkerRoute,
+    request: RequestEnvelope,
+  ): Promise<WorkerJsonValue> {
+    if (!WorkerRuntimeRouter.isHotOperation(request.method)) {
+      throw new Error(`Operation ${request.method} is not a worker-runtime command.`);
+    }
+    const operation = request.method;
+    const sessionPath = readSessionPath(request.params);
+    const operationId = (operation === 'message.send'
+      || operation === 'message.continue'
+      || operation === 'message.compact'
+      || operation === 'operation.status')
+      ? readMessageOperationId(request.params)
+      : undefined;
+    if (operationId) {
+      const existingOwner = this.messageOperationOwners.get(operationId);
+      if (existingOwner && !sameWorkerOwner(existingOwner, hot.owner)) {
+        throw new BackendError(
+          'SESSION_GENERATION_ENDED',
+          'The worker generation that owned this message operation is no longer available.',
+        );
+      }
+      if (!existingOwner && operation !== 'operation.status') {
+        this.messageOperationOwners.set(operationId, hot.owner);
+      }
+    }
+    const extensionUiResponse = operation === 'extension_ui.response'
+      ? readExtensionUiResponseId(request.params)
+      : undefined;
+    if (extensionUiResponse !== undefined) {
+      const owner = this.extensionUiOwners.resolve(sessionPath, extensionUiResponse, hot.owner);
+      if (!owner) throw new BackendError('UI_REQUEST_NOT_PENDING', 'The extension UI request is no longer pending.');
+    }
+    const response = await hot.worker.client.requestFrame!({
+      kind: 'runtime.command',
+      operation,
+      payload: asWorkerJsonObject({ params: request.params ?? {}, publicRequestId: request.id }),
+    }, 'response');
+    if (extensionUiResponse !== undefined) {
+      this.extensionUiOwners.settle(sessionPath, extensionUiResponse);
+      if (!response.ok && typeof response.error?.message === 'string'
+        && (response.error.message.startsWith('UI_REQUEST_NOT_PENDING:')
+          || response.error.message.startsWith('NO_UI_BRIDGE:'))) {
+        throw new BackendError('UI_REQUEST_NOT_PENDING', 'The extension UI request is no longer pending.');
+      }
+    }
+    if (!response.ok) throw new BackendError(response.error.code, response.error.message);
+    if (response.result.kind !== 'runtime.command') throw new Error('Worker returned the wrong runtime command result.');
+    const resultPayload = response.result.payload;
+    const earlyAckRequestId = resultPayload !== null
+      && typeof resultPayload === 'object'
+      && !Array.isArray(resultPayload)
+      && typeof resultPayload.requestId === 'string'
+      ? resultPayload.requestId
+      : undefined;
+    const earlyAckOperationId = resultPayload !== null
+      && typeof resultPayload === 'object'
+      && !Array.isArray(resultPayload)
+      && typeof resultPayload.operationId === 'string'
+      ? resultPayload.operationId
+      : undefined;
+    const earlyAckOperationAttempt = resultPayload !== null
+      && typeof resultPayload === 'object'
+      && !Array.isArray(resultPayload)
+      && Number.isSafeInteger(resultPayload.operationAttempt)
+      && (resultPayload.operationAttempt as number) > 0
+      ? resultPayload.operationAttempt as number
+      : undefined;
+    if ((operation === 'message.send' || operation === 'message.continue') && earlyAckRequestId) {
+      if (hot.checkpoint.requestId === undefined
+        && hot.checkpoint.terminalRequestId !== earlyAckRequestId) {
+        hot.checkpoint.requestId = earlyAckRequestId;
+        hot.checkpoint.operationId = earlyAckOperationId;
+        hot.checkpoint.operationAttempt = earlyAckOperationAttempt;
+        hot.checkpoint.turnId = undefined;
+        hot.checkpoint.messageId = undefined;
+        hot.checkpoint.preflightOnly = true;
+      } else if (hot.checkpoint.requestId === earlyAckRequestId
+        && hot.checkpoint.operationId === earlyAckOperationId
+        && earlyAckOperationAttempt !== undefined
+        && earlyAckOperationAttempt > (hot.checkpoint.operationAttempt ?? 0)) {
+        hot.checkpoint.operationAttempt = earlyAckOperationAttempt;
+      }
+    }
+    return resultPayload;
+  }
+
+  async promote(sessionPath: string): Promise<HotWorkerRoute> {
+    if (this.disposed) throw new Error('Worker runtime router is disposed.');
+    const key = routeKey(sessionPath);
+    const root = this.roots.get(key);
+    if (root?.state === 'transitioning') throw new SessionTransitionInProgressError(sessionPath);
+    const current = root ?? this.currentPaths.get(key);
+    if (this.writerFenceRevoked && current?.state !== 'hot') {
+      throw new BackendError('WRITER_FENCE_REVOKED', 'Session manager admission is revoked for this worker generation.');
+    }
+    if (current?.state === 'hot') {
+      this.assertCurrentOwner(current, sessionPath);
+      return current;
+    }
+    if (current?.state === 'promoting') return await current.promotion;
+    if (current?.state === 'retiring') {
+      await current.retirement;
+      return await this.promote(sessionPath);
+    }
+    const promotion = this.promoteOnce(sessionPath);
+    const promoting: WorkerRuntimeRouteState = { state: 'promoting', rootSessionPath: sessionPath, promotion };
+    this.roots.set(key, promoting);
+    this.notify(promoting);
+    try {
+      return await promotion;
+    } catch (error) {
+      if (!this.roots.has(key) || this.roots.get(key) === promoting) {
+        if (error instanceof UnconfirmedWorkerExitError) {
+          const retirement = Promise.reject(error);
+          void retirement.catch(() => undefined);
+          const retiring: WorkerRuntimeRouteState = {
+            state: 'retiring',
+            rootSessionPath: sessionPath,
+            owner: error.owner,
+            retirement,
+          };
+          this.roots.set(key, retiring);
+          this.notify(retiring);
+        } else {
+          const cold: WorkerRuntimeRouteState = { state: 'cold', rootSessionPath: sessionPath };
+          this.roots.set(key, cold);
+          this.notify(cold);
+        }
+      }
+      throw error;
+    }
+  }
+
+  runHotTransition<T>(
+    sessionPath: string,
+    transitionKey: string,
+    operation: (control: WorkerRuntimeTransitionControl) => Promise<T>,
+  ): Promise<T> {
+    if (this.disposed) return Promise.reject(new Error('Worker runtime router is disposed.'));
+    const key = routeKey(sessionPath);
+    const existing = this.roots.get(key);
+    if (existing?.state === 'transitioning') {
+      if (existing.transitionKey === transitionKey) return existing.completion as Promise<T>;
+      return Promise.reject(new SessionTransitionInProgressError(sessionPath));
+    }
+    const route = this.currentPaths.get(key);
+    if (!route || !this.isCurrent(route)) return Promise.reject(new Error(`No hot worker owns ${sessionPath}.`));
+
+    let resolveCompletion!: (value: T | PromiseLike<T>) => void;
+    let rejectCompletion!: (error: unknown) => void;
+    const completion = new Promise<T>((resolve, reject) => {
+      resolveCompletion = resolve;
+      rejectCompletion = reject;
+    });
+    const transition: WorkerRuntimeTransitionRoute = {
+      state: 'transitioning',
+      rootSessionPath: route.rootSessionPath,
+      transitionKey,
+      owner: route.owner,
+      completion,
+      source: route,
+      retireStarted: false,
+      retired: false,
+      cancelled: false,
+      cleanupPending: false,
+      cleanupFailed: false,
+      recoveryStops: new Map(),
+    };
+    this.roots.set(routeKey(route.rootSessionPath), transition);
+    this.notify(transition);
+
+    const assertActive = () => {
+      if (transition.cancelled) {
+        throw new BackendError(
+          'SESSION_OPERATION_CANCELLED',
+          `The ${transition.transitionKey} transition was interrupted before settlement.`,
+        );
+      }
+    };
+    const control: WorkerRuntimeTransitionControl = {
+      assertActive,
+      interrupt: async (reason) => {
+        assertActive();
+        try {
+          return await this.options.supervisor.interrupt(route.currentLeasePath, undefined, reason);
+        } catch (error) {
+          // WorkerSupervisor only rejects after escalation could not confirm
+          // process-tree exit. Keep this transition fenced permanently rather
+          // than restoring routing or write authority to an ambiguous owner.
+          transition.retireStarted = true;
+          throw error;
+        }
+        assertActive();
+      },
+      retire: async (reason) => {
+        assertActive();
+        if (transition.retired) return;
+        transition.retireStarted = true;
+        this.markIntentionalWorkerStop(route.worker);
+        await this.options.supervisor.stopWorker(route.currentLeasePath, reason);
+        this.closeAnalyticsRoute(route);
+        this.extensionUiOwners.clearWorker(route.owner.workerId, route.owner.workerGeneration);
+        this.clearPendingProviderAcquires(route);
+        this.providerLeases.releaseOwner(route.owner, reason);
+        await this.options.ownership.reconcileCrash({ owner: route.owner, processDeathConfirmed: true });
+        this.currentPaths.delete(routeKey(route.currentLeasePath));
+        this.workersById.delete(route.owner.workerId);
+        transition.retired = true;
+        assertActive();
+      },
+      promote: async (target) => {
+        assertActive();
+        const promoted = await this.promoteOnce(target);
+        transition.promoted = promoted;
+        if (transition.cancelled) {
+          await this.stopTransitionRouteOnce(transition, promoted, 'cancelled transition promotion');
+          throw new BackendError('SESSION_OPERATION_CANCELLED', `The ${transition.transitionKey} transition was interrupted during promotion.`);
+        }
+        return promoted;
+      },
+      routePromoted: async (request) => {
+        assertActive();
+        const promoted = transition.promoted;
+        if (!promoted
+          || this.roots.get(routeKey(transition.rootSessionPath)) !== transition
+          || !this.isCurrentOrPromoting(promoted)) {
+          throw new BackendError('SESSION_GENERATION_ENDED', 'The promoted edit runtime is no longer authoritative.');
+        }
+        if (!WorkerRuntimeRouter.isHotOperation(request.method)) {
+          throw new Error(`Operation ${request.method} is not a worker-runtime command.`);
+        }
+        const result = await this.dispatchRuntimeCommand(promoted, request);
+        assertActive();
+        return result;
+      },
+    };
+
+    void (async () => {
+      try {
+        const result = await operation(control);
+        if (this.roots.get(routeKey(transition.rootSessionPath)) === transition) {
+          const settled = this.settledTransitionRoute(transition, route);
+          this.roots.set(routeKey(settled.rootSessionPath), settled);
+          this.notify(settled);
+        }
+        resolveCompletion(result);
+      } catch (error) {
+        const transitionRootKey = routeKey(transition.rootSessionPath);
+        const current = this.roots.get(transitionRootKey);
+        if (current === transition && !transition.retireStarted
+            && !transition.cleanupPending && !transition.cleanupFailed
+            && this.currentPaths.get(routeKey(route.currentLeasePath)) === route) {
+          this.roots.set(routeKey(route.rootSessionPath), route);
+          this.notify(route);
+        } else if (transition.retired && (!current || current === transition)) {
+          // A post-promotion compound-command failure keeps the fresh runtime
+          // authoritative only while its route is still live. A cancelled or
+          // otherwise stopped promotion falls back to the retained cold handle
+          // only after cleanup confirms that no ambiguous owner remains; a
+          // pending or failed cleanup keeps the transition fence in place.
+          const settled = this.settledTransitionRoute(transition, route);
+          this.roots.set(routeKey(settled.rootSessionPath), settled);
+          this.notify(settled);
+        }
+        // An unconfirmed retirement remains transitioning/fenced. No command
+        // may be routed back to a process whose death is ambiguous.
+        rejectCompletion(error);
+      }
+    })();
+    return completion;
+  }
+
+  private async stopTransitionRoute(route: HotWorkerRoute, reason: string): Promise<void> {
+    this.markIntentionalWorkerStop(route.worker);
+    await this.options.supervisor.stopWorker(route.currentLeasePath, reason);
+    this.closeAnalyticsRoute(route);
+    this.extensionUiOwners.clearWorker(route.owner.workerId, route.owner.workerGeneration);
+    this.clearPendingProviderAcquires(route);
+    this.providerLeases.releaseOwner(route.owner, reason);
+    await this.options.ownership.reconcileCrash({ owner: route.owner, processDeathConfirmed: true });
+    this.currentPaths.delete(routeKey(route.currentLeasePath));
+    this.workersById.delete(route.owner.workerId);
+  }
+
+  private stopTransitionRouteOnce(
+    transition: WorkerRuntimeTransitionRoute,
+    route: HotWorkerRoute,
+    reason: string,
+  ): Promise<void> {
+    const key = `${route.owner.workerId}\u0000${route.owner.workerGeneration}`;
+    const existing = transition.recoveryStops.get(key);
+    if (existing) return existing;
+    // Fence settlement before starting the first await. Otherwise a
+    // cancellation can reject the compound operation in the same turn that a
+    // failed stop/reconciliation rejects, allowing the catch path to publish
+    // the still-mapped promoted route before the cleanup failure is recorded.
+    transition.cleanupPending = true;
+    transition.cleanupFailed = false;
+    const stopping = this.stopTransitionRoute(route, reason).then(
+      () => {
+        transition.cleanupPending = false;
+      },
+      (error) => {
+        // stopWorker may fail before process death is confirmed, and ownership
+        // reconciliation may fail after that confirmation. In either case the
+        // route maps are intentionally retained and the public transition must
+        // remain fenced rather than settling a still-addressable owner hot or
+        // exposing a reusable cold path. Remove the rejected attempt so a later
+        // confirmed-exit callback can retry the cleanup.
+        transition.cleanupPending = false;
+        transition.cleanupFailed = true;
+        transition.recoveryStops.delete(key);
+        throw error;
+      },
+    );
+    transition.recoveryStops.set(key, stopping);
+    return stopping;
+  }
+
+  /**
+   * A worker exit is narrower than a coordinator exit. HostAnalyticsTransport
+   * therefore needs an exact route fence to discard detail assemblies that may
+   * have received their start frame before this worker died. Emit once per
+   * retained route identity (session replacement can leave old and new lease
+   * identities in the same worker), then release the coordinator-side map.
+   */
+  private closeAnalyticsRoute(route: HotWorkerRoute): void {
+    const pending = route.analyticsPendingDeliveries;
+    if (!pending || pending.size === 0) return;
+    const emitted = new Set<string>();
+    for (const entry of pending.values()) {
+      const key = JSON.stringify(entry.route);
+      if (emitted.has(key)) continue;
+      emitted.add(key);
+      const payload: AnalyticsTransportRouteClosedPayload = { route: { ...entry.route } };
+      this.options.emit(ANALYTICS_ROUTE_CLOSED_EVENT, payload);
+    }
+    pending.clear();
+    route.analyticsPendingBytes = 0;
+  }
+
+  /** Priority Stop recovery after a compound transition exceeded its cooperative
+   * settlement budget. The transition is cancelled, every current worker
+   * authority is revoked after confirmed process exit, and completion is joined
+   * so it cannot publish a later promoted owner behind the Stop acknowledgement. */
+  async forceRecoverTransition(sessionPath: string, reason: string): Promise<boolean> {
+    const route = this.getRoute(sessionPath);
+    if (route.state !== 'transitioning') return false;
+    this.cancelPendingRuntimeOperations(sessionPath);
+    if (route.promoted) {
+      await this.stopTransitionRouteOnce(route, route.promoted, reason);
+      route.retired = true;
+    } else if (!route.retired) {
+      // `retireStarted` is not death evidence: it is also set when a prior
+      // interrupt/retirement failed to confirm exit. Retry termination and do
+      // not publish cold authority unless this call confirms process death.
+      await this.stopTransitionRouteOnce(route, route.source, reason);
+      route.retireStarted = true;
+      route.retired = true;
+    }
+    await route.completion.catch(() => undefined);
+    if (this.roots.get(routeKey(route.rootSessionPath)) === route) {
+      const cold: WorkerRuntimeRouteState = { state: 'cold', rootSessionPath: sessionPath };
+      this.roots.set(routeKey(sessionPath), cold);
+      this.notify(cold);
+    }
+    return true;
+  }
+
+  async interrupt(sessionPath: string, reason: string): Promise<{ soft: boolean }> {
+    const interruptedRoute = this.requireHot(sessionPath);
+    return await this.runHotTransition(
+      sessionPath,
+      `public-interrupt:${reason}`,
+      async (control) => {
+        const result = await control.interrupt(reason);
+        if (!result.soft) {
+          // WorkerSupervisor has force-killed and confirmed process-tree exit.
+          // Finish the same transition before acknowledging Stop so write,
+          // provider-network, UI, and routing authority are all revoked and an
+          // immediate next send can only promote a fresh generation.
+          await control.retire('forced interrupt recovery');
+          this.reconcileInterruptedCheckpoint(interruptedRoute);
+        }
+        return result;
+      },
+    );
+  }
+
+  async retire(sessionPath: string, reason = 'runtime retirement'): Promise<void> {
+    const route = this.requireHot(sessionPath);
+    const rootKey = routeKey(route.rootSessionPath);
+    this.markIntentionalWorkerStop(route.worker);
+    const retirement = (async () => {
+      this.clearLiveSyncRetries(route.worker);
+      await this.options.supervisor.stopWorker(route.currentLeasePath, reason);
+      this.closeAnalyticsRoute(route);
+      // Keep an active response body fenced until process-tree death is
+      // confirmed. Releasing before stop could overlap it with the next worker.
+      this.extensionUiOwners.clearWorker(route.owner.workerId, route.owner.workerGeneration);
+      this.clearPendingProviderAcquires(route);
+      this.providerLeases.releaseOwner(route.owner, reason);
+      await this.options.ownership.reconcileCrash({ owner: route.owner, processDeathConfirmed: true });
+      this.currentPaths.delete(routeKey(route.currentLeasePath));
+      this.workersById.delete(route.owner.workerId);
+      const cold: WorkerRuntimeRouteState = { state: 'cold', rootSessionPath: route.currentLeasePath };
+      this.roots.delete(rootKey);
+      this.roots.set(routeKey(route.currentLeasePath), cold);
+      this.notify(cold);
+    })();
+    const retiring: WorkerRuntimeRouteState = {
+      state: 'retiring', rootSessionPath: route.rootSessionPath, owner: route.owner, retirement,
+    };
+    this.roots.set(rootKey, retiring);
+    this.notify(retiring);
+    await retirement;
+  }
+
+  async syncRuntimePrefs(values: WorkerJsonObject): Promise<void> {
+    await this.broadcastSync('runtimePrefs', { values });
+  }
+
+  async syncProviderPolicy(providers: WorkerJsonObject): Promise<void> {
+    this.providerPolicy = { ...providers };
+    this.providerLeases.updatePolicies(this.providerPolicy);
+    await this.broadcastSync('providerPolicy', { providers: this.providerPolicy });
+  }
+
+  /** Broadcast the coordinator-authoritative settings snapshot after a cold
+   * (global) settings write so hot workers never serve stale values. */
+  async syncSettings(): Promise<void> {
+    const values = this.options.readModelSettings ? await this.options.readModelSettings() : undefined;
+    if (!values) return;
+    await this.broadcastSync('settings', { values: asWorkerJsonObject(values) });
+  }
+
+  /** Broadcast the coordinator-authoritative configured catalog (models.json)
+   * after its file fingerprint moved. The payload is the configured authority;
+   * runtime discovery reports never replace it. */
+  async syncCatalog(models: WorkerJsonValue[]): Promise<void> {
+    await this.broadcastSync('catalog', { models });
+  }
+
+  /** Auth fingerprint refresh: bump the auth sync revision and broadcast the
+   * new fingerprint to every worker. A missed live acknowledgement retries
+   * without interrupting active work; a definite transport/protocol failure
+   * still retires that worker. Returns the number of retired workers. */
+  async refreshAuth(fingerprint: string, authPath?: string): Promise<{ bumped: boolean; retiredWorkers: number }> {
+    if (authPath) this.authPath = authPath;
+    if (!this.authPath) return { bumped: false, retiredWorkers: 0 };
+    if (fingerprint === this.authFingerprint) return { bumped: false, retiredWorkers: 0 };
+    this.authFingerprint = fingerprint;
+    const retiredWorkers = await this.broadcastSync('auth', { authPath: this.authPath, fingerprint });
+    return { bumped: true, retiredWorkers };
+  }
+
+  async dispose(): Promise<void> {
+    if (this.disposed) return;
+    this.disposed = true;
+    for (const timers of this.liveSyncRetryTimers.values()) {
+      for (const timer of Object.values(timers)) {
+        if (timer) this.scheduler.clearTimeout(timer);
+      }
+    }
+    this.liveSyncRetryTimers.clear();
+    this.operationCancellationGenerations.clear();
+    const hot = [...this.roots.values()].filter((route): route is HotWorkerRoute => route.state === 'hot');
+    for (const route of hot) this.extensionUiOwners.clearWorker(route.owner.workerId, route.owner.workerGeneration);
+    await Promise.allSettled(hot.map((route) => this.retire(route.currentLeasePath, 'coordinator shutdown')));
+  }
+
+  async handleWorkerStateChange(
+    rootSessionPath: string,
+    snapshot: WorkerClientSnapshot,
+    identity?: { workerId: string; workerGeneration: number },
+  ): Promise<void> {
+    if (snapshot.status !== 'exited') return;
+    const route = identity
+      ? this.workersById.get(identity.workerId)
+      : [...this.workersById.values()].find((candidate) => routeKey(candidate.workerRootSessionPath) === routeKey(rootSessionPath));
+    // A sync failure may claim the UI incident and retire the route before
+    // this confirmed-exit callback runs. Evidence therefore precedes both
+    // route lookup acceptance and the UI incident dedupe gate.
+    const owner = route?.owner ?? identity;
+    const intentionalExit = owner !== undefined && this.isIntentionalWorkerExit(owner);
+    if (owner) this.logConfirmedWorkerExitEvidence(owner, snapshot, intentionalExit);
+    if (!route || route.state !== 'hot') return;
+    const owningState = this.roots.get(routeKey(route.rootSessionPath));
+    if (intentionalExit && owningState?.state === 'retiring') return;
+    let confirmedExitOwnsFailedTransition = false;
+    let failedPromotedCleanup: WorkerRuntimeTransitionRoute | undefined;
+    if (owningState?.state === 'transitioning'
+      && (sameWorkerOwner(owningState.owner, route.owner)
+        || (owningState.promoted === route && sameWorkerOwner(owningState.promoted.owner, route.owner)))) {
+      // A controlled interrupt/retirement owns authority revocation. A promoted
+      // replacement is also owned by this transition while its public root is
+      // fenced. Wait for that transition to publish its terminal route before
+      // applying the exit snapshot; this avoids both duplicate terminalization
+      // and restoring a process whose exit raced a nominally-soft interrupt.
+      await owningState.completion.catch(() => undefined);
+      if (this.roots.get(routeKey(route.rootSessionPath)) !== owningState) {
+        return await this.handleWorkerStateChange(rootSessionPath, snapshot, identity);
+      }
+      // Escalation previously could not confirm death and deliberately left the
+      // transition fenced. This later exited snapshot is the missing proof;
+      // finish revocation below instead of recursing on the same transition.
+      confirmedExitOwnsFailedTransition = true;
+      if (owningState.promoted === route && owningState.cleanupFailed) {
+        // The first recovery attempt may have raced the process exit. Retry the
+        // complete stop/reconciliation now that this exact promoted owner has
+        // supplied confirmed-exit evidence; a rejected attempt is not reusable.
+        failedPromotedCleanup = owningState;
+      }
+    }
+    this.clearLiveSyncRetries(route.worker);
+    // Snapshot the bounded checkpoint (including the detail subscription
+    // manifest) BEFORE invalidating live subscriptions so crash diagnostics
+    // still describe what was in flight.
+    const crashCheckpoint = this.checkpointManifest(route);
+    this.invalidateDetailSubscriptions(route, 'generation-change');
+    this.extensionUiOwners.clearWorker(route.owner.workerId, route.owner.workerGeneration);
+    this.clearPendingProviderAcquires(route);
+    this.providerLeases.releaseOwner(route.owner, 'Worker crashed.');
+    if (failedPromotedCleanup) {
+      // Reuse the transition cleanup path so a delayed exit retries both the
+      // supervisor's process-map removal and the ownership reconciliation.
+      await this.stopTransitionRouteOnce(failedPromotedCleanup, route, 'confirmed worker exit');
+    } else {
+      await this.options.supervisor.stopWorker(route.currentLeasePath, 'confirmed worker exit').catch(() => undefined);
+      this.closeAnalyticsRoute(route);
+      await this.options.ownership.reconcileCrash({ owner: route.owner, processDeathConfirmed: true });
+    }
+    if (!this.isCurrent(route) && !confirmedExitOwnsFailedTransition) return;
+    this.currentPaths.delete(routeKey(route.currentLeasePath));
+    this.workersById.delete(route.owner.workerId);
+    const cold: WorkerRuntimeRouteState = { state: 'cold', rootSessionPath: route.currentLeasePath };
+    this.roots.delete(routeKey(route.rootSessionPath));
+    this.roots.set(routeKey(route.currentLeasePath), cold);
+    this.notify(cold);
+    if (!intentionalExit) this.reconcileInterruptedCheckpoint(route);
+    if (intentionalExit) return;
+    // Preserve the crash cause behind the notice's More control. The worker's
+    // stderr tail is the only place an unhandled rejection/exception stack is
+    // visible; without it a SESSION_WORKER_EXITED notice is undiagnosable.
+    const stderrTail = snapshot.stderrTail?.trim();
+    const exitEvidence = describeWorkerExitEvidence(snapshot);
+    // The first causal failure (EOF/fatal) stays first; the observed exit
+    // status follows as evidence and never replaces it.
+    const detail = [
+      snapshot.failure,
+      exitEvidence ? `Observed exit status: ${exitEvidence}.` : undefined,
+      stderrTail ? `Worker stderr: ${stderrTail.slice(-2000)}` : undefined,
+    ].filter((part): part is string => typeof part === 'string' && part.length > 0).join('\n') || undefined;
+    if (this.claimUnexpectedWorkerIncident(route.worker)) {
+      const checkpoint = route.checkpoint;
+      this.options.emit('operational-error', {
+        ...createOperationalIncident({
+          incidentId: `worker-exit:${route.owner.workerId}:${route.owner.workerGeneration}`,
+          dedupeKey: `worker-exit:${route.owner.workerId}:${route.owner.workerGeneration}`,
+          code: 'SESSION_WORKER_EXITED',
+          message: 'The session worker exited. Live work was interrupted and was not replayed.',
+          detail: detail ?? 'The worker exited without reporting a failure detail.',
+          sessionPath: route.currentLeasePath,
+          ...(checkpoint.operationId ? { operationId: checkpoint.operationId } : {}),
+          ...(checkpoint.requestId ? { requestId: checkpoint.requestId } : {}),
+          ...(checkpoint.turnId ? { turnId: checkpoint.turnId } : {}),
+          ...(checkpoint.messageId ? { messageId: checkpoint.messageId } : {}),
+          severity: 'error',
+          certainty: 'definitive',
+          phase: 'runtime',
+          recovery: { restart: true },
+        }),
+        checkpoint: crashCheckpoint,
+      });
+    }
+  }
+
+  async handleWorkerFrame(rootSessionPath: string, frame: WorkerToCoordinatorFrame): Promise<void> {
+    const root = this.roots.get(routeKey(rootSessionPath));
+    const route = this.workersById.get(frame.workerId)
+      ?? (root?.state === 'hot'
+        ? root
+        : root?.state === 'promoting'
+          ? this.currentPaths.get(routeKey(frame.leasePath))
+          : undefined);
+    if (!route || frame.workerId !== route.owner.workerId
+      || frame.workerGeneration !== route.owner.workerGeneration
+      || frame.coordinatorGeneration !== route.owner.coordinatorGeneration
+      || routeKey(frame.rootSessionPath) !== routeKey(route.workerRootSessionPath)
+      || routeKey(frame.leasePath) !== routeKey(route.currentLeasePath)
+      || frame.leaseRevision !== route.currentLeaseRevision) {
+      return; // stale/cross-session frames are telemetry-only drops
+    }
+
+    if (frame.kind === 'session.control') {
+      const handler = this.options.onSessionControl;
+      if (!handler || !this.isCurrentOrPromoting(route)) return;
+      let outcome: WorkerSessionControlOutcome;
+      try {
+        outcome = await handler(frame, {
+          sessionPath: route.currentLeasePath,
+          rootSessionPath: route.workerRootSessionPath,
+          owner: route.owner,
+        });
+      } catch (error) {
+        if (!this.isCurrentOrPromoting(route)) return;
+        const message = truncateUtf8Field(
+          error instanceof Error ? error.message : error,
+          'Session control failed.',
+          64 * 1024,
+        );
+        const sent = route.worker.client.sendFrame?.({
+          kind: 'session.control.result',
+          requestId: frame.requestId,
+          ok: false,
+          error: { code: 'SESSION_CONTROL_FAILED', message, retryable: false },
+        });
+        if (!sent) return;
+        return;
+      }
+      if (!this.isCurrentOrPromoting(route)) return;
+      const sent = route.worker.client.sendFrame?.({
+        kind: 'session.control.result',
+        requestId: frame.requestId,
+        ok: true,
+        result: outcome.result,
+      });
+      if (sent && outcome.afterResponse) void Promise.resolve(outcome.afterResponse()).catch((error) => {
+        backendWarn('backend-session-control', 'after-response failed', {
+          requestId: frame.requestId,
+          sessionPath: route.currentLeasePath,
+          error: toErrorMessage(error),
+        });
+      });
+      return;
+    }
+
+    if (frame.kind === 'runtime.event') {
+      const eventPath = typeof frame.payload.sessionPath === 'string' ? frame.payload.sessionPath : route.currentLeasePath;
+      const isSupersededTerminal = route.previousLeasePath !== undefined
+        && routeKey(eventPath) === routeKey(route.previousLeasePath)
+        && (frame.event === 'preflight.failed'
+          || (frame.event === 'message.aborted'
+            && (frame.payload.outcome === 'cancelled' || frame.payload.outcome === 'superseded'))
+          || frame.event === 'agent.settled'
+          || (frame.event === 'busy.changed' && frame.payload.busy === false));
+      if (routeKey(eventPath) !== routeKey(route.currentLeasePath) && !isSupersededTerminal) return;
+      if (frame.event === 'extension_ui.request' && !isSupersededTerminal) {
+        // Record the exact pending owner BEFORE forwarding the public request.
+        // A request that cannot be owned exactly once must never reach the
+        // host, and a later response for it must never invoke the worker.
+        if (!this.recordExtensionUiOwner(route, frame.payload)) return;
+      }
+      const publicPayload = this.normalizeRuntimeEventPayload(route, frame.event, frame.payload);
+      if (frame.event === 'session.opened' && this.options.analyticsActivation) {
+        route.analyticsCaptureSubject = this.analyticsCaptureSubject(publicPayload);
+      }
+      if (!isSupersededTerminal) this.observeCheckpoint(route, frame.event, publicPayload);
+      this.options.emit(frame.event, publicPayload);
+      return;
+    }
+    if (frame.kind === 'analytics.capture') {
+      const activation = this.options.analyticsActivation;
+      const captureSubject = route.analyticsCaptureSubject;
+      const workerPid = route.worker.client.getSnapshot().pid;
+      const pending = route.analyticsPendingDeliveries?.get(frame.packet.deliveryId);
+      if (!activation || !captureSubject || typeof workerPid !== 'number' || !Number.isSafeInteger(workerPid) || workerPid <= 0
+          || frame.packet.generationId !== activation.generationId
+          || (!sameAnalyticsCaptureSubject(frame.packet.captureSubject, captureSubject)
+            && (!pending || !sameAnalyticsCaptureSubject(frame.packet.captureSubject, pending.captureSubject)))) {
+        return;
+      }
+      const pendingRoute: AnalyticsTransportIngressEnvelope['route'] = pending?.route ?? {
+        coordinatorGeneration: route.owner.coordinatorGeneration,
+        workerId: route.owner.workerId,
+        workerGeneration: route.owner.workerGeneration,
+        workerPid,
+        rootSessionPath: route.workerRootSessionPath,
+        leasePath: route.currentLeasePath,
+        leaseRevision: route.currentLeaseRevision,
+      };
+      const retainedBytes = Buffer.byteLength(JSON.stringify({
+        deliveryId: frame.packet.deliveryId,
+        route: pendingRoute,
+        captureSubject: frame.packet.captureSubject,
+      }), 'utf8');
+      if (!pending && ((route.analyticsPendingDeliveries?.size ?? 0) >= 4_096
+          || (route.analyticsPendingBytes ?? 0) + retainedBytes > 8 * 1024 * 1024)) {
+        route.worker.client.sendFrame?.({
+          kind: 'analytics.ack',
+          acknowledgement: {
+            version: 1,
+            deliveryId: frame.packet.deliveryId,
+            generationId: frame.packet.generationId,
+            status: 'rejected',
+            code: 'router_capacity',
+            message: 'Analytics coordinator pending-delivery capacity exceeded.',
+          },
+        });
+        return;
+      }
+      const emittedEnvelope: AnalyticsTransportIngressEnvelope = { route: pendingRoute, packet: frame.packet };
+      if (!pending) {
+        route.analyticsPendingDeliveries?.set(frame.packet.deliveryId, {
+          route: pendingRoute,
+          captureSubject: frame.packet.captureSubject,
+          retainedBytes,
+        });
+        route.analyticsPendingBytes = (route.analyticsPendingBytes ?? 0) + retainedBytes;
+      }
+      this.options.emit('analytics.capture', emittedEnvelope);
+      return;
+    }
+    if (frame.kind === 'analytics.rebind') {
+      const activation = this.options.analyticsActivation;
+      if (!activation || frame.captureSubject.kind !== 'session' || !this.isCurrentOrPromoting(route)) return;
+      route.analyticsCaptureSubject = frame.captureSubject;
+      route.worker.client.sendFrame?.({
+        kind: 'analytics.rebound',
+        requestId: frame.requestId,
+        captureSubject: frame.captureSubject,
+      });
+      return;
+    }
+    if (frame.kind === 'runtime.report') {
+      this.handleRuntimeReport(route, frame);
+      return;
+    }
+    if (frame.kind === 'detail.page' || frame.kind === 'detail.delta' || frame.kind === 'detail.rebase'
+      || frame.kind === 'detail.terminal' || frame.kind === 'detail.error') {
+      this.handleDetailFrame(route, frame);
+      return;
+    }
+    if (frame.kind === 'detail.start' || frame.kind === 'detail.unsubscribed') {
+      return; // Correlated responses are consumed by WorkerClient.
+    }
+    if (frame.kind === 'ownership.reserve') {
+      try {
+        const reservation = await this.options.ownership.reserve(route.owner, frame.intent);
+        route.worker.client.sendFrame?.({ kind: 'ownership.reserved', requestId: frame.requestId, reservation });
+      } catch (error) {
+        this.sendOwnershipRejected(route, frame.requestId, 'reserve', error);
+      }
+      return;
+    }
+    if (frame.kind === 'ownership.abort') {
+      try {
+        await this.options.ownership.abort(route.owner, frame.reservation, frame.reason);
+        route.worker.client.sendFrame?.({ kind: 'ownership.aborted', requestId: frame.requestId, reservationId: frame.reservation.reservationId });
+      } catch (error) {
+        this.sendOwnershipRejected(route, frame.requestId, 'abort', error);
+      }
+      return;
+    }
+    if (frame.kind === 'ownership.commit') {
+      try {
+        const authorization = await this.options.ownership.commit(route.owner, frame.reservation, frame.sourceLease);
+        // Enqueue the response under the old frame identity, then atomically rekey
+        // both coordinator route and client identity before any successor frame.
+        route.worker.client.sendFrame?.({ kind: 'ownership.committed', requestId: frame.requestId, authorization });
+        const sourcePath = route.currentLeasePath;
+        const sourceRootKey = routeKey(route.rootSessionPath);
+        const destinationPath = authorization.destinationLease.canonicalSessionPath;
+        // The coordinator response is queued under the source identity first.
+        // Everything after it is a synchronous ownership commit: supervisor
+        // lookup, public roots, current lease lookup, and client identity move
+        // together. The released source immediately becomes an independent
+        // cold root and can be promoted without resolving through this worker.
+        route.worker.client.updateLeaseIdentity?.(
+          destinationPath,
+          authorization.destinationLease.ownershipRevision,
+        );
+        this.options.supervisor.rekeyWorker(sourcePath, destinationPath);
+        this.currentPaths.delete(routeKey(sourcePath));
+        this.roots.delete(sourceRootKey);
+        this.roots.set(routeKey(sourcePath), { state: 'cold', rootSessionPath: sourcePath });
+        route.rootSessionPath = destinationPath;
+        route.previousLeasePath = sourcePath;
+        route.currentLeasePath = destinationPath;
+        route.currentLeaseRevision = authorization.destinationLease.ownershipRevision;
+        this.roots.set(routeKey(destinationPath), route);
+        this.currentPaths.set(routeKey(destinationPath), route);
+        this.options.onSessionReplaced?.(sourcePath, destinationPath);
+        this.notify(route);
+      } catch (error) {
+        this.sendOwnershipRejected(route, frame.requestId, 'commit', error);
+        await this.options.ownership.failClosed(route.owner, error).catch(() => undefined);
+        await this.failWorkerRoute(route, error);
+      }
+      return;
+    }
+    if (frame.kind === 'ownership.consume') {
+      try {
+        const lease = await this.options.ownership.consumeTransfer(
+          route.owner,
+          frame.authorization,
+          frame.canonicalDestinationPath,
+        );
+        route.worker.client.sendFrame?.({
+          kind: 'ownership.consumed',
+          requestId: frame.requestId,
+          authorizationId: frame.authorization.authorizationId,
+          lease,
+        });
+      } catch (error) {
+        this.sendOwnershipRejected(route, frame.requestId, 'consume', error);
+        await this.options.ownership.failClosed(route.owner, error).catch(() => undefined);
+        await this.failWorkerRoute(route, error);
+      }
+      return;
+    }
+    if (frame.kind === 'ownership.runtimeReady') {
+      try {
+        await this.options.ownership.createAdapter(route.owner).runtimeReady(frame.lease, frame.canonicalPath);
+        route.worker.client.sendFrame?.({
+          kind: 'ownership.runtimeReadyAck',
+          requestId: frame.requestId,
+          canonicalPath: frame.canonicalPath,
+          ownershipRevision: frame.lease.ownershipRevision,
+        });
+      } catch (error) {
+        this.sendOwnershipRejected(route, frame.requestId, 'runtimeReady', error);
+        await this.failWorkerRoute(route, error);
+      }
+      return;
+    }
+    if (frame.kind === 'provider.acquire') {
+      const acquireKey = this.providerAcquireKey(route, frame.requestId);
+      if (this.pendingProviderAcquires.has(acquireKey)) {
+        const reason = 'Duplicate provider admission request.';
+        // Cancel the original authority waiter as well as settling its worker
+        // correlation. Otherwise the original queued acquire could later win
+        // capacity and deliver a second terminal frame for the same requestId.
+        this.providerLeases.cancel(route.owner, frame.requestId, reason);
+        this.settleProviderAcquire(route, frame.requestId, {
+          reason,
+        });
+        return;
+      }
+      this.pendingProviderAcquires.set(acquireKey, route);
+      try {
+        const lease = await this.providerLeases.acquire(route.owner, frame.requestId, frame.request);
+        if (!this.isCurrentOrPromoting(route) || !this.providerLeases.isActive(route.owner, frame.requestId, lease.leaseId)) {
+          this.providerLeases.release(route.owner, lease.leaseId, 'cancelled');
+          this.settleProviderAcquire(route, frame.requestId, {
+            reason: 'Provider admission owner changed before the grant was delivered.',
+          });
+          return;
+        }
+        const sent = this.settleProviderAcquire(route, frame.requestId, { lease });
+        if (!sent || !this.providerLeases.markDelivered(route.owner, frame.requestId, lease.leaseId)) {
+          this.providerLeases.release(route.owner, lease.leaseId, 'cancelled');
+        }
+      } catch (error) {
+        // `settleProviderAcquire` is an exact-once guard shared with the
+        // provider.cancel handler. AbortError may have been settled there; an
+        // owner-release AbortError still needs this correlated cancellation.
+        this.settleProviderAcquire(route, frame.requestId, error instanceof Error && error.name === 'AbortError'
+          ? { reason: error.message }
+          : { error: normalizeProviderRejection(error) });
+      }
+      return;
+    }
+    if (frame.kind === 'provider.cancel') {
+      const cancellation = this.providerLeases.cancel(route.owner, frame.targetRequestId, frame.reason);
+      if (cancellation.notifyAcquire) {
+        this.settleProviderAcquire(route, frame.targetRequestId, { reason: frame.reason });
+      }
+      route.worker.client.sendFrame?.({
+        kind: 'provider.cancelAck',
+        requestId: frame.requestId,
+        targetRequestId: frame.targetRequestId,
+        status: cancellation.status,
+        ...(cancellation.leaseId ? { leaseId: cancellation.leaseId } : {}),
+      });
+      return;
+    }
+    if (frame.kind === 'provider.observation') {
+      this.providerLeases.observe(route.owner, frame.leaseId, frame.observation);
+      return;
+    }
+    if (frame.kind === 'provider.release') {
+      this.providerLeases.release(route.owner, frame.leaseId, frame.outcome);
+      route.worker.client.sendFrame?.({ kind: 'provider.released', requestId: frame.requestId, leaseId: frame.leaseId });
+      return;
+    }
+    if (frame.kind === 'settings.mutate') {
+      try {
+        const writeSettings = this.options.writeModelSettings;
+        if (!writeSettings) throw new Error('Coordinator settings authority is unavailable.');
+        // Persist + revision allocation + enqueue stay one short sync-locked
+        // unit, but acknowledgements run outside it on per-worker/domain tails.
+        // That preserves monotonic writes without letting one wedged worker
+        // block unrelated startup synchronization.
+        const settlements = await this.withSyncLock(async () => {
+          const updates = { ...(frame.updates as unknown as Record<string, unknown>) };
+          for (const key of frame.unset ?? []) updates[key] = undefined;
+          let applied = true;
+          let values: ModelSettings;
+          if (frame.expected !== undefined) {
+            const writeIfCurrent = this.options.writeModelSettingsIfCurrent;
+            if (!writeIfCurrent) {
+              throw new Error('Coordinator conditional settings authority is unavailable.');
+            }
+            applied = await writeIfCurrent(
+              modelSettingsFromWorkerObject(frame.expected),
+              updates as Partial<ModelSettings>,
+              frame.unset as ModelSettingsUnsetKey[] | undefined,
+            );
+            values = this.options.readModelSettings
+              ? await this.options.readModelSettings()
+              : modelSettingsFromWorkerObject(frame.expected);
+          } else {
+            values = await writeSettings(updates as Partial<ModelSettings>);
+          }
+          const revision = this.syncRevisions.settings + 1;
+          this.syncRevisions.settings = revision;
+          const payload = { values: asWorkerJsonObject(values) };
+          this.syncPayloads.settings = payload;
+          route.worker.client.sendFrame?.({
+            kind: 'settings.authoritative',
+            requestId: frame.requestId,
+            revision,
+            values: asWorkerJsonObject(values),
+            applied,
+          });
+          return this.scheduleBroadcastLocked('settings', payload, revision, 'broadcast');
+        });
+        await this.settleBroadcastSync(settlements);
+      } catch (error) {
+        await this.failWorkerRoute(route, error);
+      }
+    }
+  }
+
+  private handleDetailFrame(route: HotWorkerRoute, frame: WorkerDetailStreamFrame): void {
+    const owner = this.detailSubscriptions.get(frame.subscriptionId);
+    if (!owner || owner.route !== route || owner.state === 'closing' || !this.isCurrent(route)) return;
+    if (owner.state === 'subscribing') {
+      // The correlated detail.start is resolved before WorkerClient dispatches
+      // later frames from the same IPC chunk. Do not validate or rebase against
+      // an unbound baseline; the subscribe continuation will replay these
+      // frames after forwarding detail.start.
+      if (frame.kind === 'detail.error' && frame.requestId !== undefined) return;
+      owner.preStartFrames.push(frame);
+      return;
+    }
+    const fence = this.detailFence(route);
+    if (frame.kind === 'detail.page') {
+      if (frame.ref.baselineRevision !== owner.baselineRevision || frame.ref.pageCount !== owner.pageCount
+        || frame.ref.pageIndex >= owner.pageCount
+        || frame.checksum !== createHash('sha256').update(JSON.stringify(frame.payload)).digest('hex')) {
+        this.rebaseDetail(owner, 'gap');
+        return;
+      }
+      if (frame.requestId === undefined) {
+        if (owner.state !== 'active' || frame.ref.pageIndex !== owner.nextPageIndex) {
+          this.rebaseDetail(owner, 'gap');
+          return;
+        }
+        owner.nextPageIndex += 1;
+      }
+      this.forwardDetail(route, {
+        kind: 'detail.page', subscriptionId: frame.subscriptionId, ref: frame.ref,
+        payload: frame.payload, payloadBytes: frame.payloadBytes, checksum: frame.checksum, fence,
+      });
+      return;
+    }
+    if (frame.kind === 'detail.delta') {
+      if (owner.state !== 'active' || frame.baseRevision !== owner.revision || frame.revision <= frame.baseRevision) {
+        this.rebaseDetail(owner, 'gap');
+        return;
+      }
+      owner.revision = frame.revision;
+      this.forwardDetail(route, { kind: 'detail.delta', subscriptionId: frame.subscriptionId,
+        baseRevision: frame.baseRevision, revision: frame.revision, operations: frame.operations, fence });
+      return;
+    }
+    if (frame.kind === 'detail.rebase') {
+      owner.state = 'rebasing';
+      this.forwardDetail(route, { kind: 'detail.rebase', subscriptionId: frame.subscriptionId,
+        currentRevision: frame.currentRevision, reason: frame.reason, fence });
+      return;
+    }
+    if (frame.kind === 'detail.terminal') {
+      if (owner.state === 'terminal') return;
+      owner.state = 'terminal';
+      this.forwardDetail(route, { kind: 'detail.terminal', subscriptionId: frame.subscriptionId,
+        revision: frame.revision, durableRef: frame.durableRef, fence });
+      this.detailSubscriptions.delete(frame.subscriptionId);
+      return;
+    }
+    // Subscribe-correlated failures (`detail.error` carrying the subscribe
+    // requestId while the owner is still `subscribing`) settle through the
+    // correlated RPC rejection and must not also be forwarded as stream
+    // traffic: the server may fall back to the durable authority for the same
+    // subscriptionId, and a forwarded error would kill the owner before the
+    // durable baseline arrives. Stream-time errors (no requestId, or after the
+    // start) are forwarded normally.
+    this.forwardDetail(route, { kind: 'detail.error', subscriptionId: frame.subscriptionId,
+      code: frame.code, message: frame.message, retryable: frame.retryable, fence });
+  }
+
+  private rebaseDetail(owner: DetailSubscriptionOwner, reason: 'gap' | 'backpressure' | 'evicted' | 'generation-change'): void {
+    if (owner.state === 'rebasing' || owner.state === 'closing' || owner.state === 'terminal') return;
+    owner.state = 'rebasing';
+    const subscriptionId = [...this.detailSubscriptions].find(([, candidate]) => candidate === owner)?.[0];
+    if (!subscriptionId) return;
+    this.forwardDetail(owner.route, { kind: 'detail.rebase', subscriptionId, currentRevision: owner.revision,
+      reason, fence: this.detailFence(owner.route) });
+  }
+
+  private assertDetailAddressOwner(route: HotWorkerRoute, address: LiveSubagentDetailAddress): void {
+    this.assertCurrentOwner(route, address.sessionPath);
+    if (routeKey(address.sessionPath) !== routeKey(route.currentLeasePath)) throw new Error('Detail address path is not owned by this worker route.');
+  }
+
+  private detailFence(route: HotWorkerRoute): import('../lib/rpc/subagent-detail.js').BackendDetailFence {
+    return {
+      backendGeneration: route.owner.coordinatorGeneration,
+      coordinatorGeneration: route.owner.coordinatorGeneration,
+      workerId: route.owner.workerId,
+      workerGeneration: route.owner.workerGeneration,
+    };
+  }
+
+  private forwardDetail(route: HotWorkerRoute, message: CoordinatorToHostDetailMessage): void {
+    if (!this.isCurrent(route)) return;
+    this.options.emitDetail?.(message);
+  }
+
+  private async promoteOnce(sessionPath: string): Promise<HotWorkerRoute> {
+    this.assertWriterAdmission();
+    const snapshot = await this.options.buildPromotionSnapshot(sessionPath);
+    this.assertWriterAdmission();
+    const exactSessionPath = snapshot.exactSessionPath ?? snapshot.openedPayload.session.path;
+    const grant = this.options.coldStore.serializePromotionGrant(
+      exactSessionPath,
+      snapshot.creationReason ?? 'resume',
+    );
+    let owner: SdkWorkerOwnershipIdentity | undefined;
+    let lease: SdkSessionWriteLease | undefined;
+    let worker: SupervisedWorker | undefined;
+    try {
+      worker = await this.options.supervisor.startWorker(exactSessionPath, async (identity) => {
+        owner = {
+          coordinatorGeneration: this.options.coordinatorGeneration ?? 1,
+          workerId: identity.workerId,
+          workerGeneration: identity.workerGeneration,
+        };
+        lease = await this.options.ownership.registerHot(exactSessionPath, owner);
+        return { leasePath: lease.canonicalSessionPath, leaseRevision: lease.ownershipRevision };
+      });
+      if (!owner || !lease) throw new Error('Worker ownership was not prepared before spawn.');
+      this.assertWriterAdmission();
+      await this.syncStartup(worker, snapshot);
+      this.assertWriterAdmission();
+      const route: HotWorkerRoute = {
+        state: 'hot',
+        rootSessionPath: lease.canonicalSessionPath,
+        workerRootSessionPath: exactSessionPath,
+        currentLeasePath: lease.canonicalSessionPath,
+        currentLeaseRevision: lease.ownershipRevision,
+        owner,
+        worker,
+        ...(this.options.analyticsActivation
+          ? {
+              analyticsCaptureSubject: this.analyticsCaptureSubject(snapshot.openedPayload),
+              analyticsPendingDeliveries: new Map(),
+              analyticsPendingBytes: 0,
+            }
+          : {}),
+        checkpoint: { busySeq: 0, tools: [] },
+      };
+      // Install only worker/current-path lookup while the public root remains
+      // `promoting`. Events are fenced and delivered through that owner, but a
+      // concurrent command still joins the promotion promise and cannot reach
+      // the process before runtime.ready.
+      this.currentPaths.set(routeKey(route.currentLeasePath), route);
+      this.workersById.set(route.owner.workerId, route);
+      await this.withDeadline(
+        worker.client.requestFrame!({
+          kind: 'runtime.promote',
+          operationId: grant.grantId,
+          payload: asWorkerJsonObject({
+            sdkPath: snapshot.sdkPath,
+            agentDir: snapshot.agentDir,
+            startupCwd: snapshot.startupCwd,
+            sessionDir: snapshot.sessionDir,
+            sessionPath: exactSessionPath,
+            creationReason: grant.creationReason,
+            writeLease: lease,
+            // The cold snapshot has already reached the host before the first
+            // execution mutation. Promotion only needs bounded metadata to
+            // hydrate the worker and publish runtime readiness; re-sending the
+            // durable transcript here can cross the private protocol's
+            // structural validator even when it fits the byte cap (notably for
+            // large subagent detail projections). Keep the source snapshot
+            // untouched so its lazy detail refs and durable history remain
+            // available to the existing cold view and to the promoted worker.
+            openedPayload: promotionOpenedPayload(snapshot.openedPayload),
+            modelSettings: snapshot.modelSettings,
+            ...(this.options.analyticsActivation && route.analyticsCaptureSubject
+              ? {
+                analytics: {
+                  ...this.options.analyticsActivation,
+                  captureSubject: route.analyticsCaptureSubject,
+                  ...(this.options.analyticsWriterAdmission
+                    ? { writerAdmission: this.options.analyticsWriterAdmission }
+                    : {}),
+                },
+              }
+              : {}),
+          }),
+        }, 'runtime.ready'),
+        this.runtimeReadyTimeoutMs,
+        `Worker ${worker.workerId} did not become runtime-ready`,
+      );
+      this.options.coldStore.consumePromotionGrant(grant);
+      snapshot.commitPromotion?.();
+      const root = this.roots.get(routeKey(route.rootSessionPath));
+      // A compound hot transition keeps its public root fenced until its final
+      // replacement command has acknowledged. Normal cold promotion still
+      // publishes the hot route immediately after runtime.ready.
+      if (root?.state !== 'transitioning') {
+        this.roots.set(routeKey(route.rootSessionPath), route);
+        this.notify(route);
+      }
+      return route;
+    } catch (error) {
+      this.options.coldStore.abortPromotionGrant(grant);
+      if (owner) {
+        try {
+          await this.options.supervisor.stopWorker(worker?.sessionPath ?? exactSessionPath, 'failed promotion');
+        } catch (stopError) {
+          throw new UnconfirmedWorkerExitError(
+            `Failed promotion remains fenced because worker exit was not confirmed: ${stopError instanceof Error ? stopError.message : String(stopError)}`,
+            owner,
+          );
+        }
+        this.extensionUiOwners.clearWorker(owner.workerId, owner.workerGeneration);
+        this.providerLeases.releaseOwner(owner);
+        await this.options.ownership.reconcileCrash({ owner, processDeathConfirmed: true });
+      }
+      const failedRoute = owner ? this.workersById.get(owner.workerId) : undefined;
+      if (failedRoute) {
+        this.closeAnalyticsRoute(failedRoute);
+        this.clearPendingProviderAcquires(failedRoute);
+        this.roots.delete(routeKey(failedRoute.rootSessionPath));
+        this.currentPaths.delete(routeKey(failedRoute.currentLeasePath));
+        this.workersById.delete(failedRoute.owner.workerId);
+      }
+      snapshot.abortPromotion?.();
+      throw error;
+    }
+  }
+
+  private assertWriterAdmission(): void {
+    if (this.writerFenceRevoked) {
+      throw new BackendError('WRITER_FENCE_REVOKED', 'Session manager admission is revoked for this worker generation.');
+    }
+  }
+
+  private async broadcastSync(
+    domain: SyncDomain,
+    payload: WorkerJsonObject,
+  ): Promise<number> {
+    const settlements = await this.withSyncLock(async () => {
+      const revision = this.syncRevisions[domain] + 1;
+      this.syncRevisions[domain] = revision;
+      this.syncPayloads[domain] = payload;
+      return this.scheduleBroadcastLocked(domain, payload, revision, 'broadcast');
+    });
+    return await this.settleBroadcastSync(settlements);
+  }
+
+  /** Called only while revision allocation is locked. Queueing is synchronous:
+   *  each worker/domain tail captures revision order before the lock is
+   *  released, while the actual acknowledgement waits independently. */
+  private scheduleBroadcastLocked(
+    domain: SyncDomain,
+    payload: WorkerJsonObject,
+    revision: number,
+    phase: 'broadcast' | 'startup',
+  ): WorkerSyncSettlement[] {
+    // WorkerSupervisor publishes a generation before `client.start()` has
+    // completed so it can own/kill a failed spawn. Broadcasts must not mistake
+    // that lifecycle ownership for a usable IPC route; startup sync catches up
+    // the latest revisions once the client reaches ready.
+    return this.options.supervisor.listWorkers()
+      .filter((worker) => this.isWorkerTransportUsable(worker))
+      .map((worker) => ({
+      worker,
+      domain,
+      revision,
+      completion: this.queueWorkerSync(worker, domain, revision, payload, phase),
+      }));
+  }
+
+  private async syncStartup(worker: SupervisedWorker, snapshot: WorkerRuntimePromotionSnapshot): Promise<void> {
+    // Reads that may touch disk happen outside the revision lock. Once inside,
+    // initialize only missing payloads and enqueue the current revisions on
+    // this worker's private sync chains. A concurrent later broadcast queues
+    // behind the matching per-domain chain, never behind another worker.
+    const currentSettings = this.options.readModelSettings
+      ? await this.options.readModelSettings()
+      : snapshot.modelSettings;
+    const currentRuntimePrefs = this.options.readRuntimePrefs?.() ?? snapshot.runtimePrefs ?? {};
+
+    while (true) {
+      const settlements = await this.withSyncLock(async () => {
+        this.authPath ??= snapshot.authPath ?? path.join(snapshot.agentDir, 'auth.json');
+        this.authFingerprint ??= snapshot.authFingerprint ?? 'startup-unavailable';
+        this.syncPayloads.settings ??= { values: asWorkerJsonObject(currentSettings) };
+        this.syncPayloads.catalog ??= {
+          models: (snapshot.openedPayload.availableModels ?? []) as unknown as WorkerJsonValue[],
+        };
+        this.syncPayloads.auth ??= {
+          authPath: this.authPath ?? snapshot.authPath ?? path.join(snapshot.agentDir, 'auth.json'),
+          fingerprint: snapshot.authFingerprint ?? this.authFingerprint ?? 'startup-unavailable',
+        };
+        this.syncPayloads.runtimePrefs ??= { values: currentRuntimePrefs };
+        this.syncPayloads.providerPolicy ??= {
+          providers: Object.keys(this.providerPolicy).length > 0 ? this.providerPolicy : snapshot.providerPolicy ?? {},
+        };
+        return (Object.keys(this.syncRevisions) as SyncDomain[]).map((domain) => {
+          const revision = this.syncRevisions[domain];
+          const payload = this.syncPayloads[domain]!;
+          return {
+            worker,
+            domain,
+            revision,
+            completion: this.queueWorkerSync(worker, domain, revision, payload, 'startup'),
+          };
+        });
+      });
+
+      const results = await Promise.allSettled(settlements.map((settlement) => settlement.completion));
+      const failedIndex = results.findIndex((result) => result.status === 'rejected');
+      if (failedIndex >= 0) {
+        const failed = settlements[failedIndex]!;
+        const result = results[failedIndex] as PromiseRejectedResult;
+        throw new Error(
+          `Worker startup sync ${failed.domain}@${failed.revision} failed for ${failed.worker.workerId}: ${toErrorMessage(result.reason)}`,
+        );
+      }
+
+      const caughtUp = await this.withSyncLock(async () => {
+        const revisions = this.workerSyncRevisions.get(worker) ?? {};
+        return (Object.keys(this.syncRevisions) as SyncDomain[])
+          .every((domain) => (revisions[domain] ?? 0) >= this.syncRevisions[domain]);
+      });
+      if (caughtUp) return;
+    }
+  }
+
+  private queueWorkerSync(
+    worker: SupervisedWorker,
+    domain: SyncDomain,
+    revision: number,
+    payload: WorkerJsonObject,
+    phase: 'broadcast' | 'startup',
+  ): Promise<void> {
+    const revisions = this.workerSyncRevisions.get(worker) ?? {};
+    if ((revisions[domain] ?? 0) >= revision) return Promise.resolve();
+
+    const states = this.workerSyncStates.get(worker) ?? {};
+    const scheduled = states[domain];
+    if (scheduled && scheduled.revision >= revision) return scheduled.completion;
+
+    const previous = scheduled?.tail ?? Promise.resolve();
+    const completion = previous.then(async () => {
+      const latest = this.workerSyncRevisions.get(worker) ?? {};
+      if ((latest[domain] ?? 0) >= revision) return;
+      const startedAt = this.scheduler.now();
+      try {
+        const ackTimeoutMs = phase === 'startup'
+          ? this.syncAckTimeoutMs
+          : this.broadcastSyncAckTimeoutMs;
+        const response = await this.withDeadline(
+          worker.client.requestFrame!(
+            { kind: 'sync', domain, revision, payload } as never,
+            'sync.ack',
+            {
+              timeoutMs: ackTimeoutMs,
+              // A bounded live enqueue failure may be retried without marking
+              // the whole worker transport failed. Startup remains fail-closed.
+              fatalOnEnqueueRejection: phase === 'startup',
+            },
+          ),
+          ackTimeoutMs,
+          `Worker ${worker.workerId} did not acknowledge ${domain}@${revision}`,
+        );
+        if (response.domain !== domain || response.revision !== revision) {
+          throw new Error(`Worker sync acknowledgement mismatch for ${domain}.`);
+        }
+        const acknowledged = this.workerSyncRevisions.get(worker) ?? {};
+        acknowledged[domain] = Math.max(acknowledged[domain] ?? 0, revision);
+        this.workerSyncRevisions.set(worker, acknowledged);
+        const durationMs = Math.max(0, this.scheduler.now() - startedAt);
+        if (durationMs >= SYNC_SLOW_ACK_DIAGNOSTIC_MS) {
+          backendDebug('backend-worker-sync', 'sync.slow-ack', {
+            phase, domain, revision,
+            workerId: worker.workerId,
+            workerGeneration: worker.workerGeneration,
+            sessionPath: worker.sessionPath,
+            durationMs,
+          });
+        }
+      } catch (error) {
+        backendWarn('backend-worker-sync', 'sync.failed', {
+          phase, domain, revision,
+          workerId: worker.workerId,
+          workerGeneration: worker.workerGeneration,
+          sessionPath: worker.sessionPath,
+          durationMs: Math.max(0, this.scheduler.now() - startedAt),
+          error: toErrorMessage(error),
+        });
+        throw error;
+      }
+    });
+    const state: WorkerSyncState = {
+      revision,
+      completion,
+      tail: completion.then(() => undefined, () => undefined),
+    };
+    states[domain] = state;
+    this.workerSyncStates.set(worker, states);
+    // A deadline-rejected latest state must be retryable. Keep an older
+    // state's cleanup from deleting a newer queued revision that replaced it.
+    void completion.catch((error) => {
+      if (!this.isRetryableLiveSyncFailure(error)) return;
+      const current = this.workerSyncStates.get(worker);
+      if (current?.[domain]?.completion === completion) delete current[domain];
+    });
+    return completion;
+  }
+
+  private observeLiveSyncBroadcast(settlements: WorkerSyncSettlement[]): void {
+    for (const settlement of settlements) {
+      void settlement.completion.then(
+        () => this.clearLiveSyncRetry(settlement.worker, settlement.domain),
+        async (error) => {
+          if (this.isRetryableLiveSyncFailure(error)) {
+            this.scheduleLiveSyncRetry(settlement.worker, settlement.domain, settlement.revision, error);
+            return;
+          }
+          await this.quarantineSyncFailure(settlement, error);
+        },
+      ).catch((error) => backendWarn('backend-worker-sync', 'sync.settlement-failed', {
+        workerId: settlement.worker.workerId,
+        workerGeneration: settlement.worker.workerGeneration,
+        domain: settlement.domain,
+        revision: settlement.revision,
+        error: toErrorMessage(error),
+      }));
+    }
+  }
+
+  private scheduleLiveSyncRetry(
+    worker: SupervisedWorker,
+    domain: SyncDomain,
+    failedRevision: number,
+    error: unknown,
+  ): void {
+    if (!this.canRetryWorkerSync(worker)) return;
+    const timers = this.liveSyncRetryTimers.get(worker) ?? {};
+    if (timers[domain]) return;
+    const attempts = this.liveSyncRetryAttempts.get(worker) ?? {};
+    const attempt = (attempts[domain] ?? 0) + 1;
+    attempts[domain] = attempt;
+    this.liveSyncRetryAttempts.set(worker, attempts);
+    const delayMs = LIVE_SYNC_RETRY_DELAYS_MS[
+      Math.min(attempt - 1, LIVE_SYNC_RETRY_DELAYS_MS.length - 1)
+    ]!;
+    backendWarn('backend-worker-sync', 'sync.retry-scheduled', {
+      workerId: worker.workerId,
+      workerGeneration: worker.workerGeneration,
+      sessionPath: worker.sessionPath,
+      domain,
+      failedRevision,
+      delayMs,
+      error: toErrorMessage(error),
+    });
+    const timer = this.scheduler.setTimeout(() => {
+      const currentTimers = this.liveSyncRetryTimers.get(worker);
+      if (currentTimers?.[domain] === timer) delete currentTimers[domain];
+      if (currentTimers && Object.values(currentTimers).every((value) => value === undefined)) {
+        this.liveSyncRetryTimers.delete(worker);
+      }
+      if (!this.canRetryWorkerSync(worker)) return;
+      void this.withSyncLock(async () => {
+        // The exact generation can retire while this retry waits behind another
+        // revision allocation. Recheck inside the lock before touching it.
+        if (!this.canRetryWorkerSync(worker)) return undefined;
+        const revision = this.syncRevisions[domain];
+        const payload = this.syncPayloads[domain];
+        if (!payload) return undefined;
+        return {
+          worker,
+          domain,
+          revision,
+          completion: this.queueWorkerSync(worker, domain, revision, payload, 'broadcast'),
+        };
+      }).then(
+        (settlement) => {
+          if (settlement) this.observeLiveSyncBroadcast([settlement]);
+        },
+        (retryError) => this.scheduleLiveSyncRetry(worker, domain, failedRevision, retryError),
+      );
+    }, delayMs);
+    timer.unref?.();
+    timers[domain] = timer;
+    this.liveSyncRetryTimers.set(worker, timers);
+  }
+
+  private clearLiveSyncRetry(worker: SupervisedWorker, domain: SyncDomain): void {
+    const timers = this.liveSyncRetryTimers.get(worker);
+    const timer = timers?.[domain];
+    if (timer) this.scheduler.clearTimeout(timer);
+    if (timers) {
+      delete timers[domain];
+      if (Object.values(timers).every((value) => value === undefined)) {
+        this.liveSyncRetryTimers.delete(worker);
+      }
+    }
+    const attempts = this.liveSyncRetryAttempts.get(worker);
+    if (attempts) {
+      delete attempts[domain];
+      if (Object.values(attempts).every((value) => value === undefined)) {
+        this.liveSyncRetryAttempts.delete(worker);
+      }
+    }
+  }
+
+  private clearLiveSyncRetries(worker: SupervisedWorker): void {
+    const timers = this.liveSyncRetryTimers.get(worker);
+    if (timers) {
+      for (const timer of Object.values(timers)) {
+        if (timer) this.scheduler.clearTimeout(timer);
+      }
+    }
+    this.liveSyncRetryTimers.delete(worker);
+    this.liveSyncRetryAttempts.delete(worker);
+  }
+
+  private canRetryWorkerSync(worker: SupervisedWorker): boolean {
+    return !this.disposed
+      && this.isWorkerTransportUsable(worker)
+      && this.options.supervisor.listWorkers().some((candidate) =>
+        candidate.workerId === worker.workerId
+        && candidate.workerGeneration === worker.workerGeneration,
+      );
+  }
+
+  private isRetryableLiveSyncFailure(error: unknown): boolean {
+    return error instanceof OperationDeadlineError
+      || error instanceof WorkerRequestTimeoutError
+      || (error instanceof WorkerRequestEnqueueError && error.reason === 'capacity');
+  }
+
+  private isWorkerTransportUsable(worker: SupervisedWorker): boolean {
+    const status = worker.client.getSnapshot().status;
+    // `unresponsive` means heartbeat liveness is suspect, not that the IPC
+    // descriptor is closed. WorkerClient still accepts control requests in
+    // this state and a later heartbeat can restore `ready`; skipping it would
+    // silently lose critical authority updates with no catch-up transition.
+    return status === 'ready' || status === 'unresponsive';
+  }
+
+  private async settleBroadcastSync(settlements: WorkerSyncSettlement[]): Promise<number> {
+    const results = await Promise.allSettled(settlements.map((settlement) => settlement.completion));
+    const quarantines: Array<{ settlement: WorkerSyncSettlement; error: unknown }> = [];
+    for (const [index, settlement] of settlements.entries()) {
+      const result = results[index];
+      if (result?.status === 'fulfilled') {
+        this.clearLiveSyncRetry(settlement.worker, settlement.domain);
+        continue;
+      }
+      if (!result || result.status !== 'rejected') continue;
+      if (this.isRetryableLiveSyncFailure(result.reason)) {
+        this.scheduleLiveSyncRetry(settlement.worker, settlement.domain, settlement.revision, result.reason);
+      } else {
+        quarantines.push({ settlement, error: result.reason });
+      }
+    }
+    await Promise.all(quarantines.map(({ settlement, error }) =>
+      this.quarantineSyncFailure(settlement, error)));
+    return quarantines.length;
+  }
+
+  private async quarantineSyncFailure(settlement: WorkerSyncSettlement, error: unknown): Promise<void> {
+    const { worker, domain, revision } = settlement;
+    const reason = `Worker ${domain}@${revision} sync failed: ${toErrorMessage(error)}`;
+    const candidateRoute = this.workersById.get(worker.workerId);
+    const route = candidateRoute?.owner.workerGeneration === worker.workerGeneration
+      ? candidateRoute
+      : undefined;
+    // A request can settle after its old route has retired. Supervisor stop is
+    // path-addressed, so never let that stale settlement target a replacement
+    // generation which now owns the same durable path.
+    const exactWorkerStillSupervised = this.options.supervisor.listWorkers().some((candidate) =>
+      candidate.workerId === worker.workerId
+      && candidate.workerGeneration === worker.workerGeneration,
+    );
+    if (!route && !exactWorkerStillSupervised) return;
+    const firstIncident = this.claimUnexpectedWorkerIncident(worker);
+    if (firstIncident) {
+      const checkpoint = route?.checkpoint;
+      this.options.emit('operational-error', {
+        ...createOperationalIncident({
+          incidentId: `worker-sync:${worker.workerId}:${worker.workerGeneration}:${domain}:${revision}`,
+          dedupeKey: `worker-sync:${worker.workerId}:${worker.workerGeneration}:${domain}`,
+          code: 'SESSION_WORKER_SYNC_FAILED',
+          message: 'A session worker stopped acknowledging coordinator state and was retired.',
+          sessionPath: route?.currentLeasePath ?? worker.sessionPath,
+          detail: reason,
+          ...(checkpoint?.operationId ? { operationId: checkpoint.operationId } : {}),
+          ...(checkpoint?.requestId ? { requestId: checkpoint.requestId } : {}),
+          ...(checkpoint?.turnId ? { turnId: checkpoint.turnId } : {}),
+          ...(checkpoint?.messageId ? { messageId: checkpoint.messageId } : {}),
+          severity: 'error',
+          certainty: 'definitive',
+          phase: 'runtime',
+          recovery: { restart: true },
+        }),
+        domain,
+        revision,
+        workerId: worker.workerId,
+        workerGeneration: worker.workerGeneration,
+      });
+    }
+    const root = route ? this.roots.get(routeKey(route.rootSessionPath)) : undefined;
+    if (!firstIncident) {
+      if (root?.state === 'retiring'
+        && root.owner.workerId === worker.workerId
+        && root.owner.workerGeneration === worker.workerGeneration) {
+        // Concurrent domain/revision failures can settle after the first one
+        // has already fenced this exact route. Join that retirement instead
+        // of issuing a second stop against the same process generation.
+        await root.retirement;
+      }
+      return;
+    }
+    if (route && this.isCurrent(route)) {
+      // A failed authoritative sync is an unexpected runtime loss just like a
+      // confirmed process crash. Reconcile while the exact hot generation is
+      // still addressable; retire() intentionally does not do this because it
+      // also owns coordinator shutdown and deliberate lifecycle transitions.
+      this.reconcileInterruptedCheckpoint(route);
+      await this.retire(route.currentLeasePath, reason);
+      return;
+    }
+    // A not-yet-public promotion (including a replacement beneath a
+    // transitioning root) is owned by promoteOnce's catch/finalization. Stop
+    // its exact process here; that promotion then aborts its grant and
+    // reconciles ownership without publishing the failed generation.
+    if (!this.options.supervisor.listWorkers().some((candidate) =>
+      candidate.workerId === worker.workerId
+      && candidate.workerGeneration === worker.workerGeneration,
+    )) return;
+    await this.options.supervisor.stopWorker(worker.sessionPath, reason);
+    // A promoted replacement is addressable through workersById/currentPaths
+    // before it becomes the public root. It can therefore already have
+    // accepted analytics frames even though isCurrent(route) is false.
+    if (route) this.closeAnalyticsRoute(route);
+  }
+
+  private async withDeadline<T>(operation: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+    return await new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const timer = this.scheduler.setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(new OperationDeadlineError(message, timeoutMs));
+      }, timeoutMs);
+      timer.unref?.();
+      void operation.then(
+        (value) => {
+          if (settled) return;
+          settled = true;
+          this.scheduler.clearTimeout(timer);
+          resolve(value);
+        },
+        (error) => {
+          if (settled) return;
+          settled = true;
+          this.scheduler.clearTimeout(timer);
+          reject(error);
+        },
+      );
+    });
+  }
+
+  private claimUnexpectedWorkerIncident(worker: SupervisedWorker): boolean {
+    const key = this.workerGenerationKey(worker);
+    if (this.reportedUnexpectedWorkerKeys.has(key)) return false;
+    this.reportedUnexpectedWorkerKeys.add(key);
+    if (this.reportedUnexpectedWorkerKeys.size > MAX_REPORTED_UNEXPECTED_WORKERS) {
+      const oldest = this.reportedUnexpectedWorkerKeys.values().next().value as string | undefined;
+      if (oldest) this.reportedUnexpectedWorkerKeys.delete(oldest);
+    }
+    return true;
+  }
+
+  private markIntentionalWorkerStop(worker: SupervisedWorker): void {
+    const key = this.workerGenerationKey(worker);
+    if (this.reportedUnexpectedWorkerKeys.has(key)) return;
+    this.intentionalWorkerStopKeys.add(key);
+    while (this.intentionalWorkerStopKeys.size > MAX_REPORTED_UNEXPECTED_WORKERS) {
+      const oldest = this.intentionalWorkerStopKeys.values().next().value as string | undefined;
+      if (!oldest) break;
+      this.intentionalWorkerStopKeys.delete(oldest);
+    }
+  }
+
+  private isIntentionalWorkerExit(worker: Pick<SupervisedWorker, 'workerId' | 'workerGeneration'>): boolean {
+    const key = this.workerGenerationKey(worker);
+    return this.intentionalWorkerStopKeys.has(key) && !this.reportedUnexpectedWorkerKeys.has(key);
+  }
+
+  private logConfirmedWorkerExitEvidence(
+    worker: Pick<SupervisedWorker, 'workerId' | 'workerGeneration'>,
+    snapshot: WorkerClientSnapshot,
+    intentional: boolean,
+  ): void {
+    const key = this.workerGenerationKey(worker);
+    if (this.reportedConfirmedExitKeys.has(key)) return;
+    this.reportedConfirmedExitKeys.add(key);
+    while (this.reportedConfirmedExitKeys.size > MAX_REPORTED_UNEXPECTED_WORKERS) {
+      const oldest = this.reportedConfirmedExitKeys.values().next().value as string | undefined;
+      if (!oldest) break;
+      this.reportedConfirmedExitKeys.delete(oldest);
+    }
+    const log = intentional ? backendInfo : backendError;
+    log('backend-worker', 'worker.exit-confirmed', {
+      workerId: worker.workerId,
+      workerGeneration: worker.workerGeneration,
+      ...(snapshot.pid ? { pid: snapshot.pid } : {}),
+      exitCode: snapshot.exitCode,
+      exitSignal: snapshot.exitSignal,
+      exitClassification: intentional ? 'intentional-stop' : 'unexpected-exit',
+      ...(snapshot.failure ? { failure: snapshot.failure } : {}),
+    });
+  }
+
+  private workerGenerationKey(worker: Pick<SupervisedWorker, 'workerId' | 'workerGeneration'>): string {
+    return `${worker.workerId}:${worker.workerGeneration}`;
+  }
+
+  private async withSyncLock<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.syncTail.then(operation, operation);
+    this.syncTail = run.then(() => undefined, () => undefined);
+    return await run;
+  }
+
+  private requireHot(sessionPath: string): HotWorkerRoute {
+    const root = this.roots.get(routeKey(sessionPath));
+    if (root?.state === 'transitioning') throw new SessionTransitionInProgressError(sessionPath);
+    const route = this.currentPaths.get(routeKey(sessionPath));
+    if (!route || route.state !== 'hot') throw new Error(`No hot worker owns ${sessionPath}.`);
+    this.assertCurrentOwner(route, sessionPath);
+    return route;
+  }
+
+  private assertCurrentOwner(route: HotWorkerRoute, sessionPath: string): void {
+    if (!this.isCurrent(route) || routeKey(route.currentLeasePath) !== routeKey(sessionPath)) {
+      throw new Error(`Stale or cross-session worker route for ${sessionPath}.`);
+    }
+  }
+
+  private isCurrent(route: HotWorkerRoute): boolean {
+    return this.roots.get(routeKey(route.rootSessionPath)) === route
+      && this.currentPaths.get(routeKey(route.currentLeasePath)) === route
+      && this.workersById.get(route.owner.workerId) === route;
+  }
+
+  private settledTransitionRoute(
+    transition: WorkerRuntimeTransitionRoute,
+    source: HotWorkerRoute,
+  ): WorkerRuntimeRouteState {
+    if (transition.cleanupPending || transition.cleanupFailed) {
+      // A pending or failed stop/reconciliation retains the transition as the
+      // public fence. Do not infer cold authority from cleanup that has not
+      // completed: an ambiguous worker or ownership record must never overlap
+      // a later writer.
+      return transition;
+    }
+    const promoted = transition.promoted;
+    if (promoted) {
+      return this.isCurrentOrPromoting(promoted)
+        ? promoted
+        : { state: 'cold', rootSessionPath: source.currentLeasePath };
+    }
+    return transition.retired
+      ? { state: 'cold', rootSessionPath: source.currentLeasePath }
+      : source;
+  }
+
+  /** True when `route` is the legitimate owner, including while it is still
+   *  promoting. During promotion the public root holds a `promoting` placeholder
+   *  (the hot route is installed in `roots` only after `runtime.ready`), so
+   *  `isCurrent` is false even though the route is already the sole owner in
+   *  `currentPaths`/`workersById`. Provider admission and ownership handshakes
+   *  that the worker performs DURING promotion (e.g. a `session_start` extension
+   *  fetch) must not be dropped just because the root has not yet flipped to
+   *  `hot`; otherwise the worker's correlated `provider.granted` never arrives
+   *  and promotion hangs forever. */
+  private isCurrentOrPromoting(route: HotWorkerRoute): boolean {
+    if (this.currentPaths.get(routeKey(route.currentLeasePath)) !== route) return false;
+    if (this.workersById.get(route.owner.workerId) !== route) return false;
+    const root = this.roots.get(routeKey(route.rootSessionPath));
+    if (root === route) return true;
+    if (root?.state === 'promoting') {
+      return routeKey(root.rootSessionPath) === routeKey(route.rootSessionPath);
+    }
+    // A hot truncate keeps the public root in `transitioning` while its old
+    // generation is retired and `promoteOnce` installs the replacement only in
+    // currentPaths/workersById. That replacement is the legitimate sole owner
+    // once retirement is confirmed; provider work issued by runtime startup
+    // must receive a correlated answer just as it does under a normal
+    // `promoting` placeholder.
+    return root?.state === 'transitioning'
+      && root.retired
+      && root.source !== route
+      && routeKey(root.rootSessionPath) === routeKey(route.rootSessionPath);
+  }
+
+  private analyticsCaptureSubject(
+    openedPayload: SessionOpenedPayload | WorkerJsonObject,
+  ): AnalyticsTransportIngressEnvelope['packet']['captureSubject'] {
+    const session = openedPayload.session;
+    const sessionId = session && typeof session === 'object' && !Array.isArray(session)
+      && 'sessionId' in session && typeof session.sessionId === 'string'
+      ? session.sessionId.trim()
+      : undefined;
+    if (!sessionId || sessionId.includes('\0')) {
+      throw new BackendError('INVALID_SESSION', 'Canonical analytics activation requires a stable opened-session identity.');
+    }
+    return { kind: 'session', rootSessionId: sessionId };
+  }
+
+  /** Route a host-issued durable disposition only to the exact current worker
+   * that produced the corresponding ingress envelope. */
+  acknowledgeAnalytics(
+    routeIdentity: AnalyticsTransportIngressEnvelope['route'],
+    acknowledgement: AnalyticsTransportAcknowledgement,
+  ): boolean {
+    const route = this.workersById.get(routeIdentity.workerId);
+    if (!route || !this.options.analyticsActivation || !route.analyticsCaptureSubject) return false;
+    const pending = route.analyticsPendingDeliveries?.get(acknowledgement.deliveryId);
+    if (!pending || !this.sameAnalyticsRoute(pending.route, routeIdentity)) return false;
+    if (route.owner.coordinatorGeneration !== routeIdentity.coordinatorGeneration
+        || route.owner.workerGeneration !== routeIdentity.workerGeneration
+        || route.worker.client.getSnapshot().pid !== routeIdentity.workerPid
+        || acknowledgement.generationId !== this.options.analyticsActivation.generationId) return false;
+    const accepted = route.worker.client.sendFrame?.({ kind: 'analytics.ack', acknowledgement }) === true;
+    if (accepted) {
+      route.analyticsPendingDeliveries?.delete(acknowledgement.deliveryId);
+      route.analyticsPendingBytes = Math.max(0, (route.analyticsPendingBytes ?? 0) - pending.retainedBytes);
+    }
+    return accepted;
+  }
+
+  private sameAnalyticsRoute(
+    left: AnalyticsTransportIngressEnvelope['route'],
+    right: AnalyticsTransportIngressEnvelope['route'],
+  ): boolean {
+    return left.coordinatorGeneration === right.coordinatorGeneration
+      && left.workerId === right.workerId
+      && left.workerGeneration === right.workerGeneration
+      && left.workerPid === right.workerPid
+      && routeKey(left.rootSessionPath) === routeKey(right.rootSessionPath)
+      && routeKey(left.leasePath) === routeKey(right.leasePath)
+      && left.leaseRevision === right.leaseRevision;
+  }
+
+  private providerAcquireKey(route: HotWorkerRoute, requestId: string): string {
+    return `${route.owner.coordinatorGeneration}:${route.owner.workerId}:${route.owner.workerGeneration}:${requestId}`;
+  }
+
+  /** Settle one worker-originated provider.acquire exactly once. Cancellation
+   *  and admission completion race on separate frame handlers; sharing this
+   *  coordinator-owned pending map prevents both a dropped response and a
+   *  duplicate response that would fatal the worker's correlation table. */
+  private settleProviderAcquire(
+    route: HotWorkerRoute,
+    requestId: string,
+    result: { lease: CoordinatorProviderNetworkLease }
+      | { reason: string }
+      | { error: { name: string; message: string; retryable: boolean; httpStatus?: number } },
+  ): boolean {
+    const key = this.providerAcquireKey(route, requestId);
+    if (this.pendingProviderAcquires.get(key) !== route) return false;
+    this.pendingProviderAcquires.delete(key);
+    try {
+      const settlement = 'lease' in result
+        ? { kind: 'provider.granted' as const, requestId, lease: result.lease }
+        : 'reason' in result
+          ? { kind: 'provider.cancelled' as const, requestId, reason: result.reason }
+          : { kind: 'provider.rejected' as const, requestId, error: result.error };
+      return route.worker.client.sendFrame?.(settlement) === true;
+    } catch (error) {
+      backendWarn('backend-worker-provider', 'provider.settlement-send-failed', {
+        requestId,
+        workerId: route.owner.workerId,
+        workerGeneration: route.owner.workerGeneration,
+        sessionPath: route.currentLeasePath,
+        settlement: 'lease' in result ? 'granted' : 'reason' in result ? 'cancelled' : 'rejected',
+        error: toErrorMessage(error),
+      });
+      return false;
+    }
+  }
+
+  private clearPendingProviderAcquires(route: HotWorkerRoute): void {
+    const prefix = `${route.owner.coordinatorGeneration}:${route.owner.workerId}:${route.owner.workerGeneration}:`;
+    for (const key of [...this.pendingProviderAcquires.keys()]) {
+      if (key.startsWith(prefix)) this.pendingProviderAcquires.delete(key);
+    }
+  }
+
+  private observeCheckpoint(route: HotWorkerRoute, event: string, payload: WorkerJsonObject): void {
+    const requestId = typeof payload.requestId === 'string' ? payload.requestId : undefined;
+    const operationId = typeof payload.operationId === 'string' ? payload.operationId : undefined;
+    const operationAttempt = Number.isSafeInteger(payload.operationAttempt) && (payload.operationAttempt as number) > 0
+      ? payload.operationAttempt as number
+      : undefined;
+    const turnId = typeof payload.turnId === 'string' ? payload.turnId : undefined;
+    const attemptId = typeof payload.attemptId === 'string' ? payload.attemptId : undefined;
+    const messageId = typeof payload.messageId === 'string' ? payload.messageId : undefined;
+    if (event === 'busy.changed' && Number.isSafeInteger(payload.seq)) {
+      route.checkpoint.busySeq = Math.max(route.checkpoint.busySeq, payload.seq as number);
+    } else if (event === 'live.semantic' && payload.kind === 'turn.started') {
+      const retainedOperationAttempt = operationId !== undefined
+        && operationId === route.checkpoint.operationId
+        ? route.checkpoint.operationAttempt
+        : undefined;
+      route.checkpoint.requestId = requestId;
+      route.checkpoint.operationId = operationId;
+      route.checkpoint.operationAttempt = operationAttempt ?? retainedOperationAttempt;
+      route.checkpoint.turnId = turnId;
+      route.checkpoint.attemptId = attemptId;
+      route.checkpoint.terminalRequestId = undefined;
+      route.checkpoint.terminalOperationId = undefined;
+      route.checkpoint.terminalOperationAttempt = undefined;
+      route.checkpoint.terminalTurnId = undefined;
+      route.checkpoint.terminalAttemptId = undefined;
+      route.checkpoint.messageId = typeof payload.canonicalMessageId === 'string'
+        ? payload.canonicalMessageId
+        : undefined;
+      route.checkpoint.preflightOnly = false;
+    } else if (event === 'live.semantic' && payload.kind === 'turn.terminal') {
+      if (requestId) route.checkpoint.terminalRequestId = requestId;
+      route.checkpoint.terminalOperationId = operationId ?? route.checkpoint.operationId;
+      route.checkpoint.terminalOperationAttempt = operationAttempt ?? route.checkpoint.operationAttempt;
+      route.checkpoint.terminalTurnId = turnId ?? route.checkpoint.turnId;
+      route.checkpoint.terminalAttemptId = attemptId ?? route.checkpoint.attemptId;
+      route.checkpoint.requestId = undefined;
+      route.checkpoint.operationId = undefined;
+      route.checkpoint.operationAttempt = undefined;
+      route.checkpoint.turnId = undefined;
+      route.checkpoint.attemptId = undefined;
+      route.checkpoint.messageId = undefined;
+      route.checkpoint.preflightOnly = undefined;
+      route.checkpoint.tools = [];
+      const durableId = typeof payload.durableEntryId === 'string'
+        && payload.durableEntryId.length > 0 && payload.durableEntryId.length <= 512
+        ? payload.durableEntryId
+        : undefined;
+      if (durableId) route.checkpoint.durableWatermark = durableId;
+    } else if (event === 'message.aborted' && requestId?.startsWith('queued:')) {
+      // A queued send has its own operation terminal but never owns the active
+      // request checkpoint. Forward it without clearing the running turn.
+    } else if (event === 'message.queuedDelivered') {
+      // Delivery transfers the still-running SDK loop to the queued send. Keep
+      // its transport attempt until the next turn.started supplies request/turn
+      // identity, so crash settlement cannot lose the retry fence.
+      route.checkpoint.operationId = operationId;
+      route.checkpoint.operationAttempt = operationAttempt;
+    } else if (event === 'message.started') {
+      route.checkpoint.requestId = requestId;
+      route.checkpoint.operationId = operationId;
+      route.checkpoint.operationAttempt = operationAttempt;
+      route.checkpoint.terminalRequestId = undefined;
+      route.checkpoint.terminalOperationId = undefined;
+      route.checkpoint.terminalOperationAttempt = undefined;
+      route.checkpoint.terminalTurnId = undefined;
+      route.checkpoint.terminalAttemptId = undefined;
+      route.checkpoint.messageId = messageId;
+      route.checkpoint.preflightOnly = false;
+    } else if (event === 'message.finished' || event === 'message.aborted' || event === 'preflight.failed') {
+      const sameTerminalRequest = requestId !== undefined && requestId === route.checkpoint.terminalRequestId;
+      if (requestId) route.checkpoint.terminalRequestId = requestId;
+      route.checkpoint.terminalOperationId = operationId
+        ?? (sameTerminalRequest ? route.checkpoint.terminalOperationId : route.checkpoint.operationId);
+      route.checkpoint.terminalOperationAttempt = operationAttempt
+        ?? (sameTerminalRequest ? route.checkpoint.terminalOperationAttempt : route.checkpoint.operationAttempt);
+      route.checkpoint.terminalTurnId = turnId
+        ?? (sameTerminalRequest ? route.checkpoint.terminalTurnId : route.checkpoint.turnId);
+      route.checkpoint.terminalAttemptId = attemptId
+        ?? (sameTerminalRequest ? route.checkpoint.terminalAttemptId : route.checkpoint.attemptId);
+      route.checkpoint.requestId = undefined;
+      route.checkpoint.operationId = undefined;
+      route.checkpoint.operationAttempt = undefined;
+      route.checkpoint.turnId = undefined;
+      route.checkpoint.attemptId = undefined;
+      route.checkpoint.messageId = undefined;
+      route.checkpoint.preflightOnly = undefined;
+      route.checkpoint.tools = [];
+      if (event === 'message.finished') {
+        const durableId = readDurableEntryId(payload, 'message');
+        if (durableId) route.checkpoint.durableWatermark = durableId;
+      }
+    } else if (event === 'tool.started' && requestId && messageId && typeof payload.toolCallId === 'string') {
+      route.checkpoint.tools = [
+        ...route.checkpoint.tools.filter((tool) => tool.toolCallId !== payload.toolCallId),
+        {
+          requestId,
+          messageId,
+          toolCallId: payload.toolCallId,
+          ...(typeof payload.name === 'string' ? { name: payload.name } : {}),
+          ...(payload.input !== undefined ? { input: payload.input } : {}),
+          ...(typeof payload.startedAt === 'number' ? { startedAt: payload.startedAt } : {}),
+          ...(typeof payload.parallelGroupId === 'string' ? { parallelGroupId: payload.parallelGroupId } : {}),
+        },
+      ].slice(-64);
+    } else if (event === 'tool.finished' && typeof payload.toolCallId === 'string') {
+      route.checkpoint.tools = route.checkpoint.tools.filter((tool) => tool.toolCallId !== payload.toolCallId);
+      const durableId = readDurableEntryId(payload, 'tool');
+      if (durableId) route.checkpoint.durableWatermark = durableId;
+    } else if (event === 'contextUsage.changed') {
+      const usage = payload.contextUsage;
+      if (usage && typeof usage === 'object' && !Array.isArray(usage)
+        && typeof usage.tokens === 'number' && typeof usage.contextWindow === 'number'
+        && typeof usage.percent === 'number' && Number.isFinite(usage.tokens)
+        && Number.isFinite(usage.contextWindow) && Number.isFinite(usage.percent)) {
+        route.checkpoint.usage = {
+          tokens: usage.tokens,
+          contextWindow: usage.contextWindow,
+          percent: usage.percent,
+        };
+      } else {
+        route.checkpoint.usage = undefined;
+      }
+    }
+  }
+
+  private reconcileInterruptedCheckpoint(route: HotWorkerRoute): void {
+    if (this.reconciledInterruptedRoutes.has(route)) return;
+    // Mark first so a re-entrant/closely-following exited callback cannot
+    // duplicate tool terminals, request terminalization, or busy=false.
+    this.reconciledInterruptedRoutes.add(route);
+    const reason = 'The session worker exited before live work settled.';
+    for (const tool of route.checkpoint.tools) {
+      this.options.emit('tool.finished', {
+        ...tool,
+        sessionPath: route.currentLeasePath,
+        result: { error: reason },
+        status: 'failed',
+      });
+    }
+    // Event checkpoint terminal observations clear request ownership. A
+    // heartbeat may predate message.finished, so never resurrect its older
+    // activeRequestId during crash reconciliation.
+    const requestId = route.checkpoint.requestId;
+    if (requestId) {
+      if (route.checkpoint.preflightOnly) {
+        this.options.emit('preflight.failed', {
+          requestId,
+          ...(route.checkpoint.operationId ? { operationId: route.checkpoint.operationId } : {}),
+          ...(route.checkpoint.operationAttempt !== undefined
+            ? { operationAttempt: route.checkpoint.operationAttempt } : {}),
+          sessionPath: route.currentLeasePath,
+          error: reason,
+        });
+      } else {
+        this.options.emit('message.aborted', {
+          requestId,
+          ...(route.checkpoint.operationId ? { operationId: route.checkpoint.operationId } : {}),
+          sessionPath: route.currentLeasePath,
+          ...(route.checkpoint.messageId ? { messageId: route.checkpoint.messageId } : {}),
+          reason,
+        });
+      }
+    }
+    const settlementOperationId = route.checkpoint.operationId ?? route.checkpoint.terminalOperationId;
+    const settlementRequestId = route.checkpoint.requestId ?? route.checkpoint.terminalRequestId;
+    const settlementTurnId = route.checkpoint.turnId ?? route.checkpoint.terminalTurnId;
+    const settlementAttemptId = route.checkpoint.attemptId ?? route.checkpoint.terminalAttemptId;
+    const settlementOperationAttempt = route.checkpoint.operationAttempt ?? route.checkpoint.terminalOperationAttempt;
+    this.options.emit('agent.settled', {
+      sessionPath: route.currentLeasePath,
+      capabilities: { ...SETTLED_SESSION_CAPABILITIES },
+      ...(settlementOperationId ? { operationId: settlementOperationId } : {}),
+      ...(settlementRequestId ? { requestId: settlementRequestId } : {}),
+      ...(settlementTurnId ? { turnId: settlementTurnId } : {}),
+      ...(settlementAttemptId ? { attemptId: settlementAttemptId } : {}),
+      ...(settlementOperationAttempt !== undefined
+        ? { operationAttempt: settlementOperationAttempt } : {}),
+      backendGeneration: route.owner.coordinatorGeneration,
+      workerGeneration: route.owner.workerGeneration,
+    });
+    const busyPayload = this.normalizeRuntimeEventPayload(route, 'busy.changed', {
+      sessionPath: route.currentLeasePath,
+      busy: false,
+      capabilities: { ...SETTLED_SESSION_CAPABILITIES },
+      seq: route.checkpoint.busySeq + 1,
+    });
+    this.observeCheckpoint(route, 'busy.changed', busyPayload);
+    this.options.emit('busy.changed', busyPayload);
+  }
+
+  private normalizeRuntimeEventPayload(
+    route: HotWorkerRoute,
+    event: string,
+    payload: WorkerJsonObject,
+  ): WorkerJsonObject {
+    const sessionPath = typeof payload.sessionPath === 'string'
+      ? payload.sessionPath
+      : route.currentLeasePath;
+    if (event === 'agent.settled') {
+      return {
+        ...payload,
+        sessionPath,
+        backendGeneration: route.owner.coordinatorGeneration,
+        workerGeneration: route.owner.workerGeneration,
+      };
+    }
+    if (event === 'session.opened') {
+      return { ...payload, workerGeneration: route.owner.workerGeneration };
+    }
+    if (event !== 'busy.changed') return payload;
+    const key = routeKey(sessionPath);
+    const seq = (this.publicBusySeqByPath.get(key) ?? 0) + 1;
+    this.publicBusySeqByPath.set(key, seq);
+    return { ...payload, sessionPath, seq };
+  }
+
+  /** Bounded last-known checkpoint projection for diagnostics. Usage is a
+   * fixed-shape triple, the durable watermark one bounded identity, and the
+   * detail manifest is sliced so a hostile subscription set cannot grow the
+   * payload. */
+  private checkpointManifest(route: HotWorkerRoute): WorkerRuntimeCheckpointManifest {
+    return {
+      busySeq: route.checkpoint.busySeq,
+      ...(route.checkpoint.requestId ? { requestId: route.checkpoint.requestId } : {}),
+      tools: route.checkpoint.tools.map((tool) => ({
+        requestId: tool.requestId,
+        messageId: tool.messageId,
+        toolCallId: tool.toolCallId,
+        ...(tool.name === undefined ? {} : { name: tool.name }),
+        ...(tool.startedAt === undefined ? {} : { startedAt: tool.startedAt }),
+      })).slice(-64),
+      ...(route.checkpoint.usage ? { usage: { ...route.checkpoint.usage } } : {}),
+      ...(route.checkpoint.durableWatermark ? { durableWatermark: route.checkpoint.durableWatermark } : {}),
+      ...(this.detailSubscriptions.size > 0 ? {
+        detailManifest: [...this.detailSubscriptions.entries()]
+          .filter(([, owner]) => owner.route === route)
+          .map(([subscriptionId, owner]) => ({ subscriptionId, state: owner.state, revision: owner.revision, pageCount: owner.pageCount }))
+          .slice(-32),
+      } : {}),
+    };
+  }
+
+  private recordExtensionUiOwner(route: HotWorkerRoute, payload: WorkerJsonObject): boolean {
+    const request = payload as {
+      id?: unknown;
+      method?: unknown;
+      sessionPath?: unknown;
+      subagentCallId?: unknown;
+      toolCallId?: unknown;
+      timeout?: unknown;
+    };
+    if (typeof request.id !== 'string' || request.id.length === 0
+      || (request.method !== 'confirm' && request.method !== 'select' && request.method !== 'input')) {
+      // `notify` and malformed requests are fire-and-forget/never forwarded.
+      return request.method !== 'notify';
+    }
+    try {
+      this.extensionUiOwners.record({
+        sessionPath: route.currentLeasePath,
+        workerId: route.owner.workerId,
+        workerGeneration: route.owner.workerGeneration,
+        uiRequestId: request.id,
+        ...(typeof request.subagentCallId === 'string' ? { subagentCallId: request.subagentCallId } : {}),
+        ...(typeof request.toolCallId === 'string' ? { toolCallId: request.toolCallId } : {}),
+      });
+      this.extensionUiOwners.attachMetadata(request.id, {
+        method: request.method as 'confirm' | 'select' | 'input',
+        ...(typeof request.timeout === 'number' && Number.isSafeInteger(request.timeout) && request.timeout > 0
+          ? { timeoutMs: request.timeout }
+          : {}),
+      });
+      return true;
+    } catch (error) {
+      // Fail closed: never forward a request the coordinator cannot settle
+      // exactly once. The worker's dialog timeout still releases its own
+      // pending promise, so no extension callback is leaked.
+      const checkpoint = route.checkpoint;
+      const requestId = checkpoint.requestId ?? request.id;
+      const message = error instanceof Error ? error.message : String(error);
+      this.options.emit('operational-error', createOperationalIncident({
+        incidentId: `extension-ui-owner:${route.owner.workerId}:${request.id}`,
+        dedupeKey: `extension-ui-owner:${route.currentLeasePath}:${request.id}`,
+        code: 'EXTENSION_UI_OWNER_UNAVAILABLE',
+        message,
+        detail: `The coordinator could not retain the extension UI request owner: ${message}`,
+        sessionPath: route.currentLeasePath,
+        ...(checkpoint.operationId ? { operationId: checkpoint.operationId } : {}),
+        requestId,
+        ...(checkpoint.turnId ? { turnId: checkpoint.turnId } : {}),
+        ...(checkpoint.messageId ? { messageId: checkpoint.messageId } : {}),
+        severity: 'error',
+        certainty: 'definitive',
+        phase: 'extension',
+        recovery: { showLogs: true },
+      }));
+      return false;
+    }
+  }
+
+  private handleRuntimeReport(route: HotWorkerRoute, frame: Extract<WorkerToCoordinatorFrame, { kind: 'runtime.report' }>): void {
+    if (frame.domain !== 'catalog' || !Array.isArray(frame.payload.models)) return;
+    // Bounded: one latest report per live worker; cap the total map and evict
+    // the oldest report when it overflows. The configured catalog authority
+    // (loadConfiguredModels) is never replaced by these reports.
+    this.reportedRuntimeCatalogs.set(route.owner.workerId, {
+      reportedAt: Date.now(),
+      models: frame.payload.models as unknown[],
+    });
+    if (this.reportedRuntimeCatalogs.size > 64) {
+      const oldest = [...this.reportedRuntimeCatalogs.entries()]
+        .sort((left, right) => left[1].reportedAt - right[1].reportedAt)[0];
+      if (oldest) this.reportedRuntimeCatalogs.delete(oldest[0]);
+    }
+  }
+
+  /** Bounded per-worker runtime discovery report snapshot for diagnostics/tests. */
+  inspectRuntimeReports(): Array<{ workerId: string; reportedAt: number; models: unknown[] }> {
+    return [...this.reportedRuntimeCatalogs.entries()].map(([workerId, report]) => ({
+      workerId,
+      reportedAt: report.reportedAt,
+      models: report.models,
+    }));
+  }
+
+  /** Cross-worker provider truth used by the public metrics strip. The legacy
+   * coordinator-local gate does not observe isolated worker fetches. */
+  getProviderGateMetrics(): ReturnType<CoordinatorProviderNetworkLeaseAuthority['getMetrics']> {
+    return this.providerLeases.getMetrics();
+  }
+
+  /** Bounded pending extension-UI owner snapshot for diagnostics/tests. */
+  inspectExtensionUiOwners(): ReturnType<ExtensionUiOwnerRegistry['inspect']> {
+    return this.extensionUiOwners.inspect();
+  }
+
+  private sendOwnershipRejected(
+    route: HotWorkerRoute,
+    requestId: string,
+    phase: 'reserve' | 'commit' | 'consume' | 'abort' | 'runtimeReady',
+    error: unknown,
+  ): void {
+    const code = error instanceof SessionOwnershipConflictError
+      ? 'OWNERSHIP_CONFLICT'
+      : error instanceof StaleSessionWriteLeaseError
+        ? 'STALE_OWNERSHIP'
+        : 'OWNERSHIP_FAILED';
+    route.worker.client.sendFrame?.({
+      kind: 'ownership.rejected',
+      requestId,
+      phase,
+      code,
+      message: error instanceof Error ? error.message : String(error),
+      retryable: code === 'OWNERSHIP_CONFLICT',
+    });
+  }
+
+  private invalidateDetailSubscriptions(route: HotWorkerRoute, reason: 'generation-change' | 'evicted'): void {
+    for (const [subscriptionId, owner] of [...this.detailSubscriptions]) {
+      if (owner.route !== route) continue;
+      owner.preStartFrames.length = 0;
+      this.forwardDetail(route, { kind: 'detail.rebase', subscriptionId, currentRevision: owner.revision,
+        reason, fence: this.detailFence(route) });
+      this.detailSubscriptions.delete(subscriptionId);
+    }
+  }
+
+  private async failWorkerRoute(route: HotWorkerRoute, error: unknown): Promise<void> {
+    const checkpoint = route.checkpoint;
+    const message = error instanceof Error ? error.message : String(error);
+    this.options.emit('operational-error', createOperationalIncident({
+      incidentId: `runtime-ownership:${route.currentLeasePath}`,
+      dedupeKey: `runtime-ownership:${route.currentLeasePath}`,
+      code: 'SESSION_RUNTIME_OWNERSHIP_FAILED',
+      message,
+      detail: `The coordinator could not complete the worker ownership operation: ${message}`,
+      sessionPath: route.currentLeasePath,
+      ...(checkpoint.operationId ? { operationId: checkpoint.operationId } : {}),
+      ...(checkpoint.requestId ? { requestId: checkpoint.requestId } : {}),
+      ...(checkpoint.turnId ? { turnId: checkpoint.turnId } : {}),
+      ...(checkpoint.messageId ? { messageId: checkpoint.messageId } : {}),
+      severity: 'error',
+      certainty: 'definitive',
+      phase: 'runtime',
+      recovery: { restart: true },
+    }));
+    await this.retire(route.currentLeasePath, 'ownership failure');
+  }
+
+  private notify(state: WorkerRuntimeRouteState): void {
+    try { this.options.onRouteChanged?.(state); } catch { /* observer only */ }
+  }
+}
+
+function readSessionPath(params: unknown): string {
+  if (!params || typeof params !== 'object' || Array.isArray(params)
+    || typeof (params as { sessionPath?: unknown }).sessionPath !== 'string') {
+    throw new Error('Worker runtime command requires an exact sessionPath.');
+  }
+  return (params as { sessionPath: string }).sessionPath;
+}
+
+function readMessageOperationId(params: unknown): string | undefined {
+  if (!params || typeof params !== 'object' || Array.isArray(params)) return undefined;
+  const operationId = (params as { operationId?: unknown }).operationId;
+  return typeof operationId === 'string' && operationId.length > 0 ? operationId : undefined;
+}
+
+function sameWorkerOwner(left: SdkWorkerOwnershipIdentity, right: SdkWorkerOwnershipIdentity): boolean {
+  return left.coordinatorGeneration === right.coordinatorGeneration
+    && left.workerId === right.workerId
+    && left.workerGeneration === right.workerGeneration;
+}
+
+function readExtensionUiResponseId(params: unknown): string | undefined {
+  if (!params || typeof params !== 'object' || Array.isArray(params)) return undefined;
+  const response = (params as { response?: unknown }).response;
+  if (!response || typeof response !== 'object' || Array.isArray(response)) return undefined;
+  const id = (response as { id?: unknown }).id;
+  return typeof id === 'string' && id.length > 0 ? id : undefined;
+}
+
+/** Read the durability-confirmed entry identity from a terminal event payload
+ * (`message.finished` nests it under `message`; `tool.finished` carries it
+ * directly). Bounded to the identity budget of a message id. */
+function readDurableEntryId(payload: WorkerJsonObject, kind: 'message' | 'tool'): string | undefined {
+  const candidate = kind === 'message'
+    ? (payload.message && typeof payload.message === 'object' && !Array.isArray(payload.message)
+        ? (payload.message as { durableEntryId?: unknown }).durableEntryId
+        : undefined)
+    : payload.durableEntryId;
+  return typeof candidate === 'string' && candidate.length > 0 && candidate.length <= 512
+    ? candidate
+    : undefined;
+}
+
+function routeKey(sessionPath: string): string {
+  const absolute = path.resolve(sessionPath);
+  let canonical = absolute;
+  try { canonical = fs.realpathSync.native(absolute); } catch { /* replacement destination may not exist yet */ }
+  const normalized = path.normalize(canonical);
+  return process.platform === 'win32' ? normalized.toLocaleLowerCase('en-US') : normalized;
+}
+
+function cloneDetailAddress(address: LiveSubagentDetailAddress): LiveSubagentDetailAddress {
+  return { ...address, lineage: address.lineage.map((identity) => ({ ...identity })) };
+}
+
+function sameDetailAddress(left: LiveSubagentDetailAddress, right: LiveSubagentDetailAddress): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function modelSettingsFromWorkerObject(value: WorkerJsonObject): ModelSettings {
+  const settings: ModelSettings = {
+    defaultModel: typeof value.defaultModel === 'string' ? value.defaultModel : '',
+    defaultThinkingLevel: value.defaultThinkingLevel as ModelSettings['defaultThinkingLevel'],
+  };
+  if (typeof value.defaultProvider === 'string' && value.defaultProvider.length > 0) {
+    settings.defaultProvider = value.defaultProvider;
+  }
+  return settings;
+}
+
+function promotionOpenedPayload(payload: SessionOpenedPayload): SessionOpenedPayload {
+  const totalCount = Number.isSafeInteger(payload.transcriptWindow.totalCount)
+    ? Math.max(0, payload.transcriptWindow.totalCount)
+    : 0;
+  return {
+    ...payload,
+    transcript: [],
+    transcriptSkipped: true,
+    transcriptWindow: {
+      ...payload.transcriptWindow,
+      loadedStart: 0,
+      loadedEnd: 0,
+      hasOlder: false,
+      hasNewer: totalCount > 0,
+      isPartial: totalCount > 0,
+    },
+  };
+}
+
+function asWorkerJsonObject(value: unknown): WorkerJsonObject {
+  const normalized = JSON.parse(JSON.stringify(value)) as WorkerJsonValue;
+  if (!normalized || typeof normalized !== 'object' || Array.isArray(normalized)) throw new Error('Worker command payload must be a JSON object.');
+  return normalized as WorkerJsonObject;
+}
+
+function toErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function normalizeProviderRejection(
+  error: unknown,
+): { name: string; message: string; retryable: boolean; httpStatus?: number } {
+  const record = error && typeof error === 'object' ? error as Record<string, unknown> : undefined;
+  const rawStatus = record?.httpStatus ?? record?.status;
+  const httpStatus = Number.isSafeInteger(rawStatus) && Number(rawStatus) >= 100 && Number(rawStatus) <= 599
+    ? Number(rawStatus)
+    : undefined;
+  return {
+    name: truncateUtf8Field(
+      error instanceof Error ? error.name : record?.name,
+      'ProviderAdmissionError',
+      512,
+    ),
+    message: truncateUtf8Field(
+      error instanceof Error ? error.message : error,
+      'Provider admission was rejected.',
+      64 * 1024,
+    ),
+    retryable: record?.isRetryable === true || record?.retryable === true,
+    ...(httpStatus === undefined ? {} : { httpStatus }),
+  };
+}
+
+function truncateUtf8Field(value: unknown, fallback: string, maxBytes: number): string {
+  const text = typeof value === 'string' && value.length > 0 ? value : fallback;
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text;
+  const parts: string[] = [];
+  let bytes = 0;
+  for (const part of text) {
+    const partBytes = Buffer.byteLength(part, 'utf8');
+    if (bytes + partBytes > maxBytes) break;
+    parts.push(part);
+    bytes += partBytes;
+  }
+  return parts.join('') || fallback;
+}
+
+export function assertPromotionGrantConsumedOnce(
+  store: ColdSessionStore,
+  grant: SerializedColdSessionPromotionGrant,
+): void {
+  store.consumePromotionGrant(grant);
+}

@@ -1,0 +1,252 @@
+/** @jsxRuntime automatic */
+/** @jsxImportSource preact */
+
+import type { ComponentChildren, RefObject } from 'preact';
+
+import type { ChatMessage, ChatPrefs, CompactionSummaryDetails, ComposerInput, InlineEditDraft } from '../../../lib/protocol/index.js';
+import { cx } from '../../lib/components/cx';
+import { InlineEditor } from '../inline-editor';
+import { CompactionSummary } from '../compaction-summary';
+import type { PruningHeaderState } from '../pruning';
+import { PruningHeaderPanel } from '../pruning-header';
+import { handleContextMenuKeyRequest } from '../../lib/components/context-menu-key';
+import type { RenderToolCall, TranscriptContextMenuHandler } from '../types';
+import type { TurnActivityState } from '../activity';
+import { assistantPartsFromMessage, getRenderableUserParts } from '../parts';
+import { assistantReplyMeta } from '../header';
+import type { StatusTone } from '../status-chip';
+import { ErrorDetailWithFallback } from './error-detail';
+import { MessageContent } from './content';
+import { MessageFooter } from './footer';
+import { MessageItemHeader, MessageHeaderActions } from './header';
+
+interface MessageItemShellProps {
+  /** Authoritative transcript id retained for protocol/debug semantics. */
+  messageId: string;
+  /** UI-only identity used by DOM scroll-anchor restoration. */
+  renderIdentity: string;
+  role: ChatMessage['role'];
+  /** Message status — used to dim queued (follow-up) user messages. */
+  status: ChatMessage['status'];
+  /** Host-side synthetic-send tag. Marks the auto-resume
+   *  wake-up message so the shell can render it differently from a typed user
+   *  message (dashed outline, muted fill, header badge). */
+  customType?: string;
+  isCurrentlyStreaming: boolean;
+  isClickableUserMsg: boolean;
+  isEditing: boolean;
+  /** True only the first time a message id is mounted (genuinely new); used to
+   *  gate the entrance animation so virtualized remounts don't replay it. */
+  entered?: boolean;
+  handleMessageClick: ((event: MouseEvent) => void) | undefined;
+  /** Row-level context-menu fallback (generic-message menu). Nested specific
+   *  menus run first via bubbling; this handler ignores already-handled
+   *  events (`defaultPrevented`) so it never overwrites a tool/file/reasoning
+   *  menu. */
+  onRowContextMenu?: (event: MouseEvent) => void;
+  children: ComponentChildren;
+}
+
+export function MessageItemShell({
+  messageId,
+  renderIdentity,
+  role,
+  status,
+  customType,
+  isCurrentlyStreaming,
+  isClickableUserMsg,
+  isEditing,
+  entered,
+  handleMessageClick,
+  onRowContextMenu,
+  children,
+}: MessageItemShellProps) {
+  const isSyntheticSend = role === 'user' && customType !== undefined;
+  return (
+    <div
+      class={cx(
+        // Width is role-scoped rather than set on the shell and overridden
+        // via the cascade. Assistant replies fill the transcript width whether
+        // streaming or completed, so the column stays stable whatever the
+        // content. User bubbles stay content-fit with the historical 88% cap;
+        // system messages stretch the full width. No width transition is added
+        // (would re-introduce horizontal motion).
+        'message-item-shell flex min-w-0 flex-col gap-2',
+        'transition-[background-color] duration-[var(--panel-duration-normal)]',
+        'forced-colors:border forced-colors:border-[ButtonText]',
+        role === 'assistant' && 'self-start w-full max-w-full px-1 py-2',
+        role === 'user' && 'w-fit max-w-[88%] self-end rounded-lg px-2 py-1.5',
+        role === 'system' && 'w-auto max-w-none self-stretch px-2 py-2',
+        role === 'user' && status === 'queued' && 'opacity-60',
+        isClickableUserMsg && 'cursor-pointer',
+      )}
+      data-message-id={messageId}
+      data-scroll-anchor-id={renderIdentity}
+      data-role={role}
+      data-synthetic={isSyntheticSend ? 'true' : undefined}
+      data-queued={role === 'user' && status === 'queued' ? 'true' : undefined}
+      data-entered={entered ? 'true' : undefined}
+      data-editing={isEditing ? 'true' : undefined}
+      data-streaming={isCurrentlyStreaming ? 'true' : undefined}
+      // Keyboard access to the row context menu: the shell is a tab stop so the
+      // ContextMenu key / Shift+F10 can open the generic message menu from the
+      // focused row (see components/context-menu-key.ts).
+      tabIndex={0}
+      onClick={handleMessageClick}
+      onContextMenu={onRowContextMenu}
+      onKeyDown={(event) => handleContextMenuKeyRequest(event as KeyboardEvent)}
+      title={status === 'queued'
+        ? 'Queued for this turn — click to edit before delivery.'
+        : isClickableUserMsg ? 'Click to edit' : undefined}
+    >
+      {children}
+    </div>
+  );
+}
+
+interface MessageItemInnerProps {
+  message: ChatMessage;
+  isEditing: boolean;
+  isCurrentlyStreaming: boolean;
+  capturedHeight: number | null;
+  initialInputs: ComposerInput[];
+  editingDraft?: InlineEditDraft | null;
+  pruningHeaderState: PruningHeaderState | undefined;
+  pruningExpanded: boolean;
+  setPruningExpanded: (fn: (v: boolean) => boolean) => void;
+  pruningRawExpanded: boolean;
+  setPruningRawExpanded: (fn: (v: boolean) => boolean) => void;
+  statusLabel: string | null;
+  statusTone: StatusTone;
+  replyMeta: ReturnType<typeof assistantReplyMeta>;
+  assistantMetaTooltip: string | null;
+  requestCreatedAt?: string;
+  html: string;
+  getMessageRaw: () => string;
+  combinedParts: ReturnType<typeof assistantPartsFromMessage> | undefined;
+  deferHistoricalToolCalls?: boolean;
+  renderableUserParts: ReturnType<typeof getRenderableUserParts> | undefined;
+  prefs: ChatPrefs;
+  workingDirectory: string | null;
+  onOpenFile: (path: string) => void;
+  renderToolCall: RenderToolCall;
+  onContextMenu: TranscriptContextMenuHandler;
+  messageBodyRef: RefObject<HTMLDivElement>;
+  hasActivityFooter: boolean | undefined;
+  footerActivityState: TurnActivityState | null;
+  onEditConfirm: (messageId: string, text: string, inputs?: ComposerInput[], queued?: boolean) => void;
+  onEditCancel: () => void;
+  onCancelPrepass?: () => void;
+}
+
+export function MessageItemInner({
+  message,
+  isEditing,
+  isCurrentlyStreaming,
+  capturedHeight,
+  initialInputs,
+  editingDraft,
+  pruningHeaderState,
+  pruningExpanded,
+  setPruningExpanded,
+  pruningRawExpanded,
+  setPruningRawExpanded,
+  statusLabel,
+  statusTone,
+  replyMeta,
+  assistantMetaTooltip,
+  requestCreatedAt,
+  html,
+  getMessageRaw,
+  combinedParts,
+  deferHistoricalToolCalls,
+  renderableUserParts,
+  prefs,
+  workingDirectory,
+  onOpenFile,
+  renderToolCall,
+  onContextMenu,
+  messageBodyRef,
+  hasActivityFooter,
+  footerActivityState,
+  onEditConfirm,
+  onEditCancel,
+  onCancelPrepass,
+}: MessageItemInnerProps) {
+  if (message.customType === 'compaction-summary') {
+    return <CompactionSummary summary={message.markdown} details={message.customDetails as CompactionSummaryDetails | undefined} />;
+  }
+
+  const showHeaderActions = pruningHeaderState || statusLabel;
+  const headerActions = showHeaderActions ? (
+    <MessageHeaderActions
+      pruningHeaderState={pruningHeaderState}
+      pruningExpanded={pruningExpanded}
+      onTogglePruning={() => setPruningExpanded((v) => !v)}
+      statusLabel={statusLabel}
+      statusTone={statusTone}
+      onCancelPrepass={onCancelPrepass}
+    />
+  ) : null;
+
+  return (
+    <>
+      <MessageItemHeader
+        role={message.role}
+        isCurrentlyStreaming={isCurrentlyStreaming}
+        durationMs={message.durationMs}
+        replyMeta={replyMeta}
+        assistantMetaTooltip={assistantMetaTooltip}
+        requestCreatedAt={requestCreatedAt}
+        actions={headerActions}
+        customType={message.customType}
+      />
+
+      {pruningHeaderState?.kind === 'result' && pruningExpanded && (
+        <PruningHeaderPanel
+          details={pruningHeaderState.details}
+          rawExpanded={pruningRawExpanded}
+          onRawToggle={() => setPruningRawExpanded((v) => !v)}
+        />
+      )}
+
+      {message.status === 'error' && (
+        <ErrorDetailWithFallback message={message} />
+      )}
+
+      {isEditing ? (
+        <InlineEditor
+          initialText={editingDraft?.messageId === message.id ? editingDraft.text : message.markdown}
+          initialInputs={editingDraft?.messageId === message.id ? editingDraft.inputs : initialInputs}
+          capturedHeight={capturedHeight}
+          onConfirm={(text, inputs) => onEditConfirm(message.id, text, inputs, message.status === 'queued')}
+          onCancel={onEditCancel}
+        />
+      ) : (
+        <>
+          <MessageContent
+            messageId={message.id}
+            role={message.role}
+            combinedParts={combinedParts}
+            deferHistoricalToolCalls={deferHistoricalToolCalls}
+            renderableUserParts={renderableUserParts}
+            html={html}
+            isCurrentlyStreaming={isCurrentlyStreaming}
+            messageBodyRef={messageBodyRef}
+            workingDirectory={workingDirectory}
+            onOpenFile={onOpenFile}
+            prefs={prefs}
+            renderToolCall={renderToolCall}
+            onContextMenu={onContextMenu}
+            getMessageRaw={getMessageRaw}
+          />
+
+          <MessageFooter
+            hasActivityFooter={hasActivityFooter}
+            footerActivityState={footerActivityState}
+          />
+        </>
+      )}
+    </>
+  );
+}

@@ -17,14 +17,17 @@ Route to a specialized skill when the request matches one; this skill remains th
 
 | Path | Purpose |
 |---|---|
-| `extension/` | TypeScript VS Code extension: host, embedded Pi backend, Preact webview, and tests |
-| `tools/` | Explicit Pie-owned tool catalog and the implementations of all nine catalog tools; see [`tools/README.md`](../../../../tools/README.md) for the catalog and registration boundaries |
-| `extensions/` | Pi discovery adapters and middleware; each catalog tool's `extensions/<id>/index.ts` is a shim re-exporting its `tools/` implementation, and dependency manifests for `computer-use`/`playwright` stay there |
-| `agents/` | Specialized subagent definitions |
-| `skills/` | On-demand workflows, including this one |
+| `application/` | Application backend and CQRS state, passive Preact frontend, browser-safe protocol/validation, and host adapters |
+| `application/hosts/vscode/` | VS Code distribution package, toolchain, runtime assets, and package-owned configuration |
+| `harness/` | Pie-owned tools, agent processes, model providers, session storage, agent instructions, and tool/skill selection |
+| `harness/tools/` | Explicit Pie-owned tool catalog, implementations, and package integrations; see [`README.md`](../../../tools/README.md). Backend composition lives in [`backend-tools.ts`](../../../agent-processes/coordinator/backend-tools.ts). |
+| `extensions/` | Stable Pi discovery adapters and middleware; tool adapters delegate to `harness/tools/`, while `computer-use` and `playwright` dependency owners remain here |
+| `harness/agent-instructions/agents/` and `harness/agent-instructions/skills/` | Specialized agent definitions and on-demand workflows, including this one |
+| `analytics/` | Runtime analytics owners and the retained local DuckDB query workspace at `analytics/analysis/` |
+| `lib/` | Cross-owner low-level data-root, validation, logging, and temporary-file helpers |
+| `test/integration/` | Repository-root integration gates spanning multiple owners |
 | `models.yaml` | Source of truth for providers, models, pricing, eligibility, concurrency, retry policy, and seed selections |
-| `docs/` | Architecture contracts, active plans, operational references, and internal notes |
-| `analysis/` | Retained local DuckDB query workspace over legacy run-analytics exports/stores |
+| `docs/` | Categorized architecture, contracts, plans, operations, and research; start at [`docs/INDEX.md`](../../../../docs/INDEX.md) |
 | `scripts/` | Repository build, test, model-sync, and install orchestration |
 | `settings.defaults.json` | Tracked portable defaults; model-owned fields are generated from `models.yaml` |
 | `settings.json` | Tracked, committed Pi runtime settings; model-owned fields are generated from `models.yaml`, chat and pruning selections are user-owned |
@@ -35,17 +38,17 @@ For setup, storage, and repository-wide workflows, see [`README.md`](../../../..
 ## Common practices
 
 - Use the repository-root test wrappers: `test:file` for focused checks while iterating and `npm test` as the default final development test. `npm test` resolves working-tree changes to affected tests, runs package groups concurrently, and conservatively broadens when dependency evidence is incomplete. Do not invoke `npx tsx` directly. Use `test:coverage` only for an explicit release coverage gate.
-- After any edit under `extension/src/`, run `npm run extension:build`. It validates and stages a complete immutable runtime in a matching installed extension, and publishes live renderer assets. The startup loader automatically selects the newest verified runtime on the next normal VS Code restart; loaded windows retain their leased host/backend files. Never force a restart or interrupt active work merely to deploy a fix.
+- After any runtime-source edit under `application/`, `analytics/`, `harness/`, or `lib/`, run `npm run extension:build`. It validates and stages a complete immutable runtime in a matching installed extension, and publishes live renderer assets. The startup loader automatically selects the newest verified runtime on the next normal VS Code restart; loaded windows retain their leased host/backend files. Never force a restart or interrupt active work merely to deploy a fix.
 - Older installations need `npm run extension:activate` once to install the startup loader. This command stages immutable loader files and updates the entrypoint for the next restart without replacing locked running bundles. Routine changes need only a successful build and a normal restart, not another installation command. SDK/dependency or extension manifest upgrades remain explicit package/install work.
 - For a user-reported bug, distinguish built, staged, loaded, and behavior verified. Check the staged generation and running build evidence, not just build success. A pending host update is not a live fix; tell the user it will load on their next normal restart. Do not mistake reopening the sidebar for restarting the extension host.
-- Treat [`docs/STATE_CONTRACT.md`](../../../../docs/STATE_CONTRACT.md) as authoritative for host↔webview synchronization. Contract changes require matching tests under `extension/test/`, including the sync-contract coverage.
-- Analytics have one active authority at a time, selected by the activation manifest: legacy (run analytics + billable ledger, the default) or canonical (the SQLite store under the resolved data root). Capture is never a dual-write between them. See [`docs/ANALYTICS_IMPLEMENTATION_CONTRACT.md`](../../../../docs/ANALYTICS_IMPLEMENTATION_CONTRACT.md) before changing capture, privacy, or storage paths; the `PIE_STORAGE_CUTOFF_AUTHORIZATION` cutoff and any activation must not be described as active without evidence.
+- Treat [`docs/contracts/STATE_CONTRACT.md`](../../../../docs/contracts/STATE_CONTRACT.md) as authoritative for host↔webview synchronization. Contract changes require matching tests under the owning test roots, including `test/integration/sync-contract.test.ts`.
+- Analytics have one active authority at a time, selected by the activation manifest: legacy (run analytics + billable ledger, the default) or canonical (the SQLite store under the resolved data root). Capture is never a dual-write between them. See [`docs/contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md`](../../../../docs/contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md) before changing capture, privacy, or storage paths; the `PIE_STORAGE_CUTOFF_AUTHORIZATION` cutoff and any activation must not be described as active without evidence.
 - Keep the host architecture CQRS/Elm-style MVI: pure reducer, one effect runner, passive webview, explicit session addressing, and `Record<string, T>` host collections rather than `Map`/`Set`.
 - Preserve unrelated working-tree changes. Generated or user-owned files may already be modified; inspect status and focused diffs before finishing.
 
 ### Model configuration
 
-Edit `models.yaml`, then run `npm run sync-models`. This regenerates `models.json`, `model-profiles.yaml`, and model-owned fields in `settings.json`. Do not directly edit generated model files; `extension/test/integration/model-config-sync.test.ts` guards against drift. `settings.json` is tracked and committed: synchronization rewrites only its model-owned fields, while existing chat and pruning model selections are user-owned and preserved. Use `npm run settings:init` to seed it from `settings.defaults.json` if it is ever missing. For provider work, also load the `add-provider` skill.
+Edit `models.yaml`, then run `npm run sync-models`. This regenerates `models.json`, `model-profiles.yaml`, and model-owned fields in `settings.json`. Do not directly edit generated model files; `scripts/model-config/test/model-config-sync.test.ts` guards against drift. `settings.json` is tracked and committed: synchronization rewrites only its model-owned fields, while existing chat and pruning model selections are user-owned and preserved. Use `npm run settings:init` to seed it from `settings.defaults.json` if it is ever missing. For provider work, also load the `add-provider` skill.
 
 ### Context-lean terminology
 
@@ -53,7 +56,7 @@ Do not conflate these mechanisms:
 
 - **History compaction**: Pi summarizes older conversation history across turns (`/compact`; `compaction{enabled,reserveTokens,keepRecentTokens}`). Avoid unqualified “compaction” or “summarization.”
 - **Skill pruning**: the `skill-pruner` extension's prepass removes tools or skills from the catalog for a turn (`pruning-result`; `disablePruning`). Avoid unqualified “pruning.”
-- **Tool-result pruning**: deterministic middleware rewrites one tool result before it enters context (for example ANSI stripping or JSON minification). Avoid “output compaction” and “result compaction.” See [`docs/TOOL-RESULT-PRUNING.md`](../../../../docs/TOOL-RESULT-PRUNING.md).
+- **Tool-result pruning**: deterministic middleware rewrites one tool result before it enters context (for example ANSI stripping or JSON minification). Avoid “output compaction” and “result compaction.” See [`docs/contracts/TOOL-RESULT-PRUNING.md`](../../../../docs/contracts/TOOL-RESULT-PRUNING.md).
 
 ## Commands
 
@@ -62,7 +65,7 @@ Run from the repository root unless noted:
 ```bash
 npm ci                                      # install all locked dependency trees
 npm run test                                # changed-file affected development testing
-npm run test:file -- extension/test/path/to/test.ts
+npm run test:file -- path/to/owner/test.ts
 npm run test:all                             # full fast suite
 npm run test:all -- --package extension --test-name-pattern="pattern"
 npm run test:changed                        # fast suites affected by working-tree changes
@@ -103,11 +106,11 @@ Choose focused tests while iterating, then run checks proportionate to the chang
 
 ### pie architecture and UI
 
-- [`docs/ARCHITECTURE.md`](../../../../docs/ARCHITECTURE.md) — primary system architecture, data flow, extension points, and invariants
-- [`docs/STATE_CONTRACT.md`](../../../../docs/STATE_CONTRACT.md) — authoritative host↔webview state contract
-- [`docs/ANALYTICS_IMPLEMENTATION_CONTRACT.md`](../../../../docs/ANALYTICS_IMPLEMENTATION_CONTRACT.md) — analytics authority, data root, privacy, and the gated storage cutoff
-- [`docs/internal/ARCH-OVERVIEW.md`](../../../../docs/internal/ARCH-OVERVIEW.md) — concise spine-file map and glossary
-- [`extension/README.md`](../../../../extension/README.md) — UI design philosophy and local GUI workflow
+- [`docs/architecture/ARCHITECTURE.md`](../../../../docs/architecture/ARCHITECTURE.md) — primary system architecture, data flow, extension points, and invariants
+- [`docs/contracts/STATE_CONTRACT.md`](../../../../docs/contracts/STATE_CONTRACT.md) — authoritative host↔webview state contract
+- [`docs/contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md`](../../../../docs/contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md) — analytics authority, data root, privacy, and the gated storage cutoff
+- [`docs/architecture/ARCH-OVERVIEW.md`](../../../../docs/architecture/ARCH-OVERVIEW.md) — concise spine-file map and glossary
+- [UI design philosophy](../../../../docs/architecture/UI-DESIGN-PHILOSOPHY.md) and [GUI development](../../../../docs/operations/GUI-DEVELOPMENT.md)
 
 ### Pi runtime documentation (locked local version)
 

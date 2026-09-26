@@ -8,11 +8,15 @@ import * as url from 'node:url';
 // TypeScript dependency. Keep the config seam typed at its use site.
 // @ts-expect-error The repository build helper is an ESM .mjs module without a declaration file.
 import { createViteAliases } from '../../../scripts/lib/package-resolution.mjs';
+// @ts-expect-error The plain-Node traversal adapter is an ESM .mjs module without declarations.
+import { isProtectedDirectoryName } from '../../../scripts/lib/traversal-policy.mjs';
 
 const rootDir = path.dirname(url.fileURLToPath(import.meta.url));
 const repoDir = path.resolve(rootDir, '../../..');
 const srcDir = path.join(repoDir, 'extension', 'src');
-const testDir = path.join(repoDir, 'extension', 'test');
+const vscodeHostDir = path.join(repoDir, 'application', 'hosts', 'vscode');
+const hostsDir = path.join(repoDir, 'application', 'hosts');
+const frontendDir = path.join(repoDir, 'application', 'frontend');
 const outDir = path.join(rootDir, 'out');
 
 /**
@@ -20,9 +24,15 @@ const outDir = path.join(rootDir, 'out');
  * config's working directory: current and legacy Pi spellings map to the SDK's
  * nested graph (including the private pi-ai/TypeBox identity), and Preact
  * keeps its owner-installed files and subpaths. Native tools keep their own
- * sidecar owners and stay unaliased.
+ * sidecar owners and stay unaliased. The Node host and browser renderer use
+ * their respective package export conditions so Node-only dependencies such
+ * as ws never resolve to a browser stub in the host bundle.
  */
 const packageAliases = createViteAliases({ layout: 'planned' });
+const nodePackageAliases = createViteAliases({
+  layout: 'planned',
+  conditions: ['node', 'require', 'import', 'default'],
+});
 
 const webviewOutDir = path.join(outDir, 'webview', 'panel');
 const BUILD_ID_SENTINEL = '__PIE_COMPILED_BUILD_ID_REPLACE__';
@@ -32,7 +42,8 @@ function sourceFiles(directory: string): string[] {
     .sort((left, right) => left.name.localeCompare(right.name))
     .flatMap((entry) => {
       const resolved = path.join(directory, entry.name);
-      return entry.isDirectory() ? sourceFiles(resolved) : [resolved];
+      if (entry.isDirectory()) return isProtectedDirectoryName(entry.name) ? [] : sourceFiles(resolved);
+      return entry.isFile() ? [resolved] : [];
     });
 }
 
@@ -42,13 +53,33 @@ function buildIdentityInputs(identityRoot = rootDir): string[] {
   // source at the repository root while emitting under the package owner.
   const production = identityRoot === rootDir;
   const sourceRoot = production ? srcDir : path.join(identityRoot, 'src');
+  const applicationFrontendRoot = production ? frontendDir : path.join(identityRoot, 'frontend');
   const helperRoot = production ? repoDir : path.dirname(identityRoot);
   const buildHelpers = path.join(helperRoot, 'scripts', 'build');
   const harnessInstructions = path.join(repoDir, 'harness', 'agent-instructions');
+  const harnessTools = path.join(production ? repoDir : identityRoot, 'harness', 'tools');
+  const harnessModelProviders = path.join(production ? repoDir : identityRoot, 'harness', 'model-providers');
+  const toolAndSkillSelection = path.join(production ? repoDir : identityRoot, 'harness', 'tool-and-skill-selection');
+  const harnessSessionStorage = path.join(production ? repoDir : identityRoot, 'harness', 'session-storage');
+  const harnessAgentProcesses = path.join(production ? repoDir : identityRoot, 'harness', 'agent-processes');
+  const applicationBackend = path.join(production ? repoDir : identityRoot, 'application', 'backend');
+  const applicationHosts = path.join(production ? repoDir : identityRoot, 'application', 'hosts');
+  const applicationLib = path.join(production ? repoDir : identityRoot, 'application', 'lib');
+  const rootLib = path.join(production ? repoDir : identityRoot, 'lib');
   return [
     ...sourceFiles(sourceRoot),
     ...(production ? sourceFiles(path.join(repoDir, 'shared')) : []),
     ...(production && fs.existsSync(harnessInstructions) ? sourceFiles(harnessInstructions) : []),
+    ...(fs.existsSync(harnessTools) ? sourceFiles(harnessTools) : []),
+    ...(fs.existsSync(harnessModelProviders) ? sourceFiles(harnessModelProviders) : []),
+    ...(fs.existsSync(toolAndSkillSelection) ? sourceFiles(toolAndSkillSelection) : []),
+    ...(fs.existsSync(harnessSessionStorage) ? sourceFiles(harnessSessionStorage) : []),
+    ...(fs.existsSync(harnessAgentProcesses) ? sourceFiles(harnessAgentProcesses) : []),
+    ...(production && fs.existsSync(applicationBackend) ? sourceFiles(applicationBackend) : []),
+    ...(fs.existsSync(applicationHosts) ? sourceFiles(applicationHosts) : []),
+    ...(production && fs.existsSync(applicationFrontendRoot) ? sourceFiles(applicationFrontendRoot) : []),
+    ...(production && fs.existsSync(applicationLib) ? sourceFiles(applicationLib) : []),
+    ...(fs.existsSync(rootLib) ? sourceFiles(rootLib) : []),
     ...(production ? sourceFiles(path.join(identityRoot, 'runtime')) : []),
     ...(production && fs.existsSync(buildHelpers) ? sourceFiles(buildHelpers) : []),
     path.join(identityRoot, 'package.json'),
@@ -56,6 +87,8 @@ function buildIdentityInputs(identityRoot = rootDir): string[] {
     path.join(identityRoot, 'tsconfig.json'),
     path.join(identityRoot, 'vite.config.ts'),
     path.join(helperRoot, 'scripts', 'lib', 'package-resolution.mjs'),
+    path.join(helperRoot, 'scripts', 'lib', 'traversal-policy.mjs'),
+    path.join(helperRoot, 'scripts', 'lib', 'native-owner.mjs'),
   ].filter((input) => fs.existsSync(input)).sort((left, right) => left.localeCompare(right));
 }
 
@@ -114,18 +147,18 @@ export default defineConfig(({ mode }) => {
         ssr: true,
         rollupOptions: {
           input: {
-            extension: path.join(srcDir, 'extension.ts'),
-            standalone: path.join(srcDir, 'standalone', 'index.ts'),
-            backend: path.join(srcDir, 'backend', 'index.ts'),
-            'worker-entry': path.join(srcDir, 'backend', 'worker-entry.ts'),
+            extension: path.join(vscodeHostDir, 'activation', 'extension.ts'),
+            standalone: path.join(hostsDir, 'standalone', 'index.ts'),
+            backend: path.join(repoDir, 'harness', 'agent-processes', 'coordinator', 'index.ts'),
+            'worker-entry': path.join(repoDir, 'harness', 'agent-processes', 'workers', 'worker-entry.ts'),
             // Spawned as separate worker scripts by the running host, so these
             // must stay emitted files rather than modules bundled only into
             // extension.js.
-            'analytics-recorder-worker': path.join(srcDir, 'analytics', 'recorder-worker-entry.ts'),
-            'analytics-query-worker': path.join(srcDir, 'analytics', 'query-worker-entry.ts'),
-            'cold-browse-helper-entry': path.join(srcDir, 'backend', 'cold-browse-helper-entry.ts'),
-            'initial-context-estimate-worker': path.join(srcDir, 'backend', 'initial-context-estimate-worker.ts'),
-            'phase4-worker-command-extension': path.join(testDir, 'fixtures', 'phase4-worker-command-extension.ts'),
+            'analytics-recorder-worker': path.join(repoDir, 'analytics', 'recording', 'recorder-worker-entry.ts'),
+            'analytics-query-worker': path.join(repoDir, 'analytics', 'queries', 'query-worker-entry.ts'),
+            'cold-browse-helper-entry': path.join(repoDir, 'harness', 'agent-processes', 'cold-browse-helper', 'cold-browse-helper-entry.ts'),
+            'initial-context-estimate-worker': path.join(repoDir, 'harness', 'agent-processes', 'context-inventory', 'initial-context-estimate-worker.ts'),
+            'phase4-worker-command-extension': path.join(repoDir, 'harness', 'agent-processes', 'lib', 'sdk-integration', 'test', 'fixtures', 'phase4-worker-command-extension.ts'),
           },
           output: {
             entryFileNames: '[name].js',
@@ -148,14 +181,14 @@ export default defineConfig(({ mode }) => {
       resolve: {
         alias: [
           { find: '@shared', replacement: path.join(srcDir, 'shared') },
-          ...packageAliases,
+          ...nodePackageAliases,
         ],
       },
     };
   }
 
   return {
-    root: srcDir,
+    root: frontendDir,
     publicDir: false,
     define,
     plugins: [createBuildIdentityPlugin()],
@@ -167,7 +200,7 @@ export default defineConfig(({ mode }) => {
       cssCodeSplit: true,
       modulePreload: { polyfill: false },
       rollupOptions: {
-        input: path.join(srcDir, 'webview', 'panel', 'panel.tsx'),
+        input: path.join(frontendDir, 'shell', 'panel.tsx'),
         output: {
           entryFileNames: 'assets/[name]-[hash].js',
           chunkFileNames: 'assets/[name]-[hash].js',
