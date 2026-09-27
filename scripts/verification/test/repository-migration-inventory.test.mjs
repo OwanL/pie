@@ -266,7 +266,7 @@ export function validateMigrationInventory(manifest, inventory) {
   }
 
   // --- coverage: unmapped inventory files -----------------------------------
-  const tombstones = manifest.tombstones ?? [];
+  const tombstones = manifest.tombstones === undefined ? [] : manifest.tombstones;
   if (!Array.isArray(tombstones)) {
     add('tombstone-integrity', 'tombstones must be an array when present');
   } else {
@@ -533,6 +533,16 @@ test('synthetic: deleted record source is reported as stale', () => {
   });
   assert.equal(result.ok, false);
   assert.ok(result.problems.some((p) => p.check === 'stale-source' && p.detail.includes('extension/src/gone.ts')));
+});
+
+test('synthetic: explicit null tombstones are rejected', () => {
+  const manifest = syntheticManifest([syntheticRecord()]);
+  manifest.tombstones = null;
+  const result = validateMigrationInventory(manifest, {
+    tracked: ['extension/src/feature.ts'],
+    untracked: [],
+  });
+  assert.ok(result.problems.some((problem) => problem.check === 'tombstone-integrity' && problem.detail === 'tombstones must be an array when present'));
 });
 
 test('synthetic: deletion tombstones document absent transitional paths without hiding stale sources', () => {

@@ -397,7 +397,7 @@ test("child prepass completion after owner teardown cannot repopulate pruning st
 		const ctx = { cwd: "/repo", sessionManager: { getSessionId: () => sessionId } };
 		hookPromise = childRuntimeOwner.runWithChildToolRuntimeOwner(owner, () => subagentContext.run(
 			{ depth: 1 },
-			() => handler(event, ctx),
+			() => Promise.resolve(handler(event, ctx)),
 		));
 		await scorerStarted;
 
@@ -2144,7 +2144,7 @@ test("child without request_capability can still prune skills but never prunes t
 	let scorerCalls = 0;
 	let capturedScorerInput = "";
 	const childTools = mockToolInfo.filter((tool) => tool.name !== "web_search").map((tool) => tool.name);
-	let activeTools = [...childTools];
+	const activeTools = [...childTools];
 	__setCompleteFn(async (_model, context) => {
 		scorerCalls++;
 		capturedScorerInput = context.map((message) => message.content).join("\n");

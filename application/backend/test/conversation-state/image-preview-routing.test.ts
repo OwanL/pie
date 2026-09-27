@@ -69,7 +69,7 @@ function createRouter(options: {
   return { router, state, targeted, broadcast, notices };
 }
 
-const request = {
+const request: Extract<WebviewToHostMessage, { type: 'requestImagePreview' }> = {
   type: 'requestImagePreview',
   requestId: 'image-preview:1',
   sessionPath: '/session-a.jsonl',
@@ -77,7 +77,7 @@ const request = {
   reference: '/tmp/agent-image.png',
   workingDirectory: '/workspace',
   viewGeneration: 4,
-} as unknown as WebviewToHostMessage;
+};
 
 const context: RendererCommandContext = {
   rendererId: 'renderer-a',
@@ -149,8 +149,7 @@ test('image preview reads are limited to two in-flight requests per renderer', a
 });
 
 test('a tab change while reading suppresses the late renderer result', async () => {
-  let harness!: ReturnType<typeof createRouter>;
-  harness = createRouter({
+  const harness: ReturnType<typeof createRouter> = createRouter({
     preview: async () => {
       harness.state.sessions.activeSessionPath = '/session-b.jsonl';
       return { mimeType: 'image/png', dataUrl: 'data:image/png;base64,iVBORw0KGgo=' };

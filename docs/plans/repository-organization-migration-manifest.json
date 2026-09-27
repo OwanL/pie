@@ -81,10 +81,12 @@
     "application/frontend/transcript/selection-overlap.ts",
     "application/hosts/test/vscode/open-file.test.ts",
     "application/hosts/vscode/editor-integration/open-file.ts",
-    "application/lib/protocol/image-preview.ts"
+    "application/lib/protocol/image-preview.ts",
+    "application/frontend/styles/image-preview.css",
+    "scripts/install/test/bootstrap.test.mjs"
    ],
-   "sourceRecordCount": 1830,
-   "validation": "Original baseline: all 1,778 tracked paths plus explicitly owned relevant additions received source records; baseline test identities remain immutable. The 2026-09-27 stale-reference correction recorded 1,813 sources and 1,715 currentLocations. This dead-code reconciliation adds six authorized source records and two explicit deletion tombstones; the privacy-test follow-up adds one retained test record, bringing the source-record count to 1,820. The UX inventory follow-up adds ten owned source/test records, bringing it to 1,830. currentLocations remains 1,715. Focused migration-inventory validation passes with the expanded tombstone schema; earlier broad verification remains historical and predates these working-tree changes.",
+   "sourceRecordCount": 1832,
+   "validation": "Original baseline: all 1,778 tracked paths plus explicitly owned relevant additions received source records; baseline test identities remain immutable. The 2026-09-27 stale-reference correction recorded 1,813 sources and 1,715 currentLocations. This dead-code reconciliation adds six authorized source records and two explicit deletion tombstones; the privacy-test follow-up adds one retained test record, bringing the source-record count to 1,820. The UX inventory follow-up adds ten owned source/test records, bringing it to 1,830. The image-preview stylesheet and bootstrap-test follow-up add two owned records, bringing the source-record count to 1,832. currentLocations remains 1,715. Focused migration-inventory validation passes with the expanded tombstone schema; earlier broad verification remains historical and predates these working-tree changes.",
    "currentGitStatus": {
     "recordedAt": "2026-09-24",
     "note": "Snapshot at B3 working-tree completion, before the B3 milestone commit; the commit landed all 41 settled moves, migration-owned settings skills entries, routing, tests, docs, and plan artifacts on top of ea74351f, excluding user-owned settings.json field values.",
@@ -7139,7 +7141,7 @@
    "kind": "intentional-consolidation"
   }
  ],
- "recordCount": 1838,
+ "recordCount": 1840,
  "records": [
   {
    "source": "extension/src/backend/analytics-worker-transport.ts",
@@ -33342,6 +33344,24 @@
    "batch": "B7",
    "verification": ["Image-preview routing and VS Code open-file tests exercise bounded image-preview protocol data."],
    "reason": "New browser-safe image-preview payload bounds and validation belong to the canonical application protocol owner."
+  },
+  {
+   "source": "application/frontend/styles/image-preview.css",
+   "targets": ["application/frontend/styles/image-preview.css"],
+   "action": "retain",
+   "owner": "application/frontend/styles",
+   "batch": "B7",
+   "verification": ["Frontend image-path-preview tests and renderer build validate the imported tooltip stylesheet."],
+   "reason": "New renderer-local image-path preview styles are imported by the frontend styles entry and belong with the frontend styling owner."
+  },
+  {
+   "source": "scripts/install/test/bootstrap.test.mjs",
+   "targets": ["scripts/install/test/bootstrap.test.mjs"],
+   "action": "retain",
+   "owner": "scripts/install",
+   "batch": "B8",
+   "verification": ["Run the focused bootstrap test through the root test:file wrapper."],
+   "reason": "New regression coverage for the relocated bootstrap command plan and host build cwd belongs with the scripts/install owner."
   }
  ],
  "tombstones": [

@@ -6,7 +6,10 @@ import { deriveFileChangesFromTranscript } from '../../../file-changes/file-chan
 // Import the EXTENSION's JSONL adapter (option A's second traversal) — this is
 // what pins "shared logic, not shared value": the same per-tool-call core, two
 // traversal adapters (ChatMessage[] vs SessionEntry[]), must yield equal results.
-import { deriveFileChangesFromSessionEntries } from '../../../../../harness/tools/session-changes/session-jsonl';
+import {
+  deriveFileChangesFromSessionEntries,
+  type SessionEntryLike,
+} from '../../../../../harness/tools/session-changes/session-jsonl';
 import type { FileChange } from '../../../../../harness/tools/session-changes/types';
 
 // ─── Equivalence: host (ChatMessage[]) vs extension (SessionEntry[]/JSONL) ──
@@ -103,7 +106,9 @@ function hostTranscript(): ChatMessage[] {
 
 /** Extension form: the raw JSONL shape — assistant toolCall parts (arguments=input)
  *  as SEPARATE entries from their toolResult entries (joined by toolCallId). */
-function jsonlEntries(): Record<string, unknown>[] {
+type JsonlFixtureEntry = SessionEntryLike & { version?: number };
+
+function jsonlEntries(): JsonlFixtureEntry[] {
   return [
     { type: 'session', version: 3, id: 's1', timestamp: 't0', cwd: '/proj' },
     // m1: write (created)
@@ -136,7 +141,9 @@ function jsonlEntries(): Record<string, unknown>[] {
 /** Normalize to a plain comparable shape (drops timestamp/messageId noise that
  *  is implementation-internal to each adapter, keeping the teeth-relevant
  *  fields: path, kind, churn, toolCallId, description). */
-function normalize(changes: FileChangeEntry[] | FileChange[]): unknown[] {
+type NormalizedFileChange = Pick<FileChangeEntry, 'path' | 'kind' | 'additions' | 'deletions' | 'toolCallId' | 'description'>;
+
+function normalize(changes: FileChangeEntry[] | FileChange[]): NormalizedFileChange[] {
   return changes.map((c) => ({
     path: c.path,
     kind: c.kind,
@@ -149,20 +156,20 @@ function normalize(changes: FileChangeEntry[] | FileChange[]): unknown[] {
 
 test('equivalence: host ChatMessage[] and extension SessionEntry[] yield equal changes', () => {
   const host = normalize(deriveFileChangesFromTranscript(hostTranscript()));
-  const ext = normalize(deriveFileChangesFromSessionEntries(jsonlEntries() as never));
+  const ext = normalize(deriveFileChangesFromSessionEntries(jsonlEntries()));
   assert.deepEqual(ext, host);
 });
 
 test('equivalence: both adapters skip the failed edit (tooth b)', () => {
   const host = deriveFileChangesFromTranscript(hostTranscript());
-  const ext = deriveFileChangesFromSessionEntries(jsonlEntries() as never);
+  const ext = deriveFileChangesFromSessionEntries(jsonlEntries());
   assert.ok(!host.some((c) => c.path === 'src/failed.ts'), 'host leaked the failed edit');
   assert.ok(!ext.some((c) => c.path === 'src/failed.ts'), 'extension leaked the failed edit');
 });
 
 test('equivalence: both adapters surface subagent-attributed changes (tooth a)', () => {
   const host = deriveFileChangesFromTranscript(hostTranscript());
-  const ext = deriveFileChangesFromSessionEntries(jsonlEntries() as never);
+  const ext = deriveFileChangesFromSessionEntries(jsonlEntries());
   assert.ok(host.some((c) => c.path === 'src/sub.ts'), 'host dropped the subagent change');
   assert.ok(ext.some((c) => c.path === 'src/sub.ts'), 'extension dropped the subagent change');
   // The subagent change's synthetic toolCallId is derived from the parent
@@ -174,7 +181,7 @@ test('equivalence: both adapters surface subagent-attributed changes (tooth a)',
 
 test('equivalence: churn totals match across both forms', () => {
   const host = deriveFileChangesFromTranscript(hostTranscript());
-  const ext = deriveFileChangesFromSessionEntries(jsonlEntries() as never);
+  const ext = deriveFileChangesFromSessionEntries(jsonlEntries());
   const sum = (cs: FileChangeEntry[] | FileChange[]) =>
     cs.reduce((a, c) => a + (c.additions ?? 0), 0) +
     cs.reduce((a, c) => a + (c.deletions ?? 0), 0);
@@ -208,13 +215,14 @@ test('equivalence: parent + subagent edits to one file merge across path spellin
     ] }),
   ], '/proj'));
 
-  const ext = normalize(deriveFileChangesFromSessionEntries([
+  const extEntries: JsonlFixtureEntry[] = [
     { type: 'session', version: 3, id: 's1', timestamp: 't0', cwd: '/proj' },
     { type: 'message', id: 'm1', timestamp: 't1', message: { role: 'assistant', content: [{ type: 'toolCall', id: 'c1', name: 'edit', arguments: { path: 'src/shared.ts', oldText: 'x', newText: 'a\nb' } }] } },
     { type: 'message', id: 'tr1', timestamp: 't1', message: { role: 'toolResult', toolCallId: 'c1', toolName: 'edit', content: 'ok', isError: false } },
     { type: 'message', id: 'm2', timestamp: 't2', message: { role: 'assistant', content: [{ type: 'toolCall', id: 'c2', name: 'subagent', arguments: { agent: 'worker', task: 'merge' } }] } },
     { type: 'message', id: 'tr2', timestamp: 't2', message: { role: 'toolResult', toolCallId: 'c2', toolName: 'subagent', content: 'done', isError: false, details } },
-  ] as never));
+  ];
+  const ext = normalize(deriveFileChangesFromSessionEntries(extEntries));
 
   assert.equal(host.length, 1, 'host must merge parent + subagent into one entry');
   assert.equal(ext.length, 1, 'extension must merge parent + subagent into one entry');

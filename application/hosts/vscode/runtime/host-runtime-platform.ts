@@ -152,7 +152,7 @@ function createFilePathResolver(): FilePathResolverAdapter {
       }
     },
     findFiles: async (workingDirectory, basename) => {
-      const escapedBasename = basename.replace(/[\\*?\[\]{}]/g, '\\$&');
+      const escapedBasename = basename.replace(/[\\*?\x5b\]{}]/g, '\\$&');
       const include = new vscode.RelativePattern(
         vscode.Uri.file(workingDirectory),
         `**/${escapedBasename}`,

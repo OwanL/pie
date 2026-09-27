@@ -6,17 +6,22 @@ import {
   resolveLocalFilePath,
 } from './markdown-file-path';
 import { IMAGE_PREVIEW_MIME_BY_EXTENSION } from '../../lib/protocol/image-preview.js';
+import { hasSelectionOverlapping } from './selection-overlap';
 
 interface FilePathElement {
   getAttribute?: (name: string) => string | null;
+  ownerDocument?: Document;
+}
+
+function filePathElementFromTarget(target: EventTarget | null): FilePathElement | null {
+  const candidate = resolveClosestCapableTarget(target);
+  if (!candidate) return null;
+  return candidate.closest(MARKDOWN_FILE_PATH_SELECTOR) as FilePathElement | null;
 }
 
 /** Find a rendered local-path element from a delegated event target. */
 export function filePathReferenceFromTarget(target: EventTarget | null): string | null {
-  const candidate = resolveClosestCapableTarget(target);
-  if (!candidate) return null;
-
-  const element = candidate.closest(MARKDOWN_FILE_PATH_SELECTOR) as FilePathElement | null;
+  const element = filePathElementFromTarget(target);
   const value = element?.getAttribute?.(MARKDOWN_FILE_PATH_ATTRIBUTE)?.trim();
   return value || null;
 }
@@ -60,9 +65,8 @@ interface DelegatedEvent {
   stopPropagation: () => void;
 }
 
-function hasTextSelection(): boolean {
-  const selection = typeof window !== 'undefined' ? window.getSelection?.() : null;
-  return !!selection && !selection.isCollapsed;
+function hasTextSelection(element: FilePathElement | null): boolean {
+  return !!element?.ownerDocument && hasSelectionOverlapping(element as Element);
 }
 
 function suppressPathDefault(event: DelegatedEvent): void {
@@ -76,13 +80,14 @@ export function handleDelegatedFilePathClick(
   workingDirectory: string | null,
   onOpenFile: (path: string, reference?: string, workingDirectory?: string) => void,
 ): boolean {
+  const element = filePathElementFromTarget(event.target);
   const request = filePathOpenRequestFromTarget(event.target, workingDirectory);
   if (!request) return false;
 
   // A drag-selection ending on a path also emits click. Match native-link
   // behavior: suppress the anchor's default navigation while leaving the
   // selection available for copying instead of opening the file.
-  if (hasTextSelection()) {
+  if (hasTextSelection(element)) {
     suppressPathDefault(event);
     return true;
   }
@@ -100,6 +105,7 @@ export function handleDelegatedFilePathKeyDown(
 ): boolean {
   if (event.key !== 'Enter' && event.key !== ' ') return false;
 
+  const element = filePathElementFromTarget(event.target);
   const request = filePathOpenRequestFromTarget(event.target, workingDirectory);
   if (!request) return false;
 
@@ -107,7 +113,7 @@ export function handleDelegatedFilePathKeyDown(
   // also makes holding Enter/Space safe: auto-repeat is consumed but opens
   // nothing after the first keydown.
   suppressPathDefault(event);
-  if (event.repeat || hasTextSelection()) return true;
+  if (event.repeat || hasTextSelection(element)) return true;
 
   onOpenFile(request.path, request.reference, request.workingDirectory);
   return true;

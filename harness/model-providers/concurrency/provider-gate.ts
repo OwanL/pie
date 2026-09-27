@@ -891,12 +891,13 @@ export class ProviderGate {
 		this.applyPolicyMap(policies, (policy, baseLimit) => {
 			const value = policy?.maxConcurrentRequests;
 			if (!isProviderMaxConcurrentRequests(value)) return baseLimit;
-			switch (policy.maxConcurrentRequestsSource) {
+			const source = policy?.maxConcurrentRequestsSource;
+			switch (source) {
 				case 'configured-default':
 				case 'saved-preference':
 				case 'environment-override':
 				case 'safety-fallback':
-					return { value, source: policy.maxConcurrentRequestsSource };
+					return { value, source };
 				default:
 					return baseLimit;
 			}

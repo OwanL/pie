@@ -673,7 +673,8 @@ test('rendered ToolCallItem hides subagent model-selection badges in collapsed h
   assert.doesNotMatch(html, />tok 1\.6k</);
   assert.doesNotMatch(html, />in 1\.2k<|>out 345<|>cache 50<|>2t</);
   assert.match(html, /subagent-model-details-trigger/);
-  assert.match(html, />\$0\.012</);
+  assert.match(html, />\$0\.01</); // collapsed cost chip uses two decimals
+  assert.match(html, /title="Cost: \$0\.0123"/); // tooltip retains full precision
   assert.doesNotMatch(html, /subagent-model-tag/);
 });
 

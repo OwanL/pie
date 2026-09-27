@@ -36,6 +36,7 @@ function ownerGlobals(): OwnerGlobals {
 }
 
 export function createChildToolRuntimeOwner(label = "Pie child agent"): ChildToolRuntimeOwner {
+	// eslint-disable-next-line no-control-regex -- Strip ASCII control characters from supplied owner labels.
 	const shortLabel = label.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 140);
 	return {
 		id: `child-${randomUUID()}`,

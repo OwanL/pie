@@ -526,7 +526,9 @@ export class WorkerRuntimeRouter {
     if (existing) return existing as Promise<T>;
 
     for (const key of keys) this.forgettingSessionPaths.add(key);
+    // Assigned before the awaited retirement can settle and run cleanup.
     let barrier!: Promise<T>;
+    // eslint-disable-next-line prefer-const
     barrier = (async () => {
       try {
         await this.retireSessionForForget(sessionPath);

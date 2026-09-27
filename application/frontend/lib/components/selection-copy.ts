@@ -34,6 +34,7 @@ function storeCodeBlock(text: string, codeBlocks: string[]): string {
 }
 
 function restoreCodeBlocks(text: string, codeBlocks: string[]): string {
+  // eslint-disable-next-line no-control-regex -- Matches the private NUL-delimited tokens created above.
   return text.replace(/\u0000PIE_CODE_BLOCK_(\d+)\u0000/g, (token, index: string) => (
     codeBlocks[Number(index)] ?? token
   ));
@@ -44,7 +45,7 @@ function childNodesMarkdown(node: Node, codeBlocks: string[]): string {
 }
 
 function escapeMarkdownText(text: string): string {
-  return text.replace(/[\\`*_{}\[\]()#+.!|>~-]/g, '\\$&');
+  return text.replace(/[\\`*_{}\x5b\]()#+.!|>~-]/g, '\\$&');
 }
 
 function inlineCodeMarkdown(text: string): string {

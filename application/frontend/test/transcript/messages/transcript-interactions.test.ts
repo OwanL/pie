@@ -30,11 +30,16 @@ function withWindowSelection<T>(selection: {
   isCollapsed: boolean;
   anchorNode: Node | null;
   focusNode: Node | null;
-} | null, run: () => T): T {
+} | null, run: () => T, overlapsTarget = true): T {
   const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  const documentSelection = selection && {
+    ...selection,
+    rangeCount: selection.isCollapsed ? 0 : 1,
+    getRangeAt: () => ({ intersectsNode: () => overlapsTarget }),
+  };
   Object.defineProperty(globalThis, 'window', {
     configurable: true,
-    value: { getSelection: () => selection },
+    value: { getSelection: () => documentSelection },
   });
 
   try {
@@ -127,8 +132,14 @@ test('shouldOpenSubagentContextMenu suppresses nested message descendants', () =
 });
 
 function pathTarget(reference: string): EventTarget {
+  const element = {
+    getAttribute: () => reference,
+    ownerDocument: {
+      getSelection: () => typeof window !== 'undefined' ? window.getSelection?.() ?? null : null,
+    },
+  };
   return {
-    closest: () => ({ getAttribute: () => reference }),
+    closest: () => element,
   } as unknown as EventTarget;
 }
 
@@ -194,26 +205,14 @@ test('delegated inline-code keyboard activation opens the resolved path', () => 
 });
 
 test('selected file-path clicks suppress native anchor navigation without opening', () => {
-  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'window');
-  Object.defineProperty(globalThis, 'window', {
-    configurable: true,
-    value: { getSelection: () => ({ isCollapsed: false, toString: () => 'selected path text' }) },
-  });
-
-  try {
+  withWindowSelection({ isCollapsed: false, anchorNode: {} as Node, focusNode: {} as Node }, () => {
     const { event, calls } = delegatedEvent(pathTarget('reveal/docs/foo.md'));
     const opened: string[] = [];
 
     assert.equal(handleDelegatedFilePathClick(event, '/workspace/pie', (path) => opened.push(path)), true);
     assert.deepEqual(opened, []);
     assert.deepEqual(calls, ['preventDefault', 'stopPropagation']);
-  } finally {
-    if (descriptor) {
-      Object.defineProperty(globalThis, 'window', descriptor);
-    } else {
-      delete (globalThis as { window?: unknown }).window;
-    }
-  }
+  });
 });
 
 test('repeated file-path keydown activation is consumed without reopening', () => {
@@ -223,6 +222,19 @@ test('repeated file-path keydown activation is consumed without reopening', () =
   assert.equal(handleDelegatedFilePathKeyDown(event, '/workspace/pie', (path) => opened.push(path)), true);
   assert.deepEqual(opened, []);
   assert.deepEqual(calls, ['preventDefault', 'stopPropagation']);
+});
+
+test('an unrelated text selection does not block file-path click or keyboard activation', () => {
+  const selectedText = {} as Node;
+  const opened: string[] = [];
+
+  withWindowSelection({ isCollapsed: false, anchorNode: selectedText, focusNode: selectedText }, () => {
+    const click = delegatedEvent(pathTarget('README.md'));
+    assert.equal(handleDelegatedFilePathClick(click.event, '/workspace/pie', (path) => opened.push(path)), true);
+    const keydown = delegatedEvent(pathTarget('./guide.md'), 'Enter');
+    assert.equal(handleDelegatedFilePathKeyDown(keydown.event, '/workspace/pie', (path) => opened.push(path)), true);
+    assert.deepEqual(opened, ['/workspace/pie/README.md', '/workspace/pie/guide.md']);
+  }, false);
 });
 
 test('delegated right-click opens a file-path context menu instead of the message menu', () => {

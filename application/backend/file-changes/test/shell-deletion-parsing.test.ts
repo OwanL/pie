@@ -164,6 +164,19 @@ test('&& / ; / newline split into independent segments', () => {
   assert.deepEqual(parseDeletedPathsFromCommand('rm a\nrm b'), ['a', 'b']);
 });
 
+test('comments ignore quotes and end at the next newline', () => {
+  assert.deepEqual(parseDeletedPathsFromCommand('rm old.txt # "comment\nrm new.txt'), ['old.txt', 'new.txt']);
+  assert.deepEqual(parseDeletedPathsFromCommand('rm old.txt # rm ignored.txt'), ['old.txt']);
+  assert.deepEqual(parseDeletedPathsFromCommand('rm first.txt;# "comment\nrm second.txt'), ['first.txt', 'second.txt']);
+});
+
+test('quoted, escaped, and embedded hash characters stay literal', () => {
+  assert.deepEqual(
+    parseDeletedPathsFromCommand("rm 'quoted#file' \"quoted # file\" escaped\\#file embedded#file"),
+    ['quoted#file', 'quoted # file', 'escaped#file', 'embedded#file'],
+  );
+});
+
 test('|| splits segments (distinct from a single pipe, which stops tokenization)', () => {
   assert.deepEqual(parseDeletedPathsFromCommand('rm a || rm b'), ['a', 'b']);
 });
@@ -202,6 +215,17 @@ test('non-deletion commands yield nothing', () => {
 test('quoted paths with spaces become a single token', () => {
   assert.deepEqual(parseDeletedPathsFromCommand('rm "my file"'), ['my file']);
   assert.deepEqual(parseDeletedPathsFromCommand("rm 'my file'"), ['my file']);
+});
+
+test('command separators inside quoted paths stay literal and nested shells still split', () => {
+  assert.deepEqual(
+    parseDeletedPathsFromCommand(`rm "semi; rm phantom.txt" 'logic && pipe ||' && rm after.txt`),
+    ['semi; rm phantom.txt', 'logic && pipe ||', 'after.txt'],
+  );
+  assert.deepEqual(
+    parseDeletedPathsFromCommand('bash -c "rm first.txt; rm second.txt"'),
+    ['first.txt', 'second.txt'],
+  );
 });
 
 test('backslash escape keeps a space inside a single token', () => {

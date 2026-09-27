@@ -16,6 +16,64 @@ function looksLikeGlob(p: string): boolean {
   return /[*?[\]]/.test(p);
 }
 
+/** Split command separators outside quotes and comments, preserving nested shell text. */
+function splitShellSegments(command: string): string[] {
+  const segments: string[] = [];
+  let start = 0;
+  let quote: string | undefined;
+  let escaped = false;
+  let atWordStart = true;
+
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (escaped) {
+      escaped = false;
+      atWordStart = false;
+      continue;
+    }
+    if (ch === '\\' && quote !== "'") {
+      escaped = true;
+      atWordStart = false;
+      continue;
+    }
+    if (quote) {
+      if (ch === quote) quote = undefined;
+      atWordStart = false;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      atWordStart = false;
+      continue;
+    }
+    if (ch === '#' && atWordStart) {
+      segments.push(command.slice(start, i));
+      const newline = command.indexOf('\n', i);
+      if (newline === -1) return segments;
+      start = newline + 1;
+      i = newline;
+      atWordStart = true;
+      continue;
+    }
+
+    const pairedSeparator = (ch === '&' && command[i + 1] === '&')
+      || (ch === '|' && command[i + 1] === '|');
+    if (ch === ';' || ch === '\n' || pairedSeparator) {
+      segments.push(command.slice(start, i));
+      if (pairedSeparator) i++;
+      start = i + 1;
+      atWordStart = true;
+    } else if (/\s/.test(ch) || /[&|<>();]/.test(ch)) {
+      atWordStart = true;
+    } else {
+      atWordStart = false;
+    }
+  }
+
+  segments.push(command.slice(start));
+  return segments;
+}
+
 /** Tokenize a single shell segment, honoring single/double quotes and
  *  backslash escapes. Stops at the first redirect/pipe operator — anything
  *  after `|`, `>`, or `<` is not a target of the preceding command. */
@@ -182,8 +240,9 @@ export function parseDeletedPathsFromCommand(command: string): string[] {
   if (!trimmed) return [];
 
   const paths: string[] = [];
-  // Split on command separators so `cd d && rm f` and `a; rm b` are covered.
-  const segments = trimmed.split(/(?:&&|\|\||;|\n)/);
+  // Split on command separators only outside quotes; quoted paths and nested
+  // shell commands may contain the same punctuation as literal content.
+  const segments = splitShellSegments(trimmed);
 
   for (const seg of segments) {
     const tokens = tokenizeShellSegment(seg);

@@ -34,7 +34,7 @@ test('diff inspects HEAD literally with requested context and no history walk', 
   const diff = calls.find((args) => args[0] === 'diff')!;
   assert.ok(diff.includes('HEAD'));
   assert.ok(diff.includes('--unified=3'));
-  assert.equal(diff.at(-1), ':(literal)[f].ts');
+  assert.equal(diff[diff.length - 1], ':(literal)[f].ts');
   assert.ok(calls.every((args) => args[0] !== 'log'));
 });
 
