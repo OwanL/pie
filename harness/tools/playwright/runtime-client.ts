@@ -9,6 +9,7 @@ import {
   type ChildToolRuntimeOwner,
 } from '../../agent-processes/lib/process-lifecycle/child-tool-runtime-owner.js';
 import { encodeJsonl, JsonlDecoder } from './protocol.js';
+import { confirmTaskkillTree } from './sidecar-core.mjs';
 import type { RuntimeResponse } from './types.js';
 
 interface ChildLike {
@@ -107,16 +108,30 @@ function unresolvedCleanupError(message: string): PlaywrightRuntimeError {
   return new PlaywrightRuntimeError('RUNTIME_CLEANUP_UNRESOLVED', `${message} Runtime cleanup remains unresolved.`, false);
 }
 
+function formatTaskkillOutput(stdout: unknown, stderr: unknown): string {
+  const entries = [['stdout', stdout], ['stderr', stderr]] as const;
+  return entries
+    .map(([stream, value]) => [stream, typeof value === 'string' ? value : Buffer.isBuffer(value) ? value.toString('utf8') : ''] as const)
+    .filter(([, text]) => text.trim())
+    .map(([stream, text]) => `${stream}: ${text.trim().replace(/\s+/g, ' ').slice(0, 4000)}`)
+    .join('; ');
+}
+
 function killProcessTreeSync(child: ChildLike | undefined): void {
   if (!child || hasExited(child)) return;
   if (process.platform === 'win32' && child.pid !== undefined) {
     try {
-      const result = spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', timeout: 1000 });
-      if (!result.error && result.status === 0) {
+      const result = spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { encoding: 'utf8', timeout: 1000, maxBuffer: 4096, windowsHide: true });
+      const confirmation = result.error ? { confirmed: false, reason: result.error.message } : confirmTaskkillTree({
+        rootPid: child.pid, exitCode: result.status, signal: result.signal, stdout: result.stdout, stderr: result.stderr,
+      });
+      if (confirmation.confirmed) {
         confirmedTreeKills.add(child);
         unresolvedTreeKills.delete(child);
       } else {
-        unresolvedTreeKills.set(child, result.error?.message ?? `taskkill exited with code ${String(result.status)}`);
+        const output = formatTaskkillOutput(result.stdout, result.stderr);
+        const status = result.signal ? `signal ${result.signal}` : `code ${String(result.status)}`;
+        unresolvedTreeKills.set(child, `${result.error?.message ?? `taskkill exited with ${status} and did not confirm the complete process tree: ${confirmation.reason}`}${output ? `; taskkill output: ${output}` : ''}`);
       }
     } catch (error) {
       unresolvedTreeKills.set(child, error instanceof Error ? error.message : String(error));
@@ -143,13 +158,14 @@ export async function killProcessTree(child: ChildLike | undefined, timeoutMs = 
     throw unresolvedCleanupError(`Playwright sidecar process ${child.pid ?? '(unknown PID)'} exited before descendant cleanup was confirmed.`);
   }
   const boundedTimeout = Math.max(1, timeoutMs);
-  const deadline = Date.now() + boundedTimeout;
+  // Observe the owned process while taskkill is running. The tree-kill command
+  // and process-exit confirmation share one deadline instead of splitting the
+  // budget in half (which made a 5s cleanup fail after only 2.5s under load).
+  const exit = waitForChildExit(child, boundedTimeout);
   let treeKillFailure: string | undefined;
   let treeKillSucceeded = confirmedTreeKills.has(child);
   if (process.platform === 'win32' && child.pid !== undefined && !treeKillSucceeded) {
-    // Leave time after taskkill for the child exit event to be observed. The
-    // direct kill below remains a fallback if taskkill fails or times out.
-    const treeKillTimeout = Math.max(1, Math.floor(boundedTimeout / 2));
+    const treeKillTimeout = Math.max(1, boundedTimeout);
     try {
       await new Promise<void>((resolve) => {
         let settled = false;
@@ -163,13 +179,22 @@ export async function killProcessTree(child: ChildLike | undefined, timeoutMs = 
           killer.off('close', onClose);
           resolve();
         };
+        const output = { stdout: '', stderr: '', truncated: false };
+        const maxOutputChars = 8192;
         const onError = (error: Error) => {
-          treeKillFailure = `taskkill could not start: ${error.message}`;
+          const diagnostic = formatTaskkillOutput(output.stdout, output.stderr);
+          treeKillFailure = `taskkill could not start: ${error.message}${diagnostic ? `; taskkill output: ${diagnostic}` : ''}`;
           finish();
         };
         const onClose = (code: number | null, signal?: NodeJS.Signals | null) => {
-          if (code !== 0 || (signal !== null && signal !== undefined)) {
-            treeKillFailure = `taskkill exited with ${signal ? `signal ${signal}` : `code ${String(code)}`}`;
+          const confirmation = confirmTaskkillTree({
+            rootPid: child.pid!, exitCode: code, signal: signal ?? null,
+            stdout: output.stdout, stderr: output.stderr, truncated: output.truncated,
+          });
+          if (!confirmation.confirmed) {
+            const diagnostic = formatTaskkillOutput(output.stdout, output.stderr);
+            const status = signal ? `signal ${signal}` : `code ${String(code)}`;
+            treeKillFailure = `taskkill exited with ${status} and did not confirm the complete process tree: ${confirmation.reason}${diagnostic ? `; taskkill output: ${diagnostic}` : ''}`;
           } else {
             treeKillSucceeded = true;
             confirmedTreeKills.add(child);
@@ -177,16 +202,24 @@ export async function killProcessTree(child: ChildLike | undefined, timeoutMs = 
           finish();
         };
         try {
-          killer = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+          killer = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
         } catch (error) {
           treeKillFailure = `taskkill could not start: ${error instanceof Error ? error.message : String(error)}`;
           resolve();
           return;
         }
+        for (const stream of ['stdout', 'stderr'] as const) {
+          killer[stream]?.on('data', (chunk: Buffer | string) => {
+            const incoming = chunk.toString();
+            if (output[stream].length + incoming.length > maxOutputChars) output.truncated = true;
+            output[stream] = (output[stream] + incoming).slice(0, maxOutputChars);
+          });
+        }
         killer.on('error', onError);
         killer.on('close', onClose);
         timer = setTimeout(() => {
-          treeKillFailure = `taskkill did not finish within ${treeKillTimeout}ms`;
+          const diagnostic = formatTaskkillOutput(output.stdout, output.stderr);
+          treeKillFailure = `taskkill did not finish within ${treeKillTimeout}ms${diagnostic ? `; taskkill output: ${diagnostic}` : ''}`;
           try { killer.kill(); } catch { /* best effort */ }
           finish();
         }, treeKillTimeout);
@@ -199,8 +232,8 @@ export async function killProcessTree(child: ChildLike | undefined, timeoutMs = 
     // signal is not evidence that Chromium descendants were terminated.
     treeKillFailure = `process-tree termination is unsupported on ${process.platform}`;
   }
-  const remainingMs = Math.max(0, deadline - Date.now());
-  const exit = waitForChildExit(child, remainingMs);
+  // Also target the direct process as a fallback; descendants are only
+  // considered confirmed when taskkill itself succeeds.
   try { child.kill('SIGKILL'); } catch { /* observe exit below; report if unresolved */ }
   const sidecarExit = await exit;
   if (!sidecarExit.exited || treeKillFailure) {
@@ -238,6 +271,7 @@ export class RuntimeClient {
   private shutdownPromise?: Promise<void>;
   private stopping = false;
   private needsReopen = false;
+  private readonly stderrOutput = new WeakMap<ChildLike, string>();
 
   constructor(
     readonly sessionPath: string,
@@ -263,7 +297,10 @@ export class RuntimeClient {
       try { for (const record of this.decoder.push(chunk)) this.handleRecord(record); }
       catch (error) { void this.failAndRecover(error instanceof Error ? error : new Error(String(error))).catch(() => {}); }
     });
-    child.stderr?.on('data', () => { /* sidecar diagnostics are intentionally not copied into model context */ });
+    child.stderr?.on('data', (chunk) => {
+      const output = `${this.stderrOutput.get(child) ?? ''}${chunk.toString('utf8')}`;
+      this.stderrOutput.set(child, output.slice(-8192));
+    });
     child.on('error', (error) => { if (child === this.child) void this.failAndRecover(error).catch(() => {}); });
     child.on('exit', (code, signal) => { markChildExited(child, code, signal ?? null); });
     child.on('close', (code, signal) => {
@@ -272,6 +309,19 @@ export class RuntimeClient {
         void this.failAndRecover(new PlaywrightRuntimeError('BROWSER_CRASHED', 'Playwright sidecar exited unexpectedly. All browser sessions are gone.', false)).catch(() => {});
       }
     });
+  }
+
+  private cleanupDiagnostic(child: ChildLike): string | undefined {
+    const lines = (this.stderrOutput.get(child) ?? '').split(/\r?\n/);
+    const diagnostic = lines.filter((line) => line.startsWith('[pie:playwright-cleanup] ')).slice(-3).join(' ');
+    return diagnostic ? diagnostic.slice(0, 2000) : undefined;
+  }
+
+  private includeCleanupDiagnostic(child: ChildLike, error: Error): Error {
+    const diagnostic = this.cleanupDiagnostic(child);
+    return diagnostic
+      ? new PlaywrightRuntimeError('RUNTIME_CLEANUP_UNRESOLVED', `${error.message} ${diagnostic}`, false)
+      : error;
   }
 
   private write(record: unknown): void {
@@ -393,7 +443,7 @@ export class RuntimeClient {
       if (child) {
         try { await killProcessTree(child, this.shutdownTimeoutMs); }
         catch (error) {
-          rejection = error instanceof Error ? error : new Error(String(error));
+          rejection = this.includeCleanupDiagnostic(child, error instanceof Error ? error : new Error(String(error)));
           this.unresolvedCleanup = { child, error: rejection };
         }
       }
@@ -437,7 +487,7 @@ export class RuntimeClient {
         if (!graceful) {
           try { await killProcessTree(child, this.shutdownTimeoutMs); }
           catch (error) {
-            const cleanupError = error instanceof Error ? error : new Error(String(error));
+            const cleanupError = this.includeCleanupDiagnostic(child, error instanceof Error ? error : new Error(String(error)));
             this.unresolvedCleanup = { child, error: cleanupError };
             throw cleanupError;
           }
@@ -449,7 +499,10 @@ export class RuntimeClient {
     }
   }
 
-  killForTesting(): void { killProcessTreeSync(this.child); }
+  async killForTesting(): Promise<void> {
+    await this.failAndRecover(new PlaywrightRuntimeError('RUNTIME_REOPEN_REQUIRED', REOPEN_MESSAGE, false));
+  }
+  killForProcessExit(): void { killProcessTreeSync(this.child); }
 }
 
 export class RuntimeRegistry {
@@ -499,8 +552,8 @@ export class RuntimeRegistry {
     }
   }
   killAllSync(): void {
-    for (const client of this.clients.values()) client.killForTesting();
-    for (const client of this.childClients.values()) client.killForTesting();
+    for (const client of this.clients.values()) client.killForProcessExit();
+    for (const client of this.childClients.values()) client.killForProcessExit();
   }
   get size(): number { return this.clients.size + this.childClients.size; }
 }

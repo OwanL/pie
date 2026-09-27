@@ -1,4 +1,63 @@
 const MAX_JSONL_BYTES = 1024 * 1024;
+const TASKKILL_SUCCESS = /^SUCCESS: The process with PID (\d+)(?: \(child process of PID \d+\))? has been terminated\.$/i;
+const TASKKILL_ERROR_HEADER = /^ERROR: The process with PID \d+(?: \(child process of PID \d+\))? could not be terminated\.$/i;
+const TASKKILL_NO_INSTANCE = /^ERROR: The process with PID (\d+)(?: \(child process of PID \d+\))? could not be terminated\. Reason: There is no running instance of the task\.$/i;
+const TASKKILL_REASON = /^Reason:.+$/i;
+
+function inspectProcess(pid) {
+  try {
+    process.kill(pid, 0);
+    return { status: 'live' };
+  } catch (error) {
+    if (error?.code === 'ESRCH') return { status: 'absent' };
+    return { status: 'unknown', reason: error?.code ?? error?.message ?? String(error) };
+  }
+}
+
+/**
+ * Preserves taskkill's exit-0 success contract across Windows locales. For
+ * nonzero exits, confirm only fully recognized output and independently verify
+ * that every reported target PID is gone.
+ */
+export function confirmTaskkillTree({ rootPid, exitCode, signal = null, stdout = '', stderr = '', truncated = false, probePid = inspectProcess }) {
+  const reject = (reason) => ({ confirmed: false, reason });
+  if (!Number.isSafeInteger(rootPid) || rootPid <= 0) return reject('the requested root PID is invalid');
+  if (signal) return reject(`taskkill was terminated by signal ${signal}`);
+  if (exitCode === 0) return { confirmed: true };
+  if (truncated) return reject('taskkill output was truncated');
+  if (![128, 255].includes(exitCode)) return reject(`taskkill exited with unrecognized code ${String(exitCode)}`);
+
+  const streams = [stdout, stderr].map((text) => String(text ?? '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
+  const pids = new Set();
+  if (streams.every((lines) => lines.length === 0)) return reject('taskkill produced no process report');
+  for (const lines of streams) {
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index];
+      let match = TASKKILL_SUCCESS.exec(line);
+      if (!match && TASKKILL_ERROR_HEADER.test(line)) {
+        const reason = lines[index + 1];
+        if (!TASKKILL_REASON.test(reason ?? '')) return reject(`taskkill output contains an unrecognized diagnostic: ${line}`);
+        match = TASKKILL_NO_INSTANCE.exec(`${line} ${reason}`);
+        if (!match) return reject(`taskkill output contains an unrecognized diagnostic: ${line} ${reason}`);
+        index += 1;
+      }
+      if (!match) return reject(`taskkill output contains an unrecognized diagnostic: ${line}`);
+      const pid = Number(match[1]);
+      if (!Number.isSafeInteger(pid) || pid <= 0) return reject('taskkill reported an invalid PID');
+      pids.add(pid);
+    }
+  }
+  if (!pids.has(rootPid)) return reject(`taskkill output did not report requested root PID ${rootPid}`);
+
+  for (const pid of pids) {
+    let status;
+    try { status = probePid(pid); }
+    catch (error) { return reject(`could not verify reported PID ${pid} is absent (${error?.code ?? error?.message ?? String(error)})`); }
+    if (status?.status === 'live') return reject(`reported PID ${pid} is still live`);
+    if (status?.status !== 'absent') return reject(`could not verify reported PID ${pid} is absent (${status?.reason ?? 'unknown process state'})`);
+  }
+  return { confirmed: true, pids: [...pids] };
+}
 
 export class SidecarJsonlDecoder {
   constructor() { this.buffer = Buffer.alloc(0); this.discardingOversizedRecord = false; this.errors = []; }

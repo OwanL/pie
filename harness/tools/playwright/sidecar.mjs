@@ -34,6 +34,7 @@ async function stop(code) {
   // A zero exit is the parent's existing cleanup acknowledgement: backend and
   // browser-server teardown must have completed, not merely been attempted.
   let cleanupConfirmed = false;
+  let shutdownError;
   let shutdownTimer;
   try {
     await Promise.race([
@@ -41,7 +42,7 @@ async function stop(code) {
       new Promise((_, reject) => { shutdownTimer = setTimeout(() => reject(new Error('Sidecar shutdown exceeded its cleanup budget.')), 5000); }),
     ]);
     cleanupConfirmed = true;
-  } catch { /* force every retained browser owner below before deciding exit status */ }
+  } catch (error) { shutdownError = error; }
   finally { if (shutdownTimer) clearTimeout(shutdownTimer); }
   // closeSession can consume its grace budget before it reaches browserServer.
   // Parent death has no surviving RuntimeClient watchdog, so force every live
@@ -49,8 +50,10 @@ async function stop(code) {
   try {
     await backend.forceKillAll();
     cleanupConfirmed = true;
-  } catch {
+  } catch (error) {
     cleanupConfirmed = false;
+    const detail = [shutdownError, error].filter(Boolean).map((failure) => failure?.message ?? String(failure)).join(' ');
+    console.error(`[pie:playwright-cleanup] ${detail || 'Runtime cleanup could not be confirmed.'}`);
   }
   process.stdin.pause();
   process.exit(code === 0 && cleanupConfirmed ? 0 : 1);

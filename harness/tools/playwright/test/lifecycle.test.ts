@@ -87,7 +87,7 @@ test('force-killing a live sidecar terminates its Chromium process tree and inva
     client.markReopened();
     const pids = await client.request('debug_pids', {}, { timeoutMs: 10_000 }) as unknown as { sidecarPid: number; browserPids: number[] };
     assert.equal(pids.browserPids.length, 1);
-    client.killForTesting();
+    await client.killForTesting();
     await waitForExit(pids.sidecarPid);
     await Promise.all(pids.browserPids.map((pid) => waitForExit(pid)));
     await waitForState(() => client.state === 'needs_reopen');
@@ -151,7 +151,7 @@ test('backend forced browser-close fallback terminates the full browser process 
         if (Number.isInteger(parsed) && parsed > 0) { clearTimeout(timer); resolve(parsed); }
       });
     });
-    const backend = new PlaywrightBackend({ closeGraceMs: 50 });
+    const backend = new PlaywrightBackend({ closeGraceMs: 5000 });
     const never = new Promise<void>(() => {});
     const session = backend.makeSession('forced-close', { artifactDir: tmpdir() });
     session.browser = { close: async () => await never };

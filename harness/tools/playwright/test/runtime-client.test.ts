@@ -179,6 +179,7 @@ test('graceful shutdown rejects a sidecar exit that does not confirm cleanup', a
       if (record.kind === 'shutdown') {
         this.killed = true;
         this.exitCode = 1;
+        this.stderr.emit('data', Buffer.from('[pie:playwright-cleanup] taskkill exited with code 128; stderr: injected cleanup detail\\n'));
         queueMicrotask(() => {
           this.emit('exit', 1, null);
           this.emit('close', 1, null);
@@ -197,7 +198,9 @@ test('graceful shutdown rejects a sidecar exit that does not confirm cleanup', a
   await client.request('ping', {});
   await assert.rejects(
     () => client.shutdown(),
-    (error: unknown) => error instanceof PlaywrightRuntimeError && error.code === 'RUNTIME_CLEANUP_UNRESOLVED',
+    (error: unknown) => error instanceof PlaywrightRuntimeError
+      && error.code === 'RUNTIME_CLEANUP_UNRESOLVED'
+      && /injected cleanup detail/.test(error.message),
   );
   assert.equal(children[0]!.exitCode, 1);
   await assert.rejects(
@@ -211,10 +214,14 @@ test('Windows tree-kill failure remains unresolved even when the sidecar fallbac
   assert.ok(platform);
   Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
   try {
-    const taskkill = new EventEmitter() as EventEmitter & { kill(): boolean };
+    const taskkill = new EventEmitter() as EventEmitter & { kill(): boolean; stderr: EventEmitter };
     taskkill.kill = () => true;
+    taskkill.stderr = new EventEmitter();
     const spawnMock = t.mock.method(childProcess, 'spawn', (() => {
-      queueMicrotask(() => taskkill.emit('close', 1, null));
+      queueMicrotask(() => {
+        taskkill.stderr.emit('data', Buffer.from('ERROR: injected taskkill diagnostic'));
+        taskkill.emit('close', 1, null);
+      });
       return taskkill as never;
     }) as typeof childProcess.spawn);
     syncBuiltinESMExports();
@@ -223,7 +230,8 @@ test('Windows tree-kill failure remains unresolved even when the sidecar fallbac
       () => killProcessTree(child as never, 100),
       (error: unknown) => error instanceof PlaywrightRuntimeError
         && error.code === 'RUNTIME_CLEANUP_UNRESOLVED'
-        && /tree termination failed/i.test(error.message),
+        && /tree termination failed/i.test(error.message)
+        && /injected taskkill diagnostic/.test(error.message),
     );
     assert.equal(child.killed, true, 'direct sidecar termination remains the fallback');
     await assert.rejects(
@@ -234,6 +242,75 @@ test('Windows tree-kill failure remains unresolved even when the sidecar fallbac
       'a later retry preserves the failed descendant evidence after sidecar exit',
     );
     assert.equal(spawnMock.mock.callCount(), 1, 'an exited sidecar PID is never reused for another taskkill');
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    Object.defineProperty(process, 'platform', platform);
+  }
+});
+
+test('a clean sidecar exit cannot rescue taskkill root NOT_FOUND when descendants were not enumerated', async (t) => {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  assert.ok(platform);
+  Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+  try {
+    const child = new FakeChild(7129, []);
+    const taskkill = new EventEmitter() as EventEmitter & { kill(): boolean; stderr: EventEmitter };
+    taskkill.kill = () => true;
+    taskkill.stderr = new EventEmitter();
+    const spawnMock = t.mock.method(childProcess, 'spawn', (() => {
+      queueMicrotask(() => {
+        child.exitCleanly();
+        taskkill.stderr.emit('data', Buffer.from('ERROR: The process "7129" not found.'));
+        taskkill.emit('close', 128, null);
+      });
+      return taskkill as never;
+    }) as typeof childProcess.spawn);
+    syncBuiltinESMExports();
+
+    await assert.rejects(
+      () => killProcessTree(child as never, 100),
+      (error: unknown) => error instanceof PlaywrightRuntimeError
+        && error.code === 'RUNTIME_CLEANUP_UNRESOLVED'
+        && /unrecognized diagnostic: ERROR: The process "7129" not found\./i.test(error.message),
+    );
+    assert.equal(child.exitCode, 0, 'the root exited, but that alone cannot confirm its descendants');
+    assert.equal(spawnMock.mock.callCount(), 1);
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    Object.defineProperty(process, 'platform', platform);
+  }
+});
+
+test('Windows tree kill can use the full cleanup budget while sidecar exit is observed concurrently', async (t) => {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  assert.ok(platform);
+  Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+  try {
+    const nativeProcessKill = process.kill.bind(process);
+    t.mock.method(process, 'kill', ((pid: number, signal?: NodeJS.Signals | number) => {
+      if (pid === 7130 && signal === 0) throw Object.assign(new Error('no such process'), { code: 'ESRCH' });
+      return nativeProcessKill(pid, signal);
+    }) as typeof process.kill);
+    const child = new FakeChild(7130, []);
+    const taskkill = new EventEmitter() as EventEmitter & { kill(): boolean; stdout: EventEmitter };
+    taskkill.kill = () => true;
+    taskkill.stdout = new EventEmitter();
+    const spawnMock = t.mock.method(childProcess, 'spawn', (() => {
+      // Complete after more than half the overall bound but before its deadline.
+      setTimeout(() => {
+        child.exitCleanly();
+        taskkill.stdout.emit('data', Buffer.from('SUCCESS: The process with PID 7130 (child process of PID 4728) has been terminated.'));
+        taskkill.emit('close', 0, null);
+      }, 150);
+      return taskkill as never;
+    }) as typeof childProcess.spawn);
+    syncBuiltinESMExports();
+
+    await killProcessTree(child as never, 200);
+    assert.equal(child.exitCode, 0);
+    assert.equal(spawnMock.mock.callCount(), 1);
   } finally {
     t.mock.restoreAll();
     syncBuiltinESMExports();

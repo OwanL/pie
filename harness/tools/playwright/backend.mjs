@@ -1,7 +1,7 @@
 // Playwright sidecar backend. This is the only module (with its imports) that
 // loads Playwright or starts Chromium; the parent process never does. Keep
 // wire constants in sync with types.ts.
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createWriteStream, existsSync } from 'node:fs';
 import { mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
@@ -11,6 +11,7 @@ import path from 'node:path';
 import { requirePlaywrightDependency } from './dependency-owner.mjs';
 import { createDisplayPng } from './image.mjs';
 import { captureBoundedSnapshot, extractRefs } from './snapshots.mjs';
+import { confirmTaskkillTree } from './sidecar-core.mjs';
 
 const { chromium } = requirePlaywrightDependency('playwright');
 
@@ -56,6 +57,59 @@ function sanitizeName(value) {
 }
 function delay(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 function cleanupUnresolved(message) { return coded('RUNTIME_CLEANUP_UNRESOLVED', `${message} Runtime cleanup remains unresolved.`); }
+function runTaskkill(spawnProcess, pid, timeoutMs) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer;
+    let killer;
+    const output = { stdout: '', stderr: '', truncated: false };
+    const maxOutputChars = 8192;
+    const diagnostic = () => Object.entries(output)
+      .filter(([stream, text]) => stream !== 'truncated' && text.trim())
+      .map(([stream, text]) => `${stream}: ${bound(text.trim().replace(/\s+/g, ' '), 4000)}`)
+      .join('; ');
+    const failure = (reason) => `${reason}${diagnostic() ? `; taskkill output: ${diagnostic()}` : ''}`;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      killer?.off('error', onError);
+      killer?.off('close', onClose);
+      resolve(result);
+    };
+    const onError = (error) => finish({ ok: false, error: failure(`taskkill could not start: ${error.message}`) });
+    const onClose = (code, signal) => {
+      const confirmation = confirmTaskkillTree({
+        rootPid: pid, exitCode: code, signal, stdout: output.stdout, stderr: output.stderr, truncated: output.truncated,
+      });
+      if (!confirmation.confirmed) {
+        const status = signal ? `signal ${signal}` : `code ${String(code)}`;
+        finish({ ok: false, code, error: failure(`taskkill exited with ${status} and did not confirm the complete process tree: ${confirmation.reason}`) });
+      } else {
+        finish({ ok: true });
+      }
+    };
+    try {
+      killer = spawnProcess('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    } catch (error) {
+      finish({ ok: false, error: `taskkill could not start: ${error?.message ?? String(error)}` });
+      return;
+    }
+    for (const stream of ['stdout', 'stderr']) {
+      killer[stream]?.on('data', (chunk) => {
+        const incoming = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
+        if (output[stream].length + incoming.length > maxOutputChars) output.truncated = true;
+        output[stream] = (output[stream] + incoming).slice(0, maxOutputChars);
+      });
+    }
+    killer.on('error', onError);
+    killer.on('close', onClose);
+    timer = setTimeout(() => {
+      try { killer.kill(); } catch { /* best effort; descendants remain unconfirmed */ }
+      finish({ ok: false, error: failure(`taskkill did not finish within ${timeoutMs}ms`) });
+    }, Math.max(1, timeoutMs));
+  });
+}
 function processHasExited(child) {
   return (child.exitCode !== undefined && child.exitCode !== null)
     || (child.signalCode !== undefined && child.signalCode !== null);
@@ -91,7 +145,7 @@ export class PlaywrightBackend {
     this.closingSessions = new Set();
     this.sessionTeardowns = new WeakMap();
     this.closeGraceMs = options.closeGraceMs ?? 5000;
-    this.spawnSync = options.spawnSync ?? spawnSync;
+    this.spawn = options.spawn ?? spawn;
     this.limits = {
       imageBytes: options.maxImageArtifactBytes ?? MAX_IMAGE_ARTIFACT_BYTES,
       downloadBytes: options.maxDownloadArtifactBytes ?? MAX_DOWNLOAD_ARTIFACT_BYTES,
@@ -249,7 +303,7 @@ export class PlaywrightBackend {
     }
   }
 
-  async forceKillBrowserSession(session, gracefulCloseConfirmed = () => false) {
+  async forceKillBrowserSession(session) {
     const browserServer = session.browserServer;
     if (!browserServer) return;
     let processHandle;
@@ -261,29 +315,25 @@ export class PlaywrightBackend {
 
     const priorTreeFailure = unresolvedBrowserTreeKills.get(processHandle);
     if (processHasExited(processHandle)) {
-      if (gracefulCloseConfirmed()) {
+      if (priorTreeFailure) throw cleanupUnresolved(`Windows process-tree termination failed (${priorTreeFailure}); Chromium descendants may remain.`);
+      if (confirmedBrowserTreeKills.has(processHandle)) {
         unresolvedBrowserTreeKills.delete(processHandle);
         return;
       }
-      if (priorTreeFailure) throw cleanupUnresolved(`Windows process-tree termination failed (${priorTreeFailure}); Chromium descendants may remain.`);
-      if (confirmedBrowserTreeKills.has(processHandle)) return;
       // The browser PID may already have been reused. Never retry a tree kill
       // after the owned process exits without prior tree-cleanup evidence.
       throw cleanupUnresolved(`Playwright browser process ${processHandle.pid ?? '(unknown PID)'} exited before descendant cleanup was confirmed.`);
     }
 
+    const exit = waitForProcessExit(processHandle, this.closeGraceMs);
     let treeFailure;
     if (process.platform === 'win32' && processHandle.pid && !confirmedBrowserTreeKills.has(processHandle)) {
-      try {
-        const result = this.spawnSync('taskkill', ['/PID', String(processHandle.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
-        if (result.error || result.status !== 0 || result.signal) {
-          treeFailure = result.error?.message ?? `taskkill exited with ${result.signal ? `signal ${result.signal}` : `code ${String(result.status)}`}`;
-        } else {
-          confirmedBrowserTreeKills.add(processHandle);
-          unresolvedBrowserTreeKills.delete(processHandle);
-        }
-      } catch (error) {
-        treeFailure = error instanceof Error ? error.message : String(error);
+      const result = await runTaskkill(this.spawn, processHandle.pid, this.closeGraceMs);
+      if (result.ok) {
+        confirmedBrowserTreeKills.add(processHandle);
+        unresolvedBrowserTreeKills.delete(processHandle);
+      } else {
+        treeFailure = result.error;
       }
     } else if (process.platform !== 'win32' || !processHandle.pid) {
       treeFailure = process.platform === 'win32'
@@ -292,11 +342,7 @@ export class PlaywrightBackend {
     }
 
     try { processHandle.kill('SIGKILL'); } catch { /* still wait for observed process exit */ }
-    const exited = await waitForProcessExit(processHandle, this.closeGraceMs);
-    if (exited && gracefulCloseConfirmed()) {
-      unresolvedBrowserTreeKills.delete(processHandle);
-      return;
-    }
+    const exited = await exit;
     if (treeFailure) unresolvedBrowserTreeKills.set(processHandle, treeFailure);
     if (!exited || treeFailure) {
       const reasons = [
@@ -401,7 +447,6 @@ export class PlaywrightBackend {
     const gracefulCloseConfirmed = () => browserServer
       ? serverAttempt?.outcome?.ok === true
       : !browser || browserAttempt?.outcome?.ok === true;
-
     let processHandle;
     if (browserServer) {
       try { processHandle = browserServer.process(); }
@@ -425,7 +470,7 @@ export class PlaywrightBackend {
     }
 
     try {
-      await this.forceKillBrowserSession(session, gracefulCloseConfirmed);
+      await this.forceKillBrowserSession(session);
       this.finishClosedSession(session);
     } catch (error) {
       failures.push(error);

@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 
-import { PACKAGE_DIRECTIVES, classifyFileToPackage, isGlobalTestInfra, isUnownedCodeSource } from './test-packages.mjs';
+import { PACKAGE_DIRECTIVES, PACKAGE_REGISTRY, classifyFileToPackage, isGlobalTestInfra, isUnownedCodeSource } from './test-packages.mjs';
 import { isProtectedDirectoryName } from './traversal-policy.mjs';
 
 const SOURCE_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.mjs', '.cjs', '.js', '.jsx', '.json', '.css', '.sql', '.yaml', '.yml'];
@@ -15,6 +15,9 @@ const MODEL_CONFIG_TESTS = [
 ];
 const WINDOWS_INSTALLER_PATHS = new Set(['install.bat', '.gitattributes']);
 const WINDOWS_INSTALLER_TESTS = ['scripts/install/test/install-batch.test.mjs'];
+const RETIRED_SOURCE_DIRS = PACKAGE_REGISTRY.flatMap((entry) => entry.retiredSourceDirs ?? []);
+const RETIRED_SOURCE_DIR_SET = new Set(RETIRED_SOURCE_DIRS);
+const CODE_SOURCE = /\.(?:ts|tsx|mts|cts|mjs|cjs|js|jsx)$/u;
 
 function normalize(value) {
   return value.replace(/\\/gu, '/');
@@ -119,7 +122,21 @@ export function impactedTestsForChanges({ files, testFiles, changedFiles, readSo
   return { testFiles: [...impacted].sort(), uncovered };
 }
 
-function owningPackage(file) {
+function isRetiredSourcePath(file) {
+  return RETIRED_SOURCE_DIRS.some((dir) => file === dir || file.startsWith(`${dir}/`));
+}
+
+function isPresentRetiredCodeSource(repoRoot, file) {
+  if (!CODE_SOURCE.test(file) || !isRetiredSourcePath(file)) return false;
+  try {
+    return statSync(path.join(repoRoot, file)).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function owningPackage(repoRoot, file) {
+  if (isPresentRetiredCodeSource(repoRoot, file)) return null;
   return classifyFileToPackage(file) ?? (file.startsWith('scripts/') && file.endsWith('.mjs') ? 'scripts' : null);
 }
 
@@ -127,21 +144,27 @@ export function planAffectedTests(repoRoot, changedFiles) {
   const normalizedChanges = changedFiles.map(normalize);
   if (normalizedChanges.some(isGlobalTestInfra)) return { mode: 'full', testFiles: [], reasons: ['global test infrastructure changed'] };
 
-  // Walking every routed source/test root (PACKAGE_DIRECTIVES) keeps changed,
-  // untracked, renamed, and planned distributed roots enumerable; missing dirs
-  // (declared future roots) are skipped by walkFiles.
+  // Walking the active routed source/test roots (PACKAGE_DIRECTIVES, excluding
+  // retired roots) keeps changed, untracked, renamed, and planned distributed
+  // roots enumerable; missing dirs (declared future roots) are skipped by walkFiles.
   const files = [];
-  for (const { dir } of PACKAGE_DIRECTIVES) walkFiles(repoRoot, dir, files);
+  for (const { dir } of PACKAGE_DIRECTIVES) {
+    // Retired roots stay in the path-only classifier for deleted/old rename
+    // records, but they are not live roots and must not enumerate new sources.
+    if (RETIRED_SOURCE_DIR_SET.has(dir)) continue;
+    walkFiles(repoRoot, dir, files);
+  }
   walkFiles(repoRoot, 'scripts', files);
   const uniqueFiles = [...new Set(files)];
   const testFiles = uniqueFiles.filter((file) => TEST_FILE.test(file));
   const modelConfigChanged = normalizedChanges.some((file) => MODEL_CONFIG_PATHS.has(file));
   const windowsInstallerChanged = normalizedChanges.some((file) => WINDOWS_INSTALLER_PATHS.has(file));
-  const relevantChanges = normalizedChanges.filter((file) => owningPackage(file) !== null);
+  const relevantChanges = normalizedChanges.filter((file) => owningPackage(repoRoot, file) !== null);
   // Unknown ownership (a code file under no registered root — e.g. a moved or
   // newly created distributed root) must broaden verification, never select
   // zero tests.
-  const unownedChanges = normalizedChanges.filter((file) => isUnownedCodeSource(file));
+  const unownedChanges = normalizedChanges.filter((file) =>
+    isUnownedCodeSource(file) || isPresentRetiredCodeSource(repoRoot, file));
   if (relevantChanges.length === 0 && unownedChanges.length === 0 && !modelConfigChanged && !windowsInstallerChanged) {
     return { mode: 'none', testFiles: [], reasons: [] };
   }
@@ -153,8 +176,10 @@ export function planAffectedTests(repoRoot, changedFiles) {
     };
   }
 
-  const allForPackages = new Set(relevantChanges.filter((file) => PACKAGE_CONFIG.test(file)).map(owningPackage));
-  const dependencyChanges = relevantChanges.filter((file) => !allForPackages.has(owningPackage(file)));
+  const allForPackages = new Set(relevantChanges
+    .filter((file) => PACKAGE_CONFIG.test(file))
+    .map((file) => owningPackage(repoRoot, file)));
+  const dependencyChanges = relevantChanges.filter((file) => !allForPackages.has(owningPackage(repoRoot, file)));
   const impact = impactedTestsForChanges({
     files: uniqueFiles,
     testFiles,
@@ -175,13 +200,13 @@ export function planAffectedTests(repoRoot, changedFiles) {
   }
   for (const packageId of allForPackages) {
     for (const testFile of testFiles) {
-      if (owningPackage(testFile) === packageId) selected.add(testFile);
+      if (owningPackage(repoRoot, testFile) === packageId) selected.add(testFile);
     }
   }
   for (const uncovered of impact.uncovered) {
-    const packageId = owningPackage(uncovered);
+    const packageId = owningPackage(repoRoot, uncovered);
     for (const testFile of testFiles) {
-      if (owningPackage(testFile) === packageId) selected.add(testFile);
+      if (owningPackage(repoRoot, testFile) === packageId) selected.add(testFile);
     }
   }
   return {

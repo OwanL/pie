@@ -81,22 +81,25 @@ test('impactedTestsForChanges reports source changes with no dependency edge', (
 async function withFixture(run) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'pie-test-impact-'));
   try {
-    await mkdir(path.join(root, 'extension', 'src'), { recursive: true });
-    await mkdir(path.join(root, 'extension', 'test', 'integration'), { recursive: true });
+    await mkdir(path.join(root, 'application', 'frontend', 'src'), { recursive: true });
+    await mkdir(path.join(root, 'application', 'frontend', 'test', 'integration'), { recursive: true });
     await mkdir(path.join(root, 'scripts', 'test'), { recursive: true });
     await mkdir(path.join(root, 'scripts', 'model-config', 'test'), { recursive: true });
     await mkdir(path.join(root, 'scripts', 'install', 'test'), { recursive: true });
     await mkdir(path.join(root, 'harness', 'model-providers', 'catalog', 'test'), { recursive: true });
-    await writeFile(path.join(root, 'extension', 'src', 'used.ts'), 'export const used = true;');
-    await writeFile(path.join(root, 'extension', 'src', 'orphan.ts'), 'export const orphan = true;');
-    await writeFile(path.join(root, 'extension', 'test', 'used.test.ts'), "import '../src/used';");
-    await writeFile(path.join(root, 'extension', 'test', 'other.test.ts'), 'export {};');
+    await mkdir(path.join(root, 'harness', 'tools', 'ask-user', 'test'), { recursive: true });
+    await writeFile(path.join(root, 'application', 'frontend', 'src', 'used.ts'), 'export const used = true;');
+    await writeFile(path.join(root, 'application', 'frontend', 'src', 'orphan.ts'), 'export const orphan = true;');
+    await writeFile(path.join(root, 'application', 'frontend', 'test', 'used.test.ts'), "import '../src/used';");
+    await writeFile(path.join(root, 'application', 'frontend', 'test', 'other.test.ts'), 'export {};');
     await writeFile(path.join(root, 'scripts', 'model-config', 'test', 'model-config-sync.test.ts'), 'export {};');
     await writeFile(path.join(root, 'harness', 'model-providers', 'catalog', 'test', 'model-profile-coverage.test.ts'), 'export {};');
+    await writeFile(path.join(root, 'harness', 'tools', 'ask-user', 'test', 'loader-shim.test.ts'), 'export {};');
+    await writeFile(path.join(root, 'harness', 'tools', 'ask-user', 'new-source.ts'), 'export const value = true;');
     await writeFile(path.join(root, 'scripts', 'install', 'test', 'install-batch.test.mjs'), 'export {};');
     for (const protectedDir of ['data', 'build', '.pie-sdk-fixture']) {
-      await mkdir(path.join(root, 'extension', protectedDir), { recursive: true });
-      await writeFile(path.join(root, 'extension', protectedDir, `${protectedDir}.test.ts`), 'export {};');
+      await mkdir(path.join(root, 'application', 'frontend', protectedDir), { recursive: true });
+      await writeFile(path.join(root, 'application', 'frontend', protectedDir, `${protectedDir}.test.ts`), 'export {};');
     }
     await run(root);
   } finally {
@@ -106,10 +109,10 @@ async function withFixture(run) {
 
 test('planAffectedTests selects direct dependents and falls back to the package for uncovered source', async () => {
   await withFixture(async (root) => {
-    assert.deepEqual(planAffectedTests(root, ['extension/src/used.ts']).testFiles, ['extension/test/used.test.ts']);
-    assert.deepEqual(planAffectedTests(root, ['extension/src/orphan.ts']).testFiles, [
-      'extension/test/other.test.ts',
-      'extension/test/used.test.ts',
+    assert.deepEqual(planAffectedTests(root, ['application/frontend/src/used.ts']).testFiles, ['application/frontend/test/used.test.ts']);
+    assert.deepEqual(planAffectedTests(root, ['application/frontend/src/orphan.ts']).testFiles, [
+      'application/frontend/test/other.test.ts',
+      'application/frontend/test/used.test.ts',
     ]);
   });
 });
@@ -121,10 +124,32 @@ test('planAffectedTests routes deleted sources to their package without silent z
     const plan = planAffectedTests(root, ['extension/src/deleted-in-worktree.ts']);
     assert.equal(plan.mode, 'files');
     assert.deepEqual(plan.testFiles, [
-      'extension/test/other.test.ts',
-      'extension/test/used.test.ts',
+      'application/frontend/test/other.test.ts',
+      'application/frontend/test/used.test.ts',
     ]);
     assert.ok(plan.reasons.some((reason) => reason.includes('deleted-in-worktree.ts')));
+  });
+});
+
+test('planAffectedTests routes deleted retired sources but broadens for present source in retired dirs', async () => {
+  await withFixture(async (root) => {
+    const deleted = planAffectedTests(root, ['tools/ask-user/deleted-source.ts']);
+    assert.equal(deleted.mode, 'files');
+    assert.deepEqual(deleted.testFiles, ['harness/tools/ask-user/test/loader-shim.test.ts']);
+
+    const renamed = planAffectedTests(root, [
+      'tools/ask-user/old-source.ts',
+      'harness/tools/ask-user/new-source.ts',
+    ]);
+    assert.equal(renamed.mode, 'files');
+    assert.deepEqual(renamed.testFiles, ['harness/tools/ask-user/test/loader-shim.test.ts']);
+
+    await mkdir(path.join(root, 'tools', 'ask-user'), { recursive: true });
+    await writeFile(path.join(root, 'tools', 'ask-user', 'new-source.ts'), 'export const value = true;');
+    const present = planAffectedTests(root, ['tools/ask-user/new-source.ts']);
+    assert.equal(present.mode, 'full');
+    assert.deepEqual(present.testFiles, []);
+    assert.ok(present.reasons.some((reason) => reason.includes('tools/ask-user/new-source.ts')));
   });
 });
 
@@ -132,11 +157,11 @@ test('planAffectedTests merges rename old/new paths and never duplicates selecti
   await withFixture(async (root) => {
     // A rename reaches the runner as both the old and the new path; the old
     // path no longer exists on disk while the new one is untracked.
-    const plan = planAffectedTests(root, ['extension/src/used.ts', 'extension/src/renamed.ts']);
+    const plan = planAffectedTests(root, ['application/frontend/src/used.ts', 'application/frontend/src/renamed.ts']);
     assert.equal(plan.mode, 'files');
     assert.deepEqual(plan.testFiles, [
-      'extension/test/other.test.ts',
-      'extension/test/used.test.ts',
+      'application/frontend/test/other.test.ts',
+      'application/frontend/test/used.test.ts',
     ]);
   });
 });
@@ -150,7 +175,7 @@ test('planAffectedTests broadens to the full suite for unknown-ownership code fi
     assert.ok(unowned.reasons.some((reason) => reason.includes('harness/session-storage/new-store.ts')));
 
     // Broadening dominates even alongside owned changes.
-    const mixed = planAffectedTests(root, ['extension/src/used.ts', 'application/backend/new-action.ts']);
+    const mixed = planAffectedTests(root, ['application/frontend/src/used.ts', 'application/backend/new-action.ts']);
     assert.equal(mixed.mode, 'full');
 
     // Non-code unknown paths keep the narrow behavior.
@@ -161,8 +186,8 @@ test('planAffectedTests broadens to the full suite for unknown-ownership code fi
 test('planAffectedTests selects a package for manifest changes and full suite for global infrastructure', async () => {
   await withFixture(async (root) => {
     assert.deepEqual(planAffectedTests(root, ['application/hosts/vscode/package.json']).testFiles, [
-      'extension/test/other.test.ts',
-      'extension/test/used.test.ts',
+      'application/frontend/test/other.test.ts',
+      'application/frontend/test/used.test.ts',
     ]);
     assert.deepEqual(planAffectedTests(root, ['models.yaml']).testFiles, [
       'harness/model-providers/catalog/test/model-profile-coverage.test.ts',

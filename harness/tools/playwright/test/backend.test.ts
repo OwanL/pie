@@ -512,7 +512,20 @@ test('browser close and Windows tree-kill failures remain unresolved after the b
   let taskkillCalls = 0;
   const backend = new PlaywrightBackend({
     closeGraceMs: 5,
-    spawnSync: () => { taskkillCalls += 1; return { status: 1, signal: null }; },
+    spawn: () => {
+      taskkillCalls += 1;
+      const child = new EventEmitter() as EventEmitter & { kill(): boolean; stderr: EventEmitter };
+      child.kill = () => true;
+      child.stderr = new EventEmitter();
+      queueMicrotask(() => {
+        processHandle.signalCode = 'SIGTERM';
+        processHandle.emit('exit', null, 'SIGTERM');
+        processHandle.emit('close', null, 'SIGTERM');
+        child.stderr.emit('data', Buffer.from('ERROR: The process with PID 7123 (child process of PID 4728) could not be terminated.\r\nReason: Access is denied.\r\n'));
+        child.emit('close', 128, null);
+      });
+      return child;
+    },
   });
   const processHandle = new EventEmitter() as EventEmitter & {
     pid: number; exitCode: number | null; signalCode: NodeJS.Signals | null; kill(signal?: string): boolean;
@@ -520,14 +533,7 @@ test('browser close and Windows tree-kill failures remain unresolved after the b
   processHandle.pid = 7123;
   processHandle.exitCode = null;
   processHandle.signalCode = null;
-  processHandle.kill = () => {
-    queueMicrotask(() => {
-      processHandle.signalCode = 'SIGKILL';
-      processHandle.emit('exit', null, 'SIGKILL');
-      processHandle.emit('close', null, 'SIGKILL');
-    });
-    return true;
-  };
+  processHandle.kill = () => false;
   const session = backend.makeSession('cleanup-failure', { artifactDir: tmpdir() });
   session.browser = { close: async () => { throw new Error('injected browser close failure'); } };
   session.browserServer = {
@@ -540,7 +546,9 @@ test('browser close and Windows tree-kill failures remain unresolved after the b
       () => backend.closeSession(session),
       (error: unknown) => errorCode(error, 'RUNTIME_CLEANUP_UNRESOLVED')
         && /browser close failure/.test((error as Error).message)
-        && /tree termination failed/i.test((error as Error).message),
+        && /tree termination failed/i.test((error as Error).message)
+        && /code 128/i.test((error as Error).message)
+        && /7123.*Access is denied/i.test((error as Error).message),
     );
     assert.equal(backend.closingSessions.has(session), true, 'unresolved browser ownership remains retained');
     assert.equal(session.browserServer !== undefined, true, 'the process handle remains available for safe retry');
