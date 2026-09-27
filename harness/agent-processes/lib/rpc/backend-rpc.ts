@@ -24,6 +24,12 @@ import {
 } from '../../../model-providers/concurrency/provider-concurrency.js';
 import { isPendingTabPath } from '../../../../lib/session-path.js';
 import {
+  DEFAULT_SUBAGENT_MAX_INFLIGHT,
+  MAX_SUBAGENT_MAX_INFLIGHT,
+  MIN_SUBAGENT_MAX_INFLIGHT,
+  type ConcurrencyLimitSource,
+} from '../../../../lib/concurrency-config.js';
+import {
   isDetailCursor,
   isDetailPageRef,
   isLiveSubagentDetailAddress,
@@ -629,6 +635,10 @@ export interface SettingsSetParams extends Partial<ModelSettings> {
   sessionPath?: string;
 }
 
+export interface RuntimePrefsSetParamsWithConcurrencySource extends RuntimePrefsSetParams {
+  subagentMaxInflightSource?: Extract<ConcurrencyLimitSource, 'configured-default' | 'saved-preference'>;
+}
+
 function validateOptionalInt(
   method: string,
   fieldName: string,
@@ -929,7 +939,7 @@ function validateOptionalHistoryCompaction(
   };
 }
 
-export function validateRuntimePrefsSet(params: unknown): RuntimePrefsSetParams {
+export function validateRuntimePrefsSet(params: unknown): RuntimePrefsSetParamsWithConcurrencySource {
   if (!isObj(params)) fail('runtimePrefs.set', 'expected an object');
   const providerToggles = validateBooleanMap(
     'runtimePrefs.set',
@@ -987,7 +997,26 @@ export function validateRuntimePrefsSet(params: unknown): RuntimePrefsSetParams 
   );
   const rawSubagentDropTools = (params as Record<string, unknown>)['subagentDropTools'];
   const subagentDropTools = rawSubagentDropTools === undefined ? undefined : Array.isArray(rawSubagentDropTools) && rawSubagentDropTools.every((entry) => typeof entry === 'string') ? [...(rawSubagentDropTools as string[])] : fail('runtimePrefs.set', 'subagentDropTools must be an array of strings when provided');
-  const subagentMaxInflight = validateOptionalInt('runtimePrefs.set', 'subagentMaxInflight', (params as Record<string, unknown>)['subagentMaxInflight'], 1, 16);
+  const subagentMaxInflight = validateOptionalInt(
+    'runtimePrefs.set',
+    'subagentMaxInflight',
+    (params as Record<string, unknown>)['subagentMaxInflight'],
+    MIN_SUBAGENT_MAX_INFLIGHT,
+    MAX_SUBAGENT_MAX_INFLIGHT,
+  );
+  const rawSubagentMaxInflightSource = (params as Record<string, unknown>)['subagentMaxInflightSource'];
+  const subagentMaxInflightSource = rawSubagentMaxInflightSource === undefined
+    ? undefined
+    : rawSubagentMaxInflightSource === 'configured-default' || rawSubagentMaxInflightSource === 'saved-preference'
+      ? rawSubagentMaxInflightSource
+      : fail('runtimePrefs.set', 'subagentMaxInflightSource must be configured-default or saved-preference when provided');
+  if (subagentMaxInflightSource !== undefined && subagentMaxInflight === undefined) {
+    fail('runtimePrefs.set', 'subagentMaxInflightSource requires subagentMaxInflight');
+  }
+  if (subagentMaxInflightSource === 'configured-default'
+    && subagentMaxInflight !== DEFAULT_SUBAGENT_MAX_INFLIGHT) {
+    fail('runtimePrefs.set', 'configured-default must equal the shared default for subagentMaxInflight');
+  }
   const bashWarmPoolSize = validateOptionalInt('runtimePrefs.set', 'bashWarmPoolSize', (params as Record<string, unknown>)['bashWarmPoolSize'], 0, 8);
   const rawBashFastPath = (params as Record<string, unknown>)['bashFastPath'];
   const bashFastPath = rawBashFastPath === undefined ? undefined : typeof rawBashFastPath === 'boolean' ? rawBashFastPath : fail('runtimePrefs.set', 'bashFastPath must be a boolean when provided');
@@ -997,7 +1026,7 @@ export function validateRuntimePrefsSet(params: unknown): RuntimePrefsSetParams 
   const bashDefaultTimeout = validateOptionalInt('runtimePrefs.set', 'bashDefaultTimeout', (params as Record<string, unknown>)['bashDefaultTimeout'], 1, 600);
   const providerConcurrency = validateOptionalProviderConcurrency('runtimePrefs.set', (params as Record<string, unknown>)['providerConcurrency']);
   const historyCompaction = validateOptionalHistoryCompaction((params as Record<string, unknown>)['historyCompaction']);
-  return { providerToggles, ...(subagentProviderDefaults !== undefined ? { subagentProviderDefaults } : {}), ...(subagentProviderTogglesBySession !== undefined ? { subagentProviderTogglesBySession } : {}), extensionToggles, autonomousMode, mcpEnabled, subagentAlwaysParentModel, subagentRouteAroundSaturatedProviders, subagentFallbackOnProviderFailure, subagentMaxDepth, subagentMaxTreeSessions, subagentMaxInflight, bashWarmPoolSize, bashFastPath, bashShellPath, bashWarmupTimeoutMs, bashDefaultTimeout, subagentBuckets, subagentNestedAllowedBuckets, subagentBucketCanSpawn, subagentDropTools, providerConcurrency, ...(historyCompaction !== undefined ? { historyCompaction } : {}) };
+  return { providerToggles, ...(subagentProviderDefaults !== undefined ? { subagentProviderDefaults } : {}), ...(subagentProviderTogglesBySession !== undefined ? { subagentProviderTogglesBySession } : {}), extensionToggles, autonomousMode, mcpEnabled, subagentAlwaysParentModel, subagentRouteAroundSaturatedProviders, subagentFallbackOnProviderFailure, subagentMaxDepth, subagentMaxTreeSessions, subagentMaxInflight, ...(subagentMaxInflightSource !== undefined ? { subagentMaxInflightSource } : {}), bashWarmPoolSize, bashFastPath, bashShellPath, bashWarmupTimeoutMs, bashDefaultTimeout, subagentBuckets, subagentNestedAllowedBuckets, subagentBucketCanSpawn, subagentDropTools, providerConcurrency, ...(historyCompaction !== undefined ? { historyCompaction } : {}) };
 }
 
 export interface McpSetServerEnabledParams {

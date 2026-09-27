@@ -49,9 +49,10 @@ const subagentDetails = {
         {
           role: 'assistant',
           content: [
-            { type: 'toolCall', name: 'write', arguments: { path: 'src/sub.ts', content: 'd\ne' } },
+            { type: 'toolCall', id: 'child_write_1', name: 'write', arguments: { path: 'src/sub.ts', content: 'd\ne' } },
           ],
         },
+        { role: 'toolResult', toolCallId: 'child_write_1', toolName: 'write', isError: false },
       ],
       stderr: '',
       usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
@@ -191,7 +192,8 @@ test('equivalence: parent + subagent edits to one file merge across path spellin
     results: [{
       agent: 'worker', agentSource: 'user', task: 'merge', exitCode: 0,
       messages: [
-        { role: 'assistant', content: [{ type: 'toolCall', name: 'edit', arguments: { path: '/proj/src/shared.ts', oldText: 'a\nb', newText: 'a\nb\nc\nd' } }] },
+        { role: 'assistant', content: [{ type: 'toolCall', id: 'shared-child-edit', name: 'edit', arguments: { path: '/proj/src/shared.ts', oldText: 'a\nb', newText: 'a\nb\nc\nd' } }] },
+        { role: 'toolResult', toolCallId: 'shared-child-edit', toolName: 'edit', isError: false },
       ],
       stderr: '', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
     }],
@@ -217,4 +219,8 @@ test('equivalence: parent + subagent edits to one file merge across path spellin
   assert.equal(host.length, 1, 'host must merge parent + subagent into one entry');
   assert.equal(ext.length, 1, 'extension must merge parent + subagent into one entry');
   assert.deepEqual(ext, host);
+  assert.equal(host[0]?.additions, 6, 'merged parent + child edits must retain accumulated additions');
+  assert.equal(host[0]?.deletions, 3, 'merged parent + child edits must retain accumulated deletions');
+  assert.equal(ext[0]?.additions, 6);
+  assert.equal(ext[0]?.deletions, 3);
 });

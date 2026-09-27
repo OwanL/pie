@@ -15,15 +15,16 @@
 // place that carries the package.json/lockfile and compiler selection. It is
 // deliberately distinct from the verification identity (`id`): routing of
 // source and test files uses the explicit `sourceRoots`/`testRoots` schema
-// below, which defaults to `dir` (+`ownedDirs`) and `<dir>/test` so the
+// below, which defaults to `dir` (+`ownedDirs` and retired route roots) and `<dir>/test` so the
 // current single-root layout keeps classifying identically. Distributed
 // future roots (see the repository organization plan) are declared per entry;
 // they route as soon as files appear, before or after their directory is
 // created. Most extension packages live under `extensions/<id>/`; migrated
 // tools use explicit group metadata. `ownedDirs` routes compatibility adapters
-// and extracted implementation files to their existing test owner. Everything
-// else a runner needs — test cwd, tsx/tsc compiler, batching and concurrency —
-// is explicit metadata below so runner adapters never re-derive it locally.
+// and extracted implementation files to their existing test owner. `retiredSourceDirs`
+// retain absent historical paths only for rename/delete routing. Everything else a
+// runner needs — test cwd, tsx/tsc compiler, batching and concurrency — is explicit
+// metadata below so runner adapters never re-derive it locally.
 
 /**
  * Registry entry for one testable package.
@@ -34,10 +35,13 @@
  * @property {string[]} [aliases] Additional accepted ids (e.g. `--package analytics`).
  * @property {string[]} [groups] Explicit named group membership; otherwise extension packages
  *   are included in the `extensions` group when their directory is under `extensions/`.
- * @property {string[]} [ownedDirs] Additional repo-relative paths whose source changes
+ * @property {string[]} [ownedDirs] Additional live repo-relative paths whose source changes
  *   are classified and dependency-scanned as this package (e.g. a discovery shim).
+ * @property {string[]} [retiredSourceDirs] Absent historical source paths kept routable
+ *   solely for Git rename/delete records; unlike `ownedDirs`, these are not live roots.
  * @property {string[]} [sourceRoots] Additional repo-relative source roots routed to
- *   this verification id (forward slashes). Additive on top of `dir` + `ownedDirs`;
+ *   this verification id (forward slashes). Additive on top of `dir`, `ownedDirs`, and
+ *   `retiredSourceDirs`;
  *   `dir` remains the install/package owner and always routes. Declared planned
  *   roots may be created by a later migration batch and route as soon as files
  *   appear, so early declaration cannot silently select zero tests.
@@ -84,7 +88,7 @@ export const PACKAGE_REGISTRY = [
     dir: 'application/hosts/vscode',
     sourceRoots: ['harness/agent-instructions/prompt-assembly', 'application/lib/protocol', 'application/frontend', 'application/hosts', 'test/integration/browser', 'test/integration/large-detail.e2e.ts'],
     // Keep the deleted extension/ prefix routable for outstanding Git rename/deletion records.
-    ownedDirs: ['extension'],
+    retiredSourceDirs: ['extension'],
     testRoots: [
       'harness/agent-instructions/prompt-assembly/test',
       'application/frontend/composer/test',
@@ -113,7 +117,7 @@ export const PACKAGE_REGISTRY = [
       'test/integration/system-prompt-provider-payload.test.ts',
     ],
     testDir: 'application/frontend/test',
-    testCwd: 'extension',
+    testCwd: 'application/hosts/vscode',
     // The host-local TSX version classifies cross-owner harness TypeScript as
     // CommonJS; use the root CLI for correct ESM named exports without changing
     // protected package dependencies.
@@ -127,7 +131,7 @@ export const PACKAGE_REGISTRY = [
     id: 'analysis',
     dir: 'analytics/analysis',
     aliases: ['analytics'],
-    ownedDirs: ['analysis'], // Retired source identity remains routable for changed/deleted paths.
+    retiredSourceDirs: ['analysis'], // Retired source identity remains routable for changed/deleted paths.
     testCwd: 'analytics/analysis',
     typecheck: { config: 'analytics/analysis/tsconfig.json', compiler: 'analytics/analysis/node_modules/typescript/bin/tsc' },
     fastBatch: { batches: 4 },
@@ -264,9 +268,9 @@ export const PACKAGE_REGISTRY = [
     id: 'subagent',
     dir: 'harness/tools/subagent',
     groups: ['extensions'],
-    // Keep the discovery adapter, extracted agent-discovery tests, and retired
-    // source identity under the same verification owner.
-    ownedDirs: ['extensions/subagent', 'harness/agent-instructions/agent-discovery', 'tools/subagent'],
+    // Keep the discovery adapter and extracted agent-discovery tests under the same owner.
+    ownedDirs: ['extensions/subagent', 'harness/agent-instructions/agent-discovery'],
+    retiredSourceDirs: ['tools/subagent'],
     testRoots: ['harness/agent-instructions/agent-discovery/test'],
     tsxConfig: 'harness/tools/subagent/tsconfig.json',
     typecheck: { config: 'harness/tools/subagent/tsconfig.release.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
@@ -277,9 +281,9 @@ export const PACKAGE_REGISTRY = [
     id: 'ask-user',
     dir: 'harness/tools/ask-user',
     groups: ['extensions'],
-    // Keep the retired source identity routable for rename/delete diffs; the
-    // active owner is harness/tools/ask-user and the SDK adapter stays in extensions/.
-    ownedDirs: ['extensions/ask-user', 'tools/ask-user'],
+    // The retired source identity stays routable for rename/delete diffs.
+    ownedDirs: ['extensions/ask-user'],
+    retiredSourceDirs: ['tools/ask-user'],
     typecheck: { config: 'harness/tools/ask-user/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
     fastConcurrency: 3,
   },
@@ -287,9 +291,9 @@ export const PACKAGE_REGISTRY = [
     id: 'warm-bash',
     dir: 'harness/tools/warm-bash',
     groups: ['extensions'],
-    // Keep the retired source identity routable for rename/delete diffs; the
-    // active owner is harness/tools/warm-bash and the SDK adapter stays in extensions/.
-    ownedDirs: ['extensions/warm-bash', 'tools/warm-bash'],
+    // The retired source identity stays routable for rename/delete diffs.
+    ownedDirs: ['extensions/warm-bash'],
+    retiredSourceDirs: ['tools/warm-bash'],
     typecheck: { config: 'harness/tools/warm-bash/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
     fastConcurrency: 3,
   },
@@ -323,10 +327,9 @@ export const PACKAGE_REGISTRY = [
     id: 'deferred-triggers',
     dir: 'harness/tools/deferred-triggers',
     groups: ['extensions'],
-    // Keep the retired source identity routable for rename/delete diffs; the
-    // active owner is harness/tools/deferred-triggers and the SDK adapter
-    // stays in extensions/deferred-triggers.
-    ownedDirs: ['extensions/deferred-triggers', 'tools/deferred-triggers'],
+    // The retired source identity stays routable for rename/delete diffs.
+    ownedDirs: ['extensions/deferred-triggers'],
+    retiredSourceDirs: ['tools/deferred-triggers'],
     typecheck: { config: 'harness/tools/deferred-triggers/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
     fastConcurrency: 3,
   },
@@ -334,10 +337,9 @@ export const PACKAGE_REGISTRY = [
     id: 'session-changes',
     dir: 'harness/tools/session-changes',
     groups: ['extensions'],
-    // Keep the retired source identity routable for rename/delete diffs; the
-    // active owner is harness/tools/session-changes and the SDK adapter
-    // stays in extensions/session-changes.
-    ownedDirs: ['extensions/session-changes', 'tools/session-changes'],
+    // The retired source identity stays routable for rename/delete diffs.
+    ownedDirs: ['extensions/session-changes'],
+    retiredSourceDirs: ['tools/session-changes'],
     typecheck: { config: 'harness/tools/session-changes/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
     fastConcurrency: 3,
   },
@@ -345,8 +347,9 @@ export const PACKAGE_REGISTRY = [
     id: 'computer-use',
     dir: 'harness/tools/computer-use',
     groups: ['extensions'],
-    // Keep the retired source identity routable for rename/delete diffs; native dependencies remain extension-owned.
-    ownedDirs: ['extensions/computer-use', 'tools/computer-use'],
+    // The retired source identity stays routable for rename/delete diffs; native dependencies remain extension-owned.
+    ownedDirs: ['extensions/computer-use'],
+    retiredSourceDirs: ['tools/computer-use'],
     tsxConfig: 'harness/tools/computer-use/tsconfig.runtime.json',
     typecheck: { config: 'harness/tools/computer-use/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
     fastBatch: { batches: 3 },
@@ -364,8 +367,9 @@ export const PACKAGE_REGISTRY = [
     id: 'playwright',
     dir: 'harness/tools/playwright',
     groups: ['extensions'],
-    // Keep the retired source identity routable for rename/delete diffs; browser dependencies remain extension-owned.
-    ownedDirs: ['extensions/playwright', 'tools/playwright'],
+    // The retired source identity stays routable for rename/delete diffs; browser dependencies remain extension-owned.
+    ownedDirs: ['extensions/playwright'],
+    retiredSourceDirs: ['tools/playwright'],
     tsxConfig: 'harness/tools/playwright/tsconfig.runtime.json',
     typecheck: { config: 'harness/tools/playwright/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
     fastBatch: { batches: 2 },
@@ -642,15 +646,15 @@ export function packageTestCwd(entry) {
 
 /**
  * Repo-relative source roots routed to a package's verification id, in
- * classification-precedence order: the install/package owner dir first, then
- * owned dirs, then any explicitly declared (planned or distributed) roots.
- * For every currently registered package without explicit `sourceRoots` this
- * is exactly `[dir, ...ownedDirs]`, so enumeration is unchanged.
+ * classification-precedence order: install-owner dir, live owned dirs, retired
+ * historical dirs, then explicitly declared (planned or distributed) roots.
+ * Retired source dirs remain routable for rename/delete analysis but are not
+ * validated as active filesystem roots.
  * @param {PackageEntry} entry
  * @returns {string[]}
  */
 export function packageSourceRoots(entry) {
-  return [...new Set([entry.dir, ...(entry.ownedDirs ?? []), ...(entry.sourceRoots ?? [])])];
+  return [...new Set([entry.dir, ...(entry.ownedDirs ?? []), ...(entry.retiredSourceDirs ?? []), ...(entry.sourceRoots ?? [])])];
 }
 
 /**
@@ -738,11 +742,11 @@ export const TYPECHECK_PROJECTS = PACKAGE_REGISTRY
 /**
  * Package/directory pairs — the classification view of the registry used by
  * test-impact.mjs and run-test-files.mjs. Built from every package's routed
- * source roots (`dir` + `ownedDirs` + explicit `sourceRoots`) and test roots,
+ * source roots (`dir` + live/retired owned paths + explicit `sourceRoots`) and test roots,
  * in registration order with per-package de-duplication, so distributed and
  * planned roots classify to their verification id like any package dir.
- * `ownedDirs` include compatibility adapters and implementation files whose
- * tests remain with another package.
+ * `ownedDirs` include live compatibility adapters and implementation files whose
+ * tests remain with another package; retired roots only preserve historical routing.
  * @typedef {{ id: string, dir: string }} PackageDirective
  * @type {PackageDirective[]}
  */

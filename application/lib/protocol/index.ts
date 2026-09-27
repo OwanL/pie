@@ -1,4 +1,5 @@
 export * from './envelopes.js';
+export * from './image-preview.js';
 export * from './models.js';
 export * from './messages.js';
 export * from './sessions.js';

@@ -22,6 +22,7 @@ import type {
   ThinkingLevel,
 } from '../../../lib/protocol/index.js';
 import type { TurnThroughputStatus } from '../../../../analytics/legacy/run-analytics/types.js';
+import { isAgentSessionMessageLocalId } from '../../../lib/protocol/messages.js';
 import { stripReqIds } from '../../conversation-state/error-mapping.js';
 
 /**
@@ -328,6 +329,9 @@ export function onPreflightFailed(payload: PreflightFailedPayload, deps: Handler
     return;
   }
 
+  if (isAgentSessionMessageLocalId(payload.localId)) {
+    deps.dispatchArch({ kind: 'AgentMessageRejected', sessionPath, localId: payload.localId });
+  }
   deps.dispatchArch({
     kind: 'PreflightFailed',
     sessionPath,

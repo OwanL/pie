@@ -20,6 +20,7 @@ import '../../../transcript/register-builtins.ts';
 import { clearCollapsibleCache } from '../../../transcript/use-collapsible-open';
 import { readFile } from 'node:fs/promises';
 import { DEFAULT_CHAT_PREFS, type ChatPrefs, type ToolCall } from '../../../../lib/protocol/index.js';
+import type { TokenPricingResolver } from '../../../session-tabs/token-usage';
 import type { RenderToolCall, TranscriptContextMenuHandler } from '../../../transcript/types';
 
 const noop = () => undefined;
@@ -179,7 +180,7 @@ function makeRenderToolCall(prefs: ChatPrefs): RenderToolCall {
   return renderToolCall;
 }
 
-function mount(toolCall: ToolCall, prefs: ChatPrefs) {
+function mount(toolCall: ToolCall, prefs: ChatPrefs, pricingForModel?: TokenPricingResolver) {
   const renderToolCall = makeRenderToolCall(prefs);
   act(() => {
     render(
@@ -190,6 +191,7 @@ function mount(toolCall: ToolCall, prefs: ChatPrefs) {
         onOpenFile: noop,
         onContextMenu: noopContextMenu,
         renderToolCall,
+        pricingForModel,
       }),
       container,
     );
@@ -245,7 +247,7 @@ test('completed legacy subagent keeps model, reasoning, elapsed, cost, and recov
   assert.ok(header);
   assert.match(header?.textContent ?? '', /worker-model · off/);
   assert.match(header?.textContent ?? '', /2s/);
-  assert.match(header?.textContent ?? '', /\$0\.012/);
+  assert.match(header?.textContent ?? '', /\$0\.01/);
   assert.match(header?.textContent ?? '', /Recovered/);
   assert.doesNotMatch(header?.textContent ?? '', /ctx|tok|cached|tokens\/s|context latest/i);
 
@@ -365,35 +367,92 @@ function costEvidenceToolCall(usage: Record<string, number> | undefined): ToolCa
   } as unknown as ToolCall;
 }
 
-test('subagent without cost evidence renders no cost chip and no tooltip Cost row', async () => {
+test('subagent without cost evidence omits the inline cost and tooltip row', async () => {
   mount(costEvidenceToolCall({ input: 100, output: 20, cacheRead: 0, cacheWrite: 0, contextTokens: 100 }), prefsWith({ autoExpandSubagentCalls: false }));
 
-  assert.ok(!container.querySelector('.subagent-telemetry-cost'), 'a child without cost evidence must not display a fabricated $0.000 chip');
+  assert.equal(container.querySelector('.subagent-telemetry-cost'), null);
+  assert.equal(container.querySelector('.subagent-runtime-telemetry:not(.subagent-runtime-telemetry-stable)'), null);
 
   const host = await openModelTooltip();
   assert.match(host.textContent ?? '', /Input100 tokens/);
-  assert.doesNotMatch(host.textContent ?? '', /\$0\.000/);
   assert.doesNotMatch(host.textContent ?? '', /Cost/);
 });
 
-test('subagent with reported zero cost preserves known free usage', async () => {
+test('subagent with reported zero cost renders two decimals', async () => {
   mount(costEvidenceToolCall({ input: 100, output: 50, cacheRead: 0, cacheWrite: 0, contextTokens: 150, cost: 0 }), prefsWith({ autoExpandSubagentCalls: false }));
 
-  assert.equal(container.querySelector('.subagent-telemetry-cost')?.textContent, '$0.000');
+  assert.equal(container.querySelector('.subagent-telemetry-cost')?.textContent, '$0.00');
 
   const host = await openModelTooltip();
   assert.match(host.textContent ?? '', /Cost\$0\.0000/);
 });
 
-test('subagent with provider-reported cost keeps the chip and tooltip row', async () => {
-  mount(costEvidenceToolCall({ input: 100, output: 50, cacheRead: 0, cacheWrite: 0, contextTokens: 150, cost: 0.42 }), prefsWith({ autoExpandSubagentCalls: false }));
+test('subagent with provider-reported cost renders only the two-decimal USD amount inline', async () => {
+  mount(costEvidenceToolCall({ input: 100, output: 50, cacheRead: 0, cacheWrite: 0, contextTokens: 150, cost: 0.64 }), prefsWith({ autoExpandSubagentCalls: false }));
 
-  const chip = container.querySelector<HTMLElement>('.subagent-telemetry-cost');
-  assert.ok(chip, 'reported cost evidence stays visible in the header');
-  assert.match(chip.textContent ?? '', /\$0\.420/);
+  const cost = container.querySelector<HTMLElement>('.subagent-telemetry-cost');
+  assert.ok(cost, 'reported cost evidence stays visible in the header');
+  assert.equal(cost.textContent, '$0.64');
 
   const host = await openModelTooltip();
-  assert.match(host.textContent ?? '', /Cost\$0\.4200/);
+  assert.match(host.textContent ?? '', /Cost\$0\.6400/);
+});
+
+test('small positive reported cost uses two decimals inline and keeps detail precision in the tooltip', async () => {
+  mount(costEvidenceToolCall({ input: 100, output: 50, cacheRead: 0, cacheWrite: 0, contextTokens: 150, cost: 0.0004 }), prefsWith({ autoExpandSubagentCalls: false }));
+
+  assert.equal(container.querySelector('.subagent-telemetry-cost')?.textContent, '$0.00');
+  const host = await openModelTooltip();
+  assert.match(host.textContent ?? '', /Cost\$0\.0004/);
+});
+
+test('estimated cost has no inline estimate decoration but keeps semantics in hover details', async () => {
+  const pricingForModel: TokenPricingResolver = () => ({ input: 4, output: 4, cacheRead: 4, cacheWrite: 4 });
+  mount(costEvidenceToolCall({ input: 100_000, output: 60_000, cacheRead: 0, cacheWrite: 0, contextTokens: 160_000 }), prefsWith({ autoExpandSubagentCalls: false }), pricingForModel);
+
+  assert.equal(container.querySelector('.subagent-telemetry-cost')?.textContent, '$0.64');
+  assert.doesNotMatch(container.querySelector('.subagent-telemetry-cost')?.textContent ?? '', /~|</);
+  const costTelemetry = container.querySelector<HTMLElement>('.subagent-telemetry-cost')?.parentElement;
+  assert.match(costTelemetry?.getAttribute('title') ?? '', /Estimated cost: ~\$0\.6400/);
+  const host = await openModelTooltip();
+  assert.match(host.textContent ?? '', /Estimated cost~\$0\.6400/);
+});
+
+test('recovery telemetry remains when no cost is available', () => {
+  const toolCall = costEvidenceToolCall(undefined);
+  const details = (toolCall.result as any).details;
+  details.results[0].retryCount = 1;
+  details.results[0].fallback = true;
+  mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }));
+
+  assert.equal(container.querySelector('.subagent-telemetry-cost'), null);
+  assert.ok(container.querySelector('.subagent-runtime-telemetry:not(.subagent-runtime-telemetry-stable) .subagent-telemetry-recovered'));
+});
+
+test('parallel child costs stay separate instead of repeating the group total', () => {
+  const toolCall = {
+    id: 'parallel-costs',
+    name: 'subagent',
+    input: { agent: 'worker', task: 'parallel work' },
+    status: 'completed',
+    result: {
+      billing: [
+        { path: '0', usage: { cost: 0.01 } },
+        { path: '1', usage: { cost: 0.02 } },
+      ],
+      details: {
+        mode: 'parallel',
+        results: [
+          { agent: 'worker', task: 'first', exitCode: 0, model: 'provider/model', messages: [] },
+          { agent: 'scout', task: 'second', exitCode: 0, model: 'provider/model', messages: [] },
+        ],
+      },
+    },
+  } as unknown as ToolCall;
+  mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }));
+
+  const costs = Array.from(container.querySelectorAll('.subagent-telemetry-cost'), (chip) => chip.textContent);
+  assert.deepEqual(costs, ['$0.01', '$0.02']);
 });
 
 test('nested subagent: with autoExpand, both outer and inner subagent headers render', () => {

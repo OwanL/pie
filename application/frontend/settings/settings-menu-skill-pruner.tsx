@@ -70,6 +70,18 @@ export function SkillPrunerSettings({ prefs, pruningSettings, skillCatalog, tool
         </select>
       </div>
       <SettingCheckbox
+        label="Main agents"
+        checked={pruningSettings.mainAgentEnabled ?? true}
+        title="Enable skill and tool pruning for main-agent turns. The pruning mode can still turn pruning off globally."
+        onChange={() => onSetPruningSettings({ mainAgentEnabled: !(pruningSettings.mainAgentEnabled ?? true) })}
+      />
+      <SettingCheckbox
+        label="Subagents"
+        checked={pruningSettings.subagentEnabled ?? true}
+        title="Enable skill and tool pruning for subagent turns. The pruning mode can still turn pruning off globally."
+        onChange={() => onSetPruningSettings({ subagentEnabled: !(pruningSettings.subagentEnabled ?? true) })}
+      />
+      <SettingCheckbox
         label="Skip small prepasses"
         checked={autoSkipBelowTokens !== null}
         title="Skip the pruning prepass when its estimated input is below the configured token threshold. Skipped turns keep the full catalog and do not produce a pruning summary."

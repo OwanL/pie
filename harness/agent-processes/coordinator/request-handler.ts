@@ -170,6 +170,12 @@ async function handleRuntimePrefsSet(
   }
   if (params.subagentMaxInflight !== undefined) {
     process.env['PIE_SUBAGENT_MAX_INFLIGHT'] = String(params.subagentMaxInflight);
+    // A numeric preference always replaces provenance as a pair. Missing
+    // metadata on older/partial callers is a saved preference, not a stale
+    // source inherited from a previous update.
+    process.env['PIE_SUBAGENT_MAX_INFLIGHT_SOURCE'] = params.subagentMaxInflightSource ?? 'saved-preference';
+  } else if (params.subagentMaxInflightSource !== undefined) {
+    process.env['PIE_SUBAGENT_MAX_INFLIGHT_SOURCE'] = params.subagentMaxInflightSource;
   }
   if (params.bashWarmPoolSize !== undefined) {
     process.env['PIE_BASH_WARM_POOL'] = String(params.bashWarmPoolSize);
@@ -675,12 +681,14 @@ async function handleProviderGateMetrics(
   // coordinator lease authority's cross-worker metrics here. Standalone and
   // legacy consumers retain the in-process ProviderGate fallback.
   const authorityMetrics = deps.getProviderGateMetrics?.();
-  if (authorityMetrics) {
-    return { enabled: authorityMetrics.length > 0, providers: authorityMetrics };
-  }
   const gate = ProviderGate.getInstance();
-  if (!gate) return { enabled: false, providers: [] };
-  return { enabled: true, providers: gate.getMetrics() };
+  const result = authorityMetrics
+    ? { enabled: authorityMetrics.length > 0, providers: authorityMetrics }
+    : gate
+      ? { enabled: true, providers: gate.getMetrics() }
+      : { enabled: false, providers: [] };
+  const subagentConcurrency = deps.getSubagentConcurrencyStatus?.();
+  return subagentConcurrency ? { ...result, subagentConcurrency } : result;
 }
 
 async function handleAnalyticsAcknowledgement(

@@ -2,10 +2,14 @@ import { randomUUID } from 'node:crypto';
 
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
-import { artifactDirectory } from './artifacts.js';
+import { artifactDirectory, childArtifactDirectory } from './artifacts.js';
 import { buildToolError, buildToolResult, modelAcceptsImages } from './result.js';
 import { playwrightSchema } from './schema.js';
-import { installProcessTeardown, runtimeRegistry } from './runtime-client.js';
+import { installProcessTeardown, runtimeRegistry, type RuntimeClient } from './runtime-client.js';
+import {
+  assertChildToolRuntimeOwnerOpen,
+  currentChildToolRuntimeOwner,
+} from '../../agent-processes/lib/process-lifecycle/child-tool-runtime-owner.js';
 import {
   DEFAULT_NAVIGATION_TIMEOUT_MS, DEFAULT_RUN_CODE_TIMEOUT_MS, MAX_TIMEOUT_MS,
   type ActParams, type OpenParams, type PlaywrightParams, type RunCodeParams,
@@ -75,15 +79,26 @@ export default function registerPlaywright(pi: ExtensionAPI) {
         if (disabled()) throw Object.assign(new Error('The playwright extension is disabled.'), { code: 'EXTENSION_DISABLED' });
         validatePlaywrightParams(rawParams);
         const params = rawParams;
-        const sessionPath = ctx?.sessionManager?.getSessionFile();
-        if (!sessionPath) throw Object.assign(new Error('A persistent pie session path is required for playwright runtime ownership and artifacts.'), { code: 'SESSION_PATH_REQUIRED' });
-        const client = await runtimeRegistry.get(sessionPath);
+        const childOwner = currentChildToolRuntimeOwner();
+        let sessionPath: string | undefined;
+        let client: RuntimeClient;
+        if (childOwner) {
+          assertChildToolRuntimeOwnerOpen(childOwner);
+          client = runtimeRegistry.getForChild(childOwner);
+        } else {
+          sessionPath = ctx?.sessionManager?.getSessionFile();
+          if (!sessionPath) throw Object.assign(new Error('A persistent pie session path is required for playwright runtime ownership and artifacts.'), { code: 'SESSION_PATH_REQUIRED' });
+          client = await runtimeRegistry.get(sessionPath);
+        }
         const timeoutMs = deadlineMs(params);
 
         let result;
         if (params.action === 'open') {
           const sessionId = params.sessionId ?? `pw-${randomUUID()}`;
-          const artifactDir = await artifactDirectory(sessionPath, sessionId);
+          const artifactDir = childOwner
+            ? await childArtifactDirectory(childOwner.id, sessionId)
+            : await artifactDirectory(sessionPath!, sessionId);
+          if (childOwner) assertChildToolRuntimeOwnerOpen(childOwner);
           result = await client.request('open', { ...params, sessionId, artifactDir }, { signal, sessionId, timeoutMs, allowNeedsReopen: true });
           client.markReopened();
         } else if (params.action === 'observe') {

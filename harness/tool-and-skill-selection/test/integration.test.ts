@@ -16,10 +16,13 @@ const { default: skillPruner, __setFormatter, __setToolSeams, __setCompleteFn, r
 // require compiled the same files twice and node's coverage reporter then
 // dropped the CJS instance's real coverage (prepass.ts reported ~58% despite
 // its retry-loop tests passing). Coverage routing stays identical.
-const { clearPruningTrackingForTesting, flushLog, setLogPathForTesting } = require("../lifecycle/logger.ts") as typeof import("../lifecycle/logger.js");
-const { readKeptSkills, clearKeptSkills } = require("../state/pruned-skills.ts") as typeof import("../state/pruned-skills.js");
+const { clearPruningTrackingForTesting, flushLog, recordKnownSkills, recordSkillRead, setLogPathForTesting } = require("../lifecycle/logger.ts") as typeof import("../lifecycle/logger.js");
+const selectorState = require("../state/selector-state.ts") as typeof import("../state/selector-state.js");
+const prepassCache = require("../state/prepass-cache.ts") as typeof import("../state/prepass-cache.js");
+const childRuntimeOwner = require("../../agent-processes/lib/process-lifecycle/child-tool-runtime-owner.ts") as typeof import("../../agent-processes/lib/process-lifecycle/child-tool-runtime-owner.js");
 const { runAsk } = require("../../tools/ask-user/ask.ts") as typeof import("../../tools/ask-user/ask.js");
 const { installPieSystemPromptRebuildGuard } = require("../../agent-instructions/prompt-assembly/pie-harness-prompt.ts") as typeof import("../../agent-instructions/prompt-assembly/pie-harness-prompt.js");
+const { subagentContext } = require("../../agent-processes/lib/process-lifecycle/subagent-context.ts") as typeof import("../../agent-processes/lib/process-lifecycle/subagent-context.js");
 
 function installSdkResolverForTests(): void {
 	// Isolate from host extension-toggle state. When tests run inside the
@@ -278,6 +281,165 @@ async function runBeforeAgentStart(handlers: Map<string, Handler>, prompt: strin
 		},
 	}, { cwd: "/repo", sessionManager: { getSessionId: () => sessionId } }) as BeforeAgentStartReturn;
 }
+
+test("child tool-runtime disposal clears only that session's pruning state", async () => {
+	const logPath = path.join(mkdtempSync(path.join(tmpdir(), "skill-pruner-child-cleanup-")), "pruning.jsonl");
+	const childSessionId = "pruning-child-disposed";
+	const parentSessionId = "pruning-parent-live";
+	const owner = childRuntimeOwner.createChildToolRuntimeOwner("pruning cleanup regression");
+	const { handlers } = register(config({}, "off"), logPath);
+	const handler = handlers.get("before_agent_start");
+	assert.ok(handler, "before_agent_start handler registered");
+	setLogPathForTesting(logPath);
+
+	const cachedResult = {
+		prunedSkills: ["child-skill"], prunedTools: ["child-tool"], error: null,
+		rawResponse: "{}", rawThinking: "", rawSystemPrompt: "", rawUserMessage: "",
+		latencyMs: 0, thinkingLevel: "minimal",
+	};
+	try {
+		// The extension hook runs in the child owner's async context. This
+		// registers cleanup without relying on session_shutdown, which direct
+		// AgentSession.dispose() does not emit.
+		await childRuntimeOwner.runWithChildToolRuntimeOwner(owner, () => subagentContext.run(
+			{ depth: 1 },
+			() => handler({
+				type: "before_agent_start",
+				prompt: "a complete child task prompt",
+				systemPrompt: systemPrompt([]),
+				systemPromptOptions: { cwd: "/repo", skills: [], contextFiles: [] },
+			}, { cwd: "/repo", sessionManager: { getSessionId: () => childSessionId } }),
+		));
+
+		selectorState.recordHiddenSkills(childSessionId, [skill("child-skill", "child-only")]);
+		selectorState.recordLoadedSkill(childSessionId, "child-skill");
+		selectorState.recordPrunedTools(childSessionId, ["child-tool"]);
+		selectorState.recordAllowedChildTools(parentSessionId, ["read"]);
+		selectorState.recordHiddenSkills(parentSessionId, [skill("parent-skill", "parent-only")]);
+		selectorState.recordLoadedSkill(parentSessionId, "parent-skill");
+		selectorState.recordPrunedTools(parentSessionId, ["parent-tool"]);
+		prepassCache.cacheSuccessfulPrepass(childSessionId, "child task", "child-fingerprint", "child-fingerprint", cachedResult);
+		prepassCache.cacheSuccessfulPrepass(parentSessionId, "parent task", "parent-fingerprint", "parent-fingerprint", cachedResult);
+		recordKnownSkills(childSessionId, "auto", ["/repo/skills/child-skill/SKILL.md"], ["/repo/skills/child-skill/SKILL.md"], []);
+		recordKnownSkills(parentSessionId, "auto", ["/repo/skills/parent-skill/SKILL.md"], ["/repo/skills/parent-skill/SKILL.md"], []);
+
+		// Simulate the runner's owner cleanup after direct session disposal.
+		await childRuntimeOwner.cleanupChildToolRuntimeOwner(owner);
+
+		assert.equal(selectorState.getHiddenSkills(childSessionId).size, 0);
+		assert.equal(selectorState.getLoadedSkills(childSessionId).size, 0);
+		assert.equal(selectorState.getPrunedTools(childSessionId).size, 0);
+		assert.equal(selectorState.getAllowedChildTools(childSessionId), undefined);
+		assert.equal(prepassCache.getCachedPrepass(childSessionId, "child task", "child-fingerprint", "child-fingerprint"), null);
+		assert.equal(selectorState.getHiddenSkills(parentSessionId).has("parent-skill"), true);
+		assert.deepEqual([...selectorState.getLoadedSkills(parentSessionId)], ["parent-skill"]);
+		assert.deepEqual([...selectorState.getPrunedTools(parentSessionId)], ["parent-tool"]);
+		assert.deepEqual(Array.from(selectorState.getAllowedChildTools(parentSessionId) ?? []), ["read"]);
+		assert.equal(prepassCache.getCachedPrepass(parentSessionId, "parent task", "parent-fingerprint", "parent-fingerprint")?.cacheHit, true);
+
+		// Logger's catalog is also forgotten for the child, while the parent's
+		// known skill tracking continues to classify reads normally.
+		recordSkillRead(childSessionId, "/repo/skills/child-skill/SKILL.md");
+		recordSkillRead(parentSessionId, "/repo/skills/parent-skill/SKILL.md");
+		await flushLog();
+		const entries = readFileSync(logPath, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
+		assert.deepEqual(entries.map((entry) => entry.sessionId), [parentSessionId]);
+	} finally {
+		await childRuntimeOwner.cleanupChildToolRuntimeOwner(owner).catch(() => undefined);
+		setLogPathForTesting(null);
+		clearPruningTrackingForTesting();
+		prepassCache.clearPrepassCacheForTesting();
+		selectorState.clearSessionSelectorState(childSessionId);
+		selectorState.clearSessionSelectorState(parentSessionId);
+	}
+});
+
+test("child prepass completion after owner teardown cannot repopulate pruning state", async () => {
+	const logPath = path.join(mkdtempSync(path.join(tmpdir(), "skill-pruner-child-late-result-")), "pruning.jsonl");
+	const sessionId = "pruning-child-late-result";
+	const prompt = "Assignment: remove unused tools and skills for this child task";
+	const owner = childRuntimeOwner.createChildToolRuntimeOwner("late pruning result regression");
+	const activeConfig = config({}, "auto", { ceiling: 10 });
+	const childToolCatalog = [
+		...mockToolInfo,
+		{ name: "request_capability", description: "Recover a hidden capability", parameters: { type: "object", properties: {} } },
+	] as any[];
+	let activeTools = childToolCatalog.map((tool) => tool.name as string);
+	let activationCalls = 0;
+	let scorerCalls = 0;
+	let resolveScorer!: (value: { text: string }) => void;
+	let announceScorerStarted!: () => void;
+	const scorerStarted = new Promise<void>((resolve) => { announceScorerStarted = resolve; });
+	const scorerResult = new Promise<{ text: string }>((resolve) => { resolveScorer = resolve; });
+	const scorerResponse = { text: JSON.stringify({ pruneSkills: ["frontend-design"], pruneTools: ["web_search"] }) };
+	let hookPromise: Promise<unknown> | undefined;
+
+	__setCompleteFn(async () => {
+		scorerCalls++;
+		announceScorerStarted();
+		return await scorerResult;
+	});
+	try {
+		const { handlers } = register(activeConfig, logPath);
+		const handler = handlers.get("before_agent_start");
+		assert.ok(handler, "before_agent_start handler registered");
+		__setToolSeams({
+			getAllTools: () => childToolCatalog,
+			getActiveTools: () => [...activeTools],
+			setActiveTools: (names) => { activationCalls++; activeTools = [...names]; },
+		});
+		const event = {
+			type: "before_agent_start",
+			prompt,
+			systemPrompt: systemPrompt(realisticSkills),
+			systemPromptOptions: { cwd: "/repo", skills: realisticSkills, contextFiles: [] },
+		};
+		const ctx = { cwd: "/repo", sessionManager: { getSessionId: () => sessionId } };
+		hookPromise = childRuntimeOwner.runWithChildToolRuntimeOwner(owner, () => subagentContext.run(
+			{ depth: 1 },
+			() => handler(event, ctx),
+		));
+		await scorerStarted;
+
+		// The runner owns teardown independently from the still-pending prompt.
+		await childRuntimeOwner.cleanupChildToolRuntimeOwner(owner);
+		resolveScorer(scorerResponse);
+		const result = await hookPromise;
+		recordSkillRead(sessionId, realisticSkills[0]!.filePath);
+		await flushLog();
+
+		assert.equal(scorerCalls, 1, "teardown must not cause the launch prepass to run twice");
+		assert.equal(result, undefined, "disposed child must not activate a pruning decision or emit hook telemetry");
+		assert.equal(activationCalls, 0, "no tool activation may happen after disposal");
+		assert.deepEqual(activeTools, childToolCatalog.map((tool) => tool.name));
+		assert.equal(selectorState.getHiddenSkills(sessionId).size, 0);
+		assert.equal(selectorState.getLoadedSkills(sessionId).size, 0);
+		assert.equal(selectorState.getPrunedTools(sessionId).size, 0);
+		assert.equal(selectorState.getAllowedChildTools(sessionId), undefined);
+		const fingerprintInput = {
+			userPrompt: prompt,
+			skills: realisticSkills.map(({ name, description }) => ({ name, description })),
+			tools: mockToolInfo.map(({ name, description }) => ({ name, description })),
+			recentConversation: [],
+			config: activeConfig,
+		};
+		const fingerprint = prepassCache.buildPrepassFingerprint(fingerprintInput, activeConfig);
+		assert.equal(prepassCache.getCachedPrepass(sessionId, prompt, fingerprint), null);
+		assert.equal(prepassCache.getCachedPrepassCrossSession(prompt, fingerprint), null);
+		assert.equal(existsSync(logPath), false, "disposed child must not append pruning decision telemetry");
+	} finally {
+		// Let the scorer unwind even if a setup/assertion above fails.
+		resolveScorer(scorerResponse);
+		await childRuntimeOwner.cleanupChildToolRuntimeOwner(owner).catch(() => undefined);
+		await hookPromise?.catch(() => undefined);
+		__setCompleteFn(null);
+		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
+		setLogPathForTesting(null);
+		clearPruningTrackingForTesting();
+		prepassCache.clearPrepassCacheForTesting();
+		selectorState.clearSessionSelectorState(sessionId);
+	}
+});
 
 /** Create a mock LLM completion function that returns a fixed prune-list response. */
 function mockCompleteFn(response: { pruneSkills?: string[]; pruneTools?: string[] }) {
@@ -1152,7 +1314,6 @@ test("actual SDK hook chain applies tools before skills, preserves foreign prose
 		assert.match(toolOnly.systemPrompt, /Foreign extension guidance\./u);
 		assert.match(toolOnly.systemPrompt, /LATER EXTENSION$/u);
 	} finally {
-		clearKeptSkills("sdk-hook-session");
 		__setCompleteFn(null);
 		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
 		resetForTesting();
@@ -1187,7 +1348,6 @@ test("standalone Pi without the fresh-base seam does not return stale tool prose
 		assert.deepEqual(result?.message?.details.excludedSkills, []);
 		assert.match(result?.message?.details.prepassSafeguardReason ?? "", /fresh-base accessor unavailable/u);
 	} finally {
-		clearKeptSkills("standalone-session");
 		__setCompleteFn(null);
 		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
 	}
@@ -1220,7 +1380,6 @@ test("shadow restoration without the Pie seam does not return the stale pre-rest
 		assert.equal(result?.systemPrompt, undefined);
 		assert.ok(result?.message);
 	} finally {
-		clearKeptSkills("standalone-shadow-session");
 		__setCompleteFn(null);
 		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
 	}
@@ -1649,11 +1808,9 @@ test("autoSkipBelowTokens restores tools pruned by the prior turn without an LLM
 		assert.equal(calls, 1);
 		assert.equal(result, undefined);
 		assert.ok(setActiveToolsCalls.at(-1)?.includes("web_search"));
-		assert.equal(readKeptSkills("session-1"), "keep-all");
 	} finally {
 		__setCompleteFn(null);
 		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
-		clearKeptSkills("session-1");
 	}
 });
 
@@ -1681,9 +1838,7 @@ test("all skill and tool prompt entries disabled skips the LLM prepass", async (
 		}, { cwd: "/repo", sessionManager: { getSessionId: () => "session-empty" } });
 		assert.equal(result, undefined);
 		assert.equal(calls, 0);
-		assert.equal(readKeptSkills("session-empty"), "keep-all");
 	} finally {
-		clearKeptSkills("session-empty");
 		__setCompleteFn(null);
 		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
 	}
@@ -1717,7 +1872,6 @@ test("disabled Tools prompt still permits skill-only pruning without re-enabling
 		assert.match(result!.systemPrompt!, /^Explicit custom replacement\./u);
 		assert.doesNotMatch(result!.systemPrompt!, /<name>frontend-design<\/name>/);
 	} finally {
-		clearKeptSkills("session-skills-only");
 		__setCompleteFn(null);
 		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
 	}
@@ -1898,7 +2052,7 @@ test("github-copilot model without headers: copilot headers injected via model r
 	}
 });
 
-test("disabled-by-toggle records keep-all for subagent inheritance without throwing", async () => {
+test("disabled-by-toggle remains a global no-op without throwing", async () => {
 	const prevToggles = process.env.PIE_EXTENSION_TOGGLES_JSON;
 	process.env.PIE_EXTENSION_TOGGLES_JSON = JSON.stringify({ "skill-pruner": false });
 	try {
@@ -1906,36 +2060,161 @@ test("disabled-by-toggle records keep-all for subagent inheritance without throw
 		// Must not throw (regression: sessionId was referenced before declaration).
 		const result = await runBeforeAgentStart(handlers, "anything", realisticSkills);
 		assert.equal(result, undefined);
-		// The disabled path records keep-all keyed by the session id, so subagents
-		// spawned this turn inherit "no filter" rather than a stale prior set.
-		assert.equal(readKeptSkills("session-1"), "keep-all");
 	} finally {
-		clearKeptSkills("session-1");
 		if (prevToggles === undefined) delete process.env.PIE_EXTENSION_TOGGLES_JSON;
 		else process.env.PIE_EXTENSION_TOGGLES_JSON = prevToggles;
 	}
 });
 
-test("too-short prompt records keep-all for subagent inheritance", async () => {
+test("too-short prompt remains a no-op for the main session", async () => {
+	const { handlers } = register(config());
+	const result = await runBeforeAgentStart(handlers, "hi", realisticSkills);
+	assert.equal(result, undefined);
+});
+
+test("child launch pruning is independent, once-only, and reuses its selected prompt/tools", async () => {
+	let scorerCalls = 0;
+	let capturedScorerInput = "";
+	let activeTools = [...mockToolInfo.map((tool) => tool.name), "request_capability"];
+	const toolUpdates: string[][] = [];
+	__setCompleteFn(async (_model, context) => {
+		scorerCalls++;
+		capturedScorerInput = context.map((message) => message.content).join("\n");
+		return { text: JSON.stringify({ pruneSkills: ["duckdb-query-optimization", "frontend-design"], pruneTools: ["web_search"] }) };
+	});
 	try {
-		const { handlers } = register(config());
-		await runBeforeAgentStart(handlers, "hi", realisticSkills);
-		assert.equal(readKeptSkills("session-1"), "keep-all");
+		const enabledConfig = config({}, "auto", { ceiling: 10 });
+		enabledConfig.mainAgentEnabled = false;
+		enabledConfig.subagentEnabled = true;
+		const { handlers } = register(enabledConfig);
+		const handler = handlers.get("before_agent_start");
+		assert.ok(handler);
+		const childTools = [
+			...mockToolInfo,
+			{ name: "request_capability", description: "Recover a hidden capability", parameters: { type: "object", properties: {} } },
+		] as any[];
+		__setToolSeams({
+			getAllTools: () => childTools,
+			getActiveTools: () => [...activeTools],
+			setActiveTools: (names) => { activeTools = [...names]; toolUpdates.push([...names]); },
+		});
+		const event = {
+			type: "before_agent_start",
+			prompt: "Assignment: optimize the reporting query for the worker agent",
+			systemPrompt: systemPrompt(realisticSkills),
+			systemPromptOptions: { cwd: "/repo", skills: realisticSkills, contextFiles: [] },
+		};
+		const ctx = { cwd: "/repo", sessionManager: { getSessionId: () => "child-launch-once" } };
+
+		// The main-agent switch does not disable a separately enabled child pass.
+		await handler(event, { ...ctx, sessionManager: { getSessionId: () => "main-disabled" } });
+		assert.equal(scorerCalls, 0);
+
+		const firstAndContinuation = await subagentContext.run(
+			{ depth: 1, agentContext: "Agent: worker\nDescription: analytics specialist\nInstructions: Optimize reporting queries." } as any,
+			async () => {
+				const first = await handler(event, ctx) as BeforeAgentStartReturn;
+				const continuation = await handler({
+					...event,
+					prompt: "continue",
+					systemPrompt: systemPrompt(realisticSkills),
+				}, ctx) as BeforeAgentStartReturn;
+				return { first, continuation };
+			},
+		);
+		assert.equal(scorerCalls, 1, "child internal continuation must not make a second scorer call");
+		assert.match(capturedScorerInput, /Assignment: optimize the reporting query/u);
+		assert.match(capturedScorerInput, /Agent: worker[\s\S]*Optimize reporting queries\./u);
+		assert.ok(firstAndContinuation.first?.systemPrompt);
+		assert.ok(firstAndContinuation.continuation?.systemPrompt);
+		for (const result of [firstAndContinuation.first, firstAndContinuation.continuation]) {
+			assert.match(result!.systemPrompt!, /<name>code-simplification<\/name>/);
+			assert.doesNotMatch(result!.systemPrompt!, /<name>duckdb-query-optimization<\/name>/);
+			assert.doesNotMatch(result!.systemPrompt!, /<name>frontend-design<\/name>/);
+		}
+		assert.ok(!activeTools.includes("web_search"), "launch selection remains active for the child");
+		assert.equal(toolUpdates.length, 1, "continuation must preserve the selected tool set without resetting it");
 	} finally {
-		clearKeptSkills("session-1");
+		__setCompleteFn(null);
+		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
 	}
 });
 
-test("LLM pruning records the kept subset for subagent inheritance", async () => {
-	__setCompleteFn(mockCompleteFn({ pruneSkills: ["duckdb-query-optimization", "frontend-design"] }));
+test("child without request_capability can still prune skills but never prunes tools", async () => {
+	let scorerCalls = 0;
+	let capturedScorerInput = "";
+	const childTools = mockToolInfo.filter((tool) => tool.name !== "web_search").map((tool) => tool.name);
+	let activeTools = [...childTools];
+	__setCompleteFn(async (_model, context) => {
+		scorerCalls++;
+		capturedScorerInput = context.map((message) => message.content).join("\n");
+		return { text: JSON.stringify({ pruneSkills: ["frontend-design"], pruneTools: ["bash"] }) };
+	});
 	try {
-		const { handlers } = register(config());
-		await runBeforeAgentStart(handlers, "Refactor this code for clarity", realisticSkills);
-		// code-simplification is the only kept skill (the other two are pruned).
-		assert.deepEqual(readKeptSkills("session-1"), ["code-simplification"]);
+		const { handlers } = register(config({}, "auto", { ceiling: 10 }));
+		const handler = handlers.get("before_agent_start");
+		assert.ok(handler);
+		__setToolSeams({
+			getAllTools: () => mockToolInfo as any[],
+			getActiveTools: () => [...activeTools],
+			setActiveTools: () => { throw new Error("tool pruning must be skipped without recovery"); },
+		});
+		const result = await subagentContext.run(
+			{ depth: 1, agentContext: "Agent: worker" } as any,
+			() => handler({
+				type: "before_agent_start",
+				prompt: "Assignment: inspect this implementation",
+				systemPrompt: systemPrompt(realisticSkills),
+				systemPromptOptions: { cwd: "/repo", skills: realisticSkills, contextFiles: [] },
+			}, { cwd: "/repo", sessionManager: { getSessionId: () => "child-no-recovery" } }) as Promise<BeforeAgentStartReturn>,
+		);
+		assert.equal(scorerCalls, 1);
+		assert.ok(result?.systemPrompt);
+		assert.doesNotMatch(result.systemPrompt, /<name>frontend-design<\/name>/);
+		assert.match(capturedScorerInput, /Candidate tools:\s*$/u, "without request_capability the child gets no tool candidates");
+		assert.deepEqual(activeTools, childTools);
 	} finally {
-		clearKeptSkills("session-1");
 		__setCompleteFn(null);
+		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
+	}
+});
+
+test("child prepass failure is fail-open once per session, with no recovery-tool requirement for skills", async () => {
+	let scorerCalls = 0;
+	let activeTools = ["read", "request_capability"];
+	__setCompleteFn(async () => {
+		scorerCalls++;
+		throw new Error("model unavailable");
+	});
+	try {
+		const { handlers } = register(config({}, "auto", { ceiling: 10 }));
+		const handler = handlers.get("before_agent_start");
+		assert.ok(handler);
+		__setToolSeams({
+			getAllTools: () => [...mockToolInfo, { name: "request_capability", description: "Recover" }] as any[],
+			getActiveTools: () => [...activeTools],
+			setActiveTools: (names) => { activeTools = [...names]; },
+		});
+		const ctx = { cwd: "/repo", sessionManager: { getSessionId: () => "child-failed-once" } };
+		const event = {
+			type: "before_agent_start",
+			prompt: "Assignment: make this implementation more reliable",
+			systemPrompt: systemPrompt(realisticSkills),
+			systemPromptOptions: { cwd: "/repo", skills: realisticSkills, contextFiles: [] },
+		};
+		const results = await subagentContext.run({ depth: 1 } as any, async () => [
+			await handler(event, ctx) as BeforeAgentStartReturn,
+			await handler({ ...event, prompt: "continue" }, ctx) as BeforeAgentStartReturn,
+		]);
+		assert.equal(scorerCalls, 1, "failed launch pass must not be retried on internal continuation");
+		for (const result of results) {
+			assert.match(result?.systemPrompt ?? systemPrompt(realisticSkills), /<name>duckdb-query-optimization<\/name>/);
+			assert.match(result?.systemPrompt ?? systemPrompt(realisticSkills), /<name>frontend-design<\/name>/);
+		}
+		assert.ok(activeTools.includes("read"));
+	} finally {
+		__setCompleteFn(null);
+		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });
 	}
 });
 

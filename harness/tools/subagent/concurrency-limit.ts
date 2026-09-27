@@ -7,6 +7,12 @@
  * deadlock while every process permit is held by a parent waiting on children.
  */
 
+import {
+  DEFAULT_SUBAGENT_MAX_INFLIGHT,
+  type ConcurrencyLimitSource,
+  type ResolvedConcurrencyLimit,
+} from '../../../lib/concurrency-config.js';
+
 /** Acquire/release handle returned by {@link Semaphore.acquire}. */
 export interface Release {
 	(): void;
@@ -112,15 +118,35 @@ export class Semaphore {
 
 /** Environment key for the global active root-tree cap. */
 const MAX_INFLIGHT_ENV = "PIE_SUBAGENT_MAX_INFLIGHT";
+const MAX_INFLIGHT_SOURCE_ENV = "PIE_SUBAGENT_MAX_INFLIGHT_SOURCE";
 /** Default active root-tree cap when no override is supplied. */
-export const DEFAULT_MAX_INFLIGHT = 2;
+export const DEFAULT_MAX_INFLIGHT = DEFAULT_SUBAGENT_MAX_INFLIGHT;
+
+/** Resolve the global active root-tree cap and its provenance. Existing CLI / env
+ *  numeric semantics are preserved: positive finite values are floored, with no
+ *  upper bound imposed by the preference setting's UI range. */
+export function getMaxInflightResolution(): ResolvedConcurrencyLimit {
+	const raw = process.env[MAX_INFLIGHT_ENV];
+	if (raw === undefined || raw === "") {
+		return { value: DEFAULT_MAX_INFLIGHT, source: "configured-default" };
+	}
+	const n = Number(raw);
+	if (!Number.isFinite(n) || n < 1) {
+		return { value: DEFAULT_MAX_INFLIGHT, source: "safety-fallback" };
+	}
+	const requestedSource = process.env[MAX_INFLIGHT_SOURCE_ENV];
+	const source: ConcurrencyLimitSource = requestedSource === "configured-default"
+		|| requestedSource === "saved-preference"
+		|| requestedSource === "environment-override"
+		|| requestedSource === "safety-fallback"
+		? requestedSource
+		: "environment-override";
+	return { value: Math.floor(n), source };
+}
 
 /** Resolve the global active root-tree cap. */
 export function getMaxInflight(): number {
-	const raw = process.env[MAX_INFLIGHT_ENV];
-	if (raw === undefined || raw === "") return DEFAULT_MAX_INFLIGHT;
-	const n = Number(raw);
-	return Number.isFinite(n) && n >= 1 ? Math.floor(n) : DEFAULT_MAX_INFLIGHT;
+	return getMaxInflightResolution().value;
 }
 
 /** Process-wide semaphore guarding complete root-tree lifetimes. */

@@ -3,8 +3,6 @@
 
 import type { ComponentChildren, JSX } from 'preact';
 
-import { CollapsibleChevron } from './chevron';
-
 import { Tooltip } from './tooltip';
 
 type PanelChipVariant = 'toolbar' | 'pruning';
@@ -255,39 +253,6 @@ export function ToolbarRunStatusChip({ label, title, tooltip, tone, placement = 
       placement={placement}
       label={label}
     />
-  );
-}
-
-
-
-interface ToolbarSelectChipProps {
-  value: string;
-  label: string;
-  title: string;
-  ariaLabel: string;
-  width: 'reasoning';
-  onChange: JSX.GenericEventHandler<HTMLSelectElement>;
-  children: ComponentChildren;
-}
-
-export function ToolbarSelectChip({ value, label, title, ariaLabel, width, onChange, children }: ToolbarSelectChipProps) {
-  // Wrap in the custom Tooltip (placement 'top') so the reasoning-level chip's
-  // tooltip opens upward like the rest of the model-picker row, instead of the
-  // native <select> title whose direction the browser controls.
-  return (
-    <Tooltip content={title} placement="top">
-      <div class={`panel-chip panel-chip-toolbar panel-chip-select panel-chip-${width}-select`}>
-        <span class="panel-chip-select-label" aria-hidden="true">{label}</span>
-        <CollapsibleChevron open={false} size={10} class="panel-chip-select-caret" />
-        <select
-          value={value}
-          onChange={onChange}
-          aria-label={ariaLabel}
-        >
-          {children}
-        </select>
-      </div>
-    </Tooltip>
   );
 }
 

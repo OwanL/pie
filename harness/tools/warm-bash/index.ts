@@ -30,6 +30,7 @@ import { join } from "node:path";
 import { createWarmBashOperations, createWarmBashMetrics } from "./operations.js";
 import { probeGnuGrep } from "./auto-prune.js";
 import { logAutoPruneRewrite, logSessionSummary, flushLog, type WarmBashSessionSummary } from "./logger.js";
+import { rootSessionAttribution } from "../../../lib/session-attribution.js";
 import { WarmBashPool } from "./warm-pool.js";
 import { effectiveTimeout, parseDefaultTimeout } from "./timeout.js";
 import { BASH_DEFAULT_TIMEOUT, BASH_MAX_TIMEOUT, registerWarmBashTool } from "./tool-metadata.js";
@@ -241,7 +242,7 @@ export default function (pi: ExtensionAPI) {
     toolPoolGeneration.clear();
   }
 
-  function getTool(sessionId: string, cwd: string): ReturnType<typeof createBashTool> {
+  function getTool(sessionId: string, cwd: string, rootSessionId?: string): ReturnType<typeof createBashTool> {
     let entry = sessionCwd.get(sessionId);
     if (!entry) {
       entry = { cwd };
@@ -292,11 +293,11 @@ export default function (pi: ExtensionAPI) {
         log: (payload) => {
           // Live debug line for the Pie OutputChannel + persisted
           // side-channel record for analytics ingestion.
-          // stderr is the worker's diagnostic transport, not an indication of
-          // severity. Include an explicit level so routine command rewrites do
-          // not appear as backend errors in the host log.
-          console.error(JSON.stringify({ level: "debug", ...payload }));
-          logAutoPruneRewrite(sessionId, payload.before as string, payload.after as string);
+          // stderr is persisted in the host diagnostic log, so keep command
+          // contents out of it. The raw rewrite remains only in the dedicated
+          // side-channel JSONL, which private-session close scrubs by identity.
+          console.error(JSON.stringify({ level: "debug", source: payload.source, event: payload.event }));
+          logAutoPruneRewrite(sessionId, payload.before as string, payload.after as string, rootSessionId);
         },
         fallbackOps,
         metrics: m,
@@ -334,7 +335,8 @@ export default function (pi: ExtensionAPI) {
       return baseBashTool.execute(toolCallId, effectiveParams, signal, onUpdate);
     }
     const sessionId = ctx.sessionManager.getSessionId();
-    const tool = getTool(sessionId, ctx.cwd);
+    const rootSessionId = rootSessionAttribution(ctx, sessionId).rootSessionId;
+    const tool = getTool(sessionId, ctx.cwd, rootSessionId);
     const effectiveParams = {
       ...params,
       timeout: effectiveTimeout({ timeout: params.timeout, defaultTimeout: defaultTimeout(), maxTimeout: BASH_MAX_TIMEOUT }),
@@ -361,7 +363,7 @@ export default function (pi: ExtensionAPI) {
         fastPathEnabled: cfg.fastPath,
         gnuGrep: gnuGrepProbe(),
       };
-      logSessionSummary(id, summary);
+      logSessionSummary(id, summary, rootSessionAttribution(ctx, id).rootSessionId);
     }
     // Per-session teardown. The shared pool is NOT disposed here — it persists
     // for the process lifetime (or until the idle target is set to 0) so the

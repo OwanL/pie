@@ -52,6 +52,26 @@ test('mergePruningSettings: preserves arrays (same reference) when the update om
   assert.equal(merged.toolAlwaysKeep, base.toolAlwaysKeep);
 });
 
+test('mergePruningSettings: keeps main-agent and subagent switches independent', () => {
+  const merged = mergePruningSettings(base, { mainAgentEnabled: false });
+  assert.equal(merged.mainAgentEnabled, false);
+  assert.equal(merged.subagentEnabled, true);
+
+  const subagentOnly = mergePruningSettings(merged, { subagentEnabled: false });
+  assert.equal(subagentOnly.mainAgentEnabled, false);
+  assert.equal(subagentOnly.subagentEnabled, false);
+});
+
+test('mergePruningSettings: restores true defaults for switches missing from legacy settings', () => {
+  const legacy = { ...base };
+  delete legacy.mainAgentEnabled;
+  delete legacy.subagentEnabled;
+
+  const merged = mergePruningSettings(legacy, {});
+  assert.equal(merged.mainAgentEnabled, true);
+  assert.equal(merged.subagentEnabled, true);
+});
+
 test('mergePruningSettings: treats prepassTimeoutSec null as a real value, not omitted', () => {
   const cleared = mergePruningSettings(base, { prepassTimeoutSec: null });
   assert.equal(cleared.prepassTimeoutSec, null, 'null clears the override');

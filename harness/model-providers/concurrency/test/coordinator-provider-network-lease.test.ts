@@ -198,20 +198,26 @@ test('coordinator policies expose base metrics and grant worker transport bounds
   authority.updatePolicies({
     p: {
       maxConcurrentRequests: 2,
+      maxConcurrentRequestsSource: 'configured-default',
       queueWaitSeconds: 1.5,
       headerWaitSeconds: 2.5,
       streamIdleTimeoutMs: 3_500,
     },
-    q: { maxConcurrentRequests: 4, queueWaitMs: 75, headerWaitMs: 125 },
+    q: {
+      maxConcurrentRequests: 4,
+      maxConcurrentRequestsSource: 'saved-preference',
+      queueWaitMs: 75,
+      headerWaitMs: 125,
+    },
   });
   assert.deepEqual(authority.getMetrics(), [
     {
       provider: 'p', activeRequests: 0, queuedRequests: 0, maxConcurrentRequests: 2,
-      afterburnSeconds: 0, queueWaitSeconds: 1.5, paused: false, pausedUntilMs: 0, strikeCount: 0,
+      maxConcurrentRequestsSource: 'configured-default', afterburnSeconds: 0, queueWaitSeconds: 1.5, paused: false, pausedUntilMs: 0, strikeCount: 0,
     },
     {
       provider: 'q', activeRequests: 0, queuedRequests: 0, maxConcurrentRequests: 4,
-      afterburnSeconds: 0, queueWaitSeconds: 0.075, paused: false, pausedUntilMs: 0, strikeCount: 0,
+      maxConcurrentRequestsSource: 'saved-preference', afterburnSeconds: 0, queueWaitSeconds: 0.075, paused: false, pausedUntilMs: 0, strikeCount: 0,
     },
   ]);
 
@@ -224,7 +230,7 @@ test('coordinator policies expose base metrics and grant worker transport bounds
   assert.equal(clock.pendingTimers, 1);
   assert.deepEqual(authority.getMetrics()[0], {
     provider: 'p', activeRequests: 2, queuedRequests: 1, maxConcurrentRequests: 2,
-    afterburnSeconds: 0, queueWaitSeconds: 1.5, paused: false, pausedUntilMs: 0, strikeCount: 0,
+    maxConcurrentRequestsSource: 'configured-default', afterburnSeconds: 0, queueWaitSeconds: 1.5, paused: false, pausedUntilMs: 0, strikeCount: 0,
   });
 
   authority.release(owner('a'), first.leaseId, 'completed');
@@ -251,6 +257,7 @@ test('coordinator Unlimited bypasses capacity and afterburn but keeps transport 
   authority.updatePolicies({
     p: {
       maxConcurrentRequests: 0,
+      maxConcurrentRequestsSource: 'saved-preference',
       afterburnSeconds: 60,
       queueWaitSeconds: 1,
       headerWaitSeconds: 2.5,
@@ -264,6 +271,7 @@ test('coordinator Unlimited bypasses capacity and afterburn but keeps transport 
   assert.equal(authority.inspect().queued, 0);
   assert.equal(authority.getMetrics()[0]?.activeRequests, 3);
   assert.equal(authority.getMetrics()[0]?.maxConcurrentRequests, 0);
+  assert.equal(authority.getMetrics()[0]?.maxConcurrentRequestsSource, 'saved-preference');
   assert.equal(first.headerWaitMs, 2_500);
   assert.equal(first.streamIdleTimeoutMs, 3_500);
 
@@ -275,6 +283,7 @@ test('coordinator Unlimited bypasses capacity and afterburn but keeps transport 
 
   // A live finite policy can be restored without stale Unlimited state.
   authority.updatePolicies({ p: { maxConcurrentRequests: 1, afterburnSeconds: 0 } });
+  assert.equal(authority.getMetrics()[0]?.maxConcurrentRequestsSource, 'configured-default');
   const finite = await authority.acquire(owner('finite-a'), 'finite-a', { provider: 'p', model: 'm' });
   const waiting = authority.acquire(owner('finite-b'), 'finite-b', { provider: 'p', model: 'm' });
   await Promise.resolve();

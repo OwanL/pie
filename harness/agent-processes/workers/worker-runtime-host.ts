@@ -101,6 +101,7 @@ import {
 } from '../../model-providers/traffic-observation/provider-incident';
 import { observeProviderTransport, type ProviderTransportObservation } from '../../model-providers/traffic-observation/provider-progress-bus';
 import { resolvePieDataPaths } from '../../../lib/data-root/pie-data-root.js';
+import { cleanupAllSessionTempOutputs } from '../../../lib/temporary-files/session-temp-output-lifecycle.js';
 import {
   SUBAGENT_TOOL_NAME,
   subagentProvidersAllDisabled,
@@ -270,7 +271,7 @@ export class WorkerRuntimeHost {
     } else if (domain === 'runtimePrefs' && payload.values && typeof payload.values === 'object' && !Array.isArray(payload.values)) {
       this.applyRuntimePrefs(payload.values as WorkerJsonObject);
     } else if (domain === 'providerPolicy' && payload.providers && typeof payload.providers === 'object' && !Array.isArray(payload.providers)) {
-      ProviderGate.getInstance()?.applyUserOverrides(payload.providers as never);
+      ProviderGate.getInstance()?.applyResolvedPolicies(payload.providers as never);
     }
   }
 
@@ -528,12 +529,26 @@ export class WorkerRuntimeHost {
     const analyticsDisposalReport = await analyticsDisposalPromise;
     const context = this.context;
     this.context = undefined;
+    let runtimeDisposeError: unknown;
     if (context) {
-      context.retired = true;
-      context.uiBridge?.dispose();
-      context.unsubscribe();
-      context.session.sessionManager.revokePieWriteLease?.();
-      await context.runtime.dispose();
+      try {
+        context.retired = true;
+        context.uiBridge?.dispose();
+        context.unsubscribe();
+        context.session.sessionManager.revokePieWriteLease?.();
+        await context.runtime.dispose();
+      } catch (error) {
+        runtimeDisposeError = error;
+      }
+    }
+    let tempOutputCleanupError: unknown;
+    try {
+      // The SDK may swallow session_shutdown extension-hook errors. Re-run the
+      // exact worker-owned manifest cleanup after dispose and let shutdown
+      // report failure while the coordinator still retains retry manifests.
+      await cleanupAllSessionTempOutputs();
+    } catch (error) {
+      tempOutputCleanupError = error;
     }
     this.detailStore.dispose();
     this.stopProviderProgressObserver?.();
@@ -548,6 +563,15 @@ export class WorkerRuntimeHost {
     this.lifecycleStore = undefined;
     this.analyticsWriterAdmission = undefined;
     this.lifecycleBarrier = undefined;
+    if (runtimeDisposeError || tempOutputCleanupError) {
+      const details = [runtimeDisposeError, tempOutputCleanupError]
+        .filter((error) => error !== undefined)
+        .map((error) => error instanceof Error ? error.message : String(error))
+        .join('; ');
+      throw new Error(`Worker session teardown was incomplete: ${details}`, {
+        cause: tempOutputCleanupError ?? runtimeDisposeError,
+      });
+    }
     return analyticsDisposalReport;
   }
 
@@ -647,7 +671,7 @@ export class WorkerRuntimeHost {
     }
     const syncedProviderPolicy = this.syncPayloads.get('providerPolicy')?.providers;
     if (syncedProviderPolicy && typeof syncedProviderPolicy === 'object' && !Array.isArray(syncedProviderPolicy)) {
-      ProviderGate.getInstance()?.applyUserOverrides(syncedProviderPolicy as never);
+      ProviderGate.getInstance()?.applyResolvedPolicies(syncedProviderPolicy as never);
     }
     const authPath = this.syncedAuthPath ?? resolveAuthPath(this.agentDir);
     await fs.mkdir(path.dirname(authPath), { recursive: true });
@@ -1584,6 +1608,16 @@ export class WorkerRuntimeHost {
     ];
     for (const [key, env] of scalarEnv) {
       if (typeof values[key] === 'string' || typeof values[key] === 'number') process.env[env] = String(values[key]);
+    }
+    const maxInflight = values.subagentMaxInflight;
+    const maxInflightSource = values.subagentMaxInflightSource;
+    if (typeof maxInflight === 'string' || typeof maxInflight === 'number') {
+      process.env['PIE_SUBAGENT_MAX_INFLIGHT_SOURCE'] = maxInflightSource === 'configured-default'
+        || maxInflightSource === 'saved-preference'
+        ? maxInflightSource
+        : 'saved-preference';
+    } else if (maxInflightSource === 'configured-default' || maxInflightSource === 'saved-preference') {
+      process.env['PIE_SUBAGENT_MAX_INFLIGHT_SOURCE'] = maxInflightSource;
     }
     if (this.context
       && (values.subagentProviderDefaults !== undefined

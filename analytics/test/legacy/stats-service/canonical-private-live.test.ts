@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -83,6 +83,96 @@ for (const authority of ['canonical', 'legacy'] as const) {
     }
   });
 }
+
+test('canonical private close deletes session rows and scrubs rotated side-channel logs only for that session', async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'pie-private-close-side-channels-'));
+  const dataRoot = path.join(root, 'data');
+  const sessionPath = path.join(root, 'sessions', 'private.jsonl');
+  const otherSessionPath = path.join(root, 'sessions', 'other.jsonl');
+  mkdirSync(dataRoot, { recursive: true });
+  const state = sessionState(sessionPath);
+  const recorder = new SqliteAnalyticsRecorder(path.join(root, 'analytics.sqlite'));
+  const capture = new CanonicalAnalyticsCapture({
+    authority: 'canonical', generationId: 'generation-side-channels', workspaceId: 'workspace-side-channels',
+    buildId: 'build', processGeneration: 'process',
+    sink: { submit: (observation) => { recorder.submit(observation); } },
+    detailSink: { submitDetail: () => undefined },
+    lifecycleSink: {
+      bindPendingCreate: async () => undefined,
+      deleteSession: async (...args) => { recorder.deleteSession(...args); },
+    },
+  });
+  const captureSettlement = (invocationId: string, sessionId: string, pathForSession: string) => {
+    capture.captureProviderSettlement({
+      schemaVersion: 1, invocationId, sourceId: invocationId, sessionId, sessionPath: pathForSession,
+      branchId: null, parentOperationId: null, parentRunId: null, parentToolId: null,
+      kind: 'conversation', provider: 'provider', model: 'model', provenance: 'exact', instrumentationGap: false,
+      startedAt: '2026-09-10T00:00:00.000Z', endedAt: '2026-09-10T00:00:01.000Z', outcome: 'succeeded',
+      inputTokens: 1, outputTokens: 2, providerReportedCostUsd: 0.25,
+    });
+  };
+  captureSettlement('private-invocation', 'private-root', sessionPath);
+  captureSettlement('other-invocation', 'other-root', otherSessionPath);
+  const fileNames = ['pruning.jsonl', 'tool-result-pruning.jsonl', 'warm-bash.jsonl'];
+  for (const fileName of fileNames) {
+    for (const suffix of ['', '.1', '.2']) {
+      const records = [
+        { sessionId: 'private-root', sessionPath, event: 'private', command: 'sensitive private command' },
+        { sessionId: 'private-child', rootSessionId: 'private-root', event: 'child' },
+        { sessionId: 'private-grandchild', rootSessionId: 'private-root', event: 'nested-child' },
+        { sessionId: 'other-root', sessionPath: otherSessionPath, event: 'other' },
+      ];
+      writeFileSync(path.join(dataRoot, `${fileName}${suffix}`), `${records.map((record) => JSON.stringify(record)).join('\n')}\n`);
+    }
+  }
+  const stats = new StatsService({
+    dataOutcomesRootPath: path.join(dataRoot, 'outcomes'), workspaceId: 'workspace-side-channels',
+    getArchState: () => state, analyticsCapture: capture,
+  });
+  try {
+    assert.equal(recorder.readProviderSettlements('private-root').settlements.length, 1);
+    assert.equal(recorder.readProviderSettlements('other-root').settlements.length, 1);
+    await stats.setSessionPrivacy(sessionPath, true);
+    assert.equal(readFileSync(path.join(dataRoot, 'pruning.jsonl'), 'utf8').trim().split(/\r?\n/).length, 4,
+      'canonical privacy-on while open does not scrub auxiliary logs');
+
+    await stats.closePrivateSessionAnalytics(sessionPath, undefined, 'private-root');
+
+    assert.equal(recorder.readProviderSettlements('private-root').settlements.length, 0);
+    assert.equal(recorder.readProviderSettlements('other-root').settlements.length, 1);
+    for (const fileName of fileNames) {
+      for (const suffix of ['', '.1', '.2']) {
+        const lines = readFileSync(path.join(dataRoot, `${fileName}${suffix}`), 'utf8')
+          .trim().split(/\r?\n/).map((line) => JSON.parse(line) as { sessionId: string; sessionPath: string });
+        assert.equal(lines.length, 1, `${fileName}${suffix} retains only the unrelated session`);
+        assert.equal(lines[0]?.sessionId, 'other-root');
+        assert.equal(lines[0]?.sessionPath, otherSessionPath);
+      }
+    }
+
+    // session-actions makes a second pass after backend runtime disposal. A
+    // child shutdown write must not escape the first scrub's close window.
+    stats.onSessionClosed(sessionPath);
+    const closes = (stats as unknown as { canonicalPrivateClosesByPath: Map<string, unknown> })
+      .canonicalPrivateClosesByPath;
+    assert.ok(closes.has(sessionPath), 'runtime retirement keeps the close fence until the post-disposal scrub');
+    const warmBashPath = path.join(dataRoot, 'warm-bash.jsonl');
+    const lateSummary = {
+      sessionId: 'private-child', rootSessionId: 'private-root', event: 'session_summary', summary: 'late shutdown record',
+    };
+    writeFileSync(warmBashPath, `${JSON.stringify(lateSummary)}\n${readFileSync(warmBashPath, 'utf8')}`);
+    await stats.setSessionPrivacy(sessionPath, true);
+    const remainingWarmBash = readFileSync(warmBashPath, 'utf8').trim().split(/\r?\n/)
+      .map((line) => JSON.parse(line) as { sessionId: string });
+    assert.equal(remainingWarmBash.length, 1);
+    assert.equal(remainingWarmBash[0]?.sessionId, 'other-root');
+    assert.equal(closes.has(sessionPath), false, 'post-disposal scrub releases the retired close fence');
+  } finally {
+    await stats.shutdown();
+    recorder.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test('private close prevents cache rehydration while deletion is in flight', async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'pie-private-close-display-'));
@@ -205,6 +295,7 @@ test('canonical private close coalesces identical identities and rejects conflic
   const sessionPath = path.join(root, 'private.jsonl');
   const state = sessionState(sessionPath);
   const deleteGate = deferred<void>();
+  const deleteStarted = deferred<void>();
   let deleteCalls = 0;
   const capture = new CanonicalAnalyticsCapture({
     authority: 'canonical', generationId: 'generation-coalesce', workspaceId: 'workspace-coalesce',
@@ -215,6 +306,7 @@ test('canonical private close coalesces identical identities and rejects conflic
       bindPendingCreate: async () => undefined,
       deleteSession: async () => {
         deleteCalls += 1;
+        deleteStarted.resolve();
         await deleteGate.promise;
       },
     },
@@ -227,7 +319,7 @@ test('canonical private close coalesces identical identities and rejects conflic
   try {
     stats.prepareForSend(sessionPath, []);
     const first = stats.closePrivateSessionAnalytics(sessionPath, undefined, 'private-root');
-    await Promise.resolve();
+    await deleteStarted.promise;
     const second = stats.closePrivateSessionAnalytics(sessionPath, undefined, 'private-root');
     assert.equal(deleteCalls, 1, 'same identity shares one durable delete');
     await assert.rejects(
@@ -238,6 +330,7 @@ test('canonical private close coalesces identical identities and rejects conflic
     deleteGate.resolve();
     await Promise.all([first, second]);
     assert.equal(internals.canonicalPrivateClosesByPath.get(sessionPath)?.phase, 'deleted');
+    await stats.setSessionPrivacy(sessionPath, true);
     stats.onSessionClosed(sessionPath);
     assert.equal(internals.canonicalPrivateClosesByPath.has(sessionPath), false, 'runtime retirement releases the fence');
   } finally {

@@ -112,26 +112,26 @@ export function MessageItemView({
   // Message-level menu metadata, bound ONCE per row: every nested region
   // (assistant text, reasoning, tool cards, user bubble, system note,
   // compaction-summary shell) reaches the same enriched menu through the
-  // wrapped handler below, so right-click actions like Copy text / Edit /
-  // Delete from here are available on the whole row, not just the plain-text
-  // body.
+  // wrapped handler below, so right-click copy / Edit / Delete actions are
+  // available on the whole row, not just the plain-text body.
   const messageMenu: TranscriptMessageMenuInfo = {
     messageId: message.id,
     role: message.role,
     ...(sessionKey ? { sessionPath: sessionKey } : {}),
     plainText: combinedMarkdown,
+    markdownText: combinedMarkdown,
     editable: derived.isClickableUserMsg,
     // `readonly` is only set on nested subagent transcript rows (the main
     // transcript never passes it). Their message ids are synthetic — not
     // durable session entries — so they must not offer "Delete from here".
     canTruncate: !readonly && isTruncateEligibleMessage(message),
   };
-  const handleRowContextMenu: TranscriptContextMenuHandler = (type, rawData, e, info) => {
+  const handleRowContextMenu: TranscriptContextMenuHandler = (type, rawData, e, info, filePath) => {
     // Nested renderers may provide only target-specific metadata. Merge it
     // with the row-owned eligibility/id fields, and derive the copy target
     // from the region that was right-clicked rather than from rawData.
     if (type === 'filePath') {
-      onContextMenu(type, rawData, e);
+      onContextMenu(type, rawData, e, undefined, filePath);
       return;
     }
     const targetPlainText = type === 'message'
@@ -139,10 +139,16 @@ export function MessageItemView({
       : type === 'reasoning'
         ? rawData
         : info?.plainText?.trim() ? info.plainText : undefined;
+    const targetMarkdown = type === 'message'
+      ? messageMenu.markdownText
+      : type === 'reasoning'
+        ? rawData
+        : info?.markdownText;
     onContextMenu(type, rawData, e, {
       ...messageMenu,
       ...info,
       plainText: targetPlainText,
+      markdownText: targetMarkdown,
     });
   };
   // Row-level fallback for regions without a specific menu (user bubble text,

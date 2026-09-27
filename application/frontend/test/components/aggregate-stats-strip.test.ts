@@ -127,6 +127,29 @@ test('aggregate stats strip shows muted compact adjusted character volume separa
   assert.match(html, /aggregate-strip-counts">4 open<\/span>/);
 });
 
+test('provider concurrency uses a compact infinity symbol for unlimited capacity', () => {
+  const html = renderToString(h(AggregateStatsStrip, {
+    stats: {
+      ...EMPTY_AGGREGATE_STATS,
+      ready: true,
+      providerGate: {
+        enabled: true,
+        providers: [0, 2].map((limit) => ({
+          provider: `provider-${limit}`, activeRequests: 0, queuedRequests: 0,
+          maxConcurrentRequests: limit, afterburnSeconds: 0, paused: false,
+          pausedUntilMs: 0, strikeCount: 0,
+        })),
+      },
+    },
+    deferredTriggers: [],
+    onOpenDeferredMenu: () => {},
+  }));
+
+  assert.match(html, /0\/∞/);
+  assert.match(html, /0\/2/);
+  assert.doesNotMatch(html, /Unlimited/);
+});
+
 test('aggregate informational rich-tooltip triggers are keyboard-focusable and labelled', () => {
   const html = renderToString(h(AggregateStatsStrip, {
     stats: {
@@ -323,6 +346,63 @@ test('aggregate memo signature includes interior redistribution and new token/we
     aggregateStatsSignature({ ...base, lastRun: { ...lastRun, turnSeriesCoverage: 'unavailable' } }),
     aggregateStatsSignature({ ...base, lastRun: { ...lastRun, turnSeriesCoverage: undefined } }),
     'last-run turn coverage changes must participate in the memo signature',
+  );
+});
+
+test('aggregate memo signature includes concurrency provenance and worker acknowledgement status', () => {
+  const base = {
+    ...EMPTY_AGGREGATE_STATS,
+    providerGate: {
+      enabled: true,
+      providers: [{
+        provider: 'alpha', activeRequests: 1, queuedRequests: 0, maxConcurrentRequests: 3,
+        maxConcurrentRequestsSource: 'environment-override' as const,
+        afterburnSeconds: 0, paused: false, pausedUntilMs: 0, strikeCount: 0,
+      }],
+      subagentConcurrency: {
+        scope: 'worker-process' as const,
+        configured: { value: 8, source: 'saved-preference' as const },
+        workerCount: 2,
+        pendingWorkers: 1,
+      },
+    },
+  };
+
+  assert.notEqual(
+    aggregateStatsSignature(base),
+    aggregateStatsSignature({
+      ...base,
+      providerGate: {
+        ...base.providerGate,
+        providers: [{ ...base.providerGate.providers[0]!, maxConcurrentRequestsSource: 'configured-default' }],
+      },
+    }),
+    'provider source changes participate in the strip equality signature',
+  );
+  assert.notEqual(
+    aggregateStatsSignature(base),
+    aggregateStatsSignature({
+      ...base,
+      providerGate: {
+        ...base.providerGate,
+        subagentConcurrency: { ...base.providerGate.subagentConcurrency, pendingWorkers: 0 },
+      },
+    }),
+    'worker sync status changes participate in the strip equality signature',
+  );
+  assert.notEqual(
+    aggregateStatsSignature(base),
+    aggregateStatsSignature({
+      ...base,
+      providerGate: {
+        ...base.providerGate,
+        subagentConcurrency: {
+          ...base.providerGate.subagentConcurrency,
+          effective: { value: 6, source: 'environment-override' },
+        },
+      },
+    }),
+    'runtime acknowledgement values and source participate in the strip equality signature',
   );
 });
 

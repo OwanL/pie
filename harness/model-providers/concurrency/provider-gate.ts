@@ -31,11 +31,14 @@ import {
 	PROVIDER_GATE_REQUEST_CLASS_HEADER,
 	type ProviderGateRequestClass,
 } from './provider-gate-request-class.js';
+import type { ConcurrencyLimitSource } from '../../../lib/concurrency-config.js';
 import {
 	PROVIDER_MAX_AFTERBURN_SECONDS,
 	PROVIDER_MAX_CONCURRENT_REQUESTS,
 	PROVIDER_NETWORK_PHASE_MAX_WAIT_MS,
 	PROVIDER_UNLIMITED_CONCURRENCY,
+	isProviderMaxConcurrentRequests,
+	resolveProviderMaxConcurrentRequests,
 } from './provider-concurrency.js';
 
 // ── Request class / queue priority ─────────────────────────────────────────────
@@ -80,6 +83,8 @@ export interface ProviderConcurrencyConfig {
 	/** Max concurrent in-flight LLM requests to this provider. 0 = Unlimited
 	 * capacity/afterburn throttling; circuit and network safety remain active. */
 	maxConcurrentRequests: number;
+	/** Where the enforced max-concurrency value came from. */
+	maxConcurrentRequestsSource?: ConcurrencyLimitSource;
 	/** Per-session sticky-slot window in seconds (0 = disabled). When a
 	 *  session's LLM call finishes, the slot it held stays reserved for THAT
 	 *  session for this many seconds. A follow-up from the same session
@@ -96,12 +101,56 @@ export interface ProviderConcurrencyConfig {
 	headerWaitSeconds?: number;
 }
 
+interface ProviderGatePolicyValues {
+	maxConcurrentRequests?: number;
+	maxConcurrentRequestsSource?: unknown;
+	afterburnSeconds?: number;
+	queueWaitSeconds?: number;
+	headerWaitSeconds?: number;
+}
+
+function resolveConfigMaxConcurrentRequests(config: ProviderConcurrencyConfig): {
+	value: number;
+	source: ConcurrencyLimitSource;
+} {
+	switch (config.maxConcurrentRequestsSource) {
+		case 'saved-preference':
+			return resolveProviderMaxConcurrentRequests(config.maxConcurrentRequests, undefined);
+		case 'safety-fallback':
+			return resolveProviderMaxConcurrentRequests(undefined, undefined, config.maxConcurrentRequests);
+		case 'environment-override':
+			if (isProviderMaxConcurrentRequests(config.maxConcurrentRequests)) {
+				return { value: config.maxConcurrentRequests, source: 'environment-override' };
+			}
+			break;
+	}
+	return resolveProviderMaxConcurrentRequests(undefined, config.maxConcurrentRequests);
+}
+
+/** Freeze a copy of the catalog snapshot; override application always derives
+ * a new active config and never mutates this reset baseline. */
+function snapshotProviderConfigs(configs: readonly ProviderConcurrencyConfig[]): readonly ProviderConcurrencyConfig[] {
+	return configs.map((config) => {
+		const limit = resolveConfigMaxConcurrentRequests(config);
+		return Object.freeze({
+			...config,
+			maxConcurrentRequests: limit.value,
+			maxConcurrentRequestsSource: limit.source,
+			...(config.baseUrls && {
+				baseUrls: Object.freeze([...config.baseUrls]) as unknown as string[],
+			}),
+		});
+	});
+}
+
 	/** Per-provider live metrics (for the status bar / aggregate stats). */
 export interface ProviderGateMetrics {
 	provider: string;
 	activeRequests: number;
 	queuedRequests: number;
 	maxConcurrentRequests: number;
+	/** Provenance for the max limit currently enforced by the gate. */
+	maxConcurrentRequestsSource?: ConcurrencyLimitSource;
 	/** Configured afterburn sticky-slot window (seconds; 0 = disabled). */
 	afterburnSeconds: number;
 	/** Configured maximum queue wait before saturation fails. */
@@ -723,7 +772,12 @@ export class ProviderGateTransportCircuitOpenError extends Error {
 export class ProviderGate {
 	private static instance: ProviderGate | null = null;
 	private originalFetch: typeof globalThis.fetch | null = null;
-	private pools = new Map<string, { pool: ProviderPool; headerWaitMs: number }>();
+	private pools = new Map<string, {
+		pool: ProviderPool;
+		headerWaitMs: number;
+		maxConcurrentRequestsSource: ConcurrencyLimitSource;
+	}>();
+	private originalConfigs: readonly ProviderConcurrencyConfig[] = [];
 	private configs: ProviderConcurrencyConfig[] = [];
 	private idleTimeoutMs: number;
 	private defaultHeaderWaitMs: number;
@@ -739,7 +793,8 @@ export class ProviderGate {
 		idleTimeoutSeconds: number,
 		resilience: ProviderGateResilienceOptions = {},
 	) {
-		this.configs = configs;
+		this.originalConfigs = snapshotProviderConfigs(configs);
+		this.configs = this.originalConfigs.map((config) => ({ ...config }));
 		this.idleTimeoutMs = Math.max(0, idleTimeoutSeconds) * 1000;
 		this.transportFailureThreshold = Math.max(1, Math.floor(
 			resilience.transportFailureThreshold ?? DEFAULT_TRANSPORT_FAILURE_THRESHOLD,
@@ -795,7 +850,8 @@ export class ProviderGate {
 		idleTimeoutSeconds: number,
 		resilience?: ProviderGateResilienceOptions,
 	): void {
-		this.configs = configs;
+		this.originalConfigs = snapshotProviderConfigs(configs);
+		this.configs = this.originalConfigs.map((config) => ({ ...config }));
 		this.idleTimeoutMs = Math.max(0, idleTimeoutSeconds) * 1000;
 		if (resilience?.transportFailureThreshold !== undefined) {
 			this.transportFailureThreshold = Math.max(1, Math.floor(resilience.transportFailureThreshold));
@@ -807,27 +863,74 @@ export class ProviderGate {
 	}
 
 	/** Apply user-configured per-provider concurrency overrides on top of the
-	 *  models.json base configs and rebuild the pools live. Called from the
-	 *  `runtimePrefs.set` handler when the user changes concurrency settings
-	 *  in the Providers tab. No restart needed — the new pools take effect
-	 *  immediately for new requests; in-flight requests continue on their
-	 *  existing slots. */
+	 *  models.json base configs and rebuild the pools live. User inputs never
+	 *  supply provenance: a valid max override is always a saved preference. */
 	applyUserOverrides(overrides: Record<string, {
 		maxConcurrentRequests?: number;
 		afterburnSeconds?: number;
 		queueWaitSeconds?: number;
 		headerWaitSeconds?: number;
 	}>): void {
-		// Merge overrides onto the base configs (shallow per-provider merge).
-		this.configs = this.configs.map((cfg) => {
-			const ov = overrides[cfg.provider];
-			if (!ov) return cfg;
+		this.applyPolicyMap(overrides, (ov, baseLimit) =>
+			isProviderMaxConcurrentRequests(ov?.maxConcurrentRequests)
+				? resolveProviderMaxConcurrentRequests(ov.maxConcurrentRequests, baseLimit.value)
+				: baseLimit,
+		);
+	}
+
+	/** Apply an already-resolved provider-policy snapshot, preserving its
+	 *  validated max-limit provenance instead of reclassifying defaults as user
+	 *  preferences. */
+	applyResolvedPolicies(policies: Record<string, {
+		maxConcurrentRequests: number;
+		maxConcurrentRequestsSource: ConcurrencyLimitSource;
+		afterburnSeconds?: number;
+		queueWaitSeconds?: number;
+		headerWaitSeconds?: number;
+	}>): void {
+		this.applyPolicyMap(policies, (policy, baseLimit) => {
+			const value = policy?.maxConcurrentRequests;
+			if (!isProviderMaxConcurrentRequests(value)) return baseLimit;
+			switch (policy.maxConcurrentRequestsSource) {
+				case 'configured-default':
+				case 'saved-preference':
+				case 'environment-override':
+				case 'safety-fallback':
+					return { value, source: policy.maxConcurrentRequestsSource };
+				default:
+					return baseLimit;
+			}
+		});
+	}
+
+	/** Shared policy merge/rebuild path. Both user inputs and resolved snapshots
+	 *  derive from the immutable catalog baseline, preserving reset behavior and
+	 *  live pools/circuits while retaining runtime-discovered provider URLs. */
+	private applyPolicyMap(
+		policies: Record<string, ProviderGatePolicyValues>,
+		resolveLimit: (
+			policy: ProviderGatePolicyValues | undefined,
+			baseLimit: { value: number; source: ConcurrencyLimitSource },
+		) => { value: number; source: ConcurrencyLimitSource },
+	): void {
+		const currentConfigs = new Map(this.configs.map((config) => [config.provider, config]));
+		this.configs = this.originalConfigs.map((cfg) => {
+			const policy = policies[cfg.provider];
+			const baseLimit = resolveConfigMaxConcurrentRequests(cfg);
+			const currentBaseUrls = currentConfigs.get(cfg.provider)?.baseUrls ?? [];
+			const baseUrls = [...new Set([...(cfg.baseUrls ?? []), ...currentBaseUrls])];
+			const maxLimit = resolveLimit(policy, baseLimit);
 			return {
 				...cfg,
-				...(ov.maxConcurrentRequests !== undefined && { maxConcurrentRequests: ov.maxConcurrentRequests }),
-				...(ov.afterburnSeconds !== undefined && { afterburnSeconds: ov.afterburnSeconds }),
-				...(ov.queueWaitSeconds !== undefined && { queueWaitSeconds: ov.queueWaitSeconds }),
-				...(ov.headerWaitSeconds !== undefined && { headerWaitSeconds: ov.headerWaitSeconds }),
+				maxConcurrentRequests: maxLimit.value,
+				maxConcurrentRequestsSource: maxLimit.source,
+				...(baseUrls.length > 0 && { baseUrls }),
+				...(policy?.afterburnSeconds !== undefined && { afterburnSeconds: policy.afterburnSeconds }),
+				...(policy?.queueWaitSeconds !== undefined && { queueWaitSeconds: policy.queueWaitSeconds }),
+				// Zero restores the catalog header bound, matching the coordinator
+				// policy merge semantics rather than persisting a gate-wide default.
+				...(policy?.headerWaitSeconds !== undefined && policy.headerWaitSeconds !== 0
+					&& { headerWaitSeconds: policy.headerWaitSeconds }),
 			};
 		});
 		this.rebuildPools();
@@ -854,7 +957,11 @@ export class ProviderGate {
 			const headerWaitMs = (cfg.headerWaitSeconds ?? 0) > 0
 				? Math.min(PROVIDER_NETWORK_PHASE_MAX_WAIT_MS, cfg.headerWaitSeconds! * 1000)
 				: this.defaultHeaderWaitMs;
-			this.pools.set(cfg.provider, { pool, headerWaitMs });
+			this.pools.set(cfg.provider, {
+				pool,
+				headerWaitMs,
+				maxConcurrentRequestsSource: cfg.maxConcurrentRequestsSource ?? 'configured-default',
+			});
 		}
 		for (const [provider, entry] of oldPools) {
 			if (!this.pools.has(provider)) entry.pool.dispose();
@@ -1516,6 +1623,7 @@ export class ProviderGate {
 				activeRequests: entry.pool.activeRequests,
 				queuedRequests: entry.pool.queuedRequests,
 				maxConcurrentRequests: entry.pool.maxConcurrent,
+				maxConcurrentRequestsSource: entry.maxConcurrentRequestsSource,
 				afterburnSeconds: Math.round(entry.pool.afterburnMs / 1000),
 				queueWaitSeconds: entry.pool.queueWaitMs / 1000,
 				paused: entry.pool.isPaused() || transportPaused,
@@ -1553,10 +1661,12 @@ export class ProviderGate {
 				|| !Number.isInteger(cc.maxConcurrentRequests)
 				|| cc.maxConcurrentRequests < PROVIDER_UNLIMITED_CONCURRENCY
 				|| cc.maxConcurrentRequests > PROVIDER_MAX_CONCURRENT_REQUESTS) continue;
+			const maxLimit = resolveProviderMaxConcurrentRequests(undefined, cc.maxConcurrentRequests);
 			configs.push({
 				provider: name,
 				...(entry.baseUrl ? { baseUrl: entry.baseUrl } : {}),
-				maxConcurrentRequests: cc.maxConcurrentRequests,
+				maxConcurrentRequests: maxLimit.value,
+				maxConcurrentRequestsSource: maxLimit.source,
 				afterburnSeconds: cc.afterburnSeconds ?? 0,
 				queueWaitSeconds: cc.queueWaitSeconds ?? 30,
 				headerWaitSeconds: cc.headerWaitSeconds,

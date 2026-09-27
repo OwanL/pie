@@ -420,6 +420,8 @@ export interface OpenFileInEditorEffect extends EffectBase {
 export interface OpenFileEffect extends EffectBase {
   kind: 'OpenFile';
   path: string;
+  reference?: string;
+  workingDirectory?: string;
 }
 
 export interface SetPruningSettingsEffect extends EffectBase {

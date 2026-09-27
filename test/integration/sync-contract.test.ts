@@ -65,6 +65,15 @@ test('protocol v11 browser-server network state remains host-global and separate
   assert.match(contract, /must never implicitly start the server/u);
 });
 
+test('agent session-control messages retain user-role provenance through queue delivery and reload', async () => {
+  const stateContract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
+  const agentContract = await readFile(new URL('../../docs/contracts/AGENT-SESSION-CONTROL.md', import.meta.url), 'utf8');
+  assert.match(stateContract, /Agent-originated `session_control` messages are user-role rows/u);
+  assert.match(stateContract, /`pie\.agent-message-provenance` custom sidecar linked to the durable user session-entry ID/u);
+  assert.match(stateContract, /Duplicate observations cannot downgrade a delivered row/u);
+  assert.match(agentContract, /Each accepted message appears as a user-role transcript row/u);
+});
+
 test('PROTOCOL_VERSION is a positive integer', () => {
   assert.equal(typeof PROTOCOL_VERSION, 'number');
   assert.ok(Number.isInteger(PROTOCOL_VERSION));
@@ -304,7 +313,29 @@ test('HostToWebviewMessage state envelope carries hostInstanceId and revision', 
       runSummariesBySession: {},
       tokenRateBySession: {},
       workingTimeBySession: {},
-      aggregateStats: EMPTY_AGGREGATE_STATS,
+      aggregateStats: {
+        ...EMPTY_AGGREGATE_STATS,
+        providerGate: {
+          enabled: true,
+          providers: [{
+            provider: 'openai',
+            activeRequests: 0,
+            queuedRequests: 0,
+            maxConcurrentRequests: 0,
+            maxConcurrentRequestsSource: 'saved-preference',
+            afterburnSeconds: 0,
+            paused: false,
+            pausedUntilMs: 0,
+            strikeCount: 0,
+          }],
+          subagentConcurrency: {
+            scope: 'worker-process',
+            configured: { value: 8, source: 'configured-default' },
+            workerCount: 1,
+            pendingWorkers: 0,
+          },
+        },
+      },
       deferredTriggers: [],
       draftText: '',
       busy: false,
@@ -367,6 +398,16 @@ test('HostToWebviewMessage state envelope carries hostInstanceId and revision', 
     assert.equal(msg.state.sessionUsage?.refreshStatus, 'idle');
     assert.equal(msg.state.sessionUsage?.pendingSamples?.[0]?.canonicalInvocationId, 'canonical-1');
     assert.equal(msg.state.sessionUsage?.pendingSamples?.[0]?.provisionalMessageId, 'stream-1');
+    const transported = JSON.parse(JSON.stringify(msg)) as HostToWebviewMessage;
+    assert.equal(transported.type, 'state');
+    if (transported.type !== 'state') return;
+    assert.equal(transported.state.aggregateStats.providerGate.providers[0]?.maxConcurrentRequestsSource, 'saved-preference');
+    assert.deepEqual(transported.state.aggregateStats.providerGate.subagentConcurrency, {
+      scope: 'worker-process',
+      configured: { value: 8, source: 'configured-default' },
+      workerCount: 1,
+      pendingWorkers: 0,
+    });
   }
 });
 

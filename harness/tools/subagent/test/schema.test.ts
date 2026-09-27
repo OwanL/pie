@@ -22,6 +22,13 @@ test("SubagentParams exposes one required task shape without a reasoning overrid
 	assert.equal("agentScope" in props, false);
 });
 
+test("task guidance requests bounded work and concise, actionable handoffs", () => {
+	const description = SubagentParams.properties.task.description as string;
+	assert.match(description, /One small, bounded task/);
+	assert.match(description, /clear outcome and ownership boundaries/);
+	assert.match(description, /concise handoff of results, verification, and any blockers/);
+});
+
 test("cwd guidance documents project-agent discovery and the session-cwd default", () => {
 	const description = (SubagentParams.properties as Record<string, any>).cwd.description as string;
 	assert.match(description, /Working directory for the agent process/);

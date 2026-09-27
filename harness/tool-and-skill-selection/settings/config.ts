@@ -21,6 +21,8 @@ export const DEFAULT_CONFIG: PruningConfig = {
 	model: "gpt-5.4-mini",
 	provider: "github-copilot",
 	thinkingLevel: "minimal",
+	mainAgentEnabled: true,
+	subagentEnabled: true,
 	skills: {
 		strategy: "discretion",
 		ceiling: 8,
@@ -44,6 +46,8 @@ function cloneDefault(): PruningConfig {
 		model: DEFAULT_CONFIG.model,
 		provider: DEFAULT_CONFIG.provider,
 		thinkingLevel: DEFAULT_CONFIG.thinkingLevel,
+		mainAgentEnabled: DEFAULT_CONFIG.mainAgentEnabled,
+		subagentEnabled: DEFAULT_CONFIG.subagentEnabled,
 		skills: {
 			strategy: DEFAULT_CONFIG.skills.strategy,
 			ceiling: DEFAULT_CONFIG.skills.ceiling,
@@ -89,6 +93,19 @@ function isNonNegativeInteger(value: unknown): value is number {
 
 function isStringArray(value: unknown): value is string[] {
 	return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+
+function assignBooleanValue(
+	value: unknown,
+	assign: (next: boolean) => void,
+	invalidMessage: string,
+): void {
+	if (value === undefined) return;
+	if (typeof value === "boolean") {
+		assign(value);
+		return;
+	}
+	warn(invalidMessage);
 }
 
 function assignEnumValue<T extends string>(
@@ -197,6 +214,9 @@ export function loadConfig(
 	const config = cloneDefault();
 
 	// Parse top-level fields
+	assignBooleanValue(raw.mainAgentEnabled, (value) => { config.mainAgentEnabled = value; }, "invalid pruning.mainAgentEnabled; must be a boolean; using default");
+	assignBooleanValue(raw.subagentEnabled, (value) => { config.subagentEnabled = value; }, "invalid pruning.subagentEnabled; must be a boolean; using default");
+
 	assignEnumValue(
 		raw.mode,
 		VALID_MODES,

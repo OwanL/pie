@@ -27,13 +27,14 @@ const MAX_CONCURRENT_REQUESTS = 1;
  * browser transport accepted it still releases the sole detail lane instead
  * of leaving every later expansion queued forever. */
 export const LAZY_DETAIL_REQUEST_TIMEOUT_MS = 35_000;
-const entries = new Map<string, { state: LazyDetailState; bytes: number }>();
-const inFlight = new Set<string>();
-const activeRequests = new Set<string>();
+const entries = new Map<string, { state: LazyDetailState; bytes: number; sessionPath: string }>();
+const inFlight = new Map<string, string>();
+const activeRequests = new Map<string, string>();
 const requestTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
 const pendingRequests: Array<{ sessionPath: string; ref: LazyDetailRef }> = [];
 const subscribersByKey = new Map<string, Set<() => void>>();
 let cacheGeneration = 0;
+let ownedSessionPaths: Set<string> | undefined;
 let post: ((message: WebviewToHostMessage) => unknown) | undefined;
 
 function notifyKey(key: string): void {
@@ -97,6 +98,7 @@ function armRequestTimeout(key: string): void {
           message: 'Detail loading timed out. Retry to try again.',
         },
         bytes: 0,
+        sessionPath: entry.sessionPath,
       });
       notifyKey(key);
     }
@@ -117,7 +119,11 @@ function pumpRequests(): void {
     const next = pendingRequests.shift();
     if (!next) return;
     if (!inFlight.has(next.ref.key)) continue;
-    activeRequests.add(next.ref.key);
+    if (ownedSessionPaths && !ownedSessionPaths.has(next.sessionPath)) {
+      inFlight.delete(next.ref.key);
+      continue;
+    }
+    activeRequests.set(next.ref.key, next.sessionPath);
     let accepted: unknown = false;
     try {
       accepted = post({ type: 'requestDetail', sessionPath: next.sessionPath, ref: next.ref });
@@ -147,24 +153,84 @@ export function setLazyDetailPostMessage(value: (message: WebviewToHostMessage) 
   pumpRequests();
 }
 
+function evictSessionDetails(sessionPath: string): void {
+  const keys = new Set<string>();
+  for (const [key, entry] of entries) {
+    if (entry.sessionPath === sessionPath) keys.add(key);
+  }
+  for (const [key, owner] of inFlight) {
+    if (owner === sessionPath) keys.add(key);
+  }
+  for (const [key, owner] of activeRequests) {
+    if (owner === sessionPath) keys.add(key);
+  }
+  for (const request of pendingRequests) {
+    if (request.sessionPath === sessionPath) keys.add(request.ref.key);
+  }
+  for (let index = pendingRequests.length - 1; index >= 0; index -= 1) {
+    if (pendingRequests[index]?.sessionPath === sessionPath) pendingRequests.splice(index, 1);
+  }
+  for (const key of keys) {
+    clearRequestTimeout(key);
+    entries.delete(key);
+    inFlight.delete(key);
+    activeRequests.delete(key);
+    notifyKey(key);
+  }
+  // Hook-local previous-detail fallbacks are also cache data. Advance the
+  // opaque epoch so mounted detail hooks discard them on their next render,
+  // even if their detail was already evicted from the shared LRU.
+  cacheGeneration += 1;
+}
+
+/** Update session ownership from an authoritative host snapshot. Session
+ * summaries remain present for ordinary hidden tabs; only paths removed from
+ * that list are evicted. Requests/results for an absent path are rejected. */
+export function setLazyDetailSessionOwnership(sessionPaths: readonly string[]): void {
+  const previousOwnedPaths = ownedSessionPaths;
+  ownedSessionPaths = new Set(sessionPaths);
+  const pathsToEvict = new Set<string>();
+  for (const sessionPath of previousOwnedPaths ?? []) {
+    if (!ownedSessionPaths.has(sessionPath)) pathsToEvict.add(sessionPath);
+  }
+  for (const entry of entries.values()) {
+    if (!ownedSessionPaths.has(entry.sessionPath)) pathsToEvict.add(entry.sessionPath);
+  }
+  for (const sessionPath of inFlight.values()) {
+    if (!ownedSessionPaths.has(sessionPath)) pathsToEvict.add(sessionPath);
+  }
+  for (const sessionPath of activeRequests.values()) {
+    if (!ownedSessionPaths.has(sessionPath)) pathsToEvict.add(sessionPath);
+  }
+  for (const request of pendingRequests) {
+    if (!ownedSessionPaths.has(request.sessionPath)) pathsToEvict.add(request.sessionPath);
+  }
+  for (const sessionPath of pathsToEvict) evictSessionDetails(sessionPath);
+  pumpRequests();
+}
+
 export function clearLazyDetailCache(): void {
   clearRequestTimeouts();
   entries.clear();
   inFlight.clear();
   activeRequests.clear();
   pendingRequests.length = 0;
+  ownedSessionPaths = undefined;
   cacheGeneration += 1;
   notifyAll();
 }
 
 export function receiveLazyDetailResult(result: DetailResult): void {
+  if (ownedSessionPaths && !ownedSessionPaths.has(result.sessionPath)) return;
+  const requestedSessionPath = inFlight.get(result.key) ?? entries.get(result.key)?.sessionPath;
+  if (requestedSessionPath !== undefined && requestedSessionPath !== result.sessionPath) return;
   clearRequestTimeout(result.key);
   inFlight.delete(result.key);
   activeRequests.delete(result.key);
   entries.delete(result.key);
   entries.set(result.key, result.status === 'loaded'
-    ? { state: { status: 'loaded', value: result.value }, bytes: result.sizeBytes }
-    : { state: { status: result.status, message: result.message }, bytes: 0 });
+    ? { state: { status: 'loaded', value: result.value }, bytes: result.sizeBytes, sessionPath: result.sessionPath }
+    : { state: { status: result.status, message: result.message }, bytes: 0, sessionPath: result.sessionPath });
   const evictedKeys = enforceBounds();
   notifyKey(result.key);
   for (const key of evictedKeys) {
@@ -174,15 +240,18 @@ export function receiveLazyDetailResult(result: DetailResult): void {
 }
 
 export function requestLazyDetail(sessionPath: string, ref: LazyDetailRef, force = false): void {
+  if (ownedSessionPaths && !ownedSessionPaths.has(sessionPath)) return;
+  const existingEntry = entries.get(ref.key);
+  if (existingEntry && existingEntry.sessionPath !== sessionPath) entries.delete(ref.key);
   const existing = entries.get(ref.key)?.state;
   if (!force && (existing?.status === 'loading' || existing?.status === 'loaded')) {
     touch(ref.key);
     return;
   }
   if (inFlight.has(ref.key)) return;
-  inFlight.add(ref.key);
+  inFlight.set(ref.key, sessionPath);
   entries.delete(ref.key);
-  entries.set(ref.key, { state: { status: 'loading' }, bytes: 0 });
+  entries.set(ref.key, { state: { status: 'loading' }, bytes: 0, sessionPath });
   notifyKey(ref.key);
   pendingRequests.push({ sessionPath, ref });
   pumpRequests();
@@ -197,6 +266,7 @@ export function useLazyDetail(
   const previousKey = useRef<string | undefined>(undefined);
   const lastLoaded = useRef<{
     key: string;
+    sessionPath: string;
     toolCallId?: string;
     executionId?: string;
     value: unknown;
@@ -237,16 +307,26 @@ export function useLazyDetail(
   const retry = useCallback(() => {
     if (ref) requestLazyDetail(ref.sessionPath, ref, true);
   }, [ref?.key]);
-  let state = ref ? entries.get(ref.key)?.state ?? { status: 'idle' as const } : { status: 'idle' as const };
+  const cachedEntry = ref ? entries.get(ref.key) : undefined;
+  let state = ref && cachedEntry?.sessionPath === ref.sessionPath
+    ? cachedEntry.state
+    : { status: 'idle' as const };
   if (ref && state.status === 'loaded') {
     touch(ref.key);
-    lastLoaded.current = { key: ref.key, toolCallId: ref.toolCallId, executionId: ref.executionId, value: state.value };
+    lastLoaded.current = {
+      key: ref.key,
+      sessionPath: ref.sessionPath,
+      toolCallId: ref.toolCallId,
+      executionId: ref.executionId,
+      value: state.value,
+    };
   } else if (
     ref?.kind === 'tool-result'
     && ref.toolCallId !== undefined
     && (state.status === 'idle' || state.status === 'loading')
     && lastLoaded.current
     && lastLoaded.current.key !== ref.key
+    && lastLoaded.current.sessionPath === ref.sessionPath
     && lastLoaded.current.toolCallId === ref.toolCallId
     && lastLoaded.current.executionId === ref.executionId
   ) {

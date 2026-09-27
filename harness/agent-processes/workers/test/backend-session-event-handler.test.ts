@@ -1951,6 +1951,71 @@ test('assistant message events ignore non-assistant roles and incomplete streami
   assert.equal(context.activeRequest?.currentMessageId, undefined);
 });
 
+test('idle agent-originated user prompts persist agent provenance linked to their durable entry', () => {
+  const appended: Array<{ customType: string; data: unknown }> = [];
+  const { deps } = createDeps();
+  const context = createContext({
+    session: {
+      sessionManager: {
+        appendCustomEntry(customType: string, data?: unknown) {
+          appended.push({ customType, data });
+          return `custom-${appended.length}`;
+        },
+      },
+    } as unknown as SessionContext['session'],
+    activeRequest: {
+      id: 'agent-request',
+      messageIndex: 0,
+      agentMessageLocalId: 'local:agent-session:control-1',
+      aborted: false,
+    },
+  });
+  const userEvent = {
+    type: 'message_end' as const,
+    sessionEntryId: 'durable-user-1',
+    message: { role: 'user' as const, content: 'please continue' } as any,
+  };
+
+  handleSdkSessionEvent(deps, context, userEvent);
+  handleSdkSessionEvent(deps, context, userEvent);
+
+  assert.deepEqual(appended, [{
+    customType: 'pie.agent-message-provenance',
+    data: { userEntryId: 'durable-user-1' },
+  }]);
+});
+
+test('busy queued agent-originated user prompts retain provenance through queued delivery', () => {
+  const appended: Array<{ customType: string; data: unknown }> = [];
+  const { deps, emitted } = createDeps();
+  const context = createContext({
+    session: {
+      sessionManager: {
+        appendCustomEntry(customType: string, data?: unknown) {
+          appended.push({ customType, data });
+          return `custom-${appended.length}`;
+        },
+      },
+    } as unknown as SessionContext['session'],
+    activeRequest: { id: 'active-request', messageIndex: 1, aborted: false },
+    queuedLocalIds: ['local:agent-session:control-2'],
+  });
+
+  handleSdkSessionEvent(deps, context, { type: 'message_start', message: { role: 'user' } as any });
+  handleSdkSessionEvent(deps, context, {
+    type: 'message_end',
+    sessionEntryId: 'durable-user-2',
+    message: { role: 'user', content: 'queued instruction' } as any,
+  });
+
+  assert.equal((emitted.find((entry) => entry.event === 'message.queuedDelivered')?.payload as { localId: string }).localId,
+    'local:agent-session:control-2');
+  assert.deepEqual(appended, [{
+    customType: 'pie.agent-message-provenance',
+    data: { userEntryId: 'durable-user-2' },
+  }]);
+});
+
 test('message_update emits thinking content from the explicit thinking field and skips empty tool execution state', () => {
   const { deps, emitted, getContextUsageChangedCount } = createDeps();
   const context = createContext({

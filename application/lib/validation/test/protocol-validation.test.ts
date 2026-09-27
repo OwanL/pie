@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import { validateHostToWebviewDetailMessage, validateWebviewToHostMessage } from '../protocol-validation';
 import { DETAIL_REF_KEY_MAX_BYTES } from '../../../../harness/agent-processes/lib/rpc/subagent-detail';
+import { DEFAULT_SUBAGENT_MAX_INFLIGHT } from '../../../../lib/concurrency-config.js';
 
 test('validateWebviewToHostMessage accepts the simple no-payload messages', () => {
   for (const type of ['ready', 'refreshState', 'requestSnapshot', 'openFilePicker', 'newSession', 'showLogs', 'openSettings', 'restartBackend']) {
@@ -55,6 +56,20 @@ test('validateWebviewToHostMessage validates MCP control messages', () => {
   assert.equal(validateWebviewToHostMessage({ type: 'mcpSetServerEnabledForSession', name: 'jira', enabled: true }).ok, false);
 });
 
+test('validateWebviewToHostMessage validates bounded image-preview requests', () => {
+  assert.equal(validateWebviewToHostMessage({
+    type: 'requestImagePreview', requestId: 'preview-1', sessionPath: '/sessions/a',
+    path: '/workspace/image.png', reference: 'image.png', workingDirectory: '/workspace',
+  }).ok, true);
+  for (const message of [
+    { type: 'requestImagePreview', requestId: '', sessionPath: '/sessions/a', path: '/a.png' },
+    { type: 'requestImagePreview', requestId: 'x'.repeat(257), sessionPath: '/sessions/a', path: '/a.png' },
+    { type: 'requestImagePreview', requestId: 'preview-1', sessionPath: '/sessions/a' },
+    { type: 'requestImagePreview', requestId: 'preview-1', sessionPath: '/sessions/a', path: '/a.png', reference: 1 },
+    { type: 'requestImagePreview', requestId: 'preview-1', sessionPath: '/sessions/a', path: 'x'.repeat(4097) },
+  ]) assert.equal(validateWebviewToHostMessage(message).ok, false);
+});
+
 test('validateWebviewToHostMessage validates compact payloads', () => {
   assert.equal(validateWebviewToHostMessage({ type: 'compact', sessionPath: '/a' }).ok, true);
   assert.equal(validateWebviewToHostMessage({ type: 'compact' }).ok, false);
@@ -77,6 +92,10 @@ test('validateWebviewToHostMessage validates send payloads', () => {
 
 test('validateWebviewToHostMessage validates openFile', () => {
   assert.equal(validateWebviewToHostMessage({ type: 'openFile', path: '/x' }).ok, true);
+  assert.equal(validateWebviewToHostMessage({
+    type: 'openFile', path: '/workspace/README.md', reference: 'README.md', workingDirectory: '/workspace',
+  }).ok, true);
+  assert.equal(validateWebviewToHostMessage({ type: 'openFile', path: '/x', reference: 3 }).ok, false);
   assert.equal(validateWebviewToHostMessage({ type: 'openFile' }).ok, false);
 });
 
@@ -663,6 +682,37 @@ test('validateWebviewToHostMessage validates setPrefs patches and rejects unknow
   );
 });
 
+test('validateWebviewToHostMessage validates subagent concurrency preference bounds and provenance', () => {
+  for (const value of [1, DEFAULT_SUBAGENT_MAX_INFLIGHT, 16]) {
+    assert.equal(validateWebviewToHostMessage({ type: 'setPrefs', prefs: { subagentMaxInflight: value } }).ok, true);
+  }
+  for (const value of [0, 17, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.equal(validateWebviewToHostMessage({ type: 'setPrefs', prefs: { subagentMaxInflight: value } }).ok, false);
+  }
+  assert.equal(validateWebviewToHostMessage({
+    type: 'setPrefs',
+    prefs: { subagentMaxInflight: DEFAULT_SUBAGENT_MAX_INFLIGHT, subagentMaxInflightSource: 'configured-default' },
+  }).ok, true);
+  assert.equal(validateWebviewToHostMessage({
+    type: 'setPrefs',
+    prefs: { subagentMaxInflight: 2, subagentMaxInflightSource: 'saved-preference' },
+  }).ok, true);
+  assert.equal(validateWebviewToHostMessage({
+    type: 'setPrefs', prefs: { subagentMaxInflight: 2 },
+  }).ok, true, 'legacy numeric updates without provenance remain compatible');
+  for (const source of ['configured-default', 'saved-preference']) {
+    assert.equal(validateWebviewToHostMessage({
+      type: 'setPrefs', prefs: { subagentMaxInflightSource: source },
+    }).ok, false, `${source} requires a numeric limit`);
+  }
+  assert.equal(validateWebviewToHostMessage({
+    type: 'setPrefs', prefs: { subagentMaxInflight: 2, subagentMaxInflightSource: 'configured-default' },
+  }).ok, false, 'configured-default must match the shared default');
+  assert.equal(validateWebviewToHostMessage({
+    type: 'setPrefs', prefs: { subagentMaxInflightSource: 'environment-override' },
+  }).ok, false);
+});
+
 test('validateWebviewToHostMessage accepts valid provider concurrency preference patches', () => {
   assert.equal(
     validateWebviewToHostMessage({
@@ -824,6 +874,25 @@ test('validateWebviewToHostMessage validates historyCompaction patches', () => {
     false,
     'model profile with soft below minimum is rejected',
   );
+});
+
+test('validateWebviewToHostMessage accepts independent pruning-agent switches', () => {
+  assert.equal(validateWebviewToHostMessage({
+    type: 'setPruningSettings',
+    settings: { mainAgentEnabled: false, subagentEnabled: true },
+  }).ok, true);
+  assert.equal(validateWebviewToHostMessage({
+    type: 'setPruningSettings',
+    settings: { mainAgentEnabled: 'false' },
+  }).ok, false);
+  assert.equal(validateWebviewToHostMessage({
+    type: 'setPruningSettings',
+    settings: { subagentEnabled: 1 },
+  }).ok, false);
+  assert.equal(validateWebviewToHostMessage({
+    type: 'setPruningSettings',
+    settings: { unknownSwitch: true },
+  }).ok, false);
 });
 
 test('Phase 5 detail keys admit composite subagent keys beyond 512 bytes', () => {

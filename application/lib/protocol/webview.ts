@@ -1,5 +1,6 @@
 import type { ThinkingLevel, ModelSettings, ModelInfo, ContextWindowUsage, InitialContextEstimate } from './models.js';
 import type { ComposerInput, ComposerInputDraft, ChatMessage, DetailResult, LazyDetailRef } from './messages.js';
+import type { ImagePreviewData } from './image-preview.js';
 import type { SessionCatalogProgress, SessionSummary, TranscriptWindow, SystemPromptEntry, FileChangeEntry, RetryStatus } from './sessions.js';
 import type { ExtensionInfo, PruningResult, PruningSettings, SessionTitlesSettings, ToolResultPruningSettings, PruningCatalog, ChatPrefs, ActiveRunSummary } from './settings.js';
 import type { AggregateStats } from './aggregate-stats-view.js';
@@ -603,6 +604,15 @@ export type HostToWebviewMessage =
       type: 'detailResult';
       result: DetailResult;
     }
+  | {
+      /** Bounded, renderer-targeted ephemeral image preview response. */
+      type: 'imagePreviewResult';
+      requestId: string;
+      sessionPath: string;
+      viewGeneration: number;
+      status: 'ready' | 'unavailable';
+      data?: ImagePreviewData;
+    }
   // ── Subagent detail stream. The six variants below are the ONLY
   //    stream content; subscribe/unsubscribe/fetchPages acknowledgements are
   //    correlated control responses and never carry pages. Each message
@@ -746,7 +756,7 @@ type WebviewToHostMessagePayload =
       sessionPath?: string;
     }
   | { type: 'openFilePicker' }
-  | { type: 'openFile'; path: string }
+  | { type: 'openFile'; path: string; reference?: string; workingDirectory?: string }
   | { type: 'addComposerInput'; sessionPath: string; input: ComposerInputDraft }
   | { type: 'removeComposerInput'; sessionPath: string; inputId: string }
   | { type: 'setComposerDraft'; sessionPath: string; text: string }
@@ -768,6 +778,15 @@ type WebviewToHostMessagePayload =
   | { type: 'openSession'; sessionPath: string }
   | { type: 'closeSession'; sessionPath: string; interactionId?: string }
   | { type: 'requestDetail'; sessionPath: string; ref: LazyDetailRef }
+  | {
+      /** One-shot hover/focus request; image bytes never enter ViewState. */
+      type: 'requestImagePreview';
+      requestId: string;
+      sessionPath: string;
+      path: string;
+      reference?: string;
+      workingDirectory?: string;
+    }
   // ── Demand-driven subagent detail. `viewGeneration`, `detailKey`,
   //    and `detailAttempt` are required (not optional wrapper fields): the host
   //    records the exact renderer owner before forwarding any stream content.

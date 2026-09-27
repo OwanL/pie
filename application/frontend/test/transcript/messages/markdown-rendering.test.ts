@@ -13,6 +13,7 @@ import { JSDOM } from 'jsdom';
 import {
   isLocalFilePath,
   localFilePathReference,
+  ordinaryProseFilePathReference,
   resolveLocalFilePath,
 } from '../../../transcript/markdown-file-path';
 
@@ -124,6 +125,49 @@ test('renderMarkdown marks local inline paths and links without changing ordinar
   const plainHtml = renderMarkdown('`reveal/docs/foo.md` <span role="link" tabindex="0">ordinary</span>', true, false);
   assert.match(plainHtml, /<code>reveal\/docs\/foo\.md<\/code>/);
   assert.match(plainHtml, /<span role="link" tabindex="0">ordinary<\/span>/);
+});
+
+test('ordinary prose file references are clickable without absolute paths and retain punctuation', async () => {
+  const renderMarkdown = await loadRenderMarkdown();
+  const html = renderMarkdown('Open src/markdown.ts, then README.md. Keep response.ok, console.log, v1.2.3, 192.168.1.1, and example.com/docs/README.md unchanged.');
+  const document = new JSDOM(`<body>${html}</body>`).window.document;
+  const references = [...document.querySelectorAll('[data-pie-file-path]')];
+
+  assert.deepEqual(references.map((reference) => reference.getAttribute('data-pie-file-path')), [
+    'src/markdown.ts',
+    'README.md',
+  ]);
+  assert.deepEqual(references.map((reference) => reference.textContent), ['src/markdown.ts', 'README.md']);
+  assert.match(document.body.textContent ?? '', /src\/markdown\.ts, then README\.md\./);
+  assert.doesNotMatch(html, /data-pie-file-path="(?:response\.ok|console\.log|v1\.2\.3|192\.168\.1\.1|example\.com)/);
+  assert.match(html, /<a class="file-path-link"[^>]*data-pie-file-path="README\.md"[^>]*role="link" tabindex="0">README\.md<\/a>\./);
+
+  const plainHtml = renderMarkdown('README.md & note', true, false);
+  assert.doesNotMatch(plainHtml, /data-pie-file-path=/);
+  assert.match(plainHtml, /README\.md &amp; note/);
+});
+
+test('ordinary prose detection leaves existing links and code unchanged', async () => {
+  const renderMarkdown = await loadRenderMarkdown();
+  const html = renderMarkdown([
+    '`README.md` [linked README.md](README.md) https://example.com/README.md',
+    '',
+    '```text',
+    'README.md',
+    '```',
+  ].join('\n'));
+  const document = new JSDOM(`<body>${html}</body>`).window.document;
+
+  assert.equal(document.querySelectorAll('code.file-path-link[data-pie-file-path="README.md"]').length, 1);
+  assert.equal(document.querySelectorAll('a.file-path-link[data-pie-file-path="README.md"]').length, 1);
+  assert.equal(document.querySelectorAll('a[href^="https://example.com"] [data-pie-file-path]').length, 0);
+  assert.equal(document.querySelector('pre')?.querySelector('[data-pie-file-path]'), null);
+});
+
+test('ordinary prose path candidates reject domains and leave trailing punctuation outside references', () => {
+  assert.equal(ordinaryProseFilePathReference('README.md:'), 'README.md');
+  assert.equal(ordinaryProseFilePathReference('example.com/docs/README.md'), null);
+  assert.equal(ordinaryProseFilePathReference('localhost/docs/README.md'), null);
 });
 
 test('renderMarkdown emits semantic rich markdown and task-list controls', async () => {

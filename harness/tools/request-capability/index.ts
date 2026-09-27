@@ -31,8 +31,12 @@ export interface RequestCapabilityPorts {
   setActiveTools(names: string[]): void;
   /** Derive the owning session id from the SDK execution context. */
   getSessionId(ctx: unknown): string;
+  /** Resolve the private-close root for auxiliary recovery records. */
+  getRootSessionId?(ctx: unknown): string | undefined;
   /** Lifecycle-state ports (single owner: skill-pruner's state module). */
   getPrunedTools(sessionId: string): ReadonlySet<string>;
+  /** Initial child tool allowlist; undefined for an unrestricted main session. */
+  getAllowedTools?(sessionId: string): ReadonlySet<string> | undefined;
   getHiddenSkills(sessionId: string): ReadonlyMap<string, SkillRecord>;
   getLoadedSkills(sessionId: string): ReadonlySet<string>;
   recordLoadedSkill(sessionId: string, skillName: string): void;
@@ -41,8 +45,8 @@ export interface RequestCapabilityPorts {
   askUserToolName: string;
   getToolDependencies(): Readonly<Record<string, readonly string[]>>;
   /** Log ports: over-pruning recovery telemetry. */
-  recordSkillRecovery(sessionId: string, skillName: string): void;
-  recordToolRecovery(sessionId: string, toolName: string): void;
+  recordSkillRecovery(sessionId: string, skillName: string, rootSessionId?: string): void;
+  recordToolRecovery(sessionId: string, toolName: string, rootSessionId?: string): void;
 }
 
 function stripFrontmatter(content: string): string {
@@ -86,12 +90,15 @@ export function createRequestCapabilityTool(ports: RequestCapabilityPorts) {
       const capabilityType = typeof params.capabilityType === 'string' ? params.capabilityType.trim() : '';
       const capabilityName = typeof params.capabilityName === 'string' ? params.capabilityName.trim() : '';
       const sessionId = ports.getSessionId(ctx);
+      const rootSessionId = ports.getRootSessionId?.(ctx);
       const allTools = ports.getAllTools();
       const activeTools = ports.getActiveTools();
       const knownToolNames = new Set(allTools.map((tool) => tool.name));
+      const allowedTools = ports.getAllowedTools?.(sessionId);
+      const isAllowed = (name: string) => !allowedTools || allowedTools.has(name);
       const autonomousMode = ports.isAutonomousModeEnabled();
       const hiddenToolNames = [...ports.getPrunedTools(sessionId)]
-        .filter((name) => knownToolNames.has(name) && !activeTools.includes(name))
+        .filter((name) => knownToolNames.has(name) && isAllowed(name) && !activeTools.includes(name))
         .filter((name) => !autonomousMode || name !== ports.askUserToolName)
         .sort();
       const hiddenSkills = ports.getHiddenSkills(sessionId);
@@ -128,7 +135,7 @@ export function createRequestCapabilityTool(ports: RequestCapabilityPorts) {
         try {
           const text = formatSkill(skill);
           ports.recordLoadedSkill(sessionId, capabilityName);
-          ports.recordSkillRecovery(sessionId, capabilityName);
+          ports.recordSkillRecovery(sessionId, capabilityName, rootSessionId);
           return { content: [{ type: 'text' as const, text }] };
         } catch (error) {
           return { content: [{ type: 'text' as const, text: `Failed to load hidden skill '${capabilityName}': ${error instanceof Error ? error.message : String(error)}` }], isError: true };
@@ -144,10 +151,10 @@ export function createRequestCapabilityTool(ports: RequestCapabilityPorts) {
 
       const pruned = ports.getPrunedTools(sessionId);
       const dependencies = ports.getToolDependencies();
-      const enabled = new Set(activeTools);
+      const enabled = new Set(activeTools.filter(isAllowed));
       const visited = new Set<string>();
       const visit = (name: string) => {
-        if (visited.has(name) || !knownToolNames.has(name)) return;
+        if (visited.has(name) || !knownToolNames.has(name) || !isAllowed(name)) return;
         visited.add(name);
         if (name === capabilityName || pruned.has(name)) enabled.add(name);
         for (const dependency of dependencies[name] ?? []) visit(dependency);
@@ -155,7 +162,7 @@ export function createRequestCapabilityTool(ports: RequestCapabilityPorts) {
       visit(capabilityName);
       const newActiveTools = [...enabled];
       ports.setActiveTools(newActiveTools);
-      ports.recordToolRecovery(sessionId, capabilityName);
+      ports.recordToolRecovery(sessionId, capabilityName, rootSessionId);
       return { content: [{ type: 'text' as const, text: `Enabled tool '${capabilityName}'; it is available on the next model step.` }] };
     },
   };

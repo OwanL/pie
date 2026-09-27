@@ -2,6 +2,11 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath, URL } from 'node:url';
 
+import {
+  assertChildToolRuntimeOwnerOpen,
+  registerChildToolRuntimeCleanup,
+  type ChildToolRuntimeOwner,
+} from '../../agent-processes/lib/process-lifecycle/child-tool-runtime-owner.js';
 import { canonicalSessionPath } from './artifacts.js';
 import { encodeJsonl, JsonlDecoder } from './protocol.js';
 import type { ComputerAction, ComputerSequence, HeldState, MouseButton, RuntimeResponse, SessionHeldState } from './types.js';
@@ -85,6 +90,7 @@ export class RuntimeClient {
   private readonly heldBySession = new Map<string, HeldState>();
   private recovering?: Promise<void>;
   private healthTimer?: NodeJS.Timeout;
+  private shutdownPromise?: Promise<void>;
   private stopping = false;
   private needsReopen = false;
 
@@ -348,7 +354,18 @@ export class RuntimeClient {
     }
   }
 
-  async shutdown(): Promise<void> {
+  shutdown(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise;
+    const shutdownPromise = this.performShutdown();
+    this.shutdownPromise = shutdownPromise;
+    void shutdownPromise.then(
+      () => { if (this.shutdownPromise === shutdownPromise) this.shutdownPromise = undefined; },
+      () => { if (this.shutdownPromise === shutdownPromise) this.shutdownPromise = undefined; },
+    );
+    return shutdownPromise;
+  }
+
+  private async performShutdown(): Promise<void> {
     if (this.stopping) return;
     const heldBySession = new Map([...this.snapshotHeldBySession()].filter(([, held]) => hasHeld(held)));
     for (const [sessionId, held] of heldBySession) this.heldBySession.set(sessionId, held);
@@ -387,6 +404,7 @@ export class RuntimeClient {
 
 export class RuntimeRegistry {
   private readonly clients = new Map<string, RuntimeClient>();
+  private readonly childClients = new Map<string, RuntimeClient>();
   constructor(private readonly spawnSidecar?: SidecarSpawn) {}
   async get(sessionPath: string): Promise<RuntimeClient> {
     const key = await canonicalSessionPath(sessionPath);
@@ -394,17 +412,46 @@ export class RuntimeRegistry {
     if (!client) { client = new RuntimeClient(key, this.spawnSidecar); this.clients.set(key, client); }
     return client;
   }
+  /** Resolve a runtime private to one in-memory child execution attempt. */
+  getForChild(owner: ChildToolRuntimeOwner): RuntimeClient {
+    assertChildToolRuntimeOwnerOpen(owner);
+    let client = this.childClients.get(owner.id);
+    if (!client) {
+      client = new RuntimeClient(`child:${owner.id}`, this.spawnSidecar);
+      this.childClients.set(owner.id, client);
+      try {
+        registerChildToolRuntimeCleanup(owner, 'computer-use-runtime', async () => await this.shutdownChild(owner));
+      } catch (error) {
+        this.childClients.delete(owner.id);
+        throw error;
+      }
+    }
+    return client;
+  }
+  peekForChild(owner: ChildToolRuntimeOwner): RuntimeClient | undefined { return this.childClients.get(owner.id); }
+  async shutdownChild(owner: ChildToolRuntimeOwner): Promise<void> {
+    const client = this.childClients.get(owner.id);
+    await client?.shutdown();
+    if (client && !client.hasHeldInput) this.childClients.delete(owner.id);
+  }
   async peek(sessionPath: string): Promise<RuntimeClient | undefined> { return this.clients.get(await canonicalSessionPath(sessionPath)); }
   async shutdownSession(sessionPath: string): Promise<void> {
     const key = await canonicalSessionPath(sessionPath); const client = this.clients.get(key); await client?.shutdown();
     if (client && !client.hasHeldInput) this.clients.delete(key);
   }
   async shutdownAll(): Promise<void> {
-    const clients = [...this.clients.entries()];
-    await Promise.allSettled(clients.map(async ([key, client]) => { await client.shutdown(); if (!client.hasHeldInput) this.clients.delete(key); }));
+    const clients = [...this.clients.entries()].map(([key, client]) => ({ key, client, child: false as const }));
+    const childClients = [...this.childClients.entries()].map(([key, client]) => ({ key, client, child: true as const }));
+    await Promise.allSettled([...clients, ...childClients].map(async ({ key, client, child }) => {
+      await client.shutdown();
+      if (!client.hasHeldInput) (child ? this.childClients : this.clients).delete(key);
+    }));
   }
-  killAllSync(): void { for (const client of this.clients.values()) client.killForTesting(); }
-  get size(): number { return this.clients.size; }
+  killAllSync(): void {
+    for (const client of this.clients.values()) client.killForTesting();
+    for (const client of this.childClients.values()) client.killForTesting();
+  }
+  get size(): number { return this.clients.size + this.childClients.size; }
 }
 
 // The pi extension loader (jiti, moduleCache: false) re-evaluates this module on
@@ -414,7 +461,11 @@ export class RuntimeRegistry {
 // registry and the install-once flag on globalThis so every evaluation shares
 // them; Symbol.for keeps the key stable across re-evaluations.
 const RUNTIME_GLOBAL_KEY = Symbol.for('pie.computer-use.runtime');
-interface RuntimeGlobals { registry: RuntimeRegistry; teardownInstalled: boolean; }
+interface RuntimeGlobals {
+  registry: RuntimeRegistry;
+  teardownInstalled: boolean;
+  beforeExitCleanup?: () => Promise<void>;
+}
 function runtimeGlobals(): RuntimeGlobals {
   const holder = globalThis as Record<PropertyKey, unknown>;
   const existing = holder[RUNTIME_GLOBAL_KEY] as RuntimeGlobals | undefined;
@@ -426,10 +477,15 @@ function runtimeGlobals(): RuntimeGlobals {
 
 export const runtimeRegistry: RuntimeRegistry = runtimeGlobals().registry;
 
-export function installProcessTeardown(): void {
+export function installProcessTeardown(beforeExitCleanup?: () => Promise<void>): void {
   const state = runtimeGlobals();
+  if (beforeExitCleanup) state.beforeExitCleanup = beforeExitCleanup;
   if (state.teardownInstalled) return;
   state.teardownInstalled = true;
-  process.once('beforeExit', () => { void state.registry.shutdownAll(); });
+  process.once('beforeExit', async () => {
+    try { await state.beforeExitCleanup?.(); }
+    catch (error) { console.error(`[pie:computer-use] desktop shutdown cleanup blocked: ${(error as Error)?.message ?? String(error)}`); }
+    await state.registry.shutdownAll();
+  });
   process.once('exit', () => state.registry.killAllSync());
 }

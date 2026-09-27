@@ -42,10 +42,11 @@ export function flushLog(): Promise<void> {
 }
 
 /** Record one transparent auto-prune command rewrite (point-in-time event). */
-export function logAutoPruneRewrite(sessionId: string, before: string, after: string): void {
+export function logAutoPruneRewrite(sessionId: string, before: string, after: string, rootSessionId?: string): void {
   writer.append(JSON.stringify({
     event: "auto_prune_rewrite",
     sessionId,
+    ...(rootSessionId && rootSessionId !== sessionId ? { rootSessionId } : {}),
     timestamp: new Date().toISOString(),
     before,
     after,
@@ -65,10 +66,11 @@ export interface WarmBashSessionSummary {
 
 /** Record a session's cumulative routing counters + config context at
  *  session_shutdown. One line per session that used the bash tool. */
-export function logSessionSummary(sessionId: string, summary: WarmBashSessionSummary): void {
+export function logSessionSummary(sessionId: string, summary: WarmBashSessionSummary, rootSessionId?: string): void {
   writer.append(JSON.stringify({
     event: "session_summary",
     sessionId,
+    ...(rootSessionId && rootSessionId !== sessionId ? { rootSessionId } : {}),
     timestamp: new Date().toISOString(),
     ...summary,
   }));

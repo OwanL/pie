@@ -48,7 +48,9 @@ export interface ColdBrowseHelper {
     address: LiveSubagentDetailAddress,
     durableRef?: LazyDetailRef,
   ): Promise<ResolvedDurableDetail>;
+  /** Resolves only after the helper has acknowledged removal of this path's cache entries. */
   invalidatePath(sessionPathKey: string): Promise<void>;
+  /** Resolves only after helper exit is confirmed; rejects if termination cannot be confirmed. */
   dispose(): Promise<void>;
 }
 
@@ -117,6 +119,7 @@ export class ColdBrowseHelperClient implements ColdBrowseHelper {
   private readonly shutdownTimeoutMs: number;
   private current?: HelperGeneration;
   private starting?: Promise<HelperGeneration>;
+  private disposal?: Promise<void>;
   private nextRequestId = 1;
   private disposed = false;
 
@@ -184,9 +187,17 @@ export class ColdBrowseHelperClient implements ColdBrowseHelper {
     await this.request({ operation: 'invalidate', sessionPathKey });
   }
 
-  async dispose(): Promise<void> {
-    if (this.disposed) return;
+  dispose(): Promise<void> {
+    if (this.disposal) return this.disposal;
     this.disposed = true;
+    // Publish the in-flight promise before shutdown can yield so concurrent
+    // callers join the same exit confirmation instead of observing an early
+    // no-op while this generation still retains cached transcript bytes.
+    this.disposal = Promise.resolve().then(async () => await this.disposeGeneration());
+    return this.disposal;
+  }
+
+  private async disposeGeneration(): Promise<void> {
     const generation = this.current ?? await this.starting?.catch(() => undefined);
     if (!generation) return;
     clearTimeout(generation.startupTimer);

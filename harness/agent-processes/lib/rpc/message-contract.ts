@@ -3,6 +3,19 @@ import type { ThinkingLevel } from '../../../model-providers/catalog/thinking-le
 import type { DurationClockDomain } from '../../../../analytics/contracts/timing.js';
 
 export const COMPACTION_METRICS_CUSTOM_TYPE = 'pie.compaction-metrics';
+
+/** Durable transcript provenance marker for agent-to-agent session messages. */
+export const AGENT_MESSAGE_PROVENANCE_CUSTOM_TYPE = 'pie.agent-message-provenance';
+/** Host-local identity prefix for optimistic rows created by session_control. */
+export const AGENT_SESSION_MESSAGE_LOCAL_ID_PREFIX = 'local:agent-session:';
+/** Transcript/display tag for messages authored by another agent. */
+export const AGENT_MESSAGE_CUSTOM_TYPE = 'agent-message';
+
+export function isAgentSessionMessageLocalId(value: unknown): value is string {
+  return typeof value === 'string'
+    && value.startsWith(AGENT_SESSION_MESSAGE_LOCAL_ID_PREFIX)
+    && value.length > AGENT_SESSION_MESSAGE_LOCAL_ID_PREFIX.length;
+}
 export type {
   ComposerInput,
   FileBlobComposerInput,

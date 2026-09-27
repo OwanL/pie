@@ -2,11 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import type { ChatPrefs } from '../settings.js';
+import { DEFAULT_SUBAGENT_MAX_INFLIGHT } from '../../../../lib/concurrency-config.js';
 import {
   ALL_NESTED_BUCKETS_ALLOWED,
   ALL_SUBAGENT_BUCKETS_CAN_SPAWN,
   DEFAULT_CHAT_PREFS,
   EMPTY_SUBAGENT_BUCKETS,
+  buildRuntimePrefsPayload,
+  mergeChatPrefs,
   normalizeBooleanMap,
   normalizeNestedAllowedBuckets,
   normalizeSubagentBucketCanSpawn,
@@ -195,4 +198,52 @@ test('subagent bucket delegation defaults to allowed and normalizes fail-open', 
     resolveChatPrefs({ subagentBucketCanSpawn: { small: false, medium: false, frontier: true } }).subagentBucketCanSpawn,
     { small: false, medium: false, frontier: true },
   );
+});
+
+test('subagent max inflight defaults to the shared default and preserves saved preferences', () => {
+  assert.equal(DEFAULT_CHAT_PREFS.subagentMaxInflight, DEFAULT_SUBAGENT_MAX_INFLIGHT);
+  assert.equal(DEFAULT_CHAT_PREFS.subagentMaxInflightSource, 'configured-default');
+  assert.equal(resolveChatPrefs(null).subagentMaxInflight, DEFAULT_SUBAGENT_MAX_INFLIGHT);
+  assert.equal(resolveChatPrefs(null).subagentMaxInflightSource, 'configured-default');
+  assert.deepEqual(
+    [2, DEFAULT_SUBAGENT_MAX_INFLIGHT].map((value) => {
+      const resolved = resolveChatPrefs({ subagentMaxInflight: value, subagentMaxInflightSource: 'saved-preference' });
+      return [resolved.subagentMaxInflight, resolved.subagentMaxInflightSource];
+    }),
+    [[2, 'saved-preference'], [DEFAULT_SUBAGENT_MAX_INFLIGHT, 'saved-preference']],
+  );
+  const legacy = resolveChatPrefs({ subagentMaxInflight: 2 });
+  assert.equal(legacy.subagentMaxInflight, 2);
+  assert.equal(legacy.subagentMaxInflightSource, 'saved-preference');
+
+  const staleConfiguredDefault = resolveChatPrefs({
+    subagentMaxInflight: 2,
+    subagentMaxInflightSource: 'configured-default',
+  });
+  assert.equal(staleConfiguredDefault.subagentMaxInflight, DEFAULT_SUBAGENT_MAX_INFLIGHT);
+  assert.equal(staleConfiguredDefault.subagentMaxInflightSource, 'configured-default');
+});
+
+test('subagent max inflight source survives unrelated preference merges and is included in runtime payloads', () => {
+  const defaults = resolveChatPrefs(null);
+  const unrelated = mergeChatPrefs(defaults, { autoExpandReasoning: true });
+  assert.equal(unrelated.subagentMaxInflightSource, 'configured-default');
+  assert.equal(buildRuntimePrefsPayload(unrelated).subagentMaxInflightSource, 'configured-default');
+
+  const explicit = mergeChatPrefs(defaults, { subagentMaxInflight: 2 });
+  assert.equal(explicit.subagentMaxInflightSource, 'saved-preference');
+  assert.equal(buildRuntimePrefsPayload(explicit).subagentMaxInflightSource, 'saved-preference');
+
+  const restoredDefault = mergeChatPrefs(defaults, {
+    subagentMaxInflight: 2,
+    subagentMaxInflightSource: 'configured-default',
+  });
+  assert.equal(restoredDefault.subagentMaxInflight, DEFAULT_SUBAGENT_MAX_INFLIGHT);
+  assert.equal(restoredDefault.subagentMaxInflightSource, 'configured-default');
+
+  const payloadFromStaleDefault = buildRuntimePrefsPayload({
+    ...defaults,
+    subagentMaxInflight: 2,
+  });
+  assert.equal(payloadFromStaleDefault.subagentMaxInflight, DEFAULT_SUBAGENT_MAX_INFLIGHT);
 });

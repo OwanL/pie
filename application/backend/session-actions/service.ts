@@ -1,5 +1,5 @@
 import { BackendClient } from '../agent-connection/client';
-import { resolveChatPrefs, buildRuntimePrefsPayload } from '../../lib/protocol/index.js';
+import { buildRuntimePrefsPayload, mergeChatPrefs, resolveChatPrefs } from '../../lib/protocol/index.js';
 import {
   STORAGE_CUTOFF_AUTHORIZATION_ENV,
   STORAGE_CUTOFF_AUTHORIZATION_VALUE,
@@ -503,6 +503,7 @@ export class SessionService implements HostDisposable {
       // explicitly scrub the observer before the ordinary close callback can
       // finalize anything. Reopen only while the transcript still exists: a
       // successful session.forget is the irreversible deletion boundary.
+      let forgetCommitted = false;
       try {
         const closeOperationId = operationId?.trim() || `private-close:${sessionPath}`;
         let pendingCreateOperationId: string | undefined;
@@ -534,18 +535,22 @@ export class SessionService implements HostDisposable {
           sessionPath,
           ...(filesystemLifecycleAuthorized ? { operationId: closeOperationId } : {}),
         });
+        forgetCommitted = true;
+        // Runtime disposal can emit a final warm-bash/session summary. Treat
+        // its scrub as part of private-close success; the observer keeps the
+        // close fence active until this awaited pass settles.
+        await this.runObserver.setSessionPrivacy?.(sessionPath, true);
       } catch (error) {
         this.dispatchArch({
           kind: 'Command',
           cmd: { kind: 'SetPrivacyMode', corrId: `privacy-retry:${Date.now()}`, sessionPath, enabled: true },
         });
-        if (!filesystemLifecycleAuthorized) this.tabs.openSession(sessionPath);
+        // Reopen only while the transcript still exists. Once forget has
+        // committed, retain the retry marker and report failure without trying
+        // to resurrect a deleted session path.
+        if (!filesystemLifecycleAuthorized && !forgetCommitted) this.tabs.openSession(sessionPath);
         throw error;
       }
-      // Runtime disposal may emit a final warm-bash/session summary. The first
-      // scrub already committed privacy before deletion, so this second pass is
-      // best-effort and must never attempt to reopen a deleted transcript.
-      await Promise.resolve(this.runObserver.setSessionPrivacy?.(sessionPath, true)).catch(() => undefined);
     }
     await this.tabs.closeSession(sessionPath, nextPath, selectionChanged, operationId);
     if (privacyMode) {
@@ -680,28 +685,7 @@ export class SessionService implements HostDisposable {
 
   async setPrefs(prefs: Partial<ChatPrefs>): Promise<void> {
     const current = this.getArchState().settings.prefs;
-    const deepMerged: Partial<ChatPrefs> = {
-      ...prefs,
-      ...(prefs.extensionToggles && {
-        extensionToggles: { ...current.extensionToggles, ...prefs.extensionToggles },
-      }),
-      ...(prefs.providerToggles && {
-        providerToggles: { ...current.providerToggles, ...prefs.providerToggles },
-      }),
-      ...(prefs.subagentProviderDefaults && {
-        subagentProviderDefaults: {
-          ...current.subagentProviderDefaults,
-          ...prefs.subagentProviderDefaults,
-        },
-      }),
-      ...(prefs.subagentProviderTogglesBySession && {
-        subagentProviderTogglesBySession: {
-          ...current.subagentProviderTogglesBySession,
-          ...prefs.subagentProviderTogglesBySession,
-        },
-      }),
-    };
-    const merged = resolveChatPrefs({ ...current, ...deepMerged });
+    const merged = resolveChatPrefs(mergeChatPrefs(current, prefs));
     // Apply the runtime-audit-log toggle to the audit module so emit decisions
     // take effect immediately on live updates AND on cold-start restore (which
     // also routes through this method via the SetPrefs → SetPrefsRpc pipeline).

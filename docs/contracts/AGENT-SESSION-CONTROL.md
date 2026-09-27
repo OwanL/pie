@@ -22,7 +22,9 @@ worker transport. In-memory subagents cannot use it.
   bounded to 1--64 rows.
 - `message` uses ordinary `message.send` semantics. Idle targets wake through
   the normal runtime path; busy targets retain Pie's existing queued-send
-  behavior.
+  behavior. Each accepted message appears as a user-role transcript row with an
+  Agent/bot cue, remains identifiable after reload through durable provenance,
+  and is removed if the send is rejected before acceptance.
 - `close` uses `session.lifecycleClose`. It is reversible by default. Passing
   `delete: true` records the privacy decision, acknowledges the lifecycle
   close, then runs the existing `session.forget` cleanup after the response;

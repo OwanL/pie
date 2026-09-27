@@ -2,13 +2,17 @@ import type { ExtensionAPI, BeforeAgentStartEvent, InputEvent, ToolCallEvent, Sk
 import { appendDecision, estimateTokens, recordSkillRead, recordKnownSkills, recordSkillsBlockNotFound } from "./logger.js";
 import {
 	getFormatSkillsForPromptImpl,
+	getAllowedChildTools,
+	getHiddenSkills,
 	getPrunedTools,
+	recordAllowedChildTools,
 	recordHiddenSkills,
 	recordPrunedTools,
 	state,
+	PROCESS_SESSION_ID,
 } from "../state/selector-state.js";
 import { toErrorMessage } from "../../../lib/structured-logging/error-message.js";
-import { recordKeptSkills } from "../state/pruned-skills.js";
+import { rootSessionAttribution } from "../../../lib/session-attribution.js";
 import { getPieBaseSystemPrompt, rebasePieToolPrompt } from "../../agent-instructions/prompt-assembly/pie-harness-prompt.js";
 import { createRequestCapabilityDefinition, type PiToolSeams } from "../recovery/request-capability-ports.js";
 import { getCodeVersion, prewarmCodeVersion } from "./version.js";
@@ -21,7 +25,7 @@ import {
 	getCachedPrepassCrossSession,
 } from "../state/prepass-cache.js";
 import { pruningResultRenderer } from "./render.js";
-import type { PrepassInvocation, PrepassUsage, SkillPruningResult, ToolPruningResult } from "../prepass/types.js";
+import type { PrepassInvocation, PrepassRunResult, PrepassUsage, SkillPruningResult, ToolPruningResult } from "../prepass/types.js";
 import { getCompleteFn, getRecentConversation, runPruningPrepass } from "../prepass/prepass.js";
 import { buildReplacement, buildDecision, buildFeedbackMessage, estimateToolTokens } from "../prepass/message-builders.js";
 import { shouldSkipPruning, getSessionId, getSessionPath, getConfig } from "./pruning-lifecycle.js";
@@ -29,6 +33,12 @@ import { resolveVisibleSkills, applySkillSelection, SKILLS_BLOCK_RE } from "../.
 import { applyToolSelection, RECOVERY_TOOL_NAME } from "../../tools/selection/tool-policy.js";
 import { ASK_USER_TOOL_NAME } from "../../tools/catalog/tool-names.js";
 import { isAutonomousModeEnabled } from "../settings/autonomous-mode.js";
+import { isInSubagentContext, subagentContext } from "../../agent-processes/lib/process-lifecycle/subagent-context.js";
+import {
+	currentChildToolRuntimeOwner,
+	registerChildToolRuntimeCleanup,
+} from "../../agent-processes/lib/process-lifecycle/child-tool-runtime-owner.js";
+import { clearSessionPruningState } from "../state/session-pruning-state.js";
 
 const DEFERRED_TRIGGER_WAKE_PREFIX = "[deferred trigger fired: ";
 const WAKE_TOOL_NAMES = ["defer_trigger"];
@@ -72,6 +82,10 @@ export default function register(pi: ExtensionAPI) {
 	// before_agent_start hook can preserve the current catalog without paying for
 	// another pruning prepass (or inserting a pruning-result transcript entry).
 	const queuedPrompts = new Map<string, number>();
+	// One launch-time decision per child session owned by this extension
+	// registration. Mark before awaiting the scorer so failures and concurrent
+	// continuations never trigger an unnecessary second prepass.
+	const processedChildSessions = new Set<string>();
 	pi.on("input", (event: InputEvent) => {
 		if (event.streamingBehavior) {
 			queuedPrompts.set(event.text, (queuedPrompts.get(event.text) ?? 0) + 1);
@@ -81,6 +95,34 @@ export default function register(pi: ExtensionAPI) {
 
 	// --- before_agent_start: skill + tool pruning ---
 	pi.on("before_agent_start", async (event: BeforeAgentStartEvent, ctx: unknown) => {
+		const sessionId = getSessionId(ctx);
+		const isChildSession = isInSubagentContext();
+		const childRuntimeOwner = isChildSession && sessionId !== PROCESS_SESSION_ID
+			? currentChildToolRuntimeOwner()
+			: undefined;
+		if (isChildSession && sessionId !== PROCESS_SESSION_ID) {
+			if (childRuntimeOwner?.state === "open") {
+				registerChildToolRuntimeCleanup(childRuntimeOwner, `skill-pruner-state:${sessionId}`, () => {
+					clearSessionPruningState(sessionId);
+					processedChildSessions.delete(sessionId);
+				});
+			} else if (childRuntimeOwner) {
+				// Teardown can race a final extension callback. Do not repopulate
+				// session state after the owner has started disposing its resources.
+				clearSessionPruningState(sessionId);
+				processedChildSessions.delete(sessionId);
+				return undefined;
+			}
+		}
+		const stopIfChildRuntimeDisposed = (): boolean => {
+			if (!childRuntimeOwner || childRuntimeOwner.state === "open") return false;
+			// The owner may begin teardown while the scorer is pending. Cleanup can
+			// still be in flight when this continuation resumes, so fence and clear
+			// here as well as relying on the registered owner cleanup.
+			clearSessionPruningState(sessionId);
+			processedChildSessions.delete(sessionId);
+			return true;
+		};
 		let modifiedSystemPrompt = event.systemPrompt;
 		let currentPieBasePrompt = getPieBaseSystemPrompt(ctx);
 		let toolPromptRefreshFailed = false;
@@ -99,7 +141,11 @@ export default function register(pi: ExtensionAPI) {
 			currentPieBasePrompt = freshPieBasePrompt;
 		};
 		const setActiveTools = (names: string[]) => {
-			toolSeams.setActiveTools(names);
+			const allowedChildTools = isChildSession ? getAllowedChildTools(sessionId) : undefined;
+			const scopedNames = allowedChildTools
+				? names.filter((name) => allowedChildTools.has(name))
+				: names;
+			toolSeams.setActiveTools(scopedNames);
 			refreshToolProse();
 		};
 		const promptRefreshResult = () => modifiedSystemPrompt === event.systemPrompt
@@ -114,22 +160,47 @@ export default function register(pi: ExtensionAPI) {
 			}
 		}
 
+		const reapplyChildSelection = () => {
+			const hiddenNames = new Set(getHiddenSkills(sessionId).keys());
+			if (hiddenNames.size === 0) return promptRefreshResult();
+			const skills = (event.systemPromptOptions.skills ?? []) as Skill[];
+			const match = modifiedSystemPrompt.match(SKILLS_BLOCK_RE);
+			if (!match) return promptRefreshResult();
+			const includedSkills = skills.filter((skill) => !hiddenNames.has(skill.name));
+			modifiedSystemPrompt = modifiedSystemPrompt.replace(
+				SKILLS_BLOCK_RE,
+				buildReplacement(getFormatSkillsForPromptImpl()(includedSkills)),
+			);
+			return promptRefreshResult();
+		};
+
 		const queuedCount = queuedPrompts.get(event.prompt) ?? 0;
 		if (queuedCount > 0) {
 			if (queuedCount === 1) queuedPrompts.delete(event.prompt);
 			else queuedPrompts.set(event.prompt, queuedCount - 1);
-			return promptRefreshResult();
+			return isChildSession && processedChildSessions.has(sessionId)
+				? reapplyChildSelection()
+				: promptRefreshResult();
+		}
+		if (isChildSession && processedChildSessions.has(sessionId)) {
+			// Internal continuation/re-entry: the catalog and active-tool set from
+			// the launch decision are still authoritative. Rebuild only the skills
+			// block from that decision; never issue another prepass or reset recovery.
+			return reapplyChildSelection();
 		}
 
 		const activeConfig = getConfig();
+		if (isChildSession) processedChildSessions.add(sessionId);
 		const skipInfo = shouldSkipPruning(event, activeConfig);
-		const sessionId = getSessionId(ctx);
+		const rootSessionFields = rootSessionAttribution(ctx, sessionId);
 		// A new top-level pruning decision owns a fresh hidden-skill catalog.
 		// Queued continuations returned above intentionally retain the current one.
 		recordHiddenSkills(sessionId, []);
 		const configuredTools = toolSeams.getAllTools();
 		const blockedToolNames = new Set(autonomousMode ? [ASK_USER_TOOL_NAME] : []);
-		const activeToolNames = toolSeams.getActiveTools()
+		const initialActiveToolNames = toolSeams.getActiveTools();
+		if (isChildSession) recordAllowedChildTools(sessionId, initialActiveToolNames);
+		const activeToolNames = initialActiveToolNames
 			.filter((name) => !blockedToolNames.has(name));
 		// An explicit empty selected-tools list is the backend's authoritative
 		// signal that the user switched off the Tools system-prompt entry. Do not
@@ -137,7 +208,8 @@ export default function register(pi: ExtensionAPI) {
 		const toolsManuallyDisabled = Array.isArray(event.systemPromptOptions.selectedTools)
 			&& event.systemPromptOptions.selectedTools.length === 0;
 		const previouslyPruned = getPrunedTools(sessionId);
-		const consideredToolNames = toolsManuallyDisabled
+		const childCanRecoverTools = !isChildSession || activeToolNames.includes(RECOVERY_TOOL_NAME);
+		const consideredToolNames = toolsManuallyDisabled || !childCanRecoverTools
 			? new Set<string>()
 			: new Set([...activeToolNames, ...previouslyPruned].filter((name) => !blockedToolNames.has(name)));
 		// Reconsider tools hidden by the preceding pruning decision, but never
@@ -154,13 +226,12 @@ export default function register(pi: ExtensionAPI) {
 			recordPrunedTools(sessionId, []);
 		};
 
-		if (skipInfo.skip && (skipInfo.reason === "disabled-by-toggle" || skipInfo.reason === "subagent")) {
+		if (skipInfo.skip && (skipInfo.reason === "disabled-by-toggle" || skipInfo.reason === "subagent" || skipInfo.reason === "main-agent-disabled")) {
 			// Subagent sessions own their scoped tool set, so never mutate it. When
-			// the main-session extension is disabled, restore tools left inactive by
-			// a prior auto-mode turn before returning.
-			if (skipInfo.reason === "disabled-by-toggle") {
+			// the main-session extension/switch is disabled, restore only tools left
+			// inactive by the pruner's prior auto-mode decision.
+			if (skipInfo.reason === "disabled-by-toggle" || skipInfo.reason === "main-agent-disabled") {
 				restorePrunerOwnedTools();
-				recordKeptSkills(sessionId, "keep-all");
 			}
 			return promptRefreshResult();
 		}
@@ -171,9 +242,6 @@ export default function register(pi: ExtensionAPI) {
 		if (skipInfo.skip) {
 			restorePrunerOwnedTools();
 			recordKnownSkills(sessionId, activeConfig.mode, allSkillPaths, [], []);
-			// off / too-short: the main session keeps every visible skill, so
-			// subagents should inherit keep-all (no filter) for this turn.
-			recordKeptSkills(sessionId, "keep-all");
 			return promptRefreshResult();
 		}
 
@@ -235,6 +303,9 @@ export default function register(pi: ExtensionAPI) {
 					.map((t) => ({ name: t.name, description: t.description ?? "" })),
 				config: activeConfig,
 				recentConversation: getRecentConversation(ctx),
+				...(isChildSession ? {
+					agentContext: (subagentContext.getStore() as { agentContext?: string } | undefined)?.agentContext,
+				} : {}),
 			};
 
 			let prunedSkills: string[] | null = null;
@@ -250,7 +321,6 @@ export default function register(pi: ExtensionAPI) {
 				// restoring the complete catalog, not merely skipping this decision.
 				if (activeConfig.mode === "auto") restorePrunerOwnedTools();
 				recordKnownSkills(sessionId, activeConfig.mode, allSkillPaths, [], []);
-				recordKeptSkills(sessionId, "keep-all");
 				return promptRefreshResult();
 			}
 
@@ -274,7 +344,18 @@ export default function register(pi: ExtensionAPI) {
 				pruningError = "No completion function available";
 				recordKnownSkills(sessionId, activeConfig.mode, allSkillPaths, [], []);
 			} else {
-				const prepassResult = cached ?? await runPruningPrepass(ctx, llmInput, activeConfig, completeFn!);
+				let prepassResult: PrepassRunResult;
+				try {
+					prepassResult = cached ?? await runPruningPrepass(ctx, llmInput, activeConfig, completeFn!);
+				} catch (error) {
+					// Unexpected scorer rejection is fenced too; otherwise preserve the
+					// hook's existing error behavior for a still-live child owner.
+					if (stopIfChildRuntimeDisposed()) return undefined;
+					throw error;
+				}
+				// Check immediately after either successful or fail-open scorer results,
+				// before caches, selectors, logger state, tool activation, or telemetry.
+				if (!cached && stopIfChildRuntimeDisposed()) return undefined;
 				if (!cached) {
 					cacheSuccessfulPrepass(sessionId, event.prompt, fingerprint, continuationFingerprint, prepassResult);
 					cacheSuccessfulPrepassCrossSession(event.prompt, fingerprint, prepassResult);
@@ -372,7 +453,7 @@ export default function register(pi: ExtensionAPI) {
 					}
 				} else if (skills.length > 0) {
 					console.warn("[skill-pruner] skills block not found in system prompt; skipping skill pruning");
-					recordSkillsBlockNotFound(sessionId, activeConfig.mode);
+					recordSkillsBlockNotFound(sessionId, activeConfig.mode, rootSessionFields.rootSessionId);
 					recordKnownSkills(sessionId, activeConfig.mode, allSkillPaths, [], []);
 				}
 
@@ -382,7 +463,7 @@ export default function register(pi: ExtensionAPI) {
 				const skillsBlockFound = !!match;
 				const toolsConsidered = !!(activeConfig.tools && availableTools.length > 0);
 				if (skillsBlockFound || toolsConsidered) {
-					appendDecision(buildDecision({
+					const decision = buildDecision({
 						sessionId, sessionPath, mode: activeConfig.mode, query: event.prompt,
 						contextFilePath: contextFile?.path, llmModel: activeConfig.model,
 						llmThinkingLevel: prepassThinkingLevel, llmResponse: rawResponse, llmLatencyMs: latencyMs,
@@ -401,7 +482,8 @@ export default function register(pi: ExtensionAPI) {
 						prepassSystemPrompt: rawSystemPrompt,
 						prepassUserMessage: rawUserMessage,
 						codeVersion: getCodeVersion(),
-					}));
+					});
+					appendDecision({ ...decision, ...rootSessionFields });
 				}
 			}
 		} else {
@@ -431,14 +513,6 @@ export default function register(pi: ExtensionAPI) {
 			safeguardReason,
 		});
 
-		// Record the kept-skill set for subagent inheritance (direction C). This is
-		// the single recording point for every non-early-return path: success,
-		// shadow, parse-failure safeguard, block-not-found, no-completeFn, and
-		// error all reach here. `skillResult.included` holds the kept subset when
-		// the prepass ran and the skills block was found; otherwise null → keep-all
-		// (no filtering) so subagents never read a stale set from a previous turn.
-		recordKeptSkills(sessionId, skillResult?.included ?? "keep-all");
-
 		if (activeConfig.mode === "shadow") {
 			if (toolPromptRefreshFailed && modifiedSystemPrompt === event.systemPrompt) {
 				return feedbackMessage ? { message: feedbackMessage } : undefined;
@@ -459,7 +533,8 @@ export default function register(pi: ExtensionAPI) {
 
 			const readPath = typeof event.input?.path === "string" ? event.input.path : undefined;
 			if (readPath !== undefined) {
-				recordSkillRead(getSessionId(ctx), readPath);
+				const sessionId = getSessionId(ctx);
+				recordSkillRead(sessionId, readPath, rootSessionAttribution(ctx, sessionId).rootSessionId);
 			}
 		} catch (error) {
 			console.warn(`[skill-pruner] failed to record skill read: ${toErrorMessage(error)}`);

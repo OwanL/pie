@@ -1,5 +1,10 @@
 import type { ThinkingLevel } from './models.js';
 import { isThinkingLevel } from './thinking-level.js';
+import {
+  DEFAULT_SUBAGENT_MAX_INFLIGHT,
+  isSubagentConcurrencyLimit,
+  type ConcurrencyLimitSource,
+} from '../../../lib/concurrency-config.js';
 import type { ProviderConcurrencyMap, ProviderConcurrencyOverrides } from './provider-concurrency.js';
 import {
   ALL_NESTED_BUCKETS_ALLOWED,
@@ -169,6 +174,10 @@ export interface PruningSettings {
   provider: string;
   /** Thinking level for the pruning prepass. */
   thinkingLevel: ThinkingLevel;
+  /** Enables pruning for main-agent turns; defaults to true for legacy settings. */
+  mainAgentEnabled?: boolean;
+  /** Enables pruning for subagent turns; defaults to true for legacy settings. */
+  subagentEnabled?: boolean;
   /** Optional timeout override for the pruning prepass, in seconds. */
   prepassTimeoutSec?: number | null;
   /** Skip the prepass when estimated input is below this positive token
@@ -182,6 +191,8 @@ export interface PruningCatalog {
 }
 
 export type UiDensity = 'compact' | 'comfortable' | 'spacious';
+
+export type SubagentMaxInflightSource = Extract<ConcurrencyLimitSource, 'configured-default' | 'saved-preference'>;
 
 export const COMPOSER_INITIAL_ROWS_MIN = 1;
 export const COMPOSER_INITIAL_ROWS_MAX = 6;
@@ -256,8 +267,11 @@ export interface ChatPrefs {
    *  subagent extension via PIE_SUBAGENT_MAX_TREE_SESSIONS. */
   subagentMaxTreeSessions: number;
   /** Max concurrent in-flight subagent sessions across the whole process.
-   *  Default 2. Mirrored via PIE_SUBAGENT_MAX_INFLIGHT. */
+   *  Default 8. Mirrored via PIE_SUBAGENT_MAX_INFLIGHT. */
   subagentMaxInflight: number;
+  /** Provenance for the configured default or saved preference. Omitted only
+   *  by legacy preference values that have not passed through normalization. */
+  subagentMaxInflightSource?: SubagentMaxInflightSource;
   /** Size of the per-session warm bash pool (pre-warmed bash processes that
    *  hide shell-spawn latency). 0 disables warm bash (today's fresh-spawn
    *  behaviour). Default 2. Mirrored via PIE_BASH_WARM_POOL. Applies on the
@@ -439,7 +453,8 @@ export const DEFAULT_CHAT_PREFS: ChatPrefs = {
   runtimeAuditLog: false,
   subagentMaxDepth: 3,
   subagentMaxTreeSessions: 10,
-  subagentMaxInflight: 2,
+  subagentMaxInflight: DEFAULT_SUBAGENT_MAX_INFLIGHT,
+  subagentMaxInflightSource: 'configured-default',
   bashWarmPoolSize: 2,
   bashFastPath: true,
   bashShellPath: '',
@@ -491,6 +506,8 @@ export const DEFAULT_PRUNING_SETTINGS: PruningSettings = {
   model: 'gpt-5.4-mini',
   provider: 'github-copilot',
   thinkingLevel: 'minimal',
+  mainAgentEnabled: true,
+  subagentEnabled: true,
   prepassTimeoutSec: null,
   // Keep this aligned with skill-pruner/config.ts: an omitted on-disk value
   // enables the extension's 1,200-token small-turn optimization.
@@ -604,6 +621,10 @@ export function mergePruningSettings(
     provider: updates.provider !== undefined ? updates.provider : current.provider,
     thinkingLevel:
       updates.thinkingLevel !== undefined ? updates.thinkingLevel : current.thinkingLevel,
+    mainAgentEnabled:
+      updates.mainAgentEnabled ?? current.mainAgentEnabled ?? DEFAULT_PRUNING_SETTINGS.mainAgentEnabled,
+    subagentEnabled:
+      updates.subagentEnabled ?? current.subagentEnabled ?? DEFAULT_PRUNING_SETTINGS.subagentEnabled,
     prepassTimeoutSec:
       updates.prepassTimeoutSec !== undefined ? updates.prepassTimeoutSec : current.prepassTimeoutSec,
     autoSkipBelowTokens:
@@ -753,8 +774,23 @@ export function normalizeUiPathParentDepth(value: unknown): number {
     : DEFAULT_CHAT_PREFS.uiPathParentDepth;
 }
 
+export function normalizeSubagentMaxInflight(value: unknown): number {
+  return isSubagentConcurrencyLimit(value) ? value : DEFAULT_SUBAGENT_MAX_INFLIGHT;
+}
+
+function isSubagentMaxInflightSource(value: unknown): value is SubagentMaxInflightSource {
+  return value === 'configured-default' || value === 'saved-preference';
+}
+
 export function resolveChatPrefs(prefs?: Partial<ChatPrefs> | null): ChatPrefs {
   const storedPrefs = { ...(prefs ?? {}) };
+  const storedMaxInflight = storedPrefs.subagentMaxInflight;
+  const hasStoredMaxInflight = isSubagentConcurrencyLimit(storedMaxInflight);
+  const storedMaxInflightSource = storedPrefs.subagentMaxInflightSource;
+  const useConfiguredDefault = !hasStoredMaxInflight || storedMaxInflightSource === 'configured-default';
+  const subagentMaxInflightSource: SubagentMaxInflightSource = useConfiguredDefault
+    ? 'configured-default'
+    : 'saved-preference';
   // Remove the retired width preference before spreading persisted state. The
   // next service write therefore normalizes legacy globalState without
   // disturbing any other stored override.
@@ -762,6 +798,10 @@ export function resolveChatPrefs(prefs?: Partial<ChatPrefs> | null): ChatPrefs {
   return {
     ...DEFAULT_CHAT_PREFS,
     ...storedPrefs,
+    subagentMaxInflight: useConfiguredDefault
+      ? DEFAULT_SUBAGENT_MAX_INFLIGHT
+      : normalizeSubagentMaxInflight(storedMaxInflight),
+    subagentMaxInflightSource,
     autonomousMode: typeof storedPrefs.autonomousMode === 'boolean'
       ? storedPrefs.autonomousMode
       : DEFAULT_CHAT_PREFS.autonomousMode,
@@ -794,6 +834,47 @@ export function resolveChatPrefs(prefs?: Partial<ChatPrefs> | null): ChatPrefs {
 }
 
 /**
+ * Merge a partial chat-preference patch into the current preferences. Map
+ * preferences retain their existing additive semantics. Updating the explicit
+ * concurrency value records a saved preference unless a restore patch carries
+ * its own provenance marker; unrelated patches retain the current provenance.
+ */
+export function mergeChatPrefs(current: ChatPrefs, updates: Partial<ChatPrefs>): ChatPrefs {
+  const merged: ChatPrefs = {
+    ...current,
+    ...updates,
+    ...(updates.extensionToggles && {
+      extensionToggles: { ...current.extensionToggles, ...updates.extensionToggles },
+    }),
+    ...(updates.providerToggles && {
+      providerToggles: { ...current.providerToggles, ...updates.providerToggles },
+    }),
+    ...(updates.subagentProviderDefaults && {
+      subagentProviderDefaults: {
+        ...current.subagentProviderDefaults,
+        ...updates.subagentProviderDefaults,
+      },
+    }),
+    ...(updates.subagentProviderTogglesBySession && {
+      subagentProviderTogglesBySession: {
+        ...current.subagentProviderTogglesBySession,
+        ...updates.subagentProviderTogglesBySession,
+      },
+    }),
+  };
+  const subagentMaxInflightSource = isSubagentMaxInflightSource(updates.subagentMaxInflightSource)
+    ? updates.subagentMaxInflightSource
+    : updates.subagentMaxInflight !== undefined
+      ? 'saved-preference'
+      : isSubagentMaxInflightSource(current.subagentMaxInflightSource)
+        ? current.subagentMaxInflightSource
+        : isSubagentConcurrencyLimit(current.subagentMaxInflight)
+          ? 'saved-preference'
+          : 'configured-default';
+  return resolveChatPrefs({ ...merged, subagentMaxInflightSource });
+}
+
+/**
  * Build the payload for `runtimePrefs.set` from resolved {@link ChatPrefs}.
  * Shared between the live `setPrefs` path and startup restore so a pref field
  * is never mirrored on one path but missing on the other.
@@ -821,7 +902,11 @@ export function normalizeNestedBooleanMap(value: unknown): Record<string, Record
   return result;
 }
 
-export function buildRuntimePrefsPayload(prefs: ChatPrefs): RuntimePrefsSetParams {
+export function buildRuntimePrefsPayload(prefs: ChatPrefs): RuntimePrefsSetParams & {
+  subagentMaxInflightSource: SubagentMaxInflightSource;
+} {
+  const resolvedPrefs = resolveChatPrefs(prefs);
+  const subagentMaxInflightSource = resolvedPrefs.subagentMaxInflightSource ?? 'configured-default';
   return {
     providerToggles: prefs.providerToggles,
     autonomousMode: prefs.autonomousMode,
@@ -834,7 +919,8 @@ export function buildRuntimePrefsPayload(prefs: ChatPrefs): RuntimePrefsSetParam
     subagentFallbackOnProviderFailure: prefs.subagentFallbackOnProviderFailure,
     subagentMaxDepth: prefs.subagentMaxDepth,
     subagentMaxTreeSessions: prefs.subagentMaxTreeSessions,
-    subagentMaxInflight: prefs.subagentMaxInflight,
+    subagentMaxInflight: resolvedPrefs.subagentMaxInflight,
+    subagentMaxInflightSource,
     bashWarmPoolSize: prefs.bashWarmPoolSize,
     bashFastPath: prefs.bashFastPath,
     bashShellPath: prefs.bashShellPath,

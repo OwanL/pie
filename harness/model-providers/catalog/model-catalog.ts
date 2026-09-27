@@ -143,15 +143,9 @@ export async function loadConfiguredModels(
     return { ok: true, models: result };
   } catch (error) {
     const message = toErrorMessage(error);
-    backendTrace('sessionMetadata', 'listConfiguredModels.failed', { level: 'debug', error: message });
+    backendTrace('sessionMetadata', 'loadConfiguredModels.failed', { level: 'debug', error: message });
     return { ok: false, models: [], error: message };
   }
-}
-
-/** Compatibility projection for callers where an empty fallback is explicitly
- * acceptable. Authority-publishing paths use `loadConfiguredModels` instead. */
-export async function listConfiguredModels(agentDir: string): Promise<ModelInfo[]> {
-  return (await loadConfiguredModels(agentDir)).models;
 }
 
 export function loadAvailableModels(context?: ModelCatalogContext, agentDir?: string): ModelCatalogLoadResult {
@@ -164,11 +158,7 @@ export function loadAvailableModels(context?: ModelCatalogContext, agentDir?: st
     return { ok: true, models: projectRegistryModels(models, agentDir) };
   } catch (error) {
     const message = toErrorMessage(error);
-    backendTrace('sessionMetadata', 'listAvailableModels.failed', { level: 'debug', error: message });
+    backendTrace('sessionMetadata', 'loadAvailableModels.failed', { level: 'debug', error: message });
     return { ok: false, models: [], error: message };
   }
-}
-
-export function listAvailableModels(context?: ModelCatalogContext, agentDir?: string): ModelInfo[] {
-  return loadAvailableModels(context, agentDir).models;
 }

@@ -59,6 +59,15 @@ test('build identity hashes and watches package resolution for both graphs', (t)
   const productionWebview = runIdentityPlugin(createBuildIdentityPlugin());
   assert.ok(productionNode.watched.includes(packageResolutionHelper));
   assert.ok(productionWebview.watched.includes(packageResolutionHelper));
+  const runtimeDeclaration = path.join(repositoryRoot, 'application', 'hosts', 'vscode', 'runtime', 'runtime-generations.d.cts');
+  assert.ok(productionNode.watched.includes(runtimeDeclaration), 'the canonical runtime declaration must be hashed and watched');
+  for (const retiredRoot of [path.join(repositoryRoot, 'extension', 'src'), path.join(repositoryRoot, 'shared')]) {
+    assert.equal(
+      productionNode.watched.some((input) => input === retiredRoot || input.startsWith(`${retiredRoot}${path.sep}`)),
+      false,
+      `${retiredRoot} is a retired source root and must not be scanned`,
+    );
+  }
   for (const input of [
     traversalPolicyHelper,
     nativeOwnerHelper,
@@ -78,27 +87,28 @@ test('build identity hashes and watches package resolution for both graphs', (t)
 
   const fixtureRoot = mkdtempSync(path.join(os.tmpdir(), 'pie-build-identity-'));
   t.after(() => rmSync(fixtureRoot, { recursive: true, force: true }));
-  const identityRoot = path.join(fixtureRoot, 'extension');
+  const identityRoot = path.join(fixtureRoot, 'vscode');
   const helperFixture = path.join(fixtureRoot, 'scripts', 'lib', 'package-resolution.mjs');
   const toolFixture = path.join(identityRoot, 'harness', 'tools', 'fixture-tool.ts');
   const selectorFixture = path.join(identityRoot, 'harness', 'tool-and-skill-selection', 'fixture-selector.ts');
   const modelProviderFixture = path.join(identityRoot, 'harness', 'model-providers', 'fixture-provider.ts');
   const hostFixture = path.join(identityRoot, 'application', 'hosts', 'fixture-host.ts');
   const rootLibFixture = path.join(identityRoot, 'lib', 'fixture-fact.ts');
-  mkdirSync(path.join(identityRoot, 'src'), { recursive: true });
+  const runtimeFixture = path.join(identityRoot, 'runtime', 'runtime-generations.d.cts');
   mkdirSync(path.dirname(helperFixture), { recursive: true });
   mkdirSync(path.dirname(toolFixture), { recursive: true });
   mkdirSync(path.dirname(selectorFixture), { recursive: true });
   mkdirSync(path.dirname(modelProviderFixture), { recursive: true });
   mkdirSync(path.dirname(hostFixture), { recursive: true });
   mkdirSync(path.dirname(rootLibFixture), { recursive: true });
-  writeFileSync(path.join(identityRoot, 'src', 'entry.ts'), 'export const entry = true;\n');
+  mkdirSync(path.dirname(runtimeFixture), { recursive: true });
   writeFileSync(helperFixture, 'export const resolution = "before";\n');
   writeFileSync(toolFixture, 'export const tool = "before";\n');
   writeFileSync(selectorFixture, 'export const selector = "before";\n');
   writeFileSync(modelProviderFixture, 'export const provider = "before";\n');
   writeFileSync(hostFixture, 'export const host = "before";\n');
   writeFileSync(rootLibFixture, 'export const fact = "before";\n');
+  writeFileSync(runtimeFixture, 'export interface RuntimeGenerations {}\n');
 
   const node = createBuildIdentityPlugin(identityRoot);
   const webview = createBuildIdentityPlugin(identityRoot);
@@ -116,6 +126,8 @@ test('build identity hashes and watches package resolution for both graphs', (t)
   assert.ok(beforeWebview.watched.includes(hostFixture));
   assert.ok(beforeNode.watched.includes(rootLibFixture));
   assert.ok(beforeWebview.watched.includes(rootLibFixture));
+  assert.ok(beforeNode.watched.includes(runtimeFixture));
+  assert.ok(beforeWebview.watched.includes(runtimeFixture));
   assert.equal(beforeNode.buildId, beforeWebview.buildId);
 
   writeFileSync(helperFixture, 'export const resolution = "after";\n');
@@ -159,4 +171,11 @@ test('build identity hashes and watches package resolution for both graphs', (t)
   assert.notEqual(afterRootLibNode.buildId, afterHostNode.buildId);
   assert.notEqual(afterRootLibWebview.buildId, afterHostWebview.buildId);
   assert.equal(afterRootLibNode.buildId, afterRootLibWebview.buildId);
+
+  writeFileSync(runtimeFixture, 'export interface RuntimeGenerations { generation: string }\n');
+  const afterRuntimeNode = runIdentityPlugin(node);
+  const afterRuntimeWebview = runIdentityPlugin(webview);
+  assert.notEqual(afterRuntimeNode.buildId, afterRootLibNode.buildId);
+  assert.notEqual(afterRuntimeWebview.buildId, afterRootLibWebview.buildId);
+  assert.equal(afterRuntimeNode.buildId, afterRuntimeWebview.buildId);
 });

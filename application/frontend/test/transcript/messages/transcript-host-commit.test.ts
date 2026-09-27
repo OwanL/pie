@@ -15,6 +15,7 @@ for (const [key, value] of Object.entries({
   Node: dom.window.Node,
   Element: dom.window.Element,
   HTMLElement: dom.window.HTMLElement,
+  MutationObserver: dom.window.MutationObserver,
 })) {
   Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
 }
@@ -40,6 +41,7 @@ Object.defineProperty(globalThis, 'ResizeObserver', {
 
 let TranscriptCommitProvider: typeof import('../../../transcript/commit-registry').TranscriptCommitProvider;
 let BufferedTextPart: typeof import('../../../transcript/buffered-text-part').BufferedTextPart;
+let ReasoningBlock: typeof import('../../../transcript/message-item/reasoning-block').ReasoningBlock;
 let TranscriptHost: typeof import('../../../transcript/transcript-host').TranscriptHost;
 let commitRegistryModule: typeof import('../../../transcript/commit-registry');
 
@@ -47,8 +49,68 @@ test.before(async () => {
   commitRegistryModule = await import('../../../transcript/commit-registry');
   ({ TranscriptCommitProvider } = commitRegistryModule);
   ({ BufferedTextPart } = await import('../../../transcript/buffered-text-part'));
+  ({ ReasoningBlock } = await import('../../../transcript/message-item/reasoning-block'));
   ({ TranscriptHost } = await import('../../../transcript/transcript-host'));
 });
+
+function installFakeTimers(startAt: number) {
+  const originalWindowSetTimeout = window.setTimeout;
+  const originalWindowClearTimeout = window.clearTimeout;
+  const originalGlobalClearTimeout = globalThis.clearTimeout;
+  const originalNow = Date.now;
+  let now = startAt;
+  let nextId = 1;
+  const timers = new Map<number, { callback: TimerHandler; dueAt: number }>();
+  const fakeSetTimeout = ((callback: TimerHandler, delay = 0) => {
+    const id = nextId++;
+    timers.set(id, { callback, dueAt: now + Math.max(0, Number(delay) || 0) });
+    return id;
+  }) as typeof window.setTimeout;
+  const fakeClearTimeout = ((id: number) => { timers.delete(Number(id)); }) as typeof window.clearTimeout;
+  window.setTimeout = fakeSetTimeout;
+  window.clearTimeout = fakeClearTimeout;
+  globalThis.clearTimeout = fakeClearTimeout as typeof globalThis.clearTimeout;
+  Date.now = () => now;
+
+  return {
+    get pendingCount() {
+      return timers.size;
+    },
+    async advanceBy(milliseconds: number) {
+      now += milliseconds;
+      while (true) {
+        const due = [...timers.entries()]
+          .filter(([, timer]) => timer.dueAt <= now)
+          .sort((left, right) => left[1].dueAt - right[1].dueAt || left[0] - right[0])[0];
+        if (!due) return;
+        const [id, timer] = due;
+        timers.delete(id);
+        await act(async () => {
+          if (typeof timer.callback === 'function') timer.callback();
+          await Promise.resolve();
+        });
+      }
+    },
+    restore() {
+      window.setTimeout = originalWindowSetTimeout;
+      window.clearTimeout = originalWindowClearTimeout;
+      globalThis.clearTimeout = originalGlobalClearTimeout;
+      Date.now = originalNow;
+      timers.clear();
+    },
+  };
+}
+
+function firstTextNode(element: Element): Text {
+  const walker = document.createTreeWalker(element, dom.window.NodeFilter.SHOW_TEXT);
+  return walker.nextNode() as Text;
+}
+
+function CommitLeafProbe({ leafKey, capture }: { leafKey: string; capture: (leaf: unknown) => void }) {
+  const registry = commitRegistryModule.useTranscriptCommitRegistry();
+  useLayoutEffect(() => capture(registry.leaves.get(leafKey)), [registry.version, registry.leaves, leafKey, capture]);
+  return null;
+}
 
 function ToolCommitLeaf({ tool, onRender }: { tool: ToolCall; onRender?: () => void }) {
   onRender?.();
@@ -124,21 +186,24 @@ test('mounted commit provider retains every accepted leaf above the former 512-l
   const observedSizes: number[] = [];
   let toolLeafRenders = 0;
 
-  render(h(TranscriptCommitProvider, {
-    target,
-    appSurface: 'transcript',
-    postMessage() {},
-    children: h(CommitRegistryProbe, {
-      message,
-      observe: (size) => observedSizes.push(size),
-      onToolLeafRender: () => { toolLeafRenders += 1; },
-    }),
-  }), root);
-  await new Promise((resolve) => setImmediate(resolve));
-  render(null, root);
+  try {
+    render(h(TranscriptCommitProvider, {
+      target,
+      appSurface: 'transcript',
+      postMessage() {},
+      children: h(CommitRegistryProbe, {
+        message,
+        observe: (size) => observedSizes.push(size),
+        onToolLeafRender: () => { toolLeafRenders += 1; },
+      }),
+    }), root);
+    await new Promise((resolve) => setImmediate(resolve));
 
-  assert.equal(Math.max(...observedSizes), 513, 'message plus 512 live tool leaves must exceed the old boundary');
-  assert.equal(toolLeafRenders, tools.length, 'registry bookkeeping must not rerender every leaf consumer');
+    assert.equal(Math.max(...observedSizes), 513, 'message plus 512 live tool leaves must exceed the old boundary');
+    assert.equal(toolLeafRenders, tools.length, 'registry bookkeeping must not rerender every leaf consumer');
+  } finally {
+    render(null, root);
+  }
 });
 
 test('commit registry preserves mounted leaf evidence across revision-only targets', async () => {
@@ -183,23 +248,27 @@ test('commit registry preserves mounted leaf evidence across revision-only targe
     },
   });
 
-  render(h(TranscriptCommitProvider, {
-    target: target(1), appSurface: 'transcript', postMessage() {}, children: h(RegistryMapProbe, {}),
-  }), root);
-  await new Promise((resolve) => setImmediate(resolve));
-  const firstMap = maps.at(-1);
-  assert.ok(firstMap);
-  assert.equal(firstMap.size, 2);
+  let firstMap: ReadonlyMap<string, unknown> | undefined;
+  try {
+    render(h(TranscriptCommitProvider, {
+      target: target(1), appSurface: 'transcript', postMessage() {}, children: h(RegistryMapProbe, {}),
+    }), root);
+    await new Promise((resolve) => setImmediate(resolve));
+    firstMap = maps.at(-1);
+    assert.ok(firstMap);
+    assert.equal(firstMap.size, 2);
 
-  render(h(TranscriptCommitProvider, {
-    target: target(2), appSurface: 'transcript', postMessage() {}, children: h(RegistryMapProbe, {}),
-  }), root);
-  await new Promise((resolve) => setImmediate(resolve));
+    render(h(TranscriptCommitProvider, {
+      target: target(2), appSurface: 'transcript', postMessage() {}, children: h(RegistryMapProbe, {}),
+    }), root);
+    await new Promise((resolve) => setImmediate(resolve));
 
-  assert.equal(maps.at(-1), firstMap, 'an unchanged mounted DOM leaf map must survive a snapshot revision');
-  assert.equal(maps.at(-1)?.size, 2);
-  render(null, root);
-  assert.equal(firstMap.size, 0, 'unmounted DOM leaves must be released from preserved evidence');
+    assert.equal(maps.at(-1), firstMap, 'an unchanged mounted DOM leaf map must survive a snapshot revision');
+    assert.equal(maps.at(-1)?.size, 2);
+  } finally {
+    render(null, root);
+  }
+  assert.equal(firstMap?.size, 0, 'unmounted DOM leaves must be released from preserved evidence');
 });
 
 test('app commit reports only a transcript block that survives the render grace period', async () => {
@@ -583,6 +652,148 @@ test('streaming markdown timers are latest-wins, terminal-safe, and canceled on 
   }
 });
 
+test('streaming text preserves reverse cross-body selections beyond 1500ms and then applies the latest snapshot', async () => {
+  const root = document.getElementById('root')!;
+  const timers = installFakeTimers(5000);
+  const renderPair = (left: string, right: string) => render(h(TranscriptCommitProvider, {
+    target: null,
+    appSurface: 'transcript',
+    postMessage() {},
+    children: h('div', {}, [
+      h(BufferedTextPart, {
+        messageId: 'selection-left', index: 0, text: left, streaming: true,
+        workingDirectory: null, onOpenFile() {}, onContextMenu() {}, onFilePathContextMenu() {},
+      }),
+      h(BufferedTextPart, {
+        messageId: 'selection-right', index: 0, text: right, streaming: true,
+        workingDirectory: null, onOpenFile() {}, onContextMenu() {}, onFilePathContextMenu() {},
+      }),
+    ]),
+  }), root);
+
+  try {
+    await act(async () => {
+      renderPair('original left', 'original right');
+      await Promise.resolve();
+    });
+    const bodies = [...root.querySelectorAll('.message-body')];
+    assert.equal(bodies.length, 2);
+    const leftText = firstTextNode(bodies[0]!);
+    const rightText = firstTextNode(bodies[1]!);
+    const selection = document.getSelection()!;
+    // Backward selection: the anchor is in the later block and the focus is
+    // in the earlier one, so checking only the anchor loses the first body.
+    selection.setBaseAndExtent(rightText, rightText.length, leftText, 0);
+
+    await act(async () => {
+      renderPair('intermediate left', 'intermediate right');
+      await Promise.resolve();
+    });
+    await timers.advanceBy(100);
+    await act(async () => {
+      renderPair('latest left', 'latest right');
+      await Promise.resolve();
+    });
+    await timers.advanceBy(100);
+    for (let poll = 0; poll < 9; poll += 1) await timers.advanceBy(200);
+
+    assert.equal(bodies[0]?.textContent?.trim(), 'original left');
+    assert.equal(bodies[1]?.textContent?.trim(), 'original right');
+    assert.equal(selection.anchorNode, rightText, 'the backward selection anchor remains mounted');
+    assert.equal(selection.focusNode, leftText, 'the backward selection focus remains mounted');
+
+    selection.removeAllRanges();
+    await timers.advanceBy(200);
+    assert.equal(bodies[0]?.textContent?.trim(), 'latest left');
+    assert.equal(bodies[1]?.textContent?.trim(), 'latest right');
+
+    const latestLeftText = firstTextNode(bodies[0]!);
+    selection.setBaseAndExtent(latestLeftText, 0, latestLeftText, latestLeftText.length);
+    await act(async () => {
+      renderPair('deferred until unmount', 'latest right');
+      await Promise.resolve();
+    });
+    await timers.advanceBy(100);
+    assert.equal(timers.pendingCount, 1, 'a selection poll is armed while a stream update is deferred');
+    render(null, root);
+    assert.equal(timers.pendingCount, 0, 'unmount clears the selection poll');
+  } finally {
+    document.getSelection()?.removeAllRanges();
+    render(null, root);
+    timers.restore();
+  }
+});
+
+test('reasoning text and streaming cursor wait for selection, then commit the latest terminal body', async () => {
+  const root = document.getElementById('root')!;
+  const timers = installFakeTimers(9000);
+  let reasoningLeaf: unknown;
+  const captureLeaf = (leaf: unknown) => { reasoningLeaf = leaf; };
+  const renderReasoning = (text: string, streaming: boolean) => render(h(TranscriptCommitProvider, {
+    target: null,
+    appSurface: 'transcript',
+    postMessage() {},
+    children: h('div', {}, [
+      h(ReasoningBlock, {
+        text,
+        autoExpand: true,
+        collapsibleKey: 'reasoning:selection-preservation:0',
+        streaming,
+        onContextMenu() {},
+      }),
+      h(CommitLeafProbe, { leafKey: 'reasoning:selection-preservation:0', capture: captureLeaf }),
+    ]),
+  }), root);
+
+  try {
+    await act(async () => {
+      renderReasoning('original reasoning', true);
+      await Promise.resolve();
+    });
+    const body = root.querySelector('.reasoning-scroll')!;
+    const originalText = firstTextNode(body);
+    const selection = document.getSelection()!;
+    selection.setBaseAndExtent(originalText, 0, originalText, originalText.length);
+    assert.ok(body.querySelector('.reasoning-stream-cursor'));
+    assert.equal((reasoningLeaf as { text?: string } | undefined)?.text, 'original reasoning');
+
+    await act(async () => {
+      renderReasoning('intermediate reasoning', true);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      renderReasoning('latest terminal reasoning', false);
+      await Promise.resolve();
+    });
+    await timers.advanceBy(120);
+    for (let poll = 0; poll < 9; poll += 1) await timers.advanceBy(200);
+
+    assert.equal(body.textContent?.trim(), 'original reasoning');
+    assert.ok(body.querySelector('.reasoning-stream-cursor'), 'terminal cursor removal must not replace selected markup');
+    assert.equal((reasoningLeaf as { text?: string } | undefined)?.text, 'original reasoning', 'commit evidence stays with the displayed selection-safe text');
+
+    selection.removeAllRanges();
+    await timers.advanceBy(200);
+    assert.equal(body.textContent?.trim(), 'latest terminal reasoning');
+    assert.equal(body.querySelector('.reasoning-stream-cursor'), null);
+    assert.equal((reasoningLeaf as { text?: string } | undefined)?.text, 'latest terminal reasoning');
+
+    const latestReasoningText = firstTextNode(body);
+    selection.setBaseAndExtent(latestReasoningText, 0, latestReasoningText, latestReasoningText.length);
+    await act(async () => {
+      renderReasoning('deferred before unmount', true);
+      await Promise.resolve();
+    });
+    assert.ok(timers.pendingCount > 0, 'the selected reasoning update schedules a deferred apply');
+    render(null, root);
+    assert.equal(timers.pendingCount, 0, 'unmount clears reasoning selection and markdown timers');
+  } finally {
+    document.getSelection()?.removeAllRanges();
+    render(null, root);
+    timers.restore();
+  }
+});
+
 test('switching session props preserves the transcript host and surface while committing the new session content', async () => {
   const root = document.getElementById('root')!;
   const offsetWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetWidth');
@@ -645,44 +856,47 @@ test('switching session props preserves the transcript host and surface while co
     children: h(TranscriptHost, hostProps as never),
   }), root);
 
-  renderHost(target(1, '/session/a', sessionA, 'identity-a'), props);
-  await new Promise((resolve) => setImmediate(resolve));
-  const firstHost = root.querySelector('.transcript-host');
-  const firstSurface = root.querySelector('.transcript-surface');
-  const firstView = root.querySelector('.transcript-virtual-wrap');
-  assert.ok(firstHost);
-  assert.ok(firstSurface);
-  assert.ok(firstView);
-  assert.match(root.textContent ?? '', /Session A content/);
-  assert.ok(messages.some((message) => message.type === 'transcriptCommitted' && message.payload.revision === 1));
+  try {
+    renderHost(target(1, '/session/a', sessionA, 'identity-a'), props);
+    await new Promise((resolve) => setImmediate(resolve));
+    const firstHost = root.querySelector('.transcript-host');
+    const firstSurface = root.querySelector('.transcript-surface');
+    const firstView = root.querySelector('.transcript-virtual-wrap');
+    assert.ok(firstHost);
+    assert.ok(firstSurface);
+    assert.ok(firstView);
+    assert.match(root.textContent ?? '', /Session A content/);
+    assert.ok(messages.some((message) => message.type === 'transcriptCommitted' && message.payload.revision === 1));
 
-  renderHost(target(2, '/session/b', sessionB, 'identity-b'), {
-    ...props,
-    activeSessionPath: '/session/b',
-    transcript: sessionB,
-  });
-  await new Promise((resolve) => setImmediate(resolve));
-  // Session switching remounts the keyed virtualizer. Its first range change
-  // is delivered through a timer-backed rAF in this DOM harness, so wait one
-  // timer turn before asserting the new leaf evidence.
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  const secondHost = root.querySelector('.transcript-host');
-  const secondSurface = root.querySelector('.transcript-surface');
-  const secondView = root.querySelector('.transcript-virtual-wrap');
+    renderHost(target(2, '/session/b', sessionB, 'identity-b'), {
+      ...props,
+      activeSessionPath: '/session/b',
+      transcript: sessionB,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    // Session switching remounts the keyed virtualizer. Its first range change
+    // is delivered through a timer-backed rAF in this DOM harness, so wait one
+    // timer turn before asserting the new leaf evidence.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const secondHost = root.querySelector('.transcript-host');
+    const secondSurface = root.querySelector('.transcript-surface');
+    const secondView = root.querySelector('.transcript-virtual-wrap');
 
-  assert.equal(secondHost, firstHost, 'the transcript host must stay mounted across session switches');
-  assert.equal(secondSurface, firstSurface, 'the transcript surface must stay mounted across session switches');
-  assert.notEqual(secondView, firstView, 'the session-owned transcript view must reset its virtualizer at the new tab bottom');
-  assert.equal(secondSurface?.getAttribute('data-session-path'), '/session/b');
-  assert.match(root.textContent ?? '', /Session B content/);
-  assert.doesNotMatch(root.textContent ?? '', /Session A content/);
-  assert.ok(messages.some((message) => message.type === 'transcriptCommitted'
-    && message.payload.revision === 2 && message.payload.identity === 'identity-b'));
-  render(null, root);
-  Object.defineProperties(HTMLElement.prototype, {
-    offsetWidth: offsetWidth!,
-    offsetHeight: offsetHeight!,
-  });
-  window.requestAnimationFrame = originalWindowRaf;
-  window.cancelAnimationFrame = originalWindowCaf;
+    assert.equal(secondHost, firstHost, 'the transcript host must stay mounted across session switches');
+    assert.equal(secondSurface, firstSurface, 'the transcript surface must stay mounted across session switches');
+    assert.notEqual(secondView, firstView, 'the session-owned transcript view must reset its virtualizer at the new tab bottom');
+    assert.equal(secondSurface?.getAttribute('data-session-path'), '/session/b');
+    assert.match(root.textContent ?? '', /Session B content/);
+    assert.doesNotMatch(root.textContent ?? '', /Session A content/);
+    assert.ok(messages.some((message) => message.type === 'transcriptCommitted'
+      && message.payload.revision === 2 && message.payload.identity === 'identity-b'));
+  } finally {
+    render(null, root);
+    Object.defineProperties(HTMLElement.prototype, {
+      offsetWidth: offsetWidth!,
+      offsetHeight: offsetHeight!,
+    });
+    window.requestAnimationFrame = originalWindowRaf;
+    window.cancelAnimationFrame = originalWindowCaf;
+  }
 });

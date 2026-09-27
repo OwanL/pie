@@ -7,6 +7,7 @@ import {
   PROVIDER_MAX_CONCURRENT_REQUESTS,
   PROVIDER_UNLIMITED_CONCURRENCY,
 } from '../../lib/protocol/provider-concurrency.js';
+import { concurrencySourceLabel } from '../../../lib/concurrency-config.js';
 import { setProviderEnabled } from '../shell/chat-prefs';
 import { CollapsibleChevron } from '../lib/components/chevron';
 import { SettingCheckbox } from './setting-checkbox';
@@ -45,13 +46,27 @@ function ProviderConcurrencyControls({
   metrics?: ProviderGateProviderMetrics;
 }) {
   const overrides = prefs.providerConcurrency[provider] ?? {};
-  const maxConcurrent = overrides.maxConcurrentRequests ?? metrics?.maxConcurrentRequests ?? 2;
+  const hasRequestedMax = overrides.maxConcurrentRequests !== undefined || metrics !== undefined;
+  const maxConcurrent = overrides.maxConcurrentRequests ?? metrics?.maxConcurrentRequests;
   const maxConcurrentSliderValue = maxConcurrent === PROVIDER_UNLIMITED_CONCURRENCY
     ? PROVIDER_UNLIMITED_SLIDER_VALUE
-    : maxConcurrent;
+    : maxConcurrent ?? 1;
+  const maxConcurrentLabel = maxConcurrent === undefined
+    ? 'Unavailable'
+    : maxConcurrent === PROVIDER_UNLIMITED_CONCURRENCY ? 'Unlimited' : String(maxConcurrent);
+  const runtimeMaxConcurrentLabel = metrics === undefined
+    ? 'Unavailable'
+    : metrics.maxConcurrentRequests === PROVIDER_UNLIMITED_CONCURRENCY
+      ? 'Unlimited'
+      : String(metrics.maxConcurrentRequests);
   const afterburn = overrides.afterburnSeconds ?? metrics?.afterburnSeconds ?? 0;
-  const queueWait = overrides.queueWaitSeconds ?? 30;
+  const queueWait = overrides.queueWaitSeconds ?? metrics?.queueWaitSeconds ?? 30;
   const headerWait = overrides.headerWaitSeconds ?? 0;
+  const requestedMaxDetail = overrides.maxConcurrentRequests !== undefined
+    ? `Configured/requested: ${maxConcurrentLabel} · ${concurrencySourceLabel('saved-preference')}`
+    : metrics
+      ? `No saved override · using current runtime value (${maxConcurrentLabel})`
+      : 'Configured/requested: unavailable';
 
   const setOverride = (field: 'maxConcurrentRequests' | 'afterburnSeconds' | 'queueWaitSeconds' | 'headerWaitSeconds', value: number) => {
     const current = prefs.providerConcurrency[provider] ?? {};
@@ -73,15 +88,24 @@ function ProviderConcurrencyControls({
           min={1}
           max={PROVIDER_UNLIMITED_SLIDER_VALUE}
           step={1}
-          formatValue={(value) => value === PROVIDER_UNLIMITED_SLIDER_VALUE ? 'Unlimited' : `${value}`}
+          formatValue={(value) => !hasRequestedMax
+            ? 'Unavailable'
+            : value === PROVIDER_UNLIMITED_SLIDER_VALUE ? 'Unlimited' : `${value}`}
           ariaLabel={`Max concurrent requests for ${provider}`}
-          tooltip="Provider-wide in-flight request cap. Unlimited disables concurrency and afterburn capacity throttling while retaining circuit breakers and network safety deadlines."
+          tooltip="Provider-wide in-flight request cap. Unlimited disables this provider's concurrency and afterburn capacity throttling while retaining circuit breakers and network safety deadlines. It does not bypass the separate subagent tree limit."
           hint="Max in-flight LLM requests to this provider. Move to the rightmost position for Unlimited."
+          disabled={!hasRequestedMax}
           onChange={(value) => setOverride(
             'maxConcurrentRequests',
             value === PROVIDER_UNLIMITED_SLIDER_VALUE ? PROVIDER_UNLIMITED_CONCURRENCY : value,
           )}
         />
+        <div class="toolbar-settings-item-hint" style="margin-top: -8px;">
+          {requestedMaxDetail}<br />
+          {metrics
+            ? `Runtime/applied: ${runtimeMaxConcurrentLabel} · ${concurrencySourceLabel(metrics.maxConcurrentRequestsSource)}`
+            : 'Runtime/applied: unavailable'}
+        </div>
 
         {/* Afterburn sticky-slot window */}
         <SliderRow

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test, { describe, beforeEach, afterEach } from 'node:test';
 import path from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -64,6 +65,7 @@ function badgeOf(patch: Patch | undefined): PruningBadge | undefined {
 
 describe('index handler (visibility badge + analytics)', () => {
   let handler: (e: Event, ctx: unknown) => Promise<Patch | undefined>;
+  let updateHandler: AnyHandler;
   let shutdownHandler: AnyHandler;
   let configMod: ConfigModule;
   let loggerMod: LoggerModule;
@@ -71,6 +73,7 @@ describe('index handler (visibility badge + analytics)', () => {
   let dir: string;
   let logPath: string;
   let stashDir: string;
+  const sessionContexts = new Map<string, unknown>();
 
   test.before(async () => {
     configMod = (await import(configUrl)) as ConfigModule;
@@ -87,6 +90,8 @@ describe('index handler (visibility badge + analytics)', () => {
     const toolResult = handlers.get('tool_result');
     if (!toolResult) throw new Error('tool_result handler was not registered');
     handler = toolResult;
+    updateHandler = handlers.get('tool_execution_update')!;
+    if (!updateHandler) throw new Error('tool_execution_update handler was not registered');
     shutdownHandler = handlers.get('session_shutdown')!;
     if (!shutdownHandler) throw new Error('session_shutdown handler was not registered');
   });
@@ -97,6 +102,7 @@ describe('index handler (visibility badge + analytics)', () => {
     logPath = path.join(dir, 'tool-result-pruning.jsonl');
     stashDir = path.join(dir, 'stash');
     setStashDir(stashDir);
+    sessionContexts.clear();
     loggerMod.setLogPathOverrideForTesting(logPath);
   });
 
@@ -105,6 +111,10 @@ describe('index handler (visibility badge + analytics)', () => {
     // pending writes either hit a torn-down dir (ENOENT noise) or escape to
     // the real data/tool-result-pruning.jsonl (test-isolation leak).
     await loggerMod.flushLog();
+    for (const context of sessionContexts.values()) {
+      await shutdownHandler({ type: 'session_shutdown', reason: 'test cleanup' }, context);
+    }
+    sessionContexts.clear();
     setStashDir(null);
     configMod.setConfigOverrideForTesting(null);
     configMod.resetConfigCache();
@@ -242,7 +252,7 @@ describe('index handler (visibility badge + analytics)', () => {
   ].join('\n') + '\n';
 
   test('ls -l lossy: fidelity marker + recall stash + details.pruning', async () => {
-    const out = await handler(ev({ input: { command: 'ls -l' }, content: [{ type: 'text', text: LS_L_BIG }] }), {});
+    const out = await handler(ev({ input: { command: 'ls -l' }, content: [{ type: 'text', text: LS_L_BIG }] }), ctxWith('ls-lossy'));
     assert.ok(out);
     const text = out!.content![0]!.text;
     assert.match(text, /^\[pruned: ls-long \(8 entries → names only\) — raw: .*\]\n/);
@@ -261,7 +271,7 @@ describe('index handler (visibility badge + analytics)', () => {
 
   test('recall stash holds the pre-pruning text (incl. ANSI lossless stripped)', async () => {
     const colored = '\u001B[31m' + LS_L_BIG + '\u001B[0m';
-    const out = await handler(ev({ input: { command: 'ls -l' }, content: [{ type: 'text', text: colored }] }), {});
+    const out = await handler(ev({ input: { command: 'ls -l' }, content: [{ type: 'text', text: colored }] }), ctxWith('stash-colored'));
     assert.ok(out);
     const pruning = (out!.details as { pruning?: { rawPath: string } }).pruning!;
     assert.equal(readFileSync(pruning.rawPath, 'utf-8'), colored);
@@ -307,24 +317,26 @@ describe('index handler (visibility badge + analytics)', () => {
     // and fails (parent is a file) → the lossy rewrite is abandoned and the
     // lossless ANSI-stripped result is used instead.
     const colored = '\u001B[31m' + LS_L_BIG + '\u001B[0m';
-    const out = await handler(ev({ input: { command: 'ls -l' }, content: [{ type: 'text', text: colored }] }), {});
+    const out = await handler(ev({ input: { command: 'ls -l' }, content: [{ type: 'text', text: colored }] }), ctxWith('stash-write-failure'));
     assert.ok(out);
     assert.doesNotMatch(out!.content![0]!.text, /\u001B/);
     assert.doesNotMatch(out!.content![0]!.text, /^\[pruned/);
     assert.equal((out!.details as { pruning?: unknown }).pruning, undefined);
     assert.deepEqual(badgeOf(out)!.rules, ['ansi-strip']);
+    rmSync(blocker, { force: true });
   });
 
   test('stash failure with no lossless opportunity → undefined (history untouched)', async () => {
     const blocker = path.join(dir, 'blocker-file');
     writeFileSync(blocker, 'x');
     setStashDir(path.join(blocker, 'sub'));
-    const out = await handler(ev({ input: { command: 'ls -l' }, content: [{ type: 'text', text: LS_L_BIG }] }), {});
+    const out = await handler(ev({ input: { command: 'ls -l' }, content: [{ type: 'text', text: LS_L_BIG }] }), ctxWith('stash-hard-failure'));
     assert.equal(out, undefined);
+    rmSync(blocker, { force: true });
   });
 
   test('git log lossy: oneline + marker + stash', async () => {
-    const out = await handler(ev({ input: { command: 'git log' }, content: [{ type: 'text', text: GIT_LOG_3 }] }), {});
+    const out = await handler(ev({ input: { command: 'git log' }, content: [{ type: 'text', text: GIT_LOG_3 }] }), ctxWith('git-log-lossy'));
     assert.ok(out);
     assert.match(
       out!.content![0]!.text,
@@ -336,7 +348,7 @@ describe('index handler (visibility badge + analytics)', () => {
   });
 
   test('grep/rg lossy: path-grouped + marker + stash', async () => {
-    const out = await handler(ev({ input: { command: 'rg foo' }, content: [{ type: 'text', text: RG_GROUP_BIG }] }), {});
+    const out = await handler(ev({ input: { command: 'rg foo' }, content: [{ type: 'text', text: RG_GROUP_BIG }] }), ctxWith('grep-lossy'));
     assert.ok(out, 'grep-group should fire (RG_GROUP_BIG clears LOSSY_MIN_NET_SAVED after the marker)');
     const text = out!.content![0]!.text;
     assert.ok(text.startsWith('[pruned: grep-group (16 matches in 2 files'), 'fidelity marker present');
@@ -348,18 +360,56 @@ describe('index handler (visibility badge + analytics)', () => {
     assert.equal(readFileSync(pruning.rawPath, 'utf-8'), RG_GROUP_BIG);
   });
 
-  // --- session-scoped stash cleanup (P1-7 follow-up) ---
+  // --- session-scoped stash cleanup ---
   // The tool_result handler namespaces recall stashes by session id
   // (pruned-raw-<sessionId>-<hex>.txt); the session_shutdown handler deletes a
-  // session's stashes on teardown. These cover the namespacing + the shutdown
-  // delete, including the safety guard ("unknown" id = no-op).
+  // session's exact owned stash paths, and unknown identities cannot create one.
   function ctxWith(sessionId: string): unknown {
-    return { sessionManager: { getSessionId: () => sessionId } };
+    let context = sessionContexts.get(sessionId);
+    if (!context) {
+      context = { sessionManager: { getSessionId: () => sessionId } };
+      sessionContexts.set(sessionId, context);
+    }
+    return context;
   }
 
   function stashesIn(dir: string): string[] {
-    return readdirSync(dir).filter((n) => n.startsWith('pruned-raw-') && n.endsWith('.txt'));
+    try {
+      return readdirSync(dir).filter((n) => n.startsWith('pruned-raw-') && n.endsWith('.txt'));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
+    }
   }
+
+  test('session_shutdown removes only SDK output temp files owned by that session', async () => {
+    const sessionA = `sdk-a-${randomBytes(6).toString('hex')}`;
+    const sessionB = `sdk-b-${randomBytes(6).toString('hex')}`;
+    const outputA = path.join(tmpdir(), `pi-bash-${randomBytes(8).toString('hex')}.log`);
+    const outputB = path.join(tmpdir(), `pi-bash-${randomBytes(8).toString('hex')}.log`);
+    const unrelatedFile = path.join(tmpdir(), `user-${randomBytes(8).toString('hex')}.txt`);
+    writeFileSync(outputA, 'session A SDK output');
+    writeFileSync(outputB, 'session B SDK output');
+    writeFileSync(unrelatedFile, 'not an SDK output file');
+
+    try {
+      await updateHandler({
+        type: 'tool_execution_update',
+        toolName: 'bash',
+        partialResult: { details: { fullOutputPath: outputA } },
+      }, ctxWith(sessionA));
+      await handler(ev({ details: { fullOutputPath: outputB } }), ctxWith(sessionB));
+      await handler(ev({ details: { fullOutputPath: unrelatedFile } }), ctxWith(sessionA));
+      await shutdownHandler({ type: 'session_shutdown', reason: 'quit' }, ctxWith(sessionA));
+      assert.equal(existsSync(outputA), false);
+      assert.equal(existsSync(outputB), true, 'another live session output must remain');
+      assert.equal(existsSync(unrelatedFile), true, 'a user file outside the SDK naming contract must remain');
+    } finally {
+      rmSync(outputA, { force: true });
+      rmSync(outputB, { force: true });
+      rmSync(unrelatedFile, { force: true });
+    }
+  });
 
   test('tool_result namespaces the recall stash by session id', async () => {
     const out = await handler(
@@ -393,13 +443,12 @@ describe('index handler (visibility badge + analytics)', () => {
     assert.ok(after[0]!.startsWith('pruned-raw-sess-b-'), 'the other live session\'s stash must survive');
   });
 
-  test('session_shutdown is a no-op for an "unknown" session id', async () => {
-    await handler(
+  test('lossy pruning declines to write a recall stash without a safe session identity', async () => {
+    const out = await handler(
       ev({ input: { command: 'ls -l' }, content: [{ type: 'text', text: LS_L_BIG }] }),
       {}, // no sessionManager → getSessionId returns "unknown"
     );
-    assert.equal(stashesIn(stashDir).length, 1);
-    await shutdownHandler({ type: 'session_shutdown', reason: 'new' }, {});
-    assert.equal(stashesIn(stashDir).length, 1, 'unknown-id shutdown must not delete the stash');
+    assert.equal(out, undefined, 'lossy output must fall back to unchanged history without an owner');
+    assert.equal(stashesIn(stashDir).length, 0);
   });
 });

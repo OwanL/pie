@@ -1,15 +1,4 @@
 {
-	"version": "2.0.0",
-	"tasks": [
-		{
-			"label": "test proxy-service-notice",
-			"type": "shell",
-			"command": "node ../../../scripts/run-test-files.mjs extension/test/proxy-service-notice.test.ts",
-			"args": [],
-			"problemMatcher": [
-				"$tsc"
-			],
-			"group": "test"
-		}
-	]
+  "version": "2.0.0",
+  "tasks": []
 }

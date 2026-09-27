@@ -8,6 +8,7 @@ import { renderMarkdown } from './markdown';
 import { handleDelegatedFilePathClick, handleDelegatedFilePathContextMenu, handleDelegatedFilePathKeyDown } from './file-path-interactions';
 import type { TranscriptContextMenuHandler } from './types';
 import { useCommittedTextLeaf } from './commit-registry';
+import { hasSelectionOverlapping } from './selection-overlap';
 
 interface BufferedTextPartProps {
   messageId: string;
@@ -23,24 +24,9 @@ interface BufferedTextPartProps {
 /** Re-parse streamed markdown at most this often (ms): bounds marked+DOMPurify cost and reduces mid-token flicker. */
 const MARKDOWN_PARSE_THROTTLE_MS = 100;
 
-/** While the user has an active text selection anchored in the streaming body,
- *  skip innerHTML updates (which would destroy the Selection). Poll this often
- *  (ms) to apply the deferred update once the selection clears. */
+/** While the user has an active text selection overlapping the body, skip
+ *  innerHTML updates and poll until the selection clears. */
 const SELECTION_DEFER_POLL_MS = 200;
-/** Maximum total defer (ms) before the pending update is force-applied even if
- *  a selection is still active, so streaming output cannot fall behind
- *  indefinitely. */
-const SELECTION_FORCE_APPLY_MS = 1500;
-
-/** True when the user has a non-collapsed text selection rooted inside `el`. */
-function hasSelectionInBody(el: HTMLDivElement | null): boolean {
-  if (!el) return false;
-  const sel = document.getSelection();
-  if (!sel || sel.isCollapsed || sel.rangeCount === 0) return false;
-  const anchor = sel.anchorNode;
-  if (!anchor) return false;
-  return el.contains(anchor);
-}
 
 /**
  * Renders a text part while it streams.
@@ -53,10 +39,9 @@ function hasSelectionInBody(el: HTMLDivElement | null): boolean {
  * and the rendered text is kept alongside the HTML so commit evidence only
  * reports what is mounted in the body.
  *
- * While the user is selecting text inside the streaming body, innerHTML
- * updates are deferred (re-applied once the selection clears or after a short
- * timeout) — otherwise each distinct html string resets innerHTML, recreating
- * DOM nodes and clearing the user's Selection up to 10x/s.
+ * While the user is selecting text overlapping the body, innerHTML updates
+ * are deferred until the selection clears — otherwise each distinct html
+ * string resets innerHTML, recreating DOM nodes and clearing the Selection.
  */
 export function BufferedTextPart({ messageId, index, text, streaming, workingDirectory, onOpenFile, onContextMenu, onFilePathContextMenu }: BufferedTextPartProps) {
   // Advance this synchronously with prop replacement, before effects from the
@@ -87,21 +72,19 @@ export function BufferedTextPart({ messageId, index, text, streaming, workingDir
   const bodyRef = useRef<HTMLDivElement>(null);
   const pendingHtmlRef = useRef<{ html: string; text: string } | null>(null);
   const deferTimerRef = useRef<number | null>(null);
-  const deferStartedAtRef = useRef(0);
 
-  /** Apply `nextHtml` now unless the user is mid-selection in the body, in
-   *  which case defer it (re-checked on a poll, force-applied after a timeout). */
+  /** Apply `nextHtml` now unless a selection overlaps the body, in which case
+   *  retain only the latest candidate until the selection clears. */
   function applyHtml(nextHtml: string, representedText: string) {
     pendingHtmlRef.current = { html: nextHtml, text: representedText };
     // A deferred apply is already scheduled — it will pick up the latest
     // pending html when it fires, so don't schedule another.
     if (deferTimerRef.current !== null) return;
-    if (!hasSelectionInBody(bodyRef.current)) {
+    if (!hasSelectionOverlapping(bodyRef.current)) {
       setRendered({ html: nextHtml, text: representedText });
       pendingHtmlRef.current = null;
       return;
     }
-    deferStartedAtRef.current = Date.now();
     scheduleDeferredApply();
   }
 
@@ -109,13 +92,13 @@ export function BufferedTextPart({ messageId, index, text, streaming, workingDir
     deferTimerRef.current = window.setTimeout(() => {
       deferTimerRef.current = null;
       if (pendingHtmlRef.current === null) return;
-      const elapsed = Date.now() - deferStartedAtRef.current;
-      if (elapsed >= SELECTION_FORCE_APPLY_MS || !hasSelectionInBody(bodyRef.current)) {
+      if (!hasSelectionOverlapping(bodyRef.current)) {
         setRendered(pendingHtmlRef.current);
         pendingHtmlRef.current = null;
         return;
       }
-      // Still selecting — keep deferring.
+      // Keep the user's selection intact for its full lifetime. The next poll
+      // applies whichever pending snapshot is newest when the selection clears.
       scheduleDeferredApply();
     }, SELECTION_DEFER_POLL_MS);
   }

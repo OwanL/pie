@@ -210,6 +210,23 @@ export class SessionServiceEvents {
       onCustomMessage: (payload) => onCustomMessage(payload, deps),
       onMessageAborted: (payload) => onMessageAborted(payload, deps),
       onPreflightFailed: (payload) => onPreflightFailed(payload, deps),
+      onAgentMessage: (payload) => {
+        const sessionPath = this.requireEventSessionPath('message.agent', payload.sessionPath);
+        if (!sessionPath) return;
+        if (payload.status === 'rejected') {
+          this.dispatchArch({ kind: 'AgentMessageRejected', sessionPath, localId: payload.localId });
+        } else {
+          this.dispatchArch({
+            kind: 'AgentMessageReceived',
+            sessionPath,
+            localId: payload.localId,
+            text: payload.text,
+            status: payload.status,
+            timestamp: payload.timestamp,
+          });
+        }
+        this.scheduleRender();
+      },
       onQueuedDelivered: (payload) => onQueuedDelivered(payload, deps),
       onRetryStarted: (payload) => onRetryStarted(payload, deps),
       onRetryEnded: (payload) => onRetryEnded(payload, deps),

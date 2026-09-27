@@ -646,7 +646,7 @@ function SettingsTabBody(props: SettingsTabBodyProps) {
         </>
       )}
       {effectiveTab === 'subagents' && hasSubagent && (
-        <SubagentSection prefs={prefs} onSetPrefs={onSetPrefs} availableModels={availableModels} />
+        <SubagentSection prefs={prefs} onSetPrefs={onSetPrefs} availableModels={availableModels} providerGateStats={providerGateStats} />
       )}
       {effectiveTab === 'appearance' && (
         <AppearanceSection prefs={prefs} onSetPrefs={onSetPrefs} />

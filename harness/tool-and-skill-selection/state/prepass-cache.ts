@@ -58,6 +58,7 @@ export function buildPrepassFingerprint(
 		// reusing a cached decision produced under an older contract.
 		systemPrompt: buildPruningSystemPrompt(config),
 		contextFile: input.contextFile ?? null,
+		agentContext: input.agentContext ?? null,
 		...(includeRecentConversation ? { recentConversation: input.recentConversation ?? [] } : {}),
 		skills: input.skills.map(({ name, description }) => ({ name, description })),
 		tools: input.tools.map(({ name, description }) => ({ name, description })),
@@ -197,10 +198,17 @@ function crossSessionKey(fingerprint: string, prompt: string): string {
 	return `${fingerprint}\u0000${normalizePromptForExactCache(prompt)}`;
 }
 
+/** Clear the successful decision cached for one finished session. The bounded
+ * cross-session cache is intentionally retained: its exact fingerprint entries
+ * are shared reusable results, not state owned by the disposed session. */
+export function clearSessionPrepassCache(sessionId: string): void {
+	cache.delete(sessionId);
+}
+
 /** Test seam: clear one session (per-session only) or the entire per-session +
- *  cross-session cache. */
+ * cross-session cache. */
 export function clearPrepassCacheForTesting(sessionId?: string): void {
-	if (sessionId) cache.delete(sessionId);
+	if (sessionId) clearSessionPrepassCache(sessionId);
 	else {
 		cache.clear();
 		crossSessionCache.clear();

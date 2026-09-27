@@ -3,6 +3,11 @@ import { createHash } from 'node:crypto';
 import * as path from 'node:path';
 
 import type { ModelSettings } from '../../model-providers/catalog/model-contract.js';
+import {
+  isSubagentConcurrencyLimit,
+  type SubagentConcurrencyStatus,
+} from '../../../lib/concurrency-config.js';
+import { getMaxInflightResolution } from '../../tools/subagent/concurrency-limit.js';
 import type { RequestEnvelope } from '../lib/rpc/wire.js';
 import type { SessionOpenedPayload } from '../lib/rpc/session-events.js';
 import type { ModelSettingsUnsetKey } from './request-handler-shared';
@@ -387,6 +392,11 @@ export class WorkerRuntimeRouter {
    *  host reject the new worker's terminal busy=false as stale. Keep one
    *  monotonic sequence per durable path for this coordinator lifetime. */
   private readonly publicBusySeqByPath = new Map<string, number>();
+  /** A private forget fences route admission until all workers/transitions are
+   * retired and its durable cleanup callback has completed. Successful fences
+   * remain as tombstones for this coordinator generation. */
+  private readonly forgettingSessionPaths = new Set<string>();
+  private readonly sessionForgetBarriers = new Map<string, Promise<unknown>>();
   /** Bounded per-worker runtime discovery reports; never replaces the configured catalog authority. */
   private readonly reportedRuntimeCatalogs = new Map<string, { reportedAt: number; models: unknown[] }>();
   private readonly pendingProviderAcquires = new Map<string, HotWorkerRoute>();
@@ -419,6 +429,47 @@ export class WorkerRuntimeRouter {
 
   static isHotOperation(method: string): method is WorkerRuntimeOperation {
     return HOT_OPERATIONS.has(method);
+  }
+
+  /** Report configured capacity separately from the value proven applied by
+   * the current worker generations' runtimePrefs acknowledgements. */
+  getSubagentConcurrencyStatus(): SubagentConcurrencyStatus {
+    const workers = this.options.supervisor.listWorkers();
+    const usableWorkers = workers.filter((worker) => this.isWorkerTransportUsable(worker));
+    const currentRevision = this.syncRevisions.runtimePrefs;
+    const pendingWorkers = workers.filter((worker) => {
+      const acknowledged = this.workerSyncRevisions.get(worker)?.runtimePrefs ?? 0;
+      return acknowledged < currentRevision;
+    }).length;
+
+    const configured = this.resolveConfiguredSubagentConcurrency();
+    return {
+      scope: 'worker-process',
+      configured,
+      ...(usableWorkers.length > 0 && pendingWorkers === 0 ? { effective: configured } : {}),
+      workerCount: workers.length,
+      pendingWorkers,
+    };
+  }
+
+  private resolveConfiguredSubagentConcurrency(): SubagentConcurrencyStatus['configured'] {
+    const syncedValues = this.syncPayloads.runtimePrefs?.values;
+    const runtimePrefs = syncedValues && typeof syncedValues === 'object' && !Array.isArray(syncedValues)
+      ? syncedValues
+      : this.options.readRuntimePrefs?.();
+    const value = runtimePrefs?.subagentMaxInflight;
+    if (isSubagentConcurrencyLimit(value)) {
+      const source = runtimePrefs?.subagentMaxInflightSource;
+      return {
+        value,
+        // Older or partial preference snapshots may carry the numeric value
+        // only. Treat that as a saved value and never retain prior provenance.
+        source: source === 'configured-default' || source === 'saved-preference'
+          ? source
+          : 'saved-preference',
+      };
+    }
+    return getMaxInflightResolution();
   }
 
   getRoute(sessionPath: string): WorkerRuntimeRouteState {
@@ -463,6 +514,33 @@ export class WorkerRuntimeRouter {
 
   async routeExisting(request: RequestEnvelope): Promise<WorkerJsonValue> {
     return await this.routeCommand(request, false);
+  }
+
+  /** Fence a private-session deletion against promotion, retirement, and hot
+   * transitions. The callback does not begin until every possible owner has
+   * stopped; admission stays closed throughout manifest/artifact cleanup. */
+  withSessionForgetBarrier<T>(sessionPath: string, operation: () => Promise<T>): Promise<T> {
+    const keys = this.sessionForgetKeys(sessionPath);
+    const existing = [...keys].map((key) => this.sessionForgetBarriers.get(key))
+      .find((barrier): barrier is Promise<unknown> => barrier !== undefined);
+    if (existing) return existing as Promise<T>;
+
+    for (const key of keys) this.forgettingSessionPaths.add(key);
+    let barrier!: Promise<T>;
+    barrier = (async () => {
+      try {
+        await this.retireSessionForForget(sessionPath);
+        return await operation();
+      } catch (error) {
+        for (const key of keys) {
+          if (this.sessionForgetBarriers.get(key) === barrier) this.sessionForgetBarriers.delete(key);
+          this.forgettingSessionPaths.delete(key);
+        }
+        throw error;
+      }
+    })();
+    for (const key of keys) this.sessionForgetBarriers.set(key, barrier);
+    return barrier;
   }
 
   /** Revoke every currently promoted worker's manager admission. The
@@ -629,6 +707,7 @@ export class WorkerRuntimeRouter {
       throw new Error(`Operation ${request.method} is not a worker-runtime command.`);
     }
     const sessionPath = readSessionPath(request.params);
+    this.assertSessionAdmissionOpen(sessionPath);
     const operationCancellationGeneration = expectedCancellationGeneration
       ?? this.operationCancellationGeneration(sessionPath);
     const hot = promoteIfCold ? await this.promote(sessionPath) : this.requireHot(sessionPath);
@@ -639,6 +718,7 @@ export class WorkerRuntimeRouter {
         'The pending session operation was interrupted before runtime promotion completed.',
       );
     }
+    this.assertSessionAdmissionOpen(sessionPath);
     this.assertCurrentOwner(hot, sessionPath);
     return await this.dispatchRuntimeCommand(hot, request);
   }
@@ -733,6 +813,7 @@ export class WorkerRuntimeRouter {
 
   async promote(sessionPath: string): Promise<HotWorkerRoute> {
     if (this.disposed) throw new Error('Worker runtime router is disposed.');
+    this.assertSessionAdmissionOpen(sessionPath);
     const key = routeKey(sessionPath);
     const root = this.roots.get(key);
     if (root?.state === 'transitioning') throw new SessionTransitionInProgressError(sessionPath);
@@ -784,6 +865,11 @@ export class WorkerRuntimeRouter {
     operation: (control: WorkerRuntimeTransitionControl) => Promise<T>,
   ): Promise<T> {
     if (this.disposed) return Promise.reject(new Error('Worker runtime router is disposed.'));
+    try {
+      this.assertSessionAdmissionOpen(sessionPath);
+    } catch (error) {
+      return Promise.reject(error);
+    }
     const key = routeKey(sessionPath);
     const existing = this.roots.get(key);
     if (existing?.state === 'transitioning') {
@@ -1061,6 +1147,59 @@ export class WorkerRuntimeRouter {
     this.roots.set(rootKey, retiring);
     this.notify(retiring);
     await retirement;
+  }
+
+  private async retireSessionForForget(sessionPath: string): Promise<void> {
+    // Promotion can already own a spawned worker before runtime.ready. Join it
+    // before selecting the next state, then retire that owner. An unconfirmed
+    // promotion failure settles as `retiring` and must propagate rather than
+    // allowing artifact deletion beside an ambiguous process.
+    for (;;) {
+      const route = this.getRoute(sessionPath);
+      if (route.state === 'cold') return;
+      if (route.state === 'promoting') {
+        await route.promotion.catch(() => undefined);
+        continue;
+      }
+      if (route.state === 'retiring') {
+        await route.retirement;
+        continue;
+      }
+      if (route.state === 'transitioning') {
+        // Cancel and stop before joining completion. This also breaks worker
+        // tool/deferred-forget cycles where a transition is waiting for that
+        // worker to finish its current tool call.
+        await this.forceRecoverTransition(route.rootSessionPath, 'session forgotten');
+        continue;
+      }
+      await this.retire(route.currentLeasePath, 'session forgotten');
+    }
+  }
+
+  private sessionForgetKeys(sessionPath: string): Set<string> {
+    const keys = new Set([routeKey(sessionPath)]);
+    const route = this.getRoute(sessionPath);
+    if (route.state === 'promoting' || route.state === 'retiring') {
+      keys.add(routeKey(route.rootSessionPath));
+    } else if (route.state === 'hot') {
+      keys.add(routeKey(route.rootSessionPath));
+      keys.add(routeKey(route.currentLeasePath));
+    } else if (route.state === 'transitioning') {
+      keys.add(routeKey(route.rootSessionPath));
+      keys.add(routeKey(route.source.rootSessionPath));
+      keys.add(routeKey(route.source.currentLeasePath));
+      if (route.promoted) {
+        keys.add(routeKey(route.promoted.rootSessionPath));
+        keys.add(routeKey(route.promoted.currentLeasePath));
+      }
+    }
+    return keys;
+  }
+
+  private assertSessionAdmissionOpen(sessionPath: string): void {
+    if (this.forgettingSessionPaths.has(routeKey(sessionPath))) {
+      throw new BackendError('SESSION_NOT_FOUND', `Session ${sessionPath} is being forgotten.`);
+    }
   }
 
   async syncRuntimePrefs(values: WorkerJsonObject): Promise<void> {

@@ -18,6 +18,7 @@ for (const [key, value] of Object.entries({
   Node: dom.window.Node,
   Element: dom.window.Element,
   HTMLElement: dom.window.HTMLElement,
+  MutationObserver: dom.window.MutationObserver,
 })) {
   Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
 }

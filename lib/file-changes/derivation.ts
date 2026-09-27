@@ -46,6 +46,7 @@ interface SubagentMessage {
   content?: SubagentContentPart[];
   toolCallId?: string;
   toolName?: string;
+  isError?: boolean;
   details?: unknown;
 }
 
@@ -53,6 +54,9 @@ interface SubagentSingleResult {
   /** Effective cwd of this child session. Legacy results may omit it. */
   cwd?: string;
   messages?: SubagentMessage[];
+  /** True when messages are only a bounded projection and fileChanges is the
+   * authoritative retained evidence. */
+  transcriptCompacted?: boolean;
   fileChanges?: Array<{
     path: string;
     kind: FileChangeEntry['kind'];
@@ -265,28 +269,19 @@ export function mergeFileChangeKind(
 
 export function accumulateFileChange(
   seen: Map<string, FileChangeEntry>,
-  createdPaths: Set<string>,
   entry: FileChangeEntry,
   cwd?: string,
 ): void {
   // Canonicalize the path identity against the session cwd so the same file
   // reached through different spellings (relative/absolute, `./`, separator/
-  // case variants, parent vs subagent) collapses to one entry. The Map/Set
-  // are keyed by the canonical form; the entry keeps its original `path`
-  // spelling for display (the first-seen spelling is preserved on merge so
-  // manifest paths stay stable across re-derivation).
+  // case variants, parent vs subagent) collapses to one entry. The map is keyed
+  // by the canonical form; the entry keeps its original `path` spelling for
+  // display (the first-seen spelling is preserved on merge so manifest paths
+  // stay stable across re-derivation). Keep successful create/delete pairs:
+  // this manifest records attributed mutations, not a net filesystem diff, and
+  // `created` is only a heuristic for a write call (which may overwrite a file).
   const key = canonicalFilePath(entry.path, cwd);
   const existing = seen.get(key);
-  if (entry.kind === 'created' && (!existing || existing.kind === 'created')) {
-    createdPaths.add(key);
-  } else if (entry.kind === 'deleted' && createdPaths.has(key)) {
-    // File was created in this session and then deleted — net no-op. Clear the
-    // marker too: if the path is later recreated/modified, a subsequent delete
-    // must describe that later lifecycle rather than being suppressed forever.
-    createdPaths.delete(key);
-    seen.delete(key);
-    return;
-  }
 
   if (existing) {
     // Accumulate stats across edits to the same file.
@@ -348,6 +343,20 @@ function indexSubagentCwds(messages: SubagentMessage[]): Map<string, string> {
   return cwds;
 }
 
+/** Index completed tool results in the child transcript. A result entry is
+ * required evidence that an individual mutation call finished; its error flag
+ * distinguishes failed mutations from successful ones. Subagent task failures
+ * are handled separately because their details may still contain successful
+ * descendant mutations. */
+function indexSubagentToolResults(messages: SubagentMessage[]): Map<string, SubagentMessage> {
+  const results = new Map<string, SubagentMessage>();
+  for (const message of messages) {
+    if (message.role !== 'toolResult' || typeof message.toolCallId !== 'string' || !message.toolCallId) continue;
+    if (!results.has(message.toolCallId)) results.set(message.toolCallId, message);
+  }
+  return results;
+}
+
 /**
  * Derive file changes from a subagent tool result by scanning the inner
  * subagent transcripts for file-modifying tool calls (edit, write, etc.).
@@ -386,7 +395,14 @@ export function deriveFileChangesFromSubagentResult(
     const normalize = (entry: FileChangeEntry): FileChangeEntry =>
       normalizeDescendantPath(entry, resultCwd, parentCwd);
 
-    if (Array.isArray(singleResult.fileChanges)) {
+    const messages = Array.isArray(singleResult.messages) ? singleResult.messages : [];
+    // Full durable transcripts are more complete than the bounded producer
+    // summary (which may cap paths and cannot independently recover recursive
+    // descendants). Use exactly one evidence source: summaries are the fallback
+    // only when the transcript was compacted or is unavailable, avoiding both
+    // lost descendants and summary/transcript double counting.
+    if (singleResult.transcriptCompacted === true || messages.length === 0) {
+      if (!Array.isArray(singleResult.fileChanges)) continue;
       for (let changeIdx = 0; changeIdx < singleResult.fileChanges.length; changeIdx++) {
         const change = singleResult.fileChanges[changeIdx];
         if (!change?.path || !change.kind) continue;
@@ -403,34 +419,42 @@ export function deriveFileChangesFromSubagentResult(
       }
       continue;
     }
-    if (!Array.isArray(singleResult.messages)) continue;
 
-    const nestedCwds = indexSubagentCwds(singleResult.messages);
-    for (let mIdx = 0; mIdx < singleResult.messages.length; mIdx++) {
-      const msg = singleResult.messages[mIdx];
-      if (msg.role === 'toolResult' && msg.toolName === 'subagent' && msg.details !== undefined) {
-        const nestedToolCwd = msg.toolCallId ? nestedCwds.get(msg.toolCallId) : undefined;
-        const nestedChanges = deriveFileChangesFromSubagentResult(
-          { details: msg.details },
-          messageId,
-          timestamp,
-          `${toolCallId}-sa${rIdx}-m${mIdx}`,
-          resultCwd,
-          nestedToolCwd ?? resultCwd,
-        );
-        // A legacy nested result may have used the immediate child's cwd as its
-        // fallback and therefore retained a relative path. Normalize that path
-        // once more when returning to the outer session's accumulation base.
-        for (const entry of nestedChanges) changes.push(normalize(entry));
-        continue;
-      }
-      if (msg.role !== 'assistant') continue;
-      if (!Array.isArray(msg.content)) continue;
+    const nestedCwds = indexSubagentCwds(messages);
+    const toolResults = indexSubagentToolResults(messages);
+    for (let mIdx = 0; mIdx < messages.length; mIdx++) {
+      const msg = messages[mIdx];
+      if (msg.role !== 'assistant' || !Array.isArray(msg.content)) continue;
 
       for (let cIdx = 0; cIdx < msg.content.length; cIdx++) {
         const part = msg.content[cIdx];
         if (part.type !== 'toolCall') continue;
+        const toolResult = part.id ? toolResults.get(part.id) : undefined;
 
+        if (part.name === 'subagent') {
+          // A failed child task may still have completed, successful mutations
+          // in its own transcript. Recurse through its durable details even if
+          // the subagent result is marked as an error.
+          if (!toolResult || toolResult.details === undefined) continue;
+          const nestedToolCwd = part.id ? nestedCwds.get(part.id) : undefined;
+          const nestedChanges = deriveFileChangesFromSubagentResult(
+            { details: toolResult.details },
+            messageId,
+            timestamp,
+            `${toolCallId}-sa${rIdx}-m${mIdx}-c${cIdx}`,
+            resultCwd,
+            nestedToolCwd ?? resultCwd,
+          );
+          // A legacy nested result may have used the immediate child's cwd as
+          // its fallback and therefore retained a relative path. Normalize that
+          // path once more before returning to the outer accumulation base.
+          for (const entry of nestedChanges) changes.push(normalize(entry));
+          continue;
+        }
+
+        // An absent toolResult is unfinished, and isError marks a failed call;
+        // neither is evidence of a successfully changed file.
+        if (!toolResult || toolResult.isError) continue;
         const syntheticId = `${toolCallId}-sa${rIdx}-m${mIdx}-c${cIdx}`;
         const entries = deriveFileChangesFromToolCall(
           { id: syntheticId, name: part.name ?? '', input: part.arguments },

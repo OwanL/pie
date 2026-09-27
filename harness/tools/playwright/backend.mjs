@@ -55,12 +55,43 @@ function sanitizeName(value) {
   return cleaned || 'artifact';
 }
 function delay(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+function cleanupUnresolved(message) { return coded('RUNTIME_CLEANUP_UNRESOLVED', `${message} Runtime cleanup remains unresolved.`); }
+function processHasExited(child) {
+  return (child.exitCode !== undefined && child.exitCode !== null)
+    || (child.signalCode !== undefined && child.signalCode !== null);
+}
+
+async function waitForProcessExit(child, timeoutMs) {
+  if (processHasExited(child)) return true;
+  return await new Promise((resolve) => {
+    let settled = false;
+    let timer;
+    const finish = (exited) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      child.off?.('exit', onExit);
+      child.off?.('close', onExit);
+      resolve(exited);
+    };
+    const onExit = () => finish(true);
+    child.on('exit', onExit);
+    child.on('close', onExit);
+    timer = setTimeout(() => finish(processHasExited(child)), Math.max(0, timeoutMs));
+    if (processHasExited(child)) finish(true);
+  });
+}
+
+const confirmedBrowserTreeKills = new WeakSet();
+const unresolvedBrowserTreeKills = new WeakMap();
 
 export class PlaywrightBackend {
   constructor(options = {}) {
     this.sessions = new Map();
     this.closingSessions = new Set();
+    this.sessionTeardowns = new WeakMap();
     this.closeGraceMs = options.closeGraceMs ?? 5000;
+    this.spawnSync = options.spawnSync ?? spawnSync;
     this.limits = {
       imageBytes: options.maxImageArtifactBytes ?? MAX_IMAGE_ARTIFACT_BYTES,
       downloadBytes: options.maxDownloadArtifactBytes ?? MAX_DOWNLOAD_ARTIFACT_BYTES,
@@ -92,7 +123,11 @@ export class PlaywrightBackend {
   }
 
   async shutdown() {
-    for (const session of [...this.sessions.values()]) await this.closeSession(session).catch(() => {});
+    const sessions = new Set([...this.sessions.values(), ...this.closingSessions]);
+    const results = await Promise.allSettled([...sessions].map(async (session) => await this.closeSession(session)));
+    const errors = results.flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) throw new AggregateError(errors, `${errors.length} Playwright sessions could not be closed cleanly.`);
   }
 
   // ---------------------------------------------------------------- session
@@ -214,35 +249,188 @@ export class PlaywrightBackend {
     }
   }
 
-  forceKillBrowserSession(session) {
-    try {
-      const processHandle = session.browserServer?.process();
-      if (processHandle && processHandle.exitCode === null && processHandle.signalCode === null) {
-        if (process.platform === 'win32' && processHandle.pid) {
-          spawnSync('taskkill', ['/PID', String(processHandle.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
-        }
-        if (processHandle.exitCode === null && processHandle.signalCode === null) processHandle.kill('SIGKILL');
+  async forceKillBrowserSession(session, gracefulCloseConfirmed = () => false) {
+    const browserServer = session.browserServer;
+    if (!browserServer) return;
+    let processHandle;
+    try { processHandle = browserServer.process(); }
+    catch (error) {
+      throw cleanupUnresolved(`Could not inspect the Playwright browser process: ${error?.message ?? String(error)}.`);
+    }
+    if (!processHandle) throw cleanupUnresolved('The Playwright browser process handle is unavailable.');
+
+    const priorTreeFailure = unresolvedBrowserTreeKills.get(processHandle);
+    if (processHasExited(processHandle)) {
+      if (gracefulCloseConfirmed()) {
+        unresolvedBrowserTreeKills.delete(processHandle);
+        return;
       }
-    } catch { /* browser already fully closed */ }
+      if (priorTreeFailure) throw cleanupUnresolved(`Windows process-tree termination failed (${priorTreeFailure}); Chromium descendants may remain.`);
+      if (confirmedBrowserTreeKills.has(processHandle)) return;
+      // The browser PID may already have been reused. Never retry a tree kill
+      // after the owned process exits without prior tree-cleanup evidence.
+      throw cleanupUnresolved(`Playwright browser process ${processHandle.pid ?? '(unknown PID)'} exited before descendant cleanup was confirmed.`);
+    }
+
+    let treeFailure;
+    if (process.platform === 'win32' && processHandle.pid && !confirmedBrowserTreeKills.has(processHandle)) {
+      try {
+        const result = this.spawnSync('taskkill', ['/PID', String(processHandle.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+        if (result.error || result.status !== 0 || result.signal) {
+          treeFailure = result.error?.message ?? `taskkill exited with ${result.signal ? `signal ${result.signal}` : `code ${String(result.status)}`}`;
+        } else {
+          confirmedBrowserTreeKills.add(processHandle);
+          unresolvedBrowserTreeKills.delete(processHandle);
+        }
+      } catch (error) {
+        treeFailure = error instanceof Error ? error.message : String(error);
+      }
+    } else if (process.platform !== 'win32' || !processHandle.pid) {
+      treeFailure = process.platform === 'win32'
+        ? 'taskkill could not identify the browser process'
+        : `process-tree termination is unsupported on ${process.platform}`;
+    }
+
+    try { processHandle.kill('SIGKILL'); } catch { /* still wait for observed process exit */ }
+    const exited = await waitForProcessExit(processHandle, this.closeGraceMs);
+    if (exited && gracefulCloseConfirmed()) {
+      unresolvedBrowserTreeKills.delete(processHandle);
+      return;
+    }
+    if (treeFailure) unresolvedBrowserTreeKills.set(processHandle, treeFailure);
+    if (!exited || treeFailure) {
+      const reasons = [
+        !exited ? `Could not confirm Playwright browser process ${processHandle.pid ?? '(unknown PID)'} exited after force-kill.` : undefined,
+        treeFailure ? `Process-tree termination failed (${treeFailure}); Chromium descendants may remain.` : undefined,
+      ].filter(Boolean);
+      throw cleanupUnresolved(reasons.join(' '));
+    }
+    unresolvedBrowserTreeKills.delete(processHandle);
+    if (process.platform === 'win32' && processHandle.pid) confirmedBrowserTreeKills.add(processHandle);
   }
 
-  forceKillAll() {
-    for (const session of new Set([...this.sessions.values(), ...this.closingSessions])) this.forceKillBrowserSession(session);
+  async forceKillAll() {
+    const sessions = new Set([...this.sessions.values(), ...this.closingSessions]);
+    const results = await Promise.allSettled([...sessions].map(async (session) => await this.closeSession(session, true)));
+    const errors = results.flatMap((result) => result.status === 'rejected' ? [result.reason] : []);
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) throw new AggregateError(errors, `${errors.length} Playwright browser trees could not be terminated cleanly.`);
   }
 
-  async closeSession(session) {
-    this.sessions.delete(session.id);
+  finishClosedSession(session) {
+    session.browser = undefined;
+    session.browserServer = undefined;
+    if (this.sessions.get(session.id) === session) this.sessions.delete(session.id);
+    this.closingSessions.delete(session);
+    const teardown = this.sessionTeardowns.get(session);
+    if (teardown) teardown.completed = true;
+  }
+
+  closeAttempt(teardown, key, operation) {
+    let attempt = teardown.attempts[key];
+    if (attempt?.outcome?.ok === false) attempt = undefined;
+    if (!attempt) {
+      attempt = { outcome: undefined };
+      attempt.promise = Promise.resolve().then(operation).then(
+        () => (attempt.outcome = { ok: true }),
+        (error) => (attempt.outcome = { ok: false, error }),
+      );
+      teardown.attempts[key] = attempt;
+    }
+    return attempt;
+  }
+
+  async awaitCloseAttempt(attempt, teardown) {
+    let timer;
+    try {
+      return await Promise.race([
+        attempt.promise.then((outcome) => ({ kind: 'settled', outcome })),
+        teardown.forcePromise.then(() => ({ kind: 'force' })),
+        new Promise((resolve) => { timer = setTimeout(() => resolve({ kind: 'timeout' }), this.closeGraceMs); }),
+      ]);
+    } finally { if (timer) clearTimeout(timer); }
+  }
+
+  requestTeardownForce(teardown) {
+    if (teardown.forceRequested) return;
+    teardown.forceRequested = true;
+    teardown.resolveForce();
+  }
+
+  closeSession(session, force = false) {
+    let teardown = this.sessionTeardowns.get(session);
+    if (teardown?.completed) return Promise.resolve();
+    if (teardown?.running) {
+      if (force) this.requestTeardownForce(teardown);
+      return teardown.running;
+    }
+    if (!teardown) {
+      teardown = { attempts: {}, completed: false, running: undefined };
+      this.sessionTeardowns.set(session, teardown);
+    }
+    teardown.forceRequested = false;
+    teardown.forcePromise = new Promise((resolve) => { teardown.resolveForce = resolve; });
+    if (force) this.requestTeardownForce(teardown);
+    if (this.sessions.get(session.id) === session) this.sessions.delete(session.id);
     this.closingSessions.add(session);
+
+    const run = this.runSessionTeardown(session, teardown);
+    teardown.running = run.then(
+      (result) => { teardown.running = undefined; teardown.resolveForce = undefined; return result; },
+      (error) => { teardown.running = undefined; teardown.resolveForce = undefined; teardown.forceRequested = false; throw error; },
+    );
+    return teardown.running;
+  }
+
+  async runSessionTeardown(session, teardown) {
     const browser = session.browser;
     const browserServer = session.browserServer;
+    const failures = [];
+    let browserAttempt = teardown.attempts.browser;
+    let serverAttempt = teardown.attempts.browserServer;
+    if (!teardown.forceRequested && browser && !session.crashed) {
+      browserAttempt = this.closeAttempt(teardown, 'browser', () => browser.close());
+      const result = await this.awaitCloseAttempt(browserAttempt, teardown);
+      if (result.kind === 'settled' && !result.outcome.ok) failures.push(result.outcome.error);
+    }
+    if (browserServer && (!teardown.forceRequested || browserAttempt !== undefined)) {
+      serverAttempt = this.closeAttempt(teardown, 'browserServer', () => browserServer.close());
+      const result = await this.awaitCloseAttempt(serverAttempt, teardown);
+      if (result.kind === 'settled' && !result.outcome.ok) failures.push(result.outcome.error);
+    }
+    const gracefulCloseConfirmed = () => browserServer
+      ? serverAttempt?.outcome?.ok === true
+      : !browser || browserAttempt?.outcome?.ok === true;
+
+    let processHandle;
+    if (browserServer) {
+      try { processHandle = browserServer.process(); }
+      catch (error) { failures.push(error); }
+    }
+    const serverClosed = browserServer ? serverAttempt?.outcome?.ok === true : gracefulCloseConfirmed();
+    let processExited = browserServer === undefined
+      ? browser === undefined || browserAttempt?.outcome?.ok === true
+      : processHandle !== undefined && processHasExited(processHandle);
+    if (serverClosed && !processExited && processHandle) {
+      const result = await Promise.race([
+        waitForProcessExit(processHandle, this.closeGraceMs).then((exited) => ({ kind: 'exit', exited })),
+        teardown.forcePromise.then(() => ({ kind: 'force' })),
+      ]);
+      processExited = result.kind === 'exit' && result.exited;
+    }
+    const treeCleanupUnresolved = processHandle !== undefined && unresolvedBrowserTreeKills.has(processHandle);
+    if (serverClosed && processExited && !treeCleanupUnresolved) {
+      this.finishClosedSession(session);
+      return;
+    }
+
     try {
-      if (browser && !session.crashed) await Promise.race([browser.close().catch(() => {}), delay(this.closeGraceMs)]);
-      if (browserServer) await Promise.race([browserServer.close().catch(() => {}), delay(this.closeGraceMs)]);
-      this.forceKillBrowserSession(session);
-    } finally {
-      session.browser = undefined;
-      session.browserServer = undefined;
-      this.closingSessions.delete(session);
+      await this.forceKillBrowserSession(session, gracefulCloseConfirmed);
+      this.finishClosedSession(session);
+    } catch (error) {
+      failures.push(error);
+      const detail = failures.map((failure) => failure?.message ?? String(failure)).join(' ');
+      throw cleanupUnresolved(`Could not confirm cleanup for Playwright session "${session.id}". ${detail}`);
     }
   }
 
@@ -545,12 +733,17 @@ export class PlaywrightBackend {
     }
   }
 
+  assertSessionIdAvailable(sessionId) {
+    if (this.sessions.has(sessionId) || [...this.closingSessions].some((session) => session.id === sessionId)) {
+      throw coded('INVALID_ARGUMENTS', `playwright session "${bound(sessionId, 128)}" already exists or still has unresolved cleanup; choose another sessionId.`);
+    }
+  }
+
   async open(params, signal) {
+    this.assertSessionIdAvailable(params.sessionId);
     this.assertBrowserInstalled();
     await this.validateStorageStatePath(params.storageStatePath);
-    if (this.sessions.has(params.sessionId)) {
-      throw coded('INVALID_ARGUMENTS', `playwright session "${bound(params.sessionId, 128)}" already exists; close it or choose another sessionId.`);
-    }
+    this.assertSessionIdAvailable(params.sessionId);
     const session = this.makeSession(params.sessionId, params);
     this.sessions.set(session.id, session);
     try {
@@ -598,7 +791,10 @@ export class PlaywrightBackend {
       if (settings.screenshot === true) response.screenshot = await this.captureScreenshot(session, page);
       return response;
     } catch (error) {
-      await this.closeSession(session).catch(() => {});
+      try { await this.closeSession(session); }
+      catch (cleanupError) {
+        throw cleanupUnresolved(`Playwright open failed and its browser cleanup could not be confirmed. ${cleanupError?.message ?? String(cleanupError)}`);
+      }
       throw error;
     }
   }
@@ -937,23 +1133,24 @@ export class PlaywrightBackend {
   // ------------------------------------------------------------------ close
 
   async close(params) {
-    const ids = params.scope === 'session'
-      ? (params.sessionId === undefined ? [] : [params.sessionId])
-      : [...this.sessions.keys()];
+    const ownedSessions = new Set([...this.sessions.values(), ...this.closingSessions]);
+    const sessions = params.scope === 'session'
+      ? [...ownedSessions].filter((session) => session.id === params.sessionId)
+      : [...ownedSessions];
     let storageStatePath;
     let exportError;
     try {
       if (params.exportStorageState === true && params.sessionId !== undefined) {
-        const session = this.sessions.get(params.sessionId);
+        const session = sessions.find((candidate) => candidate.id === params.sessionId);
         if (session) storageStatePath = await this.exportStorageState(session);
       }
     } catch (error) {
       exportError = error;
     }
     const closedIds = [];
-    for (const id of ids) {
-      const session = this.sessions.get(id);
-      if (session) { await this.closeSession(session); closedIds.push(id); }
+    for (const session of sessions) {
+      await this.closeSession(session);
+      closedIds.push(session.id);
     }
     const returnedIds = closedIds.slice(0, MAX_CLOSED_SESSION_IDS);
     const omittedSessionIds = closedIds.length - returnedIds.length;

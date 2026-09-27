@@ -9,7 +9,6 @@ import { textContent } from "./text-content.js";
 import { realRetryClock, type RetryClock, zeroUsage } from "./retry.js";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { readKeptSkills } from "../../tool-and-skill-selection/state/pruned-skills.js";
 import { type AgentConfig, type AgentScope, discoverAgents } from "../../agent-instructions/agent-discovery/agents.js";
 import {
 	readRuntimeContext,
@@ -470,16 +469,9 @@ export async function execute(
 		);
 
 	// Resolve the parent (main) session id and the full tool-name set once per
-	// subagent tool call, so subagents can (a) inherit the main turn's pruned
-	// skills by looking up the skill-pruner's kept set, and (b) have the
-	// user-configured drop-tools list subtracted from unrestricted agents.
-	// Both are defensive: undefined when unresolvable → today's behavior.
+	// subagent tool call, so root attribution and the user-configured drop-tools
+	// list for unrestricted agents are stable across the attempt.
 	const parentSessionId = (ctx as { sessionManager?: { getSessionId?: () => string } }).sessionManager?.getSessionId?.();
-	// Seed once from the main session; the runtime context carries this
-	// immutable selection through every deeper nested child.
-	if (runtimeCtx.keptSkills === undefined && parentSessionId) {
-		runtimeCtx.keptSkills = readKeptSkills(parentSessionId);
-	}
 	let allToolNames: string[] | undefined;
 	try {
 		allToolNames = _pi.getAllTools().map((t) => t.name);

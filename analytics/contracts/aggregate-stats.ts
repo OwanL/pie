@@ -1,3 +1,5 @@
+import type { ConcurrencyLimitSource, SubagentConcurrencyStatus } from '../../lib/concurrency-config.js';
+
 /**
  * Aggregate statistics across ALL sessions, computed host-side by
  * {@link AggregateStatsService} (mirroring `TokenRateService`'s host-owned pattern)
@@ -293,6 +295,8 @@ export interface ProviderGateStats {
   enabled: boolean;
   /** Per-provider live metrics (active/queued/max + afterburn + pause state). */
   providers: ProviderGateProviderMetrics[];
+  /** Separate per-worker root-tree cap and runtime acknowledgement evidence. */
+  subagentConcurrency?: SubagentConcurrencyStatus;
 }
 
 /** Per-provider metrics within a {@link ProviderGateStats} snapshot. */
@@ -301,6 +305,8 @@ export interface ProviderGateProviderMetrics {
   activeRequests: number;
   queuedRequests: number;
   maxConcurrentRequests: number;
+  /** Provenance reported by the enforcing provider authority, not inferred by the UI. */
+  maxConcurrentRequestsSource?: ConcurrencyLimitSource;
   afterburnSeconds: number;
   /** Configured maximum queue wait before provider-gate saturation fails. */
   queueWaitSeconds?: number;

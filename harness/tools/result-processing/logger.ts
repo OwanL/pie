@@ -27,6 +27,8 @@ export interface ToolResultPruningEvent {
   /** Session id from ctx.sessionManager.getSessionId() — joins to runs by
    *  sessionPathHash in the analysis pipeline (same key skill-pruner uses). */
   sessionId: string;
+  /** Owning chat session when this row came from a subagent session. */
+  rootSessionId?: string;
   /** Tool that produced the output ("bash", "ls", "grep", ...). */
   toolName: string;
   /** Ordered list of rule names that changed content (only those that fired). */

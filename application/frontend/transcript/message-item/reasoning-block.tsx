@@ -11,6 +11,7 @@ import { useCollapsibleOpen } from '../use-collapsible-open';
 import { countTextLines } from '../tool-call-analysis';
 import { useCommittedReasoningLeaf } from '../commit-registry';
 import { useLazyDetail } from '../lazy-detail-store';
+import { hasSelectionOverlapping } from '../selection-overlap';
 import type { LazyDetailRef } from '../../../lib/protocol/index.js';
 
 interface ReasoningBlockProps {
@@ -36,6 +37,8 @@ const REASONING_PARSE_THROTTLE_MS = 100;
 /** Trailing parse delay (ms) after the last text change so the final text is
  *  always rendered, even without an explicit streaming-end signal. */
 const REASONING_PARSE_TRAILING_MS = 120;
+/** Poll until a selection overlapping the reasoning body clears. */
+const SELECTION_DEFER_POLL_MS = 200;
 
 /** The commit leaf must describe the text actually visible under its policy. */
 export function reasoningCommitEvidence(text: string, open: boolean): {
@@ -55,19 +58,66 @@ export function ReasoningBlock({ text, detailRef, autoExpand, collapsibleKey, on
     : text;
   const { scrollRef, height, startResize, minHeight, maxHeight, canResize, resizeBy, reset } = useResizableHeight<HTMLDivElement>();
 
+  // Fence queued parses synchronously when text, disclosure, or streaming
+  // state changes so an older callback cannot replace the newest render.
+  const renderGenerationRef = useRef({ displayText, open, streaming, generation: 0 });
+  if (
+    renderGenerationRef.current.displayText !== displayText
+    || renderGenerationRef.current.open !== open
+    || renderGenerationRef.current.streaming !== streaming
+  ) {
+    renderGenerationRef.current = {
+      displayText,
+      open,
+      streaming,
+      generation: renderGenerationRef.current.generation + 1,
+    };
+  }
+  const renderGeneration = renderGenerationRef.current.generation;
+
   // Throttled markdown re-parse: leading parse at most once per
   // REASONING_PARSE_THROTTLE_MS while text keeps changing, plus a trailing
   // parse REASONING_PARSE_TRAILING_MS after the last change so the final text
   // is always rendered. When closed, render '' (no parse). This mirrors the
   // BufferedTextPart throttle but reasoning reveals the full text immediately
   // (no progressive reveal), so only the parse is throttled.
-  const [rendered, setRendered] = useState(() => ({ html: open ? renderMarkdown(displayText, true, false) : '', text: displayText }));
+  const [rendered, setRendered] = useState(() => ({
+    html: open ? renderMarkdown(displayText, true, false) : '',
+    text: displayText,
+    cursor: open && streaming,
+  }));
   const lastParseAtRef = useRef(0);
   const timerRef = useRef<number | null>(null);
-  // Latest text read by the scheduled (trailing) parse so it always reflects
-  // the most recent token, not the token that scheduled it.
+  const deferTimerRef = useRef<number | null>(null);
+  const pendingRenderRef = useRef<{ html: string; text: string; cursor: boolean } | null>(null);
+  // Latest text read by the scheduled parse so it always reflects the most
+  // recent token, not the token that scheduled it.
   const textRef = useRef(displayText);
   textRef.current = displayText;
+
+  function scheduleDeferredApply() {
+    deferTimerRef.current = window.setTimeout(() => {
+      deferTimerRef.current = null;
+      if (pendingRenderRef.current === null) return;
+      if (!hasSelectionOverlapping(scrollRef.current)) {
+        setRendered(pendingRenderRef.current);
+        pendingRenderRef.current = null;
+        return;
+      }
+      scheduleDeferredApply();
+    }, SELECTION_DEFER_POLL_MS);
+  }
+
+  function applyRendered(next: { html: string; text: string; cursor: boolean }) {
+    pendingRenderRef.current = next;
+    if (deferTimerRef.current !== null) return;
+    if (!hasSelectionOverlapping(scrollRef.current)) {
+      setRendered(next);
+      pendingRenderRef.current = null;
+      return;
+    }
+    scheduleDeferredApply();
+  }
 
   useEffect(() => {
     if (!open) {
@@ -75,7 +125,7 @@ export function ReasoningBlock({ text, detailRef, autoExpand, collapsibleKey, on
         clearTimeout(timerRef.current);
         timerRef.current = null;
       }
-      setRendered({ html: '', text: textRef.current });
+      applyRendered({ html: '', text: textRef.current, cursor: false });
       return;
     }
 
@@ -87,7 +137,11 @@ export function ReasoningBlock({ text, detailRef, autoExpand, collapsibleKey, on
         clearTimeout(timerRef.current);
         timerRef.current = null;
       }
-      setRendered({ html: renderMarkdown(textRef.current, true, false), text: textRef.current });
+      applyRendered({
+        html: renderMarkdown(textRef.current, true, false),
+        text: textRef.current,
+        cursor: streaming,
+      });
       return;
     }
 
@@ -95,19 +149,33 @@ export function ReasoningBlock({ text, detailRef, autoExpand, collapsibleKey, on
     // after the last text change, guaranteeing the final text renders even
     // without a streaming-end signal.
     if (timerRef.current !== null) clearTimeout(timerRef.current);
-    timerRef.current = window.setTimeout(() => {
-      timerRef.current = null;
+    const generation = renderGeneration;
+    const timerId = window.setTimeout(() => {
+      if (timerRef.current === timerId) {
+        timerRef.current = null;
+      }
+      if (renderGenerationRef.current.generation !== generation || !renderGenerationRef.current.open) return;
       lastParseAtRef.current = Date.now();
-      setRendered({ html: renderMarkdown(textRef.current, true, false), text: textRef.current });
+      applyRendered({
+        html: renderMarkdown(textRef.current, true, false),
+        text: textRef.current,
+        cursor: renderGenerationRef.current.streaming,
+      });
     }, REASONING_PARSE_TRAILING_MS);
-  }, [displayText, open]);
+    timerRef.current = timerId;
+  }, [displayText, open, streaming, renderGeneration]);
 
-  // Clear any pending trailing parse on unmount.
+  // Clear pending markdown and selection-deferred updates on unmount.
   useEffect(() => () => {
     if (timerRef.current !== null) {
       clearTimeout(timerRef.current);
       timerRef.current = null;
     }
+    if (deferTimerRef.current !== null) {
+      clearTimeout(deferTimerRef.current);
+      deferTimerRef.current = null;
+    }
+    pendingRenderRef.current = null;
   }, []);
 
   // Collapsed size hint mirrors tool calls (`~543 lines`): a quick magnitude
@@ -118,7 +186,7 @@ export function ReasoningBlock({ text, detailRef, autoExpand, collapsibleKey, on
   // Streaming cursor (polish): a blinking block at the end of the rendered
   // markdown while the assistant is still emitting reasoning tokens. Appended
   // after sanitization so the trusted span survives DOMPurify.
-  const renderedHtml = streaming && open
+  const renderedHtml = rendered.cursor
     ? `${rendered.html}<span class="reasoning-stream-cursor" aria-hidden="true"></span>`
     : rendered.html;
   const keyMatch = /^reasoning:(.*):(\d+)$/.exec(collapsibleKey);

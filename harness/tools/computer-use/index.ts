@@ -1,12 +1,25 @@
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
-import { artifactDirectory } from './artifacts.js';
+import {
+  currentChildToolRuntimeOwner,
+  type ChildToolRuntimeOwner,
+} from '../../agent-processes/lib/process-lifecycle/child-tool-runtime-owner.js';
+import { artifactDirectory, childArtifactDirectory } from './artifacts.js';
 import { buildToolError, buildToolResult, modelAcceptsImages } from './result.js';
 import {
+  desktopCoordinator,
+  childRuntimeOwnerLabel,
+  type DesktopCoordinator,
+  type DesktopRuntimeIdentity,
+  type DesktopScope,
+} from './desktop-ownership.js';
+import {
   installProcessTeardown, potentialHeldForAction, potentialHeldForSequence, runtimeRegistry,
+  type RuntimeClient,
 } from './runtime-client.js';
 import { computerSchema } from './schema.js';
 import { estimateSequenceDuration } from './sequence.mjs';
@@ -15,7 +28,24 @@ import { sequenceUsesTargetCoordinates, validateComputerParams, validateRevision
 
 interface ComputerToolContext {
   model?: { input?: string[] };
-  sessionManager: { getSessionFile(): string | undefined };
+  sessionManager?: {
+    getSessionFile?: () => string | undefined;
+    getSessionName?: () => string | undefined;
+  };
+}
+
+interface RuntimeAccess {
+  get(sessionPath: string): Promise<RuntimeClient>;
+  peek(sessionPath: string): Promise<RuntimeClient | undefined>;
+  shutdownSession(sessionPath: string): Promise<void>;
+  getForChild(owner: ChildToolRuntimeOwner): RuntimeClient;
+  peekForChild(owner: ChildToolRuntimeOwner): RuntimeClient | undefined;
+  shutdownChild(owner: ChildToolRuntimeOwner): Promise<void>;
+}
+
+interface ComputerUseDependencies {
+  desktopCoordinator?: DesktopCoordinator;
+  runtimeRegistry?: RuntimeAccess;
 }
 
 function disabled(): boolean {
@@ -57,8 +87,60 @@ function cleanupFailure(cleanupError: unknown, originalError: unknown): Error {
   );
 }
 
-export default function registerComputerUse(pi: ExtensionAPI) {
-  installProcessTeardown();
+function sessionOwnerLabel(ctx: ComputerToolContext, sessionPath: string): string {
+  const title = ctx.sessionManager?.getSessionName?.()?.trim();
+  const basename = path.basename(sessionPath, path.extname(sessionPath));
+  return title ? `Pie session “${title}”` : `Pie session “${basename || 'untitled'}”`;
+}
+
+async function peekRuntime(registry: RuntimeAccess, runtime: DesktopRuntimeIdentity): Promise<RuntimeClient | undefined> {
+  return runtime.kind === 'child' ? registry.peekForChild(runtime.owner) : await registry.peek(runtime.sessionPath);
+}
+
+async function releaseRuntime(registry: RuntimeAccess, runtime: DesktopRuntimeIdentity): Promise<void> {
+  const client = await peekRuntime(registry, runtime);
+  if (!client) return;
+  await client.releaseAllHeldKnown();
+  if (client.hasHeldInput) {
+    throw Object.assign(new Error('Held keyboard or pointer input remains unresolved after release.'), { code: 'RELEASE_FAILED', retryable: true });
+  }
+}
+
+async function shutdownRuntime(registry: RuntimeAccess, runtime: DesktopRuntimeIdentity): Promise<void> {
+  const client = await peekRuntime(registry, runtime);
+  if (client) await client.releaseAllHeldKnown();
+  if (client?.hasHeldInput) {
+    throw Object.assign(new Error('Held keyboard or pointer input remains unresolved; the computer sidecar was not safely closed.'), { code: 'RELEASE_FAILED', retryable: true });
+  }
+  if (runtime.kind === 'child') await registry.shutdownChild(runtime.owner);
+  else await registry.shutdownSession(runtime.sessionPath);
+  if (client?.hasHeldInput) {
+    throw Object.assign(new Error('Computer sidecar shutdown did not confirm that all held input was released.'), { code: 'RELEASE_FAILED', retryable: true });
+  }
+}
+
+function primarySessionPath(ctx: ComputerToolContext): string | undefined {
+  return ctx.sessionManager?.getSessionFile?.();
+}
+
+function reportLifecycleCleanupFailure(boundary: string, error: unknown): void {
+  const value = error as { code?: unknown; message?: unknown };
+  console.error(JSON.stringify({
+    source: 'pie:computer-use',
+    event: `${boundary}_cleanup_blocked`,
+    code: typeof value?.code === 'string' ? value.code : 'DESKTOP_CLEANUP_BLOCKED',
+    message: typeof value?.message === 'string' ? value.message : String(error),
+  }));
+}
+
+export default function registerComputer(pi: ExtensionAPI, dependencies: ComputerUseDependencies = {}) {
+  const coordinator = dependencies.desktopCoordinator ?? desktopCoordinator;
+  const registry = dependencies.runtimeRegistry ?? runtimeRegistry;
+  if (!dependencies.desktopCoordinator && !dependencies.runtimeRegistry) {
+    installProcessTeardown(async () => {
+      await coordinator.shutdownAll(async (runtime) => await shutdownRuntime(registry, runtime));
+    });
+  }
 
   pi.registerTool({
     name: 'computer',
@@ -75,6 +157,7 @@ export default function registerComputerUse(pi: ExtensionAPI) {
       'For repeatable visible probes, prefer stable labels/roles/menu actions over positional control indexes or incidental node names; run a focused scenario before replaying a full viewport/configuration matrix.',
       'After an action opens a native dialog or another window, discover/open that new exact foreground target before continuing; do not keep typing through the parent target.',
       'Use computer run_sequence for timing-sensitive or simultaneous input, and verify visible postconditions with a fresh observation.',
+      'Computer use is globally exclusive across Pie agents/processes; if DESKTOP_BUSY, do not retry or take over—report the named owner.'
     ],
     executionMode: 'sequential',
     parameters: computerSchema,
@@ -86,53 +169,105 @@ export default function registerComputerUse(pi: ExtensionAPI) {
       _onUpdate: unknown,
       ctx: ComputerToolContext,
     ) {
-      let sessionPath: string | undefined;
       let params: ComputerParams | undefined;
-      let client: Awaited<ReturnType<typeof runtimeRegistry.get>> | undefined;
+      let sequenceForRun: ComputerSequence | undefined;
+      let client: RuntimeClient | undefined;
       try {
         if (disabled()) throw Object.assign(new Error('The computer-use extension is disabled.'), { code: 'EXTENSION_DISABLED' });
         validateComputerParams(rawParams); params = rawParams;
-        sessionPath = ctx?.sessionManager?.getSessionFile();
-        if (!sessionPath) throw Object.assign(new Error('A persistent pie session path is required for computer runtime ownership and artifacts.'), { code: 'SESSION_PATH_REQUIRED' });
-        client = await runtimeRegistry.get(sessionPath);
-        let result;
-        if (params.action === 'open') {
-          await client.releaseAllHeldKnown();
-          const sessionId = params.sessionId ?? `computer-${randomUUID()}`;
-          const artifactDir = await artifactDirectory(sessionPath, sessionId);
-          const observesInline = params.screenshot === true || params.tree === true || params.state === true;
-          result = await client.request('open', { ...params, sessionId, artifactDir }, { signal, sessionId, allowNeedsReopen: true, timeoutMs: observesInline ? 60000 : 30000 });
-          client.markReopened();
-        } else if (params.action === 'observe') {
-          result = await client.request('observe', params, { signal, sessionId: params.sessionId, timeoutMs: 30000 });
-        } else if (params.action === 'act') {
-          result = await client.request('act', params, { signal, sessionId: params.sessionId, potential: potentialHeldForAction(params.input), timeoutMs: params.input.kind === 'wait' ? params.input.durationMs + 30000 : 30000 });
-        } else if (params.action === 'run_sequence') {
-          const potentialSequence = params.sequence ?? await sequenceFromArtifact(params.sequencePath!);
-          validateRevisionForActions(sequenceUsesTargetCoordinates(potentialSequence), params.revision);
-          const observesInline = params.screenshot === true || params.tree === true || params.state === true;
-          result = await client.request('run_sequence', params, { signal, sessionId: params.sessionId, potential: potentialHeldForSequence(potentialSequence), timeoutMs: estimateSequenceDuration(potentialSequence) + (observesInline ? 60000 : 30000) });
+        if (params.action === 'run_sequence') {
+          sequenceForRun = params.sequence ?? await sequenceFromArtifact(params.sequencePath!);
+          validateRevisionForActions(sequenceUsesTargetCoordinates(sequenceForRun), params.revision);
+        }
+
+        const childOwner = currentChildToolRuntimeOwner();
+        let scope: DesktopScope;
+        if (childOwner) {
+          scope = coordinator.child(
+            childOwner,
+            `Sub-agent “${childRuntimeOwnerLabel(childOwner)}”`,
+            async (runtime) => await shutdownRuntime(registry, runtime),
+          );
         } else {
-          await client.releaseAllHeldKnown();
-          result = await client.request('close', params, { signal, sessionId: params.sessionId, timeoutMs: 30000, allowNeedsReopen: true });
+          const persistentPath = primarySessionPath(ctx);
+          if (!persistentPath) throw Object.assign(new Error('A persistent pie session path is required for primary computer runtime ownership and artifacts.'), { code: 'SESSION_PATH_REQUIRED' });
+          scope = coordinator.primary(persistentPath, sessionOwnerLabel(ctx, persistentPath));
         }
-        return await buildToolResult(params.action, result, (params.action === 'observe' || params.action === 'open' || params.action === 'run_sequence') && modelAcceptsImages(ctx.model));
+
+        return await coordinator.run(
+          scope,
+          async (runtime) => {
+            try {
+              client = runtime.kind === 'child'
+                ? registry.getForChild(runtime.owner)
+                : await registry.get(runtime.sessionPath);
+              let result;
+              if (params!.action === 'open') {
+                await client.releaseAllHeldKnown();
+                const sessionId = params!.sessionId ?? `computer-${randomUUID()}`;
+                const artifactDir = runtime.kind === 'child'
+                  ? await childArtifactDirectory(runtime.owner.id, sessionId)
+                  : await artifactDirectory(runtime.sessionPath, sessionId);
+                const observesInline = params!.screenshot === true || params!.tree === true || params!.state === true;
+                result = await client.request('open', { ...params, sessionId, artifactDir }, { signal, sessionId, allowNeedsReopen: true, timeoutMs: observesInline ? 60000 : 30000 });
+                client.markReopened();
+              } else if (params!.action === 'observe') {
+                result = await client.request('observe', params, { signal, sessionId: params!.sessionId, timeoutMs: 30000 });
+              } else if (params!.action === 'act') {
+                result = await client.request('act', params, { signal, sessionId: params!.sessionId, potential: potentialHeldForAction(params!.input), timeoutMs: params!.input.kind === 'wait' ? params!.input.durationMs + 30000 : 30000 });
+              } else if (params!.action === 'run_sequence') {
+                const potentialSequence = sequenceForRun!;
+                const observesInline = params!.screenshot === true || params!.tree === true || params!.state === true;
+                result = await client.request('run_sequence', params, { signal, sessionId: params!.sessionId, potential: potentialHeldForSequence(potentialSequence), timeoutMs: estimateSequenceDuration(potentialSequence) + (observesInline ? 60000 : 30000) });
+              } else {
+                await client.releaseAllHeldKnown();
+                result = await client.request('close', params, { signal, sessionId: params!.sessionId, timeoutMs: 30000, allowNeedsReopen: true });
+              }
+              return await buildToolResult(params!.action, result, (params!.action === 'observe' || params!.action === 'open' || params!.action === 'run_sequence') && modelAcceptsImages(ctx.model));
+            } catch (error) {
+              try {
+                const cleanupClient = client ?? await peekRuntime(registry, runtime);
+                await cleanupClient?.releaseAllHeldKnown();
+              } catch (cleanupError) {
+                throw cleanupFailure(cleanupError, error);
+              }
+              throw error;
+            }
+          },
+        );
       } catch (error) {
-        if (sessionPath) {
-          try {
-            const cleanupClient = client ?? await runtimeRegistry.peek(sessionPath);
-            await cleanupClient?.releaseAllHeldKnown();
-          } catch (cleanupError) {
-            throw buildToolError(cleanupFailure(cleanupError, error));
-          }
-        }
         throw buildToolError(error);
       }
     },
   } as any);
 
+  pi.on('agent_start', async (_event: unknown, ctx: ComputerToolContext) => {
+    const sessionPath = primarySessionPath(ctx);
+    if (sessionPath) coordinator.beginPrimary(sessionPath, sessionOwnerLabel(ctx, sessionPath));
+  });
+
+  pi.on('agent_settled', async (_event: unknown, ctx: ComputerToolContext) => {
+    const sessionPath = primarySessionPath(ctx);
+    if (!sessionPath) return;
+    const scope = coordinator.findPrimary(sessionPath);
+    if (!scope) return;
+    try { await coordinator.settle(scope, async (runtime) => await releaseRuntime(registry, runtime)); }
+    catch (error) {
+      reportLifecycleCleanupFailure('agent_settled', error);
+      throw error;
+    }
+  });
+
   pi.on('session_shutdown', async (_event: unknown, ctx: ComputerToolContext) => {
-    const sessionPath = ctx?.sessionManager?.getSessionFile();
-    if (sessionPath) await runtimeRegistry.shutdownSession(sessionPath);
+    const sessionPath = primarySessionPath(ctx);
+    if (!sessionPath) return;
+    const scope = coordinator.findPrimary(sessionPath);
+    try {
+      if (scope) await coordinator.shutdown(scope, async (runtime) => await shutdownRuntime(registry, runtime));
+      else await shutdownRuntime(registry, { kind: 'persistent', sessionPath: path.resolve(sessionPath) });
+    } catch (error) {
+      reportLifecycleCleanupFailure('session_shutdown', error);
+      throw error;
+    }
   });
 }

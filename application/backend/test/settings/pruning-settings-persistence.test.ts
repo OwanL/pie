@@ -152,7 +152,7 @@ test('savePruningSettings writes to settings.json and mirrors to storage when PI
       storage,
       (settings) => dispatched.push(settings),
       () => DEFAULT_PRUNING_SETTINGS,
-      { mode: 'off', toolCeiling: 7 },
+      { mode: 'off', toolCeiling: 7, mainAgentEnabled: false, subagentEnabled: false },
       (message) => errors.push(message),
     );
 
@@ -160,6 +160,8 @@ test('savePruningSettings writes to settings.json and mirrors to storage when PI
       ...DEFAULT_PRUNING_SETTINGS,
       mode: 'off',
       toolCeiling: 7,
+      mainAgentEnabled: false,
+      subagentEnabled: false,
     };
     assert.deepEqual(dispatched, [expected]);
     assert.deepEqual(storage.get(), expected);
@@ -168,6 +170,8 @@ test('savePruningSettings writes to settings.json and mirrors to storage when PI
     const written = JSON.parse(readFileSync(path.join(tempDir, 'settings.json'), 'utf8'));
     assert.equal(written.pruning.mode, 'off');
     assert.equal(written.pruning.tools.ceiling, 7);
+    assert.equal(written.pruning.mainAgentEnabled, false);
+    assert.equal(written.pruning.subagentEnabled, false);
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
     if (previous !== undefined) {

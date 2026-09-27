@@ -108,7 +108,10 @@ test('derive: subagent inner changes attributed via the joined toolResult detail
     mode: 'single', agentScope: 'user', projectAgentsDir: null,
     results: [{
       agent: 'worker', task: 't', exitCode: 0,
-      messages: [{ role: 'assistant', content: [tc('inner', 'write', { path: 'sub.ts', content: 'd\ne' })] }],
+      messages: [
+        { role: 'assistant', content: [tc('inner', 'write', { path: 'sub.ts', content: 'd\ne' })] },
+        toolResult('inner-result', 't1', 'inner', 'write').message as never,
+      ],
       stderr: '', usage: {},
     }],
   };
@@ -136,6 +139,53 @@ test('derive: subagent with NO joined result produces nothing (no details to sca
   assert.equal(changes.length, 0);
 });
 
+test('derive: failed child task retains successful edits and ignores failed or unfinished mutations', () => {
+  const childMessages = [
+    assistantMsg('child-message', 'child-time', [
+      tc('good', 'write', { path: 'good.ts', content: 'ok' }),
+      tc('bad', 'edit', { path: 'bad.ts', oldText: 'old', newText: 'new' }),
+      tc('pending', 'write', { path: 'pending.ts', content: 'not finished' }),
+    ]).message,
+    toolResult('good-result', 'child-time', 'good', 'write').message,
+    toolResult('bad-result', 'child-time', 'bad', 'edit', { isError: true }).message,
+  ];
+  const details = {
+    results: [{ exitCode: 1, messages: childMessages }],
+  };
+  const changes = derive([
+    header(),
+    assistantMsg('m1', 't1', [tc('c1', 'subagent', { agent: 'worker', task: 'failed after edits' })]),
+    toolResult('tr1', 't1', 'c1', 'subagent', { isError: true, details }),
+  ]);
+  assert.deepEqual(changes.map((change) => change.path), ['good.ts']);
+});
+
+test('derive: full nested transcripts beat compact summaries without double counting', () => {
+  const nestedDetails = {
+    results: [{
+      messages: [
+        assistantMsg('grandchild-message', 't3', [tc('deep-write', 'write', { path: 'deep.ts', content: 'deep' })]).message,
+        toolResult('deep-result', 't3', 'deep-write', 'write').message,
+      ],
+    }],
+  };
+  const childDetails = {
+    results: [{
+      fileChanges: [{ path: 'summary-only.ts', kind: 'created', description: 'created', additions: 1 }],
+      messages: [
+        assistantMsg('child-message', 't2', [tc('nested-call', 'subagent', { agent: 'worker', task: 'nested' })]).message,
+        toolResult('nested-result', 't2', 'nested-call', 'subagent', { details: nestedDetails }).message,
+      ],
+    }],
+  };
+  const changes = derive([
+    header(),
+    assistantMsg('m1', 't1', [tc('c1', 'subagent', { agent: 'worker', task: 'nested changes' })]),
+    toolResult('tr1', 't1', 'c1', 'subagent', { details: childDetails }),
+  ]);
+  assert.deepEqual(changes.map((change) => change.path), ['deep.ts']);
+});
+
 // ─── the join: failed edits (isError) are skipped ───────────────────────────
 
 test('derive: toolCall whose toolResult.isError=true is skipped', () => {
@@ -147,19 +197,16 @@ test('derive: toolCall whose toolResult.isError=true is skipped', () => {
   assert.equal(changes.length, 0);
 });
 
-test('derive: toolCall with NO toolResult entry is NOT skipped (matches host running/completed)', () => {
-  // The host only skips status==='failed'; a call with no result is treated as
-  // non-failed. The extension matches: no joined result → not skipped.
+test('derive: toolCall with NO toolResult entry is unfinished and not attributed', () => {
   const changes = derive([
     header(),
     assistantMsg('m1', 't1', [tc('c1', 'write', { path: 'a.ts', content: 'x' })]),
     // no toolResult entry
   ]);
-  assert.equal(changes.length, 1);
-  assert.equal(changes[0].path, 'a.ts');
+  assert.equal(changes.length, 0);
 });
 
-// ─── accumulation + net no-op ───────────────────────────────────────────────
+// ─── accumulation across successful mutations ───────────────────────────────
 
 test('derive: accumulates churn across multiple edits to the same file', () => {
   const changes = derive([
@@ -174,7 +221,7 @@ test('derive: accumulates churn across multiple edits to the same file', () => {
   assert.equal(changes[0].deletions, 3); // 1 (edit1) + 2 (edit2)
 });
 
-test('derive: created-then-deleted is a net no-op', () => {
+test('derive: created-then-deleted remains attributed with the latest deleted kind', () => {
   const changes = derive([
     header(),
     assistantMsg('m1', 't1', [tc('c1', 'write', { path: 'tmp.ts', content: 'x' })]),
@@ -182,10 +229,13 @@ test('derive: created-then-deleted is a net no-op', () => {
     assistantMsg('m2', 't2', [tc('c2', 'bash', { command: 'rm tmp.ts' })]),
     toolResult('tr2', 't2', 'c2', 'bash'),
   ]);
-  assert.equal(changes.length, 0);
+  assert.equal(changes.length, 1);
+  assert.equal(changes[0]?.path, 'tmp.ts');
+  assert.equal(changes[0]?.kind, 'deleted');
+  assert.equal(changes[0]?.additions, 1);
 });
 
-test('derive: create-delete bookkeeping resets before a later modify-delete', () => {
+test('derive: churn accumulates through repeated create-delete and modify-delete', () => {
   const changes = derive([
     header(),
     assistantMsg('m1', 't1', [tc('c1', 'write', { path: 'tmp.ts', content: 'x' })]),
@@ -200,6 +250,8 @@ test('derive: create-delete bookkeeping resets before a later modify-delete', ()
   assert.equal(changes.length, 1);
   assert.equal(changes[0]?.kind, 'deleted');
   assert.equal(changes[0]?.toolCallId, 'c4');
+  assert.equal(changes[0]?.additions, 2);
+  assert.equal(changes[0]?.deletions, 1);
 });
 
 // ─── path-identity canonicalization (parent/subagent + spelling variants) ──
@@ -212,7 +264,10 @@ test('derive: merges parent + subagent edits to the same file across relative/ab
     mode: 'single', agentScope: 'user', projectAgentsDir: null,
     results: [{
       agent: 'worker', task: 't', exitCode: 0,
-      messages: [{ role: 'assistant', content: [tc('inner', 'edit', { path: '/proj/src/shared.ts', oldText: 'a\nb', newText: 'a\nb\nc\nd' })] }],
+      messages: [
+        { role: 'assistant', content: [tc('inner', 'edit', { path: '/proj/src/shared.ts', oldText: 'a\nb', newText: 'a\nb\nc\nd' })] },
+        toolResult('inner-result', 't1', 'inner', 'edit').message as never,
+      ],
       stderr: '', usage: {},
     }],
   };
@@ -228,7 +283,7 @@ test('derive: merges parent + subagent edits to the same file across relative/ab
   assert.equal(changes[0].deletions, 3);
 });
 
-test('derive: create-then-delete matches across relative/absolute spellings', () => {
+test('derive: create-then-delete remains attributed across relative/absolute spellings', () => {
   const changes = derive([
     header('/proj'),
     assistantMsg('m1', 't1', [tc('c1', 'write', { path: 'tmp/gen.uid', content: 'x' })]),
@@ -236,7 +291,10 @@ test('derive: create-then-delete matches across relative/absolute spellings', ()
     assistantMsg('m2', 't2', [tc('c2', 'bash', { command: 'rm /proj/tmp/gen.uid' })]),
     toolResult('tr2', 't2', 'c2', 'bash'),
   ]);
-  assert.equal(changes.length, 0, 'create + delete of the same file is a net no-op');
+  assert.equal(changes.length, 1, 'successful create and delete mutations remain attributed');
+  assert.equal(changes[0]?.path, 'tmp/gen.uid');
+  assert.equal(changes[0]?.kind, 'deleted');
+  assert.equal(changes[0]?.additions, 1);
 });
 
 test('derive: mixed-cwd legacy child resolves its relative path and deduplicates a later parent edit', async () => {
@@ -253,7 +311,7 @@ test('derive: mixed-cwd legacy child resolves its relative path and deduplicates
         messages: [{
           role: 'assistant',
           content: [tc('inner', 'edit', { path: 'extension/x.ts', oldText: 'old', newText: 'old\nchild' })],
-        }],
+        }, toolResult('inner-result', 't1', 'inner', 'edit').message as never],
       }],
     };
     const changes = derive([
@@ -305,7 +363,7 @@ test('derive: nested mixed-cwd descendants use each result cwd, including compac
                 messages: [{
                   role: 'assistant',
                   content: [tc('grand-edit', 'edit', { path: 'nested.ts', oldText: 'a', newText: 'b\nc' })],
-                }],
+                }, toolResult('grand-edit-result', 't1', 'grand-edit', 'edit').message as never],
               }],
             },
           }],

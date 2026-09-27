@@ -43,15 +43,18 @@ export function deriveFileChangesFromTranscript(
   cwd?: string,
 ): FileChangeEntry[] {
   const seen = new Map<string, FileChangeEntry>();
-  const createdPaths = new Set<string>();
 
   for (const message of transcript) {
     if (message.role !== 'assistant') continue;
     const toolCalls = message.toolCalls ?? [];
     for (const tool of toolCalls) {
-      if (tool.status === 'failed') continue;
-
-      if (tool.name === 'subagent' && isRecord(tool.result)) {
+      if (tool.name === 'subagent') {
+        // A provisional result may be present while a child is still running.
+        // Only terminal child-task outcomes have durable mutation evidence.
+        if ((tool.status !== 'completed' && tool.status !== 'failed') || !isRecord(tool.result)) continue;
+        // A child task can fail after making successful edits. Attribute its
+        // completed descendants from the result instead of treating the parent
+        // subagent status as an individual mutation's success/failure.
         const owningCwd = isRecord(tool.input) && typeof tool.input.cwd === 'string' && tool.input.cwd.trim()
           ? tool.input.cwd
           : undefined;
@@ -64,10 +67,14 @@ export function deriveFileChangesFromTranscript(
           owningCwd,
         );
         for (const entry of subagentChanges) {
-          accumulateFileChange(seen, createdPaths, entry, cwd);
+          accumulateFileChange(seen, entry, cwd);
         }
         continue;
       }
+
+      // Only terminal success is evidence of a completed mutation. Failed,
+      // running, and provisional calls must not be presented as changed files.
+      if (tool.status !== 'completed') continue;
 
       const entries = deriveFileChangesFromToolCall(
         { id: tool.id, name: tool.name, input: tool.input },
@@ -75,7 +82,7 @@ export function deriveFileChangesFromTranscript(
         message.createdAt,
       );
       for (const entry of entries) {
-        accumulateFileChange(seen, createdPaths, entry, cwd);
+        accumulateFileChange(seen, entry, cwd);
       }
     }
   }

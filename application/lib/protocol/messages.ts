@@ -3,10 +3,14 @@ import type {
   FilesystemPathComposerInput,
   ImageBlobComposerInput,
 } from '../../../harness/agent-processes/lib/rpc/composer-input.js';
-import type { PruningDetails } from './settings.js';
-import type { CompactionSummaryDetails } from '../../../harness/agent-processes/lib/rpc/message-contract.js';
 
-export { COMPACTION_METRICS_CUSTOM_TYPE } from '../../../harness/agent-processes/lib/rpc/message-contract.js';
+export {
+  AGENT_MESSAGE_CUSTOM_TYPE,
+  AGENT_MESSAGE_PROVENANCE_CUSTOM_TYPE,
+  AGENT_SESSION_MESSAGE_LOCAL_ID_PREFIX,
+  COMPACTION_METRICS_CUSTOM_TYPE,
+  isAgentSessionMessageLocalId,
+} from '../../../harness/agent-processes/lib/rpc/message-contract.js';
 export type {
   ChatMessage,
   ChatMessagePart,
@@ -38,6 +42,3 @@ export type ComposerInputDraft =
   | Omit<FilesystemPathComposerInput, 'id'>
   | Omit<ImageBlobComposerInput, 'id'>
   | Omit<FileBlobComposerInput, 'id'>;
-
-/** Application detail projection for custom message types. */
-export type CustomMessageDetails = PruningDetails | CompactionSummaryDetails | unknown;

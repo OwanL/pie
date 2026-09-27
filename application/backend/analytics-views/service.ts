@@ -14,6 +14,7 @@ import type { BillableInvocationRecord } from '../../../analytics/usage-accounti
 import { analyzeToolCall, type ToolCallAnalysis } from '../../../analytics/capture/tool-call-analysis/index.js';
 import { resolveSessionCwd } from '../file-changes/file-change-derivation.js';
 import { SessionRunTracker } from '../../../analytics/legacy/stats-service/tracker';
+import { forgetGlobalSideChannelsForStorageDirs } from '../../../analytics/legacy/run-analytics/side-channel';
 import { SessionRunStateManager } from '../conversation-state/run-state-manager';
 import type {
   AssistantTurnIdentity,
@@ -127,6 +128,7 @@ type CanonicalPrivateCloseOperation = {
   pendingCreateOperationId?: string;
   phase: 'closing' | 'deleted';
   runtimeRetired: boolean;
+  auxiliaryCleanupSettled: boolean;
   promise: Promise<void>;
 };
 
@@ -271,8 +273,9 @@ export class StatsService implements RunObserver {
   private canonicalGlobalActivity: CanonicalActivityCacheEntry | null = null;
   private canonicalActivityCacheBytes = 0;
   private canonicalActivityUseSequence = 0;
-  /** An entry is an in-flight close until the recorder deletion resolves, then
-   * remains as an ephemeral display/capture fence until runtime retirement. */
+  /** An entry is an in-flight close until recorder deletion resolves, then
+   * remains as a fence through runtime retirement and the final side-channel
+   * scrub issued by session-actions. */
   private readonly canonicalPrivateClosesByPath = new Map<string, CanonicalPrivateCloseOperation>();
   /** Session paths whose working-time clock was already restored from the
    * canonical busy wall-time union in this process. Cleared by a privacy close
@@ -632,6 +635,16 @@ export class StatsService implements RunObserver {
     return `${sessionPath}\0${toolId}`;
   }
 
+  /** Scrub only the shared auxiliary JSONL logs. Reading the run-store path is
+   * path derivation only: this never starts or writes legacy analytics. */
+  private async scrubPrivateAuxiliaryLogs(sessionPath: string, sessionId?: string): Promise<void> {
+    await forgetGlobalSideChannelsForStorageDirs(
+      this.storage.getGlobalSideChannelStorageDirs(),
+      sessionPath,
+      sessionId,
+    );
+  }
+
   /** Clear private display state while the operational close deletes its facts. */
   async closePrivateSessionAnalytics(
     sessionPath: string,
@@ -659,6 +672,7 @@ export class StatsService implements RunObserver {
         ...(pendingOrigin ? { pendingCreateOperationId: pendingOrigin } : {}),
         phase: 'closing',
         runtimeRetired: false,
+        auxiliaryCleanupSettled: false,
         promise: Promise.resolve(),
       };
       this.canonicalPrivateClosesByPath.set(sessionPath, operation);
@@ -678,6 +692,10 @@ export class StatsService implements RunObserver {
     this.invalidateCanonicalSessionCache();
     this.scheduleRender();
     try {
+      // First scrub records already on disk. session-actions performs a second
+      // scrub after runtime disposal so its final warm-bash summary is removed
+      // too, using the still-live close fence in setSessionPrivacy below.
+      await this.scrubPrivateAuxiliaryLogs(sessionPath, operation.rootSessionId);
       await this.canonicalCapture!.closeSession(
         operation.rootSessionId,
         'on',
@@ -699,20 +717,33 @@ export class StatsService implements RunObserver {
     this.workingTime.resetSession(sessionPath, false);
     this.canonicalBusyRestoredRootByPath.delete(sessionPath);
     this.releaseCanonicalSessionCorrelations(sessionPath);
-    // Keep the ephemeral fence until the runtime's existing close callback;
-    // late local events must not recreate the discarded state.
+    // Keep the ephemeral fence through runtime retirement and session-actions'
+    // post-disposal side-channel scrub; late events must not recreate state.
     this.invalidateCanonicalSessionCache();
     this.scheduleRender();
-    if (operation.runtimeRetired && this.canonicalPrivateClosesByPath.get(sessionPath) === operation) {
+    if (operation.runtimeRetired && operation.auxiliaryCleanupSettled
+      && this.canonicalPrivateClosesByPath.get(sessionPath) === operation) {
       this.canonicalPrivateClosesByPath.delete(sessionPath);
     }
   }
 
   async setSessionPrivacy(sessionPath: string, enabled: boolean): Promise<void> {
     if (this.canonicalCapture) {
-      // Canonical privacy remains queryable while open. P2b owns the explicit
-      // close/delete barrier and will call the recorder deletion adapter; mode
-      // toggles alone must never erase or suppress capture.
+      // Canonical privacy remains queryable while open. Only the post-disposal
+      // pass issued by session-actions, after the explicit close has deleted
+      // canonical facts, scrubs the final shutdown summary; privacy toggles do
+      // not remove auxiliary records while a session is open.
+      const close = this.canonicalPrivateClosesByPath.get(sessionPath);
+      if (enabled && close?.phase === 'deleted') {
+        try {
+          await this.scrubPrivateAuxiliaryLogs(sessionPath, close.rootSessionId);
+        } finally {
+          close.auxiliaryCleanupSettled = true;
+          if (close.runtimeRetired && this.canonicalPrivateClosesByPath.get(sessionPath) === close) {
+            this.canonicalPrivateClosesByPath.delete(sessionPath);
+          }
+        }
+      }
       return;
     }
     const sessionId = this.getArchState().sessions.sessions.find((session) => session.path === sessionPath)?.sessionId;
@@ -1562,8 +1593,11 @@ export class StatsService implements RunObserver {
       }
       this.tracker.onSessionClosed(sessionPath);
       this.releaseCanonicalSessionCorrelations(sessionPath);
-      if (close?.phase === 'deleted' && this.canonicalPrivateClosesByPath.get(sessionPath) === close) {
-        this.canonicalPrivateClosesByPath.delete(sessionPath);
+      if (close?.phase === 'deleted') {
+        close.runtimeRetired = true;
+        if (close.auxiliaryCleanupSettled && this.canonicalPrivateClosesByPath.get(sessionPath) === close) {
+          this.canonicalPrivateClosesByPath.delete(sessionPath);
+        }
       }
       return;
     }

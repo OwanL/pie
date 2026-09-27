@@ -13,8 +13,9 @@ import { createLocalMessageId } from '../composer/local-message-id';
 import { createUuidV4 } from '../../../lib/uuid';
 import type { TranscriptContextMenuType } from './chat-prefs';
 import type { ContextMenuState } from '../lib/components/context-menu';
+import { captureSelectionForCopy } from '../lib/components/selection-copy';
 import { getContextMenuTrigger } from '../lib/components/useMenuTriggerAria';
-import type { TranscriptMessageMenuInfo } from '../transcript/types';
+import type { TranscriptFilePathMenuInfo, TranscriptMessageMenuInfo } from '../transcript/types';
 import type { SessionTabRunAction } from '../session-tabs/run-state';
 
 export interface AppHandlers {
@@ -27,7 +28,7 @@ export interface AppHandlers {
    *  and input pickup are identical to a fresh send. */
   handleRetrySend: (text: string, disablePruning?: boolean) => boolean;
   handleInterrupt: () => boolean;
-  handleOpenFile: (path: string) => void;
+  handleOpenFile: (path: string, reference?: string, workingDirectory?: string) => void;
   handleNewSession: () => void;
   handleCloseTab: (path: string) => void;
   handleDuplicateTab: (path: string) => void;
@@ -73,6 +74,7 @@ export interface AppHandlers {
     rawData: string,
     e: MouseEvent,
     message?: Partial<TranscriptMessageMenuInfo>,
+    filePath?: TranscriptFilePathMenuInfo,
   ) => void;
 }
 
@@ -150,7 +152,12 @@ export function useAppHandlers(
     return true;
   }, [postMessage, activeSessionPathRef, setInterrupting, commandsAvailable]);
 
-  const handleOpenFile = useCallback((path: string) => postMessage({ type: 'openFile', path }), [postMessage]);
+  const handleOpenFile = useCallback((path: string, reference?: string, workingDirectory?: string) => postMessage({
+    type: 'openFile',
+    path,
+    ...(reference !== undefined ? { reference } : {}),
+    ...(workingDirectory !== undefined ? { workingDirectory } : {}),
+  }), [postMessage]);
   const handleNewSession = useCallback(() => postMessage({ type: 'newSession' }), [postMessage]);
   const handleCloseTab = useCallback((path: string) => postMessage({
     type: 'closeSession', sessionPath: path, interactionId: createUuidV4(),
@@ -296,25 +303,23 @@ export function useAppHandlers(
   }, [postMessage, activeSessionPathRef]);
 
   const handleOpenContextMenu = useCallback(
-    (type: TranscriptContextMenuType, rawData: string, e: MouseEvent, message?: Partial<TranscriptMessageMenuInfo>) => {
+    (type: TranscriptContextMenuType, rawData: string, e: MouseEvent, message?: Partial<TranscriptMessageMenuInfo>, filePath?: TranscriptFilePathMenuInfo) => {
     // Capture the trigger element (the onContextMenu target) so the menu can
     // mirror its open state back onto the trigger via aria-haspopup/
     // aria-expanded (see components/context-menu.tsx). Resolve it
     // synchronously, before the event finishes dispatching.
     //
-    // Also capture the live text selection *now*: a right-click (contextmenu)
-    // does not clear the selection, so this is the user's highlighted text.
-    // Reading it later (e.g. when the "Copy" item is clicked) would be too
-    // late — the menu's open effect moves focus to the first item, which can
-    // collapse the document selection. Stored on the menu state so the
-    // "Copy" item can copy just the selection instead of the whole block.
-    const selectionText = window.getSelection()?.toString() ?? '';
+    // Capture selected visible text and its rendered Markdown before menu
+    // focus moves. The menu's focus effect can collapse the live selection.
+    const selection = captureSelectionForCopy();
     setContextMenu({
       type,
       rawData,
       sessionPath: message?.sessionPath ?? activeSessionPathRef.current,
       message: message ?? null,
-      selectionText,
+      filePath: filePath ?? null,
+      selectionText: selection.text,
+      selectionMarkdown: selection.markdown,
       x: e.clientX,
       y: e.clientY,
       triggerEl: getContextMenuTrigger(e),

@@ -49,7 +49,7 @@ export const SubagentParams = Type.Object(
 		agent: Type.String({
 			description: "Exact discovered agent name to invoke (e.g. 'worker', 'scout', 'reviewer').",
 		}),
-		task: Type.String({ description: "One concrete task to delegate to the agent" }),
+		task: Type.String({ description: "One small, bounded task with a clear outcome and ownership boundaries; request a concise handoff of results, verification, and any blockers." }),
 		userContext: UserContextSchema,
 		cwd: Type.Optional(Type.String({ description: "Working directory for the agent process. Project agents under this directory are also discovered (defaults to the current session cwd)." })),
 		bucket: BucketSchema,

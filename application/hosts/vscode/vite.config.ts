@@ -13,7 +13,6 @@ import { isProtectedDirectoryName } from '../../../scripts/lib/traversal-policy.
 
 const rootDir = path.dirname(url.fileURLToPath(import.meta.url));
 const repoDir = path.resolve(rootDir, '../../..');
-const srcDir = path.join(repoDir, 'extension', 'src');
 const vscodeHostDir = path.join(repoDir, 'application', 'hosts', 'vscode');
 const hostsDir = path.join(repoDir, 'application', 'hosts');
 const frontendDir = path.join(repoDir, 'application', 'frontend');
@@ -52,7 +51,6 @@ function buildIdentityInputs(identityRoot = rootDir): string[] {
   // The explicit root parameter remains a fixture seam; production hashes
   // source at the repository root while emitting under the package owner.
   const production = identityRoot === rootDir;
-  const sourceRoot = production ? srcDir : path.join(identityRoot, 'src');
   const applicationFrontendRoot = production ? frontendDir : path.join(identityRoot, 'frontend');
   const helperRoot = production ? repoDir : path.dirname(identityRoot);
   const buildHelpers = path.join(helperRoot, 'scripts', 'build');
@@ -67,8 +65,6 @@ function buildIdentityInputs(identityRoot = rootDir): string[] {
   const applicationLib = path.join(production ? repoDir : identityRoot, 'application', 'lib');
   const rootLib = path.join(production ? repoDir : identityRoot, 'lib');
   return [
-    ...sourceFiles(sourceRoot),
-    ...(production ? sourceFiles(path.join(repoDir, 'shared')) : []),
     ...(production && fs.existsSync(harnessInstructions) ? sourceFiles(harnessInstructions) : []),
     ...(fs.existsSync(harnessTools) ? sourceFiles(harnessTools) : []),
     ...(fs.existsSync(harnessModelProviders) ? sourceFiles(harnessModelProviders) : []),
@@ -80,7 +76,7 @@ function buildIdentityInputs(identityRoot = rootDir): string[] {
     ...(production && fs.existsSync(applicationFrontendRoot) ? sourceFiles(applicationFrontendRoot) : []),
     ...(production && fs.existsSync(applicationLib) ? sourceFiles(applicationLib) : []),
     ...(fs.existsSync(rootLib) ? sourceFiles(rootLib) : []),
-    ...(production ? sourceFiles(path.join(identityRoot, 'runtime')) : []),
+    ...(fs.existsSync(path.join(identityRoot, 'runtime')) ? sourceFiles(path.join(identityRoot, 'runtime')) : []),
     ...(production && fs.existsSync(buildHelpers) ? sourceFiles(buildHelpers) : []),
     path.join(identityRoot, 'package.json'),
     path.join(identityRoot, 'package-lock.json'),
@@ -135,7 +131,7 @@ export default defineConfig(({ mode }) => {
   };
   if (mode === 'node') {
     return {
-      root: srcDir,
+      root: vscodeHostDir,
       publicDir: false,
       define,
       plugins: [createBuildIdentityPlugin()],
@@ -180,7 +176,6 @@ export default defineConfig(({ mode }) => {
       },
       resolve: {
         alias: [
-          { find: '@shared', replacement: path.join(srcDir, 'shared') },
           ...nodePackageAliases,
         ],
       },
@@ -219,7 +214,6 @@ export default defineConfig(({ mode }) => {
     },
     resolve: {
       alias: [
-        { find: '@shared', replacement: path.join(srcDir, 'shared') },
         ...packageAliases,
       ],
     },

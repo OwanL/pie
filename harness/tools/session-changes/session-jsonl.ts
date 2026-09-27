@@ -21,12 +21,12 @@
  *     its `details`) and the error flag.
  * So this is a TWO-PASS JOIN keyed by `toolCallId`, not a single content-parts
  * scan: (1) index `toolResult` entries by `toolCallId`; (2) walk assistant
- * `toolCall` parts, mapping `arguments`→`input`, skipping calls whose joined
- * `toolResult.isError` is set (the JSONL equivalent of the host's
- * `status==='failed'` skip), and — for `subagent` calls — feeding the joined
- * `toolResult.details` to `deriveFileChangesFromSubagentResult`. A plain
+ * `toolCall` parts, mapping `arguments`→`input`, requiring a successful joined
+ * result for individual mutations, and — for `subagent` calls — feeding the
+ * joined `toolResult.details` to `deriveFileChangesFromSubagentResult` even if
+ * the child task failed, so successful descendant edits survive. A plain
  * content-parts scan alone would silently drop all subagent-attributed changes
- * and include failed edits.
+ * and include failed or unfinished edits.
  *
  * Deliberately self-contained (only node:fs + the shared core) so the extension
  * stays decoupled from the host build. Needs tool-call INPUTS, so it's distinct
@@ -76,6 +76,7 @@ interface JoinedToolCall {
   id: string;
   name: string;
   input: unknown;
+  hasResult: boolean;
   isError: boolean;
   details: unknown;
 }
@@ -101,7 +102,6 @@ export function deriveFileChangesFromSessionEntries(
   cwdOverride?: string,
 ): FileChange[] {
   const seen = new Map<string, FileChange>();
-  const createdPaths = new Set<string>();
   // Canonicalize file identity against the session cwd (from the `session`
   // header entry for persisted sessions or the runtime manager for in-memory
   // sessions) so the same file reached through different spellings
@@ -133,34 +133,34 @@ export function deriveFileChangesFromSessionEntries(
       const joined = joinToolCallPart(part, resultsByCallId);
       if (!joined) continue;
 
-      // Skip calls whose result errored (the JSONL equivalent of the host's
-      // `status === 'failed'` skip). A toolCall with no joined result is NOT
-      // skipped — it maps to a non-failed (running/completed) tool, matching
-      // the host, which only skips 'failed'.
-      if (joined.isError) continue;
-
-      // Subagent: feed the joined details to the subagent recursion. The host
-      // passes the merged `tool.result` ({content, details}); here we synthesise
-      // the same shape from the joined toolResult entry's `details`.
-      if (joined.name === 'subagent' && joined.details !== undefined) {
-        const subagentChanges = deriveFileChangesFromSubagentResult(
-          { details: joined.details },
-          messageId,
-          timestamp,
-          joined.id,
-          cwd,
-          readToolCwd(joined.input) ?? cwd,
-        );
-        for (const e of subagentChanges) accumulateFileChange(seen, createdPaths, e, cwd);
+      // Subagent task failure is not a reason to discard successful mutations
+      // recorded in its child transcript. The shared recursion filters those
+      // individual calls by their own toolResult evidence.
+      if (joined.name === 'subagent') {
+        if (joined.hasResult && joined.details !== undefined) {
+          const subagentChanges = deriveFileChangesFromSubagentResult(
+            { details: joined.details },
+            messageId,
+            timestamp,
+            joined.id,
+            cwd,
+            readToolCwd(joined.input) ?? cwd,
+          );
+          for (const e of subagentChanges) accumulateFileChange(seen, e, cwd);
+        }
         continue;
       }
+
+      // A missing result is an unfinished call; an errored result is a failed
+      // mutation. Neither is evidence that the session successfully changed it.
+      if (!joined.hasResult || joined.isError) continue;
 
       const changes = deriveFileChangesFromToolCall(
         { id: joined.id, name: joined.name, input: joined.input },
         messageId,
         timestamp,
       );
-      for (const e of changes) accumulateFileChange(seen, createdPaths, e, cwd);
+      for (const e of changes) accumulateFileChange(seen, e, cwd);
     }
   }
 
@@ -185,6 +185,7 @@ function joinToolCallPart(
     id,
     name,
     input,
+    hasResult: joined !== undefined,
     isError: joined?.isError ?? false,
     details: joined?.details,
   };

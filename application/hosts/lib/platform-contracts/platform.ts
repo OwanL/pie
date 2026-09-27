@@ -13,6 +13,7 @@
  */
 
 import type { HostToWebviewMessage } from '../../../lib/protocol/index.js';
+import type { ImagePreviewData } from '../../../lib/protocol/image-preview.js';
 import type { RuntimeGenerationIdentity } from '../../../../analytics/authority/analytics-handoff-discovery.js';
 import type {
   BrowserServerService,
@@ -67,8 +68,14 @@ export interface HostEditorCapabilities {
   openFilePicker(options: { title: string; openLabel: string }): Promise<readonly string[] | undefined>;
   /** Open the effective settings surface, including any host-specific fallback. */
   openSettings(): Promise<void>;
-  /** Open a filesystem path in the host editor. */
-  openFileInEditor(filePath: string): Promise<void>;
+  /** Open a filesystem path in the host editor, optionally retaining the
+   *  original markdown reference and its session cwd for scoped fallback. */
+  openFileInEditor(filePath: string, options?: { reference?: string; workingDirectory?: string }): Promise<void>;
+  /** Read a bounded display-safe image preview, if the host supports it. */
+  previewImageFile?(
+    filePath: string,
+    options?: { reference?: string; workingDirectory?: string },
+  ): Promise<ImagePreviewData | undefined>;
 }
 
 /**

@@ -27,6 +27,7 @@
  */
 
 import type { WebviewToHostMessage } from '../protocol/index.js';
+import { MAX_IMAGE_PREVIEW_PATH_BYTES } from '../protocol/image-preview.js';
 import { DETAIL_REF_KEY_MAX_BYTES, PROVIDER_EXECUTION_ID_MAX_BYTES, PROVIDER_TOOL_CALL_ID_MAX_BYTES } from '../../../harness/agent-processes/lib/rpc/subagent-detail';
 import { validateWebviewToHostMessage, type ValidationResult } from './protocol-validation';
 import { isRecord } from '../../../lib/validation/type-guards';
@@ -94,7 +95,7 @@ const MESSAGE_KEYS: Readonly<Record<string, readonly string[]>> = {
   refreshState: ['type', 'assetVersion', 'buildId'],
   requestSnapshot: ['type', 'assetVersion', 'buildId', 'sessionPath'],
   openFilePicker: ['type'],
-  openFile: ['type', 'path'],
+  openFile: ['type', 'path', 'reference', 'workingDirectory'],
   addComposerInput: ['type', 'sessionPath', 'input'],
   removeComposerInput: ['type', 'sessionPath', 'inputId'],
   setComposerDraft: ['type', 'sessionPath', 'text'],
@@ -107,6 +108,7 @@ const MESSAGE_KEYS: Readonly<Record<string, readonly string[]>> = {
   openSession: ['type', 'sessionPath'],
   closeSession: ['type', 'sessionPath', 'interactionId'],
   requestDetail: ['type', 'sessionPath', 'ref'],
+  requestImagePreview: ['type', 'requestId', 'sessionPath', 'path', 'reference', 'workingDirectory'],
   'detail.subscribe': ['type', 'viewGeneration', 'detailKey', 'detailAttempt', 'address', 'cursor'],
   'detail.unsubscribe': ['type', 'viewGeneration', 'detailKey', 'detailAttempt', 'reason'],
   'detail.fetchPages': ['type', 'viewGeneration', 'detailKey', 'detailAttempt', 'ref'],
@@ -562,6 +564,22 @@ export function validateBrowserToHostMessage(
       return validateExtensionUiResponse(value);
     case 'requestDetail':
       return validateRequestDetailRef(value);
+    case 'requestImagePreview':
+      if (!boundedString(value.requestId, 256) || value.requestId.length === 0) {
+        return fail('requestImagePreview: invalid requestId');
+      }
+      if (!boundedString(value.sessionPath, MAX_IMAGE_PREVIEW_PATH_BYTES)
+        || !boundedString(value.path, MAX_IMAGE_PREVIEW_PATH_BYTES)) {
+        return fail('requestImagePreview: invalid or oversized path');
+      }
+      if (value.reference !== undefined && !boundedString(value.reference, MAX_IMAGE_PREVIEW_PATH_BYTES)) {
+        return fail('requestImagePreview: invalid or oversized reference');
+      }
+      if (value.workingDirectory !== undefined
+        && !boundedString(value.workingDirectory, MAX_IMAGE_PREVIEW_PATH_BYTES)) {
+        return fail('requestImagePreview: invalid or oversized workingDirectory');
+      }
+      return { ok: true, value: value as unknown as WebviewToHostMessage };
     case 'log':
       return validateLogData(value);
     case 'setSystemPromptToggles':

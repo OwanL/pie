@@ -1,7 +1,11 @@
 import type { ChatMessage, CompactionSummaryDetails } from '../../agent-processes/lib/rpc/message-contract.js';
 import type { ThinkingLevel } from '../../model-providers/catalog/thinking-level.js';
 import type { SessionSummary } from '../../agent-processes/lib/rpc/session-events.js';
-import { COMPACTION_METRICS_CUSTOM_TYPE } from '../../agent-processes/lib/rpc/message-contract.js';
+import {
+  AGENT_MESSAGE_CUSTOM_TYPE,
+  AGENT_MESSAGE_PROVENANCE_CUSTOM_TYPE,
+  COMPACTION_METRICS_CUSTOM_TYPE,
+} from '../../agent-processes/lib/rpc/message-contract.js';
 import { NEW_SESSION_NAME } from '../metadata/session-name';
 import { formatToolResult } from './tool-result-format.js';
 import {
@@ -223,6 +227,8 @@ interface MapLoopState {
    *  attach typed {@link CompactionSummaryDetails} to the matching
    *  `compaction-summary` ChatMessage. Sidecars themselves never render. */
   compactionMetricsByEntryId: Map<string, CompactionSummaryDetails>;
+  /** Agent provenance sidecars keyed by their durable user-entry identity. */
+  agentMessageEntryIds: Set<string>;
 }
 
 type MapResult =
@@ -236,7 +242,7 @@ type MapResult =
 const DEFERRED_TRIGGER_PREFIX = '[deferred trigger fired: ';
 
 /** Append a user-role message and return a `push` directive. */
-function mapUserMessage(entry: SessionEntryLike, message: MessageLike): MapResult {
+function mapUserMessage(entry: SessionEntryLike, message: MessageLike, isAgentMessage: boolean): MapResult {
   const userParts = userPartsFromContent(message.content);
   const hasImageParts = userParts?.some((part) => part.kind === 'image') ?? false;
   const markdown =
@@ -248,7 +254,9 @@ function mapUserMessage(entry: SessionEntryLike, message: MessageLike): MapResul
   // messages without customType). Parse the reason up to the closing bracket.
   let customType: string | undefined;
   let customDetails: unknown;
-  if (markdown.startsWith(DEFERRED_TRIGGER_PREFIX)) {
+  if (isAgentMessage) {
+    customType = AGENT_MESSAGE_CUSTOM_TYPE;
+  } else if (markdown.startsWith(DEFERRED_TRIGGER_PREFIX)) {
     const end = markdown.indexOf(']', DEFERRED_TRIGGER_PREFIX.length);
     const reason = end === -1
       ? markdown.slice(DEFERRED_TRIGGER_PREFIX.length).trim()
@@ -477,7 +485,7 @@ function dispatchMessageEntry(
 ): MapResult {
   switch (message.role) {
     case 'user':
-      return mapUserMessage(entry, message);
+      return mapUserMessage(entry, message, state.agentMessageEntryIds.has(entry.id));
     case 'assistant':
       return mapAssistantTurn(entry, message, state);
     case 'toolResult':
@@ -591,6 +599,20 @@ function scanCompactionMetricsSidecars(
   return map;
 }
 
+/** Read durable agent-message markers before dispatching their user entries. */
+function scanAgentMessageProvenance(entries: SessionEntryLike[]): Set<string> {
+  const userEntryIds = new Set<string>();
+  for (const entry of entries) {
+    if (entry.type !== 'custom' || entry.customType !== AGENT_MESSAGE_PROVENANCE_CUSTOM_TYPE) continue;
+    const data = entry.data;
+    const userEntryId = data && typeof data === 'object' && !Array.isArray(data)
+      ? (data as Record<string, unknown>).userEntryId
+      : undefined;
+    if (typeof userEntryId === 'string' && userEntryId.length > 0) userEntryIds.add(userEntryId);
+  }
+  return userEntryIds;
+}
+
 function dispatchSummaryEntry(
   entry: SessionEntryLike,
   heading: string,
@@ -634,6 +656,7 @@ export function mapTranscript(entries: SessionEntryLike[]): ChatMessage[] {
     currentProvider: undefined,
     currentThinkingLevel: undefined,
     compactionMetricsByEntryId: scanCompactionMetricsSidecars(entries),
+    agentMessageEntryIds: scanAgentMessageProvenance(entries),
   };
 
   for (const entry of entries) {
@@ -665,14 +688,11 @@ function dispatchEntry(entry: SessionEntryLike, state: MapLoopState): MapResult 
     case 'custom_message':
       return dispatchCustomEntry(entry, state);
     case 'custom':
-      // The `pie.compaction-metrics` sidecar is a non-context `custom` entry
-      // appended after a successful compaction. It carries no `content` (its
-      // payload is in `data`), so it would already be skipped by
-      // `mapCustomMessage`, but short-circuit here to make the intent explicit
-      // and keep future data-only sidecar customTypes from accidentally
-      // rendering. The metrics were already captured by the pre-scan in
-      // `mapTranscript`.
-      if (entry.customType === COMPACTION_METRICS_CUSTOM_TYPE) {
+      // These data-only sidecars never render as transcript rows. Compaction
+      // metrics and agent-message provenance were already captured by the
+      // pre-scans in `mapTranscript`.
+      if (entry.customType === COMPACTION_METRICS_CUSTOM_TYPE
+          || entry.customType === AGENT_MESSAGE_PROVENANCE_CUSTOM_TYPE) {
         return { kind: 'skip' };
       }
       return dispatchCustomEntry(entry, state);

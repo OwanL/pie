@@ -23,13 +23,11 @@ import {
 
 const REPORT_PREFIX = '__PI_TEST_SUMMARY__';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const extensionRoot = path.join(repoRoot, 'extension');
 const EXTENSION_PACKAGE = resolvePackageEntry('extension');
-export const EXTENSION_TEST_ROOTS = packageTestRoots(EXTENSION_PACKAGE).map((testRoot) => testRoot === 'extension/test'
-  ? { relativeDir: 'test', root: extensionRoot }
-  : testRoot.startsWith('test/')
-    ? { relativeDir: `repo/${testRoot}`, root: repoRoot }
-    : { relativeDir: testRoot, root: repoRoot });
+const extensionPackageRoot = path.join(repoRoot, EXTENSION_PACKAGE.dir);
+export const EXTENSION_TEST_ROOTS = packageTestRoots(EXTENSION_PACKAGE).map((testRoot) => testRoot.startsWith('test/')
+  ? { relativeDir: `repo/${testRoot}`, root: repoRoot }
+  : { relativeDir: testRoot, root: repoRoot });
 // Timing overrides (used by scripts/verification/update-extension-test-costs.mjs and by
 // one-off perf probes): swap the summarizing reporter for the timing one.
 const reporterSpecifier = process.env.PIE_TIMING_REPORTER
@@ -92,7 +90,7 @@ const UNSAFE_SCOPED_BATCH_ENTRIES = new Set([
 ]);
 const UNSAFE_SCOPED_BATCH_SOURCE = /\bModule\.(?:register|_load)|\bmodule\.register|\bimport\s*\(/u;
 
-async function walkTestFiles(relativeDir, output, root = extensionRoot) {
+async function walkTestFiles(relativeDir, output, root = extensionPackageRoot) {
   const diskRelativeDir = relativeDir.startsWith('repo/') ? relativeDir.slice('repo/'.length) : relativeDir;
   const absoluteDir = path.join(root, diskRelativeDir);
   for (const entry of await readdir(absoluteDir, { withFileTypes: true })) {
@@ -106,10 +104,10 @@ async function walkTestFiles(relativeDir, output, root = extensionRoot) {
 export function resolveExtensionTestPath(relativePath) {
   const normalizedPath = relativePath.replace(/\\/gu, '/');
   if (normalizedPath.startsWith('repo/')) return path.join(repoRoot, normalizedPath.slice('repo/'.length));
-  if (normalizedPath.startsWith('harness/')) return path.join(repoRoot, normalizedPath);
-  return normalizedPath.startsWith('application/')
-    ? path.join(repoRoot, normalizedPath)
-    : path.join(extensionRoot, normalizedPath);
+  if (normalizedPath.startsWith('harness/') || normalizedPath.startsWith('application/') || normalizedPath.startsWith('extension/')) {
+    return path.join(repoRoot, normalizedPath);
+  }
+  return path.join(extensionPackageRoot, normalizedPath);
 }
 
 export function extensionBundleOutputPath(tempDir, sourceFile) {
@@ -117,7 +115,7 @@ export function extensionBundleOutputPath(tempDir, sourceFile) {
 }
 
 function resolveExtensionTestArgument(relativePath) {
-  return path.relative(extensionRoot, resolveExtensionTestPath(relativePath)).replace(/\\/gu, '/');
+  return path.relative(extensionPackageRoot, resolveExtensionTestPath(relativePath)).replace(/\\/gu, '/');
 }
 
 export function bundledSuiteMarker(sourceFile) {
@@ -400,7 +398,7 @@ async function main() {
     const unsafeRun = run(
       process.execPath,
       [tsxCli, `--tsconfig=${tsxOverlay.configPath}`, ...isolatedArgs, ...unsafe.map(resolveExtensionTestArgument)],
-      extensionRoot,
+      extensionPackageRoot,
       (child) => { unsafeChild = child; },
       {
         PIE_LIVE_PIPELINE_TRACE_DIR: traceDirs[1],
@@ -516,7 +514,7 @@ async function main() {
       bundledFiles.sort((a, b) => weight(bundleSourcePath(b)) - weight(bundleSourcePath(a)));
     }
     const results = await Promise.all([
-      run(process.execPath, [...bundledArgs, ...bundledFiles], extensionRoot, undefined, {
+      run(process.execPath, [...bundledArgs, ...bundledFiles], extensionPackageRoot, undefined, {
         PIE_LIVE_PIPELINE_TRACE_DIR: traceDirs[0],
         [TEST_FILE_ACCOUNTING_ENV]: bundledAccountingContext,
       }),

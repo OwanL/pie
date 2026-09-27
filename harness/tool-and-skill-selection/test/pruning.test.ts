@@ -187,30 +187,44 @@ test("shouldSkipPruning: malformed toggle JSON is treated as not disabled", () =
 	}
 });
 
-test("shouldSkipPruning: subagent context -> skip with reason 'subagent'", () => {
-	// Inside a scoped subagent session the prepass is skipped: it is
-	// main-agent-oriented and would add a 20–35s LLM call (plus a fail-open
-	// failure mode) before the first streamed token, making subagents look hung.
-	const r = subagentContext.run({ depth: 1 }, () =>
-		shouldSkipPruning({ prompt: "refactor this code for clarity" } as any, config({ mode: "auto" })),
+test("shouldSkipPruning: main-agent switch is independent from the subagent switch", () => {
+	const r = shouldSkipPruning(
+		{ prompt: "refactor this code for clarity" } as any,
+		config({ mode: "auto", mainAgentEnabled: false, subagentEnabled: true }),
 	);
-	assert.deepEqual(r, { skip: true, reason: "subagent" });
+	assert.deepEqual(r, { skip: true, reason: "main-agent-disabled" });
 });
 
-test("shouldSkipPruning: nested subagent (depth > 1) still skips", () => {
+test("shouldSkipPruning: subagent switch disables only child launches", () => {
+	const disabled = subagentContext.run({ depth: 1 }, () =>
+		shouldSkipPruning(
+			{ prompt: "refactor this code for clarity" } as any,
+			config({ mode: "auto", mainAgentEnabled: true, subagentEnabled: false }),
+		),
+	);
+	assert.deepEqual(disabled, { skip: true, reason: "subagent" });
+
+	const enabled = subagentContext.run({ depth: 1 }, () =>
+		shouldSkipPruning(
+			{ prompt: "refactor this code for clarity" } as any,
+			config({ mode: "auto", mainAgentEnabled: false, subagentEnabled: true }),
+		),
+	);
+	assert.deepEqual(enabled, { skip: false });
+});
+
+test("shouldSkipPruning: nested subagents are enabled by default", () => {
 	const r = subagentContext.run({ depth: 2 }, () =>
 		shouldSkipPruning({ prompt: "refactor this code for clarity" } as any, config({ mode: "auto" })),
 	);
-	assert.deepEqual(r, { skip: true, reason: "subagent" });
+	assert.deepEqual(r, { skip: false });
 });
 
-test("shouldSkipPruning: subagent skip takes precedence over a too-short prompt", () => {
-	// The subagent check runs before the too-short check, so even a tiny prompt
-	// inside a subagent is skipped as 'subagent' (no prepass either way).
+test("shouldSkipPruning: enabled subagent still observes shared short-prompt guard", () => {
 	const r = subagentContext.run({ depth: 1 }, () =>
 		shouldSkipPruning({ prompt: "hi" } as any, config({ mode: "auto" })),
 	);
-	assert.deepEqual(r, { skip: true, reason: "subagent" });
+	assert.deepEqual(r, { skip: true, reason: "too-short" });
 });
 
 // ---------------------------------------------------------------------------

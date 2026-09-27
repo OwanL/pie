@@ -99,13 +99,13 @@ function sessionManagerPath(manager: SdkSessionManager): string {
   return sessionPath;
 }
 
-function createColdSession(
+async function createColdSession(
   deps: BackendRequestHandlerDeps,
   cwd?: string,
   pendingCreateOperationId?: string,
   agentCreated?: boolean,
-): { sessionPath: string } {
-  if (deps.createColdSession) return deps.createColdSession(cwd, pendingCreateOperationId, agentCreated);
+): Promise<{ sessionPath: string }> {
+  if (deps.createColdSession) return await deps.createColdSession(cwd, pendingCreateOperationId, agentCreated);
   const manager = deps.sdk.SessionManager.create(cwd || deps.startupCwd, deps.sessionDir);
   if (agentCreated) {
     // The production cold store owns the durable marker; retain a compatible
@@ -155,7 +155,7 @@ async function handleSessionCreate(
         params.agentCreated,
       ),
       execute: async (registerDurablePath) => {
-        const created = createColdSession(deps, params.cwd, params.operationId, params.agentCreated);
+        const created = await createColdSession(deps, params.cwd, params.operationId, params.agentCreated);
         // The server callback installs the process-local manager handle before
         // returning. Only then may the ledger record the durable commit.
         registerDurablePath(created.sessionPath);
@@ -184,7 +184,7 @@ async function handleSessionCreate(
     });
     return { ok: true, sessionPath: result.sessionPath };
   }
-  const created = createColdSession(deps, params.cwd, params.operationId, params.agentCreated);
+  const created = await createColdSession(deps, params.cwd, params.operationId, params.agentCreated);
   const result = await publishCreatedSession(deps, created.sessionPath, params, request.id);
   return { ok: true, sessionPath: result.sessionPath };
 }

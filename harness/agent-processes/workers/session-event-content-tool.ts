@@ -24,6 +24,10 @@ import { hasNestedToolFailure } from './subagent-result';
 import { LIVE_PIPELINE_LIMITS, LIVE_PIPELINE_PROTOCOL_VERSION } from '../lib/rpc/live-pipeline.js';
 import type { DurationClockDomain } from '../../../analytics/contracts/timing.js';
 import type { SdkSessionEvent } from '../lib/sdk-integration/sdk';
+import {
+  AGENT_MESSAGE_PROVENANCE_CUSTOM_TYPE,
+  isAgentSessionMessageLocalId,
+} from '../lib/rpc/message-contract.js';
 import { FENCED_ENTRY_ID } from '../../session-storage/ownership/session-manager-fence';
 import { BackendLiveTurnAccumulator } from './live-turn-accumulator';
 import {
@@ -65,6 +69,35 @@ export const TOOL_TERMINAL_PAYLOAD_MAX_BYTES = Math.min(
 
 const PROVIDER_TOOL_PROTOCOL_LEAK_BLOCK_LIMIT = 4;
 const PROVIDER_TOOL_PROTOCOL_LEAK_TAIL_CHARS = 64;
+
+interface AgentMessageProvenanceSidecarAppender {
+  appendCustomEntry(customType: string, data?: unknown): string;
+}
+
+function appendAgentMessageProvenanceSidecar(context: SessionContext, userEntryId: string): void {
+  const active = context.activeRequest;
+  if (!active || !isAgentSessionMessageLocalId(active.agentMessageLocalId)
+      || active.agentMessageProvenanceEntryId === userEntryId) return;
+  const manager = context.session.sessionManager as
+    (typeof context.session.sessionManager) & Partial<AgentMessageProvenanceSidecarAppender>;
+  if (typeof manager?.appendCustomEntry !== 'function') {
+    logBackendDiagnostic('warn', 'agentMessage.provenanceSidecarUnavailable', {
+      sessionPath: context.sessionPath,
+      userEntryId,
+    });
+    return;
+  }
+  try {
+    const sidecarEntryId = manager.appendCustomEntry(AGENT_MESSAGE_PROVENANCE_CUSTOM_TYPE, { userEntryId });
+    if (sidecarEntryId !== FENCED_ENTRY_ID) active.agentMessageProvenanceEntryId = userEntryId;
+  } catch (error) {
+    logBackendDiagnostic('warn', 'agentMessage.provenanceSidecarAppendFailed', {
+      sessionPath: context.sessionPath,
+      userEntryId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
 
 function observedTimestampIso(value: unknown): string | undefined {
   const timestamp = typeof value === 'number'
@@ -884,6 +917,10 @@ function handleContentToolSessionEvent(
         const localId = queuedLocalIds && queuedLocalIds.length > 0
           ? queuedLocalIds.shift()
           : undefined;
+        if (context.activeRequest) {
+          context.activeRequest.agentMessageLocalId = isAgentSessionMessageLocalId(localId) ? localId : undefined;
+          context.activeRequest.agentMessageProvenanceEntryId = undefined;
+        }
         const queuedOperationIds = context.queuedOperationIds;
         const operationId = queuedOperationIds && queuedOperationIds.length > 0
           ? queuedOperationIds.shift()
@@ -1297,6 +1334,10 @@ function handleContentToolSessionEvent(
 
       if (event.sessionEntryId) {
         emitDurableBranchObservation(deps, context, event.sessionEntryId);
+      }
+      if (event.message.role === 'user') {
+        if (event.sessionEntryId) appendAgentMessageProvenanceSidecar(context, event.sessionEntryId);
+        return;
       }
 
       // SDK adapters can replay a durable assistant boundary after the first

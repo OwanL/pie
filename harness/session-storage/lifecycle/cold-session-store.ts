@@ -57,6 +57,8 @@ export const COLD_SESSION_STORE_PLACEMENT = 'coordinator-with-optional-helper' a
 
 const MISSING_FINGERPRINT = 'missing';
 const DEFAULT_READ_ATTEMPTS = 3;
+const DEFAULT_BROWSE_HELPER_INVALIDATION_TIMEOUT_MS = 30_000;
+const DEFAULT_BROWSE_HELPER_SHUTDOWN_TIMEOUT_MS = 5_000;
 const ATOMIC_REPLACE_RETRY_DELAYS_MS = [10, 25, 50, 100, 200] as const;
 const ATOMIC_REPLACE_RETRY_WAIT = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
 
@@ -369,6 +371,12 @@ export class ColdSessionLeaseAuthority {
     return this.bumpOwnershipRevision(this.canonicalPathKey(sessionPath));
   }
 
+  /** Fence a captured canonical identity without resolving a path whose durable
+   * target may have been deleted or replaced since the capture. */
+  invalidateCanonicalPathKey(sessionPathKey: string): number {
+    return this.bumpOwnershipRevision(sessionPathKey);
+  }
+
   /** Retire every stamp from an old coordinator generation. */
   advanceCoordinatorGeneration(nextGeneration: number): void {
     if (!Number.isSafeInteger(nextGeneration) || nextGeneration <= this.currentCoordinatorGeneration) {
@@ -493,6 +501,9 @@ export interface ColdSessionStoreOptions {
   browseCacheMaxSourceBytes?: number;
   browseCacheMaxEntries?: number;
   browseHelper?: ColdBrowseHelper;
+  /** Privacy cleanup deadlines; failed invalidation falls back to confirmed helper shutdown. */
+  browseHelperInvalidationTimeoutMs?: number;
+  browseHelperShutdownTimeoutMs?: number;
   /** Durable analytics writer admission for every coordinator-side session
    * mutation. Omitted for legacy/coordinator-only callers. */
   writerAdmission?: SessionOwnershipAdmission;
@@ -549,6 +560,8 @@ export class ColdSessionStore {
   private readonly writerAdmission?: SessionOwnershipAdmission;
   private readonly readAttempts: number;
   private readonly browseHelper?: ColdBrowseHelper;
+  private readonly browseHelperInvalidationTimeoutMs: number;
+  private readonly browseHelperShutdownTimeoutMs: number;
   private catalogMutationRevision = 0;
   private readonly resultStamps = new WeakMap<object, readonly ColdSessionOwnershipStamp[]>();
   private readonly catalogPublicationStamps = new WeakMap<object, ColdSessionCatalogPublicationStamp>();
@@ -579,6 +592,18 @@ export class ColdSessionStore {
     this.writerAdmission = options.writerAdmission;
     this.readAttempts = options.readAttempts ?? DEFAULT_READ_ATTEMPTS;
     this.browseHelper = options.browseHelper;
+    this.browseHelperInvalidationTimeoutMs = options.browseHelperInvalidationTimeoutMs
+      ?? DEFAULT_BROWSE_HELPER_INVALIDATION_TIMEOUT_MS;
+    this.browseHelperShutdownTimeoutMs = options.browseHelperShutdownTimeoutMs
+      ?? DEFAULT_BROWSE_HELPER_SHUTDOWN_TIMEOUT_MS;
+    for (const [name, value] of [
+      ['browse helper invalidation', this.browseHelperInvalidationTimeoutMs],
+      ['browse helper shutdown', this.browseHelperShutdownTimeoutMs],
+    ] as const) {
+      if (!Number.isSafeInteger(value) || value <= 0) {
+        throw new Error(`Cold browse helper ${name} timeout must be a positive safe integer.`);
+      }
+    }
     this.browseCache = new ColdBrowseProjectionCache(
       options.browseCacheMaxSourceBytes,
       options.browseCacheMaxEntries,
@@ -1245,7 +1270,7 @@ export class ColdSessionStore {
     });
     this.catalog.remove(sessionPath);
     this.catalogMutationRevision += 1;
-    this.leases.invalidate(sessionPath);
+    this.leases.invalidateCanonicalPathKey(stamp.sessionPathKey);
     // Privacy-sensitive forget eagerly drops any durable projection rather
     // than relying only on the now-unreachable fingerprint/revision key.
     // Preserve the exact pre-delete canonical identity. Re-canonicalizing a
@@ -1254,10 +1279,10 @@ export class ColdSessionStore {
     const sessionPathKey = stamp.sessionPathKey;
     this.browseCache.invalidatePath(sessionPathKey);
     this.hotTranscriptCache.invalidatePath(sessionPathKey);
-    // The local privacy/ownership fences above already make every helper entry
-    // unreachable. Reclaim helper memory opportunistically without queuing this
-    // user action behind an in-flight multi-second projection.
-    void this.browseHelper?.invalidatePath(sessionPathKey).catch(() => undefined);
+    // Forget is not successful until helper-held transcript bytes are confirmed
+    // gone. Invalidation is serialized behind any active helper projection; if
+    // it fails or exceeds its bound, shutting down the helper is the safe fallback.
+    await this.confirmBrowseHelperForgetCleanup(sessionPathKey);
   }
 
   tree(sessionPath: string): ColdSessionTreeNode[] {
@@ -1496,6 +1521,34 @@ export class ColdSessionStore {
     return { browse, stamp: opened.stamp };
   }
 
+  private async confirmBrowseHelperForgetCleanup(sessionPathKey: string): Promise<void> {
+    const helper = this.browseHelper;
+    if (!helper) return;
+    try {
+      await withTimeout(
+        () => helper.invalidatePath(sessionPathKey),
+        this.browseHelperInvalidationTimeoutMs,
+        `Cold browse helper path invalidation timed out: ${sessionPathKey}`,
+      );
+      return;
+    } catch (invalidationError) {
+      try {
+        // dispose() resolves only after the client confirms child exit. That
+        // retires every projection, including loads racing this forget.
+        await withTimeout(
+          () => helper.dispose(),
+          this.browseHelperShutdownTimeoutMs,
+          'Cold browse helper shutdown could not be confirmed after forget.',
+        );
+      } catch (shutdownError) {
+        throw new AggregateError(
+          [invalidationError, shutdownError],
+          `Unable to confirm cold browse helper privacy cleanup for ${sessionPathKey}.`,
+        );
+      }
+    }
+  }
+
   private resetBrowseCacheForGeneration(): void {
     const generation = this.leases.coordinatorGeneration;
     if (generation === this.browseCacheGeneration) return;
@@ -1660,6 +1713,22 @@ function isTransientAtomicReplaceError(error: unknown): boolean {
     && (filesystemError.code === 'EPERM'
       || filesystemError.code === 'EACCES'
       || filesystemError.code === 'EBUSY');
+}
+
+async function withTimeout<T>(
+  operation: () => Promise<T>,
+  timeoutMs: number,
+  timeoutMessage: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+  });
+  try {
+    return await Promise.race([Promise.resolve().then(operation), timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 function missingSessionError(sessionPath: string): NodeJS.ErrnoException {

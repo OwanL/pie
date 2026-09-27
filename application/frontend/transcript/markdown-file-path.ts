@@ -114,6 +114,27 @@ function stripReferenceSuffix(value: string): string {
   return isFileLikeLeaf(prefix) ? prefix : value;
 }
 
+/**
+ * Validate a file-like token found in ordinary prose. Prose needs stricter
+ * host handling than explicit markdown links: otherwise `example.com/docs/a.md`
+ * would look like a relative path just because it has a slash and extension.
+ */
+export function ordinaryProseFilePathReference(value: string): string | null {
+  const trimmed = value.replace(/[.,:]+$/, '');
+  if (!trimmed) return null;
+
+  const explicitLocalPrefix = /^(?:[A-Za-z]:[\\/]|\\\\|\/|\.{1,2}[\\/])/.test(trimmed);
+  if (!explicitLocalPrefix && /[\\/]/.test(trimmed)) {
+    const firstSegment = trimmed.split(/[\\/]/, 1)[0] ?? '';
+    if (firstSegment.toLowerCase() === 'localhost'
+      || /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/.test(firstSegment)) {
+      return null;
+    }
+  }
+
+  return localFilePathReference(trimmed);
+}
+
 function decodeFileUri(value: string): string | null {
   if (!/^file:/i.test(value)) return null;
   try {

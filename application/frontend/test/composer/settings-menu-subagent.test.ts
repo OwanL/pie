@@ -57,6 +57,47 @@ test('SubagentSection renders behavior and nesting controls without model bucket
   assert.doesNotMatch(html, /Max parallel tasks</);
 });
 
+test('SubagentSection distinguishes saved tree preference from pending worker-process acknowledgement', () => {
+  const html = renderToString(
+    h(SubagentBehaviorSection, {
+      prefs: prefsWith({ subagentMaxInflight: 8, subagentMaxInflightSource: 'saved-preference' }),
+      onSetPrefs: () => undefined,
+      availableModels: AVAILABLE_MODELS,
+      providerGateStats: {
+        enabled: true,
+        providers: [],
+        subagentConcurrency: {
+          scope: 'worker-process',
+          configured: { value: 6, source: 'environment-override' },
+          workerCount: 3,
+          pendingWorkers: 2,
+        },
+      },
+    }),
+  );
+
+  assert.match(html, /Preference: 8 · Saved preference/);
+  assert.match(html, /Runtime configured: 6 · Environment override/);
+  assert.match(html, /Applied: awaiting sync \(2 pending\)/);
+  assert.match(html, /Worker-process scope · 3 workers/);
+  assert.match(html, /not a cap across all sessions or processes/);
+  assert.match(html, /max="16"/);
+});
+
+test('SubagentSection reports unavailable runtime acknowledgement when metrics are absent', () => {
+  const html = renderToString(
+    h(SubagentBehaviorSection, {
+      prefs: prefsWith({ subagentMaxInflight: 8 }),
+      onSetPrefs: () => undefined,
+      availableModels: AVAILABLE_MODELS,
+    }),
+  );
+
+  assert.match(html, /Preference: 8 · Configured default/);
+  assert.match(html, /Runtime configured\/applied: unavailable/);
+  assert.match(html, /Worker-process scope · runtime status unavailable/);
+});
+
 test('SubagentSection renders the nested-bucket allowlist toggles reflecting prefs', () => {
   const html = renderToString(
     h(SubagentBehaviorSection, {

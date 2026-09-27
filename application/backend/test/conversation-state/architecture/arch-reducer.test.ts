@@ -1912,6 +1912,33 @@ test('reducer: SetPrefs with suppressCompletionNotifications=true clears unreadF
   }
 });
 
+test('reducer: subagent concurrency provenance survives unrelated writes and marks explicit values saved', () => {
+  const unrelated = reducer(initialArchState, {
+    kind: 'Command',
+    cmd: { kind: 'SetPrefs', corrId: 'c-unrelated-pref', prefs: { autoExpandReasoning: true } },
+  }).state.settings.prefs;
+  assert.equal(unrelated.subagentMaxInflight, 8);
+  assert.equal(unrelated.subagentMaxInflightSource, 'configured-default');
+
+  for (const value of [2, 8]) {
+    const explicit = reducer(initialArchState, {
+      kind: 'Command',
+      cmd: { kind: 'SetPrefs', corrId: `c-max-inflight-${value}`, prefs: { subagentMaxInflight: value } },
+    }).state.settings.prefs;
+    assert.equal(explicit.subagentMaxInflight, value);
+    assert.equal(explicit.subagentMaxInflightSource, 'saved-preference');
+  }
+
+  const restored = reducer(initialArchState, {
+    kind: 'Command',
+    cmd: {
+      kind: 'SetPrefs', corrId: 'c-max-inflight-restore',
+      prefs: { subagentMaxInflight: 8, subagentMaxInflightSource: 'configured-default' },
+    },
+  }).state.settings.prefs;
+  assert.equal(restored.subagentMaxInflightSource, 'configured-default');
+});
+
 test('reducer: SetPrefs normalizes malformed composer row counts before exposing prefs to the webview', () => {
   const result = reducer(initialArchState, {
     kind: 'Command',

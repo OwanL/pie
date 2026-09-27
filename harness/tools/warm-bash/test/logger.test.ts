@@ -11,8 +11,8 @@ const loggerUrl = pathToFileURL(path.resolve(__dirname, '../logger.ts')).href;
 async function load() {
   const m = await import(loggerUrl);
   return m as {
-    logAutoPruneRewrite: (sessionId: string, before: string, after: string) => void;
-    logSessionSummary: (sessionId: string, summary: Record<string, unknown>) => void;
+    logAutoPruneRewrite: (sessionId: string, before: string, after: string, rootSessionId?: string) => void;
+    logSessionSummary: (sessionId: string, summary: Record<string, unknown>, rootSessionId?: string) => void;
     flushLog: () => Promise<void>;
     setLogPathForTesting: (p: string | null) => void;
     setMaxLogBytesForTesting: (b: number | null) => void;
@@ -79,6 +79,21 @@ describe('warm-bash logger (side-channel analytics jsonl)', () => {
     assert.equal(summary!.fastPathEnabled, true);
     assert.equal(summary!.gnuGrep, true);
     assert.match(summary!.timestamp as string, /^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  test('child rewrite and shutdown rows retain root-session attribution', async () => {
+    const L = await load();
+    L.logAutoPruneRewrite('child-session', 'grep secret .', 'grep --exclude-dir=node_modules secret .', 'private-root');
+    L.logSessionSummary('child-session', {
+      fastPath: 1, warm: 2, fallback: 0, poolSize: 1, warmupFailures: 0,
+      autoPruneEnabled: true, fastPathEnabled: true, gnuGrep: true,
+    }, 'private-root');
+    await L.flushLog();
+
+    const childRows = (readLines(logFile) as Array<Record<string, unknown>>)
+      .filter((line) => line.sessionId === 'child-session');
+    assert.equal(childRows.length, 2);
+    assert.ok(childRows.every((line) => line.rootSessionId === 'private-root'));
   });
 
   test('writes are serialized — concurrent appends preserve order', async () => {

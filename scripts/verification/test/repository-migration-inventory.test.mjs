@@ -8,7 +8,8 @@
 //    file is either a record source or an explicitly declared current location
 //    (new files are reported, never exempted or self-mapped by this test);
 //  - each record source or one of its declared current locations exists; moved
-//    sources without an extant current location fail;
+//    sources without an extant current location fail; explicit deletion
+//    tombstones account for intentionally removed transitional locations;
 //  - target collisions are only allowed when documented in resolvedCollisions
 //    (fails on unintended collisions);
 //  - explicit `retain` records keep a single self-target (retain exception),
@@ -265,6 +266,60 @@ export function validateMigrationInventory(manifest, inventory) {
   }
 
   // --- coverage: unmapped inventory files -----------------------------------
+  const tombstones = manifest.tombstones ?? [];
+  if (!Array.isArray(tombstones)) {
+    add('tombstone-integrity', 'tombstones must be an array when present');
+  } else {
+    const seenTombstonePaths = new Set();
+    for (const tombstone of tombstones) {
+      if (!tombstone || typeof tombstone !== 'object' || Array.isArray(tombstone)) {
+        add('tombstone-integrity', `tombstone must be an object: ${JSON.stringify(tombstone)}`);
+        continue;
+      }
+      const { path: deletedPath, action, recordSource, owner, batch, verification, reason } = tombstone;
+      if (typeof deletedPath !== 'string' || deletedPath.length === 0) {
+        add('tombstone-integrity', `tombstone has missing/empty path: ${JSON.stringify(deletedPath)}`);
+        continue;
+      }
+      if (seenTombstonePaths.has(deletedPath)) {
+        add('tombstone-integrity', `duplicate tombstone path: ${deletedPath}`);
+      }
+      seenTombstonePaths.add(deletedPath);
+      if (action !== 'delete') {
+        add('tombstone-integrity', `tombstone ${deletedPath}: action must be delete`);
+      }
+      if (typeof recordSource !== 'string' || !recordSources.has(recordSource)) {
+        add('tombstone-integrity', `tombstone ${deletedPath}: recordSource has no manifest record: ${JSON.stringify(recordSource)}`);
+      } else if (
+        !inventorySet.has(recordSource)
+        && !(Array.isArray(currentLocations[recordSource]) && currentLocations[recordSource].some((location) => inventorySet.has(location)))
+      ) {
+        add('tombstone-integrity', `tombstone ${deletedPath}: associated source has no surviving source/current location: ${recordSource}`);
+      }
+      if (typeof owner !== 'string' || owner.length === 0) {
+        add('tombstone-integrity', `tombstone ${deletedPath}: owner must be named`);
+      }
+      if (typeof batch !== 'string' || !/^B[0-9]+(?:\/B[0-9]+)*$/u.test(batch)) {
+        add('tombstone-integrity', `tombstone ${deletedPath}: batch ${JSON.stringify(batch)} is not a migration batch id`);
+      }
+      if (typeof reason !== 'string' || reason.length === 0) {
+        add('tombstone-integrity', `tombstone ${deletedPath}: reason must be non-empty`);
+      }
+      if (!Array.isArray(verification) || verification.length === 0 || verification.some((item) => typeof item !== 'string' || item.length === 0)) {
+        add('tombstone-integrity', `tombstone ${deletedPath}: verification must be a non-empty array of non-empty strings`);
+      }
+      if (inventorySet.has(deletedPath)) {
+        add('tombstone-integrity', `tombstoned path is still present in the working-tree inventory: ${deletedPath}`);
+      }
+      if (recordSources.has(deletedPath) || currentLocationOwners.has(deletedPath)) {
+        add('tombstone-integrity', `tombstoned path is still declared as a source/current location: ${deletedPath}`);
+      }
+      if (isTopLevelProtected(deletedPath)) {
+        add('tombstone-integrity', `tombstoned path sits under a protected top-level tree: ${deletedPath}`);
+      }
+    }
+  }
+
   const unmappedFiles = [];
   for (const file of inventory.tracked) {
     if (!recordSources.has(file) && !currentLocationOwners.has(file)) {
@@ -478,6 +533,44 @@ test('synthetic: deleted record source is reported as stale', () => {
   });
   assert.equal(result.ok, false);
   assert.ok(result.problems.some((p) => p.check === 'stale-source' && p.detail.includes('extension/src/gone.ts')));
+});
+
+test('synthetic: deletion tombstones document absent transitional paths without hiding stale sources', () => {
+  const source = 'extension/src/old-barrel.ts';
+  const current = 'harness/feature.ts';
+  const deleted = 'application/backend/old-barrel.ts';
+  const manifest = syntheticManifest([
+    syntheticRecord({ source, targets: [current] }),
+  ]);
+  manifest.currentLocations = { [source]: [current] };
+  manifest.tombstones = [{
+    path: deleted,
+    action: 'delete',
+    recordSource: source,
+    owner: 'application.backend',
+    batch: 'B8',
+    verification: ['No live imports; canonical implementation remains at the mapped current location.'],
+    reason: 'Remove an unreferenced compatibility barrel after consolidation.',
+  }];
+
+  const valid = validateMigrationInventory(manifest, { tracked: [], untracked: [current] });
+  assert.equal(valid.ok, true, formatProblems(valid));
+
+  const stillPresent = validateMigrationInventory(manifest, {
+    tracked: [],
+    untracked: [current, deleted],
+  });
+  assert.ok(stillPresent.problems.some((problem) => problem.check === 'tombstone-integrity' && problem.detail.includes('still present')));
+
+  const orphaned = structuredClone(manifest);
+  orphaned.tombstones[0].recordSource = 'extension/src/missing.ts';
+  const orphanResult = validateMigrationInventory(orphaned, { tracked: [], untracked: [current] });
+  assert.ok(orphanResult.problems.some((problem) => problem.check === 'tombstone-integrity' && problem.detail.includes('no manifest record')));
+
+  const aliased = structuredClone(manifest);
+  aliased.currentLocations[source].push(deleted);
+  const aliasedResult = validateMigrationInventory(aliased, { tracked: [], untracked: [current] });
+  assert.ok(aliasedResult.problems.some((problem) => problem.check === 'tombstone-integrity' && problem.detail.includes('still declared')));
 });
 
 test('synthetic: explicit current location accounts for a moved source without suppressing unmapped files', () => {

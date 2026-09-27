@@ -22,7 +22,11 @@ Cua + NutJS was selected over Terminator `0.24.32` + NutJS. Both finalists passe
 - `run_sequence` — execute a serializable monotonic input sequence; accepts optional `screenshot`/`tree`/`state` for a trailing verification observation;
 - `close` — release input and close runtime state, optionally the exact application.
 
-Each durable pie session owns a lazy Node sidecar keyed by canonical session path. Native packages load only in that child. Parent and child communicate through bounded 1 MiB JSONL records; screenshots remain files and never cross the sidecar protocol as base64. The parent owns timeout, restart, cancellation, and emergency-release recovery.
+Each primary durable pie session owns a lazy Node sidecar keyed by canonical session path. In-memory subagent sessions use a distinct child runtime identity, with their own sidecar and retained artifact directory under the OS temporary directory; they never borrow the parent session's runtime or artifact path. Native packages load only in that child. Parent and child communicate through bounded 1 MiB JSONL records; screenshots remain files and never cross the sidecar protocol as base64. The parent owns timeout, restart, cancellation, and emergency-release recovery.
+
+Physical desktop access is globally exclusive across Pie agents and processes. The first valid `computer` call atomically creates an exclusive claim at `%TEMP%\\pie-computer-use\\desktop-owner.lock` (or `$TMPDIR/pie-computer-use/desktop-owner.lock`) and reports the human-readable owning session/child label to contenders. There is no explicit acquire tool, queue, takeover, PID-based stale recovery, or automatic deletion. Primary ownership ends only at `agent_settled`, after active computer calls drain and held input release is confirmed; child ownership ends during awaited child-runtime cleanup. Session/process shutdown follows the same drain-and-confirm rule. `close` does not release global ownership early. Failed cleanup keeps the claim and returns/logs an actionable blocked error.
+
+A crashed controller deliberately leaves an orphan claim and blocks later use. Manual recovery is permitted only after verifying that the old controller process is stopped and all keyboard/pointer input it may have held is released. Then remove the exact claim file above; never delete it solely because its PID is absent or old.
 
 Target safety is fail-closed:
 
@@ -102,7 +106,7 @@ Live desktop tests are excluded from the deterministic suite and require both `P
 
 - Windows ordinary, non-elevated desktop only; protected/elevated desktops are unsupported.
 - Window screenshots require exact foreground visibility and a region entirely on NutJS's main display. They capture the composited visible region, so overlays or other content drawn over the target can appear; pixels are not guaranteed to be HWND-owned.
-- Desktop sessions intentionally act on the current global desktop rather than a target HWND. They require a fresh revision and stable observed foreground for every physical action; prefer exact window sessions for safe application work.
+- Desktop sessions intentionally act on the current global desktop rather than a target HWND. They require a fresh revision and stable observed foreground for every physical action; prefer exact window sessions for safe application work. Regardless of target type, only one Pie agent/process may own physical computer use at a time, through `agent_settled` or confirmed cleanup.
 - Godot/custom surfaces may expose no useful UIA tree; pixel grounding remains available when a screenshot was requested.
 - Mixed-DPI movement between multiple monitors is not yet hardware-verified; window capture outside the main display is unsupported.
 - Visible applications can reject or delay physical input while the workstation is locked.

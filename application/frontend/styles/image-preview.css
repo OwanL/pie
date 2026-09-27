@@ -1,0 +1,29 @@
+/* Renderer-local image-path hover preview; it overlays the transcript and
+   never participates in layout or host snapshots. */
+.image-path-preview {
+  position: fixed;
+  z-index: 340;
+  display: flex;
+  max-width: min(288px, calc(100vw - 16px));
+  max-height: min(244px, calc(100vh - 16px));
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  overflow: hidden;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--panel-radius-md);
+  background: var(--panel-overlay-surface);
+  box-shadow: var(--panel-shadow-overlay);
+  color: var(--panel-foreground);
+  font-size: 11px;
+  line-height: 1.45;
+  pointer-events: auto;
+  user-select: none;
+}
+
+.image-path-preview img {
+  display: block;
+  max-width: min(272px, calc(100vw - 32px));
+  max-height: min(228px, calc(100vh - 32px));
+  object-fit: contain;
+}

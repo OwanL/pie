@@ -1,8 +1,5 @@
 /**
- * Tests for the two v1 subagent-scoping features:
- *  - Skills inherit the parent (main) turn's pruned set (direction C).
- *  - Tools: the user-configured drop-tools list is subtracted from every
- *    subagent's effective tool set.
+ * Tests for independent child skill selection and child tool allowlist scoping.
  *
  * Self-contained: defines a minimal capturing SDK mock so we can assert what
  * `tools` and `skillsOverride` were passed to createSession / createResourceLoader.
@@ -13,7 +10,6 @@ import assert from "node:assert/strict";
 import type { Model, ModelRegistry } from "@mariozechner/pi-coding-agent";
 import { runSingleAgent, subagentRuntime } from "../runner.js";
 import type { AgentConfig } from "../../../agent-instructions/agent-discovery/agents.js";
-import { recordKeptSkills, clearKeptSkills, readKeptSkills } from "../../../tool-and-skill-selection/state/pruned-skills.js";
 
 interface CapturingState {
 	createSessionArgs: Array<Record<string, unknown>>;
@@ -189,30 +185,19 @@ test("runSingleAgent preserves an explicit zero-tool agent allowlist", async () 
 	}
 });
 
-test("runSingleAgent passes a skillsOverride that filters to the parent's kept-skill set", async () => {
-	const sessionId = "test-parent-session-for-skills-inherit";
-	recordKeptSkills(sessionId, ["librarian", "tdd"]);
-	try {
-		const { sdk, state } = createCapturingSdk();
-		await runSingleAgent(
-			process.cwd(), [makeAgent()], "worker", "do work", undefined, undefined, undefined, undefined,
-			details, makeModelRegistry(), undefined, selection,
-			undefined, undefined, undefined, sessionId, undefined,
-			{ sdk: sdk as any },
-		);
-		assert.equal(state.createResourceLoaderArgs.length, 1);
-		const override = state.createResourceLoaderArgs[0].skillsOverride as
-			| ((base: { skills: Array<{ name: string }>; diagnostics: unknown[] }) => { skills: Array<{ name: string }>; diagnostics: unknown[] })
-			| undefined;
-		assert.equal(typeof override, "function");
-		const filtered = override!({ skills: [{ name: "librarian" }, { name: "tdd" }, { name: "diagnose" }], diagnostics: [] });
-		assert.deepEqual(filtered.skills.map((s) => s.name), ["librarian", "tdd"]);
-	} finally {
-		clearKeptSkills(sessionId);
-	}
+test("runSingleAgent discovers skills independently of the parent turn's selection", async () => {
+	const { sdk, state } = createCapturingSdk();
+	await runSingleAgent(
+		process.cwd(), [makeAgent()], "worker", "do work", undefined, undefined, undefined, undefined,
+		details, makeModelRegistry(), undefined, selection,
+		undefined, undefined, undefined, "parent-with-a-pruned-skill-set", undefined,
+		{ sdk },
+	);
+	assert.equal(state.createResourceLoaderArgs.length, 1);
+	assert.equal(state.createResourceLoaderArgs[0].skillsOverride, undefined);
 });
 
-test("depth-2+ run without a parent session record does not inherit async-local kept skills", async () => {
+test("nested runSingleAgent also discovers skills independently", async () => {
 	const { sdk, state } = createCapturingSdk();
 	await subagentRuntime.run(
 		{ depth: 2, trail: ["worker", "worker"], budget: { sessions: 2 } },
@@ -220,66 +205,8 @@ test("depth-2+ run without a parent session record does not inherit async-local 
 			process.cwd(), [makeAgent()], "worker", "nested work", undefined, undefined, undefined, undefined,
 			details, makeModelRegistry(), undefined, selection,
 			undefined, undefined, undefined, undefined, undefined,
-			{ sdk: sdk as any },
-		),
-	);
-	assert.equal(state.createResourceLoaderArgs[0].skillsOverride, undefined);
-});
-
-// --- pruned-skills store (harness/tool-and-skill-selection/state/pruned-skills.ts) ---
-
-test("recordKeptSkills / readKeptSkills round-trips a kept set and clearKeptSkills removes it", () => {
-	const id = "store-unit-session";
-	try {
-		recordKeptSkills(id, ["librarian", "tdd"]);
-		assert.deepEqual(readKeptSkills(id), ["librarian", "tdd"]);
-		clearKeptSkills(id);
-		assert.equal(readKeptSkills(id), undefined);
-	} finally {
-		clearKeptSkills(id);
-	}
-});
-
-test("recordKeptSkills stores the keep-all sentinel and readKeptSkills returns it", () => {
-	const id = "store-unit-keepall";
-	try {
-		recordKeptSkills(id, "keep-all");
-		assert.equal(readKeptSkills(id), "keep-all");
-	} finally {
-		clearKeptSkills(id);
-	}
-});
-
-test("readKeptSkills returns undefined for an unknown session", () => {
-	assert.equal(readKeptSkills("never-recorded-session"), undefined);
-});
-
-test("runSingleAgent passes no skillsOverride when the parent kept-set is empty (keep-all safeguard)", async () => {
-	const sessionId = "test-parent-session-empty-kept";
-	recordKeptSkills(sessionId, []);
-	try {
-		const { sdk, state } = createCapturingSdk();
-		await runSingleAgent(
-			process.cwd(), [makeAgent()], "worker", "do work", undefined, undefined, undefined, undefined,
-			details, makeModelRegistry(), undefined, selection,
-			undefined, undefined, undefined, sessionId, undefined,
 			{ sdk },
-		);
-		// An empty kept set must NOT strip all skills — it falls back to no filter
-		// (keep-all), matching the pruner's own keep-all safeguard.
-		assert.equal(state.createResourceLoaderArgs[0].skillsOverride, undefined);
-	} finally {
-		clearKeptSkills(sessionId);
-	}
-});
-
-test("runSingleAgent passes no skillsOverride when no parent kept-set is recorded (today's behavior)", async () => {
-	const { sdk, state } = createCapturingSdk();
-	await runSingleAgent(
-		process.cwd(), [makeAgent()], "worker", "do work", undefined, undefined, undefined, undefined,
-		details, makeModelRegistry(), undefined, selection,
-		undefined, undefined, undefined, undefined, undefined,
-		{ sdk },
+		),
 	);
 	assert.equal(state.createResourceLoaderArgs[0].skillsOverride, undefined);
 });

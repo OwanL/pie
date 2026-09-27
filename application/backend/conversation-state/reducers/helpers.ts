@@ -320,6 +320,8 @@ export function evictSession(
   const { [sp]: _mr, ...remainingModelRevisions } = state.settings.modelHydrationRevisionBySession;
   const { [sp]: _cu, ...remainingContext } = state.settings.contextUsageBySession;
   const { [sp]: _ice, ...remainingInitialContextEstimates } = state.settings.initialContextEstimateBySession;
+  const { [sp]: _mcpOverrides, ...remainingMcpSessionOverrides } = state.settings.mcpSessionOverridesBySession;
+  const { [sp]: _mcpPendingApply, ...remainingMcpPendingApply } = state.settings.mcpPendingApplyBySession;
   const { [sp]: _eui, ...remainingExtUI } = state.settings.pendingExtensionUIRequestsBySession;
   const { [sp]: _ci, ...remainingComposer } = state.composer.pendingComposerInputsBySession;
   const { [sp]: _rs, ...remainingRunSummaries } = state.composer.activeRunSummaryBySession;
@@ -471,6 +473,8 @@ export function evictSession(
         modelHydrationRevisionBySession: remainingModelRevisions,
         contextUsageBySession: remainingContext,
         initialContextEstimateBySession: remainingInitialContextEstimates,
+        mcpSessionOverridesBySession: remainingMcpSessionOverrides,
+        mcpPendingApplyBySession: remainingMcpPendingApply,
         pendingExtensionUIRequestsBySession: remainingExtUI,
       },
       composer: {

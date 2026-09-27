@@ -55,7 +55,7 @@
  * { "tool-result-pruner": false }, the same global toggle skill-pruner honors.
  */
 
-import type { ExtensionAPI, SessionShutdownEvent, ToolResultEvent, ToolResultEventResult } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, SessionShutdownEvent, ToolExecutionUpdateEvent, ToolResultEvent, ToolResultEventResult } from "@earendil-works/pi-coding-agent";
 import { randomBytes } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -65,12 +65,49 @@ import { recordPruning } from "../../harness/tools/result-processing/logger.js";
 import { runPipeline } from "../../harness/tools/result-processing/pipeline.js";
 import { reapPrunedRawStashes, reapSessionStashes } from "../../harness/tools/result-processing/reaper.js";
 import { countTokens } from "../../lib/tokenization.js";
+import { getRootSessionId, rootSessionAttribution } from "../../lib/session-attribution.js";
+import {
+  cleanupSessionTempOutputs,
+  createSessionTempOutput,
+  isSdkSessionTempOutputPath,
+  trackSessionTempOutput,
+} from "../../lib/temporary-files/session-temp-output-lifecycle.js";
+
+function getSessionManager(ctx: unknown): object | undefined {
+  const ctxObj = ctx as Record<string, unknown> | undefined;
+  const manager = ctxObj?.sessionManager;
+  return manager !== null && (typeof manager === "object" || typeof manager === "function")
+    ? manager as object
+    : undefined;
+}
 
 function getSessionId(ctx: unknown): string {
-  const ctxObj = ctx as Record<string, unknown> | undefined;
-  const sessionManager = ctxObj?.sessionManager as { getSessionId?: () => string } | undefined;
+  const sessionManager = getSessionManager(ctx) as { getSessionId?: () => string } | undefined;
   const id = sessionManager?.getSessionId?.();
   return typeof id === "string" && id.length > 0 ? id : "unknown";
+}
+
+async function trackSdkOutput(ctx: unknown, toolName: string, result: unknown): Promise<void> {
+  const details = (result as { details?: unknown } | null)?.details;
+  const fullOutputPath = (details as { fullOutputPath?: unknown } | null)?.fullOutputPath;
+  if (typeof fullOutputPath !== "string") return;
+  const sessionId = getSessionId(ctx);
+  const owner = getSessionManager(ctx);
+  const isOwnedSdkPath = toolName === "bash" && isSdkSessionTempOutputPath(fullOutputPath);
+  if (!owner) {
+    if (isOwnedSdkPath) throw new Error("Cannot own an SDK temporary output without its session manager.");
+    return;
+  }
+  const tracked = await trackSessionTempOutput(
+    sessionId,
+    toolName,
+    fullOutputPath,
+    owner,
+    getRootSessionId(ctx),
+  );
+  if (!tracked && isOwnedSdkPath) {
+    throw new Error("The SDK exposed an unowned bash temporary output; refusing to continue private cleanup without its exact owner.");
+  }
 }
 
 // --- Recall stash (§7.3) --------------------------------------------------
@@ -80,17 +117,12 @@ function getSessionId(ctx: unknown): string {
 // agent reads it back with the existing `read` tool (the pipeline skips `read`,
 // so recall returns the pre-pruning text verbatim).
 //
-// Session-scoped cleanup (P1-7 follow-up): the session id is embedded in the
-// filename at write time (`pruned-raw-<sessionId>-<hex>.txt`) so that on
-// `session_shutdown` we can delete exactly this session's stashes via
-// reapSessionStashes() (matched by prefix) without ever touching another live
-// session's recall raw. The `session_shutdown` event carries no session id, but
-// ctx.sessionManager is bound to the shutting-down session's own runtime, so
-// getSessionId(ctx) returns that session's id. When the id is "unknown"/
-// unsafe, reapSessionStashes is a no-op and the load-time age/size reaper
-// remains the safety net — never an early eviction of an unresolved session's
-// raw. The load-time reaper (reapPrunedRawStashes, run on extension load) also
-// mops up pre-namespace stashes from older builds and crashed sessions.
+// Session-scoped cleanup: the session id is embedded in each stash filename,
+// and the temp-output lifecycle records the exact path under its SDK manager
+// owner before writing. Private close additionally consumes durable sidecar
+// manifests after worker retirement, so a swallowed SDK hook is not treated as
+// proof of purge. Missing/unsafe session identity blocks lossy stash creation;
+// the age/size reaper remains a fallback for legacy and crashed-process files.
 let stashDirOverride: string | null = null;
 
 /** Test seam: redirect the recall stash to a specific dir (null = os.tmpdir()). */
@@ -110,9 +142,25 @@ function stashPath(sessionId: string): { id: string; rawPath: string } {
 /** Write the pre-pruning text to a temp file for recall. Best-effort: the
  *  caller (the tool_result handler) treats a throw as "stash failed → fall
  *  back to lossless" (§7.3 hard gate). */
-async function writeStash(rawPath: string, text: string): Promise<void> {
-  await mkdir(dirname(rawPath), { recursive: true });
-  await writeFile(rawPath, text, "utf-8");
+async function writeStash(
+  rawPath: string,
+  text: string,
+  sessionId: string,
+  rootSessionId: string | undefined,
+  owner: object,
+): Promise<void> {
+  const created = await createSessionTempOutput(
+    sessionId,
+    rootSessionId,
+    owner,
+    rawPath,
+    async () => {
+      await mkdir(dirname(rawPath), { recursive: true });
+      await writeFile(rawPath, text, "utf-8");
+    },
+    { tmpDir: stashDir() },
+  );
+  if (!created) throw new Error("The session closed before its pruning recall stash could be written.");
 }
 
 /** Build the fidelity marker the agent sees: `[pruned: <rule> (<desc>); ... — raw: <path>]`. */
@@ -140,21 +188,29 @@ export default function (pi: ExtensionAPI) {
     // Best-effort cleanup — never surface a reaper failure.
   });
 
-  // Session-scoped recall-stash cleanup (P1-7 follow-up): on `session_shutdown`
-  // delete the stashes this session wrote. Stashes are namespaced by session id
-  // at write time (pruned-raw-<sessionId>-<hex>.txt), so reapSessionStashes
-  // only ever touches this session's files — a live session with a different
-  // id is never affected. The `session_shutdown` event carries no id, but
-  // ctx.sessionManager is bound to the shutting-down session's own runtime, so
-  // getSessionId(ctx) returns that session's id. When the id is "unknown"/
-  // unsafe, reapSessionStashes is a no-op (load-time reaper remains the safety
-  // net). Best-effort, never-throwing — the .catch keeps a reap failure from breaking teardown.
+  // Session-scoped cleanup: SDK and pruner outputs are owned by the session
+  // manager and removed by exact path. Unlike the age/size reaper, a purge
+  // failure is surfaced so the worker can retain its manifest for coordinator
+  // retry after retirement. Legacy stash reaping remains best-effort.
   pi.on("session_shutdown", async (_event: SessionShutdownEvent, ctx: unknown): Promise<void> => {
-    await reapSessionStashes(getSessionId(ctx), { tmpDir: stashDir() }).catch(() => {
-      // Best-effort cleanup — never surface a failure during teardown.
-    });
+    const sessionId = getSessionId(ctx);
+    const owner = getSessionManager(ctx);
+    if (!owner) throw new Error("Cannot close temporary output ownership without its session manager.");
+    await Promise.all([
+      cleanupSessionTempOutputs(sessionId, owner, getRootSessionId(ctx)),
+      reapSessionStashes(sessionId, { tmpDir: stashDir() }).catch(() => {
+        // Best-effort cleanup — never surface a failure during teardown.
+      }),
+    ]);
+  });
+  // OutputAccumulator publishes its temp path in partial tool results while a
+  // tool is still running. Record it before completion so session teardown can
+  // reap truncated output even if the final tool_result never arrives.
+  pi.on("tool_execution_update", async (event: ToolExecutionUpdateEvent, ctx: unknown): Promise<void> => {
+    await trackSdkOutput(ctx, event.toolName, event.partialResult);
   });
   pi.on("tool_result", async (event: ToolResultEvent, ctx: unknown): Promise<ToolResultEventResult | undefined> => {
+    await trackSdkOutput(ctx, event.toolName, event);
     if (isExtensionDisabledByToggle()) return undefined;
     const config = loadConfig();
     const result = runPipeline(event, config);
@@ -185,7 +241,9 @@ export default function (pi: ExtensionAPI) {
       const netSaved = countTokens(result.meta.losslessText) - countTokens(candidate);
       if (netSaved >= LOSSY_MIN_NET_SAVED) {
         try {
-          await writeStash(rawPath, result.meta.beforeText);
+          const owner = getSessionManager(ctx);
+          if (!owner) throw new Error("Cannot create a pruning recall stash without its session manager.");
+          await writeStash(rawPath, result.meta.beforeText, sessionId, getRootSessionId(ctx), owner);
           finalText = candidate;
           details.pruning = { id, rawPath, rules: result.meta.recallRules };
         } catch {
@@ -214,9 +272,11 @@ export default function (pi: ExtensionAPI) {
     // when pruning actually changed content. Best-effort — recordPruning
     // swallows write failures so telemetry never breaks the pruning path.
     try {
+      const sessionId = getSessionId(ctx);
       recordPruning({
         event: "tool_result_pruned",
-        sessionId: getSessionId(ctx),
+        sessionId,
+        ...rootSessionAttribution(ctx, sessionId),
         toolName: event.toolName,
         rules: effectiveRules,
         beforeTokens,

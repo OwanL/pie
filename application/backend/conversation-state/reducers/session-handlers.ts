@@ -17,6 +17,7 @@ import {
   upsertSessionSummary,
 } from './helpers.js';
 import type { ChatMessage, ComposerInput, SessionSummary } from '../../../lib/protocol/index.js';
+import { AGENT_MESSAGE_CUSTOM_TYPE } from '../../../lib/protocol/messages.js';
 import { LIVE_PIPELINE_LIMITS } from '../../../../harness/agent-processes/lib/rpc/live-pipeline.js';
 import { NEW_SESSION_NAME } from '../../../../harness/session-storage/metadata/session-name.js';
 import { reorderOpenTabsPinnedFirst, replacePathInPinnedTabGroups, reconcilePinnedGroups } from '../../../frontend/session-tabs/tab-behavior.js';
@@ -207,6 +208,11 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
   // made the agent reply to nothing). A bare running marker is insufficient:
   // it may itself be the orphan an idle authoritative reopen must repair. See
   // STATE_CONTRACT "Snapshot Recovery" / "Optimistic Reconciliation".
+  const hostOwnsOptimisticAgentMessage = localTranscript.some((message) =>
+    message.role === 'user'
+      && message.customType === AGENT_MESSAGE_CUSTOM_TYPE
+      && message.id.startsWith('local:'),
+  );
   const hostOwnsOptimisticTurn = Object.values(state.pending.ops).some(
     (operation) => operation.sessionPath === sessionPath && !operation.queued,
   ) || Object.values(state.pending.promoted).some(
@@ -245,7 +251,7 @@ export function handleSessionOpened(state: ArchState, event: Extract<Event, { ki
         aliases: [] as Array<{ aliasId: string; canonicalId: string }>,
       }
     : resolveSessionOpenedTranscript({
-        busy: payload.busy || hostOwnsOptimisticTurn,
+        busy: payload.busy || hostOwnsOptimisticTurn || hostOwnsOptimisticAgentMessage,
         incomingTranscript: payload.transcript,
         incomingTranscriptWindow: payload.transcriptWindow,
         localTranscript,

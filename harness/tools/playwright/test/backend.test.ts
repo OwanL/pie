@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
@@ -502,6 +503,53 @@ test('run_code rejects oversized result artifacts instead of saving a capped pre
     const files = await readdir(artifactDir, { recursive: true });
     assert.equal(files.some((name) => String(name).endsWith('.json')), false);
   }, { maxRunCodeResultBytes: 4096 });
+});
+
+test('browser close and Windows tree-kill failures remain unresolved after the browser process exits', async () => {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  assert.ok(platform);
+  Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+  let taskkillCalls = 0;
+  const backend = new PlaywrightBackend({
+    closeGraceMs: 5,
+    spawnSync: () => { taskkillCalls += 1; return { status: 1, signal: null }; },
+  });
+  const processHandle = new EventEmitter() as EventEmitter & {
+    pid: number; exitCode: number | null; signalCode: NodeJS.Signals | null; kill(signal?: string): boolean;
+  };
+  processHandle.pid = 7123;
+  processHandle.exitCode = null;
+  processHandle.signalCode = null;
+  processHandle.kill = () => {
+    queueMicrotask(() => {
+      processHandle.signalCode = 'SIGKILL';
+      processHandle.emit('exit', null, 'SIGKILL');
+      processHandle.emit('close', null, 'SIGKILL');
+    });
+    return true;
+  };
+  const session = backend.makeSession('cleanup-failure', { artifactDir: tmpdir() });
+  session.browser = { close: async () => { throw new Error('injected browser close failure'); } };
+  session.browserServer = {
+    close: async () => { throw new Error('injected browser server close failure'); },
+    process: () => processHandle,
+  };
+  backend.sessions.set(session.id, session);
+  try {
+    await assert.rejects(
+      () => backend.closeSession(session),
+      (error: unknown) => errorCode(error, 'RUNTIME_CLEANUP_UNRESOLVED')
+        && /browser close failure/.test((error as Error).message)
+        && /tree termination failed/i.test((error as Error).message),
+    );
+    assert.equal(backend.closingSessions.has(session), true, 'unresolved browser ownership remains retained');
+    assert.equal(session.browserServer !== undefined, true, 'the process handle remains available for safe retry');
+    await assert.rejects(() => backend.closeSession(session), (error: unknown) => errorCode(error, 'RUNTIME_CLEANUP_UNRESOLVED'));
+    await assert.rejects(() => backend.forceKillAll(), (error: unknown) => errorCode(error, 'RUNTIME_CLEANUP_UNRESOLVED'));
+    assert.equal(taskkillCalls, 1, 'an exited browser PID is never reused for a later taskkill attempt');
+  } finally {
+    Object.defineProperty(process, 'platform', platform);
+  }
 });
 
 test('telemetry fitting counts omitted entries and remains below the sidecar envelope cap', () => {

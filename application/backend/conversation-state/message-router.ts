@@ -1,6 +1,19 @@
 import * as crypto from 'node:crypto';
 
-import type { WebviewToHostMessage, SessionSummary, ChatPrefs, DetailResult, LazyDetailRef, PruningSettings, SessionTitlesSettings, ToolResultPruningSettings, PruningMode, RendererCommandContext } from '../../lib/protocol/index.js';
+import type {
+  WebviewToHostMessage,
+  SessionSummary,
+  ChatPrefs,
+  DetailResult,
+  ImagePreviewData,
+  LazyDetailRef,
+  PruningSettings,
+  SessionTitlesSettings,
+  ToolResultPruningSettings,
+  PruningMode,
+  RendererCommandContext,
+} from '../../lib/protocol/index.js';
+import { isBoundedImagePreviewData } from '../../lib/protocol/image-preview.js';
 import type { Event } from './events';
 import type { ArchState } from './reducer';
 import { bootLog } from '../../../lib/structured-logging/pie-logger';
@@ -21,6 +34,7 @@ export interface SidebarProviderLike {
   /** Renderer-scoped imperative (browser server plan §4.4): lazy-detail
    *  responses answer the INITIATING renderer, not the sidebar. */
   postImperativeToRenderer?(rendererId: string, msg: any): void;
+  isRendererOwnerCurrent?(rendererId: string, viewGeneration: number, rendererGeneration: number): boolean;
 }
 
 /** Narrow host capabilities used by side-effect-only router actions. */
@@ -40,6 +54,12 @@ export interface MessageRouterPlatform {
    *  listener. Hosts whose only renderer surface is the browser server must
    *  reject rather than stop the sole UI. */
   setBrowserServerEnabled(enabled: boolean): Promise<void>;
+  /** Read a bounded display-safe image preview through the host file adapter. */
+  previewImageFile?(request: {
+    path: string;
+    reference?: string;
+    workingDirectory?: string;
+  }): Promise<ImagePreviewData | undefined>;
 }
 
 const DEFAULT_PLATFORM: MessageRouterPlatform = {
@@ -85,6 +105,7 @@ const SILENT_ROUTE_FAILURE_TYPES: ReadonlySet<WebviewToHostMessage['type']> = ne
   'ready',
   'refreshState',
   'requestSnapshot',
+  'requestImagePreview',
   'stateReceived',
   'appCommitted',
   'transcriptCommitted',
@@ -105,6 +126,7 @@ const SILENT_ROUTE_FAILURE_TYPES: ReadonlySet<WebviewToHostMessage['type']> = ne
  */
 export class MessageRouter {
   private readonly recentCloseInteractionIds = new Set<string>();
+  private readonly imagePreviewRequestsByRenderer = new Map<string, number>();
   private readonly closeInteractionOrder: string[] = [];
 
   constructor(
@@ -208,6 +230,12 @@ export class MessageRouter {
 
       case 'requestDetail':
         return await this.onRequestDetail(msg as Extract<WebviewToHostMessage, { type: 'requestDetail' }>, context);
+
+      case 'requestImagePreview':
+        return await this.onRequestImagePreview(
+          msg as Extract<WebviewToHostMessage, { type: 'requestImagePreview' }>,
+          context,
+        );
 
       case 'detail.subscribe':
         return this.onDetailSubscribe(msg as Extract<WebviewToHostMessage, { type: 'detail.subscribe' }>, context);
@@ -700,7 +728,13 @@ export class MessageRouter {
     const corrId = crypto.randomUUID();
     this.dispatchEvent({
       kind: 'Command',
-      cmd: { kind: 'OpenFile', corrId, path: msg.path },
+      cmd: {
+        kind: 'OpenFile',
+        corrId,
+        path: msg.path,
+        ...(msg.reference !== undefined ? { reference: msg.reference } : {}),
+        ...(msg.workingDirectory !== undefined ? { workingDirectory: msg.workingDirectory } : {}),
+      },
     });
   }
 
@@ -784,6 +818,80 @@ export class MessageRouter {
     });
     this.dispatchEvent({ kind: 'Command', cmd: { kind: 'SetEditingMessage', corrId: crypto.randomUUID(), sessionPath: msg.sessionPath, messageId: null } });
     this.sidebarProvider.postState();
+  }
+
+  private async onRequestImagePreview(
+    msg: Extract<WebviewToHostMessage, { type: 'requestImagePreview' }>,
+    context?: RendererCommandContext,
+  ): Promise<void> {
+    const sessionPath = msg.sessionPath;
+    const initialState = this.getArchState();
+    if (!sessionPath || initialState.sessions.activeSessionPath !== sessionPath
+      || !initialState.sessions.openTabPaths.includes(sessionPath)) return;
+
+    const viewGeneration = msg.viewGeneration;
+    if (!context?.rendererId || viewGeneration === undefined
+      || !this.sidebarProvider.isRendererOwnerCurrent?.(
+        context.rendererId,
+        viewGeneration,
+        context.rendererGeneration,
+      )) return;
+
+    const rendererKey = context.rendererId;
+    const inFlight = this.imagePreviewRequestsByRenderer.get(rendererKey) ?? 0;
+    if (inFlight >= 2) {
+      this.postImagePreviewResult(msg, sessionPath, viewGeneration, context);
+      return;
+    }
+    this.imagePreviewRequestsByRenderer.set(rendererKey, inFlight + 1);
+
+    let data: ImagePreviewData | undefined;
+    try {
+      const candidate = await this.platform.previewImageFile?.({
+        path: msg.path,
+        ...(msg.reference !== undefined ? { reference: msg.reference } : {}),
+        ...(msg.workingDirectory !== undefined ? { workingDirectory: msg.workingDirectory } : {}),
+      });
+      if (isBoundedImagePreviewData(candidate)) data = candidate;
+    } catch {
+      // Previews are opportunistic. Missing, unreadable, or failed files stay
+      // quiet and never become a picker, notice, or notification.
+    } finally {
+      const remaining = (this.imagePreviewRequestsByRenderer.get(rendererKey) ?? 1) - 1;
+      if (remaining > 0) this.imagePreviewRequestsByRenderer.set(rendererKey, remaining);
+      else this.imagePreviewRequestsByRenderer.delete(rendererKey);
+    }
+
+    this.postImagePreviewResult(msg, sessionPath, viewGeneration, context, data);
+  }
+
+  private postImagePreviewResult(
+    msg: Extract<WebviewToHostMessage, { type: 'requestImagePreview' }>,
+    sessionPath: string,
+    viewGeneration: number,
+    context: RendererCommandContext,
+    data?: ImagePreviewData,
+  ): void {
+    const currentState = this.getArchState();
+    if (currentState.sessions.activeSessionPath !== sessionPath
+      || !currentState.sessions.openTabPaths.includes(sessionPath)) return;
+    if (!this.sidebarProvider.isRendererOwnerCurrent?.(
+      context.rendererId,
+      viewGeneration,
+      context.rendererGeneration,
+    )) return;
+
+    const result = {
+      type: 'imagePreviewResult' as const,
+      requestId: msg.requestId,
+      sessionPath,
+      viewGeneration,
+      status: data ? 'ready' as const : 'unavailable' as const,
+      ...(data ? { data } : {}),
+    };
+    // A renderer-scoped result must never fall back to a broadcast: a hover
+    // in one browser/sidebar surface owns only its own ephemeral request.
+    this.sidebarProvider.postImperativeToRenderer?.(context.rendererId, result);
   }
 
   private async onRequestDetail(

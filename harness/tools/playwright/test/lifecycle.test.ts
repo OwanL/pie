@@ -159,7 +159,7 @@ test('backend forced browser-close fallback terminates the full browser process 
     backend.sessions.set(session.id, session);
     const closing = backend.closeSession(session);
     await waitForState(() => backend.closingSessions.has(session));
-    backend.forceKillAll();
+    await backend.forceKillAll();
     await waitForExit(owner.pid!);
     await waitForExit(childPid);
     await closing;

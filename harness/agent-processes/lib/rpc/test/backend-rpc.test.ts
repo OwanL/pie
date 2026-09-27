@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { validateDetailFetch, validateDetailSubscribe, validateDetailUnsubscribe, validateLoadTranscriptPage, validateMessageSend, validateRuntimePrefsSet, validateSessionCreate, validateSessionDuplicate, validateSessionOpen, validateSettingsSet } from '../backend-rpc.js';
 import { THINKING_LEVELS } from '../../../../model-providers/catalog/thinking-level.js';
+import { DEFAULT_SUBAGENT_MAX_INFLIGHT } from '../../../../../lib/concurrency-config.js';
 
 test('validateMessageSend requires an explicit sessionPath', () => {
   assert.throws(
@@ -303,6 +304,72 @@ test('validateRuntimePrefsSet accepts provider and extension toggles', () => {
 
 test('validateRuntimePrefsSet defaults missing toggle maps to empty', () => {
   assert.deepEqual(validateRuntimePrefsSet({}), { providerToggles: {}, extensionToggles: {}, autonomousMode: undefined, mcpEnabled: undefined, subagentAlwaysParentModel: undefined, subagentRouteAroundSaturatedProviders: undefined, subagentFallbackOnProviderFailure: undefined, subagentMaxDepth: undefined, subagentMaxTreeSessions: undefined, subagentMaxInflight: undefined, bashWarmPoolSize: undefined, bashFastPath: undefined, bashShellPath: undefined, bashWarmupTimeoutMs: undefined, bashDefaultTimeout: undefined, subagentBuckets: undefined, subagentNestedAllowedBuckets: undefined, subagentBucketCanSpawn: undefined, subagentDropTools: undefined, providerConcurrency: undefined });
+});
+
+test('validateRuntimePrefsSet accepts paired subagent concurrency provenance and enforces its bounds', () => {
+  assert.deepEqual(
+    validateRuntimePrefsSet({ subagentMaxInflight: DEFAULT_SUBAGENT_MAX_INFLIGHT, subagentMaxInflightSource: 'saved-preference' }),
+    {
+      providerToggles: {},
+      extensionToggles: {},
+      autonomousMode: undefined,
+      mcpEnabled: undefined,
+      subagentAlwaysParentModel: undefined,
+      subagentRouteAroundSaturatedProviders: undefined,
+      subagentFallbackOnProviderFailure: undefined,
+      subagentMaxDepth: undefined,
+      subagentMaxTreeSessions: undefined,
+      subagentMaxInflight: DEFAULT_SUBAGENT_MAX_INFLIGHT,
+      subagentMaxInflightSource: 'saved-preference',
+      bashWarmPoolSize: undefined,
+      bashFastPath: undefined,
+      bashShellPath: undefined,
+      bashWarmupTimeoutMs: undefined,
+      bashDefaultTimeout: undefined,
+      subagentBuckets: undefined,
+      subagentNestedAllowedBuckets: undefined,
+      subagentBucketCanSpawn: undefined,
+      subagentDropTools: undefined,
+      providerConcurrency: undefined,
+    },
+  );
+  assert.equal(
+    validateRuntimePrefsSet({
+      subagentMaxInflight: DEFAULT_SUBAGENT_MAX_INFLIGHT,
+      subagentMaxInflightSource: 'configured-default',
+    }).subagentMaxInflightSource,
+    'configured-default',
+  );
+  assert.deepEqual(
+    validateRuntimePrefsSet({ subagentMaxInflight: 2 }),
+    {
+      ...validateRuntimePrefsSet({}),
+      subagentMaxInflight: 2,
+    },
+    'numeric limits without provenance remain compatible',
+  );
+  assert.equal(
+    validateRuntimePrefsSet({ subagentMaxInflight: 2, subagentMaxInflightSource: 'saved-preference' }).subagentMaxInflight,
+    2,
+    'saved numeric values remain distinct from the configured default',
+  );
+  for (const source of ['configured-default', 'saved-preference']) {
+    assert.throws(
+      () => validateRuntimePrefsSet({ subagentMaxInflightSource: source }),
+      /subagentMaxInflightSource requires subagentMaxInflight/,
+    );
+  }
+  assert.throws(
+    () => validateRuntimePrefsSet({ subagentMaxInflight: 2, subagentMaxInflightSource: 'configured-default' }),
+    /configured-default must equal the shared default/,
+  );
+  for (const value of [0, 17, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.throws(() => validateRuntimePrefsSet({ subagentMaxInflight: value }), /subagentMaxInflight must be an integer/);
+  }
+  assert.throws(
+    () => validateRuntimePrefsSet({ subagentMaxInflightSource: 'environment-override' }),
+    /subagentMaxInflightSource must be configured-default or saved-preference/,
+  );
 });
 
 test('validateRuntimePrefsSet bounds provider network deadline overrides', () => {

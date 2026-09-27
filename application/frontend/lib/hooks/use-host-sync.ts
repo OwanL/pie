@@ -10,6 +10,7 @@ import {
   clearLazyDetailCache,
   receiveLazyDetailResult,
   setLazyDetailPostMessage,
+  setLazyDetailSessionOwnership,
 } from '../../transcript/lazy-detail-store';
 import {
   clearDetailSubscriptionStore,
@@ -17,6 +18,7 @@ import {
   setDetailStoreContext,
   type DetailStreamMessage,
 } from '../../transcript/detail-subscription-store';
+import { clearImagePreviewRequests, receiveImagePreviewResult } from '../../transcript/image-preview-store';
 
 import type {
   ChatMessage,
@@ -489,6 +491,13 @@ function handleStateMessage(msg: HostToWebviewMessage, ctx: HostMessageContext) 
     ctx.optimisticOps.reconcileWithHostIds(hostIds);
   }
 
+  // Session summaries retain ownership for ordinary hidden tabs. A path that
+  // disappears from an authoritative snapshot has been removed (including a
+  // private close), so evict only that session's lazy detail data and reject
+  // any response that arrives after the removal. Keep this independent from
+  // active-session changes so ordinary tab switches preserve their caches.
+  setLazyDetailSessionOwnership(m.state.sessions.map((session) => session.path));
+
   if (nextActiveSessionPath) {
     ctx.draftOps.applyQueued(nextActiveSessionPath);
   }
@@ -638,6 +647,7 @@ export function useHostSync(
   const hydrateViewState = useHydrateViewState();
 
   const clearTransientUi = useCallback(() => {
+    clearImagePreviewRequests();
     setDraftRestore(null);
     setInputsRestore(null);
     setOptimisticMessages([]);
@@ -730,6 +740,10 @@ export function useHostSync(
       // Legacy lazy-detail correlation (superseded for NEW subscriptions by
       // the detail.subscribe protocol, but still served for existing
       // lazy refs).
+      if (message.type === 'imagePreviewResult') {
+        receiveImagePreviewResult(message);
+        return;
+      }
       if (message.type === 'detailResult' && message.result) {
         receiveLazyDetailResult(message.result);
         return;
@@ -785,6 +799,7 @@ export function useHostSync(
     // stuck in the single active slot.
     setLazyDetailPostMessage(postMessage);
     if (effectiveConnectionState !== 'connected') {
+      clearImagePreviewRequests();
       // Browser confirmations are canceled host-side when their renderer
       // disconnects; never leave the old imperative dialog actionable.
       setInlineConfirm(null);

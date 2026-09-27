@@ -66,6 +66,19 @@ test('install.bat invokes no PowerShell/WSL/Unix tools outside REM comments', ()
   }
 });
 
+test('preflight and unknown-argument handling fail before installer mutations', () => {
+  const text = readFileSync(installBat, 'utf8');
+  assert.match(text, /echo Unknown argument: %~1 1>&2\r?\nexit \/b 1/);
+
+  const preflight = text.indexOf('REM --- preflight: validate prerequisites before any persistent mutations');
+  const npmCheck = text.indexOf('where npm >nul 2>nul || goto :no_npm', preflight);
+  const nodePinCheck = text.indexOf('if /i not "%NODE_VERSION%"=="%PIN_NODE%"', preflight);
+  const firstMutation = text.indexOf('call :setx_user PI_CODING_AGENT_DIR');
+  assert.ok(preflight >= 0 && npmCheck > preflight, 'npm availability is checked in preflight');
+  assert.ok(nodePinCheck > npmCheck, 'the exact Node pin is checked after prerequisites resolve');
+  assert.ok(firstMutation > nodePinCheck, 'persistent environment changes occur only after preflight');
+});
+
 test('every goto/call target resolves to a defined label', () => {
   const text = readFileSync(installBat, 'utf8');
   const labels = new Set();
@@ -150,9 +163,9 @@ test('full install runs end-to-end against a temp repo with mocked setx/npm/pi/c
     const shimLog = path.join(tmp, 'shim.log');
     const crlf = (s) => s.replace(/\n/g, '\r\n');
     writeFileSync(path.join(shims, 'setx.cmd'), crlf('@echo off\n>>"%SHIM_LOG%" echo setx %*\nexit /b 0\n'));
-    writeFileSync(path.join(shims, 'reg.cmd'), crlf('@echo off\nif /i "%~1"=="query" if /i "%~4"=="PI_CODING_AGENT_SESSION_DIR" if defined MOCK_USER_SESSION_DIR echo PI_CODING_AGENT_SESSION_DIR    REG_SZ    %MOCK_USER_SESSION_DIR%\nexit /b 0\n'));
+    writeFileSync(path.join(shims, 'reg.cmd'), crlf('@echo off\nif /i "%~1"=="query" if /i "%~4"=="PI_CODING_AGENT_SESSION_DIR" if defined MOCK_USER_SESSION_DIR echo PI_CODING_AGENT_SESSION_DIR    REG_SZ    %MOCK_USER_SESSION_DIR%\nif /i "%~1"=="query" if /i "%~4"=="PI_CODING_AGENT_AUTH_DIR" if defined MOCK_USER_AUTH_DIR echo PI_CODING_AGENT_AUTH_DIR    REG_SZ    %MOCK_USER_AUTH_DIR%\nexit /b 0\n'));
     writeFileSync(path.join(shims, 'npm.cmd'), crlf('@echo off\nif "%~1"=="--version" (echo 9.9.9 & exit /b 0)\n>>"%SHIM_LOG%" echo npm %*\nexit /b 0\n'));
-    writeFileSync(path.join(shims, 'pi.cmd'), crlf('@echo off\nif "%~1"=="--version" (echo 9.9.9 & exit /b 0)\n>>"%SHIM_LOG%" echo pi %*\nexit /b 0\n'));
+    writeFileSync(path.join(shims, 'pi.cmd'), crlf('@echo off\nif "%~1"=="--version" (echo 9.9.9 & exit /b 0)\n>>"%SHIM_LOG%" echo pi %* AUTH=%PI_CODING_AGENT_AUTH_DIR%\nexit /b 0\n'));
     writeFileSync(path.join(shims, 'code.cmd'), crlf('@echo off\n>>"%SHIM_LOG%" echo code %*\nexit /b 0\n'));
 
     // Distinct process- and HKCU-level authorities must both be migrated.
@@ -195,6 +208,52 @@ test('full install runs end-to-end against a temp repo with mocked setx/npm/pi/c
     };
 
     const bat = path.win32.normalize(path.join(tRepo, 'install.bat'));
+    const settingsPath = path.join(tRepo, 'settings.json');
+    const settingsBeforePreflight = readFileSync(settingsPath);
+    const authPath = path.join(tRepo, 'auth.json');
+    const authBeforePreflight = Buffer.from('{"providers":{}}\n');
+    writeFileSync(authPath, authBeforePreflight);
+
+    const unknownOption = spawnSync(process.env.ComSpec, ['/d', '/s', '/c', `"${bat}" --bogus --no-pause`], {
+      env, cwd: tRepo, encoding: 'utf8', windowsVerbatimArguments: true,
+    });
+    assert.equal(unknownOption.status, 1, `unknown option must fail\nstdout:\n${unknownOption.stdout}\nstderr:\n${unknownOption.stderr}`);
+    assert.match(`${unknownOption.stdout}${unknownOption.stderr}`, /Unknown argument: --bogus/);
+    assert.ok(!existsSync(shimLog), 'unknown options exit before setx/npm/pi/code shims run');
+    assert.deepEqual(readFileSync(settingsPath), settingsBeforePreflight, 'settings.json is untouched');
+    assert.deepEqual(readFileSync(authPath), authBeforePreflight, 'auth.json is untouched');
+    assert.ok(!existsSync(path.join(tRepo, 'data', 'outcomes', 'sessions')), 'sessions are not migrated');
+    assert.ok(!existsSync(path.join(tmp, 'appdata', 'Code', 'User', 'settings.json')), 'VS Code settings are untouched');
+
+    writeFileSync(path.join(tRepo, '.node-version'), '0.0.0\n');
+    const wrongNode = spawnSync(process.env.ComSpec, ['/d', '/s', '/c', `"${bat}" --no-pause`], {
+      env, cwd: tRepo, encoding: 'utf8', windowsVerbatimArguments: true,
+    });
+    assert.equal(wrongNode.status, 1, `wrong Node pin must fail\nstdout:\n${wrongNode.stdout}\nstderr:\n${wrongNode.stderr}`);
+    assert.match(`${wrongNode.stdout}${wrongNode.stderr}`, /Node\.js 0\.0\.0 is required/);
+    assert.ok(!existsSync(shimLog), 'Node pin failure occurs before persistent commands');
+    assert.deepEqual(readFileSync(settingsPath), settingsBeforePreflight, 'settings.json is untouched on Node pin failure');
+    assert.deepEqual(readFileSync(authPath), authBeforePreflight, 'auth.json is untouched on Node pin failure');
+    assert.ok(!existsSync(path.join(tRepo, 'data', 'outcomes', 'sessions')), 'sessions are not migrated on Node pin failure');
+    assert.ok(!existsSync(path.join(tmp, 'appdata', 'Code', 'User', 'settings.json')), 'VS Code settings are untouched on Node pin failure');
+
+    const nodeOnlyDir = path.join(tmp, 'node-only');
+    mkdirSync(nodeOnlyDir);
+    writeFileSync(path.join(nodeOnlyDir, 'node.cmd'), crlf(`@echo off\n"${process.execPath}" %*\nexit /b %ERRORLEVEL%\n`));
+    const noNpm = spawnSync(process.env.ComSpec, ['/d', '/s', '/c', `"${bat}" --no-pause`], {
+      env: { ...env, PATH: [nodeOnlyDir, `${sysRoot}\\System32`, sysRoot].join(';') },
+      cwd: tRepo, encoding: 'utf8', windowsVerbatimArguments: true,
+    });
+    assert.equal(noNpm.status, 1, `missing npm must fail\nstdout:\n${noNpm.stdout}\nstderr:\n${noNpm.stderr}`);
+    assert.match(`${noNpm.stdout}${noNpm.stderr}`, /npm is required but was not found on PATH/);
+    assert.ok(!existsSync(shimLog), 'npm availability failure occurs before persistent commands');
+    assert.deepEqual(readFileSync(settingsPath), settingsBeforePreflight, 'settings.json is untouched when npm is missing');
+    assert.deepEqual(readFileSync(authPath), authBeforePreflight, 'auth.json is untouched when npm is missing');
+    assert.ok(!existsSync(path.join(tRepo, 'data', 'outcomes', 'sessions')), 'sessions are not migrated when npm is missing');
+    assert.ok(!existsSync(path.join(tmp, 'appdata', 'Code', 'User', 'settings.json')), 'VS Code settings are untouched when npm is missing');
+
+    writeFileSync(path.join(tRepo, '.node-version'), `${process.versions.node}\n`);
+    rmSync(authPath);
     const r = spawnSync(process.env.ComSpec, ['/d', '/s', '/c', `"${bat}" --no-pause`], {
       env, cwd: tRepo, encoding: 'utf8', windowsVerbatimArguments: true,
     });
@@ -205,6 +264,10 @@ test('full install runs end-to-end against a temp repo with mocked setx/npm/pi/c
     assert.equal(r.status, 0, `install failed\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}\nshim log:\n${log}`);
     assert.match(log, /setx PI_CODING_AGENT_DIR/);
     assert.match(log, /setx PI_CODING_AGENT_SESSION_DIR/);
+    const defaultAuthDir = path.join(tmp, 'localappdata', 'pie');
+    assert.ok(log.includes(`setx PI_CODING_AGENT_AUTH_DIR "${defaultAuthDir}"`), 'clean install persists secure auth directory at User scope');
+    assert.ok(existsSync(defaultAuthDir), 'clean install initializes the secure auth directory without an in-tree auth.json');
+    assert.ok(r.stdout.includes(`Auth:     ${defaultAuthDir}\\auth.json`), 'installer process resolves auth through the secure directory');
     assert.match(log, /npm ci/);
     assert.match(log, /npm run build/);
     assert.match(log, /npm run package/);
@@ -232,6 +295,29 @@ test('full install runs end-to-end against a temp repo with mocked setx/npm/pi/c
       !existsSync(path.join(tRepo, 'data', 'outcomes', 'session-reviews')),
       'retired review sidecars are not migrated into the canonical store',
     );
+
+    // A User-scope custom auth directory remains authoritative, receives the
+    // in-tree credentials via merge, and is applied to this installer process
+    // even though the value was not inherited from its parent environment.
+    const customAuthDir = path.join(tmp, 'custom auth');
+    mkdirSync(customAuthDir, { recursive: true });
+    writeFileSync(path.join(customAuthDir, 'auth.json'), JSON.stringify({ anthropic: { apiKey: 'existing-custom-key' } }));
+    writeFileSync(authPath, JSON.stringify({ openai: { apiKey: 'in-tree-key' } }));
+    writeFileSync(shimLog, '');
+    const customAuthInstall = spawnSync(process.env.ComSpec, ['/d', '/s', '/c', `"${bat}" --no-pause`], {
+      env: { ...env, MOCK_USER_AUTH_DIR: customAuthDir },
+      cwd: tRepo, encoding: 'utf8', windowsVerbatimArguments: true,
+    });
+    const customAuthLog = readFileSync(shimLog, 'utf8');
+    assert.equal(customAuthInstall.status, 0, `custom auth install failed\nstdout:\n${customAuthInstall.stdout}\nstderr:\n${customAuthInstall.stderr}\nshim log:\n${customAuthLog}`);
+    assert.ok(!customAuthLog.includes('setx PI_CODING_AGENT_AUTH_DIR'), 'existing custom User-scope auth path is preserved');
+    assert.ok(customAuthInstall.stdout.includes(`Auth:     ${customAuthDir}\\auth.json`), 'User-scope custom path is applied to installer process');
+    assert.ok(customAuthLog.includes(`AUTH=${customAuthDir}`), 'child installer commands inherit the User-scope custom auth path');
+    assert.ok(!existsSync(authPath), 'in-tree auth file is removed after merging');
+    assert.deepEqual(JSON.parse(readFileSync(path.join(customAuthDir, 'auth.json'), 'utf8')), {
+      anthropic: { apiKey: 'existing-custom-key' },
+      openai: { apiKey: 'in-tree-key' },
+    }, 'existing custom auth is retained and augmented with in-tree credentials');
 
     // A package-source parse failure must stop before dependency/build work;
     // FOR /F alone does not propagate the child command's exit code.

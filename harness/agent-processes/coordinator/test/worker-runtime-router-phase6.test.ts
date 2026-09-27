@@ -116,6 +116,88 @@ function makeRouter(client: any, extra: { supervisor?: Record<string, unknown>; 
   return { router, sessionPath, client, emitted, stopped, supervisor };
 }
 
+test('subagent concurrency status requires current runtimePrefs acknowledgements from a usable worker', async () => {
+  const sessionPath = `${process.cwd()}/phase6-subagent-concurrency.jsonl`;
+  const workers: any[] = [];
+  let holdRuntimePrefsSync = false;
+  let signalRuntimePrefsSync: (() => void) | undefined;
+  let releaseRuntimePrefsSync: (() => void) | undefined;
+  const client = makeClient({
+    requestFrame: async (body: any) => {
+      if (body.kind === 'sync') {
+        if (body.domain === 'runtimePrefs' && holdRuntimePrefsSync) {
+          signalRuntimePrefsSync?.();
+          await new Promise<void>((resolve) => { releaseRuntimePrefsSync = resolve; });
+        }
+        return { kind: 'sync.ack', requestId: 'subagent-sync', domain: body.domain, revision: body.revision };
+      }
+      if (body.kind === 'runtime.promote') {
+        return { kind: 'runtime.ready', requestId: 'subagent-ready', runtimeMetadata: { mode: 'phase4', startedAt: 1 } };
+      }
+      if (body.kind === 'runtime.command') {
+        return { kind: 'response', requestId: 'subagent-command', ok: true, result: { ok: true } };
+      }
+      throw new Error(`unexpected frame ${body.kind}`);
+    },
+  });
+  const { router } = makeRouter(client, {
+    supervisor: {
+      listWorkers: () => workers,
+      startWorker: async (root: string, prepare: any) => {
+        const worker = {
+          workerId: 'subagent-status-worker', workerGeneration: 1, sessionPath: root, client,
+        };
+        await prepare({ workerId: worker.workerId, workerGeneration: worker.workerGeneration, sessionPath: root });
+        workers.push(worker);
+        return worker;
+      },
+    },
+    options: {
+      readRuntimePrefs: () => ({
+        subagentMaxInflight: 8,
+        subagentMaxInflightSource: 'configured-default',
+      }),
+    },
+  });
+
+  assert.deepEqual(router.getSubagentConcurrencyStatus(), {
+    scope: 'worker-process',
+    configured: { value: 8, source: 'configured-default' },
+    workerCount: 0,
+    pendingWorkers: 0,
+  }, 'configured capacity is not reported as applied when no worker exists');
+
+  await router.promote(sessionPath);
+  assert.deepEqual(router.getSubagentConcurrencyStatus(), {
+    scope: 'worker-process',
+    configured: { value: 8, source: 'configured-default' },
+    effective: { value: 8, source: 'configured-default' },
+    workerCount: 1,
+    pendingWorkers: 0,
+  });
+
+  holdRuntimePrefsSync = true;
+  const runtimePrefsSyncStarted = new Promise<void>((resolve) => { signalRuntimePrefsSync = resolve; });
+  const update = router.syncRuntimePrefs({ subagentMaxInflight: 2 });
+  await runtimePrefsSyncStarted;
+  assert.deepEqual(router.getSubagentConcurrencyStatus(), {
+    scope: 'worker-process',
+    configured: { value: 2, source: 'saved-preference' },
+    workerCount: 1,
+    pendingWorkers: 1,
+  }, 'a current but unacknowledged preference revision is pending, not effective');
+
+  releaseRuntimePrefsSync?.();
+  await update;
+  assert.deepEqual(router.getSubagentConcurrencyStatus(), {
+    scope: 'worker-process',
+    configured: { value: 2, source: 'saved-preference' },
+    effective: { value: 2, source: 'saved-preference' },
+    workerCount: 1,
+    pendingWorkers: 0,
+  });
+});
+
 function eventFrame(route: any, sessionPath: string, event: string, payload: any, seq: number): any {
   return {
     ipcVersion: WORKER_IPC_VERSION, coordinatorGeneration: 1, workerId: route.owner.workerId,

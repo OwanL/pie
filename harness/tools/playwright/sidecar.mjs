@@ -31,14 +31,29 @@ process.stdin.on('end', () => { void stop(0); });
 
 async function stop(code) {
   if (exiting) return; exiting = true;
-  // browser.close() can hang on a wedged renderer; never let shutdown block exit.
-  await Promise.race([core.shutdown(), new Promise((resolve) => setTimeout(resolve, 5000))]).catch(() => {});
+  // A zero exit is the parent's existing cleanup acknowledgement: backend and
+  // browser-server teardown must have completed, not merely been attempted.
+  let cleanupConfirmed = false;
+  let shutdownTimer;
+  try {
+    await Promise.race([
+      core.shutdown(),
+      new Promise((_, reject) => { shutdownTimer = setTimeout(() => reject(new Error('Sidecar shutdown exceeded its cleanup budget.')), 5000); }),
+    ]);
+    cleanupConfirmed = true;
+  } catch { /* force every retained browser owner below before deciding exit status */ }
+  finally { if (shutdownTimer) clearTimeout(shutdownTimer); }
   // closeSession can consume its grace budget before it reaches browserServer.
   // Parent death has no surviving RuntimeClient watchdog, so force every live
-  // or in-flight-closing dedicated browser tree synchronously before exit.
-  backend.forceKillAll();
+  // or in-flight-closing dedicated browser tree before exit and retain failure.
+  try {
+    await backend.forceKillAll();
+    cleanupConfirmed = true;
+  } catch {
+    cleanupConfirmed = false;
+  }
   process.stdin.pause();
-  process.exit(code);
+  process.exit(code === 0 && cleanupConfirmed ? 0 : 1);
 }
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.once(signal, () => { void stop(0); });
 process.once('uncaughtException', () => { void stop(1); });

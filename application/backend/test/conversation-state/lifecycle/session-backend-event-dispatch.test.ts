@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { dispatchSessionBackendEvent } from '../../../conversation-state/event-dispatch';
+import { onPreflightFailed } from '../../../session-actions/handlers/streaming.js';
 import type { SessionBackendEventHandlers } from '../../../conversation-state/event-dispatch';
 import type { OperationalErrorPayload } from '../../../../lib/protocol/index.js';
 
@@ -24,6 +25,7 @@ function createHandlers() {
     onCustomMessage: (payload) => calls.push({ name: 'message.custom', payload }),
     onMessageAborted: (payload) => calls.push({ name: 'message.aborted', payload }),
     onPreflightFailed: (payload) => calls.push({ name: 'preflight.failed', payload }),
+    onAgentMessage: (payload) => calls.push({ name: 'message.agent', payload }),
     onQueuedDelivered: (payload) => calls.push({ name: 'message.queuedDelivered', payload }),
     onRetryStarted: (payload) => calls.push({ name: 'retry.started', payload }),
     onRetryEnded: (payload) => calls.push({ name: 'retry.ended', payload }),
@@ -225,6 +227,43 @@ test('dispatchSessionBackendEvent preserves terminal tool metadata', () => {
   dispatchSessionBackendEvent({ event: 'tool.finished', payload }, handlers);
 
   assert.deepEqual(calls, [{ name: 'tool.finished', payload }]);
+});
+
+test('dispatchSessionBackendEvent validates and routes agent-originated messages', () => {
+  const { handlers, calls } = createHandlers();
+  const payload = {
+    sessionPath: '/workspace/session.jsonl',
+    localId: 'local:agent-session:request-1',
+    text: 'please check the session',
+    status: 'queued' as const,
+    timestamp: 1_800_000_000_000,
+  };
+
+  dispatchSessionBackendEvent({ event: 'message.agent', payload }, handlers);
+  dispatchSessionBackendEvent({ event: 'message.agent', payload: { ...payload, status: 'unknown' } }, handlers);
+  dispatchSessionBackendEvent({ event: 'message.agent', payload: { ...payload, timestamp: Number.NaN } }, handlers);
+
+  assert.deepEqual(calls, [{ name: 'message.agent', payload }]);
+});
+
+test('post-ack preflight failure removes only the correlated agent-originated row', () => {
+  const dispatched: Array<{ kind: string; sessionPath?: string; localId?: string }> = [];
+  const deps = {
+    requireEventSessionPath: (_eventName: string, sessionPath: string | undefined) => sessionPath ?? null,
+    dispatchArch: (event: { kind: string; sessionPath?: string; localId?: string }) => dispatched.push(event),
+  } as any;
+
+  onPreflightFailed({
+    requestId: 'request-1',
+    sessionPath: '/workspace/session.jsonl',
+    localId: 'local:agent-session:request-1',
+    error: 'prepass failed',
+  }, deps);
+
+  assert.deepEqual(dispatched.map(({ kind, localId }) => ({ kind, localId })), [
+    { kind: 'AgentMessageRejected', localId: 'local:agent-session:request-1' },
+    { kind: 'PreflightFailed', localId: undefined },
+  ]);
 });
 
 test('dispatchSessionBackendEvent routes preflight.failed payloads', () => {

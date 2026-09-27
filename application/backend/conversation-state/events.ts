@@ -1088,6 +1088,23 @@ export interface QueuedDeliveredEvent {
   localId?: string;
 }
 
+/** Agent-to-agent session_control message surfaced as a user-role transcript row. */
+export interface AgentMessageReceivedEvent {
+  kind: 'AgentMessageReceived';
+  sessionPath: string;
+  localId: string;
+  text: string;
+  status: 'queued' | 'completed';
+  timestamp: number;
+}
+
+/** Remove a session_control row rejected before the SDK accepted its prompt. */
+export interface AgentMessageRejectedEvent {
+  kind: 'AgentMessageRejected';
+  sessionPath: string;
+  localId: string;
+}
+
 /** The SDK began an auto-retry attempt (transient provider error). The
  *  reducer records per-session retry status so the webview can surface a
  *  "Retrying N of M…" chip with a Cancel affordance. Independent of the busy
@@ -1147,6 +1164,8 @@ export type BackendEvent =
   | SessionOpenedEvent
   | SessionClosedEvent
   | QueuedDeliveredEvent
+  | AgentMessageReceivedEvent
+  | AgentMessageRejectedEvent
   | RetryStartedEvent
   | RetryEndedEvent;
 

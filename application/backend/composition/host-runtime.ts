@@ -40,7 +40,12 @@ import {
 import { resolvePieDataPaths } from '../../../lib/data-root/pie-data-root.js';
 import { toErrorMessage } from '../../../lib/structured-logging/error-message.js';
 import { PIE_BUILD_ID } from '../../../lib/build-identity.js';
-import { type HostToWebviewMessage, type WebviewToHostMessage, type ViewState } from '../../lib/protocol/index.js';
+import {
+  type HostToWebviewMessage,
+  type RendererCommandContext,
+  type WebviewToHostMessage,
+  type ViewState,
+} from '../../lib/protocol/index.js';
 import { EffectRunner } from '../conversation-state/effects/effect-runner.js';
 import { dispatch } from '../conversation-state/dispatch.js';
 import { initialArchState, type ArchState } from '../conversation-state/reducer.js';
@@ -626,6 +631,9 @@ export class HostRuntime {
         postImperative: (msg) => this.platform.renderer.postImperative(msg),
         postImperativeToRenderer: (rendererId, msg) =>
           this.platform.renderer.postImperativeToRenderer(rendererId, msg),
+        isRendererOwnerCurrent: (rendererId, viewGeneration, rendererGeneration) =>
+          this.platform.renderer.isRendererOwnerCurrent(rendererId, viewGeneration, rendererGeneration)
+          || this.browserServer.isRendererOwnerCurrent(rendererId, viewGeneration, rendererGeneration),
       },
       () => this.scheduleRender(),
       deriveSessionNameFromText,
@@ -642,6 +650,9 @@ export class HostRuntime {
         showLogs: () => this.platform.showLogs?.(),
         setBrowserServerLanEnabled: (enabled) => this.setBrowserServerLanEnabled(enabled),
         setBrowserServerEnabled: (enabled) => this.setBrowserServerEnabled(enabled),
+        previewImageFile: (request) => this.platform.editor.previewImageFile
+          ? this.platform.editor.previewImageFile(request.path, request)
+          : Promise.resolve(undefined),
       },
     );
 
@@ -781,8 +792,8 @@ export class HostRuntime {
       fileDiffService: this.fileDiffService,
       fileDiffViewer: this.platform.createFileDiffViewer(this.fileDiffService),
       openFile: {
-        openFile: async (filePath) => {
-          await this.platform.editor.openFileInEditor(filePath);
+        openFile: async (filePath, options) => {
+          await this.platform.editor.openFileInEditor(filePath, options);
         },
       },
       service: this.service,
@@ -1199,8 +1210,8 @@ export class HostRuntime {
   }
 
   /** Route an inbound renderer message through the message router. */
-  async handleWebviewMessage(msg: WebviewToHostMessage): Promise<void> {
-    await this.messageRouter.handle(msg);
+  async handleWebviewMessage(msg: WebviewToHostMessage, context?: RendererCommandContext): Promise<void> {
+    await this.messageRouter.handle(msg, context);
   }
 
   /** Config-backed experiment assignment changed (host config listener). */

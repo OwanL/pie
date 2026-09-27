@@ -5,10 +5,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { getEventListeners } from "node:events";
-import { Semaphore, getMaxInflight, DEFAULT_MAX_INFLIGHT } from "../concurrency-limit.js";
+import { Semaphore, getMaxInflight, getMaxInflightResolution, DEFAULT_MAX_INFLIGHT } from "../concurrency-limit.js";
 
 const ENV_KEYS = [
 	"PIE_SUBAGENT_MAX_INFLIGHT",
+	"PIE_SUBAGENT_MAX_INFLIGHT_SOURCE",
 ] as const;
 
 const snapshot: Record<string, string | undefined> = {};
@@ -148,8 +149,10 @@ test("Semaphore: lowering capacity does not transfer released permits above the 
 
 test("getMaxInflight: unset → DEFAULT_MAX_INFLIGHT", () => {
 	delete process.env.PIE_SUBAGENT_MAX_INFLIGHT;
+	delete process.env.PIE_SUBAGENT_MAX_INFLIGHT_SOURCE;
 	assert.equal(getMaxInflight(), DEFAULT_MAX_INFLIGHT);
-	assert.equal(DEFAULT_MAX_INFLIGHT, 2);
+	assert.deepEqual(getMaxInflightResolution(), { value: DEFAULT_MAX_INFLIGHT, source: "configured-default" });
+	assert.equal(DEFAULT_MAX_INFLIGHT, 8);
 });
 
 test("getMaxInflight: override honoured", () => {
@@ -157,7 +160,30 @@ test("getMaxInflight: override honoured", () => {
 	assert.equal(getMaxInflight(), 4);
 });
 
+test("getMaxInflight preserves accepted env values above the preference range", () => {
+	process.env.PIE_SUBAGENT_MAX_INFLIGHT = "20";
+	delete process.env.PIE_SUBAGENT_MAX_INFLIGHT_SOURCE;
+	assert.equal(getMaxInflight(), 20);
+	assert.deepEqual(getMaxInflightResolution(), { value: 20, source: "environment-override" });
+});
+
 test("getMaxInflight: below 1 falls back to default", () => {
 	process.env.PIE_SUBAGENT_MAX_INFLIGHT = "0";
+	assert.equal(getMaxInflight(), DEFAULT_MAX_INFLIGHT);
+});
+
+test("getMaxInflightResolution honors companion provenance or reports an environment override", () => {
+	process.env.PIE_SUBAGENT_MAX_INFLIGHT = "3.9";
+	delete process.env.PIE_SUBAGENT_MAX_INFLIGHT_SOURCE;
+	assert.deepEqual(getMaxInflightResolution(), { value: 3, source: "environment-override" });
+
+	process.env.PIE_SUBAGENT_MAX_INFLIGHT_SOURCE = "saved-preference";
+	assert.deepEqual(getMaxInflightResolution(), { value: 3, source: "saved-preference" });
+});
+
+test("getMaxInflightResolution reports a safety fallback for invalid values", () => {
+	process.env.PIE_SUBAGENT_MAX_INFLIGHT = "invalid";
+	process.env.PIE_SUBAGENT_MAX_INFLIGHT_SOURCE = "saved-preference";
+	assert.deepEqual(getMaxInflightResolution(), { value: DEFAULT_MAX_INFLIGHT, source: "safety-fallback" });
 	assert.equal(getMaxInflight(), DEFAULT_MAX_INFLIGHT);
 });

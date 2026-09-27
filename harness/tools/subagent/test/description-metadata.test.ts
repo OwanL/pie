@@ -55,14 +55,15 @@ function installSdkResolverForTests(): () => void {
 	};
 }
 
-test("subagent tool description clarifies isolation is not sandboxing and cwd-based discovery", () => {
-	let def: { description: string } | undefined;
+test("subagent tool guidance encourages bounded parallel work while preserving isolation and ordering safeguards", () => {
+	type PromptMetadata = { description: string; promptSnippet: string; promptGuidelines: string[] };
+	let def: PromptMetadata | undefined;
 	registerSubagent({
 		on: () => undefined,
 		getFlag: () => undefined,
 		getThinkingLevel: () => undefined,
 		registerFlag: () => undefined,
-		registerTool: (definition: { description: string }) => {
+		registerTool: (definition: PromptMetadata) => {
 			def = definition;
 		},
 	});
@@ -71,4 +72,11 @@ test("subagent tool description clarifies isolation is not sandboxing and cwd-ba
 	assert.match(def!.description, /not sandboxing/);
 	assert.match(def!.description, /process, filesystem, and credentials/);
 	assert.match(def!.description, /project agents under an explicitly provided cwd/);
+	assert.match(def!.promptSnippet, /small, bounded task/);
+	assert.match(def!.promptSnippet, /prefer parallel sibling calls for independent tasks/);
+	const guidance = def!.promptGuidelines.join(" ");
+	assert.match(guidance, /Proactively dispatch independent, small subagent tasks together as sibling calls in one response/);
+	assert.match(guidance, /non-overlapping edit ownership/);
+	assert.match(guidance, /wait for prior results when tasks depend on them/);
+	assert.match(guidance, /serialize work that would conflict over shared files or resources/);
 });

@@ -271,7 +271,7 @@ that sub agents are unavailable. Any call returns:
 
 - Max depth: 3 (nested subagent calls) — configurable via `PIE_SUBAGENT_MAX_DEPTH`
   (set by the pie host from the settings menu; default 3).
-- Process-wide active root trees: 2 by default — configurable via `PIE_SUBAGENT_MAX_INFLIGHT`. Sibling subagent calls emitted in one agent turn have no separate count cap; calls beyond the active-tree limit wait for a process permit. Each root child holds one permit for its full lifetime; nested descendants borrow that tree scope so parents waiting on nested work cannot exhaust the same semaphore and deadlock.
+- Process-wide active root trees: default owned by [`lib/concurrency-config.ts`](../../../lib/concurrency-config.ts), shared with application preferences. See [concurrency configuration](../../../docs/operations/CONCURRENCY-CONFIGURATION.md) for saved-preference/environment precedence and applied-status diagnostics. Configurable via `PIE_SUBAGENT_MAX_INFLIGHT`. Sibling subagent calls emitted in one agent turn have no separate count cap; calls beyond the active-tree limit wait for a process permit. Each root child holds one permit for its full lifetime; nested descendants borrow that tree scope so parents waiting on nested work cannot exhaust the same semaphore and deadlock.
 - Tree-wide session budget: 10 — caps the total number of subagent sessions spawned
   across an *entire* nested tree, so increased nesting can't run away on cost.
   Configurable via `PIE_SUBAGENT_MAX_TREE_SESSIONS`
@@ -300,24 +300,14 @@ The root caller (the main agent) is never restricted.
 
 Two mechanisms keep subagent system prompts lean and focused:
 
-### Skills: inherit the parent turn's pruned set
+### Skills: independently discovered and pruned per child
 
-The skill-pruner computes a kept-skill set for the **main** turn and rewrites
-the main agent's system prompt. Subagents inherit that same kept set — the
-pruner records it (keyed by session id) and the subagent runner filters the
-subagent's loaded skills by name via the resource loader's `skillsOverride`.
-No extra LLM call runs inside the subagent (the prepass is skipped for
-subagent sessions, as before). Behaviour:
-
-- A non-empty kept set → the subagent's system prompt includes only those skills.
-- `"keep-all"` / no record / unresolvable parent session → no filter (today's
-  behaviour — all skills loaded).
-- An empty kept set is treated as keep-all (never strips the lot), matching the
-  pruner's own keep-all safeguard.
-- The selected set is threaded through the tree's async-local runtime context,
-  so depth-2+ children inherit the same main-turn selection. They do not widen
-  back to all skills merely because their immediate parent is an in-memory
-  subagent session (the pruner intentionally skips those sessions).
+Each child loads its own full skill catalog and, when `pruning.subagentEnabled`
+is true, runs one launch-time pruning pass against its assigned task plus its
+agent definition. It does not inherit the main agent's kept-skill set. Nested
+children likewise discover and score their own catalog. Internal continuations
+reuse the first selection without an additional scorer call; fail-open results
+are also retained for that child session.
 
 ### Tools: user-configured drop list
 
@@ -332,9 +322,13 @@ mirroring pattern as the model buckets). Behaviour:
   from the parent session's full tool set.
 - An empty list (the default) → no tools dropped (today's behaviour).
 
-Tool *pruning* inheritance (the pruner's `setActiveTools` decisions) is **not**
-inherited — subagents remain frontmatter-driven for tools; the drop list is the
-only host-side tool override.
+Tool *pruning* is applied independently in each child session when the child
+initially has `request_capability`; without that recovery surface, skills can
+still be pruned but tools are left untouched. Tool selection and recovery stay
+inside the session's initial permitted tool set. Main-agent and subagent
+pruning can be toggled independently with `pruning.mainAgentEnabled` and
+`pruning.subagentEnabled`; shared `mode: "off"` and the global extension toggle
+disable both.
 
 ## Timeouts
 

@@ -354,6 +354,11 @@ test('deriveFileChangesFromToolCall: brace + tilde combined', () => {
 // ─── deriveFileChangesFromSubagentResult ──────────────────────────────────
 
 function buildSubagentResult(innerToolCalls: { name: string; arguments: Record<string, unknown> }[]) {
+  const calls = innerToolCalls.map((toolCall, index) => ({
+    type: 'toolCall',
+    id: `inner-${index}`,
+    ...toolCall,
+  }));
   return {
     content: [{ type: 'text', text: 'done' }],
     details: {
@@ -367,10 +372,13 @@ function buildSubagentResult(innerToolCalls: { name: string; arguments: Record<s
           task: 'fix bugs',
           exitCode: 0,
           messages: [
-            {
-              role: 'assistant',
-              content: innerToolCalls.map((tc) => ({ type: 'toolCall', ...tc })),
-            },
+            { role: 'assistant', content: calls },
+            ...calls.map((call) => ({
+              role: 'toolResult',
+              toolCallId: call.id,
+              toolName: call.name,
+              isError: false,
+            })),
           ],
           stderr: '',
           usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
@@ -410,19 +418,89 @@ test('deriveFileChangesFromSubagentResult: reads compact persisted summaries wit
   })), [{ path: '/compact.ts', kind: 'modified', additions: 3, deletions: 1 }]);
 });
 
+test('deriveFileChangesFromSubagentResult: full nested transcript beats bounded summary without double counting', () => {
+  const messages = [
+    {
+      role: 'assistant',
+      content: [
+        { type: 'toolCall', id: 'direct-write', name: 'write', arguments: { path: 'direct.ts', content: 'direct' } },
+        { type: 'toolCall', id: 'nested-call', name: 'subagent', arguments: { agent: 'worker', task: 'nested' } },
+      ],
+    },
+    { role: 'toolResult', toolCallId: 'direct-write', toolName: 'write', isError: false },
+    {
+      role: 'toolResult', toolCallId: 'nested-call', toolName: 'subagent', isError: false,
+      details: {
+        results: [{
+          messages: [
+            { role: 'assistant', content: [{ type: 'toolCall', id: 'deep-edit', name: 'edit', arguments: { path: 'deep.ts', oldText: 'a', newText: 'b' } }] },
+            { role: 'toolResult', toolCallId: 'deep-edit', toolName: 'edit', isError: false },
+          ],
+        }],
+      },
+    },
+  ];
+  const result = {
+    details: {
+      results: [{
+        exitCode: 1,
+        messages,
+        fileChanges: [
+          { path: 'direct.ts', kind: 'created' as const, description: 'created', additions: 99 },
+          ...Array.from({ length: 63 }, (_, index) => ({
+            path: `bounded-${index}.ts`, kind: 'created' as const, description: 'created',
+          })),
+        ],
+      }],
+    },
+  };
+  const changes = deriveFileChangesFromSubagentResult(result, 'msg1', '2024-01-01T00:00:00Z', 'tc1');
+  assert.deepEqual(changes.map((change) => change.path), ['direct.ts', 'deep.ts']);
+  assert.equal(changes[0]?.additions, 1, 'full transcript wins over the overlapping summary without double counting');
+});
+
+test('deriveFileChangesFromSubagentResult: successful edits survive failed child while failed and unfinished calls are excluded', () => {
+  const result = {
+    details: {
+      results: [{
+        exitCode: 1,
+        messages: [
+          {
+            role: 'assistant',
+            content: [
+              { type: 'toolCall', id: 'good', name: 'write', arguments: { path: 'good.ts', content: 'ok' } },
+              { type: 'toolCall', id: 'bad', name: 'edit', arguments: { path: 'bad.ts', oldText: 'a', newText: 'b' } },
+              { type: 'toolCall', id: 'pending', name: 'write', arguments: { path: 'pending.ts', content: 'not done' } },
+            ],
+          },
+          { role: 'toolResult', toolCallId: 'good', toolName: 'write', isError: false },
+          { role: 'toolResult', toolCallId: 'bad', toolName: 'edit', isError: true },
+        ],
+      }],
+    },
+  };
+  const changes = deriveFileChangesFromSubagentResult(result, 'msg1', '2024-01-01T00:00:00Z', 'tc1');
+  assert.deepEqual(changes.map((change) => change.path), ['good.ts']);
+});
+
 test('deriveFileChangesFromSubagentResult: recursively falls back to nested shell transcripts', () => {
   const result = {
     details: {
       results: [{
-        messages: [{
-          role: 'toolResult',
-          toolName: 'subagent',
-          details: {
-            results: [{
-              messages: [{ role: 'assistant', content: [{ type: 'toolCall', name: 'bash', arguments: { command: 'rm nested.txt' } }] }],
-            }],
+        messages: [
+          { role: 'assistant', content: [{ type: 'toolCall', id: 'nested-call', name: 'subagent', arguments: {} }] },
+          {
+            role: 'toolResult', toolCallId: 'nested-call', toolName: 'subagent', isError: false,
+            details: {
+              results: [{
+                messages: [
+                  { role: 'assistant', content: [{ type: 'toolCall', id: 'nested-rm', name: 'bash', arguments: { command: 'rm nested.txt' } }] },
+                  { role: 'toolResult', toolCallId: 'nested-rm', toolName: 'bash', isError: false },
+                ],
+              }],
+            },
           },
-        }],
+        ],
       }],
     },
   };
@@ -474,10 +552,13 @@ test('deriveFileChangesFromTranscript: modern child cwd keeps same-cwd relative 
           details: {
             results: [{
               cwd: '/proj',
-              messages: [{
-                role: 'assistant',
-                content: [{ type: 'toolCall', name: 'edit', arguments: { path: 'src/modern.ts', oldText: 'a', newText: 'b' } }],
-              }],
+              messages: [
+                {
+                  role: 'assistant',
+                  content: [{ type: 'toolCall', id: 'modern-edit', name: 'edit', arguments: { path: 'src/modern.ts', oldText: 'a', newText: 'b' } }],
+                },
+                { role: 'toolResult', toolCallId: 'modern-edit', toolName: 'edit', isError: false },
+              ],
             }],
           },
         },
@@ -502,10 +583,13 @@ test('deriveFileChangesFromTranscript: legacy mixed-cwd child resolves relative 
           details: {
             results: [{
               // Legacy result: no child cwd provenance.
-              messages: [{
-                role: 'assistant',
-                content: [{ type: 'toolCall', name: 'edit', arguments: { path: 'src/legacy.ts', oldText: 'a', newText: 'b' } }],
-              }],
+              messages: [
+                {
+                  role: 'assistant',
+                  content: [{ type: 'toolCall', id: 'legacy-edit', name: 'edit', arguments: { path: 'src/legacy.ts', oldText: 'a', newText: 'b' } }],
+                },
+                { role: 'toolResult', toolCallId: 'legacy-edit', toolName: 'edit', isError: false },
+              ],
             }],
           },
         },
@@ -533,10 +617,8 @@ test('deriveFileChangesFromSubagentResult: handles multiple results (parallel mo
           task: 't1',
           exitCode: 0,
           messages: [
-            {
-              role: 'assistant',
-              content: [{ type: 'toolCall', name: 'write', arguments: { path: '/a.txt', content: 'a' } }],
-            },
+            { role: 'assistant', content: [{ type: 'toolCall', id: 'write-a', name: 'write', arguments: { path: '/a.txt', content: 'a' } }] },
+            { role: 'toolResult', toolCallId: 'write-a', toolName: 'write', isError: false },
           ],
           stderr: '',
           usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
@@ -547,10 +629,8 @@ test('deriveFileChangesFromSubagentResult: handles multiple results (parallel mo
           task: 't2',
           exitCode: 0,
           messages: [
-            {
-              role: 'assistant',
-              content: [{ type: 'toolCall', name: 'edit', arguments: { path: '/b.ts', oldText: 'x', newText: 'y' } }],
-            },
+            { role: 'assistant', content: [{ type: 'toolCall', id: 'edit-b', name: 'edit', arguments: { path: '/b.ts', oldText: 'x', newText: 'y' } }] },
+            { role: 'toolResult', toolCallId: 'edit-b', toolName: 'edit', isError: false },
           ],
           stderr: '',
           usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
@@ -632,7 +712,7 @@ test('deriveFileChangesFromTranscript: accumulates subagent changes with parent 
   assert.equal(changes[0].deletions, 3); // 1 from parent + 2 from subagent
 });
 
-test('deriveFileChangesFromTranscript: subagent delete removes prior create', () => {
+test('deriveFileChangesFromTranscript: subagent delete retains prior create attribution', () => {
   const subagentResult = buildSubagentResult([
     { name: 'delete_file', arguments: { path: '/temp.txt' } },
   ]);
@@ -649,7 +729,9 @@ test('deriveFileChangesFromTranscript: subagent delete removes prior create', ()
     }),
   ];
   const changes = deriveFileChangesFromTranscript(transcript);
-  assert.equal(changes.length, 0);
+  assert.equal(changes.length, 1);
+  assert.equal(changes[0]?.kind, 'deleted');
+  assert.equal(changes[0]?.additions, 1);
 });
 
 test('deriveFileChangesFromTranscript: bash rm produces deleted entry', () => {
@@ -666,7 +748,7 @@ test('deriveFileChangesFromTranscript: bash rm produces deleted entry', () => {
   assert.equal(changes[0].kind, 'deleted');
 });
 
-test('deriveFileChangesFromTranscript: bash rm of session-created file is net no-op', () => {
+test('deriveFileChangesFromTranscript: bash rm of session-created file remains attributed', () => {
   const transcript: ChatMessage[] = [
     makeChatMessage({
       toolCalls: [
@@ -680,12 +762,14 @@ test('deriveFileChangesFromTranscript: bash rm of session-created file is net no
     }),
   ];
   const changes = deriveFileChangesFromTranscript(transcript);
-  assert.equal(changes.length, 0);
+  assert.equal(changes.length, 1);
+  assert.equal(changes[0]?.kind, 'deleted');
+  assert.equal(changes[0]?.additions, 1);
 });
 
-test('deriveFileChangesFromTranscript: skips failed subagent tool calls', () => {
+test('deriveFileChangesFromTranscript: successful child edits survive failed subagent task', () => {
   const subagentResult = buildSubagentResult([
-    { name: 'write', arguments: { path: '/fail.txt', content: 'data' } },
+    { name: 'write', arguments: { path: '/child-edit.txt', content: 'data' } },
   ]);
   const transcript: ChatMessage[] = [
     makeChatMessage({
@@ -695,7 +779,41 @@ test('deriveFileChangesFromTranscript: skips failed subagent tool calls', () => 
     }),
   ];
   const changes = deriveFileChangesFromTranscript(transcript);
-  assert.equal(changes.length, 0);
+  assert.deepEqual(changes.map((change) => change.path), ['/child-edit.txt']);
+});
+
+test('deriveFileChangesFromTranscript: ignores provisional subagent results until the task is terminal', () => {
+  const subagentResult = buildSubagentResult([
+    { name: 'write', arguments: { path: '/provisional.txt', content: 'not final' } },
+  ]);
+  for (const status of ['drafting', 'ready', 'running'] as const) {
+    const changes = deriveFileChangesFromTranscript([
+      makeChatMessage({
+        toolCalls: [{
+          id: `tc-${status}`,
+          name: 'subagent',
+          input: { agent: 'worker', task: 'still running' },
+          result: subagentResult,
+          status,
+        }],
+      }),
+    ]);
+    assert.deepEqual(changes, [], `${status} subagent result must not be traversed`);
+  }
+});
+
+test('deriveFileChangesFromTranscript: excludes failed and unfinished direct mutations', () => {
+  const transcript: ChatMessage[] = [
+    makeChatMessage({
+      toolCalls: [
+        { id: 'complete', name: 'write', input: { path: '/complete.txt', content: 'ok' }, status: 'completed' },
+        { id: 'failed', name: 'write', input: { path: '/failed.txt', content: 'no' }, status: 'failed' },
+        { id: 'running', name: 'write', input: { path: '/running.txt', content: 'not done' }, status: 'running' },
+      ],
+    }),
+  ];
+  const changes = deriveFileChangesFromTranscript(transcript);
+  assert.deepEqual(changes.map((change) => change.path), ['/complete.txt']);
 });
 
 // ─── Path-identity canonicalization (parent/subagent + spelling variants) ──
@@ -742,11 +860,9 @@ test('deriveFileChangesFromTranscript: `./` prefix and bare relative merge (cwd)
   assert.equal(changes.length, 1);
 });
 
-test('deriveFileChangesFromTranscript: create-then-delete matches across relative/absolute spellings (cwd)', () => {
+test('deriveFileChangesFromTranscript: create-then-delete remains attributed across relative/absolute spellings (cwd)', () => {
   // A file created via a relative path and deleted via an absolute path must
-  // be recognized as the same file → net no-op (the stale create/delete
-  // bookkeeping bug: without canonicalization the delete never matched the
-  // create, leaving a stale created + a stale deleted entry).
+  // be recognized as the same touched file, with the latest deleted kind.
   const transcript: ChatMessage[] = [
     makeChatMessage({
       toolCalls: [
@@ -760,7 +876,10 @@ test('deriveFileChangesFromTranscript: create-then-delete matches across relativ
     }),
   ];
   const changes = deriveFileChangesFromTranscript(transcript, '/proj');
-  assert.equal(changes.length, 0, 'create + delete of the same file is a net no-op');
+  assert.equal(changes.length, 1, 'successful create and delete mutations remain attributed');
+  assert.equal(changes[0]?.path, 'tmp/gen.uid');
+  assert.equal(changes[0]?.kind, 'deleted');
+  assert.equal(changes[0]?.additions, 1);
 });
 
 test('deriveFileChangesFromTranscript: kind reflects session-level file state, not the latest write verb', () => {

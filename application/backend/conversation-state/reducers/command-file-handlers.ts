@@ -14,6 +14,8 @@ export function handleOpenFile(state: ArchState, cmd: Extract<Command, { kind: '
         kind: 'OpenFile',
         corrId: cmd.corrId,
         path: cmd.path,
+        ...(cmd.reference !== undefined ? { reference: cmd.reference } : {}),
+        ...(cmd.workingDirectory !== undefined ? { workingDirectory: cmd.workingDirectory } : {}),
       },
     ],
   };

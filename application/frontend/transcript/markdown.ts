@@ -6,6 +6,7 @@ import {
   escapeMarkdownHtmlText,
   isLocalFilePath,
   localFilePathReference,
+  ordinaryProseFilePathReference,
   MARKDOWN_FILE_PATH_CLASS,
   MARKDOWN_FILE_PATH_ATTRIBUTE,
 } from './markdown-file-path';
@@ -114,6 +115,96 @@ const markdownCache = new LruCache<string, string>(MARKDOWN_CACHE_MAX, {
 export const MARKDOWN_CACHE_MAX_ENTRIES = MARKDOWN_CACHE_MAX;
 export const MARKDOWN_CACHE_MAX_BYTES = MARKDOWN_CACHE_MAX_WEIGHT;
 
+const ORDINARY_PROSE_FILE_TOKEN = /(?:[A-Za-z]:[\\/]|\\\\|\/|\.{1,2}[\\/])?[A-Za-z0-9_.~@%+-]+(?::[A-Za-z0-9_.-]+)?(?:[\\/][A-Za-z0-9_.~@%+-]+)*/g;
+const PROTECTED_PROSE_TAGS = new Set(['a', 'code', 'pre', 'script', 'style', 'textarea', 'title']);
+const VOID_HTML_TAGS = new Set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr']);
+
+function linkifyOrdinaryProse(text: string): string {
+  let output = '';
+  let cursor = 0;
+
+  for (const match of text.matchAll(ORDINARY_PROSE_FILE_TOKEN)) {
+    const candidate = match[0];
+    const start = match.index ?? 0;
+    if (start > 0 && /[A-Za-z0-9_.:/\\@%+-]/.test(text[start - 1]!)) continue;
+
+    const referenceText = candidate.replace(/[.,:]+$/, '');
+    const trailingPunctuation = candidate.slice(referenceText.length);
+    const reference = ordinaryProseFilePathReference(referenceText);
+    if (!reference) continue;
+
+    output += text.slice(cursor, start);
+    output += `<a class="${MARKDOWN_FILE_PATH_CLASS}" ${MARKDOWN_FILE_PATH_ATTRIBUTE}="${escapeMarkdownHtmlAttribute(reference)}" role="link" tabindex="0">${referenceText}</a>`;
+    output += trailingPunctuation;
+    cursor = start + candidate.length;
+  }
+
+  return output + text.slice(cursor);
+}
+
+/**
+ * Linkify prose text in marked's HTML output while leaving existing links and
+ * code untouched. Doing this after Markdown parsing also means markup, link
+ * destinations, and code-block contents are never mistaken for prose.
+ */
+function linkifyOrdinaryProseHtml(html: string): string {
+  const openTags: string[] = [];
+  let output = '';
+  let cursor = 0;
+
+  while (cursor < html.length) {
+    if (html.startsWith('<!--', cursor)) {
+      const commentEnd = html.indexOf('-->', cursor + 4);
+      const end = commentEnd < 0 ? html.length : commentEnd + 3;
+      output += html.slice(cursor, end);
+      cursor = end;
+      continue;
+    }
+
+    if (html[cursor] === '<') {
+      let end = cursor + 1;
+      let quote = '';
+      while (end < html.length) {
+        const character = html[end]!;
+        if (quote) {
+          if (character === quote) quote = '';
+        } else if (character === '"' || character === "'") {
+          quote = character;
+        } else if (character === '>') {
+          end++;
+          break;
+        }
+        end++;
+      }
+
+      const tagMarkup = html.slice(cursor, end);
+      const tagMatch = /^<\/?\s*([a-z][\w:-]*)\b/i.exec(tagMarkup);
+      if (tagMatch) {
+        const tagName = tagMatch[1]!.toLowerCase();
+        const closing = /^<\//.test(tagMarkup);
+        if (closing) {
+          const openIndex = openTags.lastIndexOf(tagName);
+          if (openIndex >= 0) openTags.length = openIndex;
+        } else if (!VOID_HTML_TAGS.has(tagName) && !/\/\s*>$/.test(tagMarkup)) {
+          openTags.push(tagName);
+        }
+      }
+
+      output += tagMarkup;
+      cursor = end;
+      continue;
+    }
+
+    const nextTag = html.indexOf('<', cursor);
+    const end = nextTag < 0 ? html.length : nextTag;
+    const text = html.slice(cursor, end);
+    output += openTags.some((tag) => PROTECTED_PROSE_TAGS.has(tag)) ? text : linkifyOrdinaryProse(text);
+    cursor = end;
+  }
+
+  return output;
+}
+
 function stripInteractiveFilePathMarkup(html: string): string {
   return html.replace(/<([a-z][\w:-]*)([^>]*\sdata-pie-file-path="[^"]*"[^>]*)>/gi, (_match, tag: string, attrs: string) => (
     `<${tag}${attrs
@@ -140,7 +231,8 @@ export function renderMarkdown(text: string, cache = true, interactiveFilePaths 
   const withTableWrappers = raw
     .replace(/<table>/g, '<div class="md-table-wrap"><table>')
     .replace(/<\/table>/g, '</table></div>');
-  const sanitizedHtml = DOMPurify.sanitize(withTableWrappers, { RETURN_DOM: false });
+  const proseLinkedHtml = interactiveFilePaths ? linkifyOrdinaryProseHtml(withTableWrappers) : withTableWrappers;
+  const sanitizedHtml = DOMPurify.sanitize(proseLinkedHtml, { RETURN_DOM: false });
   const html = interactiveFilePaths ? sanitizedHtml : stripInteractiveFilePathMarkup(sanitizedHtml);
   if (cache) markdownCache.set(cacheKey, html);
   return html;

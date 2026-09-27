@@ -22,7 +22,7 @@ import type {
   HostRuntimePlatform,
   HostRendererSurface,
 } from '../../../hosts/lib/platform-contracts/platform.js';
-import type { HostToWebviewMessage, WebviewToHostMessage } from '../../../lib/protocol/index.js';
+import type { HostToWebviewMessage, RendererCommandContext, WebviewToHostMessage } from '../../../lib/protocol/index.js';
 import { selectRuntimeSetting } from '../../../hosts/lib/platform-contracts/session-platform';
 import type { FileDiffCoreLike } from '../../file-changes/file-diff-service';
 
@@ -168,6 +168,36 @@ function useTempDataRoot(): string {
 }
 
 // ─── Composition + lifecycle behavior against plain-object adapters ─────────
+
+test('HostRuntime preserves the trusted renderer context when routing webview commands', async () => {
+  const dataRoot = useTempDataRoot();
+  try {
+    const { platform } = createPlatformFixture();
+    const runtime = new HostRuntime(platform, new BackendClient());
+    try {
+      let receivedContext: RendererCommandContext | undefined;
+      (runtime as unknown as {
+        messageRouter: { handle(message: WebviewToHostMessage, context?: RendererCommandContext): Promise<void> };
+      }).messageRouter = {
+        handle: async (_message, context) => { receivedContext = context; },
+      };
+
+      const context: RendererCommandContext = {
+        rendererId: 'sidebar-renderer',
+        kind: 'vscode',
+        rendererGeneration: 7,
+      };
+      await runtime.handleWebviewMessage({ type: 'detail.subscribe' } as WebviewToHostMessage, context);
+
+      assert.deepEqual(receivedContext, context, 'detail routing needs the owning sidebar identity');
+      void dataRoot;
+    } finally {
+      await runtime.shutdown();
+    }
+  } finally {
+    delete process.env.PIE_DATA_DIR;
+  }
+});
 
 test('HostRuntime composes and projects ViewState from plain platform adapters (no vscode)', async () => {
   const dataRoot = useTempDataRoot();

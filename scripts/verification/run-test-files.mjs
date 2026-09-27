@@ -2,14 +2,14 @@
 
 // Run one or more repo-relative test files directly through the appropriate
 // LOCAL tsx with node:test, in fast mode (parallel files, no coverage). This is
-// the tightest dev loop: `node scripts/verification/run-test-files.mjs extension/test/foo.test.ts
+// the tightest dev loop: `node scripts/verification/run-test-files.mjs application/hosts/vscode/test/foo.test.ts
 // `harness/tools/subagent/test/schema.test.ts`.
 //
 // Classification mirrors scripts/verification/run-tests.mjs PACKAGE_CONFIGS and registry
 // testCwd metadata, routing over every registered source/test root (including
 // declared distributed future roots, which classify like any package dir):
-//  - extension/      -> cwd extension/,         tsx = registry-selected local/root CLI
-//  - analytics/analysis/ -> cwd analytics/analysis/, tsx = analytics/analysis/node_modules/tsx
+//  - application/hosts/vscode/ -> cwd application/hosts/vscode/, tsx = registry-selected local/root CLI
+//  - analytics/analysis/       -> cwd analytics/analysis/,        tsx = analytics/analysis/node_modules/tsx
 //  - scripts/**/test/ -> cwd repoRoot,            tsx = node_modules/tsx (root)
 //  - extensions/* and tools/* -> cwd repoRoot, tsx = node_modules/tsx (root)
 //
@@ -111,9 +111,10 @@ export function classifyTestFile(repoRoot, input) {
     );
   }
   const { id } = directive;
-  // Repo-root packages declare no testCwd; only extension/ and analytics/analysis run
-  // with a package-local cwd. This also lets harness/tools/ask-user remain in
-  // the extensions test group without pretending its tests live in extensions/.
+  // Repo-root packages declare no testCwd; application/hosts/vscode and
+  // analytics/analysis run with their package-local cwd. This also lets
+  // harness/tools/ask-user remain in the extensions test group without
+  // pretending its tests live in extensions/.
   const packageEntry = resolvePackageEntry(id);
   const cwd = packageEntry?.testCwd ? path.join(repoRoot, packageEntry.testCwd) : repoRoot;
   const tsxConfig = packageEntry?.tsxConfig;
@@ -226,7 +227,7 @@ function printHelp() {
     `Usage: node scripts/verification/run-test-files.mjs <test-file>... [options]\n\n` +
       `Run specific test files through the appropriate local tsx with node:test\n` +
       `(fast mode: parallel files, no coverage). Classifies each path into\n` +
-      `extension/, analytics/analysis/, scripts/, extensions/<id>/, or tools/<id>/ and uses that package's local\n` +
+      `application/hosts/vscode/, analytics/analysis/, scripts/, extensions/<id>/, or tools/<id>/ and uses that package's local\n` +
       `tsx; packages with SDK path aliases additionally pass --tsconfig.\n\n` +
       `Options:\n` +
       `  --help, -h   Show this help.\n` +

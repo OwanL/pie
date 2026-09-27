@@ -11,6 +11,7 @@ const loggerUrl = pathToFileURL(path.resolve(__dirname, '../logger.ts')).href;
 type Event = {
   event: 'tool_result_pruned';
   sessionId: string;
+  rootSessionId?: string;
   toolName: string;
   rules: string[];
   beforeTokens: number;
@@ -46,7 +47,7 @@ describe('logger', () => {
 
   test('appends one JSONL line per pruned result', async () => {
     mod.recordPruning({
-      event: 'tool_result_pruned', sessionId: 's1', toolName: 'bash',
+      event: 'tool_result_pruned', sessionId: 's1', rootSessionId: 'private-root', toolName: 'bash',
       rules: ['ansi-strip', 'minify-json'], beforeTokens: 100, afterTokens: 40,
       tokensSaved: 60, timestamp: '2026-07-04T08:00:00.000Z',
     });
@@ -62,6 +63,7 @@ describe('logger', () => {
     const first = JSON.parse(lines[0]!);
     assert.equal(first.event, 'tool_result_pruned');
     assert.equal(first.toolName, 'bash');
+    assert.equal(first.rootSessionId, 'private-root');
     assert.deepEqual(first.rules, ['ansi-strip', 'minify-json']);
     assert.equal(first.tokensSaved, 60);
     const second = JSON.parse(lines[1]!);

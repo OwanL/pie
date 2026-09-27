@@ -4,7 +4,7 @@
 import type { ComponentChildren } from 'preact';
 
 interface MessageHeaderProps {
-  label?: string | null;
+  label?: ComponentChildren;
   duration?: string | null;
   durationTitle?: string;
   meta?: string | null;

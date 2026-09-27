@@ -135,29 +135,13 @@
   .toolbar-settings-trigger,
   .model-picker-trigger,
   .panel-chip-toolbar
-)::before,
-.composer-bottom-bar .panel-chip-toolbar.panel-chip-select select {
+)::before {
   inset: -1px;
 }
 
 .composer-bottom-bar .model-picker-trigger {
   max-width: 180px;
   padding-inline: 6px;
-}
-
-.composer-bottom-bar .panel-chip-toolbar.panel-chip-select {
-  gap: 4px;
-  padding-left: 6px;
-  padding-right: 20px;
-}
-
-.composer-bottom-bar .panel-chip-select-caret {
-  right: 6px;
-}
-
-.composer-bottom-bar .panel-chip-reasoning-select {
-  min-width: 58px;
-  max-width: 96px;
 }
 
 .composer-indicators {

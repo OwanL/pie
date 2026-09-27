@@ -123,7 +123,10 @@ test('live path: parent + subagent edits to one file merge across relative/absol
     details: {
       mode: 'single', results: [{
         agent: 'worker', exitCode: 0,
-        messages: [{ role: 'assistant', content: [{ type: 'toolCall', name: 'edit', arguments: { path: '/proj/src/shared.ts', oldText: 'a\nb', newText: 'a\nb\nc\nd' } }] }],
+        messages: [
+          { role: 'assistant', content: [{ type: 'toolCall', id: 'child-edit', name: 'edit', arguments: { path: '/proj/src/shared.ts', oldText: 'a\nb', newText: 'a\nb\nc\nd' } }] },
+          { role: 'toolResult', toolCallId: 'child-edit', toolName: 'edit', isError: false },
+        ],
         stderr: '', usage: {},
       }],
     },
@@ -149,12 +152,19 @@ test('live path: legacy mixed-cwd subagent summaries resolve against the owning 
     requestId: 'r1', sessionPath, messageId: 'm1', toolCallId: 't1',
     name: 'subagent', input: { agent: 'worker', task: 't', cwd: '/other' },
     result: {
-      details: { mode: 'single', results: [{
-        agent: 'worker', exitCode: 0, messages: [{
-          role: 'assistant',
-          content: [{ type: 'toolCall', name: 'edit', arguments: { path: 'src/legacy.ts', oldText: 'a', newText: 'b' } }],
+      details: {
+        mode: 'single',
+        results: [{
+          agent: 'worker', exitCode: 0,
+          messages: [
+            {
+              role: 'assistant',
+              content: [{ type: 'toolCall', id: 'legacy-child-edit', name: 'edit', arguments: { path: 'src/legacy.ts', oldText: 'a', newText: 'b' } }],
+            },
+            { role: 'toolResult', toolCallId: 'legacy-child-edit', toolName: 'edit', isError: false },
+          ],
         }],
-      }] },
+      },
     },
     status: 'completed',
   }, deps, { skipTranscriptMutation: true });

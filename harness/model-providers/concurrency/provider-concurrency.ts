@@ -1,3 +1,38 @@
+import type { ConcurrencyLimitSource, ResolvedConcurrencyLimit } from '../../../lib/concurrency-config.js';
+
+/** Safety cap used only when neither a saved preference nor catalog default is valid. */
+export const PROVIDER_SAFETY_FALLBACK_MAX_CONCURRENT_REQUESTS = 1;
+
+/** Provider concurrency values are bounded at the shared config/RPC seam. */
+export function isProviderMaxConcurrentRequests(value: unknown): value is number {
+  return Number.isSafeInteger(value)
+    && Number(value) >= PROVIDER_UNLIMITED_CONCURRENCY
+    && Number(value) <= PROVIDER_MAX_CONCURRENT_REQUESTS;
+}
+
+/** Resolve a provider max from its saved preference, catalog default, or the
+ * existing fail-closed safety fallback. 0 is a valid Unlimited setting. */
+export function resolveProviderMaxConcurrentRequests(
+  savedPreference: unknown,
+  configuredDefault: unknown,
+  safetyFallback = PROVIDER_SAFETY_FALLBACK_MAX_CONCURRENT_REQUESTS,
+): ResolvedConcurrencyLimit {
+  if (isProviderMaxConcurrentRequests(savedPreference)) {
+    return { value: savedPreference, source: 'saved-preference' };
+  }
+  if (isProviderMaxConcurrentRequests(configuredDefault)) {
+    return { value: configuredDefault, source: 'configured-default' };
+  }
+  return {
+    value: isProviderMaxConcurrentRequests(safetyFallback)
+      ? safetyFallback
+      : PROVIDER_SAFETY_FALLBACK_MAX_CONCURRENT_REQUESTS,
+    source: 'safety-fallback',
+  };
+}
+
+export type { ConcurrencyLimitSource };
+
 /** Per-provider concurrency overrides, user-configurable in runtime settings.
  * Each field is optional: `undefined` means use the provider catalog default. */
 export interface ProviderConcurrencyOverrides {

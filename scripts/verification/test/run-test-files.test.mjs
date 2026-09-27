@@ -60,11 +60,11 @@ test('normalizeRepoRelative rejects paths outside the repo', () => {
 test('classifyTestFile uses the registered root tsx for extension files with cross-owner ESM imports', () => {
   const d = classifyTestFile(repoRoot, 'application/frontend/test/components/app-smoke.test.ts');
   assert.equal(d.id, 'extension');
-  assert.equal(fwd(d.cwd), fwd(path.join(repoRoot, 'extension')));
+  assert.equal(fwd(d.cwd), fwd(path.join(repoRoot, 'application', 'hosts', 'vscode')));
   assert.equal(d.tsxConfig, 'application/hosts/vscode/tsconfig.json');
   assert.equal(d.includeOwnerDependencies, true);
   assert.equal(d.repoRel, 'application/frontend/test/components/app-smoke.test.ts');
-  assert.equal(d.relativeFilePath, '../application/frontend/test/components/app-smoke.test.ts');
+  assert.equal(d.relativeFilePath, '../../frontend/test/components/app-smoke.test.ts');
   assert.match(fwd(d.tsxBin), /(^|\/)node_modules\/tsx\/dist\/cli\.mjs$/);
   const promptTest = classifyTestFile(repoRoot, 'harness/agent-instructions/prompt-assembly/test/backend-system-prompts.test.ts');
   assert.equal(promptTest.id, 'extension');
@@ -170,7 +170,7 @@ test('groupFilesByPackage groups real files by package (sorted) and sets subagen
   const ext = groups.find((g) => g.id === 'extension');
   assert.equal(ext.tsxConfig, 'application/hosts/vscode/tsconfig.json');
   assert.equal(ext.includeOwnerDependencies, true);
-  assert.deepEqual(ext.files, ['../application/frontend/test/components/app-smoke.test.ts']);
+  assert.deepEqual(ext.files, ['../../frontend/test/components/app-smoke.test.ts']);
 });
 
 test('groupFilesByPackage retains repo-relative script paths for execution', () => {

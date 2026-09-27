@@ -29,6 +29,7 @@
 
 ## Operations
 
+- [CONCURRENCY-CONFIGURATION.md](operations/CONCURRENCY-CONFIGURATION.md) — subagent/provider limit ownership, preference precedence, effective runtime evidence, and regression-test entry points.
 - [AGENT-WORKFLOWS.md](operations/AGENT-WORKFLOWS.md) — current-state and research findings for agent coordination, session-scoped change review, deferred work, and persistent sessions; not an implemented contract.
 - [COMPUTER-USE.md](operations/COMPUTER-USE.md) — selected dependencies, isolated runtime architecture, tool/coordinate/lifecycle contracts, acceptance evidence, verification, and known limitations.
 - [GUI-DEVELOPMENT.md](operations/GUI-DEVELOPMENT.md) — local GUI build/watch/reload workflow.

@@ -409,7 +409,9 @@ function RuntimeTelemetry({ result, displayCost }: { result: SubagentSingleResul
   if (cost === undefined && !recovered) return null;
 
   const title = [
-    cost !== undefined ? `${cost.estimated ? 'Estimated cost: ~' : 'Cost: $'}${cost.cost.toFixed(4)}` : undefined,
+    cost !== undefined
+      ? `${cost.estimated ? 'Estimated cost: ~' : 'Cost: '}$${cost.cost.toFixed(4)}`
+      : undefined,
     recovered
       ? `Recovered${retryCount !== undefined && retryCount > 0 ? ` after ${retryCount} ${retryCount === 1 ? 'retry' : 'retries'}` : ' via fallback'}`
       : undefined,
@@ -417,7 +419,9 @@ function RuntimeTelemetry({ result, displayCost }: { result: SubagentSingleResul
 
   return (
     <span class="subagent-runtime-telemetry" title={title} aria-label={title}>
-      {cost !== undefined && <span class="subagent-telemetry-item subagent-telemetry-cost">{cost.estimated ? '~' : ''}${cost.cost.toFixed(3)}</span>}
+      {cost !== undefined && (
+        <span class="subagent-telemetry-item subagent-telemetry-cost">${cost.cost.toFixed(2)}</span>
+      )}
       {recovered && <span class="subagent-telemetry-item subagent-telemetry-recovered">Recovered</span>}
     </span>
   );

@@ -5,6 +5,7 @@ import {
   MARKDOWN_FILE_PATH_SELECTOR,
   resolveLocalFilePath,
 } from './markdown-file-path';
+import { IMAGE_PREVIEW_MIME_BY_EXTENSION } from '../../lib/protocol/image-preview.js';
 
 interface FilePathElement {
   getAttribute?: (name: string) => string | null;
@@ -24,6 +25,33 @@ export function filePathReferenceFromTarget(target: EventTarget | null): string 
 export function resolvedFilePathFromTarget(target: EventTarget | null, workingDirectory: string | null): string | null {
   const reference = filePathReferenceFromTarget(target);
   return reference ? resolveLocalFilePath(reference, workingDirectory) : null;
+}
+
+export function filePathOpenRequestFromTarget(
+  target: EventTarget | null,
+  workingDirectory: string | null,
+): { path: string; reference: string; workingDirectory?: string } | null {
+  const reference = filePathReferenceFromTarget(target);
+  if (!reference) return null;
+  const path = resolveLocalFilePath(reference, workingDirectory);
+  if (!path) return null;
+  return {
+    path,
+    reference,
+    ...(workingDirectory !== null ? { workingDirectory } : {}),
+  };
+}
+
+/** The image-path hover affordance shares click's exact path/cwd resolution. */
+export function filePathPreviewRequestFromTarget(
+  target: EventTarget | null,
+  workingDirectory: string | null,
+): { path: string; reference: string; workingDirectory?: string } | null {
+  const request = filePathOpenRequestFromTarget(target, workingDirectory);
+  if (!request) return null;
+  const leaf = request.path.replace(/[\\/]+$/, '').split(/[\\/]/).at(-1) ?? '';
+  const extension = /\.[^.]+$/u.exec(leaf)?.[0]?.toLowerCase();
+  return extension && IMAGE_PREVIEW_MIME_BY_EXTENSION[extension] ? request : null;
 }
 
 interface DelegatedEvent {
@@ -46,10 +74,10 @@ function suppressPathDefault(event: DelegatedEvent): void {
 export function handleDelegatedFilePathClick(
   event: DelegatedEvent,
   workingDirectory: string | null,
-  onOpenFile: (path: string) => void,
+  onOpenFile: (path: string, reference?: string, workingDirectory?: string) => void,
 ): boolean {
-  const path = resolvedFilePathFromTarget(event.target, workingDirectory);
-  if (!path) return false;
+  const request = filePathOpenRequestFromTarget(event.target, workingDirectory);
+  if (!request) return false;
 
   // A drag-selection ending on a path also emits click. Match native-link
   // behavior: suppress the anchor's default navigation while leaving the
@@ -60,7 +88,7 @@ export function handleDelegatedFilePathClick(
   }
 
   suppressPathDefault(event);
-  onOpenFile(path);
+  onOpenFile(request.path, request.reference, request.workingDirectory);
   return true;
 }
 
@@ -68,12 +96,12 @@ export function handleDelegatedFilePathClick(
 export function handleDelegatedFilePathKeyDown(
   event: DelegatedEvent & { key: string; repeat?: boolean },
   workingDirectory: string | null,
-  onOpenFile: (path: string) => void,
+  onOpenFile: (path: string, reference?: string, workingDirectory?: string) => void,
 ): boolean {
   if (event.key !== 'Enter' && event.key !== ' ') return false;
 
-  const path = resolvedFilePathFromTarget(event.target, workingDirectory);
-  if (!path) return false;
+  const request = filePathOpenRequestFromTarget(event.target, workingDirectory);
+  if (!request) return false;
 
   // Prevent the native anchor activation for every recognized keydown. This
   // also makes holding Enter/Space safe: auto-repeat is consumed but opens
@@ -81,7 +109,7 @@ export function handleDelegatedFilePathKeyDown(
   suppressPathDefault(event);
   if (event.repeat || hasTextSelection()) return true;
 
-  onOpenFile(path);
+  onOpenFile(request.path, request.reference, request.workingDirectory);
   return true;
 }
 
@@ -91,10 +119,13 @@ export function handleDelegatedFilePathContextMenu(
   workingDirectory: string | null,
   onContextMenu: TranscriptContextMenuHandler,
 ): boolean {
-  const path = resolvedFilePathFromTarget(event.target, workingDirectory);
-  if (!path) return false;
+  const request = filePathOpenRequestFromTarget(event.target, workingDirectory);
+  if (!request) return false;
   event.preventDefault();
   event.stopPropagation();
-  onContextMenu('filePath', path, event as MouseEvent);
+  onContextMenu('filePath', request.path, event as MouseEvent, undefined, {
+    reference: request.reference,
+    ...(request.workingDirectory !== undefined ? { workingDirectory: request.workingDirectory } : {}),
+  });
   return true;
 }

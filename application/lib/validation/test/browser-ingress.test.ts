@@ -221,6 +221,37 @@ test('detail ref counts must be non-negative safe integers', () => {
   }
 });
 
+test('requestImagePreview accepts bounded path context and rejects unknown or oversized fields', () => {
+  expectOk({
+    type: 'requestImagePreview', requestId: 'image-preview:1', sessionPath: '/sessions/a.jsonl',
+    path: '/workspace/image.png', reference: 'image.png', workingDirectory: '/workspace',
+    viewGeneration: 4, clientCommandId: UUID,
+  });
+  expectRejected({
+    type: 'requestImagePreview', requestId: 'x'.repeat(257), sessionPath: '/sessions/a.jsonl',
+    path: '/workspace/image.png', clientCommandId: UUID,
+  });
+  expectRejected({
+    type: 'requestImagePreview', requestId: 'image-preview:1', sessionPath: '/sessions/a.jsonl',
+    path: 'x'.repeat(BROWSER_INGRESS_LIMITS.maxPathUtf8Bytes + 1), clientCommandId: UUID,
+  });
+  expectRejected({
+    type: 'requestImagePreview', requestId: 'image-preview:1', sessionPath: '/sessions/a.jsonl',
+    path: '/workspace/image.png', unrelated: true, clientCommandId: UUID,
+  });
+});
+
+test('openFile accepts the renderer-captured basename and cwd context', () => {
+  expectOk({
+    type: 'openFile', path: '/workspace/README.md', reference: 'README.md',
+    workingDirectory: '/workspace', clientCommandId: UUID,
+  });
+  expectRejected({
+    type: 'openFile', path: '/workspace/README.md', reference: 1,
+    workingDirectory: '/workspace', clientCommandId: UUID,
+  });
+});
+
 // ─── Oversized strings and arrays ───────────────────────────────────────────
 
 test('oversized strings are rejected', () => {

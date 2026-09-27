@@ -3,7 +3,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import * as path from "node:path";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { tmpdir } from "node:os";
 import { runSingleAgent, subagentRuntime } from "../runner.js";
+import { trackSessionTempOutput } from "../../../../lib/temporary-files/session-temp-output-lifecycle.js";
+import { rootSessionAttribution } from "../../../../lib/session-attribution.js";
+import {
+	assertChildToolRuntimeOwnerOpen,
+	cleanupChildToolRuntimeOwner,
+	createChildToolRuntimeOwner,
+	currentChildToolRuntimeOwner,
+	registerChildToolRuntimeCleanup,
+	type ChildToolRuntimeOwner,
+} from "../../../agent-processes/lib/process-lifecycle/child-tool-runtime-owner.js";
 import { captureSubagentTerminalResult } from "../analytics-capture.js";
 import { parseModelPricing, resolveApplicablePricing } from "../../../model-providers/pricing/pricing-core.js";
 import type { AgentConfig } from "../../../agent-instructions/agent-discovery/agents.js";
@@ -28,13 +41,18 @@ function makeModelRegistry() {
 	} as any;
 }
 
+let fakeSessionSequence = 0;
+
 function createFakeSdk(options?: {
 	onPrompt?: (emit: (event: any) => void) => Promise<void>;
+	onCreateSession?: (sessionManager: object | undefined) => Promise<void> | void;
 	subscribeThrows?: boolean;
+	onAbort?: () => void;
 }) {
+	const sessionId = `fake-child-${++fakeSessionSequence}`;
 	const listeners: Array<(event: any) => void> = [];
 	let releasePrompt: (() => void) | undefined;
-	const state: { resourceReloadCalls: number; createdModel?: { provider?: string; id?: string } } = {
+	const state: { resourceReloadCalls: number; createdModel?: { provider?: string; id?: string }; createdSessionManager?: object } = {
 		resourceReloadCalls: 0,
 	};
 
@@ -58,24 +76,27 @@ function createFakeSdk(options?: {
 			});
 		},
 		abort: async () => {
+			options?.onAbort?.();
 			releasePrompt?.();
 		},
 		dispose: () => undefined,
 	};
 
 	const sdk = {
-		createSession: async (args: { model?: { provider?: string; id?: string } }) => {
+		createSession: async (args: { model?: { provider?: string; id?: string }; sessionManager?: object }) => {
 			state.createdModel = args.model;
+			state.createdSessionManager = args.sessionManager;
+			await options?.onCreateSession?.(args.sessionManager);
 			return { session };
 		},
 		createResourceLoader: () => ({
 			reload: async () => { state.resourceReloadCalls++; },
 		}),
-		createSessionManager: () => ({}),
+		createSessionManager: () => ({ getSessionId: () => sessionId }),
 		getAgentDir: () => ".",
 	};
 
-	return { sdk, state };
+	return { sdk, state, sessionId };
 }
 
 function runFakeAgent(
@@ -83,6 +104,7 @@ function runFakeAgent(
 	onUpdate?: (partial: any) => void,
 	signal?: AbortSignal,
 	cwd?: string,
+	parentSessionId?: string,
 ) {
 	return runSingleAgent(
 		process.cwd(),
@@ -100,14 +122,17 @@ function runFakeAgent(
 		undefined,
 		undefined,
 		undefined,
-		undefined,
+		parentSessionId,
 		undefined,
 		{ sdk: sdk as any },
 	);
 }
 
-function successfulFakeSdk() {
+function successfulFakeSdk(options?: {
+	onCreateSession?: (sessionManager: object | undefined) => Promise<void> | void;
+}) {
 	return createFakeSdk({
+		...options,
 		onPrompt: async (emit) => {
 			emit({
 				type: "message_end",
@@ -122,6 +147,44 @@ function successfulFakeSdk() {
 		},
 	});
 }
+
+test("child disposal removes its exact SDK output and recall stash files", async () => {
+	const rootSessionId = "private-root";
+	const outputPath = path.join(tmpdir(), `pi-bash-${randomBytes(8).toString("hex")}.log`);
+	const { sdk, sessionId } = successfulFakeSdk({
+		onCreateSession: async (manager) => {
+			if (!manager) throw new Error("Expected the child session manager.");
+			const childId = (manager as { getSessionId: () => string }).getSessionId();
+			await trackSessionTempOutput(childId, "bash", outputPath, manager, rootSessionId);
+		},
+	});
+	const stashPath = path.join(tmpdir(), `pruned-raw-${sessionId}-${randomBytes(8).toString("hex")}.txt`);
+	writeFileSync(outputPath, "owned SDK output");
+	writeFileSync(stashPath, "owned recall raw");
+
+	try {
+		await runFakeAgent(sdk, undefined, undefined, undefined, rootSessionId);
+		assert.equal(existsSync(outputPath), false);
+		assert.equal(existsSync(stashPath), false);
+	} finally {
+		rmSync(outputPath, { force: true });
+		rmSync(stashPath, { force: true });
+	}
+});
+
+test("child session manager carries root attribution without replacing its distinct child ID", async () => {
+	const { sdk, state, sessionId } = successfulFakeSdk();
+	await runFakeAgent(sdk, undefined, undefined, undefined, "private-root");
+
+	const manager = state.createdSessionManager as {
+		getSessionId: () => string;
+		getRootSessionId?: () => string;
+	} | undefined;
+	assert.ok(manager);
+	assert.equal(manager.getSessionId(), sessionId);
+	assert.equal(manager.getRootSessionId?.(), "private-root");
+	assert.deepEqual(rootSessionAttribution({ sessionManager: manager }, sessionId), { rootSessionId: "private-root" });
+});
 
 test("runSingleAgent exposes tool-call drafts while the child model generates them", async () => {
 	const { sdk } = createFakeSdk({
@@ -589,6 +652,146 @@ test("runSingleAgent accumulates only provider-reported cost across turns", asyn
 
 	assert.equal(result.usage.turns, 2);
 	assert.equal(result.usage.cost, 0.3, "only the reported turn contributes cost evidence");
+});
+
+test("runSingleAgent closes its private tool-runtime owner on success, prompt failure, and cancellation", async () => {
+	const owners: ChildToolRuntimeOwner[] = [];
+	const cleaned: string[] = [];
+	const ownRuntime = () => {
+		const owner = currentChildToolRuntimeOwner();
+		assert.ok(owner, "the prompt inherits its private tool-runtime owner");
+		owners.push(owner);
+		registerChildToolRuntimeCleanup(owner, "runner-test", async () => {
+			await Promise.resolve();
+			cleaned.push(owner.id);
+		});
+		return owner;
+	};
+
+	const completedEvent = {
+		type: "message_end",
+		message: {
+			role: "assistant",
+			content: [{ type: "text", text: "done" }],
+			usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { total: 0 } },
+			model: "session-model",
+			stopReason: "completed",
+		},
+	};
+	const success = createFakeSdk({ onPrompt: async (emit) => { ownRuntime(); emit(completedEvent); } });
+	await runFakeAgent(success.sdk);
+	assert.equal(owners[0]!.state, "closed");
+	assert.deepEqual(cleaned, [owners[0]!.id], "successful return awaits owner cleanup");
+
+	const failure = createFakeSdk({ onPrompt: async () => { ownRuntime(); throw new Error("prompt failed"); } });
+	await runFakeAgent(failure.sdk);
+	assert.equal(owners[1]!.state, "closed");
+	assert.deepEqual(cleaned, owners.slice(0, 2).map((owner) => owner.id), "prompt failure still awaits owner cleanup");
+
+	let announceStarted!: () => void;
+	let releasePrompt!: () => void;
+	const started = new Promise<void>((resolve) => { announceStarted = resolve; });
+	const promptGate = new Promise<void>((resolve) => { releasePrompt = resolve; });
+	const controller = new AbortController();
+	let cancellationOwner: ChildToolRuntimeOwner | undefined;
+	const cancellation = createFakeSdk({
+		onPrompt: async () => { cancellationOwner = ownRuntime(); announceStarted(); await promptGate; },
+		onAbort: () => assert.equal(cancellationOwner?.state, "closing", "cancellation fences late runtime calls synchronously"),
+	});
+	const running = runFakeAgent(cancellation.sdk, undefined, controller.signal);
+	await started;
+	controller.abort();
+	await running;
+	assert.equal(owners[2]!.state, "closed");
+	assert.deepEqual(cleaned, owners.map((owner) => owner.id), "cancellation cleanup awaits its registered runtime disposer");
+	assert.throws(() => assertChildToolRuntimeOwnerOpen(cancellationOwner!), (error: unknown) =>
+		(error as { code?: string }).code === "CHILD_RUNTIME_CLOSING");
+	releasePrompt();
+});
+
+test("child runtime owner shares an in-flight cleanup across concurrent callers", async () => {
+	const owner = createChildToolRuntimeOwner("concurrent cleanup");
+	let releaseCleanup!: () => void;
+	let announceCleanupStarted!: () => void;
+	const cleanupGate = new Promise<void>((resolve) => { releaseCleanup = resolve; });
+	const cleanupStarted = new Promise<void>((resolve) => { announceCleanupStarted = resolve; });
+	let cleanupCalls = 0;
+	registerChildToolRuntimeCleanup(owner, "concurrent-test", async () => {
+		cleanupCalls++;
+		announceCleanupStarted();
+		await cleanupGate;
+	});
+
+	const first = cleanupChildToolRuntimeOwner(owner);
+	const concurrent = cleanupChildToolRuntimeOwner(owner);
+	assert.equal(concurrent, first, "all callers await the same in-flight cleanup");
+	await cleanupStarted;
+	assert.equal(cleanupCalls, 1, "the callback is not invoked concurrently twice");
+	releaseCleanup();
+	await Promise.all([first, concurrent]);
+	assert.equal(owner.state, "closed");
+	assert.equal(owner.cleanups.size, 0);
+});
+
+test("runSingleAgent retries only failed child cleanup once without replaying the model task", async () => {
+	let promptCalls = 0;
+	let cleanupCalls = 0;
+	let owner: ChildToolRuntimeOwner | undefined;
+	const { sdk } = createFakeSdk({
+		onPrompt: async (emit) => {
+			promptCalls++;
+			owner = currentChildToolRuntimeOwner();
+			assert.ok(owner);
+			registerChildToolRuntimeCleanup(owner, "fail-once", async () => {
+				cleanupCalls++;
+				if (cleanupCalls === 1) throw new Error("transient shutdown failure");
+			});
+			emit({
+				type: "message_end",
+				message: { role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "completed", usage: { output: 1 } },
+			});
+		},
+	});
+
+	const result = await runFakeAgent(sdk);
+
+	assert.equal(promptCalls, 1, "cleanup recovery never replays the child task");
+	assert.equal(cleanupCalls, 2, "the failed callback receives exactly one cleanup-only retry");
+	assert.equal(owner?.state, "closed");
+	assert.equal(owner?.cleanups.size, 0);
+	assert.equal(result.exitCode, 0, "transient cleanup failure is recovered before terminalizing the result");
+});
+
+test("runSingleAgent reports permanent child cleanup failure as terminal and preserves task error", async () => {
+	let promptCalls = 0;
+	let cleanupCalls = 0;
+	let owner: ChildToolRuntimeOwner | undefined;
+	const { sdk } = createFakeSdk({
+		onPrompt: async () => {
+			promptCalls++;
+			owner = currentChildToolRuntimeOwner();
+			assert.ok(owner);
+			registerChildToolRuntimeCleanup(owner, "permanent-failure", async () => {
+				cleanupCalls++;
+				throw new Error(`permanent shutdown failure ${cleanupCalls}`);
+			});
+			throw new Error("original model task failure");
+		},
+	});
+
+	const result = await runFakeAgent(sdk);
+
+	assert.equal(promptCalls, 1, "a terminal cleanup failure cannot replay the model task");
+	assert.equal(cleanupCalls, 2, "permanent cleanup gets only one retry");
+	assert.equal(owner?.state, "closing", "a failed owner stays fenced");
+	assert.equal(owner?.cleanups.size, 1, "the failed callback remains available for explicit later recovery");
+	assert.equal(result.exitCode, 1);
+	assert.equal(result.stopReason, "error");
+	assert.equal(result.retryable, false);
+	assert.equal(result.replaySafety, "terminal");
+	assert.match(result.errorMessage ?? "", /original model task failure/);
+	assert.match(result.errorMessage ?? "", /cleanup failed after one cleanup-only retry/);
+	assert.match(result.errorMessage ?? "", /permanent shutdown failure 2/);
 });
 
 test("runSingleAgent keeps provider-reported zero cost as evidence", async () => {

@@ -43,8 +43,8 @@ test('tool metadata makes session-scoped review the default after file edits', (
   assert.match(firstDescriptionSentence, /session-scoped manifest/);
   assert.match(firstDescriptionSentence, /before workspace-wide Git checks/);
   assert.ok(firstDescriptionSentence.length + 1 <= 180);
-  assert.match(tool.description, /successful completed subagent results, not running children/);
-  assert.match(tool.description, /not a complete filesystem mutation journal/);
+  assert.match(tool.description, /completed subagents and nested descendants, even when their task failed/);
+  assert.match(tool.description, /not running children or a complete filesystem mutation journal/);
   assert.match(tool.promptSnippet, /after file edits/);
   assert.ok(tool.promptGuidelines.some((guideline: string) => (
     guideline.includes('omit sessionPath')
@@ -56,7 +56,7 @@ test('tool metadata makes session-scoped review the default after file edits', (
   )));
   assert.ok(tool.promptGuidelines.some((guideline: string) => (
     guideline.includes('git status/diff separately')
-    && guideline.includes('pre-existing hunks')
+    && guideline.includes('other sessions editing the same file')
   )));
 });
 
@@ -67,9 +67,8 @@ test('schema pins diff path as required with minItems 1', () => {
   assert.match(props.action.description, /`path` is required/);
 });
 
-/** Build a temp session JSONL (well-formed) whose cwd is the temp dir and
- *  that "created" `created.ts` there — so `diff` on it resolves to a file that
- *  exists and produces a synthetic all-additions body (no git needed). */
+/** Build a session that recorded a write to an existing current file, outside
+ * Git. The manifest records it; diff must report the missing Git baseline. */
 interface SessionOptions {
   toolPath?: string | ((dir: string) => string);
   cwd?: string | null | ((dir: string) => string);
@@ -141,7 +140,8 @@ test('execute: default list and diff use current in-memory edit/write entries wi
     const diff = await exe({ action: 'diff', path: ['created.ts', 'edited.ts'] }, ctx);
     assert.equal(diff.isError, false);
     assert.match(textOf(diff), /^A created\.ts /m);
-    assert.match(textOf(diff), /\+new\n\+file/);
+    assert.match(textOf(diff), /Not in a Git repository; use read/);
+    assert.doesNotMatch(textOf(diff), /@@/);
     assert.match(textOf(diff), /^M edited\.ts /m);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
@@ -220,7 +220,7 @@ test('execute: default runtime self-review resolves relative paths against a chi
     const diff = await exe({ action: 'diff', path: ['child.ts'] }, ctx);
     assert.equal(diff.isError, false);
     assert.match(textOf(diff), /^A child\.ts /m);
-    assert.match(textOf(diff), /\+child/);
+    assert.match(textOf(diff), /Not in a Git repository; use read/);
   } finally {
     await fs.rm(childDir, { recursive: true, force: true });
   }
@@ -378,8 +378,8 @@ test('execute: diff accepts a single-element path array', async () => {
   try {
     const res = await exe({ action: 'diff', sessionPath, path: ['created.ts'] });
     assert.equal(res.isError, false);
-    assert.match(textOf(res), /^A created\.ts \+2 -0 baseline=\(new file\)/m);
-    assert.match(textOf(res), /@@ -0,0 \+1,2 @@/);
+    assert.match(textOf(res), /^A created\.ts recorded=\+2\/-0 baseline=\(unavailable\)/m);
+    assert.match(textOf(res), /Not in a Git repository; use read/);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
@@ -408,12 +408,12 @@ test('execute: diff renders an absolute manifest path inside cwd as relative', a
   }
 });
 
-test('execute: diff unknown path never errors (defaults to modified, returns header)', async () => {
+test('execute: diff rejects paths outside the session manifest', async () => {
   const { dir, sessionPath } = await makeSession();
   try {
     const res = await exe({ action: 'diff', sessionPath, path: ['no/such/file.ts'] });
-    assert.equal(res.isError, false);
-    assert.match(textOf(res), /^M no\/such\/file\.ts /m);
+    assert.equal(res.isError, true);
+    assert.match(textOf(res), /must belong to this session/);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
@@ -425,8 +425,7 @@ test('execute: diff context param is honoured (0 default, explicit passed)', asy
     const r0 = await exe({ action: 'diff', sessionPath, path: ['created.ts'], context: 0 });
     assert.equal(textOf(r0).split('\n').some((l: string) => l.startsWith(' ')), false);
     const r3 = await exe({ action: 'diff', sessionPath, path: ['created.ts'], context: 3 });
-    // created file → all-additions; context has no effect on a creation hunk,
-    // but the param must not error and still produce the body.
+    // No repository here; context is accepted without fabricating a patch.
     assert.equal(r3.isError, false);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
@@ -501,6 +500,54 @@ test('execute: diff rejects empty path entries', async () => {
     const res = await exe({ action: 'diff', sessionPath, path: [''] });
     assert.equal(res.isError, true);
     assert.match(textOf(res), /non-empty strings/);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('execute: invalid paging and context arguments fail explicitly', async () => {
+  const { dir, sessionPath } = await makeSession();
+  try {
+    for (const offset of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      assert.equal((await exe({ action: 'list', sessionPath, offset })).isError, true);
+    }
+    for (const context of [-1, 1.5, 101]) {
+      assert.equal((await exe({ action: 'diff', sessionPath, path: ['created.ts'], context })).isError, true);
+    }
+    assert.equal((await exe({ action: 'diff', sessionPath, path: 'created.ts' })).isError, true);
+    const multi = await exe({ action: 'diff', sessionPath, path: ['created.ts', 'created.ts'], offset: 5 });
+    assert.equal(multi.isError, true);
+    assert.match(textOf(multi), /exactly one path/);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('execute: diff continuation reaches omitted deleted content without reading the deleted file', async () => {
+  const { dir, sessionPath } = await makeSession();
+  try {
+    const git = (args: string[]) => execFileP('git', args, { cwd: dir });
+    await git(['init', '-q']); await git(['config', 'user.email', 'test@example.com']);
+    await git(['config', 'user.name', 'Test']);
+    await fs.writeFile(path.join(dir, 'created.ts'), Array.from({ length: 1000 }, (_, i) => `line-${i} ${'x'.repeat(40)}`).join('\n'));
+    await git(['add', 'created.ts']); await git(['commit', '-q', '-m', 'baseline']);
+    await fs.unlink(path.join(dir, 'created.ts'));
+    // The list identifies a recorded path; the working tree can differ from
+    // that operation, and diff must explicitly describe current Git changes.
+    let offset = 0; let sawLastLine = false;
+    for (let page = 0; page < 20; page++) {
+      const result = await exe({ action: 'diff', sessionPath, path: ['created.ts'], offset });
+      assert.equal(result.isError, false);
+      const text = textOf(result);
+      assert.ok(text.length <= 8000);
+      assert.match(text, /Current Git changes, not session-only edits/);
+      if (text.includes('-line-999 ')) sawLastLine = true;
+      const next = /truncated; next:[^\n]*offset=(\d+)/.exec(text);
+      if (!next) break;
+      assert.ok(Number(next[1]) > offset);
+      offset = Number(next[1]);
+    }
+    assert.ok(sawLastLine);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }
@@ -608,10 +655,9 @@ test('execute: diff finds a manifest entry via a case-variant path on Windows', 
   try {
     const res = await exe({ action: 'diff', sessionPath, path: ['CREATED.TS'] });
     assert.equal(res.isError, false);
-    // Must resolve to the created-kind entry (all-additions body), not default
-    // to modified — proving the case-variant path matched the manifest entry.
+    // Must resolve the case-variant spelling to the manifest entry.
     assert.match(textOf(res), /^A created\.ts /m);
-    assert.match(textOf(res), /@@ -0,0 \+1,2 @@/);
+    assert.match(textOf(res), /Not in a Git repository; use read/);
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }

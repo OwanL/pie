@@ -68,6 +68,10 @@ export interface PruningConfig {
 	model: string;
 	provider: string;
 	thinkingLevel: string;
+	/** Enable launch pruning for the main agent. Omitted values default to true. */
+	mainAgentEnabled?: boolean;
+	/** Enable launch pruning for subagents. Omitted values default to true. */
+	subagentEnabled?: boolean;
 	skills: SkillPruningConfig;
 	tools?: ToolPruningConfig;
 	prepass?: PrepassConfig;
@@ -137,6 +141,8 @@ export interface PruningResult {
 export interface PruningDecision {
 	timestamp: string;
 	sessionId: string;
+	/** Owning chat session when this decision came from a subagent session. */
+	rootSessionId?: string;
 	sessionPath: string;
 	mode: PruningMode;
 	query: string;

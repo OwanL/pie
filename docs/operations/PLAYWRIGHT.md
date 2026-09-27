@@ -47,6 +47,8 @@ Runtime ownership follows the same durable-session shape as computer-use without
 
 A tool session deliberately owns a dedicated process because trusted `run_code` can reach `page.context().browser()` and create more contexts. The backend reconciles all reachable contexts/pages after code execution, and closing the session destroys the whole dedicated process.
 
+An in-process subagent has an in-memory `SessionManager` and no session JSONL. During each child execution attempt, Playwright instead resolves a private runtime owner from async-local context. It never borrows the parent session path, and different child attempts cannot share a sidecar. The runner fences the owner as soon as cancellation/cleanup begins and awaits sidecar shutdown during its own cleanup; direct SDK session disposal is not relied on to emit `session_shutdown`.
+
 Chromium is started with `launchServer({ headless: true })`, then connected locally by the same sidecar. This gives the owner a deterministic process handle for graceful and forced cleanup. There is no CDP connection to machine Chrome/Edge, no channel fallback, no `userDataDir`, and no persistent profile.
 
 ## Public tool surface
@@ -223,6 +225,8 @@ Artifacts live beneath the durable session's sibling `playwright/` directory, pa
 
 Both the canonical durable-session path and the unsanitized Playwright session ID contribute stable hash suffixes to their directory segments, preventing lossy filename sanitization from merging unrelated sessions.
 
+Child artifacts are written under the OS temporary directory in an owner-specific `pie-playwright-child-artifacts` partition. Runtime shutdown intentionally does not remove them: paths returned to the agent remain readable after the child returns for evidence review or follow-up. They are temporary files and may be removed by the operating system's normal temp-directory cleanup; they are not durable session storage.
+
 Storage-state and download artifacts can contain authentication or private data. Paths are returned; storage JSON is never automatically inlined.
 
 ## Storage state
@@ -263,7 +267,7 @@ Parent↔sidecar transport is UTF-8 JSONL v1 with a 1 MiB record bound and reque
 
 Requests execute serially. Playwright defaults are 30 seconds for actions and 45 seconds for navigation; public overrides and waits are capped at 120 seconds. The parent owns a larger enclosing deadline so customized sidecar timeouts are never clipped.
 
-Cancellation sends a correlated cancel frame. If the request does not settle within a five-second grace period, the parent kills the sidecar process tree and rejects with `CANCELLED`.
+Cancellation sends a correlated cancel frame. If the request does not settle within a five-second grace period, the parent force-kills the sidecar process tree, waits a bounded period for confirmed sidecar exit, and rejects with `CANCELLED`. A successful kill-signal request alone is not treated as process exit.
 
 After a sidecar timeout, crash, or protocol loss:
 
@@ -272,7 +276,7 @@ After a sidecar timeout, crash, or protocol loss:
 - calls other than `open`/cleanup fail with `RUNTIME_REOPEN_REQUIRED`;
 - `open` lazily starts a fresh runtime.
 
-Windows forced cleanup uses `taskkill /T /F` on the sidecar PID, so Chromium descendants are included. The sidecar also watches stdin and parent liveness; owner death without a shutdown frame triggers graceful browser close before exit.
+Windows asynchronous forced cleanup uses `taskkill /T /F` on the sidecar PID, so Chromium descendants are included. Failed tree termination remains unresolved even if the direct sidecar exits; retries never target an already-exited PID. On unsupported hosts, forced cleanup does not treat direct process exit as descendant confirmation. Graceful shutdown is acknowledged only by a zero sidecar exit after browser-server close/process exit or successful Windows tree termination is confirmed. Unknown cleanup, a failed browser-tree kill, or a non-clean sidecar exit becomes `RUNTIME_CLEANUP_UNRESOLVED`; the runtime stays retained and cannot be reopened as clean. The final synchronous process-exit fallback can only send the kill and cannot await confirmation. The sidecar also watches stdin and parent liveness; owner death without a shutdown frame triggers browser cleanup, and exits nonzero if descendant cleanup cannot be confirmed.
 
 ## Stable error codes
 
@@ -295,6 +299,7 @@ Primary codes:
 - `ARTIFACT_TOO_LARGE`
 - `SIDECAR_PROTOCOL_ERROR`
 - `RUNTIME_REOPEN_REQUIRED`
+- `RUNTIME_CLEANUP_UNRESOLVED`
 
 Validation uses `INVALID_ARGUMENTS`; uncategorized backend action failures use `REQUEST_FAILED`.
 

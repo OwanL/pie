@@ -86,6 +86,14 @@ export async function readPruningSettings(): Promise<PruningSettings> {
       ? (pruning.thinkingLevel as ThinkingLevel)
       : DEFAULT_PRUNING_SETTINGS.thinkingLevel;
 
+    const mainAgentEnabled = typeof pruning.mainAgentEnabled === 'boolean'
+      ? pruning.mainAgentEnabled
+      : DEFAULT_PRUNING_SETTINGS.mainAgentEnabled;
+
+    const subagentEnabled = typeof pruning.subagentEnabled === 'boolean'
+      ? pruning.subagentEnabled
+      : DEFAULT_PRUNING_SETTINGS.subagentEnabled;
+
     const prepassTimeoutSec = typeof pruning.prepassTimeoutSec === 'number' && Number.isFinite(pruning.prepassTimeoutSec) && pruning.prepassTimeoutSec > 0
       ? pruning.prepassTimeoutSec
       : DEFAULT_PRUNING_SETTINGS.prepassTimeoutSec;
@@ -99,7 +107,20 @@ export async function readPruningSettings(): Promise<PruningSettings> {
         ? rawAutoSkip
         : DEFAULT_PRUNING_SETTINGS.autoSkipBelowTokens;
 
-    return { mode, skillCeiling, toolCeiling, skillAlwaysKeep, toolAlwaysKeep, model, provider, thinkingLevel, prepassTimeoutSec, autoSkipBelowTokens };
+    return {
+      mode,
+      skillCeiling,
+      toolCeiling,
+      skillAlwaysKeep,
+      toolAlwaysKeep,
+      model,
+      provider,
+      thinkingLevel,
+      mainAgentEnabled,
+      subagentEnabled,
+      prepassTimeoutSec,
+      autoSkipBelowTokens,
+    };
   } catch {
     return cloneDefaultPruningSettings();
   }
@@ -162,6 +183,8 @@ export async function writePruningSettings(
     if (updates.model !== undefined) pruning.model = updates.model;
     if (updates.provider !== undefined) pruning.provider = updates.provider;
     if (updates.thinkingLevel !== undefined) pruning.thinkingLevel = updates.thinkingLevel;
+    if (updates.mainAgentEnabled !== undefined) pruning.mainAgentEnabled = updates.mainAgentEnabled;
+    if (updates.subagentEnabled !== undefined) pruning.subagentEnabled = updates.subagentEnabled;
     if (updates.prepassTimeoutSec !== undefined) pruning.prepassTimeoutSec = updates.prepassTimeoutSec;
     if (updates.autoSkipBelowTokens !== undefined) pruning.autoSkipBelowTokens = updates.autoSkipBelowTokens;
 

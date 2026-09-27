@@ -1,27 +1,36 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { URL } from 'node:url';
 import { requireComputerUseDependency } from '../dependency-owner.mjs';
+import { DesktopCoordinator } from '../desktop-ownership.js';
 import registerComputer from '../index.js';
 import discoveryShim from '../../../../extensions/computer-use/index.js';
-import { runtimeRegistry } from '../runtime-client.js';
 
 const { PNG } = requireComputerUseDependency('pngjs');
 
-function registeredTool(): any {
+function registeredTool(dependencies: any = {}): any {
   let tool: any;
-  registerComputer({ registerTool(value: any) { tool = value; }, on() {} } as any);
+  registerComputer({ registerTool(value: any) { tool = value; }, on() {} } as any, dependencies);
   return tool;
 }
 
 async function withFakeClient<T>(client: any, run: (tool: any) => Promise<T>): Promise<T> {
-  const registry = runtimeRegistry as any; const originalGet = registry.get; const originalPeek = registry.peek;
-  registry.get = async () => client; registry.peek = async () => client;
-  try { return await run(registeredTool()); }
-  finally { registry.get = originalGet; registry.peek = originalPeek; }
+  const dir = await mkdtemp(path.join(tmpdir(), 'computer-extension-claim-'));
+  const registry = {
+    async get() { return client; },
+    async peek() { return client; },
+    async shutdownSession() {},
+  };
+  const coordinator = new DesktopCoordinator(path.join(dir, 'desktop-owner.lock'));
+  try {
+    return await run(registeredTool({ desktopCoordinator: coordinator, runtimeRegistry: registry }));
+  } finally {
+    await coordinator.shutdownAll(async () => {});
+    await rm(dir, { recursive: true, force: true });
+  }
 }
 
 const context = { sessionManager: { getSessionFile: () => '/tmp/computer-extension-fake.jsonl' }, model: { input: ['text'] } };
@@ -49,6 +58,10 @@ test('extension registers exactly one sequential computer tool and session-owned
   // longer registers its own `context` handler, so the two limits are never
   // enforced by two independently ordered handlers.
   assert.equal(handlers.has('context'), false);
+  assert.ok(handlers.has('agent_start'));
+  assert.ok(handlers.has('agent_settled'));
+  assert.equal(handlers.has('agent_end'), false);
+  assert.equal(handlers.has('turn_end'), false);
   assert.ok(handlers.has('session_shutdown'));
 });
 

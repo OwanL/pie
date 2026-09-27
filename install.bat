@@ -32,8 +32,7 @@ if /i "%~1"=="-h" goto :pa_help
 if /i "%~1"=="--check" goto :pa_check
 if /i "%~1"=="--no-pause" goto :pa_nopause
 echo Unknown argument: %~1 1>&2
-shift
-goto :parse_args
+exit /b 1
 :pa_help
 set "MODE=help" & shift & goto :parse_args
 :pa_check
@@ -55,6 +54,24 @@ echo %CMDCMDLINE% | find /i "%~nx0" >nul && set "INTERACTIVE=1"
 :detect_done
 
 if "%MODE%"=="check" goto :check
+
+REM --- preflight: validate prerequisites before any persistent mutations -----
+call :check_node
+if "%NODE_MISSING%"=="1" goto :no_node
+where npm >nul 2>nul || goto :no_npm
+set "PIN_NODE="
+set "PIN_NPM="
+set "PIN_PI="
+for /f "delims=" %%L in ('node "%RUNNER%" pinned-versions 2^>nul') do if not defined PIN_NODE set "PIN_NODE=%%L"
+for /f "skip=1 delims=" %%L in ('node "%RUNNER%" pinned-versions 2^>nul') do if not defined PIN_NPM set "PIN_NPM=%%L"
+for /f "skip=2 delims=" %%L in ('node "%RUNNER%" pinned-versions 2^>nul') do if not defined PIN_PI set "PIN_PI=%%L"
+if not defined PIN_NODE goto :pins_failed
+if not defined PIN_NPM goto :pins_failed
+if not defined PIN_PI goto :pins_failed
+if /i not "%NODE_VERSION%"=="%PIN_NODE%" (
+  echo ==^> Node.js %PIN_NODE% is required for reproducible installs; found %NODE_VERSION%. See .node-version.
+  goto :error
+)
 
 REM ===========================================================================
 REM  FULL INSTALL
@@ -95,11 +112,6 @@ call :setx_user PI_CODING_AGENT_SESSION_DIR "%NEW_SESSIONS%" || goto :error
 set "PI_CODING_AGENT_SESSION_DIR=%NEW_SESSIONS%"
 echo ==^> PI_CODING_AGENT_SESSION_DIR uses the machine-local store at '%NEW_SESSIONS%'
 
-REM --- validate prerequisites (Node first so a node-less box fails cleanly) --
-call :check_node
-if "%NODE_MISSING%"=="1" goto :no_node
-where npm >nul 2>nul || goto :no_npm
-
 REM --- settings.json#sessionDir rewrite + global outcomes migration ----------
 REM  Preserve reviews and run analytics alongside transcripts when repairing a
 REM  displaced session authority. Derived exports/open checkpoints are rebuilt.
@@ -113,18 +125,7 @@ REM  Batch cannot parse/rewrite JSON; the shared runner owns legacy transcript
 REM  migration and the canonical settings.json rewrite.
 node "%RUNNER%" configure-sessions "%REPO_ROOT%" || goto :error
 
-REM --- pinned Node/npm/pi versions ------------------------------------------
-for /f "delims=" %%L in ('node "%RUNNER%" pinned-versions 2^>nul') do if not defined PIN_NODE set "PIN_NODE=%%L"
-for /f "skip=1 delims=" %%L in ('node "%RUNNER%" pinned-versions 2^>nul') do if not defined PIN_NPM set "PIN_NPM=%%L"
-for /f "skip=2 delims=" %%L in ('node "%RUNNER%" pinned-versions 2^>nul') do if not defined PIN_PI set "PIN_PI=%%L"
-if not defined PIN_NODE goto :pins_failed
-if not defined PIN_NPM goto :pins_failed
-if not defined PIN_PI goto :pins_failed
-
-if /i not "%NODE_VERSION%"=="%PIN_NODE%" (
-  echo ==^> Node.js %PIN_NODE% is required for reproducible installs; found %NODE_VERSION%. See .node-version.
-  goto :error
-)
+REM --- pinned npm version ----------------------------------------------------
 for /f "delims=" %%V in ('npm --version 2^>nul') do set "ACTUAL_NPM=%%V"
 if /i not "%ACTUAL_NPM%"=="%PIN_NPM%" (
   echo ==^> Installing pinned npm@%PIN_NPM% (found %ACTUAL_NPM%)
@@ -161,9 +162,21 @@ REM --- relocate auth.json out of the working tree ---------------------------
 set "IN_TREE_AUTH=%REPO_ROOT%\auth.json"
 set "TARGET_AUTH_DIR=%LOCALAPPDATA%\pie"
 set "TARGET_AUTH=%TARGET_AUTH_DIR%\auth.json"
-if not exist "%IN_TREE_AUTH%" goto :after_relocate
 call :read_user_env PI_CODING_AGENT_AUTH_DIR
 set "AUTH_DIR_ENV=%USER_ENV_VALUE%"
+if exist "%IN_TREE_AUTH%" goto :auth_in_tree
+if defined AUTH_DIR_ENV goto :auth_dir_ready
+REM A clean install has no in-tree auth.json to trigger relocation. Still set
+REM and persist the secure location now so future `pi login` writes outside git.
+set "AUTH_DIR_ENV=%TARGET_AUTH_DIR%"
+if not exist "%AUTH_DIR_ENV%" mkdir "%AUTH_DIR_ENV%" || goto :error
+call :setx_user PI_CODING_AGENT_AUTH_DIR "%AUTH_DIR_ENV%" || goto :error
+:auth_dir_ready
+set "PI_CODING_AGENT_AUTH_DIR=%AUTH_DIR_ENV%"
+if not exist "%AUTH_DIR_ENV%" mkdir "%AUTH_DIR_ENV%" || goto :error
+goto :after_relocate
+
+:auth_in_tree
 if defined AUTH_DIR_ENV goto :merge_auth
 echo.
 echo ==^> SECURITY: auth.json is inside the working tree.
@@ -188,6 +201,8 @@ del "%IN_TREE_AUTH%" >nul 2>nul
 echo ==^> auth.json moved to '%TARGET_AUTH%' and PI_CODING_AGENT_AUTH_DIR set.
 goto :after_relocate
 :merge_auth
+REM The User-scope value may not be in this installer's inherited environment.
+set "PI_CODING_AGENT_AUTH_DIR=%AUTH_DIR_ENV%"
 set "SECURE_AUTH=%AUTH_DIR_ENV%\auth.json"
 node "%RUNNER%" merge-auth "%IN_TREE_AUTH%" "%SECURE_AUTH%" || goto :error
 echo     in-tree auth.json removed to prevent future split-brain; backend reads from PI_CODING_AGENT_AUTH_DIR

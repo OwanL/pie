@@ -21,6 +21,8 @@ export interface RecentConversationMessage {
 
 export interface LlmPruningInput {
 	userPrompt: string;
+	/** Optional child-agent definition context; the userPrompt remains its task assignment. */
+	agentContext?: string;
 	contextFile?: string;
 	recentConversation?: RecentConversationMessage[];
 	skills: SkillCandidate[];
@@ -158,6 +160,10 @@ export function compactDescription(
 /** Build the user message for the pruning LLM call. */
 export function buildPruningUserMessage(input: LlmPruningInput): string {
 	const lines = [`User request: "${input.userPrompt}"`];
+
+	if (input.agentContext) {
+		lines.push("", "Agent definition context:", input.agentContext);
+	}
 
 	if (input.recentConversation && input.recentConversation.length > 0) {
 		lines.push("", "Recent conversation (use this to interpret follow-up requests):");

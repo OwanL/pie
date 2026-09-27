@@ -9,6 +9,7 @@ export interface SessionSummary extends BackendSessionSummary {
 /** Worker/RPC session event DTOs. The host-only capability projection remains
  * application-owned and is exported separately below. */
 export type {
+  AgentMessagePayload,
   AgentSettledPayload,
   AuxiliaryLlmUsagePayload,
   BackendReadyPayload,

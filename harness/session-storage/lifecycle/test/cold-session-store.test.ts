@@ -1295,13 +1295,18 @@ test('forget eagerly purges the hot transcript cache', async () => {
   }
 });
 
-test('forget does not wait behind helper cache reclamation', async () => {
+test('forget waits for acknowledged helper invalidation using the pre-delete cache identity', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-cold-forget-helper-'));
   try {
     const sessionPath = path.join(root, 'forget.jsonl');
     await writeJsonl(sessionPath, [header(root, 3, 'forget-helper'), userEntry('user', null, 'private')]);
+    let resolveInvalidation!: () => void;
+    let invalidationStarted!: () => void;
+    const invalidationGate = new Promise<void>((resolve) => { resolveInvalidation = resolve; });
+    const started = new Promise<void>((resolve) => { invalidationStarted = resolve; });
     let invalidateCalls = 0;
     let invalidatedKey: string | undefined;
+    let forgetSettled = false;
     const preDeleteKey = 'canonical-before-delete';
     const helper = {
       warm: async () => undefined,
@@ -1311,7 +1316,8 @@ test('forget does not wait behind helper cache reclamation', async () => {
       invalidatePath: async (sessionPathKey) => {
         invalidateCalls += 1;
         invalidatedKey = sessionPathKey;
-        await new Promise<void>(() => undefined);
+        invalidationStarted();
+        await invalidationGate;
       },
       dispose: async () => undefined,
     } satisfies ColdBrowseHelper;
@@ -1332,15 +1338,106 @@ test('forget does not wait behind helper cache reclamation', async () => {
       browseHelper: helper,
     });
 
-    await Promise.race([
-      store.forget(sessionPath),
-      new Promise<never>((_, reject) => setTimeout(
-        () => reject(new Error('forget waited for helper invalidation')),
-        250,
-      )),
-    ]);
+    const forgetting = store.forget(sessionPath).finally(() => { forgetSettled = true; });
+    await started;
     assert.equal(invalidateCalls, 1);
     assert.equal(invalidatedKey, preDeleteKey, 'helper invalidation retains the exact pre-delete cache identity');
+    assert.equal(forgetSettled, false, 'forget must wait until the helper confirms cache removal');
+    await assert.rejects(fs.stat(sessionPath), (error: NodeJS.ErrnoException) => error.code === 'ENOENT');
+    resolveInvalidation();
+    await forgetting;
+    assert.equal(forgetSettled, true);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('forget bounds helper invalidation and waits for confirmed helper shutdown', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-cold-forget-helper-timeout-'));
+  try {
+    const sessionPath = path.join(root, 'forget.jsonl');
+    await writeJsonl(sessionPath, [header(root, 3, 'forget-helper-timeout'), userEntry('user', null, 'private')]);
+    let resolveShutdown!: () => void;
+    let shutdownStarted!: () => void;
+    const shutdownGate = new Promise<void>((resolve) => { resolveShutdown = resolve; });
+    const started = new Promise<void>((resolve) => { shutdownStarted = resolve; });
+    let disposeCalls = 0;
+    let forgetSettled = false;
+    const helper = {
+      warm: async () => undefined,
+      openSnapshot: async () => { throw new Error('unused'); },
+      loadPage: async () => { throw new Error('unused'); },
+      loadDetail: async () => { throw new Error('unused'); },
+      invalidatePath: async () => await new Promise<void>(() => undefined),
+      dispose: async () => {
+        disposeCalls += 1;
+        shutdownStarted();
+        await shutdownGate;
+      },
+    } satisfies ColdBrowseHelper;
+    const catalog = {
+      list: async () => [],
+      refresh: () => undefined,
+      remove: () => undefined,
+    };
+    const store = new ColdSessionStore({
+      sdk: { SessionManager: {} } as any,
+      coordinatorGeneration: 34,
+      startupCwd: root,
+      agentDir: root,
+      sessionCatalog: catalog as any,
+      browseHelper: helper,
+      browseHelperInvalidationTimeoutMs: 10,
+      browseHelperShutdownTimeoutMs: 1_000,
+    });
+
+    const forgetting = store.forget(sessionPath).finally(() => { forgetSettled = true; });
+    await started;
+    assert.equal(disposeCalls, 1, 'a stalled invalidation must retire the helper');
+    assert.equal(forgetSettled, false, 'forget must wait for helper exit confirmation');
+    resolveShutdown();
+    await forgetting;
+    assert.equal(forgetSettled, true);
+    await assert.rejects(fs.stat(sessionPath), (error: NodeJS.ErrnoException) => error.code === 'ENOENT');
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('forget propagates failure when helper invalidation and shutdown are unconfirmed', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-cold-forget-helper-failure-'));
+  try {
+    const sessionPath = path.join(root, 'forget.jsonl');
+    await writeJsonl(sessionPath, [header(root, 3, 'forget-helper-failure'), userEntry('user', null, 'private')]);
+    const invalidationError = new Error('invalidation failed');
+    const shutdownError = new Error('helper exit not confirmed');
+    const helper = {
+      warm: async () => undefined,
+      openSnapshot: async () => { throw new Error('unused'); },
+      loadPage: async () => { throw new Error('unused'); },
+      loadDetail: async () => { throw new Error('unused'); },
+      invalidatePath: async () => { throw invalidationError; },
+      dispose: async () => { throw shutdownError; },
+    } satisfies ColdBrowseHelper;
+    const catalog = {
+      list: async () => [],
+      refresh: () => undefined,
+      remove: () => undefined,
+    };
+    const store = new ColdSessionStore({
+      sdk: { SessionManager: {} } as any,
+      coordinatorGeneration: 35,
+      startupCwd: root,
+      agentDir: root,
+      sessionCatalog: catalog as any,
+      browseHelper: helper,
+    });
+
+    await assert.rejects(store.forget(sessionPath), (error) => {
+      assert.ok(error instanceof AggregateError);
+      assert.deepEqual(error.errors, [invalidationError, shutdownError]);
+      return true;
+    });
     await assert.rejects(fs.stat(sessionPath), (error: NodeJS.ErrnoException) => error.code === 'ENOENT');
   } finally {
     await fs.rm(root, { recursive: true, force: true });

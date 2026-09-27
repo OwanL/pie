@@ -204,6 +204,22 @@ test('handleSessionScopeCleared preserves maps for other sessions', () => {
 
 // ─── evictSession (full-eviction path) ─────────────────────────────────────
 
+test('evictSession clears session-scoped MCP state on tab cleanup and preserves other sessions', () => {
+  const state: ArchState = {
+    ...readyState,
+    settings: {
+      ...readyState.settings,
+      mcpSessionOverridesBySession: { '/a': { serverA: true }, '/b': { serverB: false } },
+      mcpPendingApplyBySession: { '/a': true, '/b': false },
+    },
+  };
+  const result = evictSession(state, '/a', { removeSummary: false, removeTabs: true });
+  assert.equal(result.state.settings.mcpSessionOverridesBySession['/a'], undefined);
+  assert.deepEqual(result.state.settings.mcpSessionOverridesBySession['/b'], { serverB: false });
+  assert.equal(result.state.settings.mcpPendingApplyBySession['/a'], undefined);
+  assert.equal(result.state.settings.mcpPendingApplyBySession['/b'], false);
+});
+
 test('evictSession cleans pagingInFlightBySession', () => {
   const state: ArchState = {
     ...readyState,
@@ -343,6 +359,8 @@ test('Both dispatch routes clean the same set of per-session keyed maps', () => 
       ...readyState.settings,
       availableModelsBySession: { [sp]: [], [other]: [] },
       contextUsageBySession: { [sp]: {} as never, [other]: {} as never },
+      mcpSessionOverridesBySession: { [sp]: { serverA: true }, [other]: { serverB: false } },
+      mcpPendingApplyBySession: { [sp]: true, [other]: false },
       pendingExtensionUIRequestsBySession: {
         [sp]: { req1: extUiPayload },
         [other]: { req2: extUiPayload },
@@ -392,6 +410,8 @@ test('Both dispatch routes clean the same set of per-session keyed maps', () => 
     { name: 'sessions.analyticsFactorsBySession', map: cleared.state.sessions.analyticsFactorsBySession },
     { name: 'settings.availableModelsBySession', map: cleared.state.settings.availableModelsBySession },
     { name: 'settings.contextUsageBySession', map: cleared.state.settings.contextUsageBySession },
+    { name: 'settings.mcpSessionOverridesBySession', map: cleared.state.settings.mcpSessionOverridesBySession },
+    { name: 'settings.mcpPendingApplyBySession', map: cleared.state.settings.mcpPendingApplyBySession },
     { name: 'settings.pendingExtensionUIRequestsBySession', map: cleared.state.settings.pendingExtensionUIRequestsBySession },
     { name: 'composer.pendingComposerInputsBySession', map: cleared.state.composer.pendingComposerInputsBySession },
     { name: 'composer.activeRunSummaryBySession', map: cleared.state.composer.activeRunSummaryBySession },
@@ -436,6 +456,9 @@ test('Both dispatch routes clean the same set of per-session keyed maps', () => 
     );
   }
 
+  assert.deepEqual(cleared.state.settings.mcpSessionOverridesBySession[other], { serverB: false });
+  assert.equal(cleared.state.settings.mcpPendingApplyBySession[other], false);
+
   // Same checks for the direct evictSession route. NOTE: build a parallel
   // array referencing evicted.state.* — reusing the `checks` array above would
   // re-read `cleared` and leave the evictSession route unverified.
@@ -448,6 +471,8 @@ test('Both dispatch routes clean the same set of per-session keyed maps', () => 
     { name: 'sessions.analyticsFactorsBySession', map: evicted.state.sessions.analyticsFactorsBySession },
     { name: 'settings.availableModelsBySession', map: evicted.state.settings.availableModelsBySession },
     { name: 'settings.contextUsageBySession', map: evicted.state.settings.contextUsageBySession },
+    { name: 'settings.mcpSessionOverridesBySession', map: evicted.state.settings.mcpSessionOverridesBySession },
+    { name: 'settings.mcpPendingApplyBySession', map: evicted.state.settings.mcpPendingApplyBySession },
     { name: 'settings.pendingExtensionUIRequestsBySession', map: evicted.state.settings.pendingExtensionUIRequestsBySession },
     { name: 'composer.pendingComposerInputsBySession', map: evicted.state.composer.pendingComposerInputsBySession },
     { name: 'composer.activeRunSummaryBySession', map: evicted.state.composer.activeRunSummaryBySession },
@@ -488,4 +513,6 @@ test('Both dispatch routes clean the same set of per-session keyed maps', () => 
       `evictSession left stale requestIdToLocalId[${reqId}] referencing ${sp}`,
     );
   }
+  assert.deepEqual(evicted.state.settings.mcpSessionOverridesBySession[other], { serverB: false });
+  assert.equal(evicted.state.settings.mcpPendingApplyBySession[other], false);
 });

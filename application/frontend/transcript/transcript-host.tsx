@@ -31,6 +31,7 @@ import {
   useTranscriptCommitRegistry,
 } from './commit-registry';
 import { recordRenderEvidenceTarget } from '../shell/render-error';
+import { ImagePathPreview } from './image-path-preview';
 
 // Offscreen evidence is a bounded proof. If the mounted DOM exceeds this
 // bound, do not use a partial scan to claim that a missing leaf is offscreen.
@@ -392,6 +393,12 @@ export function TranscriptHost({
           onCancelPrepass={onCancelPrepass}
         />
       )}
+      <ImagePathPreview
+        rootRef={hostRef}
+        sessionPath={activeSessionPath}
+        workingDirectory={workingDirectory}
+        postMessage={postMessage}
+      />
     </div>
   );
 }

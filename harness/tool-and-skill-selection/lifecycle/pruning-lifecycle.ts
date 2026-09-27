@@ -14,19 +14,20 @@ import { MIN_PROMPT_LENGTH } from "../../agent-instructions/skill-selection/skil
 export function shouldSkipPruning(
 	event: BeforeAgentStartEvent,
 	activeConfig: PruningConfig,
-): { skip: boolean; reason?: "disabled-by-toggle" | "off" | "too-short" | "subagent" } {
+): { skip: boolean; reason?: "disabled-by-toggle" | "off" | "too-short" | "subagent" | "main-agent-disabled" } {
 	if (isExtensionDisabledByToggle("skill-pruner")) {
 		return { skip: true, reason: "disabled-by-toggle" };
 	}
-	// Subagent sessions are scoped, isolated tasks. The prepass is designed to
-	// prune skills/tools for the main agent's broad context; running it inside
-	// every subagent turn adds a 20–35s LLM call (plus a fail-open failure mode)
-	// before the first streamed token, which makes subagents look hung. Skip it.
-	if (isInSubagentContext()) {
-		return { skip: true, reason: "subagent" };
-	}
+	// `off` and the global extension toggle remain global; the two booleans only
+	// opt the main agent and subagents in/out independently.
 	if (activeConfig.mode === "off") {
 		return { skip: true, reason: "off" };
+	}
+	if (isInSubagentContext() && activeConfig.subagentEnabled === false) {
+		return { skip: true, reason: "subagent" };
+	}
+	if (!isInSubagentContext() && activeConfig.mainAgentEnabled === false) {
+		return { skip: true, reason: "main-agent-disabled" };
 	}
 	if (event.prompt.trim().length < MIN_PROMPT_LENGTH) {
 		return { skip: true, reason: "too-short" };
@@ -52,6 +53,8 @@ export function clonePruningConfig(input: PruningConfig): PruningConfig {
 		model: input.model,
 		provider: input.provider,
 		thinkingLevel: input.thinkingLevel,
+		mainAgentEnabled: input.mainAgentEnabled ?? true,
+		subagentEnabled: input.subagentEnabled ?? true,
 		skills: {
 			strategy: input.skills.strategy,
 			ceiling: input.skills.ceiling,

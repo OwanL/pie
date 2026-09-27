@@ -136,6 +136,8 @@ Supporting references (never pinned by tests):
 ## Queued Follow-ups
 
 - Sends accepted while a session is already running remain optimistic `queued` transcript messages until the backend reports delivery.
+- Agent-originated `session_control` messages are user-role rows with a distinct `agent-message` provenance tag. Idle prompts enter the host transcript from the coordinator event because the SDK does not emit the ordinary user-start event; busy prompts start as `queued` and retain the same host-local `localId` through exact queued-delivery promotion. Duplicate observations cannot downgrade a delivered row, an idle `session.opened` snapshot cannot erase the accepted local row before SDK persistence, and a send or post-ack preflight rejection removes only that agent row.
+- The worker persists provenance in a non-rendering `pie.agent-message-provenance` custom sidecar linked to the durable user session-entry ID. Transcript reconstruction pre-scans the sidecar and restores the `agent-message` tag after reload; it never changes the SDK user content or renders the marker as a row. The header shows an Agent label with the bot icon while keeping the message's role as `user`.
 - While the current assistant turn is live, transcript projection places queued follow-ups after that turn, at the boundary where the backend will deliver them, rather than before the in-progress output.
 - Delivery reconciliation is FIFO, matching the SDK's steering/follow-up queue order. Interrupt and queue-clear operations remove queued optimistic messages and their pending rollback snapshots.
 - Queued follow-ups remain editable without interrupting or truncating the active turn. Because the SDK exposes only whole-queue clearing, an edit atomically replaces the ordered backend queue and preserves every message's local delivery correlation.
@@ -172,7 +174,7 @@ Supporting references (never pinned by tests):
 The webview must not hold logic state in local `useState`/`useReducer`. Only the following ephemeral UI concerns are allowed as webview-local state:
 
 - **contextMenu** — position and type of the currently open context menu (dismissed on click-outside/Escape)
-- **peek / hover overlay** — transient overlay visibility for the changed-files rail (and analogous hover-peek surfaces), dismissed on mouse-leave / tap-outside / Escape. It is an overlay, not a layout push — it reserves no horizontal space; only an explicit pin (`ViewState.fileChangesExpanded`) durably reserves space. The moral equivalent of `contextMenu`.
+- **peek / hover overlay** — transient overlay visibility for the changed-files rail (and analogous hover-peek surfaces, including image-path previews), dismissed on mouse-leave / tap-outside / Escape. It is an overlay, not a layout push — it reserves no horizontal space; only an explicit pin (`ViewState.fileChangesExpanded`) durably reserves space. Image bytes arrive through a targeted, bounded imperative response and remain renderer-local; they are never copied into `ViewState`, snapshots, or durable state. The moral equivalent of `contextMenu`.
 - **scrollPosition / autoScroll** — viewport scroll tracking
 - **input focus / caret position** — DOM focus state
 - **drag state** — transient tab drag-and-drop position
@@ -185,6 +187,7 @@ The webview must not hold logic state in local `useState`/`useReducer`. Only the
 
 All other state (editing, draft content, session selection, model settings, prefs) lives in the host store and reaches the webview via ViewState snapshots.
 
+- Concurrency diagnostics distinguish configured preferences from runtime evidence. Provider metrics carry the enforcing authority's max-request limit and optional source; saved overrides take precedence over catalog defaults, and removing them restores catalog policy. Subagent tree capacity is per worker process, not an application-wide pool; its shared default and saved-preference provenance survive preference resolution and persistence. The optional `aggregateStats.providerGate.subagentConcurrency` snapshot separates configured capacity from effective capacity: effective is omitted when no usable workers exist or current worker generations have not all acknowledged the latest runtime-preference revision. The webview remains a passive consumer and never infers applied limits from preferences or catalog defaults. Missing diagnostics are unavailable, not evidence of successful application. See [concurrency configuration](../operations/CONCURRENCY-CONFIGURATION.md) for owners and precedence.
 - Subagent nesting controls are host-owned preferences. In particular, `subagentBucketCanSpawn` is a complete `{ small, medium, frontier }` boolean map that defaults missing or malformed tiers to `true`, is mirrored to every worker through `runtimePrefs.set`, and applies to the caller's effective subagent bucket. Active-parent fallback children inherit a subagent parent's bucket; root chats and their unclassified fallback children remain unrestricted.
 
 ## MCP Server State

@@ -1,24 +1,30 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { PlaywrightRuntimeError, RuntimeClient, RuntimeRegistry } from '../runtime-client.js';
+import { killProcessTree, PlaywrightRuntimeError, RuntimeClient, RuntimeRegistry } from '../runtime-client.js';
+import { cleanupChildToolRuntimeOwner, createChildToolRuntimeOwner } from '../../../agent-processes/lib/process-lifecycle/child-tool-runtime-owner.js';
+
+const childProcess = createRequire(import.meta.url)('node:child_process') as typeof import('node:child_process');
 
 class FakeChild extends EventEmitter {
   stdout = new EventEmitter();
   stderr = new EventEmitter();
-  pid: number;
+  pid?: number;
+  exitCode: number | null = null;
+  signalCode: NodeJS.Signals | null = null;
   killed = false;
   records: unknown[] = [];
   stdin = { write: (data: string) => { for (const line of data.trim().split('\n')) if (line) this.receive(JSON.parse(line)); return true; } };
-  constructor(pid: number, readonly allRecords: unknown[], readonly neverCancel = false) { super(); this.pid = pid; }
+  constructor(pid: number | undefined, readonly allRecords: unknown[], readonly neverCancel = false) { super(); this.pid = pid; }
   respond(record: unknown) { queueMicrotask(() => this.stdout.emit('data', Buffer.from(`${JSON.stringify(record)}\n`))); }
   receive(record: any) {
     this.records.push(record); this.allRecords.push({ pid: this.pid, ...record });
-    if (record.kind === 'shutdown') { queueMicrotask(() => this.kill()); return; }
+    if (record.kind === 'shutdown') { queueMicrotask(() => this.exitCleanly()); return; }
     if (record.kind === 'cancel') {
       if (!this.neverCancel) this.respond({ v: 1, kind: 'response', id: record.id, ok: false, error: { code: 'CANCELLED', message: 'cancelled' } });
       return;
@@ -32,14 +38,30 @@ class FakeChild extends EventEmitter {
     if (method === 'fail') { this.respond({ v: 1, kind: 'response', id, ok: false, error: { code: 'STALE_REF', message: 'injected', retryable: true } }); return; }
     this.respond({ v: 1, kind: 'response', id, ok: true, result: { sessionId: params?.sessionId ?? 'echo' } });
   }
-  kill() { if (this.killed) return false; this.killed = true; queueMicrotask(() => this.emit('close', 1, null)); return true; }
+  exitCleanly() {
+    if (this.killed) return false;
+    this.killed = true;
+    this.exitCode = 0;
+    this.signalCode = null;
+    this.emit('exit', 0, null);
+    this.emit('close', 0, null);
+    return true;
+  }
+  kill() {
+    if (this.killed) return false;
+    this.killed = true;
+    this.signalCode = 'SIGKILL';
+    this.emit('exit', null, 'SIGKILL');
+    this.emit('close', null, 'SIGKILL');
+    return true;
+  }
 }
 
 function fakeFactory(options: { neverCancel?: boolean } = {}) {
   const children: FakeChild[] = []; const records: unknown[] = [];
   return {
     children, records,
-    spawn: () => { const child = new FakeChild(200 + children.length, records, options.neverCancel); children.push(child); return child as never; },
+    spawn: () => { const child = new FakeChild(undefined, records, options.neverCancel); children.push(child); return child as never; },
   };
 }
 
@@ -142,13 +164,196 @@ test('shutdown rejects in-flight requests and hung shutdown force-kills the chil
     }
   }
   const children: FakeChild[] = [];
-  const spawn = () => { const child = new HungShutdown(400 + children.length, fake.records); children.push(child); return child as never; };
+  const spawn = () => { const child = new HungShutdown(undefined, fake.records); children.push(child); return child as never; };
   const client = new RuntimeClient(path.join(tmpdir(), 'pw-hung-shutdown.jsonl'), spawn, 25, 20);
   const pending = client.request('hang', {}, { timeoutMs: 10_000 });
   const rejected = assert.rejects(pending, (error: unknown) => (error as PlaywrightRuntimeError).code === 'RUNTIME_REOPEN_REQUIRED');
   await client.shutdown();
   await rejected;
   assert.equal(children[0].killed, true);
+});
+
+test('graceful shutdown rejects a sidecar exit that does not confirm cleanup', async () => {
+  class FailedShutdown extends FakeChild {
+    override receive(record: any) {
+      if (record.kind === 'shutdown') {
+        this.killed = true;
+        this.exitCode = 1;
+        queueMicrotask(() => {
+          this.emit('exit', 1, null);
+          this.emit('close', 1, null);
+        });
+        return;
+      }
+      super.receive(record);
+    }
+  }
+  const children: FailedShutdown[] = [];
+  const client = new RuntimeClient(path.join(tmpdir(), 'pw-failed-graceful-shutdown.jsonl'), () => {
+    const child = new FailedShutdown(undefined, []);
+    children.push(child);
+    return child as never;
+  }, 25, 15);
+  await client.request('ping', {});
+  await assert.rejects(
+    () => client.shutdown(),
+    (error: unknown) => error instanceof PlaywrightRuntimeError && error.code === 'RUNTIME_CLEANUP_UNRESOLVED',
+  );
+  assert.equal(children[0]!.exitCode, 1);
+  await assert.rejects(
+    () => client.shutdown(),
+    (error: unknown) => error instanceof PlaywrightRuntimeError && error.code === 'RUNTIME_CLEANUP_UNRESOLVED',
+  );
+});
+
+test('Windows tree-kill failure remains unresolved even when the sidecar fallback exits', async (t) => {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  assert.ok(platform);
+  Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+  try {
+    const taskkill = new EventEmitter() as EventEmitter & { kill(): boolean };
+    taskkill.kill = () => true;
+    const spawnMock = t.mock.method(childProcess, 'spawn', (() => {
+      queueMicrotask(() => taskkill.emit('close', 1, null));
+      return taskkill as never;
+    }) as typeof childProcess.spawn);
+    syncBuiltinESMExports();
+    const child = new FakeChild(700, []);
+    await assert.rejects(
+      () => killProcessTree(child as never, 100),
+      (error: unknown) => error instanceof PlaywrightRuntimeError
+        && error.code === 'RUNTIME_CLEANUP_UNRESOLVED'
+        && /tree termination failed/i.test(error.message),
+    );
+    assert.equal(child.killed, true, 'direct sidecar termination remains the fallback');
+    await assert.rejects(
+      () => killProcessTree(child as never, 100),
+      (error: unknown) => error instanceof PlaywrightRuntimeError
+        && error.code === 'RUNTIME_CLEANUP_UNRESOLVED'
+        && /tree termination failed/i.test(error.message),
+      'a later retry preserves the failed descendant evidence after sidecar exit',
+    );
+    assert.equal(spawnMock.mock.callCount(), 1, 'an exited sidecar PID is never reused for another taskkill');
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    Object.defineProperty(process, 'platform', platform);
+  }
+});
+
+test('unsupported host direct sidecar exit does not claim descendant cleanup', async () => {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  assert.ok(platform);
+  Object.defineProperty(process, 'platform', { ...platform, value: 'linux' });
+  try {
+    const child = new FakeChild(7125, []);
+    await assert.rejects(
+      () => killProcessTree(child as never, 100),
+      (error: unknown) => error instanceof PlaywrightRuntimeError
+        && error.code === 'RUNTIME_CLEANUP_UNRESOLVED'
+        && /unsupported on linux/i.test(error.message),
+    );
+    assert.equal(child.killed, true, 'direct termination is still attempted without claiming descendant cleanup');
+  } finally {
+    Object.defineProperty(process, 'platform', platform);
+  }
+});
+
+test('unresolved child runtime cleanup remains fenced and retained across shutdown retries', async (t) => {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  assert.ok(platform);
+  Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+  try {
+    const taskkill = new EventEmitter() as EventEmitter & { kill(): boolean };
+    taskkill.kill = () => true;
+    const spawnMock = t.mock.method(childProcess, 'spawn', (() => {
+      queueMicrotask(() => taskkill.emit('close', 1, null));
+      return taskkill as never;
+    }) as typeof childProcess.spawn);
+    syncBuiltinESMExports();
+
+    class ShutdownUnresponsive extends FakeChild {
+      override receive(record: any) {
+        if (record.kind === 'shutdown') return;
+        super.receive(record);
+      }
+    }
+    const children: ShutdownUnresponsive[] = [];
+    const registry = new RuntimeRegistry(() => {
+      const child = new ShutdownUnresponsive(7124, []);
+      children.push(child);
+      return child as never;
+    });
+    const owner = createChildToolRuntimeOwner('unresolved Playwright child');
+    const client = registry.getForChild(owner) as RuntimeClient;
+    (client as unknown as { shutdownTimeoutMs: number }).shutdownTimeoutMs = 20;
+    await client.request('ping', {});
+
+    await assert.rejects(
+      () => cleanupChildToolRuntimeOwner(owner),
+      (error: unknown) => error instanceof AggregateError
+        && /cleanup remains unresolved/i.test(error.message),
+    );
+    assert.equal(owner.state, 'closing', 'the failed owner remains fenced until cleanup is confirmed');
+    assert.equal(registry.size, 1, 'the child runtime stays retained until cleanup is confirmed');
+    assert.equal(children[0]!.killed, true);
+    await assert.rejects(
+      () => client.shutdown(),
+      (error: unknown) => error instanceof PlaywrightRuntimeError && error.code === 'RUNTIME_CLEANUP_UNRESOLVED',
+    );
+    assert.equal(spawnMock.mock.callCount(), 1, 'shutdown retries do not target the exited sidecar PID again');
+    assert.equal(registry.size, 1, 'a failed retry still retains the child runtime record');
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    Object.defineProperty(process, 'platform', platform);
+  }
+});
+
+test('forced cleanup reports unresolved when kill does not produce a confirmed exit', async () => {
+  class UnresponsiveChild extends FakeChild {
+    override receive(record: any) {
+      if (record.kind === 'shutdown') return;
+      super.receive(record);
+    }
+    override kill() { this.killed = true; return true; }
+  }
+  const children: UnresponsiveChild[] = [];
+  const spawn = () => { const child = new UnresponsiveChild(500 + children.length, []); child.pid = undefined; children.push(child); return child as never; };
+  const client = new RuntimeClient(path.join(tmpdir(), 'pw-unresolved-cleanup.jsonl'), spawn, 25, 15);
+  await client.request('ping', {});
+
+  await assert.rejects(
+    () => client.shutdown(),
+    (error: unknown) => error instanceof PlaywrightRuntimeError
+      && error.code === 'RUNTIME_CLEANUP_UNRESOLVED'
+      && /cleanup remains unresolved/i.test(error.message),
+  );
+  assert.equal(children[0].killed, true);
+  await assert.rejects(
+    () => client.shutdown(),
+    (error: unknown) => error instanceof PlaywrightRuntimeError && error.code === 'RUNTIME_CLEANUP_UNRESOLVED',
+    'a later shutdown cannot claim success while the sidecar still has not exited',
+  );
+});
+
+test('timeout recovery rejects with unresolved cleanup instead of claiming the runtime restarted', async () => {
+  class UnresponsiveChild extends FakeChild {
+    override kill() { this.killed = true; return true; }
+  }
+  const children: UnresponsiveChild[] = [];
+  const spawn = () => { const child = new UnresponsiveChild(600 + children.length, []); child.pid = undefined; children.push(child); return child as never; };
+  const client = new RuntimeClient(path.join(tmpdir(), 'pw-unresolved-recovery.jsonl'), spawn, 25, 15);
+
+  await assert.rejects(
+    () => client.request('hang', {}, { timeoutMs: 5 }),
+    (error: unknown) => error instanceof PlaywrightRuntimeError && error.code === 'RUNTIME_CLEANUP_UNRESOLVED',
+  );
+  assert.equal(children[0].killed, true);
+  await assert.rejects(
+    () => client.request('open', {}, { allowNeedsReopen: true }),
+    (error: unknown) => error instanceof PlaywrightRuntimeError && error.code === 'RUNTIME_CLEANUP_UNRESOLVED',
+  );
 });
 
 test('two canonical pie session paths own isolated sidecars; shutdown only removes the owning runtime', async () => {

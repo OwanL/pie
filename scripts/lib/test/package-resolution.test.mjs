@@ -419,8 +419,13 @@ test('the Vite host and browser graphs use owner aliases with their respective e
   assert.equal(findFor(browserAliases, 'ws').replacement, path.join(ownerRoot, 'node_modules', 'ws', 'browser.js'),
     'the renderer retains ws package browser conditions');
 
-  // The source-root alias is preserved alongside package aliases.
-  assert.equal(findFor(aliases, '@shared').replacement, path.join(repoRoot, 'extension', 'src', 'shared'));
+  // Current and legacy SDK package aliases resolve through the canonical
+  // dependency owner's installed SDK, not the retired extension source tree.
+  const canonicalSdkRoot = path.join(ownerRoot, 'node_modules', '@earendil-works', 'pi-coding-agent');
+  assert.equal(findFor(aliases, '@earendil-works/pi-coding-agent').replacement,
+    path.join(canonicalSdkRoot, 'dist', 'index.js'));
+  assert.equal(findFor(aliases, '@mariozechner/pi-coding-agent').replacement,
+    path.join(canonicalSdkRoot, 'dist', 'index.js'));
 
   // Current and legacy Pi spellings rewrite into the canonical nested SDK
   // graph, including wildcard subpaths.

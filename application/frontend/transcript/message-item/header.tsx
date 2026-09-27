@@ -4,6 +4,8 @@
 import type { ComponentChildren } from 'preact';
 
 import type { ChatMessage } from '../../../lib/protocol/index.js';
+import { AGENT_MESSAGE_CUSTOM_TYPE } from '../../../lib/protocol/messages.js';
+import { AgentIcon } from '../../session-tabs/icons';
 import {
   assistantReplyMeta,
   formatDuration,
@@ -71,10 +73,13 @@ export function MessageItemHeader({
   actions,
   customType,
 }: MessageItemHeaderProps) {
-  // User messages normally carry no header label. A synthetic send (host-
-  // injected user message) is badged so it is visually differentiated from a
-  // typed message while keeping it honest (still a user-role bubble).
-  const userLabel = role === 'user' && customType !== undefined ? 'Auto-resume' : null;
+  // Agent-originated session messages keep the user-role bubble but carry an
+  // explicit bot cue. Other host-injected messages retain their Auto-resume tag.
+  const userLabel = role !== 'user'
+    ? null
+    : customType === AGENT_MESSAGE_CUSTOM_TYPE
+      ? <span class="inline-flex items-center gap-1"><AgentIcon compact />Agent</span>
+      : customType !== undefined ? 'Auto-resume' : null;
   const requestTime = role === 'assistant' ? formatRequestTime(requestCreatedAt) : null;
   return (
     <MessageHeader

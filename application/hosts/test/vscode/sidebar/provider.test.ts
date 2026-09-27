@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Module } from 'node:module';
 
-import { type ViewState, type WebviewToHostMessage } from '../../../../lib/protocol/index.js';
+import { type RendererCommandContext, type ViewState, type WebviewToHostMessage } from '../../../../lib/protocol/index.js';
 import { PIE_BUILD_ID } from '../../../../../lib/build-identity.js';
 import type { StateDeliveryClock } from '../../../lib/renderer-delivery/state-delivery-controller';
 
@@ -132,12 +132,16 @@ function createProvider(
   clock: FakeClock,
   routed: WebviewToHostMessage[],
   assetResolutions?: Array<string | Promise<string>>,
+  routedContexts?: Array<RendererCommandContext | undefined>,
 ) {
   let assetCount = 0;
   const provider = new SidebarViewProvider(
     { extensionPath: '/extension', extensionUri: {} } as never,
     () => state(),
-    (message) => routed.push(message),
+    (message, commandContext?: RendererCommandContext) => {
+      routed.push(message);
+      routedContexts?.push(commandContext);
+    },
     () => 0,
     {
       clock,
@@ -172,6 +176,39 @@ async function resolveReady(provider: InstanceType<typeof SidebarViewProvider>, 
 function stateMessages(view: FakeView): StateMessage[] {
   return view.posted.filter((message): message is StateMessage => message.type === 'state');
 }
+
+test('sidebar routes detail commands with the trusted renderer ownership context', async () => {
+  const clock = new FakeClock();
+  const routed: WebviewToHostMessage[] = [];
+  const routedContexts: Array<RendererCommandContext | undefined> = [];
+  const { provider } = createProvider(clock, routed, undefined, routedContexts);
+  const view = new FakeView();
+  await resolveReady(provider, view);
+
+  view.send({
+    type: 'detail.subscribe',
+    viewGeneration: provider.getDebugState().viewGeneration,
+    detailKey: 'subagent:message:tool',
+    detailAttempt: 1,
+    address: {
+      sessionPath: 'C:\\sessions\\test.jsonl',
+      turnId: 'turn-1',
+      rootToolCallId: 'tool-1',
+      rootAttemptId: 'attempt-1',
+      lineage: [{ childId: 'child-1', spawningToolCallId: 'tool-1', attemptId: 'attempt-1' }],
+    },
+  } as WebviewToHostMessage);
+  await settle();
+
+  const subscribeIndex = routed.findIndex((message) => message.type === 'detail.subscribe');
+  assert.notEqual(subscribeIndex, -1, 'detail.subscribe should reach the host router');
+  const context = routedContexts[subscribeIndex];
+  assert.ok(context, 'sidebar adapter must not drop the renderer session context');
+  assert.equal(context.kind, 'vscode');
+  assert.ok(context.rendererId.length > 0);
+  assert.ok(context.rendererGeneration > 0);
+  provider.dispose();
+});
 
 test('a matching-asset renderer from another build remains usable without a window reload', async () => {
   const clock = new FakeClock();

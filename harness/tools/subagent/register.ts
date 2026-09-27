@@ -73,7 +73,7 @@ function buildPromptSnippet(disabled = false): string {
 	if (disabled) {
 		return "DISABLED: Sub agents are disabled.";
 	}
-	return "Delegate one concrete task to a discovered agent; sibling calls run in parallel natively.";
+	return "Delegate one small, bounded task to a discovered agent; prefer parallel sibling calls for independent tasks.";
 }
 
 /** Check whether subagent execution is disabled via flag or env var. */
@@ -109,7 +109,7 @@ export default function (pi: ExtensionAPI) {
 		description: buildDescription(disabled),
 		promptSnippet: buildPromptSnippet(disabled),
 		promptGuidelines: [
-			"Use sibling subagent calls in one response only for independent work; for dependent work, wait for the prior subagent result before calling another.",
+			"Proactively dispatch independent, small subagent tasks together as sibling calls in one response. Give parallel workers non-overlapping edit ownership; wait for prior results when tasks depend on them, and serialize work that would conflict over shared files or resources.",
 		],
 		parameters: SubagentParams,
 		prepareArguments: prepareSubagentArguments,

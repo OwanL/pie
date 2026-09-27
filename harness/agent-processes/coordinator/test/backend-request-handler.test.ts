@@ -3505,6 +3505,71 @@ test('provider_gate.metrics reports disabled shape when the ProviderGate is not 
   assert.deepEqual(result, { enabled: false, providers: [] });
 });
 
+test('provider_gate.metrics includes injected subagent status when the ProviderGate is absent', async (t) => {
+  ProviderGate.uninstall();
+  t.after(() => ProviderGate.uninstall());
+  const subagentConcurrency = {
+    scope: 'worker-process' as const,
+    configured: { value: 8, source: 'configured-default' as const },
+    workerCount: 0,
+    pendingWorkers: 0,
+  };
+
+  const result = await handleBackendRequest({
+    getSubagentConcurrencyStatus: () => subagentConcurrency,
+  } as any, {
+    id: 'test-provider-gate-metrics-with-subagent-status',
+    method: 'provider_gate.metrics',
+    params: undefined,
+  });
+
+  assert.deepEqual(result, {
+    enabled: false,
+    providers: [],
+    subagentConcurrency,
+  });
+});
+
+test('runtimePrefs.set propagates subagent concurrency provenance without retaining stale source', async () => {
+  const envKeys = [
+    PROVIDER_TOGGLES_ENV,
+    'PIE_EXTENSION_TOGGLES_JSON',
+    'PIE_SUBAGENT_MAX_INFLIGHT',
+    'PIE_SUBAGENT_MAX_INFLIGHT_SOURCE',
+  ];
+  const savedEnv = new Map(envKeys.map((key) => [key, process.env[key]]));
+  const restore = () => {
+    for (const [key, value] of savedEnv) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  };
+  try {
+    const harness = createHarness();
+    process.env.PIE_SUBAGENT_MAX_INFLIGHT_SOURCE = 'environment-override';
+    await handleBackendRequest(harness.deps, {
+      id: 'runtime-prefs-default-concurrency',
+      method: 'runtimePrefs.set',
+      params: {
+        providerToggles: {}, extensionToggles: {},
+        subagentMaxInflight: 8, subagentMaxInflightSource: 'configured-default',
+      },
+    });
+    assert.equal(process.env.PIE_SUBAGENT_MAX_INFLIGHT, '8');
+    assert.equal(process.env.PIE_SUBAGENT_MAX_INFLIGHT_SOURCE, 'configured-default');
+
+    await handleBackendRequest(harness.deps, {
+      id: 'runtime-prefs-saved-concurrency',
+      method: 'runtimePrefs.set',
+      params: { providerToggles: {}, extensionToggles: {}, subagentMaxInflight: 2 },
+    });
+    assert.equal(process.env.PIE_SUBAGENT_MAX_INFLIGHT, '2');
+    assert.equal(process.env.PIE_SUBAGENT_MAX_INFLIGHT_SOURCE, 'saved-preference');
+  } finally {
+    restore();
+  }
+});
+
 test('analytics.ack validates the closed route and forwards one exact durable disposition', async () => {
   const harness = createHarness();
   const seen: unknown[] = [];
@@ -3567,6 +3632,7 @@ test('provider_gate.metrics returns live ProviderGate metrics when installed', a
       activeRequests: 0,
       queuedRequests: 0,
       maxConcurrentRequests: 2,
+      maxConcurrentRequestsSource: 'configured-default',
       afterburnSeconds: 5,
       queueWaitSeconds: 30,
       paused: false,

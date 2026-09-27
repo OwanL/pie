@@ -11,6 +11,7 @@ type FakeServer = {
   }>;
   listSessionSummaries(): Promise<unknown[]>;
   handleRequest(request: { id: string; method: string; params?: unknown }): Promise<unknown>;
+  emit(event: string, payload?: unknown): void;
   workerRuntimeRouter?: { getRoute(path: string): { state: string; checkpoint?: { requestId?: string } } };
 };
 
@@ -78,6 +79,7 @@ test('session-control server delegates cold-session creation with an idempotent 
 test('session-control server addresses a newly created retained cold session despite a stale warm catalog', async () => {
   const server = serverForTests();
   const newSessionPath = '/workspace/new.jsonl';
+  server.emit = () => undefined;
   server.listSessionSummaries = async () => summaries;
   const coordinator = server as unknown as {
     retainColdSessionManager(handle: { sessionPath: string }, creationReason: 'new'): void;
@@ -120,6 +122,8 @@ test('session-control server adapts transcript cursors and ordinary message send
   const server = serverForTests();
   server.listSessionSummaries = async () => summaries;
   const requests: Array<{ method: string; params?: unknown }> = [];
+  const events: Array<{ event: string; payload?: unknown }> = [];
+  server.emit = (event, payload) => events.push({ event, payload });
   server.handleRequest = async (request) => {
     requests.push(request);
     if (request.method === 'session.loadTranscriptPage') {
@@ -158,8 +162,83 @@ test('session-control server adapts transcript cursors and ordinary message send
   assert.equal(requests[1]?.method, 'message.send');
   assert.deepEqual(requests[1]?.params, {
     sessionPath: '/workspace/idle.jsonl', text: 'please continue', inputs: [],
-    operationId: 'agent-session:control-message', operationAttempt: 1, localId: 'agent-session:control-message',
+    operationId: 'agent-session:control-message', operationAttempt: 1,
+    localId: 'local:agent-session:control-message',
   });
+  assert.equal(events[0]?.event, 'message.agent');
+  const pendingMessage = events[0]?.payload as {
+    sessionPath: string; localId: string; text: string; status: string; timestamp: number;
+  };
+  const acceptedMessage = events[1]?.payload as typeof pendingMessage;
+  assert.deepEqual({ ...pendingMessage, timestamp: undefined }, {
+    sessionPath: '/workspace/idle.jsonl',
+    localId: 'local:agent-session:control-message',
+    text: 'please continue',
+    status: 'queued',
+    timestamp: undefined,
+  });
+  assert.equal(acceptedMessage.status, 'completed');
+  assert.equal(acceptedMessage.localId, pendingMessage.localId);
+  assert.equal(acceptedMessage.timestamp, pendingMessage.timestamp);
+  assert.ok(Number.isFinite(pendingMessage.timestamp));
+});
+
+test('a route promoted before agent send acceptance reconciles to direct delivery', async () => {
+  const server = serverForTests();
+  server.listSessionSummaries = async () => summaries;
+  server.workerRuntimeRouter = {
+    getRoute: () => ({ state: 'promoting' }),
+  };
+  const events: Array<{ event: string; payload?: unknown }> = [];
+  server.emit = (event, payload) => events.push({ event, payload });
+  let acceptSend!: (result: unknown) => void;
+  let markSendStarted!: () => void;
+  const sendStarted = new Promise<void>((resolve) => { markSendStarted = resolve; });
+  server.handleRequest = async () => {
+    markSendStarted();
+    return await new Promise((resolve) => { acceptSend = resolve; });
+  };
+
+  const sending = server.handleWorkerSessionControl(
+    frame('message', { sessionPath: '/workspace/current.jsonl', text: 'send after promotion' }),
+    '/workspace/idle.jsonl',
+  );
+  await sendStarted;
+  assert.deepEqual(events.map(({ payload }) => (payload as { status: string }).status), ['queued']);
+  acceptSend({ requestId: 'direct-request' });
+  await sending;
+
+  assert.deepEqual(events.map(({ payload }) => (payload as { status: string }).status), [
+    'queued', 'completed',
+  ]);
+  assert.equal((events[0]?.payload as { localId: string }).localId,
+    (events[1]?.payload as { localId: string }).localId);
+});
+
+test('session-control message rows reflect queued delivery and roll back rejected sends', async () => {
+  const server = serverForTests();
+  server.listSessionSummaries = async () => summaries;
+  server.workerRuntimeRouter = {
+    getRoute: () => ({ state: 'hot', checkpoint: { requestId: 'active-request' } }),
+  };
+  const events: Array<{ event: string; payload?: unknown }> = [];
+  server.emit = (event, payload) => events.push({ event, payload });
+  server.handleRequest = async () => ({ queued: true });
+
+  await server.handleWorkerSessionControl(
+    frame('message', { sessionPath: '/workspace/current.jsonl', text: 'queued message' }),
+    '/workspace/idle.jsonl',
+  );
+  assert.equal((events[0]?.payload as { status: string }).status, 'queued');
+
+  server.handleRequest = async () => { throw new Error('send rejected'); };
+  await assert.rejects(server.handleWorkerSessionControl(
+    { requestId: 'control-message-rejected', action: 'message', payload: { sessionPath: '/workspace/idle.jsonl', text: 'rejected message' } },
+    '/workspace/current.jsonl',
+  ), /send rejected/);
+  assert.equal((events[1]?.payload as { status: string }).status, 'queued');
+  assert.equal((events[2]?.payload as { status: string }).status, 'rejected');
+  assert.equal((events[1]?.payload as { localId: string }).localId, (events[2]?.payload as { localId: string }).localId);
 });
 
 test('session-control read pages older and newer rows relative to the caller cursor', async () => {

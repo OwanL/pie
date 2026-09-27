@@ -690,6 +690,30 @@ test('host applies monotonic sync domains and runtime preferences', () => {
   }
 });
 
+test('worker runtime preference sync propagates subagent concurrency value and source together', () => {
+  const { host } = makeHost();
+  const savedLimit = process.env.PIE_SUBAGENT_MAX_INFLIGHT;
+  const savedSource = process.env.PIE_SUBAGENT_MAX_INFLIGHT_SOURCE;
+  try {
+    process.env.PIE_SUBAGENT_MAX_INFLIGHT_SOURCE = 'environment-override';
+    host.applySync('runtimePrefs', 1, {
+      values: { subagentMaxInflight: 8, subagentMaxInflightSource: 'configured-default' },
+    });
+    assert.equal(process.env.PIE_SUBAGENT_MAX_INFLIGHT, '8');
+    assert.equal(process.env.PIE_SUBAGENT_MAX_INFLIGHT_SOURCE, 'configured-default');
+
+    // A newer numeric-only payload must not retain the previous default source.
+    host.applySync('runtimePrefs', 2, { values: { subagentMaxInflight: 2 } });
+    assert.equal(process.env.PIE_SUBAGENT_MAX_INFLIGHT, '2');
+    assert.equal(process.env.PIE_SUBAGENT_MAX_INFLIGHT_SOURCE, 'saved-preference');
+  } finally {
+    if (savedLimit === undefined) delete process.env.PIE_SUBAGENT_MAX_INFLIGHT;
+    else process.env.PIE_SUBAGENT_MAX_INFLIGHT = savedLimit;
+    if (savedSource === undefined) delete process.env.PIE_SUBAGENT_MAX_INFLIGHT_SOURCE;
+    else process.env.PIE_SUBAGENT_MAX_INFLIGHT_SOURCE = savedSource;
+  }
+});
+
 test('worker provider incidents dedupe repeats but preserve a later definitive condition', () => {
   const { host, sent } = makeHost();
   const internals = getInternals(host);

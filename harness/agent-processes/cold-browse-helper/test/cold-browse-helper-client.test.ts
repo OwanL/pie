@@ -238,6 +238,24 @@ test('client kills a child that acknowledges shutdown but retains a live handle'
   assert.equal(isProcessAlive(childPid), false);
 });
 
+test('concurrent dispose callers join confirmed helper exit', async () => {
+  const helper = client('sticky-shutdown', { shutdownTimeoutMs: 500 });
+  await helper.warm();
+  const result = await helper.openSnapshot(fence, openOptions);
+  const childPid = (result as any).fixturePid as number;
+  const firstDisposal = helper.dispose();
+  let secondDisposalSettled = false;
+  const secondDisposal = helper.dispose().then(() => { secondDisposalSettled = true; });
+  try {
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    assert.equal(secondDisposalSettled, false, 'a repeated call cannot claim shutdown before the first confirms exit');
+    await Promise.all([firstDisposal, secondDisposal]);
+    assert.equal(isProcessAlive(childPid), false);
+  } finally {
+    await firstDisposal;
+  }
+});
+
 function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);

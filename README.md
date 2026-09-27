@@ -38,9 +38,15 @@ The installer pins the optional standalone `pi` CLI to the exact SDK version res
 
 ## Install
 
+On a new Windows device, install Git, VS Code, and the exact Node.js version above, then clone to the location where you intend to keep Pie:
+
 ```cmd
+git clone https://github.com/OwanL/pie.git
+cd pie
 .\install.bat
 ```
+
+Node.js must already be on PATH. The installer checks prerequisites before changing configuration and installs the pinned npm version if needed. Dependency setup also downloads Playwright's pinned Chromium browser, so allow internet access and time for that download. On an existing installation, close VS Code windows using Pie before reinstalling to avoid locked dependency files.
 
 Double-clicking `install.bat` also works; it pauses at the end so the window doesn't close immediately.
 
@@ -51,7 +57,7 @@ The installer is idempotent and safe to re-run. On each run it:
 1. **Sets `PI_CODING_AGENT_DIR`** to the repo root as a Windows User environment variable so the `pi` CLI reads `settings.json` and `models.json` from here.
 2. **Pins `PI_CODING_AGENT_SESSION_DIR`** to this checkout's `data/outcomes/sessions/` so standalone `pi` writes session JSONL to the repo-local store even when launched outside the checkout.
 3. **Pins `pi`** ([`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)) globally to the exact version in `application/hosts/vscode/package-lock.json`, then restores each configured package source with `pi install` without self-updating the CLI.
-4. **Relocates `auth.json`** out of the working tree into `%LOCALAPPDATA%\pie\` and sets `PI_CODING_AGENT_AUTH_DIR`.
+4. **Configures the auth directory** at `%LOCALAPPDATA%\pie\` and sets `PI_CODING_AGENT_AUTH_DIR`, even before the first login. Existing custom User-scope auth directories are preserved; any in-tree `auth.json` is relocated or merged.
 5. **Merges split-brain auth** — if a *new* in-tree `auth.json` appears after relocation (from running `pi` in a shell without `PI_CODING_AGENT_AUTH_DIR`), the installer merges its credentials into the secure location and removes the in-tree copy.
 6. **Writes `pie.agentDir`** to VS Code User settings so the extension host forwards the correct config dir to the backend, even before VS Code picks up the new User env vars (which only happens on a full restart, not a window reload).
 7. **Repairs extension paths** in `settings.json` (committed paths may reference another machine's npm global tree).
@@ -211,7 +217,7 @@ Test and typecheck children have a 20-minute watchdog that kills the complete pr
 
 ### Build the pie VS Code extension
 
-From a fresh checkout, install every dependency tree once from the repository root:
+For first-time setup, use `install.bat`: it also restores the managed `pi-web-access` and `pi-mcp-adapter` packages needed by the build. `npm ci` alone does not restore those Pi-managed packages. After setup, refresh dependency trees and build from the repository root:
 
 ```bash
 npm ci                             # also installs application/hosts/vscode/ and analytics/analysis/ via postinstall

@@ -363,6 +363,7 @@ export async function forgetGlobalSideChannels(
         }
         const belongsToSession = parsed && (
           (typeof parsed.sessionId === 'string' && ids.has(parsed.sessionId))
+          || (typeof parsed.rootSessionId === 'string' && ids.has(parsed.rootSessionId))
           || (typeof parsed.sessionPath === 'string' && parsed.sessionPath === sessionPath)
         );
         if (!belongsToSession) kept.push(line);
@@ -370,6 +371,21 @@ export async function forgetGlobalSideChannels(
       const next = kept.length > 0 ? `${kept.join('\n')}\n` : '';
       if (next !== raw) await atomicWriteText(filePath, next);
     }
+  }
+}
+
+/** Scrub global side-channel logs for a subject using any run-store roots that
+ * share the data root. This operation is independent of run-analytics storage
+ * authority; canonical close uses only its resolved run-store location and
+ * never starts or writes the legacy analytics store. */
+export async function forgetGlobalSideChannelsForStorageDirs(
+  storageDirs: readonly string[],
+  sessionPath: string,
+  sessionId?: string,
+): Promise<void> {
+  const roots = [...new Set(storageDirs.map(inferGlobalLogRoot))];
+  for (const root of roots) {
+    await forgetGlobalSideChannels(root, sessionPath, sessionId);
   }
 }
 

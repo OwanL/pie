@@ -3,6 +3,7 @@ import * as crypto from 'node:crypto';
 import { PROVIDER_TOGGLES_ENV } from '../lib/rpc/settings.js';
 import type { CustomMessagePayload, ErrorPayload, MessageAbortedPayload, PreflightFailedPayload } from '../lib/rpc/session-events.js';
 import type { RequestEnvelope } from '../lib/rpc/wire.js';
+import { isAgentSessionMessageLocalId } from '../lib/rpc/message-contract.js';
 import { createOperationalIncident } from '../lib/rpc/incident-payload.js';
 import { enrichConnectionError, toErrorMessage } from '../../../lib/structured-logging/error-message.js';
 import { LIVE_PIPELINE_LIMITS, LIVE_PIPELINE_PROTOCOL_VERSION } from '../lib/rpc/live-pipeline.js';
@@ -137,6 +138,7 @@ function emitPreflightFailed(
 ): void {
   const operationId = expected?.operationId ?? context.activeRequest?.operationId;
   const operationAttempt = expected?.operationAttempt ?? context.activeRequest?.operationAttempt;
+  const agentMessageLocalId = expected?.agentMessageLocalId ?? context.activeRequest?.agentMessageLocalId;
   context.sendOperationLedger?.markFailed(operationId, 'MESSAGE_SEND_PRECOMMIT_FAILED', message);
   deps.emit('preflight.failed', {
     requestId,
@@ -144,6 +146,7 @@ function emitPreflightFailed(
     ...(operationAttempt !== undefined ? { operationAttempt } : {}),
     sessionPath,
     error: message,
+    ...(isAgentSessionMessageLocalId(agentMessageLocalId) ? { localId: agentMessageLocalId } : {}),
   } satisfies PreflightFailedPayload);
   clearActiveRequest(context, requestId, expected);
   deps.emitBusyChanged(context, hasBillableSessionActivity(context));
@@ -311,6 +314,7 @@ async function executeMessageSend(
   const thinkingLevel = normalizeThinkingLevel(context.session.thinkingLevel);
   context.activeRequest = {
     id: requestId,
+    ...(isAgentSessionMessageLocalId(params.localId) ? { agentMessageLocalId: params.localId } : {}),
     ...(params.operationId ? { operationId: params.operationId } : {}),
     ...(params.operationAttempt !== undefined ? { operationAttempt: params.operationAttempt } : {}),
     messageIndex: 0,

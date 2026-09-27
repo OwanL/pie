@@ -16,7 +16,7 @@ Before each agent turn, `skill-pruner` sends the user prompt + available skill/t
 
 The scorer returns only the tiny JSON shape `{"keep":[]}` with no explanation. The parser remains backward-compatible with the former `{"pruneSkills":[],"pruneTools":[]}` response and its optional `reasoning` field so cached/test responses remain readable.
 
-The parser is **fail-open**: unreadable output keeps everything. It first recovers safe common formatting mistakes (including fenced/embedded JSON and trailing commas). If a non-empty response is still unreadable, the prepass retries once at the same thinking level with the invalid output plus an explicit JSON-only correction; only a second unreadable response falls back to keeping everything. An empty response retries with `minimal` reasoning, except when the model maps `minimal` to the same provider effort already attempted; in that case recovery disables reasoning when supported instead of replaying an equivalent request. A valid empty keep list means no optional candidate is probably needed. Pruning 100% of a category still triggers a **keep-all safeguard** when it would strand the agent. The tool safeguard always fires on a true 100% tool-prune (zero tools is fatal). The **skill** safeguard only fires when *no tools remain either* — an agent with zero skills but its tools is still fully functional, so a legitimate full skill-prune is allowed whenever at least one tool survives. Subagents still inherit keep-all on an empty parent kept-set as an independent safety net.
+The parser is **fail-open**: unreadable output keeps everything. It first recovers safe common formatting mistakes (including fenced/embedded JSON and trailing commas). If a non-empty response is still unreadable, the prepass retries once at the same thinking level with the invalid output plus an explicit JSON-only correction; only a second unreadable response falls back to keeping everything. An empty response retries with `minimal` reasoning, except when the model maps `minimal` to the same provider effort already attempted; in that case recovery disables reasoning when supported instead of replaying an equivalent request. A valid empty keep list means no optional candidate is probably needed. Pruning 100% of a category still triggers a **keep-all safeguard** when it would strand the agent. The tool safeguard always fires on a true 100% tool-prune (zero tools is fatal). The **skill** safeguard only fires when *no tools remain either* — an agent with zero skills but its tools is still fully functional, so a legitimate full skill-prune is allowed whenever at least one tool survives. Each subagent scores its own discovered skills against its assignment and agent definition; it does not inherit the parent's kept-skill set.
 
 A single `request_capability` recovery tool progressively discloses both hidden tools and hidden skills. With no arguments it returns grouped names only. Selecting an exact tool activates it for the next model step in the same request; selecting an exact trusted skill returns its full `SKILL.md` body immediately. Recovered tools are reconsidered by the next pruning decision rather than remaining sticky for the whole session. Recoveries are logged to `data/pruning.jsonl` as over-pruning quality signals.
 
@@ -31,6 +31,8 @@ Add a `pruning` block to `settings.json`:
     "model": "gpt-5.4-mini",
     "provider": "github-copilot",
     "thinkingLevel": "minimal",
+    "mainAgentEnabled": true,
+    "subagentEnabled": true,
     "prepass": {
       "timeoutMs": { "minimal": 30000, "low": 45000 },
       "maxTransportRetries": 2,
@@ -63,6 +65,8 @@ Add a `pruning` block to `settings.json`:
 | `model` | `"gpt-5.4-mini"` | LLM model for relevance scoring |
 | `provider` | `"github-copilot"` | Provider for the scoring model |
 | `thinkingLevel` | `"minimal"` | Reasoning effort for the scorer (e.g., `"minimal"`, `"medium"`, `"high"`) |
+| `mainAgentEnabled` | `true` | Enable the main agent's independent launch pruning pass |
+| `subagentEnabled` | `true` | Enable one independent launch pruning pass per subagent session; continuations reuse the session decision |
 | `prepass` | _(built-in defaults)_ | Sampling, output, timeout, and manual retry controls for the LLM prepass call; see [Prepass options](#prepass-options) |
 | `autoSkipBelowTokens` | `1200` | Skip the LLM and keep all when the assembled prepass input (system prompt plus candidates) is below this estimate. Set `null` to disable |
 
@@ -121,7 +125,7 @@ Built-in `timeoutMs` defaults (calibrated for reasoning models like `gpt-5-mini`
 
 `skill-pruner` is a pi extension (loaded via `settings.json` packages). It hooks into:
 
-- `before_agent_start` — main pruning logic. Any unexpected error fails open: the prompt and active tools are left untouched and the error is surfaced in the pruning-result message.
+- `before_agent_start` — one pruning pass for a main-agent turn and, when enabled, one independent launch pass per child session/registration. Child selections use the child's task assignment and agent definition. Child tools are pruned only when `request_capability` is initially permitted; skills can still be pruned without it. Any unexpected error fails open: the prompt and active tools are left untouched and the error is surfaced in the pruning-result message. Global `mode: "off"` and the extension toggle still disable both scopes.
 - `tool_call(read)` — tracks skill file reads for analytics
 
 A `pruning-result` custom message is rendered in the transcript showing what was kept/pruned and estimated tokens saved; the agent turn then proceeds normally (no input handler is needed to continue).
@@ -134,4 +138,4 @@ Call `request_capability({})` only after checking the active tools and skills an
 { "capabilityType": "tool", "capabilityName": "web_search" }
 ```
 
-A tool becomes formally available on the next model step within the same user request. For a skill, use `"capabilityType": "skill"`; the recovery result contains the trusted skill body and its relative-reference base directory. Do not repeat a poll whose result remains in context. A new top-level pruning decision may hide a previously recovered tool again.
+A tool becomes formally available on the next model step within the same user request. In a child session, recovery is limited to that child's hidden tools and its initial permitted tool set; configured dependencies cannot widen the child allowlist. For a skill, use `"capabilityType": "skill"`; the recovery result contains the trusted skill body and its relative-reference base directory. Do not repeat a poll whose result remains in context. A new top-level pruning decision may hide a previously recovered tool again.

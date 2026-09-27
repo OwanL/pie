@@ -4,7 +4,7 @@ import test from 'node:test';
 import { h } from 'preact';
 import renderToString from 'preact-render-to-string';
 
-import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS } from '../../../lib/protocol/index.js';
+import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS, type PruningSettings } from '../../../lib/protocol/index.js';
 import { SkillPrunerModelAssignment, SkillPrunerSettings } from '../../settings/settings-menu-skill-pruner';
 
 function renderAutoSkip(autoSkipBelowTokens: number | null): string {
@@ -25,6 +25,29 @@ test('SkillPrunerSettings exposes the small-prepass auto-skip threshold', () => 
   assert.match(html, /aria-checked="true"/);
   assert.match(html, /Skip below tokens/);
   assert.match(html, />1200</);
+});
+
+test('SkillPrunerSettings exposes independent main-agent and subagent switches', () => {
+  const pruningSettings: PruningSettings = {
+    ...DEFAULT_PRUNING_SETTINGS,
+    mode: 'off',
+    mainAgentEnabled: false,
+    subagentEnabled: true,
+  };
+  const html = renderToString(h(SkillPrunerSettings, {
+    prefs: DEFAULT_CHAT_PREFS,
+    pruningSettings,
+    skillCatalog: [],
+    toolCatalog: [],
+    onSetPrefs: () => undefined,
+    onSetPruningSettings: () => undefined,
+  }));
+  const checkedValues = [...html.matchAll(/aria-checked="(true|false)"/gu)].map((match) => match[1]);
+
+  assert.match(html, /Main agents/);
+  assert.match(html, /Subagents/);
+  assert.deepEqual(checkedValues.slice(1, 3), ['false', 'true']);
+  assert.match(html, /selected value="off"/);
 });
 
 test('SkillPrunerSettings hides the threshold when small-prepass skipping is disabled', () => {

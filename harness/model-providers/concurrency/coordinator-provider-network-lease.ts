@@ -3,11 +3,14 @@ import { randomUUID } from 'node:crypto';
 import type { ProviderGateMetrics } from './provider-gate.js';
 import type { SdkWorkerOwnershipIdentity } from '../../agent-processes/lib/sdk-integration/sdk.js';
 import type { WorkerProviderReleaseOutcome } from '../../agent-processes/lib/rpc/worker-protocol.js';
+import type { ConcurrencyLimitSource } from '../../../lib/concurrency-config.js';
 import {
+  isProviderMaxConcurrentRequests,
   PROVIDER_MAX_AFTERBURN_SECONDS,
-  PROVIDER_MAX_CONCURRENT_REQUESTS,
   PROVIDER_NETWORK_PHASE_MAX_WAIT_MS,
+  PROVIDER_SAFETY_FALLBACK_MAX_CONCURRENT_REQUESTS,
   PROVIDER_UNLIMITED_CONCURRENCY,
+  resolveProviderMaxConcurrentRequests,
 } from './provider-concurrency.js';
 
 interface PendingLease {
@@ -60,6 +63,7 @@ export interface CoordinatorProviderPolicy {
   /** 0 disables only capacity/afterburn throttling; circuit and network
    * deadlines remain enforced. */
   maxConcurrentRequests: number;
+  maxConcurrentRequestsSource: ConcurrencyLimitSource;
   /** Per-owner sticky capacity retained after a healthy settlement. */
   afterburnMs: number;
   circuitFailureThreshold: number;
@@ -91,7 +95,8 @@ interface ProviderPool {
 }
 
 const DEFAULT_POLICY: CoordinatorProviderPolicy = {
-  maxConcurrentRequests: 1,
+  maxConcurrentRequests: PROVIDER_SAFETY_FALLBACK_MAX_CONCURRENT_REQUESTS,
+  maxConcurrentRequestsSource: 'safety-fallback',
   afterburnMs: 0,
   circuitFailureThreshold: 3,
   circuitResetMs: 30_000,
@@ -141,12 +146,24 @@ function positiveInteger(value: unknown, fallback: number): number {
   return Number.isSafeInteger(value) && Number(value) > 0 ? Number(value) : fallback;
 }
 
-function boundedConcurrency(value: unknown, fallback: number): number {
-  return Number.isSafeInteger(value)
-    && Number(value) >= PROVIDER_UNLIMITED_CONCURRENCY
-    && Number(value) <= PROVIDER_MAX_CONCURRENT_REQUESTS
-    ? Number(value)
-    : fallback;
+function resolvePolicyMaxConcurrentRequests(
+  record: Record<string, unknown>,
+  fallback: Pick<CoordinatorProviderPolicy, 'maxConcurrentRequests' | 'maxConcurrentRequestsSource'>,
+): Pick<CoordinatorProviderPolicy, 'maxConcurrentRequests' | 'maxConcurrentRequestsSource'> {
+  const value = record.maxConcurrentRequests;
+  if (!isProviderMaxConcurrentRequests(value)) return fallback;
+  const source = record.maxConcurrentRequestsSource;
+  if (source === 'safety-fallback') {
+    const resolved = resolveProviderMaxConcurrentRequests(undefined, undefined, value);
+    return { maxConcurrentRequests: resolved.value, maxConcurrentRequestsSource: resolved.source };
+  }
+  const resolved = source === 'saved-preference'
+    ? resolveProviderMaxConcurrentRequests(value, undefined, fallback.maxConcurrentRequests)
+    : resolveProviderMaxConcurrentRequests(undefined, value, fallback.maxConcurrentRequests);
+  return {
+    maxConcurrentRequests: resolved.value,
+    maxConcurrentRequestsSource: source === 'environment-override' ? source : resolved.source,
+  };
 }
 
 function nonNegativeNumber(value: unknown, fallback: number): number {
@@ -232,8 +249,12 @@ export class CoordinatorProviderNetworkLeaseAuthority {
     this.now = options.now ?? Date.now;
     this.setTimer = options.setTimeout ?? ((callback, delayMs) => setTimeout(callback, delayMs));
     this.clearTimer = options.clearTimeout ?? ((timer) => clearTimeout(timer as ReturnType<typeof setTimeout>));
+    const defaultMax = resolvePolicyMaxConcurrentRequests({
+      maxConcurrentRequests: options.defaultPolicy?.maxConcurrentRequests,
+      maxConcurrentRequestsSource: options.defaultPolicy?.maxConcurrentRequestsSource,
+    }, DEFAULT_POLICY);
     this.defaultPolicy = {
-      maxConcurrentRequests: boundedConcurrency(options.defaultPolicy?.maxConcurrentRequests, DEFAULT_POLICY.maxConcurrentRequests),
+      ...defaultMax,
       afterburnMs: boundedAfterburnMilliseconds(options.defaultPolicy?.afterburnMs, DEFAULT_POLICY.afterburnMs),
       circuitFailureThreshold: positiveInteger(options.defaultPolicy?.circuitFailureThreshold, DEFAULT_POLICY.circuitFailureThreshold),
       circuitResetMs: nonNegativeNumber(options.defaultPolicy?.circuitResetMs, DEFAULT_POLICY.circuitResetMs),
@@ -256,7 +277,7 @@ export class CoordinatorProviderNetworkLeaseAuthority {
       const record = raw as Record<string, unknown>;
       const previous = this.configuredPolicies.get(provider) ?? this.defaultPolicy;
       const policy: CoordinatorProviderPolicy = {
-        maxConcurrentRequests: boundedConcurrency(record.maxConcurrentRequests, previous.maxConcurrentRequests),
+        ...resolvePolicyMaxConcurrentRequests(record, previous),
         afterburnMs: afterburnPolicyMilliseconds(record, previous.afterburnMs),
         circuitFailureThreshold: positiveInteger(record.circuitFailureThreshold, previous.circuitFailureThreshold),
         circuitResetMs: nonNegativeNumber(
@@ -442,6 +463,7 @@ export class CoordinatorProviderNetworkLeaseAuthority {
         activeRequests: pool?.active.size ?? 0,
         queuedRequests: pool?.queue.length ?? 0,
         maxConcurrentRequests: policy.maxConcurrentRequests,
+        maxConcurrentRequestsSource: policy.maxConcurrentRequestsSource,
         afterburnSeconds: policy.afterburnMs / 1000,
         queueWaitSeconds: policy.queueWaitMs / 1000,
         paused: circuitOpen,

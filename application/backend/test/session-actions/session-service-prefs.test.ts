@@ -252,6 +252,36 @@ test('setPrefs persists prefs without dispatching a recursive SetPrefs command',
   const persisted = context.globalState.get('chatPrefs');
   assert.equal(persisted?.autoExpandReasoning, true);
   assert.equal(persisted?.composerInitialRows, 4);
+  assert.equal(persisted?.subagentMaxInflight, 8);
+  assert.equal(persisted?.subagentMaxInflightSource, 'configured-default');
+});
+
+test('setPrefs marks explicit subagent concurrency saved and preserves provenance on unrelated writes', async () => {
+  const { service, backend, context, archState } = makeHarness();
+  archState.settings.backendReady = true;
+  const requests: Array<{ method: string; params: unknown }> = [];
+  backend.request = async <TResult = unknown>(method: string, params?: unknown): Promise<TResult> => {
+    requests.push({ method, params });
+    return {} as TResult;
+  };
+
+  await service.setPrefs({ subagentMaxInflight: 2 });
+  let persisted = context.globalState.get('chatPrefs') as ChatPrefs | undefined;
+  assert.equal(persisted?.subagentMaxInflight, 2);
+  assert.equal(persisted?.subagentMaxInflightSource, 'saved-preference');
+
+  archState.settings.prefs = reducer(archState, {
+    kind: 'Command',
+    cmd: { kind: 'SetPrefs', corrId: 'prefs-inflight-2', prefs: { subagentMaxInflight: 2 } },
+  }).state.settings.prefs;
+  await service.setPrefs({ autoExpandReasoning: true });
+
+  persisted = context.globalState.get('chatPrefs') as ChatPrefs | undefined;
+  assert.equal(persisted?.subagentMaxInflight, 2);
+  assert.equal(persisted?.subagentMaxInflightSource, 'saved-preference');
+  const runtimePrefs = requests.filter((request) => request.method === 'runtimePrefs.set').at(-1)?.params as Record<string, unknown>;
+  assert.equal(runtimePrefs.subagentMaxInflightSource, 'saved-preference');
+  service.dispose();
 });
 
 test('setPrefs strips the retired width key while preserving appearance overrides', async () => {
@@ -395,11 +425,12 @@ test('backend generation failure rejects an undispatched deferred send and remov
   service.dispose();
 });
 
-test('private close does not reopen a deleted transcript when the final analytics scrub fails', async () => {
+test('private close fails and retains its retry marker when the final analytics scrub fails', async () => {
   const context = createExtensionContext();
   const archState = createInitialArchState();
   const dispatched: Event[] = [];
   const backendRequests: string[] = [];
+  const tabCalls: string[] = [];
   let privacyCalls = 0;
   const service = new SessionServiceCtor(
     createPlatform(context),
@@ -413,12 +444,11 @@ test('private close does not reopen a deleted transcript when the final analytic
       ...NOOP_RUN_OBSERVER,
       setSessionPrivacy: async () => {
         privacyCalls += 1;
-        throw new Error('late analytics scrub failed');
+        if (privacyCalls === 2) throw new Error('late analytics scrub failed');
       },
       closePrivateSessionAnalytics: async () => { privacyCalls += 1; },
     },
   );
-  const tabCalls: string[] = [];
   const tabs = (service as unknown as { tabs: {
     openSession(path: string): void;
     closeSession(path: string, nextPath: string | null): Promise<void>;
@@ -426,11 +456,26 @@ test('private close does not reopen a deleted transcript when the final analytic
   tabs.openSession = (path) => { tabCalls.push(`open:${path}`); };
   tabs.closeSession = async (path) => { tabCalls.push(`close:${path}`); };
 
-  await service.closeSession('/sessions/private.jsonl', null, true, false, 'close-private', 7);
+  await assert.rejects(
+    service.closeSession('/sessions/private.jsonl', null, true, false, 'close-private', 7),
+    /late analytics scrub failed/,
+  );
 
   assert.deepEqual(backendRequests, ['session.forget']);
-  assert.deepEqual(tabCalls, ['close:/sessions/private.jsonl']);
+  assert.deepEqual(tabCalls, [], 'a deleted transcript is neither reopened nor finalized as a successful close');
   assert.equal(privacyCalls, 2);
+  assert.ok(dispatched.some((event) => event.kind === 'Command'
+    && event.cmd.kind === 'SetPrivacyMode' && event.cmd.enabled === true));
+  assert.equal(dispatched.some((event) => event.kind === 'Command'
+    && event.cmd.kind === 'PersistTabs'
+    && event.cmd.acknowledgementKey === 'privacy-marker-removal'), false);
+
+  // The retained marker and surfaced rejection permit an explicit retry. The
+  // final scrub must settle before tabs close and marker removal is scheduled.
+  await service.closeSession('/sessions/private.jsonl', null, true, false, 'close-private', 7);
+  assert.deepEqual(backendRequests, ['session.forget', 'session.forget']);
+  assert.deepEqual(tabCalls, ['close:/sessions/private.jsonl']);
+  assert.equal(privacyCalls, 4);
   const finalPersistence = dispatched.find((event) => event.kind === 'Command'
     && event.cmd.kind === 'PersistTabs'
     && event.cmd.acknowledgementKey === 'privacy-marker-removal');

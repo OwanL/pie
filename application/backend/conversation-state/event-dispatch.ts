@@ -1,4 +1,5 @@
 import type {
+  AgentMessagePayload,
   AgentSettledPayload,
   AuxiliaryLlmUsagePayload,
   BusyChangedPayload,
@@ -33,6 +34,7 @@ import {
 } from '../../../analytics/contracts/branch-observation.js';
 import { ANALYTICS_ROUTE_CLOSED_EVENT } from '../../../analytics/contracts/transport.js';
 import {
+  isAgentMessagePayload,
   isAgentSettledPayload,
   isAuxiliaryLlmUsagePayload,
   isBusyChangedPayload,
@@ -81,6 +83,7 @@ export interface SessionBackendEventHandlers {
   onCustomMessage(payload: CustomMessagePayload): void;
   onMessageAborted(payload: MessageAbortedPayload): void;
   onPreflightFailed(payload: PreflightFailedPayload): void;
+  onAgentMessage(payload: AgentMessagePayload): void;
   onQueuedDelivered(payload: QueuedDeliveredPayload): void;
   onRetryStarted(payload: RetryStartedPayload): void;
   onRetryEnded(payload: RetryEndedPayload): void;
@@ -178,6 +181,9 @@ export function dispatchSessionBackendEvent(
       return;
     case 'preflight.failed':
       dispatch(event, isPreflightFailedPayload, handlers.onPreflightFailed);
+      return;
+    case 'message.agent':
+      dispatch(event, isAgentMessagePayload, handlers.onAgentMessage);
       return;
     case 'message.queuedDelivered':
       dispatch(event, isQueuedDeliveredPayload, handlers.onQueuedDelivered);

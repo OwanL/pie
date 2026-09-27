@@ -27,6 +27,7 @@ type JsonLineEvent = PruningDecision | {
 	toolName?: string;
 	mode?: PruningMode;
 	sessionId: string;
+	rootSessionId?: string;
 	timestamp: string;
 };
 
@@ -38,6 +39,10 @@ function normalizeSkillPath(readPath: string): string {
 
 function appendJsonLine(event: JsonLineEvent): void {
 	writer.append(JSON.stringify(event));
+}
+
+function rootSessionFields(sessionId: string, rootSessionId?: string): { rootSessionId?: string } {
+	return rootSessionId && rootSessionId !== sessionId ? { rootSessionId } : {};
 }
 
 /** Wait for all queued log writes to finish. Tests await this before reading
@@ -83,7 +88,7 @@ export function recordKnownSkills(
 	sessionTracking.set(sessionId, tracking);
 }
 
-export function recordSkillRead(sessionId: string, readPath: string): void {
+export function recordSkillRead(sessionId: string, readPath: string, rootSessionId?: string): void {
 	const normalizedPath = normalizeSkillPath(readPath);
 	const tracking = sessionTracking.get(sessionId);
 
@@ -96,20 +101,20 @@ export function recordSkillRead(sessionId: string, readPath: string): void {
 	const timestamp = new Date().toISOString();
 
 	if (tracking.mode === "auto" && tracking.prunedSkillPathsLowercase.has(normalizedPath)) {
-		appendJsonLine({ event: "skill_miss", skillName, sessionId, timestamp });
+		appendJsonLine({ event: "skill_miss", skillName, sessionId, ...rootSessionFields(sessionId, rootSessionId), timestamp });
 	} else if (tracking.mode === "shadow" && tracking.shadowPrunedPathsLowercase.has(normalizedPath)) {
-		appendJsonLine({ event: "shadow_miss_candidate", skillName, sessionId, timestamp });
+		appendJsonLine({ event: "shadow_miss_candidate", skillName, sessionId, ...rootSessionFields(sessionId, rootSessionId), timestamp });
 	} else {
-		appendJsonLine({ event: "skill_read", skillName, sessionId, timestamp });
+		appendJsonLine({ event: "skill_read", skillName, sessionId, ...rootSessionFields(sessionId, rootSessionId), timestamp });
 	}
 }
 
-export function recordSkillRecovery(sessionId: string, skillName: string): void {
-	appendJsonLine({ event: "skill_recovered", skillName, sessionId, timestamp: new Date().toISOString() });
+export function recordSkillRecovery(sessionId: string, skillName: string, rootSessionId?: string): void {
+	appendJsonLine({ event: "skill_recovered", skillName, sessionId, ...rootSessionFields(sessionId, rootSessionId), timestamp: new Date().toISOString() });
 }
 
-export function recordToolRecovery(sessionId: string, toolName: string): void {
-	appendJsonLine({ event: "tool_recovered", toolName, sessionId, timestamp: new Date().toISOString() });
+export function recordToolRecovery(sessionId: string, toolName: string, rootSessionId?: string): void {
+	appendJsonLine({ event: "tool_recovered", toolName, sessionId, ...rootSessionFields(sessionId, rootSessionId), timestamp: new Date().toISOString() });
 }
 
 /** Record that skill pruning self-disabled because the host skills block was
@@ -117,11 +122,12 @@ export function recordToolRecovery(sessionId: string, toolName: string): void {
  *  drift). Emitted to the JSONL log so the silent disable is auditable rather
  *  than just a transient `console.warn`. The analytics pipeline drops unknown
  *  event types, so this is a diagnostic signal, not a dashboard metric. */
-export function recordSkillsBlockNotFound(sessionId: string, mode: PruningMode): void {
+export function recordSkillsBlockNotFound(sessionId: string, mode: PruningMode, rootSessionId?: string): void {
 	appendJsonLine({
 		event: "skills_block_not_found",
 		mode,
 		sessionId,
+		...rootSessionFields(sessionId, rootSessionId),
 		timestamp: new Date().toISOString(),
 	});
 }
@@ -142,6 +148,11 @@ function deriveSkillName(readPath: string): string {
 
 export function setLogPathForTesting(logPath: string | null): void {
 	writer.setLogPathForTesting(logPath);
+}
+
+/** Forget the skill catalog used to classify reads for a finished session. */
+export function clearSessionPruningTracking(sessionId: string): void {
+	sessionTracking.delete(sessionId);
 }
 
 /** Lower the rotation threshold so tests can exercise rotation without writing 5MB. */

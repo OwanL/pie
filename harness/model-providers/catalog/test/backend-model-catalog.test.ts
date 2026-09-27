@@ -5,7 +5,6 @@ import * as path from 'node:path';
 import test from 'node:test';
 
 import {
-  listAvailableModels,
   loadAvailableModels,
   loadConfiguredModels,
   resolveActiveModel,
@@ -58,8 +57,8 @@ async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {
   }
 }
 
-test('listAvailableModels derives input kinds and tolerates missing or failing registries', () => {
-  assert.deepEqual(listAvailableModels(undefined), []);
+test('loadAvailableModels derives input kinds and reports missing or failing registries', () => {
+  assert.deepEqual(loadAvailableModels(undefined), { ok: true, models: [] });
 
   const context = makeContext({
     runtime: {
@@ -91,7 +90,7 @@ test('listAvailableModels derives input kinds and tolerates missing or failing r
     } as SessionContext['runtime'],
   });
 
-  assert.deepEqual(listAvailableModels(context), [{
+  assert.deepEqual(loadAvailableModels(context), { ok: true, models: [{
     id: 'claude-sonnet',
     name: 'Claude Sonnet',
     provider: 'anthropic',
@@ -109,7 +108,7 @@ test('listAvailableModels derives input kinds and tolerates missing or failing r
     inputKinds: ['text'],
     contextWindow: 32000,
     maxTokens: 4096,
-  }]);
+  }] });
 
   const failingContext = makeContext({
     runtime: {
@@ -123,7 +122,10 @@ test('listAvailableModels derives input kinds and tolerates missing or failing r
       },
     } as SessionContext['runtime'],
   });
-  assert.deepEqual(listAvailableModels(failingContext), []);
+  const failed = loadAvailableModels(failingContext);
+  assert.equal(failed.ok, false);
+  assert.deepEqual(failed.models, []);
+  if (!failed.ok) assert.equal(failed.error, 'boom');
 });
 
 test('catalog loaders distinguish valid empty catalogs from retrieval failures', async () => {

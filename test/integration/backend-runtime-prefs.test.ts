@@ -2,9 +2,22 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { handleBackendRequest } from '../../harness/agent-processes/coordinator/request-handler.js';
-import { EXTENSION_TOGGLES_ENV, HISTORY_COMPACTION_ENV, NESTED_ALLOWED_BUCKETS_ENV, PROVIDER_TOGGLES_ENV, SUBAGENT_BUCKET_CAN_SPAWN_ENV, SUBAGENT_BUCKETS_ENV, SUBAGENT_PROVIDER_DEFAULTS_ENV, SUBAGENT_ROUTE_AROUND_SATURATED_PROVIDERS_ENV, SUBAGENT_FALLBACK_ON_PROVIDER_FAILURE_ENV } from '../../application/lib/protocol/index.js';
+import {
+  buildRuntimePrefsPayload,
+  EXTENSION_TOGGLES_ENV,
+  HISTORY_COMPACTION_ENV,
+  NESTED_ALLOWED_BUCKETS_ENV,
+  PROVIDER_TOGGLES_ENV,
+  resolveChatPrefs,
+  SUBAGENT_BUCKET_CAN_SPAWN_ENV,
+  SUBAGENT_BUCKETS_ENV,
+  SUBAGENT_PROVIDER_DEFAULTS_ENV,
+  SUBAGENT_ROUTE_AROUND_SATURATED_PROVIDERS_ENV,
+  SUBAGENT_FALLBACK_ON_PROVIDER_FAILURE_ENV,
+} from '../../application/lib/protocol/index.js';
 import { validateRuntimePrefsSet } from '../../harness/agent-processes/lib/rpc/backend-rpc.js';
 import { ProviderGate } from '../../harness/model-providers/concurrency/provider-gate.js';
+import { getMaxInflightResolution } from '../../harness/tools/subagent/concurrency-limit.js';
 import { normalizeProviderConcurrency } from '../../application/lib/protocol/settings.js';
 import { AUTONOMOUS_MODE_ENV } from '../../harness/tool-and-skill-selection/settings/autonomous-mode.js';
 
@@ -12,6 +25,7 @@ const SUBAGENT_ALWAYS_PARENT_MODEL_ENV = 'PIE_SUBAGENT_ALWAYS_PARENT_MODEL';
 const SUBAGENT_MAX_DEPTH_ENV = 'PIE_SUBAGENT_MAX_DEPTH';
 const SUBAGENT_MAX_TREE_SESSIONS_ENV = 'PIE_SUBAGENT_MAX_TREE_SESSIONS';
 const SUBAGENT_MAX_INFLIGHT_ENV = 'PIE_SUBAGENT_MAX_INFLIGHT';
+const SUBAGENT_PROVIDER_TOGGLES_ENV = 'PIE_SUBAGENT_PROVIDER_TOGGLES_BY_SESSION_JSON';
 
 test('runtimePrefs.set validates and mirrors proactive history compaction', async (t) => {
   const previous = process.env[HISTORY_COMPACTION_ENV];
@@ -399,6 +413,122 @@ test('persisted providerConcurrency normalization drops values rejected by runti
   assert.doesNotThrow(() => validateRuntimePrefsSet({ providerConcurrency: normalized }));
 });
 
+test('runtime prefs preserve and live-apply subagent concurrency independently of provider Unlimited', async (t) => {
+  const sourceEnv = 'PIE_SUBAGENT_MAX_INFLIGHT_SOURCE';
+  const keys = [
+    PROVIDER_TOGGLES_ENV,
+    EXTENSION_TOGGLES_ENV,
+    SUBAGENT_PROVIDER_DEFAULTS_ENV,
+    SUBAGENT_PROVIDER_TOGGLES_ENV,
+    AUTONOMOUS_MODE_ENV,
+    'PIE_MCP_ENABLED',
+    HISTORY_COMPACTION_ENV,
+    SUBAGENT_ALWAYS_PARENT_MODEL_ENV,
+    SUBAGENT_ROUTE_AROUND_SATURATED_PROVIDERS_ENV,
+    SUBAGENT_FALLBACK_ON_PROVIDER_FAILURE_ENV,
+    SUBAGENT_MAX_DEPTH_ENV,
+    SUBAGENT_MAX_TREE_SESSIONS_ENV,
+    SUBAGENT_MAX_INFLIGHT_ENV,
+    sourceEnv,
+    'PIE_BASH_WARM_POOL',
+    'PIE_BASH_FAST_PATH',
+    'PIE_SHELL',
+    'PIE_BASH_WARMUP_TIMEOUT_MS',
+    'PIE_BASH_DEFAULT_TIMEOUT',
+    SUBAGENT_BUCKETS_ENV,
+    NESTED_ALLOWED_BUCKETS_ENV,
+    SUBAGENT_BUCKET_CAN_SPAWN_ENV,
+    'PIE_SUBAGENT_DROP_TOOLS_JSON',
+  ];
+  const previous = new Map(keys.map((key) => [key, process.env[key]]));
+  ProviderGate.uninstall();
+  t.after(() => {
+    ProviderGate.uninstall();
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+  for (const key of keys) delete process.env[key];
+  ProviderGate.install([{
+    provider: 'openai',
+    baseUrl: 'https://api.openai.test/v1',
+    maxConcurrentRequests: 2,
+    afterburnSeconds: 0,
+    queueWaitSeconds: 30,
+    headerWaitSeconds: 120,
+  }]);
+  const prefsDeps = { setAutonomousMode: () => undefined };
+
+  const defaults = resolveChatPrefs({ providerConcurrency: { openai: { maxConcurrentRequests: 0 } } });
+  const defaultPayload = buildRuntimePrefsPayload(defaults);
+  assert.equal(defaults.subagentMaxInflight, 8);
+  assert.equal(defaults.subagentMaxInflightSource, 'configured-default');
+  assert.equal(defaultPayload.subagentMaxInflight, 8);
+  assert.equal(defaultPayload.subagentMaxInflightSource, 'configured-default');
+  const defaultResult = await handleBackendRequest(prefsDeps as any, {
+    id: 'test-runtime-prefs-concurrency-default',
+    method: 'runtimePrefs.set',
+    params: defaultPayload,
+  }) as { subagentMaxInflight?: number; subagentMaxInflightSource?: string };
+  assert.equal(defaultResult.subagentMaxInflight, 8);
+  assert.equal(defaultResult.subagentMaxInflightSource, 'configured-default');
+  assert.deepEqual(getMaxInflightResolution(), { value: 8, source: 'configured-default' });
+  assert.equal(process.env[SUBAGENT_MAX_INFLIGHT_ENV], '8');
+  assert.equal(process.env[sourceEnv], 'configured-default');
+
+  const metrics = await handleBackendRequest({
+    getSubagentConcurrencyStatus: () => ({
+      scope: 'worker-process' as const,
+      configured: getMaxInflightResolution(),
+      workerCount: 0,
+      pendingWorkers: 0,
+    }),
+  } as any, {
+    id: 'test-runtime-prefs-provider-unlimited-metrics',
+    method: 'provider_gate.metrics',
+    params: undefined,
+  }) as {
+    enabled: boolean;
+    providers: Array<{ provider: string; maxConcurrentRequests: number; maxConcurrentRequestsSource?: string }>;
+    subagentConcurrency?: { configured: { value: number; source: string } };
+  };
+  assert.equal(metrics.enabled, true);
+  assert.equal(metrics.providers[0]?.provider, 'openai');
+  assert.equal(metrics.providers[0]?.maxConcurrentRequests, 0);
+  assert.equal(metrics.providers[0]?.maxConcurrentRequestsSource, 'saved-preference');
+  assert.deepEqual(metrics.subagentConcurrency?.configured, { value: 8, source: 'configured-default' });
+  assert.deepEqual(getMaxInflightResolution(), { value: 8, source: 'configured-default' });
+
+  const saved = resolveChatPrefs({ subagentMaxInflight: 2 });
+  const savedPayload = buildRuntimePrefsPayload(saved);
+  assert.equal(saved.subagentMaxInflight, 2);
+  assert.equal(saved.subagentMaxInflightSource, 'saved-preference');
+  assert.equal(savedPayload.subagentMaxInflight, 2);
+  assert.equal(savedPayload.subagentMaxInflightSource, 'saved-preference');
+  const savedResult = await handleBackendRequest(prefsDeps as any, {
+    id: 'test-runtime-prefs-concurrency-saved',
+    method: 'runtimePrefs.set',
+    params: savedPayload,
+  }) as { subagentMaxInflight?: number; subagentMaxInflightSource?: string };
+  assert.equal(savedResult.subagentMaxInflight, 2);
+  assert.equal(savedResult.subagentMaxInflightSource, 'saved-preference');
+  assert.deepEqual(getMaxInflightResolution(), { value: 2, source: 'saved-preference' });
+  assert.equal(process.env[SUBAGENT_MAX_INFLIGHT_ENV], '2');
+  assert.equal(process.env[sourceEnv], 'saved-preference');
+
+  const updated = resolveChatPrefs({ subagentMaxInflight: 5 });
+  const updatedPayload = buildRuntimePrefsPayload(updated);
+  await handleBackendRequest(prefsDeps as any, {
+    id: 'test-runtime-prefs-concurrency-live-update',
+    method: 'runtimePrefs.set',
+    params: updatedPayload,
+  });
+  assert.deepEqual(getMaxInflightResolution(), { value: 5, source: 'saved-preference' });
+  assert.equal(process.env[SUBAGENT_MAX_INFLIGHT_ENV], '5');
+  assert.equal(process.env[sourceEnv], 'saved-preference');
+});
+
 test('runtimePrefs.set applies providerConcurrency overrides to the live ProviderGate', async (t) => {
   ProviderGate.uninstall();
   t.after(() => ProviderGate.uninstall());
@@ -431,6 +561,7 @@ test('runtimePrefs.set applies providerConcurrency overrides to the live Provide
     activeRequests: 0,
     queuedRequests: 0,
     maxConcurrentRequests: 3,
+    maxConcurrentRequestsSource: 'saved-preference',
     afterburnSeconds: 7,
     queueWaitSeconds: 9,
     paused: false,

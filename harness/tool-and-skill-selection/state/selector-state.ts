@@ -39,6 +39,9 @@ export const state = {
 	/** Tools disabled by the latest auto-mode decision, tracked so neutral
 	 * keep-all/off/shadow paths can restore only pruner-owned changes. */
 	prunedTools: new Map<string, Set<string>>(),
+
+	/** Initial per-child-session tool permission ceiling for scoped recovery. */
+	allowedChildTools: new Map<string, Set<string>>(),
 };
 
 /** Root of the pi-config repo, resolved from this extension's known position. */
@@ -87,14 +90,32 @@ export function getLoadedSkills(sessionId: string): Set<string> {
 	return state.loadedSkills.get(sessionId) ?? new Set<string>();
 }
 
+/** Drop every selector decision owned by a completed session. */
+export function clearSessionSelectorState(sessionId: string): void {
+	state.hiddenSkills.delete(sessionId);
+	state.loadedSkills.delete(sessionId);
+	state.prunedTools.delete(sessionId);
+	state.allowedChildTools.delete(sessionId);
+}
+
 export function clearCapabilityStateForTesting(sessionId?: string): void {
 	if (sessionId) {
 		state.hiddenSkills.delete(sessionId);
 		state.loadedSkills.delete(sessionId);
+		state.allowedChildTools.delete(sessionId);
 	} else {
 		state.hiddenSkills.clear();
 		state.loadedSkills.clear();
+		state.allowedChildTools.clear();
 	}
+}
+
+export function recordAllowedChildTools(sessionId: string, names: readonly string[]): void {
+	if (!state.allowedChildTools.has(sessionId)) state.allowedChildTools.set(sessionId, new Set(names));
+}
+
+export function getAllowedChildTools(sessionId: string): ReadonlySet<string> | undefined {
+	return state.allowedChildTools.get(sessionId);
 }
 
 export function getPrunedTools(sessionId: string): Set<string> {

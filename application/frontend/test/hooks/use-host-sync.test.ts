@@ -2,9 +2,15 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { dispatchHostMessage } from '../../lib/hooks/use-host-sync';
-import { type HostToWebviewMessage, type ViewState } from '../../../lib/protocol/index.js';
+import type { HostToWebviewMessage, LazyDetailRef, ViewState, WebviewToHostMessage } from '../../../lib/protocol/index.js';
 import { PIE_BUILD_ID } from '../../../../lib/build-identity.js';
 import { WEBVIEW_PROTOCOL_VERSION } from '../../../lib/protocol/envelopes.js';
+import {
+  clearLazyDetailCache,
+  receiveLazyDetailResult,
+  requestLazyDetail,
+  setLazyDetailPostMessage,
+} from '../../transcript/lazy-detail-store';
 
 test('a queued background draft survives a same-host session switch', () => {
   const queuedDrafts = new Map<string, string>();
@@ -75,6 +81,7 @@ test('a queued background draft survives a same-host session switch', () => {
   assert.equal(queuedDrafts.get('/session/b'), 'background draft');
 
   const nextState = {
+    sessions: [],
     activeSession: {
       path: '/session/b',
       name: 'Session B',
@@ -148,6 +155,7 @@ test('protocol skew latches before hydration, evidence, revision, or later imper
     postMessage: () => { posted += 1; },
   };
   const state = {
+    sessions: [],
     activeSession: null,
     openTabPaths: [],
     transcript: [],
@@ -175,6 +183,133 @@ test('protocol skew latches before hydration, evidence, revision, or later imper
   assert.equal(posted, 0, 'no stateReceived evidence acknowledges incompatible state');
   assert.equal(lastRevisionRef.current, 4);
   assert.equal(restoredDrafts, 0, 'later imperatives are ignored after the terminal fence');
+});
+
+test('session removal evicts lazy details and rejects late responses without tab-switch eviction', () => {
+  clearLazyDetailCache();
+  const posts: WebviewToHostMessage[] = [];
+  setLazyDetailPostMessage((message) => {
+    posts.push(message);
+    return true;
+  });
+  const detailRef = (key: string): LazyDetailRef => ({
+    key,
+    kind: 'tool-result',
+    source: 'durable',
+    sessionPath: '/session/private.jsonl',
+    messageId: `message-${key}`,
+    toolCallId: `tool-${key}`,
+    sizeBytes: 1,
+    summary: key,
+    available: true,
+  });
+  const session = (path: string) => ({
+    path,
+    name: path,
+    cwd: '/workspace',
+    modifiedAt: '2026-01-01T00:00:00.000Z',
+    messageCount: 1,
+  });
+  const makeState = (revision: number, activePath: string | null, sessionPaths: string[]): HostToWebviewMessage => ({
+    type: 'state',
+    protocolVersion: WEBVIEW_PROTOCOL_VERSION,
+    buildId: PIE_BUILD_ID,
+    hostInstanceId: 'host-1',
+    rendererId: 'renderer-1',
+    rendererGeneration: 1,
+    viewGeneration: 1,
+    revision,
+    expectedTranscriptIdentity: `identity-${revision}`,
+    snapshotBytes: 100,
+    state: {
+      sessions: sessionPaths.map(session),
+      activeSession: activePath ? session(activePath) : null,
+      openTabPaths: sessionPaths,
+      transcript: [],
+      transcriptWindow: { start: 0, end: 0, total: 0, hasOlder: false, hasNewer: false },
+    } as unknown as ViewState,
+  });
+  const ctx = {
+    hydrateViewState: (state: ViewState) => state,
+    resetPerSessionState: () => undefined,
+    hostInstanceIdRef: { current: 'host-1' },
+    rendererIdentityRef: { current: { rendererId: 'renderer-1', rendererGeneration: 1 } },
+    viewGenerationRef: { current: 1 },
+    lastRevisionRef: { current: 0 },
+    activeSessionPathRef: { current: null as string | null },
+    committedSessionPathRef: { current: null as string | null },
+    compatibilityFailedRef: { current: false },
+    onCompatibilityMismatch: () => undefined,
+    clearTransientUi: () => undefined,
+    optimisticOps: {
+      clear: () => undefined,
+      reconcileWithHostIds: () => undefined,
+      removeByLocalId: () => undefined,
+      removeBySessionPath: () => undefined,
+    },
+    draftOps: {
+      applyQueued: () => false,
+      clearQueued: () => undefined,
+      queueForSession: () => undefined,
+      restoreNow: () => undefined,
+    },
+    inputsOps: { restoreNow: () => undefined, clear: () => undefined },
+    setViewState: () => undefined,
+    setCommitTarget: () => undefined,
+    setInlineConfirm: () => undefined,
+    postMessage: () => undefined,
+  };
+
+  try {
+    const privateDetail = detailRef('cached');
+    const pendingDetail = detailRef('pending');
+    dispatchHostMessage(makeState(1, privateDetail.sessionPath, [privateDetail.sessionPath, '/session/other.jsonl']), ctx);
+
+    requestLazyDetail(privateDetail.sessionPath, privateDetail);
+    receiveLazyDetailResult({
+      sessionPath: privateDetail.sessionPath,
+      key: privateDetail.key,
+      status: 'loaded',
+      value: 'private body',
+      sizeBytes: 1,
+    });
+
+    // Hiding/switching tabs is not ownership destruction: cached details stay
+    // available when returning to an ordinary session.
+    dispatchHostMessage(makeState(2, '/session/other.jsonl', [privateDetail.sessionPath, '/session/other.jsonl']), ctx);
+    requestLazyDetail(privateDetail.sessionPath, privateDetail);
+    assert.equal(posts.length, 1, 'ordinary tab switches retain the session-owned cache');
+
+    requestLazyDetail(pendingDetail.sessionPath, pendingDetail);
+    assert.equal(posts.length, 2, 'a second detail request is in flight before removal');
+    dispatchHostMessage(makeState(3, '/session/other.jsonl', ['/session/other.jsonl']), ctx);
+    requestLazyDetail(privateDetail.sessionPath, privateDetail);
+    assert.equal(posts.length, 2, 'removed sessions cannot start another detail request');
+    receiveLazyDetailResult({
+      sessionPath: pendingDetail.sessionPath,
+      key: pendingDetail.key,
+      status: 'loaded',
+      value: 'late private body',
+      sizeBytes: 1,
+    });
+
+    // Reopening the same path (for example after a failed close) must not
+    // resurrect either the loaded cache or a late response from its old owner.
+    dispatchHostMessage(makeState(4, privateDetail.sessionPath, [privateDetail.sessionPath, '/session/other.jsonl']), ctx);
+    requestLazyDetail(privateDetail.sessionPath, privateDetail);
+    assert.equal(posts.length, 3, 'the evicted loaded detail is fetched again');
+    receiveLazyDetailResult({
+      sessionPath: privateDetail.sessionPath,
+      key: privateDetail.key,
+      status: 'loaded',
+      value: 'fresh body',
+      sizeBytes: 1,
+    });
+    requestLazyDetail(pendingDetail.sessionPath, pendingDetail);
+    assert.equal(posts.length, 4, 'the response from the removed session was rejected');
+  } finally {
+    clearLazyDetailCache();
+  }
 });
 
 test('build skew is accepted when the webview protocol still matches', () => {
@@ -215,6 +350,7 @@ test('build skew is accepted when the webview protocol still matches', () => {
     postMessage: () => { posted += 1; },
   };
   const state = {
+    sessions: [],
     activeSession: null,
     openTabPaths: [],
     transcript: [],

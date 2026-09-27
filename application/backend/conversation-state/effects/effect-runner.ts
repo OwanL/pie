@@ -106,7 +106,7 @@ export interface ModalSink {
 
 /** Host sink for the generic `OpenFile` effect. */
 export interface OpenFileSink {
-  openFile(path: string): Promise<void>;
+  openFile(path: string, options?: { reference?: string; workingDirectory?: string }): Promise<void>;
 }
 
 export interface SessionServiceLike {
@@ -1215,7 +1215,10 @@ export class EffectRunner {
   private handleOpenFile(effect: OpenFileEffect): void {
     void (async () => {
       try {
-        await this.deps.openFile.openFile(effect.path);
+        await this.deps.openFile.openFile(effect.path, {
+          ...(effect.reference !== undefined ? { reference: effect.reference } : {}),
+          ...(effect.workingDirectory !== undefined ? { workingDirectory: effect.workingDirectory } : {}),
+        });
         this.deps.dispatch({ kind: 'OpenFileResult', corrId: effect.corrId, ok: true });
       } catch (err) {
         this.deps.dispatch({ kind: 'OpenFileResult', corrId: effect.corrId, ok: false, error: toErrorMessage(err) });

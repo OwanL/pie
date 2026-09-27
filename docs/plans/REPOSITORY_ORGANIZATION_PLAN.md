@@ -1,12 +1,11 @@
 # Repository organization: architecture and migration handoff
 
-**Status (2026-09-27):** B0–B8 migration acceptance criteria and final post-fix
-verification are complete in the working tree. The full `npm run verify`,
-isolated headless UI smoke, opt-in built-worker package smoke, and `npm run
-doctor` passed; a flaky test retry and doctor warnings are recorded in the
-[migration progress checkpoint](repository-organization-migration-progress.md).
-This is not a claim of live restart or deployed behavior. No commit or push was
-performed.
+**Status (2026-09-27):** The previously recorded B0–B8 acceptance reconciliation
+and full post-fix verification are historical. A subsequent stale-reference
+audit found omissions not covered by that gate; the focused corrections and
+checks are recorded in the [migration progress checkpoint](repository-organization-migration-progress.md).
+The full `npm run verify` was not rerun after those corrections. This is not a
+claim of live restart or deployed behavior. No commit or push was performed.
 
 **Source baseline inspected:** `78e5c0d7` on 2026-09-24. At preparation time the
 only pending changes were this plan, `docs/INDEX.md`, and the navigation-study

@@ -37,13 +37,14 @@ test("recordSkillRead logs known non-SKILL.md paths with derived filename", asyn
 			[],
 			[],
 		);
-		recordSkillRead("session-logger", "c:/repo/skills/customguide.md");
+		recordSkillRead("session-logger", "c:/repo/skills/customguide.md", "root-logger");
 		await flushLog();
 
 		const entries = readFileSync(logPath, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
 		assert.equal(entries.length, 1);
 		assert.equal(entries[0].event, "skill_read");
 		assert.equal(entries[0].skillName, "CustomGuide");
+		assert.equal(entries[0].rootSessionId, "root-logger");
 	} finally {
 		setLogPathForTesting(null);
 		clearPruningTrackingForTesting();
@@ -71,6 +72,7 @@ test("appendDecision returns the same decision object and appends JSONL", async 
 		const decision: PruningDecision = {
 			timestamp: new Date().toISOString(),
 			sessionId: "s1",
+			rootSessionId: "root-s1",
 			sessionPath: "/repo/s1",
 			mode: "auto",
 			query: "query",
@@ -90,6 +92,7 @@ test("appendDecision returns the same decision object and appends JSONL", async 
 
 		const stored = JSON.parse(readFileSync(logPath, "utf-8").trim());
 		assert.equal(stored.sessionId, "s1");
+		assert.equal(stored.rootSessionId, "root-s1");
 	} finally {
 		setLogPathForTesting(null);
 		clearPruningTrackingForTesting();

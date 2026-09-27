@@ -1649,11 +1649,47 @@ describe('ProviderGate — metrics', () => {
 		assert.equal(metrics[0].activeRequests, 0);
 		assert.equal(metrics[0].queuedRequests, 0);
 		assert.equal(metrics[0].maxConcurrentRequests, 2);
+		assert.equal(metrics[0].maxConcurrentRequestsSource, 'configured-default');
 		assert.equal(metrics[0].afterburnSeconds, 15);
 		assert.equal(metrics[0].queueWaitSeconds, 1);
 		assert.equal(metrics[0].paused, false);
 		assert.equal(metrics[0].pausedUntilMs, 0);
 		assert.equal(metrics[0].strikeCount, 0);
+	});
+
+	test('resolved policy provenance survives user overrides and clearing restores the catalog default', () => {
+		globalThis.fetch = async () => new Response('ok', { status: 200 });
+		const gate = ProviderGate.install([{
+			...BASE_CONFIG,
+			maxConcurrentRequests: 2,
+			maxConcurrentRequestsSource: 'configured-default',
+			afterburnSeconds: 15,
+		}], 0);
+
+		gate.applyResolvedPolicies({
+			'test-provider': {
+				maxConcurrentRequests: 2,
+				maxConcurrentRequestsSource: 'configured-default',
+			},
+		});
+		assert.equal(gate.getMetrics()[0].maxConcurrentRequests, 2);
+		assert.equal(gate.getMetrics()[0].maxConcurrentRequestsSource, 'configured-default');
+
+		gate.applyUserOverrides({
+			'test-provider': {
+				maxConcurrentRequests: 0,
+				afterburnSeconds: 2,
+				maxConcurrentRequestsSource: 'configured-default',
+			},
+		} as never);
+		assert.equal(gate.getMetrics()[0].maxConcurrentRequests, 0);
+		assert.equal(gate.getMetrics()[0].maxConcurrentRequestsSource, 'saved-preference');
+		assert.equal(gate.getMetrics()[0].afterburnSeconds, 2);
+
+		gate.applyUserOverrides({});
+		assert.equal(gate.getMetrics()[0].maxConcurrentRequests, 2);
+		assert.equal(gate.getMetrics()[0].maxConcurrentRequestsSource, 'configured-default');
+		assert.equal(gate.getMetrics()[0].afterburnSeconds, 15);
 	});
 
 	test('getMetrics reflects paused state after account suspension', async () => {
@@ -1694,6 +1730,7 @@ describe('ProviderGate — resolveConfigs from models.json', () => {
 		assert.equal(configs[0].provider, 'umans');
 		assert.equal(configs[0].baseUrl, 'https://api.code.umans.ai/v1');
 		assert.equal(configs[0].maxConcurrentRequests, 4);
+		assert.equal(configs[0].maxConcurrentRequestsSource, 'configured-default');
 		assert.equal(configs[0].afterburnSeconds, 15);
 	});
 
@@ -1708,6 +1745,7 @@ describe('ProviderGate — resolveConfigs from models.json', () => {
 		assert.deepEqual(configs, [{
 			provider: 'github-copilot',
 			maxConcurrentRequests: 2,
+			maxConcurrentRequestsSource: 'configured-default',
 			afterburnSeconds: 15,
 			queueWaitSeconds: 30,
 			headerWaitSeconds: undefined,

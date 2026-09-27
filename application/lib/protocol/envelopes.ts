@@ -35,5 +35,11 @@
  * v11: ViewState carries host-global browser-server network state (actual
  * listener, configured preference, pending/error status, and LAN URLs), and
  * renderers can request a persisted live LAN exposure change.
+ *
+ * v12: `openFile` may carry the original markdown reference and the originating
+ * session cwd so the host can perform a project-scoped basename fallback.
+ *
+ * v13: transcript image previews use a renderer-targeted bounded request/result
+ * pair; image data remains ephemeral and outside ViewState snapshots.
  */
-export const WEBVIEW_PROTOCOL_VERSION = 11;
+export const WEBVIEW_PROTOCOL_VERSION = 13;

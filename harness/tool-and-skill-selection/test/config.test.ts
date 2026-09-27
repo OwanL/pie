@@ -36,6 +36,8 @@ test("loadConfig returns defaults for a missing settings file", () => {
 	assert.equal(result.model, DEFAULT_CONFIG.model);
 	assert.equal(result.provider, DEFAULT_CONFIG.provider);
 	assert.equal(result.thinkingLevel, DEFAULT_CONFIG.thinkingLevel);
+	assert.equal(result.mainAgentEnabled, true);
+	assert.equal(result.subagentEnabled, true);
 	assert.ok(warnings.some((warning) => warning.includes("settings.json not found")));
 });
 
@@ -73,6 +75,8 @@ test("loadConfig parses a valid full config", () => {
 	assert.equal(result.model, "claude-sonnet-4");
 	assert.equal(result.provider, "anthropic");
 	assert.equal(result.thinkingLevel, "high");
+	assert.equal(result.mainAgentEnabled, true);
+	assert.equal(result.subagentEnabled, true);
 	assert.deepEqual(result.skills, {
 		strategy: "topK",
 		ceiling: 4,
@@ -82,6 +86,24 @@ test("loadConfig parses a valid full config", () => {
 	assert.ok(result.tools);
 	assert.equal(result.tools.ceiling, DEFAULT_TOOL_CONFIG.ceiling);
 	assert.deepEqual(result.tools.alwaysKeep, []);
+});
+
+test("loadConfig parses independent main-agent and subagent switches", () => {
+	const result = loadConfig(tempSettings(JSON.stringify({
+		pruning: { mainAgentEnabled: false, subagentEnabled: true },
+	})));
+	assert.equal(result.mainAgentEnabled, false);
+	assert.equal(result.subagentEnabled, true);
+});
+
+test("loadConfig defaults invalid agent switches and warns", () => {
+	const { result, warnings } = captureWarns(() => loadConfig(tempSettings(JSON.stringify({
+		pruning: { mainAgentEnabled: "no", subagentEnabled: 0 },
+	}))));
+	assert.equal(result.mainAgentEnabled, true);
+	assert.equal(result.subagentEnabled, true);
+	assert.ok(warnings.some((warning) => warning.includes("pruning.mainAgentEnabled")));
+	assert.ok(warnings.some((warning) => warning.includes("pruning.subagentEnabled")));
 });
 
 test("loadConfig defaults only invalid mode and warns", () => {

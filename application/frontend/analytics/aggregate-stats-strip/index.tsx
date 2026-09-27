@@ -6,6 +6,7 @@ import type { JSX } from 'preact';
 import { useState } from 'preact/hooks';
 
 import { PROVIDER_UNLIMITED_CONCURRENCY } from '../../../lib/protocol/provider-concurrency.js';
+import { concurrencySourceLabel } from '../../../../lib/concurrency-config.js';
 import type {
   AggregateLastRun,
   AggregateProductivityStats,
@@ -292,7 +293,16 @@ export function aggregateStatsSignature(s: AggregateStats): string {
     seriesSignature(s.weekCostSeries),
     s.lastRun ? `${s.lastRun.generationId ?? ''}:${s.lastRun.executionId ?? ''}:${s.lastRun.rootSessionId ?? ''}:${s.lastRun.sourceKey ?? ''}:${s.lastRun.outcome ?? ''}:${s.lastRun.cost}:${s.lastRun.durationMs}:${s.lastRun.startedAt}:${s.lastRun.endedAt}:${s.lastRun.modelId}:${s.lastRun.provider}:${s.lastRun.inputTokens}:${s.lastRun.outputTokens}:${s.lastRun.usageCoverage ?? ''}:${s.lastRun.attributionCoverage ?? ''}:${s.lastRun.turnSeriesCoverage ?? ''}:${s.lastRun.turnSeries.map((t) => `${t.ms}:${t.outputTokens}`).join(',')}` : '',
     s.providerGate.enabled,
-    s.providerGate.providers.map((p) => `${p.provider}:${p.activeRequests}:${p.queuedRequests}:${p.maxConcurrentRequests}:${p.afterburnSeconds}:${p.queueWaitSeconds ?? ''}:${p.paused}:${p.pausedUntilMs}:${p.strikeCount}`).join(','),
+    s.providerGate.providers.map((p) => `${p.provider}:${p.activeRequests}:${p.queuedRequests}:${p.maxConcurrentRequests}:${p.maxConcurrentRequestsSource ?? ''}:${p.afterburnSeconds}:${p.queueWaitSeconds ?? ''}:${p.paused}:${p.pausedUntilMs}:${p.strikeCount}`).join(','),
+    s.providerGate.subagentConcurrency ? [
+      s.providerGate.subagentConcurrency.scope,
+      s.providerGate.subagentConcurrency.configured.value,
+      s.providerGate.subagentConcurrency.configured.source,
+      s.providerGate.subagentConcurrency.effective?.value ?? '',
+      s.providerGate.subagentConcurrency.effective?.source ?? '',
+      s.providerGate.subagentConcurrency.workerCount,
+      s.providerGate.subagentConcurrency.pendingWorkers,
+    ].join(':') : '',
   ].join('|');
 }
 
@@ -629,13 +639,13 @@ function lastRunTooltipNode(r: AggregateLastRun): JSX.Element {
 }
 
 function providerLimitLabel(maxConcurrentRequests: number): string {
-  return maxConcurrentRequests === PROVIDER_UNLIMITED_CONCURRENCY ? 'Unlimited' : String(maxConcurrentRequests);
+  return maxConcurrentRequests === PROVIDER_UNLIMITED_CONCURRENCY ? '∞' : String(maxConcurrentRequests);
 }
 
 function providerGateTooltipNode(g: ProviderGateStats): JSX.Element {
   const lines: string[] = [];
   for (const p of g.providers) {
-    let line = `${pad(p.provider, 14)}${p.activeRequests}/${providerLimitLabel(p.maxConcurrentRequests)} active`;
+    let line = `${pad(p.provider, 14)}${p.activeRequests}/${providerLimitLabel(p.maxConcurrentRequests)} active · ${concurrencySourceLabel(p.maxConcurrentRequestsSource)}`;
     if (p.queuedRequests > 0) line += `  · ${p.queuedRequests} queued`;
     if (p.paused) {
       const seconds = Math.max(0, Math.ceil((p.pausedUntilMs - Date.now()) / 1000));

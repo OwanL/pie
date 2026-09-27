@@ -37,6 +37,7 @@ test('fast extension discovery includes standalone host tests under the existing
   const root = EXTENSION_TEST_ROOTS.find((candidate) => candidate.relativeDir === relativeDir);
   const repoRoot = path.resolve(import.meta.dirname, '../../..');
 
+  assert.equal(EXTENSION_TEST_ROOTS.some(({ relativeDir: testRoot }) => testRoot.startsWith('extension/')), false);
   assert.deepEqual(root, { relativeDir, root: repoRoot });
   assert.equal(resolveExtensionTestPath(testFile), path.join(repoRoot, testFile));
   assert.equal(classifyExtensionTest(testFile, "test('standalone host', () => {});"), 'tsx');
@@ -88,7 +89,12 @@ test('bundle output paths follow the repository outbase and preserve relocated m
   assert.equal(accounting.report().success, true, 'the relocated markdown test is accounted for once');
   assert.equal(
     extensionBundleOutputPath(tempDir, 'test/backend/runtime/rpc.test.ts'),
-    path.join(tempDir, 'extension/test/backend/runtime/rpc.test.js'),
+    path.join(tempDir, 'application/hosts/vscode/test/backend/runtime/rpc.test.js'),
+  );
+  assert.equal(
+    resolveExtensionTestPath('extension/test/backend/runtime/rpc.test.ts'),
+    path.join(repoRoot, 'extension/test/backend/runtime/rpc.test.ts'),
+    'retired test identities remain resolvable at their historical repository path',
   );
   assert.equal(
     extensionBundleOutputPath(tempDir, 'repo/test/integration/backend-runtime-prefs.test.ts'),
@@ -168,9 +174,8 @@ test('fast runner removes OS temp directories when bundle build throws', async (
 
 test('recoverBundledFailureSourceFiles restores source attribution for tests and batch wrappers', () => {
   const repoRoot = path.resolve(import.meta.dirname, '../../..');
-  const extensionRoot = path.join(repoRoot, 'extension');
   const tempDir = path.join(repoRoot, '.tmp-fast-extension-runner');
-  const sourceFile = 'test/backend/sessions/cold-session-store.test.ts';
+  const sourceFile = 'extension/test/backend/sessions/cold-session-store.test.ts';
   const markdownSourceFile = 'application/frontend/test/transcript/messages/markdown-rendering.test.ts';
   const bundledFile = extensionBundleOutputPath(tempDir, sourceFile);
   const markdownBundleFile = extensionBundleOutputPath(tempDir, markdownSourceFile);
@@ -184,8 +189,8 @@ test('recoverBundledFailureSourceFiles restores source attribution for tests and
     { name: 'unrelated infrastructure failure', file: unrelatedFile },
   ], tempDir, [sourceFile, markdownSourceFile]);
 
-  assert.equal(recovered[0].file, path.join(extensionRoot, sourceFile));
-  assert.equal(recovered[1].file, path.join(extensionRoot, sourceFile));
+  assert.equal(recovered[0].file, path.join(repoRoot, sourceFile));
+  assert.equal(recovered[1].file, path.join(repoRoot, sourceFile));
   assert.equal(recovered[2].file, path.join(repoRoot, markdownSourceFile));
   assert.equal(recovered[3].file, unrelatedFile);
 });

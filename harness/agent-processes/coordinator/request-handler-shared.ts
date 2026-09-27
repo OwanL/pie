@@ -8,6 +8,7 @@ import type {
   TranscriptPagePayload,
 } from '../lib/rpc/session-events.js';
 import type { ProviderGateMetrics } from '../../model-providers/concurrency/provider-gate.js';
+import type { SubagentConcurrencyStatus } from '../../../lib/concurrency-config.js';
 import { CreateOperationLedger } from './create-operation-ledger.js';
 import type { SdkModule, SdkSessionManager } from '../lib/sdk-integration/sdk';
 import type { SessionContext, SessionContextCreationReason } from './server-types.js';
@@ -84,7 +85,7 @@ export interface BackendRequestHandlerDeps {
     cwd?: string,
     pendingCreateOperationId?: string,
     agentCreated?: boolean,
-  ): { sessionPath: string };
+  ): { sessionPath: string } | Promise<{ sessionPath: string }>;
   duplicateColdSession?(
     sessionPath: string,
     publicRequestId: string,
@@ -220,6 +221,8 @@ export interface BackendRequestHandlerDeps {
    *  Production injects the coordinator lease authority; standalone paths
    *  fall back to the in-process gate inside the handler. */
   getProviderGateMetrics?: () => readonly ProviderGateMetrics[] | undefined;
+  /** Coordinator-authoritative subagent concurrency and worker-sync status. */
+  getSubagentConcurrencyStatus?: () => SubagentConcurrencyStatus | undefined;
   /** Route one host-issued recorder disposition to the exact current worker. */
   acknowledgeAnalytics?: (
     route: AnalyticsTransportRoute,

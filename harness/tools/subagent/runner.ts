@@ -15,12 +15,11 @@ import type {
 	CreateAgentSessionResult,
 	DefaultResourceLoader,
 	ModelRegistry,
-	ResourceDiagnostic,
 	SessionManager,
-	Skill,
 } from "@mariozechner/pi-coding-agent";
 
 import type { AgentConfig } from "../../agent-instructions/agent-discovery/agents.js";
+import { attachRootSessionId } from "../../../lib/session-attribution.js";
 import { textContent } from "./text-content.js";
 import { formatSubagentPrompt, type UserContextMode } from "./user-context.js";
 import { getFinalOutput } from "./formatting.js";
@@ -33,8 +32,13 @@ import { createInvalidAgentResult } from "./validation.js";
 import { toErrorMessage } from "../../../lib/structured-logging/error-message.js";
 import { unavailablePieToolNames } from "../catalog/index.js";
 import { installPieSystemPromptRebuildGuard, type PieSystemPromptOptions } from "../../agent-instructions/prompt-assembly/pie-harness-prompt.js";
-import { subagentContext } from "../../agent-processes/lib/process-lifecycle/subagent-context.js";
-import { readKeptSkills } from "../../tool-and-skill-selection/state/pruned-skills.js";
+import { subagentContext, type SubagentSignal } from "../../agent-processes/lib/process-lifecycle/subagent-context.js";
+import {
+	cleanupChildToolRuntimeOwner,
+	createChildToolRuntimeOwner,
+	markChildToolRuntimeOwnerClosing,
+	runWithChildToolRuntimeOwner,
+} from "../../agent-processes/lib/process-lifecycle/child-tool-runtime-owner.js";
 import { readProviderCapacitySnapshot } from "../../model-providers/concurrency/provider-capacity-bridge.js";
 import {
 	readAlwaysParentModelFromEnv,
@@ -54,8 +58,8 @@ import type { RetryClock } from "./retry.js";
 import { isRuntimeTraceEnabled, recordRuntimeTrace } from "./runtime-trace.js";
 import { populateFileChanges } from "./result-compaction.js";
 import type { SubagentAnalyticsCaptureContext } from "./analytics-capture.js";
-
-type SubagentSkillsOverride = (base: { skills: Skill[]; diagnostics: ResourceDiagnostic[] }) => { skills: Skill[]; diagnostics: ResourceDiagnostic[] };
+import { reapSessionStashes } from "../result-processing/reaper.js";
+import { cleanupSessionTempOutputs } from "../../../lib/temporary-files/session-temp-output-lifecycle.js";
 
 /**
  * Minimal contract for the session events emitted by the pi SDK's
@@ -230,12 +234,12 @@ export interface SubagentRuntimeContext {
 	budget?: TreeBudget;
 	/** Main chat session whose per-session provider policy applies to this tree. */
 	rootSessionPath?: string;
+	/** Main chat's identity for privacy attribution of all descendant sessions. */
+	rootSessionId?: string;
 	/** Effective subagent-only provider policy snapshotted by the root call. Child
 	 * sessions have in-memory session managers, so they must inherit this policy
 	 * rather than trying to resolve a per-chat override from their own path. */
 	subagentProviderToggles?: Record<string, boolean>;
-	/** Main-turn skill selection inherited by every descendant. */
-	keptSkills?: string[] | "keep-all";
 	/** One process-wide permit held for the complete root-tree lifetime. */
 	processPermitScope?: ProcessPermitScope;
 	/** Immutable producer lineage of the currently executing ancestor attempt. */
@@ -1287,9 +1291,7 @@ export async function runSingleAgent(
 	_toolCallId?: string,
 	/** The parent session's UI bridge, for proxying ask_user calls. */
 	parentUiBridge?: ParentBridge,
-	/** The PARENT (main) session id, used to look up the skill-pruner's kept-skill
-	 *  set so this subagent inherits the main turn's pruned skills (direction C).
-	 *  Undefined when unresolvable → no skill filtering (today's behavior). */
+	/** The immediate parent session id, used only as a fallback for root attribution. */
 	parentSessionId?: string,
 	/** The full set of tool names available in the parent session, used so the
 	 *  user-configured drop-tools list can be subtracted from unrestricted agents
@@ -1408,28 +1410,13 @@ export async function runSingleAgent(
 	//   load into nested sessions, enabling further delegation. Nesting is bounded
 	//   by the depth/trail/tree-budget guards in execute()/modes.ts, not by hiding
 	//   the tool.
-	// Skills: inherit the parent's pruned set (direction C). The skill-pruner
-	// writes the kept-skill names for the main turn to a per-session store;
-	// here we read them and filter the subagent's loaded skills by name. Both
-	// sessions load skills from the same locations, so name-based filtering is
-	// exact. Undefined / "keep-all" / not-found → no filter (today's behavior).
-	let skillsOverride: SubagentSkillsOverride | undefined;
-	if (parentSessionId) {
-		const kept = readKeptSkills(parentSessionId);
-		// A non-empty kept set filters the subagent's skills to exactly those the
-		// main turn kept. An empty array is treated as keep-all (no filter): the
-		// main turn may now legitimately prune every skill when tools remain, but a
-		// subagent works on an isolated sub-task with no mid-turn skill recovery, so
-		// it never inherits zero skills via this path. "keep-all" / undefined also
-		// fall through to no filter (today's behavior).
-		if (Array.isArray(kept) && kept.length > 0) {
-			const keptSet = new Set(kept);
-			skillsOverride = (base) => ({
-				skills: base.skills.filter((s) => keptSet.has(s.name)),
-				diagnostics: base.diagnostics,
-			});
-		}
-	}
+	// Skills are discovered independently for each child and pruned against the
+	// child's own assignment plus this agent's definition.
+	const agentDefinitionContext = [
+		`Agent: ${agent.name}`,
+		agent.description ? `Description: ${agent.description}` : "",
+		agent.systemPrompt.trim() ? `Instructions:\n${agent.systemPrompt.trim()}` : "",
+	].filter(Boolean).join("\n\n");
 
 	// Tools: subtract the user-configured drop list (e.g. ["ask_user"]) and
 	// capabilities unsupported by an in-memory child from the effective tool set.
@@ -1450,7 +1437,6 @@ export async function runSingleAgent(
 		agentDir: sdk.getAgentDir(),
 		appendSystemPrompt: agent.systemPrompt.trim() ? [agent.systemPrompt] : undefined,
 		noExtensions: false,
-		skillsOverride,
 	});
 
 	// Pre-spawn phase: resource load → root-tree permit → session creation.
@@ -1474,8 +1460,44 @@ export async function runSingleAgent(
 	const signalListenersBefore = snapshotSignalListeners();
 	const resolvedAttemptId = attemptId ?? nextAttemptIdentity(agentName, _toolCallId);
 	currentResult.attemptId = resolvedAttemptId;
+	const childToolRuntimeOwner = createChildToolRuntimeOwner(`${agentName}: ${task.slice(0, 100)}`);
+	const cleanupChildToolRuntimes = async (): Promise<void> => {
+		try {
+			await cleanupChildToolRuntimeOwner(childToolRuntimeOwner);
+		} catch (firstError) {
+			// The first owner cleanup fully settles every callback before rejecting.
+			// Retry only the retained failed callbacks; never recreate the runtime or
+			// replay the model task. The owner remains fenced throughout both passes.
+			try {
+				await cleanupChildToolRuntimeOwner(childToolRuntimeOwner);
+			} catch (retryError) {
+				const cleanupMessage = `Child tool-runtime cleanup failed after one cleanup-only retry; an exclusive desktop claim may remain blocked. First attempt: ${toErrorMessage(firstError)}; retry: ${toErrorMessage(retryError)}`;
+				currentResult.exitCode = 1;
+				currentResult.stopReason = "error";
+				currentResult.retryable = false;
+				currentResult.replaySafety = "terminal";
+				currentResult.errorMessage = currentResult.errorMessage
+					? `${currentResult.errorMessage}; ${cleanupMessage}`
+					: cleanupMessage;
+				currentResult.stderr = currentResult.stderr
+					? `${currentResult.stderr}\n${cleanupMessage}`
+					: cleanupMessage;
+				setActivity(currentResult, "failed", currentResult.errorMessage);
+				logLoud("subagent child tool-runtime cleanup failed", {
+					toolCallId: _toolCallId,
+					agent: agentName,
+					task,
+					attemptId: resolvedAttemptId,
+					error: cleanupMessage,
+				});
+			}
+		}
+	};
 	const orphanRegistry = _internal?.orphanRegistry ?? globalOrphanRegistry;
 	let session: SessionLike;
+	let childSessionId: string | undefined;
+	let childSessionRootId: string | undefined;
+	let childSessionManager: ReturnType<typeof sdk.createSessionManager> | undefined;
 	let createSessionPromise: Promise<CreateAgentSessionResult> | undefined;
 	// Publish before resource loading begins; otherwise a slow loader leaves the
 	// parent showing its synthetic "Starting" state with no real child status.
@@ -1494,6 +1516,10 @@ export async function runSingleAgent(
 		}
 		setActivity(currentResult, "preparing", "creating subagent session");
 		emitUpdate();
+		childSessionManager = sdk.createSessionManager(sessionCwd);
+		childSessionId = (childSessionManager as { getSessionId?: () => string }).getSessionId?.();
+		childSessionRootId = runtimeContext.rootSessionId ?? parentSessionId;
+		attachRootSessionId(childSessionManager, childSessionRootId);
 		createSessionPromise = sdk.createSession({
 			cwd: sessionCwd,
 			modelRegistry,
@@ -1501,7 +1527,7 @@ export async function runSingleAgent(
 			thinkingLevel,
 			tools: effectiveTools,
 			excludeTools: [...UNSUPPORTED_SUBAGENT_TOOLS],
-			sessionManager: sdk.createSessionManager(sessionCwd),
+			sessionManager: childSessionManager,
 			resourceLoader,
 		});
 		const created = parentAlreadyAborted
@@ -1525,6 +1551,7 @@ export async function runSingleAgent(
 		// process permit. The orphan registry handles retry/backoff and
 		// best-effort drain.
 		const interrupted = parentAlreadyAborted || !!signal?.aborted || (err as { name?: string } | null)?.name === "AbortError";
+		await cleanupChildToolRuntimes();
 		if (createSessionPromise && interrupted) {
 			const capturedCreatePromise = createSessionPromise;
 			const capturedListenersBefore = signalListenersBefore;
@@ -1565,8 +1592,16 @@ export async function runSingleAgent(
 							attemptId: resolvedAttemptId,
 							error: toErrorMessage(error),
 						});
+						if (childSessionId) {
+							await cleanupSessionTempOutputs(childSessionId, childSessionManager, childSessionRootId);
+							await reapSessionStashes(childSessionId);
+						}
 						reclaimOrphanedSignalListeners(capturedListenersBefore);
 						throw error;
+					}
+					if (childSessionId) {
+						await cleanupSessionTempOutputs(childSessionId, childSessionManager, childSessionRootId);
+						await reapSessionStashes(childSessionId);
 					}
 					reclaimOrphanedSignalListeners(capturedListenersBefore);
 				})().catch((error) => {
@@ -1650,9 +1685,10 @@ export async function runSingleAgent(
 			/* a broken parent bridge must not prevent owned-session teardown */
 		}
 	};
-	const cleanupOwnedSession = (): void => {
+	const cleanupOwnedSession = async (): Promise<void> => {
 		if (sessionCleanedUp) return;
 		sessionCleanedUp = true;
+		markChildToolRuntimeOwnerClosing(childToolRuntimeOwner);
 		const terminalStartedAt = performance.now();
 		try {
 			// Stamp the bounded file-change summary before the terminal lifecycle
@@ -1674,16 +1710,27 @@ export async function runSingleAgent(
 			// Fence the SDK callback before cancelling UI or disposing the session;
 			// either operation may synchronously flush provider/extension callbacks.
 			teardownSession(unsubscribe, session, cancelProxy);
-			// Reclaim the orphaned exit-signal listeners the SDK's loader leaked
-			// during this session (see `snapshotSignalListeners` above). Runs after
-			// `teardownSession` so the session's own disposal has settled; the
-			// reclaimed closures are pure no-arg pool-disposers that are no-ops on
-			// a live host anyway. No-op for the mock SDK / a fixed upstream.
-			reclaimOrphanedSignalListeners(signalListenersBefore);
-			if (ownedProcessPermit) {
-				ownedProcessPermit();
-				if (runtimeContext.processPermitScope?.release === ownedProcessPermit) runtimeContext.processPermitScope = undefined;
-				ownedProcessPermit = undefined;
+			// Direct AgentSession disposal does not emit session_shutdown. Await the
+			// attempt-owned runtime cleanup explicitly; the owner was fenced above.
+			await cleanupChildToolRuntimes();
+			// Clean this in-memory child's exact SDK output files and pruning stashes.
+			try {
+				if (childSessionId) {
+					await cleanupSessionTempOutputs(childSessionId, childSessionManager, childSessionRootId);
+					await reapSessionStashes(childSessionId);
+				}
+			} finally {
+				// Reclaim the orphaned exit-signal listeners the SDK's loader leaked
+				// during this session (see `snapshotSignalListeners` above). Runs after
+				// `teardownSession` so the session's own disposal has settled; the
+				// reclaimed closures are pure no-arg pool-disposers that are no-ops on
+				// a live host anyway. No-op for the mock SDK / a fixed upstream.
+				reclaimOrphanedSignalListeners(signalListenersBefore);
+				if (ownedProcessPermit) {
+					ownedProcessPermit();
+					if (runtimeContext.processPermitScope?.release === ownedProcessPermit) runtimeContext.processPermitScope = undefined;
+					ownedProcessPermit = undefined;
+				}
 			}
 		} finally {
 			const runtimeContext = readRuntimeContext();
@@ -1703,14 +1750,17 @@ export async function runSingleAgent(
 	// Variables used by the prompt phase are created before setup so setup
 	// failures can propagate after cleanup without widening the prompt catch.
 	const stageRef = { value: "preparing" };
-	// Wrap the prompt in the shared subagent context (A) so extensions whose
-	// before_agent_start hooks fire during session.prompt() — notably the
-	// skill-pruner prepass — can detect they are inside a scoped subagent
-	// session and skip. AsyncLocalStorage is per-async-context, so this is safe
-	// under parallel subagent runs (unlike a process.env flag, which would race).
+	// Carry the immutable agent-definition context only through this async child
+	// prompt lifecycle. The pruner combines it with the child assignment while
+	// sibling child sessions remain isolated by AsyncLocalStorage.
 	const subagentDepth = readRuntimeContext().depth;
+	const childSignal: SubagentSignal & { agentContext?: string } = {
+		depth: subagentDepth,
+		agentContext: agentDefinitionContext,
+	};
 	const runPrompt = (): Promise<void> =>
-		subagentContext.run({ depth: subagentDepth }, () => session.prompt(formatSubagentPrompt(task, parentUserContext?.content)));
+		runWithChildToolRuntimeOwner(childToolRuntimeOwner, () =>
+			subagentContext.run(childSignal, () => session.prompt(formatSubagentPrompt(task, parentUserContext?.content))));
 	try {
 		// Capture the model the session actually selected (in case our hint was overridden).
 		if (session.agent?.state?.model) {
@@ -1743,13 +1793,14 @@ export async function runSingleAgent(
 		setActivity(currentResult, "waiting_provider", currentResult.provider ? `waiting for ${currentResult.provider}` : "waiting for model response");
 		emitUpdate();
 	} catch (error) {
-		cleanupOwnedSession();
+		await cleanupOwnedSession();
 		throw error;
 	}
 
 	// 6. Run the prompt with parent-signal handling, then shape the final result.
 	try {
 		if (parentAlreadyAborted) {
+			markChildToolRuntimeOwnerClosing(childToolRuntimeOwner);
 			// If the parent signal is already aborted, run the prompt anyway
 			// (it'll abort quickly after session.abort()) and return an explicit
 			// abort result. Race against a short timeout so a hung SDK/dead
@@ -1773,6 +1824,9 @@ export async function runSingleAgent(
 			return () => signal.removeEventListener("abort", handler);
 		};
 		const removeAbortListener = onAbort(() => {
+			// Fence browser/tool runtime admissions synchronously with cancellation;
+			// cleanup later awaits teardown of anything already admitted.
+			markChildToolRuntimeOwnerClosing(childToolRuntimeOwner);
 			// Immediately stop the child's billable windows (compaction,
 			// branch-summary, bash, retry) — these run in the gap between
 			// agent_end and teardownSession and are NOT covered by abort().
@@ -1860,6 +1914,6 @@ export async function runSingleAgent(
 		applyThrownError(currentResult, err, stageRef.value, !!signal?.aborted, _internal?.clock);
 		return currentResult;
 	} finally {
-		cleanupOwnedSession();
+		await cleanupOwnedSession();
 	}
 }

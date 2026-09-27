@@ -23,7 +23,7 @@ import {
   type RunAnalyticsExportPayload,
   type RunAnalyticsQueryResult,
 } from '../run-analytics/query';
-import { forgetGlobalSideChannels, inferGlobalLogRoot } from '../run-analytics/side-channel';
+import { forgetGlobalSideChannelsForStorageDirs } from '../run-analytics/side-channel';
 import {
   RUN_ANALYTICS_SCHEMA_VERSION,
   type PersistedSessionRunState,
@@ -271,6 +271,12 @@ export class RunAnalyticsStorage {
     return this.storageDir;
   }
 
+  /** Candidate run-store locations used only to infer the shared auxiliary-log
+   * roots during privacy cleanup. This is path derivation and performs no I/O. */
+  getGlobalSideChannelStorageDirs(): string[] {
+    return [...new Set([this.storageDir, ...this.legacyStorageDirs])];
+  }
+
   async flush(): Promise<void> {
     this.cancelPersistTimer();
     if (this.dirty || this.pendingSnapshots.size > 0) {
@@ -445,16 +451,13 @@ export class RunAnalyticsStorage {
         // otherwise restart would resurrect data removed from the canonical
         // store. Both A/B checkpoint slots are rewritten because either can be
         // selected after a crash.
-        const storageDirs = [...new Set([this.storageDir, ...this.legacyStorageDirs])];
+        const storageDirs = this.getGlobalSideChannelStorageDirs();
         for (const storageDir of storageDirs) {
           await this.forgetSessionFromStorageDir(storageDir, sessionPath, effectiveSessionId);
         }
         this.historyMetadata.delete('run-snapshots.jsonl');
 
-        const sideChannelRoots = [...new Set(storageDirs.map(inferGlobalLogRoot))];
-        for (const root of sideChannelRoots) {
-          await forgetGlobalSideChannels(root, sessionPath, effectiveSessionId);
-        }
+        await forgetGlobalSideChannelsForStorageDirs(storageDirs, sessionPath, effectiveSessionId);
         this.markAutoExportDirty();
         });
       });

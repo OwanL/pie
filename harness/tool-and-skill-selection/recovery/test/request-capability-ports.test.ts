@@ -81,6 +81,7 @@ function makeFakePorts(initial: {
 	pruned?: string[];
 	hiddenSkills?: SkillRecord[];
 	dependencies?: Record<string, string[]>;
+	allowedTools?: string[];
 	autonomousMode?: boolean;
 } = {}) {
 	const state: FakeState = {
@@ -101,6 +102,7 @@ function makeFakePorts(initial: {
 		},
 		getSessionId: () => "fake-session",
 		getPrunedTools: () => state.pruned,
+		getAllowedTools: () => initial.allowedTools ? new Set(initial.allowedTools) : undefined,
 		getHiddenSkills: () => state.hiddenSkills,
 		getLoadedSkills: () => state.loadedSkills,
 		recordLoadedSkill: (_sessionId, skillName) => {
@@ -174,6 +176,33 @@ test("extracted tool runs entirely through injected ports without touching skill
 		clearCapabilityStateForTesting();
 		clearPrunedToolsForTesting();
 	}
+});
+
+test("child recovery is scoped to its initial allowlist, including dependency traversal", async () => {
+	const scoped = makeFakePorts({
+		allTools: [
+			...TOOL_INFO,
+			{ name: "bash", description: "Run commands" } as unknown as ToolInfo,
+			{ name: "request_capability", description: "Recover a capability" } as unknown as ToolInfo,
+			{ name: "forbidden", description: "Not in the child allowlist" } as unknown as ToolInfo,
+		],
+		activeTools: ["read", "request_capability"],
+		pruned: ["edit", "bash", "forbidden"],
+		allowedTools: ["read", "edit", "bash", "request_capability"],
+		dependencies: { edit: ["bash", "forbidden"], bash: ["forbidden"] },
+	});
+	const tool = createRequestCapabilityTool(scoped.ports);
+	const listed = await callTool(tool, "scope-list") as any;
+	assert.equal(listed.content[0].text, "tools\tbash, edit\nskills\t(none)");
+
+	const recovered = await callTool(tool, "scope-recover", {
+		capabilityType: "tool", capabilityName: "edit",
+	}) as any;
+	assert.equal(recovered.isError, undefined);
+	assert.ok(scoped.state.activeTools.includes("edit"));
+	assert.ok(scoped.state.activeTools.includes("bash"), "allowed hidden dependency may be recovered");
+	assert.ok(!scoped.state.activeTools.includes("forbidden"), "dependency traversal must not widen the allowlist");
+	assert.deepEqual(scoped.state.activationLog.at(-1), ["read", "request_capability", "edit", "bash"]);
 });
 
 test("adapter wires the extracted tool to skill-pruner's single lifecycle state", async () => {

@@ -76,8 +76,8 @@ export class PieExtension implements vscode.Disposable {
     this.sidebarProvider = new SidebarViewProvider(
       context,
       () => this.runtime.buildViewState(),
-      (message) => {
-        void this.runtime.handleWebviewMessage(message);
+      (message, commandContext) => {
+        void this.runtime.handleWebviewMessage(message, commandContext);
       },
       () => this.runtime.getRunningSessionCount(),
       {

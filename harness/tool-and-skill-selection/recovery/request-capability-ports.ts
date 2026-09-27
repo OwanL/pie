@@ -3,9 +3,11 @@ import {
 	getHiddenSkills,
 	getLoadedSkills,
 	getPrunedTools,
+	getAllowedChildTools,
 	recordLoadedSkill,
 } from "../state/selector-state.js";
 import { getConfig, getSessionId } from "../lifecycle/pruning-lifecycle.js";
+import { rootSessionAttribution } from "../../../lib/session-attribution.js";
 import { isAutonomousModeEnabled } from "../settings/autonomous-mode.js";
 import { ASK_USER_TOOL_NAME } from "../../tools/catalog/tool-names.js";
 import { recordSkillRecovery, recordToolRecovery } from "../lifecycle/logger.js";
@@ -30,7 +32,9 @@ export function createRequestCapabilityDefinition(toolSeams: PiToolSeams) {
 	const ports: RequestCapabilityPorts = {
 		...toolSeams,
 		getSessionId,
+		getRootSessionId: (ctx) => rootSessionAttribution(ctx, getSessionId(ctx)).rootSessionId,
 		getPrunedTools,
+		getAllowedTools: getAllowedChildTools,
 		getHiddenSkills,
 		getLoadedSkills,
 		recordLoadedSkill,

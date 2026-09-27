@@ -12,8 +12,9 @@ import {
   getChatPrefContextValue,
   toggleChatPrefForContext,
 } from '../../shell/chat-prefs';
-import type { TranscriptMessageMenuInfo } from '../../transcript/types';
+import type { TranscriptFilePathMenuInfo, TranscriptMessageMenuInfo } from '../../transcript/types';
 import { writeTextToClipboard } from './clipboard';
+import { markdownToReadableText } from './selection-copy';
 import { useMenuTriggerAria } from './useMenuTriggerAria';
 import { useMenuViewportClamp } from './useMenuViewportClamp';
 
@@ -25,16 +26,16 @@ export interface ContextMenuState {
   sessionPath: string | null;
   /** Message-level metadata captured when the menu was opened inside a
    *  transcript message row (bound once per row by MessageItemView). Powers
-   *  the message-scoped actions: Edit, Delete from here, and plain-text Copy
-   *  when a plain-text representation exists. Absent for filePath menus and
-   *  menus opened outside a message row. */
+   *  message-scoped Copy, Copy as Markdown, Edit, and Delete from here actions.
+   *  Absent for filePath menus and menus opened outside a message row. */
   message?: Partial<TranscriptMessageMenuInfo> | null;
-  /** The live text selection captured at the moment the menu was opened, so
-   * the "Copy" item can copy just the user's selection instead of the whole
-   * block. Captured in handleOpenContextMenu (use-app-handlers.ts) rather than
-   * at click time because the menu's focus-management moves focus to the
-   * first item on open, which can clear the document's live selection. */
+  /** Original reference and captured cwd for file-path Open File fallback.
+   *  rawData stays the resolved path so Copy Path preserves its semantics. */
+  filePath?: TranscriptFilePathMenuInfo | null;
+  /** The live selected text and its Markdown serialization captured before
+   * menu focus moves and can collapse the document selection. */
   selectionText: string;
+  selectionMarkdown?: string;
   x: number;
   y: number;
   /** The trigger element that opened the menu (the onContextMenu target),
@@ -56,7 +57,7 @@ export function ContextMenu({
   menu: ContextMenuState;
   prefs: ChatPrefs;
   onSetPrefs: (p: Partial<ChatPrefs>) => void;
-  onOpenFile: (path: string) => void;
+  onOpenFile: (path: string, reference?: string, workingDirectory?: string) => void;
   /** Edit an eligible user message (routes to the existing `startEdit` flow). */
   onEditMessage: (sessionPath: string, messageId: string) => void;
   /** Destructive "Delete from here" (host-validated truncateAfter). */
@@ -76,11 +77,38 @@ export function ContextMenu({
   // "Confirm delete?", a second click issues the command. The component only
   // mounts while a menu is open, so confirming state resets on close.
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [copyFailure, setCopyFailure] = useState(false);
   const meta = menu.message ?? null;
+  const copyAndClose = (text: string) => {
+    setCopyFailure(false);
+    void writeTextToClipboard(text).then((copied) => {
+      if (copied) onClose();
+      else setCopyFailure(true);
+    });
+  };
+  const copyFailureNotice = copyFailure ? (
+    <div role="status" aria-live="polite" style="padding:4px 10px;color:var(--panel-muted);font-size:11px">
+      Couldn’t copy to clipboard.
+    </div>
+  ) : null;
+
+  const onMenuKey = (event: KeyboardEvent) => {
+    const target = event.target;
+    if (!(target instanceof Node && ref.current?.contains(target))) return;
+    if (target instanceof HTMLElement && target.closest('input, textarea, select, [contenteditable]')) return;
+    if (!menu.selectionText || (!event.ctrlKey && !event.metaKey) || event.altKey || event.shiftKey) return;
+    if (event.key.toLowerCase() !== 'c') return;
+
+    event.preventDefault();
+    setCopyFailure(false);
+    void writeTextToClipboard(menu.selectionText).then((copied) => {
+      if (!copied) setCopyFailure(true);
+    });
+  };
 
   // Transcript menus intentionally remain open during scrolling: the menu is
   // fixed and transcript auto-scroll is part of normal streaming behavior.
-  useMenuListeners(ref, onClose);
+  useMenuListeners(ref, onClose, { onKey: onMenuKey });
 
   const style = `position:fixed;top:${pos.top}px;left:${pos.left}px`;
 
@@ -92,7 +120,7 @@ export function ContextMenu({
           role="menuitem"
           type="button"
           onClick={() => {
-            onOpenFile(menu.rawData);
+            onOpenFile(menu.rawData, menu.filePath?.reference, menu.filePath?.workingDirectory);
             onClose();
           }}
         >
@@ -104,13 +132,13 @@ export function ContextMenu({
           role="menuitem"
           type="button"
           onClick={() => {
-            void writeTextToClipboard(menu.rawData);
-            onClose();
+            copyAndClose(menu.rawData);
           }}
         >
           <svg class="context-menu-check" width="13" height="13" viewBox="0 0 13 13" aria-hidden="true" style="opacity:0" />
           Copy Path
         </button>
+        {copyFailureNotice}
       </div>
     );
   }
@@ -135,39 +163,42 @@ export function ContextMenu({
     </button>
   ) : null;
 
-  // Copy the user's current text selection. Only shown when a non-empty
-  // selection was captured at open time, so right-clicking selected text gives
-  // the familiar "copy what I highlighted" action instead of forcing the
-  // whole-block "Copy raw".
-  const copySelection = menu.selectionText ? (
-    <button
-      class="context-menu-item"
-      role="menuitem"
-      type="button"
-      onClick={() => {
-        void writeTextToClipboard(menu.selectionText);
-        onClose();
-      }}
-    >
+  const hasMessageCopy = menu.type === 'message' || menu.type === 'reasoning';
+  const markdownBody = menu.type === 'reasoning'
+    ? meta?.markdownText ?? meta?.plainText ?? menu.rawData
+    : meta?.markdownText ?? meta?.plainText ?? '';
+  const hasSelection = menu.selectionText.length > 0;
+
+  // Message and reasoning menus have one plain-text and one Markdown action.
+  // A captured selection always wins over the entire message/block body.
+  const copyMessageText = hasMessageCopy ? (
+    <button class="context-menu-item" role="menuitem" type="button" onClick={() => copyAndClose(
+      hasSelection ? menu.selectionText : markdownToReadableText(markdownBody),
+    )}>
       <svg class="context-menu-check" width="13" height="13" viewBox="0 0 13 13" aria-hidden="true" style="opacity:0" />
       Copy
     </button>
   ) : null;
+  const copyMessageMarkdown = hasMessageCopy ? (
+    <button class="context-menu-item" role="menuitem" type="button" onClick={() => copyAndClose(
+      hasSelection ? menu.selectionMarkdown ?? menu.selectionText : markdownBody,
+    )}>
+      <svg class="context-menu-check" width="13" height="13" viewBox="0 0 13 13" aria-hidden="true" style="opacity:0" />
+      Copy as Markdown
+    </button>
+  ) : null;
 
-  // Copy the message's plain-text (markdown source) body. Only shown when a
-  // plain-text representation exists — right-clicking a reasoning block or a
-  // tool card leaves the copy surface to "Copy raw" (the JSON dump).
+  // Tool-specific menus retain their existing selection / renderer-provided
+  // text behavior and Copy raw action; tool JSON is not called Markdown.
+  const copySelection = !hasMessageCopy && hasSelection ? (
+    <button class="context-menu-item" role="menuitem" type="button" onClick={() => copyAndClose(menu.selectionText)}>
+      <svg class="context-menu-check" width="13" height="13" viewBox="0 0 13 13" aria-hidden="true" style="opacity:0" />
+      Copy
+    </button>
+  ) : null;
   const plainText = meta?.plainText;
-  const copyText = plainText?.trim() ? (
-    <button
-      class="context-menu-item"
-      role="menuitem"
-      type="button"
-      onClick={() => {
-        void writeTextToClipboard(plainText);
-        onClose();
-      }}
-    >
+  const copyText = !hasMessageCopy && plainText?.trim() ? (
+    <button class="context-menu-item" role="menuitem" type="button" onClick={() => copyAndClose(plainText)}>
       <svg class="context-menu-check" width="13" height="13" viewBox="0 0 13 13" aria-hidden="true" style="opacity:0" />
       Copy text
     </button>
@@ -223,20 +254,17 @@ export function ContextMenu({
   return (
     <div ref={ref} class="block-context-menu" role="menu" style={style} onMouseDown={(e) => e.stopPropagation()}>
       {expandToggle}
+      {copyMessageText}
+      {copyMessageMarkdown}
       {copySelection}
       {copyText}
-      <button
-        class="context-menu-item"
-        role="menuitem"
-        type="button"
-        onClick={() => {
-          void writeTextToClipboard(menu.rawData);
-          onClose();
-        }}
-      >
-        <svg class="context-menu-check" width="13" height="13" viewBox="0 0 13 13" aria-hidden="true" style="opacity:0" />
-        Copy raw
-      </button>
+      {!hasMessageCopy ? (
+        <button class="context-menu-item" role="menuitem" type="button" onClick={() => copyAndClose(menu.rawData)}>
+          <svg class="context-menu-check" width="13" height="13" viewBox="0 0 13 13" aria-hidden="true" style="opacity:0" />
+          Copy raw
+        </button>
+      ) : null}
+      {copyFailureNotice}
       {destructiveGroup}
     </div>
   );

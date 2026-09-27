@@ -2,7 +2,7 @@ import { produce } from 'immer';
 
 import type { ArchState } from '../arch-state.js';
 import { isPendingTabPath } from '../../../../lib/session-path.js';
-import { mergePruningSettings, mergeSessionTitlesSettings, mergeToolResultPruningSettings, normalizeComposerInitialRows, normalizeNestedAllowedBuckets, normalizeSubagentBucketCanSpawn, normalizeSubagentBuckets, normalizeUiPathParentDepth, type ChatPrefs, type ComposerInput } from '../../../lib/protocol/index.js';
+import { mergeChatPrefs, mergePruningSettings, mergeSessionTitlesSettings, mergeToolResultPruningSettings, normalizeComposerInitialRows, normalizeNestedAllowedBuckets, normalizeSubagentBucketCanSpawn, normalizeSubagentBuckets, normalizeSubagentMaxInflight, normalizeUiPathParentDepth, type ChatPrefs, type ComposerInput } from '../../../lib/protocol/index.js';
 import type { Command } from '../commands.js';
 import type { ReducerResult } from './helpers.js';
 import { addToArray, appendLocalUserMessage, truncateLocalTranscriptAfter } from './helpers.js';
@@ -853,25 +853,9 @@ export function handleSetPrivacyMode(state: ArchState, cmd: Extract<Command, { k
 export function handleSetPrefs(state: ArchState, cmd: Extract<Command, { kind: 'SetPrefs' }>): ReducerResult {
   const current = state.settings.prefs;
   const deepMerged: ChatPrefs = {
-    ...current,
-    ...cmd.prefs,
-    ...(cmd.prefs.extensionToggles && {
-      extensionToggles: { ...current.extensionToggles, ...cmd.prefs.extensionToggles },
-    }),
-    ...(cmd.prefs.providerToggles && {
-      providerToggles: { ...current.providerToggles, ...cmd.prefs.providerToggles },
-    }),
-    ...(cmd.prefs.subagentProviderDefaults && {
-      subagentProviderDefaults: {
-        ...current.subagentProviderDefaults,
-        ...cmd.prefs.subagentProviderDefaults,
-      },
-    }),
-    ...(cmd.prefs.subagentProviderTogglesBySession && {
-      subagentProviderTogglesBySession: {
-        ...current.subagentProviderTogglesBySession,
-        ...cmd.prefs.subagentProviderTogglesBySession,
-      },
+    ...mergeChatPrefs(current, cmd.prefs),
+    ...(cmd.prefs.subagentMaxInflight !== undefined && {
+      subagentMaxInflight: normalizeSubagentMaxInflight(cmd.prefs.subagentMaxInflight),
     }),
     // Normalize subagentBuckets so ArchState always holds a complete
     // {small,medium,frontier} object even if a caller dispatches a partial

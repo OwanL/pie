@@ -22,6 +22,7 @@ import { resolveModel, type SelectionContext } from "../execute.js";
 import { resolveExecutionModel } from "../model-resolution.js";
 import { compactSingleResult } from "../result-compaction.js";
 import { executeSingleTask } from "../single.js";
+import { readRuntimeContext } from "../runner.js";
 import { resetFairSelectionBags } from "../bucket-selector.js";
 import type { AgentConfig } from "../../../agent-instructions/agent-discovery/agents.js";
 import type { ModelRequirements, SingleResult, SubagentDetails } from "../types.js";
@@ -642,6 +643,7 @@ test("executeSingleTask hands off an independently-owned rich terminal snapshot 
 	});
 	const captured: any[] = [];
 	let attemptResourcesReleased = false;
+	let inheritedRootSessionId: string | undefined;
 	const richBody = "nested terminal detail ".repeat(65_536);
 
 	const response: any = await executeSingleTask({
@@ -651,6 +653,7 @@ test("executeSingleTask hands off an independently-owned rich terminal snapshot 
 		runtimeCtx: {
 			depth: 0,
 			trail: [],
+			rootSessionId: "capture-root",
 			budget: { sessions: 0 },
 			analyticsCapture: {
 				generationId: "capture-generation",
@@ -669,11 +672,12 @@ test("executeSingleTask hands off an independently-owned rich terminal snapshot 
 		selectionCtx,
 		toolCallId: "capture-tool-call",
 		parentUiBridge: undefined,
-		parentSessionId: "capture-root",
+		parentSessionId: "immediate-parent",
 		allToolNames: undefined,
 		_internal: {
 			clock: new ImmediateClock(),
 			runAttempt: (_resolved: any, attemptId: string) => {
+				inheritedRootSessionId = readRuntimeContext().rootSessionId;
 				attemptResourcesReleased = true;
 				return Promise.resolve(syntheticResult({
 					exitCode: 0,
@@ -695,6 +699,7 @@ test("executeSingleTask hands off an independently-owned rich terminal snapshot 
 	});
 
 	assert.equal(response.details.results[0].analyticsCaptureStatus, "submitted");
+	assert.equal(inheritedRootSessionId, "capture-root", "nested execution retains the tree root instead of its immediate parent");
 	assert.equal(captured.length, 1);
 	const detached = deserialize(Buffer.from(captured[0].bytes));
 	assert.equal(detached.messages[0].details.results[0].messages[0].content[0].text, richBody);

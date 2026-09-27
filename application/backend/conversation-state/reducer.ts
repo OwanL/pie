@@ -79,6 +79,8 @@ import {
   handleAvailableExtensionsChanged,
 } from './reducers/host-handlers.js';
 import {
+  handleAgentMessageReceived,
+  handleAgentMessageRejected,
   handleOptimisticMessageInserted,
   handleOptimisticMessageRemoved,
 } from './reducers/optimistic-handlers.js';
@@ -208,6 +210,14 @@ function reduceEvent(state: ArchState, event: Event): ReducerResult {
 
     case 'QueuedDelivered': {
       return handleQueuedDelivered(state, event);
+    }
+
+    case 'AgentMessageReceived': {
+      return handleAgentMessageReceived(state, event);
+    }
+
+    case 'AgentMessageRejected': {
+      return handleAgentMessageRejected(state, event);
     }
 
     // ─── Session lifecycle events ─────────────────────────────────────────

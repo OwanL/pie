@@ -25,13 +25,13 @@ const piIntro = 'You are an expert coding assistant operating inside pi, a codin
 const pieIntro = 'You are a coding assistant operating inside Pie, a development harness built on the Pi runtime. Pie provides project-aware guidance, specialized agents, dynamically available tools and skills, and session workflows.';
 const pieRole = 'You may be assisting the user directly or completing a delegated task. Follow the assigned task and any role-specific instructions.';
 const pieCapabilities = "The current tool definitions and guidance describe this session's capabilities. Do not assume upstream Pi features are available in Pie.";
+const repoRoot = path.resolve(process.cwd(), '..', '..', '..');
 
 async function loadSdkPrompt(): Promise<{
   buildSystemPrompt(options: PieSystemPromptOptions): string;
 }> {
   const modulePath = path.join(
-    process.cwd(),
-    '..',
+    repoRoot,
     'application',
     'hosts',
     'vscode',
@@ -48,7 +48,7 @@ async function loadSdkPrompt(): Promise<{
 }
 
 test('root AGENTS policy mirror cannot drift from the canonical prompt', () => {
-  const agents = readFileSync(path.join(process.cwd(), '..', 'AGENTS.md'), 'utf8');
+  const agents = readFileSync(path.join(repoRoot, 'AGENTS.md'), 'utf8');
   const match = agents.match(/<!-- canonical-traversal-policy:start -->([\s\S]*?)<!-- canonical-traversal-policy:end -->/u);
   assert.ok(match, 'AGENTS.md must carry the canonical traversal-policy block');
   assert.equal(match[1]!.replace(/\s+/gu, ' ').trim(), TRAVERSAL_POLICY_PROMPT);

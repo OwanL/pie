@@ -157,7 +157,7 @@ test('Shift+F10 focused on the shell opens the generic row menu at the shell rec
   // The synthetic contextmenu is grounded at the center of the focused shell.
   assert.equal(menu.event.clientX, 140);
   assert.equal(menu.event.clientY, 110);
-  // Row metadata is still bound (Copy text / Edit / Delete from here work).
+  // Row metadata is still bound (Copy / Copy as Markdown / Edit / Delete work).
   assert.equal(menu.message?.messageId, 'u-durable');
   assert.equal(menu.message?.plainText, 'Please fix the test');
   unmount(harness);
@@ -212,10 +212,10 @@ test('a loaded reasoning detail is the reasoning menu value, not the compacted s
     });
     assert.equal(harness.menus.length, 1);
     assert.equal(harness.menus[0].type, 'reasoning');
-    // rawData AND the bound plainText are the loaded detail — Copy raw / Copy
-    // text target what the block displays, not the short summary.
+    // The reasoning copy target is the loaded detail, not the short summary.
     assert.equal(harness.menus[0].rawData, 'THE FULL DETAIL BODY');
     assert.equal(harness.menus[0].message?.plainText, 'THE FULL DETAIL BODY');
+    assert.equal(harness.menus[0].message?.markdownText, 'THE FULL DETAIL BODY');
   } finally {
     clearLazyDetailCache();
   }
@@ -250,6 +250,7 @@ test('user message row binds message metadata and opens the generic menu (Edit +
   assert.equal(menu.message.role, 'user');
   assert.equal(menu.message.sessionPath, '/sessions/rendered-old');
   assert.equal(menu.message.plainText, 'Please fix the test');
+  assert.equal(menu.message.markdownText, 'Please fix the test');
   assert.equal(menu.message.editable, true);
   assert.equal(menu.message.canTruncate, true);
   assert.equal(menu.event.defaultPrevented, true);

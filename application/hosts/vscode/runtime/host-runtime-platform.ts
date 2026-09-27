@@ -1,4 +1,5 @@
 import * as crypto from 'node:crypto';
+import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
 import * as vscode from 'vscode';
@@ -14,6 +15,11 @@ import { readBrowserServerSettings } from '../../browser/settings';
 import type { RuntimeGenerationIdentity } from '../../../../analytics/authority/analytics-handoff-discovery';
 import type { FileDiffCoreLike, FileDiffViewerLike } from '../../../backend/file-changes/file-diff-service';
 import { VscodeFileDiffViewer } from '../editor-integration/file-diff';
+import {
+  openFileWithFallback,
+  readImagePreviewWithFallback,
+  type FilePathResolverAdapter,
+} from '../editor-integration/open-file';
 import { runtimeOutputDirectory, runtimeRendererSelection } from './runtime-location';
 import { appendPieLog } from '../../../../lib/structured-logging/pie-logger';
 import { toErrorMessage } from '../../../../lib/structured-logging/error-message';
@@ -129,6 +135,34 @@ async function openVscodeSettings(): Promise<void> {
   await vscode.commands.executeCommand('workbench.action.openSettings', 'pie');
 }
 
+/** One resolver shared by open-file and image-preview actions, preserving the
+ * same VS Code workspace search behavior and renderer-captured cwd fences. */
+function createFilePathResolver(): FilePathResolverAdapter {
+  return {
+    exists: async (filePath) => {
+      try {
+        await vscode.workspace.fs.stat(vscode.Uri.file(filePath));
+        return true;
+      } catch (error) {
+        const code = typeof error === 'object' && error !== null
+          ? (error as { code?: unknown }).code
+          : undefined;
+        if (code === 'FileNotFound' || code === 'ENOENT') return false;
+        throw error;
+      }
+    },
+    findFiles: async (workingDirectory, basename) => {
+      const escapedBasename = basename.replace(/[\\*?\[\]{}]/g, '\\$&');
+      const include = new vscode.RelativePattern(
+        vscode.Uri.file(workingDirectory),
+        `**/${escapedBasename}`,
+      );
+      const matches = await vscode.workspace.findFiles(include);
+      return matches.map((uri) => uri.fsPath);
+    },
+  };
+}
+
 /** VS Code adapters for the shared {@link HostRuntime} platform seam
  *  (`application/hosts/lib/platform-contracts/platform.ts`). Every member mirrors the exact behavior of
  *  the previous direct `vscode` usage in the extension-host composition;
@@ -171,9 +205,50 @@ export function createVscodeHostRuntimePlatform(
         return uris?.map((uri) => uri.fsPath);
       },
       openSettings: openVscodeSettings,
-      openFileInEditor: async (filePath) => {
-        await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(filePath));
+      openFileInEditor: async (filePath, options) => {
+        await openFileWithFallback({ path: filePath, ...options }, {
+          ...createFilePathResolver(),
+          chooseFile: async (files, workingDirectory, basename) => {
+            const items = files.map((fullPath) => ({
+              label: path.relative(workingDirectory, fullPath) || path.basename(fullPath),
+              description: fullPath,
+              fullPath,
+            }));
+            const selected = await vscode.window.showQuickPick(items, {
+              placeHolder: `Select which ${basename} to open`,
+            });
+            return selected?.fullPath;
+          },
+          open: async (candidate) => {
+            await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(candidate));
+          },
+          showError: (message) => { void vscode.window.showErrorMessage(message); },
+        });
       },
+      previewImageFile: async (filePath, options) => readImagePreviewWithFallback(
+        { path: filePath, ...options },
+        {
+          ...createFilePathResolver(),
+          readFile: async (candidate, maxBytes) => {
+            const handle = await fs.open(candidate, 'r');
+            try {
+              const stat = await handle.stat();
+              if (!stat.isFile() || stat.size > maxBytes) throw new Error('Preview file exceeds its size bound.');
+              const buffer = Buffer.alloc(maxBytes + 1);
+              let bytesRead = 0;
+              while (bytesRead < buffer.length) {
+                const result = await handle.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead);
+                if (result.bytesRead === 0) break;
+                bytesRead += result.bytesRead;
+                if (bytesRead > maxBytes) throw new Error('Preview file exceeds its size bound.');
+              }
+              return buffer.subarray(0, bytesRead);
+            } finally {
+              await handle.close();
+            }
+          },
+        },
+      ),
     },
     getWorkspaceAnalyticsId: () => getWorkspaceAnalyticsId(context),
     getLegacyWorkspaceAnalyticsIds: () => getLegacyWorkspaceAnalyticsIds(),

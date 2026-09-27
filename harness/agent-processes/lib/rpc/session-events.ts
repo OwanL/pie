@@ -442,6 +442,8 @@ export interface PreflightFailedPayload {
   operationAttempt?: number;
   sessionPath: string;
   error: string;
+  /** Agent-originated optimistic row to roll back on post-ack failure. */
+  localId?: string;
 }
 
 /** Steering delivery signal. Emitted by the backend when the agent loop
@@ -469,6 +471,17 @@ export interface QueuedDeliveredPayload {
    *  (clear/interrupt race) before the SDK drained — the host then falls back to
    *  FIFO matching (the earliest remaining 'queued' message). */
   localId?: string;
+}
+
+/** An agent-originated session_control message became visible to the host.
+ *  `status` reflects whether it is waiting in the SDK's busy-session queue,
+ *  already dispatched as an idle prompt, or was rejected before acceptance. */
+export interface AgentMessagePayload {
+  sessionPath: string;
+  localId: string;
+  text: string;
+  status: 'queued' | 'completed' | 'rejected';
+  timestamp: number;
 }
 
 /** Live auto-retry status for a session's in-flight turn. The SDK retries

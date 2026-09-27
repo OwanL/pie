@@ -17,7 +17,7 @@ import {
   resolvePackageEntry,
 } from '../../lib/test-packages.mjs';
 
-test('PACKAGE_DIRECTIVES covers package dirs, owned dirs, and routed test roots', () => {
+test('PACKAGE_DIRECTIVES covers package dirs, owned and retired source dirs, and routed test roots', () => {
   const expected = [
     'extension', 'analysis', 'scripts', 'lib',
     'cwd-skills', 'safeguard', 'skill-pruner', 'model-provider-authentication', 'model-provider-concurrency', 'model-provider-pricing', 'model-provider-traffic-observation', 'agent-processes-coordinator', 'session-control', 'tool-catalog', 'subagent', 'ask-user',
@@ -37,7 +37,7 @@ test('PACKAGE_DIRECTIVES covers package dirs, owned dirs, and routed test roots'
 test('source/test root defaults keep single-root enumeration identical', () => {
   for (const entry of PACKAGE_REGISTRY) {
     if (entry.sourceRoots) continue;
-    assert.deepEqual(packageSourceRoots(entry), [entry.dir, ...(entry.ownedDirs ?? [])], `${entry.id} default source roots`);
+    assert.deepEqual(packageSourceRoots(entry), [entry.dir, ...(entry.ownedDirs ?? []), ...(entry.retiredSourceDirs ?? [])], `${entry.id} default source roots`);
     assert.deepEqual(packageTestRoots(entry), [entry.testDir ?? `${entry.dir}/test`, ...(entry.testRoots ?? [])], `${entry.id} test roots`);
   }
   // The scripts package routes grouped sources and all its test roots once.

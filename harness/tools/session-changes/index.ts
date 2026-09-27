@@ -8,7 +8,7 @@ import { parseSessionEntriesChanges, parseSessionFileChanges } from './session-j
 import type { ParsedSession, SessionEntryLike } from './session-jsonl.js';
 import { renderList, renderDiffs } from './render.js';
 import { computeFileDiff } from './diff.js';
-import type { DiffOutput, DiffKind } from './diff.js';
+import type { DiffOutput } from './diff.js';
 import { canonicalFilePath } from '../../../lib/file-changes/file-path.js';
 
 /** Honor the host's per-extension toggle (PIE_EXTENSION_TOGGLES_JSON, keyed by
@@ -41,10 +41,8 @@ interface ToolExecuteCtx {
   };
 }
 
-// Success results carry NO `details` object — per docs/SESSION-CHANGES-TOOL.md
-// §4 ("No `details` object — every byte is review-relevant signal"), the
-// manifest/diff text is the whole payload; truncation is signalled inline.
-// (Errors keep a `details: { error }` for machine-readable diagnosis.)
+// The manifest/diff text is the payload; paging instructions are inline.
+// Errors also retain a machine-readable diagnostic.
 function ok(text: string) {
   return {
     content: [{ type: 'text' as const, text }],
@@ -108,8 +106,8 @@ function displayPath(filePath: string, cwd: string | undefined): string {
 /** Find the manifest entry for a requested path: exact string match first, then
  *  a canonical-identity match (so `src/x.ts` matches `./src/x.ts`, an absolute
  *  form, or a case/separator variant on case-insensitive filesystems). Returns
- *  undefined when the path isn't in the manifest (defaulting the caller to
- *  `modified`). Uses the shared `canonicalFilePath` so lookup identity matches
+ *  undefined when the path isn't in the manifest. Uses the shared
+ *  `canonicalFilePath` so lookup identity matches
  *  the accumulation identity exactly. */
 function findManifestEntry(
   changes: FileChange[],
@@ -130,15 +128,14 @@ async function diffOne(
   context: number,
 ): Promise<DiffOutput> {
   const cwd = parsed.cwd;
-  const entry = findManifestEntry(parsed.changes, relPath, cwd);
-  const kind: DiffKind = entry?.kind ?? 'modified';
-  const manifestPath = entry?.path ?? relPath;
+  // execute validates every selected path before any Git inspection starts.
+  const entry = findManifestEntry(parsed.changes, relPath, cwd)!;
   return computeFileDiff({
-    relPath: displayPath(manifestPath, cwd),
-    absPath: resolveAgainstCwd(manifestPath, cwd),
-    kind,
-    additions: entry?.additions,
-    deletions: entry?.deletions,
+    relPath: displayPath(entry.path, cwd),
+    absPath: resolveAgainstCwd(entry.path, cwd),
+    kind: entry.kind,
+    additions: entry.additions,
+    deletions: entry.deletions,
     context,
   });
 }
@@ -167,15 +164,13 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: 'session_changes',
     label: 'Session changes',
-    // The separate git status/diff caveat and the pre-existing-hunks baseline
-    // warning stay in promptGuidelines; do not duplicate them here.
-    description: 'Review files changed by the current or specified Pi session after editing, using a session-scoped manifest and focused diffs before workspace-wide Git checks. Includes edits from successful completed subagent results, not running children; this is not a complete filesystem mutation journal.',
+    description: 'Review files changed by the current or specified Pi session after editing, using a session-scoped manifest before workspace-wide Git checks. Includes successful mutations from completed subagents and nested descendants, even when their task failed; not running children or a complete filesystem mutation journal. Optional diff inspects current Git changes only for manifest paths.',
     promptSnippet: 'Review this session\'s changed-file manifest and focused diffs after file edits.',
     promptGuidelines: [
       'For the current runtime session, omit sessionPath so session_changes reads live entries (including in-memory sessions); pass sessionPath only to review another persisted session.',
       'After editing files, use session_changes list before claiming or reviewing what this session changed; then use session_changes diff only for relevant manifest paths.',
-      'Use git status/diff separately for overall worktree state and integration checks. For files already dirty at session start, session_changes diff may include pre-existing hunks from its Git baseline; do not attribute those hunks to the session without corroboration.',
-      'Read files when session_changes reports generated or untracked files whose focused diff is incomplete.',
+      'session_changes list uses recorded execution evidence, not Git; kinds are inferred and line counts are cumulative input churn, not net changes. diff shows current HEAD-to-working-tree Git changes (staged and unstaged), which may include older work or other sessions editing the same file. Do not attribute every hunk to this session. Use git status/diff separately for overall worktree checks.',
+      'Follow inline offset instructions for omitted output; diff continuation requires one path and the same context. Pages are recomputed, so restart at offset=0 if the files change. For untracked or non-Git files, read current content; no historical before-image is implied.',
     ],
     parameters: sessionChangesSchema,
 
@@ -194,6 +189,8 @@ export default function (pi: ExtensionAPI) {
         return err(`action must be one of list | diff (got ${String(p.action)}).`);
       }
 
+      const offset = p.offset ?? 0;
+      if (!Number.isSafeInteger(offset) || offset < 0) return err('offset must be a non-negative safe integer.');
       const requestedSessionPath = p.sessionPath || undefined;
 
       let parsed: ParsedSession | undefined;
@@ -221,7 +218,7 @@ export default function (pi: ExtensionAPI) {
           ...change,
           path: displayPath(change.path, parsed.cwd),
         }));
-        return ok(renderList(displayChanges));
+        return ok(renderList(displayChanges, offset));
       }
 
       // action === 'diff'
@@ -229,6 +226,7 @@ export default function (pi: ExtensionAPI) {
         return err('diff requires path (an array of file paths from the list manifest, e.g. ["src/x.ts"]).');
       }
       const paths = p.path;
+      if (!Array.isArray(paths)) return err('diff path must be an array of file paths from the list manifest.');
       if (paths.length === 0) {
         return err('diff requires a non-empty path array (e.g. ["src/x.ts"]).');
       }
@@ -238,9 +236,14 @@ export default function (pi: ExtensionAPI) {
       if (!paths.every((rel) => typeof rel === 'string' && rel.length > 0)) {
         return err('diff path entries must be non-empty strings.');
       }
-      const context = Number.isInteger(p.context) && p.context! >= 0 && p.context! <= 100 ? p.context! : 0;
+      if (offset > 0 && paths.length !== 1) return err('diff continuation with offset requires exactly one path.');
+      if (paths.some((rel) => !findManifestEntry(parsed.changes, rel, parsed.cwd))) {
+        return err('Every diff path must belong to this session\'s list manifest; call list for the recorded paths.');
+      }
+      const context = p.context ?? 0;
+      if (!Number.isInteger(context) || context < 0 || context > 100) return err('context must be an integer from 0 to 100.');
 
-      return ok(renderDiffs(await diffPaths(paths, parsed, context)));
+      return ok(renderDiffs(await diffPaths(paths, parsed, context), offset));
     },
   });
 }

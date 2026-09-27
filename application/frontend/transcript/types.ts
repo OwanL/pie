@@ -19,11 +19,21 @@ export interface TranscriptMessageMenuInfo {
    * message, reasoning block, or renderer when appropriate. Tool renderers
    * omit it unless they have a meaningful plain-text representation. */
   plainText?: string;
+  /** Markdown source for message/reasoning copy actions. Tool JSON remains
+   *  exclusively in `rawData` and is never treated as Markdown. */
+  markdownText?: string;
   /** Whether the Edit action applies (eligible, non-editing user messages). */
   editable: boolean;
   /** Whether destructive "Delete from here" (truncateAfter) applies: durable,
    *  non-streaming, non-queued transcript messages only. */
   canTruncate: boolean;
+}
+
+export interface TranscriptFilePathMenuInfo {
+  /** Original markdown reference, retained for basename fallback on open. */
+  reference: string;
+  /** Working directory captured from the transcript that rendered the path. */
+  workingDirectory?: string;
 }
 
 export type TranscriptContextMenuHandler = (
@@ -33,6 +43,9 @@ export type TranscriptContextMenuHandler = (
   /** Message-level metadata for right-clicks that occurred inside a transcript
    *  message row. Absent for menus opened outside a row. */
   message?: Partial<TranscriptMessageMenuInfo>,
+  /** File-path context for Open File; kept separate from rawData, which is the
+   *  resolved path used by Copy Path. */
+  filePath?: TranscriptFilePathMenuInfo,
 ) => void;
 
 export type RenderToolCall = (

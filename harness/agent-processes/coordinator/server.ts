@@ -9,6 +9,7 @@ import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { BoundedEventLoopHistogram } from '../../../lib/structured-logging/live-pipeline-trace';
 import { resolveSessionIdentity } from '../../session-storage/ownership/session-identity';
 import { resolvePieDataPaths } from '../../../lib/data-root/pie-data-root.js';
+import { cleanupSessionTempOutputManifests } from '../../../lib/temporary-files/session-temp-output-lifecycle.js';
 import { BackendAnalyticsActivation } from '../../../analytics/authority/backend-analytics-activation.js';
 import type { AnalyticsBackendDescriptor } from '../../../analytics/authority/activation.js';
 import { attachJsonlLineReader, JSONL_MAX_LINE_BYTES } from '../lib/rpc/jsonl.js';
@@ -21,7 +22,11 @@ import {
 } from '../../../analytics/authority/storage-cutoff-authorization';
 import { PROTOCOL_VERSION } from '../lib/rpc/wire.js';
 import type { RequestEnvelope } from '../lib/rpc/wire.js';
-import type { DetailResult, LazyDetailRef } from '../lib/rpc/message-contract.js';
+import {
+  AGENT_SESSION_MESSAGE_LOCAL_ID_PREFIX,
+  type DetailResult,
+  type LazyDetailRef,
+} from '../lib/rpc/message-contract.js';
 import type { ModelSettings } from '../../model-providers/catalog/model-contract.js';
 import type { ThinkingLevel } from '../../model-providers/catalog/thinking-level.js';
 import type {
@@ -61,7 +66,7 @@ import {
 } from '../../model-providers/catalog/model-catalog';
 import { SessionCatalog } from '../../session-storage/catalog/session-catalog';
 import { forgetLegacyReviewArtifacts } from '../../session-storage/lifecycle/legacy-review-artifact-cleanup';
-import { SessionLifecycleStore } from '../../session-storage/lifecycle/session-lifecycle-store';
+import { SessionLifecycleStore, type LifecycleArtifactRecord } from '../../session-storage/lifecycle/session-lifecycle-store';
 import {
   SessionExpiryScheduler,
   SessionFilesystemMutationBarrier,
@@ -82,6 +87,7 @@ import {
   type SdkModelRegistry,
 } from '../lib/sdk-integration/sdk';
 import { ProviderGate, type ProviderConcurrencyConfig } from '../../model-providers/concurrency/provider-gate.js';
+import { resolveProviderMaxConcurrentRequests } from '../../model-providers/concurrency/provider-concurrency.js';
 import { markDisabledEntries } from '../../agent-instructions/prompt-assembly/system-prompts.js';
 import { CreateOperationLedger } from './create-operation-ledger.js';
 import {
@@ -234,15 +240,19 @@ function timed<T>(label: string, op: () => T | Promise<T>): T | Promise<T> {
  * so workers can classify internal pruning/failover fetches by their actual
  * destination instead of blindly charging the root session's provider. */
 export function providerPoliciesFromConfigs(configs: readonly ProviderConcurrencyConfig[]): WorkerJsonObject {
-  return Object.fromEntries(configs.map((config) => [config.provider, {
-    maxConcurrentRequests: config.maxConcurrentRequests,
-    queueWaitSeconds: config.queueWaitSeconds ?? 30,
-    headerWaitSeconds: (config.headerWaitSeconds ?? 0) > 0 ? config.headerWaitSeconds! : 120,
-    streamIdleTimeoutSeconds: 120,
-    afterburnSeconds: config.afterburnSeconds ?? 0,
-    ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
-    ...(config.baseUrls && config.baseUrls.length > 0 ? { baseUrls: [...config.baseUrls] } : {}),
-  }])) as WorkerJsonObject;
+  return Object.fromEntries(configs.map((config) => {
+    const maxLimit = resolveProviderMaxConcurrentRequests(undefined, config.maxConcurrentRequests);
+    return [config.provider, {
+      maxConcurrentRequests: maxLimit.value,
+      maxConcurrentRequestsSource: maxLimit.source,
+      queueWaitSeconds: config.queueWaitSeconds ?? 30,
+      headerWaitSeconds: (config.headerWaitSeconds ?? 0) > 0 ? config.headerWaitSeconds! : 120,
+      streamIdleTimeoutSeconds: 120,
+      afterburnSeconds: config.afterburnSeconds ?? 0,
+      ...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
+      ...(config.baseUrls && config.baseUrls.length > 0 ? { baseUrls: [...config.baseUrls] } : {}),
+    }];
+  })) as WorkerJsonObject;
 }
 
 export function mergeProviderPolicies(base: WorkerJsonObject, overrides: unknown): WorkerJsonObject {
@@ -259,12 +269,24 @@ export function mergeProviderPolicies(base: WorkerJsonObject, overrides: unknown
     const overrideRecord = override && typeof override === 'object' && !Array.isArray(override)
       ? override as WorkerJsonObject
       : {};
+    const maxLimit = resolveProviderMaxConcurrentRequests(
+      overrideRecord.maxConcurrentRequests,
+      baseRecord.maxConcurrentRequests,
+    );
     const normalizedOverride = { ...overrideRecord };
+    delete normalizedOverride.maxConcurrentRequests;
+    // Provenance is derived here; settings cannot supply or retain stale source metadata.
+    delete normalizedOverride.maxConcurrentRequestsSource;
     // Public settings use zero to mean "restore the provider default" for the
     // header phase. Resolve that against the current models.json base snapshot,
     // not whichever older override happens to be installed in the authority.
     if (normalizedOverride.headerWaitSeconds === 0) delete normalizedOverride.headerWaitSeconds;
-    return [provider, { ...baseRecord, ...normalizedOverride }];
+    return [provider, {
+      ...baseRecord,
+      ...normalizedOverride,
+      maxConcurrentRequests: maxLimit.value,
+      maxConcurrentRequestsSource: maxLimit.source,
+    }];
   })) as WorkerJsonObject;
 }
 
@@ -1858,7 +1880,7 @@ export class BackendServer {
       const router = this.workerRuntimeRouter;
       if (router?.hasHotOwner(sessionPath)) {
         const duplicated = await router.duplicateHotSession(sessionPath, { sessionPath }, publicRequestId);
-        this.registerNewSessionLifecycle(duplicated.sessionPath, pendingCreateOperationId);
+        await this.registerNewSessionLifecycle(duplicated.sessionPath, pendingCreateOperationId);
         return duplicated;
       }
       let handle: ColdSessionManagerHandle;
@@ -1869,7 +1891,7 @@ export class BackendServer {
         throw error;
       }
       this.retainColdSessionManager(handle, 'new');
-      this.registerNewSessionLifecycle(handle.sessionPath, pendingCreateOperationId);
+      await this.registerNewSessionLifecycle(handle.sessionPath, pendingCreateOperationId);
       return { sessionPath: handle.sessionPath };
     }
     throw new BackendError(
@@ -2279,7 +2301,65 @@ export class BackendServer {
     return { store: this.lifecycleStore, barrier: this.lifecycleBarrier };
   }
 
-  private registerLifecycleArtifacts(store: SessionLifecycleStore, sessionId: string, sessionPath: string, nowMs: number): void {
+  private async canonicalSessionArtifactPath(sessionPath: string): Promise<string> {
+    const absolutePath = path.resolve(sessionPath);
+    try { return await fs.realpath(absolutePath); } catch { return absolutePath; }
+  }
+
+  private managedSessionArtifactDirectories(canonicalPath: string): {
+    baseName: string;
+    directories: readonly { artifactId: string; path: string }[];
+  } {
+    const sanitize = (value: string) => value.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'session';
+    const baseName = sanitize(path.basename(canonicalPath, path.extname(canonicalPath)));
+    return {
+      baseName,
+      directories: [
+        { artifactId: 'computer-use-artifacts', path: path.join(path.dirname(canonicalPath), 'computer-use', baseName) },
+        {
+          artifactId: 'playwright-artifacts',
+          path: path.join(
+            path.dirname(canonicalPath),
+            'playwright',
+            `${baseName}-${createHash('sha256').update(canonicalPath).digest('hex').slice(0, 12)}`,
+          ),
+        },
+      ],
+    };
+  }
+
+  /** The computer-use owner partitions by a sanitized transcript basename,
+   * unlike Playwright's canonical-path hash. Refuse cleanup if a sibling file
+   * currently maps to that same partition rather than deleting shared data. */
+  private async assertComputerArtifactDirectoryIsSessionScoped(canonicalPath: string, baseName: string): Promise<void> {
+    const sessionDirectory = path.dirname(canonicalPath);
+    for (const entry of await fs.readdir(sessionDirectory, { withFileTypes: true })) {
+      if (!entry.isFile() && !entry.isSymbolicLink()) continue;
+      const candidatePath = path.join(sessionDirectory, entry.name);
+      let candidateCanonicalPath: string;
+      try {
+        candidateCanonicalPath = await fs.realpath(candidatePath);
+        if (!(await fs.stat(candidateCanonicalPath)).isFile()) continue;
+      } catch {
+        continue;
+      }
+      if (candidateCanonicalPath === canonicalPath
+        || path.dirname(candidateCanonicalPath) !== sessionDirectory) continue;
+      const candidateBaseName = path.basename(candidateCanonicalPath, path.extname(candidateCanonicalPath))
+        .replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'session';
+      if (candidateBaseName === baseName) {
+        throw new Error(`Computer-use artifacts for ${canonicalPath} may be shared with ${candidateCanonicalPath}; refusing private cleanup.`);
+      }
+    }
+  }
+
+  private registerLifecycleArtifacts(
+    store: SessionLifecycleStore,
+    sessionId: string,
+    sessionPath: string,
+    nowMs: number,
+    canonicalPath: string,
+  ): void {
     const registered = new Set(store.listArtifacts(sessionId).map((artifact) => artifact.artifactId));
     if (!registered.has('transcript')) {
       store.registerArtifact({
@@ -2310,23 +2390,8 @@ export class BackendServer {
         identityJson: filesystemArtifactIdentity(mcpPath),
       }, nowMs);
     }
-    const canonicalPath = (() => {
-      try { return fsSync.realpathSync(sessionPath); } catch { return path.resolve(sessionPath); }
-    })();
-    const sanitize = (value: string) => value.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'session';
-    const baseName = sanitize(path.basename(canonicalPath, path.extname(canonicalPath)));
-    const managedDirectories = [
-      ['computer-use-artifacts', path.join(path.dirname(canonicalPath), 'computer-use', baseName)],
-      [
-        'playwright-artifacts',
-        path.join(
-          path.dirname(canonicalPath),
-          'playwright',
-          `${baseName}-${createHash('sha256').update(canonicalPath).digest('hex').slice(0, 12)}`,
-        ),
-      ],
-    ] as const;
-    for (const [artifactId, artifactPath] of managedDirectories) {
+    const managedDirectories = this.managedSessionArtifactDirectories(canonicalPath).directories;
+    for (const { artifactId, path: artifactPath } of managedDirectories) {
       if (registered.has(artifactId) || !fsSync.existsSync(artifactPath)) continue;
       store.registerArtifact({
         sessionId, artifactId, kind: 'managed_cache', locationKind: 'fixed_absolute',
@@ -2363,13 +2428,14 @@ export class BackendServer {
     return sessionPath;
   }
 
-  private registerNewSessionLifecycle(sessionPath: string, pendingCreateOperationId?: string): void {
+  private async registerNewSessionLifecycle(sessionPath: string, pendingCreateOperationId?: string): Promise<void> {
     if (process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV] !== STORAGE_CUTOFF_AUTHORIZATION_VALUE) return;
     const { store, barrier } = this.initializeFilesystemLifecycle();
     const sessionId = resolveSessionIdentity(sessionPath).sessionId;
+    const canonicalPath = await this.canonicalSessionArtifactPath(sessionPath);
     barrier.runAdministrative(sessionId, 'coordinator-create-register', () => {
       const nowMs = Date.now();
-      this.registerLifecycleArtifacts(store, sessionId, sessionPath, nowMs);
+      this.registerLifecycleArtifacts(store, sessionId, sessionPath, nowMs, canonicalPath);
       if (pendingCreateOperationId) {
         store.registerPendingCreateOperation(sessionId, pendingCreateOperationId, nowMs);
       }
@@ -2417,9 +2483,10 @@ export class BackendServer {
   private async setSessionLifecyclePrivacy(sessionPath: string, enabled: boolean): Promise<void> {
     const { store, barrier } = this.initializeFilesystemLifecycle();
     const { sessionId } = resolveSessionIdentity(sessionPath);
+    const canonicalPath = await this.canonicalSessionArtifactPath(sessionPath);
     await barrier.runAdministrativeAsync(sessionId, 'coordinator-privacy', async () => {
       const nowMs = Date.now();
-      this.registerLifecycleArtifacts(store, sessionId, sessionPath, nowMs);
+      this.registerLifecycleArtifacts(store, sessionId, sessionPath, nowMs, canonicalPath);
       store.setPrivacyMode(sessionId, enabled ? 'on' : 'off', nowMs);
     });
   }
@@ -2431,10 +2498,11 @@ export class BackendServer {
   ): Promise<{ rootSessionId: string; pendingCreateOperationId?: string }> {
     const { store, barrier } = this.initializeFilesystemLifecycle();
     const { sessionId } = resolveSessionIdentity(sessionPath);
+    const canonicalPath = await this.canonicalSessionArtifactPath(sessionPath);
     await barrier.runAdministrativeAsync(sessionId, 'coordinator-close', async () => {
       const nowMs = Date.now();
       const existing = store.get(sessionId);
-      this.registerLifecycleArtifacts(store, sessionId, sessionPath, nowMs);
+      this.registerLifecycleArtifacts(store, sessionId, sessionPath, nowMs, canonicalPath);
       if (!existing) store.setPrivacyMode(sessionId, privacyMode ? 'on' : 'off', nowMs);
       else if ((existing.privacyMode === 'on') !== privacyMode) {
         throw new BackendError('SESSION_OWNERSHIP_CONFLICT', 'Close privacy setting is stale; retry from authoritative state.');
@@ -2452,12 +2520,28 @@ export class BackendServer {
    *  artifact. Called only after the host has chosen privacy mode; ordinary
    *  tab closes intentionally keep sessions reopenable. */
   private async forgetSession(sessionPath: string, operationId?: string): Promise<void> {
-    await this.withAnalyticsWriterAdmission(
-      () => this.forgetSessionAdmitted(sessionPath, operationId),
-    );
+    await this.withAnalyticsWriterAdmission(async () => {
+      // Close coordinator-side admission before waiting for a worker lifecycle
+      // barrier. The router holds its own tombstone across manifest cleanup, so
+      // no promotion or transition can create a later output manifest.
+      this.forgottenSessionPaths.add(sessionPath);
+      try {
+        const forget = async () => await this.forgetSessionAdmitted(sessionPath, operationId);
+        const router = this.workerRuntimeRouter;
+        if (router) await router.withSessionForgetBarrier(sessionPath, forget);
+        else await forget();
+      } catch (error) {
+        this.forgottenSessionPaths.delete(sessionPath);
+        throw error;
+      }
+    });
   }
 
   private async forgetSessionAdmitted(sessionPath: string, operationId?: string): Promise<void> {
+    // The isolated worker has already been retired by the request router.
+    // Validate and retry only its durable exact-path manifests before any
+    // transcript/session artifact deletion can commit.
+    await cleanupSessionTempOutputManifests(resolveSessionIdentity(sessionPath).sessionId);
     let lifecycle: { store: SessionLifecycleStore; sessionId: string; cleanupOperationId: string } | undefined;
     if (process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV] === STORAGE_CUTOFF_AUTHORIZATION_VALUE) {
       const requestedOperationId = operationId?.trim() || `private-close:${resolveSessionIdentity(sessionPath).sessionId}`;
@@ -2497,6 +2581,30 @@ export class BackendServer {
         if (!fsSync.existsSync(artifact.location)) continue;
         verifyFilesystemArtifactIdentity(artifact, artifact.location);
         fsSync.rmSync(artifact.location, { recursive: true, force: false });
+      }
+      if (!lifecycle) {
+        const sessionId = resolveSessionIdentity(sessionPath).sessionId;
+        const canonicalPath = await this.canonicalSessionArtifactPath(sessionPath);
+        const managed = this.managedSessionArtifactDirectories(canonicalPath);
+        await this.assertComputerArtifactDirectoryIsSessionScoped(canonicalPath, managed.baseName);
+        for (const { artifactId, path: artifactPath } of managed.directories) {
+          if (!fsSync.existsSync(artifactPath)) continue;
+          if (!fsSync.lstatSync(artifactPath).isDirectory()) {
+            throw new Error(`Private session artifact is not a directory: ${artifactId}`);
+          }
+          const artifact: LifecycleArtifactRecord = {
+            sessionId,
+            artifactId,
+            kind: 'managed_cache',
+            locationKind: 'fixed_absolute',
+            location: artifactPath,
+            identityJson: filesystemArtifactIdentity(artifactPath),
+            state: 'present',
+            updatedAtMs: String(Date.now()),
+          };
+          verifyFilesystemArtifactIdentity(artifact, artifactPath);
+          fsSync.rmSync(artifactPath, { recursive: true, force: false });
+        }
       }
       await this.runColdSessionMutation(sessionPath, async () => {
         store.leases.invalidate(sessionPath);
@@ -2935,21 +3043,42 @@ export class BackendServer {
       if (!boundedAgentString(payload.text, AGENT_SESSION_CONTROL_MAX_MESSAGE_BYTES) || !payload.text.trim()) {
         throw new BackendError('INVALID_PARAMS', 'message.text must be non-empty and bounded.');
       }
-      const result = await this.handleRequest({
-        id: `${frame.requestId}:message`,
-        method: 'message.send',
-        params: {
-          sessionPath,
-          text: payload.text,
-          inputs: [],
-          operationId,
-          operationAttempt: 1,
-          localId: `agent-session:${frame.requestId}`,
-        },
-      });
-      return {
-        result: workerJson({ sessionPath, result }),
+      const localId = `${AGENT_SESSION_MESSAGE_LOCAL_ID_PREFIX}${frame.requestId}`;
+      const agentMessage = {
+        sessionPath,
+        localId,
+        text: payload.text,
+        timestamp: Date.now(),
       };
+      // Show the agent prompt immediately as pending. Route state is only a
+      // snapshot: promotion may finish before message.send is routed, making
+      // an initially inferred queue status stale. The send acknowledgement is
+      // authoritative; direct acceptance reconciles this row to completed.
+      this.emit('message.agent', { ...agentMessage, status: 'queued' });
+      try {
+        const result = await this.handleRequest({
+          id: `${frame.requestId}:message`,
+          method: 'message.send',
+          params: {
+            sessionPath,
+            text: payload.text,
+            inputs: [],
+            operationId,
+            operationAttempt: 1,
+            localId,
+          },
+        });
+        const response = workerJson({ sessionPath, result });
+        const acceptedQueued = result !== null && typeof result === 'object' && !Array.isArray(result)
+          && (result as { queued?: unknown }).queued === true;
+        if (!acceptedQueued) {
+          this.emit('message.agent', { ...agentMessage, status: 'completed' });
+        }
+        return { result: response };
+      } catch (error) {
+        this.emit('message.agent', { ...agentMessage, status: 'rejected' });
+        throw error;
+      }
     }
 
     const deleteRequested = payload.delete === true;
@@ -3197,12 +3326,7 @@ export class BackendServer {
             },
           );
         }
-        if (request.method === 'session.forget' && sessionPath && router.hasHotOwner(sessionPath)) {
-          await router.retire(sessionPath, 'session forgotten');
-          // The shared `.pi/mcp.json`-layer overrides cannot leak here, but a
-          // session-scoped artifact must die with its session.
-          await fs.rm(sessionMcpOverridePath(sessionPath), { force: true }).catch(() => undefined);
-        } else if (sessionPath && WorkerRuntimeRouter.isHotOperation(request.method)) {
+        if (sessionPath && WorkerRuntimeRouter.isHotOperation(request.method)) {
           if (request.method === 'extension_ui.response' && !router.hasHotOwner(sessionPath)) {
             // A response for a session whose worker is gone (crashed, retired,
             // or replaced) is correlated typed-stale: never promote a fresh
@@ -3263,12 +3387,12 @@ export class BackendServer {
         await runtimeRouter.retire(sessionPath, reason);
         return true;
       },
-      createColdSession: (cwd, pendingCreateOperationId, agentCreated) => {
+      createColdSession: async (cwd, pendingCreateOperationId, agentCreated) => {
         const replayPath = this.resolvePendingCreateReplay(pendingCreateOperationId);
         if (replayPath) return { sessionPath: replayPath };
         const handle = this.initializeColdSessionStore().create({ cwd, agentCreated });
         this.retainColdSessionManager(handle, 'new');
-        this.registerNewSessionLifecycle(handle.sessionPath, pendingCreateOperationId);
+        await this.registerNewSessionLifecycle(handle.sessionPath, pendingCreateOperationId);
         return { sessionPath: handle.sessionPath };
       },
       duplicateColdSession: async (sessionPath, publicRequestId, pendingCreateOperationId) => {
@@ -3417,6 +3541,7 @@ export class BackendServer {
         return true;
       },
       getProviderGateMetrics: () => this.workerRuntimeRouter?.getProviderGateMetrics(),
+      getSubagentConcurrencyStatus: () => this.workerRuntimeRouter?.getSubagentConcurrencyStatus(),
       acknowledgeAnalytics: (route, acknowledgement) => (
         this.workerRuntimeRouter?.acknowledgeAnalytics(route, acknowledgement) === true
       ),

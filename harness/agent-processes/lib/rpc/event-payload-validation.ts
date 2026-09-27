@@ -21,6 +21,7 @@
  */
 
 import type {
+  AgentMessagePayload,
   AgentSettledPayload,
   AuxiliaryLlmUsagePayload,
   BusyChangedPayload,
@@ -50,6 +51,7 @@ import type {
 } from './session-events.js';
 import type { ExtensionUIRequestPayload } from './extension-ui.js';
 import { isToolPreview } from './live-pipeline.js';
+import { isAgentSessionMessageLocalId } from './message-contract.js';
 import { isFiniteNumber } from '../../../../lib/validation/type-guards.js';
 
 // ─── shared primitives ───────────────────────────────────────────────────────
@@ -470,6 +472,18 @@ export function isPreflightFailedPayload(value: unknown): value is PreflightFail
       || (Number.isSafeInteger(value.operationAttempt) && (value.operationAttempt as number) > 0))
     && isString(value.sessionPath)
     && isString(value.error)
+    && isOptionalString(value.localId)
+  );
+}
+
+export function isAgentMessagePayload(value: unknown): value is AgentMessagePayload {
+  return (
+    isObject(value)
+    && isString(value.sessionPath)
+    && isAgentSessionMessageLocalId(value.localId)
+    && isString(value.text)
+    && (value.status === 'queued' || value.status === 'completed' || value.status === 'rejected')
+    && isFiniteNumber(value.timestamp)
   );
 }
 

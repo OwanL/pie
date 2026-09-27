@@ -98,6 +98,9 @@ test('registry entries are well-formed and their directories exist', () => {
     assert.equal(dirs.has(entry.dir), false, `duplicate package dir: ${entry.dir}`);
     dirs.add(entry.dir);
     assert.ok(statSync(path.join(repoRoot, entry.dir)).isDirectory(), `missing package dir: ${entry.dir}`);
+    if (entry.testCwd) {
+      assert.ok(statSync(path.join(repoRoot, entry.testCwd)).isDirectory(), `missing test cwd: ${entry.testCwd}`);
+    }
     for (const ownedDir of entry.ownedDirs ?? []) {
       assert.ok(statSync(path.join(repoRoot, ownedDir)).isDirectory(), `missing owned source dir: ${ownedDir}`);
     }
@@ -167,6 +170,36 @@ test('registry entries are well-formed and their directories exist', () => {
       );
       assert.equal(classifyTestFile(repoRoot, relativeTestFile).id, entry.id, `${relativeTestFile} must route to ${entry.id}`);
     }
+  }
+});
+
+test('extension tests run from the relocated package owner', () => {
+  const entry = resolvePackageEntry('extension');
+  assert.ok(entry);
+  assert.equal(entry.testCwd, entry.dir);
+  assert.equal(entry.dir, 'application/hosts/vscode');
+});
+
+test('explicit retired source roots remain routed for rename/delete analysis', () => {
+  const expectedRetiredRoots = [
+    { id: 'extension', root: 'extension' },
+    { id: 'analysis', root: 'analysis' },
+    { id: 'subagent', root: 'tools/subagent' },
+    { id: 'ask-user', root: 'tools/ask-user' },
+    { id: 'warm-bash', root: 'tools/warm-bash' },
+    { id: 'deferred-triggers', root: 'tools/deferred-triggers' },
+    { id: 'session-changes', root: 'tools/session-changes' },
+    { id: 'computer-use', root: 'tools/computer-use' },
+    { id: 'playwright', root: 'tools/playwright' },
+  ];
+  const registeredRetiredRoots = PACKAGE_REGISTRY.flatMap((entry) =>
+    (entry.retiredSourceDirs ?? []).map((root) => ({ id: entry.id, root })),
+  );
+  assert.deepEqual(registeredRetiredRoots, expectedRetiredRoots,
+    'only known historical rename/delete routes may bypass live-root validation');
+  for (const { id, root } of expectedRetiredRoots) {
+    assert.equal(existsSync(path.join(repoRoot, root)), false, `${root} must remain an absent historical root`);
+    assert.equal(classifyTestFile(repoRoot, `${root}/former-source.test.ts`).id, id, root);
   }
 });
 

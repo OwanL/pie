@@ -33,7 +33,7 @@
   "checkpointDate": "2026-09-27",
   "acceptanceDate": "2026-09-25",
   "milestone": "B8",
-  "status": "FINAL VERIFICATION COMPLETE (2026-09-27): B0–B8 acceptance criteria are supported in the working tree; B4 exit is accepted. Manifest: 1,813 source records and 1,714 currentLocations; focused migration inventory passes 14/14 with zero problems. Latest `npm run verify` passed retry-free: 14/14 test packages, 7,786 passed / 0 failed / 37 skipped; typecheck (32 projects), lint, model sync, and extension build passed (host/webview identity `ad476e6ad16033cdd083`). The earlier retry-bearing markdown-rendering result remains historical in the progress checkpoint. Isolated headless UI smoke passed 4/4; opt-in built-worker package smoke passed 2/2. npm run doctor exited 0 with jq unavailable and an empty-root-auth warning; authentication was not touched. Optional browser-roadmap/live real-device checks are not migration gates. No restart/live deployment, commit, or push is claimed.",
+  "status": "The previously recorded 2026-09-27 `npm run verify` passed retry-free (14/14 packages, 7,786 passed / 37 skipped; typecheck, lint, model sync, and extension build; identity `ad476e6ad16033cdd083`). A post-verification stale-reference audit then found concrete omissions not covered by that gate; this follow-up corrects them and records focused routing/runtime/type/build checks below. The earlier broad verify remains historical and does not include these edits. Optional browser-roadmap/live real-device checks remain outside scope. No restart/live deployment, commit, or push is claimed.",
   "partialBatch": "Historical B4 checkpoint summary: the ask-user checkpoint (7 paths) and subsequent middleware/leaf-tool checkpoint (46 paths) are detailed in the progress chronology. Later checkpoints supersede the checkpoint-era partial status: B4 acceptance is now recorded as accepted in the B4–B8 reconciliation. No commit was authorized or made for this reconciliation.",
   "scope": "B3 authored skill/agent bundle relocation implemented (not exit-accepted): all nine tracked Pie skill bundles, the three authored agent definitions, the subagent agent-discovery loader, the cwd-skills implementation, and the three prompt-assembly modules moved to harness/agent-instructions per manifest targets; settings.json and settings.defaults.json gained the global `skills` array entry `harness/agent-instructions/skills`; root AGENTS.md and APPEND_SYSTEM.md kept; live documentation and prompt links updated; real pinned-SDK discovery verified through the SettingsManager→PackageManager→loadSkills pipeline. Temporary compatibility re-export shims remain at three retired old paths with explicit removal owners. No pushes, loader activation, or host restarts. Exit acceptance: the plan-required B3 gates (real SDK load/reload, global/project precedence and exclusions, tool package resources, cold inventory, hot worker and subagent discovery; identical catalog/precedence, no double prompt injection, no bundle fragmentation) were each met by the results recorded in implemented.b3VerificationGate, and the B3 milestone commit followed. Staged-not-live remains a recorded limitation, not an unmet gate.",
   "inventory": {
@@ -64,10 +64,27 @@
     "harness/agent-processes/lib/process-lifecycle/tsconfig.json",
     "harness/agent-processes/lib/rpc/tsconfig.json",
     "test/integration/browser/ui-smoke-fixtures.ts",
-    "scripts/diagnostics/test/doctor-startup.test.mjs"
+    "scripts/diagnostics/test/doctor-startup.test.mjs",
+    "application/backend/test/conversation-state/architecture/arch-agent-message.test.ts",
+    "application/frontend/test/transcript/messages/agent-message-header.test.ts",
+    "harness/agent-processes/coordinator/test/private-session-artifact-forget.test.ts",
+    "harness/session-storage/transcripts/test/transcript-agent-message.test.ts",
+    "lib/temporary-files/session-temp-output-lifecycle.ts",
+    "lib/temporary-files/test/session-temp-output-lifecycle.test.ts",
+    "lib/session-attribution.ts",
+    "application/backend/test/conversation-state/image-preview-routing.test.ts",
+    "application/frontend/lib/components/selection-copy.ts",
+    "application/frontend/test/components/selection-copy.test.ts",
+    "application/frontend/test/transcript/image-path-preview.test.tsx",
+    "application/frontend/transcript/image-path-preview.tsx",
+    "application/frontend/transcript/image-preview-store.ts",
+    "application/frontend/transcript/selection-overlap.ts",
+    "application/hosts/test/vscode/open-file.test.ts",
+    "application/hosts/vscode/editor-integration/open-file.ts",
+    "application/lib/protocol/image-preview.ts"
    ],
-   "sourceRecordCount": 1813,
-   "validation": "Original baseline: all 1,778 tracked paths plus six explicitly owned relevant untracked additions received one source record; baseline test identities remain immutable. Latest 2026-09-27 working-tree inventory: 1,813 source records, 1,714 currentLocations, zero inventory problems; the focused migration-inventory suite passes 14/14, including the run after the final progress/manifest updates. Current owner/path changes and verification are recorded in executionProgress and the migration progress checkpoint.",
+   "sourceRecordCount": 1830,
+   "validation": "Original baseline: all 1,778 tracked paths plus explicitly owned relevant additions received source records; baseline test identities remain immutable. The 2026-09-27 stale-reference correction recorded 1,813 sources and 1,715 currentLocations. This dead-code reconciliation adds six authorized source records and two explicit deletion tombstones; the privacy-test follow-up adds one retained test record, bringing the source-record count to 1,820. The UX inventory follow-up adds ten owned source/test records, bringing it to 1,830. currentLocations remains 1,715. Focused migration-inventory validation passes with the expanded tombstone schema; earlier broad verification remains historical and predates these working-tree changes.",
    "currentGitStatus": {
     "recordedAt": "2026-09-24",
     "note": "Snapshot at B3 working-tree completion, before the B3 milestone commit; the commit landed all 41 settled moves, migration-owned settings skills entries, routing, tests, docs, and plan artifacts on top of ea74351f, excluding user-owned settings.json field values.",
@@ -183,6 +200,12 @@
     "verification": "npm run typecheck passed (all 31 projects); npm run lint passed; npm run sync-models -- --check passed. analytics-runtime full package passed 763/763. extension full fast package passed 3,470/0/17 (one known-flaky webview file passed on rerun). agent-processes-coordinator package passed 265/0/2 including the retargeted backend integration tests (PIE_RUN_INTEGRATION_TESTS=1 for the activation suite). model-provider-concurrency and agent-processes-rpc focused suites passed. No lint, build/package, activation, restart, commit, or push was performed.",
     "remaining": "B1/B6/B7 aggregate-stats and tool-call-analysis frontend split verification breadth; captured pricing facts; remaining B6 authority/privacy/capture/analysis acceptance gates and the broad test:all/build/package gates; B7 conversation-state/session-usage moves; B8 harness boundary moves. No B6 exit is claimed."
    }
+  },
+  "postVerificationStaleReferenceCorrection": {
+   "recordedAt": "2026-09-27",
+   "findingsAndFixes": "After the recorded full verify, a targeted audit found: Vite still hashed retired extension/src and shared roots (removed, along with the stale @shared alias; host Vite root now uses application/hosts/vscode); application/hosts/vscode/eslint.config.mjs still selected retired extension/src and extension/test roots (selectors now target canonical application owners, and the obsolete store-root rule was removed); the extension test cwd and fast runner still executed from the retired extension directory (moved to the registered application/hosts/vscode owner, runner globs updated, and the dead extension/test discovery branch removed; explicit historical-path resolution remains); test/integration/pie-harness-prompt.test.ts resolved repository files relative to the old process cwd (now anchors them to the registered owner cwd, including bundled fast execution); application/hosts/vscode/.vscode/tasks.json named the absent extension/test/proxy-service-notice.test.ts (the dead task was removed, with the migrated task file now empty); and extension/runtime/runtime-generations.d.cts was still physically outside its declared application/hosts/vscode/runtime target (moved, and its missing currentLocations entry added). Type imports already target the canonical runtime-generations.cjs module; no legacy declaration-path imports remained. Retired tools/<id> source routes and old extension identity routing remain intentionally registered for rename/delete impact analysis, not live source ownership.",
+   "verification": "npm run test:file -- scripts/verification/test/package-registry-drift.test.mjs scripts/verification/test/fast-extension-runner.test.mjs scripts/build/test/build-identity.test.ts scripts/verification/test/repository-migration-inventory.test.mjs passed 40/40, including inventory 14/14 and canonical runtime watch/retired-root exclusion assertions; the full fast extension package suite passed retry-free (1,963 passed / 5 skipped), including the CWD-sensitive prompt integration test (8/8); runtime asset/bootstrap tests passed 14/14; npm run lint passed; npm run typecheck -- --project extension passed; required npm run extension:build passed and staged runtime e042d3399947fb9db59ab59cfc65959fee61962cff664282f9958a9624c05e40 with coordinated host/webview identity 4d853e4fb132eb52c618. This build is staged for next normal VS Code startup, not live; the prior full npm run verify was not rerun after these edits. No activation, restart, commit, or push.",
+   "currentLocations": 1715
   },
   "pending": ["Optional browser-roadmap milestones and live real-device checks are outside this migration acceptance gate; no live restart/deployment evidence is claimed."],
   "settingsWorkingTree": "The B0 settings.json high-to-medium note is an immutable baseline snapshot. Corrected live user-field evidence (2026-09-25): defaultModel gpt-6-astra (unchanged from the tracked baseline), defaultThinkingLevel low (the pre-existing user working-tree change; the B0 snapshot's medium value is historical), and pruning.model gpt-6-luna. The prior 'gpt-6-luna defaultModel / xhigh thinking' wording was a review misreading of the pruning block. User fields are preserved unchanged by the migration; the only migration-owned settings.json change is the added skills array, and the working tree keeps the user values as-is. Exclude ongoing settings edits from migration; do not restore or pin future edits.",
@@ -393,6 +416,9 @@
   ],
   "extension/runtime/runtime-generations.cjs": [
    "application/hosts/vscode/runtime/runtime-generations.cjs"
+  ],
+  "extension/runtime/runtime-generations.d.cts": [
+   "application/hosts/vscode/runtime/runtime-generations.d.cts"
   ],
   "extension/scripts/build.mjs": [
    "scripts/build/build.mjs"
@@ -961,7 +987,6 @@
    "lib/sensitive-data/renderer-error-redaction.ts"
   ],
   "extension/src/shared/runtime-trace-bridge.ts": [
-   "application/backend/agent-connection/runtime-trace-types.ts",
    "harness/agent-processes/lib/sdk-integration/runtime-trace-contract.ts",
    "harness/agent-processes/lib/sdk-integration/runtime-trace-bridge.ts"
   ],
@@ -2008,7 +2033,7 @@
    "harness/model-providers/concurrency/provider-gate-request-class.ts"
   ],
   "shared/pruned-skills.ts": [
-   "harness/tool-and-skill-selection/state/pruned-skills.ts"
+   "harness/tool-and-skill-selection/state/session-pruning-state.ts"
   ],
   "shared/run-analytics-contracts.ts": [
    "analytics/contracts/legacy-run-analytics-contracts.ts"
@@ -2821,7 +2846,7 @@
    "application/backend/deferred-triggers/probe-lease.ts"
   ],
   "extension/src/host/session-service/index.ts": [
-   "application/backend/session-actions/index.ts"
+   "application/backend/session-actions/service.ts"
   ],
   "extension/src/host/session-service/private-session-cleanup.ts": [
    "application/backend/session-actions/private-session-cleanup.ts"
@@ -7114,7 +7139,7 @@
    "kind": "intentional-consolidation"
   }
  ],
- "recordCount": 1813,
+ "recordCount": 1838,
  "records": [
   {
    "source": "extension/src/backend/analytics-worker-transport.ts",
@@ -33064,6 +33089,300 @@
     "focused doctor startup tests"
    ],
    "reason": "New startup-diagnostic regression coverage belongs with its scripts/diagnostics owner; no pre-migration source path exists."
+  },
+  {
+   "source": "application/backend/test/conversation-state/architecture/arch-agent-message.test.ts",
+   "targets": [
+    "application/backend/test/conversation-state/architecture/arch-agent-message.test.ts"
+   ],
+   "action": "retain",
+   "owner": "application.backend.conversation-state",
+   "batch": "B7",
+   "verification": [
+    "Conversation-state owner test covers agent-message reducer state and session-open reconciliation."
+   ],
+   "reason": "New architecture regression coverage for agent-originated transcript rows belongs with the conversation-state owner; no pre-migration source path exists."
+  },
+  {
+   "source": "application/frontend/test/transcript/messages/agent-message-header.test.ts",
+   "targets": [
+    "application/frontend/test/transcript/messages/agent-message-header.test.ts"
+   ],
+   "action": "retain",
+   "owner": "application.frontend",
+   "batch": "B7",
+   "verification": [
+    "Frontend transcript owner test covers the agent-message header label and ordinary-user rendering."
+   ],
+   "reason": "New renderer regression coverage for agent-originated transcript rows belongs with the frontend transcript owner; no pre-migration source path exists."
+  },
+  {
+   "source": "harness/agent-processes/coordinator/test/private-session-artifact-forget.test.ts",
+   "targets": [
+    "harness/agent-processes/coordinator/test/private-session-artifact-forget.test.ts"
+   ],
+   "action": "retain",
+   "owner": "harness.agent-processes.coordinator",
+   "batch": "B5",
+   "verification": [
+    "Coordinator test covers private-session artifact cleanup and collision refusal."
+   ],
+   "reason": "New coordinator regression coverage for private-session artifact cleanup belongs with the backend session-forget owner; no pre-migration source path exists."
+  },
+  {
+   "source": "harness/session-storage/transcripts/test/transcript-agent-message.test.ts",
+   "targets": [
+    "harness/session-storage/transcripts/test/transcript-agent-message.test.ts"
+   ],
+   "action": "retain",
+   "owner": "harness.session-storage.transcripts",
+   "batch": "B5",
+   "verification": [
+    "Transcript owner test covers agent provenance restoration and malformed-marker rejection."
+   ],
+   "reason": "New transcript storage regression coverage for persisted agent-message provenance belongs with the transcript owner; no pre-migration source path exists."
+  },
+  {
+   "source": "lib/temporary-files/session-temp-output-lifecycle.ts",
+   "targets": [
+    "lib/temporary-files/session-temp-output-lifecycle.ts"
+   ],
+   "action": "retain",
+   "owner": "lib.temporary-files",
+   "batch": "B8",
+   "verification": [
+    "Focused registered lib tests and inventory validation for the new temporary-file lifecycle owner."
+   ],
+   "reason": "New low-level owner tracks only exact Pi bash temporary outputs for owning session teardown; it excludes user files and unrelated temp-file families."
+  },
+  {
+   "source": "lib/temporary-files/test/session-temp-output-lifecycle.test.ts",
+   "targets": [
+    "lib/temporary-files/test/session-temp-output-lifecycle.test.ts"
+   ],
+   "action": "retain",
+   "owner": "lib.temporary-files",
+   "batch": "B8",
+   "verification": [
+    "Temporary-file lifecycle tests cover retry-safe cleanup, session/root isolation, and refusal to remove non-file paths."
+   ],
+   "reason": "New privacy regression coverage ensures session-scoped temporary-output cleanup leaves other sessions and unrelated user files untouched."
+  },
+  {
+   "source": "lib/session-attribution.ts",
+   "targets": [
+    "lib/session-attribution.ts"
+   ],
+   "action": "retain",
+   "owner": "lib",
+   "batch": "B8",
+   "verification": [
+    "Focused consumer tests for root-session attribution across in-process tool and extension producers."
+   ],
+   "reason": "New low-level root-session identity adapter supports auxiliary artifact attribution across library, harness, and extension consumers; no pre-migration source path exists."
+  },
+  {
+   "source": "lib/concurrency-config.ts",
+   "targets": ["lib/concurrency-config.ts"],
+   "action": "retain",
+   "owner": "lib",
+   "batch": "B8",
+   "verification": ["Cross-layer runtime preference and concurrency resolution tests."],
+   "reason": "Browser-safe shared subagent concurrency default, bounds, and provenance vocabulary; new cross-owner contract with no pre-migration source."
+  },
+  {
+   "source": "docs/operations/CONCURRENCY-CONFIGURATION.md",
+   "targets": ["docs/operations/CONCURRENCY-CONFIGURATION.md"],
+   "action": "retain",
+   "owner": "docs",
+   "batch": "B8",
+   "verification": ["Check owner links and configuration precedence against runtime implementation."],
+   "reason": "Operational reference for concurrency settings ownership, resolution, applied diagnostics, and regression entry points."
+  },
+  {
+   "source": "harness/agent-processes/lib/process-lifecycle/child-tool-runtime-owner.ts",
+   "targets": ["harness/agent-processes/lib/process-lifecycle/child-tool-runtime-owner.ts"],
+   "action": "retain",
+   "owner": "harness/agent-processes/lib/process-lifecycle",
+   "batch": "B8",
+   "verification": ["Subagent runner and child browser/desktop lifecycle regressions."],
+   "reason": "New shared ephemeral child tool-runtime ownership and awaited cleanup; no pre-migration source exists."
+  },
+  {
+   "source": "harness/tools/computer-use/desktop-ownership.ts",
+   "targets": ["harness/tools/computer-use/desktop-ownership.ts"],
+   "action": "retain",
+   "owner": "harness/tools/computer-use",
+   "batch": "B8",
+   "verification": ["Computer-use cross-process contention and cleanup regressions."],
+   "reason": "New automatic exclusive desktop ownership for primary and child agents."
+  },
+  {
+   "source": "harness/tools/computer-use/test/child-ownership.test.ts",
+   "targets": ["harness/tools/computer-use/test/child-ownership.test.ts"],
+   "action": "retain",
+   "owner": "harness/tools/computer-use",
+   "batch": "B8",
+   "verification": ["Run computer-use child ownership tests."],
+   "reason": "New regression coverage for child runtime isolation and awaited desktop cleanup."
+  },
+  {
+   "source": "harness/tools/computer-use/test/desktop-ownership.test.ts",
+   "targets": ["harness/tools/computer-use/test/desktop-ownership.test.ts"],
+   "action": "retain",
+   "owner": "harness/tools/computer-use",
+   "batch": "B8",
+   "verification": ["Run computer-use desktop ownership tests."],
+   "reason": "New regression coverage for exclusive cross-process desktop claims and failure recovery."
+  },
+  {
+   "source": "harness/tools/playwright/test/child-scope.test.ts",
+   "targets": ["harness/tools/playwright/test/child-scope.test.ts"],
+   "action": "retain",
+   "owner": "harness/tools/playwright",
+   "batch": "B8",
+   "verification": ["Run Playwright child scope tests."],
+   "reason": "New regression coverage for private child browser ownership and artifact retention."
+  },
+  {
+   "source": "harness/tools/playwright/test/backend-cleanup.test.ts",
+   "targets": ["harness/tools/playwright/test/backend-cleanup.test.ts"],
+   "action": "retain",
+   "owner": "harness/tools/playwright",
+   "batch": "B8",
+   "verification": ["Run mock-only backend cleanup retry tests."],
+   "reason": "New regression coverage for retained browser cleanup ownership and repeated close failure reporting."
+  },
+  {
+   "source": "application/backend/test/conversation-state/image-preview-routing.test.ts",
+   "targets": ["application/backend/test/conversation-state/image-preview-routing.test.ts"],
+   "action": "retain",
+   "owner": "application.backend.conversation-state",
+   "batch": "B7",
+   "verification": ["Conversation-state tests verify image previews are bounded and routed only to the requesting current renderer."],
+   "reason": "New backend regression coverage for session- and renderer-scoped image-preview routing."
+  },
+  {
+   "source": "application/frontend/lib/components/selection-copy.ts",
+   "targets": ["application/frontend/lib/components/selection-copy.ts"],
+   "action": "retain",
+   "owner": "application.frontend",
+   "batch": "B7",
+   "verification": ["Frontend selection-copy tests cover readable text and selected-fragment Markdown serialization."],
+   "reason": "New frontend selection-copy helper belongs to the shared passive UI component owner."
+  },
+  {
+   "source": "application/frontend/test/components/selection-copy.test.ts",
+   "targets": ["application/frontend/test/components/selection-copy.test.ts"],
+   "action": "retain",
+   "owner": "application.frontend",
+   "batch": "B7",
+   "verification": ["Frontend selection-copy tests cover readable text and selected-fragment Markdown serialization."],
+   "reason": "New regression tests for readable clipboard text and Markdown-preserving selection capture belong with the frontend component owner."
+  },
+  {
+   "source": "application/frontend/test/transcript/image-path-preview.test.tsx",
+   "targets": ["application/frontend/test/transcript/image-path-preview.test.tsx"],
+   "action": "retain",
+   "owner": "application.frontend",
+   "batch": "B7",
+   "verification": ["Frontend image-path preview tests cover request lifecycle, accessibility, dismissal, and layout."],
+   "reason": "New renderer regression coverage for the image-path tooltip belongs with the frontend transcript owner."
+  },
+  {
+   "source": "application/frontend/transcript/image-path-preview.tsx",
+   "targets": ["application/frontend/transcript/image-path-preview.tsx"],
+   "action": "retain",
+   "owner": "application.frontend",
+   "batch": "B7",
+   "verification": ["Frontend image-path preview tests cover request lifecycle, accessibility, dismissal, and layout."],
+   "reason": "New accessible image-path preview tooltip belongs to the frontend transcript owner."
+  },
+  {
+   "source": "application/frontend/transcript/image-preview-store.ts",
+   "targets": ["application/frontend/transcript/image-preview-store.ts"],
+   "action": "retain",
+   "owner": "application.frontend",
+   "batch": "B7",
+   "verification": ["Frontend image-path preview tests cover request lifecycle and stale-result handling."],
+   "reason": "New renderer-local pending image-preview request store belongs to the frontend transcript owner."
+  },
+  {
+   "source": "application/frontend/transcript/selection-overlap.ts",
+   "targets": ["application/frontend/transcript/selection-overlap.ts"],
+   "action": "retain",
+   "owner": "application.frontend",
+   "batch": "B7",
+   "verification": ["Frontend transcript interaction tests cover document-selection overlap handling."],
+   "reason": "New transcript interaction helper prevents controls from interfering with overlapping text selections."
+  },
+  {
+   "source": "application/hosts/test/vscode/open-file.test.ts",
+   "targets": ["application/hosts/test/vscode/open-file.test.ts"],
+   "action": "retain",
+   "owner": "application.hosts.vscode.editor-integration",
+   "batch": "B7",
+   "verification": ["VS Code open-file tests cover exact-path opening, scoped fallback selection, and bounded image previews."],
+   "reason": "New host-adapter regression coverage for file opening and secure image-preview reads belongs to VS Code editor integration."
+  },
+  {
+   "source": "application/hosts/vscode/editor-integration/open-file.ts",
+   "targets": ["application/hosts/vscode/editor-integration/open-file.ts"],
+   "action": "retain",
+   "owner": "application.hosts.vscode.editor-integration",
+   "batch": "B7",
+   "verification": ["VS Code open-file tests cover exact-path opening, scoped fallback selection, and bounded image previews."],
+   "reason": "New VS Code editor-integration adapter owns path-safe file opening and bounded image-preview reads."
+  },
+  {
+   "source": "application/lib/protocol/image-preview.ts",
+   "targets": ["application/lib/protocol/image-preview.ts"],
+   "action": "retain",
+   "owner": "application.lib.protocol",
+   "batch": "B7",
+   "verification": ["Image-preview routing and VS Code open-file tests exercise bounded image-preview protocol data."],
+   "reason": "New browser-safe image-preview payload bounds and validation belong to the canonical application protocol owner."
+  }
+ ],
+ "tombstones": [
+  {
+   "path": "application/backend/session-actions/index.ts",
+   "action": "delete",
+   "recordSource": "extension/src/host/session-service/index.ts",
+   "owner": "application.backend.session-actions",
+   "batch": "B8",
+   "verification": [
+    "HEAD version was an export-only alias of ./service.js.",
+    "Targeted git grep over tracked current sources/tests found no imports of application/backend/session-actions/index.",
+    "Current inventory validates the record's surviving service.ts location."
+   ],
+   "reason": "Delete the unreferenced rebuilt compatibility barrel; its SessionService export is absorbed by the canonical service.ts implementation. Preserve the original B7 consolidate record and map its source to that surviving implementation."
+  },
+  {
+   "path": "application/backend/agent-connection/runtime-trace-types.ts",
+   "action": "delete",
+   "recordSource": "extension/src/shared/runtime-trace-bridge.ts",
+   "owner": "application.backend.agent-connection",
+   "batch": "B8",
+   "verification": [
+    "HEAD version only re-exported RuntimeTraceEvent and RuntimeTracePhase from the harness SDK-integration contract.",
+    "Targeted git grep over tracked current sources/tests found no imports of application/backend/agent-connection/runtime-trace-types.",
+    "Current inventory validates the surviving harness contract and bridge locations."
+   ],
+   "reason": "Delete the unreferenced application-side type-only compatibility adapter; the canonical contract and runtime bridge remain under the harness SDK-integration owner. Preserve the original split record and its surviving harness locations."
+  },
+  {
+   "path": "harness/tool-and-skill-selection/state/pruned-skills.ts",
+   "action": "delete",
+   "recordSource": "shared/pruned-skills.ts",
+   "owner": "harness/tool-and-skill-selection/state",
+   "batch": "B8",
+   "verification": [
+    "The obsolete kept-skill parent bridge was intentionally removed rather than retained as a compatibility module.",
+    "session-pruning-state.ts is the surviving per-session cleanup owner for selector, prepass, and tracking state.",
+    "The focused migration-inventory test validates the old location tombstone and the original source's surviving current location."
+   ],
+   "reason": "Retire the obsolete parent kept-skill bridge. The new session-pruning-state.ts owns session selection state teardown; preserve the original shared/pruned-skills.ts identity by mapping it to that surviving cleanup owner and tombstoning the removed intermediate path."
   }
  ]
 }

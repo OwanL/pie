@@ -6,8 +6,13 @@ installDom();
 
 import { h, render } from 'preact';
 import { act } from 'preact/test-utils';
+import { useState } from 'preact/hooks';
 
-import { ContextMenu } from '../../lib/components/context-menu';
+import { ContextMenu, type ContextMenuState } from '../../lib/components/context-menu';
+import { useAppHandlers, type AppHandlers } from '../../shell/use-app-handlers';
+import { handleDelegatedFilePathContextMenu } from '../../transcript/file-path-interactions';
+import { MARKDOWN_FILE_PATH_ATTRIBUTE } from '../../transcript/markdown-file-path';
+import type { WebviewToHostMessage } from '../../../lib/protocol/index.js';
 import { writeTextToClipboard } from '../../lib/components/clipboard';
 import { useMenuListeners } from '../../lib/components/useMenuListeners';
 import { useMenuTriggerAria } from '../../lib/components/useMenuTriggerAria';
@@ -54,41 +59,122 @@ function keydown(key: string): void {
   });
 }
 
-test('file-path context menu offers Open File and Copy Path without Copy raw', () => {
+test('file-path context menu offers Open File and Copy Path without Copy raw', async () => {
   container = document.createElement('div');
   document.body.appendChild(container);
-  const opened: string[] = [];
+  const opened: Array<{ path: string; reference?: string; workingDirectory?: string }> = [];
+  const copied: string[] = [];
+  const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+  try {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: async (text: string) => { copied.push(text); } },
+    });
 
-  act(() => {
-    render(h(ContextMenu, {
-      menu: {
-        type: 'filePath',
-        rawData: '/workspace/pie/reveal/docs/foo.md',
-        sessionPath: null,
-        selectionText: '',
-        x: 10,
-        y: 10,
-        triggerEl: null,
-      },
+    act(() => {
+      render(h(ContextMenu, {
+        menu: {
+          type: 'filePath',
+          rawData: '/workspace/pie/reveal/docs/foo.md',
+          filePath: { reference: 'reveal/docs/foo.md', workingDirectory: '/workspace/pie' },
+          sessionPath: null,
+          selectionText: '',
+          x: 10,
+          y: 10,
+          triggerEl: null,
+        },
+        prefs,
+        onSetPrefs: () => {},
+        onOpenFile: (path, reference, workingDirectory) => opened.push({ path, reference, workingDirectory }),
+        onEditMessage: () => {},
+        onTruncateAfter: () => {},
+        onClose: () => {},
+      }), container);
+    });
+
+    const labels = Array.from(container.querySelectorAll('button')).map((button) => button.textContent?.trim());
+    assert.deepEqual(labels, ['Open File', 'Copy Path']);
+
+    act(() => {
+      (container.querySelector('button') as HTMLButtonElement).click();
+    });
+    assert.deepEqual(opened, [{
+      path: '/workspace/pie/reveal/docs/foo.md',
+      reference: 'reveal/docs/foo.md',
+      workingDirectory: '/workspace/pie',
+    }]);
+
+    act(() => {
+      (container.querySelectorAll('button')[1] as HTMLButtonElement).click();
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(copied, ['/workspace/pie/reveal/docs/foo.md'], 'Copy Path keeps using the resolved rawData');
+  } finally {
+    render(null, container);
+    container.remove();
+    if (originalClipboard) Object.defineProperty(navigator, 'clipboard', originalClipboard);
+    else delete (navigator as unknown as { clipboard?: unknown }).clipboard;
+  }
+});
+
+test('file-path Open File keeps its captured cwd after the active session changes', () => {
+  const menuContainer = document.createElement('div');
+  document.body.appendChild(menuContainer);
+  const activeSessionPathRef = { current: '/sessions/old' };
+  const posted: WebviewToHostMessage[] = [];
+  let handlers: AppHandlers | undefined;
+
+  function AppHandlerHarness() {
+    const [menu, setMenu] = useState<ContextMenuState | null>(null);
+    handlers = useAppHandlers(
+      (message) => { posted.push(message); return true; },
+      activeSessionPathRef,
+      () => {},
+      () => {},
+      false,
+      setMenu,
+      () => {},
+      true,
+    );
+    return menu ? h(ContextMenu, {
+      menu,
       prefs,
       onSetPrefs: () => {},
-      onOpenFile: (path: string) => opened.push(path),
+      onOpenFile: handlers.handleOpenFile,
       onEditMessage: () => {},
       onTruncateAfter: () => {},
-      onClose: () => {},
-    }), container);
-  });
+      onClose: () => setMenu(null),
+    }) : null;
+  }
 
-  const labels = Array.from(container.querySelectorAll('button')).map((button) => button.textContent?.trim());
-  assert.deepEqual(labels, ['Open File', 'Copy Path']);
-
+  act(() => render(h(AppHandlerHarness, null), menuContainer));
+  assert.ok(handlers, 'application handlers should mount');
+  const link = document.createElement('a');
+  link.setAttribute(MARKDOWN_FILE_PATH_ATTRIBUTE, 'README.md');
+  document.body.appendChild(link);
+  const event = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 12, clientY: 14 });
+  link.dispatchEvent(event);
   act(() => {
-    (container.querySelector('button') as HTMLButtonElement).click();
+    assert.equal(handleDelegatedFilePathContextMenu(event, '/workspace/old', handlers!.handleOpenContextMenu), true);
   });
-  assert.deepEqual(opened, ['/workspace/pie/reveal/docs/foo.md']);
 
-  render(null, container);
-  container.remove();
+  // Switching the mutable active-session ref after the menu opens must not
+  // replace the renderer-captured cwd used by basename fallback.
+  activeSessionPathRef.current = '/sessions/new';
+  const openButton = Array.from(menuContainer.querySelectorAll('button'))
+    .find((button) => button.textContent?.trim() === 'Open File');
+  assert.ok(openButton, 'the captured file menu should render Open File');
+  act(() => { (openButton as HTMLButtonElement).click(); });
+  assert.deepEqual(posted, [{
+    type: 'openFile',
+    path: '/workspace/old/README.md',
+    reference: 'README.md',
+    workingDirectory: '/workspace/old',
+  }]);
+
+  render(null, menuContainer);
+  menuContainer.remove();
+  link.remove();
 });
 
 test('shared menu navigation wraps and skips disabled items', () => {
@@ -199,6 +285,7 @@ const USER_MESSAGE_MENU: TranscriptMessageMenuInfo = {
   messageId: 'msg-1',
   role: 'user',
   plainText: 'Fix the failing test',
+  markdownText: 'Fix **the failing test**',
   editable: true,
   canTruncate: true,
 };
@@ -216,6 +303,7 @@ function renderTranscriptMenu(options: {
   type?: Parameters<typeof ContextMenu>[0]['menu']['type'];
   rawData?: string;
   selectionText?: string;
+  selectionMarkdown?: string;
   message?: Partial<TranscriptMessageMenuInfo> | null;
 }): MenuCapture {
   const menuContainer = document.createElement('div');
@@ -230,6 +318,7 @@ function renderTranscriptMenu(options: {
         rawData: options.rawData ?? '{"role":"user"}',
         sessionPath: '/sessions/origin',
         selectionText: options.selectionText ?? '',
+        selectionMarkdown: options.selectionMarkdown,
         message: options.message === undefined ? USER_MESSAGE_MENU : options.message,
         x: 10,
         y: 10,
@@ -259,7 +348,7 @@ function renderTranscriptMenu(options: {
   };
 }
 
-test('transcript message menu offers Copy text alongside Copy raw for a plain-text message', async () => {
+test('transcript message menu offers readable Copy and Copy as Markdown without exposing raw JSON', async () => {
   const writes: Array<{ call: string; text: string }> = [];
   const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
   try {
@@ -268,10 +357,137 @@ test('transcript message menu offers Copy text alongside Copy raw for a plain-te
       value: { writeText: async (text: string) => { writes.push({ call: 'plain', text }); } },
     });
     const menu = renderTranscriptMenu({ rawData: '{"role":"user","markdown":"Fix the failing test"}' });
-    assert.deepEqual(menu.labels(), ['Copy text', 'Copy raw', 'Edit', 'Delete from here']);
-    menu.click('Copy text');
+    assert.deepEqual(menu.labels(), ['Copy', 'Copy as Markdown', 'Edit', 'Delete from here']);
+    menu.click('Copy');
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.deepEqual(writes, [{ call: 'plain', text: 'Fix the failing test' }]);
+    menu.click('Copy as Markdown');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(writes[1], { call: 'plain', text: 'Fix **the failing test**' });
+    render(null, menu.container);
+    menu.container.remove();
+  } finally {
+    if (original) Object.defineProperty(navigator, 'clipboard', original);
+    else delete (navigator as unknown as { clipboard?: unknown }).clipboard;
+  }
+});
+
+test('both message copy actions use the pre-focus selection instead of the whole message', async () => {
+  const writes: string[] = [];
+  const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+  try {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: async (text: string) => { writes.push(text); } },
+    });
+    const menu = renderTranscriptMenu({
+      selectionText: 'selected text',
+      selectionMarkdown: '**selected** text',
+    });
+    menu.click('Copy');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    menu.click('Copy as Markdown');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(writes, ['selected text', '**selected** text']);
+    assert.equal(menu.closes(), 2);
+    render(null, menu.container);
+    menu.container.remove();
+  } finally {
+    if (original) Object.defineProperty(navigator, 'clipboard', original);
+    else delete (navigator as unknown as { clipboard?: unknown }).clipboard;
+  }
+});
+
+test('keyboard Ctrl+C copies only the captured plain selection and leaves the menu open', async () => {
+  const writes: string[] = [];
+  const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+  try {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: async (text: string) => { writes.push(text); } },
+    });
+    const menu = renderTranscriptMenu({ selectionText: 'plain selected text', selectionMarkdown: '**markdown selected text**' });
+    const target = menu.container.querySelector('button')!;
+    const event = new KeyboardEvent('keydown', { key: 'c', ctrlKey: true, bubbles: true, cancelable: true });
+    act(() => { target.dispatchEvent(event); });
+    assert.equal(event.defaultPrevented, true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(writes, ['plain selected text']);
+    assert.equal(menu.closes(), 0);
+    assert.ok(menu.container.isConnected);
+    render(null, menu.container);
+    menu.container.remove();
+  } finally {
+    if (original) Object.defineProperty(navigator, 'clipboard', original);
+    else delete (navigator as unknown as { clipboard?: unknown }).clipboard;
+  }
+});
+
+test('keyboard Ctrl+C is not intercepted without a selection or outside the menu', () => {
+  const empty = renderTranscriptMenu({});
+  const insideEvent = new KeyboardEvent('keydown', { key: 'c', ctrlKey: true, bubbles: true, cancelable: true });
+  act(() => { empty.container.querySelector('button')!.dispatchEvent(insideEvent); });
+  assert.equal(insideEvent.defaultPrevented, false);
+
+  const selected = renderTranscriptMenu({ selectionText: 'selected' });
+  const outside = document.createElement('button');
+  document.body.appendChild(outside);
+  const outsideEvent = new KeyboardEvent('keydown', { key: 'c', metaKey: true, bubbles: true, cancelable: true });
+  act(() => { outside.dispatchEvent(outsideEvent); });
+  assert.equal(outsideEvent.defaultPrevented, false);
+
+  render(null, empty.container);
+  render(null, selected.container);
+  empty.container.remove();
+  selected.container.remove();
+  outside.remove();
+});
+
+test('keyboard Ctrl+C is not intercepted from an editable menu input', () => {
+  const menu = renderTranscriptMenu({ selectionText: 'selected' });
+  const input = document.createElement('input');
+  menu.container.appendChild(input);
+  const event = new KeyboardEvent('keydown', { key: 'c', ctrlKey: true, bubbles: true, cancelable: true });
+  act(() => { input.dispatchEvent(event); });
+  assert.equal(event.defaultPrevented, false);
+  render(null, menu.container);
+  menu.container.remove();
+});
+
+test('keyboard Ctrl+C rejection uses the existing copy failure notice without closing', async () => {
+  const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+  try {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: async () => { throw new Error('denied'); } },
+    });
+    const menu = renderTranscriptMenu({ selectionText: 'selected' });
+    const event = new KeyboardEvent('keydown', { key: 'c', ctrlKey: true, bubbles: true, cancelable: true });
+    act(() => { menu.container.querySelector('button')!.dispatchEvent(event); });
+    assert.equal(event.defaultPrevented, true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(menu.closes(), 0);
+    assert.equal(menu.container.querySelector('[role="status"]')?.textContent, 'Couldn’t copy to clipboard.');
+    render(null, menu.container);
+    menu.container.remove();
+  } finally {
+    if (original) Object.defineProperty(navigator, 'clipboard', original);
+    else delete (navigator as unknown as { clipboard?: unknown }).clipboard;
+  }
+});
+
+test('clipboard failure remains visible instead of closing as if copying succeeded', async () => {
+  const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+  try {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: async () => { throw new Error('denied'); } },
+    });
+    const menu = renderTranscriptMenu({});
+    menu.click('Copy');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(menu.closes(), 0);
+    assert.equal(menu.container.querySelector('[role="status"]')?.textContent, 'Couldn’t copy to clipboard.');
     render(null, menu.container);
     menu.container.remove();
   } finally {
@@ -313,9 +529,9 @@ test('assistant tool menu keeps auto-expand + Copy raw and omits message-only ac
   menu.container.remove();
 });
 
-test('message menu without metadata keeps only the copy surface', () => {
+test('message menu without metadata never exposes the raw message JSON', () => {
   const menu = renderTranscriptMenu({ message: null });
-  assert.deepEqual(menu.labels(), ['Copy raw']);
+  assert.deepEqual(menu.labels(), ['Copy', 'Copy as Markdown']);
   render(null, menu.container);
   menu.container.remove();
 });
@@ -324,7 +540,7 @@ test('message action visibility follows the captured metadata (read-only/assista
   const menu = renderTranscriptMenu({
     message: { messageId: 'msg-2', role: 'assistant', plainText: 'Answer body', editable: false, canTruncate: true },
   });
-  assert.deepEqual(menu.labels(), ['Copy text', 'Copy raw', 'Delete from here']);
+  assert.deepEqual(menu.labels(), ['Copy', 'Copy as Markdown', 'Delete from here']);
   render(null, menu.container);
   menu.container.remove();
 });
@@ -335,7 +551,7 @@ test('reasoning menus copy the reasoning block while tool menus omit Copy text w
     rawData: 'private reasoning block',
     message: { role: 'assistant', plainText: 'private reasoning block', editable: false, canTruncate: false },
   });
-  assert.deepEqual(reasoning.labels(), ['Auto-expand reasoning', 'Copy text', 'Copy raw']);
+  assert.deepEqual(reasoning.labels(), ['Auto-expand reasoning', 'Copy', 'Copy as Markdown']);
   render(null, reasoning.container);
   reasoning.container.remove();
 

@@ -3,7 +3,12 @@
 
 import type { JSX } from 'preact';
 import { useMemo, useState, useEffect, useRef } from 'preact/hooks';
-import type { ChatPrefs, ModelInfo, SubagentBucketAssignment, ThinkingLevel } from '../../lib/protocol/index.js';
+import type { ChatPrefs, ModelInfo, ProviderGateStats, SubagentBucketAssignment, ThinkingLevel } from '../../lib/protocol/index.js';
+import {
+  MAX_SUBAGENT_MAX_INFLIGHT,
+  MIN_SUBAGENT_MAX_INFLIGHT,
+  concurrencySourceLabel,
+} from '../../../lib/concurrency-config.js';
 import { THINKING_LEVEL_OPTIONS } from '../composer/thinking-level-options.js';
 import {
   getSubagentBucketProviders,
@@ -352,6 +357,7 @@ interface SubagentSettingsProps {
   prefs: ChatPrefs;
   onSetPrefs: OnSetPrefs;
   availableModels: ModelInfo[];
+  providerGateStats?: ProviderGateStats;
 }
 
 interface SubagentModelAssignmentsProps extends SubagentSettingsProps {
@@ -389,11 +395,22 @@ export function SubagentModelAssignments({ prefs, onSetPrefs, availableModels, m
 }
 
 /** Subagents-tab behavior, routing, nesting, and throughput controls. */
-export function SubagentSection({ prefs, onSetPrefs, availableModels }: SubagentSettingsProps) {
+export function SubagentSection({ prefs, onSetPrefs, availableModels, providerGateStats }: SubagentSettingsProps) {
   const subagentProviders = useMemo(
     () => getSubagentBucketProviders(prefs, availableModels),
     [availableModels, prefs.subagentBuckets, prefs.subagentProviderDefaults],
   );
+  const runtimeConcurrency = providerGateStats?.subagentConcurrency;
+  const appliedRuntimeStatus = runtimeConcurrency?.effective
+    ? `Applied: ${runtimeConcurrency.effective.value} · ${concurrencySourceLabel(runtimeConcurrency.effective.source)}`
+    : runtimeConcurrency?.workerCount === 0
+      ? 'Applied: awaiting workers'
+      : runtimeConcurrency && runtimeConcurrency.pendingWorkers > 0
+        ? `Applied: awaiting sync (${runtimeConcurrency.pendingWorkers} pending)`
+        : 'Applied: unavailable';
+  const pendingRuntimeStatus = runtimeConcurrency?.effective && runtimeConcurrency.pendingWorkers > 0
+    ? ` · ${runtimeConcurrency.pendingWorkers} worker${runtimeConcurrency.pendingWorkers === 1 ? '' : 's'} pending sync`
+    : '';
 
   return (
     <div class="toolbar-settings-ext-settings">
@@ -508,13 +525,25 @@ export function SubagentSection({ prefs, onSetPrefs, availableModels }: Subagent
       <SliderRow
         label="Max active trees"
         value={prefs.subagentMaxInflight}
-        min={1}
-        max={16}
+        min={MIN_SUBAGENT_MAX_INFLIGHT}
+        max={MAX_SUBAGENT_MAX_INFLIGHT}
         step={1}
         ariaLabel="Max concurrent root subagent trees"
-        hint="Global concurrency cap on independent root subagent trees across all sessions. Sibling calls have no per-turn count cap; calls beyond this limit wait for a permit. Nested descendants borrow their root's permit, so recursive delegation cannot deadlock the throttle."
+        hint="Per-worker-process cap on independent root subagent trees, shared by that process's sessions—not a cap across all sessions or processes. Sibling calls beyond it wait for a permit. Nested descendants borrow their root's permit, so recursive delegation cannot deadlock the throttle."
         onChange={(subagentMaxInflight) => onSetPrefs({ subagentMaxInflight })}
       />
+      <div class="toolbar-settings-item-hint">
+        Preference: {prefs.subagentMaxInflight} · {concurrencySourceLabel(prefs.subagentMaxInflightSource)}<br />
+        {runtimeConcurrency ? (
+          <>
+            Runtime configured: {runtimeConcurrency.configured.value} · {concurrencySourceLabel(runtimeConcurrency.configured.source)}<br />
+            {appliedRuntimeStatus}{pendingRuntimeStatus}<br />
+            Worker-process scope · {runtimeConcurrency.workerCount} worker{runtimeConcurrency.workerCount === 1 ? '' : 's'}
+          </>
+        ) : (
+          <>Runtime configured/applied: unavailable<br />Worker-process scope · runtime status unavailable</>
+        )}
+      </div>
     </div>
   );
 }

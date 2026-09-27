@@ -297,6 +297,8 @@ export interface OpenFileInEditorCommand extends CommandBase {
 export interface OpenFileCommand extends CommandBase {
   kind: 'OpenFile';
   path: string;
+  reference?: string;
+  workingDirectory?: string;
 }
 
 export interface SetPruningSettingsCommand extends CommandBase {

@@ -4,6 +4,7 @@
 import type { ComponentChildren, RefObject } from 'preact';
 
 import type { ChatMessage, ChatPrefs, CompactionSummaryDetails, ComposerInput, InlineEditDraft } from '../../../lib/protocol/index.js';
+import { AGENT_MESSAGE_CUSTOM_TYPE } from '../../../lib/protocol/messages.js';
 import { cx } from '../../lib/components/cx';
 import { InlineEditor } from '../inline-editor';
 import { CompactionSummary } from '../compaction-summary';
@@ -61,7 +62,7 @@ export function MessageItemShell({
   onRowContextMenu,
   children,
 }: MessageItemShellProps) {
-  const isSyntheticSend = role === 'user' && customType !== undefined;
+  const isSyntheticSend = role === 'user' && customType !== undefined && customType !== AGENT_MESSAGE_CUSTOM_TYPE;
   return (
     <div
       class={cx(

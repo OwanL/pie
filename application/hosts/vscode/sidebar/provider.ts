@@ -7,7 +7,7 @@ import { RendererHub } from '../../lib/renderer-delivery/renderer-hub';
 import type { RendererRegistration, RendererTransport } from '../../lib/renderer-delivery/types';
 import type { StateDeliveryClock } from '../../lib/renderer-delivery/state-delivery-controller';
 import type { StateDeliveryRecoveryReason } from '../../lib/renderer-delivery/state-delivery-controller';
-import type { HostToWebviewMessage, ViewState, WebviewToHostMessage } from '../../../lib/protocol/index.js';
+import type { HostToWebviewMessage, RendererCommandContext, ViewState, WebviewToHostMessage } from '../../../lib/protocol/index.js';
 
 type ResolvedWebviewHtml = Awaited<ReturnType<typeof resolveWebviewHtml>>;
 
@@ -59,7 +59,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
   constructor(
     private readonly context: vscode.ExtensionContext,
     getViewState: () => ViewState,
-    onMessage: (msg: WebviewToHostMessage) => void,
+    onMessage: (msg: WebviewToHostMessage, context: RendererCommandContext) => void,
     getRunningSessionCount: () => number = () => 0,
     options: SidebarViewProviderOptions = {},
   ) {

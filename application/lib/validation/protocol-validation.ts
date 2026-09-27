@@ -38,6 +38,11 @@ import type {
 } from '../protocol/index.js';
 import { isThinkingLevel, THINKING_LEVEL_SET } from '../protocol/thinking-level.js';
 import { isFiniteNumber } from '../../../lib/validation/type-guards.js';
+import { MAX_IMAGE_PREVIEW_PATH_BYTES } from '../protocol/image-preview.js';
+import {
+  DEFAULT_SUBAGENT_MAX_INFLIGHT,
+  isSubagentConcurrencyLimit,
+} from '../../../lib/concurrency-config.js';
 import { utf8ByteLength } from '../../../lib/utf8.js';
 import {
   COMPOSER_INITIAL_ROWS_MAX,
@@ -363,7 +368,6 @@ function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
     completionSoundVolume: [0, 100],
     subagentMaxDepth: [0, 8],
     subagentMaxTreeSessions: [5, 200],
-    subagentMaxInflight: [1, 16],
     bashWarmPoolSize: [0, 8],
     bashWarmupTimeoutMs: [0, 60000],
     bashDefaultTimeout: [1, 600],
@@ -394,6 +398,14 @@ function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
     const v = (value as Record<string, unknown>)[key];
     if (key === 'uiDensity') {
       if (v !== undefined && !validDensities.has(v as string)) return false;
+      continue;
+    }
+    if (key === 'subagentMaxInflight') {
+      if (v !== undefined && !isSubagentConcurrencyLimit(v)) return false;
+      continue;
+    }
+    if (key === 'subagentMaxInflightSource') {
+      if (v !== undefined && v !== 'configured-default' && v !== 'saved-preference') return false;
       continue;
     }
     if (key === 'historyCompaction') {
@@ -437,6 +449,11 @@ function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
       )) return false;
     }
   }
+  if (value.subagentMaxInflightSource !== undefined) {
+    if (value.subagentMaxInflight === undefined) return false;
+    if (value.subagentMaxInflightSource === 'configured-default'
+      && value.subagentMaxInflight !== DEFAULT_SUBAGENT_MAX_INFLIGHT) return false;
+  }
   return true;
 }
 
@@ -456,6 +473,8 @@ function validatePruningSettingsPatch(value: unknown): value is Partial<PruningS
       if (v !== undefined && (typeof v !== 'string' || v.length === 0)) return false;
     } else if (key === 'thinkingLevel') {
       if (v !== undefined && (typeof v !== 'string' || !THINKING_LEVEL_SET.has(v as ThinkingLevel))) return false;
+    } else if (key === 'mainAgentEnabled' || key === 'subagentEnabled') {
+      if (v !== undefined && typeof v !== 'boolean') return false;
     } else {
       return false;
     }
@@ -668,6 +687,8 @@ export function validateWebviewToHostMessage(
 
     case 'openFile':
       if (!isString(value.path)) return fail('openFile: missing string `path`');
+      if (!isOptionalString(value.reference)) return fail('openFile: invalid `reference`');
+      if (!isOptionalString(value.workingDirectory)) return fail('openFile: invalid `workingDirectory`');
       return { ok: true, value: value as WebviewToHostMessage };
 
     case 'addComposerInput':
@@ -713,6 +734,26 @@ export function validateWebviewToHostMessage(
 
     case 'clearQueue':
       if (!isString(value.sessionPath)) return fail('clearQueue: missing string `sessionPath`');
+      return { ok: true, value: value as WebviewToHostMessage };
+
+    case 'requestImagePreview':
+      if (!isString(value.requestId) || value.requestId.length === 0 || value.requestId.length > 256) {
+        return fail('requestImagePreview: invalid `requestId`');
+      }
+      if (!isString(value.sessionPath) || utf8ByteLength(value.sessionPath) > MAX_IMAGE_PREVIEW_PATH_BYTES) {
+        return fail('requestImagePreview: invalid or oversized `sessionPath`');
+      }
+      if (!isString(value.path) || utf8ByteLength(value.path) > MAX_IMAGE_PREVIEW_PATH_BYTES) {
+        return fail('requestImagePreview: invalid or oversized `path`');
+      }
+      if (!isOptionalString(value.reference)
+        || (value.reference !== undefined && utf8ByteLength(value.reference) > MAX_IMAGE_PREVIEW_PATH_BYTES)) {
+        return fail('requestImagePreview: invalid or oversized `reference`');
+      }
+      if (!isOptionalString(value.workingDirectory)
+        || (value.workingDirectory !== undefined && utf8ByteLength(value.workingDirectory) > MAX_IMAGE_PREVIEW_PATH_BYTES)) {
+        return fail('requestImagePreview: invalid or oversized `workingDirectory`');
+      }
       return { ok: true, value: value as WebviewToHostMessage };
 
     case 'requestDetail':
