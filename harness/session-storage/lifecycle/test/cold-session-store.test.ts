@@ -1810,7 +1810,7 @@ test('a failed atomic cold model-settings commit preserves durable bytes and the
   }
 });
 
-test('a transient atomic-replace denial retries before publishing cold model settings', async () => {
+test('a transient atomic-replace denial is delegated once and fails closed', async () => {
   const h = await makeHarness();
   const SessionManager = await getRealSessionManager();
   try {
@@ -1825,16 +1825,12 @@ test('a transient atomic-replace denial retries before publishing cold model set
         SessionManager: {
           open(targetPath: string) {
             const manager = SessionManager.open(targetPath);
-            const originalBatch = manager.appendPieModelSettingsChange.bind(manager);
-            manager.appendPieModelSettingsChange = (...args: unknown[]) => {
+            manager.appendPieModelSettingsChange = () => {
               batchCalls += 1;
-              if (batchCalls === 1) {
-                const error = new Error('injected transient atomic replace denial') as NodeJS.ErrnoException;
-                error.code = 'EPERM';
-                error.syscall = 'rename';
-                throw error;
-              }
-              return originalBatch(...args);
+              const error = new Error('injected transient atomic replace denial') as NodeJS.ErrnoException;
+              error.code = 'EPERM';
+              error.syscall = 'rename';
+              throw error;
             };
             return manager;
           },
@@ -1845,25 +1841,24 @@ test('a transient atomic-replace denial retries before publishing cold model set
       agentDir: h.root,
       sessionDir: h.sessionDir,
     });
+    await store.openSnapshot(sessionPath, browseOpenOptions);
+    const before = await fs.readFile(sessionPath, 'utf8');
+    const beforeContext = store.context(sessionPath);
 
-    assert.deepEqual(store.setModelSettings(sessionPath, {
-      model: { provider: 'mock', modelId: 'model-new' },
-      thinkingLevel: 'high',
-    }), { modelChanged: true, thinkingLevelChanged: true });
-    assert.equal(batchCalls, 2);
+    assert.throws(
+      () => store.setModelSettings(sessionPath, {
+        model: { provider: 'mock', modelId: 'model-new' },
+        thinkingLevel: 'high',
+      }),
+      (error: unknown) => error instanceof Error
+        && (error as NodeJS.ErrnoException).code === 'EPERM'
+        && (error as NodeJS.ErrnoException).syscall === 'rename',
+    );
 
-    const restartedStore = new ColdSessionStore({
-      sdk: { SessionManager } as any,
-      coordinatorGeneration: 18,
-      startupCwd: h.root,
-      agentDir: h.root,
-      sessionDir: h.sessionDir,
-    });
-    assert.deepEqual(restartedStore.context(sessionPath), {
-      messages: [{ role: 'user', content: 'keep', timestamp: 1 }],
-      model: { provider: 'mock', modelId: 'model-new' },
-      thinkingLevel: 'high',
-    });
+    assert.equal(batchCalls, 1, 'one settings intent is delegated once to the SDK atomic operation');
+    assert.equal(await fs.readFile(sessionPath, 'utf8'), before, 'a rejected SDK commit leaves durable bytes unchanged');
+    assert.deepEqual(store.context(sessionPath), beforeContext, 'failed settings are not exposed as committed context');
+    assert.equal(store.getBrowseCacheStats().entries, 1, 'a failed commit preserves the valid pre-write cache');
   } finally {
     await fs.rm(h.root, { recursive: true, force: true });
   }

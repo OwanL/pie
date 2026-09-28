@@ -150,7 +150,6 @@ test('late browser-server close cannot override unconfirmed taskkill cleanup aft
     assert.equal(processHandle.signalCode, 'SIGKILL', 'root exit was observed');
     assert.equal(backend.sessions.has(session.id), false);
     assert.equal(backend.closingSessions.has(session), true, 'late graceful resolution cannot release unresolved ownership');
-    await new Promise((resolve) => setTimeout(resolve, 15));
     assert.equal(serverCloseCalls, 1, 'the in-flight graceful close resolves after the fallback root exit');
   } finally {
     Object.defineProperty(process, 'platform', platform);
@@ -215,13 +214,16 @@ test('Windows browser-tree taskkill is asynchronous and leaves the sidecar event
   }
 });
 
-test('late graceful-close resolution after taskkill failure does not prove descendant cleanup', async () => {
+test('late graceful-close resolution after taskkill failure does not prove descendant cleanup', { timeout: 5_000 }, async () => {
   const platform = Object.getOwnPropertyDescriptor(process, 'platform');
   assert.ok(platform);
   Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
   let resolveServerClose!: () => void;
+  let resolveTaskkillStarted!: () => void;
+  let finishTaskkill!: () => void;
   let taskkillCalls = 0;
   const serverClose = new Promise<void>((resolve) => { resolveServerClose = resolve; });
+  const taskkillStarted = new Promise<void>((resolve) => { resolveTaskkillStarted = resolve; });
   const processHandle = new EventEmitter() as EventEmitter & {
     pid: number; exitCode: number | null; signalCode: NodeJS.Signals | null; kill(signal?: string): boolean;
   };
@@ -236,14 +238,14 @@ test('late graceful-close resolution after taskkill failure does not prove desce
       const taskkill = new EventEmitter() as EventEmitter & { kill(): boolean; stderr: EventEmitter };
       taskkill.kill = () => true;
       taskkill.stderr = new EventEmitter();
-      queueMicrotask(() => {
+      finishTaskkill = () => {
         processHandle.signalCode = 'SIGTERM';
         processHandle.emit('exit', null, 'SIGTERM');
         processHandle.emit('close', null, 'SIGTERM');
         taskkill.stderr.emit('data', Buffer.from('ERROR: The process with PID 7128 (child process of PID 4728) could not be terminated.\r\nReason: Access is denied.\r\n'));
         taskkill.emit('close', 128, null);
-        setTimeout(resolveServerClose, 5);
-      });
+      };
+      resolveTaskkillStarted();
       return taskkill;
     },
   });
@@ -255,12 +257,16 @@ test('late graceful-close resolution after taskkill failure does not prove desce
   };
   backend.sessions.set(session.id, session);
   try {
+    const closing = backend.closeSession(session);
+    await taskkillStarted;
+    finishTaskkill();
     await assert.rejects(
-      () => backend.closeSession(session),
+      () => closing,
       (error: unknown) => errorCode(error, 'RUNTIME_CLEANUP_UNRESOLVED') && /Access is denied/i.test((error as Error).message),
     );
     assert.equal(taskkillCalls, 1);
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    resolveServerClose();
+    await serverClose;
     assert.equal(backend.closingSessions.has(session), true, 'late graceful confirmation cannot release unresolved ownership');
   } finally {
     Object.defineProperty(process, 'platform', platform);

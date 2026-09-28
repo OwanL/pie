@@ -11,6 +11,7 @@ import type { PruningConfig } from "../settings/config-types.js";
 installSdkResolverForTests();
 const require = createRequire(import.meta.url);
 const { default: skillPruner, __setFormatter, __setToolSeams, __setCompleteFn, resetForTesting, setConfigForTesting, getHiddenSkills, recordHiddenSkills, recordPrunedTools, clearCapabilityStateForTesting } = require("../../../extensions/skill-pruner/index.ts") as typeof import("../../../extensions/skill-pruner/index.js");
+const { DEFAULT_CONFIG } = require("../settings/config.ts") as typeof import("../settings/config.js");
 // Sibling repo modules are require()d (not ESM-imported) so this child holds
 // ONE module instance per source file. Mixing ESM imports with the CJS shim
 // require compiled the same files twice and node's coverage reporter then
@@ -1781,33 +1782,24 @@ test("cross-session cache: a continuation prompt in a second session does NOT re
 	}
 });
 
-test("autoSkipBelowTokens restores tools pruned by the prior turn without an LLM call or error feedback", async () => {
+test("small inputs still run pruning", async () => {
 	let calls = 0;
-	const setActiveToolsCalls: string[][] = [];
 	let activeTools = mockToolInfo.map((tool) => tool.name);
-	__setCompleteFn(async () => { calls++; return { text: '{"pruneSkills":[],"pruneTools":["web_search"]}' }; });
+	__setCompleteFn(async () => {
+		calls++;
+		return { text: '{"pruneSkills":[],"pruneTools":["web_search"]}' };
+	});
 	try {
-		const cfg = config({}, "auto", { ceiling: 10 });
-		const { handlers } = register(cfg);
+		const { handlers } = register(DEFAULT_CONFIG);
 		__setToolSeams({
 			getAllTools: () => mockToolInfo as any[],
 			getActiveTools: () => activeTools,
-			setActiveTools: (names: string[]) => {
-				activeTools = names;
-				setActiveToolsCalls.push(names);
-			},
+			setActiveTools: (names: string[]) => { activeTools = names; },
 		});
-		await runBeforeAgentStart(handlers, "Refactor this code", realisticSkills);
-		assert.equal(calls, 1);
-		assert.ok(!setActiveToolsCalls[0].includes("web_search"));
-
-		const skipConfig = config({}, "auto", { ceiling: 10 });
-		skipConfig.autoSkipBelowTokens = 1_000_000;
-		setConfigForTesting(skipConfig);
-		const result = await runBeforeAgentStart(handlers, "A different small task", realisticSkills);
-		assert.equal(calls, 1);
-		assert.equal(result, undefined);
-		assert.ok(setActiveToolsCalls.at(-1)?.includes("web_search"));
+		const result = await runBeforeAgentStart(handlers, "Fix typo.", [skill("tiny-skill", "A tiny test skill.")]);
+		assert.equal(calls, 1, "small prompts must still invoke the pruning prepass");
+		assert.ok(!activeTools.includes("web_search"), "the returned pruning decision must still be applied");
+		assert.deepEqual(result?.message?.details.excludedTools, ["web_search"]);
 	} finally {
 		__setCompleteFn(null);
 		__setToolSeams({ getAllTools: null, getActiveTools: null, setActiveTools: null });

@@ -49,6 +49,7 @@ import type {
 } from '../../../analytics/capture/canonical-capture.js';
 import { analyticsRootSessionId } from '../../../analytics/capture/canonical-capture.js';
 import type { CanonicalAnalyticsReadModel } from '../../../analytics/queries/query-entry.js';
+import type { AnalyticsQueryPriority } from '../../../analytics/queries/query-client.js';
 import type { ProviderSettlementScope, ScopedProviderSettlementReadModel } from '../../../analytics/recording/sqlite-recorder.js';
 import { CanonicalRevisionRefresher } from '../../../analytics/queries/revision-refresher.js';
 import { sessionUsageSnapshotFromCanonicalSettlements } from '../../../analytics/usage-accounting/canonical-usage.js';
@@ -262,8 +263,10 @@ export class StatsService implements RunObserver {
    * successful watermark. Lazy reads stay fail-closed during this window. */
   private canonicalRevisionAwaitingBaseline = true;
   private canonicalSessionUsageRefresh: Promise<void> | null = null;
+  private canonicalSessionUsageRefreshAbort: AbortController | null = null;
   private canonicalSessionUsageRetryTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly canonicalSessionPathRefreshes = new Map<string, Promise<void>>();
+  private readonly canonicalSessionPathRefreshAborts = new Map<string, AbortController>();
   private readonly canonicalSessionPathEpochs = new Map<string, number>();
   /** Bounded persisted activity/facet reads share the session usage refresh
    * epoch, so a peer revision or deletion invalidates every canonical surface
@@ -2131,11 +2134,16 @@ export class StatsService implements RunObserver {
     const readModel = this.analyticsReadModel!;
     if (this.canonicalSessionPathRefreshes.size >= readModel.getMaxConcurrentQueries()
       || this.canonicalSessionPathRefreshes.has(sessionPath)) return;
-    const refresh = this.refreshCanonicalSessionPath(sessionPath);
+    const controller = new AbortController();
+    const refresh = this.refreshCanonicalSessionPath(sessionPath, controller.signal);
+    this.canonicalSessionPathRefreshAborts.set(sessionPath, controller);
     this.canonicalSessionPathRefreshes.set(sessionPath, refresh);
     void refresh.finally(() => {
       if (this.canonicalSessionPathRefreshes.get(sessionPath) === refresh) {
         this.canonicalSessionPathRefreshes.delete(sessionPath);
+        if (this.canonicalSessionPathRefreshAborts.get(sessionPath) === controller) {
+          this.canonicalSessionPathRefreshAborts.delete(sessionPath);
+        }
         if (!this.canonicalSessionUsageByPath.has(sessionPath)
           && !this.canonicalActivityByPath.has(sessionPath)) {
           this.canonicalSessionPathEpochs.delete(sessionPath);
@@ -2256,27 +2264,63 @@ export class StatsService implements RunObserver {
     }
   }
 
-  private async readCanonicalActivityScope(sessionPath?: string): Promise<CanonicalActivityReadResult> {
+  private canonicalQueryPriority(sessionPath?: string): AnalyticsQueryPriority {
+    if (sessionPath === undefined) return 'background';
+    return this.getArchState().sessions.activeSessionPath === sessionPath ? 'interactive' : 'normal';
+  }
+
+  private async readCanonicalActivityScope(
+    sessionPath?: string,
+    signal?: AbortSignal,
+  ): Promise<CanonicalActivityReadResult> {
     const readModel = this.analyticsReadModel!;
+    const priority = this.canonicalQueryPriority(sessionPath);
     const scope = this.canonicalProjectionScope(sessionPath);
     const rootSessionId = scope.kind === 'session' ? scope.rootSessionId : undefined;
     const activityReader = readModel.readActivityProjection;
     const facetReader = readModel.readToolFacetProjection;
-    const activityPromise: Promise<CanonicalActivityProjection | null> = typeof activityReader === 'function'
-      ? Promise.resolve().then(() => activityReader.call(readModel, {
-        ...(rootSessionId === undefined ? {} : { rootSessionId }),
-        maxKinds: MAX_CANONICAL_ACTIVITY_KINDS,
-        maxResultBytes: MAX_CANONICAL_ACTIVITY_RESULT_BYTES,
-      }))
-      : Promise.resolve(null);
-    const facetPromise: Promise<CanonicalToolFacetProjection | null> = typeof facetReader === 'function'
-      ? Promise.resolve().then(() => facetReader.call(readModel, {
-        ...(rootSessionId === undefined ? {} : { rootSessionId }),
-        limit: MAX_CANONICAL_TOOL_FACETS,
-        maxResultBytes: MAX_CANONICAL_ACTIVITY_RESULT_BYTES,
-      }))
-      : Promise.resolve(null);
-    const [activityRead, facetRead] = await Promise.allSettled([activityPromise, facetPromise]);
+    let activityRead: PromiseSettledResult<CanonicalActivityProjection | null>;
+    let facetRead: PromiseSettledResult<CanonicalToolFacetProjection | null>;
+    const bundledReader = readModel.readActivityAndToolFacetProjections;
+    if (typeof bundledReader === 'function') {
+      try {
+        const bundled = await bundledReader.call(readModel, {
+          ...(rootSessionId === undefined ? {} : { rootSessionId }),
+          maxKinds: MAX_CANONICAL_ACTIVITY_KINDS,
+          limit: MAX_CANONICAL_TOOL_FACETS,
+          maxResultBytes: MAX_CANONICAL_ACTIVITY_RESULT_BYTES,
+        }, signal, priority);
+        activityRead = 'error' in bundled.activity
+          ? { status: 'rejected', reason: new Error(bundled.activity.error) }
+          : { status: 'fulfilled', value: bundled.activity.value };
+        facetRead = 'error' in bundled.toolFacets
+          ? { status: 'rejected', reason: new Error(bundled.toolFacets.error) }
+          : { status: 'fulfilled', value: bundled.toolFacets.value };
+      } catch (error) {
+        // The bundle transport is one worker. A transport failure invalidates
+        // both subreads just as independently failing workers would.
+        activityRead = { status: 'rejected', reason: error };
+        facetRead = { status: 'rejected', reason: error };
+      }
+    } else {
+      // Compatibility for embedded/read-model adapters predating the bundled
+      // helper command. Production uses one helper for both projections.
+      const activityPromise: Promise<CanonicalActivityProjection | null> = typeof activityReader === 'function'
+        ? Promise.resolve().then(() => activityReader.call(readModel, {
+          ...(rootSessionId === undefined ? {} : { rootSessionId }),
+          maxKinds: MAX_CANONICAL_ACTIVITY_KINDS,
+          maxResultBytes: MAX_CANONICAL_ACTIVITY_RESULT_BYTES,
+        }, signal, priority))
+        : Promise.resolve(null);
+      const facetPromise: Promise<CanonicalToolFacetProjection | null> = typeof facetReader === 'function'
+        ? Promise.resolve().then(() => facetReader.call(readModel, {
+          ...(rootSessionId === undefined ? {} : { rootSessionId }),
+          limit: MAX_CANONICAL_TOOL_FACETS,
+          maxResultBytes: MAX_CANONICAL_ACTIVITY_RESULT_BYTES,
+        }, signal, priority))
+        : Promise.resolve(null);
+      [activityRead, facetRead] = await Promise.allSettled([activityPromise, facetPromise]);
+    }
     const activity = activityRead.status === 'fulfilled' ? activityRead.value : null;
     const toolFacets = facetRead.status === 'fulfilled' ? facetRead.value : null;
     const revisions = [
@@ -2343,6 +2387,8 @@ export class StatsService implements RunObserver {
         this.canonicalRefreshRequested = false;
         this.canonicalDirtyRevision = null;
         const epoch = ++this.canonicalCacheEpoch;
+        const passAbort = new AbortController();
+        this.canonicalSessionUsageRefreshAbort = passAbort;
         // Startup/revision work is limited to the actual displayed/running UI
         // surface. The session catalogue may be much larger than that surface;
         // omitted paths hydrate lazily when requested and remain unknown until
@@ -2364,7 +2410,7 @@ export class StatsService implements RunObserver {
           .sort((left, right) => displayedPathRank.get(left.path)! - displayedPathRank.get(right.path)!)
           .slice(0, MAX_CANONICAL_DISPLAYED_SESSION_REFRESH_ENTRIES);
         refreshTargetPaths = sessions.map((session) => session.path);
-        const globalActivityRead = this.readCanonicalActivityScope();
+        const globalActivityRead = this.readCanonicalActivityScope(undefined, passAbort.signal);
         const hydrateGlobalActivity = globalActivityRead.then((result) => {
           if (!this.disposed && epoch === this.canonicalCacheEpoch) {
             this.applyCanonicalActivityRead(undefined, result, epoch);
@@ -2389,12 +2435,12 @@ export class StatsService implements RunObserver {
             const session = sessions[index];
             if (!session) return;
             const [usageRead, activityRead] = await Promise.allSettled([
-              this.readCanonicalSessionPath(session.path),
-              this.readCanonicalActivityScope(session.path),
+              this.readCanonicalSessionPath(session.path, passAbort.signal),
+              this.readCanonicalActivityScope(session.path, passAbort.signal),
             ]);
             if (usageRead.status === 'fulfilled') {
               this.applyCanonicalSessionRead(session.path, usageRead.value, epoch);
-            } else {
+            } else if (!passAbort.signal.aborted) {
               passHadFailure = true;
               if (epoch === this.canonicalCacheEpoch) {
                 this.cacheCanonicalRefreshFailure(session.path, epoch);
@@ -2404,9 +2450,12 @@ export class StatsService implements RunObserver {
                 error: usageRead.reason instanceof Error ? usageRead.reason.message : String(usageRead.reason),
               });
             }
-            if (activityRead.status === 'fulfilled') {
+            if (activityRead.status === 'fulfilled'
+              && !passAbort.signal.aborted
+              && epoch === this.canonicalCacheEpoch) {
               this.applyCanonicalActivityRead(session.path, activityRead.value, epoch);
-            } else if (epoch === this.canonicalCacheEpoch) {
+            } else if (activityRead.status === 'rejected' && epoch === this.canonicalCacheEpoch
+              && !passAbort.signal.aborted) {
               appendPieLog('warn', 'analytics', 'canonical session activity projection refresh failed', {
                 path: session.path,
                 error: activityRead.reason instanceof Error ? activityRead.reason.message : String(activityRead.reason),
@@ -2418,6 +2467,9 @@ export class StatsService implements RunObserver {
           hydrateGlobalActivity,
           ...Array.from({ length: workerCount }, () => readWorker()),
         ]);
+        if (this.canonicalSessionUsageRefreshAbort === passAbort) {
+          this.canonicalSessionUsageRefreshAbort = null;
+        }
         // A helper result carries its own snapshot revision. If the refresher
         // already knows a newer revision, do not release this pass as fresh;
         // immediately run one more bounded read instead of publishing an
@@ -2453,6 +2505,8 @@ export class StatsService implements RunObserver {
     } finally {
       if (this.canonicalSessionUsageRefresh === refresh) {
         this.canonicalSessionUsageRefresh = null;
+        this.canonicalSessionUsageRefreshAbort?.abort(new Error('Canonical session refresh completed.'));
+        this.canonicalSessionUsageRefreshAbort = null;
         if (!refreshSucceeded && !this.disposed) {
           // An unexpected strict refresh failure cannot release the fence. An
           // ordinary refresh retains its last complete same-scope read with
@@ -2508,6 +2562,8 @@ export class StatsService implements RunObserver {
   private invalidateCanonicalSessionCache(schedule = true, failClosed = true): void {
     this.canonicalCacheEpoch += 1;
     this.canonicalRefreshRequested = true;
+    this.canonicalSessionUsageRefreshAbort?.abort(new Error('Canonical session refresh invalidated.'));
+    this.cancelCanonicalSessionPathRefreshes(new Error('Canonical session path refresh invalidated.'));
     if (failClosed) {
       this.cancelCanonicalSessionUsageRetry();
       this.canonicalCacheFailClosed = true;
@@ -2526,6 +2582,8 @@ export class StatsService implements RunObserver {
   private markCanonicalRevisionForRefresh(revision: string): void {
     this.canonicalCacheEpoch += 1;
     this.canonicalRefreshRequested = true;
+    this.canonicalSessionUsageRefreshAbort?.abort(new Error('Canonical session refresh superseded by a newer revision.'));
+    this.cancelCanonicalSessionPathRefreshes(new Error('Canonical session path refresh superseded by a newer revision.'));
     if (this.canonicalDirtyRevision === null
       || canonicalRevision(revision) > canonicalRevision(this.canonicalDirtyRevision)) {
       this.canonicalDirtyRevision = canonicalRevisionString(revision);
@@ -2546,6 +2604,8 @@ export class StatsService implements RunObserver {
   private markCanonicalRevisionDirty(revision: string): void {
     this.canonicalCacheEpoch += 1;
     this.canonicalRefreshRequested = true;
+    this.canonicalSessionUsageRefreshAbort?.abort(new Error('Canonical session refresh invalidated by a strict revision fence.'));
+    this.cancelCanonicalSessionPathRefreshes(new Error('Canonical session path refresh invalidated by a strict revision fence.'));
     this.cancelCanonicalSessionUsageRetry();
     this.canonicalCacheFailClosed = true;
     this.canonicalSessionUsageHeldByPath = null;
@@ -2558,6 +2618,10 @@ export class StatsService implements RunObserver {
       && !this.canonicalSessionUsageRefresh) {
       void this.refreshCanonicalSessionUsage();
     }
+  }
+
+  private cancelCanonicalSessionPathRefreshes(reason: Error): void {
+    for (const controller of this.canonicalSessionPathRefreshAborts.values()) controller.abort(reason);
   }
 
   private clearCanonicalSessionCache(): void {
@@ -2764,7 +2828,10 @@ export class StatsService implements RunObserver {
     this.cacheCanonicalSessionUsage(sessionPath, snapshot, result.revision, result.scopeKey, epoch);
   }
 
-  private async readCanonicalSessionPath(sessionPath: string): Promise<CanonicalSessionReadResult> {
+  private async readCanonicalSessionPath(
+    sessionPath: string,
+    signal?: AbortSignal,
+  ): Promise<CanonicalSessionReadResult> {
     const identity = this.sessionIdentity(sessionPath);
     const rootSessionId = identity.sessionId ?? analyticsRootSessionId(null, sessionPath);
     const readModel = this.analyticsReadModel!;
@@ -2776,6 +2843,8 @@ export class StatsService implements RunObserver {
     const rootResult = await readModel.readScopedProviderSettlements(
       { kind: 'rootSession', rootSessionId },
       { limit: MAX_CANONICAL_SESSION_CACHE_SAMPLES, maxResultBytes: MAX_CANONICAL_SESSION_CACHE_BYTES },
+      signal,
+      this.canonicalQueryPriority(sessionPath),
     );
     return {
       revision: canonicalRevisionString(rootResult.revision),
@@ -2854,7 +2923,7 @@ export class StatsService implements RunObserver {
     };
   }
 
-  private async refreshCanonicalSessionPath(sessionPath: string): Promise<void> {
+  private async refreshCanonicalSessionPath(sessionPath: string, signal?: AbortSignal): Promise<void> {
     if (!this.analyticsReadModel || !this.canonicalCapture) return;
     if (this.canonicalSessionUsageRefresh) {
       // An ordinary bounded pass owns the revision fence right now. Its finally
@@ -2875,10 +2944,11 @@ export class StatsService implements RunObserver {
     this.canonicalSessionPathEpochs.set(sessionPath, pathRefreshEpoch);
     try {
       const [usageRead, activityRead] = await Promise.allSettled([
-        this.readCanonicalSessionPath(sessionPath),
-        this.readCanonicalActivityScope(sessionPath),
+        this.readCanonicalSessionPath(sessionPath, signal),
+        this.readCanonicalActivityScope(sessionPath, signal),
       ]);
       const current = !this.disposed
+        && !signal?.aborted
         && (epoch === this.canonicalCacheEpoch || !this.canonicalCacheFailClosed)
         && this.canonicalSessionPathEpochs.get(sessionPath) === pathRefreshEpoch;
       if (usageRead.status === 'fulfilled' && current) {
@@ -3041,7 +3111,7 @@ export class StatsService implements RunObserver {
       maxRows: 1,
       maxQueryBytes: 16 * 1024,
       maxResultBytes: 256 * 1024,
-    });
+    }, undefined, 'background');
     if (result.truncation.rowLimit || result.truncation.byteLimit || result.truncation.cellLimit) return null;
     if (result.returnedRows !== 1) return null;
     const unionMs = canonicalTimestampAnchor(result.rows[0]?.union_ms);
@@ -3160,6 +3230,8 @@ export class StatsService implements RunObserver {
   async shutdown(): Promise<void> {
     if (this.canonicalCapture) {
       this.disposed = true;
+      this.canonicalSessionUsageRefreshAbort?.abort(new Error('StatsService is shutting down.'));
+      this.cancelCanonicalSessionPathRefreshes(new Error('StatsService is shutting down.'));
       this.cancelCanonicalSessionUsageRetry();
       const revisionRefreshDrain = this.analyticsRevisionRefresher?.stop();
       this.backgroundCompactionAbort.abort();
@@ -3176,6 +3248,7 @@ export class StatsService implements RunObserver {
       this.canonicalCacheFailClosed = true;
       this.canonicalSessionPathEpochs.clear();
       this.canonicalSessionPathRefreshes.clear();
+      this.canonicalSessionPathRefreshAborts.clear();
       this.canonicalPrivateClosesByPath.clear();
       this.canonicalBranchEntriesBySession.clear();
       this.canonicalBusyRestoredRootByPath.clear();

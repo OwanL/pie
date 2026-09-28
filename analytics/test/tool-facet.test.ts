@@ -394,7 +394,7 @@ test('pending-create facets rebind to the trusted session identity without cross
   }
 });
 
-test('v12 to v13 migration preserves schema12 data and never backfills facet history', () => {
+test('v12 to current migration preserves schema12 data and never backfills facet history', () => {
   const temp = tempDatabase();
   let recorder = new SqliteAnalyticsRecorder(temp.databasePath);
   let captureErrors: Error[] = [];
@@ -441,7 +441,7 @@ test('v12 to v13 migration preserves schema12 data and never backfills facet his
 
   recorder = new SqliteAnalyticsRecorder(temp.databasePath);
   try {
-    assert.equal(recorder.getDatabaseSchemaVersion(), 13);
+    assert.equal(recorder.getDatabaseSchemaVersion(), 15);
 
     // Schema12 data is untouched: the registry, the detail payload and the
     // deletion marker all survive, and facet history is not reconstructed

@@ -16,7 +16,6 @@ import { rootSessionAttribution } from "../../../lib/session-attribution.js";
 import { getPieBaseSystemPrompt, rebasePieToolPrompt } from "../../agent-instructions/prompt-assembly/pie-harness-prompt.js";
 import { createRequestCapabilityDefinition, type PiToolSeams } from "../recovery/request-capability-ports.js";
 import { getCodeVersion, prewarmCodeVersion } from "./version.js";
-import { buildPruningSystemPrompt, buildPruningUserMessage } from "../prepass/llm-scorer.js";
 import {
 	buildPrepassFingerprint,
 	cacheSuccessfulPrepass,
@@ -310,19 +309,6 @@ export default function register(pi: ExtensionAPI) {
 
 			let prunedSkills: string[] | null = null;
 			let prunedTools: string[] | null = null;
-
-			// autoSkipBelowTokens is based only on the assembled prepass input, not
-			// the main agent's much larger system prompt. This is a neutral keep-all
-			// optimization, not an error or pruning-result event.
-			const estimatedPrepassTokens = estimateTokens(buildPruningSystemPrompt(activeConfig))
-				+ estimateTokens(buildPruningUserMessage(llmInput));
-			if (activeConfig.autoSkipBelowTokens != null && estimatedPrepassTokens < activeConfig.autoSkipBelowTokens) {
-				// A prior auto-mode turn may have disabled tools. Fail-open means
-				// restoring the complete catalog, not merely skipping this decision.
-				if (activeConfig.mode === "auto") restorePrunerOwnedTools();
-				recordKnownSkills(sessionId, activeConfig.mode, allSkillPaths, [], []);
-				return promptRefreshResult();
-			}
 
 			const fingerprint = buildPrepassFingerprint(llmInput, activeConfig);
 			const continuationFingerprint = buildPrepassFingerprint(llmInput, activeConfig, false);

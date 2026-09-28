@@ -9,6 +9,8 @@ import {
   validateWorkerIpcFrameDraft,
 } from '../../lib/rpc/worker-protocol.js';
 import { BackendError } from '../server-io.js';
+import { sessionOpenedUnavailableForWorkerIpc } from '../../lib/rpc/session-opened-transport.js';
+import { SESSION_SNAPSHOT_TOO_LARGE_CODE } from '../../lib/rpc/wire.js';
 
 function opened(sessionPath: string) {
   return {
@@ -97,6 +99,8 @@ test('cold promotion omits an oversized transcript at the actual worker protocol
     'the unbounded handoff reproduces the validator failure without raising its limit',
   );
   let promotedFrame: any;
+  const runtimeCommands: any[] = [];
+  const routedEvents: Array<{ event: string; payload: any }> = [];
   const client = {
     requestFrame: async (body: any) => {
       const frame = { ...frameBase, ...body, requestId: body.requestId ?? `${body.kind}-request` };
@@ -108,6 +112,21 @@ test('cold promotion omits an oversized transcript at the actual worker protocol
         promotedFrame = frame;
         if (measured.ok) assert.ok(measured.bytes + 1 < WORKER_IPC_MAX_FRAME_BYTES);
         return { kind: 'runtime.ready', runtimeMetadata: { mode: 'phase4', startedAt: 1 } };
+      }
+      if (body.kind === 'runtime.command') {
+        runtimeCommands.push(body);
+        return {
+          kind: 'response', requestId: frame.requestId, ok: true,
+          result: { kind: 'runtime.command', payload: {
+            sessionPath,
+            transcript: [{ id: 'durable-history-entry', role: 'user', markdown: 'saved history' }],
+            transcriptWindow: {
+              totalCount: 1, loadedStart: 0, loadedEnd: 1,
+              hasOlder: false, hasNewer: false, isPartial: false, hasUserMessages: true,
+            },
+            busy: false,
+          } },
+        };
       }
       return { kind: 'sync.ack', domain: body.domain, revision: body.revision };
     },
@@ -154,6 +173,38 @@ test('cold promotion omits an oversized transcript at the actual worker protocol
   assert.equal(promotedFrame.payload.openedPayload.session.path, sessionPath);
   assert.equal(promotedFrame.payload.openedPayload.modelSettings.defaultModel, 'm');
   assert.equal(promotedFrame.payload.openedPayload.transcriptWindow.totalCount, oversizedTranscript.length);
+
+  (router as any).options.emit = (event: string, payload: any) => routedEvents.push({ event, payload });
+  const metadataOpened = {
+    ...sessionOpenedUnavailableForWorkerIpc(openedPayload),
+    sessionPath,
+    runtimeReady: true,
+    contextUsage: { tokens: 2_000, contextWindow: 16_000, percent: 0.125 },
+  };
+  const eventFrame = {
+    ...frameBase,
+    seq: 1,
+    kind: 'runtime.event',
+    event: 'session.opened',
+    payload: metadataOpened,
+  };
+  const { seq: _seq, ...eventDraft } = eventFrame;
+  assert.equal(validateWorkerIpcFrameDraft(eventDraft), undefined);
+  await router.handleWorkerFrame(sessionPath, eventFrame as any);
+  assert.equal(routedEvents.length, 1);
+  assert.equal(routedEvents[0]?.event, 'session.opened');
+  assert.equal(routedEvents[0]?.payload.snapshotUnavailable?.code, SESSION_SNAPSHOT_TOO_LARGE_CODE);
+  assert.equal(routedEvents[0]?.payload.transcriptSkipped, undefined);
+  assert.deepEqual(routedEvents[0]?.payload.contextUsage, metadataOpened.contextUsage);
+
+  const page = await router.routeExisting({
+    id: 'history-page-after-promotion',
+    method: 'session.loadTranscriptPage',
+    params: { sessionPath, direction: 'latest' },
+  } as any) as any;
+  assert.equal(runtimeCommands.at(-1)?.operation, 'session.loadTranscriptPage');
+  assert.equal(page.transcript[0].id, 'durable-history-entry');
+  assert.equal(page.transcriptWindow.totalCount, 1);
 });
 
 test('worker router promotion is single-flight and runtime.ready precedes the initiating command', async () => {

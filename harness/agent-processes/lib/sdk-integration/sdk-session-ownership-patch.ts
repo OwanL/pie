@@ -1,4 +1,4 @@
-export const SDK_SESSION_OWNERSHIP_MANAGER_PATCH_VERSION = 4 as const;
+export const SDK_SESSION_OWNERSHIP_MANAGER_PATCH_VERSION = 5 as const;
 export const SDK_SESSION_REPLACEMENT_RUNTIME_PATCH_VERSION = 10 as const;
 export const SDK_SESSION_MANAGER_RELATIVE_PATH = 'dist/core/session-manager.js';
 export const SDK_SESSION_RUNTIME_RELATIVE_PATH = 'dist/core/agent-session-runtime.js';
@@ -370,6 +370,26 @@ const MANAGER_METHODS_REPLACEMENT = `${PIE_MODEL_SETTINGS_METHOD}    attachPieWr
 
 const MANAGER_IMPORT_V2 = `import { appendFileSync, closeSync, createReadStream, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readdirSync, readSync, rmSync, statSync, writeFileSync, } from "fs";`;
 const MANAGER_IMPORT_REPLACEMENT = `import { appendFileSync, closeSync, createReadStream, existsSync, fsyncSync, linkSync, mkdirSync, openSync, readdirSync, readSync, renameSync, rmSync, statSync, writeFileSync, } from "fs";`;
+const MANAGER_TRANSIENT_RENAME_HELPER = `// The model-settings mutation is synchronous, so mirror the shared atomic-write
+// retry window here without yielding. Only known Windows sharing codes retry.
+function renamePieFileWithTransientRetry(sourcePath, targetPath) {
+    const retryDelays = [10, 25, 50, 100, 250, 500, 1000, 2000, 4000];
+    const waitArray = new Int32Array(new SharedArrayBuffer(4));
+    for (let attempt = 0; ; attempt++) {
+        try {
+            renameSync(sourcePath, targetPath);
+            return;
+        }
+        catch (error) {
+            const code = error && typeof error === "object" ? error.code : undefined;
+            const delay = retryDelays[attempt];
+            if (!["EACCES", "EBUSY", "EPERM"].includes(code) || delay === undefined)
+                throw error;
+            Atomics.wait(waitArray, 0, 0, delay);
+        }
+    }
+}
+`;
 const MANAGER_WRITE_MUTATION_METHOD = `    _runPieWriteMutation(seam, mutation) {
         this._assertPieWriteLease(seam);
         if (!this.pieOwnershipAdapter || typeof this.pieOwnershipAdapter.runWriteMutation !== "function")
@@ -515,6 +535,17 @@ const SDK_SESSION_MANAGER_OWNERSHIP_V2_MARKERS = [
   'Worker branch destinations require preparePieBranched',
 ] as const;
 
+const MANAGER_V4_TO_V5_REPLACEMENTS: ReadonlyArray<readonly [string, string]> = [
+  [
+    'export class StaleSessionWriteLeaseError extends Error {',
+    `${MANAGER_TRANSIENT_RENAME_HELPER}export class StaleSessionWriteLeaseError extends Error {`,
+  ],
+  [
+    'renameSync(temporaryPath, sessionFile);',
+    'renamePieFileWithTransientRetry(temporaryPath, sessionFile);',
+  ],
+];
+
 const SDK_SESSION_MANAGER_OWNERSHIP_V3_MARKERS = [
   ...SDK_SESSION_MANAGER_OWNERSHIP_V2_MARKERS,
   'appendPieModelSettingsChange(provider, modelId, thinkingLevel)',
@@ -522,7 +553,7 @@ const SDK_SESSION_MANAGER_OWNERSHIP_V3_MARKERS = [
   'renameSync(temporaryPath, sessionFile)',
 ] as const;
 
-export const SDK_SESSION_MANAGER_OWNERSHIP_MARKERS = [
+const SDK_SESSION_MANAGER_OWNERSHIP_V4_MARKERS = [
   ...SDK_SESSION_MANAGER_OWNERSHIP_V3_MARKERS.filter((marker) => ![
     'this._assertPieWriteLease("_rewriteFile")',
     'this._assertPieWriteLease("_persist")',
@@ -535,6 +566,12 @@ export const SDK_SESSION_MANAGER_OWNERSHIP_MARKERS = [
   'this._runPieWriteMutation("_appendEntry", () => {',
   'copyPieSessionFile(sourcePath, destinationPath)',
   'renameSync(temporaryPath, sessionFile)',
+] as const;
+
+export const SDK_SESSION_MANAGER_OWNERSHIP_MARKERS = [
+  ...SDK_SESSION_MANAGER_OWNERSHIP_V4_MARKERS.filter((marker) => marker !== 'renameSync(temporaryPath, sessionFile)'),
+  'function renamePieFileWithTransientRetry(sourcePath, targetPath) {',
+  'renamePieFileWithTransientRetry(temporaryPath, sessionFile)',
 ] as const;
 
 const SDK_SESSION_MANAGER_OWNERSHIP_V1_MARKERS = SDK_SESSION_MANAGER_OWNERSHIP_V2_MARKERS.map((marker) => (
@@ -1058,6 +1095,11 @@ function reverseReplacements(
 export function reverseSdkSessionManagerOwnership(source: string): string | undefined {
   let current = source;
   if (hasAll(current, SDK_SESSION_MANAGER_OWNERSHIP_MARKERS)) {
+    const withoutTransientRetry = reverseReplacements(current, MANAGER_V4_TO_V5_REPLACEMENTS);
+    if (!withoutTransientRetry) return undefined;
+    current = withoutTransientRetry;
+  }
+  if (hasAll(current, SDK_SESSION_MANAGER_OWNERSHIP_V4_MARKERS)) {
     const withoutSeams = reverseReplacements(current, MANAGER_V3_TO_V4_SEAM_REPLACEMENTS);
     if (!withoutSeams) return undefined;
     return replaceExactlyOnce(withoutSeams, MANAGER_METHODS_REPLACEMENT, MANAGER_METHODS_REPLACEMENT_V3);
@@ -1126,12 +1168,18 @@ export function transformSdkSessionManagerOwnership(source: string): {
   if (hasAll(source, SDK_SESSION_MANAGER_OWNERSHIP_MARKERS)) {
     return { result: 'already-present', source };
   }
+  if (hasAll(source, SDK_SESSION_MANAGER_OWNERSHIP_V4_MARKERS)) {
+    const upgraded = applyForwardReplacements(source, MANAGER_V4_TO_V5_REPLACEMENTS);
+    return upgraded && hasAll(upgraded, SDK_SESSION_MANAGER_OWNERSHIP_MARKERS)
+      ? { result: 'patched', source: upgraded }
+      : { result: 'unsupported-shape', source };
+  }
   if (hasAll(source, SDK_SESSION_MANAGER_OWNERSHIP_V3_MARKERS)) {
     let upgraded = replaceExactlyOnce(source, MANAGER_METHODS_REPLACEMENT_V3, MANAGER_METHODS_REPLACEMENT);
     if (!upgraded) return { result: 'unsupported-shape', source };
     upgraded = applyForwardReplacements(upgraded, MANAGER_V3_TO_V4_SEAM_REPLACEMENTS);
-    return upgraded && hasAll(upgraded, SDK_SESSION_MANAGER_OWNERSHIP_MARKERS)
-      ? { result: 'patched', source: upgraded }
+    return upgraded && hasAll(upgraded, SDK_SESSION_MANAGER_OWNERSHIP_V4_MARKERS)
+      ? transformSdkSessionManagerOwnership(upgraded)
       : { result: 'unsupported-shape', source };
   }
   if (hasAll(source, SDK_SESSION_MANAGER_OWNERSHIP_V2_MARKERS)) {
@@ -1147,8 +1195,8 @@ export function transformSdkSessionManagerOwnership(source: string): {
     }
     upgraded = replaceExactlyOnce(upgraded, MANAGER_METHODS_REPLACEMENT_V3, MANAGER_METHODS_REPLACEMENT) ?? upgraded;
     upgraded = applyForwardReplacements(upgraded, MANAGER_V3_TO_V4_SEAM_REPLACEMENTS) ?? upgraded;
-    return hasAll(upgraded, SDK_SESSION_MANAGER_OWNERSHIP_MARKERS)
-      ? { result: 'patched', source: upgraded }
+    return hasAll(upgraded, SDK_SESSION_MANAGER_OWNERSHIP_V4_MARKERS)
+      ? transformSdkSessionManagerOwnership(upgraded)
       : { result: 'unsupported-shape', source };
   }
   if (hasAll(source, SDK_SESSION_MANAGER_OWNERSHIP_V1_MARKERS)) {

@@ -11,10 +11,12 @@ import { mapTranscript, type SessionEntryLike } from './transcript';
 export interface DisplayTranscriptCache {
   /** Full durable projection retained backend-side for detail retrieval. */
   transcript: ChatMessage[];
-  /** Compact transport projection used by ordinary transcript windows. */
-  transportTranscript?: ChatMessage[];
+  /** Lazily memoized compact transport rows; unprojected positions stay empty. */
+  transportTranscript?: Array<ChatMessage | undefined>;
   /** Whole-branch usage derived with the durable transcript projection. */
   sessionUsage: SessionUsageSnapshot;
+  /** Path used only to address lazily projected durable details. */
+  transportSessionPath?: string;
   hasUserMessages: boolean;
   branchEntryCount: number;
   branchLastEntryId?: string;
@@ -98,10 +100,16 @@ function buildSlice(
     hasUserMessages: cache.hasUserMessages,
   };
 
-  return {
-    transcript: (cache.transportTranscript ?? cache.transcript).slice(range.start, range.end),
-    transcriptWindow,
-  };
+  const transcript = Array.from({ length: range.end - range.start }, (_, offset) => {
+    const index = range.start + offset;
+    const cached = cache.transportTranscript?.[index];
+    if (cached) return cached;
+    const projected = compactDurableMessageDetails(cache.transcript[index]!, cache.transportSessionPath ?? '');
+    if (cache.transportTranscript) cache.transportTranscript[index] = projected;
+    return projected;
+  });
+
+  return { transcript, transcriptWindow };
 }
 
 function resolvePinnedIndex(
@@ -127,7 +135,7 @@ function deriveCacheFingerprint(entries: SessionEntryLike[]): {
 
 export function buildDisplayTranscriptCache(entries: SessionEntryLike[], sessionPath = ''): DisplayTranscriptCache {
   const transcript = mapTranscript(entries);
-  const transportTranscript = transcript.map((message) => compactDurableMessageDetails(message, sessionPath));
+  const transportTranscript = new Array<ChatMessage | undefined>(transcript.length);
   const { branchEntryCount, branchLastEntryId } = deriveCacheFingerprint(entries);
   // Transcript accounting is retained only as a historical migration/rebuild
   // input; steady-state product surfaces project the host invocation ledger.
@@ -139,6 +147,7 @@ export function buildDisplayTranscriptCache(entries: SessionEntryLike[], session
     transcript,
     transportTranscript,
     sessionUsage,
+    transportSessionPath: sessionPath,
     hasUserMessages: transcript.some((message) => message.role === 'user'),
     branchEntryCount,
     branchLastEntryId,

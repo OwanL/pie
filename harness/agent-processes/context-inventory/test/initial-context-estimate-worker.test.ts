@@ -50,6 +50,7 @@ test('fresh inventory binds resources, counts the unfiltered catalog, and dispos
     waitForIdle: async () => undefined,
     prompt: async () => { promptCalls += 1; },
   };
+  const stageTimings: Array<{ stage: string; durationMs: number }> = [];
   const sdk: any = {
     AuthStorage: { create: () => ({}) },
     SessionManager: { inMemory: () => ({}) },
@@ -100,8 +101,13 @@ test('fresh inventory binds resources, counts the unfiltered catalog, and dispos
     cwd: '/workspace',
     agentDir: '/agent',
     model: { provider: 'mock', id: 'model-a' },
-  });
+  }, (stage, durationMs) => stageTimings.push({ stage, durationMs }));
 
+  assert.deepEqual(stageTimings.map(({ stage }) => stage), [
+    'resourceDiscoveryDurationMs',
+    'promptAndEstimateDurationMs',
+  ]);
+  assert.ok(stageTimings.every(({ durationMs }) => Number.isFinite(durationMs) && durationMs >= 0));
   assert.equal(bound, true, 'resources_discover/session_start binding runs before inventory');
   assert.equal(disposed, true, 'the temporary runtime is always disposed');
   assert.equal(promptCalls, 0, 'inventory never invokes the original AgentSession.prompt');

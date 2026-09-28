@@ -545,7 +545,7 @@ test('schema v10 to current adds source-time and exact execution indexes', () =>
   let upgraded: SqliteAnalyticsRecorder | undefined;
   try {
     upgraded = new SqliteAnalyticsRecorder(temp.databasePath);
-    assert.equal(upgraded.getDatabaseSchemaVersion(), 13);
+    assert.equal(upgraded.getDatabaseSchemaVersion(), 15);
     const indexNames = new Set(
       upgraded.executeReadOnlyQuery(
         "SELECT name FROM sqlite_master WHERE type = 'index' AND name IN ('analytics_execution_state_source_end_global_idx', 'analytics_execution_state_source_end_session_idx', 'analytics_provider_settlement_execution_idx')",
@@ -587,7 +587,7 @@ test('schema v12 to current creates facet storage and aggregate-series indexes',
   let upgraded: SqliteAnalyticsRecorder | undefined;
   try {
     upgraded = new SqliteAnalyticsRecorder(temp.databasePath);
-    assert.equal(upgraded.getDatabaseSchemaVersion(), 13);
+    assert.equal(upgraded.getDatabaseSchemaVersion(), 15);
     const names = new Set(
       upgraded.executeReadOnlyQuery(`
         SELECT name FROM sqlite_master
@@ -850,6 +850,181 @@ test('SQLite recorder accepts exact redelivery and exposes conflicting source re
   }
 });
 
+test('query metadata uses maintained exact retained-detail bytes without rescanning detail tables', () => {
+  const temp = tempDatabase();
+  const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  try {
+    const first = detail({ payloadId: 'metadata-detail-a', rootSessionId: 'root-a', value: { body: 'shared detail body'.repeat(64) } });
+    const second = detail({ payloadId: 'metadata-detail-b', rootSessionId: 'root-b', value: { body: 'shared detail body'.repeat(64) } });
+    recorder.submitDetail(first);
+    recorder.submitDetail(second);
+    recorder.submitDetail(first);
+
+    const assertMetadataMatchesExactStorageWithoutScanning = (): void => {
+      const expected = recorder.detailStorageStats();
+      const originalDetailStorageStats = recorder.detailStorageStats.bind(recorder);
+      recorder.detailStorageStats = () => { throw new Error('query metadata must use maintained detail-byte counters'); };
+      try {
+        const metadata = recorder.readActivityProjection().pendingDetailCoverage;
+        assert.equal(String(metadata.retainedDetailLogicalBytes), String(expected.logicalBytes));
+        assert.equal(String(metadata.retainedDetailStoredBytes), String(expected.storedContentBytes));
+        assert.equal(String(metadata.completeDetailWatermark), String(recorder.readCompleteDetailWatermark()));
+      } finally {
+        recorder.detailStorageStats = originalDetailStorageStats;
+      }
+    };
+    const assertStorageSummaryUsesMaintainedCountersWithoutScanning = (): void => {
+      const expected = recorder.detailStorageStats();
+      const database = (recorder as unknown as { database: { prepare(sql: string): unknown } }).database;
+      const originalPrepare = database.prepare.bind(database);
+      database.prepare = (sql: string): unknown => {
+        assert.doesNotMatch(sql, /FROM analytics_detail_(?:payloads|content)/iu,
+          'visible storage reads must not scan detail tables');
+        return originalPrepare(sql);
+      };
+      try {
+        const summary = recorder.readStorageReadModel().storage;
+        assert.equal(summary.payloadCount, expected.payloadCount);
+        assert.equal(summary.contentCount, expected.contentCount);
+        assert.equal(String(summary.logicalBytes), String(expected.logicalBytes));
+        assert.equal(String(summary.storedContentBytes), String(expected.storedContentBytes));
+      } finally {
+        database.prepare = originalPrepare;
+      }
+    };
+
+    const initialStorage = recorder.detailStorageStats();
+    assert.equal(initialStorage.payloadCount, 2);
+    assert.ok(BigInt(String(initialStorage.logicalBytes)) > BigInt(String(initialStorage.storedContentBytes)),
+      'deduplicated content keeps logical bytes additive');
+    assertMetadataMatchesExactStorageWithoutScanning();
+    assertStorageSummaryUsesMaintainedCountersWithoutScanning();
+
+    const rollbackDb = new DatabaseSync(temp.databasePath);
+    try {
+      rollbackDb.exec(`
+        CREATE TRIGGER test_reject_detail_payload
+        BEFORE INSERT ON analytics_detail_payloads
+        BEGIN
+          SELECT RAISE(ABORT, 'forced detail insert rollback');
+        END;
+      `);
+      assert.throws(
+        () => recorder.submitDetail(detail({
+          payloadId: 'metadata-detail-rollback',
+          rootSessionId: 'root-rollback',
+          value: { body: 'content inserted before payload rollback' },
+        })),
+        /forced detail insert rollback/,
+      );
+    } finally {
+      rollbackDb.exec('DROP TRIGGER IF EXISTS test_reject_detail_payload;');
+      rollbackDb.close();
+    }
+    assert.deepEqual(recorder.detailStorageStats(), initialStorage, 'aborted payload insert rolls back both byte counters');
+    assertMetadataMatchesExactStorageWithoutScanning();
+
+    recorder.deleteSession('root-a', 'metadata-delete-a', 300);
+    const sharedStorage = recorder.detailStorageStats();
+    assert.equal(sharedStorage.payloadCount, 1);
+    assert.equal(sharedStorage.contentCount, initialStorage.contentCount, 'shared body stays retained');
+    assert.equal(String(sharedStorage.storedContentBytes), String(initialStorage.storedContentBytes), 'shared body stays retained');
+    assertMetadataMatchesExactStorageWithoutScanning();
+
+    recorder.deleteSession('root-b', 'metadata-delete-b', 301);
+    const emptyStorage = recorder.detailStorageStats();
+    assert.equal(emptyStorage.payloadCount, 0);
+    assert.equal(emptyStorage.contentCount, 0);
+    assert.equal(String(emptyStorage.logicalBytes), '0');
+    assert.equal(String(emptyStorage.storedContentBytes), '0');
+    assertMetadataMatchesExactStorageWithoutScanning();
+  } finally {
+    recorder.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('schema 13 migration seeds exact retained-detail byte and count counters for existing data', () => {
+  const temp = tempDatabase();
+  let recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  try {
+    recorder.submitDetail(detail({ payloadId: 'schema-13-detail', value: { body: 'retained before migration'.repeat(128) } }));
+    recorder.close();
+
+    const raw = new DatabaseSync(temp.databasePath);
+    try {
+      raw.exec(`
+        DROP TRIGGER analytics_detail_payload_bytes_insert;
+        DROP TRIGGER analytics_detail_payload_bytes_delete;
+        DROP TRIGGER analytics_detail_content_bytes_insert;
+        DROP TRIGGER analytics_detail_content_bytes_delete;
+        DROP TRIGGER analytics_detail_payload_count_insert;
+        DROP TRIGGER analytics_detail_payload_count_delete;
+        DROP TRIGGER analytics_detail_content_count_insert;
+        DROP TRIGGER analytics_detail_content_count_delete;
+        ALTER TABLE analytics_delivery_accounting DROP COLUMN detail_count_counters_seeded;
+        ALTER TABLE analytics_delivery_accounting DROP COLUMN retained_detail_content_count;
+        ALTER TABLE analytics_delivery_accounting DROP COLUMN retained_detail_payload_count;
+        ALTER TABLE analytics_delivery_accounting DROP COLUMN detail_byte_counters_seeded;
+        ALTER TABLE analytics_delivery_accounting DROP COLUMN retained_detail_stored_bytes;
+        ALTER TABLE analytics_delivery_accounting DROP COLUMN retained_detail_logical_bytes;
+        PRAGMA user_version = 13;
+      `);
+    } finally {
+      raw.close();
+    }
+
+    recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+    const expected = recorder.detailStorageStats();
+    const read = recorder.readActivityProjection();
+    assert.equal(read.databaseSchemaVersion, 15);
+    assert.equal(String(read.pendingDetailCoverage.retainedDetailLogicalBytes), String(expected.logicalBytes));
+    assert.equal(String(read.pendingDetailCoverage.retainedDetailStoredBytes), String(expected.storedContentBytes));
+    recorder.submitDetail(detail({ payloadId: 'schema-15-detail', value: { body: 'new content after migration' } }));
+    assert.equal(String(recorder.readActivityProjection().pendingDetailCoverage.retainedDetailLogicalBytes),
+      String(recorder.detailStorageStats().logicalBytes));
+  } finally {
+    recorder.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
+test('schema 14 migration seeds exact retained-detail row-count counters', () => {
+  const temp = tempDatabase();
+  let recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+  try {
+    recorder.submitDetail(detail({ payloadId: 'schema-14-detail-a', rootSessionId: 'root-a', value: { body: 'shared before migration'.repeat(32) } }));
+    recorder.submitDetail(detail({ payloadId: 'schema-14-detail-b', rootSessionId: 'root-b', value: { body: 'shared before migration'.repeat(32) } }));
+    const expected = recorder.detailStorageStats();
+    recorder.close();
+
+    const raw = new DatabaseSync(temp.databasePath);
+    try {
+      raw.exec(`
+        DROP TRIGGER analytics_detail_payload_count_insert;
+        DROP TRIGGER analytics_detail_payload_count_delete;
+        DROP TRIGGER analytics_detail_content_count_insert;
+        DROP TRIGGER analytics_detail_content_count_delete;
+        ALTER TABLE analytics_delivery_accounting DROP COLUMN detail_count_counters_seeded;
+        ALTER TABLE analytics_delivery_accounting DROP COLUMN retained_detail_content_count;
+        ALTER TABLE analytics_delivery_accounting DROP COLUMN retained_detail_payload_count;
+        PRAGMA user_version = 14;
+      `);
+    } finally {
+      raw.close();
+    }
+
+    recorder = new SqliteAnalyticsRecorder(temp.databasePath);
+    assert.equal(recorder.getDatabaseSchemaVersion(), 15);
+    assert.deepEqual(recorder.detailStorageStats(), expected);
+    recorder.submitDetail(detail({ payloadId: 'schema-15-detail', rootSessionId: 'root-c', value: { body: 'new content after migration' } }));
+    assert.equal(recorder.detailStorageStats().payloadCount, expected.payloadCount + 1);
+  } finally {
+    recorder.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
 test('linked detail storage reconstructs exact rich results and deduplicates nested bodies', () => {
   const temp = tempDatabase();
   const recorder = new SqliteAnalyticsRecorder(temp.databasePath);
@@ -1081,6 +1256,14 @@ test('v1 upgrade retains facts, detail, deletion fences, accounting, and source 
         DROP TABLE analytics_projection_state;
         DROP VIEW analytics_provider_usage_v1;
         DROP TRIGGER analytics_detail_reference_last_owner_cleanup;
+        DROP TRIGGER analytics_detail_payload_bytes_insert;
+        DROP TRIGGER analytics_detail_payload_bytes_delete;
+        DROP TRIGGER analytics_detail_content_bytes_insert;
+        DROP TRIGGER analytics_detail_content_bytes_delete;
+        DROP TRIGGER analytics_detail_payload_count_insert;
+        DROP TRIGGER analytics_detail_payload_count_delete;
+        DROP TRIGGER analytics_detail_content_count_insert;
+        DROP TRIGGER analytics_detail_content_count_delete;
         DROP TABLE analytics_delivery_accounting;
         DROP TABLE analytics_generations;
         ALTER TABLE analytics_detail_payloads DROP COLUMN omission_reason;
@@ -1098,7 +1281,7 @@ test('v1 upgrade retains facts, detail, deletion fences, accounting, and source 
     }
 
     recorder = new SqliteAnalyticsRecorder(temp.databasePath);
-    assert.equal(recorder.getDatabaseSchemaVersion(), 13);
+    assert.equal(recorder.getDatabaseSchemaVersion(), 15);
     assert.equal(recorder.readDeliveryAccounting().deliveryHistoryCoverage, 'retained_only');
     assert.equal(recorder.countObservations('root-retained'), 1);
     assert.deepEqual(recorder.reconstructDetail('legacy-detail'), { retained: true });
@@ -1285,14 +1468,14 @@ test('recorder rejects unsupported newer database schema versions', () => {
   try {
     // One beyond the current schema: an unversioned future database must fail
     // closed rather than be read with today's assumptions.
-    raw.exec('PRAGMA user_version = 14');
+    raw.exec('PRAGMA user_version = 16');
   } finally {
     raw.close();
   }
   try {
     assert.throws(
       () => new SqliteAnalyticsRecorder(temp.databasePath),
-      /Unsupported newer analytics database schema version 14/,
+      /Unsupported newer analytics database schema version 16/,
     );
   } finally {
     rmSync(temp.root, { recursive: true, force: true });
@@ -1933,7 +2116,7 @@ test('logical query surface is native read-only, bounded, and reports snapshot/d
       ['query-a'],
       { maxRows: 2, maxCellBytes: 32 },
     );
-    assert.equal(result.databaseSchemaVersion, 13);
+    assert.equal(result.databaseSchemaVersion, 15);
     assert.equal(result.snapshotWatermark, 3);
     assert.deepEqual(result.generationIds, ['generation-1']);
     assert.equal(result.returnedRows, 2);
@@ -2218,7 +2401,7 @@ test('schema v5 adds the projection-order index without changing stored settleme
 
     const upgraded = new SqliteAnalyticsRecorder(temp.databasePath);
     try {
-      assert.equal(upgraded.getDatabaseSchemaVersion(), 13);
+      assert.equal(upgraded.getDatabaseSchemaVersion(), 15);
       const after = upgraded.readProviderSettlements();
       assert.deepEqual(after.settlements, before.settlements);
       assert.equal(upgraded.readProviderAccountingSummary().inputTokens.knownTotal, knownTotalBefore);

@@ -44,6 +44,7 @@ import {
   parseLivePipelineToggleParams,
   waitForSessionTransition,
   type ModelSettingsUnsetKey,
+  type SessionOpenTimingSample,
   type TranscriptPageLoadOptions,
 } from './request-handler.js';
 import {
@@ -653,6 +654,7 @@ export class BackendServer {
         sdkPath: this.sdkPath,
         sdkPatchIdentity,
         onDiagnostic: (chunk) => backendWarn('backend-initial-context-inventory', 'worker diagnostic', { chunk }),
+        onTiming: (sample) => backendLog('info', 'backend-timing', 'initial-context-inventory.stage', { ...sample }),
       });
     }
     if (this.coldBrowseHelperEntryPath) {
@@ -663,6 +665,7 @@ export class BackendServer {
         startupCwd: this.startupCwd,
         parentPid: process.pid,
         onDiagnostic: (chunk) => backendWarn('backend-cold-browse-helper', 'helper diagnostic', { chunk }),
+        onTiming: (sample) => backendLog('info', 'backend-timing', 'cold-browse-helper.stage', { ...sample }),
       });
       // Eagerly validate/import the helper SDK while coordinator startup does
       // independent work. Failure is deliberately non-fatal: the first exact
@@ -995,6 +998,12 @@ export class BackendServer {
       ...(this.analyticsAuthority?.descriptor ? { analyticsActivation: this.analyticsAuthority.descriptor } : {}),
     });
 
+    // Preload only validated SDK modules in one short-lived spare. The child
+    // does not see session cwd/model/agent settings or discover user extensions
+    // until an actual cold open consumes it; idle expiry and dispose own it.
+    void this.initialContextEstimateClient?.warm().catch((error) => {
+      backendWarn('backend-initial-context-inventory', 'eager warm failed', { error: toErrorMessage(error) });
+    });
     this.startSessionCatalogPolling();
   }
 
@@ -1712,6 +1721,8 @@ export class BackendServer {
           && snapshot.contextUsage === undefined
           && (snapshot.sessionUsage?.samples.length ?? 0) === 0
         );
+        // The fresh inventory target comes from this authoritative session
+        // snapshot (cwd/model), so discovery cannot safely overlap this read.
         let payload = await openColdSnapshot(options);
         if (includeInitialContextInventory
           && payload.runtimeReady === false
@@ -2180,7 +2191,17 @@ export class BackendServer {
         pid: process.pid,
       });
     };
-    const invoke = () => this.handleRequest(request, onRequestValidated, toggleGeneration);
+    const invoke = () => this.handleRequest(
+      request,
+      onRequestValidated,
+      toggleGeneration,
+      request.method === 'session.open'
+        ? (sample) => backendLog('info', 'backend-timing', 'session.open.stages', {
+            requestId: request.id,
+            ...sample,
+          })
+        : undefined,
+    );
     // Exactly one finish/error completion per request: the success record is
     // emitted only after the final (possibly retried) handler run settles, and
     // a later response-write failure must not also emit a failure completion.
@@ -3128,6 +3149,7 @@ export class BackendServer {
     request: RequestEnvelope,
     onRequestValidated?: () => void,
     livePipelineTraceToggleGeneration?: number,
+    onSessionOpenTiming?: (sample: SessionOpenTimingSample) => void,
   ): Promise<unknown> {
     const router = this.workerRuntimeRouter;
     if (request.method === 'message.edit') {
@@ -3546,6 +3568,7 @@ export class BackendServer {
         this.workerRuntimeRouter?.acknowledgeAnalytics(route, acknowledgement) === true
       ),
       onRequestValidated,
+      onSessionOpenTiming,
       suppressRequestTrace: true,
       livePipelineTraceToggleGeneration,
       deferLivePipelineTraceDisable: (requestId, generation, onApplied) => (

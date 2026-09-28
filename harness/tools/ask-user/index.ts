@@ -47,7 +47,8 @@ export default function (pi: ExtensionAPI) {
     description: 'Ask one clarifying question with preset answers and an optional free-form reply.',
     promptSnippet: 'Ask the user a clarifying question and wait for their reply.',
     promptGuidelines: [
-      'Use ask_user for material ambiguity, preferably with 2–4 options; never use it for status updates or needless permission.',
+      "Use ask_user for clarification, important decisions, approval, or steering. Don't end turns with a question or a request for approval; use ask_user and continue after the user responds.",
+      'Prefer 2–4 options; never use ask_user for status updates or needless permission.',
     ],
     parameters: askUserSchema,
     async execute(toolCallId, params, signal, _onUpdate, ctx) {

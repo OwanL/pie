@@ -98,15 +98,6 @@ export async function readPruningSettings(): Promise<PruningSettings> {
       ? pruning.prepassTimeoutSec
       : DEFAULT_PRUNING_SETTINGS.prepassTimeoutSec;
 
-    // A positive number enables auto-skip; explicit null disables it. Missing
-    // or invalid values fall back to the declared application default.
-    const rawAutoSkip = pruning.autoSkipBelowTokens;
-    const autoSkipBelowTokens = rawAutoSkip === null
-      ? null
-      : typeof rawAutoSkip === 'number' && Number.isFinite(rawAutoSkip) && rawAutoSkip > 0
-        ? rawAutoSkip
-        : DEFAULT_PRUNING_SETTINGS.autoSkipBelowTokens;
-
     return {
       mode,
       skillCeiling,
@@ -119,7 +110,6 @@ export async function readPruningSettings(): Promise<PruningSettings> {
       mainAgentEnabled,
       subagentEnabled,
       prepassTimeoutSec,
-      autoSkipBelowTokens,
     };
   } catch {
     return cloneDefaultPruningSettings();
@@ -186,7 +176,6 @@ export async function writePruningSettings(
     if (updates.mainAgentEnabled !== undefined) pruning.mainAgentEnabled = updates.mainAgentEnabled;
     if (updates.subagentEnabled !== undefined) pruning.subagentEnabled = updates.subagentEnabled;
     if (updates.prepassTimeoutSec !== undefined) pruning.prepassTimeoutSec = updates.prepassTimeoutSec;
-    if (updates.autoSkipBelowTokens !== undefined) pruning.autoSkipBelowTokens = updates.autoSkipBelowTokens;
 
     return { ...existing, pruning };
   });

@@ -231,7 +231,10 @@ export function setSubagentProviderDefaultEnabled(
   };
 }
 
-/** Toggle a provider only for subagents launched by one chat session. */
+/** Toggle a provider only for subagents launched by one chat session.
+ * Send the complete override set for that session, not the renderer's full
+ * historical per-session map: the host merges this bounded projection into
+ * its durable prefs, while browser ingress retains its generic object-key cap. */
 export function setSubagentProviderEnabled(
   prefs: ChatPrefs,
   sessionPath: string,
@@ -240,7 +243,6 @@ export function setSubagentProviderEnabled(
 ): Partial<ChatPrefs> {
   return {
     subagentProviderTogglesBySession: {
-      ...prefs.subagentProviderTogglesBySession,
       [sessionPath]: {
         ...(prefs.subagentProviderTogglesBySession[sessionPath] ?? {}),
         [provider]: enabled,

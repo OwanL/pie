@@ -4,6 +4,7 @@ import {
 import type {
   AnalyticsQueryAdmissionSnapshot,
   AnalyticsQueryLifecycleEvent,
+  AnalyticsQueryPriority,
 } from './query-client.js';
 import type {
   AnalyticsDetailRangeResult,
@@ -125,6 +126,25 @@ export interface CanonicalToolFacetProjectionRequest {
   maxResultBytes?: number;
 }
 
+export interface CanonicalActivityToolFacetProjectionRequest {
+  /** Session scope; omitted selects the global scope. */
+  rootSessionId?: string;
+  maxKinds?: number;
+  limit?: number;
+  /** Per-projection target; the combined helper result is bounded to twice
+   * this value plus a fixed metadata allowance. */
+  maxResultBytes?: number;
+}
+
+export type CanonicalProjectionReadOutcome<Value> =
+  | { value: Value }
+  | { error: string };
+
+export interface CanonicalActivityToolFacetProjectionReadModel {
+  activity: CanonicalProjectionReadOutcome<ActivityProjectionReadModel & AnalyticsQuerySnapshotMetadata>;
+  toolFacets: CanonicalProjectionReadOutcome<ToolFacetProjectionReadModel & AnalyticsQuerySnapshotMetadata>;
+}
+
 function boundedPositiveInteger(
   value: number | undefined,
   fallback: number,
@@ -221,7 +241,7 @@ export class CanonicalAnalyticsReadModel {
     const result = await this.client.query<AnalyticsReadOnlyQueryResult>({
       type: 'query',
       sql: 'SELECT revision FROM analytics_projection_state WHERE singleton = 1',
-    }, signal);
+    }, signal, 'normal');
     const value = result.rows[0]?.revision;
     if (typeof value !== 'number' && typeof value !== 'string') {
       throw new Error('Canonical analytics projection revision is unavailable.');
@@ -252,7 +272,11 @@ export class CanonicalAnalyticsReadModel {
 
   /** One bounded read-only SELECT. Results carry the snapshot watermark,
    * projection revision, generation coverage, and explicit truncation flags. */
-  executeQuery(request: CanonicalQueryRequest, signal?: AbortSignal): Promise<AnalyticsReadOnlyQueryResult> {
+  executeQuery(
+    request: CanonicalQueryRequest,
+    signal?: AbortSignal,
+    priority: AnalyticsQueryPriority = 'normal',
+  ): Promise<AnalyticsReadOnlyQueryResult> {
     if (!request.sql || /\0/u.test(request.sql)) {
       throw new Error('Canonical analytics query SQL must be a non-empty string without NUL.');
     }
@@ -264,7 +288,7 @@ export class CanonicalAnalyticsReadModel {
       maxQueryBytes: request.maxQueryBytes,
       maxCellBytes: request.maxCellBytes,
       maxResultBytes: request.maxResultBytes ?? this.maxResultBytes,
-    }, signal);
+    }, signal, priority);
   }
 
   /** One bounded detail range; large payloads page via `nextOffset` and the
@@ -314,6 +338,7 @@ export class CanonicalAnalyticsReadModel {
     scope: ProviderSettlementScope,
     page: { limit?: number; offset?: number; expectedRevision?: number | string; maxResultBytes?: number } = {},
     signal?: AbortSignal,
+    priority: AnalyticsQueryPriority = 'normal',
   ): Promise<ScopedProviderSettlementReadModel> {
     const maxResultBytes = boundedPositiveInteger(
       page.maxResultBytes,
@@ -328,7 +353,7 @@ export class CanonicalAnalyticsReadModel {
       offset: page.offset,
       expectedRevision: page.expectedRevision,
       maxResultBytes,
-    }, signal);
+    }, signal, priority);
   }
 
   /** Engine-neutral scoped accounting summary over the canonical settlements. */
@@ -398,7 +423,7 @@ export class CanonicalAnalyticsReadModel {
       dailyWindowEndMs: request.dailyWindowEndMs,
       maxGroups,
       maxResultBytes,
-      }, signal);
+      }, signal, 'interactive');
     })();
   }
 
@@ -420,6 +445,7 @@ export class CanonicalAnalyticsReadModel {
   readActivityProjection(
     request: CanonicalActivityProjectionRequest = {},
     signal?: AbortSignal,
+    priority: AnalyticsQueryPriority = 'normal',
   ): Promise<ActivityProjectionReadModel & AnalyticsQuerySnapshotMetadata> {
     if (request.rootSessionId !== undefined
         && (!request.rootSessionId.trim() || request.rootSessionId.includes('\0'))) {
@@ -433,7 +459,7 @@ export class CanonicalAnalyticsReadModel {
       rootSessionId: request.rootSessionId,
       maxKinds,
       maxResultBytes: request.maxResultBytes ?? this.maxResultBytes,
-    }, signal);
+    }, signal, priority);
   }
 
   /** Bounded maintained tool/file facet rows with explicit attempted
@@ -442,6 +468,7 @@ export class CanonicalAnalyticsReadModel {
   readToolFacetProjection(
     request: CanonicalToolFacetProjectionRequest = {},
     signal?: AbortSignal,
+    priority: AnalyticsQueryPriority = 'normal',
   ): Promise<ToolFacetProjectionReadModel & AnalyticsQuerySnapshotMetadata> {
     if (request.rootSessionId !== undefined
         && (!request.rootSessionId.trim() || request.rootSessionId.includes('\0'))) {
@@ -455,7 +482,41 @@ export class CanonicalAnalyticsReadModel {
       rootSessionId: request.rootSessionId,
       limit,
       maxResultBytes: request.maxResultBytes ?? this.maxResultBytes,
-    }, signal);
+    }, signal, priority);
+  }
+
+  /** Coalesced host-refresh read for activity and tool facets. Both projection
+   * outcomes retain their own snapshot metadata and independent failure state,
+   * while one disposable helper serves the scope. */
+  readActivityAndToolFacetProjections(
+    request: CanonicalActivityToolFacetProjectionRequest = {},
+    signal?: AbortSignal,
+    priority: AnalyticsQueryPriority = 'normal',
+  ): Promise<CanonicalActivityToolFacetProjectionReadModel> {
+    if (request.rootSessionId !== undefined
+        && (!request.rootSessionId.trim() || request.rootSessionId.includes('\0'))) {
+      throw new Error('Canonical analytics rootSessionId must be a non-empty string without NUL.');
+    }
+    const maxKinds = request.maxKinds === undefined
+      ? undefined
+      : boundedPositiveInteger(request.maxKinds, this.maxRows, MAX_ROWS, 'activity maxKinds');
+    const limit = request.limit === undefined
+      ? undefined
+      : boundedPositiveInteger(request.limit, this.maxRows, MAX_ROWS, 'facet limit');
+    const projectionMaxResultBytes = boundedPositiveInteger(
+      request.maxResultBytes,
+      this.maxResultBytes,
+      MAX_RESULT_BYTES,
+      'activity/facet maxResultBytes',
+    );
+    const maxResultBytes = Math.min(MAX_RESULT_BYTES, 2 * projectionMaxResultBytes + 16 * 1024);
+    return this.client.query<CanonicalActivityToolFacetProjectionReadModel>({
+      type: 'activityToolFacetProjections',
+      rootSessionId: request.rootSessionId,
+      maxKinds,
+      limit,
+      maxResultBytes,
+    }, signal, priority);
   }
 
   private delay(ms: number, signal?: AbortSignal): Promise<void> {

@@ -699,19 +699,6 @@ async function writeFastCache(fingerprint, totals) {
   await writeFile(fastCachePath, JSON.stringify({ fingerprint, totals }), 'utf8');
 }
 
-function delayUnlessAborted(delayMs, signal) {
-  if (signal.aborted) return Promise.resolve();
-  return new Promise((resolve) => {
-    const timer = setTimeout(finish, delayMs);
-    signal.addEventListener('abort', finish, { once: true });
-    function finish() {
-      clearTimeout(timer);
-      signal.removeEventListener('abort', finish);
-      resolve();
-    }
-  });
-}
-
 function formatPercent(value) {
   return `${value.toFixed(1)}%`;
 }
@@ -800,6 +787,61 @@ function summarizeCoverageFailures(config, coverage) {
     failures.push(`branch coverage ${formatPercent(coverage.coveredBranchPercent)} < ${config.thresholds.branches}%`);
   }
   return failures;
+}
+
+/**
+ * Run a broad fast suite without multiplying package-level Node runners.
+ * Extension tests have their own bundled/esbuild wave and are exclusive with
+ * other package runners. Remaining groups share a fixed three-runner budget;
+ * each group's node:test concurrency is already bounded by the package registry.
+ * Results retain the caller's package order even though extension runs first.
+ */
+export async function runFastPackageQueue(configs, runConfig, concurrency = 3) {
+  if (!Number.isInteger(concurrency) || concurrency < 1) {
+    throw new Error(`Fast package concurrency must be a positive integer; received ${concurrency}.`);
+  }
+
+  const results = new Array(configs.length);
+  let hasFailure = false;
+  let firstFailure;
+  const run = async (index) => {
+    try {
+      results[index] = await runConfig(configs[index]);
+    } catch (error) {
+      if (!hasFailure) firstFailure = error;
+      hasFailure = true;
+    }
+  };
+
+  const extensionIndex = configs.findIndex((config) => config.id === 'extension');
+  if (extensionIndex !== -1) await run(extensionIndex);
+
+  const queuedIndexes = configs.map((_, index) => index).filter((index) => index !== extensionIndex);
+  let nextIndex = 0;
+  const workerCount = Math.min(concurrency, queuedIndexes.length);
+  const workers = Array.from({ length: workerCount }, async () => {
+    for (;;) {
+      const queueIndex = nextIndex;
+      nextIndex += 1;
+      if (queueIndex >= queuedIndexes.length) return;
+      await run(queuedIndexes[queueIndex]);
+    }
+  });
+
+  await Promise.all(workers);
+  if (hasFailure) throw firstFailure;
+  return results;
+}
+
+export function buildFastRunnerArgs(config) {
+  const args = config.fastBatchMode ? [config.fastBatchMode] : [];
+  // The root runner makes one batch per test root. Honor the shared root
+  // package budget instead of launching all roots at once (currently 30 child
+  // test processes on a full checkout).
+  if (config.fastBatchMode === 'root' && config.fastConcurrency !== undefined) {
+    args.push(`--test-concurrency=${config.fastConcurrency}`);
+  }
+  return args;
 }
 
 export function buildTestArgs(config, fast = false, testArgs = []) {
@@ -927,7 +969,7 @@ function runChildProcess(command, args, cwd, signal, envOverrides = {}, verifyCl
 async function runPackage(config, fast = false, integration = false, testArgs = [], signal) {
   const useFastRunner = fast && (config.fastRunner || config.fastBatchMode) && testArgs.length === 0;
   const fastRunner = config.fastRunner ?? path.join(repoRoot, 'scripts', 'verification', 'run-fast-batched-tests.mjs');
-  const fastRunnerArgs = config.fastBatchMode ? [config.fastBatchMode] : [];
+  const fastRunnerArgs = buildFastRunnerArgs(config);
   // Packages with a registry tsxConfig run through a generated overlay config
   // (owner-relative aliases extending the checked-in base tsconfig) instead of
   // the raw repo-relative path; dedicated fast-batch modes overlay inside
@@ -1198,24 +1240,19 @@ async function main() {
   const processAbort = abortOnProcessSignals();
   let results;
   try {
-    const staggerFullFastSuite = parsedArgs.fast
+    const runConfig = (config) => runPackage(
+      config,
+      parsedArgs.fast,
+      parsedArgs.integration,
+      parsedArgs.testArgs,
+      processAbort.signal,
+    );
+    const isBroadFastSuite = parsedArgs.fast
       && parsedArgs.selected.length === 0
-      && executionConfigs.some((config) => config.id === 'extension');
-    results = await Promise.all(executionConfigs.map(async (config) => {
-      if (staggerFullFastSuite && config.id !== 'extension') {
-        // Let esbuild clear its initial CPU burst before starting the tsx
-        // batches. Their execution still overlaps, but transform workers no
-        // longer multiply into the suite's dominant oversubscription spike.
-        await delayUnlessAborted(7_250, processAbort.signal);
-      }
-      return await runPackage(
-        config,
-        parsedArgs.fast,
-        parsedArgs.integration,
-        parsedArgs.testArgs,
-        processAbort.signal,
-      );
-    }));
+      && parsedArgs.testArgs.length === 0;
+    results = isBroadFastSuite
+      ? await runFastPackageQueue(executionConfigs, runConfig)
+      : await Promise.all(executionConfigs.map(runConfig));
     // Absorb load-induced flakiness in the fast loop: re-run failed packages
     // once under minimal contention before declaring a red suite. Coverage
     // (verify) runs, integration runs, and pattern-filtered runs stay strict.

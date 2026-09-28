@@ -119,7 +119,7 @@ test('production query worker includes terminal telemetry on a bounded schema re
   });
   try {
     const schema = await client.query<{ databaseSchemaVersion: number }>({ type: 'schema' });
-    assert.equal(schema.databaseSchemaVersion, 13);
+    assert.equal(schema.databaseSchemaVersion, 15);
     const terminal = lifecycle.find((event) => event.phase === 'terminal');
     assert.ok(terminal);
     assert.equal(terminal.telemetryStatus, 'available');
@@ -192,6 +192,77 @@ test('malformed or missing query telemetry stays unqualified while the query res
     assert.equal(terminal.telemetry, null);
     assert.equal(terminal.telemetryStatus, expectedStatus);
   }
+});
+
+test('interactive aggregate/session refreshes bypass background work while query capacity stays bounded and fair', async (context) => {
+  const lifecycle: Array<AnalyticsQueryLifecycleEvent & { at: number }> = [];
+  const client = new AnalyticsQueryClient({
+    databasePath: path.join(tmpdir(), 'capacity-observation-priority.sqlite'),
+    workerScript,
+    maxConcurrentQueries: 2,
+    maxQueuedQueries: 4,
+    onQueryLifecycle: (event) => lifecycle.push({ ...structuredClone(event), at: performance.now() }),
+  });
+  const aggregate = {
+    type: 'providerAggregate' as const,
+    todayStartMs: 1,
+    todayEndMs: 2,
+    weekStartMs: 1,
+    weekEndMs: 2,
+  };
+  const activeSession = {
+    type: 'scopedProviderSettlements' as const,
+    scope: { kind: 'rootSession' as const, rootSessionId: 'root-active' },
+  };
+  const occupied = [
+    client.query({ type: 'activityToolFacetProjections' }, undefined, 'background'),
+    client.query(activeSession, undefined, 'interactive'),
+  ];
+  const readyDeadline = Date.now() + 5_000;
+  while (lifecycle.filter((event) => event.phase === 'ready').length < 2 && Date.now() < readyDeadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(lifecycle.filter((event) => event.phase === 'ready').length, 2, 'fixture must hold two real helper slots');
+
+  const queued = [
+    client.query({ type: 'query', sql: 'SELECT 1' }, undefined, 'background'),
+    client.query(aggregate, undefined, 'interactive'),
+    client.query(activeSession, undefined, 'interactive'),
+    client.query({ type: 'activityProjection', rootSessionId: 'root-active' }, undefined, 'interactive'),
+  ];
+  await Promise.all([...occupied, ...queued]);
+
+  const queuedAdmissions = lifecycle
+    .filter((event) => event.phase === 'admitted' && event.admission === 'queued')
+    .map((event) => event.requestType);
+  assert.deepEqual(
+    queuedAdmissions,
+    ['providerAggregate', 'scopedProviderSettlements', 'query', 'activityProjection'],
+    'aggregate and active-session reads bypass lower-priority queued helper work; bounded bypass fairness then admits it',
+  );
+  assert.equal(Math.max(...lifecycle.map((event) => event.snapshot.activeQueries)), 2);
+  assert.equal(Math.max(...lifecycle.map((event) => event.snapshot.queuedQueries)), 4);
+  assert.ok(lifecycle.every((event) => event.snapshot.queuedQueries <= event.snapshot.maxQueuedQueries));
+  const aggregateRequestId = lifecycle.find((event) => event.phase === 'submitted' && event.requestType === 'providerAggregate')?.requestId;
+  assert.ok(aggregateRequestId !== undefined);
+  const aggregateStart = lifecycle.find((event) => event.requestId === aggregateRequestId && event.phase === 'submitted')?.at;
+  const aggregateEnd = lifecycle.find((event) => event.requestId === aggregateRequestId && event.phase === 'settled')?.at;
+  assert.ok(aggregateStart !== undefined && aggregateEnd !== undefined);
+  assert.ok(aggregateEnd - aggregateStart < 5_000, 'visible aggregate work stays within the under-load freshness target');
+  const backgroundRequestId = lifecycle.find((event) => event.phase === 'submitted' && event.requestType === 'query')?.requestId;
+  assert.ok(backgroundRequestId !== undefined);
+  const backgroundSubmitted = lifecycle.find((event) => event.requestId === backgroundRequestId && event.phase === 'submitted')?.at;
+  const backgroundAdmitted = lifecycle.find((event) => event.requestId === backgroundRequestId && event.phase === 'admitted')?.at;
+  const backgroundSettled = lifecycle.find((event) => event.requestId === backgroundRequestId && event.phase === 'settled')?.at;
+  assert.ok(backgroundSubmitted !== undefined && backgroundAdmitted !== undefined && backgroundSettled !== undefined);
+  assert.ok(backgroundAdmitted - backgroundSubmitted < 5_000, 'background helper work receives a fair bounded admission');
+  context.diagnostic(`controlled delayed helpers: aggregate freshness ${(aggregateEnd - aggregateStart).toFixed(1)}ms; background queue wait ${(backgroundAdmitted - backgroundSubmitted).toFixed(1)}ms; background completion ${(backgroundSettled - backgroundSubmitted).toFixed(1)}ms; peak 2 helpers, queue cap 4, priority fairness after 2 bypasses`);
+  assert.deepEqual(client.getAdmissionSnapshot(), {
+    activeQueries: 0,
+    queuedQueries: 0,
+    maxConcurrentQueries: 2,
+    maxQueuedQueries: 4,
+  });
 });
 
 test('forced query cancellation and timeout publish null unavailable telemetry', async () => {

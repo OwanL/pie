@@ -75,8 +75,6 @@ export interface PruningConfig {
 	skills: SkillPruningConfig;
 	tools?: ToolPruningConfig;
 	prepass?: PrepassConfig;
-	/** Skip the LLM and keep all when the assembled prepass input is smaller than this. Disabled by default. */
-	autoSkipBelowTokens?: number | null;
 }
 
 export interface PruningResult {

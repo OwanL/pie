@@ -22,7 +22,7 @@ const childFixture = path.join(repoRoot, 'application', 'backend', 'deferred-tri
 const SESSION = '/repo/watcher.jsonl';
 
 interface ChildResult {
-  pid: number;
+  pid?: number;
   claimed: boolean;
   dispatched?: boolean;
   recovered?: string[];
@@ -66,7 +66,7 @@ function runChild(
     ], { cwd: repoRoot, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     let stdout = '';
     let stderr = '';
-    const timeout = setTimeout(() => child.kill(), 10_000);
+    const timeout = setTimeout(() => child.kill(), 20_000);
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => { stdout += chunk; });
@@ -88,7 +88,9 @@ function runChild(
 }
 
 async function releaseWhenReady(barrierDir: string, count: number): Promise<void> {
-  const deadline = Date.now() + 5_000;
+  // Child startup includes a cold tsx loader in each OS process; keep this
+  // readiness bound below the child watchdog, but above ordinary suite load.
+  const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
     const ready = fs.existsSync(barrierDir)
       ? fs.readdirSync(barrierDir).filter((name) => name.startsWith('ready-')).length
@@ -103,10 +105,10 @@ async function releaseWhenReady(barrierDir: string, count: number): Promise<void
 }
 
 async function raceChildren(
-  action: 'claim-and-deliver' | 'recover-and-deliver',
   file: string,
   triggerId: string,
   barrierDir: string,
+  action: 'claim-and-deliver' | 'recover-and-deliver' = 'claim-and-deliver',
 ): Promise<ChildResult[]> {
   const children = [
     runChild(action, file, triggerId, barrierDir, 'host-a'),
@@ -116,15 +118,13 @@ async function raceChildren(
   return await Promise.all(children);
 }
 
-test('two OS processes claim once, and two replacement processes recover one dead pre-dispatch owner once', async () => {
+test('OS processes race deferred-trigger claims and dead-owner recovery without duplicate dispatch', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pie-deferred-trigger-process-race-'));
   const file = path.join(root, 'deferred-triggers', 'triggers.jsonl');
   const store = new DeferredTriggerStore(file);
   try {
     store.append(register('race'));
-    const claimRace = await raceChildren(
-      'claim-and-deliver', file, 'race', path.join(root, 'claim-barrier'),
-    );
+    const claimRace = await raceChildren(file, 'race', path.join(root, 'claim-barrier'));
     assert.equal(claimRace.filter((result) => result.claimed).length, 1);
     assert.equal(claimRace.filter((result) => result.dispatched).length, 1);
     assert.equal(dispatchWitnesses(file, 'race').length, 1);
@@ -132,20 +132,26 @@ test('two OS processes claim once, and two replacement processes recover one dea
     assert.equal(store.readOps().filter((op) => op.id === 'race' && op.op === 'fire').length, 1);
 
     store.append(register('recover'));
+    // This separate OS process persists a claim then exits without crossing the
+    // dispatch boundary. Two replacement processes must recover it under the
+    // store lock and only one may claim and dispatch the retry.
     const crashed = await runChild(
       'claim-crash', file, 'recover', path.join(root, 'unused-barrier'), 'dead-host',
     );
     assert.equal(crashed.claimed, true);
-    assert.notEqual(crashed.pid, process.pid);
+    assert.ok(crashed.pid !== undefined && crashed.pid !== process.pid);
     assert.equal(replayTriggers(store.readOps()).get('recover')?.claimOwnerPid, crashed.pid);
 
     const recoveryRace = await raceChildren(
-      'recover-and-deliver', file, 'recover', path.join(root, 'recovery-barrier'),
+      file,
+      'recover',
+      path.join(root, 'recovery-barrier'),
+      'recover-and-deliver',
     );
     assert.equal(recoveryRace.filter((result) => result.claimed).length, 1);
     assert.equal(recoveryRace.filter((result) => result.dispatched).length, 1);
     assert.equal(dispatchWitnesses(file, 'recover').length, 1);
-    assert.equal(recoveryRace.flatMap((result) => result.recovered ?? []).filter((id) => id === 'recover').length >= 1, true);
+    assert.ok(recoveryRace.flatMap((result) => result.recovered ?? []).includes('recover'));
     assert.equal(replayTriggers(store.readOps()).has('recover'), false);
     assert.equal(store.readOps().filter((op) => op.id === 'recover' && op.op === 'fire').length, 1);
     assert.ok(store.readOps().some((op) =>

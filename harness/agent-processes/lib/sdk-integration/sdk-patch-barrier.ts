@@ -814,7 +814,7 @@ async function atomicDurableWrite(filePath: string, source: string): Promise<voi
     await handle.sync();
     await handle.close();
     handle = undefined;
-    await fs.rename(tempPath, filePath);
+    await renameWithTransientRetry(tempPath, filePath);
     await syncDirectory(path.dirname(filePath));
   } finally {
     await handle?.close();

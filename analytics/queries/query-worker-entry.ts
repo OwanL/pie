@@ -150,6 +150,30 @@ process.on('message', (raw: unknown) => {
         rootSessionId: message.rootSessionId,
         limit,
       });
+    } else if (message.type === 'activityToolFacetProjections') {
+      const readProjection = <Value>(read: () => Value): { value: Value } | { error: string } => {
+        try {
+          return { value: read() };
+        } catch (error) {
+          return { error: error instanceof Error ? error.message : String(error) };
+        }
+      };
+      const maxKinds = message.maxKinds === undefined
+        ? undefined
+        : boundedInteger(message.maxKinds, DEFAULT_ROW_LIMIT, MAX_ROW_LIMIT);
+      const limit = message.limit === undefined
+        ? undefined
+        : boundedInteger(message.limit, DEFAULT_ROW_LIMIT, MAX_ROW_LIMIT);
+      result = {
+        activity: readProjection(() => recorder!.readActivityProjection({
+          rootSessionId: message.rootSessionId,
+          maxKinds,
+        })),
+        toolFacets: readProjection(() => recorder!.readToolFacetProjection({
+          rootSessionId: message.rootSessionId,
+          limit,
+        })),
+      };
     } else if (message.type === 'qualificationSpin') {
       // Disposable cancellation seam. Production callers never issue this
       // request; it proves a CPU-bound query can be terminated independently.

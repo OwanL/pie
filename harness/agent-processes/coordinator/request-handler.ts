@@ -44,6 +44,7 @@ export {
   type SessionTransitionWaitOptions,
   type SessionTransitionWaitOutcome,
   type TranscriptPageLoadOptions,
+  type SessionOpenTimingSample,
   type ModelSettingsUnsetKey,
   formatInterruptWatchdogDuration,
   waitForSessionTransition,

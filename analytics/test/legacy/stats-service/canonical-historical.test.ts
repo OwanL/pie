@@ -37,6 +37,16 @@ function closeFixtureWriter(writer: SqliteAnalyticsRecorder): void {
   writer.close();
 }
 
+async function waitForReadModelQueriesToDrain(readModel: CanonicalAnalyticsReadModel): Promise<void> {
+  const deadline = Date.now() + 20_000;
+  for (;;) {
+    const { activeQueries, queuedQueries } = readModel.getAdmissionSnapshot();
+    if (activeQueries === 0 && queuedQueries === 0) return;
+    assert.ok(Date.now() < deadline, `canonical read-model queries did not drain: ${activeQueries} active, ${queuedQueries} queued`);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+}
+
 function settlement(options: {
   invocationId: string;
   rootSessionId: string;
@@ -363,12 +373,16 @@ test('StatsService hydrates bounded canonical activity and facets, refreshes the
   ]);
   closeFixtureWriter(writer);
 
+  const submittedQueryTypes: string[] = [];
   const readModel = new CanonicalAnalyticsReadModel({
     databasePath,
     workerScript,
     execArgv,
     timeoutMs: 20_000,
     revisionPollIntervalMs: 25,
+    onQueryLifecycle: (event) => {
+      if (event.phase === 'submitted') submittedQueryTypes.push(event.requestType);
+    },
   });
   const state = createInitialArchState();
   state.sessions.sessions.push({
@@ -408,6 +422,11 @@ test('StatsService hydrates bounded canonical activity and facets, refreshes the
   };
   try {
     await stats.start();
+    assert.equal(
+      submittedQueryTypes.filter((type) => type === 'activityToolFacetProjections').length,
+      2,
+      'startup hydrates global and displayed-session activity/facets with one worker each',
+    );
     const global = stats.getCanonicalActivityStats();
     assert.equal(global.activity.authority, 'canonical');
     assert.equal(global.activity.projection?.scope.kind, 'global');
@@ -784,6 +803,8 @@ test('canonical refresh rejects a delayed pre-delete response instead of resurre
   });
   const originalRead = baseReadModel.readScopedProviderSettlements.bind(baseReadModel);
   let holdNextRead = false;
+  let capturedOldReadRevision: string | number | undefined;
+  let delayedReadSignal: AbortSignal | undefined;
   let captureOldRead: () => void = () => undefined;
   let rejectOldRead: (reason?: unknown) => void = () => undefined;
   const oldReadCaptured = new Promise<void>((resolve, reject) => {
@@ -811,6 +832,8 @@ test('canonical refresh rejects a delayed pre-delete response instead of resurre
     }
     if (!holdNextRead) return result;
     holdNextRead = false;
+    capturedOldReadRevision = result.revision;
+    delayedReadSignal = signal;
     captureOldRead();
     await heldReadReleased;
     return result;
@@ -833,16 +856,22 @@ test('canonical refresh rejects a delayed pre-delete response instead of resurre
     analyticsCapture: capture,
     analyticsReadModel: delayedReadModel,
   });
+  const internals = stats as unknown as {
+    analyticsRevisionRefresher?: { stop(): Promise<void> };
+    refreshCanonicalSessionUsage(): Promise<void>;
+    markCanonicalRevisionDirty(revision: string): void;
+  };
   try {
     await stats.start();
     assert.equal(stats.getSessionUsage(sessionPath).samples.length, 1);
+    // Drive the strict delete fence below as the only revision invalidation.
+    // Draining the periodic observer prevents its independent notification of
+    // the same commit from canceling the deterministic catch-up pass.
+    assert.ok(internals.analyticsRevisionRefresher, 'startup must establish the revision observer');
+    await internals.analyticsRevisionRefresher.stop();
+
     holdNextRead = true;
-    const refresh = (stats as unknown as { refreshCanonicalSessionUsage(): Promise<void> }).refreshCanonicalSessionUsage();
-    const handshakeTimeout = setTimeout(() => {
-      rejectOldRead(new Error(
-        `Timed out waiting for delayed canonical read (database=${databasePath}, rootSessionId=root-race, workerLifecycle=${JSON.stringify(lifecycleEvents)}).`,
-      ));
-    }, 5_000);
+    const refresh = internals.refreshCanonicalSessionUsage();
     try {
       await oldReadCaptured;
     } catch (error) {
@@ -850,17 +879,16 @@ test('canonical refresh rejects a delayed pre-delete response instead of resurre
         `Delayed canonical read handshake failed (database=${databasePath}, rootSessionId=root-race, workerLifecycle=${JSON.stringify(lifecycleEvents)}): ${String(error)}`,
         { cause: error },
       );
-    } finally {
-      clearTimeout(handshakeTimeout);
     }
     const beforeDelete = await baseReadModel.readRevision();
+    assert.equal(String(capturedOldReadRevision), beforeDelete, 'held response must come from the pre-delete durable snapshot');
     const deleteWriter = new SqliteAnalyticsRecorder(databasePath);
     deleteWriter.deleteSession('root-race', 'private-close-race', at + 3_000);
     deleteWriter.close();
     const deletedRevision = await baseReadModel.readRevision();
     assert.ok(BigInt(deletedRevision) > BigInt(beforeDelete), 'peer delete must advance the durable revision');
-    (stats as unknown as { markCanonicalRevisionDirty(revision: string): void })
-      .markCanonicalRevisionDirty(deletedRevision);
+    internals.markCanonicalRevisionDirty(deletedRevision);
+    assert.equal(delayedReadSignal?.aborted, true, 'the strict delete fence cancels the pre-delete response');
     assert.equal(stats.getSessionUsage(sessionPath).authority, 'unknown');
     assert.equal(stats.getSessionUsage(sessionPath).samples.length, 0);
     releaseOldRead();
@@ -869,7 +897,7 @@ test('canonical refresh rejects a delayed pre-delete response instead of resurre
     assert.equal(stats.getSessionUsage(sessionPath).samples.length, 0);
   } finally {
     // The delayed helper may still be between its capture handshake and the
-    // held-read release when an assertion or timeout fails. Resolve this gate
+    // held-read release when an assertion fails. Resolve this gate
     // before StatsService.shutdown() drains tracked work, so cleanup cannot
     // wait forever on a deliberately paused response.
     releaseOldRead();
@@ -1103,8 +1131,15 @@ test('canonical startup hydrates visible sessions within query capacity and isol
     assert.equal(failedUsage.authority, 'unknown');
     assert.equal(failedUsage.refreshStatus, 'error');
   } finally {
-    await stats.shutdown();
-    rmSync(root, { recursive: true, force: true });
+    try {
+      await stats.shutdown();
+      // Session-path refreshes are drained by StatsService, but canonical busy
+      // time restoration is deliberately detached from those slots. Wait for
+      // its disposable query worker to exit before removing the SQLite fixture.
+      await waitForReadModelQueriesToDrain(baseReadModel);
+    } finally {
+      rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
   }
 });
 

@@ -1,6 +1,6 @@
 {
   "defaultModel": "gpt-6-astra",
-  "defaultThinkingLevel": "medium",
+  "defaultThinkingLevel": "low",
   "defaultProvider": "openai-codex",
   "retry": {
     "enabled": true,
@@ -52,8 +52,7 @@
         "ask_user",
         "mcp"
       ]
-    },
-    "autoSkipBelowTokens": null
+    }
   },
   "toolResultPruning": {
     "enabled": true,

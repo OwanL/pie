@@ -94,6 +94,20 @@ interface Deferred<T> {
   reject(error: Error): void;
 }
 
+export type ColdBrowseHelperTimingSample =
+  | {
+      readonly stage: 'start';
+      readonly durationMs: number;
+      readonly outcome: 'success' | 'failure';
+    }
+  | {
+      readonly stage: 'operation';
+      readonly operation: 'warm' | ColdBrowseHelperOperation['operation'];
+      readonly waitDurationMs: number;
+      readonly requestDurationMs?: number;
+      readonly outcome: 'success' | 'failure';
+    };
+
 export interface ColdBrowseHelperClientOptions {
   readonly entryPath: string;
   /** Additional child arguments for isolated transport fixtures only. */
@@ -110,6 +124,8 @@ export interface ColdBrowseHelperClientOptions {
   readonly maxEntries?: number;
   readonly spawnProcess?: typeof spawn;
   readonly onDiagnostic?: (chunk: string) => void;
+  /** Bounded lifecycle timings; samples never include request payloads or paths. */
+  readonly onTiming?: (sample: ColdBrowseHelperTimingSample) => void;
 }
 
 /** Persistent, restartable client for the read-only browse helper process. */
@@ -139,7 +155,19 @@ export class ColdBrowseHelperClient implements ColdBrowseHelper {
   }
 
   async warm(): Promise<void> {
-    await this.ensureStarted();
+    const startedAt = performance.now();
+    let outcome: 'success' | 'failure' = 'failure';
+    try {
+      await this.ensureStarted();
+      outcome = 'success';
+    } finally {
+      this.recordTiming({
+        stage: 'operation',
+        operation: 'warm',
+        waitDurationMs: elapsedMs(startedAt),
+        outcome,
+      });
+    }
   }
 
   async openSnapshot(
@@ -227,39 +255,64 @@ export class ColdBrowseHelperClient implements ColdBrowseHelper {
   }
 
   private async request(payload: ColdBrowseHelperOperation): Promise<unknown> {
-    const generation = await this.ensureStarted();
-    const requestId = `browse-${this.nextRequestId++}`;
-    const result = deferred<ColdBrowseHelperSuccessFrame>();
-    // The helper intentionally serializes projection mutations and reads. A
-    // later request receives one timeout budget per request already ahead of
-    // it, so it cannot expire merely while waiting its FIFO turn.
-    const timeoutMs = Math.min(
-      2_147_483_647,
-      this.requestTimeoutMs * (generation.pending.size + 1),
-    );
-    const timer = setTimeout(() => {
-      const pending = generation.pending.get(requestId);
-      if (!pending) return;
-      generation.pending.delete(requestId);
-      const error = new Error(`Cold browse helper request timed out: ${requestId}`);
-      pending.reject(error);
-      this.failGeneration(generation, error, true);
-    }, timeoutMs);
-    timer.unref?.();
-    generation.pending.set(requestId, {
-      operation: payload,
-      resolve: result.resolve,
-      reject: result.reject,
-      timer,
-    });
-    this.writeFrame(generation, {
-      protocolVersion: COLD_BROWSE_HELPER_PROTOCOL_VERSION,
-      kind: 'request',
-      requestId,
-      payload,
-    });
-    const frame = await result.promise;
-    return frame.result;
+    const waitStartedAt = performance.now();
+    let waitDurationMs = 0;
+    let requestDurationMs: number | undefined;
+    let outcome: 'success' | 'failure' = 'failure';
+    try {
+      let generation: HelperGeneration;
+      try {
+        generation = await this.ensureStarted();
+      } finally {
+        waitDurationMs = elapsedMs(waitStartedAt);
+      }
+      const requestStartedAt = performance.now();
+      try {
+        const requestId = `browse-${this.nextRequestId++}`;
+        const result = deferred<ColdBrowseHelperSuccessFrame>();
+        // The helper intentionally serializes projection mutations and reads. A
+        // later request receives one timeout budget per request already ahead
+        // of it, so it cannot expire merely while waiting its FIFO turn.
+        const timeoutMs = Math.min(
+          2_147_483_647,
+          this.requestTimeoutMs * (generation.pending.size + 1),
+        );
+        const timer = setTimeout(() => {
+          const pending = generation.pending.get(requestId);
+          if (!pending) return;
+          generation.pending.delete(requestId);
+          const error = new Error(`Cold browse helper request timed out: ${requestId}`);
+          pending.reject(error);
+          this.failGeneration(generation, error, true);
+        }, timeoutMs);
+        timer.unref?.();
+        generation.pending.set(requestId, {
+          operation: payload,
+          resolve: result.resolve,
+          reject: result.reject,
+          timer,
+        });
+        this.writeFrame(generation, {
+          protocolVersion: COLD_BROWSE_HELPER_PROTOCOL_VERSION,
+          kind: 'request',
+          requestId,
+          payload,
+        });
+        const frame = await result.promise;
+        outcome = 'success';
+        return frame.result;
+      } finally {
+        requestDurationMs = elapsedMs(requestStartedAt);
+      }
+    } finally {
+      this.recordTiming({
+        stage: 'operation',
+        operation: payload.operation,
+        waitDurationMs,
+        ...(requestDurationMs !== undefined ? { requestDurationMs } : {}),
+        outcome,
+      });
+    }
   }
 
   private async ensureStarted(): Promise<HelperGeneration> {
@@ -279,6 +332,18 @@ export class ColdBrowseHelperClient implements ColdBrowseHelper {
   }
 
   private async startGeneration(): Promise<HelperGeneration> {
+    const startedAt = performance.now();
+    let outcome: 'success' | 'failure' = 'failure';
+    try {
+      const generation = await this.startGenerationInner();
+      outcome = 'success';
+      return generation;
+    } finally {
+      this.recordTiming({ stage: 'start', durationMs: elapsedMs(startedAt), outcome });
+    }
+  }
+
+  private async startGenerationInner(): Promise<HelperGeneration> {
     const spawnProcess = this.options.spawnProcess ?? spawn;
     const child = spawnProcess(
       this.options.nodePath ?? process.execPath,
@@ -358,6 +423,14 @@ export class ColdBrowseHelperClient implements ColdBrowseHelper {
     });
     await generation.ready.promise;
     return generation;
+  }
+
+  private recordTiming(sample: ColdBrowseHelperTimingSample): void {
+    try {
+      this.options.onTiming?.(sample);
+    } catch {
+      // Diagnostics must not alter helper lifecycle behavior.
+    }
   }
 
   private handleOutput(generation: HelperGeneration, value: unknown): void {
@@ -583,6 +656,10 @@ async function waitForExit(generation: HelperGeneration, timeoutMs: number): Pro
     generation.exited.promise.then(() => true),
     delay(timeoutMs).then(() => false),
   ]);
+}
+
+function elapsedMs(startedAt: number): number {
+  return Math.max(0, performance.now() - startedAt);
 }
 
 function delay(timeoutMs: number): Promise<void> {

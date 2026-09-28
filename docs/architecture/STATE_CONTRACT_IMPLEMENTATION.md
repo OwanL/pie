@@ -43,7 +43,7 @@ Provider-forced overflow compaction is treated as resumable when the provider re
 ## Snapshot Recovery — compaction chip and readiness probe constants
 
 - The per-session last-compaction chip record expires after a bounded TTL via the `ClearLastCompaction` effect → `LastCompactionCleared` event.
-- `WebviewReadinessProbe` is bounded by `READINESS_PROBE_MAX_ATTEMPTS`; its reload-skip bails for the first ticks of a genuine reload but, past `RELOAD_STUCK_SKIPS` consecutive skips (~6s), treats `reloading` as stale, force-clears it, and probes. The per-renderer reload circuit uses a rolling wall-clock window that transcript commits cannot reset.
+- `WebviewReadinessProbe` is bounded by `READINESS_PROBE_MAX_ATTEMPTS`; its reload-skip bails for the first ticks of a genuine reload but, past `RELOAD_STUCK_SKIPS` consecutive skips (~6s), treats `reloading` as stale, force-clears it, and probes. The per-renderer reload circuit uses the rolling wall-clock limit, then remains terminally open until a deliberate renderer command or genuinely new/resolved renderer resets it; commits, handshakes, visibility changes, automatic retries, and elapsed time do not clear it.
 
 ## Conserved Billable Accounting — file mappings
 

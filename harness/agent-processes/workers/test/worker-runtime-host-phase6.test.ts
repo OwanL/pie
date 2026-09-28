@@ -17,10 +17,19 @@ import type { ProviderTransportObservation } from '../../../model-providers/traf
 import { BackendLiveTurnAccumulator } from '../live-turn-accumulator';
 import { WorkerRuntimeHost } from '../worker-runtime-host';
 import type { SessionOpenedPayload } from '../../lib/rpc/session-events.js';
+import {
+  WORKER_IPC_MAX_FRAME_BYTES,
+  WORKER_IPC_VERSION,
+  measureWorkerIpcMessage,
+  validateWorkerIpcFrameDraft,
+} from '../../lib/rpc/worker-protocol.js';
+import { SESSION_SNAPSHOT_TOO_LARGE_CODE } from '../../lib/rpc/wire.js';
 
 interface WorkerRuntimeHostInternals {
   sdk?: unknown;
   context?: SessionContext;
+  currentLease?: { canonicalSessionPath: string };
+  runtimeReady: boolean;
   agentDir: string;
   availableModels: () => unknown;
   openedPayload?: SessionOpenedPayload;
@@ -529,6 +538,140 @@ test('priority interrupt closes a semantic turn when abort emits no agent_end', 
   );
 });
 
+test('live-turn checkpoint bypasses a held session-title provider request', async () => {
+  const { host } = makeHost();
+  const internals = getInternals(host);
+  const sessionPath = path.join(os.tmpdir(), `pie-worker-checkpoint-${process.pid}`, 'session.jsonl');
+  const context = makeSessionEventContext(sessionPath);
+  context.activeRequest = {
+    id: 'request-checkpoint', messageIndex: 1, aborted: false,
+    liveTurnAccumulator: new BackendLiveTurnAccumulator({
+      protocolVersion: 7,
+      sessionPath,
+      requestId: 'request-checkpoint',
+      operationId: 'operation-checkpoint',
+      turnId: 'turn-checkpoint',
+      attemptId: 'attempt-checkpoint',
+      canonicalMessageId: 'message-checkpoint',
+      startedAt: 1,
+    }),
+  };
+  context.session = {
+    sessionManager: { getSessionName: () => undefined },
+    _modelRegistry: {
+      find: () => ({ id: 'ollama-title-fixture', provider: 'ollama', baseUrl: 'http://ollama.test' }),
+    },
+    _getCompactionRequestAuth: async () => ({}),
+    setSessionName: () => undefined,
+  } as unknown as SessionContext['session'];
+  internals.context = context;
+  internals.sdk = {};
+  internals.runtimeReady = true;
+  internals.currentLease = {
+    coordinatorGeneration: 1,
+    workerId: 'host-worker',
+    workerGeneration: 1,
+    canonicalSessionPath: sessionPath,
+    ownershipRevision: 1,
+    nonce: 'checkpoint-lease',
+  } as never;
+
+  const originalFetch = globalThis.fetch;
+  let releaseProvider!: () => void;
+  let markProviderStarted!: () => void;
+  const providerStarted = new Promise<void>((resolve) => { markProviderStarted = resolve; });
+  const providerGate = new Promise<void>((resolve) => { releaseProvider = resolve; });
+  let providerCalls = 0;
+  globalThis.fetch = (async () => {
+    providerCalls += 1;
+    markProviderStarted();
+    await providerGate;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ message: { content: 'A useful session title' }, prompt_eval_count: 1, eval_count: 2 }),
+    } as Response;
+  }) as typeof fetch;
+
+  const title = host.command('session.title.generate', {
+    params: {
+      sessionPath,
+      prompt: 'Investigate checkpoint recovery while a provider is slow',
+      provider: 'ollama',
+      model: 'ollama-title-fixture',
+      thinkingLevel: 'off',
+      timeoutSec: 15,
+    },
+  }, 'held-title');
+  let checkpoint: Promise<unknown> | undefined;
+  try {
+    await providerStarted;
+    assert.equal(providerCalls, 1, 'the title command is held inside its real async provider wait');
+    checkpoint = host.command('liveTurn.checkpoint', {
+      params: { sessionPath, turnId: 'turn-checkpoint', attemptId: 'attempt-checkpoint' },
+    }, 'live-checkpoint');
+    const outcome = await Promise.race([
+      checkpoint.then(
+        (result) => ({ state: 'settled' as const, result }),
+        (error) => ({ state: 'rejected' as const, error }),
+      ),
+      waitForAsyncEvent().then(() => ({ state: 'blocked' as const })),
+    ]);
+    assert.equal(outcome.state, 'settled', 'the in-memory checkpoint must not wait for title provider I/O');
+    if (outcome.state !== 'settled') return;
+    assert.equal((outcome.result as { status?: string }).status, 'active');
+    assert.equal(((outcome.result as { checkpoint?: { turnId?: string } }).checkpoint)?.turnId, 'turn-checkpoint');
+    assert.equal(providerCalls, 1, 'checkpoint recovery neither waits for nor starts another provider request');
+  } finally {
+    releaseProvider();
+    try {
+      await title;
+      if (checkpoint) await checkpoint.catch(() => undefined);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }
+});
+
+test('live-turn checkpoint rejects unready and stale worker ownership', async () => {
+  const { host } = makeHost();
+  const internals = getInternals(host);
+  const sessionPath = path.join(os.tmpdir(), `pie-worker-stale-checkpoint-${process.pid}`, 'session.jsonl');
+  const context = makeSessionEventContext(sessionPath);
+  context.activeRequest = {
+    id: 'request-stale-checkpoint', messageIndex: 1, aborted: false,
+    liveTurnAccumulator: new BackendLiveTurnAccumulator({
+      protocolVersion: 7,
+      sessionPath,
+      requestId: 'request-stale-checkpoint',
+      operationId: 'operation-stale-checkpoint',
+      turnId: 'turn-stale-checkpoint',
+      attemptId: 'attempt-stale-checkpoint',
+      canonicalMessageId: 'message-stale-checkpoint',
+      startedAt: 1,
+    }),
+  };
+  internals.context = context;
+  internals.sdk = {};
+  internals.currentLease = {
+    coordinatorGeneration: 1,
+    workerId: 'host-worker',
+    workerGeneration: 1,
+    canonicalSessionPath: sessionPath,
+    ownershipRevision: 1,
+    nonce: 'stale-checkpoint-lease',
+  } as never;
+  const command = {
+    params: { sessionPath, turnId: 'turn-stale-checkpoint', attemptId: 'attempt-stale-checkpoint' },
+  };
+
+  await assert.rejects(host.command('liveTurn.checkpoint', command, 'not-ready-checkpoint'), /not ready/);
+  internals.runtimeReady = true;
+  const stale = host.command('liveTurn.checkpoint', command, 'stale-checkpoint');
+  internals.context = makeSessionEventContext(sessionPath);
+  await assert.rejects(stale, /ownership changed during live-turn checkpoint/);
+});
+
 test('a quota incident does not schedule delayed heuristic recovery', async () => {
   const { host, sent, runtimeFailures } = makeHost();
   const internals = getInternals(host);
@@ -640,6 +783,152 @@ test('agent_settled refreshes session.opened from the current session and preser
   assert.equal(emittedPayload.operationAttempt, 3);
   assert.equal(emittedPayload.replacesSessionPath, sourceSessionPath);
   assert.equal(emittedPayload.runtimeReady, true);
+});
+
+test('session.opened structural fallback keeps the worker usable and durable history pageable', async () => {
+  const { host, sent, runtimeFailures } = makeHost();
+  const internals = getInternals(host);
+  const sessionPath = '/sessions/complex.jsonl';
+  const transcript = [{
+    id: 'message-with-many-subagent-details',
+    role: 'assistant',
+    createdAt: '2026-09-26T10:05:00.000Z',
+    status: 'completed',
+    parts: Array.from({ length: 8_000 }, (_, index) => ({
+      kind: 'toolCall',
+      toolCall: {
+        id: `subagent-${index}`,
+        name: 'subagent',
+        result: {
+          details: {
+            results: [{ messages: [{ role: 'toolResult', content: 'saved child result' }] }],
+          },
+        },
+      },
+    })),
+  }] as unknown as SessionOpenedPayload['transcript'];
+  const contextUsage = { tokens: 12_345, contextWindow: 128_000, percent: 0.0964 };
+  const modelSettings = { defaultModel: 'provider/model', defaultThinkingLevel: 'high' } as any;
+  const availableModels = [{ id: 'provider/model', provider: 'provider', name: 'Model' }];
+  const systemPrompts = [{ source: 'harness', title: 'Harness', text: 'Model context remains.', summary: 'Harness', availability: 'available' }];
+  const payload = makeOpenedPayload(sessionPath, transcript, {
+    contextUsage,
+    modelSettings,
+    availableModels: availableModels as any,
+    systemPrompts: systemPrompts as any,
+  });
+  const frameBase = {
+    ipcVersion: WORKER_IPC_VERSION,
+    coordinatorGeneration: 1,
+    workerId: 'host-worker',
+    workerGeneration: 1,
+    workerPid: process.pid,
+    rootSessionPath: sessionPath,
+    leasePath: sessionPath,
+    leaseRevision: 1,
+    sessionPath,
+  };
+  const frameDraft = (eventPayload: unknown) => ({
+    ...frameBase,
+    kind: 'runtime.event' as const,
+    event: 'session.opened' as const,
+    payload: eventPayload,
+  });
+  const sourceDraft = frameDraft(payload);
+  const sourceMeasurement = measureWorkerIpcMessage(sourceDraft);
+  assert.equal(sourceMeasurement.ok, true);
+  if (sourceMeasurement.ok) {
+    assert.ok(sourceMeasurement.bytes + 1 < WORKER_IPC_MAX_FRAME_BYTES,
+      'the transcript is structurally oversized, not byte oversized');
+  }
+  assert.match(validateWorkerIpcFrameDraft(sourceDraft) ?? '', /too structurally complex/);
+
+  internals.openedPayload = payload;
+  internals.buildOpenedPayload = async () => payload;
+  await internals.emitRefreshedSessionOpened(sessionPath);
+
+  const openedFrame = sent.find((frame) => frame.kind === 'runtime.event' && frame.event === 'session.opened');
+  assert.ok(openedFrame);
+  const emitted = openedFrame.payload as SessionOpenedPayload;
+  assert.equal(validateWorkerIpcFrameDraft(frameDraft(emitted)), undefined);
+  assert.deepEqual(emitted.transcript, []);
+  assert.equal(emitted.transcriptSkipped, undefined, 'public structural fallback is not the host-requested skip optimization');
+  assert.equal(emitted.transcriptWindow.totalCount, transcript.length);
+  assert.deepEqual(emitted.transcriptWindow, {
+    ...payload.transcriptWindow,
+    loadedStart: transcript.length,
+    loadedEnd: transcript.length,
+    hasOlder: true,
+    hasNewer: false,
+    isPartial: true,
+  });
+  assert.equal(emitted.snapshotUnavailable?.code, SESSION_SNAPSHOT_TOO_LARGE_CODE);
+  assert.equal(emitted.session.path, sessionPath);
+  assert.equal(emitted.runtimeReady, true);
+  assert.deepEqual(emitted.contextUsage, contextUsage);
+  assert.deepEqual(emitted.modelSettings, modelSettings);
+  assert.deepEqual(emitted.availableModels, availableModels);
+  assert.deepEqual(emitted.systemPrompts, systemPrompts);
+  assert.equal(payload.transcript, transcript, 'the cached session snapshot and saved history source remain untouched');
+  assert.equal(transcript.length, 1);
+  const emittedMeasurement = measureWorkerIpcMessage(frameDraft(emitted));
+  assert.equal(emittedMeasurement.ok, true);
+  if (emittedMeasurement.ok) assert.ok(emittedMeasurement.bytes + 1 <= WORKER_IPC_MAX_FRAME_BYTES);
+
+  const nestedText = 'saved child result '.repeat(2_000);
+  const historyEntries = [
+    {
+      id: 'assistant-history-entry',
+      type: 'message',
+      timestamp: '2026-09-26T10:05:00.000Z',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'toolCall', id: 'subagent-call', name: 'subagent', arguments: { task: 'inspect' } }],
+        stopReason: 'toolUse',
+      },
+    },
+    {
+      id: 'tool-result-history-entry',
+      type: 'message',
+      timestamp: '2026-09-26T10:05:01.000Z',
+      message: {
+        role: 'toolResult',
+        toolCallId: 'subagent-call',
+        toolName: 'subagent',
+        content: [{ type: 'text', text: 'done' }],
+        details: {
+          results: [{ messages: [{ role: 'assistant', content: [{ type: 'text', text: nestedText }] }] }],
+        },
+      },
+    },
+  ];
+  const context = makeSessionEventContext(sessionPath);
+  context.activeRequest = undefined;
+  context.session = { sessionManager: { getBranch: () => historyEntries } } as any;
+  internals.context = context;
+  internals.sdk = {};
+  const page = await host.command('session.loadTranscriptPage', {
+    sessionPath,
+    direction: 'latest',
+  } as any, 'history-page-after-metadata-refresh') as any;
+  assert.equal(page.sessionPath, sessionPath);
+  assert.equal(page.transcriptWindow.totalCount, 1);
+  assert.equal(page.transcript[0].id, 'assistant-history-entry');
+  const detailRef = page.transcript[0].toolCalls[0].detailRef;
+  assert.ok(detailRef, 'the page returns the oversized durable subagent detail as a lazy ref');
+  const detail = await host.command('session.loadDetail', {
+    sessionPath,
+    ref: detailRef,
+  } as any, 'history-detail-after-metadata-refresh') as any;
+  assert.equal(detail.status, 'loaded');
+  assert.equal(detail.value.details.results[0].messages[0].content[0].text, nestedText);
+
+  const emitter = host as unknown as { emit(event: string, payload?: unknown): void };
+  emitter.emit('busy.changed', { sessionPath, busy: false });
+  const followup = sent.at(-1)!;
+  assert.equal(followup.event, 'busy.changed', 'a subsequent lifecycle event is still sent by this worker');
+  assert.equal(validateWorkerIpcFrameDraft({ ...frameBase, kind: 'runtime.event', event: followup.event, payload: followup.payload }), undefined);
+  assert.deepEqual(runtimeFailures, []);
 });
 
 test('session.opened refresh falls back to the cached payload when rebuilding throws', async () => {

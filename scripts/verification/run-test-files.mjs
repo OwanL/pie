@@ -41,6 +41,53 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+// Focused affected runs can span many registered packages. Keep a small fixed
+// process budget so one npm test invocation cannot start every package runner
+// at once (each runner may itself parallelize test files).
+export const DEFAULT_GROUP_CONCURRENCY = 3;
+
+/**
+ * Run package groups with a bounded number of active package test processes.
+ * Results retain the input order; entries for groups not started after abort
+ * remain undefined. Runner errors are re-thrown after active workers settle.
+ *
+ * @template T, R
+ * @param {T[]} groups
+ * @param {(group: T, index: number) => Promise<R>} run
+ * @param {{ concurrency?: number, signal?: AbortSignal }} [options]
+ * @returns {Promise<Array<R | undefined>>}
+ */
+export async function runGroupQueue(groups, run, {
+  concurrency = DEFAULT_GROUP_CONCURRENCY,
+  signal,
+} = {}) {
+  if (!Number.isInteger(concurrency) || concurrency < 1) {
+    throw new Error(`Test group concurrency must be a positive integer; received ${concurrency}.`);
+  }
+
+  const results = new Array(groups.length);
+  let nextIndex = 0;
+  let hasError = false;
+  let firstError;
+  const worker = async () => {
+    while (!signal?.aborted) {
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= groups.length) return;
+      try {
+        results[index] = await run(groups[index], index);
+      } catch (error) {
+        if (!hasError) firstError = error;
+        hasError = true;
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(concurrency, groups.length) }, worker));
+  if (hasError) throw firstError;
+  return results;
+}
+
 /** Repo root inferred from this file's location: scripts/ -> .. */
 export function inferRepoRoot() {
   return path.resolve(__dirname, '../..');
@@ -226,7 +273,7 @@ function printHelp() {
   console.log(
     `Usage: node scripts/verification/run-test-files.mjs <test-file>... [options]\n\n` +
       `Run specific test files through the appropriate local tsx with node:test\n` +
-      `(fast mode: parallel files, no coverage). Classifies each path into\n` +
+      `(fast mode: parallel files, no coverage; up to ${DEFAULT_GROUP_CONCURRENCY} package groups at once). Classifies each path into\n` +
       `application/hosts/vscode/, analytics/analysis/, scripts/, extensions/<id>/, or tools/<id>/ and uses that package's local\n` +
       `tsx; packages with SDK path aliases additionally pass --tsconfig.\n\n` +
       `Options:\n` +
@@ -309,7 +356,7 @@ async function main() {
   const overlays = new Map();
   const processAbort = abortOnProcessSignals();
   const failures = [];
-  let completedGroups = 0;
+  let passedGroups = 0;
   try {
     for (const group of groups) {
       if (!group.tsxConfig) continue;
@@ -317,31 +364,38 @@ async function main() {
         includeOwnerDependencies: group.includeOwnerDependencies === true,
       }));
     }
-    await Promise.all(groups.map(async (group) => {
+    const results = await runGroupQueue(groups, async (group) => {
       const overlay = overlays.get(group.id);
       const args = buildTsxArgs(overlay ? { ...group, tsxConfig: overlay.configPath } : group);
       const fileWord = group.files.length === 1 ? 'file' : 'files';
       console.log(`\n▶ ${group.id} (${group.files.length} ${fileWord})`);
       const code = await runGroup(group, args, processAbort.signal);
-      completedGroups += 1;
       if (code === 0) {
+        passedGroups += 1;
         console.log(`✓ ${group.id}`);
       } else {
         console.log(`✖ ${group.id} (exit ${code})`);
         failures.push(group.id);
       }
-    }));
+      return code;
+    }, { signal: processAbort.signal });
+    for (let index = 0; index < results.length; index += 1) {
+      if (results[index] !== undefined) continue;
+      const group = groups[index];
+      console.log(`\n✖ ${group.id} (not started: aborted)`);
+      failures.push(group.id);
+    }
   } finally {
     processAbort.dispose();
     for (const overlay of overlays.values()) overlay.dispose();
   }
 
   console.log('');
-  if (failures.length === 0 && !processAbort.signal.aborted) {
+  if (passedGroups === groups.length && !processAbort.signal.aborted) {
     console.log(`Summary: ${groups.length}/${groups.length} packages passed.`);
     return;
   }
-  console.log(`Summary: ${completedGroups - failures.length}/${groups.length} packages passed. Failed: ${failures.join(', ') || 'aborted'}`);
+  console.log(`Summary: ${passedGroups}/${groups.length} packages passed. Failed: ${failures.join(', ') || 'aborted'}`);
   process.exitCode = 1;
 }
 

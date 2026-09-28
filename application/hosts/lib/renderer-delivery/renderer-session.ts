@@ -417,6 +417,7 @@ export class RendererSession implements RendererRegistration, DisposableLike {
       const becameReady = readinessGeneration === undefined
         ? false
         : this.markBridgeReady(msg.type, readinessGeneration);
+      if (isMeaningfulRendererActivity(msg)) this.watchdog.resetReloadCircuit();
       this.options.onMessage(msg, this.getCommandContext());
       if (becameReady && this.webviewReady) this.delivery.notifyEligibilityChanged();
     } catch (error: unknown) {
@@ -430,7 +431,7 @@ export class RendererSession implements RendererRegistration, DisposableLike {
     this.options.onRendererInvalidated?.(this.rendererId, this.rendererGeneration);
     this.rendererGeneration += 1;
     this.readinessProbe.clear();
-    this.watchdog.resetRecoveryEpisode();
+    this.watchdog.resetReloadCircuit();
     this.delivery.invalidateView();
     this.delivery.setVisible(visible);
     this.readinessProbe.setVisible(visible);
@@ -670,12 +671,38 @@ export class RendererSession implements RendererRegistration, DisposableLike {
       desiredGeneration: debug.desiredGeneration,
       viewGeneration: debug.viewGeneration,
     };
-    // Exhaustion is terminal for this bounded probe episode. Reset its counter
-    // before a successful reload starts a fresh episode; when reload storm
-    // protection declines the request, remain explicitly exhausted until a
-    // later host change or visibility transition begins another episode.
+    // Exhaustion is terminal for this bounded probe episode. Re-arming the
+    // readiness probe later does not reset the watchdog's independent terminal
+    // reload suppression; only explicit renderer activity or a new view does.
     this.readinessProbe.clear();
     this.watchdog.handleRecovery(recovery);
+  }
+}
+
+function isMeaningfulRendererActivity(msg: WebviewToHostMessage): boolean {
+  switch (msg.type) {
+    // These are automatic transport/render-lifecycle signals, not evidence
+    // that a user or genuinely new view is asking to try recovery again.
+    case 'ready':
+    case 'refreshState':
+    case 'requestSnapshot':
+    case 'stateReceived':
+    case 'appCommitted':
+    case 'transcriptCommitted':
+    case 'transcriptCommitBlocked':
+    case 'paintObserved':
+    case 'renderFailure':
+    case 'rendererVisibilityChanged':
+    case 'rendererFocusChanged':
+    case 'commandStatusRequest':
+    case 'requestDetail':
+    case 'requestImagePreview':
+    case 'detail.subscribe':
+    case 'detail.unsubscribe':
+    case 'detail.fetchPages':
+      return false;
+    default:
+      return true;
   }
 }
 

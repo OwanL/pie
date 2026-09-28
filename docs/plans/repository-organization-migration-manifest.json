@@ -83,10 +83,13 @@
     "application/hosts/vscode/editor-integration/open-file.ts",
     "application/lib/protocol/image-preview.ts",
     "application/frontend/styles/image-preview.css",
-    "scripts/install/test/bootstrap.test.mjs"
+    "scripts/install/test/bootstrap.test.mjs",
+    "harness/agent-processes/lib/rpc/session-opened-transport.ts",
+    "harness/agent-processes/lib/rpc/test/session-opened-transport.test.ts",
+    "harness/agent-processes/context-inventory/initial-context-estimate-protocol.ts"
    ],
-   "sourceRecordCount": 1832,
-   "validation": "Original baseline: all 1,778 tracked paths plus explicitly owned relevant additions received source records; baseline test identities remain immutable. The 2026-09-27 stale-reference correction recorded 1,813 sources and 1,715 currentLocations. This dead-code reconciliation adds six authorized source records and two explicit deletion tombstones; the privacy-test follow-up adds one retained test record, bringing the source-record count to 1,820. The UX inventory follow-up adds ten owned source/test records, bringing it to 1,830. The image-preview stylesheet and bootstrap-test follow-up add two owned records, bringing the source-record count to 1,832. currentLocations remains 1,715. Focused migration-inventory validation passes with the expanded tombstone schema; earlier broad verification remains historical and predates these working-tree changes.",
+   "sourceRecordCount": 1835,
+   "validation": "Original baseline: all 1,778 tracked paths plus explicitly owned relevant additions received source records; baseline test identities remain immutable. The 2026-09-27 stale-reference correction recorded 1,813 sources and 1,715 currentLocations. This dead-code reconciliation adds six authorized source records and two explicit deletion tombstones; the privacy-test follow-up adds one retained test record, bringing the source-record count to 1,820. The UX inventory follow-up adds ten owned source/test records, bringing it to 1,830. The image-preview stylesheet and bootstrap-test follow-up add two owned records, bringing the source-record count to 1,832. The session-opened transport source and focused test add two owned records, bringing the source-record count to 1,834. The shared context-inventory worker protocol adds one owned source record, bringing the source-record count to 1,835. currentLocations remains 1,715. Focused migration-inventory validation passes with the expanded tombstone schema; earlier broad verification remains historical and predates these working-tree changes.",
    "currentGitStatus": {
     "recordedAt": "2026-09-24",
     "note": "Snapshot at B3 working-tree completion, before the B3 milestone commit; the commit landed all 41 settled moves, migration-owned settings skills entries, routing, tests, docs, and plan artifacts on top of ea74351f, excluding user-owned settings.json field values.",
@@ -7141,7 +7144,7 @@
    "kind": "intentional-consolidation"
   }
  ],
- "recordCount": 1840,
+ "recordCount": 1843,
  "records": [
   {
    "source": "extension/src/backend/analytics-worker-transport.ts",
@@ -33362,6 +33365,33 @@
    "batch": "B8",
    "verification": ["Run the focused bootstrap test through the root test:file wrapper."],
    "reason": "New regression coverage for the relocated bootstrap command plan and host build cwd belongs with the scripts/install owner."
+  },
+  {
+   "source": "harness/agent-processes/lib/rpc/session-opened-transport.ts",
+   "targets": ["harness/agent-processes/lib/rpc/session-opened-transport.ts"],
+   "action": "retain",
+   "owner": "harness/agent-processes/lib/rpc",
+   "batch": "B8",
+   "verification": ["agent-processes-rpc tests cover worker-IPC session-opened transcript projections.", "The registered RPC owner typecheck covers the new transport module."],
+   "reason": "New session-opened transcript projection for worker IPC belongs to the RPC owner; no pre-migration source path exists."
+  },
+  {
+   "source": "harness/agent-processes/lib/rpc/test/session-opened-transport.test.ts",
+   "targets": ["harness/agent-processes/lib/rpc/test/session-opened-transport.test.ts"],
+   "action": "retain",
+   "owner": "harness/agent-processes/lib/rpc",
+   "batch": "B8",
+   "verification": ["Run the focused session-opened transport regression through the registered agent-processes-rpc test owner."],
+   "reason": "New regression coverage for the RPC owner's session-opened transport behavior; no pre-migration test path exists."
+  },
+  {
+   "source": "harness/agent-processes/context-inventory/initial-context-estimate-protocol.ts",
+   "targets": ["harness/agent-processes/context-inventory/initial-context-estimate-protocol.ts"],
+   "action": "retain",
+   "owner": "harness/agent-processes/context-inventory",
+   "batch": "B8",
+   "verification": ["The context-inventory client and worker use the shared initialization/ready protocol contract."],
+   "reason": "New shared wire-protocol types for initial context inventory; no pre-migration source path exists."
   }
  ],
  "tombstones": [

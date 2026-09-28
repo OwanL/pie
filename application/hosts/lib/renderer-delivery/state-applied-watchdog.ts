@@ -46,17 +46,20 @@ export class StateAppliedWatchdog {
     this.commitTimeouts = 0;
   }
 
+  /** A deliberate renderer command or genuinely new view may begin a fresh
+   *  reload-recovery episode. Automatic reload/readiness/commit events must not. */
+  resetReloadCircuit(): void {
+    this.commitTimeouts = 0;
+    this.reloadAttemptTimestamps = [];
+    this.reloadCircuitOpen = false;
+  }
+
   handleRecovery(recovery: StateDeliveryRecovery): boolean {
     this.lastDecision = 'ignored';
     if (this.disposed) return false;
     if (this.reloadCircuitOpen) {
-      const now = this.deps.now?.() ?? Date.now();
-      this.pruneReloadAttempts(now);
-      if (this.reloadAttemptTimestamps.length >= STATE_APPLIED_RELOAD_LIMIT) {
-        this.lastDecision = 'circuit-open';
-        return false;
-      }
-      this.reloadCircuitOpen = false;
+      this.lastDecision = 'circuit-open';
+      return false;
     }
 
     if (recovery.reason === 'commit-timeout') {

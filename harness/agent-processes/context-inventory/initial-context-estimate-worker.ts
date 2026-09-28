@@ -17,7 +17,12 @@ import type {
   SdkToolInfo,
 } from '../lib/sdk-integration/sdk.js';
 import { loadSdk, loadSdkInternalModule } from '../lib/sdk-integration/sdk.js';
-import type { SdkPatchIdentity } from '../lib/sdk-integration/sdk-patch-barrier.js';
+import { validateSdkPatchBarrier, type SdkPatchIdentity } from '../lib/sdk-integration/sdk-patch-barrier.js';
+import {
+  INITIAL_CONTEXT_INVENTORY_PROTOCOL_VERSION,
+  type InitialContextEstimateWorkerInitialization,
+  type InitialContextEstimateWorkerReady,
+} from './initial-context-estimate-protocol.js';
 import { createPieSystemPromptBuilder } from '../../agent-instructions/prompt-assembly/pie-harness-prompt.js';
 import { createBackendTools } from '../coordinator/backend-tools.js';
 import {
@@ -26,8 +31,8 @@ import {
   normalizePromptText,
 } from '../../agent-instructions/prompt-assembly/system-prompts.js';
 
-const IPC_READ_FD = 3;
-const IPC_WRITE_FD = 4;
+const IPC_READ_FD = 4;
+const IPC_WRITE_FD = 3;
 // The inventory carries the lossless prompt catalog, including complete context
 // files and tool schemas. Keep it bounded below the public 32 MiB JSONL ceiling
 // without imposing the old 256 KiB text truncation/failure cliff.
@@ -35,11 +40,12 @@ const MAX_FRAME_BYTES = 30 * 1024 * 1024;
 const PARENT_WATCHDOG_INTERVAL_MS = 1_000;
 
 export interface InitialContextEstimateWorkerInput {
+  protocolVersion: typeof INITIAL_CONTEXT_INVENTORY_PROTOCOL_VERSION;
+  kind: 'discover';
   sdkPath: string;
   sdkPatchIdentity: SdkPatchIdentity;
   cwd: string;
   agentDir: string;
-  parentPid: number;
   model: { provider: string; id: string };
 }
 
@@ -48,9 +54,30 @@ export interface InitialContextInventory {
   systemPrompts: SystemPromptEntry[];
 }
 
+export interface InitialContextEstimateWorkerTimings {
+  /** Coordinator-issued SDK barrier validation and both dynamic module imports. */
+  sdkImportDurationMs?: number;
+  /** SDK runtime creation, resource loading, and extension session_start binding. */
+  resourceDiscoveryDurationMs?: number;
+  /** Prompt projection, system-prompt construction, and token estimation. */
+  promptAndEstimateDurationMs?: number;
+}
+
 export type InitialContextEstimateWorkerOutput =
-  | { ok: true; inventory: InitialContextInventory }
-  | { ok: false; error: string };
+  | {
+      protocolVersion: typeof INITIAL_CONTEXT_INVENTORY_PROTOCOL_VERSION;
+      kind: 'result';
+      ok: true;
+      inventory: InitialContextInventory;
+      timings?: InitialContextEstimateWorkerTimings;
+    }
+  | {
+      protocolVersion: typeof INITIAL_CONTEXT_INVENTORY_PROTOCOL_VERSION;
+      kind: 'result';
+      ok: false;
+      error: string;
+      timings?: InitialContextEstimateWorkerTimings;
+    };
 
 interface RuntimeFactoryArgs {
   cwd: string;
@@ -80,6 +107,10 @@ export async function collectInitialContextInventory(
   sdk: SdkModule,
   systemPromptModule: SdkSystemPromptModule,
   input: Pick<InitialContextEstimateWorkerInput, 'cwd' | 'agentDir' | 'model'>,
+  onTiming?: (
+    stage: 'resourceDiscoveryDurationMs' | 'promptAndEstimateDurationMs',
+    durationMs: number,
+  ) => void,
 ): Promise<InitialContextInventory> {
   const providerBoundary = installInventoryProviderDenyBoundary();
   try {
@@ -88,6 +119,7 @@ export async function collectInitialContextInventory(
       systemPromptModule,
       input,
       providerBoundary.assertNoAttempts,
+      onTiming,
     );
   } finally {
     providerBoundary.restore();
@@ -99,6 +131,10 @@ async function collectInitialContextInventoryInsideBoundary(
   systemPromptModule: SdkSystemPromptModule,
   input: Pick<InitialContextEstimateWorkerInput, 'cwd' | 'agentDir' | 'model'>,
   assertNoProviderAttempts: () => void,
+  onTiming?: (
+    stage: 'resourceDiscoveryDurationMs' | 'promptAndEstimateDurationMs',
+    durationMs: number,
+  ) => void,
 ): Promise<InitialContextInventory> {
   const authDir = process.env.PI_CODING_AGENT_AUTH_DIR?.trim();
   const authPath = authDir
@@ -135,66 +171,103 @@ async function collectInitialContextInventoryInsideBoundary(
     return { ...created, services };
   };
 
-  const runtime = await sdk.createAgentSessionRuntime(createRuntime, {
-    cwd: input.cwd,
-    agentDir: input.agentDir,
-    sessionManager: manager,
-    sessionStartEvent: { type: 'session_start', reason: 'startup' },
-  });
-
+  let runtime: Awaited<ReturnType<SdkModule['createAgentSessionRuntime']>> | undefined;
   try {
-    const session = runtime.session;
-    installInventorySessionGuards(session);
-    await bindInventoryExtensions(session, runtime);
-    // A handler may catch the deny error and otherwise leave a plausible but
-    // incomplete catalog. Convert every attempted network call into fail-open
-    // omission instead of publishing a partial estimate.
-    assertNoProviderAttempts();
+    const resourceDiscoveryStartedAt = performance.now();
+    try {
+      runtime = await sdk.createAgentSessionRuntime(createRuntime, {
+        cwd: input.cwd,
+        agentDir: input.agentDir,
+        sessionManager: manager,
+        sessionStartEvent: { type: 'session_start', reason: 'startup' },
+      });
 
-    const promptState = session as SdkSession & PromptStateLike;
-    captureOriginalSystemPromptOptions(promptState);
-    const promptOptions = promptState._originalSystemPromptOptions ?? promptState._baseSystemPromptOptions;
-    if (!promptOptions) throw new Error('Fresh inventory did not expose system prompt options.');
-
-    const tools = session.getAllTools?.() ?? [];
-    const inventoryPromptOptions = buildAllRegisteredPromptOptions(session, promptOptions, tools);
-    const pieBuildSystemPrompt = createPieSystemPromptBuilder(systemPromptModule.buildSystemPrompt, input.agentDir);
-    const fullSystemPrompt = normalizePromptText(pieBuildSystemPrompt(inventoryPromptOptions));
-    if (!fullSystemPrompt) throw new Error('Fresh inventory did not build a system prompt.');
-    // Match the hot picker exactly: its harness card is rebuilt from only the
-    // harness/tool/runtime inputs, while custom/append/context/skill entries
-    // are projected independently from the unfiltered options below.
-    const harnessPrompt = normalizePromptText(pieBuildSystemPrompt({
-      cwd: inventoryPromptOptions.cwd,
-      selectedTools: inventoryPromptOptions.selectedTools,
-      toolSnippets: inventoryPromptOptions.toolSnippets,
-      promptGuidelines: inventoryPromptOptions.promptGuidelines,
-    }));
-
-    // Count the exact Pie-owned prompt text used by runtime requests.
-    // Provider tool descriptions/schemas are separate request metadata and are
-    // added exactly once below.
-    const tokens = estimateTextTokens(fullSystemPrompt) + estimateTextTokens(buildToolCatalogText(tools));
-    const contextWindow = session.model?.contextWindow;
-    if (!Number.isSafeInteger(tokens) || tokens < 0
-      || !Number.isSafeInteger(contextWindow) || (contextWindow ?? 0) <= 0) {
-      throw new Error('Fresh inventory did not resolve a valid token total and context window.');
+      const session = runtime.session;
+      installInventorySessionGuards(session);
+      await bindInventoryExtensions(session, runtime);
+      // A handler may catch the deny error and otherwise leave a plausible but
+      // incomplete catalog. Convert every attempted network call into fail-open
+      // omission instead of publishing a partial estimate.
+      assertNoProviderAttempts();
+    } finally {
+      reportInventoryTiming(onTiming, 'resourceDiscoveryDurationMs', resourceDiscoveryStartedAt);
     }
-    const estimate = { tokens, contextWindow: contextWindow! };
-    const systemPrompts = buildSessionSystemPrompts({
-      harnessPrompt,
-      promptOptions: inventoryPromptOptions,
-      formatSkillsForPrompt: sdk.formatSkillsForPrompt,
-      tools,
-      activeProvider: {
-        provider: input.model.provider,
-        modelId: input.model.id,
-      },
-    });
-    return { estimate, systemPrompts };
+
+    const promptEstimateStartedAt = performance.now();
+    try {
+      return buildInitialContextInventoryProjection(
+        runtime.session,
+        sdk,
+        systemPromptModule,
+        input,
+      );
+    } finally {
+      reportInventoryTiming(onTiming, 'promptAndEstimateDurationMs', promptEstimateStartedAt);
+    }
   } finally {
-    await runtime.dispose();
+    await runtime?.dispose();
   }
+}
+
+function reportInventoryTiming(
+  onTiming: ((stage: 'resourceDiscoveryDurationMs' | 'promptAndEstimateDurationMs', durationMs: number) => void) | undefined,
+  stage: 'resourceDiscoveryDurationMs' | 'promptAndEstimateDurationMs',
+  startedAt: number,
+): void {
+  try {
+    onTiming?.(stage, Math.max(0, performance.now() - startedAt));
+  } catch {
+    // Diagnostics must not change inventory construction or disposal.
+  }
+}
+
+function buildInitialContextInventoryProjection(
+  session: SdkSession,
+  sdk: SdkModule,
+  systemPromptModule: SdkSystemPromptModule,
+  input: Pick<InitialContextEstimateWorkerInput, 'agentDir' | 'model'>,
+): InitialContextInventory {
+  const promptState = session as SdkSession & PromptStateLike;
+  captureOriginalSystemPromptOptions(promptState);
+  const promptOptions = promptState._originalSystemPromptOptions ?? promptState._baseSystemPromptOptions;
+  if (!promptOptions) throw new Error('Fresh inventory did not expose system prompt options.');
+
+  const tools = session.getAllTools?.() ?? [];
+  const inventoryPromptOptions = buildAllRegisteredPromptOptions(session, promptOptions, tools);
+  const pieBuildSystemPrompt = createPieSystemPromptBuilder(systemPromptModule.buildSystemPrompt, input.agentDir);
+  const fullSystemPrompt = normalizePromptText(pieBuildSystemPrompt(inventoryPromptOptions));
+  if (!fullSystemPrompt) throw new Error('Fresh inventory did not build a system prompt.');
+  // Match the hot picker exactly: its harness card is rebuilt from only the
+  // harness/tool/runtime inputs, while custom/append/context/skill entries
+  // are projected independently from the unfiltered options below.
+  const harnessPrompt = normalizePromptText(pieBuildSystemPrompt({
+    cwd: inventoryPromptOptions.cwd,
+    selectedTools: inventoryPromptOptions.selectedTools,
+    toolSnippets: inventoryPromptOptions.toolSnippets,
+    promptGuidelines: inventoryPromptOptions.promptGuidelines,
+  }));
+
+  // Count the exact Pie-owned prompt text used by runtime requests.
+  // Provider tool descriptions/schemas are separate request metadata and are
+  // added exactly once below.
+  const tokens = estimateTextTokens(fullSystemPrompt) + estimateTextTokens(buildToolCatalogText(tools));
+  const contextWindow = session.model?.contextWindow;
+  if (!Number.isSafeInteger(tokens) || tokens < 0
+    || !Number.isSafeInteger(contextWindow) || (contextWindow ?? 0) <= 0) {
+    throw new Error('Fresh inventory did not resolve a valid token total and context window.');
+  }
+  const estimate = { tokens, contextWindow: contextWindow! };
+  const systemPrompts = buildSessionSystemPrompts({
+    harnessPrompt,
+    promptOptions: inventoryPromptOptions,
+    formatSkillsForPrompt: sdk.formatSkillsForPrompt,
+    tools,
+    activeProvider: {
+      provider: input.model.provider,
+      modelId: input.model.id,
+    },
+  });
+  return { estimate, systemPrompts };
 }
 
 function normalizeToolSnippet(value: string | undefined): string | undefined {
@@ -308,15 +381,26 @@ async function bindInventoryExtensions(
   void runtime;
 }
 
+function isInitialization(value: unknown): value is InitialContextEstimateWorkerInitialization {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const frame = value as Record<string, unknown>;
+  return frame.protocolVersion === INITIAL_CONTEXT_INVENTORY_PROTOCOL_VERSION
+    && frame.kind === 'initialize'
+    && typeof frame.sdkPath === 'string'
+    && !!frame.sdkPatchIdentity && typeof frame.sdkPatchIdentity === 'object'
+    && Number.isSafeInteger(frame.parentPid) && (frame.parentPid as number) > 0;
+}
+
 function isInput(value: unknown): value is InitialContextEstimateWorkerInput {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const frame = value as Record<string, unknown>;
   const model = frame.model as Record<string, unknown> | undefined;
-  return typeof frame.sdkPath === 'string'
+  return frame.protocolVersion === INITIAL_CONTEXT_INVENTORY_PROTOCOL_VERSION
+    && frame.kind === 'discover'
+    && typeof frame.sdkPath === 'string'
     && !!frame.sdkPatchIdentity && typeof frame.sdkPatchIdentity === 'object'
     && typeof frame.cwd === 'string'
     && typeof frame.agentDir === 'string'
-    && Number.isSafeInteger(frame.parentPid) && (frame.parentPid as number) > 0
     && !!model && typeof model.provider === 'string' && typeof model.id === 'string';
 }
 
@@ -333,19 +417,25 @@ function startParentWatchdog(parentPid: number): () => void {
   return () => clearInterval(timer);
 }
 
-async function readInput(stream: Readable): Promise<InitialContextEstimateWorkerInput> {
+async function readFrame<T>(
+  stream: Readable,
+  validate: (value: unknown) => value is T,
+  description: string,
+): Promise<T> {
   return await new Promise((resolve, reject) => {
     let settled = false;
-    const finish = (error: Error | undefined, value?: InitialContextEstimateWorkerInput) => {
+    const finish = (error: Error | undefined, value?: T) => {
       if (settled) return;
       settled = true;
       detach();
+      stream.off('end', onEnd);
       if (error) reject(error); else resolve(value!);
     };
+    const onEnd = () => finish(new Error(`${description} ended before a complete frame.`));
     const detach = attachJsonlLineReader(stream, (line) => {
       try {
         const value: unknown = JSON.parse(line);
-        if (!isInput(value)) throw new Error('Invalid initial-context inventory request.');
+        if (!validate(value)) throw new Error(`Invalid ${description}.`);
         finish(undefined, value);
       } catch (error) {
         finish(error instanceof Error ? error : new Error(String(error)));
@@ -353,13 +443,17 @@ async function readInput(stream: Readable): Promise<InitialContextEstimateWorker
     }, {
       maxLineBytes: MAX_FRAME_BYTES - 1,
       emitTrailingLineOnEnd: false,
-      onOverflow: () => finish(new Error('Initial-context inventory request exceeded its frame limit.')),
-      onIncomplete: () => finish(new Error('Initial-context inventory request ended mid-frame.')),
+      onOverflow: () => finish(new Error(`${description} exceeded its frame limit.`)),
+      onIncomplete: () => finish(new Error(`${description} ended mid-frame.`)),
     });
+    stream.once('end', onEnd);
   });
 }
 
-async function writeOutput(stream: NodeJS.WritableStream, output: InitialContextEstimateWorkerOutput): Promise<void> {
+async function writeOutput(
+  stream: NodeJS.WritableStream,
+  output: InitialContextEstimateWorkerOutput | InitialContextEstimateWorkerReady,
+): Promise<void> {
   const wire = `${JSON.stringify(output)}\n`;
   if (Buffer.byteLength(wire, 'utf8') > MAX_FRAME_BYTES) throw new Error('Initial-context inventory response exceeded its frame limit.');
   await new Promise<void>((resolve, reject) => {
@@ -371,21 +465,67 @@ async function main(): Promise<void> {
   const inputStream = fs.createReadStream('', { fd: IPC_READ_FD, autoClose: false });
   const outputStream = fs.createWriteStream('', { fd: IPC_WRITE_FD, autoClose: false });
   let stopWatchdog: (() => void) | undefined;
+  const workerTimings: InitialContextEstimateWorkerTimings = {};
   try {
-    const input = await readInput(inputStream);
-    stopWatchdog = startParentWatchdog(input.parentPid);
-    const sdk = await loadSdk(input.sdkPath, { mode: 'worker', patchIdentity: input.sdkPatchIdentity });
-    const systemPromptModule = await loadSdkInternalModule<SdkSystemPromptModule>(
-      input.sdkPath,
-      path.join('core', 'system-prompt.js'),
-      { mode: 'worker', patchIdentity: input.sdkPatchIdentity },
+    const initialization = await readFrame(
+      inputStream,
+      isInitialization,
+      'initial-context inventory initialization',
     );
-    const inventory = await collectInitialContextInventory(sdk, systemPromptModule, input);
-    await writeOutput(outputStream, { ok: true, inventory });
+    stopWatchdog = startParentWatchdog(initialization.parentPid);
+    const sdkImportStartedAt = performance.now();
+    let sdk: SdkModule;
+    let systemPromptModule: SdkSystemPromptModule;
+    try {
+      // Preload only validated SDK code. Resource and user extension discovery
+      // starts only after the separate request-specific frame arrives.
+      sdk = await loadSdk(initialization.sdkPath, {
+        mode: 'worker',
+        patchIdentity: initialization.sdkPatchIdentity,
+      });
+      systemPromptModule = await loadSdkInternalModule<SdkSystemPromptModule>(
+        initialization.sdkPath,
+        path.join('core', 'system-prompt.js'),
+        { mode: 'worker', patchIdentity: initialization.sdkPatchIdentity },
+      );
+    } finally {
+      workerTimings.sdkImportDurationMs = Math.max(0, performance.now() - sdkImportStartedAt);
+    }
+    await writeOutput(outputStream, {
+      protocolVersion: INITIAL_CONTEXT_INVENTORY_PROTOCOL_VERSION,
+      kind: 'ready',
+      timings: { sdkImportDurationMs: workerTimings.sdkImportDurationMs },
+    });
+
+    const input = await readFrame(inputStream, isInput, 'initial-context inventory discovery request');
+    if (input.sdkPath !== initialization.sdkPath
+      || JSON.stringify(input.sdkPatchIdentity) !== JSON.stringify(initialization.sdkPatchIdentity)) {
+      throw new Error('Initial-context inventory SDK identity changed after preload.');
+    }
+    // Revalidate immediately before request-specific discovery as the installed
+    // SDK may have changed while this one-use spare was idle.
+    await validateSdkPatchBarrier(input.sdkPath, initialization.sdkPatchIdentity);
+    process.chdir(input.cwd);
+    const inventory = await collectInitialContextInventory(
+      sdk,
+      systemPromptModule,
+      input,
+      (stage, durationMs) => { workerTimings[stage] = durationMs; },
+    );
+    await writeOutput(outputStream, {
+      protocolVersion: INITIAL_CONTEXT_INVENTORY_PROTOCOL_VERSION,
+      kind: 'result',
+      ok: true,
+      inventory,
+      timings: workerTimings,
+    });
   } catch (error) {
     await writeOutput(outputStream, {
+      protocolVersion: INITIAL_CONTEXT_INVENTORY_PROTOCOL_VERSION,
+      kind: 'result',
       ok: false,
       error: error instanceof Error ? error.message : String(error),
+      ...(Object.keys(workerTimings).length > 0 ? { timings: workerTimings } : {}),
     }).catch(() => undefined);
     process.exitCode = 1;
   } finally {

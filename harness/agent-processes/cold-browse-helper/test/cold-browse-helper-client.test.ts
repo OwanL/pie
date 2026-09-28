@@ -6,6 +6,7 @@ import {
   ColdBrowseHelperClient,
   ColdBrowseHelperRequestError,
   type ColdBrowseHelperClientOptions,
+  type ColdBrowseHelperTimingSample,
 } from '../cold-browse-helper-client';
 import type { ColdBrowseHelperFence } from '../cold-browse-helper-protocol';
 import {
@@ -41,6 +42,44 @@ function client(
     ...overrides,
   });
 }
+
+test('helper timing records readiness and request durations without browse payloads', async () => {
+  const timings: ColdBrowseHelperTimingSample[] = [];
+  const helper = client('delayed', {
+    startupTimeoutMs: 2_000,
+    requestTimeoutMs: 2_000,
+    onTiming: (sample) => timings.push(sample),
+  });
+  try {
+    const [, opened] = await Promise.all([
+      helper.warm(),
+      helper.openSnapshot(fence, openOptions),
+    ]);
+    assert.equal(opened.session.path, fence.sessionPath);
+  } finally {
+    await helper.dispose();
+  }
+
+  const start = timings.find((sample) => sample.stage === 'start');
+  const warm = timings.find((sample) => sample.stage === 'operation' && sample.operation === 'warm');
+  const open = timings.find((sample) => sample.stage === 'operation' && sample.operation === 'open');
+  assert.ok(start, 'one helper generation start is timed');
+  assert.ok(warm, 'readiness wait is timed for warm');
+  assert.ok(open, 'the browse request is timed');
+  assert.equal(start.outcome, 'success');
+  assert.equal(warm.outcome, 'success');
+  assert.equal(open.outcome, 'success');
+  if (start.stage !== 'start' || warm.stage !== 'operation' || open.stage !== 'operation') {
+    throw new Error('Helper timing stage did not match the expected record.');
+  }
+  assert.ok(start.durationMs >= 0 && start.durationMs < 2_000);
+  assert.ok(warm.waitDurationMs >= 0 && warm.waitDurationMs < 2_000);
+  assert.ok(open.waitDurationMs >= 0 && open.waitDurationMs < 2_000);
+  assert.ok((open.requestDurationMs ?? -1) >= 0 && (open.requestDurationMs ?? 2_000) < 2_000);
+  assert.deepEqual(Object.keys(open).sort(), [
+    'operation', 'outcome', 'requestDurationMs', 'stage', 'waitDurationMs',
+  ]);
+});
 
 test('client keeps correlated operation errors local to the request', async () => {
   const helper = client('error');

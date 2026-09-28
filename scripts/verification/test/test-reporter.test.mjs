@@ -122,27 +122,30 @@ test('reporter accounts for generated batch markers and direct file-level comple
   assert.deepEqual(report.fileAccounting.executedFiles, [batchFile, directSource]);
 });
 
-test('real Node CLI reporter and run() account direct files, wrappers, and intentional reruns', (t) => {
+test('real Node CLI reporter accounts direct files, wrappers, and intentional reruns', (t) => {
   const directory = mkdtempSync(path.join(os.tmpdir(), 'pie-test-accounting-real-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const direct = path.join(directory, 'direct.test.mjs');
   const wrapper = path.join(directory, 'wrapper.test.mjs');
-  const apiDriver = path.join(directory, 'api-driver.mjs');
+  const secondDirect = path.join(directory, 'second-direct.test.mjs');
+  const secondWrapper = path.join(directory, 'second-wrapper.test.mjs');
   const contextPath = path.join(directory, 'context.json');
   const reporterUrl = new URL('../test-reporter.mjs', import.meta.url).href;
   const marker = `${TEST_FILE_MARKER}${direct}`;
+  const secondMarker = `${TEST_FILE_MARKER}${secondDirect}`;
   writeFileSync(direct, "import { describe, test } from 'node:test'; describe('nested suite', () => { test('first', () => {}); test('second', () => {}); }); test('top level', () => {});\n");
   writeFileSync(wrapper, `import { describe } from 'node:test'; describe(${JSON.stringify(marker)}, async () => { await import(${JSON.stringify(pathToFileURL(direct).href)}); });\n`);
-  writeFileSync(apiDriver, `import { run } from 'node:test'; import reporter from ${JSON.stringify(reporterUrl)}; for await (const chunk of reporter(run({ files: process.argv.slice(2), execArgv: [] }))) process.stdout.write(chunk);\n`);
+  writeFileSync(secondDirect, "import test from 'node:test'; test('second direct', () => {});\n");
+  writeFileSync(secondWrapper, `import { describe } from 'node:test'; describe(${JSON.stringify(secondMarker)}, async () => { await import(${JSON.stringify(pathToFileURL(secondDirect).href)}); });\n`);
   const env = { ...process.env, [TEST_FILE_ACCOUNTING_ENV]: contextPath };
-  // The API driver and test subprocesses must not inherit a parent Node test runner's flags.
+  // The child test process must not inherit a parent Node test runner's flags.
   delete env.NODE_OPTIONS;
   delete env.NODE_TEST_CONTEXT;
   const runChild = (args, expectedFiles, intentionalReruns = []) => {
     writeFileSync(contextPath, JSON.stringify({
       expectedFiles,
       directFiles: { [normalizeTestFileIdentity(direct)]: direct },
-      ignoredFiles: [wrapper],
+      ignoredFiles: [wrapper, secondWrapper],
       intentionalReruns,
     }));
     const child = spawnSync(process.execPath, args, { env, encoding: 'utf8', timeout: 30_000 });
@@ -154,14 +157,11 @@ test('real Node CLI reporter and run() account direct files, wrappers, and inten
   const cli = (files, expectedFiles, reruns) => runChild(
     ['--test', `--test-reporter=${reporterUrl}`, ...files], expectedFiles, reruns,
   );
-  const first = cli([direct, wrapper], [direct]);
-  assert.equal(first.success, false, 'unapproved second execution is a duplicate');
-  assert.deepEqual(first.duplicates, [{ file: direct, expected: 1, executed: 2 }]);
-  const approved = cli([direct, wrapper], [direct], [direct]);
-  assert.equal(approved.success, true);
-  assert.equal(approved.executed, 2);
-  assert.deepEqual(approved.intentionalReruns, [{ file: direct, expected: 1, executed: 1 }]);
-  const api = runChild([apiDriver, direct, wrapper], [direct], [direct]);
-  assert.equal(api.success, true, 'run() exposes the same file-level boundary');
-  assert.deepEqual(api.executedFiles.map(normalizeTestFileIdentity), [direct, direct].map(normalizeTestFileIdentity));
+  // Exercise both permitted and accidental duplicate dispatch in one CLI run:
+  // direct+wrapper is an intentional rerun, while secondDirect+secondWrapper is not.
+  const mixed = cli([direct, wrapper, secondDirect, secondWrapper], [direct, secondDirect], [direct]);
+  assert.equal(mixed.success, false, 'an unapproved duplicate still fails closed');
+  assert.deepEqual(mixed.duplicates, [{ file: secondDirect, expected: 1, executed: 2 }]);
+  assert.deepEqual(mixed.intentionalReruns, [{ file: direct, expected: 1, executed: 1 }]);
+  assert.equal(mixed.executed, 4);
 });

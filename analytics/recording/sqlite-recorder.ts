@@ -202,7 +202,7 @@ function prepareWriterStatement(
 }
 
 const sqlite = createRequire(process.execPath)('node:sqlite') as SqliteModule;
-const DATABASE_SCHEMA_VERSION = 13;
+const DATABASE_SCHEMA_VERSION = 15;
 const BUSY_TIMEOUT_MS = 5_000;
 const MAX_PENDING_SEQUENCES_PER_PRODUCER = 4_096;
 
@@ -1339,6 +1339,133 @@ function ensureFactByteCounter(database: SqliteDatabase): void {
   }
 }
 
+/** Maintain exact retained detail-byte totals for query-envelope metadata.
+ *
+ * Every read command used to call `detailStorageStats()` while assembling its
+ * snapshot metadata. That exact count/sum scans all retained detail payload and
+ * content rows, so even the O(1) revision poll repeated history-sized work.
+ * Seed the counters once on schema upgrade, then keep them in the same SQLite
+ * transactions as detail insert/delete and shared-content cleanup. Schema v15
+ * adds matching maintained row counts so explicit storage summaries also stay
+ * bounded while remaining exact. */
+function ensureDetailByteCounters(database: SqliteDatabase): void {
+  const columns = new Set((database.prepare('PRAGMA table_info(analytics_delivery_accounting)').all() as Array<{ name: string }>)
+    .map((column) => column.name));
+  if (!columns.has('retained_detail_logical_bytes')) {
+    database.exec("ALTER TABLE analytics_delivery_accounting ADD COLUMN retained_detail_logical_bytes TEXT NOT NULL DEFAULT '0';");
+  }
+  if (!columns.has('retained_detail_stored_bytes')) {
+    database.exec("ALTER TABLE analytics_delivery_accounting ADD COLUMN retained_detail_stored_bytes TEXT NOT NULL DEFAULT '0';");
+  }
+  if (!columns.has('detail_byte_counters_seeded')) {
+    database.exec('ALTER TABLE analytics_delivery_accounting ADD COLUMN detail_byte_counters_seeded INTEGER NOT NULL DEFAULT 0;');
+  }
+  database.exec(`
+    UPDATE analytics_delivery_accounting
+    SET retained_detail_logical_bytes = CAST((
+          SELECT COALESCE(SUM(logical_bytes), 0) FROM analytics_detail_payloads
+        ) AS TEXT),
+        retained_detail_stored_bytes = CAST((
+          SELECT COALESCE(SUM(logical_bytes), 0) FROM analytics_detail_content
+        ) AS TEXT),
+        detail_byte_counters_seeded = 1
+    WHERE singleton = 1 AND detail_byte_counters_seeded = 0;
+
+    CREATE TRIGGER IF NOT EXISTS analytics_detail_payload_bytes_insert
+    AFTER INSERT ON analytics_detail_payloads
+    BEGIN
+      UPDATE analytics_delivery_accounting
+      SET retained_detail_logical_bytes = CAST(
+        CAST(retained_detail_logical_bytes AS INTEGER) + NEW.logical_bytes AS TEXT
+      ) WHERE singleton = 1;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS analytics_detail_payload_bytes_delete
+    AFTER DELETE ON analytics_detail_payloads
+    BEGIN
+      UPDATE analytics_delivery_accounting
+      SET retained_detail_logical_bytes = CAST(
+        MAX(0, CAST(retained_detail_logical_bytes AS INTEGER) - OLD.logical_bytes) AS TEXT
+      ) WHERE singleton = 1;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS analytics_detail_content_bytes_insert
+    AFTER INSERT ON analytics_detail_content
+    BEGIN
+      UPDATE analytics_delivery_accounting
+      SET retained_detail_stored_bytes = CAST(
+        CAST(retained_detail_stored_bytes AS INTEGER) + NEW.logical_bytes AS TEXT
+      ) WHERE singleton = 1;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS analytics_detail_content_bytes_delete
+    AFTER DELETE ON analytics_detail_content
+    BEGIN
+      UPDATE analytics_delivery_accounting
+      SET retained_detail_stored_bytes = CAST(
+        MAX(0, CAST(retained_detail_stored_bytes AS INTEGER) - OLD.logical_bytes) AS TEXT
+      ) WHERE singleton = 1;
+    END;
+  `);
+}
+
+/** Maintain exact retained-detail row counts for the explicit storage view.
+ * Storage diagnostics used to run COUNT(*) over both detail tables on every
+ * refresh. Seed once per schema migration, then keep the counts in the same
+ * transactions as their byte totals and retained-row changes. */
+function ensureDetailCountCounters(database: SqliteDatabase): void {
+  const columns = new Set((database.prepare('PRAGMA table_info(analytics_delivery_accounting)').all() as Array<{ name: string }>)
+    .map((column) => column.name));
+  if (!columns.has('retained_detail_payload_count')) {
+    database.exec("ALTER TABLE analytics_delivery_accounting ADD COLUMN retained_detail_payload_count TEXT NOT NULL DEFAULT '0';");
+  }
+  if (!columns.has('retained_detail_content_count')) {
+    database.exec("ALTER TABLE analytics_delivery_accounting ADD COLUMN retained_detail_content_count TEXT NOT NULL DEFAULT '0';");
+  }
+  if (!columns.has('detail_count_counters_seeded')) {
+    database.exec('ALTER TABLE analytics_delivery_accounting ADD COLUMN detail_count_counters_seeded INTEGER NOT NULL DEFAULT 0;');
+  }
+  database.exec(`
+    UPDATE analytics_delivery_accounting
+    SET retained_detail_payload_count = CAST((SELECT COUNT(*) FROM analytics_detail_payloads) AS TEXT),
+        retained_detail_content_count = CAST((SELECT COUNT(*) FROM analytics_detail_content) AS TEXT),
+        detail_count_counters_seeded = 1
+    WHERE singleton = 1 AND detail_count_counters_seeded = 0;
+
+    CREATE TRIGGER IF NOT EXISTS analytics_detail_payload_count_insert
+    AFTER INSERT ON analytics_detail_payloads
+    BEGIN
+      UPDATE analytics_delivery_accounting
+      SET retained_detail_payload_count = CAST(CAST(retained_detail_payload_count AS INTEGER) + 1 AS TEXT)
+      WHERE singleton = 1;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS analytics_detail_payload_count_delete
+    AFTER DELETE ON analytics_detail_payloads
+    BEGIN
+      UPDATE analytics_delivery_accounting
+      SET retained_detail_payload_count = CAST(MAX(0, CAST(retained_detail_payload_count AS INTEGER) - 1) AS TEXT)
+      WHERE singleton = 1;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS analytics_detail_content_count_insert
+    AFTER INSERT ON analytics_detail_content
+    BEGIN
+      UPDATE analytics_delivery_accounting
+      SET retained_detail_content_count = CAST(CAST(retained_detail_content_count AS INTEGER) + 1 AS TEXT)
+      WHERE singleton = 1;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS analytics_detail_content_count_delete
+    AFTER DELETE ON analytics_detail_content
+    BEGIN
+      UPDATE analytics_delivery_accounting
+      SET retained_detail_content_count = CAST(MAX(0, CAST(retained_detail_content_count AS INTEGER) - 1) AS TEXT)
+      WHERE singleton = 1;
+    END;
+  `);
+}
+
 /** Serve the settlement projection's declared ordering from an index.
  *
  * `readProviderSettlements` orders by `CAST(projection_revision AS INTEGER),
@@ -1703,7 +1830,7 @@ function migrateV11(database: SqliteDatabase): void {
   }
 }
 
-/** Schema v12 -> v13: typed tool/file facet observations, states, and the
+/** Schema v12 -> current: typed tool/file facet observations, states, and the
  * facet query view.
  *
  * Schema12 capture produced no tool facets, so there is nothing to backfill:
@@ -1713,9 +1840,23 @@ function migrateV11(database: SqliteDatabase): void {
  * projection and detail reference is preserved untouched. The shared aggregate
  * indexes are also ensured here so every explicit v1-v12 upgrade reaches the
  * same indexed current schema. */
+/** Schema v13 -> v14: seed and maintain exact retained-detail byte counters. */
+function migrateV13(database: SqliteDatabase): void {
+  ensureDetailByteCounters(database);
+}
+
+/** Schema v14 -> v15: seed exact retained-detail row counts used by storage views. */
+function migrateV14(database: SqliteDatabase): void {
+  ensureDetailCountCounters(database);
+}
+
 function migrateV12(database: SqliteDatabase): void {
   createToolFacetProjectionSchema(database as unknown as ToolFacetDatabase);
   ensureAggregateSeriesIndexes(database);
+  // All older supported upgrade paths converge here before publishing the
+  // current schema version, so chain both additive detail-counter migrations.
+  migrateV13(database);
+  migrateV14(database);
 }
 
 function databaseTransaction<T>(database: SqliteDatabase, operation: () => T): T {
@@ -1755,7 +1896,11 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
     // diagnostic. Ensure its time predicates stay indexed on every writable
     // open that already has the current schema. Older migrations create their
     // tables first; the version-0 path ensures the indexes after creation.
-    if (version === DATABASE_SCHEMA_VERSION) ensureAggregateSeriesIndexes(database);
+    if (version === DATABASE_SCHEMA_VERSION) {
+      ensureAggregateSeriesIndexes(database);
+      ensureDetailByteCounters(database);
+      ensureDetailCountCounters(database);
+    }
     if (version === 0) {
       const existing = database.prepare(`
         SELECT name FROM sqlite_master
@@ -1899,6 +2044,17 @@ function initializeSchema(database: SqliteDatabase, readOnly = false): void {
     }
     if (version === 12) {
       migrateV12(database);
+      database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
+      return;
+    }
+    if (version === 13) {
+      migrateV13(database);
+      migrateV14(database);
+      database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
+      return;
+    }
+    if (version === 14) {
+      migrateV14(database);
       database.exec(`PRAGMA user_version = ${DATABASE_SCHEMA_VERSION}`);
     }
   });
@@ -4415,19 +4571,22 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
 
   detailStorageStats(): AnalyticsDetailStorageStats {
     this.assertOpen();
-    const payload = this.database.prepare(`
-      SELECT COUNT(*) AS count, COALESCE(SUM(logical_bytes), 0) AS logical
-      FROM analytics_detail_payloads
-    `).get() as { count: number | bigint; logical: number | bigint };
-    const content = this.database.prepare(`
-      SELECT COUNT(*) AS count, COALESCE(SUM(logical_bytes), 0) AS stored
-      FROM analytics_detail_content
-    `).get() as { count: number | bigint; stored: number | bigint };
+    const counters = this.database.prepare(`
+      SELECT retained_detail_payload_count, retained_detail_content_count,
+        retained_detail_logical_bytes, retained_detail_stored_bytes
+      FROM analytics_delivery_accounting WHERE singleton = 1
+    `).get() as {
+      retained_detail_payload_count: string;
+      retained_detail_content_count: string;
+      retained_detail_logical_bytes: string;
+      retained_detail_stored_bytes: string;
+    } | undefined;
+    if (!counters) throw new Error('Analytics detail storage counters are missing.');
     return {
-      payloadCount: toNumber(payload.count),
-      contentCount: toNumber(content.count),
-      logicalBytes: encodeInt64(BigInt(payload.logical)),
-      storedContentBytes: encodeInt64(BigInt(content.stored)),
+      payloadCount: toNumber(BigInt(counters.retained_detail_payload_count)),
+      contentCount: toNumber(BigInt(counters.retained_detail_content_count)),
+      logicalBytes: encodeInt64(BigInt(counters.retained_detail_logical_bytes)),
+      storedContentBytes: encodeInt64(BigInt(counters.retained_detail_stored_bytes)),
     };
   }
 
@@ -4464,19 +4623,15 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
   /** Read only the complete-detail watermark.
    *
    * The capture acknowledgement needs exactly this value, and only this value.
-   * It previously called {@link readDeliveryAccounting}, which additionally runs
-   * `detailStorageStats()`: two unbounded `COUNT(*)`/`SUM(logical_bytes)`
-   * aggregates over `analytics_detail_payloads` and `analytics_detail_content`.
-   * One acknowledgement is issued per ingested batch, so at 1M facts in
-   * 256-record batches that is roughly 3,900 acknowledgements, each scanning a
-   * table that grows as the tier proceeds — cost O(batches x rows), quadratic in
-   * the tier, and the aggregates were then discarded unread.
+   * It previously called {@link readDeliveryAccounting}, assembling delivery
+   * and detail-storage fields that were discarded. Detail-storage values are
+   * now maintained counters, so this is no longer a table scan, but the narrow
+   * reader still avoids redundant point reads and response work on every batch.
    *
    * The watermark itself is an already-maintained counter (`details_accepted` on
    * the singleton accounting row), so this reader is a single indexed point read.
-   * The full summary stays available through {@link readDeliveryAccounting} and
-   * {@link detailStorageStats} for the explicit storage/summary commands, where
-   * an exact aggregate is the point and the call is rare. */
+   * The full exact summary stays available through {@link readDeliveryAccounting}
+   * and {@link detailStorageStats} for storage/summary commands. */
   readCompleteDetailWatermark(): number | string {
     this.assertOpen();
     const row = this.database.prepare(`
@@ -4491,19 +4646,17 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     return this.deliveryAccountingFromSnapshot(this.detailStorageStats());
   }
 
-  /** Read the paired accounting snapshot for one `stats` request: the full
-   * detail-storage aggregate plus the delivery accounting derived from that
-   * same snapshot.
+  /** Read the paired accounting snapshot for one `stats` request: maintained
+   * detail-storage counters plus delivery accounting derived from that same
+   * snapshot.
    *
    * {@link readDeliveryAccounting} recomputes {@link detailStorageStats}
    * internally, so the worker `stats` reply — which reports both fields —
-   * previously ran the identical unbounded `COUNT(*)`/`SUM(logical_bytes)`
-   * aggregates over `analytics_detail_payloads` and `analytics_detail_content`
-   * twice per request. This reader owns the aggregate: the detail snapshot is
-   * computed exactly once, within the request, and both reply fields derive
-   * from it. Nothing is cached across requests and the snapshot hand-off is
-   * private, so no caller can supply a stale precomputed value through the
-   * public API. */
+   * previously read the identical detail counters twice per request. This reader
+   * obtains them exactly once, within the request, and both reply fields derive
+   * from that snapshot. Nothing is cached across requests and the snapshot
+   * hand-off is private, so no caller can supply a stale precomputed value
+   * through the public API. */
   readStatsReplyAccounting(): { detailStorage: AnalyticsDetailStorageStats; delivery: AnalyticsDeliveryAccounting } {
     this.assertOpen();
     const detailStorage = this.detailStorageStats();
@@ -5949,7 +6102,17 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
     `).all() as Array<{ generation_id: string }>;
     const generationIdsTruncated = generations.length > 1_000;
     if (generationIdsTruncated) generations.pop();
-    const delivery = this.readDeliveryAccounting();
+    const delivery = this.database.prepare(`
+      SELECT delivery_history_coverage, details_accepted,
+        retained_detail_logical_bytes, retained_detail_stored_bytes
+      FROM analytics_delivery_accounting WHERE singleton = 1
+    `).get() as {
+      delivery_history_coverage: string;
+      details_accepted: string;
+      retained_detail_logical_bytes: string;
+      retained_detail_stored_bytes: string;
+    } | undefined;
+    if (!delivery) throw new Error('Analytics delivery accounting row is missing.');
     return {
       databaseSchemaVersion: this.getDatabaseSchemaVersion(),
       projectionRevision: this.getProjectionRevision(),
@@ -5957,10 +6120,10 @@ export class SqliteAnalyticsRecorder implements AnalyticsSink, AnalyticsDetailSi
       generationIds: generations.map((row) => row.generation_id),
       generationIdsTruncated,
       pendingDetailCoverage: {
-        deliveryHistoryCoverage: delivery.deliveryHistoryCoverage,
-        completeDetailWatermark: delivery.completeDetailWatermark,
-        retainedDetailLogicalBytes: delivery.retainedDetailLogicalBytes,
-        retainedDetailStoredBytes: delivery.retainedDetailStoredBytes,
+        deliveryHistoryCoverage: delivery.delivery_history_coverage === 'retained_only' ? 'retained_only' : 'complete',
+        completeDetailWatermark: encodeInt64(delivery.details_accepted),
+        retainedDetailLogicalBytes: encodeInt64(delivery.retained_detail_logical_bytes),
+        retainedDetailStoredBytes: encodeInt64(delivery.retained_detail_stored_bytes),
       },
       truncation: { rowLimit: false, byteLimit: false, cellLimit: false },
     };

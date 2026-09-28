@@ -319,6 +319,66 @@ test('an initial transcript block stays debug-level while the commit deadline re
   hub.dispose();
 });
 
+test('automatic handshake traffic cannot reopen a terminal reload circuit but user activity can', async () => {
+  const clock = new FakeClock();
+  const routed: WebviewToHostMessage[] = [];
+  const { hub } = createHub(clock, routed);
+  const transport = new FakeRendererTransport('vscode');
+  const registration = hub.registerRenderer(transport);
+  await ready(transport, registration);
+
+  const reportRenderFailure = () => transport.send({
+    type: 'renderFailure',
+    payload: {
+      viewGeneration: registration.getViewGeneration(),
+      revision: null,
+      surface: 'app',
+      classification: 'component_error',
+    },
+  });
+
+  for (let i = 0; i < 2; i++) {
+    reportRenderFailure();
+    await settle();
+  }
+  assert.equal(transport.recoverCalls.length, 2);
+  reportRenderFailure();
+  await settle();
+  assert.equal(transport.recoverCalls.length, 2, 'the threshold opens terminal suppression');
+
+  transport.send({ type: 'ready', viewGeneration: registration.getViewGeneration() });
+  transport.send({ type: 'refreshState', viewGeneration: registration.getViewGeneration() });
+  transport.send({
+    type: 'detail.unsubscribe',
+    viewGeneration: registration.getViewGeneration(),
+    detailKey: 'detail-1',
+    detailAttempt: 1,
+    reason: 'unmount',
+  });
+  reportRenderFailure();
+  await settle();
+  assert.equal(transport.recoverCalls.length, 2, 'automatic handshake and renderer evidence do not reset suppression');
+
+  transport.send({ type: 'newSession' });
+  reportRenderFailure();
+  await settle();
+  assert.equal(transport.recoverCalls.length, 3, 'a deliberate user command begins a fresh recovery episode');
+  assert.equal(routed.some((message) => message.type === 'newSession'), true);
+
+  reportRenderFailure();
+  await settle();
+  assert.equal(transport.recoverCalls.length, 4);
+  reportRenderFailure();
+  await settle();
+  assert.equal(transport.recoverCalls.length, 4, 'the new episode also becomes terminal after the rolling cap');
+
+  registration.handleViewResolved(true);
+  reportRenderFailure();
+  await settle();
+  assert.equal(transport.recoverCalls.length, 5, 'a newly resolved view starts a fresh episode');
+  hub.dispose();
+});
+
 test('blocking renderer A never delays renderer B', async () => {
   const clock = new FakeClock();
   const routed: WebviewToHostMessage[] = [];

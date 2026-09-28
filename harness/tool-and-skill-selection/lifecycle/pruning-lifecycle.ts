@@ -71,7 +71,6 @@ export function clonePruningConfig(input: PruningConfig): PruningConfig {
 			...input.prepass,
 			...(input.prepass.timeoutMs ? { timeoutMs: { ...input.prepass.timeoutMs } } : {}),
 		} : undefined,
-		autoSkipBelowTokens: input.autoSkipBelowTokens,
 	};
 }
 

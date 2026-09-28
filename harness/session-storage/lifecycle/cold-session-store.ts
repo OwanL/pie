@@ -59,8 +59,6 @@ const MISSING_FINGERPRINT = 'missing';
 const DEFAULT_READ_ATTEMPTS = 3;
 const DEFAULT_BROWSE_HELPER_INVALIDATION_TIMEOUT_MS = 30_000;
 const DEFAULT_BROWSE_HELPER_SHUTDOWN_TIMEOUT_MS = 5_000;
-const ATOMIC_REPLACE_RETRY_DELAYS_MS = [10, 25, 50, 100, 200] as const;
-const ATOMIC_REPLACE_RETRY_WAIT = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
 
 export interface ColdSessionContext {
   messages: unknown[];
@@ -1233,8 +1231,7 @@ export class ColdSessionStore {
     if ((shouldRestoreModel || shouldRestoreThinkingLevel)
       && typeof coldManager.appendPieModelSettingsChange === 'function') {
       try {
-        this.leases.commitSync(stamp, () => appendColdModelSettingsWithAtomicReplaceRetry(
-          coldManager,
+        this.leases.commitSync(stamp, () => coldManager.appendPieModelSettingsChange!(
           shouldRestoreModel ? previousModel.provider : undefined,
           shouldRestoreModel ? previousModel.modelId : undefined,
           shouldRestoreThinkingLevel ? beforeContext.thinkingLevel : undefined,
@@ -1651,10 +1648,11 @@ export class ColdSessionStore {
         }
         // Model + reasoning is one user intent. Publish both canonical Pi
         // entries through the SDK's crash-safe batch seam under one ownership
-        // fence, then advance the durable fingerprint exactly once. This also
+        // fence, then advance the durable fingerprint exactly once. The SDK
+        // owns transient atomic-rename retries; retrying here would repeat the
+        // whole staged operation and multiply its blocking budget. This also
         // keeps a retained create/fork handle promotable without reopening it.
-        this.leases.commitSync(stamp, () => appendColdModelSettingsWithAtomicReplaceRetry(
-          coldManager,
+        this.leases.commitSync(stamp, () => coldManager.appendPieModelSettingsChange!(
           modelChanged ? updates.model!.provider : undefined,
           modelChanged ? updates.model!.modelId : undefined,
           thinkingLevelChanged ? updates.thinkingLevel : undefined,
@@ -1683,36 +1681,6 @@ export class ColdSessionStore {
   private stampResult(result: object, stamps: readonly ColdSessionOwnershipStamp[]): void {
     this.resultStamps.set(result, stamps);
   }
-}
-
-function appendColdModelSettingsWithAtomicReplaceRetry(
-  manager: ColdSdkSessionManager,
-  provider: string | undefined,
-  modelId: string | undefined,
-  thinkingLevel: string | undefined,
-): void {
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      manager.appendPieModelSettingsChange!(provider, modelId, thinkingLevel);
-      return;
-    } catch (error) {
-      const delayMs = ATOMIC_REPLACE_RETRY_DELAYS_MS[attempt];
-      if (delayMs === undefined || !isTransientAtomicReplaceError(error)) throw error;
-      // Windows can transiently deny replacement while an asynchronous stat or
-      // scanner still holds the destination. The SDK has not crossed its rename
-      // commit point in this case, so retrying the complete staged append is safe.
-      Atomics.wait(ATOMIC_REPLACE_RETRY_WAIT, 0, 0, delayMs);
-    }
-  }
-}
-
-function isTransientAtomicReplaceError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  const filesystemError = error as NodeJS.ErrnoException;
-  return filesystemError.syscall === 'rename'
-    && (filesystemError.code === 'EPERM'
-      || filesystemError.code === 'EACCES'
-      || filesystemError.code === 'EBUSY');
 }
 
 async function withTimeout<T>(

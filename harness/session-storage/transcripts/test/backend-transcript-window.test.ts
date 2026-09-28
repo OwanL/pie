@@ -181,14 +181,71 @@ test('session-opened tails and transcript pages use compact transport rows while
   const cache = buildDisplayTranscriptCache(entries as any, '/workspace/session.jsonl');
   assert.ok(cache.transportTranscript);
   const durableBytes = Buffer.byteLength(JSON.stringify(cache.transcript), 'utf8');
-  const transportBytes = Buffer.byteLength(JSON.stringify(cache.transportTranscript), 'utf8');
   assert.ok(durableBytes > 1_000_000, 'backend detail source retains the complete recursive transcript');
-  assert.ok(transportBytes < durableBytes / 4, 'ordinary transcript transport uses the lazy-detail projection');
+  assert.equal(0 in cache.transportTranscript, false, 'transport rows are not eagerly projected');
 
   const tail = buildTailTranscriptWindow(cache);
   const page = buildPagedTranscriptWindow(cache, { direction: 'latest' });
+  const transportBytes = Buffer.byteLength(JSON.stringify(cache.transportTranscript), 'utf8');
+  assert.ok(transportBytes < durableBytes / 4, 'requested transport rows use the lazy-detail projection');
   assert.strictEqual(tail.transcript[0], cache.transportTranscript[0]);
   assert.strictEqual(page.transcript[0], cache.transportTranscript[0]);
+});
+
+test('a 33 MiB historical tool result stays durable without eager transport projection', () => {
+  const largeResult = { output: 'x'.repeat(33 * 1024 * 1024) };
+  const entries = [
+    {
+      id: 'old-assistant',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      type: 'message',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'toolCall', id: 'old-tool', name: 'bash', arguments: { command: 'large output' } }],
+        stopReason: 'toolUse',
+      },
+    },
+    {
+      id: 'old-tool-result',
+      timestamp: '2026-01-01T00:00:01.000Z',
+      type: 'message',
+      message: { role: 'toolResult', toolCallId: 'old-tool', toolName: 'bash', details: largeResult },
+    },
+    {
+      id: 'latest-user',
+      timestamp: '2026-01-01T00:00:02.000Z',
+      type: 'message',
+      message: { role: 'user', content: 'latest prompt' },
+    },
+    {
+      id: 'latest-assistant',
+      timestamp: '2026-01-01T00:00:03.000Z',
+      type: 'message',
+      message: { role: 'assistant', content: [{ type: 'text', text: 'latest answer' }] },
+    },
+  ] as any[];
+
+  const cache = buildDisplayTranscriptCache(entries, '/temporary/large-session.jsonl');
+  assert.equal(cache.transcript.length, 3);
+  assert.strictEqual(cache.transcript[0]!.toolCalls?.[0]?.result, largeResult);
+  assert.equal(0 in cache.transportTranscript!, false);
+
+  const tail = buildTailTranscriptWindow(cache, { tailCount: 2 });
+  assert.deepEqual(tail.transcript.map((message) => message.id), ['latest-user', 'latest-assistant']);
+  assert.equal(0 in cache.transportTranscript!, false, 'opening at the tail does not serialize an old result');
+
+  const olderPage = buildPagedTranscriptWindow(cache, {
+    direction: 'older',
+    loadedStart: 1,
+    loadedEnd: 3,
+    pageSize: 1,
+    maxLoadedCount: 2,
+  });
+  const historicalAssistant = olderPage.transcript[0]!;
+  assert.equal(historicalAssistant.id, 'old-assistant');
+  assert.ok(historicalAssistant.toolCalls?.[0]?.detailRef, 'older history still gets its lazy tool-result handle');
+  assert.strictEqual(cache.transcript[0]!.toolCalls?.[0]?.result, largeResult, 'full durable tool result remains available');
+  assert.strictEqual(cache.transportTranscript![0], historicalAssistant, 'the historical transport projection is memoized');
 });
 
 test('buildTailTranscriptWindow keeps pinned streaming messages visible outside the tail window', () => {

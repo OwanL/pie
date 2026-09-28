@@ -354,21 +354,18 @@ test("loadConfig rejects non-integer prepass budgets and warns", () => {
 	assert.ok(warnings.some((w) => w.includes("oauthRaceBackoffMs")));
 });
 
-test("loadConfig parses maxOutputTokens and autoSkipBelowTokens", () => {
+test("loadConfig parses maxOutputTokens", () => {
 	const result = loadConfig(tempSettings(JSON.stringify({
-		pruning: { autoSkipBelowTokens: 400, prepass: { maxOutputTokens: 256 } },
+		pruning: { prepass: { maxOutputTokens: 256 } },
 	})));
-	assert.equal(result.autoSkipBelowTokens, 400);
 	assert.equal(result.prepass?.maxOutputTokens, 256);
 });
 
-test("loadConfig rejects invalid positive token limits and keeps auto-skip disabled", () => {
+test("loadConfig rejects invalid prepass output token limits and warns", () => {
 	const { result, warnings } = captureWarns(() => loadConfig(tempSettings(JSON.stringify({
-		pruning: { autoSkipBelowTokens: 0, prepass: { maxOutputTokens: -1 } },
+		pruning: { prepass: { maxOutputTokens: -1 } },
 	}))));
-	assert.equal(result.autoSkipBelowTokens, null);
 	assert.equal(result.prepass, undefined);
-	assert.ok(warnings.some((w) => w.includes("autoSkipBelowTokens")));
 	assert.ok(warnings.some((w) => w.includes("maxOutputTokens")));
 });
 

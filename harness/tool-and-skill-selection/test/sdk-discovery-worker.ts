@@ -79,7 +79,6 @@ async function main(): Promise<void> {
 			model: "test-pruner",
 			provider: "ollama",
 			thinkingLevel: "off",
-			autoSkipBelowTokens: null,
 			skills: { strategy: "discretion", ceiling: 8, pinned: [], alwaysKeep: [] },
 			tools: { strategy: "discretion", ceiling: 10, dependencies: {}, alwaysKeep: [] },
 			prepass: { maxTransportRetries: 0, transportBackoffBaseMs: 0 },

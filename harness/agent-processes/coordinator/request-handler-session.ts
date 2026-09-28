@@ -195,38 +195,76 @@ async function handleSessionOpen(
 ): Promise<unknown> {
   const params = validateSessionOpen(request.params);
   markRequestValidated(deps);
-  // Record browse-time predecessor identity before the viewed path changes.
-  // Building a cold payload is deliberately SessionManager-only. The viewed
-  // path commits only after the durable read succeeds.
-  const viewedPathRollback = deps.prepareViewedSessionPath?.(params.sessionPath);
-  let openPayload: SessionOpenedPayload;
+  const timingStartedAt = performance.now();
+  let snapshotBuildDurationMs: number | undefined;
+  let sessionOpenedEmitDurationMs: number | undefined;
+  let runtimeReady: boolean | undefined;
+  let outcome: 'success' | 'failure' = 'failure';
+  let failureStage: 'snapshot_build' | 'session_opened_emit' | 'handler' | undefined;
   try {
-    openPayload = await deps.buildSessionOpenedPayload(
-      params.sessionPath,
-      params.selectionToken,
-      params.transcript,
-      undefined,
-      params.operationId,
-      params.operationAttempt,
-    );
+    // Record browse-time predecessor identity before the viewed path changes.
+    // Building a cold payload is deliberately SessionManager-only. The viewed
+    // path commits only after the durable read succeeds.
+    const viewedPathRollback = deps.prepareViewedSessionPath?.(params.sessionPath);
+    let openPayload: SessionOpenedPayload;
+    const snapshotBuildStartedAt = performance.now();
+    try {
+      openPayload = await deps.buildSessionOpenedPayload(
+        params.sessionPath,
+        params.selectionToken,
+        params.transcript,
+        undefined,
+        params.operationId,
+        params.operationAttempt,
+      );
+      runtimeReady = openPayload.runtimeReady;
+    } catch (error) {
+      failureStage = 'snapshot_build';
+      deps.discardPreparedViewedSessionPath?.(params.sessionPath, viewedPathRollback);
+      throw error;
+    } finally {
+      snapshotBuildDurationMs = Math.max(0, performance.now() - snapshotBuildStartedAt);
+    }
+    if (deps.commitPreparedViewedSessionPath) {
+      deps.commitPreparedViewedSessionPath(params.sessionPath, viewedPathRollback);
+    } else {
+      deps.setViewedSessionPath(params.sessionPath);
+    }
+    const emitStartedAt = performance.now();
+    try {
+      deps.emit('session.opened', openPayload);
+    } catch (error) {
+      failureStage = 'session_opened_emit';
+      throw error;
+    } finally {
+      sessionOpenedEmitDurationMs = Math.max(0, performance.now() - emitStartedAt);
+    }
+    const context = deps.getSessionContext(params.sessionPath);
+    if (context) {
+      deps.emitBusyChanged(context, hasBillableSessionActivity(context));
+    }
+    void deps.emitSessionListChanged();
+    // The authoritative snapshot is the session.opened event above. Return only
+    // a small acknowledgement instead of duplicating the transcript payload.
+    outcome = 'success';
+    return { ok: true, sessionPath: params.sessionPath };
   } catch (error) {
-    deps.discardPreparedViewedSessionPath?.(params.sessionPath, viewedPathRollback);
+    failureStage ??= 'handler';
     throw error;
+  } finally {
+    try {
+      deps.onSessionOpenTiming?.({
+        outcome,
+        runtimeReady,
+        snapshotBuildDurationMs,
+        sessionOpenedEmitDurationMs,
+        ackReadyDurationMs: Math.max(0, performance.now() - timingStartedAt),
+        failureStage,
+      });
+    } catch {
+      // Diagnostics must never change the session-open result.
+    }
   }
-  if (deps.commitPreparedViewedSessionPath) {
-    deps.commitPreparedViewedSessionPath(params.sessionPath, viewedPathRollback);
-  } else {
-    deps.setViewedSessionPath(params.sessionPath);
-  }
-  deps.emit('session.opened', openPayload);
-  const context = deps.getSessionContext(params.sessionPath);
-  if (context) {
-    deps.emitBusyChanged(context, hasBillableSessionActivity(context));
-  }
-  void deps.emitSessionListChanged();
-  // The authoritative snapshot is the session.opened event above. Return only
-  // a small acknowledgement instead of duplicating the transcript payload.
-  return { ok: true, sessionPath: params.sessionPath };
 }
 
 async function handleSessionViewed(

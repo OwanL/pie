@@ -141,51 +141,6 @@ beforeEach(() => {
   };
 });
 
-test('App renders composer when session is active', () => {
-  const adapter = makeAdapter();
-  adapter.initialState = sessionViewState();
-
-  act(() => {
-    render(h(App, { adapter }), container);
-  });
-
-  const textarea = container.querySelector('textarea');
-  assert.ok(textarea, 'Composer textarea should be rendered');
-});
-
-test('App composer keeps the quiet prompt-box focus treatment', () => {
-  const adapter = makeAdapter();
-  adapter.initialState = sessionViewState();
-
-  act(() => {
-    render(h(App, { adapter }), container);
-  });
-
-  const textarea = container.querySelector('textarea');
-  assert.ok(textarea, 'Composer textarea should be rendered');
-  assert.match(textarea.className, /outline-none/);
-
-  const composerShell = textarea.parentElement;
-  assert.ok(composerShell, 'Composer shell should wrap the textarea');
-  assert.match(composerShell.className, /border-transparent/);
-  assert.match(composerShell.className, /focus-within:border-border-subtle\/80/);
-  assert.doesNotMatch(composerShell.className, /focus-within:border-accent/);
-});
-
-test('App renders transcript area when session is active', () => {
-  const adapter = makeAdapter();
-  adapter.initialState = sessionViewState();
-
-  act(() => {
-    render(h(App, { adapter }), container);
-  });
-
-  // The transcript scroll container should be present even if virtualizer
-  // doesn't render rows (no real layout in happy-dom).
-  const panelMain = container.querySelector('.panel-main');
-  assert.ok(panelMain, 'Should render panel-main container');
-});
-
 test('App keeps a fixed answer surface for a subagent question when its transcript card is stale', () => {
   const adapter = makeAdapter();
   const request: ExtensionUIRequestPayload = {
@@ -257,62 +212,6 @@ test('App does not keep the transcript loader for a loaded empty session', () =>
     'Should stop showing the transcript loader once an empty session has loaded',
   );
   assert.ok(container.querySelector('textarea'), 'Composer should remain available for an empty session');
-});
-
-test('App posts ready message on mount', () => {
-  const adapter = makeAdapter();
-  adapter.initialState = sessionViewState();
-
-  act(() => {
-    render(h(App, { adapter }), container);
-  });
-
-  assert.ok(
-    adapter.messages.some((m) => m.type === 'ready'),
-    'Should post ready message on mount',
-  );
-  assert.ok(
-    adapter.messages.some((m) => m.type === 'refreshState'),
-    'Should request a fresh host snapshot on mount',
-  );
-});
-
-test('App posts send message when composer submits', () => {
-  const adapter = makeAdapter();
-  adapter.initialState = sessionViewState();
-
-  act(() => {
-    render(h(App, { adapter }), container);
-  });
-
-  // The App seeds first paint from initialState, but handleSend gates on the
-  // active-session ref, which is only populated when the host posts a `state`
-  // message (use-host-sync.ts). Drive that round-trip so the composer submit
-  // actually reaches the host — mirrors the "App handles host state message"
-  // test below.
-  const stateMsg = stateEnvelope(1, sessionViewState());
-  act(() => {
-    window.dispatchEvent(new MessageEvent('message', { data: stateMsg }));
-  });
-
-  const textarea = container.querySelector('textarea');
-  assert.ok(textarea);
-
-  // Type text
-  act(() => {
-    (textarea as HTMLTextAreaElement).value = 'test message';
-    textarea!.dispatchEvent(new Event('input', { bubbles: true }));
-  });
-
-  // Submit: the composer has no <form>; Enter posts the send.
-  act(() => {
-    textarea!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-  });
-
-  const sendMsg = adapter.messages.find((m) => m.type === 'send');
-  assert.ok(sendMsg, 'Composer submit should post a send message to the host');
-  assert.equal(sendMsg!.text, 'test message');
-  assert.equal(sendMsg!.sessionPath, '/session/a');
 });
 
 test('an empty submit continues an interrupted response without an optimistic user message', () => {
@@ -649,27 +548,52 @@ test('App retries session recovery request when projection stays unresolved', ()
   }
 });
 
-test('App handles host state message', () => {
+test('App receives host state, renders the active session, and sends composer input', () => {
   const adapter = makeAdapter();
+  adapter.initialState = sessionViewState();
 
   act(() => {
     render(h(App, { adapter }), container);
   });
 
-  // Simulate host sending state
-  const stateMsg = stateEnvelope(1, sessionViewState());
+  // Mount handshake and first-paint surface are covered together with the
+  // host-state round trip so these smoke checks share one full App render.
+  assert.ok(adapter.messages.some((message) => message.type === 'ready'));
+  assert.ok(adapter.messages.some((message) => message.type === 'refreshState'));
+  const textarea = container.querySelector('textarea');
+  assert.ok(textarea, 'Composer textarea should be rendered');
+  assert.match(textarea.className, /outline-none/);
+  const composerShell = textarea.parentElement;
+  assert.ok(composerShell, 'Composer shell should wrap the textarea');
+  assert.match(composerShell.className, /border-transparent/);
+  assert.match(composerShell.className, /focus-within:border-border-subtle\/80/);
+  assert.doesNotMatch(composerShell.className, /focus-within:border-accent/);
 
+  // The active-session ref is populated only when the host posts a state
+  // message; drive that round-trip before submitting through the composer.
   act(() => {
-    window.dispatchEvent(new MessageEvent('message', { data: stateMsg }));
+    window.dispatchEvent(new MessageEvent('message', {
+      data: stateEnvelope(1, sessionViewState()),
+    }));
   });
 
-  // After receiving state with active session, the panel-main should contain
-  // the transcript area (virtualizer may not render rows without layout).
-  const panelMain = container.querySelector('.panel-main');
-  assert.ok(panelMain, 'Should render panel-main after state message');
-  // Composer should appear
-  const textarea = container.querySelector('textarea');
-  assert.ok(textarea, 'Composer should render after state message');
+  // The transcript scroll container exists even when the virtualizer has no
+  // real layout, and the composer remains available after applying host state.
+  assert.ok(container.querySelector('.panel-main'), 'Should render panel-main after state message');
+  assert.ok(container.querySelector('textarea'), 'Composer should render after state message');
+
+  act(() => {
+    textarea.value = 'test message';
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  act(() => {
+    textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  });
+
+  const sendMsg = adapter.messages.find((message) => message.type === 'send');
+  assert.ok(sendMsg, 'Composer submit should post a send message to the host');
+  assert.equal(sendMsg.text, 'test message');
+  assert.equal(sendMsg.sessionPath, '/session/a');
 });
 
 test('protocol-v4 stateReceived precedes outer appCommitted evidence', async () => {

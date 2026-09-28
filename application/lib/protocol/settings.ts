@@ -180,9 +180,6 @@ export interface PruningSettings {
   subagentEnabled?: boolean;
   /** Optional timeout override for the pruning prepass, in seconds. */
   prepassTimeoutSec?: number | null;
-  /** Skip the prepass when estimated input is below this positive token
-   *  threshold. `null` disables skipping; omission uses the application default. */
-  autoSkipBelowTokens?: number | null;
 }
 
 export interface PruningCatalog {
@@ -509,9 +506,6 @@ export const DEFAULT_PRUNING_SETTINGS: PruningSettings = {
   mainAgentEnabled: true,
   subagentEnabled: true,
   prepassTimeoutSec: null,
-  // Keep this aligned with skill-pruner/config.ts: an omitted on-disk value
-  // enables the extension's 1,200-token small-turn optimization.
-  autoSkipBelowTokens: 1200,
 };
 
 export interface ToolResultPruningRuleToggles {
@@ -627,8 +621,6 @@ export function mergePruningSettings(
       updates.subagentEnabled ?? current.subagentEnabled ?? DEFAULT_PRUNING_SETTINGS.subagentEnabled,
     prepassTimeoutSec:
       updates.prepassTimeoutSec !== undefined ? updates.prepassTimeoutSec : current.prepassTimeoutSec,
-    autoSkipBelowTokens:
-      updates.autoSkipBelowTokens !== undefined ? updates.autoSkipBelowTokens : current.autoSkipBelowTokens,
   };
 }
 

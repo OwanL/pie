@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 import { cloneTreeByHardlink } from './helpers/clone-tree-by-hardlink';
+import { createNormalizeSessionManager } from './sdk-patch-barrier-shared';
 
 import {
   applySdkInterruptedContinuationRuntimePatch,
@@ -318,6 +319,11 @@ async function pinnedSdkDistTemplate(distributionRoot: string): Promise<string> 
         path.join(templateRoot, 'dist'),
         { recursive: true },
       );
+      // SDK fixture helpers share a process-level fingerprint environment
+      // override. Normalize this private copy to the same pinned pristine
+      // manager image as the barrier fixtures instead of fingerprinting whatever
+      // already-patched bytes happen to be installed.
+      await createNormalizeSessionManager(path.join(templateRoot, 'dist'));
       pinnedDistTemplateRoot = templateRoot;
       return templateRoot;
     });

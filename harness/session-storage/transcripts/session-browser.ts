@@ -94,10 +94,10 @@ export async function openSessionBrowseSnapshot(options: {
     ...(manager.getSessionId?.() ? { sessionId: manager.getSessionId?.() } : {}),
     ...(isAgentCreatedSession(manager) ? { agentCreated: true } : {}),
   };
-  // The projection exposes no SessionManager and is immutable by ownership:
-  // downstream browse builders only read it. Freeze the small containers to
-  // catch accidental replacement without recursively walking a potentially
-  // 65 MiB transcript on the cache-fill path.
+  // The projection exposes no SessionManager. Durable rows are immutable by
+  // ownership; browse builders memoize compact transport rows only for ranges
+  // actually requested. Freeze the small outer containers without recursively
+  // walking a potentially 65 MiB transcript on the cache-fill path.
   Object.freeze(cache);
   Object.freeze(summary);
   if (activeModel) Object.freeze(activeModel);

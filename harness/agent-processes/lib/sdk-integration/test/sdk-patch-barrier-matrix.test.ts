@@ -22,19 +22,33 @@ import {
 } from '../sdk-session-ownership-patch';
 test.after(async () => { await cleanupPristineTemplate(); });
 
-test('coordinator upgrades the exact supported v3 manager image to v4 and validates it', async () => {
+test('coordinator upgrades supported v3 and v4 manager images to v5 and validates both', async () => {
   await withFixture(async ({ sdkPath, lockRoot }) => {
     const managerPath = path.join(sdkPath, 'dist', 'core', 'session-manager.js');
     await ensureSdkPatchBarrier(sdkPath, { lockRoot });
-    const v4Source = await fs.readFile(managerPath, 'utf8');
-    const v3Source = reverseSdkSessionManagerOwnership(v4Source);
+    const patchedSource = await fs.readFile(managerPath, 'utf8');
+    const v3Source = reverseSdkSessionManagerOwnership(patchedSource);
     assert.ok(v3Source, 'the current manager transform must reverse exactly to v3');
     await fs.writeFile(managerPath, v3Source, 'utf8');
 
     const identity = await ensureSdkPatchBarrier(sdkPath, { lockRoot: path.join(lockRoot, 'upgrade') });
-    assert.equal(identity.sessionOwnershipAdapter.patchVersion, 4);
-    assert.equal(await fs.readFile(managerPath, 'utf8'), v4Source);
+    assert.equal(identity.sessionOwnershipAdapter.patchVersion, 5);
+    assert.equal(await fs.readFile(managerPath, 'utf8'), patchedSource);
     await validateSdkPatchBarrier(sdkPath, identity);
+
+    const helperStart = patchedSource.indexOf('// The model-settings mutation is synchronous,');
+    const v4ClassStart = patchedSource.indexOf('export class StaleSessionWriteLeaseError extends Error {', helperStart);
+    assert.ok(helperStart >= 0 && v4ClassStart > helperStart, 'the v5-only helper has a reversible insertion seam');
+    const v4Source = `${patchedSource.slice(0, helperStart)}${patchedSource.slice(v4ClassStart)}`
+      .replace('renamePieFileWithTransientRetry(temporaryPath, sessionFile);', 'renameSync(temporaryPath, sessionFile);');
+    assert.notEqual(v4Source, patchedSource);
+    await fs.writeFile(managerPath, v4Source, 'utf8');
+
+    const upgradedV4 = await ensureSdkPatchBarrier(sdkPath, { lockRoot: path.join(lockRoot, 'upgrade-v4') });
+    assert.equal(upgradedV4.sessionOwnershipAdapter.patchVersion, 5);
+    assert.deepEqual(upgradedV4, identity);
+    assert.equal(await fs.readFile(managerPath, 'utf8'), patchedSource);
+    await validateSdkPatchBarrier(sdkPath, upgradedV4);
   });
 });
 
@@ -133,8 +147,8 @@ test('fresh pinned production 0.80.6 clone patches, validates, and remains idemp
     const identity = await ensureSdkPatchBarrier(sdkPath, { lockRoot });
     const patched = await fs.readFile(managerPath, 'utf8');
     assert.equal(createHash('sha256').update(patched).digest('hex'),
-      '39af403e353734e42ec4852550d2fa0d90869d36d7ee60f856e637f324856c6f',
-      'fresh patch must match the retained canonical installed manager exactly');
+      'fec6f884356e2375302f6c17114b398455cfd162cc0ec1b30a6baf06d064b358',
+      'fresh patch must match the retained canonical v5 manager exactly');
     assert.match(patched, /this\._runPieWriteMutation\("activatePiePrepared\.create", \(\) => persistCreatedSessionHeader\(this\)\)/u);
     await validateSdkPatchBarrier(sdkPath, identity);
     const repeated = await ensureSdkPatchBarrier(sdkPath, { lockRoot: path.join(root, 'idempotence-locks') });

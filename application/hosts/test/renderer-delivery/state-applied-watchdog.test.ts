@@ -76,26 +76,53 @@ test('ledger overflow and retry exhaustion also request immediate reload', async
   assert.deepEqual(h.reloads.map((value) => value.reason), ['ledger-overflow', 'retry-exhausted']);
 });
 
-test('reload storm stays circuit-broken across commits until the rolling window elapses', async () => {
+test('repeated protocol-mismatch commit timeouts stay suppressed across rolling windows', async () => {
   const h = harness();
   h.setNow(10_000);
-  for (let i = 0; i < STATE_APPLIED_RELOAD_LIMIT; i++) {
-    assert.equal(h.watchdog.handleRecovery(recovery('render-failure', i + 1)), true);
+  let revision = 1;
+  for (let reload = 0; reload < STATE_APPLIED_RELOAD_LIMIT; reload++) {
+    for (let retry = 0; retry < PROVISIONAL_COMMIT_RESNAPSHOT_MAX_RETRIES; retry++) {
+      assert.equal(h.watchdog.handleRecovery(recovery('commit-timeout', revision++)), false);
+      assert.equal(h.watchdog.getLastDecision(), 'resnapshot');
+    }
+    assert.equal(h.watchdog.handleRecovery(recovery('commit-timeout', revision++)), true);
     await settle();
     h.watchdog.recordCommitAdvanced();
   }
 
-  assert.equal(h.watchdog.handleRecovery(recovery('render-failure', 99)), false);
+  // Reproduce reload → ready/commit → protocol mismatch: the bounded
+  // resnapshot budget still runs, but the next escalation terminally opens the
+  // circuit after the rolling reload cap is reached.
+  for (let retry = 0; retry < PROVISIONAL_COMMIT_RESNAPSHOT_MAX_RETRIES; retry++) {
+    assert.equal(h.watchdog.handleRecovery(recovery('commit-timeout', revision++)), false);
+  }
+  assert.equal(h.watchdog.handleRecovery(recovery('commit-timeout', revision++)), false);
   assert.equal(h.watchdog.getLastDecision(), 'throttled');
   assert.equal(h.reloads.length, STATE_APPLIED_RELOAD_LIMIT);
 
-  h.watchdog.recordCommitAdvanced();
-  assert.equal(h.watchdog.handleRecovery(recovery('render-failure', 100)), false);
-  assert.equal(h.watchdog.getLastDecision(), 'circuit-open');
+  // A commit and elapsed rolling windows cannot turn sustained protocol skew
+  // into another automatic reload episode.
+  for (let window = 0; window < 20; window++) {
+    h.setNow(10_000 + (window + 1) * (STATE_APPLIED_RELOAD_WINDOW_MS + 1));
+    h.watchdog.recordCommitAdvanced();
+    assert.equal(h.watchdog.handleRecovery(recovery('commit-timeout', revision++)), false);
+    assert.equal(h.watchdog.getLastDecision(), 'circuit-open');
+  }
   assert.equal(h.reloads.length, STATE_APPLIED_RELOAD_LIMIT);
+});
 
-  h.setNow(10_000 + STATE_APPLIED_RELOAD_WINDOW_MS + 1);
-  assert.equal(h.watchdog.handleRecovery(recovery('render-failure', 101)), true);
+test('meaningful activity explicitly resets terminal reload suppression', async () => {
+  const h = harness();
+  for (let i = 0; i < STATE_APPLIED_RELOAD_LIMIT; i++) {
+    assert.equal(h.watchdog.handleRecovery(recovery('render-failure', i + 1)), true);
+    await settle();
+  }
+  assert.equal(h.watchdog.handleRecovery(recovery('render-failure', 3)), false);
+  assert.equal(h.watchdog.getLastDecision(), 'throttled');
+
+  h.setNow(10_000 + 10 * STATE_APPLIED_RELOAD_WINDOW_MS);
+  h.watchdog.resetReloadCircuit();
+  assert.equal(h.watchdog.handleRecovery(recovery('render-failure', 4)), true);
   await settle();
   assert.equal(h.reloads.length, STATE_APPLIED_RELOAD_LIMIT + 1);
 });

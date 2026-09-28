@@ -19,6 +19,23 @@ const RETIRED_SOURCE_DIRS = PACKAGE_REGISTRY.flatMap((entry) => entry.retiredSou
 const RETIRED_SOURCE_DIR_SET = new Set(RETIRED_SOURCE_DIRS);
 const CODE_SOURCE = /\.(?:ts|tsx|mts|cts|mjs|cjs|js|jsx)$/u;
 
+// Package directories already contain their nested test/source roots. Walking
+// every registry directive independently re-enumerates those descendants,
+// multiplying filesystem work during each affected-test plan. Keep only the
+// shallowest live roots; walking one still discovers every nested source/test file.
+const LIVE_SCAN_ROOTS = (() => {
+  const roots = [...new Set(
+    PACKAGE_DIRECTIVES.map(({ dir }) => dir).filter((dir) => !RETIRED_SOURCE_DIR_SET.has(dir)),
+  )].sort((left, right) => left.length - right.length || left.localeCompare(right));
+  const minimal = [];
+  for (const root of roots) {
+    const coveredByLiveParent = minimal.some((parent) => root.startsWith(`${parent}/`)
+      && !root.slice(parent.length + 1).split('/').some(isProtectedDirectoryName));
+    if (!coveredByLiveParent) minimal.push(root);
+  }
+  return minimal;
+})();
+
 function normalize(value) {
   return value.replace(/\\/gu, '/');
 }
@@ -144,17 +161,11 @@ export function planAffectedTests(repoRoot, changedFiles) {
   const normalizedChanges = changedFiles.map(normalize);
   if (normalizedChanges.some(isGlobalTestInfra)) return { mode: 'full', testFiles: [], reasons: ['global test infrastructure changed'] };
 
-  // Walking the active routed source/test roots (PACKAGE_DIRECTIVES, excluding
+  // Walking the shallowest active routed roots (PACKAGE_DIRECTIVES, excluding
   // retired roots) keeps changed, untracked, renamed, and planned distributed
   // roots enumerable; missing dirs (declared future roots) are skipped by walkFiles.
   const files = [];
-  for (const { dir } of PACKAGE_DIRECTIVES) {
-    // Retired roots stay in the path-only classifier for deleted/old rename
-    // records, but they are not live roots and must not enumerate new sources.
-    if (RETIRED_SOURCE_DIR_SET.has(dir)) continue;
-    walkFiles(repoRoot, dir, files);
-  }
-  walkFiles(repoRoot, 'scripts', files);
+  for (const root of LIVE_SCAN_ROOTS) walkFiles(repoRoot, root, files);
   const uniqueFiles = [...new Set(files)];
   const testFiles = uniqueFiles.filter((file) => TEST_FILE.test(file));
   const modelConfigChanged = normalizedChanges.some((file) => MODEL_CONFIG_PATHS.has(file));

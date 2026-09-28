@@ -34,7 +34,7 @@ test('coordinator barrier patches both files and returns a closed, versioned ide
     assert.equal(identity.retryClassifier.patchVersion, 1);
     assert.equal(identity.coldCreateDurability.patchVersion, 2);
     assert.equal(identity.coldCreateDurability.relativePath, 'dist/core/session-manager.js');
-    assert.equal(identity.sessionOwnershipAdapter.patchVersion, 4);
+    assert.equal(identity.sessionOwnershipAdapter.patchVersion, 5);
     assert.equal(identity.sessionOwnershipAdapter.relativePath, 'dist/core/session-manager.js');
     assert.equal(identity.sessionReplacementAdapter.patchVersion, 10);
     assert.equal(identity.sessionReplacementAdapter.relativePath, 'dist/core/agent-session-runtime.js');
@@ -250,6 +250,39 @@ test('patched create seam returns the same manager after atomically publishing i
       'the returned manager owns the persisted header values',
     );
     assert.deepEqual((await fs.readdir(sessionDir)).filter((name) => name.includes('.pie-create-')), []);
+  });
+});
+
+test('patched model-settings rename helper retries transient sharing violations and fails closed for other errors', async () => {
+  await withFixture(async ({ sdkPath, lockRoot }) => {
+    await ensureSdkPatchBarrier(sdkPath, { lockRoot });
+    const managerPath = path.join(sdkPath, 'dist', 'core', 'session-manager.js');
+    const managerSource = await fs.readFile(managerPath, 'utf8');
+    const helperStart = managerSource.indexOf('function renamePieFileWithTransientRetry(sourcePath, targetPath) {');
+    const helperEnd = managerSource.indexOf('export class StaleSessionWriteLeaseError extends Error {', helperStart);
+    assert.ok(helperStart >= 0 && helperEnd > helperStart, 'the patched manager contains the bounded rename helper');
+    const helperSource = managerSource.slice(helperStart, helperEnd);
+    const createRenameHelper = new Function('renameSync', `${helperSource}return renamePieFileWithTransientRetry;`) as (
+      renameSync: (sourcePath: string, targetPath: string) => void,
+    ) => (sourcePath: string, targetPath: string) => void;
+
+    let attempts = 0;
+    const transientRename = createRenameHelper((sourcePath, targetPath) => {
+      attempts += 1;
+      assert.equal(sourcePath, 'staged.jsonl');
+      assert.equal(targetPath, 'session.jsonl');
+      if (attempts === 1) throw Object.assign(new Error('injected transient sharing violation'), { code: 'EPERM' });
+    });
+    transientRename('staged.jsonl', 'session.jsonl');
+    assert.equal(attempts, 2, 'one synthetic EPERM is retried without invoking the host filesystem');
+
+    let permanentAttempts = 0;
+    const permanentRename = createRenameHelper(() => {
+      permanentAttempts += 1;
+      throw Object.assign(new Error('injected permanent rename failure'), { code: 'EIO' });
+    });
+    assert.throws(() => permanentRename('staged.jsonl', 'session.jsonl'), /injected permanent rename failure/);
+    assert.equal(permanentAttempts, 1, 'non-transient errors remain fail-closed without retry');
   });
 });
 

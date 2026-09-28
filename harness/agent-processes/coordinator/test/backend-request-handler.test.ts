@@ -4,7 +4,13 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import test from 'node:test';
 
-import { formatInterruptWatchdogDuration, handleBackendRequest, BACKEND_REQUEST_METHODS, type BackendRequestHandlerDeps } from '../request-handler.js';
+import {
+  BACKEND_REQUEST_METHODS,
+  formatInterruptWatchdogDuration,
+  handleBackendRequest,
+  type BackendRequestHandlerDeps,
+  type SessionOpenTimingSample,
+} from '../request-handler.js';
 import { handleSdkSessionEvent, type BackendSessionEventHandlerDeps } from '../../workers/session-event-handler.js';
 import { BackendError, extractRequestError } from '../server-io.js';
 import { PROVIDER_TOGGLES_ENV } from '../../lib/rpc/settings.js';
@@ -362,6 +368,73 @@ test('cold open/preload and models refresh do not cross the runtime-promotion se
   assert.equal(promotions, 0);
   assert.equal(preload.runtimeReady, false);
   assert.equal((harness.emitted.find((item) => item.event === 'session.opened')?.payload as { runtimeReady?: boolean }).runtimeReady, false);
+});
+
+test('session.open reports successful snapshot, synchronous emit, and ack-ready timing stages', async () => {
+  const harness = createHarness();
+  const samples: SessionOpenTimingSample[] = [];
+  harness.deps.onSessionOpenTiming = (sample) => samples.push(sample);
+
+  const response = await handleBackendRequest(harness.deps, {
+    id: 'timed-open', method: 'session.open', params: { sessionPath: '/cold.jsonl' },
+  });
+
+  assert.deepEqual(response, { ok: true, sessionPath: '/cold.jsonl' });
+  assert.equal(samples.length, 1);
+  assert.equal(samples[0]?.outcome, 'success');
+  assert.equal(samples[0]?.runtimeReady, false);
+  assert.equal(typeof samples[0]?.snapshotBuildDurationMs, 'number');
+  assert.equal(typeof samples[0]?.sessionOpenedEmitDurationMs, 'number');
+  assert.equal(typeof samples[0]?.ackReadyDurationMs, 'number');
+  assert.ok(samples[0]!.snapshotBuildDurationMs! >= 0);
+  assert.ok(samples[0]!.sessionOpenedEmitDurationMs! >= 0);
+  assert.ok(samples[0]!.ackReadyDurationMs! >= samples[0]!.snapshotBuildDurationMs!);
+  assert.equal('sessionPath' in samples[0]!, false, 'timing evidence carries no session path or snapshot content');
+});
+
+test('session.open reports a failed snapshot build without claiming emit timing', async () => {
+  const harness = createHarness();
+  const samples: SessionOpenTimingSample[] = [];
+  harness.deps.onSessionOpenTiming = (sample) => samples.push(sample);
+  harness.deps.buildSessionOpenedPayload = async () => {
+    throw new Error('snapshot build failed');
+  };
+
+  await assert.rejects(handleBackendRequest(harness.deps, {
+    id: 'failed-timed-open', method: 'session.open', params: { sessionPath: '/cold.jsonl' },
+  }), /snapshot build failed/);
+
+  assert.equal(samples.length, 1);
+  assert.equal(samples[0]?.outcome, 'failure');
+  assert.equal(samples[0]?.failureStage, 'snapshot_build');
+  assert.equal(typeof samples[0]?.snapshotBuildDurationMs, 'number');
+  assert.equal(samples[0]?.sessionOpenedEmitDurationMs, undefined);
+  assert.equal(typeof samples[0]?.ackReadyDurationMs, 'number');
+  assert.equal(harness.emitted.some((entry) => entry.event === 'session.opened'), false);
+  assert.equal(harness.viewedSessionPath, undefined, 'a failed build does not commit the viewed path');
+});
+
+test('session.open reports synchronous opened-event emission failure with its stage duration', async () => {
+  const harness = createHarness();
+  const samples: SessionOpenTimingSample[] = [];
+  const emit = harness.deps.emit;
+  harness.deps.onSessionOpenTiming = (sample) => samples.push(sample);
+  harness.deps.emit = (event, payload) => {
+    if (event === 'session.opened') throw new Error('opened event write failed');
+    emit(event, payload);
+  };
+
+  await assert.rejects(handleBackendRequest(harness.deps, {
+    id: 'failed-emit-open', method: 'session.open', params: { sessionPath: '/cold.jsonl' },
+  }), /opened event write failed/);
+
+  assert.equal(samples.length, 1);
+  assert.equal(samples[0]?.outcome, 'failure');
+  assert.equal(samples[0]?.failureStage, 'session_opened_emit');
+  assert.equal(typeof samples[0]?.snapshotBuildDurationMs, 'number');
+  assert.equal(typeof samples[0]?.sessionOpenedEmitDurationMs, 'number');
+  assert.equal(typeof samples[0]?.ackReadyDurationMs, 'number');
+  assert.equal(harness.emitted.some((entry) => entry.event === 'session.opened'), false);
 });
 
 test('session.open echoes stable operation identity on its authoritative opened event', async () => {

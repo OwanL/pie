@@ -25,7 +25,6 @@ const config: PruningConfig = {
 	mode: "auto", model: "m", provider: "p", thinkingLevel: "minimal",
 	skills: { strategy: "discretion", ceiling: 8, pinned: [], alwaysKeep: [] },
 	tools: { strategy: "discretion", ceiling: 10, dependencies: {}, alwaysKeep: [] },
-	autoSkipBelowTokens: null,
 };
 const input = (prompt: string): LlmPruningInput => ({
 	userPrompt: prompt, contextFile: "AGENTS.md",

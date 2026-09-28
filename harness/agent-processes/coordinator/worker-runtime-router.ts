@@ -10,6 +10,7 @@ import {
 import { getMaxInflightResolution } from '../../tools/subagent/concurrency-limit.js';
 import type { RequestEnvelope } from '../lib/rpc/wire.js';
 import type { SessionOpenedPayload } from '../lib/rpc/session-events.js';
+import { sessionOpenedMetadataForWorkerIpc } from '../lib/rpc/session-opened-transport.js';
 import type { ModelSettingsUnsetKey } from './request-handler-shared';
 import type {
   CoordinatorToHostDetailMessage,
@@ -1886,7 +1887,7 @@ export class WorkerRuntimeRouter {
             // large subagent detail projections). Keep the source snapshot
             // untouched so its lazy detail refs and durable history remain
             // available to the existing cold view and to the promoted worker.
-            openedPayload: promotionOpenedPayload(snapshot.openedPayload),
+            openedPayload: sessionOpenedMetadataForWorkerIpc(snapshot.openedPayload),
             modelSettings: snapshot.modelSettings,
             ...(this.options.analyticsActivation && route.analyticsCaptureSubject
               ? {
@@ -3069,25 +3070,6 @@ function modelSettingsFromWorkerObject(value: WorkerJsonObject): ModelSettings {
     settings.defaultProvider = value.defaultProvider;
   }
   return settings;
-}
-
-function promotionOpenedPayload(payload: SessionOpenedPayload): SessionOpenedPayload {
-  const totalCount = Number.isSafeInteger(payload.transcriptWindow.totalCount)
-    ? Math.max(0, payload.transcriptWindow.totalCount)
-    : 0;
-  return {
-    ...payload,
-    transcript: [],
-    transcriptSkipped: true,
-    transcriptWindow: {
-      ...payload.transcriptWindow,
-      loadedStart: 0,
-      loadedEnd: 0,
-      hasOlder: false,
-      hasNewer: totalCount > 0,
-      isPartial: totalCount > 0,
-    },
-  };
 }
 
 function asWorkerJsonObject(value: unknown): WorkerJsonObject {

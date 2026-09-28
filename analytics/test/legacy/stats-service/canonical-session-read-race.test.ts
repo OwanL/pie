@@ -394,6 +394,136 @@ test('a raced root read converges without an artificial branch reset', async () 
 /** Regression: startup may finish before the opened session enters the
  * displayed-session set. The opened payload must bind its stable root and
  * trigger a completed canonical read even when no branch/pending cache exists. */
+test('revision changes cancel stale projection work and keep independent activity/facet errors isolated', async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'pie-canonical-refresh-pressure-'));
+  const state = fixtureState();
+  let revision = '1';
+  let heldUsage = false;
+  let heldActivity = false;
+  let usageAborts = 0;
+  let activityAborts = 0;
+  let activeReads = 0;
+  let maximumActiveReads = 0;
+  let signalWaiters = 0;
+  const holdUntilCancelled = (signal: AbortSignal | undefined, kind: 'usage' | 'activity'): Promise<never> => new Promise((_, reject) => {
+    assert.ok(signal, 'refresh reads must carry their cancellation signal');
+    activeReads += 1;
+    maximumActiveReads = Math.max(maximumActiveReads, activeReads);
+    signalWaiters += 1;
+    const onAbort = (): void => {
+      activeReads -= 1;
+      if (kind === 'usage') usageAborts += 1;
+      else activityAborts += 1;
+      reject(signal.reason ?? new Error('fixture refresh cancelled'));
+    };
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+  });
+  let usageSignal: AbortSignal | undefined;
+  let activitySignal: AbortSignal | undefined;
+  const activityValue = (scope: unknown) => ({
+    scope,
+    revision,
+    projectionRevision: revision,
+    databaseSchemaVersion: 13,
+    snapshotWatermark: revision,
+    generationIds: [],
+    generationIdsTruncated: false,
+    pendingDetailCoverage: { deliveryHistoryCoverage: 'complete', completeDetailWatermark: revision },
+    truncation: { rowLimit: false, byteLimit: false, cellLimit: false },
+    totals: {
+      spanCount: 0,
+      observedCount: 0,
+      estimatedCount: 0,
+      unknownCount: 0,
+      measuredKnownCount: 0,
+      measuredUnknownCount: 0,
+      measuredTotalMs: 0,
+    },
+    kinds: [],
+    truncated: false,
+  });
+  const facetsValue = (scope: unknown) => ({
+    scope,
+    revision,
+    projectionRevision: revision,
+    databaseSchemaVersion: 13,
+    snapshotWatermark: revision,
+    generationIds: [],
+    generationIdsTruncated: false,
+    pendingDetailCoverage: { deliveryHistoryCoverage: 'complete', completeDetailWatermark: revision },
+    truncation: { rowLimit: false, byteLimit: false, cellLimit: false },
+    facets: [],
+    truncated: false,
+  });
+  const readModel = {
+    getMaxConcurrentQueries: () => 2,
+    readRevision: async () => revision,
+    readScopedProviderSettlements: async (scope: { kind: string; rootSessionId: string }, _page: unknown, signal?: AbortSignal) => {
+      if (!heldUsage && scope.kind === 'rootSession') {
+        heldUsage = true;
+        usageSignal = signal;
+        await holdUntilCancelled(signal, 'usage');
+      }
+      return {
+        revision,
+        settlements: [],
+        truncated: false,
+        scope: { kind: 'rootSession' as const, rootSessionId: scope.rootSessionId },
+      };
+    },
+    readActivityAndToolFacetProjections: async (
+      request: { rootSessionId?: string },
+      signal?: AbortSignal,
+    ) => {
+      if (!heldActivity && request.rootSessionId === ROOT_ID) {
+        heldActivity = true;
+        activitySignal = signal;
+        await holdUntilCancelled(signal, 'activity');
+      }
+      const scope = request.rootSessionId === undefined
+        ? { kind: 'global' }
+        : { kind: 'session', rootSessionId: request.rootSessionId };
+      return {
+        activity: request.rootSessionId === ROOT_ID
+          ? { error: 'fixture activity projection failure' }
+          : { value: activityValue(scope) },
+        toolFacets: { value: facetsValue(scope) },
+      };
+    },
+    executeQuery: async () => ({
+      rows: [{ union_ms: 0 }],
+      returnedRows: 1,
+      truncation: { rowLimit: false, byteLimit: false, cellLimit: false },
+    }),
+  } as unknown as CanonicalAnalyticsReadModel;
+  const stats = statsFixture(state, readModel, Date.parse('2026-01-15T12:00:00.000Z'), root);
+  const startup = stats.start();
+  try {
+    const deadline = Date.now() + 5_000;
+    while (signalWaiters < 2 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(signalWaiters, 2, 'active-session usage and activity reads should overlap under the helper cap');
+    assert.equal(maximumActiveReads, 2);
+    revision = '2';
+    (stats as unknown as { markCanonicalRevisionForRefresh(revision: string): void })
+      .markCanonicalRevisionForRefresh(revision);
+    await startup;
+    assert.equal(usageSignal?.aborted, true);
+    assert.equal(activitySignal?.aborted, true);
+    assert.equal(usageAborts, 1, 'superseded root usage helper is terminated');
+    assert.equal(activityAborts, 1, 'superseded projection helper is terminated');
+    assert.equal(maximumActiveReads, 2, 'cancellation and retry never raise refresh fanout');
+    assert.equal(stats.getSessionUsage(SESSION_PATH).authority, 'canonical');
+    const projections = stats.getCanonicalActivityStats(SESSION_PATH);
+    assert.equal(projections.activity.authority, 'unknown', 'one projection failure remains explicit');
+    assert.equal(projections.toolFacets.authority, 'canonical', 'the independent successful projection remains visible');
+    assert.equal(projections.toolFacets.projection?.projectionRevision, '2');
+  } finally {
+    await stats.shutdown();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('a cold session opened after an empty startup pass hydrates by payload root identity', async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'pie-canonical-cold-open-'));
   const databasePath = canonicalAnalyticsDatabasePath(path.join(root, 'analytics'));

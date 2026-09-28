@@ -15,11 +15,71 @@ import {
   groupFilesByPackage,
   buildTsxArgs,
   parseArgs,
+  DEFAULT_GROUP_CONCURRENCY,
+  runGroupQueue,
 } from '../run-test-files.mjs';
 
 const repoRoot = inferRepoRoot();
 const expectedRepoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const fwd = (p) => p.replace(/\\/g, '/');
+
+test('focused group queue bounds default package concurrency and preserves result order', async () => {
+  const groups = Array.from({ length: 8 }, (_, index) => ({ id: `group-${index}` }));
+  const started = [];
+  let active = 0;
+  let peak = 0;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const execution = runGroupQueue(groups, async (group) => {
+    started.push(group.id);
+    active += 1;
+    peak = Math.max(peak, active);
+    try {
+      await gate;
+    } finally {
+      active -= 1;
+    }
+    return group.id;
+  });
+
+  try {
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(DEFAULT_GROUP_CONCURRENCY, 3);
+    assert.deepEqual(started, groups.slice(0, 3).map(({ id }) => id));
+    assert.equal(peak, 3);
+  } finally {
+    release();
+  }
+
+  assert.deepEqual(await execution, groups.map(({ id }) => id));
+  assert.ok(peak <= DEFAULT_GROUP_CONCURRENCY);
+});
+
+test('focused group queue stops dispatching queued groups after cancellation', async () => {
+  const groups = Array.from({ length: 6 }, (_, index) => ({ id: `group-${index}` }));
+  const controller = new AbortController();
+  const started = [];
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const execution = runGroupQueue(groups, async (group) => {
+    started.push(group.id);
+    await gate;
+    return group.id;
+  }, { signal: controller.signal });
+
+  try {
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(started, groups.slice(0, DEFAULT_GROUP_CONCURRENCY).map(({ id }) => id));
+    controller.abort();
+  } finally {
+    release();
+  }
+
+  const results = await execution;
+  assert.deepEqual(started, groups.slice(0, DEFAULT_GROUP_CONCURRENCY).map(({ id }) => id));
+  assert.deepEqual(results.slice(0, DEFAULT_GROUP_CONCURRENCY), started);
+  assert.ok(results.slice(DEFAULT_GROUP_CONCURRENCY).every((result) => result === undefined));
+});
 
 test('inferRepoRoot resolves to the pie repo root', () => {
   assert.equal(fwd(inferRepoRoot()), fwd(expectedRepoRoot));

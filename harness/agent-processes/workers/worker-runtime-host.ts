@@ -46,6 +46,7 @@ import {
   buildSessionOpenedPayload as buildSessionOpenedPayloadHelper,
   ensureDisplayTranscriptCache,
 } from './session-opened.ts';
+import { sessionOpenedUnavailableForWorkerIpc } from '../lib/rpc/session-opened-transport.js';
 import { normalizeDanglingTranscript } from '../../session-storage/transcripts/normalize-dangling-transcript.ts';
 import { AUTONOMOUS_MODE_ENV } from '../../tool-and-skill-selection/settings/autonomous-mode.js';
 import { ASK_USER_TOOL_NAME } from '../../tools/catalog/tool-names.js';
@@ -88,8 +89,12 @@ import {
   TOOLS_ENTRY_ID,
 } from '../../agent-instructions/prompt-assembly/system-prompts';
 import type { DetailCursor, DetailPageRef, LiveSubagentDetailAddress } from '../lib/rpc/subagent-detail.js';
-import type { WorkerRuntimeOperation, WorkerJsonObject, WorkerJsonValue } from '../lib/rpc/worker-protocol.js';
-import { WORKER_IPC_MAX_ORDINARY_FRAME_BYTES } from '../lib/rpc/worker-protocol.js';
+import type { WorkerRuntimeEventName, WorkerRuntimeOperation, WorkerJsonObject, WorkerJsonValue } from '../lib/rpc/worker-protocol.js';
+import {
+  WORKER_IPC_MAX_ORDINARY_FRAME_BYTES,
+  WORKER_IPC_VERSION,
+  validateWorkerIpcFrameDraft,
+} from '../lib/rpc/worker-protocol.js';
 import { WORKER_IPC_DEFAULT_LIFECYCLE_QUEUE_BYTES } from '../lib/rpc/worker-frame-io.js';
 import { WorkerServer } from '../lib/rpc/worker-server.js';
 import { installWorkerProviderNetworkLease } from './worker-provider-network-lease';
@@ -171,10 +176,21 @@ type SessionManagerFenceRecord = {
   unregister: () => void;
 };
 
+type LiveTurnCheckpointOwner = {
+  context: SessionContext;
+  sdk: SdkModule;
+  lease: SdkSessionWriteLease;
+  leaseNonce: string;
+  leaseOwnershipRevision: number;
+  leaseSessionPath: string;
+  sessionOwnershipEpoch: number;
+};
+
 export class WorkerRuntimeHost {
   private sdk?: SdkModule;
   private context?: SessionContext;
   private promotion?: Promise<void>;
+  private runtimeReady = false;
   private disposed = false;
   private commandTail = Promise.resolve();
   private extensionIncidentSequence = 0;
@@ -297,6 +313,19 @@ export class WorkerRuntimeHost {
         return asWorkerJson({ admissionRevoked: true, writersDrained: true, activeWriterCount: 0 });
       });
     }
+    if (operation === 'liveTurn.checkpoint') {
+      const params = (payload.params && typeof payload.params === 'object' && !Array.isArray(payload.params))
+        ? payload.params
+        : payload;
+      // Only a fully correlated checkpoint is eligible for the read-only
+      // lane. Legacy/malformed requests retain the ordinary validation and
+      // command-FIFO behavior below.
+      if (typeof params.sessionPath === 'string' && params.sessionPath
+        && typeof params.turnId === 'string' && params.turnId
+        && typeof params.attemptId === 'string' && params.attemptId) {
+        return this.commandLiveTurnCheckpoint(params, publicRequestId);
+      }
+    }
     const owned = this.commandTail.then(async () => {
       if (!this.context || !this.sdk) throw new Error('Worker runtime is not promoted.');
       const params = (payload.params && typeof payload.params === 'object' && !Array.isArray(payload.params))
@@ -369,6 +398,68 @@ export class WorkerRuntimeHost {
     });
     this.commandTail = owned.then(() => undefined, () => undefined);
     return owned;
+  }
+
+  private async commandLiveTurnCheckpoint(params: WorkerJsonObject, publicRequestId: string): Promise<WorkerJsonValue> {
+    const sessionPath = params.sessionPath as string;
+    const owner = this.captureLiveTurnCheckpointOwner(sessionPath);
+    const result = await handleBackendRequest(this.requestDeps(), {
+      id: publicRequestId,
+      method: 'liveTurn.checkpoint',
+      params,
+    } as RequestEnvelope);
+    if (!this.isLiveTurnCheckpointOwnerCurrent(owner, sessionPath)) {
+      throw new Error('Worker runtime ownership changed during live-turn checkpoint.');
+    }
+    return asWorkerJson(result);
+  }
+
+  private captureLiveTurnCheckpointOwner(sessionPath: string): LiveTurnCheckpointOwner {
+    const context = this.context;
+    const sdk = this.sdk;
+    const lease = this.currentLease;
+    if (!this.runtimeReady || this.disposed || !context || !sdk || !lease) {
+      throw new Error('Worker runtime is not ready for a live-turn checkpoint.');
+    }
+    const owner = {
+      context,
+      sdk,
+      lease,
+      leaseNonce: lease.nonce,
+      leaseOwnershipRevision: lease.ownershipRevision,
+      leaseSessionPath: lease.canonicalSessionPath,
+      sessionOwnershipEpoch: context.sessionOwnershipEpoch ?? 0,
+    };
+    if (!this.isLiveTurnCheckpointOwnerCurrent(owner, sessionPath)) {
+      throw new Error('Worker runtime ownership changed before live-turn checkpoint.');
+    }
+    return owner;
+  }
+
+  private isLiveTurnCheckpointOwnerCurrent(owner: LiveTurnCheckpointOwner, sessionPath: string): boolean {
+    const {
+      context, sdk, lease, leaseNonce, leaseOwnershipRevision, leaseSessionPath, sessionOwnershipEpoch,
+    } = owner;
+    return this.runtimeReady
+      && !this.disposed
+      && this.context === context
+      && this.sdk === sdk
+      && this.currentLease === lease
+      && lease.nonce === leaseNonce
+      && lease.ownershipRevision === leaseOwnershipRevision
+      && sameSessionPath(lease.canonicalSessionPath, leaseSessionPath)
+      && Number.isSafeInteger(leaseOwnershipRevision)
+      && leaseOwnershipRevision > 0
+      && leaseNonce.length > 0
+      && !context.retired
+      && context.recoveryPromise === undefined
+      && (context.sessionOwnershipEpoch ?? 0) === sessionOwnershipEpoch
+      && lease.coordinatorGeneration === this.options.owner.coordinatorGeneration
+      && lease.workerId === this.options.owner.workerId
+      && lease.workerGeneration === this.options.owner.workerGeneration
+      && sameSessionPath(context.sessionPath, sessionPath)
+      && sameSessionPath(lease.canonicalSessionPath, sessionPath)
+      && sameSessionPath(context.sessionPath, lease.canonicalSessionPath);
   }
 
   async interrupt(): Promise<{ interrupted: boolean; settled?: boolean; alreadyStopped?: boolean }> {
@@ -512,6 +603,7 @@ export class WorkerRuntimeHost {
 
   private async disposeOnce(): Promise<AnalyticsTransportDisposalReport | undefined> {
     this.disposed = true;
+    this.runtimeReady = false;
     // Revoke every manager before any async shutdown work. The SDK lease
     // revocation below remains the cross-process ownership boundary; this
     // registry closes the in-process persistence boundary first.
@@ -737,6 +829,7 @@ export class WorkerRuntimeHost {
     // host observes runtime-hydrated session.opened before any stream event.
     this.emit('session.opened', { ...this.openedPayload, runtimeReady: true });
     this.reportRuntimeCatalog();
+    this.runtimeReady = !this.disposed;
   }
 
   private async bindSession(context: SessionContext, session: SessionContext['session']): Promise<void> {
@@ -1297,7 +1390,18 @@ export class WorkerRuntimeHost {
         };
       }
     }
-    const body = asWorkerJsonObject(payload ?? {});
+    let body = asWorkerJsonObject(payload ?? {});
+    if (event === 'session.opened' && runtimeEventPayloadExceedsStructureLimit(
+      event,
+      body,
+      this.options.owner,
+    )) {
+      // A normal session.opened refresh includes a bounded transcript window,
+      // but individual rows may still contain a detail graph over the IPC
+      // structural-node limit. Preserve the existing host transcript and let
+      // it page durable rows/details rather than failing the worker generation.
+      body = asWorkerJsonObject(sessionOpenedUnavailableForWorkerIpc(body as unknown as SessionOpenedPayload));
+    }
     if (event === 'live.semantic') {
       // The one recoverable ordinary-lane event: a capacity or oversize
       // enqueue rejection is dropped, the accumulator's semantic sequence
@@ -1993,6 +2097,29 @@ export class WorkerRuntimeHost {
  * (the host detects the resulting seq gap and recovers the full content
  * through the checkpoint rebase path).
  */
+function runtimeEventPayloadExceedsStructureLimit(
+  event: WorkerRuntimeEventName,
+  payload: WorkerJsonObject,
+  owner: Pick<SdkWorkerOwnershipIdentity, 'coordinatorGeneration' | 'workerId' | 'workerGeneration'>,
+): boolean {
+  const validation = validateWorkerIpcFrameDraft({
+    ipcVersion: WORKER_IPC_VERSION,
+    coordinatorGeneration: owner.coordinatorGeneration,
+    workerId: owner.workerId,
+    workerGeneration: owner.workerGeneration,
+    workerPid: process.pid,
+    rootSessionPath: '/',
+    leasePath: '/',
+    leaseRevision: 1,
+    sessionPath: '/',
+    kind: 'runtime.event',
+    event,
+    payload,
+  });
+  return validation === 'runtime.event.payload is too structurally complex.'
+    || validation === 'runtime.event.payload exceeds the maximum nesting depth.';
+}
+
 function boundLiveSemanticPayload(payload: unknown): unknown {
   if (!payload || typeof payload !== 'object') return payload;
   const envelope = payload as { kind?: unknown; delta?: unknown; sessionPath?: unknown; durableMessage?: unknown };

@@ -15,12 +15,19 @@ import {
 import {
   CanonicalAnalyticsReadModel,
   canonicalAnalyticsDatabasePath,
+  type CanonicalProjectionReadOutcome,
 } from '../queries/query-entry.js';
 import { sessionUsageSnapshotFromCanonicalSettlements } from '../usage-accounting/canonical-usage.js';
+import type { AnalyticsQueryLifecycleEvent } from '../queries/query-client.js';
 import {
   SqliteAnalyticsRecorder,
   type AnalyticsQuerySnapshotMetadata,
 } from '../recording/sqlite-recorder.js';
+
+const requireProjectionValue = <Value>(outcome: CanonicalProjectionReadOutcome<Value>): Value => {
+  if ('error' in outcome) throw new Error(outcome.error);
+  return outcome.value;
+};
 
 const workerScript = fileURLToPath(new URL('../queries/query-worker-entry.ts', import.meta.url));
 const execArgv = [
@@ -169,7 +176,7 @@ function facetObservation(
 }
 
 function assertSnapshotMetadata(result: AnalyticsQuerySnapshotMetadata): void {
-  assert.equal(result.databaseSchemaVersion, 13);
+  assert.equal(result.databaseSchemaVersion, 15);
   assert.equal(typeof result.projectionRevision === 'number' || typeof result.projectionRevision === 'string', true);
   assert.equal(typeof result.snapshotWatermark === 'number' || typeof result.snapshotWatermark === 'string', true);
   assert.equal(result.generationIds.length > 0, true);
@@ -289,7 +296,7 @@ test('canonical read model serves schema, bounded queries, settlements, accounti
   const query = await readModel.executeQuery({
     sql: 'SELECT invocation_id, provider, effective_cost_usd FROM analytics_provider_usage_v1 ORDER BY invocation_id',
   });
-  assert.equal(query.databaseSchemaVersion, 13);
+  assert.equal(query.databaseSchemaVersion, 15);
   assertSnapshotMetadata(query);
   assert.equal(query.returnedRows, 4);
   assert.deepEqual(query.truncation, { rowLimit: false, byteLimit: false, cellLimit: false });
@@ -497,6 +504,14 @@ test('canonical read model serves activity and tool-facet projections through th
     execArgv,
     timeoutMs: 20_000,
   });
+  const bundledLifecycle: Array<{ phase: string }> = [];
+  const bundledReadModel = new CanonicalAnalyticsReadModel({
+    databasePath,
+    workerScript,
+    execArgv,
+    timeoutMs: 20_000,
+    onQueryLifecycle: (event) => bundledLifecycle.push({ phase: event.phase }),
+  });
 
   // Schema discovery includes the versioned facet view over the projection.
   const schema = await readModel.describeSchema();
@@ -528,6 +543,23 @@ test('canonical read model serves activity and tool-facet projections through th
   assert.deepEqual(rootAActivity.scope, { kind: 'session', rootSessionId: 'root-a' });
   assert.equal(rootAActivity.totals.spanCount, 3);
   assert.equal(rootAActivity.totals.measuredTotalMs, 1_500);
+
+  // Refreshes request activity and facets from one disposable worker while
+  // retaining independent, complete projection results and revision metadata.
+  const bundled = await bundledReadModel.readActivityAndToolFacetProjections({
+    rootSessionId: 'root-a',
+    maxKinds: 64,
+    limit: 200,
+    maxResultBytes: 256 * 1024,
+  });
+  assert.equal(bundledLifecycle.filter((event) => event.phase === 'submitted').length, 1);
+  assert.equal(bundledLifecycle.filter((event) => event.phase === 'spawned').length, 1);
+  if ('error' in bundled.activity) assert.fail(bundled.activity.error);
+  if ('error' in bundled.toolFacets) assert.fail(bundled.toolFacets.error);
+  assertSnapshotMetadata(bundled.activity.value);
+  assertSnapshotMetadata(bundled.toolFacets.value);
+  assert.deepEqual(bundled.activity.value.totals, rootAActivity.totals);
+  assert.deepEqual(bundled.toolFacets.value.facets.map((row) => row.toolCallId), ['tool-call-1', 'tool-call-2']);
 
   // All-unknown kind rows keep isolated unknown counts and zero measured work;
   // an unobserved session stays zero totals with an empty kind set, not error.
@@ -615,6 +647,104 @@ test('canonical read model serves activity and tool-facet projections through th
   );
 
   rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+});
+
+test('read-only helper load keeps active/global/session projections and aggregate snapshots fresh within bounded capacity', async (context) => {
+  const root = tempRoot();
+  const databasePath = canonicalAnalyticsDatabasePath(path.join(root, 'analytics'));
+  const writer = new SqliteAnalyticsRecorder(databasePath);
+  const at = 1_750_000_000_000;
+  const observations: AnalyticsObservation[] = [];
+  for (let index = 0; index < 120; index += 1) {
+    const rootSessionId = index % 3 === 0 ? 'root-active' : `root-${index % 3}`;
+    observations.push(settlementObservation({
+      generationId: 'generation-pressure',
+      sourceKey: `pressure-settlement-${index}`,
+      invocationId: `pressure-invocation-${index}`,
+      rootSessionId,
+      provider: index % 2 === 0 ? 'provider-a' : 'provider-b',
+      model: index % 2 === 0 ? 'model-a' : 'model-b',
+      purpose: 'conversation',
+      outcome: 'succeeded',
+      settledAtMs: at + index * 100,
+      reportedCostUsd: 0.001 + index / 100_000,
+    }));
+  }
+  observations.push(
+    activityObservation({ sourceKey: 'pressure-span-a', spanId: 'pressure-span-a', rootSessionId: 'root-active', durationMs: 500 }),
+    activityObservation({ sourceKey: 'pressure-span-b', spanId: 'pressure-span-b', rootSessionId: 'root-active', kind: 'agent', durationMs: 250 }),
+    facetObservation('root-active', 'pressure-tool-a'),
+  );
+  writer.submitBatch(observations);
+  writer.prepareProviderDailyProjection('UTC', at - 14 * 86_400_000, at + 2 * 86_400_000);
+  writer.close();
+
+  const lifecycle: Array<AnalyticsQueryLifecycleEvent & { at: number }> = [];
+  const readModel = new CanonicalAnalyticsReadModel({
+    databasePath,
+    workerScript,
+    execArgv,
+    timeoutMs: 20_000,
+    maxConcurrentQueries: 2,
+    maxQueuedQueries: 8,
+    onQueryLifecycle: (event) => lifecycle.push({ ...structuredClone(event), at: performance.now() }),
+  });
+  try {
+    const beforeRevision = await readModel.readRevision();
+    lifecycle.splice(0);
+    const startedAt = performance.now();
+    const [aggregate, globalProjections, activeSettlements, activeProjections, revision, storage] = await Promise.all([
+      readModel.readProviderAggregateSummary({
+        todayStartMs: at,
+        todayEndMs: at + 120 * 100,
+        weekStartMs: at - 6 * 86_400_000,
+        weekEndMs: at + 120 * 100,
+        timeZone: 'UTC',
+        dailyWindowStartMs: at - 14 * 86_400_000,
+        dailyWindowEndMs: at + 2 * 86_400_000,
+        maxGroups: 100,
+      }),
+      readModel.readActivityAndToolFacetProjections({}, undefined, 'background'),
+      readModel.readScopedProviderSettlements(
+        { kind: 'rootSession', rootSessionId: 'root-active' },
+        { limit: 200 },
+        undefined,
+        'interactive',
+      ),
+      readModel.readActivityAndToolFacetProjections({ rootSessionId: 'root-active' }, undefined, 'interactive'),
+      readModel.readRevision(),
+      readModel.readStorageSummary(),
+    ]);
+    const elapsedMs = performance.now() - startedAt;
+    assert.ok(elapsedMs < 30_000, `bounded helper load must complete within the documented 30s ceiling (got ${elapsedMs.toFixed(1)}ms)`);
+    assert.equal(aggregate.accounting.invocationCount, 120);
+    assert.equal(activeSettlements.settlements.length, 40);
+    assert.equal(String(activeSettlements.revision), beforeRevision);
+    assert.equal(String(aggregate.revision), beforeRevision);
+    assert.equal(revision, beforeRevision);
+    assert.equal(String(storage.projectionRevision), beforeRevision);
+    const globalActivity = requireProjectionValue(globalProjections.activity);
+    const globalFacets = requireProjectionValue(globalProjections.toolFacets);
+    const activeActivity = requireProjectionValue(activeProjections.activity);
+    const activeFacets = requireProjectionValue(activeProjections.toolFacets);
+    for (const projection of [globalActivity, globalFacets, activeActivity, activeFacets]) {
+      assert.equal(String(projection.projectionRevision), beforeRevision);
+    }
+    assert.equal(activeActivity.totals.spanCount, 2);
+    assert.equal(activeFacets.facets.length, 1);
+    assert.ok(lifecycle.some((event) => event.phase === 'queued'), 'overlapping scopes should exercise the bounded wait queue');
+    assert.equal(Math.max(...lifecycle.map((event) => event.snapshot.activeQueries)), 2);
+    assert.ok(lifecycle.every((event) => event.snapshot.queuedQueries <= 8));
+    const aggregateId = lifecycle.find((event) => event.phase === 'submitted' && event.requestType === 'providerAggregate')?.requestId;
+    assert.ok(aggregateId !== undefined);
+    const aggregateStart = lifecycle.find((event) => event.requestId === aggregateId && event.phase === 'submitted')?.at;
+    const aggregateEnd = lifecycle.find((event) => event.requestId === aggregateId && event.phase === 'settled')?.at;
+    assert.ok(aggregateStart !== undefined && aggregateEnd !== undefined);
+    assert.ok(aggregateEnd - aggregateStart < 5_000, 'aggregate freshness stays inside the load target');
+    context.diagnostic(`read-only analytics pressure: ${elapsedMs.toFixed(1)}ms total; aggregate ${(aggregateEnd - aggregateStart).toFixed(1)}ms; peak 2 helpers; max queue ${Math.max(...lifecycle.map((event) => event.snapshot.queuedQueries))}; 120 settlements at revision ${revision}`);
+  } finally {
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
 });
 
 test('canonical read model fails explicitly without a database and never falls back', async () => {

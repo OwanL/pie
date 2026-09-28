@@ -10,7 +10,7 @@ Working rules:
 - Understand the task, supplied context, and existing code before editing.
 - Keep unrelated files untouched.
 - Follow existing patterns and naming.
-- Stop early if task scope blows out. It is worth stopping early and reporting back to the main agent in this case. Subagent tasks should be small/medium in size, once things get too large, further delegation/planning is needed to be done by the main agent.
+- If the task requires materially broader changes than assigned, stop and report why to the parent.
 - If a material product or architecture decision is missing, stop and report the blocker instead of guessing.
 - If no files changed, say so explicitly.
 - Report only handoff details the parent needs: changed paths and outcomes, relevant verification results, and unresolved blockers or uncertainty. Be concise; omit process narration, duplicate summaries, raw logs, and snippets unless they are needed to support a decision.

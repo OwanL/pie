@@ -65,6 +65,14 @@ test('protocol v11 browser-server network state remains host-global and separate
   assert.match(contract, /must never implicitly start the server/u);
 });
 
+test('renderer reload suppression is terminal until meaningful activity or a new renderer', async () => {
+  const contract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
+  assert.match(contract, /per-renderer reload circuit uses a rolling wall-clock window that transcript commits cannot reset/u);
+  assert.match(contract, /Once that circuit opens, automatic reload escalation stays terminally suppressed/u);
+  assert.match(contract, /commits, readiness handshakes, visibility changes, automatic retries, and elapsed time do not reopen it/u);
+  assert.match(contract, /A deliberate renderer command or a genuinely new\/resolved renderer starts a fresh recovery episode/u);
+});
+
 test('agent session-control messages retain user-role provenance through queue delivery and reload', async () => {
   const stateContract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
   const agentContract = await readFile(new URL('../../docs/contracts/AGENT-SESSION-CONTROL.md', import.meta.url), 'utf8');

@@ -1,7 +1,16 @@
 import assert from 'node:assert/strict';
+import { setImmediate as waitImmediate } from 'node:timers/promises';
 import test from 'node:test';
 
-import { attemptFlakyRerun, buildTestArgs, groupFastPackageConfigs, parseArgs } from '../run-tests.mjs';
+import { parseFastBatchArgs } from '../run-fast-batched-tests.mjs';
+import {
+  attemptFlakyRerun,
+  buildFastRunnerArgs,
+  buildTestArgs,
+  groupFastPackageConfigs,
+  parseArgs,
+  runFastPackageQueue,
+} from '../run-tests.mjs';
 import { accountTestFiles } from '../test-reporter.mjs';
 
 test('parseArgs forwards name filters without requiring a second separator', () => {
@@ -46,6 +55,107 @@ test('groupFastPackageConfigs combines compatible runners to avoid worker oversu
   assert.deepEqual(groups[0].testGlobs, ['a.test.ts', 'b.test.ts']);
   assert.equal(groups[0].includeOwnerDependencies, true, 'compatible package groups retain owner dependency resolution');
   assert.equal(groups[1].id, 'isolated');
+});
+
+test('root fast-batch invocation honors its declared shared worker budget', () => {
+  assert.deepEqual(buildFastRunnerArgs({ fastBatchMode: 'root', fastConcurrency: 3 }), [
+    'root', '--test-concurrency=3',
+  ]);
+  assert.deepEqual(buildFastRunnerArgs({ fastBatchMode: 'subagent', fastConcurrency: 4 }), ['subagent']);
+  assert.deepEqual(buildFastRunnerArgs({ fastRunner: 'custom-runner' }), []);
+});
+
+test('fast batch runner parses an explicit bounded test-worker budget', () => {
+  assert.deepEqual(parseFastBatchArgs(['root', '--test-concurrency=3']), {
+    mode: 'root',
+    testConcurrency: 3,
+  });
+  assert.deepEqual(parseFastBatchArgs(['root', '--test-concurrency', '6']), {
+    mode: 'root',
+    testConcurrency: 6,
+  });
+  assert.deepEqual(parseFastBatchArgs(['subagent']), {
+    mode: 'subagent',
+    testConcurrency: undefined,
+  });
+  for (const args of [
+    ['root', '--test-concurrency=0'],
+    ['root', '--test-concurrency=nope'],
+    ['root', '--test-concurrency'],
+    ['root', '--unknown'],
+  ]) {
+    assert.throws(() => parseFastBatchArgs(args));
+  }
+});
+
+test('broad fast runs isolate extension and bound the remaining package runners', async () => {
+  const configs = [
+    { id: 'extension' },
+    { id: 'analysis' },
+    { id: 'root' },
+    { id: 'subagent' },
+    { id: 'playwright' },
+  ];
+  const started = [];
+  let activePackages = 0;
+  let peakPackages = 0;
+  let releaseExtension;
+  let releasePackages;
+  const extensionGate = new Promise((resolve) => { releaseExtension = resolve; });
+  const packageGate = new Promise((resolve) => { releasePackages = resolve; });
+
+  const run = runFastPackageQueue(configs, async (config) => {
+    started.push(config.id);
+    if (config.id === 'extension') {
+      await extensionGate;
+      return config.id;
+    }
+    activePackages += 1;
+    peakPackages = Math.max(peakPackages, activePackages);
+    try {
+      await packageGate;
+    } finally {
+      activePackages -= 1;
+    }
+    return config.id;
+  });
+
+  await waitImmediate();
+  assert.deepEqual(started, ['extension'], 'extension compilation runs without competing package runners');
+  releaseExtension();
+  await waitImmediate();
+  assert.deepEqual(started, ['extension', 'analysis', 'root', 'subagent']);
+  assert.equal(peakPackages, 3);
+
+  releasePackages();
+  assert.deepEqual(await run, configs.map((config) => config.id), 'results retain registry order');
+  assert.deepEqual(started, ['extension', 'analysis', 'root', 'subagent', 'playwright']);
+});
+
+test('fast package queue rejects invalid concurrency before starting tests', async () => {
+  let started = false;
+  await assert.rejects(
+    runFastPackageQueue([{ id: 'scripts' }], async () => { started = true; }, 0),
+    /positive integer/,
+  );
+  assert.equal(started, false);
+});
+
+test('fast package queue drains all groups before surfacing a runner error', async () => {
+  const started = [];
+  await assert.rejects(
+    runFastPackageQueue([
+      { id: 'extension' },
+      { id: 'analysis' },
+      { id: 'root' },
+    ], async (config) => {
+      started.push(config.id);
+      if (config.id === 'extension') throw new Error('extension failed');
+      return config.id;
+    }, 1),
+    /extension failed/,
+  );
+  assert.deepEqual(started, ['extension', 'analysis', 'root']);
 });
 
 test('buildTestArgs applies an explicit fast worker budget', () => {

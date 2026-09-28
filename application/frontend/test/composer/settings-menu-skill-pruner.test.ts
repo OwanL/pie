@@ -7,24 +7,22 @@ import renderToString from 'preact-render-to-string';
 import { DEFAULT_CHAT_PREFS, DEFAULT_PRUNING_SETTINGS, type PruningSettings } from '../../../lib/protocol/index.js';
 import { SkillPrunerModelAssignment, SkillPrunerSettings } from '../../settings/settings-menu-skill-pruner';
 
-function renderAutoSkip(autoSkipBelowTokens: number | null): string {
-  return renderToString(h(SkillPrunerSettings, {
+test('SkillPrunerSettings omits retired token-skip controls and retains pruning controls', () => {
+  const html = renderToString(h(SkillPrunerSettings, {
     prefs: DEFAULT_CHAT_PREFS,
-    pruningSettings: { ...DEFAULT_PRUNING_SETTINGS, autoSkipBelowTokens },
+    pruningSettings: DEFAULT_PRUNING_SETTINGS,
     skillCatalog: [],
     toolCatalog: [],
     onSetPrefs: () => undefined,
     onSetPruningSettings: () => undefined,
   }));
-}
 
-test('SkillPrunerSettings exposes the small-prepass auto-skip threshold', () => {
-  const html = renderAutoSkip(1200);
-
-  assert.match(html, /Skip small prepasses/);
-  assert.match(html, /aria-checked="true"/);
-  assert.match(html, /Skip below tokens/);
-  assert.match(html, />1200</);
+  assert.doesNotMatch(html, /Skip small prepasses/);
+  assert.doesNotMatch(html, /Skip below tokens/);
+  assert.match(html, /Skill limit/);
+  assert.match(html, /Tool limit/);
+  assert.match(html, /Omitted skills \(never pruned\)/);
+  assert.match(html, /Omitted tools \(never pruned\)/);
 });
 
 test('SkillPrunerSettings exposes independent main-agent and subagent switches', () => {
@@ -48,15 +46,6 @@ test('SkillPrunerSettings exposes independent main-agent and subagent switches',
   assert.match(html, /Subagents/);
   assert.deepEqual(checkedValues.slice(1, 3), ['false', 'true']);
   assert.match(html, /selected value="off"/);
-});
-
-test('SkillPrunerSettings hides the threshold when small-prepass skipping is disabled', () => {
-  const html = renderAutoSkip(null);
-
-  assert.match(html, /Skip small prepasses/);
-  assert.match(html, /aria-checked="false"/);
-  assert.doesNotMatch(html, /Skip below tokens/);
-  assert.doesNotMatch(html, /Prepass model/);
 });
 
 test('SkillPrunerModelAssignment owns the prepass model and thinking controls', () => {

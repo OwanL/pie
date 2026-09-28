@@ -25,6 +25,18 @@ export interface TranscriptPageLoadOptions {
   requiredMessageId?: string;
 }
 
+/** One request-correlated measurement of the awaited session snapshot build,
+ * synchronous `session.opened` emission, and handler-side acknowledgement
+ * readiness. Deliberately excludes session paths and payload contents. */
+export interface SessionOpenTimingSample {
+  outcome: 'success' | 'failure';
+  runtimeReady?: boolean;
+  snapshotBuildDurationMs?: number;
+  sessionOpenedEmitDurationMs?: number;
+  ackReadyDurationMs: number;
+  failureStage?: 'snapshot_build' | 'session_opened_emit' | 'handler';
+}
+
 /** The only model-settings key whose absence has meaning on the JSON wire.
  * Keep deletion explicit across the worker boundary; JSON.stringify otherwise
  * drops an `undefined` provider and turns a rollback into a merge-only update. */
@@ -228,6 +240,10 @@ export interface BackendRequestHandlerDeps {
     route: AnalyticsTransportRoute,
     acknowledgement: AnalyticsTransportAcknowledgement,
   ) => boolean;
+  /** Called once after a valid `session.open` settles; production emits one
+   * request-correlated structured timing record, while tests can assert stage
+   * boundaries without observing stderr. */
+  onSessionOpenTiming?: (sample: SessionOpenTimingSample) => void;
   /** Called only after the selected handler has validated its request params. */
   onRequestValidated?: () => void;
   /** The server owns the request completion span when it may retry a browse

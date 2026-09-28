@@ -46,7 +46,29 @@ export type AnalyticsQueryRequest =
   | { type: 'historicalDimensions'; maxRowsPerDimension?: number; maxCellBytes?: number; maxResultBytes?: number }
   | { type: 'activityProjection'; rootSessionId?: string; maxKinds?: number; maxResultBytes?: number }
   | { type: 'toolFacetProjection'; rootSessionId?: string; limit?: number; maxResultBytes?: number }
+  | {
+      type: 'activityToolFacetProjections';
+      rootSessionId?: string;
+      maxKinds?: number;
+      limit?: number;
+      maxResultBytes?: number;
+    }
   | { type: 'qualificationSpin'; iterations?: number; maxResultBytes?: number };
+
+export type AnalyticsQueryPriority = 'interactive' | 'normal' | 'background';
+
+const QUERY_PRIORITY_RANK: Record<AnalyticsQueryPriority, number> = {
+  interactive: 0,
+  normal: 1,
+  background: 2,
+};
+const MAX_QUERY_PRIORITY_BYPASSES = 2;
+
+type AnalyticsQueryWaiter = {
+  resume: () => void;
+  priority: AnalyticsQueryPriority;
+  priorityBypasses: number;
+};
 
 export type AnalyticsQueryLifecyclePhase =
   | 'submitted'
@@ -163,6 +185,7 @@ export interface AnalyticsQueryLifecycleEvent {
   clientId: string;
   requestId: number;
   requestType: AnalyticsQueryRequest['type'];
+  priority: AnalyticsQueryPriority;
   phase: AnalyticsQueryLifecyclePhase;
   snapshot: AnalyticsQueryAdmissionSnapshot;
   identity?: AnalyticsWorkerIdentity;
@@ -203,7 +226,7 @@ export interface AnalyticsQueryClientOptions {
 export class AnalyticsQueryClient {
   private nextRequestId = 1;
   private activeQueries = 0;
-  private readonly waiters: Array<() => void> = [];
+  private readonly waiters: AnalyticsQueryWaiter[] = [];
   private readonly clientId = randomUUID();
   private readonly maxConcurrentQueries: number;
   private readonly maxQueuedQueries: number;
@@ -217,21 +240,26 @@ export class AnalyticsQueryClient {
       ? Math.max(0, Math.floor(configuredQueued)) : 8;
   }
 
-  async query<Result = unknown>(request: AnalyticsQueryRequest, signal?: AbortSignal): Promise<Result> {
+  async query<Result = unknown>(
+    request: AnalyticsQueryRequest,
+    signal?: AbortSignal,
+    priority: AnalyticsQueryPriority = 'normal',
+  ): Promise<Result> {
     const requestId = this.nextRequestId++;
     const requestType = request.type;
     this.notifyQueryLifecycle({
       requestId,
       requestType,
+      priority,
       phase: 'submitted',
       snapshot: this.admissionSnapshot(),
     });
     let outcome: 'resolved' | 'rejected' = 'resolved';
     let admitted = false;
     try {
-      await this.acquire(requestId, requestType, signal);
+      await this.acquire(requestId, requestType, signal, priority);
       admitted = true;
-      return await this.executeQuery<Result>(request, signal, requestId);
+      return await this.executeQuery<Result>(request, signal, requestId, priority);
     } catch (error) {
       outcome = 'rejected';
       throw error;
@@ -239,6 +267,7 @@ export class AnalyticsQueryClient {
       this.notifyQueryLifecycle({
         requestId,
         requestType,
+        priority,
         phase: 'settled',
         outcome,
         snapshot: this.admissionSnapshot(),
@@ -252,7 +281,12 @@ export class AnalyticsQueryClient {
     return this.admissionSnapshot();
   }
 
-  private executeQuery<Result>(request: AnalyticsQueryRequest, signal: AbortSignal | undefined, requestId: number): Promise<Result> {
+  private executeQuery<Result>(
+    request: AnalyticsQueryRequest,
+    signal: AbortSignal | undefined,
+    requestId: number,
+    priority: AnalyticsQueryPriority,
+  ): Promise<Result> {
     if (signal?.aborted) return Promise.reject(signal.reason ?? new Error('Analytics query cancelled.'));
     const timeoutMs = this.options.timeoutMs ?? 10_000;
     return new Promise<Result>((resolve, reject) => {
@@ -284,7 +318,7 @@ export class AnalyticsQueryClient {
       });
       if (!child.pid) throw new Error('Analytics query worker did not expose a process ID.');
       const workerIdentity: AnalyticsWorkerIdentity = Object.freeze({ pid: child.pid, spawnedAtMs, instanceId });
-      this.notifyWorkerLifecycle({ state: 'spawned', identity: workerIdentity }, requestId, request.type);
+      this.notifyWorkerLifecycle({ state: 'spawned', identity: workerIdentity }, requestId, request.type, priority);
       let workerStderr = '';
       child.stderr?.on('data', (chunk: Uint8Array | string) => {
         workerStderr = `${workerStderr}${String(chunk)}`.slice(-8_192);
@@ -391,7 +425,7 @@ export class AnalyticsQueryClient {
             return;
           }
           ready = true;
-          this.notifyWorkerLifecycle({ state: 'ready', identity: workerIdentity }, requestId, request.type);
+          this.notifyWorkerLifecycle({ state: 'ready', identity: workerIdentity }, requestId, request.type, priority);
           child.send({ ...request, requestId });
           return;
         }
@@ -413,6 +447,7 @@ export class AnalyticsQueryClient {
           { state: 'terminal', identity: workerIdentity, code, signal: processSignal },
           requestId,
           request.type,
+          priority,
           telemetry,
           telemetryStatus,
         );
@@ -428,6 +463,7 @@ export class AnalyticsQueryClient {
     event: AnalyticsWorkerLifecycleEvent,
     requestId: number,
     requestType: AnalyticsQueryRequest['type'],
+    priority: AnalyticsQueryPriority,
     telemetry?: AnalyticsQueryWorkerTelemetry | null,
     telemetryStatus?: AnalyticsQueryWorkerTelemetryStatus,
   ): void {
@@ -439,6 +475,7 @@ export class AnalyticsQueryClient {
     this.notifyQueryLifecycle({
       requestId,
       requestType,
+      priority,
       phase: event.state,
       identity: event.identity,
       ...(event.state === 'terminal' ? { code: event.code ?? null, signal: event.signal ?? null } : {}),
@@ -464,11 +501,17 @@ export class AnalyticsQueryClient {
     };
   }
 
-  private acquire(requestId: number, requestType: AnalyticsQueryRequest['type'], signal?: AbortSignal): Promise<void> {
+  private acquire(
+    requestId: number,
+    requestType: AnalyticsQueryRequest['type'],
+    signal: AbortSignal | undefined,
+    priority: AnalyticsQueryPriority,
+  ): Promise<void> {
     if (signal?.aborted) {
       this.notifyQueryLifecycle({
         requestId,
         requestType,
+        priority,
         phase: 'cancelled-before-start',
         snapshot: this.admissionSnapshot(),
       });
@@ -479,6 +522,7 @@ export class AnalyticsQueryClient {
       this.notifyQueryLifecycle({
         requestId,
         requestType,
+        priority,
         phase: 'admitted',
         admission: 'active',
         snapshot: this.admissionSnapshot(),
@@ -489,31 +533,38 @@ export class AnalyticsQueryClient {
       this.notifyQueryLifecycle({
         requestId,
         requestType,
+        priority,
         phase: 'capacity-rejected',
         snapshot: this.admissionSnapshot(),
       });
       return Promise.reject(new Error('Analytics query capacity exceeded.'));
     }
     return new Promise<void>((resolve, reject) => {
-      const resume = (): void => {
-        signal?.removeEventListener('abort', onAbort);
-        this.activeQueries += 1;
-        this.notifyQueryLifecycle({
-          requestId,
-          requestType,
-          phase: 'admitted',
-          admission: 'queued',
-          snapshot: this.admissionSnapshot(),
-        });
-        resolve();
+      const waiter: AnalyticsQueryWaiter = {
+        priority,
+        priorityBypasses: 0,
+        resume: () => {
+          signal?.removeEventListener('abort', onAbort);
+          this.activeQueries += 1;
+          this.notifyQueryLifecycle({
+            requestId,
+            requestType,
+            priority,
+            phase: 'admitted',
+            admission: 'queued',
+            snapshot: this.admissionSnapshot(),
+          });
+          resolve();
+        },
       };
       const onAbort = (): void => {
-        const index = this.waiters.indexOf(resume);
+        const index = this.waiters.indexOf(waiter);
         if (index >= 0) {
           this.waiters.splice(index, 1);
           this.notifyQueryLifecycle({
             requestId,
             requestType,
+            priority,
             phase: 'cancelled-before-start',
             snapshot: this.admissionSnapshot(),
           });
@@ -521,18 +572,45 @@ export class AnalyticsQueryClient {
         reject(signal?.reason ?? new Error('Analytics query cancelled.'));
       };
       signal?.addEventListener('abort', onAbort, { once: true });
-      this.waiters.push(resume);
+      this.waiters.push(waiter);
       this.notifyQueryLifecycle({
         requestId,
         requestType,
+        priority,
         phase: 'queued',
         snapshot: this.admissionSnapshot(),
       });
     });
   }
 
+  private takeNextWaiter(): AnalyticsQueryWaiter | undefined {
+    // Prevent a steady stream of interactive refreshes from starving older
+    // background reads: after two higher-priority selections, the oldest
+    // bypassed waiter gets one bounded admission opportunity.
+    let selectedIndex = this.waiters.findIndex((waiter) => waiter.priorityBypasses >= MAX_QUERY_PRIORITY_BYPASSES);
+    if (selectedIndex < 0) {
+      for (let index = 1; index < this.waiters.length; index += 1) {
+        const candidate = this.waiters[index]!;
+        const selected = this.waiters[selectedIndex < 0 ? 0 : selectedIndex]!;
+        if (QUERY_PRIORITY_RANK[candidate.priority] < QUERY_PRIORITY_RANK[selected.priority]) {
+          selectedIndex = index;
+        }
+      }
+      if (selectedIndex < 0 && this.waiters.length > 0) selectedIndex = 0;
+    }
+    if (selectedIndex < 0) return undefined;
+    const [selected] = this.waiters.splice(selectedIndex, 1);
+    if (!selected) return undefined;
+    for (const waiter of this.waiters) {
+      if (QUERY_PRIORITY_RANK[waiter.priority] > QUERY_PRIORITY_RANK[selected.priority]) {
+        waiter.priorityBypasses += 1;
+      }
+    }
+    return selected;
+  }
+
   private release(): void {
     this.activeQueries = Math.max(0, this.activeQueries - 1);
-    this.waiters.shift()?.();
+    this.takeNextWaiter()?.resume();
   }
 }

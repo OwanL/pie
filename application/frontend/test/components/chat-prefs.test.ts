@@ -19,7 +19,8 @@ import {
   toggleChatPref,
   toggleChatPrefForContext,
 } from '../../shell/chat-prefs';
-import type { ChatPrefs, ModelInfo } from '../../../lib/protocol/index.js';
+import { mergeChatPrefs, type ChatPrefs, type ModelInfo } from '../../../lib/protocol/index.js';
+import { validateBrowserToHostMessage } from '../../../lib/validation/browser-ingress';
 
 const prefs: ChatPrefs = {
   autoExpandReasoning: false,
@@ -302,6 +303,44 @@ test('setSubagentProviderEnabled scopes provider state to one session', () => {
     '/session/a.jsonl': { 'cheap-provider': false },
   });
   assert.deepEqual(prefs.subagentProviderTogglesBySession, {});
+});
+
+test('session provider toggle keeps historical preferences off browser ingress and durable on the host', () => {
+  const activeSessionPath = '/session/active.jsonl';
+  const historical = Object.fromEntries(
+    Array.from({ length: 160 }, (_, index) => [`/session/history-${index}.jsonl`, { openai: index % 2 === 0 }]),
+  );
+  const persistedPrefs: ChatPrefs = {
+    ...prefs,
+    subagentProviderTogglesBySession: {
+      ...historical,
+      [activeSessionPath]: { anthropic: false, openai: true },
+    },
+  };
+
+  const prefsPatch = setSubagentProviderEnabled(persistedPrefs, activeSessionPath, 'anthropic', true);
+  assert.deepEqual(Object.keys(prefsPatch.subagentProviderTogglesBySession ?? {}), [activeSessionPath]);
+  const clientCommandId = '01234567-89ab-4cde-f012-3456789abcde';
+  const unprojectedFrame = {
+    type: 'setPrefs',
+    prefs: { subagentProviderTogglesBySession: persistedPrefs.subagentProviderTogglesBySession },
+    clientCommandId,
+  };
+  const unprojectedBytes = Buffer.byteLength(JSON.stringify(unprojectedFrame), 'utf8');
+  const unprojectedValidation = validateBrowserToHostMessage(unprojectedFrame, unprojectedBytes);
+  assert.equal(unprojectedValidation.ok, false, 'the generic 128-key ingress cap remains in force');
+
+  const frame = { type: 'setPrefs', prefs: prefsPatch, clientCommandId };
+  const encodedFrame = JSON.stringify(frame);
+  const validation = validateBrowserToHostMessage(frame, Buffer.byteLength(encodedFrame, 'utf8'));
+  assert.equal(validation.ok, true, validation.ok ? '' : validation.reason);
+
+  const mergedPrefs = mergeChatPrefs(persistedPrefs, prefsPatch);
+  assert.equal(Object.keys(mergedPrefs.subagentProviderTogglesBySession).length, 161);
+  assert.equal(mergedPrefs.subagentProviderTogglesBySession[activeSessionPath]?.anthropic, true);
+  assert.equal(mergedPrefs.subagentProviderTogglesBySession[activeSessionPath]?.openai, true);
+  assert.equal(mergedPrefs.subagentProviderTogglesBySession['/session/history-159.jsonl']?.openai, false);
+  assert.equal(persistedPrefs.subagentProviderTogglesBySession[activeSessionPath]?.anthropic, false);
 });
 
 test('setBucketAssignments replaces one bucket without mutating source prefs', () => {

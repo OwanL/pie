@@ -39,7 +39,6 @@ Add a `pruning` block to `settings.json`:
       "transportBackoffBaseMs": 1000,
       "oauthRaceBackoffMs": 1500
     },
-    "autoSkipBelowTokens": 1200,
     "skills": {
       "strategy": "discretion",
       "ceiling": 8,
@@ -68,7 +67,6 @@ Add a `pruning` block to `settings.json`:
 | `mainAgentEnabled` | `true` | Enable the main agent's independent launch pruning pass |
 | `subagentEnabled` | `true` | Enable one independent launch pruning pass per subagent session; continuations reuse the session decision |
 | `prepass` | _(built-in defaults)_ | Sampling, output, timeout, and manual retry controls for the LLM prepass call; see [Prepass options](#prepass-options) |
-| `autoSkipBelowTokens` | `1200` | Skip the LLM and keep all when the assembled prepass input (system prompt plus candidates) is below this estimate. Set `null` to disable |
 
 ### Skills options
 

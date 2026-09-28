@@ -236,9 +236,31 @@ async function buildPlan(mode, tempDir) {
   };
 }
 
+export function parseFastBatchArgs(argv) {
+  const [mode, ...runnerArgs] = argv;
+  let testConcurrency;
+  for (let index = 0; index < runnerArgs.length; index += 1) {
+    const arg = runnerArgs[index];
+    if (arg === '--test-concurrency') {
+      const value = runnerArgs[index + 1];
+      if (!value) throw new Error('--test-concurrency requires a positive integer');
+      testConcurrency = Number(value);
+      index += 1;
+    } else if (arg.startsWith('--test-concurrency=')) {
+      testConcurrency = Number(arg.slice('--test-concurrency='.length));
+    } else {
+      throw new Error(`Unknown fast-batch argument: ${arg}`);
+    }
+    if (!Number.isInteger(testConcurrency) || testConcurrency < 1) {
+      throw new Error('--test-concurrency requires a positive integer');
+    }
+  }
+  return { mode, testConcurrency };
+}
+
 async function main() {
-  const mode = process.argv[2];
-  if (!mode) throw new Error('Usage: run-fast-batched-tests.mjs <root|analysis|subagent|computer-use|playwright>');
+  const { mode, testConcurrency } = parseFastBatchArgs(process.argv.slice(2));
+  if (!mode) throw new Error('Usage: run-fast-batched-tests.mjs <root|analysis|subagent|computer-use|playwright> [--test-concurrency <n>]');
   const startedAt = performance.now();
   const tempDir = await mkdtemp(path.join(os.tmpdir(), `pie-${mode}-tests-`));
   try {
@@ -265,7 +287,7 @@ async function main() {
     );
     const runs = [run(
       process.execPath,
-      [...common, `--test-concurrency=${plan.batches.length}`, ...plan.batches],
+      [...common, `--test-concurrency=${Math.min(testConcurrency ?? plan.batches.length, plan.batches.length)}`, ...plan.batches],
       plan.cwd,
       { [TEST_FILE_ACCOUNTING_ENV]: primaryContext },
     )];

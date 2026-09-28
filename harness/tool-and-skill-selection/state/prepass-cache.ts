@@ -66,7 +66,6 @@ export function buildPrepassFingerprint(
 		model: config.model,
 		provider: config.provider,
 		thinkingLevel: config.thinkingLevel,
-		autoSkipBelowTokens: config.autoSkipBelowTokens ?? null,
 		skillsConfig: {
 			strategy: config.skills.strategy,
 			ceiling: config.skills.ceiling,

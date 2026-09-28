@@ -1,7 +1,7 @@
 /** @jsxRuntime automatic */
 /** @jsxImportSource preact */
 
-import { DEFAULT_PRUNING_SETTINGS, type ChatPrefs, type ModelInfo, type PruningSettings, type PruningMode } from '../../lib/protocol/index.js';
+import { type ChatPrefs, type ModelInfo, type PruningSettings, type PruningMode } from '../../lib/protocol/index.js';
 import { toggleChatPref } from '../shell/chat-prefs';
 import { orderModelsForPicker } from '../composer/model-list';
 import { ModelAssignmentRow } from './model-assignment-row';
@@ -14,8 +14,6 @@ import type { OnSetPrefs, OnSetPruningSettings } from './settings-menu-types';
 export const SKILL_PRUNER_BEHAVIOR_SETTING_LABELS = [
   'Show pruning summary',
   'Mode',
-  'Skip small prepasses',
-  'Skip below tokens',
   'Skill limit',
   'Tool limit',
   'Omitted skills (never pruned)',
@@ -45,10 +43,6 @@ interface SkillPrunerModelAssignmentProps {
 
 /** Context-tab behavior controls for the skill-pruning prepass. */
 export function SkillPrunerSettings({ prefs, pruningSettings, skillCatalog, toolCatalog, onSetPrefs, onSetPruningSettings }: SkillPrunerSettingsProps) {
-  const autoSkipBelowTokens = pruningSettings.autoSkipBelowTokens === undefined
-    ? DEFAULT_PRUNING_SETTINGS.autoSkipBelowTokens!
-    : pruningSettings.autoSkipBelowTokens;
-
   return (
     <div class="toolbar-settings-ext-settings">
       <SettingCheckbox
@@ -81,25 +75,6 @@ export function SkillPrunerSettings({ prefs, pruningSettings, skillCatalog, tool
         title="Enable skill and tool pruning for subagent turns. The pruning mode can still turn pruning off globally."
         onChange={() => onSetPruningSettings({ subagentEnabled: !(pruningSettings.subagentEnabled ?? true) })}
       />
-      <SettingCheckbox
-        label="Skip small prepasses"
-        checked={autoSkipBelowTokens !== null}
-        title="Skip the pruning prepass when its estimated input is below the configured token threshold. Skipped turns keep the full catalog and do not produce a pruning summary."
-        onChange={() => onSetPruningSettings({
-          autoSkipBelowTokens: autoSkipBelowTokens === null ? 1200 : null,
-        })}
-      />
-      {autoSkipBelowTokens !== null && (
-        <Stepper
-          label="Skip below tokens"
-          value={autoSkipBelowTokens}
-          min={100}
-          step={100}
-          decreaseLabel="Decrease auto-skip token threshold"
-          increaseLabel="Increase auto-skip token threshold"
-          onChange={(value) => onSetPruningSettings({ autoSkipBelowTokens: value })}
-        />
-      )}
       <Stepper
         label="Skill limit"
         value={pruningSettings.skillCeiling}
