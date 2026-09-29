@@ -11,7 +11,7 @@
 #   pricing:{input,output,cacheRead,cacheWrite} -> models.json cost:{...} (USD/M-token)
 #   disabledReason        -> model-profiles.yaml disabled_reason (snake_case)
 #   eligible/thinking     -> model-profiles.yaml
-#   input/maxImagesPerRequest -> models.json provider-qualified request policy
+#   input                 -> models.json provider-qualified input capabilities
 #   overrideOnly:true     -> models.json providers.<p>.modelOverrides (vs models[])
 #   defaults/pruning      -> settings.json seeds for user-owned chat/pruning
 #                           selections (only when the corresponding value is absent)
@@ -20,11 +20,6 @@
 #                           provider gate reads this at runtime to enforce
 #                           per-provider concurrency + afterburn sticky slots)
 #
-# Image-capable entries currently use the conservative policy maximum 1. Their
-# provider/runtime capability declarations establish one-image acceptance; raise
-# a limit only with provider-qualified documentation or measured acceptance
-# evidence, never by inferring behavior from a model family name.
-
 defaults:
   model: glm-5.2:cloud
   provider: ollama
@@ -234,7 +229,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 1048576
         maxTokens: 131072
         pricing:
@@ -257,7 +251,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 1048576
         maxTokens: 65536
         thinkingLevelMap:
@@ -405,7 +398,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 1048576
         maxTokens: 65536
         pricing:
@@ -427,7 +419,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 262144
         maxTokens: 65536
         pricing:
@@ -516,7 +507,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 1048576
         maxTokens: 131072
         thinkingLevelMap:
@@ -577,7 +567,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 262144
         maxTokens: 65536
         pricing:
@@ -598,7 +587,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 262144
         maxTokens: 65536
         pricing:
@@ -634,7 +622,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 524288
         maxTokens: 65536
         pricing:
@@ -654,7 +641,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 262144
         maxTokens: 65536
         pricing:
@@ -725,7 +711,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 262144
         maxTokens: 65536
         # Ollama publishes no cache-read tier for this model ('-'): positive
@@ -748,7 +733,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 262144
         maxTokens: 32768
         pricing:
@@ -785,7 +769,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 200000
         maxTokens: 64000
         thinkingLevelMap:
@@ -825,7 +808,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 200000
         maxTokens: 64000
         thinkingLevelMap:
@@ -863,7 +845,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 200000
         maxTokens: 64000
         thinkingLevelMap:
@@ -903,7 +884,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 200000
         maxTokens: 64000
         thinkingLevelMap:
@@ -938,7 +918,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 200000
         maxTokens: 128000
         thinkingLevelMap:
@@ -978,7 +957,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 200000
         maxTokens: 64000
         thinkingLevelMap:
@@ -1018,7 +996,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 200000
         maxTokens: 128000
         thinkingLevelMap:
@@ -1058,7 +1035,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 200000
         maxTokens: 64000
         thinkingLevelMap:
@@ -1097,7 +1073,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 200000
         maxTokens: 64000
         thinkingLevelMap:
@@ -1134,7 +1109,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 200000
         maxTokens: 64000
         thinkingLevelMap:
@@ -1171,7 +1145,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 200000
         maxTokens: 64000
         thinkingLevelMap:
@@ -1208,7 +1181,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 200000
         maxTokens: 65536
         thinkingLevelMap:
@@ -1241,7 +1213,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 272000
         maxTokens: 128000
         thinkingLevelMap:
@@ -1268,7 +1239,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 272000
         maxTokens: 128000
         thinkingLevelMap:
@@ -1298,7 +1268,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 200000
         maxTokens: 128000
         thinkingLevelMap:
@@ -1336,7 +1305,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 272000
         maxTokens: 128000
         thinkingLevelMap:
@@ -1374,7 +1342,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 272000
         maxTokens: 128000
         thinkingLevelMap:
@@ -1412,7 +1379,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 272000
         maxTokens: 128000
         thinkingLevelMap:
@@ -1449,7 +1415,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 272000
         maxTokens: 128000
         thinkingLevelMap:
@@ -1487,7 +1452,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 272000
         maxTokens: 128000
         thinkingLevelMap:
@@ -1525,7 +1489,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 200000
         maxTokens: 128000
         thinkingLevelMap:
@@ -1558,7 +1521,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 200000
         maxTokens: 128000
         thinkingLevelMap:
@@ -1593,7 +1555,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 200000
         maxTokens: 128000
         thinkingLevelMap:
@@ -1628,7 +1589,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 128000
         maxTokens: 128000
         thinkingLevelMap:
@@ -1656,7 +1616,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 200000
         maxTokens: 64000
         pricing:
@@ -1692,7 +1651,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 272000
         maxTokens: 128000
         thinkingLevelMap:
@@ -1734,7 +1692,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 272000
         maxTokens: 128000
         thinkingLevelMap:
@@ -1777,7 +1734,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         contextWindow: 272000
         maxTokens: 128000
         thinkingLevelMap:
@@ -1819,7 +1775,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         pricing:
           input: 4
           output: 20
@@ -1846,7 +1801,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         pricing:
           input: 2
           output: 12
@@ -1873,7 +1827,6 @@ providers:
         input:
           - text
           - image
-        maxImagesPerRequest: 1
         pricing:
           input: 0.2
           output: 1.2

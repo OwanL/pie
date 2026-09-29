@@ -52,12 +52,7 @@ test('extension registers exactly one sequential computer tool and session-owned
   registerComputer({ registerTool(tool: any) { tools.push(tool); }, on(name: string, handler: Function) { handlers.set(name, handler); } } as any);
   assert.equal(tools.length, 1); assert.equal(tools[0].name, 'computer'); assert.equal(tools[0].executionMode, 'sequential');
   assert.deepEqual(tools[0].parameters.properties.action.enum, ['open', 'observe', 'act', 'run_sequence', 'close']);
-  // The newest-three image projection is now owned by the generic
-  // image-context-guard extension (it reuses projectComputerImageContext from
-  // context.ts, still unit-tested in context.test.ts). computer-use no
-  // longer registers its own `context` handler, so the two limits are never
-  // enforced by two independently ordered handlers.
-  assert.equal(handlers.has('context'), false);
+  assert.equal(handlers.has('context'), false, 'computer-use registers no image-filtering or replacement context handler');
   assert.ok(handlers.has('agent_start'));
   assert.ok(handlers.has('agent_settled'));
   assert.equal(handlers.has('agent_end'), false);

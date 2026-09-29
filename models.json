@@ -97,7 +97,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 1048576,
           "maxTokens": 131072,
           "cost": {
@@ -118,7 +117,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 1048576,
           "maxTokens": 65536,
           "thinkingLevelMap": {
@@ -268,7 +266,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 1048576,
           "maxTokens": 65536,
           "cost": {
@@ -286,7 +283,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 262144,
           "maxTokens": 65536,
           "cost": {
@@ -368,7 +364,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 1048576,
           "maxTokens": 131072,
           "thinkingLevelMap": {
@@ -422,7 +417,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 262144,
           "maxTokens": 65536,
           "cost": {
@@ -441,7 +435,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 262144,
           "maxTokens": 65536,
           "cost": {
@@ -472,7 +465,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 524288,
           "maxTokens": 65536,
           "cost": {
@@ -489,7 +481,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 262144,
           "maxTokens": 65536,
           "cost": {
@@ -547,7 +538,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 262144,
           "maxTokens": 65536,
           "cost": {
@@ -566,7 +556,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 262144,
           "maxTokens": 32768,
           "cost": {
@@ -605,7 +594,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 200000,
           "maxTokens": 64000,
           "thinkingLevelMap": {
@@ -645,7 +633,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 200000,
           "maxTokens": 64000,
           "thinkingLevelMap": {
@@ -685,7 +672,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 200000,
           "maxTokens": 64000,
           "thinkingLevelMap": {
@@ -725,7 +711,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 200000,
           "maxTokens": 64000,
           "thinkingLevelMap": {
@@ -765,7 +750,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 200000,
           "maxTokens": 128000,
           "thinkingLevelMap": {
@@ -805,7 +789,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 200000,
           "maxTokens": 64000,
           "thinkingLevelMap": {
@@ -845,7 +828,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 200000,
           "maxTokens": 128000,
           "thinkingLevelMap": {
@@ -885,7 +867,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 200000,
           "maxTokens": 64000,
           "thinkingLevelMap": {
@@ -926,7 +907,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 200000,
           "maxTokens": 64000,
           "thinkingLevelMap": {
@@ -965,7 +945,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 200000,
           "maxTokens": 64000,
           "thinkingLevelMap": {
@@ -1004,7 +983,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 200000,
           "maxTokens": 64000,
           "thinkingLevelMap": {
@@ -1043,7 +1021,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 200000,
           "maxTokens": 65536,
           "thinkingLevelMap": {
@@ -1077,7 +1054,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 272000,
           "maxTokens": 128000,
           "thinkingLevelMap": {
@@ -1103,7 +1079,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 272000,
           "maxTokens": 128000,
           "thinkingLevelMap": {
@@ -1130,7 +1105,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 200000,
           "maxTokens": 128000,
           "thinkingLevelMap": {
@@ -1167,7 +1141,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 272000,
           "maxTokens": 128000,
           "thinkingLevelMap": {
@@ -1204,7 +1177,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 272000,
           "maxTokens": 128000,
           "thinkingLevelMap": {
@@ -1241,7 +1213,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 272000,
           "maxTokens": 128000,
           "thinkingLevelMap": {
@@ -1277,7 +1248,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 272000,
           "maxTokens": 128000,
           "thinkingLevelMap": {
@@ -1314,7 +1284,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 272000,
           "maxTokens": 128000,
           "thinkingLevelMap": {
@@ -1351,7 +1320,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 200000,
           "maxTokens": 128000,
           "thinkingLevelMap": {
@@ -1385,7 +1353,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 200000,
           "maxTokens": 128000,
           "thinkingLevelMap": {
@@ -1420,7 +1387,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 200000,
           "maxTokens": 128000,
           "thinkingLevelMap": {
@@ -1455,7 +1421,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 128000,
           "maxTokens": 128000,
           "thinkingLevelMap": {
@@ -1482,7 +1447,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 200000,
           "maxTokens": 64000,
           "cost": {
@@ -1509,7 +1473,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "cost": {
             "input": 4,
             "output": 20,
@@ -1532,7 +1495,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "cost": {
             "input": 2,
             "output": 12,
@@ -1555,7 +1517,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "cost": {
             "input": 0.2,
             "output": 1.2,
@@ -1642,7 +1603,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 272000,
           "maxTokens": 128000,
           "thinkingLevelMap": {
@@ -1685,7 +1645,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 272000,
           "maxTokens": 128000,
           "thinkingLevelMap": {
@@ -1728,7 +1687,6 @@
             "text",
             "image"
           ],
-          "maxImagesPerRequest": 1,
           "contextWindow": 272000,
           "maxTokens": 128000,
           "thinkingLevelMap": {

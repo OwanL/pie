@@ -23,7 +23,7 @@ test('PACKAGE_DIRECTIVES covers package dirs, owned and retired source dirs, and
     'cwd-skills', 'safeguard', 'skill-pruner', 'model-provider-authentication', 'model-provider-concurrency', 'model-provider-pricing', 'model-provider-traffic-observation', 'agent-processes-coordinator', 'session-control', 'tool-catalog', 'subagent', 'ask-user',
     'warm-bash', 'copilot-model-discovery', 'web-access-guard', 'tool-result-pruner',
     'deferred-triggers', 'session-changes', 'computer-use',
-    'image-context-guard', 'playwright',
+    'model-provider-request-validation', 'playwright',
     'session-storage-transcripts', 'session-storage-settings', 'agent-processes-context-inventory', 'agent-processes-process-lifecycle', 'agent-processes-rpc', 'agent-processes-workers',
     'agent-processes-sdk-integration', 'model-provider-catalog', 'session-storage-lifecycle', 'session-storage-catalog',
     'session-storage-ownership', 'session-storage-metadata', 'analytics-runtime', 'conversation-state', 'session-actions', 'agent-connection', 'deferred-triggers-backend', 'application-settings', 'file-changes', 'transcript-delivery', 'application-validation', 'cold-browse-helper',
@@ -31,7 +31,7 @@ test('PACKAGE_DIRECTIVES covers package dirs, owned and retired source dirs, and
   assert.deepEqual(ALL_PACKAGE_IDS, expected);
   // The classification view covers package/source owners, nested/distributed
   // test roots, retired source identities, and exact root-integration files.
-  assert.equal(PACKAGE_DIRECTIVES.length, 204, 'routing view covers dirs, owned dirs, test roots, and explicit test files');
+  assert.equal(PACKAGE_DIRECTIVES.length, 203, 'routing view covers dirs, owned dirs, test roots, and explicit test files');
 });
 
 test('source/test root defaults keep single-root enumeration identical', () => {
@@ -134,7 +134,7 @@ test('classifyFileToPackage maps a file under each package directory to its id',
   assert.equal(classifyFileToPackage('harness/model-providers/concurrency/test/provider-gate.test.ts'), 'model-provider-concurrency');
   assert.equal(classifyFileToPackage('harness/model-providers/pricing/test/pricing.test.ts'), 'model-provider-pricing');
   assert.equal(classifyFileToPackage('harness/model-providers/traffic-observation/test/provider-incident.test.ts'), 'model-provider-traffic-observation');
-  assert.equal(classifyFileToPackage('harness/model-providers/request-validation/test/projection.test.ts'), 'image-context-guard');
+  assert.equal(classifyFileToPackage('harness/model-providers/request-validation/test/model-input-kinds.test.ts'), 'model-provider-request-validation');
   assert.equal(classifyFileToPackage('harness/model-providers/retry-and-failover/subagent-provider-policy.ts'), 'agent-processes-coordinator');
   assert.equal(classifyFileToPackage('harness/agent-processes/coordinator/test/subagent-provider-policy.test.ts'), 'agent-processes-coordinator');
   assert.equal(classifyFileToPackage('harness/tools/package-integrations/web-access/index.ts'), 'web-access-guard');
@@ -162,7 +162,6 @@ test('classifyFileToPackage maps a file under each package directory to its id',
   assert.equal(classifyFileToPackage('tools/warm-bash/test/classifier.test.ts'), 'warm-bash');
   assert.equal(classifyFileToPackage('harness/tools/playwright/test/schema.test.ts'), 'playwright');
   assert.equal(classifyFileToPackage('tools/playwright/test/schema.test.ts'), 'playwright');
-  assert.equal(classifyFileToPackage('extensions/image-context-guard/test/projection.test.ts'), 'image-context-guard');
 });
 
 test('every migrated discovery adapter remains assigned to its tool tests', () => {

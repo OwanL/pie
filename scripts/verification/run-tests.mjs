@@ -465,10 +465,9 @@ const PACKAGE_TEST_METADATA = {
     ],
     thresholds: { lines: 80, branches: 60 },
   },
-  'image-context-guard': {
+  'model-provider-request-validation': {
     testGlobs: ['harness/model-providers/request-validation/test/**/*.test.ts'],
     coverageIncludes: [
-      'extensions/image-context-guard/index.ts',
       'harness/model-providers/request-validation/*.ts',
     ],
     thresholds: { lines: 80, branches: 60 },

@@ -74,24 +74,6 @@ function pricing(model: DiscoveredCopilotModel): Record<string, unknown> {
   };
 }
 
-function imageMaxForCatalog(
-  model: DiscoveredCopilotModel,
-  existing: SourceModel | undefined,
-): number | undefined {
-  // The discovered endpoint `input` is the source of truth for image
-  // capability. The per-request image maximum is pie-owned (the Copilot
-  // endpoint does not report one), so it is preserved from the existing entry
-  // and defaults to the conservative fail-safe of one for newly discovered
-  // image-capable models. Text-only models must not declare a maximum (their
-  // effective image budget is zero) — see
-  // extensions/image-context-guard/README.md.
-  if (!model.input.includes('image')) return undefined;
-  const preserved = existing?.maxImagesPerRequest;
-  return typeof preserved === 'number' && Number.isInteger(preserved) && preserved >= 1
-    ? preserved
-    : 1;
-}
-
 export function toCatalogModel(
   model: DiscoveredCopilotModel,
   existing?: SourceModel,
@@ -102,7 +84,6 @@ export function toCatalogModel(
   };
   const thinkingLevelMap = model.thinkingLevelMap ?? existing?.thinkingLevelMap;
   const reasoning = model.reasoning || existing?.reasoning === true;
-  const maxImagesPerRequest = imageMaxForCatalog(model, existing);
   return {
     id: model.id,
     name: `Copilot: ${model.name}`,
@@ -110,7 +91,6 @@ export function toCatalogModel(
     ...(Object.keys(compat).length > 0 ? { compat } : {}),
     ...(reasoning ? { reasoning: true } : {}),
     input: model.input,
-    ...(maxImagesPerRequest !== undefined ? { maxImagesPerRequest } : {}),
     contextWindow: model.contextWindow,
     maxTokens: model.maxTokens,
     ...(thinkingLevelMap && typeof thinkingLevelMap === 'object' ? { thinkingLevelMap } : {}),

@@ -356,9 +356,8 @@ export const PACKAGE_REGISTRY = [
     fastConcurrency: 2,
   },
   {
-    id: 'image-context-guard',
+    id: 'model-provider-request-validation',
     dir: 'harness/model-providers/request-validation',
-    ownedDirs: ['extensions/image-context-guard'],
     tsxConfig: 'harness/model-providers/request-validation/tsconfig.json',
     typecheck: { config: 'harness/model-providers/request-validation/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
     fastConcurrency: 1,

@@ -1,5 +1,5 @@
 {
-  "//": "Owner TypeScript project for provider request validation, including the stable image-context-guard SDK adapter. The application owner's pinned SDK graph supplies the SDK type aliases.",
+  "//": "Owner TypeScript project for provider request-validation utilities. The application owner's pinned SDK graph supplies the SDK type aliases.",
   "compilerOptions": {
     "module": "preserve",
     "moduleResolution": "bundler",
@@ -19,6 +19,6 @@
       "@mariozechner/pi-coding-agent": ["application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts"]
     }
   },
-  "include": ["../../../extensions/image-context-guard/index.ts", "./**/*.ts"],
+  "include": ["./**/*.ts"],
   "exclude": ["node_modules"]
 }

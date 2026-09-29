@@ -3,6 +3,7 @@
 - Resolve material scope or architecture ambiguity before implementation.
 - Give subagents bounded, verifiable tasks. Act on supported, in-scope review findings rather than expanding work to satisfy speculative suggestions. Keep task size for subagents low. Assess scope across delegated tasks, not just individually; reassess reported expansion before assigning more work.
 - Proactively identify independent subagent tasks and dispatch them together in the same response rather than serially. Give parallel workers non-overlapping edit ownership; serialize tasks that depend on each other's results or would conflict over shared files or resources.
+- Delegate image inspection and interpretation to image-capable subagents returning text-only findings; inspect images in the main session only at the user’s explicit request.
 - Change only what the requested outcome requires. Ask before materially expanding scope.
 - Prefer fast, meaningful tests and proportionate verification.
 - Keep temporary artifacts in the OS temp directory, outside source and documentation trees. Clean them up when noticed, remove obsolete untracked artifacts only when their ownership and purpose are clear.

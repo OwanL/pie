@@ -213,7 +213,7 @@
     "typecheck:agent-processes-sdk-integration": "tsc --noEmit -p ../../../harness/agent-processes/lib/sdk-integration/tsconfig.json",
     "typecheck:cold-browse-helper": "tsc --noEmit -p ../../../harness/agent-processes/cold-browse-helper/tsconfig.json",
     "typecheck:model-provider-catalog": "tsc --noEmit -p ../../../harness/model-providers/catalog/tsconfig.json",
-    "typecheck:image-context-guard": "tsc --noEmit -p ../../../harness/model-providers/request-validation/tsconfig.json",
+    "typecheck:model-provider-request-validation": "tsc --noEmit -p ../../../harness/model-providers/request-validation/tsconfig.json",
     "test": "node ../../../scripts/verification/run-tests.mjs --fast --package extension",
     "test:browser": "playwright test",
     "test:browser:configure-provider-gate": "playwright test provider-gate.pw.ts",

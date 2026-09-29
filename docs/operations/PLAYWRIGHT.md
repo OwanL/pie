@@ -10,7 +10,7 @@ The capability consists of:
 - one lazy Playwright sidecar per durable Pie session;
 - one dedicated browser process and primary isolated `BrowserContext` per Playwright tool session.
 
-It adds no host↔webview logic state. Ordinary mixed text/image tool-result rendering and the generic image-context guard handle results, so [`STATE_CONTRACT.md`](../contracts/STATE_CONTRACT.md) is unchanged.
+It adds no host↔webview logic state. Ordinary mixed text/image tool-result rendering handles results without Pie filtering images by count, so [`STATE_CONTRACT.md`](../contracts/STATE_CONTRACT.md) is unchanged.
 
 ## Interaction hierarchy
 

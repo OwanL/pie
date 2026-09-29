@@ -50,7 +50,7 @@ test('extension registers one sequential playwright tool and session-owned shutd
   assert.deepEqual(tool.parameters.properties.action.enum, ['open', 'observe', 'act', 'run_code', 'close']);
   assert.ok(typeof tool.promptSnippet === 'string' && tool.promptSnippet.length > 0);
   assert.ok(Array.isArray(tool.promptGuidelines) && tool.promptGuidelines.length >= 5, 'metadata must be sufficient for basic operation without the skill');
-  assert.ok(!handlers.has('context'), 'playwright relies on the generic image-context-guard for image projection');
+  assert.equal(handlers.has('context'), false, 'playwright registers no image-filtering or replacement context handler');
   assert.ok(handlers.has('session_shutdown'));
 });
 

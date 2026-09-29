@@ -24,6 +24,7 @@ import {
   type InitialContextEstimateWorkerReady,
 } from './initial-context-estimate-protocol.js';
 import { createPieSystemPromptBuilder } from '../../agent-instructions/prompt-assembly/pie-harness-prompt.js';
+import { centralAppendSystemPromptOverride } from '../../agent-instructions/prompt-assembly/append-system-prompt.js';
 import { createBackendTools } from '../coordinator/backend-tools.js';
 import {
   buildSessionSystemPrompts,
@@ -149,6 +150,10 @@ async function collectInitialContextInventoryInsideBoundary(
       agentDir,
       authStorage,
       resourceLoaderOptions: {
+        // Mirror the main-session loaders (runtime-factory): attach Pie's
+        // centralized appended prompt so inventories estimate the same
+        // context real sessions build.
+        appendSystemPromptOverride: centralAppendSystemPromptOverride(agentDir),
         agentsFilesOverride: (base: { agentsFiles: Array<{ path: string; content: string }> }) => ({
           agentsFiles: prepareContextFiles(base.agentsFiles).map((contextFile) => ({
             path: contextFile.path,

@@ -330,7 +330,7 @@ test('catalog mapper preserves review policy and capability defaults', () => {
   );
 });
 
-test('catalog mapper preserves an existing maxImagesPerRequest for image-capable models', () => {
+test('catalog mapper preserves discovered input capabilities without request-size limits', () => {
   const discovered = toDiscoveredCopilotModel(gpt56)!;
   const existing = {
     id: discovered.id,
@@ -339,29 +339,30 @@ test('catalog mapper preserves an existing maxImagesPerRequest for image-capable
     disabledReason: null,
     maxImagesPerRequest: 7,
   };
-  const preserved = toCatalogModel(discovered, existing);
-  assert.equal(preserved.input, discovered.input);
-  assert.equal(preserved.maxImagesPerRequest, 7, 'an existing explicit maximum is preserved across reconciliation');
+  const entry = toCatalogModel(discovered, existing);
+  assert.deepEqual(entry.input, ['text', 'image']);
+  assert.equal('maxImagesPerRequest' in entry, false, 'legacy request-size limits are not retained');
 });
 
-test('catalog mapper defaults maxImagesPerRequest to one for newly discovered image-capable models', () => {
+test('catalog mapper does not add request-size limits to newly discovered image models', () => {
   const discovered = toDiscoveredCopilotModel(gpt56)!;
   const entry = toCatalogModel(discovered);
-  assert.equal(entry.maxImagesPerRequest, 1, 'new image-capable models get the conservative fail-safe of one');
   assert.deepEqual(entry.input, ['text', 'image']);
+  assert.equal('maxImagesPerRequest' in entry, false);
 });
 
-test('catalog mapper omits maxImagesPerRequest for text-only discovered models', () => {
+test('catalog mapper preserves text-only input capabilities without request-size limits', () => {
   const textOnly = toDiscoveredCopilotModel({
     ...gpt56,
     capabilities: { ...gpt56.capabilities, supports: { ...gpt56.capabilities.supports, vision: false } },
   })!;
   assert.deepEqual(textOnly.input, ['text']);
   const entry = toCatalogModel(textOnly, { id: textOnly.id, maxImagesPerRequest: 4 });
-  assert.equal(entry.maxImagesPerRequest, undefined, 'a text-only model must not declare a positive image maximum');
+  assert.deepEqual(entry.input, ['text']);
+  assert.equal('maxImagesPerRequest' in entry, false);
 });
 
-test('reconciliation preserves maxImagesPerRequest and stays idempotent', () => {
+test('reconciliation preserves discovered input capabilities and stays idempotent', () => {
   const terra = toDiscoveredCopilotModel(gpt56)!;
   const input = `profileOrder:
   - gpt-5.6-terra
@@ -384,15 +385,17 @@ providers:
 `;
   const result = reconcileCatalogText(input, [terra]);
   const source = parse(result.text) as {
-    providers: Record<string, { models: Array<{ id: string; maxImagesPerRequest?: number }> }>;
+    providers: Record<string, { models: Array<{ id: string; input: string[] }> }>;
   };
-  assert.equal(source.providers['github-copilot'].models[0].maxImagesPerRequest, 6, 'reconciliation preserves the explicit maximum');
+  const reconciled = source.providers['github-copilot'].models[0];
+  assert.deepEqual(reconciled.input, ['text', 'image']);
+  assert.equal('maxImagesPerRequest' in reconciled, false, 'reconciliation drops the retired limit field');
   const idempotent = reconcileCatalogText(result.text, [terra]);
-  assert.equal(idempotent.changed, false, 'a catalog with a preserved maximum is idempotent');
+  assert.equal(idempotent.changed, false, 'a reconciled catalog is idempotent');
   assert.equal(idempotent.text, result.text);
 });
 
-test('reconciliation seeds the conservative default for a newly discovered image-capable model', () => {
+test('reconciliation does not add a request-size limit to newly discovered image models', () => {
   const terra = toDiscoveredCopilotModel(gpt56)!;
   const input = `profileOrder: []
 providers:
@@ -402,8 +405,10 @@ providers:
 `;
   const result = reconcileCatalogText(input, [terra]);
   const source = parse(result.text) as {
-    providers: Record<string, { models: Array<{ id: string; maxImagesPerRequest?: number }> }> };
-  assert.equal(source.providers['github-copilot'].models[0].maxImagesPerRequest, 1);
+    providers: Record<string, { models: Array<{ id: string; input: string[] }> }> };
+  const discovered = source.providers['github-copilot'].models[0];
+  assert.deepEqual(discovered.input, ['text', 'image']);
+  assert.equal('maxImagesPerRequest' in discovered, false);
 });
 
 test('reconciles Copilot without deleting same-id models owned by other providers', () => {

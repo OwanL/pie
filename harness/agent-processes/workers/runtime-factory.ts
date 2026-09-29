@@ -4,6 +4,7 @@
  */
 
 import { prepareContextFiles } from '../../agent-instructions/prompt-assembly/context-files';
+import { centralAppendSystemPromptOverride } from '../../agent-instructions/prompt-assembly/append-system-prompt';
 import { backendInfo } from '../../../lib/structured-logging/backend-log';
 import { recordBackendLivePipelineTrace } from '../coordinator/live-pipeline-trace-runtime.js';
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
@@ -193,6 +194,15 @@ export function createRuntimeFactory(
       authStorage,
       editorVersion: resolveEditorVersion(),
       resourceLoaderOptions: {
+        // Pie's appended system prompt is authored centrally under the agent
+        // instructions tree instead of the agentDir root (see
+        // `append-system-prompt.ts`), so Pi's native discovery no longer finds
+        // it anywhere — deliberately including subagent loaders, which build
+        // their own loader without this override. Attach it here so main
+        // sessions keep the maintainer's append while a trusted project's own
+        // `.pi/APPEND_SYSTEM.md` still wins, matching the previous
+        // single-file discovery semantics exactly.
+        appendSystemPromptOverride: centralAppendSystemPromptOverride(agentDir),
         // Real resource-loader boundary: the SDK invokes this callback during
         // `resourceLoader.reload()`. It observes only the agents-files override
         // step; extension loading has no callback boundary and is deliberately
