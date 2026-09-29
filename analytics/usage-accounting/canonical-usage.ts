@@ -24,7 +24,7 @@ import {
  * P5 read-model adapters over the canonical provider-settlement projection.
  *
  * Everything here is a pure projection of durable canonical settlement rows:
- * engine-neutral metrics (shared/analytics/metrics) own the sums, coverage,
+ * engine-neutral metrics (`./metrics` and `../projections/metrics`) own the sums, coverage,
  * calendar buckets, and scope math, and the public protocol owns the
  * session-usage shape. These adapters never read the legacy JSONL ledger,
  * raw run logs, or detail payloads, and never synthesize aggregates the

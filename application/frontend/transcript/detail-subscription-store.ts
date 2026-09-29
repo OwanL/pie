@@ -73,8 +73,8 @@ export function resetDetailStoreBudgets(): void {
 interface DetailStoreContext {
   hostInstanceId: string;
   viewGeneration: number;
-  /** Trusted renderer identity learned from the latest state envelope
-   *  (browser server plan §5.4): the bound route of every subscription must
+  /** Trusted renderer identity learned from the latest state envelope.
+   *  The bound route of every subscription must
    *  carry THIS renderer, so a browser renderer's stream can never settle or
    *  reach another renderer. */
   rendererId: string;

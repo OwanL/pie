@@ -116,7 +116,7 @@ export function handleContinueResult(state: ArchState, event: Extract<Event, { k
           draft.sessions.runningSessionPaths = removeFromArray(draft.sessions.runningSessionPaths, event.sessionPath);
         }
         if (updated.terminal?.outcome !== 'cancelled') {
-          draft.settings.notice = 'Could not continue the interrupted response.';
+          draft.settings.notice = 'Could not continue agent work.';
           draft.settings.noticeKind = 'operational-error';
           draft.settings.noticeRaw = event.error ?? 'message.continue failed';
           draft.settings.noticeSessionPath = event.sessionPath;

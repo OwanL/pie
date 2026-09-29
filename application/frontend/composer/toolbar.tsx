@@ -192,6 +192,16 @@ export const ComposerToolbar = memo(function ComposerToolbar({
   const selectedModelLabel = selectedProviderDisabled
     ? `${selectedModelBaseLabel} (disabled)`
     : selectedModelBaseLabel;
+  const selectedModelIdentity = selectedModelEntry
+    ? formatModelSpec(selectedModelEntry.model)
+    : selectedProvider
+      ? formatModelSpec({ provider: selectedProvider, id: selectedModel })
+      : selectedModel || selectedModelBaseLabel;
+  const selectedModelTooltip = [
+    selectedModelIdentity,
+    selectedModelBaseLabel && selectedModelBaseLabel !== selectedModelIdentity ? selectedModelBaseLabel : null,
+    selectedProviderDisabled ? 'Selected provider is disabled — select another model' : null,
+  ].filter((line): line is string => !!line).join('\n');
   const selectedThinkingLevels = getModelThinkingLevels(selectedModelEntry?.model);
   const selectedThinkingOptions = THINKING_LEVEL_OPTIONS.filter((option) =>
     selectedThinkingLevels.includes(option.value));
@@ -206,7 +216,7 @@ export const ComposerToolbar = memo(function ComposerToolbar({
           label={selectedModelLabel}
           value={selectedProvider ? formatModelSpec({ provider: selectedProvider, id: selectedModel }) : selectedModel}
           ariaLabel="Model"
-          title={selectedProviderDisabled ? 'Selected provider is disabled — select another model' : 'Select model'}
+          title={selectedModelTooltip}
           disabled={!commandsAvailable}
           entries={modelEntries}
           onChange={(spec) => {

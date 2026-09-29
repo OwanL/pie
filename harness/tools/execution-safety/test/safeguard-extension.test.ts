@@ -533,23 +533,22 @@ describe('REGRESSION: ordinary config writes outside cwd do not prompt', () => {
 
 // ─── REGRESSION: existing handler behaviour ──────────────────────────────────
 
-describe('default bash timeout safeguard', () => {
-	test('applies the default timeout when the agent omits it', async () => {
+// ─── REGRESSION: bash timeout input is never rewritten ──────────────────────
+// Previously the safeguard stamped a 600 default onto omitted/nonpositive
+// timeouts, which reached the warm-bash executor as an *explicit* 600 and
+// overrode the warm-bash configured default (PIE_BASH_DEFAULT_TIMEOUT, see
+// harness/tools/warm-bash/timeout.ts). Omitted/invalid resolution belongs to
+// the executor; the safeguard must leave timing fields untouched.
+
+describe('bash timeout input is never rewritten', () => {
+	test('omitted timeout is not added to the input (executor applies its default)', async () => {
 		const mod = await loadSafeguard();
 		const handler = registerToolCallHandler(mod);
 		const { ctx } = makeCtx({ hasUI: false });
 		const input: { command: string; timeout?: number } = { command: 'echo hello' };
-		await handler({ toolName: 'bash', input }, ctx);
-		assert.equal(input.timeout, 600, 'default timeout should be applied when omitted');
-	});
-
-	test('applies the default timeout when input has no timeout field at all', async () => {
-		const mod = await loadSafeguard();
-		const handler = registerToolCallHandler(mod);
-		const { ctx } = makeCtx({ hasUI: false });
-		const input: { command: string; timeout?: number } = { command: 'ls -la' };
-		await handler({ toolName: 'bash', input }, ctx);
-		assert.equal(input.timeout, 600);
+		const result = await handler({ toolName: 'bash', input }, ctx);
+		assert.equal(result, undefined, 'benign command is allowed');
+		assert.equal('timeout' in input, false, 'omitted timeout must stay omitted');
 	});
 
 	test('preserves an explicit per-call timeout override', async () => {
@@ -570,33 +569,35 @@ describe('default bash timeout safeguard', () => {
 		assert.equal(input.timeout, 5, 'small explicit timeout must be preserved');
 	});
 
-	test('applies the default for a non-positive timeout (treated as unset)', async () => {
+	test('leaves a non-positive timeout untouched (executor resolves the default)', async () => {
 		const mod = await loadSafeguard();
 		const handler = registerToolCallHandler(mod);
 		const { ctx } = makeCtx({ hasUI: false });
-		const input = { command: 'echo x', timeout: 0 };
-		await handler({ toolName: 'bash', input }, ctx);
-		assert.equal(input.timeout, 600, 'non-positive timeout should fall back to default');
+		const zero = { command: 'echo x', timeout: 0 };
+		await handler({ toolName: 'bash', input: zero }, ctx);
+		assert.equal(zero.timeout, 0, 'non-positive timeout must not be rewritten to a stamped default');
+		const negative = { command: 'echo x', timeout: -5 };
+		await handler({ toolName: 'bash', input: negative }, ctx);
+		assert.equal(negative.timeout, -5);
 	});
 
-	test('applies the default before a hard-blocked command is denied', async () => {
+	test('leaves a non-finite timeout untouched (executor resolves the default)', async () => {
+		const mod = await loadSafeguard();
+		const handler = registerToolCallHandler(mod);
+		const { ctx } = makeCtx({ hasUI: false });
+		const input = { command: 'echo x', timeout: Number.NaN };
+		await handler({ toolName: 'bash', input }, ctx);
+		assert.ok(Number.isNaN(input.timeout), 'non-finite timeout must not be rewritten');
+	});
+
+	test('hard-blocked commands are still denied and no timeout is added', async () => {
 		const mod = await loadSafeguard();
 		const handler = registerToolCallHandler(mod);
 		const { ctx } = makeCtx({ hasUI: false });
 		const input: { command: string; timeout?: number } = { command: 'rm -rf /' };
 		const result = await handler({ toolName: 'bash', input }, ctx) as any;
 		assert.equal(result?.block, true, 'rm -rf / must still be blocked');
-		assert.equal(input.timeout, 600, 'timeout default is applied even when blocked');
-	});
-
-	test('applies the default to a command that is ultimately allowed through', async () => {
-		const mod = await loadSafeguard();
-		const handler = registerToolCallHandler(mod);
-		const { ctx } = makeCtx({ hasUI: false });
-		const input: { command: string; timeout?: number } = { command: 'rg TODO src/' };
-		const result = await handler({ toolName: 'bash', input }, ctx);
-		assert.equal(result, undefined, 'benign command is allowed');
-		assert.equal(input.timeout, 600, 'allowed command still gets the default timeout');
+		assert.equal('timeout' in input, false, 'block path must not add a timeout');
 	});
 
 	test('does not touch non-bash tools (no timeout field added)', async () => {

@@ -1,5 +1,5 @@
 /**
- * Per-renderer delivery owner (browser server plan §4.1).
+ * Per-renderer delivery owner.
  *
  * One `RendererSession` owns everything a single renderer surface needs to
  * stay synchronized with the shared host state: its own `SidebarSyncState`,
@@ -492,9 +492,8 @@ export class RendererSession implements RendererRegistration, DisposableLike {
     }
   }
 
-  /** Focus belief transition (`rendererFocusChanged`). Recorded for the M3
-   *  attention-arbitration milestone; clearing on disconnect is implicit
-   *  (the session is disposed). */
+  /** Focus belief transition (`rendererFocusChanged`); clearing on disconnect
+   *  is implicit because the session is disposed. */
   setFocused(focused: boolean): void {
     if (this.disposed || this.focused === focused) return;
     this.focused = focused;

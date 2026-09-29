@@ -506,8 +506,8 @@ export async function startStandalone(options: StandaloneStartOptions): Promise<
     // The shared runtime exposes the host-neutral BrowserServerService seam;
     // this composition root owns the concrete adapter its platform constructed
     // above, so it narrows back to `BrowserServer` for its own shutdown/facade
-    // wiring (repository-organization plan §3.2: concrete hosts construct the
-    // service and may name the implementation).
+    // wiring: concrete hosts construct the
+    // service and may name the implementation.
     browserServer = runtime.browserServer as BrowserServer;
 
     await runtime.start();

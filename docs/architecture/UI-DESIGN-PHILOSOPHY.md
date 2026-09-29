@@ -1,62 +1,12 @@
 # Pie UI design philosophy
 
-## What it is
+The VS Code sidebar is Pie's primary design surface. The browser uses the same UI.
 
-Pie is a VS Code sidebar extension that surfaces a running `pi` agent process as a chat UI. The same UI can additionally be opened in a local browser via the loopback browser server (`pie: Open in Browser`), which registers as an extra renderer of the shared host state — the sidebar remains the primary and design-defining surface. Its closest analogue is GitHub Copilot Chat, but it differs in two key ways:
+- **Transparent:** show tool calls with expandable inputs and results, not paraphrases. Keep the active model and reasoning level visible.
+- **Responsive:** avoid unnecessary rendering and animations that delay interaction. Preserve the user's scroll position; follow new output when already at the bottom.
+- **Low noise:** show what matters for the current task. Prefer unobtrusive status indicators; reserve banners for genuine errors. Avoid confirmation dialogs for low-risk actions when undo is practical.
+- **Clear controls:** distinguish primary actions from secondary controls and passive content. Give ambiguous or icon-only controls tooltips, but never hide essential information behind hover. Use plain, direct wording.
+- **Keyboard-friendly:** support natural Tab navigation, Enter to send, and Shift+Enter for a newline. Make focus and interactive states visible.
+- **Native to VS Code:** use its theme colours, typography, and interaction conventions, with compact, consistent spacing. Support light and dark themes in both renderers.
 
-- **More minimal** — every element earns its place; decoration is removed if it adds no information
-- **More transparent** — the user can see exactly what the agent is doing (tool calls, inputs, results) without having to ask
-
-## Core UI goals
-
-### Snappy and fast
-- No full-page re-renders on state updates. Each region (tab bar, messages, model picker, composer) updates independently.
-- Scroll position is preserved unless the user is already at the bottom.
-- Event listeners are bound once at init, not re-bound on every render.
-
-### Minimal cognitive load
-- The default view shows only what is needed for the current task. Controls that aren't relevant to the current state are hidden, not just disabled.
-- Status is communicated through small, unobtrusive indicators (dot on tab, spinner in message) rather than modal dialogs or banners.
-- Banners are reserved for genuine errors, not informational noise.
-
-### Intuitive controls
-- **Tooltips** on every icon-only or ambiguous control (`title` attribute minimum; richer tooltips where appropriate).
-- **Hover effects** to signal interactivity — all clickable elements must have a visible hover state.
-- **Keyboard first** — Enter to send, Shift+Enter for newlines, Tab navigation should work naturally throughout.
-- Controls mirror VS Code conventions so the UI feels native, not bolted on.
-
-### Clean visual hierarchy
-- Three tiers of visual weight: primary action (Send), secondary controls (model picker, tabs), passive content (messages).
-- Typography inherits VS Code's font stack and sizing (`--vscode-font-*`). No custom font sizes except where a clear hierarchy demands it.
-- Spacing is consistent and tight — this is a sidebar, not a full window. Padding/margin in multiples of 4px.
-
-### Transparency
-- Tool calls are always visible in the message stream, collapsed by default but expandable. Input and result are shown verbatim — no paraphrasing.
-- The active model and reasoning level are always visible in the composer footer.
-
-## What to avoid
-
-- **Animations that delay perception** — transitions are fine for smoothness, never to fill time.
-- **Confirmation dialogs for low-risk actions** — prefer undo or soft-delete patterns.
-- **Information hidden behind hover** that the user needs to act correctly — hover should reveal detail, not primary affordance.
-- **Re-rendering regions that haven't changed** — treat the DOM as a cache.
-- **Placeholder copy that tries to be clever** — be literal and direct.
-
-## Relationship to VS Code conventions
-
-The UI lives inside a VS Code sidebar panel and must feel like it belongs there:
-- Use `--vscode-*` CSS variables for all colours. Never hardcode colours.
-- Use `color-scheme: light dark` so the browser's native controls (select, scrollbar) also theme correctly.
-- Match VS Code's interaction patterns: hover states, focus rings, disabled opacity.
-
-## Component map
-
-| Region | Update trigger | Notes |
-|---|---|---|
-| Banner | `notice` state change | Errors only; hidden when null |
-| Tab bar | Session list / active session change | Delegated click listener |
-| Messages | Transcript change, busy state | Scroll-pinned to bottom unless user scrolled up |
-| Model picker | `modelSettings` / `availableModels` change | In-place `<select>` value update, no DOM rebuild |
-| Composer | `busy` / `activeSession` change | Textarea never reset except on explicit send |
-
-For the local build/watch/reload loop, see [GUI development](../operations/GUI-DEVELOPMENT.md).
+For the build/watch/reload workflow, see [GUI development](../operations/GUI-DEVELOPMENT.md).

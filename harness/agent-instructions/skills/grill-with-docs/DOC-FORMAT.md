@@ -4,9 +4,9 @@
 
 This project uses specific docs for different concerns. Update the right one:
 
-### AGENTS.md — conventions and instructions
+### develop-pie — conventions and instructions
 
-Add terminology, conventions, and repo-specific instructions here. Keep it concise — this is the "how we work here" file, not a spec.
+Add Pie-specific terminology, conventions, and contributor instructions to the [develop-pie skill](../develop-pie/SKILL.md), as directed by the root `AGENTS.md`. Keep it concise — this is the "how we work here" file, not a spec.
 
 When adding a term, use this pattern:
 
@@ -30,7 +30,7 @@ Add or update architectural concepts, module boundaries, and design patterns her
 When updating:
 
 - Be precise about relationships and data flow
-- Use the project's established terminology (check AGENTS.md)
+- Use the project's established terminology (check the develop-pie skill)
 - Update the relevant section — don't create a parallel description
 - Keep diagrams and flow descriptions consistent with the code
 
@@ -46,6 +46,6 @@ When updating:
 
 ### New docs in docs/
 
-If a decision doesn't fit into an existing doc, use `docs/INDEX.md` to choose the right category directory before creating a new file. Name it descriptively (e.g., `MODEL-SCORING.md`, `PRUNING-DESIGN.md`). Existing examples: `docs/contracts/STATE_CONTRACT.md` and `docs/architecture/ARCHITECTURE.md`.
+If a decision doesn't fit into an existing doc, create a file in an appropriate existing documentation category directory. Name it descriptively (e.g., `MODEL-SCORING.md`, `PRUNING-DESIGN.md`).
 
 Follow the existing naming convention — either UPPER-CASE-With-Dashes.md or lower-case-with-dashes.md, matching the prevailing style in the directory.

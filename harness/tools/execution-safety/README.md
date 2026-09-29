@@ -14,7 +14,7 @@ The policy intentionally favors precision:
 
 ## Behavior
 
-- **Default bash timeout** — applies a 600s default to `bash` calls without a positive finite timeout. Explicit timeouts are preserved.
+- **Bash timeout passthrough** — bash timing fields are never rewritten; omitted or invalid timeouts are resolved by the executor (warm-bash applies the `PIE_BASH_DEFAULT_TIMEOUT` default, nonpositive values use the default, and explicit timeouts are capped at the maximum). Explicit valid timeouts reach the executor unchanged.
 - **Hard blocks** — disk/volume destruction, root recursive deletion, boot/recovery tampering, reverse shells, remote-content-to-shell pipelines, fork bombs, and writes to core system paths.
 - **Prompts** — privilege escalation, recursive force-deletes outside the cwd, destructive service/firewall/account changes, system package removal, and writes to credential-bearing files outside the cwd. Concrete children of `/tmp`, `/var/tmp`, or the platform temp directory are treated as routine cleanup; platform temp aliases such as Windows short and long paths are recognized. Deleting a temp root or using a broad wildcard still prompts.
 - **Autonomous mode** — while `PIE_AUTONOMOUS_MODE=1` (see `harness/tool-and-skill-selection/settings/autonomous-mode.ts`), confirmation-required operations are immediately refused with a blocked tool result instead of opening the confirmation dialog, since nobody is present to answer. Allowances and hard blocks are unchanged; clearing the flag restores normal prompts.
@@ -22,13 +22,17 @@ The policy intentionally favors precision:
 
 ## API
 
+This directory owns shared shell and path helpers. The policy and public API
+are implemented by the [safeguard extension](../../../extensions/safeguard/index.ts).
+From this directory:
+
 ```typescript
-import { isSafe, DEFAULT_BASH_TIMEOUT_SECONDS } from './index.js';
+import { isSafe } from '../../../extensions/safeguard/index.ts';
 
 isSafe('rm -rf ./build', { cwd: '/repo' }); // true
 isSafe('rg "rm -rf /" docs/', { cwd: '/repo' }); // true: quoted search data
 isSafe('rm -rf /', { cwd: '/repo' }); // false
 isSafe('sudo apt update', { cwd: '/repo' }); // false: requires prompt
-
-DEFAULT_BASH_TIMEOUT_SECONDS; // 600
 ```
+
+Bash timeout defaults do not belong to the safeguard; see `extensions/warm-bash` (whose implementation lives in `harness/tools/warm-bash/timeout.ts`) for executor-owned resolution.

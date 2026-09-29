@@ -12,14 +12,10 @@ may already have started); it is never silently redirected to another session.
 This feature does not promise background execution or persistence across a host
 restart beyond what the current sidecar/registry implementation can recover.
 
-Runtime code:
-
-- tool: `harness/tools/deferred-triggers/` (backend process; `extensions/deferred-triggers/index.ts` is the discovery shim)
-- host registry + sidecar store: `application/backend/deferred-triggers/`
-- host path adapter: `application/backend/deferred-triggers/sidecar-paths.ts`
-- worker sidecar wire contract: `harness/tools/deferred-triggers/sidecar-contract.ts`
-- protocol types: `application/lib/protocol/deferred-triggers.ts`
-- webview menu: `application/frontend/analytics/aggregate-stats-strip/deferred-triggers-menu.tsx`
+The [tool](../../harness/tools/deferred-triggers/index.ts) runs in the agent
+backend; the [host registry](../../application/backend/deferred-triggers/)
+owns delivery and sidecar storage. Shared protocol types define the boundary,
+and the webview's status-strip menu displays host-owned trigger state.
 
 ## 1. Public API
 
@@ -142,27 +138,18 @@ it during a deferred-trigger wake but may prune it on an ordinary turn.
 
 ## 6. Verification
 
-Focused coverage includes:
-
-- `tools/deferred-triggers/test/tool.test.ts` — required message,
-  non-aborting registration, default/explicit targets, command safeguard, and
-  creator-scoped list/cancel.
-- `tools/deferred-triggers/test/store.test.ts` — append/replay,
-  cancellation, legacy note records, and OR-trigger state.
-- `application/backend/test/deferred-triggers/deferred-triggers-registry.test.ts` —
-  target routing, real-input consumption, timers, retries, self-wake guard,
-  and at-most-once delivery.
-- `application/backend/test/deferred-triggers/deferred-triggers-store.test.ts` —
-  replay, claim artifacts, owner checks, and cancellation ownership.
-- `harness/session-storage/transcripts/test/transcript-deferred-trigger.test.ts` —
-  wake-prefix presentation after transcript reload.
-
-Run the focused tests with:
+Focused coverage spans the tool contract (required message, non-aborting
+registration, default/explicit targets, command safeguard, creator-scoped
+list/cancel), sidecar replay (append/replay, cancellation, legacy note records),
+host delivery (OR-trigger state, target routing, real-input consumption,
+timers, retries, self-wake guard, at-most-once delivery, claim artifacts, owner
+checks, cancellation ownership), and wake-prefix presentation after transcript
+reload. Run the focused tests with:
 
 ```bash
 npm run test:file -- \
-  tools/deferred-triggers/test/store.test.ts \
-  tools/deferred-triggers/test/tool.test.ts \
+  harness/tools/deferred-triggers/test/store.test.ts \
+  harness/tools/deferred-triggers/test/tool.test.ts \
   application/backend/test/deferred-triggers/deferred-triggers-store.test.ts \
   application/backend/test/deferred-triggers/deferred-triggers-registry.test.ts \
   harness/session-storage/transcripts/test/transcript-deferred-trigger.test.ts

@@ -15,25 +15,9 @@ Route to a specialized skill when the request matches one; this skill remains th
 
 ## Repository map
 
-| Path | Purpose |
-|---|---|
-| `application/` | Application backend and CQRS state, passive Preact frontend, browser-safe protocol/validation, and host adapters |
-| `application/hosts/vscode/` | VS Code distribution package, toolchain, runtime assets, and package-owned configuration |
-| `harness/` | Pie-owned tools, agent processes, model providers, session storage, agent instructions, and tool/skill selection |
-| `harness/tools/` | Explicit Pie-owned tool catalog, implementations, and package integrations; see [`README.md`](../../../tools/README.md). Backend composition lives in [`backend-tools.ts`](../../../agent-processes/coordinator/backend-tools.ts). |
-| `extensions/` | Stable Pi discovery adapters and middleware; tool adapters delegate to `harness/tools/`, while `computer-use` and `playwright` dependency owners remain here |
-| `harness/agent-instructions/agents/` and `harness/agent-instructions/skills/` | Specialized agent definitions and on-demand workflows, including this one |
-| `analytics/` | Runtime analytics owners and the retained local DuckDB query workspace at `analytics/analysis/` |
-| `lib/` | Cross-owner low-level data-root, validation, logging, and temporary-file helpers |
-| `test/integration/` | Repository-root integration gates spanning multiple owners |
-| `models.yaml` | Source of truth for providers, models, pricing, eligibility, concurrency, retry policy, and seed selections |
-| `docs/` | Categorized architecture, contracts, plans, operations, and research; start at [`docs/INDEX.md`](../../../../docs/INDEX.md) |
-| `scripts/` | Repository build, test, model-sync, and install orchestration |
-| `settings.defaults.json` | Tracked portable defaults; model-owned fields are generated from `models.yaml` |
-| `settings.json` | Tracked, committed Pi runtime settings; model-owned fields are generated from `models.yaml`, chat and pruning selections are user-owned |
-| `APPEND_SYSTEM.md` | Personal additions to Pi's system prompt |
+For the repository overview, see the [README](../../../../README.md#whats-in-this-repo); architectural ownership and dependency boundaries are described in [Architecture](../../../../docs/architecture/ARCHITECTURE.md#ownership-and-dependencies). Computer-use and Playwright dependencies remain owned by `extensions/` (see the [computer-use](../../../../docs/operations/COMPUTER-USE.md) and [Playwright](../../../../docs/operations/PLAYWRIGHT.md) guides).
 
-For setup, storage, and repository-wide workflows, see [`README.md`](../../../../README.md). Find task-relevant design documents through [`docs/INDEX.md`](../../../../docs/INDEX.md) rather than scanning `docs/`.
+For setup, storage, and repository-wide workflows, see [`README.md`](../../../../README.md). Use scoped search for task-relevant documents. For documentation changes, follow the [documentation policy](../../../../docs/DOCUMENTATION-POLICY.md).
 
 ## Common practices
 
@@ -109,7 +93,6 @@ Choose focused tests while iterating, then run checks proportionate to the chang
 - [`docs/architecture/ARCHITECTURE.md`](../../../../docs/architecture/ARCHITECTURE.md) — primary system architecture, data flow, extension points, and invariants
 - [`docs/contracts/STATE_CONTRACT.md`](../../../../docs/contracts/STATE_CONTRACT.md) — authoritative host↔webview state contract
 - [`docs/contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md`](../../../../docs/contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md) — analytics authority, data root, privacy, and the gated storage cutoff
-- [`docs/architecture/ARCH-OVERVIEW.md`](../../../../docs/architecture/ARCH-OVERVIEW.md) — concise spine-file map and glossary
 - [UI design philosophy](../../../../docs/architecture/UI-DESIGN-PHILOSOPHY.md) and [GUI development](../../../../docs/operations/GUI-DEVELOPMENT.md)
 
 ### Pi runtime documentation (locked local version)

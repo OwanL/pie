@@ -1,5 +1,5 @@
 /**
- * Browser server integration tests (browser server plan §6/§7): loopback
+ * Browser server integration tests: loopback
  * bind, HTTP surface, upgrade validation, rendererHello handshake, snapshot
  * delivery, fail-closed ingress, client cap, lifecycle events, and port
  * release. Uses real loopback sockets on ephemeral ports with a deterministic

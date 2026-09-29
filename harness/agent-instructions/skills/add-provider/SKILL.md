@@ -110,11 +110,10 @@ Run the focused model-config test through the root wrapper (never invoke `npx ts
 npm run test:file -- scripts/model-config/test/model-config-sync.test.ts
 ```
 
-If `extension/src/` was changed for provider-specific runtime behavior, also run the required extension build:
+For runtime-source changes under `application/`, `analytics/`, `harness/`, or `lib/`, follow the [current runtime build requirement](../develop-pie/SKILL.md#common-practices): from the repository root, run:
 
 ```bash
-cd application/hosts/vscode
-npm run build
+npm run extension:build
 ```
 
 Verify:
@@ -137,4 +136,4 @@ Verify:
 - [ ] Image-capable models declare `maxImagesPerRequest`, kept at the policy maximum 1 unless provider documentation or measured evidence justifies more
 - [ ] User-authored `overrideOnly` entries land in `modelOverrides` (not `models[]`); full discovered Copilot models remain in `models[]`
 - [ ] `sync-models --check` passes
-- [ ] Focused tests pass, and `extension/` was rebuilt if its source changed
+- [ ] Focused tests pass, and `npm run extension:build` passes when runtime source changed

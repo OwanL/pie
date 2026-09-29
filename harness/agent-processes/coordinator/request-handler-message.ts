@@ -563,7 +563,7 @@ function executeMessageContinue(
   if (!buildSessionCapabilities(context).canContinue) {
     throw new BackendError(
       'CONTINUATION_NOT_AVAILABLE',
-      'The session does not end at an interrupted continuation point.',
+      'The session does not end at a supported continuation point.',
     );
   }
 
@@ -639,7 +639,7 @@ function executeMessageContinue(
         certainty: 'definitive',
         phase: 'preflight',
         code: 'MESSAGE_CONTINUE_FAILED',
-        message: 'Could not continue the interrupted response.',
+        message: 'Could not continue agent work.',
         detail: reason ?? 'Continuation failed before the assistant row was created.',
         recovery: { showLogs: true },
       }));

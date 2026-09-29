@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { copyFile, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -30,6 +31,22 @@ async function loadSyncModule(): Promise<SyncModule> {
   const script = path.join(repoRoot, 'scripts', 'model-config', 'sync-models.mjs');
   return (await import(pathToFileURL(script).href)) as SyncModule;
 }
+
+test('model discovery invokes the current model-config generator path', async () => {
+  // The reconciled catalog is regenerated in-process by the model-config
+  // generator relative to the agent directory (the checkout). index.ts cannot
+  // be imported in this test environment (its pi SDK value import does not
+  // resolve without the package tsx overlay), so the invoked path is pinned
+  // at the source contract level.
+  const raw = await readFile(new URL('../index.ts', import.meta.url), 'utf8');
+  assert.match(raw, /'scripts', 'model-config', 'sync-models\.mjs'/);
+  assert.doesNotMatch(raw, /'scripts', 'sync-models\.mjs'/, 'the retired generator location must not be invoked');
+  assert.equal(
+    existsSync(path.join(repoRoot, 'scripts', 'model-config', 'sync-models.mjs')),
+    true,
+    'the generator discovery invokes must exist relative to the agent directory',
+  );
+});
 
 const gpt56 = {
   id: 'gpt-5.6-terra',

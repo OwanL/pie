@@ -1,5 +1,5 @@
 /**
- * Local browser-server settings (browser server plan §6.2). The effective
+ * Local browser-server settings. The effective
  * configuration source is supplied by the host composition layer so this
  * reader remains usable outside VS Code.
  */

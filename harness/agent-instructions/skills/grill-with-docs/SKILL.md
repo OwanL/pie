@@ -53,10 +53,4 @@ When working in Pie, use its format guidelines in [DOC-FORMAT.md](./DOC-FORMAT.m
 
 ### Offer decision records sparingly
 
-Only offer to record a decision when all three are true:
-
-1. **Hard to reverse** — the cost of changing your mind later is meaningful
-2. **Surprising without context** — a future reader will wonder "why did they do it this way?"
-3. **The result of a real trade-off** — there were genuine alternatives and you picked one for specific reasons
-
-If any of the three is missing, skip it. When working in Pie, use its format in [DECISION-FORMAT.md](./DECISION-FORMAT.md). When working in another repository, follow that repository's decision-record conventions instead; do not impose Pie's ADR/docs layout.
+Only offer to record a decision when it meets the eligibility criteria in [DECISION-FORMAT.md](./DECISION-FORMAT.md). When working in another repository, follow that repository's decision-record conventions instead; do not impose Pie's ADR/docs layout.

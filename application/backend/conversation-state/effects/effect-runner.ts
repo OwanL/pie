@@ -246,7 +246,7 @@ export interface EffectRunnerDeps {
   log: LogSink;
   postImperative: PostImperativeSink;
   modal: ModalSink;
-  /** M2 source-aware inline confirmations (browser server plan §9): the
+  /** Source-aware inline confirmations: the
    *  initiating BROWSER renderer confirms inline; the VS Code modal is never
    *  shown to a browser source. Optional so the sidebar-only host and tests
    *  without a browser server remain unchanged. */
@@ -442,7 +442,7 @@ export class EffectRunner {
       // ── Template rows (pure 1:1 effect → *Result). ──
       FileDiff: this.templateRow({ resultKind: 'FileDiffResult', withSessionPath: true, call: (e, d) => d.fileDiffViewer.openFileDiff(e.sessionPath, e.filePath) }),
       // FileRevert is a named handler: a browser source must confirm inline in
-      // ITS renderer before the destructive revert runs (§9).
+      // ITS renderer before the destructive revert runs.
       FileRevert: (e) => this.handleFileRevert(e),
       LoadOlderTranscript: this.templateRow({ resultKind: 'LoadOlderTranscriptResult', withSessionPath: true, call: (e, d) => d.service.loadOlderTranscript(e.sessionPath) }),
       LoadNewerTranscript: this.templateRow({ resultKind: 'LoadNewerTranscriptResult', withSessionPath: true, call: (e, d) => d.service.loadNewerTranscript(e.sessionPath) }),
@@ -792,7 +792,7 @@ export class EffectRunner {
    *  lifecycle queue (a modal must not block session create/open). Dispatches
    *  `ModelSwitchConfirmResult{corrId, confirmed}` (no `ok`/`error`/
    *  `sessionPath`); on modal throw, logs + dispatches `{confirmed:false}`
-   *  (no error field). For a BROWSER source (M2 source-aware seam, §9), the
+   *  (no error field). For a BROWSER source, the
    *  confirmation renders inline in the INITIATING renderer; the VS Code
    *  modal is never invoked for a browser source, and disconnect cancels. */
   private handleShowModelSwitchConfirm(effect: ShowModelSwitchConfirmEffect): void {
@@ -828,8 +828,8 @@ export class EffectRunner {
   }
 
   /** `FileRevert` — destructive `revertFile`. VS Code sources revert directly
-   *  (the sidebar UI owns its local confirmation). A BROWSER source (M2
-   *  source-aware seam, §9) first confirms inline in the INITIATING renderer;
+   *  (the sidebar UI owns its local confirmation). A BROWSER source first
+   *  confirms inline in the INITIATING renderer;
    *  the host proceeds only on explicit confirm, and disconnect cancels. A
    *  cancelled confirm dispatches `FileRevertResult{ok:false}` (the reducer
    *  treats it as a no-op) and never touches the file. */

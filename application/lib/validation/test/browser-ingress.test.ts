@@ -1,5 +1,5 @@
 /**
- * Fail-closed browser ingress schema tests (browser server plan Milestone 0).
+ * Fail-closed browser ingress schema tests.
  *
  * Acceptance: the schema rejects unknown fields, wrong types, oversized
  * strings/arrays, base64 outside the allowlisted `imageBlob`/`ComposerInputDraft`

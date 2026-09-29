@@ -20,9 +20,11 @@ import {
   type SubagentSingleResult,
 } from '../../../harness/agent-processes/workers/subagent-result';
 
-// The subagent result extraction + types now live in shared/subagent-result.ts
-// (reused by the host-side token-rate measurement). Re-export the public
-// extraction API + types here so existing webview importers (activity-tail,
+// The subagent result extraction + types live in
+// `harness/agent-processes/workers/subagent-result.ts` (reused by the host-side
+// token-rate measurement in `application/backend/analytics-views/token-rate.ts`).
+// Re-export the public extraction API + types here so existing webview
+// importers (activity-tail,
 // transcript index, tool-call-item) keep their `from './subagent'` imports
 // unchanged.
 export {

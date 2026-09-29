@@ -1,8 +1,21 @@
 # State Contract Implementation Notes
 
-Non-normative mechanics behind [STATE_CONTRACT.md](../contracts/STATE_CONTRACT.md): transport/protocol internals, byte budgets, thresholds, and file mappings. Tests must not pin this file; pin the normative contract instead. Completed remediation chronology lives in [STATE_CONTRACT_HISTORY.md](../contracts/STATE_CONTRACT_HISTORY.md).
+Non-normative mechanics behind [STATE_CONTRACT.md](../contracts/STATE_CONTRACT.md): transport/protocol internals, byte budgets, thresholds, and file mappings. Tests must not pin this file; pin the normative contract instead.
 
-Each section mirrors the corresponding contract section.
+Sections explain the corresponding contract areas.
+
+## Session Selection — catalog and storage authority
+
+The host resolves the configured agent/session authority and forwards it through `PI_CODING_AGENT_DIR` / `PI_CODING_AGENT_SESSION_DIR`; without configuration, the embedded SDK retains its defaults. With a canonical session root configured, listing uses that root and its per-cwd subdirectories rather than continually scanning retired roots. The npm doctor session check detects legacy session files without a canonical counterpart; separately, installer migration receipts register displaced outcomes roots so `npm run doctor` can report durable outcome files written or changed there since their migration scan. Explicit resume/recovery does not migrate files.
+
+The catalog uses a rebuildable SQLite metadata sidecar beside the session authority. Append checkpoints and bounded head/tail witnesses avoid rereading unchanged transcript prefixes. These witnesses are not full-prefix hashes: an interior rewrite followed by append triggers a full reparse only if a sampled boundary changes. Before publishing an existing catalog snapshot, a filename-only scan removes deleted rows; changed files reconcile in bounded background batches. An inaccessible root preserves the last complete catalog, while an unavailable sidecar falls back to SDK discovery. Transcript JSONL remains authoritative.
+
+## Execution Ordering — cold browsing and worker lifecycle
+
+- The persistent cold browse helper handles exact-v3 projection misses with a bounded in-memory cache, not a disk transcript cache. It and the coordinator independently recheck generation, ownership, and file fingerprints before publication. Legacy-format migration, mutations, and helper failures retain the coordinator's SDK path. Oversized durable-detail fallback can still reopen a transcript on the coordinator event loop; helper isolation is not a guarantee that every read is off-thread.
+- SDK create/open patch validation accepts only known pristine fingerprints or exactly reversible supported transforms. Create durably publishes its header before returning the manager retained for worker handoff; open reuses parsed entries rather than rereading the same JSONL. The coordinator owns patching; helpers only validate its identity.
+- Restored-session preloads use one background slot and yield to foreground lifecycle work or generation. Cancellation fences publication and stops the local wait, but there is no JSON-RPC request-cancellation frame. The occupied slot remains reserved until the backend response or shutdown, preventing a cancelled preload from silently overlapping its replacement.
+- Startup worker synchronization is a readiness fence. Live settings/catalog/auth/policy acknowledgement timeouts are nonfatal: retry the latest revision with bounded backoff rather than infer worker death. Same-revision retries must carry the same payload fingerprint and join or replay the original apply. Definite protocol/transport failure remains fatal.
 
 ## Backend Failure Recovery — transport budgets
 
@@ -12,7 +25,7 @@ Each section mirrors the corresponding contract section.
 
 ## Snapshot Recovery — protocol versions, build identity, and publication
 
-- Backend semantic envelopes use live protocol **v7**, independently of the RPC transport wire version (`WEBVIEW_PROTOCOL_VERSION`). Every webview envelope carries `protocolVersion` and the deterministic compile-time `PIE_BUILD_ID`; Vite recomputes the build id on every watch emission before chunk hashing, and compile/validate fails if the emitted host/webview identities differ.
+- Live-turn semantic envelopes use protocol **v7** independently of `WEBVIEW_PROTOCOL_VERSION`, which versions the host↔webview protocol—not the RPC transport wire format. Every webview envelope carries `protocolVersion` and the deterministic compile-time `PIE_BUILD_ID`; Vite recomputes the build id on every watch emission before chunk hashing, and compile/validate fails if the emitted host/webview identities differ.
 - Ordinary build/watch publication verifies and installs a complete immutable renderer generation, then exposes it through one append-only selection marker. Resolution skips invalid newest markers and retains the current plus prior generations, falling back to the packaged flat bundle.
 
 ## Snapshot Recovery — cold prompt inventory discovery worker

@@ -419,6 +419,11 @@ test('composer bottom-bar CSS allocates overflow without viewport breakpoints or
   // Actual row measurements drive compaction; no viewport/container breakpoint
   // is allowed to hide indicators or leave the controls in a scroll strip.
   assert.match(css, /\.composer-pinned-controls \.model-picker-trigger \{[\s\S]*?min-width: 0;[\s\S]*?max-width: 100%;/);
+  const modelPickerRule = css.match(/\.composer-pinned-controls \.model-picker \{([^}]*)\}/)?.[1] ?? '';
+  assert.match(modelPickerRule, /width: max-content;/);
+  assert.match(modelPickerRule, /max-width: var\(--composer-model-picker-max-width, none\);/, 'the model picker must retain its full natural width before the overflow allocator applies a pressure budget');
+  const modelTriggerRule = css.match(/\.composer-bottom-bar \.composer-pinned-controls \.model-picker-trigger \{([^}]*)\}/)?.[1] ?? '';
+  assert.match(modelTriggerRule, /max-width: 100%;/, 'the picker wrapper, not the trigger, owns the pressure budget');
   assert.match(css, /\.composer-toolbar-overflow-popover\.picker-popover \{[\s\S]*?visibility: hidden;/);
   assert.doesNotMatch(css, /@container composer-shell/);
   assert.doesNotMatch(css, /\.composer-controls \{[^}]*overflow-x: auto/);

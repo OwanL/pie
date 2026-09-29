@@ -1,5 +1,5 @@
 /**
- * Browser command decision ledger + gate tests (browser server plan §5.2):
+ * Browser command decision ledger + gate tests:
  * exactly-one host decision/ack, duplicate-ID handling, and read-only status
  * reconciliation — never replay.
  */

@@ -43,7 +43,7 @@ async function atomicWrite(filePath: string, content: string): Promise<void> {
 }
 
 async function syncGeneratedCatalog(root: string): Promise<void> {
-  await execFileAsync(process.execPath, [path.join(root, 'scripts', 'sync-models.mjs')], {
+  await execFileAsync(process.execPath, [path.join(root, 'scripts', 'model-config', 'sync-models.mjs')], {
     cwd: root,
     windowsHide: true,
   });

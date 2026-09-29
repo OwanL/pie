@@ -1,8 +1,10 @@
 /**
  * tool-result-pruner — deterministic middleware that prunes tool *output* bytes
- * before they enter the model's context. One of three context-lean layers in
- * this stack (see AGENTS.md § Context-lean layers): history compaction (pi),
- * skill pruning (skill-pruner), and tool-result pruning (this).
+ * before they enter the model's context. Tool-result pruning is one of the
+ * three context-lean mechanisms documented in
+ * harness/agent-instructions/skills/develop-pie/SKILL.md#context-lean-terminology:
+ * history compaction (pi), skill pruning (skill-pruner), and tool-result
+ * pruning (this).
  *
  * Hooks the `tool_result` event and rewrites `content` in place — the rewrite
  * is durable (it replaces the stored toolResult message; see

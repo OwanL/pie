@@ -6,6 +6,8 @@ named analytics queries. It has no dashboard or static site pipeline.
 
 ## Commands
 
+Run from `analytics/analysis/`:
+
 ```powershell
 npm run typecheck
 npm run test

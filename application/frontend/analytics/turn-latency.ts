@@ -1,8 +1,8 @@
-// Turn-latency stats now live in `shared/turn-latency.ts` so the host-side
-// token-rate measurement can reuse them. This file re-exports the shared API
-// verbatim so existing webview importers (`hooks.ts`, the token-rate test) keep
-// their `from './turn-latency'` / `'../src/webview/panel/composer/turn-latency'`
-// imports unchanged.
+// Turn-latency stats now live in `lib/transcript/turn-latency.ts` so the
+// host-side token-rate measurement in `application/backend/analytics-views/
+// token-rate.ts` can reuse them. This file re-exports the API verbatim so
+// existing webview importers (`composer/hooks.ts`, the turn-latency test)
+// keep their `from '../analytics/turn-latency'` imports unchanged.
 export {
   collectMeasuredTurns,
   computeTurnLatencyStats,

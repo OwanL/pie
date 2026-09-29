@@ -1,5 +1,5 @@
 /**
- * Browser renderer transport unit tests (browser server plan §4.2/§4.3/§5.3):
+ * Browser renderer transport unit tests:
  * hello-first ordering, fail-closed ingress, pre-send gates, recovery, and
  * the RFC 6455 close-reason clamp — against a fake socket with a
  * deterministic clock.

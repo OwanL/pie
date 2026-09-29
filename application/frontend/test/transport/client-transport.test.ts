@@ -1,5 +1,5 @@
 /**
- * Client transport tests (browser server plan §4.3): the browser transport's
+ * Client transport tests: the browser transport's
  * rendererHello identity replacement, ready/refreshState handshake, reconnect
  * backoff, outbound bounds, and lifecycle sends; the VS Code transport's
  * HTML-stamped metadata and window-message channel.

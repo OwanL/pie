@@ -532,7 +532,7 @@ export interface ProviderAggregateSeries {
   executionTruncated?: boolean;
   /** Exact cost buckets for the requested today and week ranges at the
    * shared per-range widths (minute for today, hour for week —
-   * `CANONICAL_COST_BUCKET_WIDTH_MS` in `shared/analytics/metrics`).
+   * `CANONICAL_COST_BUCKET_WIDTH_MS` in `../projections/metrics`).
    * Optional for compatibility with older read-model test adapters. Each
    * range is aggregated with its own exact settlement-time bounds, so bucket
    * sums never leak across the local calendar boundary; the ranges are

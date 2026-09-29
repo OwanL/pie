@@ -1,6 +1,6 @@
 /**
  * Pins the renderer's defensive ViewState contract exported by
- * extension/src/webview/panel/state-validator.ts (`validateViewState`).
+ * `application/lib/validation/view-state.ts` (`validateViewState`).
  *
  * The host → webview boundary must not silently render stale/broken UI, so
  * validateViewState returns violation strings for missing/mistyped critical

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { spawn, spawnSync } from 'node:child_process';
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +12,20 @@ const supervisorPath = path.join(repositoryRoot, 'application', 'hosts', 'standa
 const integrationTest = process.platform === 'win32' && process.env.PIE_RUN_INTEGRATION_TESTS === '1'
   ? test
   : test.skip;
+// Require-BuildOutput is a Windows PowerShell function; exercising it for real
+// needs powershell.exe, so this stays skipped on other platforms.
+const windowsPowerShellTest = process.platform === 'win32' ? test : test.skip;
+
+// The build files Require-BuildOutput must find before launching the staged
+// runtime, as relative segments under application/hosts/vscode/out.
+const requiredBuildFiles = [
+  ['standalone.js'],
+  ['backend.js'],
+  ['worker-entry.js'],
+  ['analytics-recorder-worker.js'],
+  ['analytics-query-worker.js'],
+  ['webview', 'panel', '.vite', 'manifest.json'],
+];
 
 async function isAlive(pid) {
   try {
@@ -30,6 +44,105 @@ async function waitFor(predicate, timeoutMs = 15_000) {
   }
   assert.fail('timed out waiting for the process-tree precondition');
 }
+
+/**
+ * Regression check for the supervisor's build-output lookup.  The staged
+ * runtime lives at application/hosts/vscode/out and the lookup must resolve
+ * that real path; the repository root must stay four levels above the startup
+ * directory.  This check is deliberately source-only so it passes on a fresh
+ * checkout before `npm run extension:build` has produced any output.
+ */
+test('the supervisor build-output lookup targets the real vscode out path and requires the staged entry files', async () => {
+  const source = await readFile(supervisorPath, 'utf8');
+  assert.ok(
+    source.includes("Join-Path $RepositoryRoot 'application\\hosts\\vscode\\out'"),
+    'the build-output lookup must target application/hosts/vscode/out',
+  );
+  assert.doesNotMatch(source, /'extension\\out'/);
+  assert.ok(
+    source.includes("Join-Path $PSScriptRoot '..\\..\\..\\..'"),
+    'the repository root must be four levels above the startup directory',
+  );
+  for (const segments of requiredBuildFiles) {
+    const relative = segments.join('\\');
+    assert.ok(
+      source.includes(`'${relative}'`),
+      `Require-BuildOutput must still require ${relative}`,
+    );
+  }
+});
+
+/**
+ * Behavior check for the supervisor's actual Require-BuildOutput function.
+ * It is extracted from the supervisor script and run against a temp fixture
+ * repository root: a complete fixture resolves to the fixture output root and
+ * a missing entry file throws the guidance error.  No real build output and
+ * no Node, browser, or Pie service is involved.
+ */
+windowsPowerShellTest('Require-BuildOutput resolves a complete fixture root and rejects a missing entry file', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'pie-start-pie-build-'));
+  try {
+    const outputRoot = path.join(tempDir, 'application', 'hosts', 'vscode', 'out');
+    for (const segments of requiredBuildFiles) {
+      const filePath = path.join(outputRoot, ...segments);
+      await mkdir(path.dirname(filePath), { recursive: true });
+      await writeFile(filePath, '', 'utf8');
+    }
+    const probePath = path.join(tempDir, 'require-build-output-probe.ps1');
+    await writeFile(probePath, String.raw`$ErrorActionPreference = 'Stop'
+$supervisorPath = $args[0]
+$fixtureRoot = $args[1]
+$source = Get-Content -LiteralPath $supervisorPath -Raw
+$tokens = $null
+$parseErrors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$parseErrors)
+$definition = $ast.Find(
+  { param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Require-BuildOutput' },
+  $true)
+if ($null -eq $definition) { throw 'Require-BuildOutput was not found in the supervisor script' }
+Invoke-Expression $definition.Extent.Text
+$expected = Join-Path $fixtureRoot 'application\hosts\vscode\out'
+$actual = Require-BuildOutput -RepositoryRoot $fixtureRoot
+if ($actual -ne $expected) { throw "unexpected output root: $actual" }
+Write-Output "RESOLVE=$actual"
+Remove-Item -LiteralPath (Join-Path $expected 'standalone.js')
+$missingError = $null
+try {
+  Require-BuildOutput -RepositoryRoot $fixtureRoot | Out-Null
+} catch {
+  $missingError = $_.Exception.Message
+}
+if ($null -eq $missingError) { throw 'a missing entry file must make Require-BuildOutput throw' }
+if ($missingError -notlike '*standalone Node entry*' -or $missingError -notlike '*npm run extension:build*') {
+  throw "unexpected missing-output error: $missingError"
+}
+Write-Output 'MISSING=OK'
+`, 'utf8');
+    const probe = spawnSync(
+      'powershell.exe',
+      [
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-File', probePath, supervisorPath, tempDir,
+      ],
+      { encoding: 'utf8', windowsHide: true },
+    );
+    assert.equal(
+      probe.status,
+      0,
+      `the fixture probe failed: ${probe.stdout}\n${probe.stderr}`,
+    );
+    assert.ok(
+      probe.stdout.includes(`RESOLVE=${outputRoot}`),
+      `the probe must resolve the fixture output root; stdout: ${probe.stdout}`,
+    );
+    assert.ok(
+      probe.stdout.includes('MISSING=OK'),
+      `a missing entry file must be rejected; stdout: ${probe.stdout}`,
+    );
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
 
 test('start-pie.bat delegates without interpolating the prompted workspace', async () => {
   const source = await readFile(batchPath, 'utf8');

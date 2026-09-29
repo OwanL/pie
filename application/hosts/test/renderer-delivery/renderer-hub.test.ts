@@ -1,5 +1,5 @@
 /**
- * Renderer hub tests (browser server plan Milestone 1).
+ * Renderer hub tests.
  *
  * Acceptance: two fake renderers receive independent snapshots; renderer A's
  * evidence cannot advance renderer B's ledger; blocking A never delays B;

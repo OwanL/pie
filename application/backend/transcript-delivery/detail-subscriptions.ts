@@ -51,7 +51,7 @@ interface SubscriptionOwner {
   subscriptionId: string;
   detailKey: string;
   viewGeneration: number;
-  /** Trusted renderer identity (browser server plan §5.4). */
+  /** Trusted renderer identity. */
   rendererId: string;
   rendererGeneration: number;
   detailAttempt: number;
@@ -97,7 +97,7 @@ function cloneAddress(address: LiveSubagentDetailAddress): LiveSubagentDetailAdd
   return { ...address, lineage: address.lineage.map((identity) => ({ ...identity })) };
 }
 
-/** The complete browser-server ownership key (browser server plan §5.4):
+/** The complete browser-server ownership key:
  *  `{hostInstanceId, viewGeneration, rendererId, rendererGeneration,
  *  detailKey, detailAttempt}`. `hostInstanceId` is fixed per service instance;
  *  the stable-key fields are encoded here and the current attempt is stored on

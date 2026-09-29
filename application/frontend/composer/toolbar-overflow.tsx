@@ -87,10 +87,9 @@ export function ComposerToolbarOverflow({ pinnedControls, items, commandsAvailab
     const availableWidth = readWidth(root);
     if (!controls || !root || !pinned || availableWidth <= 0) return;
 
-    // The model picker cap is applied after allocation. Temporarily remove it
-    // while measuring so both the pinned group and model reserve their natural,
-    // deliberately capped-at-180px widths instead of whatever a narrow flex row
-    // happened to leave them.
+    // The pressure budget is applied after allocation. Temporarily remove it
+    // while measuring so the pinned group and model reserve their natural widths
+    // instead of whatever a narrow flex row happened to leave them.
     const modelPicker = pinned.querySelector<HTMLElement>('.model-picker');
     const appliedModelWidth = pinned.style.getPropertyValue('--composer-model-picker-max-width');
     pinned.style.removeProperty('--composer-model-picker-max-width');

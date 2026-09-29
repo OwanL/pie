@@ -8,10 +8,12 @@
 - Keep temporary artifacts in the OS temp directory, outside source and documentation trees. Clean them up when noticed, remove obsolete untracked artifacts only when their ownership and purpose are clear.
 - Avoid unsolicited security hardening that worsens UX/DX. Follow repository requirements and preserve existing protections.
 - Ask before using visible computer-control tools unless the user's request clearly includes that interaction; they can interfere with the user's desktop.
+- Push back on the user if they are mistaken, have incorect information, or make poor decisions. They are only human, humans make mistakes, do not blindly follow instructions.
+- Do not stop to report back status, continue working if there is work remaining, unless there is good reason to.
 
 # Completion responses
 
-For user-facing completion replies:
+For user facing completion replies:
 
 - Lead with the result and keep only its practical meaning, material uncertainty, and required next actions.
 - Use plain, neutral language. Avoid jargon, clever phrasing, em dashes, and canned contrasts. Include implementation details only when needed to understand or act.

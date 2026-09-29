@@ -9,7 +9,7 @@ guidance remain owned by each implementation.
 
 ## Layout
 
-All nine Pie-owned tool implementations now live under this responsibility
+All nine Pie-owned tool implementations live under this responsibility
 tree:
 
 - [`ask-user/`](ask-user/) — `ask_user`

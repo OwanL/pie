@@ -15,9 +15,9 @@ export type SidebarSyncState = {
 export interface StateEnvelopeContext {
   revision: number;
   viewGeneration: number;
-  /** Host-assigned renderer session id (browser server plan §5.1). */
+  /** Host-assigned renderer session id. */
   rendererId: string;
-  /** Reload/reconnect fence for this renderer (browser server plan §5.1). */
+  /** Reload/reconnect fence for this renderer. */
   rendererGeneration: number;
 }
 

@@ -18,12 +18,12 @@ import {
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
-function runNodeScript(script, args, signal) {
+function runNodeScript(script, args, signal, stdin) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [script, ...args], withProcessTreeIsolation({
       cwd: repoRoot,
       env: withoutPiHarnessEnv(withoutGitRepositoryEnv(process.env)),
-      stdio: 'inherit',
+      stdio: stdin === undefined ? 'inherit' : ['pipe', 'inherit', 'inherit'],
       windowsHide: true,
     }));
     const watchdog = watchChildProcess(child, {
@@ -39,7 +39,15 @@ function runNodeScript(script, args, signal) {
       const cleanup = await watchdog.settle().catch(() => ({ gone: false }));
       resolve(watchdog.timedOut || watchdog.aborted || !cleanup.gone ? 1 : (code ?? 0));
     });
+    if (stdin !== undefined) {
+      child.stdin.on('error', () => {});
+      child.stdin.end(stdin);
+    }
   });
+}
+
+export function buildTestFilesInvocation(testFiles) {
+  return { args: ['--files-from-stdin'], stdin: JSON.stringify(testFiles) };
 }
 
 export async function buildAffectedTestPlan(root = repoRoot) {
@@ -69,7 +77,13 @@ async function main() {
     } else {
       console.log(`Running ${plan.testFiles.length} affected test file(s) in parallel.`);
       for (const reason of plan.reasons) console.log(`- ${reason}`);
-      exitCode = await runNodeScript(path.join(repoRoot, 'scripts', 'verification', 'run-test-files.mjs'), plan.testFiles, abort.signal);
+      const invocation = buildTestFilesInvocation(plan.testFiles);
+      exitCode = await runNodeScript(
+        path.join(repoRoot, 'scripts', 'verification', 'run-test-files.mjs'),
+        invocation.args,
+        abort.signal,
+        invocation.stdin,
+      );
     }
   } finally {
     abort.dispose();

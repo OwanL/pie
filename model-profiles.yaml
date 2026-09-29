@@ -2,6 +2,17 @@
 # Source of truth: models.yaml (repo root). Edit there and re-run sync.
 profiles:
   - provider: github-copilot
+    id: claude-sonnet-5.5
+    eligible: false
+    thinking:
+      - minimal
+      - low
+      - medium
+      - high
+      - xhigh
+      - max
+    disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
+  - provider: github-copilot
     id: claude-opus-5.5
     eligible: false
     thinking:

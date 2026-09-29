@@ -82,13 +82,13 @@
   flex: 0 0 auto;
   width: max-content;
   min-width: 0;
-  max-width: var(--composer-model-picker-max-width, 180px);
+  max-width: var(--composer-model-picker-max-width, none);
 }
 
 .composer-bottom-bar .composer-pinned-controls .model-picker-trigger {
   width: 100%;
   min-width: 0;
-  max-width: var(--composer-model-picker-max-width, 180px);
+  max-width: 100%;
   flex: 0 1 auto;
 }
 

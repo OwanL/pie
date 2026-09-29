@@ -1,5 +1,5 @@
 /**
- * Static assets tests (browser server plan §6.1): manifest allowlist serving,
+ * Static assets tests: manifest allowlist serving,
  * traversal rejection, MIME mapping, and the nonce-CSP HTML shell.
  */
 
@@ -58,8 +58,8 @@ test('load(): resolves the entry, css, and transitively imported chunks into the
 
   assert.equal(assets.getAssetVersion(), assetVersionFromManifest(await loadViteManifest(dir)));
   assert.match(assets.getAssetVersion(), /^[0-9a-f]{16}$/);
-  // URLs are `/assets/<hashed-file>` (plan §6.1) — the manifest `file` paths
-  // already carry the `assets/` output prefix and must not be doubled.
+  // URLs are `/assets/<hashed-file>` — the manifest `file` paths already
+  // carry the `assets/` output prefix and must not be doubled.
   assert.equal(assets.resolveRequest('/assets/panel-abc123.js')?.contentType, 'text/javascript; charset=utf-8');
   assert.equal(assets.resolveRequest('/assets/panel-abc123.css')?.contentType, 'text/css; charset=utf-8');
   assert.equal(assets.resolveRequest('/assets/chunk-xyz789.js')?.contentType, 'text/javascript; charset=utf-8');

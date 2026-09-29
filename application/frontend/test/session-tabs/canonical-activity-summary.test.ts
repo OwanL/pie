@@ -1,6 +1,6 @@
 /**
  * Pins the webview's canonical root-session activity/facet consumer logic in
- * `extension/src/webview/panel/session-tabs/token-usage.ts`
+ * `application/frontend/session-tabs/token-usage.ts`
  * (`buildCanonicalSessionActivitySummary` + `canonicalActivitySignature`).
  *
  * The consumer is passive: it binds the active session's entry to its stable

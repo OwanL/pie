@@ -172,7 +172,7 @@ goes to stdout. If a section prints `… N more unique group(s)`, raise `--top` 
   under native Windows Python. Do not manually translate them first.
 - **Truncated-output temp lifecycle**: Pie applies retention cleanup to orphaned
   temp logs (`pi-bash-*` / `pi-output-*`) at extension activation via a best-effort reaper
-  (`extension/src/host/util/temp-log-reaper.ts`). Retention is configurable via
+  (`lib/temporary-files/temp-log-reaper.ts`). Retention is configurable via
   the `pie.tempLogRetention` setting (`maxAgeDays` default 7, `maxTotalSizeMb`
   default 500): files older than the age cutoff are deleted first, then oldest
   survivors are evicted until the total is under the size cap. Recent logs you

@@ -22,7 +22,7 @@ export interface ComposerActionsProps {
   onClearQueue: () => void;
   sendCurrentText: () => void;
   canSend: boolean;
-  /** Empty submit will resume an interrupted assistant turn. */
+  /** Empty submit will continue agent work without adding a user message. */
   continueMode?: boolean;
 }
 
@@ -70,14 +70,14 @@ export function ComposerActions({
     : busy
       ? 'Queue message (Enter) — runs after the current turn'
       : continueMode
-        ? 'Continue interrupted response (Enter)'
+        ? 'Continue agent work (Enter)'
         : 'Send message (Enter)';
   const submitLabel = interrupting
     ? 'Waiting for stop'
     : busy
       ? 'Queue message'
       : continueMode
-        ? 'Continue interrupted response'
+        ? 'Continue agent work'
         : 'Send message';
 
   return (

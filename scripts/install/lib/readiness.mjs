@@ -9,7 +9,7 @@ import { authHasContent, authProviderNames, readAuthProviders } from './auth.mjs
 import { readJsonFile } from './json.mjs';
 import { resolveVscodeSettingsDirs } from './vscode-settings.mjs';
 
-const PROVIDER_ENV_VARS = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GOOGLE_API_KEY'];
+const PROVIDER_ENV_VARS = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GEMINI_API_KEY'];
 
 /**
  * @typedef {'ok' | 'warn' | 'fail'} ReadinessLevel

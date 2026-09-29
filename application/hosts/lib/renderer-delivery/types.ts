@@ -1,5 +1,5 @@
 /**
- * Transport-neutral renderer interfaces (browser server plan §4.1–§4.2).
+ * Transport-neutral renderer interfaces.
  *
  * The host may serve the same UI to several renderer surfaces: the VS Code
  * sidebar and, later, loopback-served browsers. Each surface registers a
@@ -54,8 +54,8 @@ export interface RendererTransport {
 /** Per-renderer delivery debug state (subset of the delivery controller's). */
 export interface RendererSessionDebugState {
   visible: boolean;
-  /** Browser focus belief (`rendererFocusChanged`); M3 attention arbitration
-   *  consumes it. Recorded here so the belief is observable/testable. */
+  /** Browser focus belief (`rendererFocusChanged`), consumed by attention
+   *  arbitration and exposed for tests. */
   focused: boolean;
   webviewReady: boolean;
   globalDirty: boolean;
@@ -99,7 +99,7 @@ export interface RendererRegistration {
   dispose(): void;
 }
 
-/** Host-owned fan-out surface (browser server plan §4.1). */
+/** Host-owned fan-out surface. */
 export interface RendererHub {
   /** Debounced fan-out of one logical render to every renderer session. */
   scheduleState(): void;

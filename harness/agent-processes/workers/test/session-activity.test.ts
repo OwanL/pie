@@ -54,14 +54,36 @@ test('one billable-activity predicate covers every exposed SDK and backend windo
   }
 });
 
-test('idle continuation classification uses the supplied complete backend context', () => {
-  assert.deepEqual(buildIdleSessionCapabilities([], undefined), {
-    billableActivity: false,
+test('hot and cold continuation capabilities recognize completed assistant replies', () => {
+  const completedReplies = [
+    { role: 'assistant', content: [{ type: 'text', text: 'finished normally' }], stopReason: 'stop' },
+    { role: 'assistant', content: [{ type: 'text', text: 'truncated at the output limit' }], stopReason: 'length' },
+  ];
+
+  for (const reply of completedReplies) {
+    assert.equal(buildSessionCapabilities(contextWith({ messages: [reply] })).canContinue, true, 'hot idle runtime');
+    assert.equal(buildIdleSessionCapabilities([reply]).canContinue, true, 'cold durable session');
+  }
+});
+
+test('continuation capability still rejects busy, empty, and non-overflow error tails', () => {
+  const completedReply = { role: 'assistant', content: [{ type: 'text', text: 'finished normally' }], stopReason: 'stop' };
+  const busy = contextWith({ messages: [completedReply], isStreaming: true });
+  assert.deepEqual(buildSessionCapabilities(busy), {
+    billableActivity: true,
     canContinue: false,
-    canInterrupt: false,
-    canCompact: true,
+    canInterrupt: true,
+    canCompact: false,
   });
 
+  assert.equal(buildSessionCapabilities(contextWith()).canContinue, false, 'empty hot history');
+  assert.equal(buildIdleSessionCapabilities([], undefined).canContinue, false, 'empty cold history');
+  const failedReply = { role: 'assistant', content: [], stopReason: 'error', errorMessage: 'provider request failed' };
+  assert.equal(buildSessionCapabilities(contextWith({ messages: [failedReply] })).canContinue, false);
+  assert.equal(buildIdleSessionCapabilities([failedReply]).canContinue, false);
+});
+
+test('idle continuation classification uses the supplied complete backend context', () => {
   const completeContext = [
     ...Array.from({ length: 500 }, (_, index) => ({ role: 'assistant', content: `old-${index}`, stopReason: 'stop' })),
     { role: 'user', content: 'delivered but not answered' },

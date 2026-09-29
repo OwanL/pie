@@ -1,375 +1,97 @@
 # Architecture
 
-## 1. System Overview
+Pie is a coding-agent application built around the Pi runtime. VS Code and standalone hosts share one application backend and Preact UI; host adapters supply platform capabilities rather than separate application implementations.
 
-pie provides a chat interface to a local PI (Programming Intelligence) backend. The application host has one platform-neutral runtime and two composition roots:
+## Components and processes
 
-- **Application runtime** — `HostRuntime` (`application/backend/composition/host-runtime.ts`) owns host-neutral application composition and lifecycle through injected ports. It does not import `vscode` or construct concrete host adapters; analytics authority machinery stays in `analytics/authority/`.
-- **VS Code adapter** — `PieExtension` and `application/hosts/vscode/runtime/host-runtime-platform.ts` own VS Code activation, commands, sidebar, notifications, editor/file/diff capabilities, and platform ports.
-- **Standalone Node entry** — `application/hosts/standalone/index.ts`, launched by `start-pie.bat` through its supervisor, composes the same `HostRuntime` with a browser-only platform and workspace-scoped host storage. It does not emulate or import VS Code.
-- **Renderers** — the shared Preact application is rendered either in the VS Code sidebar webview or in a browser served by the shared browser server.
+| Component | Responsibility | Implementation |
+|---|---|---|
+| Application runtime | State, effects, session actions, renderer projection, and lifecycle composition through injected platform ports | `application/backend/`; composition starts in `composition/host-runtime.ts` |
+| Host adapters | VS Code integration or standalone startup, browser serving, editor/file capabilities, and notifications | `application/hosts/{vscode,standalone,browser,lib}/` |
+| Renderers | Shared passive Preact UI in the sidebar or browser | `application/frontend/` |
+| Agent coordinator | Cold session operations, settings/catalog authority, worker routing, and provider-network admission | `harness/agent-processes/coordinator/` |
+| Root workers | One isolated process per hot root, owning its Pi session/runtime, tools, and write lease | `harness/agent-processes/workers/` |
+| Cold browse helper | Read-only durable transcript projection off the coordinator event loop | `harness/agent-processes/cold-browse-helper/` |
+| Analytics | Capture, accounting, queries, privacy, and storage authority; recorder/query helpers run under canonical authority | `analytics/` |
 
-Both composition roots use the same application runtime, backend boundary, browser server, and UI build; standalone is not a second application implementation.
+The coordinator does not create an `AgentSession`. Browsing a saved session does not start execution: the first execution mutation promotes it into a worker. `ColdSessionStore` and write-lease authority remain in the coordinator; the browse helper only computes read projections. This keeps browsing separate from agent startup and prevents competing writers.
 
-The isolated backend beneath that host has three process roles:
-
-- **PI coordinator** — a lightweight process communicating with the host over JSONL stdio. It owns cold durable browsing, settings/catalog authority, worker routing, and global provider-network admission; it never creates an `AgentSession` in isolated mode.
-- **Cold browse helper** — one persistent, read-only child of the coordinator. It owns exact-v3 manager-free projection misses and their bounded in-memory LRU, returning only windowed public payloads; it never owns a write lease or `AgentSession`.
-- **Root workers** — one process per hot root. Each owns exactly one SDK runtime/session context, extensions/tools, live event translation, extension UI bridge, and the root's sole write lease.
-
-Isolated mode is the sole runtime path for every backend generation. The coordinator never creates an `AgentSession`; all hot session execution runs in per-root workers. There is no legacy in-process runtime and no runtime-mode flag — Git history is the rollback mechanism if a regression is discovered.
-
----
-
-## Transport and Backend Lifecycle
-
-Stdio uses UTF-8 JSONL with a shared **32 MiB per-record limit**, enough for a supported 10 MiB raw image after base64 encoding plus envelope headroom. Readers retain bounded memory, discard an overlong record through LF, and then recover. Oversized stdin requests receive a correlated `REQUEST_TOO_LARGE` response when their ID is present in the bounded preview; an oversized correlated response is replaced with `RESPONSE_TOO_LARGE`; an oversized critical event is fatal. Event producers therefore reserve two MiB of envelope headroom; durability-confirmed terminal tool side effects replace an otherwise-oversized result/input with an explicit bounded transport representation before entering the writer. Incremental session snapshots (`session.opened`, `session.preload`, and transcript pages) measure the complete final event/response JSONL envelope, including LF, against the 30 MiB producer budget before writer enqueue. If needed they first omit an oversized live checkpoint and restore the normalized durable projection, then remove whole transcript rows away from the pinned/requested edge while recomputing exact absolute window bounds. A required durable row is never byte-truncated: metadata plus a required single row that still cannot fit fails with `SESSION_SNAPSHOT_TOO_LARGE`. Correlated create/duplicate/truncate results are acknowledgement + `sessionPath` only; their authoritative state remains the ordered `session.opened` event. Backend stdout writes are serialized with bounded response/event lanes. Live protocol v7 tool progress uses a full initial preview followed by base-revision structural patches and carries backend-calculated canonical preview and complete-checkpoint byte metadata. The backend incrementally accounts the full active checkpoint (JSON escaping, text/reasoning parts, drafts, tool inputs/metadata/previews/terminal results, arrays, keys, and envelope syntax) and rejects an observation before it would exceed the 30 MiB checkpoint ceiling. The host validates and trusts that canonical checkpoint total on the progress hot path, so neither side reserializes an assembled multi-megabyte preview for each patch. A recovery RPC serializes exactly once and verifies the actual bytes do not exceed the cached conservative total. Only contiguous same-tool patch ranges may be composed while queued; their combined envelope retains the original base and newest sequence. Intervening lifecycle records prevent composition, terminals remain ordered and durable, and the host repairs any missing or incompatible range from the backend's bounded in-memory canonical checkpoint.
-
-Session browsing is a durable-data path, not an execution-runtime path. One generation-scoped `ColdSessionStore`, installed after SDK loading, owns cold list/open/preload/page/detail/forget plus runtime-free create, duplicate, and idle truncate. It uses the SDK `SessionManager` for supported v1/v2→v3 migration and create/fork/tree/context semantics, and rechecks coordinator generation, path ownership, and file fingerprint at the final publication or write boundary. The coordinator-owned patch barrier adds fail-closed, versioned `SessionManager.create` and `SessionManager.open` seams. Create fsyncs and atomically publishes its own v3 header without replacing an existing destination before returning the same manager/path retained for handoff, and the create ledger cannot claim durability before that return. Open threads the entries it already parsed through the constructor into `setSessionFile`, removing the redundant second JSONL read while retaining that method's empty/invalid-file handling, migration, tree construction, and flushed-state semantics. Both transforms accept only exact pristine fingerprints or files that reverse exactly through the known transforms to those fingerprints; marker-preserving reorder or weakening fails startup closed. For an exact v3 cache miss, the persistent cold browse helper validates the coordinator's exact SDK patch identity, imports only cold SDK modules, and builds the immutable manager-free projection off the coordinator event loop. Its weighted LRU is keyed by canonical path, generation, ownership revision, and strong file fingerprint, retains at most four projections and 128 MiB of source weight (or one oversize current projection alone), and returns only bounded open/page/detail payloads—not the full projection—over correlated JSONL. The helper checks the exact fingerprint before open, after projection, and after building each response; the coordinator independently rechecks generation, ownership, canonical path, and fingerprint before stamping, publication, or rethrowing a typed producer error. v1/v2 migration, empty/malformed files, helper startup/crash/projection failure, tree/context, and every mutation retain the synchronous coordinator SDK path. A page whose required durable row cannot fit preserves `SESSION_SNAPSHOT_TOO_LARGE` without synchronously reopening the transcript. No transcript cache is written to disk; forget explicitly purges helper memory. The helper is eagerly warmed in production, remains lazy/restartable with bounded readiness/request waits, confirms actual exit after clean disposal, force-terminates a non-exiting child, watches parent liveness from before SDK import, and is absent from direct `BackendServer` test constructions unless explicitly configured. Model settings, configured model catalogs, and the context-window denominator are applied afresh to each helper response. Replacement reservations use the same `ColdSessionLeaseAuthority` as coordinator cold operations: sorted canonical source/destination acquisition installs explicit one-use path tokens, invalidates existing stamps, and prevents new captures or cold commits until sorted release. During runtime transfer the source manager revokes its local lease before awaiting `commitTransfer`, so a failed/lost acknowledgement cannot reactivate source writes and enters fail-closed crash reconciliation. Cold payloads return `runtimeReady:false`; no cold route creates `AgentSessionServices`, loads extensions/resources, constructs an `AgentSession`, or subscribes to SDK events. The coordinator maintains at most one prewarmed, single-use inventory child. Before an open consumes it, the child validates the coordinator's SDK patch identity and imports only SDK modules; it receives no session cwd/model/agent settings and does not discover user extensions. One public cold open supplies those request-specific inputs, creates an in-memory SDK runtime, executes ordinary extension/resource discovery (including `resources_discover`), inventories the hot catalog's unfiltered `_originalSystemPromptOptions` plus `getAllTools()`, and emits the complete lossless prompt-entry catalog; an empty unused session also receives the token estimate from that inventory. The child is disposed after that request, and an unused spare expires after a bounded idle period. Concurrent discoveries share a bounded FIFO rather than spawning extra children. The coordinator applies the addressed session's persisted disabled-entry sidecar and rebuilds through the ordinary bounded snapshot producer. A process-local deny boundary rejects outbound fetches and every turn-producing session method before `session_start`, while provider-catalog refresh handlers explicitly skip inventory mode. The SDK patch identity is revalidated immediately before request-specific discovery; a mismatch, crash, failed warmup, or timeout retires the child and omits the catalog/estimate through the ordinary fail-open path. Any caught network attempt still invalidates the inventory rather than publishing a partial catalog. No inventory process/runtime or catalog is reused, promoted, retained, or cached across requests. A newly created/forked/truncated process-local manager and its creation reason remain retained through transactional promotion; they are retired only after worker runtime readiness, and failed promotion preserves exact-path retryability. Snapshot-known local tab changes remain visually synchronous and send a separate lightweight `session.viewed` RPC carrying the host-observed predecessor; that RPC reads no transcript and creates no runtime. Same-path selection is a no-op, and a monotonic view revision prevents an older asynchronous `session.open` from overwriting a newer local selection. The first execution mutation atomically promotes through the per-path single-flight owner, consumes one serialized cold grant, registers the worker's sole write lease, publishes a bounded `runtimeReady:true` metadata refresh before streaming, and then executes. Hot commands route by immutable root identity plus exact worker generation and current lease path/revision. SDK replacement reserve/commit/consume/abort/readiness frames atomically rekey the route while stale source writes and cross-session frames are rejected. Transfer consumption is coordinator-authoritative and exactly once: commit acknowledgement precedes a correlated consume acknowledgement, which precedes destination activation/write and runtime readiness; missing acknowledgement fails closed. Hot truncate publishes a transitioning fence before awaiting interrupt, so duplicate same-target truncates join and other commands receive `SESSION_TRANSITION_IN_PROGRESS` without reaching the old worker. The host separately tracks snapshot-known and runtime-ready paths, allowing warm local tab selection without hidden promotion; both sets reset with the backend generation. Cold-only send acknowledgement timeout expansion covers service initialization while retaining the short hot-send detector.
-
-Helper transcript pages are fitted before IPC against the exact eventual response transport and pinned message; the request handler repeats the same fitter as an idempotent writer-boundary fence.
-
-The transition fence has two non-conflicting exceptions. Runtime-free `session.viewed` notifications remain immediate while a hot truncate is replacing that session, and a concurrent public interrupt waits for the transition before targeting only its resulting current owner (or settles as an idle no-op if no hot owner remains). Host-side edit cancellation is permitted only before its destructive truncate request is issued; after that boundary, the session queue completes truncate plus send and then delivers the interrupt, so local rollback cannot diverge from a backend truncate that still commits. A local truncate deadline is therefore commit-ambiguous, not failure evidence: the host retains the exact request correlation, optimistic replacement, and queue owner until the late response confirms success or transport death, and never emits rollback after that boundary.
-
-`ColdSessionStore` and `ColdSessionLeaseAuthority` remain **in the coordinator process**; only exact-v3 manager-free projection work moves to the helper. The coordinator imports the runtime-free `config`, `AuthStorage`, `ModelRegistry`, and `SessionManager` modules for fallback and mutation semantics, while the helper uses the worker-only validation branch and can never patch the shared SDK. Runtime workers load the full SDK only after promotion. Private runtime IPC v1 uses dedicated inherited directional descriptors and closed runtime/ownership/provider/sync frame families; the browse helper has a separate bounded correlated JSONL protocol whose results are independently fenced by coordinator authority. Provider admission and circuit state are coordinator-owned per provider: configured capacity updates in place, unrelated providers remain independent, failures from any worker contribute to one global circuit, and exactly one generation-owned half-open probe may run. Workers perform the HTTP request but acquire immediately at the fetch boundary, publish bounded status/classification observations, and retain the lease through response-body EOF/error/cancel or confirmed worker death; they do not install an independent per-process admission/circuit gate. Queued acquisition races the fetch `AbortSignal`; correlated `provider.cancel` removes the exact queued request or releases its just-granted lease once, preventing a settled interrupt from receiving a stale grant. Settings, configured catalog, auth fingerprints, runtime preferences, and provider policy use monotonic coordinator revisions and worker acknowledgements. Startup synchronization remains a fail-closed readiness fence. During a live turn, an acknowledgement deadline marks only that worker/domain revision as delayed: the coordinator preserves active work and retries the latest retained snapshot with bounded backoff. A timeout alone is never evidence of worker death; definite transport/protocol failure and confirmed process exit remain fail-closed. Extension-UI requests are registered against exact session/worker-generation/request lineage and settle once; stale, mismatched, duplicate, or crash-retired responses return a typed unavailable result without reaching a worker callback. Bounded checkpoints retain only execution identities, usage/durable watermarks, and the detail-subscription manifest needed for crash terminalization without replay. The perf harness measures cache-miss open and a concurrent public `app.ping`; helper acceptance is gated on keeping that ping snappy while retaining exact open/session semantics. The explicit `COLD_SESSION_STORE_PLACEMENT` constant and transport/fence tests prevent silent placement drift.
-
-Provider queue, response-header, and body-idle phases are each finite and capped at five minutes; a configured queue value of zero selects that safety maximum. `maxConcurrentRequests: 0` is the explicit Unlimited capacity sentinel: it bypasses concurrency and afterburn capacity throttling, but retains circuit breakers, network-phase deadlines, stream liveness, and cancellation. Provider rejection frames preserve retryability and HTTP status across the process boundary. Healthy completion may retain an owner-affine afterburn slot, while owner release, expiry, policy disable, or an open circuit clears it. There are no host or backend elapsed-time semantic watchdogs: a prompt, retry, or stream that outlasts every provider phase remains owned by the exact SDK lifecycle, an explicit Stop, and worker retirement, so unrelated provider activity can neither mask a stuck turn nor trigger a heuristic abort.
-
-
-
-Exact same-revision worker-sync retries are idempotent only when their bounded payload fingerprint matches the original apply; they join an in-flight apply or replay its acknowledgement. A changed payload at the same revision remains fatal. Reloadable settings/catalog/auth/runtime-policy broadcasts have a 30-second acknowledgement grace. Every live-sync deadline is nonfatal and retries the latest retained snapshot with 1s/5s/15s/30s capped backoff; successful acknowledgement clears that worker/domain retry state.
-
-Paged durable-detail subscription resolution (`detail.subscribe`) is now served through the bounded cold browse helper: the helper resolves the terminal tool result from its manager-free projection and refuses an oversized response before IPC, under the same generation/ownership/fingerprint fences as open/page. The synchronous coordinator SDK reopen remains the fallback when the helper is unavailable (startup, crash, or projection failure) or ineligible (non-current v3 headers — v1/v2 migration, empty/malformed files — retain the synchronous path), or when the resolved detail does not fit the bounded frame (32 MiB), so very large details can still reopen the transcript on the coordinator event loop and this remains a measured responsiveness follow-up.
-
-Restored-session preloads run through a FIFO, single-flight background queue. No preload starts while a foreground create/open/duplicate lifecycle task is queued or in flight, or while any session is generating. If foreground work or generation begins after a preload was admitted, the host immediately fences its payload and cancels its local response waiter. The JSON-RPC transport has no request-cancellation frame, so cancellation cannot physically abort backend work already in progress (including runtime creation on a path that has already crossed that seam). The scheduler therefore retains the occupied background slot until the correlated response or backend shutdown settles it; this preserves maximum backend background concurrency of one before queued preloads can resume.
-
-The host distinguishes intentional stops from unexpected, generation-tagged exits. Intentional stop during startup rejects that child’s readiness wait, and an old-generation exit cannot clear a replacement process. Unexpected exits terminalize orphaned in-flight state and preserve a classified interruption notice. There is no automatic backend restart; restart remains an explicit user action.
-
-An explicit restart is a reducer-owned `backend.restart` operation and configuration commit boundary. Trusted ingress assigns stable identity/source/causality; the reducer projects backend unavailability first, records configuration drain and confirmed old-generation death, and settles exactly once with the replacement generation or typed failure. Effect execution only holds the opaque promise while it drains already-accepted model/reasoning/preference effects, closes coordinator stdin, waits for accepted requests to settle, and spawns the replacement. Settings updates use a PID-owned cross-process lock with dead-owner recovery, so forced termination cannot strand the replacement behind an orphaned lock.
+Prompt inventory discovery uses a separate one-shot worker without promoting the session. Computer-use and Playwright tools also isolate native/browser execution in sidecars; see their [computer-use](../operations/COMPUTER-USE.md) and [Playwright](../operations/PLAYWRIGHT.md) documentation.
 
 ### Single active pie host per machine
 
-Exactly one pie host — the VS Code extension or the standalone Node entry, never both — is active per machine, with VS Code priority. The authority is an OS-owned exclusive listener on a fixed loopback port (`application/hosts/lib/host-coordinator.ts`; default `1996`, `PIE_HOST_COORDINATOR_PORT` override). Ownership is the bound socket itself: the kernel grants `listen(127.0.0.1)` to exactly one racing starter and releases it when the owning process dies. There is no PID file to go stale, and no component ever kills a process by PID. Both composition roots acquire ownership BEFORE environment resolution/runtime/backend startup and hold it until shutdown has actually finished: the standalone entry releases in its shutdown `finally` after the backend drain, and `PieExtension` releases only after `runtime.shutdown()` completes. A failed startup aborts the handle immediately.
+Only one application host is active per machine. An exclusive loopback listener owns this right, acquired before backend startup and held until shutdown completes. A second standalone host or VS Code window refuses to start; VS Code can request a bounded graceful handoff from standalone. It must acquire the released listener before starting its backend and never kills another host by PID.
 
-Behavior per contender:
+The coordinator listener is separate from the browser server and remains loopback-only, including when browser LAN access is enabled. Ownership is machine-wide across OS user sessions. Handoff is unauthenticated local IPC within the supported single-user desktop scope; failed probes or an occupied port do not authorize takeover. The implementation is `application/hosts/lib/host-coordinator.ts`.
 
-- **Standalone**: one bounded attempt. Any active pie host (either kind) is a hard refusal with an explicit multi-line terminal message (exit code 2); nothing was started.
-- **Second VS Code window**: refused with a visible notification while the first window's pie keeps running.
-- **VS Code handoff from standalone**: a progress notification reports that a stop was requested; the standalone host receives one unauthenticated local `shutdown` request, logs that VS Code requested the stop, performs its own graceful shutdown (saved sessions are retained), and releases the port. VS Code visibly waits a bounded time (`PIE_HOST_HANDOFF_TIMEOUT_MS`, default 30s) and treats a fresh successful bind as the only release evidence; a timeout fails closed (`refused-handoff-timeout`) without terminating anything.
-- **Crash or foreign occupant**: a dead holder frees the port through the OS, so the next starter binds; an occupant that does not answer the pie probe (or a VS Code owner, which answers `rejected`) fails acquisition closed (`refused-port-unavailable` / plain refusal). Probe misses never widen into process inspection.
+## State and event flow
 
-Scope and limits: the coordinator is loopback-only (no LAN exposure) and machine-global across OS user sessions — a host under another local user also occupies it, so a second user is refused instead of taking over, and the graceful handoff request is unauthenticated local IPC accepted within this single-user supported-desktop scope. Concurrent startups are settled by bind atomicity (exactly one winner); no session-level locks, files, or live-process restarts are involved.
+Pie uses a CQRS/Elm-style state loop:
 
-### Computer-use runtime isolation
-
-The generic `computer` pi extension adds a separate native sidecar boundary below the PI backend. Each durable pie session owns one lazy Node child that loads Cua Driver and NutJS and communicates through bounded JSONL; screenshots and sequence traces remain artifact files. Exact PID/HWND and foreground validation gates global physical input, while parent/child held-input ledgers provide cancellation, timeout, restart, close, and shutdown release barriers. The webview's ordinary tool-result renderer displays mixed text/image content; no computer-specific host state or transcript component is introduced. See [COMPUTER-USE.md](../operations/COMPUTER-USE.md) for the full contract and evidence.
-
-### Playwright runtime isolation
-
-The first-class `playwright` pi extension adds an independent rendered-page sidecar boundary below the PI backend. Each durable Pie session owns one lazy Node child, and each Playwright tool session owns one dedicated Playwright-pinned headless Chromium process plus an isolated primary `BrowserContext`. Bounded versioned JSONL carries requests and accessibility evidence; complete reduced snapshots, screenshots, downloads, oversized code results, and storage state remain session artifacts. Revision-scoped AI accessibility refs fail closed after any state-changing action, while parent deadlines, Windows process-tree termination, stdin/parent-liveness watching, explicit close, and `session_shutdown` prevent Chromium descendants from outliving their owner. The parent never imports Playwright or attaches to user browsers. Ordinary tool-result rendering and generic image-context projection require no Playwright-specific host state or transcript component. See [PLAYWRIGHT.md](../operations/PLAYWRIGHT.md) for the full behavior and evidence.
-
-## 2. Architecture Pattern
-
-The system follows a **CQRS/Elm-style MVI** pattern. User actions and backend events are unified into a single `Event` type processed by a pure reducer. The reducer returns updated state plus effect descriptors. An effect runner executes side effects (RPCs, persistence, logging) and feeds results back as events. Each renderer is a passive renderer of projected state — it never mutates logic state directly.
-
-This pattern was chosen to eliminate the class of bugs caused by distributed mutable state across host and renderer, ensure testability of all state transitions without I/O, and make streaming/optimistic-update interactions explicit and auditable.
-
-See git history (commit `d581d83`) for historical context on the migration from Redux to this architecture.
-
----
-
-## 3. Information Flow
-
-```
-                       ┌──────────────────────────────────────────┐
-  Renderer Command ──► │                                         │
-  Backend Event     ──► │   Reducer: (ArchState, Event)           │
-  EffectResult     ──► │      → { archState', effects: Effect[] } │
-  Timer Msg        ──► │   (pure — no I/O, no Redux)             │
-                       └──────────┬───────────────────────────────┘
-                                  │
-                ┌─────────────────┴──────────────────┐
-                │                                    │
-                ▼                                    ▼
-     Projection: ArchState → ViewState    EffectRunner executes:
-                │                           - RPCs to PI backend
-                ▼                           - File operations
-       Per-session snapshot channel          - Notifications
-                │                           - Analytics export
-                ▼                           Results → Event
-       Renderer mirror[sessionPath]
-                │
-                ▼
-       Render active session
+```text
+Renderer commands / backend events / effect results
+                         |
+                         v
+                  Pure reducer
+                   /         \
+                  v           v
+              ArchState     Effects
+                  |           |
+                  v           v
+              Projection   EffectRunner --> results return as events
+                  |
+                  v
+              ViewState snapshots --> renderers
 ```
 
-**File locations:**
+This makes state transitions testable without I/O and avoids competing application state in the host and UI.
 
-| Box | File |
-|-----|------|
-| Reducer | `application/backend/conversation-state/reducer.ts` |
-| EffectRunner façade | `application/backend/conversation-state/effects/effect-runner.ts` |
-| Session-operation effect controller | `application/backend/conversation-state/session-operation-effect-controller.ts` |
-| Projection | `application/backend/conversation-state/projections/projection.ts` |
-| Snapshot transport | `application/hosts/lib/renderer-delivery/sync.ts`, `application/hosts/vscode/sidebar/provider.ts`, `application/hosts/lib/renderer-delivery/`, `application/hosts/browser/` |
-| Backend event dispatch | `application/backend/conversation-state/event-dispatch.ts` |
-| Message router | `application/backend/conversation-state/message-router.ts` |
-
----
-
-## 4. Key Concepts
-
-**Command** — an intent posted from a renderer (the VS Code webview or a browser page) to the host. Carries `corrId` (correlation ID) and `sessionPath`. Defined in `application/backend/conversation-state/commands.ts`.
-
-**Event** — any input to the reducer: a wrapped Command, a backend streaming event (delta, tool call, message finished), or an EffectResult. Defined in `application/backend/conversation-state/events.ts`.
-
-**Effect** — a plain data descriptor of a side effect the reducer wants performed (e.g., `SendRpc`, `InterruptRpc`, `PersistTabs`). Never executed inside the reducer. Defined in `application/backend/conversation-state/effects/effects.ts`.
-
-**EffectRunner** — the single host-side executor façade. It owns no semantic application or lifecycle state, routes generic effects directly, and delegates session-operation execution to `session-operation-effect-controller.ts`. That controller may retain only opaque timer handles, abort controllers, promises, resolver functions, cancellation tickets, and correlation resources. Effects produce typed observations for the reducer.
-
-**Operation registry** — `ArchState.operations`, a reducer-owned `Record` keyed by stable operation ID. It owns source and causal identity, session/branch and process generations when known, semantic phase, acknowledgement/commit evidence, bounded reconciliation, recovery, and one immutable terminal outcome for create/duplicate/open/close/restart/send/edit/interrupt/continue/manual-compact.
-
-**Projection** — the pure function `ArchState → ViewState` that computes what a renderer should display. Located in `application/backend/conversation-state/projections/projection.ts`.
-
-**LivePipelineState** — the sole host authority for active assistant text/reasoning, tool drafts/executions/previews, producer phase, sequence/checkpoint state, and extension-UI ownership. Durable `ArchState.transcript` contains completed/interrupted history only.
-
-**Snapshot** — a full compact `ViewState` used for normal rendering, initial load, and recovery. It projects durable history joined with `LivePipelineState`; no direct delta channel exists. Large tool/reasoning/subagent bodies are represented by retrieval metadata and delivered once, on explicit expansion, through a bounded detail-response path rather than repeated in snapshots.
-
-**Mirror** — the renderer-side cache of `ViewState` per session. The shared implementation is managed in `application/frontend/lib/hooks/use-host-sync.ts`.
-
-**GlobalViewState / SessionViewState** — the ViewState is composed of global fields (session list, tabs, prefs) and per-session fields (transcript, busy, file changes). Renderer contracts are owned by `application/lib/protocol/`, with RPC envelopes and worker events defined under `harness/agent-processes/lib/rpc/`.
-
----
-
-## 5. Data Flow Scenarios
-
-### User sends a message
-
-1. Renderer dispatches `{ type: 'send', sessionPath, text, localId }`.
-2. For non-empty text or composer inputs, the host wraps it as a `Send` Command with a fresh `corrId` + local message ID.
-3. Reducer inserts an optimistic user message into `state.pending[corrId]`, registers the stable operation/attempt, and returns a `SendRpc` effect.
-4. EffectRunner delegates the RPC to the session-operation effect controller, which routes it through the per-session operation queue and retains only opaque execution/correlation resources.
-5. Acknowledgement is non-terminal. Correlated semantic start, status, settlement, or generation death updates the reducer-owned operation; bounded status reconciliation resolves acknowledgement ambiguity.
-6. A definitive pre-commit failure reverts via `state.pending[corrId]`; commit evidence permanently retires rollback ownership. Every accepted operation receives at most one immutable terminal outcome.
-7. An empty submit after an interrupted assistant tail is different: the host emits `Continue` → `ContinueRpc` → `message.continue`, adds no user row, and enters the SDK continuation lifecycle without `session.prompt()` or the `before_agent_start` skill-pruning prepass.
-
-### Streaming assistant reply
-
-1. Before the provider call, the backend creates an in-memory turn accumulator with opaque turn/attempt IDs and a monotonic sequence.
-2. Provider transport observations classify gate queue, header wait, headers received, raw chunks, retry, tool work, and teardown. No semantic inactivity lease exists: raw chunks are transport observations only, and provider liveness is bounded by the contractual queue/header/body deadlines rather than any elapsed-time lease.
-3. SDK observations become typed `live.semantic` envelopes. Invalid observations consume a sequence as `observation.rejected`; concurrent tool-call start/delta/end observations retain bounded raw argument JSON as ordered keyed drafts until matching execution starts, and each tool input and progress/terminal preview is normalized to a bounded representation. There is no total tool-count limit: after durability is confirmed, the backend accumulator semantically compacts older settled-tool input/result payloads while retaining their lifecycle identity and a detailed recent tail.
-4. The host validates each envelope and reduces it into `ArchState.livePipeline`. Gaps, rejected observations, unknown owners, and a missing final sequence request `liveTurn.checkpoint` through the EffectRunner. A compact repair checkpoint does not overwrite richer durability-confirmed tool details that the host already received, so normal rendering does not regress after repair.
-5. Projection joins durable transcript rows with the active live turn, replaces large detail bodies with compact `LazyDetailRef` metadata, and posts a full `ViewState` through the one-post delivery controller. Expanding a detail deduplicates a bounded retrieval from the durable backend transcript or host-owned live state and sends the body once as an imperative response.
-6. The webview reports receipt, app commit, signed transcript-leaf commit, and paint as separate protocol-v4 evidence.
-7. SDK assistant/tool terminal callbacks are hot-patched to publish only after durable append returns a stable entry ID. The host then commits the durable terminal message and clears live state in one reducer transaction. A host-only, non-authoritative render identity carries the live row's canonical ID onto that durable projection so virtualized row and scroll identity survive even when the durable message ID differs; durable ownership and protocol evidence still use the real ID. Restart/reopen never replays a tool and normalizes dangling persisted work to interrupted.
-
-### Tab switching
-
-1. Renderer dispatches `{ type: 'openSession', sessionPath }`.
-2. The Command is dispatched to the reducer, which updates `ArchState.sessions.activePath`.
-3. Projection produces a ViewState for the new active session.
-4. The renderer receives a snapshot for the new active session.
-
-### Extension-driven transcript mutation (pruning)
-
-1. Backend emits a custom message with `customType: "pruning-result"` and typed `customDetails`.
-2. Reducer processes it as a `MessageFinished` event, updating `ArchState.transcript`.
-3. Projection includes pruning data in ViewState; the renderer renders the pruning banner from structured data (no regex parsing).
-
----
-
-## 6. Boundaries and Contracts
-
-### Host ↔ PI backend
-
-- JSON-RPC over stdio. Request/response plus streaming event lines.
-- Transcript snapshots serialize complete tool results once in ordered
-  `ChatMessage.parts`. The legacy flat `toolCalls` mirror omits a result on the
-  wire when the matching part already carries it; the host restores that mirror
-  immediately after receipt. This is lossless and prevents nested subagent
-  transcripts from being doubled by JSON serialization.
-- Backend events carry `sessionPath` — missing `sessionPath` is a protocol defect.
-- The host serializes all RPCs per session to prevent races.
-- The host resolves one OS-local runtime-data root (`PIE_DATA_DIR` or the platform default) and forwards it to the backend; the canonical analytics database is `<data-root>/analytics/analytics.sqlite` and is written only under canonical analytics authority (see §9). Transcript location is separate: the gated storage cutoff (`PIE_STORAGE_CUTOFF_AUTHORIZATION=p7b-authorized-v1`) is what points the backend session root at `<data-root>/sessions`, and without that value the legacy session root below stays in effect.
-- The host normalizes one absolute agent/session storage authority and supplies
-  it through `PI_CODING_AGENT_DIR` / `PI_CODING_AGENT_SESSION_DIR`; with neither
-  configured, the embedded SDK keeps its own defaults. The session root's parent
-  is the one machine-wide outcomes authority: workspace-sharded run stores are
-  aggregated from
-  that same root, never selected by cwd. The backend uses the canonical session
-  root for create and fork, and listing reads it (plus its
-  per-cwd subdirectories) exclusively — the legacy `<agentDir>/sessions` root is
-  retired once a canonical root is configured. The installer performs a second
-  idempotent session/completed-run merge after extension installation to capture writes from
-  an old backend that retained its pre-migration process environment. Migration
-  sources are registered as bounded receipts, and `npm run doctor` detects both
-  newly stranded legacy sessions and post-migration outcomes writes instead of
-  the runtime scanning legacy roots forever.
-  Listing projects a path-deduplicated canonical inventory through a derived,
-  versioned SQLite metadata sidecar adjacent to the session authority. Strong
-  stat fingerprints identify unchanged files; append checkpoints plus bounded
-  head/tail witnesses guard the ordinary SDK append path and let growing JSONL
-  files resume metadata parsing without rescanning their established prefix.
-  These samples are not a hash of the whole prefix: a same-inode interior
-  rewrite followed by an append triggers a full reparse only when a sampled
-  boundary changes. The transcript JSONL remains the source of truth, and
-  corrupt/incompatible index data is discarded and rebuilt. This
-  SQLite database is an operational point-lookup/upsert cache on the request
-  path; DuckDB remains confined to the `analytics/analysis/` batch analytics workspace,
-  which reads the legacy export/storage formats and never the canonical store.
-  Before an existing sidecar snapshot is projected, a coalesced filename-only
-  directory scan (no transcript reads or stats) removes absent rows durably;
-  changed files then reconcile in the background. This publication fence runs
-  on every list so forgets and external deletions from another backend process
-  cannot leak stale metadata, while an inaccessible root retains the last
-  complete catalog. When a store has no snapshot, the first list waits for at
-  least one newest file and otherwise caps its useful initial slice at 16 MiB
-  or 24 files. Remaining work publishes in batches capped at 64 MiB or 128
-  files, emitting catalog-change events after each durable batch. Live sessions
-  are overlaid afresh. Missing roots count as empty, and an
-  unavailable sidecar falls back to SDK discovery. Explicit resume/recovery
-  paths remain migration-free.
-
-### Host ↔ Renderers
-
-The same one-way state contract applies to the VS Code sidebar webview and the browser renderer. `HostRuntime` owns the state and command/effect path; each composition supplies its renderer adapter and transport. The browser server remains loopback-only by default; its explicit LAN option does not change the separately loopback-only single-host coordinator.
-
-- Unidirectional state flow: host → renderer via snapshots; renderer → host via message commands.
-- Ordered assistant `ChatMessage.parts` are authoritative on this boundary. If
-  they contain tool calls, the host omits the redundant legacy `toolCalls`
-  mirror from the renderer projection; legacy-only messages keep it.
-- Streaming snapshots remain latest-wins full snapshots, with cadence backed
-  off for very part-heavy transcripts so multi-megabyte state cannot monopolize
-  Chromium's main thread.
-- The transcript host/surface survives tab selection, but its session-owned
-  virtualizer remounts at the new session's bottom. Completed tool cards older
-  than the signed commit tail materialize near the viewport; live, queued, and
-  signed-tail cards never defer. Explicit bottom jumps retain bounded scroll
-  ownership through delayed row measurement and yield immediately to manual
-  scrolling.
-- Per-session revision counter detects missed snapshots; recovery is a full snapshot.
-- `hostInstanceId` detects extension restarts; webview resets all mirrors on change.
-- `WEBVIEW_PROTOCOL_VERSION` fails closed on incompatible host/webview wire shapes. State/hello and readiness handshakes also carry the deterministic compile-time `PIE_BUILD_ID`, but build identity is diagnostic only at runtime: same-protocol renderer assets remain usable with the running extension host, so active sessions continue until the user chooses to reload. Compile/validate emits coordinated host and renderer identities. Ordinary build/watch publication stages content-addressed complete runtime generations plus live renderer generations. The startup loader selects and leases the newest verified runtime before loading host code; a normal VS Code restart adopts staged changes without another install command. Running windows retain their selected host/backend/worker paths until successful shutdown and only show an informational update-ready status. A newly started host uses its own renderer baseline unless a newer live publication exists. Current/prior and leased runtime generations remain available; dead-host leases are retained conservatively for orphan workers. Publication never replaces loaded bundles or rewrites the installed manifest. One-time startup-loader setup and explicit loader upgrades publish immutable loader files and select the next-start entrypoint through an atomic manifest update, avoiding Windows locks on running output. All publication refuses folder/manifest version skew; shared SDK upgrades remain explicit installation work.
-
-See [`docs/contracts/STATE_CONTRACT.md`](../contracts/STATE_CONTRACT.md) for the full invariant set.
-
----
-
-## 7. State Ownership Rules
-
-| Owner | What it holds |
-|-------|--------------|
-| **ArchState** (reducer) | All application and semantic lifecycle state: sessions, transcripts, operation registry, phase/ack/commit/reconciliation/recovery, model settings, prefs, file changes, optimistic rollback state, and backend event routing |
-| **EffectRunner façade and delegated controllers** (opaque resources only) | Timer handles, abort controllers, promises/resolvers, cancellation tickets, correlation resources, and execution queues; never user-visible semantic phase or outcome |
-| **Renderers** (VS Code webview or browser page; local only) | Scroll position, focus/caret, hover, drag, animation, context menu position, protocol bookkeeping (revision refs), per-keystroke draft buffer |
-
-**Rule of thumb:** if you're unsure whether something is host state or renderer-local state, it's host state.
-
-State-shape constraint: all keyed collections in host state use `Record<string, T>` — never `Map`/`Set`.
-
-Full allowlist of webview-local state: see [`STATE_CONTRACT.md`](../contracts/STATE_CONTRACT.md) § Webview-Local State.
-
----
-
-## 8. Extension Points
-
-### Adding a new Command (user action)
-
-1. Add variant to `application/backend/conversation-state/commands.ts`.
-2. Add corresponding Event wrapper in `application/backend/conversation-state/events.ts`.
-3. Handle in `application/backend/conversation-state/reducer.ts` — return state change + effects.
-4. If an RPC is needed, add Effect variant in `application/backend/conversation-state/effects/effects.ts`.
-5. Add execution logic in `application/backend/conversation-state/effects/effect-runner.ts`.
-6. Wire the renderer message → Command conversion in `application/backend/conversation-state/message-router.ts`.
-7. Add a reducer unit test under the owning application backend test root.
-
-### Adding a new backend event type
-
-1. Add variant to `Event` union in `application/backend/conversation-state/events.ts`.
-2. Handle in reducer — return state change + effects.
-3. Wire the raw backend event → typed Event dispatch in `event-dispatch.ts`.
-4. If the event requires a side-effect (RPC, notification, file operation), add an Effect variant.
-
-### Adding a new ViewState field
-
-1. Add the `ViewState` field to its canonical DTO in `application/lib/protocol/` and export it from `application/lib/protocol/index.ts` when it is part of the renderer contract.
-2. Populate in the projection function (`selectViewState`).
-3. Consume in renderer components.
-4. Update test ViewState literals in `application/hosts/test/vscode/sidebar/sidebar-sync.test.ts` and `test/integration/sync-contract.test.ts`.
-
-### Adding a new Effect type
-
-Effects are grouped into namespaces (e.g., `SessionRpc`, `SessionLifecycle`, `FileOperation`, `PostImperative`). To add a new effect:
-
-1. Add variant to the appropriate group in `application/backend/conversation-state/effects/effects.ts` (or create a new group if it's a new category).
-2. Add result Event variant to `application/backend/conversation-state/events.ts` (if the effect produces a result).
-3. Add execution case in `application/backend/conversation-state/effects/effect-runner.ts`.
-4. Handle the result in the reducer.
-
----
-
-## 9. Conserved Accounting
-
-Analytics have exactly one authority at a time, selected by the activation manifest in the resolved state directory (see [`docs/contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md`](../contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md)).
-
-**Legacy authority (no active generation).** `StatsService` owns two correlated but separate persisted authorities. The append-only billable-invocation ledger records one immutable settlement for every observable provider call and supplies session usage/cost, aggregate usage/cost, and exports. The activity timeline persists correlated busy, provider, retry-wait, tool, history-compaction, and auxiliary intervals. `WorkingTimeService` restores its clock from those intervals; run analytics remain a compatibility dual-write and own productivity/outcome dimensions. Time is never inferred from tokens or cost.
-
-**Canonical authority (a validated active generation).** The host starts the canonical recorder (a child process owning `<data-root>/analytics/analytics.sqlite`) and proves the read path with a disposable query before capture is ready; any failure fails startup closed. Capture is an exclusive authority switch, never a dual-write: settlements are submitted to the recorder and are **not** appended to the legacy JSONL ledger, and `queryRunAnalytics()` returns an explicit empty legacy run layer while canonical session usage and aggregates are served from the canonical read model. Nothing is imported from the legacy stores, and no transcript scan reconstructs aggregates.
-
-Provider seams emit exact usage when available and explicit gap settlements otherwise. Subagents preserve exact provider-response evidence within the terminal budget, emit one explicit gap identity per overflow response, and retain dispatched-attempt fallback evidence; unexpected controller-free auxiliary stream calls are classified as `other`. Under legacy authority, ledger rows preserve provider-qualified model identity, source kind, session/branch and parent operation/run/tool correlation, outcome/timing, provider totals/reported cost, and an immutable pricing-catalog snapshot; under canonical authority the recorder stores the same settlement evidence (provider/model identity, usage channels, reported cost, timing, outcome) as canonical facts. Every invocation activity interval carries the matching ledger identity, while busy/tool intervals retain operation/run/tool identity across restart.
-
-Under legacy authority, ledger, activity, run-history, checkpoint, privacy/forget, and export mutations share a PID-owned workspace transaction lock. A durable privacy fence is committed before scrub, stale hosts reload canonical state inside the lock, and checkpoints merge per-session state rather than replacing a sibling host's snapshot. Transcript-derived usage is accepted only for idempotent migration/rebuild; the renderer never falls back to transcript accounting and displays explicit unknown if the ledger projection is absent. Private rows/intervals remain process-local or are omitted, and exports contain ordinary data only. See [`docs/contracts/STATE_CONTRACT.md`](../contracts/STATE_CONTRACT.md#conserved-billable-accounting).
-
-## 10. Invariants
-
-1. **Reducer purity** — `(State, Event) → { state, effects }`. No I/O, no `Date.now()`, no randomness.
-2. **Single effect executor** — side effects only happen in the EffectRunner.
-3. **Renderer passivity** — each renderer dispatches Commands and applies snapshots. It never mutates logic state.
-4. **Session addressing** — every snapshot and session-scoped event carries `sessionPath`.
-5. **Operation conservation** — every accepted state-changing action has a stable reducer-owned operation identity and at most one immutable terminal outcome; transport acknowledgement is never completion.
-6. **Settlement correlation** — `agent.settled` must match operation/request/turn/attempt plus backend/worker generation when present; stale settlement cannot mutate newer work.
-7. **Optimistic correlation** — pending ops are tagged with `corrId` for exact rollback, independently of stable lifecycle identity.
-8. **Background preservation** — snapshots to non-active sessions update their mirrors; they are never dropped.
-9. **Record-only state** — `Record<string, T>` for keyed collections (no Map/Set in host state).
-10. **Serialized execution** — session RPCs are FIFO-ordered through the lifecycle + session queues, but queues are execution aids rather than lifecycle authority.
-11. **Accounting conservation** — one billable provider invocation maps to at most one immutable settlement record: a legacy ledger row (legacy authority) or a canonical settlement fact (canonical authority), never both. Missing usage is an explicit gap, never an inferred zero.
-12. **Single active host** — machine-wide pie host ownership is the OS-owned exclusive loopback coordinator listener, acquired before runtime/backend startup and held until shutdown finishes. A second host refuses (standalone, second VS Code window) or takes over only through a bounded graceful handoff; nothing is ever killed by PID and probe failures fail closed.
-
-See [`docs/contracts/STATE_CONTRACT.md`](../contracts/STATE_CONTRACT.md) for additional invariants (snapshot recovery, cleanup, selection ownership).
-
----
-
-## 11. Module Map
-
-| Directory | Responsibility |
-|-----------|---------------|
-| `application/backend/conversation-state/` | Pure CQRS/MVI state, reducer, effects, projections, session-operation lifecycle, and message routing |
-| `application/backend/{composition,agent-connection,session-actions,transcript-delivery,settings,file-changes,analytics-views}/` | Host-neutral application composition and backend services |
-| `application/frontend/` | Shared passive Preact UI, organized by shell, transcript, composer, settings, analytics, and other concerns |
-| `application/hosts/vscode/` | VS Code activation, sidebar, editor integration, runtime loader, logging, and package/toolchain ownership |
-| `application/hosts/browser/` | Browser HTTP/WebSocket ingress, LAN policy, static assets, and confirmations |
-| `application/hosts/standalone/` | Standalone CLI/startup/shutdown and browser-only platform adapters |
-| `application/hosts/lib/` | Shared host coordination, platform contracts, renderer delivery, and asset manifests |
-| `application/lib/{protocol,validation}/` | Browser-safe application message contracts and validation |
-| `analytics/` | Analytics contracts, capture, recording, storage, queries, projections, authority, legacy accounting, and usage facts |
-| `harness/agent-instructions/` | Authored agents, skills, discovery, selection policy, and prompt assembly |
-| `harness/agent-processes/` | Worker, coordinator, RPC, SDK integration, and helper-process owners |
-| `harness/session-storage/` | Session catalog, metadata, ownership, lifecycle, settings, transcript and durable-detail storage owners |
-| `harness/model-providers/` | Provider authentication, catalog discovery, pricing, request policy, concurrency, traffic, and retry/failover owners |
-| `harness/tools/` | Pie-owned tool implementations, catalog, selection, execution safety, result processing, and package integrations |
-| `lib/` | Cross-root low-level data-root, validation, sensitive-data, structured-logging, and temporary-file helpers |
-| `extensions/` | Stable Pi SDK discovery adapters and package metadata for reusable plugins |
-| `scripts/` | Build, install, model-config, migration, diagnostics, and verification orchestration |
-| `test/integration/` | Repository-root integration gates spanning multiple owner packages |
-
----
-
-## 11. Further Reading
-
-- [`docs/contracts/STATE_CONTRACT.md`](../contracts/STATE_CONTRACT.md) — authoritative host ↔ webview invariants
-- [`docs/contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md`](../contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md) — analytics authority, data root, privacy and the gated storage cutoff
-- [`docs/architecture/STATE_CONTRACT_IMPLEMENTATION.md`](STATE_CONTRACT_IMPLEMENTATION.md) — transport/protocol mechanics, byte budgets, and file mappings behind those invariants
-- [`docs/contracts/STATE_CONTRACT_HISTORY.md`](../contracts/STATE_CONTRACT_HISTORY.md) — completed remediation chronology
-- [`docs/architecture/ARCH-OVERVIEW.md`](ARCH-OVERVIEW.md) — concise file map and glossary
-- [develop-pie skill](../../harness/agent-instructions/skills/develop-pie/SKILL.md) — Pie-specific conventions, test commands, and build instructions
-- Git history (commit `d581d83`) — original migration plan
+- **Commands** express user intent; **events** are reducer inputs; **effects** describe work to execute outside the reducer.
+- **ArchState** owns application state and semantic operation lifecycle. Keyed state uses `Record<string, T>`, not `Map` or `Set`.
+- **EffectRunner** and delegated controllers own execution resources such as timers, queues, and promises, not user-visible lifecycle truth.
+- **Projection** joins durable history and active live-turn state into `ViewState`.
+- **Renderers** own only transient presentation state and protocol bookkeeping. Session selection, settings, editing, and committed drafts belong to the host.
+
+For example, sending a message creates optimistic state and a stable operation identity, then emits an RPC effect. Backend observations reconcile that operation through the reducer. An RPC acknowledgement is not completion; rollback depends on definitive pre-commit failure, not merely a timeout.
+
+## Communication and recovery
+
+The host communicates with the agent coordinator over bounded JSONL request/response and event streams. Session-scoped messages identify their session explicitly. Worker ownership and generation checks prevent stale processes or delayed events from changing a replacement session.
+
+Backend live events update the host's live-turn state; missing or incompatible sequences trigger checkpoint recovery rather than tool replay. Ordinary host-to-renderer state delivery uses full compact snapshots, not patches. Large tool and reasoning details are retrieved separately on expansion. Each renderer has independent delivery and recovery state, so a blocked browser or sidebar does not stall another renderer or agent execution.
+
+Unexpected backend exit ends orphaned in-flight work with an interruption notice. Restart is explicit, not automatic. Builds stage immutable runtime generations; running hosts keep their loaded files until a normal restart, while compatible renderer updates can be published independently.
+
+The [state contract](../contracts/STATE_CONTRACT.md) owns synchronization, lifecycle, and recovery guarantees. [Implementation notes](STATE_CONTRACT_IMPLEMENTATION.md) explain transport budgets, storage caches, and protocol mechanics. The [GUI development guide](../operations/GUI-DEVELOPMENT.md) covers publication and reload workflows.
+
+## Ownership and dependencies
+
+- Harness code must not depend on application or concrete host implementations. Analytics core must not depend on application state, host adapters, or harness execution code.
+- The application backend uses contracts and injected platform ports, not concrete host or frontend implementations. Hosts compose the shared runtime rather than introducing another state store, reducer, or agent backend.
+- Frontend dependencies, including transitive imports, must remain browser-safe: no Node APIs, SDK runtime, analytics recorder, or host adapters.
+- Root `lib/` contains cross-domain low-level helpers, not domain implementations. Tool and skill policies must not import their selection coordinator.
+- Contracts stay with their owner and have one definition. These boundaries apply to type-only imports too.
+
+Session persistence belongs to `harness/session-storage/`; provider catalog, pricing, and request policy belong to `harness/model-providers/`. Tools live under `harness/tools/`, while `extensions/` supplies Pi discovery adapters. Authored instructions and their discovery live under `harness/agent-instructions/`; shared tool/skill selection orchestration lives under `harness/tool-and-skill-selection/`.
+
+## Storage and analytics
+
+Transcript JSONL is durable session truth. Session catalog indexes and browse caches are derived and rebuildable, not alternative transcript authorities. Explicit session paths remain distinct from execution-worker readiness.
+
+Analytics have exactly one active authority: legacy stores by default, or the canonical SQLite store selected by a validated activation manifest. Capture is never duplicated across those authorities. Analytics persistence does not block agent execution; usage, pricing provenance, and activity timing remain separate facts rather than estimates reconstructed from transcript display.
+
+The [analytics implementation contract](../contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md) owns authority selection, data-root resolution, privacy, and the separately gated session-storage cutoff. Source support does not establish that an installation has activated either gate. The [local analysis workspace](../../analytics/analysis/README.md) reads legacy exports, not the canonical store.
+
+## Where to make changes
+
+The state loop lives in `application/backend/conversation-state/`:
+
+| Change | Main entry points |
+|---|---|
+| User action | `message-router.ts`, `commands.ts`, `events.ts`, `reducer.ts` and its handlers |
+| Side effect | `effects/effects.ts`, `effects/effect-runner.ts`; session mutations delegate to `session-operation-effect-controller.ts` |
+| Backend observation | `application/backend/agent-connection/client.ts`, then `event-dispatch.ts`, `events.ts`, and reducer handlers |
+| Displayed state | `projections/projection.ts`, canonical DTOs in `application/lib/protocol/`, and the relevant frontend consumer |
+| Platform capability | Inject a port through application composition and implement it in the appropriate host adapter |
+
+Keep reducer transitions pure, address session work explicitly, and test the owning behavior. See the [development skill](../../harness/agent-instructions/skills/develop-pie/SKILL.md) for commands and workflow, and the [UI philosophy](UI-DESIGN-PHILOSOPHY.md) for presentation choices.

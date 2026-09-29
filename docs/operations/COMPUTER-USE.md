@@ -4,11 +4,11 @@ Pie exposes one generic `computer` tool for visible Windows applications. The im
 
 ## Selected implementation
 
-Pinned dependencies live in `extensions/computer-use/package.json` and its lockfile (the implementation lives under `harness/tools/computer-use/`, but the dependency manifest, lockfile, and `node_modules` stay in the extension directory):
+Pinned dependencies are owned by the [extension manifest](../../extensions/computer-use/package.json) and [lockfile](../../extensions/computer-use/package-lock.json). The implementation lives under `harness/tools/computer-use/`, while the dependency manifest, lockfile, and `node_modules` stay in the extension directory:
 
-- `@trycua/cua-driver@0.12.5` — discovery, accessibility observations, desktop capture, launch, primary focus, and lifecycle;
-- `@computer-use/nut-js@4.2.0` — foreground visible-region capture, generic focus fallback, and all physical keyboard/pointer delivery; a bounded built-in Win32 PID/HWND-validated fallback handles Windows foreground-lock cases left unresolved by both libraries;
-- `pngjs@7.0.0` — bounded model/display PNG generation.
+- `@trycua/cua-driver` — discovery, accessibility observations, desktop capture, launch, primary focus, and lifecycle;
+- `@computer-use/nut-js` — foreground visible-region capture, generic focus fallback, and all physical keyboard/pointer delivery; a bounded built-in Win32 PID/HWND-validated fallback handles Windows foreground-lock cases left unresolved by both libraries;
+- `pngjs` — bounded model/display PNG generation.
 
 Cua + NutJS was selected over Terminator `0.24.32` + NutJS. Both finalists passed all executable candidate-matrix rows, but Cua observations were about 2–21× faster depending on the surface, exposed richer browser/Electron trees, and shipped declared license metadata.
 
@@ -60,7 +60,7 @@ desktop = logicalWindowOrigin + displayCoordinate * logicalWindowSize / displayF
 
 Desktop-absolute coordinates require explicit `scope:"desktop"`. Target-relative coordinates use exclusive upper bounds: `x >= width` or `y >= height` is rejected. Pixel actions require the latest observation revision. Accessibility refs resolve to their exact observed element centers and are also revision scoped.
 
-The `computer` tool no longer registers its own context projection. A source-specific newest-three `computer` screenshot bound is now applied as the first pass of the generic `image-context-guard` extension, which then applies the active model's per-request image maximum (`maxImagesPerRequest`) to the resulting complete context and emits one aggregate omission notice. The newest-three rule preserves all text and artifact paths, all non-computer images, and the durable session/transcript; it is a sub-bound beneath the per-model total, not a standalone handler. See `extensions/image-context-guard/README.md`. This prevents providers with bounded image request limits from failing during long observe/act loops while keeping one deterministic owner for both passes. When a screenshot artifact exists but the active model is text-only, the tool returns an explicit `image_delivery: unavailable` notice with the artifact path and image-capable delegation guidance instead of silently omitting the pixels.
+The `computer` tool no longer registers its own context projection. A source-specific newest-three `computer` screenshot bound is now applied as the first pass of the generic `image-context-guard` extension, which then applies the active model's per-request image maximum (`maxImagesPerRequest`) to the resulting complete context and emits one aggregate omission notice. The newest-three rule preserves all text and artifact paths, all non-computer images, and the durable session/transcript; it is a sub-bound beneath the per-model total, not a standalone handler. See `harness/model-providers/request-validation/README.md`. This prevents providers with bounded image request limits from failing during long observe/act loops while keeping one deterministic owner for both passes. When a screenshot artifact exists but the active model is text-only, the tool returns an explicit `image_delivery: unavailable` notice with the artifact path and image-capable delegation guidance instead of silently omitting the pixels.
 
 ## Deterministic sequences
 
@@ -86,8 +86,6 @@ Evaluation run `cu-20260725-01` used dependency-managed disposable candidates an
 - Public-tool browser dogfood completed ordinary-profile DOM form interaction and canvas click/drag/scroll plus simultaneous W+D. The independent fixture ledger recorded 40 trusted events and a final empty held-key state.
 - Public-tool Godot dogfood exposed and drove fixes for provider image-count exhaustion, unsafe launch correlation, foreground validation, UIA timeout degradation, Cua high-DPI crop, and display/full-image coordinate mismatch. Candidate-level Godot editor/runtime acceptance passed 3/3 each. A final model-orchestrated public-tool Godot workflow did not complete end to end on this desktop: focus/grounding retries and one model timeout stopped before runtime verification. The tool failed closed and cleanup targeted only exact evaluation-owned PIDs/HWNDs.
 - One early dogfood cleanup incident accepted an incomplete launch record and allowed global input to land on foreground VS Code/pie. The implementation now rejects missing/ambiguous identities, validates foreground before every dispatch, revalidates close, and has deterministic regression coverage for this path.
-
-Focused deterministic coverage: 99 passing computer-use tests with one opt-in live test skipped, plus generic renderer, shared result-format, package-runner, and fixture no-op discrimination tests. The extension build and root typecheck passed on 2026-07-25. A disposable detached source snapshot completed root `npm ci`, normal dependency installation, and resolved both pinned native packages. The full `npm run bootstrap` command was not run because it globally updates pi/extensions and could interrupt the controlling session.
 
 ## Install and verification
 

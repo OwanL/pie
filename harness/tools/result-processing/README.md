@@ -1,14 +1,11 @@
 # tool-result-pruner
 
 Deterministic middleware that prunes tool **output bytes** before they enter the
-model's context. One of three context-lean layers in this stack
-(see the root `AGENTS.md` § Context-lean terminology layers):
+model's context. One of three context-lean layers (three-layer definitions:
+[develop-pie skill § Context-lean terminology](../../agent-instructions/skills/develop-pie/SKILL.md#context-lean-terminology)).
+This extension is the **tool-result pruning** layer.
 
-- **history compaction** — pi; LLM-summarize old messages; past
-- **skill pruning** — `skill-pruner`; drop skills/tools from the catalog; prepass
-- **tool-result pruning** — **this extension**; prune a tool result's bytes; per-result
-
-Design and prior art: [`docs/contracts/TOOL-RESULT-PRUNING.md`](../../../docs/contracts/TOOL-RESULT-PRUNING.md).
+Behavior and recovery contract: [`docs/contracts/TOOL-RESULT-PRUNING.md`](../../../docs/contracts/TOOL-RESULT-PRUNING.md).
 
 ## What it does
 
@@ -70,11 +67,10 @@ abandoned and the lossless result is used instead — never silently drop (§7.3
 of bash tool tokens) — vs the lossless tier alone which saved ~0.5% on
 production telemetry.
 
-**Measurement is wired now** (§9.3): `logger.ts` writes a `tool_result_pruned`
+**Measurement** (§9.3): `logger.ts` writes a `tool_result_pruned`
 JSONL event per pruned result (rules fired + before/after token counts) to
-`data/tool-result-pruning.jsonl`, and the `analysis/` pipeline ingests it into a
-`tool_result_pruning` DuckDB table + a `tool-result-pruning-impact.json`
-site-data artifact with by-rule and by-tool aggregates.
+`data/tool-result-pruning.jsonl`. The [analytics/analysis pipeline](../../../analytics/analysis/README.md)
+ingests these events into its `tool_result_pruning` DuckDB table.
 
 ## Safety (enforced in `pipeline.ts`)
 
@@ -115,26 +111,15 @@ site-data artifact with by-rule and by-tool aggregates.
   pruning to only the listed tools (e.g. `["bash", "ls"]`); an empty array `[]`
   prunes nothing. `read` is always skipped (hard safety) even if listed.
   Configurable from the settings menu (comma-separated text field).
+- `rules` — optional per-rule switches; supported keys are defined by the
+  canonical [`RuleToggles`](./types.ts) type. Omitted keys keep their defaults.
 
 The extension can also be turned off via the global toggle env var
 `PIE_EXTENSION_TOGGLES_JSON={"tool-result-pruner": false}` (same mechanism
 `skill-pruner` honors).
 
-## Files
-
-- `index.ts` — factory; registers `pi.on("tool_result")`; recall stash +
-  fidelity marker + `details.pruning` + badge noise gate.
-- `config.ts` — load + cache `toolResultPruning`; toggle check.
-- `types.ts` — `ToolResultPruningConfig`, `Rule`, `RuleContext`, `Profile`,
-  `PruningRecall`, `PruningMeta`.
-- `rules.ts` — the lossless rule implementations (ordered, §7.2).
-- `lossy-rules.ts` — the lossy-recoverable rules (`ls-long`, `git-log`, `grep-group`, `duplicate-collapse`, `progress-noise`).
-- `pipeline.ts` — guards + lossless/lossy orchestration (lossy gated on profile
-  + toggles; stash/marker delegated to `index.ts`).
-- `tokenize.ts` — BPE token counter (gpt-tokenizer cl100k_base, chars/4 fallback).
-- `test/` — `node:test` unit tests (rules, lossy-rules, pipeline, config, index, logger).
-- `types-global.d.ts` — ambient stubs for the `@earendil-works/pi-*` peer
-  packages (precise event/content shapes, `ExtensionAPI` stays `any`).
+Implementation entry point: [`extensions/tool-result-pruner/index.ts`](../../../extensions/tool-result-pruner/index.ts).
+Shared BPE token counting: [`lib/tokenization.ts`](../../../lib/tokenization.ts).
 
 ## Develop
 

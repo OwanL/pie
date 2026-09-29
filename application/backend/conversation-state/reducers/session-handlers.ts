@@ -2099,6 +2099,19 @@ export function handlePendingPathReplaced(state: ArchState, event: Extract<Event
       delete draft.settings.modelHydrationRevisionBySession[oldPendingPath];
     }
 
+    // Session-scoped preferences can be changed while a new chat is still
+    // represented by its pending tab path. Move those settings along with the
+    // session identity before attach clears the old scope; pending-path values
+    // win on collisions because they are the latest edits made during load.
+    const providerOverrides = draft.settings.prefs.subagentProviderTogglesBySession[oldPendingPath];
+    if (Object.prototype.hasOwnProperty.call(draft.settings.prefs.subagentProviderTogglesBySession, oldPendingPath)) {
+      draft.settings.prefs.subagentProviderTogglesBySession[newSessionPath] = {
+        ...(draft.settings.prefs.subagentProviderTogglesBySession[newSessionPath] ?? {}),
+        ...(providerOverrides ?? {}),
+      };
+      delete draft.settings.prefs.subagentProviderTogglesBySession[oldPendingPath];
+    }
+
     // Move composer inputs
     const oldInputs = draft.composer.pendingComposerInputsBySession[oldPendingPath];
     if (oldInputs) {
@@ -2182,6 +2195,20 @@ export function handlePendingPathReplaced(state: ArchState, event: Extract<Event
       })
     : modelDrain.state;
   const effects: Effect[] = [...modelDrain.effects];
+  if (Object.prototype.hasOwnProperty.call(
+    state.settings.prefs.subagentProviderTogglesBySession,
+    oldPendingPath,
+  )) {
+    effects.push({
+      kind: 'SetPrefsRpc',
+      corrId: `prefs:path-replaced:${oldPendingPath}:${newSessionPath}`,
+      prefs: {
+        subagentProviderTogglesBySession: {
+          [newSessionPath]: finalState.settings.prefs.subagentProviderTogglesBySession[newSessionPath] ?? {},
+        },
+      },
+    });
+  }
   if (queuedSends.length > 0 && !holdSendsForModel) {
     effects.push({
       kind: 'DrainPendingSendQueue',

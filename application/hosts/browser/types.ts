@@ -1,5 +1,5 @@
 /**
- * Browser server types (browser server plan §6).
+ * Browser server types.
  *
  * The shared HTTP/WebSocket server that serves the compiled webview UI to an
  * ordinary browser. It binds loopback by default and can expose private IPv4
@@ -29,8 +29,8 @@ export type {
 } from '../lib/platform-contracts/browser-server-seam.js';
 
 /** Concrete construction options: the host-neutral factory options from the
- *  runtime seam extended with the concrete hosts' asset/icon/title locations
- *  (browser server plan §6). Only the VS Code/standalone platform adapters
+ *  runtime seam extended with the concrete hosts' asset/icon/title locations.
+ *  Only the VS Code/standalone platform adapters
  *  construct this shape. */
 export interface BrowserServerOptions extends HostRuntimeBrowserServerOptions {
   clock?: StateDeliveryClock;
@@ -54,7 +54,7 @@ export interface BrowserServerHubSurface {
   getHub(): RendererHub;
 }
 
-/** Bridge for the source-aware inline-confirmation seam (§9): `PieExtension`
+/** Bridge for the source-aware inline-confirmation seam: `PieExtension`
  *  calls `requestInlineConfirm` from the effect runner; the server delivers
  *  the imperative to the INITIATING renderer and resolves on its explicit
  *  response (false on decline, timeout, or disconnect). */

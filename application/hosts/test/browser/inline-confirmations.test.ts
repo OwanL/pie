@@ -1,5 +1,5 @@
 /**
- * Inline confirmation service tests (browser server plan §2.2/§9): the host
+ * Inline confirmation service tests: the host
  * proceeds only on the INITIATING renderer's explicit response; decline,
  * timeout, and disconnect cancel.
  */

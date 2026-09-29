@@ -190,6 +190,31 @@ function click(element: Element | null): void {
   act(() => { element!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
 }
 
+async function showModelTooltip(toolbarProps: Parameters<typeof ComposerToolbar>[0]): Promise<string> {
+  const pending: Array<() => void> = [];
+  const originalSetTimeout = window.setTimeout;
+  const originalClearTimeout = window.clearTimeout;
+  window.setTimeout = ((handler: TimerHandler) => {
+    if (typeof handler === 'function') pending.push(handler as () => void);
+    return pending.length as unknown as number;
+  }) as typeof window.setTimeout;
+  window.clearTimeout = (() => {}) as typeof window.clearTimeout;
+  try {
+    mount(toolbarProps);
+    const trigger = container.querySelector<HTMLElement>('.composer-pinned-controls .model-picker > .pie-tooltip-trigger');
+    assert.ok(trigger, 'selected model tooltip wrapper should render');
+    await act(async () => {
+      trigger!.dispatchEvent(new MouseEvent('mouseenter'));
+      pending.splice(0).forEach((callback) => callback());
+    });
+    const describedBy = container.querySelector<HTMLButtonElement>('.model-picker-trigger')?.getAttribute('aria-describedby');
+    return describedBy ? document.getElementById(describedBy)?.textContent ?? '' : '';
+  } finally {
+    window.setTimeout = originalSetTimeout;
+    window.clearTimeout = originalClearTimeout;
+  }
+}
+
 function openOverflow(): HTMLElement {
   click(container.querySelector('.composer-overflow-trigger'));
   const popover = container.querySelector<HTMLElement>('.composer-toolbar-overflow-popover');
@@ -200,17 +225,45 @@ function openOverflow(): HTMLElement {
 
 test('model width stays natural until secondary items are all overflowed, then uses only remaining row budget', () => {
   const input = {
-    availableWidth: 400,
-    pinnedNaturalWidth: 160,
-    modelNaturalWidth: 86,
+    availableWidth: 410,
+    pinnedNaturalWidth: 314,
+    modelNaturalWidth: 240,
     actionsWidth: 58,
     sectionGap: 4,
     controlGap: 2,
     overflowTriggerWidth: 26,
   } as const;
-  assert.equal(allocateComposerModelWidthBudget({ ...input, hasOverflow: false }), 86);
-  assert.equal(allocateComposerModelWidthBudget({ ...input, hasOverflow: true }), 86, 'the model keeps its natural width when the remaining budget is sufficient');
+  assert.equal(allocateComposerModelWidthBudget({ ...input, hasOverflow: false }), 240);
+  assert.equal(allocateComposerModelWidthBudget({ ...input, hasOverflow: true }), 240, 'a long model label keeps its natural width when the remaining budget is sufficient');
   assert.equal(allocateComposerModelWidthBudget({ ...input, availableWidth: 220, hasOverflow: true }), 56, 'the model alone yields room for settings, reasoning, actions, and the overflow trigger');
+});
+
+test('selected model tooltip identifies the provider-qualified model and display label', async () => {
+  const longModel = { ...model, id: 'gpt-6-astral-preview', name: 'GPT-6 Astra Extended' };
+  const tooltip = await showModelTooltip(props({
+    availableModels: [longModel],
+    selectedModel: longModel.id,
+    selectedProvider: longModel.provider,
+  }));
+  assert.match(tooltip, /provider-a\/gpt-6-astral-preview/);
+  assert.match(tooltip, /GPT-6 Astra Extended/);
+  assert.doesNotMatch(tooltip, /Select model/);
+});
+
+test('disabled selected model tooltip keeps the provider warning beside model identity', async () => {
+  const disabledModel = { ...model, id: 'gpt-6-astral-preview', name: 'GPT-6 Astra Extended' };
+  const tooltip = await showModelTooltip(props({
+    prefs: {
+      ...DEFAULT_CHAT_PREFS,
+      providerToggles: { ...DEFAULT_CHAT_PREFS.providerToggles, [disabledModel.provider]: false },
+    },
+    availableModels: [disabledModel],
+    selectedModel: disabledModel.id,
+    selectedProvider: disabledModel.provider,
+  }));
+  assert.match(tooltip, /provider-a\/gpt-6-astral-preview/);
+  assert.match(tooltip, /GPT-6 Astra Extended/);
+  assert.match(tooltip, /Selected provider is disabled — select another model/);
 });
 
 test('overflow removes secondary controls, then speed, duration, cost, and context regardless of presentation order', () => {

@@ -244,7 +244,7 @@ export function buildTsxArgs(group) {
 }
 
 /**
- * @typedef {{ files: string[], help: boolean }} ParsedArgs
+ * @typedef {{ files: string[], help: boolean, filesFromStdin: boolean }} ParsedArgs
  */
 
 /**
@@ -254,6 +254,7 @@ export function buildTsxArgs(group) {
 export function parseArgs(argv) {
   const files = [];
   let help = false;
+  let filesFromStdin = false;
   let onlyFiles = false;
   for (const arg of argv) {
     if (!onlyFiles && (arg === '--help' || arg === '-h')) {
@@ -264,9 +265,13 @@ export function parseArgs(argv) {
       onlyFiles = true;
       continue;
     }
+    if (!onlyFiles && arg === '--files-from-stdin') {
+      filesFromStdin = true;
+      continue;
+    }
     files.push(arg);
   }
-  return { files, help };
+  return { files, help, filesFromStdin };
 }
 
 function printHelp() {
@@ -277,8 +282,9 @@ function printHelp() {
       `application/hosts/vscode/, analytics/analysis/, scripts/, extensions/<id>/, or tools/<id>/ and uses that package's local\n` +
       `tsx; packages with SDK path aliases additionally pass --tsconfig.\n\n` +
       `Options:\n` +
-      `  --help, -h   Show this help.\n` +
-      `  --           Treat the rest of the args as file paths.\n\n` +
+      `  --help, -h          Show this help.\n` +
+      `  --files-from-stdin  Read a JSON array of file paths from stdin.\n` +
+      `  --                  Treat the rest of the args as file paths.\n\n` +
       `Examples:\n` +
       `  node scripts/verification/run-test-files.mjs application/frontend/test/components/app-smoke.test.ts\n` +
       `  node scripts/verification/run-test-files.mjs harness/tools/subagent/test/schema.test.ts analytics/analysis/test/pricing.test.ts\n`,
@@ -324,13 +330,39 @@ export function runGroup(group, args, signal) {
   });
 }
 
+export async function readFilesFromStdin(stream = process.stdin) {
+  const chunks = [];
+  for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+  let parsed;
+  try {
+    parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  } catch (error) {
+    throw new Error('Expected a JSON array of test file paths on stdin.', { cause: error });
+  }
+  if (!Array.isArray(parsed) || !parsed.every((file) => typeof file === 'string')) {
+    throw new Error('Expected a JSON array of test file paths on stdin.');
+  }
+  return parsed;
+}
+
 async function main() {
   const repoRoot = inferRepoRoot();
-  const { files, help } = parseArgs(process.argv.slice(2));
+  const { files: argFiles, help, filesFromStdin } = parseArgs(process.argv.slice(2));
 
   if (help) {
     printHelp();
     return;
+  }
+
+  let files = argFiles;
+  if (filesFromStdin) {
+    try {
+      files = [...files, ...await readFilesFromStdin()];
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exitCode = 1;
+      return;
+    }
   }
 
   if (files.length === 0) {

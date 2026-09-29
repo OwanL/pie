@@ -4,9 +4,9 @@ import type { ExtensionInfo } from '../../lib/protocol/index.js';
  * extension IDs remain authoritative; unknown/package extensions get fallback
  * metadata so adding one never requires updating this catalog to make it visible.
  *
- * Lives in `shared/` (not `host/session-service/`) because the pure arch
- * reducer (`host/core/`) seeds its initial settings state from it; `core/` may
- * only import from `shared/`. */
+ * Lives in `settings/` (not `conversation-state/`) because the pure arch
+ * reducer (`conversation-state/arch-state.ts`) seeds its initial settings
+ * state from it. */
 export const KNOWN_EXTENSIONS: ExtensionInfo[] = [
   { id: 'subagent', label: 'Subagent', description: 'Delegate tasks to specialized sub-agents' },
   { id: 'safeguard', label: 'Safeguard', description: 'Block dangerous shell commands and file writes' },

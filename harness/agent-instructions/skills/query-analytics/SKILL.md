@@ -48,7 +48,7 @@ raising bounds. Queries are cancelled by aborting the caller; only that
 helper fork is terminated.
 
 The host-side adapter is `CanonicalAnalyticsReadModel`
-(`extension/src/analytics/query-entry.ts`). The store exists only under canonical
+(`analytics/queries/query-entry.ts`). The store exists only under canonical
 analytics authority (a validated active activation manifest in the resolved
 state directory); with no active generation recorded, the runtime stays on legacy
 authority, starts no recorder, and captures nothing — and a corrupt activation
@@ -84,8 +84,8 @@ its own scope and is never silently rewritten into a selected-branch query.
 
 Calendar semantics: state the IANA timezone. Today starts at local midnight;
 the live week includes today and the preceding six local dates, including DST
-boundaries. Canonical facts retain UTC source timestamps. Schema 9 maintains
-small provider/model/day summaries in `analytics_provider_model_daily`, keyed
+boundaries. Canonical facts retain UTC source timestamps. Small provider/model/day
+summaries are maintained in `analytics_provider_model_daily`, keyed
 by the writer's active timezone/window in `analytics_provider_daily_state`;
 these are derived live summaries, not a complete historical calendar table.
 Arbitrary historical calendar queries use source `settled_at_ms` with explicit

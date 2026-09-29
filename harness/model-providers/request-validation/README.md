@@ -29,9 +29,8 @@ copy pi hands the handler, never durable session history):
    recover the omitted evidence.
 
 One deterministic guard owns both passes so two independently ordered handlers
-never enforce overlapping limits. The standalone `computer-use` `context`
-registration is removed when this guard is installed; `computer-use`'s
-projection helper is reused, not duplicated.
+never enforce overlapping limits; `computer-use`'s projection helper is
+reused, not duplicated.
 
 ## Policy source
 

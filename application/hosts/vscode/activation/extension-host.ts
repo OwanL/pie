@@ -84,7 +84,7 @@ export class PieExtension implements vscode.Disposable {
         // Renderer-scoped handshake snapshots for browser sockets: the
         // router answers a browser `ready`/`refreshState` in THAT renderer.
         onForeignRequestState: (rendererId) => this.runtime.browserServer.requestState(rendererId),
-        // Renderer-scoped imperatives (browser server plan §4.4): lazy-detail
+        // Renderer-scoped imperatives: lazy-detail
         // responses answer the INITIATING browser renderer.
         onForeignPostImperative: (rendererId, message) => this.runtime.browserServer.postImperative(message, rendererId),
         onRendererInvalidated: (rendererId, rendererGeneration) =>
@@ -454,7 +454,7 @@ export class PieExtension implements vscode.Disposable {
     return count;
   }
 
-  // ─── Browser server commands (§12.3) ────────────────────────────────────
+  // ─── Browser server commands ───────────────────────────────────────────
 
   /** `pie: Open in Browser` — open the ACTUAL URL of this host's server. */
   private async openBrowserUrl(): Promise<void> {

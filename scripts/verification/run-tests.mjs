@@ -452,7 +452,7 @@ const PACKAGE_TEST_METADATA = {
     // are the unit-testable core; index.ts is env-glue (registers the
     // `session_changes` tool) and diff.ts's git exec is integration-only.
     // types-global.d.ts is ambient only. The shared derivation core + git-baseline
-    // live in extension/src/shared/ and are covered by the extension suite.
+    // live in lib/file-changes/ and are covered by the file-changes package.
     thresholds: { lines: 80, branches: 70 },
   },
   'computer-use': {

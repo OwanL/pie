@@ -1,5 +1,5 @@
 /**
- * Browser server policy (browser server plan §5.3/§6.3/§4.1).
+ * Browser server policy.
  *
  * Pure, hand-rolled validators and bounds for the browser-server boundary:
  * Host and Origin checks (DNS-rebinding / foreign-origin defense), connection/payload
@@ -9,20 +9,20 @@
 
 /** Policy constants. */
 export const BROWSER_SERVER_POLICY = {
-  /** Max concurrent browser renderers per host instance (§5.3). */
+  /** Max concurrent browser renderers per host instance. */
   maxConcurrentRenderers: 4,
   /** Bound handshake time: a socket that never sends `ready` is closed. */
   handshakeTimeoutMs: 10_000,
-  /** Malformed-message rate bound (§5.3): ≥ 5 violations within the window
+  /** Malformed-message rate bound: ≥ 5 violations within the window
    *  close the socket with a typed reason. */
   maxMalformedMessages: 5,
   malformedWindowMs: 60_000,
   /** Pre-send gate: socket bufferedAmount above this high-water mark stops
-   *  further snapshot posts (latest-wins coalescing, §4.1). */
+   *  further snapshot posts (latest-wins coalescing). */
   bufferedAmountHighWaterBytes: 8 * 1024 * 1024,
   /** Hard record ceiling (matches `browser-ingress` 32 MiB). */
   maxFrameBytes: 32 * 1024 * 1024,
-  /** Default loopback port preference (§6.2). */
+  /** Default loopback port preference. */
   defaultPort: 1997,
   /** Min/max valid configured port. */
   minPort: 1,
@@ -33,8 +33,8 @@ export const BROWSER_SERVER_POLICY = {
 const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(['127.0.0.1', 'localhost', '[::1]']);
 
 /**
- * Validate the `Host` header against the canonical loopback host/port
- * (browser server plan §6.3). Browsers send `host[:port]`; the port must
+ * Validate the `Host` header against the canonical loopback host/port.
+ * Browsers send `host[:port]`; the port must
  * match the actual bound port when present. A missing Host header, a foreign
  * hostname, a loopback host with a mismatched port, or a header with an
  * embedded path is rejected.
@@ -132,8 +132,8 @@ function parseIPv4Address(address: string): number[] | null {
 }
 
 /**
- * Validate the `Origin` header of a WebSocket upgrade (browser server plan
- * §6.3): by default accept only the exact `http://127.0.0.1:<port>` origin.
+ * Validate the `Origin` header of a WebSocket upgrade: by default accept
+ * only the exact `http://127.0.0.1:<port>` origin.
  * LAN mode additionally accepts exact private IPv4 interface origins supplied
  * from this server's advertised URLs. Missing, `null`, wildcard,
  * extension-webview, and foreign origins are rejected; `localhost` remains
@@ -192,7 +192,7 @@ export class ViolationRateTracker {
   }
 }
 
-/** Pre-send gate result (§4.1). */
+/** Pre-send gate result. */
 export type SendGateResult =
   | { ok: true }
   | { ok: false; reason: 'buffered-amount-high-water' }

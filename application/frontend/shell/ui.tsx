@@ -247,7 +247,7 @@ function ComposerView({
 
   // The backend classifies the complete SDK context. A bounded renderer
   // transcript is never continuation authority.
-  const canContinueInterrupted = capabilities?.canContinue === true;
+  const canContinue = capabilities?.canContinue === true;
   const primaryOperation = capabilities?.primaryOperation;
   const executionBusy = capabilities?.billableActivity ?? busy;
   const canInterrupt = capabilities?.canInterrupt ?? busy;
@@ -272,7 +272,7 @@ function ComposerView({
   } = useComposerInput({
     busy: executionBusy,
     sendBlocked: interrupting || !commandsAvailable || operationBlocksSend,
-    allowEmptySend: canContinueInterrupted,
+    allowEmptySend: canContinue,
     onSend,
     onRetrySend,
     pendingComposerInputsLength: pendingComposerInputs.length,
@@ -361,7 +361,7 @@ function ComposerView({
     }
   }, [sessionPath, capabilities?.canCompact, postMessage]);
 
-  const continueMode = canContinueInterrupted
+  const continueMode = canContinue
     && text.trim().length === 0
     && pendingComposerInputs.length === 0;
   const canSend = commandsAvailable

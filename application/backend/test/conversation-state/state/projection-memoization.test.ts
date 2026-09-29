@@ -1,7 +1,7 @@
 /**
- * Brief G — Projection memoization & render-path performance.
+ * Projection memoization & render-path performance.
  *
- * Asserts the §9 acceptance criteria:
+ * Asserts:
  *  - unchanged-delta projection is O(1) amortized (same-reference return);
  *  - structural sharing: a genuine recompute reuses references for slices the
  *    delta did not touch, so the webview's pickStable / memo barriers stay

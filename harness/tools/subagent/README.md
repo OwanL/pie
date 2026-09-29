@@ -9,8 +9,6 @@ transcript/context isolation, not a security or process boundary: children inten
 share the parent process, working directory, filesystem access, extension runtime, and
 external credentials. An abort-ignoring SDK/provider/tool therefore cannot be forcibly
 killed or prevented from producing late external side effects by this extension alone.
-This architecture unlocks newer GitHub Copilot models that were broken under the previous
-CLI-subprocess approach.
 
 ## Invocation and orchestration
 
@@ -50,7 +48,7 @@ remains its scope.
 
 Agents are discovered automatically from both locations:
 
-- **User/global agents** (`<agent-dir>/harness/agent-instructions/agents/` in the Pie checkout/installed config; B3 relocated the authored definitions from the previous `<agent-dir>/agents/` location)
+- **User/global agents** (`<agent-dir>/harness/agent-instructions/agents/` in the Pie checkout/installed config)
 - **Project agents** (`agents/`, project root)
 
 Starting an agent does not require confirmation. Agent invocation is routine orchestration; any tool calls the child makes remain subject to the same action-level safeguards as the parent, so dangerous operations can still be blocked or confirmed at the point of risk.
@@ -271,7 +269,7 @@ that sub agents are unavailable. Any call returns:
 
 - Max depth: 3 (nested subagent calls) — configurable via `PIE_SUBAGENT_MAX_DEPTH`
   (set by the pie host from the settings menu; default 3).
-- Process-wide active root trees: default owned by [`lib/concurrency-config.ts`](../../../lib/concurrency-config.ts), shared with application preferences. See [concurrency configuration](../../../docs/operations/CONCURRENCY-CONFIGURATION.md) for saved-preference/environment precedence and applied-status diagnostics. Configurable via `PIE_SUBAGENT_MAX_INFLIGHT`. Sibling subagent calls emitted in one agent turn have no separate count cap; calls beyond the active-tree limit wait for a process permit. Each root child holds one permit for its full lifetime; nested descendants borrow that tree scope so parents waiting on nested work cannot exhaust the same semaphore and deadlock.
+- Process-wide active root trees: default owned by [`lib/concurrency-config.ts`](../../../lib/concurrency-config.ts), shared with application preferences. See [concurrency configuration](../../../docs/operations/CONCURRENCY-CONFIGURATION.md) for runtime ownership, root-permit borrowing, saved-preference/environment precedence, and applied-status diagnostics. Configurable via `PIE_SUBAGENT_MAX_INFLIGHT`. Sibling subagent calls emitted in one agent turn have no separate count cap; calls beyond the active-tree limit wait for a process permit.
 - Tree-wide session budget: 10 — caps the total number of subagent sessions spawned
   across an *entire* nested tree, so increased nesting can't run away on cost.
   Configurable via `PIE_SUBAGENT_MAX_TREE_SESSIONS`
@@ -284,30 +282,18 @@ spawn via the subagent tool. When omitted, the agent may spawn any agent; when
 present, only the listed agent names are permitted. An explicit empty list
 (`canSpawn: []`) makes the agent a leaf that cannot delegate at all. This
 preserves invariants such as a read-only agent (e.g. `scout`) only being able
-to delegate to other read-only agents:
-
-```yaml
----
-name: scout
-tools: read, grep, find, ls, bash, subagent
-canSpawn: [scout]
----
-```
+to delegate to other read-only agents; see the canonical [scout agent
+definition](../../agent-instructions/agents/scout.md) for its `canSpawn: [scout]`
+frontmatter.
 
 The root caller (the main agent) is never restricted.
 
 ## Skill & tool scoping for subagents
 
-Two mechanisms keep subagent system prompts lean and focused:
-
-### Skills: independently discovered and pruned per child
-
-Each child loads its own full skill catalog and, when `pruning.subagentEnabled`
-is true, runs one launch-time pruning pass against its assigned task plus its
-agent definition. It does not inherit the main agent's kept-skill set. Nested
-children likewise discover and score their own catalog. Internal continuations
-reuse the first selection without an additional scorer call; fail-open results
-are also retained for that child session.
+Skill and tool *pruning* for subagents — per-child skill scoring, child tool
+pruning, and the `pruning.mainAgentEnabled` / `pruning.subagentEnabled`
+toggles — is owned by [`tool-and-skill-selection`](../../tool-and-skill-selection/README.md);
+see that README for the authoritative behavior.
 
 ### Tools: user-configured drop list
 
@@ -320,51 +306,23 @@ mirroring pattern as the model buckets). Behaviour:
 - For agents with an explicit `tools:` list, the drop names are subtracted from it.
 - For unrestricted agents (no `tools:` frontmatter), the names are subtracted
   from the parent session's full tool set.
-- An empty list (the default) → no tools dropped (today's behaviour).
-
-Tool *pruning* is applied independently in each child session when the child
-initially has `request_capability`; without that recovery surface, skills can
-still be pruned but tools are left untouched. Tool selection and recovery stay
-inside the session's initial permitted tool set. Main-agent and subagent
-pruning can be toggled independently with `pruning.mainAgentEnabled` and
-`pruning.subagentEnabled`; shared `mode: "off"` and the global extension toggle
-disable both.
+- An empty list (the default) → no tools dropped.
 
 ## Timeouts
 
-Subagents have **no wall-clock deadline at all**. Productive work may continue
-indefinitely through long queued, preparing, streaming, tool, and retry phases;
-settlement is owned exclusively by explicit lifecycle events — the child
-completing, the parent/user cancelling, or a provider failure exhausting its
-retry bounds. There is no elapsed-inactivity net, no phase-specific lease, and
-no absolute prompt timer: none of those existed to mask a healthy child, and
-none has been replaced with another time guess. Parent cancellation remains
-immediate.
+Subagents have **no wall-clock, inactivity, phase, or prompt settlement timeout**;
+productive work may continue indefinitely. Settlement is driven by child
+completion, explicit parent/user cancellation (which remains immediate and
+preserves partial output), or bounded provider failure — never elapsed time.
+See [Subagent and provider resilience](../../../docs/contracts/SUBAGENT_PROVIDER_RESILIENCE.md)
+for retry/failover, orphan cleanup, provider/transport bounds, and containment
+details.
 
-Provider-aware retry backoff/`Retry-After` is active: failed transient attempts
-record bounded per-attempt analytics, exclude every configured model of the
-failed provider from fallback, and wait with a clamped Retry-After hint or
-bounded exponential backoff before replaying a safe turn. Auth/client failures
-and any turn with visible output or tool side effects are never retried.
-An orphan cleanup registry is also active: if session creation loses an abort
-race, the underlying creation promise is retained, and a late-resolved session
-is disposed exactly once without ever reaching setup or prompt. The registry
-retries disposal with bounded backoff, caps total retention, exposes observable
-stats, and drains best-effort on process shutdown.
-Because the upstream `DefaultResourceLoader` has no reliable `dispose()` API,
-cleanup is limited to session disposal and reclaiming leaked exit-signal
-listeners; the loader itself is not torn down.
-
-The executable containment is the bounded detached cleanup above plus the host
-provider/transport bounds (ProviderGate admission, transport connect/read
-timeouts). Local settlement can release UI/permit ownership even when an
-in-process upstream operation ignores abort, but it cannot quarantine that
-operation's external side effects.
-
-```bash
-# No subagent wall-clock timeouts exist; liveness is bounded only by provider
-# retry/admission/transport limits outside this extension.
-```
+On an abort race during session creation, the retained creation promise ensures
+any late session is disposed exactly once before setup or prompt. The upstream
+`DefaultResourceLoader` has no reliable `dispose()` API, so cleanup is limited to
+session disposal and reclaiming leaked exit-signal listeners; the loader itself
+is not torn down.
 
 ## Persisted result size
 

@@ -2,8 +2,8 @@
 //
 // Node, npm, and the global `pi` CLI are pinned by `.node-version`,
 // `package.json#packageManager`, and the VS Code host lockfile respectively. The
-// version-reading helpers live in scripts/toolchain.mjs (shared with doctor.mjs);
-// this module owns the comparison and installation-decision logic.
+// version-reading helpers live in scripts/install/toolchain.mjs; this module
+// owns the comparison and installation-decision logic.
 //
 // `verifyToolchain` is a pure comparison — it NEVER installs anything. The
 // shell wrappers act on the returned `installCommands` (or the CLI runner

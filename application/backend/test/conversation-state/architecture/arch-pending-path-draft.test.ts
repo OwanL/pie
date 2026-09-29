@@ -118,3 +118,47 @@ test('PendingPathReplaced: active session draft survives resolution (no orphanin
 
   assert.equal(selectViewState(s).draftText, 'hello world');
 });
+
+test('session-scoped settings changed while loading follow a pending session to its resolved path', () => {
+  let state = buildState({
+    sessions: {
+      ...initialArchState.sessions,
+      sessions: [placeholderSummary(PENDING)],
+      openTabPaths: [PENDING],
+      activeSessionPath: PENDING,
+    },
+  });
+
+  // This is the actual subagent provider settings path used by the UI while
+  // the new session is still represented by its host-only pending path.
+  state = reducer(state, {
+    kind: 'Command',
+    cmd: {
+      kind: 'SetPrefs',
+      corrId: 'toggle-subagent-provider-while-loading',
+      prefs: {
+        subagentProviderTogglesBySession: { [PENDING]: { anthropic: false } },
+      },
+    },
+  }).state;
+  // Mirrors attach.ts: the create/open result resolves the path, the old
+  // pending scope is cleared, then the real session is selected.
+  const replacement = reducer(state, pendingPathReplaced(PENDING, RESOLVED));
+  state = replacement.state;
+  state = reducer(state, {
+    kind: 'SessionScopeCleared',
+    sessionPath: PENDING,
+    removeSessionSummary: true,
+  }).state;
+  state = reducer(state, selectSession(RESOLVED)).state;
+
+  const view = selectViewState(state);
+  assert.equal(view.activeSession?.path, RESOLVED);
+  assert.equal(view.prefs.subagentProviderTogglesBySession[RESOLVED]?.anthropic, false);
+  assert.equal(view.prefs.subagentProviderTogglesBySession[PENDING], undefined);
+  assert.ok(
+    replacement.effects.some((effect) => effect.kind === 'SetPrefsRpc'
+      && effect.prefs.subagentProviderTogglesBySession?.[RESOLVED]?.anthropic === false),
+    'the resolved-path preference is persisted and synchronized with runtime settings',
+  );
+});

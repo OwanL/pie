@@ -2761,7 +2761,6 @@ test('reducer: handleNoticeShown clears noticeRaw for plain info notices (no raw
 });
 
 // ─── Brief C: optimistic lifecycle for composer inputs (pasted-image stickiness) ─
-// See the UX-reliability remediation (Brief C, §5 of the since-removed plan).
 // Pasted images must disappear from the
 // composer IMMEDIATELY on send (cleared at send time, not ack time), and on send
 // rejection the images must restore on BOTH rollback paths (no data loss):

@@ -136,7 +136,7 @@ export interface HostSyncState {
   /** Transport connection state (browser banner; VS Code is always
    *  `connected` while mounted). */
   connectionState: ClientConnectionState;
-  /** Pending source-aware inline confirmation (browser server plan §9), or
+  /** Pending source-aware inline confirmation, or
    *  null. Rendered by the app; answered with `respondToInlineConfirm`. */
   inlineConfirm: Extract<HostToWebviewMessage, { type: 'inlineConfirm' }> | null;
   respondToInlineConfirm: (confirmId: string, confirmed: boolean) => void;
@@ -510,7 +510,7 @@ function handleStateMessage(msg: HostToWebviewMessage, ctx: HostMessageContext) 
 
   ctx.setViewState(hydratedState);
   ctx.setCommitTarget(commitTarget);
-  // M2 (§5.2): an authoritative snapshot can confirm an `addComposerInput`
+  // An authoritative snapshot can confirm an `addComposerInput`
   // early by matching the staged input's metadata/identity in the host-owned
   // pending inputs. Absence alone never proves rejection — the host decision
   // ledger (queried via `commandStatusRequest` after reconnect) is
@@ -520,7 +520,7 @@ function handleStateMessage(msg: HostToWebviewMessage, ctx: HostMessageContext) 
   // store context (current host instance, view generation, and the control
   // post function) after every snapshot so expansions always subscribe with
   // the exact generation the host expects. The renderer identity is part of
-  // the ownership key (browser server plan §5.4): stream routes must carry
+  // the ownership key: stream routes must carry
   // THIS renderer's id/generation or they are dropped.
   setDetailStoreContext({
     hostInstanceId: m.hostInstanceId,
@@ -569,7 +569,7 @@ const HOST_MESSAGE_HANDLERS: Record<string, HostMessageHandler | undefined> = {
   state: handleStateMessage,
   playCompletionSound: (msg, _ctx) => handlePlayCompletionSound(msg),
   sendRejected: handleSendRejectedMessage,
-  // M2 (§5.2): exactly-one host decision/ack. The pending-command store
+  // Exactly-one host decision/ack. The pending-command store
   // resolves the entry; the optimistic overlay is merged/removed by the next
   // authoritative snapshot (status reconciliation, never replay).
   commandAck: (msg) => {
@@ -580,7 +580,7 @@ const HOST_MESSAGE_HANDLERS: Record<string, HostMessageHandler | undefined> = {
     const m = msg as Extract<HostToWebviewMessage, { type: 'commandStatus' }>;
     pendingCommandStore.onStatus(m.clientCommandId, m.decision);
   },
-  // M2 (§9): source-aware inline confirmation rendered by the app; the
+  // Source-aware inline confirmation rendered by the app; the
   // response is a validated `inlineConfirmResponse` (never command routing).
   inlineConfirm: (msg, ctx) => {
     ctx.setInlineConfirm(msg as Extract<HostToWebviewMessage, { type: 'inlineConfirm' }>);
@@ -603,7 +603,7 @@ export function dispatchHostMessage(msg: HostToWebviewMessage, ctx: HostMessageC
  * Encapsulates protocol-sync and transport bookkeeping between the webview and
  * host. This state is webview-local per the STATE_CONTRACT allowlist.
  *
- * M2 (§4.3): inbound messages are subscribed through the `ClientTransport`
+ * Inbound messages are subscribed through the `ClientTransport`
  * (VS Code channel or browser WebSocket) instead of a direct `window`
  * listener; the browser transport replaces its identity from the host's
  * `rendererHello` before `ready` is sent.

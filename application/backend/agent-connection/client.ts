@@ -209,7 +209,7 @@ const DEFAULT_RPC_TIMEOUT_MS = 30_000;
 
 /**
  * Time the host waits for the backend to emit `backend.ready` after spawn.
- * See `shared/backend-ready-timeout.ts` for rationale (cold SDK load on
+ * See `./backend-ready-timeout.ts` for rationale (cold SDK load on
  * Windows takes ~30s; a 30s budget races it). Shared with the reducer
  * watchdog so the two never drift.
  */

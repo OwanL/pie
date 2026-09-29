@@ -638,13 +638,21 @@ interface PatchableAgentSession {
 export type SdkHistoryCompactionPatchResult = 'patched' | 'already-present' | 'missing-target' | 'unsupported-shape';
 export type SdkInterruptedContinuationPatchResult = 'patched' | 'already-present' | 'missing-target' | 'unsupported-shape';
 export type SdkOverflowCompactionContextPatchResult = 'patched' | 'already-present' | 'missing-target' | 'unsupported-shape';
-export type InterruptedContinuationTail = 'aborted-assistant' | 'overflow-assistant' | 'open-provider-turn';
+export type InterruptedContinuationTail =
+  | 'aborted-assistant'
+  | 'overflow-assistant'
+  | 'open-provider-turn'
+  | 'completed-assistant';
 
-/** Classify the two transcript boundaries an interrupted run can leave behind.
- * If the provider had started a response, agent-core retains an aborted
+/** Classify the transcript boundaries a zero-prompt continuation can resume
+ * from. If the provider had started a response, agent-core retains an aborted
  * assistant. If interruption won before the next response started (including
  * after tools completed), the context still ends at a user/tool-result message.
- * Both are valid zero-prompt continuation points. */
+ * A settled turn can also end at a normal completed assistant reply (a stop, or
+ * a length stop with delivered output and no dangling tool calls); continuing
+ * keeps that reply in the provider context instead of removing it. All are
+ * valid zero-prompt continuation points. Arbitrary provider errors that are
+ * not classified as context overflow remain non-continuable. */
 export function classifyInterruptedContinuationTail(
   messages: unknown,
   contextWindow?: number,
@@ -655,19 +663,24 @@ export function classifyInterruptedContinuationTail(
   const role = (last as { role?: unknown }).role;
   if (role === 'user' || role === 'toolResult') return 'open-provider-turn';
   if (role !== 'assistant') return undefined;
-  if ((last as { stopReason?: unknown }).stopReason === 'aborted') return 'aborted-assistant';
-  return isContextOverflowMessage(last as MessageLike, contextWindow)
-    ? 'overflow-assistant'
-    : undefined;
+  const assistant = last as PatchableAssistantMessage;
+  if (assistant.stopReason === 'aborted') return 'aborted-assistant';
+  if (isContextOverflowMessage(assistant as MessageLike, contextWindow)) return 'overflow-assistant';
+  if ((assistant.stopReason === 'stop' || assistant.stopReason === 'length')
+      && !hasAssistantToolCall(assistant)) return 'completed-assistant';
+  return undefined;
 }
 
 /** Install the narrow continuation API Pie needs without changing the pinned
  * SDK on disk. The SDK already owns the complete run lifecycle in
  * `_runAgentPrompt`; passing an empty prompt list reaches agent-core's
  * continuation loop without emitting a user message or `before_agent_start`.
- * A provider-started aborted assistant is removed from provider context while
- * an interruption before the next provider message resumes directly from its
- * trailing user/tool-result boundary. Durable history remains unchanged. */
+ * A provider-started aborted assistant and an overflow tail are removed from
+ * provider context, a completed assistant reply is preserved there, and an
+ * interruption before the next provider message resumes directly from its
+ * trailing user/tool-result boundary. Durable history remains unchanged: the
+ * completed reply was persisted by the ordinary message_end path, so no new
+ * user or assistant row is written for the continuation itself. */
 export function applySdkInterruptedContinuationRuntimePatch(sdk: {
   AgentSession?: { prototype?: Record<string, unknown> };
 }): SdkInterruptedContinuationPatchResult {
@@ -683,9 +696,9 @@ export function applySdkInterruptedContinuationRuntimePatch(sdk: {
     const messages = this.agent?.state?.messages;
     const tail = classifyInterruptedContinuationTail(messages, this.model?.contextWindow);
     if (!tail) {
-      throw new Error('The session does not end at an interrupted continuation point.');
+      throw new Error('The session does not end at a supported continuation point.');
     }
-    if (tail !== 'open-provider-turn') {
+    if (tail === 'aborted-assistant' || tail === 'overflow-assistant') {
       this.agent.state.messages = messages.slice(0, -1);
     }
     // An explicit user continuation starts a fresh bounded overflow-recovery
@@ -830,8 +843,9 @@ interface PatchableAssistantMessage {
 }
 
 function hasAssistantToolCall(message: PatchableAssistantMessage | undefined): boolean {
-  return message?.content?.some((part) =>
-    !!part && typeof part === 'object' && (part as { type?: unknown }).type === 'toolCall') ?? false;
+  return Array.isArray(message?.content)
+    && message.content.some((part) =>
+      !!part && typeof part === 'object' && (part as { type?: unknown }).type === 'toolCall');
 }
 
 function isSilentContextOverflow(

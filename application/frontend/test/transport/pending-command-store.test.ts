@@ -1,5 +1,5 @@
 /**
- * Pending-command store tests (browser server plan §5.2/§5.3): bounded
+ * Pending-command store tests: bounded
  * tracking, ack/status resolution, snapshot confirmation, sessionStorage
  * mirroring (metadata only — never payloads), and staging release.
  */

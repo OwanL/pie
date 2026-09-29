@@ -360,7 +360,7 @@ export interface DetailSubscribeCommand extends CommandBase {
   detailAttempt: number;
   address: LiveSubagentDetailAddress;
   cursor?: DetailCursor;
-  /** Trusted renderer identity (browser server plan §5.4): the complete
+  /** Trusted renderer identity: the complete
    *  ownership key is `{hostInstanceId, viewGeneration, rendererId,
    *  rendererGeneration, detailKey}`. Never client-supplied. */
   rendererId?: string;
@@ -449,8 +449,8 @@ export interface SetModelCommand extends CommandBase {
   kind: 'SetModel';
   sessionPath: string;
   modelSettings: ModelSettings;
-  /** Trusted initiating renderer (browser server plan §9): the M2
-   *  source-aware confirmation seam routes browser-initiated switches through
+  /** Trusted initiating renderer: the source-aware confirmation seam routes
+   *  browser-initiated switches through
    *  an inline confirm in the initiating renderer instead of an invisible
    *  desktop modal. Never client-supplied. */
   source?: RendererCommandContext;
@@ -531,7 +531,7 @@ export interface RevertFileCommand extends CommandBase {
   kind: 'RevertFile';
   sessionPath: string;
   filePath: string;
-  /** Trusted initiating renderer (browser server plan §9): destructive
+  /** Trusted initiating renderer: destructive
    *   reverts from a browser source confirm inline in that renderer first.
    *   Never client-supplied. */
   source?: RendererCommandContext;

@@ -1,5 +1,5 @@
 /**
- * Source-aware confirmation seam tests (browser server plan §9): a BROWSER
+ * Source-aware confirmation seam tests: a BROWSER
  * source confirms inline in the INITIATING renderer (never the VS Code
  * modal); decline/disconnect cancel; a VS Code source keeps the native modal.
  */

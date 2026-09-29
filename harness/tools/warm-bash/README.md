@@ -25,21 +25,20 @@ truncation, "Took Xs") is inherited, so the UI is identical.
 Any protocol failure (no marker, `exec`/`exit` replaced the shell, watchdog) falls
 through to the fallback. Worst case = today's behaviour.
 
-## Managed-bin PATH semantics
+## Managed and project-aware PATH semantics
 
-pi prepends its managed SDK binary directory (`<agentDir>/bin`, holding `rg`/`fd`)
-to `PATH` via `getShellEnv()` so those binaries resolve ahead of the inherited
-PATH. warm-bash preserves this at every layer:
+`warm-bash` derives child-process environments; it does not impose global
+`PATH` changes. [`sanitizeProtoEnv`](./managed-env.ts) returns a copy that
+removes inherited proto tool-version/shim pins and direct
+`$PROTO_HOME/tools/...` PATH entries, so pinned installs cannot bypass
+project-aware shims. It places `$PROTO_HOME/shims` (then `$PROTO_HOME/bin`)
+immediately after pi's managed `<agentDir>/bin` when that entry is on `PATH`,
+preserving priority for managed SDK tools such as `rg`/`fd`; otherwise the proto
+entries go at the front. The shims can then resolve tool versions from
+the current project's `.prototools` instead of a frozen inherited activation.
 
-- **Warm pool** — the shared `WarmBashPool` is spawned with that authoritative
-  managed env (derived by prepending `join(getAgentDir(), "bin")` to the
-  platform PATH key), so warm workers resolve `rg`/`fd`.
-- **Fast path** — the resolver scans the per-call execution env's `PATH` (not
-  `process.env.PATH`) and caches per (program, PATH), so managed binaries
-  fast-path too.
-- **Fallback** — already uses pi's `getShellEnv()`.
-
-No layer is worse than the built-in fresh-spawn path for managed binaries.
+This sanitization is used for the shared warm-pool environment and per-call
+environments used by the fast and fallback paths.
 
 ## Edge cases handled
 
@@ -60,7 +59,7 @@ No layer is worse than the built-in fresh-spawn path for managed binaries.
 |---|---|---|
 | `PIE_BASH_WARM_POOL` | `2` | Idle target for the single shared warm pool — the number of bash processes kept warm across ALL sessions. Dynamically spawns up to the target and kills excess idle when lowered. `0` = disabled (today's behaviour). |
 | `PIE_BASH_FAST_PATH` | `1` | `1`/`0` — enable the execFile fast path. |
-| `PIE_BASH_AUTO_PRUNE` | `1` | `1`/`0` — transparently applies the canonical traversal-safety policy (`harness/tools/execution-safety/traversal-policy.ts`: dependencies, generated/build, caches, coverage, runtime data, sessions, logs, packaged artifacts, temp SDK trees) to recursive bash searches: recursive `grep` receives ONLY the `--exclude-dir` flags it is missing (existing ones are never duplicated; byte-identical passthrough when nothing is missing) and bare-path `find` gets the full `-prune` expression — approximates rg and is gated by a runtime GNU-grep probe. Unsupported bare-root walkers with no safe prune mechanism — recursive `ls -R`/`ls --recursive`, `tree`, and `du` (path absent, `.`, or root `*`) — are rewritten to a bounded fail-fast rejection (explanatory stderr message + exit 2) instead of traversing multi-gigabyte trees. Exact/scoped inspection (`ls -R src`, `tree data`, `du sessions`) and the explicit `PIE_BASH_AUTO_PRUNE=0` assignment prefix pass through; unrelated assignments do not disable the guard. `0` = skip all rewrites. |
+| `PIE_BASH_AUTO_PRUNE` | `1` | `1`/`0` — transparently applies the [canonical traversal-safety policy](../execution-safety/traversal-policy.ts) to recursive bash searches: recursive `grep` receives ONLY the `--exclude-dir` flags it is missing (existing ones are never duplicated; byte-identical passthrough when nothing is missing) and bare-path `find` gets the full `-prune` expression — approximates rg and is gated by a runtime GNU-grep probe. Unsupported bare-root walkers with no safe prune mechanism — recursive `ls -R`/`ls --recursive`, `tree`, and `du` (path absent, `.`, or root `*`) — are rewritten to a bounded fail-fast rejection (explanatory stderr message + exit 2) instead of traversing multi-gigabyte trees. Exact/scoped inspection (`ls -R src`, `tree data`, `du sessions`) and the explicit `PIE_BASH_AUTO_PRUNE=0` assignment prefix pass through; unrelated assignments do not disable the guard. `0` = skip all rewrites. |
 | `PIE_SHELL` | auto | Explicit bash path (default: auto-detect Git Bash / bash). |
 | `PIE_BASH_WARMUP_TIMEOUT_MS` | `10000` | Time allowed for a newly spawned worker to print its ready marker. `0` uses the default. |
 | `PIE_BASH_DEFAULT_TIMEOUT` | `60` | Default command timeout in seconds when a call does not specify one (maximum `600`). |

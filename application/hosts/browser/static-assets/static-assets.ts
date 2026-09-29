@@ -1,6 +1,5 @@
 /**
- * Manifest-backed static serving for the browser server (browser server plan
- * §6.1).
+ * Manifest-backed static serving for the browser server.
  *
  * The compiled webview bundle (`out/webview/panel`) is served over HTTP using
  * the same Vite manifest the sidebar uses. Manifest/allowlist resolution, not
@@ -101,8 +100,8 @@ function escapeHtmlAttribute(value: string): string {
 /**
  * URL key for a manifest-relative file. Vite's output config places every
  * artifact under `assets/`, so manifest `file` paths already carry that
- * prefix; the documented HTTP surface is `/assets/<hashed-file>` (plan §6.1),
- * so the prefix is stripped here. A doubled `/assets/assets/...` URL would
+ * prefix; the HTTP surface is `/assets/<hashed-file>`, so the prefix is
+ * stripped here. A doubled `/assets/assets/...` URL would
  * break the browser's relative dynamic-import resolution: the entry chunk
  * imports `./transcript-host-<hash>.js` relative to its own URL, so the
  * entry must live at `/assets/panel-<hash>.js` for the chunk to resolve to
@@ -241,7 +240,7 @@ export class BrowserStaticAssets {
   }
 
   /**
-   * Manifest-derived HTML shell for the browser (browser server plan §4.3):
+   * Manifest-derived HTML shell for the browser:
    * stamps only stable page data — asset version, transport kind, and the
    * WebSocket route. No renderer identity is baked into HTML (a socket
    * reconnect creates a new registration without reloading the page; the

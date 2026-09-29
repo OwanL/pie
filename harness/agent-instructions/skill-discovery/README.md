@@ -4,7 +4,7 @@ Auto-discovers skills from a `skills/` directory in the current working director
 
 ## How it works
 
-When pi starts, this extension checks if `./skills/` exists. If found, it registers that path as a skill directory, making all skills inside available to the agent.
+At pi startup and again on every reload (`resources_discover` with reason `startup` or `reload`), this extension checks whether the current working directory has a `skills/` directory. If found, it registers that path as a skill directory, making all skills inside available to the agent.
 
 ## Usage
 

@@ -11,15 +11,7 @@ import { analyzeRecursiveRm, maskShellData, parseShellInvocations, stripHeredocB
 import { isAutonomousModeEnabled } from "../../harness/tool-and-skill-selection/settings/autonomous-mode.js";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-export const DEFAULT_BASH_TIMEOUT_SECONDS = 600;
-
 type Safety = { action: "allow" | "block" | "prompt"; reason?: string };
-
-function applyDefaultBashTimeout(input: { command: string; timeout?: number }): void {
-	if (typeof input.timeout !== "number" || !Number.isFinite(input.timeout) || input.timeout <= 0) {
-		input.timeout = DEFAULT_BASH_TIMEOUT_SECONDS;
-	}
-}
 
 const HARD_BLOCK_PATHS: { pattern: RegExp; reason: string }[] = [
 	{ pattern: /^\/boot\//, reason: "Writing to /boot" },
@@ -186,9 +178,7 @@ export async function guardCommand(command: string, ctx: SafeguardContext): Prom
 export default function (pi: ExtensionAPI) {
 	pi.on("tool_call", async (event, ctx) => {
 		if (event.toolName === "bash") {
-			const input = event.input as { command: string; timeout?: number };
-			applyDefaultBashTimeout(input);
-			return handleBash(input.command, ctx);
+			return handleBash((event.input as { command: string }).command, ctx);
 		}
 		if (event.toolName === "write" || event.toolName === "edit") {
 			return handleWritePath((event.input as { path: string }).path, ctx);

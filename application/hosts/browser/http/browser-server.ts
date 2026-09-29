@@ -1,5 +1,5 @@
 /**
- * Shared HTTP/WebSocket browser server (browser server plan §6, §7).
+ * Shared HTTP/WebSocket browser server.
  *
  * Serves the compiled webview UI at `http://127.0.0.1:<port>` by default and
  * accepts browser renderer WebSockets at `/ws`. Explicit LAN opt-in binds
@@ -8,18 +8,18 @@
  * the host can build a valid initial `ViewState`, stop on shutdown; start/stop
  * are idempotent, and delayed binds completing after shutdown are closed.
  *
- * Port policy (§6.2): prefer the configured port (default 1997); when it is
+ * Port policy: prefer the configured port (default 1997); when it is
  * occupied and `requirePreferredPort` is false, bind an OS-assigned port on
  * the selected interface and record the actual localhost and LAN URLs.
  * Terminal bind failures surface exactly one lifecycle event (`bind-failed`);
  * successful fallback binds are
  * informational (`fallback`).
  *
- * HTTP surface (§6.1): `GET /` (manifest-derived HTML shell with a strict
+ * HTTP surface: `GET /` (manifest-derived HTML shell with a strict
  * same-origin CSP), `GET /assets/<hashed-file>` (manifest allowlist only),
  * optional `GET /favicon.svg`, and `GET /health` (local readiness only). No
  * generic APIs, backend RPC routes, filesystem routes, uploads, or command
- * endpoints. Security (§6.3): loopback-only by default; LAN requests require
+ * endpoints. Security: loopback-only by default; LAN requests require
  * a private IPv4 peer and exact Host/Origin values. Bounded client count,
  * fail-closed ingress
  * per socket (in the transport), and no state in `/health` or logs.
@@ -75,9 +75,9 @@ export class BrowserServer implements BrowserServerService {
    *  host schedules fan-out through it (owning this hub keeps browser
    *  delivery state fully isolated from the sidebar's hub). */
   private readonly hub: RendererHub;
-  /** Exactly-once command decision gate (browser server plan §5.2). */
+  /** Exactly-once command decision gate. */
   private readonly gate: BrowserCommandGate;
-  /** Source-aware inline confirmations (§2.2/§9), resolved by the initiating
+  /** Source-aware inline confirmations, resolved by the initiating
    *  renderer's explicit `inlineConfirmResponse`; disconnect cancels. */
   private readonly confirmations: InlineConfirmationService;
   /** Per-renderer registrations (`Record<string, T>` host collections). */
@@ -149,7 +149,7 @@ export class BrowserServer implements BrowserServerService {
     return this.hub.isRendererOwnerCurrent(rendererId, viewGeneration, rendererGeneration);
   }
 
-  /** Renderer-scoped imperative (browser server plan §4.4): lazy-detail
+  /** Renderer-scoped imperative: lazy-detail
    *  responses and other targeted imperatives answer the INITIATING renderer. */
   postImperative(message: HostToWebviewMessage, rendererId: string): void {
     this.hub.postImperative(message, rendererId);
@@ -159,7 +159,7 @@ export class BrowserServer implements BrowserServerService {
     return this.hub;
   }
 
-  /** Source-aware inline confirmation (§9): deliver to the INITIATING
+  /** Source-aware inline confirmation: deliver to the INITIATING
    *  renderer; resolve on explicit response; disconnect cancels. */
   requestInlineConfirm(rendererId: string, request: import('../confirmations/inline-confirmations').InlineConfirmRequest): Promise<boolean> {
     return this.confirmations.request(rendererId, request);
@@ -170,7 +170,7 @@ export class BrowserServer implements BrowserServerService {
   }
 
   /** Idempotent start. Re-reads settings; binds the preferred port with
-   *  fallback per §6.2. A delayed `listen()` completing after stop began is
+   *  fallback. A delayed `listen()` completing after stop began is
    *  closed immediately. */
   start(): Promise<BrowserServerStartOutcome> {
     if (this.startPromise) return this.startPromise;
@@ -236,7 +236,7 @@ export class BrowserServer implements BrowserServerService {
       }
     }
 
-    // A stop requested while the bind was in flight wins (§7.5).
+    // A stop requested while the bind was in flight wins.
     if (this.stopRequested) {
       await this.closeHttpServer(httpServer);
       this.httpServer = null;
@@ -337,7 +337,7 @@ export class BrowserServer implements BrowserServerService {
     });
   }
 
-  // ─── HTTP surface (§6.1) ──────────────────────────────────────────────────
+  // ─── HTTP surface ───────────────────────────────────────────────────────
 
   private async handleHttpRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     try {
@@ -435,7 +435,7 @@ export class BrowserServer implements BrowserServerService {
     }
   }
 
-  // ─── Upgrade surface (§6.3) ───────────────────────────────────────────────
+  // ─── Upgrade surface ────────────────────────────────────────────────────
 
   private handleUpgrade(req: http.IncomingMessage, socket: import('node:stream').Duplex, head: Buffer): void {
     const wss = this.wss;
@@ -570,7 +570,7 @@ function safePathname(rawUrl: string | undefined): string | null {
   }
 }
 
-/** Common security headers for every response (§6.3). */
+/** Common security headers for every response. */
 function securityHeaders(extra: Record<string, string> = {}): Record<string, string> {
   return {
     'X-Content-Type-Options': 'nosniff',

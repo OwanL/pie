@@ -33,7 +33,8 @@ uv run find_dead_code.py <directory> [options]
 Dead code is the easiest win — unused functions, classes, imports, and files can often be removed
 outright. Use `--verify-dead-code` to suppress likely false positives; findings that cannot be
 cross-checked are retained in a separate unverified section rather than labeled dead. For intentionally
-retained code (plugin re-exports, dynamic dispatch), add a `// skylos-ignore` annotation.
+retained code, verify the finding before suppressing it. Skylos supports
+`# skylos: ignore` in Python; do not assume comment suppression works in other languages.
 
 **Bundler caveat (esbuild/webpack/vite/rollup):** skylos traces static `import`/`require` edges
 only — it cannot see a bundler's entry-point graph, dynamic `import()`, or config-driven resolution.
@@ -71,7 +72,7 @@ Copy/paste duplicates across files (jscpd). Review whether they represent the sa
 uv run analyze_complexity.py <directory> [options]
 ```
 
-Qualitas reports at the **file level**. Treat scores as investigation signals, not refactoring targets. Simplify genuinely difficult behavior or split distinct responsibilities; do not move code solely to improve a metric. Domain-appropriate complexity in dispatchers or pipelines may be justified.
+Qualitas reports per function, with a file location and letter grade. Treat scores as investigation signals, not refactoring targets. Simplify genuinely difficult behavior or split distinct responsibilities; do not move code solely to improve a metric. Domain-appropriate complexity in dispatchers or pipelines may be justified.
 
 ### 5. Large files
 

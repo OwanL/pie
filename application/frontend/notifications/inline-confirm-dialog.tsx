@@ -6,7 +6,7 @@ import type { HostToWebviewMessage } from '../../lib/protocol/index.js';
 export type InlineConfirmState = Extract<HostToWebviewMessage, { type: 'inlineConfirm' }>;
 
 /**
- * Source-aware inline confirmation (browser server plan §2.2/§9): the host
+ * Source-aware inline confirmation: the host
  * delivers model-switch / destructive-revert confirmations to the INITIATING
  * browser renderer as a typed imperative; this dialog renders it and replies
  * `inlineConfirmResponse`. The host proceeds only on explicit confirm;

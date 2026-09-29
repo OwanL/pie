@@ -155,7 +155,7 @@ test('failed continuation returns the session to idle and surfaces a session-own
   });
 
   assert.deepEqual(failed.state.sessions.runningSessionPaths, []);
-  assert.equal(failed.state.settings.notice, 'Could not continue the interrupted response.');
+  assert.equal(failed.state.settings.notice, 'Could not continue agent work.');
   assert.equal(failed.state.settings.noticeRaw, 'not interrupted');
   assert.equal(failed.state.settings.noticeSessionPath, SESSION);
   assert.equal(failed.effects[0]?.kind, 'Log');

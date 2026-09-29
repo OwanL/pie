@@ -33,7 +33,7 @@ import { pendingCommandStore } from '../transport/pending-command-store';
 // the HTML-stamped metadata now; panel.tsx remains the module under test).
 export { getAssetVersion, getViewGeneration, withHandshakeMetadata, withViewGeneration };
 
-// ─── Transport bootstrap (browser server plan §4.3) ─────────────────────────
+// ─── Transport bootstrap ───────────────────────────────────────────────────
 // Browser mode is selected by server-injected bootstrap metadata, not by a
 // separate bundle. The HTTP HTML stamps only stable page data: asset version,
 // transport kind, and the WebSocket route. VS Code HTML continues to stamp its
@@ -54,7 +54,7 @@ function createTransport(): ClientTransport {
     const transport = new BrowserClientTransport({
       wsRoute: meta.wsRoute,
       onHandshake: () => {
-        // Reconnect reconciliation (§5.2): every unknown/pending command is
+        // Reconnect reconciliation: every unknown/pending command is
         // answered by a bounded read-only `commandStatusRequest` against the
         // host decision ledger — never replayed.
         for (const entry of pendingCommandStore.unknownEntries()) {

@@ -1,6 +1,5 @@
 /**
- * Host-neutral browser-server seam (repository-organization plan §3.2;
- * browser server plan §6/§7).
+ * Host-neutral browser-server seam.
  *
  * The shared `HostRuntime` composition consumes the browser service only
  * through the {@link BrowserServerService} lifecycle port and the
@@ -23,7 +22,7 @@ import type {
   WebviewToHostMessage,
 } from '../../../lib/protocol/index.js';
 
-/** Local configuration (browser server plan §6.2). Read from VS Code
+/** Local configuration. Read from VS Code
  *  configuration (`pie.browserServer.*`) by the extension wiring and from the
  *  standalone launcher/storage by the standalone platform; the server itself
  *  only consumes these values through its options' `getSettings()`. */
@@ -39,7 +38,7 @@ export interface BrowserServerSettings {
   requirePreferredPort: boolean;
 }
 
-/** Result of one `start()` attempt (browser server plan §6.2 lifecycle). */
+/** Result of one server lifecycle `start()` attempt. */
 export type BrowserServerStartOutcome =
   | { kind: 'started'; url: string; port: number; preferred: boolean }
   | { kind: 'disabled' }
@@ -63,7 +62,7 @@ export interface BrowserServerState {
   preferred: boolean;
 }
 
-/** Lifecycle outcomes, deduplicated per §6.2: only a terminal bind/start
+/** Lifecycle outcomes, deduplicated: only a terminal bind/start
  *  failure produces a user notice; successful fallback binds are
  *  informational logs only. */
 export type BrowserServerLifecycleEvent =
@@ -75,7 +74,7 @@ export type BrowserServerLifecycleEvent =
   | { kind: 'client-connected'; rendererId: string }
   | { kind: 'client-closed'; rendererId: string; code: number; reason: string };
 
-/** Source-aware inline confirmation request (browser server plan §2.2/§9):
+/** Source-aware inline confirmation request:
  *  model-switch confirm and destructive `revertFile` confirmations are
  *  delivered to the INITIATING renderer; the host proceeds only on that
  *  renderer's explicit response. */
@@ -87,8 +86,8 @@ export interface InlineConfirmRequest {
 }
 
 /** Factory options the shared runtime composition supplies to the concrete
- *  host adapter's `HostRuntimePlatform.createBrowserServer` (browser server
- *  plan §7). The concrete hosts extend these with their asset/icon/title
+ *  host adapter's `HostRuntimePlatform.createBrowserServer`.
+ *  The concrete hosts extend these with their asset/icon/title
  *  locations in `host/browser-server/types.ts`. */
 export interface HostRuntimeBrowserServerOptions {
   /** Shared extension-host incarnation used by every renderer hub. */
@@ -109,13 +108,13 @@ export interface HostRuntimeBrowserServerOptions {
   onLifecycle?(event: BrowserServerLifecycleEvent): void;
 }
 
-/** Host-neutral lifecycle/service port of the loopback browser server
- *  (browser server plan §6/§7). The runtime composition starts it after the
+/** Host-neutral lifecycle/service port of the loopback browser server.
+ *  The runtime composition starts it after the
  *  host can build a valid initial `ViewState`, fans state changes out through
  *  it, and stops/disposes it in the host shutdown order; start/stop are
  *  idempotent. */
 export interface BrowserServerService {
-  /** Idempotent start; re-reads settings and binds per §6.2. */
+  /** Idempotent start; re-reads settings and binds. */
   start(): Promise<BrowserServerStartOutcome>;
   /** Idempotent stop; closes sockets and the HTTP listener. */
   stop(): Promise<void>;
@@ -123,17 +122,16 @@ export interface BrowserServerService {
   getState(): BrowserServerState;
   /** Fan-out scheduling on host state changes. */
   scheduleState(): void;
-  /** Renderer-scoped snapshot request (handshake answers its own renderer,
-   *  browser server plan §4.1). */
+  /** Renderer-scoped snapshot request (handshake answers its own renderer). */
   requestState(rendererId: string): void;
   /** Renderer-scoped imperative: targeted responses answer the INITIATING
-   *  renderer (browser server plan §4.4). */
+   *  renderer. */
   postImperative(message: HostToWebviewMessage, rendererId: string): void;
   /** Generation fence for renderer-owned view state. */
   isRendererOwnerCurrent(rendererId: string, viewGeneration: number, rendererGeneration: number): boolean;
-  /** Source-aware inline confirmation (§9): deliver to the INITIATING
+  /** Source-aware inline confirmation: deliver to the INITIATING
    *  renderer; resolve on explicit response; disconnect cancels. */
   requestInlineConfirm(rendererId: string, request: InlineConfirmRequest): Promise<boolean>;
-  /** Release resources; idempotent shutdown (§7). */
+  /** Release resources; idempotent shutdown. */
   dispose(): void;
 }

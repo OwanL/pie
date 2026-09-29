@@ -30,7 +30,7 @@ Of the unknown-cost rows, 36,962 were subagent settlements. 20,618 had apparentl
 - Incomplete calculated costs are withheld from the session-usage display.
 - Provider mismatches cannot borrow another provider's unique catalog rate. Child pricing cache invalidation and content identity include the historical catalog.
 - Required input/output prices and advertised context tiers must be valid; missing billable prices cannot become free pricing. Copilot discovery preserves its previous catalog rather than publishing an incomplete pricing refresh.
-- Verified exact Ollama models use current official rates. DeepSeek weekday peak pricing uses observed request intervals; missing times or intervals whose endpoints cross a price band remain unpriced. Models without a published cache-read price cannot price positive cache-read usage as free. See [pricing sources](model-token-pricing-sources.md).
+- Verified exact Ollama models use current official rates. DeepSeek weekday peak pricing uses observed request intervals; missing times or intervals whose endpoints cross a price band remain unpriced. Models without a published cache-read price cannot price positive cache-read usage as free.
 - Aborted auxiliary requests preserve cancellation classification and missing-usage evidence.
 
 Regression coverage exercises capture-to-recorder cost calculation, live settlement versus historical snapshot handling, provider qualification, missing-price rejection, partial-cost display, pricing-cache refresh, scheduled boundaries, and unsupported cached-input pricing.

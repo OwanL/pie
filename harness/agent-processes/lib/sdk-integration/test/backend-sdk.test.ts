@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
 
 import { cloneTreeByHardlink } from './helpers/clone-tree-by-hardlink';
@@ -23,6 +23,11 @@ import {
   consumedOverflowMessageEntryIds,
   isContextOverflowMessage,
 } from '../../../workers/history-compaction';
+
+interface PinnedRealSdkSession {
+  subscribe(listener: (event: { type: string; message?: { role?: string } }) => void): () => void;
+  continueAfterInterruption(): Promise<void>;
+}
 
 test('interrupted continuation removes only the aborted provider-context tail and starts without a user prompt', async () => {
   const runInputs: unknown[][] = [];
@@ -159,7 +164,28 @@ test('forced-overflow classification keeps transcript and continuation decisions
   assert.equal(isContextOverflowMessage(allZeroEmptyLength), true);
   assert.equal(classifyInterruptedContinuationTail([allZeroEmptyLength], 200_000), 'overflow-assistant');
   assert.equal(isContextOverflowMessage(completedOverWindow, 200_000), false);
-  assert.equal(classifyInterruptedContinuationTail([completedOverWindow], 200_000), undefined);
+  // A completed stop over the reported window is a settled reply, not overflow:
+  // continuation preserves it in the provider context, and native overflow
+  // recovery owns any subsequent provider-side rejection.
+  assert.equal(classifyInterruptedContinuationTail([completedOverWindow], 200_000), 'completed-assistant');
+
+  assert.equal(
+    classifyInterruptedContinuationTail([
+      { role: 'assistant' as const, stopReason: 'length', content: [{ type: 'text', text: 'cut-off text' }], usage: { input: 10, output: 4, cacheRead: 0 } },
+    ], 200_000),
+    'completed-assistant',
+  );
+  assert.equal(
+    classifyInterruptedContinuationTail([{ role: 'assistant', stopReason: 'error', errorMessage: 'provider 500', content: [] }]),
+    undefined,
+  );
+  assert.equal(
+    classifyInterruptedContinuationTail([
+      { role: 'assistant', stopReason: 'stop', content: [{ type: 'toolCall', id: 'tool-1', name: 'read' }] },
+    ], 200_000),
+    undefined,
+    'a completed reply with a dangling tool call has no valid provider boundary',
+  );
 });
 
 test('threshold compaction consumes an all-zero empty length failure left by context exhaustion', () => {
@@ -200,9 +226,45 @@ test('successful assistant output is never consumed by an overflow-marked compac
   assert.deepEqual([...consumedOverflowMessageEntryIds(entries)], []);
 });
 
-test('interrupted continuation rejects a completed assistant tail', async () => {
+test('interrupted continuation resumes after a completed assistant reply and retains it in provider context', async () => {
+  const runInputs: unknown[][] = [];
+  const user = { role: 'user', content: 'work' };
+  const completed = {
+    role: 'assistant',
+    stopReason: 'stop',
+    content: [{ type: 'text', text: 'delivered answer' }],
+    usage: { input: 1_000, output: 10, cacheRead: 0 },
+  };
   class FakeAgentSession {
-    agent = { state: { messages: [{ role: 'assistant', stopReason: 'stop' }] as unknown[] } };
+    agent = { state: { messages: [user, completed] as unknown[] } };
+    _overflowRecoveryAttempted = true;
+    async _runAgentPrompt(messages: unknown[]): Promise<void> {
+      runInputs.push(messages);
+    }
+  }
+  applySdkInterruptedContinuationRuntimePatch({
+    AgentSession: FakeAgentSession as unknown as { prototype: Record<string, unknown> },
+  });
+  const session = new FakeAgentSession() as FakeAgentSession & {
+    continueAfterInterruption(): Promise<void>;
+  };
+
+  await session.continueAfterInterruption();
+
+  assert.deepEqual(
+    session.agent.state.messages,
+    [user, completed],
+    'the completed reply stays in the provider context and no user message is added',
+  );
+  assert.equal(session._overflowRecoveryAttempted, false);
+  assert.deepEqual(runInputs, [[]], 'continuation enters the run lifecycle with no prompt messages');
+});
+
+test('interrupted continuation still rejects an ordinary provider error tail', async () => {
+  class FakeAgentSession {
+    agent = {
+      state: { messages: [{ role: 'assistant', stopReason: 'error', errorMessage: 'provider 500', content: [] }] as unknown[] },
+    };
     async _runAgentPrompt(): Promise<void> {}
   }
   applySdkInterruptedContinuationRuntimePatch({
@@ -213,7 +275,150 @@ test('interrupted continuation rejects a completed assistant tail', async () => 
   };
   await assert.rejects(
     session.continueAfterInterruption(),
-    /does not end at an interrupted continuation point/,
+    /does not end at a supported continuation point/,
+  );
+});
+
+test('pinned real SDK continues after a completed reply without a new user message and settles with persistence', async () => {
+  await withPinnedSdkDist(async (sdkDir) => {
+    const agentSessionModule = (await import(
+      pathToFileURL(path.join(sdkDir, 'dist', 'core', 'agent-session.js')).href
+    )) as { AgentSession: new (config: Record<string, unknown>) => PinnedRealSdkSession };
+    const agentCoreModule = (await import(
+      pathToFileURL(path.join(sdkDir, 'node_modules', '@earendil-works', 'pi-agent-core', 'dist', 'index.js')).href
+    )) as { Agent: new (options: unknown) => { state: { messages: unknown[] } } };
+    const extensionsModule = (await import(
+      pathToFileURL(path.join(sdkDir, 'dist', 'core', 'extensions', 'index.js')).href
+    )) as { createExtensionRuntime: () => unknown };
+
+    assert.equal(
+      applySdkInterruptedContinuationRuntimePatch({
+        AgentSession: agentSessionModule.AgentSession as unknown as { prototype: Record<string, unknown> },
+      }),
+      'patched',
+      'the pinned real AgentSession prototype must accept the runtime continuation patch',
+    );
+
+    const user = { role: 'user', content: [{ type: 'text', text: 'earlier work' }], timestamp: 1 };
+    const completedReply = {
+      role: 'assistant',
+      stopReason: 'stop',
+      content: [{ type: 'text', text: 'delivered answer' }],
+      usage: { input: 1_000, output: 10, cacheRead: 0 },
+      provider: 'fake',
+      model: 'fake-model',
+      timestamp: 2,
+    };
+    const fakeModel = { id: 'fake-model', provider: 'fake', contextWindow: 200_000, maxTokens: 4_096 };
+    const persisted: Array<{ role?: string; stopReason?: string }> = [];
+    const fakeStreamFn = async () => {
+      const finalMessage = {
+        role: 'assistant',
+        stopReason: 'stop',
+        content: [{ type: 'text', text: 'continued answer' }],
+        usage: { input: 1_100, output: 5, cacheRead: 0 },
+        provider: 'fake',
+        model: 'fake-model',
+        timestamp: 3,
+      };
+      return {
+        async *[Symbol.asyncIterator]() {
+          yield { type: 'start', partial: { ...finalMessage, content: [] } };
+          yield { type: 'done' };
+        },
+        result: async () => finalMessage,
+      };
+    };
+    const agent = new agentCoreModule.Agent({
+      initialState: {
+        systemPrompt: 'test system prompt',
+        messages: [user, completedReply],
+        model: fakeModel,
+      },
+      streamFn: fakeStreamFn,
+    });
+    const sessionManager = {
+      appendMessage: (message: { role?: string; stopReason?: string }) => {
+        persisted.push(message);
+        return `entry-${persisted.length}`;
+      },
+      appendCustomMessageEntry: () => 'custom-entry',
+      getBranch: () => [],
+      getEntries: () => [],
+      getCwd: () => sdkDir,
+      getSessionFile: () => undefined,
+      getSessionName: () => undefined,
+    };
+    const session = new agentSessionModule.AgentSession({
+      agent,
+      sessionManager,
+      settingsManager: {
+        getImageAutoResize: () => false,
+        getShellCommandPrefix: () => '',
+        getShellPath: () => undefined,
+        getCompactionSettings: () => ({ enabled: false, reserveTokens: 0, keepRecentTokens: 0 }),
+        getRetrySettings: () => ({ enabled: false, maxRetries: 0 }),
+        isProjectTrusted: () => true,
+      },
+      resourceLoader: {
+        getExtensions: () => ({ extensions: [], errors: [], runtime: extensionsModule.createExtensionRuntime() }),
+        getSystemPrompt: () => '',
+        getAppendSystemPrompt: () => [],
+        getSkills: () => ({ skills: [] }),
+        getAgentsFiles: () => ({ agentsFiles: [] }),
+      },
+      modelRegistry: { find: () => undefined, getAvailable: () => [] },
+      cwd: sdkDir,
+    });
+
+    const events: Array<{ type: string; message?: { role?: string } }> = [];
+    session.subscribe((event) => events.push(event));
+    await session.continueAfterInterruption();
+
+    assert.deepEqual(
+      agent.state.messages.map((message) => (message as { role?: string }).role),
+      ['user', 'assistant', 'assistant'],
+      'the completed reply stays in context and the continuation appends only the new assistant response',
+    );
+    assert.equal(agent.state.messages[1], completedReply, 'the completed reply object is preserved, not stripped or replaced');
+    assert.equal(
+      events.some((event) => event.type === 'message_start' && event.message?.role === 'user'),
+      false,
+      'the continuation must not emit a new user message',
+    );
+    assert.deepEqual(
+      persisted.map((message) => ({ role: message.role, stopReason: message.stopReason })),
+      [{ role: 'assistant', stopReason: 'stop' }],
+      'only the new assistant response reaches durable persistence; the already-durable completed reply is not rewritten',
+    );
+    assert.deepEqual(
+      events.filter((event) => ['agent_start', 'agent_end', 'agent_settled'].includes(event.type)).map((event) => event.type),
+      ['agent_start', 'agent_end', 'agent_settled'],
+      'the continuation runs the ordinary SDK lifecycle through agent_settled',
+    );
+  });
+});
+
+test('interrupted continuation rejects a completed assistant that ends with a dangling tool call', async () => {
+  class FakeAgentSession {
+    agent = {
+      state: {
+        messages: [
+          { role: 'assistant', stopReason: 'stop', content: [{ type: 'toolCall', id: 'tool-1', name: 'read' }] },
+        ] as unknown[],
+      },
+    };
+    async _runAgentPrompt(): Promise<void> {}
+  }
+  applySdkInterruptedContinuationRuntimePatch({
+    AgentSession: FakeAgentSession as unknown as { prototype: Record<string, unknown> },
+  });
+  const session = new FakeAgentSession() as FakeAgentSession & {
+    continueAfterInterruption(): Promise<void>;
+  };
+  await assert.rejects(
+    session.continueAfterInterruption(),
+    /does not end at a supported continuation point/,
   );
 });
 
@@ -402,6 +607,47 @@ async function withSdkDir(files: Record<string, string>, run: (sdkDir: string) =
     else process.env.PIE_TRUSTED_SDK_ROOT = previousTrustedRoot;
     if (previousFixtureFingerprints === undefined) delete process.env.PIE_SDK_PATCH_FIXTURE_FINGERPRINTS;
     else process.env.PIE_SDK_PATCH_FIXTURE_FINGERPRINTS = previousFixtureFingerprints;
+    await fs.rm(root, { recursive: true, force: true });
+  }
+}
+
+/** Clone the real pinned SDK dist template into a private temp tree so a test
+ * can patch the real AgentSession prototype in memory and drive the real
+ * agent-session/agent-core code without touching the installed SDK. */
+async function withPinnedSdkDist(run: (sdkDir: string) => Promise<void>): Promise<void> {
+  const distributionRoot = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    '..', '..', '..', '..', '..', 'application', 'hosts', 'vscode',
+  );
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-sdk-continuation-real-'));
+  const sdkDir = path.join(root, 'sdk');
+  await fs.mkdir(sdkDir);
+  await fs.symlink(path.join(distributionRoot, 'node_modules'), path.join(root, 'node_modules'),
+    process.platform === 'win32' ? 'junction' : 'dir');
+  await cloneTreeByHardlink(await pinnedSdkDistTemplate(distributionRoot), sdkDir, [
+    'dist/core/agent-session.js',
+  ]);
+  // The pinned SDK ships a fully nested node_modules; expose every top-level
+  // entry so imports rooted at the cloned dist resolve exactly like production.
+  const nestedSdkNodeModules = path.join(
+    distributionRoot, 'node_modules', '@earendil-works', 'pi-coding-agent', 'node_modules',
+  );
+  await fs.mkdir(path.join(sdkDir, 'node_modules'), { recursive: true });
+  for (const entry of await fs.readdir(nestedSdkNodeModules, { withFileTypes: true })) {
+    await fs.symlink(
+      path.join(nestedSdkNodeModules, entry.name),
+      path.join(sdkDir, 'node_modules', entry.name),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+  }
+  await fs.writeFile(
+    path.join(sdkDir, 'package.json'),
+    JSON.stringify({ type: 'module', version: '0.80.6-test' }),
+    'utf8',
+  );
+  try {
+    await run(sdkDir);
+  } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
 }

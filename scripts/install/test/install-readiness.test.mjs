@@ -37,6 +37,22 @@ test('checkAuthReadiness is ok when a provider API key env var is present', () =
   assert.match(check.lines[0], /Provider API key env var detected/);
 }));
 
+test('checkAuthReadiness recognizes the SDK Gemini API key env var', () => withTempDir((root) => {
+  const auth = path.join(root, 'auth.json');
+  writeFileSync(auth, '{}');
+  const check = checkAuthReadiness({ authPath: auth, providerEnv: { GEMINI_API_KEY: 'test-key' }, platform: 'posix' });
+  assert.equal(check.level, 'ok');
+  assert.match(check.lines[0], /Provider API key env var detected/);
+}));
+
+test('checkAuthReadiness does not treat GOOGLE_API_KEY as Gemini authentication', () => withTempDir((root) => {
+  const auth = path.join(root, 'auth.json');
+  writeFileSync(auth, '{}');
+  const check = checkAuthReadiness({ authPath: auth, providerEnv: { GOOGLE_API_KEY: 'unsupported-test-key' }, platform: 'posix' });
+  assert.equal(check.level, 'warn');
+  assert.match(check.lines[0], /No auth\.json content and no provider API key env vars found/);
+}));
+
 test('checkAuthReadiness gives Windows setx advice on Windows', () => withTempDir((root) => {
   const auth = path.join(root, 'auth.json');
   writeFileSync(auth, '{}');

@@ -1,11 +1,12 @@
 /**
  * image-context-guard — deterministic outgoing-image projection.
  *
- * One of three context-lean layers (see AGENTS.md § Context-lean layers):
- * history compaction (pi), skill pruning (skill-pruner), and tool-result
- * pruning (tool-result-pruner). This extension is a fourth, request-safety
- * layer: it bounds the image parts projected into each provider request to the
- * active provider-qualified model's configured `maxImagesPerRequest` so
+ * Context-lean terminology (history compaction, skill pruning, and tool-result
+ * pruning) is documented in
+ * harness/agent-instructions/skills/develop-pie/SKILL.md#context-lean-terminology.
+ * This extension adds a request-safety layer: it bounds the image parts
+ * projected into each provider request to the active provider-qualified
+ * model's configured `maxImagesPerRequest` so
  * accumulated session images never reach a provider request limit.
  *
  * Hooks the `context` event (the only layer that sees the complete accumulated
@@ -15,19 +16,21 @@
  *   2. applies the active model's total image bound, newest-first; and
  *   3. appends one bounded text notice describing any omission.
  *
- * The guard replaces computer-use's standalone `context` registration so a
- * single deterministic handler owns both passes (two independently ordered
+ * A single deterministic context handler owns both passes; computer-use no
+ * longer registers its own projection handler (two independently ordered
  * handlers must not enforce overlapping limits). Durable session history is
  * never modified; only the deep-copied outgoing message array is projected.
  *
  * Toggle off via PIE_EXTENSION_TOGGLES_JSON { "image-context-guard": false },
  * the same global toggle computer-use / tool-result-pruner honor.
  *
- * The request-safety wiring lives in src/handler.ts (pure, unit-tested); this
- * module is the thin shim that supplies the agent dir (via `getAgentDir()`)
+ * The request-safety wiring lives in
+ * harness/model-providers/request-validation/handler.ts (pure, unit-tested);
+ * this module is the thin shim that supplies the agent dir (via `getAgentDir()`)
  * and the active model (via `ctx.model`).
  *
- * See this extension's README.md for the full contract.
+ * See harness/model-providers/request-validation/README.md for the full
+ * contract.
  */
 
 import type { ContextEvent, ExtensionAPI } from '@earendil-works/pi-coding-agent';

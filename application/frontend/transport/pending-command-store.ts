@@ -1,5 +1,5 @@
 /**
- * Bounded pending-command store (browser server plan §5.2/§5.3).
+ * Bounded pending-command store.
  *
  * The browser keeps a bounded, in-memory store of every sent-but-unacknowledged
  * application command plus its bounded optimistic metadata, mirrored to

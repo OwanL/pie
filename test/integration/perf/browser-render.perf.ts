@@ -9,9 +9,6 @@
  * the actual webview bundle (out/webview). Per envelope it reports main-thread
  * long-task time (Long Tasks API), DOM node count, and rendered text length.
  *
- * This is the "real browser timing" measurement the repo explicitly lacked
- * (docs/research/2026-07-16.md remaining-risk #1/#5).
- *
  * Run from the repository root:
  *   PIE_PERF_DUMP_DIR=... npx tsx ./test/integration/perf/session-host-pipeline.perf.ts
  *   npx tsx ./test/integration/perf/browser-render.perf.ts

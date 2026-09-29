@@ -4,7 +4,7 @@
 import type { ClientConnectionState } from '../transport/client-transport';
 
 /**
- * Compact connection banner (browser server plan §8.1): shown ONLY while the
+ * Compact connection banner: shown ONLY while the
  * browser transport is not connected. It never replaces or mutates
  * authoritative session state; the VS Code transport is always `connected`
  * while mounted, so this banner never renders there.

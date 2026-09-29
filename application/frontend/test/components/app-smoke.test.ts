@@ -303,7 +303,7 @@ test('an empty submit continues from a folded durable tool-result boundary', () 
   assert.equal(adapter.messages.some((message) => message.type === 'send' && message.text === ''), true);
 });
 
-test('a completed provider response after tools does not expose empty continuation', () => {
+test('a completed provider response after tools exposes backend-authorized empty continuation', () => {
   const adapter = makeAdapter();
   const completedAgenticTurn = sessionViewState();
   completedAgenticTurn.transcript = completedAgenticTurn.transcript.map((message) => message.role === 'assistant'
@@ -319,6 +319,9 @@ test('a completed provider response after tools does not expose empty continuati
         toolCalls: [{ id: 'tool-1', name: 'bash', input: {}, result: 'done', status: 'completed' as const }],
       }
     : message);
+  completedAgenticTurn.sessionCapabilitiesBySession = {
+    '/session/a': { billableActivity: false, canContinue: true, canInterrupt: false, canCompact: true },
+  };
   adapter.initialState = completedAgenticTurn;
 
   act(() => render(h(App, { adapter }), container));
@@ -326,8 +329,28 @@ test('a completed provider response after tools does not expose empty continuati
     window.dispatchEvent(new MessageEvent('message', { data: stateEnvelope(1, completedAgenticTurn) }));
   });
 
+  const submit = container.querySelector('[data-action="continue"]') as HTMLButtonElement | null;
+  assert.ok(submit);
+  assert.equal(submit.disabled, false);
+  assert.equal(submit.getAttribute('aria-label'), 'Continue agent work');
+  const messageCountBefore = container.querySelectorAll('[data-message-id]').length;
+  act(() => submit.click());
+  const sends = adapter.messages.filter((message) => message.type === 'send');
+  assert.equal(sends.length, 1);
+  assert.equal(sends[0].text, '');
+  assert.equal(sends[0].sessionPath, '/session/a');
+  assert.equal(container.querySelectorAll('[data-message-id]').length, messageCountBefore);
+});
+
+test('empty continuation fails closed without backend capability even for a completed reply', () => {
+  const adapter = makeAdapter();
+  adapter.initialState = sessionViewState();
+  act(() => render(h(App, { adapter }), container));
+  act(() => {
+    window.dispatchEvent(new MessageEvent('message', { data: stateEnvelope(1, sessionViewState()) }));
+  });
   assert.equal(container.querySelector('[data-action="continue"]'), null);
-  const submit = container.querySelector('[data-action="send"]') as HTMLButtonElement | null;
+  const submit = container.querySelector('[data-action="send"]') as HTMLButtonElement;
   assert.ok(submit);
   assert.equal(submit.disabled, true);
 });
@@ -1008,7 +1031,7 @@ test('Brief H: plain Retry re-sends the live draft as a retrySend (no disablePru
   assert.ok(after.some((m) => m.type === 'dismissNotice'), 'Retry dismisses the notice');
 });
 
-// ─── Interrupt one-frame "Stopping…" feedback (automatable §12 item) ─
+// ─── Interrupt one-frame "Stopping…" feedback ─
 test('interrupt reflects "Stopping…" within one frame (optimistic, before the host round-trip clears busy)', () => {
   // The webview sets `interrupting` synchronously in handleInterrupt so the
   // Stop button reflects "Stopping…" within one frame — BEFORE the host

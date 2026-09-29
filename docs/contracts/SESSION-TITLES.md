@@ -18,7 +18,7 @@ Settings → Chat → Session titles provides:
 - an enable/disable toggle, enabled by default;
 - a provider-qualified model picker containing enabled text-capable models;
 - a thinking-level selector, defaulting to `off`;
-- a 5–60 second timeout selector, defaulting to 15 seconds.
+- a 1–60 second timeout selector, defaulting to 15 seconds.
 
 The default is `ollama/deepseek-v4-flash:0731-cloud`. `models.yaml` seeds missing settings, while existing `settings.json.sessionTitles` values remain user-owned. Enabling the feature affects new unnamed sessions only; Pie does not bulk-retitle history.
 
@@ -26,10 +26,10 @@ The default is `ollama/deepseek-v4-flash:0731-cloud`. `models.yaml` seeds missin
 
 The host calls the backend `session.title.generate` RPC. It is classified as low-priority `session-title` provider work. The worker:
 
-- compacts the first prompt to at most 2,000 characters, removing code fences and retaining bounded beginning/end context;
+- compacts the first prompt to at most 4,000 characters, removing code fences and retaining bounded beginning/end context;
 - asks for only 2–6 words and at most 40 characters;
 - passes the configured thinking budget (disabled by default) and uses deterministic temperature;
-- enforces the configured end-to-end timeout;
+- starts the configured model-request timeout after model lookup and authentication; the host RPC timeout is the configured duration plus five seconds, not a strict end-to-end deadline at the selected duration;
 - accepts only one short, control-character-free line in the output contract;
 - fails open, returning a reason rather than surfacing a user-blocking error.
 

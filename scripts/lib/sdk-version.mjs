@@ -1,6 +1,6 @@
 // Pure helpers for reading the pi SDK pin from the VS Code host lockfile and
-// comparing semver-ish versions. Shared by scripts/bootstrap.mjs,
-// scripts/doctor.mjs, and the Windows installer through its Node helper.
+// comparing semver-ish versions. Consumed by the install toolchain
+// (scripts/install/toolchain.mjs).
 //
 // The application/hosts/vscode lock is the source of truth for the SDK the pie backend loads;
 // the global `pi` CLI is pinned to that same exact version so a `npm i -g`
@@ -109,7 +109,7 @@ export function inferRepoRoot() {
 }
 
 // When invoked directly as `node scripts/lib/sdk-version.mjs`, print the pinned
-// version so install.bat can consume it without duplicating the parsing.
+// version for command-line inspection.
 const invokedDirectly = process.argv[1] &&
   pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
 if (invokedDirectly) {

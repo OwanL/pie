@@ -32,11 +32,11 @@ export interface HostRendererSurface {
   postState(): void;
   postSelectionState?(): void;
   postImperative(message: HostToWebviewMessage): void;
-  /** Renderer-scoped imperative (browser server plan §4.4): lazy-detail
+  /** Renderer-scoped imperative: lazy-detail
    *  responses answer the INITIATING renderer, not the sidebar. */
   postImperativeToRenderer(rendererId: string, message: HostToWebviewMessage): void;
   /** Renderer-scoped snapshot request: handshake messages answer THEIR OWN
-   *  renderer (browser server plan §4.1). Optional; absent means the adapter
+   *  renderer. Optional; absent means the adapter
    *  has no renderer-scoped snapshot path. */
   requestState?(rendererId?: string): void;
   scheduleState(): void;

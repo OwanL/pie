@@ -9,12 +9,12 @@ A personal stack built around the [`pi` coding agent](https://www.npmjs.com/pack
 | [`application/`](application), [`analytics/`](analytics), [`harness/`](harness), [`lib/`](lib), [`test/integration/`](test/integration) | *pie* host/backend/frontend and domain runtime owners; tests are colocated with their packages, with cross-owner gates under `test/integration/` | Build and VS Code packaging live under [`application/hosts/vscode/`](application/hosts/vscode) |
 | [`application/hosts/vscode/`](application/hosts/vscode) | VS Code distribution package, toolchain, runtime assets, and package-owned configuration; build orchestration lives in [`scripts/build/`](scripts/build) | Build and packaging owner |
 | [`harness/tools/`](harness/tools/README.md) | Explicit Pie-owned tool catalog, tool implementations, and package integrations | Extension discovery adapters or backend-injected factories; backend composition lives in [`harness/agent-processes/coordinator/backend-tools.ts`](harness/agent-processes/coordinator/backend-tools.ts) |
-| [`harness/session-storage/`](harness/session-storage), [`harness/model-providers/`](harness/model-providers), [`harness/agent-processes/`](harness/agent-processes) | Owner packages for session persistence, provider catalogs/policies, and agent-process workers/helpers; cross-owner integration gates remain under [`test/integration/`](test/integration) | Internal runtime and test owners during the B5 organization migration |
-| [`extensions/`](extensions) — e.g. [`skill-pruner/`](extensions/skill-pruner), [`safeguard/`](extensions/safeguard), [`cwd-skills/`](extensions/cwd-skills), [`image-context-guard/`](extensions/image-context-guard) | Pi discovery adapters and middleware; the skill-pruner implementation lives in [`harness/tool-and-skill-selection/`](harness/tool-and-skill-selection) | Loaded by `pi` via `settings.json` packages |
+| [`harness/session-storage/`](harness/session-storage), [`harness/model-providers/`](harness/model-providers), [`harness/agent-processes/`](harness/agent-processes) | Owner packages for session persistence, provider catalogs/policies, and agent-process workers/helpers; cross-owner integration gates remain under [`test/integration/`](test/integration) | Internal runtime and test owners |
+| [`extensions/`](extensions) — e.g. [`skill-pruner/`](extensions/skill-pruner), [`safeguard/`](extensions/safeguard), [`cwd-skills/`](extensions/cwd-skills), [`image-context-guard/`](extensions/image-context-guard) | Pi discovery adapters and middleware; the skill-pruner implementation lives in [`harness/tool-and-skill-selection/`](harness/tool-and-skill-selection) | Auto-discovered by `pi` from the agent directory's `extensions/` directory |
 | [`analytics/analysis/`](analytics/analysis) | Retained local DuckDB query workspace over legacy run-analytics exports/stores | Internal research tool |
 | [`harness/agent-instructions/`](harness/agent-instructions) — authored [`agents/`](harness/agent-instructions/agents), [`skills/`](harness/agent-instructions/skills), with [`APPEND_SYSTEM.md`](APPEND_SYSTEM.md) at the repo root, [`settings.json`](settings.json) | Maintainer's personal pi config; selector policy/state is in [`harness/tool-and-skill-selection/`](harness/tool-and-skill-selection) | Reference / example only |
 | [`data/`](data), [`auth.json`](#) | Local runtime/auth data | Local-only; excluded from the portable config |
-| [`docs/`](docs) | Categorized architecture, contracts, plans, operations, and research; start at [`docs/INDEX.md`](docs/INDEX.md) | Internal |
+| [`docs/`](docs) | Architecture, contracts, plans, operations, and research | Internal |
 
 ## Goals
 
@@ -22,7 +22,7 @@ A personal stack built around the [`pi` coding agent](https://www.npmjs.com/pack
 - Collect local usage data to improve outcomes — which models, skills, tools, and treatments actually produce results.
 - Keep one portable config across machines, with session history local and out of git.
 
-These are the *original* design drivers. The architecture is being adjusted so external users can adopt the publishable pieces (extension, pi plugins) without inheriting the personal layer. Design docs and archived plans are in [`docs/`](docs/INDEX.md).
+These are the *original* design drivers. The architecture is being adjusted so external users can adopt the publishable pieces (extension, pi plugins) without inheriting the personal layer. Design docs and archived plans are in [`docs/`](docs).
 
 ## Supported platform
 
@@ -91,7 +91,7 @@ setx ANTHROPIC_API_KEY "sk-ant-..."
 REM then open a NEW terminal for it to take effect
 ```
 
-Supported env vars (checked in this order): `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`.
+Set the environment variable for the provider you use. Examples (not an exhaustive list) include `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `GEMINI_API_KEY`.
 
 ### Option B: Interactive `pi` login (writes auth.json)
 
@@ -172,7 +172,7 @@ For a deterministic dependency/build refresh after pulling, first close all VS C
 npm run bootstrap
 ```
 
-This runs a root `npm ci`; its `postinstall` automatically installs the locked `application/hosts/vscode/` and `analytics/analysis/` dependency trees (including build/test dependencies such as jsdom). It then installs the locked pi CLI, restores pi packages without updating the CLI, checks generated model files, builds the extension, and runs the doctor. For a non-destructive check:
+This runs a root `npm ci`; its `postinstall` also restores the additional locked dependency trees. It then installs the locked pi CLI, restores pi packages without updating the CLI, checks generated model files, builds the extension, and runs the doctor. For a non-destructive check:
 
 ```bash
 npm run doctor
@@ -220,7 +220,7 @@ Test and typecheck children have a 20-minute watchdog that kills the complete pr
 For first-time setup, use `install.bat`: it also restores the managed `pi-web-access` and `pi-mcp-adapter` packages needed by the build. `npm ci` alone does not restore those Pi-managed packages. After setup, refresh dependency trees and build from the repository root:
 
 ```bash
-npm ci                             # also installs application/hosts/vscode/ and analytics/analysis/ via postinstall
+npm ci                             # also restores the additional locked dependency trees via postinstall
 npm run extension:build            # validate + stage runtime + publish renderer
 npm run extension:build:validate   # compile/validate without publishing
 npm run extension:activate         # one-time startup loader setup or upgrade
@@ -330,13 +330,14 @@ Pie has one OS-local runtime-data root, resolved from `PIE_DATA_DIR` or the plat
 | Sessions | `data/outcomes/sessions/` (in-tree, git-ignored) | `PI_CODING_AGENT_SESSION_DIR` |
 | Run analytics | `data/outcomes/<workspace-id>/` (globally aggregated) | `PIE_ANALYTICS_DIR` |
 
-The backend logs resolved storage paths on startup via the `backend.ready` event.
+The host logs resolved storage paths in its `backend` log channel entry, `starting pie backend`.
 
 ## More docs
 
 - [AGENTS.md](AGENTS.md) — global agent traversal and shell conventions
 - [develop-pie skill](harness/agent-instructions/skills/develop-pie/SKILL.md) — Pie-specific working conventions, commands, and architecture references
-- [docs/INDEX.md](docs/INDEX.md) — curated index of design docs and plans
+- [Architecture](docs/architecture/ARCHITECTURE.md) — system design and boundaries
+- [Documentation policy](docs/DOCUMENTATION-POLICY.md) — keeping documentation simple and connected
 - [docs/contracts/STATE_CONTRACT.md](docs/contracts/STATE_CONTRACT.md) — authoritative host ↔ webview sync contract
 - [docs/contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md](docs/contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md) — analytics authority, data root, privacy and gated storage-cutoff contract
 - [query-analytics skill](harness/agent-instructions/skills/query-analytics/SKILL.md) — querying the canonical analytics store

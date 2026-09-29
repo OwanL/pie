@@ -1,5 +1,5 @@
 /**
- * Browser command decision ledger + gate (browser server plan §5.2).
+ * Browser command decision ledger + gate.
  *
  * Every schema-valid browser application command that reaches host command
  * routing records exactly one terminal host decision (`accepted` | `rejected`)

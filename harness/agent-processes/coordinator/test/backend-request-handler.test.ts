@@ -986,6 +986,32 @@ test('message.continue resumes after a completed tool without invoking the promp
   );
 });
 
+test('message.continue explicitly resumes completed replies with no new user prompt', async () => {
+  for (const stopReason of ['stop', 'length'] as const) {
+    let continueCalls = 0;
+    let promptCalls = 0;
+    const harness = createHarness({
+      sessionOverrides: {
+        messages: [{ role: 'assistant', stopReason, content: [{ type: 'text', text: `completed with ${stopReason}` }] }],
+        prompt: async () => { promptCalls += 1; },
+        continueAfterInterruption: async () => { continueCalls += 1; },
+      },
+    });
+
+    const result = await handleBackendRequest(harness.deps, {
+      id: `continue-completed-${stopReason}`,
+      method: 'message.continue',
+      params: { sessionPath: harness.context.sessionPath },
+    });
+
+    assert.equal(typeof (result as { requestId?: string }).requestId, 'string', `${stopReason} reply is eligible`);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(continueCalls, 1, `${stopReason} reply uses the continuation seam`);
+    assert.equal(promptCalls, 0, 'continuation must not append a prompt or enter session.prompt');
+    assert.ok(harness.context.activeRequest, 'continuation owns the ordinary live request lifecycle');
+  }
+});
+
 test('send, continue, compact, and title transition waits terminate at one deterministic typed deadline', async () => {
   const requests = [
     {
@@ -1225,24 +1251,51 @@ test('message.continue accepts a repeated provider-forced context overflow', asy
   assert.equal(continueCalls, 1);
 });
 
-test('message.continue rejects a non-interrupted tail before acknowledging provider work', async () => {
-  let continueCalls = 0;
-  const harness = createHarness({
-    sessionOverrides: {
-      messages: [{ role: 'assistant', stopReason: 'stop', content: 'done' }],
-      continueAfterInterruption: async () => { continueCalls += 1; },
+test('message.continue keeps busy, empty, and non-overflow error guards', async () => {
+  const unavailableCases = [
+    {
+      name: 'busy completed reply',
+      sessionOverrides: {
+        messages: [{ role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'done' }] }],
+        isStreaming: true,
+      },
+      code: 'REQUEST_IN_PROGRESS',
     },
-  });
-  await assert.rejects(
-    handleBackendRequest(harness.deps, {
-      id: 'continue-not-available',
-      method: 'message.continue',
-      params: { sessionPath: harness.context.sessionPath },
-    }),
-    (error: unknown) => error instanceof BackendError && error.code === 'CONTINUATION_NOT_AVAILABLE',
-  );
-  assert.equal(continueCalls, 0);
-  assert.equal(harness.context.activeRequest, undefined);
+    {
+      name: 'empty history',
+      sessionOverrides: { messages: [] },
+      code: 'CONTINUATION_NOT_AVAILABLE',
+    },
+    {
+      name: 'non-overflow assistant error',
+      sessionOverrides: {
+        messages: [{ role: 'assistant', stopReason: 'error', errorMessage: 'provider request failed', content: [] }],
+      },
+      code: 'CONTINUATION_NOT_AVAILABLE',
+    },
+  ] as const;
+
+  for (const [index, unavailable] of unavailableCases.entries()) {
+    let continueCalls = 0;
+    const harness = createHarness({
+      sessionOverrides: {
+        ...unavailable.sessionOverrides,
+        continueAfterInterruption: async () => { continueCalls += 1; },
+      },
+    });
+    await assert.rejects(
+      handleBackendRequest(harness.deps, {
+        id: `continue-unavailable-${index}`,
+        method: 'message.continue',
+        params: { sessionPath: harness.context.sessionPath },
+      }),
+      (error: unknown) => error instanceof BackendError && error.code === unavailable.code,
+      unavailable.name,
+    );
+    assert.equal(continueCalls, 0, unavailable.name);
+    assert.equal(harness.context.activeRequest, undefined, unavailable.name);
+    assert.deepEqual(harness.busyEvents, [], unavailable.name);
+  }
 });
 
 test('message.continue rejects a runtime without the continuation seam', async () => {

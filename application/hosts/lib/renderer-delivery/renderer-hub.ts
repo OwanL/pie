@@ -1,5 +1,5 @@
 /**
- * Host-owned renderer hub (browser server plan §4.1).
+ * Host-owned renderer hub.
  *
  * Sits between `PieExtension`/`SidebarViewProvider` and renderer transports.
  * Owns the registry of `RendererSession`s, the shared debounced schedule
@@ -91,7 +91,7 @@ export interface RendererHubOptions {
 export class RendererHub implements DisposableLike {
   private readonly sessions: Record<string, RendererSession> = {};
   private readonly clock: StateDeliveryClock;
-  /** Shared extension-host incarnation (browser server plan §5.1): every
+  /** Shared extension-host incarnation: every
    *  renderer session carries the same `hostInstanceId`; per-renderer
    *  identity is `rendererId`/`rendererGeneration`. */
   private readonly hostInstanceId: string;

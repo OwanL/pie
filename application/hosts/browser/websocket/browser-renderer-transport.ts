@@ -1,5 +1,5 @@
 /**
- * Browser renderer transport (browser server plan §4.2/§4.3/§5.3/§4.1).
+ * Browser renderer transport.
  *
  * Wraps ONE accepted browser WebSocket and registers it into the shared
  * `RendererHub` as a `RendererTransport`:
@@ -16,7 +16,7 @@
  *     the socket with a typed reason; binary frames are rejected outright;
  *   - browser lifecycle messages (`rendererVisibilityChanged`,
  *     `rendererFocusChanged`) update the session's beliefs directly;
- *   - outbound posts pass the pre-send gates (§4.1): a complete candidate
+ *   - outbound posts pass the pre-send gates: a complete candidate
  *     frame is measured and dropped/coalesced when `bufferedAmount > 8 MiB`
  *     or `bufferedAmount + frameBytes > 32 MiB` — latest-wins, never a
  *     backlog queue;

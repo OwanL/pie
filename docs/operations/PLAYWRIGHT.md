@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented for Windows with Playwright `1.62.1`, Chromium revision `1234` (`151.0.7922.34`), and headless Chromium only.
+Implemented for Windows with Chromium revision `1234` (`151.0.7922.34`) and headless Chromium only.
 
 The capability consists of:
 
@@ -30,7 +30,7 @@ model
   <-> durable-session RuntimeClient
   <-> bounded versioned JSONL
   <-> lazy Node sidecar
-  <-> Playwright library 1.62.1
+  <-> Playwright library
   <-> dedicated pinned headless Chromium process
   <-> isolated BrowserContexts and Pages
 ```
@@ -59,37 +59,23 @@ One sequential tool exposes five actions:
 open | observe | act | run_code | close
 ```
 
-The TypeBox schema is strict. All string enums, including discriminators, use `StringEnum` for provider compatibility. Semantic validation rejects invalid field combinations before runtime work.
+The TypeBox schema is strict. [`harness/tools/playwright/schema.ts`](../../harness/tools/playwright/schema.ts) is the canonical field inventory (`playwrightSchema`, `inputSchema`, `observationSchema`, `targetSchema`), and [`harness/tools/playwright/types.ts`](../../harness/tools/playwright/types.ts) owns the numeric constants behind it; this guide therefore restates only the fields and limits that carry behavioral meaning. All string enums, including discriminators, use `StringEnum` for provider compatibility. Semantic validation rejects invalid field combinations before runtime work.
 
 ### `open`
 
 Creates one isolated session and first page, optionally navigates, and returns the initial bounded observation.
 
-Main inputs:
-
-- optional `sessionId`, otherwise generated as `pw-<uuid>`;
-- optional URL;
-- viewport `320..1920` by `200..1080` CSS pixels;
-- optional Playwright storage-state JSON path;
-- action/navigation defaults within `1,000..120,000` ms;
-- observation settings.
+Main inputs are the `open` fields of the schema: an optional `sessionId` (generated as `pw-<uuid>` when omitted), an optional URL, a viewport, an optional Playwright storage-state JSON path, session-level action/navigation timeout defaults, and observation settings. Per-field viewport ranges and millisecond bounds live in the schema, not here.
 
 The result states `headless: true` and `isolated: true` and returns the session ID, page ID, URL, title, revision, snapshot, event/tabs evidence, and optional screenshot paths.
 
-A durable Pie session path is mandatory. Ephemeral sessions fail with `SESSION_PATH_REQUIRED` because ownership, cleanup, and artifacts require a stable boundary.
+Calls require either a durable Pie session path or a runner-provided child runtime owner, as described under [Runtime boundary](#runtime-boundary). Ephemeral sessions without a child owner fail with `SESSION_PATH_REQUIRED`.
 
 ### `observe`
 
 Returns current page evidence without changing the page.
 
-Observation settings are a closed object:
-
-- `mode`: `auto | full | none`;
-- depth `1..50`;
-- optional target by `{ ref, revision }` or `{ selector }`;
-- explicit viewport screenshot;
-- console/page-error/failed-request/download limits `0..200`;
-- optional tab summaries.
+Observation settings are the closed `observationSchema` object: a snapshot `mode`, bounded depth, an optional target, an explicit opt-in screenshot flag, per-category event limits, and optional tab summaries.
 
 Screenshots are never implicit. V1 captures the viewport only and writes both a bounded full PNG and a display PNG whose long edge is at most 1,600 pixels. Image-capable models receive the display PNG; text-only models receive an explicit unavailable notice and artifact path.
 
@@ -97,26 +83,9 @@ Screenshots are never implicit. V1 captures the viewport only and writes both a 
 
 Typed actions use Playwright strictness, auto-waiting, and finite deadlines.
 
-Supported kinds:
+Supported kinds are exactly the `inputSchema` union: navigation (`navigate`, `back`, `forward`, `reload`), typed element interactions, a `wait` for exactly one time, URL, text, or selector condition, and typed tab actions.
 
-- navigation: `navigate`, `back`, `forward`, `reload`;
-- elements: `click`, `double_click`, `fill`, `type`, `press`, `select`, `check`, `uncheck`, `hover`, `focus`, `upload`;
-- synchronization: `wait` for exactly one time, URL, text, or selector condition;
-- tabs: `tab_open`, `tab_select`, `tab_close`.
-
-Element targets are exactly one of:
-
-```json
-{ "ref": "e12", "revision": 4 }
-```
-
-or:
-
-```json
-{ "selector": "form#login button[type=submit]" }
-```
-
-A ref-targeted action also requires its owning `pageId`. Selector fields reject the `aria-ref` selector engine, so ephemeral snapshot refs can enter only through revision-checked fields.
+Element targets are exactly one of a revision-checked `{ ref, revision }` pair or a `{ selector }` (`targetSchema` holds the exact shapes). A ref-targeted action also requires its owning `pageId`. Selector fields reject the `aria-ref` selector engine, so ephemeral snapshot refs can enter only through revision-checked fields.
 
 A one-shot JavaScript dialog policy can accept (optionally with prompt text) or dismiss the next dialog. Without a policy, the sidecar dismisses it and reports `auto-dismissed`; no dialog remains open across serial requests.
 
@@ -134,9 +103,9 @@ Available objects:
 
 A body receives `page`, `context`, and `helpers` in scope. A full function receives one `{ page, context, helpers }` object. Browser globals such as `document`, `localStorage`, and `indexedDB` must be used through `page.evaluate()`.
 
-`helpers.writeArtifact` accepts text, byte arrays, array buffers, or JSON-serializable values. It returns an opaque artifact ID and byte count, while the final tool result reports the owned path. It does not expose a raw writable path. Each call is checked atomically against the 8 MiB per-artifact and 512 MiB session aggregate limits, at most 100 helper artifacts may be finalized in one `run_code`, and the helper becomes inactive as soon as the submitted function/body resolves. Unawaited writes already started are settled before result serialization; delayed calls cannot create files.
+`helpers.writeArtifact` accepts text, byte arrays, array buffers, or JSON-serializable values. It returns an opaque artifact ID and byte count, while the final tool result reports the owned path. It does not expose a raw writable path. Each call is checked atomically against the [artifact caps](#artifact-caps), at most 100 helper artifacts may be finalized in one `run_code`, and the helper becomes inactive as soon as the submitted function/body resolves. Unawaited writes already started are settled before result serialization; delayed calls cannot create files.
 
-The code field is capped at 64 KiB, the deadline at 120 seconds, and results at an 8 MiB artifact boundary. Cyclic, bigint, and function values get safe representations. Results larger than the inline 8 KiB budget spill to a complete session artifact. A result beyond 8 MiB fails with `ARTIFACT_TOO_LARGE`; no capped prefix is presented as a complete artifact.
+Code-size, deadline, and result-size bounds follow the schema and limits owners rather than restated numbers. Cyclic, bigint, and function values get safe representations. Results above the inline budget spill to a complete session artifact; a result beyond the artifact cap fails with `ARTIFACT_TOO_LARGE`, and no capped prefix is presented as a complete artifact.
 
 Every dispatch invalidates all refs before execution. Afterwards the backend reconciles contexts/pages reachable through the dedicated browser and returns a fresh bounded observation by default.
 
@@ -147,7 +116,7 @@ Synchronous infinite loops or unresponsive cancellation cannot be safely interru
 Close scopes:
 
 - `session`: close one named tool session and all contexts/pages in its dedicated browser process;
-- `runtime`: close every tool session owned by the durable Pie session.
+- `runtime`: close every tool session owned by the current runtime (durable Pie session or child execution attempt).
 
 Either scope can export the named session's primary context storage state before closing. Runtime export therefore requires a `sessionId` to identify the context.
 
@@ -209,6 +178,8 @@ Console warnings/errors, page errors, failed requests, and downloads use indepen
 | viewport PNG | 16 MiB |
 | download | 128 MiB |
 | aggregate per tool session | 512 MiB |
+
+The exact constants behind this table are the fail-closed artifact limits in [`harness/tools/playwright/types.ts`](../../harness/tools/playwright/types.ts).
 
 A payload beyond its cap is deleted or stopped at its last safe boundary and reported with `ARTIFACT_TOO_LARGE`. The result never describes it as complete.
 
@@ -305,10 +276,10 @@ Validation uses `INVALID_ARGUMENTS`; uncategorized backend action failures use `
 
 ## Install and version ownership
 
-`extensions/playwright/package.json` and its committed lockfile own the runtime dependencies independently of `application/hosts/vscode/node_modules`. The implementation lives under `harness/tools/playwright/`, and dependency installation stays with its own `extensions/playwright/` owner:
+The [extension manifest](../../extensions/playwright/package.json) and [committed lockfile](../../extensions/playwright/package-lock.json) own the runtime dependencies independently of `application/hosts/vscode/node_modules`. The implementation lives under `harness/tools/playwright/`, and dependency installation stays with its own `extensions/playwright/` owner:
 
-- `playwright`: `1.62.1` exact;
-- `pngjs`: `7.0.0` exact.
+- `playwright` — browser automation and Chromium installation;
+- `pngjs` — bounded screenshot encoding.
 
 Pi packages remain optional `peerDependencies` with `"*"` ranges, preventing npm from installing a second SDK/TypeBox generation. Development tests resolve the embedded host's pinned Pi `0.80.6` and TypeBox `1.1.38` through a test-only runtime tsconfig, and an integration test loads the extension through that embedded Pi loader.
 
@@ -362,33 +333,6 @@ The normal package suite includes a real pinned-browser smoke path and determini
 - forced sidecar tree death and parent death without a shutdown frame, followed by PID-exit proof for sidecar and Chromium.
 
 The localhost fixture path is application-neutral and requires no external network or visible browser.
-
-### Recorded acceptance evidence (2026-09-01)
-
-- The Playwright package suite completed with `62 passed, 0 failed, 0 skipped`, including real Chromium, timeout/cancellation tree termination, failed-export cleanup, cumulative artifact quotas, bounded helper writers, bounded telemetry envelopes, last-page tab recovery, pathological-line bounding, and embedded Pi loader/schema compatibility. The release coverage gate completed at `95.1%` lines / `80.7%` branches (`61 passed, 1 intentionally skipped` because Node otherwise folds the external jiti compatibility child's alternate source maps into its experimental coverage). The final root affected suite completed with `6,656 passed, 0 failed, 30 skipped` and no flaky rerun; the full repository typecheck completed for every registered project.
-- The public registered tool completed `open → ref-targeted fill → fresh ref-targeted click → changed accessibility snapshot → close` on the deterministic form fixture without emitting an image. A separate canvas pixel probe used `run_code`, and exactly one explicit visual assertion produced exactly one image part.
-- The public registered tool drove the run-analytics site UI that `analysis/site/` served at the time (that static-site pipeline has since been retired; the retained `analysis/` workspace is DuckDB-only): it filled the Start date control by revision-scoped ref, asserted one active filter in the rendered DOM, narrowed a fresh observation to the filter form, reset by a new revision-scoped ref, and asserted the rendered filter state was clear. The workflow emitted no screenshot.
-- A hidden Win32 monitor polled `GetForegroundWindow()` every 20 ms across both public-tool dogfood runs. Each run retained its initial foreground HWND throughout (`FOREGROUND_CHANGES=[]`); Chromium remained headless and no desktop input tool was used.
-- Lifecycle tests recorded the sidecar and dedicated Chromium PIDs, then proved all were gone after sidecar tree kill, `run_code` timeout, `run_code` cancellation, browser-close fallback, and owner death without a shutdown frame.
-- The production extension TypeScript/Vite build completed through the supported `npm run build -- --no-sync` path with coordinated host/webview build ID `1032a1b72e4ac9a0da6b`. Atomic sync into the installed extension was intentionally deferred because this running Pie/VS Code process held the destination `out/` directory open.
-
-A deterministic pinned-browser release probe measured the following actual outputs and artifacts. The token figures are conservative four-characters-per-token proxies, not provider tokenizer claims.
-
-| Evidence | Measured size | Token proxy where model-facing |
-|---|---:|---:|
-| initial AI snapshot | 1,002 bytes | included in the 1,245-character tool result (~312 tokens) |
-| initial open tool text | 1,245 bytes | ~312 tokens |
-| explicit screenshot tool text | 1,473 bytes | ~369 tokens |
-| viewport full PNG | 16,927 bytes | artifact/image content, not text tokens |
-| viewport display PNG | 16,927 bytes | one explicit image part |
-| completed download | 36 bytes | artifact only |
-| `run_code` complete spilled JSON | 100,002 bytes | artifact only; preview tool text was 2,501 bytes (~626 tokens) |
-| dense complete accessibility snapshot | 29,080 bytes | artifact only |
-| dense reduced returned snapshot | 91 bytes | dense action tool text was 496 bytes (~124 tokens) |
-| exported storage state | 36 bytes | artifact only |
-| aggregate session artifacts before/after storage export | 162,972 / 163,008 bytes | quota-accounted, not model text |
-
-Every measured model-facing text result remained below the 32 KiB bound, while complete recall data remained artifact-backed.
 
 ## Known v1 limits
 

@@ -22,36 +22,12 @@ A single `request_capability` recovery tool progressively discloses both hidden 
 
 ## Configuration
 
-Add a `pruning` block to `settings.json`:
+Add a `pruning` block to `settings.json`; specify only the fields you want to override. Omitted fields, including nested options, keep their built-in defaults. For example, this enables shadow mode while leaving all other settings at their defaults:
 
 ```json
 {
   "pruning": {
-    "mode": "auto",
-    "model": "gpt-5.4-mini",
-    "provider": "github-copilot",
-    "thinkingLevel": "minimal",
-    "mainAgentEnabled": true,
-    "subagentEnabled": true,
-    "prepass": {
-      "timeoutMs": { "minimal": 30000, "low": 45000 },
-      "maxTransportRetries": 2,
-      "transportBackoffBaseMs": 1000,
-      "oauthRaceBackoffMs": 1500
-    },
-    "skills": {
-      "strategy": "discretion",
-      "ceiling": 8,
-      "pinned": []
-    },
-    "tools": {
-      "strategy": "discretion",
-      "ceiling": 10,
-      "dependencies": {
-        "edit": ["read"],
-        "subagent": ["bash"]
-      }
-    }
+    "mode": "shadow"
   }
 }
 ```
@@ -121,7 +97,7 @@ Built-in `timeoutMs` defaults (calibrated for reasoning models like `gpt-5-mini`
 
 ## Integration
 
-`skill-pruner` is a pi extension (loaded via `settings.json` packages). It hooks into:
+`skill-pruner` is a pi extension (auto-discovered from the agent directory's `extensions/` directory). It hooks into:
 
 - `before_agent_start` — one pruning pass for a main-agent turn and, when enabled, one independent launch pass per child session/registration. Child selections use the child's task assignment and agent definition. Child tools are pruned only when `request_capability` is initially permitted; skills can still be pruned without it. Any unexpected error fails open: the prompt and active tools are left untouched and the error is surfaced in the pruning-result message. Global `mode: "off"` and the extension toggle still disable both scopes.
 - `tool_call(read)` — tracks skill file reads for analytics

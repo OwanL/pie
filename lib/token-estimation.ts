@@ -8,7 +8,7 @@ import { countTokens as bpeCountTokens } from 'gpt-tokenizer/encoding/cl100k_bas
  * targets (Claude, GLM, Llama, Qwen, ...) — far closer than the chars/4
  * heuristic it replaces. It is NOT the active model's exact tokenizer:
  * provider `usage` blocks remain the source of truth where available
- * (see `src/backend/context-usage.ts`). Callers that previously divided
+ * (see `harness/session-storage/transcripts/context-usage.ts`). Callers that previously divided
  * character counts by 4 should call this instead.
  */
 /**
@@ -28,7 +28,7 @@ export function estimateTextTokens(text: string): number {
   }
   // Real BPE count (cl100k_base); approximate for the active model but far
   // closer than the chars/4 heuristic. Exact attribution comes from provider
-  // usage (see backend/context-usage.ts), so these rows stay "estimated".
+  // usage (see harness/session-storage/transcripts/context-usage.ts), so these rows stay "estimated".
   return bpeCountTokens(trimmed);
 }
 

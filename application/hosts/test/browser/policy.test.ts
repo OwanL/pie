@@ -1,5 +1,5 @@
 /**
- * Browser server policy tests (browser server plan §5.3/§6.3/§4.1): pure
+ * Browser server policy tests: pure
  * Host/Origin validation, pre-send gates, and the violation rate tracker.
  */
 

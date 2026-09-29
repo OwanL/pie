@@ -30,8 +30,8 @@ export interface SidebarViewProviderOptions {
    *  (browser sockets registered in the browser server's hub). Wired by
    *  `PieExtension`; absent, foreign ids are a no-op. */
   onForeignRequestState?(rendererId: string): void;
-  /** Renderer-scoped imperative routing for foreign renderers (browser
-   *  server plan §4.4: lazy-detail responses answer the initiating renderer). */
+  /** Renderer-scoped imperative routing for foreign renderers: lazy-detail
+   *  responses answer the initiating renderer. */
   onForeignPostImperative?(rendererId: string, message: HostToWebviewMessage): void;
   /** Release resources owned by a renderer document before invalidation. */
   onRendererInvalidated?(rendererId: string, rendererGeneration: number): void;
@@ -200,7 +200,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
   }
 
   /**
-   * Renderer-scoped immediate snapshot (browser server plan §4.1): handshake
+   * Renderer-scoped immediate snapshot: handshake
    * messages answer THEIR OWN renderer. The sidebar's own renderer is served
    * by this hub; a foreign renderer id (a browser socket registered in the
    * browser server's hub) is routed through the foreign handler wired by
@@ -214,7 +214,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
     this.providerOptions.onForeignRequestState?.(rendererId);
   }
 
-  /** Renderer-scoped imperative (browser server plan §4.4): lazy-detail
+  /** Renderer-scoped imperative: lazy-detail
    *  responses and other targeted imperatives answer THEIR OWN renderer.
    *  Foreign renderer ids route through the browser server's hub. */
   postImperativeToRenderer(rendererId: string, message: HostToWebviewMessage): void {
@@ -258,7 +258,7 @@ export class SidebarViewProvider implements vscode.WebviewViewProvider, vscode.D
     return this.session.getViewGeneration();
   }
 
-  /** The renderer hub (browser renderers register here in Milestone 2). */
+  /** The renderer hub for the sidebar's own renderer. */
   getRendererHub(): RendererHub {
     return this.hub;
   }

@@ -42,8 +42,8 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '..', '..');
 
 // Run a CLI command portably: on Windows, npm/pi/etc. are .cmd shims that
-// spawnSync (shell:false) cannot resolve directly, so route through cmd.exe
-// exactly like scripts/doctor.mjs does.
+// spawnSync (shell:false) cannot resolve directly, so route through cmd.exe,
+// matching scripts/lib/subprocess.mjs's spawnCliSync for these command shims.
 function run(command, args, cwd = repoRoot) {
   return process.platform === 'win32'
     ? spawnSync(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', command, ...args], { cwd, encoding: 'utf8', windowsHide: true })
@@ -299,7 +299,7 @@ function cmdHasJsonl(args) {
 
 function cmdPinnedVersions() {
   // Single source of truth for the three pinned versions, read via the shared
-  // scripts/toolchain.mjs helpers so install.bat does not need to parse
+  // scripts/install/toolchain.mjs helpers so install.bat does not need to parse
   // .node-version, package.json, or the extension lockfile.
   // Prints node, npm, pi (one per line). Exits non-zero if any pin is missing.
   const { node, npm, pi } = readPinnedVersions(repoRoot);

@@ -51,7 +51,7 @@ test('runtime lease release stays behind awaited production backend shutdown', a
 
 test('protocol v11 browser-server network state remains host-global and separates actual from configured intent', async () => {
   const contract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
-  assert.match(contract, /Browser Server Network State \(Protocol v11\)/u);
+  assert.match(contract, /Browser Server Network State/u);
   assert.match(contract, /host-global authority for the one shared browser listener/u);
   assert.match(contract, /`setBrowserServerLanEnabled` and `setBrowserServerEnabled` renderer commands/u);
   assert.match(contract, /`lanEnabled` and `lanUrls` describe the currently running server instance/u);
@@ -486,6 +486,22 @@ test('busy-seq dedup ignores out-of-order events but accepts unordered (no seq)'
   assert.equal(acceptBusySeq(state, '/b', 1), true);
   // Missing seq is always accepted (backward-compat).
   assert.equal(acceptBusySeq(state, '/a', undefined), true);
+});
+
+test('completed and interrupted replies project explicit continuation capability without creating user input', async () => {
+  const { buildIdleSessionCapabilities } = await import('../../harness/agent-processes/workers/session-activity.js');
+  for (const stopReason of ['stop', 'length', 'aborted']) {
+    const capabilities: SessionCapabilities = buildIdleSessionCapabilities([
+      { role: 'user', content: 'work' },
+      { role: 'assistant', stopReason, content: [{ type: 'text', text: 'answer' }] },
+    ]);
+    assert.equal(capabilities.canContinue, true);
+    assert.equal(capabilities.billableActivity, false);
+  }
+  assert.equal(buildIdleSessionCapabilities([]).canContinue, false);
+  const contract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
+  assert.match(contract, /completed assistant reply preserves that reply in provider context/u);
+  assert.match(contract, /without adding a user message/u);
 });
 
 test('ContextUsageChangedPayload carries nullable live usage per session', () => {

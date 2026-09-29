@@ -1,5 +1,5 @@
 /**
- * Fail-closed browser ingress validation (browser server plan §5.3).
+ * Fail-closed browser ingress validation.
  *
  * The VS Code webview is a trusted renderer: `validateWebviewToHostMessage`
  * is audit-only and `MessageRouter` handlers perform ad-hoc per-message

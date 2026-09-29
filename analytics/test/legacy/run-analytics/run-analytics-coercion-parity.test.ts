@@ -5,7 +5,7 @@ import test from 'node:test';
  * Coercion parity matrix.
  *
  * `analytics/analysis/scripts/source.ts` carries a deliberate "thin duplicate" of the
- * extension's run-analytics coercion (`extension/src/host/run-analytics/`),
+ * extension's run-analytics coercion (`analytics/legacy/run-analytics/`),
  * duplicated across packages to avoid cross-package import complexity. The
  * source.ts header demands the two stay synchronized. This matrix feeds the
  * same edge-case run snapshots through BOTH `coerceRunSnapshot` implementations

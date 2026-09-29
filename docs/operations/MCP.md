@@ -35,8 +35,10 @@ high-value toolsets; proxy mode is the default and the recommended default.
 - `settings.json#packages` → `npm:pi-mcp-adapter@2.20.1` (pi installs it into
   the gitignored `npm/` workspace of the agent dir and loads its extension
   into the backend process; no VS Code host changes).
-- `settings.json#pruning.tools.alwaysKeep` includes `mcp` so the
-  `skill-pruner` prepass never drops the proxy tool.
+- The adapter exposes `mcp` and, by default, `mcpScript`. The `skill-pruner`
+  prepass prunes these catalog entries, not individual MCP servers or tools
+  within the adapter. `settings.json#pruning.tools.alwaysKeep` protects only
+  `mcp` from pruning.
 - Tool results flow through `tool-result-pruner` like any other tool result:
   `minify-json` shrinks API JSON, `duplicate-collapse`/`progress-noise`
   compress repeated rows — no MCP-specific rules needed.
@@ -83,8 +85,7 @@ to one session only:
 
 Note: the global guard covers the main session. In-process subagent sessions
 do not pass through the backend's `SessionContext` setup, so the adapter's
-tools remain available there while MCP is off — a future subagent-side drop
-list entry would close that gap.
+tools remain available there while MCP is off.
 
 ### Version pin
 
@@ -138,12 +139,13 @@ disable interpolation).
 1. Edit the config file (or toggle a server in the pie UI — no file edit
    needed for enable/disable).
 2. Restart the backend (`pie: Restart Backend` in VS Code, `/reload` in TUI)
-   so the adapter re-reads config — per-server toggles made in the UI apply
-   at the same point.
+   so the adapter re-reads config. Global per-server toggles also need this;
+   session-scoped toolbar toggles recycle their worker automatically when idle.
 3. Verify: ask the model to use the server, or probe with
    `mcp({ search: "..." })`; the `/mcp` panel (TUI) shows server/tool status
-   and stderr. `mcp-cache.json` at the project root is the metadata cache —
-   delete it to force re-discovery.
+   and stderr. In the Pie backend, the metadata cache is
+   `<PIE_CACHE_DIR>/mcp-cache.json`; deleting this rebuildable cache forces
+   re-discovery.
 
 ### Troubleshooting
 
@@ -163,52 +165,23 @@ workspace; treat untrusted repos' `.mcp.json` as untrusted code. The adapter
 binds auth material to the URL that supplied it (a higher-precedence override
 that changes `url` drops inherited headers/tokens). Never commit tokens.
 
-## Current setup: Jira
+## Optional setup example: Jira
 
-`~/.config/mcp/mcp.json` (user-global) runs the local
-[`sooperset/mcp-atlassian`](https://github.com/sooperset/mcp-atlassian) server
-via `uvx` (uv is installed). Fill in the three placeholders (`JIRA_URL`,
-`JIRA_USERNAME`, `JIRA_API_TOKEN` — generate a token at
-id.atlassian.com → *API tokens*), restart the backend, and verify:
-`mcp({ search: "jira" })` should list `jira_search`, `jira_get`, …
+To add a user-global Jira server, configure
+`~/.config/mcp/mcp.json` for the local
+[`sooperset/mcp-atlassian`](https://github.com/sooperset/mcp-atlassian) server.
+This option requires `uv`/`uvx` installed, with `uvx` available on the backend
+process `PATH`. Follow the project's upstream
+[setup and configuration docs](https://github.com/sooperset/mcp-atlassian) for
+current instructions and supported environment variables (such as `JIRA_URL`,
+`JIRA_USERNAME`, and `JIRA_API_TOKEN`; generate a token at id.atlassian.com →
+*API tokens*). Create the config and supply values as documented; pie does not
+provision this file or placeholders. Never commit credentials: for a
+project-scoped config, use `${VAR}` interpolation rather than storing secrets.
+Restart the backend, then verify with `mcp({ search: "jira" })` (which should
+list tools such as `jira_search`, `jira_get`, …) or ask the model to use the
+server; the `/mcp` panel shows status and stderr.
 
 Alternatives: the official remote [Atlassian Rovo](https://www.atlassian.com/software/rovo)
 server (`url` + OAuth, needs org enablement) or a project-scoped `.mcp.json`
 instead of the home file.
-
-## Verification harness
-
-`../local_utils/mcp-smoke/` (workspace root, not a repo) contains a
-dependency-free echo MCP server + `.mcp.json`. From the pie repository root,
-run this headless end-to-end check:
-
-```bash
-PIE_REPO="$(node -p "require('node:path').resolve('.')")"
-cd ../local_utils/mcp-smoke
-PI_CODING_AGENT_DIR="$PIE_REPO" \
-  node "$PIE_REPO/application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/dist/cli.js" \
-  -p "Use the mcp tool: search for a tool containing 'echo', call it with 'mcp works', report the result."
-```
-
-Expected: the model discovers `echo` and returns `mcp works`. This exercises
-package resolution → extension load → config discovery → lazy spawn →
-`tools/list` → `tools/call` without any external server.
-
-## Future work
-
-- **Skill-pruner integration.** The `skill-pruner` prepass currently treats
-  MCP as a single `mcp` tool (kept via `pruning.tools.alwaysKeep`). A later
-  pass should score MCP servers/tools individually (e.g. from the adapter's
-  `mcp-cache.json` metadata) and prune per-server tool descriptions from the
-  proxy tool's search index — the same context-lean win the prepass already
-  gives the built-in catalog. TODO: add an MCP-aware pruning stage to
-  `harness/tool-and-skill-selection` behind its stable extension adapter (see
-  [docs/contracts/TOOL-RESULT-PRUNING.md](../contracts/TOOL-RESULT-PRUNING.md) for the adjacent deterministic layer).
-- **Subagent MCP gating.** Honor the `mcpEnabled` pref in subagent sessions
-  (see the note in “MCP controls (UI)”).
-- **Apply without restart (global scope).** The global `.pi/mcp.json`
-  per-server toggles still apply on the next session reload / backend restart
-  (the adapter re-reads config on every `session_start`). A future enhancement
-  could trigger a session reload automatically when idle so a global toggle
-  applies immediately. The session-scoped toolbar toggles already recycle
-  idle workers on apply.

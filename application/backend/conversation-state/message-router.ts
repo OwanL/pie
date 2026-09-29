@@ -28,10 +28,10 @@ export interface SidebarProviderLike {
   postState(): void;
   postSelectionState?(): void;
   postImperative(msg: any): void;
-  /** Renderer-scoped immediate snapshot (browser server plan §4.1): handshake
+  /** Renderer-scoped immediate snapshot: handshake
    *  messages answer their OWN renderer, not the sidebar. */
   requestState?(rendererId?: string): void;
-  /** Renderer-scoped imperative (browser server plan §4.4): lazy-detail
+  /** Renderer-scoped imperative: lazy-detail
    *  responses answer the INITIATING renderer, not the sidebar. */
   postImperativeToRenderer?(rendererId: string, msg: any): void;
   isRendererOwnerCurrent?(rendererId: string, viewGeneration: number, rendererGeneration: number): boolean;
@@ -394,9 +394,9 @@ export class MessageRouter {
   // Individual message handlers
   // ---------------------------------------------------------------------------
 
-  /** Command-level rejection reporting for browser sources (browser server
-   *  plan §5.2): the browser command gate records exactly one `rejected`
-   *  decision + ack. The trusted sidebar has no hook and is unaffected. */
+  /** Command-level rejection reporting for browser sources: the browser
+   *  command gate records exactly one `rejected` decision + ack. The trusted
+   *  sidebar has no hook and is unaffected. */
   private rejectBrowser(msg: { type: string }, context: RendererCommandContext | undefined, reason: string): void {
     context?.onBrowserCommandRejected?.(msg.type, reason);
   }
@@ -431,7 +431,7 @@ export class MessageRouter {
         cmd: { kind: 'SelectSession', corrId: crypto.randomUUID(), sessionPath: hiddenRunning[0] },
       });
     }
-    // Handshake answers are renderer-scoped (browser server plan §4.1): the
+    // Handshake answers are renderer-scoped: the
     // readying renderer gets the snapshot, not the sidebar.
     this.postStateFor(context);
   }
@@ -919,7 +919,7 @@ export class MessageRouter {
         message: 'Could not load details. Retry to try again.',
       };
     }
-    // Lazy-detail responses are renderer-scoped (browser server plan §4.4):
+    // Lazy-detail responses are renderer-scoped:
     // the INITIATING renderer gets the result, never a broadcast to the
     // sidebar. A browser expanding a tool detail must not hang waiting for a
     // response that was posted to the sidebar hub.
@@ -1140,7 +1140,7 @@ export class MessageRouter {
           defaultProvider: msg.defaultProvider,
           defaultThinkingLevel: msg.defaultThinkingLevel,
         },
-        // Trusted source for the M2 inline-confirmation seam: the effect
+        // Trusted source for the inline-confirmation seam: the effect
         // runner asks the INITIATING renderer (browser) instead of showing an
         // invisible desktop modal. Never client-supplied.
         ...(context ? { source: { rendererId: context.rendererId, kind: context.kind, rendererGeneration: context.rendererGeneration } } : {}),
@@ -1203,7 +1203,7 @@ export class MessageRouter {
         detailAttempt: msg.detailAttempt,
         address: msg.address,
         ...(msg.cursor !== undefined ? { cursor: msg.cursor } : {}),
-        // Trusted renderer identity (browser server plan §5.4): the complete
+        // Trusted renderer identity: the complete
         // ownership key is {hostInstanceId, viewGeneration, rendererId,
         // rendererGeneration, detailKey}. Never client-supplied.
         ...(context ? { rendererId: context.rendererId, rendererGeneration: context.rendererGeneration } : {}),
@@ -1263,7 +1263,7 @@ export class MessageRouter {
         corrId,
         sessionPath: msg.sessionPath,
         filePath: msg.filePath,
-        // Source-aware confirmation (browser server plan §9): a browser
+        // Source-aware confirmation: a browser
         // source must confirm inline in ITS renderer before the destructive
         // revert runs; never an invisible desktop modal.
         ...(context ? { source: { rendererId: context.rendererId, kind: context.kind, rendererGeneration: context.rendererGeneration } } : {}),

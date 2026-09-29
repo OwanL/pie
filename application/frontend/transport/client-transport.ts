@@ -1,5 +1,5 @@
 /**
- * Client transports (browser server plan §4.3).
+ * Client transports.
  *
  * The webview talks to the host through one `ClientTransport`; the bootstrap
  * picks it from server-injected metadata (`pie-transport` meta), not from a

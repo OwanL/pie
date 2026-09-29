@@ -11,7 +11,7 @@
  * acknowledgement (`clientCommandId`, `commandAck`, `commandStatus`,
  * `commandStatusRequest`), and targeted `rendererNotice` feedback.
  *
- * v6 (browser server M2): `rendererHello` carries the live `viewGeneration`
+ * v6 (browser server): `rendererHello` carries the live `viewGeneration`
  * (the browser has no HTML-stamped generation; it must learn the fence from
  * the hello), `HostDetailRoute` gains the trusted `rendererId`/
  * `rendererGeneration` (the complete ownership key is

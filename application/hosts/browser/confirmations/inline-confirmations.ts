@@ -1,7 +1,7 @@
 /**
- * Source-aware inline confirmations (browser server plan §2.2/§9).
+ * Source-aware inline confirmations.
  *
- * The minimal M2 confirmation capability for browser sources: model-switch
+ * The minimal confirmation capability for browser sources: model-switch
  * confirm and destructive `revertFile` run through a host-owned inline
  * confirmation imperative delivered to the INITIATING browser renderer. The
  * host proceeds only on that renderer's explicit `inlineConfirmResponse`;

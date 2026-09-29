@@ -18,7 +18,7 @@ import type { FileChange } from '../../../../../harness/tools/session-changes/ty
 // derives from the merged ChatMessage.toolCalls[] (live, in-memory), the
 // session-changes tool re-derives from the raw session JSONL (separate
 // toolCall part + toolResult entries joined by toolCallId). This test pins that
-// the two traversals agree. Its teeth (docs/SESSION-CHANGES-TOOL.md §8):
+// the two traversals agree. Its teeth:
 //   (a) a subagent tool call whose SEPARATE toolResult entry carries inner
 //       transcripts — a plain content-parts scan would drop all subagent
 //       changes;

@@ -2,6 +2,8 @@
 
 ## Scope and privacy
 
+Recommendations describe the July 2026 evaluation, not current implementation status or defaults. See the [history-compaction settings](../../harness/session-storage/settings/history-compaction.ts) for current configuration.
+
 This is an offline, aggregate-only analysis of the authoritative local Pie session store, `data/outcomes/sessions/`. Raw sessions were processed only in the trusted host process. The analyzer emits no session identifiers, prompts, summaries, file paths, source text, or tool output.
 
 This report is the retained record of that analysis; the one-shot analyzer script has been retired. The findings below are observational evidence, not a controlled quality experiment. The corpus has only five sessions containing compaction, so conclusions should guide implementation and a later controlled benchmark rather than establish causality.

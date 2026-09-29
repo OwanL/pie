@@ -4,7 +4,7 @@
  * The run-analytics coercion logic in this file (the schema `*_KINDS`
  * constants, `LEGACY_RESULT_ISSUE_KIND_MAP`, the legacy failure/sample split
  * helpers, and `coerceToolUsageRollup` with its empty-rollup builders) is a thin
- * duplicate of `extension/src/host/run-analytics/coercion-rollups.ts`
+ * duplicate of `analytics/legacy/run-analytics/coercion-rollups.ts`
  * (pie extension) to avoid cross-package import complexity. Keep those
  * schema-defining coercion blocks synchronized.
  */

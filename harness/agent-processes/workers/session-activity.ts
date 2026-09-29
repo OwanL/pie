@@ -1,6 +1,6 @@
-// Backend capability producers publish the canonical inert facts contract
-// only (repository-organization plan §3.2); the host-owned operation overlay
-// is projected exclusively in `host/core/projection.ts`.
+// Backend capability producers publish only the canonical inert facts
+// contract; the host-owned operation overlay is projected exclusively in
+// `application/backend/conversation-state/projections/projection.ts`.
 import type { SessionCapabilityFacts } from '../lib/rpc/session-capability-facts.js';
 import { classifyInterruptedContinuationTail } from '../lib/sdk-integration/sdk';
 import type { SessionContext } from '../coordinator/server-types.js';

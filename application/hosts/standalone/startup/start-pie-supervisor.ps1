@@ -347,7 +347,7 @@ function Require-BuildOutput {
     [Parameter(Mandatory = $true)][string]$RepositoryRoot
   )
 
-  $outputRoot = Join-Path $RepositoryRoot 'extension\out'
+  $outputRoot = Join-Path $RepositoryRoot 'application\hosts\vscode\out'
   $requiredFiles = @(
     @{ Relative = 'standalone.js'; Label = 'standalone Node entry' },
     @{ Relative = 'backend.js'; Label = 'backend bundle' },

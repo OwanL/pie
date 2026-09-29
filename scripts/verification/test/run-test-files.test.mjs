@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import {
   inferRepoRoot,
@@ -17,6 +18,7 @@ import {
   parseArgs,
   DEFAULT_GROUP_CONCURRENCY,
   runGroupQueue,
+  readFilesFromStdin,
 } from '../run-test-files.mjs';
 
 const repoRoot = inferRepoRoot();
@@ -305,11 +307,22 @@ test('buildTsxArgs is fast/no-coverage and prefixes --tsconfig before files', ()
 });
 
 test('parseArgs collects positional files and respects -- / --help', () => {
-  assert.deepEqual(parseArgs(['a.test.ts', 'b.test.ts']), { files: ['a.test.ts', 'b.test.ts'], help: false });
-  assert.deepEqual(parseArgs(['--help']), { files: [], help: true });
-  assert.deepEqual(parseArgs(['-h']), { files: [], help: true });
+  assert.deepEqual(parseArgs(['a.test.ts', 'b.test.ts']), {
+    files: ['a.test.ts', 'b.test.ts'], help: false, filesFromStdin: false,
+  });
+  assert.deepEqual(parseArgs(['--help']), { files: [], help: true, filesFromStdin: false });
+  assert.deepEqual(parseArgs(['-h']), { files: [], help: true, filesFromStdin: false });
+  assert.deepEqual(parseArgs(['--files-from-stdin']), { files: [], help: false, filesFromStdin: true });
   assert.deepEqual(parseArgs(['a.test.ts', '--', '--help', 'b.test.ts']), {
     files: ['a.test.ts', '--help', 'b.test.ts'],
     help: false,
+    filesFromStdin: false,
   });
+});
+
+test('readFilesFromStdin parses and validates a JSON file list', async () => {
+  const files = ['scripts/a.test.mjs', 'paths/with\nnewline.test.mjs'];
+  assert.deepEqual(await readFilesFromStdin(Readable.from([JSON.stringify(files)])), files);
+  await assert.rejects(readFilesFromStdin(Readable.from(['not json'])), /JSON array of test file paths/);
+  await assert.rejects(readFilesFromStdin(Readable.from(['[1]'])), /JSON array of test file paths/);
 });

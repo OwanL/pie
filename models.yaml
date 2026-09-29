@@ -7,7 +7,7 @@
 #   models.json, model-profiles.yaml, settings.json
 # They are regenerated from this file by scripts/model-config/sync-models.mjs.
 #
-# Field flow (see docs/operations/centralized-model-config.md §4):
+# Field flow:
 #   pricing:{input,output,cacheRead,cacheWrite} -> models.json cost:{...} (USD/M-token)
 #   disabledReason        -> model-profiles.yaml disabled_reason (snake_case)
 #   eligible/thinking     -> model-profiles.yaml
@@ -51,6 +51,7 @@ sessionTitles:
   thinkingLevel: off
   timeoutSec: 15
 profileOrder:
+  - claude-sonnet-5.5
   - claude-opus-5.5
   - provider: github-copilot
     id: gpt-6-luna
@@ -276,7 +277,7 @@ providers:
           cacheRead: 0.003
           cacheWrite: 0
           peak:
-            weekdaysUtc: [1, 2, 3, 4, 5]
+            weekdaysUtc: [ 1, 2, 3, 4, 5 ]
             startMinutesUtc: 720
             endMinutesUtc: 1080
             override:
@@ -333,7 +334,7 @@ providers:
           cacheRead: 0.007
           cacheWrite: 0
           peak:
-            weekdaysUtc: [1, 2, 3, 4, 5]
+            weekdaysUtc: [ 1, 2, 3, 4, 5 ]
             startMinutesUtc: 720
             endMinutesUtc: 1080
             override:
@@ -383,7 +384,7 @@ providers:
           cacheRead: 0.022
           cacheWrite: 0
           peak:
-            weekdaysUtc: [1, 2, 3, 4, 5]
+            weekdaysUtc: [ 1, 2, 3, 4, 5 ]
             startMinutesUtc: 720
             endMinutesUtc: 1080
             override:
@@ -998,6 +999,46 @@ providers:
               output: 25
               cacheRead: 0.5
               cacheWrite: 6.25
+        eligible: false
+        thinking:
+          - minimal
+          - low
+          - medium
+          - high
+          - xhigh
+          - max
+        disabledReason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
+      - id: claude-sonnet-5.5
+        name: "Copilot: Claude Sonnet 5.5"
+        api: anthropic-messages
+        compat:
+          supportsEagerToolInputStreaming: false
+          forceAdaptiveThinking: true
+        reasoning: true
+        input:
+          - text
+          - image
+        maxImagesPerRequest: 1
+        contextWindow: 200000
+        maxTokens: 128000
+        thinkingLevelMap:
+          low: low
+          medium: medium
+          high: high
+          xhigh: xhigh
+          max: max
+          minimal: low
+        pricing:
+          input: 2
+          output: 10
+          cacheRead: 0.2
+          cacheWrite: 2.5
+          tiers:
+            - inputTokensAbove: 200000
+              input: 2
+              output: 10
+              cacheRead: 0.2
+              cacheWrite: 2.5
         eligible: false
         thinking:
           - minimal

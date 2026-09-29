@@ -16,9 +16,9 @@ resolved state directory (`<data-root>/state/analytics-activation-v1.json`).
 - **Legacy authority (default: no active generation).** `AnalyticsRuntime.start()` starts no helper,
   creates no database, and captures nothing. A validated manifest with no active generation
   (candidate or ready) also selects legacy. The legacy owners stay authoritative: the run-analytics
-  store and checkpoints under the workspace outcomes root, and the billable-invocation ledger
-  (`billable-invocations.jsonl`) plus activity timeline (`activity-intervals.json`) under the
-  workspace analytics store.
+  store and checkpoints, billable-invocation ledger (`billable-invocations.jsonl`), and activity
+  timeline (`activity-intervals.json`) all share the same per-workspace run-analytics store directory
+  beneath the workspace outcomes root.
 - **Canonical authority (a validated active generation).** The host validates the manifest, derives
   one descriptor snapshot from it, starts the production recorder, and proves the read path with a
   disposable query. Before capture counts as ready it re-reads the activation and fails closed
@@ -86,7 +86,7 @@ gated cutoff in §7.
   provider/tool execution, completion, cancellation, and failover never await acceptance,
   persistence, or queue drainage.
 - Producers submit typed facts and detail through one versioned contract
-  (`shared/analytics/contracts.ts`) rather than feature-specific stores. Settlements, executions,
+  (`analytics/contracts/contracts.ts`) rather than feature-specific stores. Settlements, executions,
   tool calls and facets, activity spans, capabilities, and features are facts; large tool/subagent
   bodies are separately addressed detail.
 - The recorder owns the database schema, ordered migrations, and projection revisions. Producers do
@@ -103,7 +103,7 @@ gated cutoff in §7.
   Ambiguous transport failures remain replayable and do not authorize sequence reuse. This
   recovery prevents a missing receipt from blocking later accounting; it does not repair lost
   facts or make historical totals complete. Historical SDK estimates already captured as reported
-  costs are not silently rewritten by this change.
+  costs are not silently rewritten.
 
 ## 4. Privacy: delete on explicit close
 
@@ -146,6 +146,10 @@ run-analytics exports, legacy storage stores, and the legacy side-channel JSONL 
 DuckDB database for named batch queries. It has no dashboard or static-site pipeline, is not the
 runtime query path, and never writes the canonical store. Removing it is not required for the
 canonical authority to be active.
+
+The legacy run store automatically refreshes a `run-analytics.json` export alongside its
+JSONL/checkpoint files. The optional VS Code setting `pie.experimentAssignment` labels new
+run analytics snapshots for treatment comparisons.
 
 ## 7. Gated session-storage cutoff
 

@@ -195,10 +195,10 @@ export interface RendererCommandContext {
   rendererId: string;
   kind: RendererKind;
   rendererGeneration: number;
-  /** Browser-only: command-level rejection reporting (browser server plan
-   *  §5.2). The router invokes this when a schema-valid command fails
-   *  command-level validation (e.g. the session is no longer open) so the
-   *  browser command gate records exactly one `rejected` decision + ack.
+  /** Browser-only: command-level rejection reporting. The router invokes
+   *  this when a schema-valid command fails command-level validation
+   *  (e.g. the session is no longer open) so the browser command gate records
+   *  exactly one `rejected` decision + ack.
    *  Set per routing call by the gate; absent for the trusted sidebar. */
   onBrowserCommandRejected?(type: string, reason: string): void;
 }
@@ -263,7 +263,7 @@ export interface RenderFailurePayload {
 /** Host-minted identity carried on every host→webview detail imperative. A
  *  generation change (host, view, backend, or worker) invalidates the stream;
  *  the webview drops any imperative whose route does not match the key-scoped
- *  subscription it opened. Since browser-server M2 (protocol v6) the route
+ *  subscription it opened. Since protocol v6 the route
  *  also carries the trusted renderer identity (`rendererId`/
  *  `rendererGeneration`, never client-supplied): a browser renderer's
  *  subscription can never be settled or streamed to another renderer, even
@@ -274,7 +274,7 @@ export interface HostDetailRoute {
   hostInstanceId: string;
   hostGeneration: number;
   viewGeneration: number;
-  /** Trusted renderer session (browser server plan §5.4). */
+  /** Trusted renderer session. */
   rendererId: string;
   /** Trusted reload/reconnect fence for that renderer. */
   rendererGeneration: number;
@@ -570,9 +570,9 @@ export type HostToWebviewMessage =
       buildId: string;
       /** Shared extension-host incarnation (same value for every renderer). */
       hostInstanceId: string;
-      /** Host-assigned renderer session id (browser server plan §5.1). */
+      /** Host-assigned renderer session id. */
       rendererId: string;
-      /** Reload/reconnect fence for this renderer (browser server plan §5.1). */
+      /** Reload/reconnect fence for this renderer. */
       rendererGeneration: number;
       /** Invalidates settlements and evidence from a replaced/reloaded view. */
       viewGeneration: number;
@@ -665,7 +665,7 @@ export type HostToWebviewMessage =
       type: 'playCompletionSound';
       volume: number;
     }
-  // ── Browser-server transport (Milestone 2). The four variants below are
+  // ── Browser-server transport. The four variants below are
   //    browser-only host→renderer traffic; the VS Code sidebar never receives
   //    them. ──
   | {
@@ -715,10 +715,10 @@ export type HostToWebviewMessage =
       kind?: 'info' | 'warning' | 'error';
     }
   | {
-      /** Source-aware inline confirmation (browser server plan §2.2/§9,
-       *  protocol v6). Host-owned: the host posts this targeted imperative to
-       *  the initiating renderer and proceeds only on that renderer's explicit
-       *  `inlineConfirmResponse`. The VS Code sidebar never receives it (its
+      /** Source-aware inline confirmation (protocol v6). Host-owned: the host
+       *  posts this targeted imperative to the initiating renderer and proceeds
+       *  only on that renderer's explicit `inlineConfirmResponse`. The VS Code
+       *  sidebar never receives it (its
        *  adapter keeps using native modals); a browser-initiated model switch
        *  or destructive `revertFile` never falls back to an invisible desktop
        *  modal. If the renderer disconnects, the pending confirmation
@@ -894,7 +894,7 @@ type WebviewToHostMessagePayload =
   | { type: 'transcriptCommitBlocked'; payload: TranscriptCommitBlockedPayload }
   | { type: 'paintObserved'; payload: PaintObservedPayload }
   | { type: 'renderFailure'; payload: RenderFailurePayload }
-  // ── Browser-server lifecycle (Milestone 2). Validated like all other
+  // ── Browser-server lifecycle. Validated like all other
   //    inbound messages; `rendererFocusChanged` is mandatory because
   //    completion-attention arbitration depends on it. ──
   | { type: 'rendererVisibilityChanged'; visible: boolean }

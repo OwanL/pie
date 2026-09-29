@@ -238,7 +238,7 @@ export interface ShowModelSwitchConfirmEffect extends EffectBase {
   modelSettings: ModelSettings;
   message: string;
   confirmChoice: string;
-  /** Trusted initiating renderer (browser server plan §9): a browser source
+  /** Trusted initiating renderer: a browser source
    *  confirms inline in ITS renderer; the VS Code modal is never shown to a
    *  browser source. Never client-supplied. */
   source?: RendererCommandContext;
@@ -376,7 +376,7 @@ export interface FileRevertEffect extends EffectBase {
   kind: 'FileRevert';
   sessionPath: string;
   filePath: string;
-  /** Trusted initiating renderer (browser server plan §9). */
+  /** Trusted initiating renderer. */
   source?: RendererCommandContext;
 }
 

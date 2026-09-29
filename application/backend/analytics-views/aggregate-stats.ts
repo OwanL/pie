@@ -8,7 +8,7 @@
  * overall — with a recent/current focus (today + this-week cost, open/running
  * counts) plus all-time context for tooltips.
  *
- * Provider attribution policy: see {@link ../../shared/protocol/aggregate-stats.ts}.
+ * Provider attribution policy: see {@link ../../../analytics/contracts/aggregate-stats.ts}.
  */
 
 import type { ModelPricingRecord, ModelTokenPricing } from '../../../harness/model-providers/pricing/pricing.js';

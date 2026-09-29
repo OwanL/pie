@@ -116,7 +116,7 @@ export class HostRuntime {
   readonly backend: BackendClient;
   /** Session command queue + backend event wiring. */
   readonly service: SessionService;
-  /** Loopback browser server (browser server plan §6/§7). Started in
+  /** Loopback browser server. Started in
    *  `start()` after the host can build a valid initial `ViewState`, stopped
    *  in `shutdown()` before the service/backend order. The field is the
    *  host-neutral {@link BrowserServerService} seam; only the concrete host
@@ -778,7 +778,7 @@ export class HostRuntime {
         showWarningModal: (message, confirmChoice) =>
           this.platform.notifications.showModalConfirm(message, confirmChoice),
       },
-      // M2 source-aware confirmation seam (§9): a BROWSER source confirms
+      // Source-aware confirmation seam: a BROWSER source confirms
       // inline in ITS OWN renderer through the browser server; the host modal
       // is never shown for a browser source, and disconnect cancels.
       // The sidebar (VS Code) source path is unchanged (native modal).
@@ -881,7 +881,7 @@ export class HostRuntime {
     this.aggregateStatsService.start();
     await this.statsService.start();
     await this.service.start();
-    // M2 (§7.2): start the browser server only after the host can build a
+    // Start the browser server only after the host can build a
     // valid initial `ViewState`. Backend readiness is a field in that state;
     // the HTTP shell does not wait for provider/backend startup.
     await this.browserServer.start();
@@ -1219,7 +1219,7 @@ export class HostRuntime {
     this.statsService.onExperimentAssignmentChanged(this.platform.getExperimentAssignment());
   }
 
-  /** Lifecycle sink (§6.2): successful fallback binds are info-log-only;
+  /** Lifecycle sink: successful fallback binds are info-log-only;
    *  only a terminal bind/start failure produces a user notice. */
   private handleBrowserServerLifecycle(event: BrowserServerLifecycleEvent): void {
     switch (event.kind) {
@@ -1315,7 +1315,7 @@ export class HostRuntime {
       // endpoint closing is not proof that backend/recorder writers drained,
       // and is never interpreted as proof that every writer was discovered.
       await this.analyticsHandoffControl?.stop();
-      // M2 (§7.4): stop the browser server FIRST — stop accepting
+      // Stop the browser server FIRST — stop accepting
       // HTTP/upgrades, close tracked WebSocket clients, close/await the HTTP
       // server, dispose browser renderer sessions/hub — then continue the
       // existing service/backend shutdown order. Closing the port releases it

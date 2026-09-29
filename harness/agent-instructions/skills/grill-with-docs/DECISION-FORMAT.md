@@ -1,6 +1,6 @@
 # Decision Record Format
 
-When a grilling session produces a decision worth recording, add it to `docs/` — either in an existing doc (`docs/architecture/ARCHITECTURE.md`, `docs/contracts/STATE_CONTRACT.md`) if it fits, or as a new file in the category identified by `docs/INDEX.md`.
+When a grilling session produces a decision worth recording, add it to `docs/` — either in an existing doc (`docs/architecture/ARCHITECTURE.md`, `docs/contracts/STATE_CONTRACT.md`) if it fits, or as a new file in an appropriate existing category directory.
 
 ## Template
 
@@ -23,7 +23,7 @@ Only include these when they add genuine value. Most records won't need them.
 
 - **Fits an existing doc** (`docs/architecture/ARCHITECTURE.md`, `docs/contracts/STATE_CONTRACT.md`) → add it there under the relevant section
 - **Standalone concern** → create a new file in `docs/` with a descriptive name (e.g. `PRUNING-DESIGN.md`)
-- **Convention or terminology** → add it to `AGENTS.md`
+- **Pie convention or terminology** → add it to the [develop-pie skill](../develop-pie/SKILL.md), as directed by the root `AGENTS.md`
 
 Don't create a separate `docs/adr/` directory — this project records decisions inline in the relevant docs, not in a numbered ADR sequence.
 
@@ -34,8 +34,6 @@ All three of these must be true:
 1. **Hard to reverse** — the cost of changing your mind later is meaningful
 2. **Surprising without context** — a future reader will look at the code and wonder "why on earth did they do it this way?"
 3. **The result of a real trade-off** — there were genuine alternatives and you picked one for specific reasons
-
-If a decision is easy to reverse, skip it — you'll just reverse it. If it's not surprising, nobody will wonder why. If there was no real alternative, there's nothing to record beyond "we did the obvious thing."
 
 ### What qualifies
 

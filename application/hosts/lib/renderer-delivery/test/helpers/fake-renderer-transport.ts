@@ -1,7 +1,6 @@
 /**
- * Deterministic fake `RendererTransport` for renderer-hub tests (browser
- * server plan Milestone 0: "Build fake host and client transports for
- * deterministic tests").
+ * Deterministic fake `RendererTransport` for renderer-hub tests, providing
+ * controllable host/client transport behavior without real sockets.
  */
 
 import type { HostToWebviewMessage, RendererKind, WebviewToHostMessage } from '../../../../../lib/protocol/index.js';
