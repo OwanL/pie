@@ -12,7 +12,7 @@ import type {
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { CreateAgentSessionResult } from "./sdk.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
-import { SessionManager } from "./session-manager.ts";
+import { SessionManager, type ContextMessageOmissionsResolver } from "./session-manager.ts";
 import type {
 	SessionOwnershipAdapter,
 	SessionOwnershipReservation,
@@ -44,7 +44,19 @@ export type CreateAgentSessionRuntimeFactory = (options: {
 	sessionManager: SessionManager;
 	sessionStartEvent?: SessionStartEvent;
 	projectTrustContext?: ProjectTrustContext;
+	contextMessageOmissions?: ContextMessageOmissionsResolver;
 }) => Promise<CreateAgentSessionRuntimeResult>;
+
+/** Initial target and caller-owned policies for a shared session runtime. */
+export interface CreateAgentSessionRuntimeOptions {
+	cwd: string;
+	agentDir: string;
+	sessionManager: SessionManager;
+	sessionStartEvent?: SessionStartEvent;
+	contextMessageOmissions?: ContextMessageOmissionsResolver;
+	ownershipAdapter?: SessionOwnershipAdapter;
+	writeLease?: SessionWriteLease;
+}
 
 /**
  * Thrown when /import references a JSONL file path that does not exist.
@@ -795,14 +807,7 @@ export class AgentSessionRuntime {
  */
 export async function createAgentSessionRuntime(
 	createRuntime: CreateAgentSessionRuntimeFactory,
-	options: {
-		cwd: string;
-		agentDir: string;
-		sessionManager: SessionManager;
-		sessionStartEvent?: SessionStartEvent;
-		ownershipAdapter?: SessionOwnershipAdapter;
-		writeLease?: SessionWriteLease;
-	},
+	options: CreateAgentSessionRuntimeOptions,
 ): Promise<AgentSessionRuntime> {
 	assertSessionCwdExists(options.sessionManager, options.cwd);
 	const hasOwnershipAdapter = options.ownershipAdapter !== undefined;
@@ -813,11 +818,22 @@ export async function createAgentSessionRuntime(
 	if (options.ownershipAdapter && options.writeLease) {
 		options.sessionManager.attachPieWriteLease(options.ownershipAdapter, options.writeLease);
 	}
-	const result = await createRuntime(options);
+	// Keep the caller's synchronous context policy on the shared factory so all
+	// replacement, self-reopen, and rebuild paths receive the same resolver.
+	const sharedFactory: CreateAgentSessionRuntimeFactory = options.contextMessageOmissions
+		? (runtimeOptions) => {
+				runtimeOptions.sessionManager.setContextMessageOmissionsResolver(options.contextMessageOmissions);
+				return createRuntime({
+					...runtimeOptions,
+					contextMessageOmissions: options.contextMessageOmissions,
+				});
+			}
+		: createRuntime;
+	const result = await sharedFactory(options);
 	return new AgentSessionRuntime(
 		result.session,
 		result.services,
-		createRuntime,
+		sharedFactory,
 		result.diagnostics,
 		result.modelFallbackMessage,
 		options.ownershipAdapter,

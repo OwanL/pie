@@ -323,6 +323,15 @@ export interface SessionContext {
 	model: { provider: string; modelId: string } | null;
 }
 
+/** Options for deriving an LLM context without changing the persisted session tree. */
+export interface SessionContextBuildOptions {
+	/** Active-branch entry IDs to omit from the projected messages. */
+	omitEntryIds?: ReadonlySet<string>;
+}
+
+/** Synchronous caller-owned policy for omitting messages from a branch context. */
+export type ContextMessageOmissionsResolver = (branchEntries: readonly SessionEntry[]) => ReadonlySet<string>;
+
 export interface SessionInfo {
 	path: string;
 	id: string;
@@ -614,10 +623,13 @@ export function buildSessionContext(
 	entries: SessionEntry[],
 	leafId?: string | null,
 	byId?: Map<string, SessionEntry>,
+	options?: SessionContextBuildOptions,
 ): SessionContext {
 	const path = buildSessionPath(entries, leafId, byId);
 	const { thinkingLevel, model } = getSessionContextSettings(path);
-	const messages = buildContextEntries(entries, leafId, byId).flatMap(sessionEntryToContextMessages);
+	const messages = buildContextEntries(entries, leafId, byId)
+		.filter((entry) => !options?.omitEntryIds?.has(entry.id))
+		.flatMap(sessionEntryToContextMessages);
 	return { messages, thinkingLevel, model };
 }
 
@@ -961,6 +973,8 @@ export class SessionManager {
 	private piePreparedKind: "create" | "open" | "branch" | "import" | undefined;
 	private piePreparedNeedsWrite = false;
 	private piePreparedWriteMode: "w" | "wx" = "w";
+	private contextOmissionEntryIds: ReadonlySet<string> = new Set();
+	private contextMessageOmissionsResolver?: ContextMessageOmissionsResolver;
 
 	private constructor(
 		cwd: string,
@@ -991,6 +1005,7 @@ export class SessionManager {
 				"Worker session manager cannot change paths without a replacement transfer.",
 			);
 		}
+		this.contextOmissionEntryIds = new Set();
 		this.sessionFile = resolvePath(sessionFile);
 		if (existsSync(this.sessionFile)) {
 			this.fileEntries = preloadedEntries ?? loadEntriesFromFile(this.sessionFile);
@@ -1031,6 +1046,7 @@ export class SessionManager {
 				"Worker session manager cannot allocate a new path without a replacement reservation.",
 			);
 		}
+		this.contextOmissionEntryIds = new Set();
 		if (options?.id !== undefined) {
 			assertValidSessionId(options.id);
 		}
@@ -1566,11 +1582,34 @@ export class SessionManager {
 	}
 
 	/**
+	 * Attach transient context-only omissions before a runtime factory builds its
+	 * initial agent context. These IDs never alter session entries or disk state.
+	 */
+	setContextOmissionEntryIds(entryIds: readonly string[]): void {
+		this.contextOmissionEntryIds = new Set(entryIds);
+	}
+
+	/**
+	 * Attach a synchronous context-only policy. The resolver is reevaluated with
+	 * the current active branch on every context build; it never changes entries.
+	 */
+	setContextMessageOmissionsResolver(resolver?: ContextMessageOmissionsResolver): void {
+		this.contextMessageOmissionsResolver = resolver;
+	}
+
+	/**
 	 * Build the session context (what gets sent to the LLM).
 	 * Uses tree traversal from current leaf.
 	 */
-	buildSessionContext(): SessionContext {
-		return buildSessionContext(this.getEntries(), this.leafId, this.byId);
+	buildSessionContext(options?: SessionContextBuildOptions): SessionContext {
+		const omitEntryIds = new Set(this.contextOmissionEntryIds);
+		for (const id of this.contextMessageOmissionsResolver?.(this.getBranch()) ?? []) {
+			omitEntryIds.add(id);
+		}
+		for (const id of options?.omitEntryIds ?? []) {
+			omitEntryIds.add(id);
+		}
+		return buildSessionContext(this.getEntries(), this.leafId, this.byId, { omitEntryIds });
 	}
 
 	/**

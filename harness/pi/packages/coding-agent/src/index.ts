@@ -16,6 +16,7 @@ export {
 	AgentSession,
 	type AgentSessionConfig,
 	type AgentSessionEvent,
+	type ContinueAfterInterruptionDecision,
 	type AgentSessionEventListener,
 	type ModelCycleResult,
 	type ParsedSkillBlock,
@@ -198,6 +199,7 @@ export {
 	type CreateAgentSessionOptions,
 	type CreateAgentSessionResult,
 	type CreateAgentSessionRuntimeFactory,
+	type CreateAgentSessionRuntimeOptions,
 	type CreateAgentSessionRuntimeResult,
 	type CreateAgentSessionServicesOptions,
 	// Factory
@@ -219,6 +221,7 @@ export {
 } from "./core/sdk.ts";
 export {
 	type BranchSummaryEntry,
+	type ContextMessageOmissionsResolver,
 	buildContextEntries,
 	buildSessionContext,
 	type CompactionEntry,
@@ -232,6 +235,7 @@ export {
 	type NewSessionOptions,
 	parseSessionEntries,
 	type SessionContext,
+	type SessionContextBuildOptions,
 	type SessionEntry,
 	type SessionEntryBase,
 	type SessionHeader,

@@ -86,7 +86,13 @@ import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
-import type { BranchSummaryEntry, CompactionEntry, SessionEntry, SessionManager } from "./session-manager.ts";
+import type {
+	BranchSummaryEntry,
+	CompactionEntry,
+	SessionContextBuildOptions,
+	SessionEntry,
+	SessionManager,
+} from "./session-manager.ts";
 import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
@@ -214,6 +220,15 @@ export interface PromptOptions {
 	/** Internal hook used by RPC mode to observe prompt preflight acceptance or rejection. */
 	preflightResult?: (success: boolean) => void;
 }
+
+/**
+ * An explicit policy decision for a zero-user-message continuation.
+ * The caller owns tail classification; AgentSession only applies the supplied
+ * branch-entry omissions and enters the normal run/settlement lifecycle.
+ */
+export type ContinueAfterInterruptionDecision =
+	| { type: "continue"; omitEntryIds?: readonly string[] }
+	| { type: "unsupported"; reason: string };
 
 /** Result from cycleModel() */
 export interface ModelCycleResult {
@@ -1489,6 +1504,35 @@ export class AgentSession {
 			images,
 			source: "extension",
 		});
+	}
+
+	/**
+	 * Continue an interrupted provider turn without synthesizing a user message.
+	 * Tail classification stays with the caller; source only applies the explicit
+	 * branch-entry omissions and runs through the ordinary settlement lifecycle.
+	 */
+	async continueAfterInterruption(decision: ContinueAfterInterruptionDecision): Promise<void> {
+		if (decision.type === "unsupported") {
+			throw new Error(decision.reason || "The session does not end at a supported continuation point.");
+		}
+		if (this.isStreaming) {
+			throw new Error("Cannot continue after interruption while the agent is already processing.");
+		}
+
+		const branchIds = new Set(this.sessionManager.getBranch().map((entry) => entry.id));
+		for (const id of decision.omitEntryIds ?? []) {
+			if (!branchIds.has(id)) {
+				throw new Error(`Context omission entry ${id} is not on the active session branch.`);
+			}
+		}
+
+		const contextOptions: SessionContextBuildOptions = {
+			omitEntryIds: new Set(decision.omitEntryIds ?? []),
+		};
+		this.agent.state.messages = this.sessionManager.buildSessionContext(contextOptions).messages;
+		// An explicit continuation starts a fresh bounded overflow-recovery attempt.
+		this._overflowRecoveryAttempted = false;
+		await this._runAgentPrompt([]);
 	}
 
 	/**
