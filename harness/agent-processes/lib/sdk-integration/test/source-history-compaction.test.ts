@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import type { CompactionHooks } from '../../../../pi/packages/coding-agent/src/core/agent-session.ts';
+import type { CompactionHooks, SessionMessageEntry } from '@earendil-works/pi-coding-agent';
 import { consumedOverflowMessageEntryIds, isEstimatedContextOverflowMessage } from '../../../workers/history-compaction';
 
 // Load only the privately compiled source candidate. The resolver rejects any
@@ -509,8 +509,11 @@ for (const overflowScenario of [
       contextUsage?.tokens,
     ),
     beforeCompact: (event) => {
-      const failedEntry = event.branchEntries.findLast((entry: any) => entry.type === 'message'
-        && entry.message.role === 'assistant' && entry.message.stopReason === overflowScenario.stopReason);
+      const failedEntry = [...event.branchEntries].reverse().find((entry): entry is SessionMessageEntry => (
+        entry.type === 'message'
+          && entry.message.role === 'assistant'
+          && entry.message.stopReason === overflowScenario.stopReason
+      ));
       assert.ok(failedEntry, 'the failed overflow reply remains durable when compaction starts');
       const result = extensionCompaction(event, 'estimated-overflow-summary');
       result.compaction.firstKeptEntryId = failedEntry.id;

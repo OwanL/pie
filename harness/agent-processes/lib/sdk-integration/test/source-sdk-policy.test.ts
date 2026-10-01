@@ -4,8 +4,8 @@ import type {
   AgentSession,
   CompactionHooks,
   ContinueAfterInterruptionDecision,
-} from '../../../../pi/packages/coding-agent/dist/core/agent-session.js';
-import type { ContextMessageOmissionsResolver, SessionEntry } from '../../../../pi/packages/coding-agent/dist/core/session-manager.js';
+} from '@earendil-works/pi-coding-agent';
+import type { ContextMessageOmissionsResolver, SessionEntry } from '@earendil-works/pi-coding-agent';
 import { resolveHistoryCompactionSettings } from '../../../../session-storage/settings/history-compaction';
 import { createSourceSdkPolicyAdapter } from '../source-sdk-policy';
 

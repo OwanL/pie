@@ -41,7 +41,7 @@ registerHooks({
   },
 });
 
-let SessionManager: typeof import('../../../../pi/packages/coding-agent/dist/core/session-manager.js').SessionManager;
+let SessionManager: typeof import('@earendil-works/pi-coding-agent').SessionManager;
 before(async () => {
   ({ SessionManager } = await import(pathToFileURL(codingAgentEntry).href));
 });
@@ -148,7 +148,9 @@ test('open leaves missing paths absent, initializes an empty file once, and pres
   const missingPath = path.join(root, 'missing.jsonl');
   const missing = SessionManager.open(missingPath);
   assert.equal(missing.getSessionFile(), path.resolve(missingPath));
-  assert.equal(missing.getHeader().version, 3);
+  const missingHeader = missing.getHeader();
+  assert.ok(missingHeader);
+  assert.equal(missingHeader.version, 3);
   assert.equal(fs.existsSync(missingPath), false);
 
   const emptyPath = path.join(root, 'empty.jsonl');
@@ -156,7 +158,9 @@ test('open leaves missing paths absent, initializes an empty file once, and pres
   const empty = withSessionReadCount(emptyPath, () => SessionManager.open(emptyPath));
   assert.equal(empty.reads, 1);
   assert.equal(empty.value.getSessionFile(), path.resolve(emptyPath));
-  assert.equal(empty.value.getHeader().version, 3);
+  const emptyHeader = empty.value.getHeader();
+  assert.ok(emptyHeader);
+  assert.equal(emptyHeader.version, 3);
   assert.equal(readJsonl(emptyPath).length, 1);
 
   const invalidPath = path.join(root, 'invalid.jsonl');
@@ -188,7 +192,9 @@ test('v1 and v2 opens migrate once and honor a cwd override', { concurrency: fal
   assert.equal(v1.reads, 1);
   assert.equal(v1.value.getCwd(), path.resolve(overrideCwd));
   assert.equal(v1.value.getSessionDir(), path.resolve(sessionDir));
-  assert.equal(v1.value.getHeader().version, 3);
+  const v1Header = v1.value.getHeader();
+  assert.ok(v1Header);
+  assert.equal(v1Header.version, 3);
   const v1Rows = readJsonl(v1Path);
   assert.equal(v1Rows[0].version, 3);
   assert.ok(v1Rows.slice(1).every((row) => typeof row.id === 'string'));
@@ -209,7 +215,9 @@ test('v1 and v2 opens migrate once and honor a cwd override', { concurrency: fal
   const v2 = withSessionReadCount(v2Path, () => SessionManager.open(v2Path, sessionDir, overrideCwd));
   assert.equal(v2.reads, 1);
   assert.equal(v2.value.getCwd(), path.resolve(overrideCwd));
-  assert.equal(v2.value.getHeader().version, 3);
+  const v2Header = v2.value.getHeader();
+  assert.ok(v2Header);
+  assert.equal(v2Header.version, 3);
   const v2Rows = readJsonl(v2Path);
   assert.equal(v2Rows[0].version, 3);
   assert.equal(v2Rows[2].message?.role, 'custom');
@@ -235,10 +243,24 @@ test('create eagerly publishes exactly its v3 header and subsequent appends do n
   assert.equal(exclusiveOpens, 1, 'creation stages its header through an exclusive file create');
   assert.equal(fs.existsSync(sessionPath), true, 'the header is durable before create returns');
   assert.deepEqual(readJsonl(sessionPath), [JSON.parse(JSON.stringify(manager.getHeader()))]);
-  assert.equal(manager.getHeader().version, 3);
+  const header = manager.getHeader();
+  assert.ok(header);
+  assert.equal(header.version, 3);
 
   manager.appendMessage({ role: 'user', content: 'hello', timestamp: 1 });
-  manager.appendMessage({ role: 'assistant', content: [{ type: 'text', text: 'answer' }], timestamp: 2 });
+  manager.appendMessage({
+    role: 'assistant',
+    content: [{ type: 'text', text: 'answer' }],
+    api: 'anthropic-messages',
+    provider: 'anthropic',
+    model: 'fixture-model',
+    usage: {
+      input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: 'stop',
+    timestamp: 2,
+  });
   const rows = readJsonl(sessionPath);
   assert.equal(rows.filter((row) => row.type === 'session').length, 1);
   assert.deepEqual(rows[0], JSON.parse(JSON.stringify(manager.getHeader())));

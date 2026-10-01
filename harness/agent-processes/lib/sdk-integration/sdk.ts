@@ -3,7 +3,7 @@ import { realpath } from 'node:fs/promises';
 import type { PiRuntimeTarget } from '../../../../lib/pi-runtime/artifact.mjs';
 import { verifySdkRuntimeArtifactDescriptor } from './sdk-runtime-artifact';
 import { createSourceSdkPolicyAdapter, type SourceSdkPolicyFactoryResult } from './source-sdk-policy';
-import type * as SourceSdk from '../../../pi/packages/coding-agent/dist/index.js';
+import type * as SourceSdk from '@earendil-works/pi-coding-agent';
 import { pathToFileURL } from 'node:url';
 
 import {

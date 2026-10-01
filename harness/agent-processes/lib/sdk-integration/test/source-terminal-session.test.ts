@@ -5,9 +5,9 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import type { AgentEvent, AgentMessage } from '../../../../pi/packages/agent/dist/types.js';
-import type { AssistantMessage } from '../../../../pi/packages/ai/dist/types.js';
-import type { AgentSessionEvent } from '../../../../pi/packages/coding-agent/dist/core/agent-session.js';
+import type { AgentEvent, AgentMessage } from '@earendil-works/pi-agent-core';
+import type { AssistantMessage } from '@earendil-works/pi-ai';
+import type { AgentSessionEvent } from '@earendil-works/pi-coding-agent';
 import { sourceFixture } from './source-fixture.js';
 
 // Never use loadSdk: these tests exercise only the privately built source graph.

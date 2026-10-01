@@ -5,13 +5,13 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import type { AgentMessage } from '../../../../pi/packages/agent/dist/types.js';
-import type { AssistantMessage } from '../../../../pi/packages/ai/dist/types.js';
-import type { CreateAgentSessionOptions } from '../../../../pi/packages/coding-agent/src/core/sdk.ts';
+import type { AgentMessage } from '@earendil-works/pi-agent-core';
+import type { AssistantMessage } from '@earendil-works/pi-ai';
 import type {
+  CreateAgentSessionOptions,
   CreateAgentSessionRuntimeFactory,
   CreateAgentSessionRuntimeOptions,
-} from '../../../../pi/packages/coding-agent/src/core/agent-session-runtime.ts';
+} from '@earendil-works/pi-coding-agent';
 import { classifyInterruptedContinuationTail } from '../sdk';
 
 // Exercise only the privately built source graph; never load the installed SDK.
@@ -168,8 +168,11 @@ async function fixture(t: test.TestContext, seed: AgentMessage[], options: { can
     getExtensions: () => ({ extensions: [], errors: [], runtime: modules.createExtensionRuntime() }),
     getSkills: () => ({ skills: [], diagnostics: [] }),
     getPrompts: () => ({ prompts: [], diagnostics: [] }),
+    getThemes: () => ({ themes: [], diagnostics: [] }),
     getAgentsFiles: () => ({ agentsFiles: [] }),
     getSystemPrompt: () => 'offline continuation fixture', getAppendSystemPrompt: () => [],
+    extendResources: () => {},
+    reload: async () => {},
   };
   const session = new modules.AgentSession({
     agent, sessionManager: manager, settingsManager, cwd, resourceLoader,
@@ -192,7 +195,7 @@ const supportedCases: Array<{ name: string; tail: AgentMessage; omitted: boolean
   { name: 'overflow assistant', tail: assistant([], 'error', 'prompt is too long: 201000 tokens > 200000 maximum'), omitted: true },
   { name: 'open provider turn after user', tail: { role: 'user', content: 'current request', timestamp: 2 }, omitted: false },
   { name: 'open provider turn after tool result', tail: {
-    role: 'toolResult', toolCallId: 'tool-1', toolName: 'lookup', content: 'tool output', isError: false, timestamp: 3,
+    role: 'toolResult', toolCallId: 'tool-1', toolName: 'lookup', content: [{ type: 'text', text: 'tool output' }], isError: false, timestamp: 3,
   }, omitted: false },
   { name: 'completed stop reply', tail: assistant([{ type: 'text', text: 'completed stop reply' }]), omitted: false, retainedText: 'completed stop reply' },
   { name: 'completed length reply', tail: assistant([{ type: 'text', text: 'completed length reply' }], 'length'), omitted: false, retainedText: 'completed length reply' },
@@ -216,9 +219,10 @@ for (const continuationCase of supportedCases) {
       assert.equal(f.agent.state.messages.some((message: any) => message.stopReason === 'aborted'
         || (message.role === 'assistant' && message.errorMessage?.includes('prompt is too long'))), false);
     }
-    if (continuationCase.retainedText) {
+    const retainedText = continuationCase.retainedText;
+    if (retainedText) {
       assert.equal(f.streamCalls[0].messages.some((message: any) => message.role === 'assistant'
-        && JSON.stringify(message.content).includes(continuationCase.retainedText)), true,
+        && JSON.stringify(message.content).includes(retainedText)), true,
       'the completed assistant reply remains in the provider context');
     }
     assert.equal(f.manager.getEntries().filter((entry: any) => entry.type === 'message' && entry.message.role === 'user').length,
@@ -386,8 +390,11 @@ test('typed SDK context omission option filters initial, replacement, and self-r
       getExtensions: () => ({ extensions: [extension], errors: [], runtime }),
       getSkills: () => ({ skills: [], diagnostics: [] }),
       getPrompts: () => ({ prompts: [], diagnostics: [] }),
+      getThemes: () => ({ themes: [], diagnostics: [] }),
       getAgentsFiles: () => ({ agentsFiles: [] }),
       getSystemPrompt: () => 'offline continuation fixture', getAppendSystemPrompt: () => [],
+      extendResources: () => {},
+      reload: async () => {},
     };
     const sdkOptions: CreateAgentSessionOptions = {
       cwd: targetCwd, agentDir, sessionManager, authStorage: auth, modelRegistry, settingsManager,

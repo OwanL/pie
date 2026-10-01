@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test, { before } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import type { SessionManager as SessionManagerInstance } from '../../../../pi/packages/coding-agent/dist/core/session-manager.js';
+import type { SessionManager as SessionManagerInstance } from '@earendil-works/pi-coding-agent';
 
 // Import the private candidate distribution directly; no installed SDK or
 // patch-barrier path is involved in source ownership tests.
@@ -42,7 +42,7 @@ registerHooks({
   },
 });
 
-let SessionManager: typeof import('../../../../pi/packages/coding-agent/dist/core/session-manager.js').SessionManager;
+let SessionManager: typeof import('@earendil-works/pi-coding-agent').SessionManager;
 before(async () => {
   ({ SessionManager } = await import(pathToFileURL(codingAgentEntry).href));
 });
