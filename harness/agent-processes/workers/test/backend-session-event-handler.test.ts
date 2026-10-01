@@ -2002,7 +2002,7 @@ test('initial user message_start preserves the direct agent attribution before h
     context.session = { sessionManager: manager } as unknown as SessionContext['session'];
 
     handleSdkSessionEvent(deps, context, { type: 'message_start', message: { role: 'user' } as any });
-    const initialEntryId = context.session.sessionManager!.appendMessage({ role: 'user', content: 'direct request' });
+    const initialEntryId = manager.appendMessage({ role: 'user', content: 'direct request' });
     handleSdkSessionEvent(deps, context, {
       type: 'message_end', sessionEntryId: initialEntryId,
       message: { role: 'user', content: 'direct request' } as any,
@@ -2024,7 +2024,7 @@ test('initial user message_start preserves the direct agent attribution before h
     assert.equal((emitted.find((entry) => entry.event === 'message.queuedDelivered')?.payload as { localId?: string })?.localId,
       'local:agent-session:queued', mode);
 
-    context.session.sessionManager!.appendMessage({ role: 'user', content: 'queued request' });
+    manager.appendMessage({ role: 'user', content: 'queued request' });
     assert.deepEqual(entries[1]?.message[AGENT_MESSAGE_PERSISTED_PROVENANCE_KEY], { sender: queuedSender }, mode);
   }
 });

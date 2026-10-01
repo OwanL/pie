@@ -232,7 +232,26 @@ test('worker settings command keeps session-only SDK defaults out of coordinator
   const context = makeSessionEventContext(path);
   context.activeRequest = undefined;
   const callbacks: string[] = [];
+  const unexpectedSessionCall = (): never => { throw new Error('unexpected SDK session call'); };
   context.session = {
+    messages: [],
+    sessionManager: {
+      getCwd: () => '/repo',
+      getSessionFile: () => path,
+      getSessionName: () => undefined,
+      getBranch: () => [],
+      getEntries: () => [],
+    },
+    subscribe: unexpectedSessionCall,
+    bindExtensions: unexpectedSessionCall,
+    waitForIdle: unexpectedSessionCall,
+    navigateTree: unexpectedSessionCall,
+    reload: unexpectedSessionCall,
+    prompt: unexpectedSessionCall,
+    compact: unexpectedSessionCall,
+    abort: unexpectedSessionCall,
+    followUp: unexpectedSessionCall,
+    clearQueue: unexpectedSessionCall,
     model: { id: 'model-a', provider: 'mock' }, thinkingLevel: 'medium', isStreaming: false,
     settingsManager: {
       setDefaultModelAndProvider: () => { callbacks.push('model'); },
@@ -242,7 +261,7 @@ test('worker settings command keeps session-only SDK defaults out of coordinator
       context.session.thinkingLevel = level;
       context.session.settingsManager!.setDefaultThinkingLevel(level);
     },
-  } as SessionContext['session'];
+  };
   internals.sdk = { VERSION: 'test' };
   internals.context = context;
   host.applySync('settings', 1, { values: { defaultModel: 'model-a', defaultProvider: 'mock', defaultThinkingLevel: 'medium' } });

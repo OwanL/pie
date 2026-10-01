@@ -27,7 +27,27 @@ function fixture(result: 'stored' | 'missing' | 'throw' | 'fenced', t: { after: 
     },
   } as unknown as SessionContext;
   let disk = '';
-  const underlying = {
+  const unexpectedMutation = (): never => { throw new Error('unexpected session-manager mutation'); };
+  const underlying: MutableSdkSessionManager = {
+    getCwd: () => root,
+    getSessionName: () => undefined,
+    getBranch: () => entries,
+    getEntries: () => entries,
+    newSession: unexpectedMutation,
+    setSessionFile: unexpectedMutation,
+    _persist: unexpectedMutation,
+    _appendEntry: unexpectedMutation,
+    appendThinkingLevelChange: unexpectedMutation,
+    appendModelChange: unexpectedMutation,
+    appendCompaction: unexpectedMutation,
+    appendCustomEntry: unexpectedMutation,
+    appendSessionInfo: unexpectedMutation,
+    appendCustomMessageEntry: unexpectedMutation,
+    appendLabelChange: unexpectedMutation,
+    branch: unexpectedMutation,
+    resetLeaf: unexpectedMutation,
+    branchWithSummary: unexpectedMutation,
+    createBranchedSession: unexpectedMutation,
     flushed: true,
     isPersisted: () => true,
     getSessionFile: () => sessionFile,
@@ -48,7 +68,7 @@ function fixture(result: 'stored' | 'missing' | 'throw' | 'fenced', t: { after: 
       if ((message as { role?: string }).role === 'assistant') this.flushed = true;
       return entryId;
     },
-  } as MutableSdkSessionManager;
+  };
   const manager = attachAgentMessageProvenance(underlying, () => context, (_owner, reason) => {
     errors.push(reason);
     settle(false);

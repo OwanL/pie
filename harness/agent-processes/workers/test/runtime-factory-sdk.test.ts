@@ -8,11 +8,9 @@ import type { SdkModule } from '../../lib/sdk-integration/sdk';
 import { createRuntimeFactory, ServiceLoadingGate } from '../runtime-factory';
 
 test('runtime factory preserves durable thinking on a message-empty configured session', async () => {
-  const sdkUrl = new URL(
-    '../../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/dist/index.js',
-    import.meta.url,
-  );
-  const sdk = await import(sdkUrl.href) as unknown as SdkModule;
+  // Preserve the SDK's ESM export conditions while allowing the runner's
+  // explicit candidate overlay to select this package.
+  const sdk = await import('@earendil-works/pi-coding-agent');
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-runtime-factory-thinking-'));
   let disposeSession: (() => void) | undefined;
 
@@ -42,8 +40,35 @@ test('runtime factory preserves durable thinking on a message-empty configured s
       modelId: 'claude-sonnet-4-5',
     });
 
+    // The Pie facade intentionally erases SDK option bags to `unknown`; this
+    // narrow adapter restores the exact public SDK parameter types at that seam.
+    const factorySdk = {
+      VERSION: sdk.VERSION,
+      getAgentDir: sdk.getAgentDir,
+      AuthStorage: sdk.AuthStorage,
+      // Forward the required static facade explicitly rather than exposing the
+      // SDK class prototype, whose type is wider than SdkModule's facade.
+      SessionManager: {
+        continueRecent: (cwd: string) => sdk.SessionManager.continueRecent(cwd),
+        create: (cwd: string, sessionDir?: string) => sdk.SessionManager.create(cwd, sessionDir),
+        inMemory: (cwd?: string) => sdk.SessionManager.inMemory(cwd),
+        open: (sessionPath: string) => sdk.SessionManager.open(sessionPath),
+        forkFrom: (sourcePath: string, targetCwd: string, sessionDir?: string) =>
+          sdk.SessionManager.forkFrom(sourcePath, targetCwd, sessionDir),
+        listAll: (sessionDir?: string) => sdk.SessionManager.listAll(sessionDir),
+      },
+      createAgentSessionServices: (options: unknown) => sdk.createAgentSessionServices(
+        options as Parameters<typeof sdk.createAgentSessionServices>[0],
+      ),
+      createAgentSessionFromServices: (options: unknown) => sdk.createAgentSessionFromServices(
+        options as Parameters<typeof sdk.createAgentSessionFromServices>[0],
+      ),
+      createAgentSessionRuntime: async () => {
+        throw new Error('This test invokes the runtime factory directly.');
+      },
+    } satisfies SdkModule;
     const factory = createRuntimeFactory(
-      sdk,
+      factorySdk,
       sdk.AuthStorage.create(path.join(agentDir, 'auth.json')),
       cwd,
       new ServiceLoadingGate(),
@@ -54,19 +79,14 @@ test('runtime factory preserves durable thinking on a message-empty configured s
       sessionManager,
       sessionStartEvent: { type: 'session_start', reason: 'startup' },
     });
-    const session = runtime.session as {
-      thinkingLevel: string;
-      sessionManager: {
-        buildSessionContext: () => { messages: unknown[]; thinkingLevel: string };
-      };
-      dispose: () => void;
-    };
-    const services = runtime.services as unknown as {
-      settingsManager: { getDefaultThinkingLevel: () => string | undefined };
-    };
+    if (!('session' in runtime)) throw new Error('The runtime factory did not return its created session.');
+    const session = runtime.session;
+    assert.ok(session instanceof sdk.AgentSession);
+    const settingsManager = runtime.services.settingsManager;
+    assert.ok(settingsManager instanceof sdk.SettingsManager);
     disposeSession = () => session.dispose();
 
-    assert.equal(services.settingsManager.getDefaultThinkingLevel(), 'high');
+    assert.equal(settingsManager.getDefaultThinkingLevel(), 'high');
     assert.equal(session.thinkingLevel, 'low');
     assert.equal(session.sessionManager.buildSessionContext().thinkingLevel, 'low');
   } finally {
