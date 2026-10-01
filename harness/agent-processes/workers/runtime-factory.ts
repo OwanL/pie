@@ -8,6 +8,7 @@ import { centralAppendSystemPromptOverride } from '../../agent-instructions/prom
 import { backendInfo } from '../../../lib/structured-logging/backend-log';
 import { recordBackendLivePipelineTrace } from '../coordinator/live-pipeline-trace-runtime.js';
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
+import type { CompactionHooks, ContextMessageOmissionsResolver } from '../../pi/packages/coding-agent/dist/index.js';
 import type { SdkModule, SdkSessionEvent, SdkSessionManager } from '../lib/sdk-integration/sdk';
 
 /** Arguments the SDK passes into the runtime factory callback. */
@@ -16,6 +17,8 @@ interface RuntimeFactoryArgs {
   agentDir: string;
   sessionManager: SdkSessionManager;
   sessionStartEvent?: SdkSessionEvent;
+  contextMessageOmissions?: ContextMessageOmissionsResolver;
+  compactionHooks?: CompactionHooks;
 }
 
 export interface RuntimeFactoryOptions {
@@ -172,7 +175,7 @@ export function createRuntimeFactory(
   gate: ServiceLoadingGate,
   options: RuntimeFactoryOptions = {},
 ) {
-  return async ({ cwd, agentDir, sessionManager, sessionStartEvent }: RuntimeFactoryArgs) => {
+  return async ({ cwd, agentDir, sessionManager, sessionStartEvent, contextMessageOmissions, compactionHooks }: RuntimeFactoryArgs) => {
     const guardedSessionManager = options.wrapSessionManager?.(sessionManager) ?? sessionManager;
     const startedAt = performance.now();
     const session = guardedSessionManager.getSessionFile?.();
@@ -304,6 +307,8 @@ export function createRuntimeFactory(
         services,
         sessionManager: guardedSessionManager,
         sessionStartEvent,
+        ...(contextMessageOmissions ? { contextMessageOmissions } : {}),
+        ...(compactionHooks ? { compactionHooks } : {}),
         ...(model !== undefined ? { model } : {}),
         ...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
         ...(customTools && customTools.length > 0 ? { customTools } : {}),

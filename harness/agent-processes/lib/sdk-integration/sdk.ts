@@ -1,4 +1,9 @@
 import * as path from 'node:path';
+import { realpath } from 'node:fs/promises';
+import type { PiRuntimeTarget } from '../../../../lib/pi-runtime/artifact.mjs';
+import { verifySdkRuntimeArtifactDescriptor } from './sdk-runtime-artifact';
+import { createSourceSdkPolicyAdapter, type SourceSdkPolicyFactoryResult } from './source-sdk-policy';
+import type * as SourceSdk from '../../../pi/packages/coding-agent/dist/index.js';
 import { pathToFileURL } from 'node:url';
 
 import {
@@ -230,7 +235,7 @@ export interface SdkSessionManager {
   appendSessionInfo?: (name: string) => string;
   attachPieWriteLease?: (adapter: SdkSessionOwnershipAdapter, lease: SdkSessionWriteLease) => void;
   revokePieWriteLease?: () => void;
-  activatePiePrepared?: (authorization: SdkSessionTransferAuthorization) => SdkSessionWriteLease;
+  activatePiePrepared?: (authorization: SdkSessionTransferAuthorization) => Promise<SdkSessionWriteLease>;
 }
 
 export interface SdkImageContent {
@@ -1184,7 +1189,24 @@ export function applySdkHistoryCompactionRuntimePatch(
   return 'patched';
 }
 
+/** Source factories preserve authoritative typed ownership and policy options. */
+export type SourceArtifactSdkModule = Omit<typeof SourceSdk,
+  'createAgentSession' | 'createAgentSessionFromServices' | 'createAgentSessionRuntime'> & {
+  createAgentSession: (options?: SourceSdk.CreateAgentSessionOptions) => Promise<SourceSdkPolicyFactoryResult<SourceSdk.CreateAgentSessionResult>>;
+  createAgentSessionFromServices: (options: SourceSdk.CreateAgentSessionFromServicesOptions) => Promise<SourceSdkPolicyFactoryResult<SourceSdk.CreateAgentSessionResult>>;
+  createAgentSessionRuntime: (factory: SourceSdk.CreateAgentSessionRuntimeFactory, options: SourceSdk.CreateAgentSessionRuntimeOptions) =>
+    Promise<Omit<SourceSdk.AgentSessionRuntime, 'session'> & { session: SourceSdkPolicyFactoryResult<SourceSdk.CreateAgentSessionResult>['session'] }>;
+};
+
+export interface SourceSdkLoadMode {
+  mode: 'source-artifact';
+  descriptor: unknown;
+  backendTarget: PiRuntimeTarget;
+  surface?: 'cold' | 'full';
+}
+
 export type SdkLoadMode =
+  | SourceSdkLoadMode
   | { mode: 'coordinator' }
   | { mode: 'cold-coordinator' }
   | { mode: 'cold-worker'; patchIdentity: unknown }
@@ -1192,7 +1214,11 @@ export type SdkLoadMode =
 
 export async function loadSdk(
   sdkPath: string,
-  mode: { mode: 'cold-coordinator' } | { mode: 'cold-worker'; patchIdentity: unknown },
+  mode: SourceSdkLoadMode & { surface?: 'full' },
+): Promise<SourceArtifactSdkModule>;
+export async function loadSdk(
+  sdkPath: string,
+  mode: { mode: 'cold-coordinator' } | { mode: 'cold-worker'; patchIdentity: unknown } | (SourceSdkLoadMode & { surface: 'cold' }),
 ): Promise<ColdCoordinatorSdkModule>;
 export async function loadSdk(
   sdkPath: string,
@@ -1201,11 +1227,12 @@ export async function loadSdk(
 export async function loadSdk(
   sdkPath: string,
   mode: SdkLoadMode,
-): Promise<SdkModule | ColdCoordinatorSdkModule>;
+): Promise<SdkModule | ColdCoordinatorSdkModule | SourceArtifactSdkModule>;
 export async function loadSdk(
   sdkPath: string,
   mode: SdkLoadMode = { mode: 'coordinator' },
-): Promise<SdkModule | ColdCoordinatorSdkModule> {
+): Promise<SdkModule | ColdCoordinatorSdkModule | SourceArtifactSdkModule> {
+  if (mode.mode === 'source-artifact') return loadSourceSdk(sdkPath, mode);
   // This is the mandatory pre-import boundary. Coordinators may patch while
   // holding the shared lock; workers receive the resulting closed identity and
   // are read-only validators. Keep every dynamic SDK import below this await.
@@ -1297,11 +1324,121 @@ export async function loadSdk(
   return typed;
 }
 
+async function verifiedSourceSdkPath(sdkPath: string, mode: SourceSdkLoadMode): Promise<string> {
+  const descriptor = await verifySdkRuntimeArtifactDescriptor(mode.descriptor, mode.backendTarget);
+  if (!path.isAbsolute(sdkPath) || await realpath(sdkPath) !== descriptor.sdkPath) {
+    throw new Error('Explicit SDK path does not match the verified source artifact.');
+  }
+  return descriptor.sdkPath;
+}
+
+async function sourceInternalPath(sdkPath: string, relativePath: string): Promise<string> {
+  const dist = await realpath(path.join(sdkPath, 'dist'));
+  if (path.isAbsolute(relativePath) || path.win32.isAbsolute(relativePath)) {
+    throw new Error('Source SDK internal path must be relative to dist.');
+  }
+  const candidate = path.resolve(dist, relativePath);
+  const contained = (entry: string) => {
+    const relative = path.relative(dist, entry);
+    return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+  };
+  if (!contained(candidate)) throw new Error('Source SDK internal path escapes dist containment.');
+  const canonical = await realpath(candidate);
+  if (!contained(canonical)) throw new Error('Source SDK internal path escapes canonical dist containment.');
+  return canonical;
+}
+
+async function loadSourceSdk(sdkPath: string, mode: SourceSdkLoadMode): Promise<SdkModule | ColdCoordinatorSdkModule> {
+  const verifiedPath = await verifiedSourceSdkPath(sdkPath, mode);
+  const policy = createSourceSdkPolicyAdapter({
+    readHistoryCompactionSettings: readLiveHistoryCompactionSettings,
+    beforeCompact: async (event, session) => {
+      // A value-only facade reuses Pie's summary policy through public source
+      // APIs. No source instance internals or prototypes are intercepted.
+      const facade = {
+        model: session.model,
+        thinkingLevel: session.thinkingLevel,
+        settingsManager: session.settingsManager,
+        agent: session.agent,
+        _modelRegistry: session.modelRegistry,
+        _getCompactionRequestAuth: session.getCompactionRequestAuth.bind(session),
+      } as unknown as PatchableAgentSession;
+      return await createCustomizedCompaction(compaction, facade, event as unknown as BeforeCompactEvent) as
+        Awaited<ReturnType<NonNullable<SourceSdk.CompactionHooks['beforeCompact']>>>;
+    },
+  });
+  const compaction: Pick<SdkModule, 'prepareCompaction' | 'compact'> = {};
+  let exports: Partial<SdkModule>;
+  if (mode.surface === 'cold') {
+    const [config, auth, models, sessions] = await Promise.all([
+      'config.js', 'core/auth-storage.js', 'core/model-registry.js', 'core/session-manager.js',
+    ].map(async (entry) => dynamicImport(pathToFileURL(await sourceInternalPath(verifiedPath, entry)).href))) as Partial<SdkModule>[];
+    exports = { VERSION: config.VERSION, getAgentDir: config.getAgentDir, AuthStorage: auth.AuthStorage,
+      ModelRegistry: models.ModelRegistry, SessionManager: sessions.SessionManager };
+  } else {
+    exports = await dynamicImport(pathToFileURL(await sourceInternalPath(verifiedPath, 'index.js')).href) as Partial<SdkModule>;
+  }
+  if (typeof exports.VERSION !== 'string' || typeof exports.getAgentDir !== 'function'
+      || typeof exports.AuthStorage?.create !== 'function' || typeof exports.ModelRegistry?.create !== 'function'
+      || ['create', 'open', 'forkFrom', 'listAll', 'inMemory'].some(key =>
+        typeof (exports.SessionManager as unknown as Record<string, unknown>)?.[key] !== 'function')) {
+    throw new Error(`SDK at ${verifiedPath} is missing required cold coordinator exports.`);
+  }
+  const manager = exports.SessionManager as unknown as typeof SourceSdk.SessionManager;
+  if (typeof manager.prototype.setContextMessageOmissionsResolver !== 'function') {
+    throw new Error('Source SDK is missing initial context projection support.');
+  }
+  // Return a constructor facade, never alter the imported class/prototype.
+  const managerFacade = new Proxy(manager, {
+    get(target, key, receiver) {
+      const value = Reflect.get(target, key, receiver);
+      if (typeof key !== 'string' || !['create', 'open', 'inMemory', 'continueRecent', 'forkFrom',
+        'preparePieCreate', 'preparePieOpen', 'preparePieBranched', 'preparePieImport'].includes(key)
+          || typeof value !== 'function') return value;
+      return (...args: unknown[]) => {
+        const instance = Reflect.apply(value, target, args) as SourceSdk.SessionManager;
+        instance.setContextMessageOmissionsResolver(policy.contextMessageOmissions());
+        return instance;
+      };
+    },
+  });
+  const adapted = { ...exports, SessionManager: managerFacade };
+  if (mode.surface === 'cold') return adapted as unknown as ColdCoordinatorSdkModule;
+  const source = exports as unknown as typeof SourceSdk;
+  if (typeof source.createAgentSession !== 'function'
+      || typeof source.createAgentSessionServices !== 'function'
+      || typeof source.createAgentSessionFromServices !== 'function'
+      || typeof source.createAgentSessionRuntime !== 'function'
+      || typeof source.AgentSession?.prototype.continueAfterInterruption !== 'function'
+      || typeof source.AgentSession?.prototype.getCompactionRequestAuth !== 'function'
+      || typeof source.prepareCompaction !== 'function' || typeof source.compact !== 'function') {
+    throw new Error(`SDK at ${verifiedPath} is missing required source exports.`);
+  }
+  Object.assign(compaction, { prepareCompaction: source.prepareCompaction, compact: source.compact });
+  return {
+    ...adapted,
+    createAgentSession: (options: SourceSdk.CreateAgentSessionOptions = {}) =>
+      policy.wrapFactory(source.createAgentSession)(options),
+    createAgentSessionFromServices: policy.wrapFactory(source.createAgentSessionFromServices),
+    createAgentSessionRuntime: (factory: SourceSdk.CreateAgentSessionRuntimeFactory, options: SourceSdk.CreateAgentSessionRuntimeOptions) =>
+      source.createAgentSessionRuntime(policy.wrapContinuationFactory(factory), {
+        ...options,
+        contextMessageOmissions: policy.contextMessageOmissions(options.contextMessageOmissions),
+        compactionHooks: policy.compactionHooks(options.compactionHooks),
+      }),
+  } as unknown as SdkModule;
+}
+
 export async function loadSdkInternalModule<TModule>(
   sdkPath: string,
   relativePath: string,
   mode: SdkLoadMode = { mode: 'coordinator' },
 ): Promise<TModule> {
+  if (mode.mode === 'source-artifact') {
+    const verifiedPath = await verifiedSourceSdkPath(sdkPath, mode);
+    const entry = await sourceInternalPath(verifiedPath, relativePath);
+    return await dynamicImport(pathToFileURL(entry).href) as TModule;
+  }
   const patchIdentity = mode.mode === 'worker' || mode.mode === 'cold-worker'
     ? await validateSdkPatchBarrier(sdkPath, mode.patchIdentity)
     : await ensureSdkPatchBarrier(sdkPath);
