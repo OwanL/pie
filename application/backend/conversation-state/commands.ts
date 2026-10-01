@@ -12,6 +12,7 @@
 
 import type { ComposerInput, ComposerInputDraft, SessionSummary, UserContentPart, ExtensionUIResponsePayload, PruningMode, RendererCommandContext } from '../../lib/protocol/index.js';
 import type { SessionOperationSource } from './operation-types.js';
+import type { SessionControlSettingsRequest } from '../../../harness/agent-processes/lib/rpc/session-control-settings.js';
 import type { LiveSubagentDetailAddress, DetailCursor, DetailPageRef } from '../../../harness/agent-processes/lib/rpc/subagent-detail';
 
 import type { ModelSettings, ChatPrefs } from '../../lib/protocol/index.js';
@@ -405,6 +406,7 @@ export type Command =
   | SetModelCommand
   | HydrateModelCommand
   | SetPrefsCommand
+  | SessionControlSettingsRequestCommand
   | McpListRequestedCommand
   | McpSetServerEnabledCommand
   | McpSetServerEnabledForSessionCommand
@@ -471,6 +473,13 @@ export interface HydrateModelCommand extends CommandBase {
 export interface SetPrefsCommand extends CommandBase {
   kind: 'SetPrefs';
   prefs: Partial<ChatPrefs>;
+}
+
+/** Coordinator-originated settings bridge request. Request identity is the
+ * correlation key carried through the host effect/result/acknowledgement. */
+export interface SessionControlSettingsRequestCommand extends CommandBase {
+  kind: 'SessionControlSettingsRequest';
+  request: SessionControlSettingsRequest;
 }
 
 /** Refresh `state.settings.mcpServers` from the backend's effective MCP
@@ -545,6 +554,16 @@ export interface CloseSessionCommand extends CommandBase {
   operationSource?: SessionOperationSource;
   causalParentOperationId?: string | null;
   backendGeneration?: number;
+  /** Trusted close mode: the existing host privacy marker, or the explicit
+   *  `delete` decision from the typed agent close bridge. The coordinator
+   *  never sources this from agent-supplied free-form content. */
+  privacyMode?: boolean;
+  /** Typed agent close bridge correlation; terminal close operations echo it
+   *  back through the `SessionCloseBridgeAck` effect. */
+  closeRequestKey?: string;
+  /** True only for a self-close, which must wait for response delivery before
+   *  stopping the requesting worker. */
+  selfHandoffRequired?: boolean;
 }
 
 /** Duplicate an existing session into a new pending tab. Mirrors

@@ -20,6 +20,8 @@ import type {
   ShowModelSwitchConfirmEffect,
   SetModelRpcEffect,
   SetPrefsRpcEffect,
+  SessionControlSettingsRpcEffect,
+  SessionControlSettingsBridgeAckEffect,
   McpListRpcEffect,
   McpSetServerRpcEffect,
   McpSetSessionServerRpcEffect,
@@ -48,6 +50,10 @@ import type { FileDiffServiceLike, FileDiffViewerLike } from '../../file-changes
 import type { ChatPrefs, ComposerInput, McpServerInfo, PruningSettings, SessionTitlesSettings, ToolResultPruningSettings, ThinkingLevel } from '../../../lib/protocol/index.js';
 import type { LiveSubagentDetailAddress, DetailCursor, DetailPageRef } from '../../../../harness/agent-processes/lib/rpc/subagent-detail';
 import { RequestTimeoutError } from '../../agent-connection/request-tracker';
+import type {
+  SessionControlSettingsAcknowledgement,
+  SessionControlSettingsRequest,
+} from '../../../../harness/agent-processes/lib/rpc/session-control-settings.js';
 import type { LiveLifecycleWatermark, LiveTurnCheckpoint } from '../../../lib/protocol/live-pipeline.js';
 import { isLivePipelineTraceEnabled, recordLivePipelineTrace } from '../../agent-connection/live-pipeline-trace-runtime.js';
 import {
@@ -115,6 +121,11 @@ export interface SessionServiceLike {
     modelWriteFence?: number;
   }): Promise<void>;
   setPrefs(prefs: Partial<ChatPrefs>): Promise<void>;
+  sessionControlSettings?(request: SessionControlSettingsRequest): Promise<{
+    acknowledgement: SessionControlSettingsAcknowledgement;
+    persistedPrefs?: Pick<ChatPrefs, 'autonomousModeBySession' | 'subagentProviderTogglesBySession'>;
+  }>;
+  sessionControlSettingsAcknowledgement?(acknowledgement: SessionControlSettingsAcknowledgement): Promise<void>;
   /** Re-read the effective MCP server config from the backend. */
   mcpList(sessionPath?: string): Promise<{ servers: McpServerInfo[]; sessionOverrides?: Record<string, boolean> }>;
   /** Persist a per-server `disabled` override; resolves with the fresh list
@@ -181,6 +192,14 @@ export interface SessionServiceLike {
     operationId?: string,
     backendGeneration?: number,
   ): Promise<void>;
+  /** Typed agent close bridge: report one terminal phase for a close request
+   *  the host accepted. Best-effort, never blocks the close lifecycle. */
+  sessionCloseBridgeAck?(
+    requestKey: string,
+    sessionPath: string,
+    phase: 'accepted' | 'completed' | 'failed' | 'unknown',
+    detail?: string,
+  ): void;
   /** Restart transport/runtime and report the exact old-process death boundary. */
   restart?(onOldGenerationDeathConfirmed?: () => void): Promise<void>;
   setPruningSettings(updates: Partial<PruningSettings>): Promise<void>;
@@ -410,6 +429,8 @@ export class EffectRunner {
       ShowModelSwitchConfirm: (e) => this.handleShowModelSwitchConfirm(e),
       SetModelRpc: (e) => this.handleSetModelRpc(e),
       SetPrefsRpc: (e) => this.handleSetPrefsRpc(e),
+      SessionControlSettingsRpc: (e) => this.handleSessionControlSettingsRpc(e),
+      SessionControlSettingsBridgeAck: (e) => this.handleSessionControlSettingsBridgeAck(e),
       McpListRpc: (e) => this.handleMcpListRpc(e),
       McpSetServerRpc: (e) => this.handleMcpSetServerRpc(e),
       McpSetSessionServerRpc: (e) => this.handleMcpSetSessionServerRpc(e),
@@ -454,6 +475,7 @@ export class EffectRunner {
       SetToolResultPruningSettings: this.templateRow({ resultKind: 'SetToolResultPruningSettingsResult', withSessionPath: false, call: (e, d) => d.service.setToolResultPruningSettings(e.settings) }),
       SetSessionTitlesSettings: this.templateRow({ resultKind: 'SetSessionTitlesSettingsResult', withSessionPath: false, call: (e, d) => d.service.setSessionTitlesSettings(e.settings) }),
       CloseSession: (e) => this.handleCloseSession(e),
+      SessionCloseBridgeAck: (e) => this.handleSessionCloseBridgeAck(e),
       RestartBackend: (e) => this.handleRestartBackend(e),
       PersistTabs: (e) => this.handlePersistTabs(e),
     };
@@ -532,6 +554,7 @@ export class EffectRunner {
         }>('session.title.generate', {
           sessionPath: effect.sessionPath,
           prompt: effect.prompt,
+          ...(effect.enabled === false ? { enabled: false } : {}),
           provider: effect.provider,
           model: effect.model,
           thinkingLevel: effect.thinkingLevel,
@@ -729,10 +752,13 @@ export class EffectRunner {
         });
       } catch (error) {
         const errorMessage = toErrorMessage(error);
+        const deletionCommitted = typeof error === 'object' && error !== null
+          && 'sessionCloseDeletionCommitted' in error
+          && (error as { sessionCloseDeletionCommitted?: unknown }).sessionCloseDeletionCommitted === true;
         this.deps.dispatch({
           kind: 'CloseSessionResult', corrId: effect.corrId, sessionPath: effect.sessionPath,
           ...(effect.operationId ? { operationId: effect.operationId, backendGeneration: effect.backendGeneration } : {}),
-          ok: false, error: errorMessage,
+          ok: false, ...(deletionCommitted ? { deletionCommitted: true } : {}), error: errorMessage,
         });
         if (effect.privacyMode && effect.operationId) {
           // Cleanup failure blocks marker removal. Settle that distinct barrier
@@ -749,6 +775,19 @@ export class EffectRunner {
         }
       }
     });
+  }
+
+  /** Typed agent close bridge terminal report. Best-effort: a delivery
+   *  failure logs and leaves the outcome unknown to the waiting tool; the
+   *  host-owned close lifecycle continues regardless. */
+  private handleSessionCloseBridgeAck(
+    effect: Extract<Effect, { kind: 'SessionCloseBridgeAck' }>,
+  ): void {
+    try {
+      this.deps.service.sessionCloseBridgeAck?.(effect.requestKey, effect.sessionPath, effect.phase, effect.error);
+    } catch (error) {
+      this.deps.log.log('warn', `session close bridge ack failed: ${toErrorMessage(error)}`);
+    }
   }
 
   private handleRestartBackend(effect: Extract<Effect, { kind: 'RestartBackend' }>): void {
@@ -939,6 +978,61 @@ export class EffectRunner {
     });
     this.prefsQueue = operation.then(() => undefined, () => undefined);
     this.trackConfigurationOperation(this.prefsQueue);
+  }
+
+  /** The settings bridge shares the ordinary preference queue so capture
+   * waits for prior durable writes and apply cannot overtake another update. */
+  private handleSessionControlSettingsRpc(effect: SessionControlSettingsRpcEffect): void {
+    const operation = this.prefsQueue.catch(() => undefined).then(async () => {
+      try {
+        if (!this.deps.service.sessionControlSettings) {
+          throw new Error('Session-control settings bridge is unavailable.');
+        }
+        const result = await this.deps.service.sessionControlSettings(effect.request);
+        this.deps.dispatch({
+          kind: 'SessionControlSettingsResult',
+          corrId: effect.corrId,
+          request: effect.request,
+          acknowledgement: result.acknowledgement,
+          ...(result.persistedPrefs ? { persistedPrefs: result.persistedPrefs } : {}),
+        });
+      } catch (error) {
+        const message = toErrorMessage(error).slice(0, 1000);
+        this.deps.dispatch({
+          kind: 'SessionControlSettingsResult',
+          corrId: effect.corrId,
+          request: effect.request,
+          acknowledgement: {
+            requestId: effect.request.requestId,
+            sessionPath: effect.request.sessionPath,
+            action: effect.request.action,
+            outcome: 'unknown',
+            application: 'unknown',
+            error: message,
+          },
+        });
+      }
+    });
+    this.prefsQueue = operation.then(() => undefined, () => undefined);
+    this.trackConfigurationOperation(this.prefsQueue);
+  }
+
+  /** Acknowledgement delivery is a reducer effect, but is deliberately not
+   * retried: the coordinator reports a missing response as unknown. */
+  private handleSessionControlSettingsBridgeAck(effect: SessionControlSettingsBridgeAckEffect): void {
+    const send = this.deps.service.sessionControlSettingsAcknowledgement;
+    if (!send) {
+      this.deps.log.log('warn', 'session-control settings acknowledgement unavailable', {
+        requestId: effect.acknowledgement.requestId,
+      });
+      return;
+    }
+    void send.call(this.deps.service, effect.acknowledgement).catch((error) => {
+      this.deps.log.log('warn', 'session-control settings acknowledgement failed', {
+        requestId: effect.acknowledgement.requestId,
+        error: toErrorMessage(error),
+      });
+    });
   }
 
   /** `McpListRpc` — refresh the effective global MCP server list immediately,

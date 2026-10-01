@@ -26,6 +26,7 @@ import type {
 import { SessionCostTooltip } from '../analytics/session-cost-tooltip';
 import { ComposerSettingsMenu } from '../settings/settings-menu';
 import { SubagentProviderMenu } from './subagent-provider-menu';
+import { getAutonomousModeForSession, setAutonomousModeForSession } from '../shell/chat-prefs';
 import { CompactionButton } from './compaction-button';
 import { formatCompactTokens } from '../lib/formatting/format-tokens';
 import { ComposerToolbarOverflow, type ComposerToolbarItem } from './toolbar-overflow';
@@ -205,7 +206,8 @@ export const ComposerToolbar = memo(function ComposerToolbar({
   const selectedThinkingLevels = getModelThinkingLevels(selectedModelEntry?.model);
   const selectedThinkingOptions = THINKING_LEVEL_OPTIONS.filter((option) =>
     selectedThinkingLevels.includes(option.value));
-  const autonomousModeLabel = prefs.autonomousMode
+  const autonomousMode = getAutonomousModeForSession(prefs, sessionPath);
+  const autonomousModeLabel = autonomousMode
     ? 'Autonomous mode on — ask_user is unavailable'
     : 'Enable autonomous mode — run without the ask_user tool';
   const pinnedControls = (
@@ -286,11 +288,11 @@ export const ComposerToolbar = memo(function ComposerToolbar({
       content: (
         <button
           type="button"
-          class={`system-prompt-toggle-trigger autonomous-mode-trigger${prefs.autonomousMode ? ' active' : ''}`}
+          class={`system-prompt-toggle-trigger autonomous-mode-trigger${autonomousMode ? ' active' : ''}`}
           aria-label={autonomousModeLabel}
-          aria-pressed={prefs.autonomousMode}
+          aria-pressed={autonomousMode}
           title={autonomousModeLabel}
-          onClick={() => onSetPrefs({ autonomousMode: !prefs.autonomousMode })}
+          onClick={() => onSetPrefs(setAutonomousModeForSession(prefs, sessionPath ?? undefined, !autonomousMode))}
         >
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M8 2v2" />

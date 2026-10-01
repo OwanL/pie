@@ -10,6 +10,7 @@ import {
   evictSession,
   mergeRejectedComposerInputs,
   mergeRejectedDraftText,
+  observeCloseOperationAcknowledgement,
   removeFromArray,
   removeMessage,
   resolveAlias,
@@ -653,8 +654,9 @@ export function handleSessionNameDerived(state: ArchState, event: Extract<Event,
       s.name = event.name;
       s.isPlaceholder = event.isPlaceholder;
     }
-    if (draft.settings.sessionTitlesSettings.enabled
-      && !draft.sessions.titleGenerationBySession[event.sessionPath]) {
+    // Even with model naming disabled the coordinator must durably finalize
+    // the bounded first-prompt snippet as an assigned live title.
+    if (!draft.sessions.titleGenerationBySession[event.sessionPath]) {
       draft.sessions.titleGenerationBySession[event.sessionPath] = {
         status: 'armed',
         prompt: event.sourcePrompt,
@@ -1985,13 +1987,40 @@ export function handleCreateOperationFailed(state: ArchState, event: Extract<Eve
     detail: event.error,
   });
   if (!settled) return { state, effects: [] };
-  return {
-    state: {
-      ...state,
-      operations: { ...state.operations, [event.operationId]: settled },
-    },
-    effects: [],
+  const next = {
+    ...state,
+    operations: { ...state.operations, [event.operationId]: settled },
   };
+  const linkedCloseId = operation.closeOperationId;
+  const linkedClose = linkedCloseId ? next.operations[linkedCloseId] : undefined;
+  if (!linkedClose || linkedClose.kind !== 'session.close' || linkedClose.terminal) {
+    return { state: next, effects: [] };
+  }
+  const cleanup = observeCloseOperationAcknowledgement(
+    next,
+    linkedClose.operationId,
+    linkedClose.backendGeneration,
+    'cleanup',
+    true,
+  );
+  const effects = [...cleanup.effects];
+  if (linkedClose.closePrivacyMode) {
+    effects.push({
+      kind: 'PersistTabs',
+      corrId: linkedClose.causal.selectionToken,
+      operationId: linkedClose.operationId,
+      backendGeneration: linkedClose.backendGeneration,
+      acknowledgementKey: 'privacy-marker-removal',
+      openTabPaths: cleanup.state.sessions.openTabPaths,
+      activeSessionPath: cleanup.state.sessions.activeSessionPath,
+      pinnedTabPaths: cleanup.state.sessions.pinnedTabPaths,
+      pinnedTabGroups: cleanup.state.sessions.pinnedTabGroups,
+      privateSessionPaths: Object.entries(cleanup.state.sessions.privacyModeBySession)
+        .filter(([path, enabled]) => enabled && path !== operation.session.pendingPath)
+        .map(([path]) => path),
+    });
+  }
+  return { state: cleanup.state, effects };
 }
 
 export function handlePendingPathReplaced(state: ArchState, event: Extract<Event, { kind: 'PendingPathReplaced' }>): ReducerResult {
@@ -2000,8 +2029,19 @@ export function handlePendingPathReplaced(state: ArchState, event: Extract<Event
   // host-only pseudo-path key; replay happens after the path is durable).
   const queuedSends = state.pending.sendQueueBySession[oldPendingPath] ?? [];
   const deferredSetModel = state.pending.deferredSetModelBySession[oldPendingPath];
+  const pendingCreate = Object.values(state.operations).find((operation) =>
+    (operation.kind === 'session.create' || operation.kind === 'session.duplicate')
+      && operation.session.pendingPath === oldPendingPath,
+  );
+  const deferredCloseId = pendingCreate?.closeOperationId;
 
   const nextState = produce(state, (draft) => {
+    if (deferredCloseId) {
+      const closeOperation = draft.operations[deferredCloseId];
+      if (closeOperation?.kind === 'session.close' && !closeOperation.terminal) {
+        closeOperation.session.resolvedPath = newSessionPath;
+      }
+    }
     for (const operation of Object.values(draft.operations)) {
       if (operation.kind === 'message.send' && !operation.terminal
         && operation.session.pendingPath === oldPendingPath) {
@@ -2104,12 +2144,26 @@ export function handlePendingPathReplaced(state: ArchState, event: Extract<Event
     // session identity before attach clears the old scope; pending-path values
     // win on collisions because they are the latest edits made during load.
     const providerOverrides = draft.settings.prefs.subagentProviderTogglesBySession[oldPendingPath];
-    if (Object.prototype.hasOwnProperty.call(draft.settings.prefs.subagentProviderTogglesBySession, oldPendingPath)) {
+    const hadProviderOverrides = Object.prototype.hasOwnProperty.call(
+      draft.settings.prefs.subagentProviderTogglesBySession,
+      oldPendingPath,
+    );
+    if (hadProviderOverrides) {
       draft.settings.prefs.subagentProviderTogglesBySession[newSessionPath] = {
         ...(draft.settings.prefs.subagentProviderTogglesBySession[newSessionPath] ?? {}),
         ...(providerOverrides ?? {}),
       };
       delete draft.settings.prefs.subagentProviderTogglesBySession[oldPendingPath];
+    }
+    const autonomousOverride = draft.settings.prefs.autonomousModeBySession?.[oldPendingPath];
+    const hadAutonomousOverride = Object.prototype.hasOwnProperty.call(
+      draft.settings.prefs.autonomousModeBySession ?? {},
+      oldPendingPath,
+    );
+    if (hadAutonomousOverride) {
+      draft.settings.prefs.autonomousModeBySession ??= {};
+      draft.settings.prefs.autonomousModeBySession[newSessionPath] = autonomousOverride!;
+      delete draft.settings.prefs.autonomousModeBySession[oldPendingPath];
     }
 
     // Move composer inputs
@@ -2194,18 +2248,52 @@ export function handlePendingPathReplaced(state: ArchState, event: Extract<Event
         for (const entry of queuedSends) queue.push({ ...entry, sessionPath: newSessionPath });
       })
     : modelDrain.state;
+  let resolvedState = finalState;
   const effects: Effect[] = [...modelDrain.effects];
-  if (Object.prototype.hasOwnProperty.call(
+  const deferredClose = deferredCloseId ? resolvedState.operations[deferredCloseId] : undefined;
+  if (deferredClose?.kind === 'session.close' && !deferredClose.terminal
+    && deferredClose.closeWaitForCreate && !deferredClose.closeCleanupDispatched) {
+    const dispatchedClose = { ...deferredClose, closeCleanupDispatched: true };
+    resolvedState = {
+      ...resolvedState,
+      operations: { ...resolvedState.operations, [deferredCloseId!]: dispatchedClose },
+    };
+    effects.push({
+      kind: 'CloseSession',
+      corrId: dispatchedClose.causal.selectionToken,
+      sessionPath: newSessionPath,
+      nextPath: dispatchedClose.closeNextPath ?? null,
+      privacyMode: dispatchedClose.closePrivacyMode === true,
+      selectionChanged: dispatchedClose.closeSelectionChanged === true,
+      operationId: dispatchedClose.operationId,
+      backendGeneration: dispatchedClose.backendGeneration,
+    });
+  }
+  const hadProviderOverrides = Object.prototype.hasOwnProperty.call(
     state.settings.prefs.subagentProviderTogglesBySession,
     oldPendingPath,
-  )) {
+  );
+  const hadAutonomousOverride = Object.prototype.hasOwnProperty.call(
+    state.settings.prefs.autonomousModeBySession ?? {},
+    oldPendingPath,
+  );
+  if (hadProviderOverrides || hadAutonomousOverride) {
     effects.push({
       kind: 'SetPrefsRpc',
       corrId: `prefs:path-replaced:${oldPendingPath}:${newSessionPath}`,
       prefs: {
-        subagentProviderTogglesBySession: {
-          [newSessionPath]: finalState.settings.prefs.subagentProviderTogglesBySession[newSessionPath] ?? {},
-        },
+        ...(hadProviderOverrides ? {
+          subagentProviderTogglesBySession: {
+            [newSessionPath]: finalState.settings.prefs.subagentProviderTogglesBySession[newSessionPath] ?? {},
+            [oldPendingPath]: undefined,
+          } as unknown as Record<string, Record<string, boolean>>,
+        } : {}),
+        ...(hadAutonomousOverride ? {
+          autonomousModeBySession: {
+            [newSessionPath]: finalState.settings.prefs.autonomousModeBySession?.[newSessionPath] ?? false,
+            [oldPendingPath]: undefined,
+          } as unknown as Record<string, boolean>,
+        } : {}),
       },
     });
   }
@@ -2218,7 +2306,7 @@ export function handlePendingPathReplaced(state: ArchState, event: Extract<Event
     });
   }
 
-  return { state: finalState, effects };
+  return { state: resolvedState, effects };
 }
 
 export function handleTabOpened(state: ArchState, event: Extract<Event, { kind: 'TabOpened' }>): ReducerResult {

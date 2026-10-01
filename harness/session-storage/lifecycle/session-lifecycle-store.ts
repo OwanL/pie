@@ -879,8 +879,8 @@ export class SessionLifecycleStore {
       if (!sameWriterIdentity(writerIdentityFromHost(host), normalizedIdentity)) {
         throw new SessionLifecycleConflictError(`Analytics host ${normalizedIdentity.hostInstanceId} identity is stale.`);
       }
-      if (host.state === 'stopped') return host;
-      if (host.state !== 'registered' && host.state !== 'stopping' && host.state !== 'unsupported') {
+      if (host.state !== 'registered' && host.state !== 'stopping'
+        && host.state !== 'unsupported' && host.state !== 'stopped') {
         throw new SessionLifecycleConflictError(`Analytics host ${normalizedIdentity.hostInstanceId} is not recoverable.`);
       }
       this.database.prepare(`
@@ -894,6 +894,7 @@ export class SessionLifecycleStore {
         normalizedIdentity.buildId,
         normalizedIdentity.processId,
       );
+      if (host.state === 'stopped') return host;
       const result = this.database.prepare(`
         UPDATE analytics_hosts SET state = 'stopped', heartbeat_at_ms = ?, stopped_at_ms = ?, updated_at_ms = ?
         WHERE host_instance_id = ? AND process_id = ? AND generation_id = ?

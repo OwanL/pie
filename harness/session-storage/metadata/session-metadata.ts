@@ -236,9 +236,11 @@ function buildIndexedSummary(
     cwd: accumulator.cwd,
     name: explicitName ?? accumulator.derivedName,
     isPlaceholder: explicitName === null ? accumulator.derivedIsPlaceholder : false,
+    isAssignedTitle: explicitName !== null,
     modifiedAt: new Date(modifiedMs).toISOString(),
     messageCount: accumulator.messageCount,
     ...(accumulator.sessionId ? { sessionId: accumulator.sessionId } : {}),
+    ...(accumulator.headerTimestamp ? { headerTimestamp: accumulator.headerTimestamp } : {}),
     ...(accumulator.agentCreated ? { agentCreated: true } : {}),
   };
 }
@@ -365,17 +367,24 @@ export function buildCurrentSummary(
   const messageCount = context.session.messages.length ?? 0;
   const { name, isPlaceholder } = deriveSessionName(context);
   const sessionId = context.session.sessionManager.getSessionId?.()?.trim();
+  // Reuse the durable SDK header rather than any mutable summary field when the
+  // title authority needs the durable creation timestamp.
+  const header = context.session.sessionManager.getHeader?.() as { timestamp?: unknown } | null | undefined;
+  const headerTimestamp = typeof header?.timestamp === 'string' ? header.timestamp : undefined;
   const summary: SessionSummary = {
     path: context.sessionPath,
     cwd: context.session.sessionManager.getCwd() ?? startupCwd,
     name,
     isPlaceholder,
+    isAssignedTitle: Boolean(context.session.sessionName?.trim()
+      || context.session.sessionManager.getSessionName()?.trim()),
     modifiedAt: new Date().toISOString(),
     messageCount,
     modelId: context.session.model?.id,
     provider: resolveActiveModel(context).provider,
     thinkingLevel: normalizeThinkingLevel(context.session.thinkingLevel),
     ...(sessionId ? { sessionId } : {}),
+    ...(headerTimestamp ? { headerTimestamp } : {}),
     ...(isAgentCreatedSession(context.session.sessionManager) ? { agentCreated: true } : {}),
   };
   return summary;

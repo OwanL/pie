@@ -694,6 +694,60 @@ test('rapid preference writes are serialized latest-last without occupying lifec
   ]);
 });
 
+test('session-control settings share prefsQueue and acknowledge only after the correlated reducer result', async () => {
+  let releasePrefs!: () => void;
+  const prefsPending = new Promise<void>((resolve) => { releasePrefs = resolve; });
+  const order: string[] = [];
+  const request = {
+    requestId: 'settings-queue-1',
+    sessionPath: '/sessions/root.jsonl',
+    action: 'capture' as const,
+  };
+  const acknowledgement = {
+    requestId: request.requestId,
+    sessionPath: request.sessionPath,
+    action: 'capture' as const,
+    outcome: 'succeeded' as const,
+    settings: { autonomousMode: false, subagentProviderChoices: {} },
+  };
+  const { deps, events } = makeEffectRunnerDeps({
+    serviceOverrides: {
+      async setPrefs() {
+        order.push('prefs-started');
+        await prefsPending;
+        order.push('prefs-finished');
+      },
+      async sessionControlSettings(received) {
+        order.push('capture');
+        assert.deepEqual(received, request);
+        return { acknowledgement };
+      },
+      async sessionControlSettingsAcknowledgement(received) {
+        order.push('ack');
+        assert.deepEqual(received, acknowledgement);
+      },
+    },
+  });
+  const runner = new EffectRunner(deps);
+  runner.run({ kind: 'SetPrefsRpc', corrId: 'prefs-before-capture', prefs: { autonomousMode: true } });
+  runner.run({ kind: 'SessionControlSettingsRpc', corrId: request.requestId, request });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(order, ['prefs-started']);
+  releasePrefs();
+  await settle();
+  assert.deepEqual(order, ['prefs-started', 'prefs-finished', 'capture']);
+  assert.equal(events.some((event) => event.kind === 'SessionControlSettingsResult'
+    && event.corrId === request.requestId && event.acknowledgement.outcome === 'succeeded'), true);
+
+  runner.run({
+    kind: 'SessionControlSettingsBridgeAck',
+    corrId: request.requestId,
+    acknowledgement,
+  });
+  await settle();
+  assert.deepEqual(order, ['prefs-started', 'prefs-finished', 'capture', 'ack']);
+});
+
 test('EffectRunner CreateSession runs on the lifecycle queue and dispatches CreateSessionResult{ok:true}', async () => {
   const { deps, calls, events } = makeEffectRunnerDeps();
   const runner = new EffectRunner(deps);
@@ -928,6 +982,34 @@ test('EffectRunner fails the blocked private marker-removal acknowledgement when
     ['CloseSessionResult', undefined, false],
     ['PersistTabsResult', 'privacy-marker-removal', false],
   ]);
+});
+
+test('EffectRunner preserves irreversible private deletion evidence when later cleanup fails', async () => {
+  const { deps, events } = makeEffectRunnerDeps({
+    serviceOverrides: {
+      async closeSession() {
+        const error = new Error('host cleanup failed after deletion');
+        Object.assign(error, { sessionCloseDeletionCommitted: true });
+        throw error;
+      },
+    },
+  });
+  const runner = new EffectRunner(deps);
+
+  runner.run({
+    kind: 'CloseSession', corrId: 'private-close-committed', sessionPath: '/private',
+    operationId: 'close-private-committed', backendGeneration: 7,
+    privacyMode: true, nextPath: null,
+  });
+  await settle();
+
+  const closeResult = events.find((event) => event.kind === 'CloseSessionResult');
+  assert.equal(closeResult?.kind, 'CloseSessionResult');
+  if (closeResult?.kind === 'CloseSessionResult') {
+    assert.equal(closeResult.ok, false);
+    assert.equal(closeResult.deletionCommitted, true);
+  }
+  runner.dispose();
 });
 
 test('EffectRunner serializes complete PersistTabs snapshots in dispatch order', async () => {

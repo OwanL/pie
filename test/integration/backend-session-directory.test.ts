@@ -74,8 +74,10 @@ function createPollingTestServer(): PollingTestServer {
 test('backend RPCs use the configured directory while explicit legacy opens keep their path', async () => {
   const previous = process.env.PI_CODING_AGENT_SESSION_DIR;
   const configuredDir = path.resolve('/configured/sessions');
-  const sdkFallbackDir = path.resolve('/sdk-default/sessions');
+  const sdkFallbackDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'pie-sdk-default-'));
   process.env.PI_CODING_AGENT_SESSION_DIR = configuredDir;
+  let releaseTitleRead: () => void = () => undefined;
+  let titleNamespaceHydration: Promise<void> | undefined;
 
   try {
     const catalogListDirs: Array<string | undefined> = [];
@@ -125,6 +127,49 @@ test('backend RPCs use the configured directory while explicit legacy opens keep
     server.emit = () => undefined;
     server.emitSessionListChanged = async () => undefined;
 
+    const legacyPath = path.join(sdkFallbackDir, 'legacy.jsonl');
+    await fs.promises.writeFile(legacyPath, `${JSON.stringify({
+      type: 'session', id: 'legacy-live-session', version: 3, cwd: '/legacy-workspace',
+    })}\n`);
+    let markTitleReadStarted!: () => void;
+    const titleReadStarted = new Promise<void>((resolve) => { markTitleReadStarted = resolve; });
+    const titleReadGate = new Promise<void>((resolve) => { releaseTitleRead = resolve; });
+    const originalReadLiveSessionTitleEntry = server.readLiveSessionTitleEntry.bind(server);
+    server.readLiveSessionTitleEntry = async (sessionPath: string) => {
+      if (sessionPath === legacyPath) {
+        markTitleReadStarted();
+        await titleReadGate;
+      }
+      return await originalReadLiveSessionTitleEntry(sessionPath);
+    };
+    await server.handleRequest({
+      id: 'startup-membership',
+      method: 'session.liveMembership',
+      params: {
+        revision: 1,
+        timestamp: Date.now(),
+        sessions: [{ path: legacyPath, name: 'legacy.jsonl', cwd: '/legacy-workspace', activity: 'idle' }],
+        closing: [],
+      },
+    });
+    titleNamespaceHydration = server.titleNamespaceHydration;
+    await titleReadStarted;
+    assert.equal(server.liveSessionTitles.ready, false, 'restored-title membership is still hydrating');
+
+    const startupOpen = server.handleRequest({
+      id: 'open-legacy-during-startup',
+      method: 'session.open',
+      params: { sessionPath: legacyPath },
+    }) as Promise<{ sessionPath: string }>;
+    const startupOpened = await startupOpen;
+    assert.equal(startupOpened.sessionPath, legacyPath);
+    assert.deepEqual(openCalls, [], 'startup restore does not use the runtime-promotion seam');
+    assert.deepEqual(catalogListDirs, [], 'opening a host-restored tab never scans the archive catalog for a title');
+    assert.deepEqual(sdkListDirs, [], 'startup title restoration does not enumerate the SDK archive');
+    releaseTitleRead();
+    await titleNamespaceHydration;
+    assert.equal(server.liveSessionTitles.ready, true);
+
     const result = await server.handleRequest({
       id: 'create-configured',
       method: 'session.create',
@@ -140,17 +185,13 @@ test('backend RPCs use the configured directory while explicit legacy opens keep
     assert.deepEqual(catalogListDirs, [configuredDir, configuredDir]);
     assert.deepEqual(sdkListDirs, [], 'an unchanged indexed catalog must not rescan session files');
 
-    const legacyPath = path.join(sdkFallbackDir, 'legacy.jsonl');
-    const opened = await server.handleRequest({
-      id: 'open-legacy',
-      method: 'session.open',
-      params: { sessionPath: legacyPath },
-    }) as { sessionPath: string };
-    assert.equal(opened.sessionPath, legacyPath);
     assert.deepEqual(openCalls, [], 'the stubbed browse payload owns file reading; session.open must not invoke the runtime-promotion seam');
   } finally {
+    releaseTitleRead();
+    await titleNamespaceHydration?.catch(() => undefined);
     if (previous === undefined) delete process.env.PI_CODING_AGENT_SESSION_DIR;
     else process.env.PI_CODING_AGENT_SESSION_DIR = previous;
+    await fs.promises.rm(sdkFallbackDir, { recursive: true, force: true });
   }
 });
 

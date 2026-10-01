@@ -19,6 +19,7 @@ import {
   handleDismissNotice,
   handleRespondExtensionUI,
   handleSetPrefs,
+  handleSessionControlSettingsRequest,
   handleMcpListRequested,
   handleMcpSetServerEnabled,
   handleMcpSetServerEnabledForSession,
@@ -133,6 +134,10 @@ export function handleCommand(state: ArchState, cmd: Command): ReducerResult {
 
     case 'SetPrefs': {
       return handleSetPrefs(state, cmd);
+    }
+
+    case 'SessionControlSettingsRequest': {
+      return handleSessionControlSettingsRequest(state, cmd);
     }
 
     case 'McpListRequested': {

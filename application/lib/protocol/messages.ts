@@ -30,6 +30,7 @@ export type {
   UserContentPart,
   UserContentTextPart,
 } from '../../../harness/agent-processes/lib/rpc/message-contract.js';
+export type { SessionControlSender, SessionControlSenderIdentity } from '../../../harness/agent-processes/lib/rpc/session-control-attribution.js';
 export type {
   ComposerInput,
   FileBlobComposerInput,

@@ -6,6 +6,8 @@ import {
   getChatPrefContextKey,
   getChatPrefContextLabel,
   getChatPrefContextValue,
+  getAutonomousModeForSession,
+  setAutonomousModeForSession,
   getSubagentBucketProviders,
   getToolCallContextType,
   isAskUserForSubagentsEnabled,
@@ -88,6 +90,21 @@ const prefs: ChatPrefs = {
   hideContextIndicator: false,
   hideRunStatus: false,
 };
+
+test('autonomous mode resolves per root session and UI edits only the addressed session', () => {
+  const configured: ChatPrefs = {
+    ...prefs,
+    autonomousMode: false,
+    autonomousModeBySession: { '/session/one.jsonl': true },
+  };
+  assert.equal(getAutonomousModeForSession(configured, '/session/one.jsonl'), true);
+  assert.equal(getAutonomousModeForSession(configured, '/session/two.jsonl'), false);
+  assert.equal(getAutonomousModeForSession(configured), false);
+  assert.deepEqual(setAutonomousModeForSession(configured, '/session/two.jsonl', true), {
+    autonomousModeBySession: { '/session/two.jsonl': true },
+  });
+  assert.deepEqual(setAutonomousModeForSession(configured, undefined, true), { autonomousMode: true });
+});
 
 test('chat pref menu sections expose transcript, display, notifications, and diagnostics toggles', () => {
   assert.equal(CHAT_PREF_MENU_SECTIONS.length, 4);

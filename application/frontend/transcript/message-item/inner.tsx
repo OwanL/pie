@@ -201,6 +201,7 @@ export function MessageItemInner({
         requestCreatedAt={requestCreatedAt}
         actions={headerActions}
         customType={message.customType}
+        sender={message.sender}
       />
 
       {pruningHeaderState?.kind === 'result' && pruningExpanded && (

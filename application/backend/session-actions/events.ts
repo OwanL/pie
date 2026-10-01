@@ -3,6 +3,8 @@ import type { RunObserver } from '../analytics-views';
 import type {
   BusyChangedPayload,
   SessionOpenedPayload,
+  SessionCloseRequestedPayload,
+  SessionCloseResponseDeliveredPayload,
 } from '../../lib/protocol/sessions.js';
 import type { EventEnvelope } from '../../../harness/agent-processes/lib/rpc/wire.js';
 import { dispatchSessionBackendEvent } from '../conversation-state/event-dispatch';
@@ -11,6 +13,11 @@ import type { Event } from '../conversation-state/events';
 import type { ArchState } from '../conversation-state/arch-state';
 import { canAcceptAgentSettlement } from '../conversation-state/reducers/session-handlers';
 import type { CoordinatorToHostDetailMessage } from '../../../harness/agent-processes/lib/rpc/subagent-detail';
+import type { SessionControlSender } from '../../../harness/agent-processes/lib/rpc/session-control-attribution.js';
+import {
+  SESSION_CONTROL_SETTINGS_REQUEST_EVENT,
+  type SessionControlSettingsRequest,
+} from '../../../harness/agent-processes/lib/rpc/session-control-settings.js';
 import { SessionServiceState } from './state';
 import type { DeferredTriggerRegistry } from '../deferred-triggers/registry';
 import type { SessionHostPlatform, HostDisposable } from '../../hosts/lib/platform-contracts/session-platform';
@@ -33,6 +40,13 @@ interface SessionServiceEventsOptions {
   /** Routes one of the six coordinator→host detail stream variants
    *  to the host's detail subscription service. */
   onDetailStream?: (message: CoordinatorToHostDetailMessage) => void;
+  /** Typed coordinator→host close bridge request (agent `session_control`
+   *  close). Owned by SessionService; optional so standalone test hosts
+   *  without the bridge stay valid. */
+  onSessionCloseRequested?: (payload: SessionCloseRequestedPayload) => void;
+  onSessionCloseResponseDelivered?: (payload: SessionCloseResponseDeliveredPayload) => void;
+  /** Typed coordinator→host execution-settings capture/apply request. */
+  onSessionControlSettingsRequested?: (payload: SessionControlSettingsRequest) => void;
 }
 
 export class SessionServiceEvents {
@@ -47,6 +61,9 @@ export class SessionServiceEvents {
   private readonly getArchState: () => ArchState;
   private readonly triggers: DeferredTriggerRegistry;
   private readonly onDetailStream?: (message: CoordinatorToHostDetailMessage) => void;
+  private readonly onSessionCloseRequested?: (payload: SessionCloseRequestedPayload) => void;
+  private readonly onSessionCloseResponseDelivered?: (payload: SessionCloseResponseDeliveredPayload) => void;
+  private readonly onSessionControlSettingsRequested?: (payload: SessionControlSettingsRequest) => void;
 
   constructor(options: SessionServiceEventsOptions) {
     this.platform = options.platform;
@@ -58,6 +75,9 @@ export class SessionServiceEvents {
     this.getArchState = options.getArchState;
     this.triggers = options.triggers;
     this.onDetailStream = options.onDetailStream;
+    this.onSessionCloseRequested = options.onSessionCloseRequested;
+    this.onSessionCloseResponseDelivered = options.onSessionCloseResponseDelivered;
+    this.onSessionControlSettingsRequested = options.onSessionControlSettingsRequested;
   }
 
   attach(backend: BackendClient): void {
@@ -194,6 +214,22 @@ export class SessionServiceEvents {
         this.scheduleRender();
       },
       onSessionOpened: (payload) => this.applySessionOpened(payload),
+      onSessionCloseRequested: (payload) => {
+        const sessionPath = this.requireEventSessionPath('session.close.requested', payload.sessionPath);
+        if (!sessionPath || !this.onSessionCloseRequested) return;
+        this.onSessionCloseRequested({ ...payload, sessionPath });
+        this.scheduleRender();
+      },
+      onSessionCloseResponseDelivered: (payload) => {
+        const sessionPath = this.requireEventSessionPath('session.close.responseDelivered', payload.sessionPath);
+        if (!sessionPath || !this.onSessionCloseResponseDelivered) return;
+        this.onSessionCloseResponseDelivered({ ...payload, sessionPath });
+      },
+      onSessionControlSettingsRequested: (payload) => {
+        const sessionPath = this.requireEventSessionPath(SESSION_CONTROL_SETTINGS_REQUEST_EVENT, payload.sessionPath);
+        if (!sessionPath || !this.onSessionControlSettingsRequested) return;
+        this.onSessionControlSettingsRequested({ ...payload, sessionPath });
+      },
       onSessionListChanged: (payload) => onSessionListChanged(payload, deps),
       onMessageStarted: (payload) => onMessageStarted(payload, deps),
       onMessageDelta: (payload) => onMessageDelta(payload, deps),
@@ -216,6 +252,9 @@ export class SessionServiceEvents {
         if (payload.status === 'rejected') {
           this.dispatchArch({ kind: 'AgentMessageRejected', sessionPath, localId: payload.localId });
         } else {
+          // Read the optional trusted DTO without coupling the UI reducer to a
+          // particular in-flight event-schema revision.
+          const sender = (payload as typeof payload & { sender?: SessionControlSender }).sender;
           this.dispatchArch({
             kind: 'AgentMessageReceived',
             sessionPath,
@@ -223,6 +262,7 @@ export class SessionServiceEvents {
             text: payload.text,
             status: payload.status,
             timestamp: payload.timestamp,
+            ...(sender ? { sender } : {}),
           });
         }
         this.scheduleRender();

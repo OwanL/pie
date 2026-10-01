@@ -229,7 +229,7 @@ test('late session.opened reconciles a timed-out create exactly once and a late 
   assert.equal(dispatchedEffects.filter((effect: any) => effect.kind === 'DrainPendingSendQueue').length, 1);
 });
 
-test('a hidden delayed create resolves late without reopening or focusing its tab', () => {
+test('closing a delayed create cancels queued sends and cleans up a late durable session', () => {
   const OLD = '/workspace/old-hidden.jsonl';
   let archState: ArchState = {
     ...createInitialArchState(),
@@ -285,51 +285,12 @@ test('a hidden delayed create resolves late without reopening or focusing its ta
   assert.equal(archState.sessions.openTabPaths.includes(pendingPath), false);
   assert.equal(archState.sessions.openTabPaths.includes(resolvedPath), false);
   assert.equal(archState.sessions.activeSessionPath, OLD);
-  assert.equal(effects.filter((effect) => effect.kind === 'DrainPendingSendQueue').length, 1);
-  assert.deepEqual(archState.sessions.intentionallyHiddenRunningPaths, [resolvedPath]);
-  const beforeFirstRun = archState;
-
-  // When the drained send starts, hidden intent survives BusyChanged(true)
-  // (and therefore renderer-ready repair) but is pruned on terminal cleanup.
-  dispatchArch({ kind: 'BusyChanged', sessionPath: resolvedPath, running: true });
-  assert.deepEqual(archState.sessions.intentionallyHiddenRunningPaths, [resolvedPath]);
-  dispatchArch({ kind: 'BusyChanged', sessionPath: resolvedPath, running: false });
+  assert.equal(archState.pending.sendQueueBySession[pendingPath], undefined);
+  assert.equal(effects.filter((effect) => effect.kind === 'DrainPendingSendQueue').length, 0);
   assert.deepEqual(archState.sessions.intentionallyHiddenRunningPaths, []);
-
-  // A first-run pre-ack failure is terminal too; it must not strand a
-  // running-only hide marker when no busy(false) event will arrive.
-  archState = beforeFirstRun;
-  dispatchArch({
-    kind: 'Command',
-    cmd: {
-      kind: 'Send', corrId: 'queued-hidden', sessionPath: resolvedPath,
-      text: 'queued', inputs: [], composedText: 'queued', localId: 'local-hidden',
-      previousSummary: null, timestamp: 1,
-    },
-  });
-  assert.deepEqual(archState.sessions.intentionallyHiddenRunningPaths, [resolvedPath]);
-  dispatchArch({
-    kind: 'Command',
-    cmd: {
-      kind: 'Send', corrId: 'queued-hidden-2', sessionPath: resolvedPath,
-      text: 'queued 2', inputs: [], composedText: 'queued 2', localId: 'local-hidden-2',
-      previousSummary: null, timestamp: 2,
-    },
-  });
-  dispatchArch({
-    kind: 'SendResult', corrId: 'queued-hidden', sessionPath: resolvedPath,
-    ok: false, error: 'first send failed',
-  });
-  assert.deepEqual(
-    archState.sessions.intentionallyHiddenRunningPaths,
-    [resolvedPath],
-    'another drained send still owns the hidden first-run intent',
-  );
-  dispatchArch({
-    kind: 'SendResult', corrId: 'queued-hidden-2', sessionPath: resolvedPath,
-    ok: false, error: 'second send failed',
-  });
-  assert.deepEqual(archState.sessions.intentionallyHiddenRunningPaths, []);
+  const cleanup = effects.find((effect) => effect.kind === 'CloseSession');
+  assert.equal(cleanup?.kind, 'CloseSession');
+  if (cleanup?.kind === 'CloseSession') assert.equal(cleanup.sessionPath, resolvedPath);
 });
 
 test('backend-generation death is the definitive cleanup path for a delayed create', () => {

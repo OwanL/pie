@@ -17,11 +17,12 @@ interface IsolatedHost {
 type Fixtures = {
   isolatedHost: IsolatedHost;
   context: BrowserContext;
+  viewState: Partial<ViewState>;
 };
 
 const assetDir = path.resolve(__dirname, '../../../application/hosts/vscode/out/webview/panel');
 
-async function startIsolatedHost(): Promise<{ host: IsolatedHost; dispose: () => Promise<void> }> {
+async function startIsolatedHost(viewStateOverrides: Partial<ViewState>): Promise<{ host: IsolatedHost; dispose: () => Promise<void> }> {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'pie-ui-smoke-'));
   const settingsDir = path.join(tempRoot, 'settings');
   const dataDir = path.join(tempRoot, 'data');
@@ -53,6 +54,7 @@ async function startIsolatedHost(): Promise<{ host: IsolatedHost; dispose: () =>
       activeSession: session,
       transcriptLoaded: true,
       workspaceCwd: tempRoot,
+      ...viewStateOverrides,
     };
     const activeServer: { current?: BrowserServer } = {};
     const options: BrowserServerOptions = {
@@ -92,10 +94,9 @@ async function startIsolatedHost(): Promise<{ host: IsolatedHost; dispose: () =>
 }
 
 export const test = base.extend<Fixtures>({
-  // Playwright requires fixture callbacks to destructure their fixture dependencies.
-  // eslint-disable-next-line no-empty-pattern
-  isolatedHost: async ({}, use) => {
-    const fixture = await startIsolatedHost();
+  viewState: [{}, { option: true }],
+  isolatedHost: async ({ viewState }, use) => {
+    const fixture = await startIsolatedHost(viewState);
     try {
       await use(fixture.host);
     } finally {

@@ -225,6 +225,9 @@ export interface SdkSessionManager {
     modelChangeId?: string;
     thinkingLevelChangeId?: string;
   };
+  /** Atomically append a durable session_info title entry (pinned SDK seam
+   * used by the coordinator-owned cold title assignment path). */
+  appendSessionInfo?: (name: string) => string;
   attachPieWriteLease?: (adapter: SdkSessionOwnershipAdapter, lease: SdkSessionWriteLease) => void;
   revokePieWriteLease?: () => void;
   activatePiePrepared?: (authorization: SdkSessionTransferAuthorization) => SdkSessionWriteLease;
@@ -310,6 +313,11 @@ export interface SdkExtensionBindings {
 }
 
 export interface SdkSession {
+  /** Pinned AgentSession default-write callbacks invoked by setModel/setThinkingLevel. */
+  settingsManager?: {
+    setDefaultModelAndProvider(provider: string, id: string): void;
+    setDefaultThinkingLevel(level: string): void;
+  };
   model?: { id: string; provider?: string; contextWindow?: number; maxTokens?: number };
   thinkingLevel?: string;
   sessionFile?: string;

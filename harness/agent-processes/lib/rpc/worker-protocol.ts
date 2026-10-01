@@ -78,6 +78,7 @@ export type WorkerRuntimeOperation =
   | 'session.loadDetail'
   | 'session.truncateAfter'
   | 'session.title.generate'
+  | 'session.title.assign'
   | 'models.list'
   | 'liveTurn.checkpoint'
   | 'message.send'
@@ -486,7 +487,14 @@ export interface WorkerSettingsMutateFrame extends WorkerFrameBase {
  * deliberately separate from runtime.command: the coordinator validates and
  * owns the public session operation, while the worker only carries the tool's
  * bounded request and correlated result. */
-export type WorkerSessionControlAction = 'list' | 'create' | 'read' | 'message' | 'close';
+export type WorkerSessionControlAction =
+  | 'list'
+  | 'create'
+  | 'read'
+  | 'message'
+  | 'settings.get'
+  | 'settings.set'
+  | 'close';
 
 export interface WorkerSessionControlFrame extends WorkerFrameBase {
   kind: 'session.control';
@@ -516,7 +524,7 @@ export type WorkerResponseResult =
   | { kind: 'runtime.command'; payload: WorkerJsonValue };
 
 export type WorkerErrorCode = 'COMMAND_FAILED' | 'RUNTIME_COMMAND_FAILED' | 'INTERRUPT_FAILED' | 'SHUTDOWN_FAILED'
-  | 'OPERATION_INTENT_MISMATCH';
+  | 'OPERATION_INTENT_MISMATCH' | 'AGENT_MESSAGE_PROVENANCE_UNAVAILABLE';
 
 export interface WorkerError {
   code: WorkerErrorCode;
@@ -995,7 +1003,7 @@ function validateCommand(value: Record<string, unknown>, requireSeq: boolean): s
 const RUNTIME_OPERATIONS: ReadonlySet<WorkerRuntimeOperation> = new Set([
   'session.duplicateHot', 'session.snapshot',
   'session.open', 'session.preload', 'session.loadTranscriptPage', 'session.loadDetail',
-  'session.truncateAfter', 'session.title.generate', 'models.list', 'liveTurn.checkpoint', 'message.send', 'operation.status', 'message.continue', 'message.compact',
+  'session.truncateAfter', 'session.title.generate', 'session.title.assign', 'models.list', 'liveTurn.checkpoint', 'message.send', 'operation.status', 'message.continue', 'message.compact',
   'message.clearQueue', 'message.replaceQueue', 'extension_ui.response',
   'settings.set', 'systemPromptToggles.set', 'test.extensionCommand', 'session.managerFence',
 ]);
@@ -1438,7 +1446,8 @@ function validateSessionControl(value: Record<string, unknown>, requireSeq: bool
   if (extra) return extra;
   if (!boundedString(value.requestId, MAX_ID_BYTES)) return 'requestId must be a bounded non-empty string.';
   if (value.action !== 'list' && value.action !== 'create' && value.action !== 'read'
-      && value.action !== 'message' && value.action !== 'close') {
+      && value.action !== 'message' && value.action !== 'settings.get'
+      && value.action !== 'settings.set' && value.action !== 'close') {
     return 'session.control.action is invalid.';
   }
   return validateJsonObject(value.payload, 'session.control.payload');
@@ -1565,7 +1574,8 @@ function validateWorkerError(value: unknown): string | undefined {
   if (extra) return `response.error ${extra}`;
   if (value.code !== 'COMMAND_FAILED' && value.code !== 'RUNTIME_COMMAND_FAILED'
       && value.code !== 'INTERRUPT_FAILED' && value.code !== 'SHUTDOWN_FAILED'
-      && value.code !== 'OPERATION_INTENT_MISMATCH') return 'response.error.code is invalid.';
+      && value.code !== 'OPERATION_INTENT_MISMATCH'
+      && value.code !== 'AGENT_MESSAGE_PROVENANCE_UNAVAILABLE') return 'response.error.code is invalid.';
   if (!boundedString(value.message, MAX_ERROR_MESSAGE_BYTES)) return 'response.error.message must be a bounded non-empty string.';
   if (typeof value.retryable !== 'boolean') return 'response.error.retryable must be boolean.';
   return undefined;

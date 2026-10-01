@@ -1,6 +1,7 @@
 import type { ModelSettings, ModelInfo } from '../../../model-providers/catalog/model-contract.js';
 import type { ThinkingLevel } from '../../../model-providers/catalog/thinking-level.js';
 import type { ChatMessage, ToolCall } from './message-contract.js';
+import type { SessionControlSender } from './session-control-attribution.js';
 import type { DurationClockDomain } from '../../../../analytics/contracts/timing.js';
 import type { LiveTurnCheckpoint, ToolPreview } from './live-pipeline.js';
 import type { SessionUsageSnapshot } from '../../../../analytics/usage-accounting/session-usage.js';
@@ -52,6 +53,13 @@ export interface BackendSessionSummary {
    *  path hash only when the header is missing or malformed. */
   sessionId?: string;
   identityFallback?: boolean;
+  /** Durable creation timestamp from the session JSONL header (RFC 3339).
+   * Title authority uses this, never the mutable `modifiedAt`. */
+  headerTimestamp?: string;
+  /** True when `name` is a durably assigned title (a `session_info` entry or
+   *  an explicit SDK name). False/absent means the name is a provisional,
+   *  replaceable first-prompt snippet that never resolves as a title target. */
+  isAssignedTitle?: boolean;
   /** Explicit durable provenance for sessions created through the worker-local
    *  agent `session_control create` flow. This is not inferred from lineage. */
   agentCreated?: boolean;
@@ -480,8 +488,34 @@ export interface AgentMessagePayload {
   sessionPath: string;
   localId: string;
   text: string;
+  /** Coordinator-authenticated sender shown with the durable transcript row. */
+  sender?: SessionControlSender;
   status: 'queued' | 'completed' | 'rejected';
   timestamp: number;
+}
+
+/** Coordinator → host typed close request for the agent `session_control`
+ *  close action. The host owns tab removal, interrupt/stop work, and
+ *  lifecycle cleanup; it acknowledges this exact request through the typed
+ *  `session.closeAcknowledgement` RPC. This is a close bridge, never a
+ *  general worker RPC tunnel. */
+export interface SessionCloseRequestedPayload {
+  sessionPath: string;
+  /** Typed bridge correlation the host echoes back in its acknowledgement. */
+  requestId: string;
+  /** Existing privacy/deletion lifecycle requested by the agent. */
+  delete: boolean;
+  /** True only when closing the requesting worker's own session; the host
+   *  must wait until the closeRequested result is delivered before stopping it. */
+  selfHandoffRequired: boolean;
+}
+
+/** Coordinator confirmation that the worker received the closeRequested result.
+ *  The host holds a self-close's stop/cleanup work until this handoff (or the
+ *  coordinator's bounded source-loss fallback) arrives. */
+export interface SessionCloseResponseDeliveredPayload {
+  sessionPath: string;
+  requestId: string;
 }
 
 /** Live auto-retry status for a session's in-flight turn. The SDK retries

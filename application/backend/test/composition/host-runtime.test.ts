@@ -226,6 +226,68 @@ test('HostRuntime composes and projects ViewState from plain platform adapters (
   }
 });
 
+for (const pausedPhase of ['handoff', 'analytics', 'stats', 'sessions', 'browser'] as const) {
+  test(`HostRuntime shutdown drains startup paused at ${pausedPhase} before closing storage`, async () => {
+    const dataRoot = useTempDataRoot();
+    const { platform, recorder } = createPlatformFixture();
+    const runtime = new HostRuntime(platform, new BackendClient());
+    const internals = runtime as unknown as {
+      analyticsHandoffControl: { start: () => Promise<void> };
+      analyticsRuntime: { start: () => Promise<unknown> };
+      analyticsHandoffRegistry: { close: () => void };
+    };
+    const calls: string[] = [];
+    let release!: () => void;
+    let reached!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const paused = new Promise<void>((resolve) => { reached = resolve; });
+    const phase = async (name: string): Promise<void> => {
+      calls.push(name);
+      if (name === pausedPhase) {
+        reached();
+        await gate;
+      }
+    };
+    internals.analyticsHandoffControl.start = () => phase('handoff');
+    internals.analyticsRuntime.start = () => phase('analytics');
+    runtime.statsService.start = () => phase('stats');
+    runtime.service.start = () => phase('sessions');
+    runtime.browserServer.start = async () => {
+      await phase('browser');
+      return { kind: 'disabled' };
+    };
+    const close = internals.analyticsHandoffRegistry.close.bind(internals.analyticsHandoffRegistry);
+    let storageClosed = false;
+    internals.analyticsHandoffRegistry.close = () => {
+      storageClosed = true;
+      close();
+    };
+    let startup: Promise<void> | undefined;
+    let shutdown: Promise<void> | undefined;
+    try {
+      startup = runtime.start();
+      await paused;
+      shutdown = runtime.shutdown();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(storageClosed, false, 'startup may still release a writer admission');
+      release();
+      await Promise.all([startup, shutdown]);
+      assert.equal(storageClosed, true);
+      const phases = ['handoff', 'analytics', 'stats', 'sessions', 'browser'];
+      assert.deepEqual(calls, phases.slice(0, phases.indexOf(pausedPhase) + 1),
+        'shutdown must fence every subsequent startup phase');
+      assert.deepEqual(recorder.notifications, [], 'normal shutdown is not an analytics outage');
+      await assert.rejects(() => runtime.start(), /shut.*down/iu);
+    } finally {
+      release();
+      await Promise.allSettled([startup, shutdown].filter((pending): pending is Promise<void> => !!pending));
+      await runtime.shutdown();
+      delete process.env.PIE_DATA_DIR;
+      fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
+  });
+}
+
 test('HostRuntime persists LAN intent and projects it separately from actual server state', async () => {
   const dataRoot = useTempDataRoot();
   try {

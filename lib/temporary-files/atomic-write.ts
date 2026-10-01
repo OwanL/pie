@@ -1,4 +1,4 @@
-import * as fs from 'node:fs/promises';
+import fs from 'node:fs/promises';
 import * as path from 'node:path';
 
 // Windows scanners, editors, and shell readers can hold a destination handle
@@ -46,11 +46,21 @@ function tempPathFor(filePath: string): string {
   return path.join(path.dirname(filePath), `.${path.basename(filePath)}.${suffix}.tmp`);
 }
 
-/** Write text to a unique same-directory temp file and atomically replace the target. */
+/** Atomically replace text, preserving an existing target's permission bits. */
 export async function atomicWriteText(filePath: string, data: string): Promise<void> {
+  let mode: number | undefined;
+  try {
+    mode = (await fs.stat(filePath)).mode & 0o7777;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+
   const tmpPath = tempPathFor(filePath);
   try {
-    await fs.writeFile(tmpPath, data, 'utf8');
+    await fs.writeFile(tmpPath, data, { encoding: 'utf8', mode });
+    // Creation applies umask; restore the exact existing mode before replacement.
+    // Missing targets keep writeFile's default permissions policy.
+    if (mode !== undefined) await fs.chmod(tmpPath, mode);
     await renameWithTransientRetry(tmpPath, filePath);
   } catch (error) {
     await fs.unlink(tmpPath).catch(() => undefined);

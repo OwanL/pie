@@ -363,6 +363,7 @@ function validateChatPrefsPatch(value: unknown): value is Partial<ChatPrefs> {
     'extensionToggles',
     'providerToggles',
     'subagentProviderDefaults',
+    'autonomousModeBySession',
   ];
   const numericRanges: Record<string, [number, number]> = {
     completionSoundVolume: [0, 100],

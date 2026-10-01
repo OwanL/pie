@@ -1760,6 +1760,127 @@ test('retained new-session handles remain promotable after a cold model-settings
   }
 });
 
+test('cold session titles append canonical session_info entries and survive a fresh store generation', async () => {
+  const h = await makeHarness();
+  const SessionManager = await getRealSessionManager();
+  try {
+    const sessionPath = path.join(h.sessionDir, 'cold-title.jsonl');
+    await writeJsonl(sessionPath, [
+      header(h.root, 3, 'cold-title-session'),
+      userEntry('root', null, 'keep'),
+    ]);
+
+    const changed = h.store.setSessionTitle(sessionPath, 'Cold Assigned Title');
+    assert.deepEqual(changed, { titleChanged: true });
+    assert.equal(h.store.getBrowseCacheStats().entries, 0, 'the pre-write browse projection is retired');
+
+    const rowsAfterChange = await readJsonl(sessionPath);
+    const nameEntry = rowsAfterChange.at(-1);
+    assert.equal(nameEntry.type, 'session_info');
+    assert.equal(nameEntry.parentId, 'root');
+    assert.equal(nameEntry.name, 'Cold Assigned Title');
+
+    const noOp = h.store.setSessionTitle(sessionPath, 'Cold Assigned Title');
+    assert.deepEqual(noOp, { titleChanged: false });
+    assert.equal((await readJsonl(sessionPath)).length, rowsAfterChange.length, 'a repeated title appends nothing');
+
+    const snapshot = await h.store.openSnapshot(sessionPath, browseOpenOptions);
+    assert.equal(snapshot.session.name, 'Cold Assigned Title');
+    assert.equal(snapshot.session.isAssignedTitle, true);
+    assert.equal(snapshot.session.isPlaceholder, false);
+
+    const restartedStore = new ColdSessionStore({
+      sdk: { SessionManager } as any,
+      coordinatorGeneration: 8,
+      startupCwd: h.root,
+      agentDir: h.root,
+      sessionDir: h.sessionDir,
+    });
+    const reopened = await restartedStore.openSnapshot(sessionPath, browseOpenOptions);
+    assert.equal(reopened.session.name, 'Cold Assigned Title');
+    assert.equal(reopened.session.isAssignedTitle, true);
+  } finally {
+    await fs.rm(h.root, { recursive: true, force: true });
+  }
+});
+
+test('retained new-session handles remain promotable after a cold title write', async () => {
+  const h = await makeHarness();
+  try {
+    const handle = h.store.create({ cwd: h.root });
+    const changed = h.store.setHandleSessionTitle(handle, 'Handle Title');
+    assert.deepEqual(changed, { titleChanged: true });
+
+    const opened = await h.store.openHandleSnapshot(handle, browseOpenOptions);
+    assert.equal(opened.session.name, 'Handle Title');
+    assert.equal(opened.session.isAssignedTitle, true);
+    assert.doesNotThrow(() => h.store.handoff(handle, () => undefined));
+  } finally {
+    await fs.rm(h.root, { recursive: true, force: true });
+  }
+});
+
+test('a failed cold title commit preserves durable bytes and the current browse cache', async () => {
+  const h = await makeHarness();
+  const SessionManager = await getRealSessionManager();
+  try {
+    const sessionPath = path.join(h.sessionDir, 'cold-title-failure.jsonl');
+    await writeJsonl(sessionPath, [
+      header(h.root, 3, 'cold-title-failure'),
+      userEntry('root', null, 'keep'),
+    ]);
+    let appendCalls = 0;
+    const store = new ColdSessionStore({
+      sdk: {
+        SessionManager: {
+          open(targetPath: string) {
+            const manager = SessionManager.open(targetPath);
+            manager.appendSessionInfo = () => {
+              appendCalls += 1;
+              throw new Error('injected title append failure');
+            };
+            return manager;
+          },
+        },
+      } as any,
+      coordinatorGeneration: 17,
+      startupCwd: h.root,
+      agentDir: h.root,
+      sessionDir: h.sessionDir,
+    });
+    await store.openSnapshot(sessionPath, browseOpenOptions);
+    const before = await fs.readFile(sessionPath, 'utf8');
+    assert.equal(store.getBrowseCacheStats().entries, 1);
+
+    assert.throws(
+      () => store.setSessionTitle(sessionPath, 'Rejected Title'),
+      /injected title append failure/,
+    );
+    assert.equal(appendCalls, 1, 'one title intent reaches one SDK append seam');
+    assert.equal(await fs.readFile(sessionPath, 'utf8'), before);
+    assert.equal(store.getBrowseCacheStats().entries, 1, 'a failed commit preserves the valid pre-write cache');
+  } finally {
+    await fs.rm(h.root, { recursive: true, force: true });
+  }
+});
+
+test('a cold title write rejects blank titles and treats equivalent names as no-ops', async () => {
+  const h = await makeHarness();
+  try {
+    const sessionPath = path.join(h.sessionDir, 'cold-title-blank.jsonl');
+    await writeJsonl(sessionPath, [header(h.root, 3, 'cold-title-blank'), userEntry('root', null, 'keep')]);
+    assert.throws(() => h.store.setSessionTitle(sessionPath, '   '), /must contain visible characters/);
+    assert.equal((await readJsonl(sessionPath)).length, 2, 'a blank title appends nothing');
+
+    h.store.setSessionTitle(sessionPath, '  Assigned  Title ');
+    h.store.setSessionTitle(sessionPath, 'Assigned  Title  ');
+    const rows = await readJsonl(sessionPath);
+    assert.equal(rows.filter((row) => row.type === 'session_info').length, 1, 'trims only outer whitespace');
+  } finally {
+    await fs.rm(h.root, { recursive: true, force: true });
+  }
+});
+
 test('a failed atomic cold model-settings commit preserves durable bytes and the current browse cache', async () => {
   const h = await makeHarness();
   const SessionManager = await getRealSessionManager();

@@ -17,6 +17,7 @@ export type SessionOperationKind =
  * reduced to serializable identity before it enters reducer-owned state. */
 export type SessionOperationSource =
   | { kind: 'host' }
+  | { kind: 'agent-session-control' }
   | {
       kind: 'renderer';
       rendererId: string;
@@ -110,7 +111,36 @@ export interface SessionOperation {
   /** Failure detail retained until the complete acknowledgement barrier settles. */
   acknowledgementErrors?: Record<string, string>;
   /** Close semantics are fixed at ingress so late results cannot reclassify cleanup. */
-  closeMode?: 'running-hide' | 'idle-cleanup' | 'private-cleanup';
+  closeMode?: 'idle-cleanup' | 'private-cleanup' | 'stop-cleanup';
+  /** Typed agent close bridge correlation carried into terminal ack effects. */
+  closeRequestKey?: string;
+  /** Self-close only: stop/cleanup waits until the caller's closeRequested
+   *  response has been delivered. */
+  closeSelfHandoffRequired?: boolean;
+  /** A close can defer cleanup until a pending create resolves to a durable path. */
+  closeWaitForCreate?: boolean;
+  /** Private deletion intent, including private sessions that must stop first. */
+  closePrivacyMode?: boolean;
+  /** Irreversible private deletion committed before a later cleanup failure. */
+  closeDeletionCommitted?: boolean;
+  /** The pending create/duplicate operation whose late result must be cleaned up. */
+  closeOperationId?: string;
+  /** Reducer-owned barrier-release marker: the deferred close lifecycle effect
+   *  was dispatched after its prerequisites succeeded. */
+  closeCleanupDispatched?: boolean;
+  /** The close-owned stop is held only until a self-close result is handed back
+   *  to its agent worker; foreign agent and UI closes stop immediately. */
+  closeStopDispatched?: boolean;
+  closeStopAbortSendCorrIds?: string[];
+  closeStopCancelQueuedOperationIds?: string[];
+  closeStopUsePriorityLane?: boolean;
+  /** The message.interrupt operation whose settlement releases the deferred
+   *  stop-cleanup lifecycle effect. */
+  closeStopOperationId?: string;
+  /** Next-tab selection captured at close ingress for the deferred cleanup. */
+  closeNextPath?: string | null;
+  /** Whether the close changed visual selection (deferred cleanup detail). */
+  closeSelectionChanged?: boolean;
   /** Reducer-owned bounded read-only reconciliation progress. EffectRunner
    * retains only the timer/promise resource for the described attempt. */
   reconciliation?: {

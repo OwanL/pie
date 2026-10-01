@@ -1,5 +1,12 @@
 export const NEW_SESSION_NAME = 'New Session';
-export const MAX_SESSION_NAME_LENGTH = 40;
+/**
+ * Base-title budget shared with the coordinator title authority: a newly
+ * assigned name is at most 25 characters after trimming, and automatic
+ * collision suffixes are additional. This bound covers the provisional
+ * first-prompt snippet so it can never consume an assigned title's base
+ * allowance; existing assigned titles are never bulk-shortened.
+ */
+export const MAX_SESSION_NAME_SNIPPET_LENGTH = 25;
 
 export interface DerivedSessionName {
   name: string;
@@ -16,8 +23,8 @@ export interface DerivedSessionName {
 export function deriveSessionNameFromText(text: string | null | undefined): DerivedSessionName {
   const normalized = text?.replace(/\s+/g, ' ').trim() ?? '';
   if (!normalized) return { name: NEW_SESSION_NAME, isPlaceholder: true };
-  const name = normalized.length <= MAX_SESSION_NAME_LENGTH
+  const name = normalized.length <= MAX_SESSION_NAME_SNIPPET_LENGTH
     ? normalized
-    : `${normalized.slice(0, MAX_SESSION_NAME_LENGTH - 1).trimEnd()}…`;
+    : `${normalized.slice(0, MAX_SESSION_NAME_SNIPPET_LENGTH - 1).trimEnd()}…`;
   return { name, isPlaceholder: true };
 }

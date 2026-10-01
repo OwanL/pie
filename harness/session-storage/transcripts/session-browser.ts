@@ -47,16 +47,20 @@ function messageText(content: unknown): string {
     .join('');
 }
 
-function deriveName(manager: SdkSessionManager, branch: SessionEntryLike[]): { name: string; isPlaceholder: boolean } {
+function deriveName(manager: SdkSessionManager, branch: SessionEntryLike[]): {
+  name: string;
+  isPlaceholder: boolean;
+  isAssignedTitle: boolean;
+} {
   const explicit = manager.getSessionName();
-  if (explicit) return { name: explicit, isPlaceholder: false };
+  if (explicit) return { name: explicit, isPlaceholder: false, isAssignedTitle: true };
   for (const entry of branch) {
     if (entry.type === 'message' && entry.message?.role === 'user') {
       const derived = deriveSessionNameFromText(messageText(entry.message.content));
-      if (derived.name !== NEW_SESSION_NAME) return derived;
+      if (derived.name !== NEW_SESSION_NAME) return { ...derived, isAssignedTitle: false };
     }
   }
-  return { name: NEW_SESSION_NAME, isPlaceholder: true };
+  return { name: NEW_SESSION_NAME, isPlaceholder: true, isAssignedTitle: false };
 }
 
 export async function openSessionBrowseSnapshot(options: {
@@ -74,7 +78,8 @@ export async function openSessionBrowseSnapshot(options: {
   // the context-window denominator is applied afresh when an open is built.
   const derivedContextTokens = deriveContextUsageFromBranch(branch, Number.MAX_SAFE_INTEGER)?.tokens;
   const contextTokens = typeof derivedContextTokens === 'number' ? derivedContextTokens : undefined;
-  const { name, isPlaceholder } = deriveName(manager, branch);
+  const { name, isPlaceholder, isAssignedTitle } = deriveName(manager, branch);
+  const header = manager.getHeader?.() as { timestamp?: unknown } | null | undefined;
   let modifiedAt = new Date(0).toISOString();
   try {
     modifiedAt = (await fs.stat(sessionPath)).mtime.toISOString();
@@ -87,11 +92,13 @@ export async function openSessionBrowseSnapshot(options: {
     cwd: manager.getCwd() || startupCwd,
     name,
     isPlaceholder,
+    isAssignedTitle,
     modifiedAt,
     messageCount: durableContext?.messages.length ?? cache.transcript.length,
     ...(activeModel ? { modelId: activeModel.modelId, provider: activeModel.provider } : {}),
     ...(durableContext?.thinkingLevel ? { thinkingLevel: normalizeThinkingLevel(durableContext.thinkingLevel) } : {}),
     ...(manager.getSessionId?.() ? { sessionId: manager.getSessionId?.() } : {}),
+    ...(typeof header?.timestamp === 'string' ? { headerTimestamp: header.timestamp } : {}),
     ...(isAgentCreatedSession(manager) ? { agentCreated: true } : {}),
   };
   // The projection exposes no SessionManager. Durable rows are immutable by

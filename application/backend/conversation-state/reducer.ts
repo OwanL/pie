@@ -99,6 +99,7 @@ import {
   handleOpenSessionResult,
   handleOpenSessionReconciliationDue,
   handleCloseSessionResult,
+  handleSessionCloseResponseDelivered,
   handlePersistTabsResult,
   handleBackendRestartDrainCompleted,
   handleBackendRestartOldGenerationDied,
@@ -162,6 +163,7 @@ function reduceEvent(state: ArchState, event: Event): ReducerResult {
     case 'FileRevertResult':
     case 'SetModelResult':
     case 'SetPrefsResult':
+    case 'SessionControlSettingsResult':
     case 'LoadOlderTranscriptResult':
     case 'LoadNewerTranscriptResult':
     case 'JumpToLatestTranscriptResult':
@@ -466,6 +468,10 @@ function reduceEvent(state: ArchState, event: Event): ReducerResult {
 
     case 'CloseSessionResult': {
       return handleCloseSessionResult(state, event);
+    }
+
+    case 'SessionCloseResponseDelivered': {
+      return handleSessionCloseResponseDelivered(state, event);
     }
 
     case 'OpenSessionResult': {

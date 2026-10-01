@@ -138,6 +138,7 @@ test('session-scoped settings changed while loading follow a pending session to 
       corrId: 'toggle-subagent-provider-while-loading',
       prefs: {
         subagentProviderTogglesBySession: { [PENDING]: { anthropic: false } },
+        autonomousModeBySession: { [PENDING]: true },
       },
     },
   }).state;
@@ -156,9 +157,12 @@ test('session-scoped settings changed while loading follow a pending session to 
   assert.equal(view.activeSession?.path, RESOLVED);
   assert.equal(view.prefs.subagentProviderTogglesBySession[RESOLVED]?.anthropic, false);
   assert.equal(view.prefs.subagentProviderTogglesBySession[PENDING], undefined);
+  assert.equal(view.prefs.autonomousModeBySession?.[RESOLVED], true);
+  assert.equal(view.prefs.autonomousModeBySession?.[PENDING], undefined);
   assert.ok(
     replacement.effects.some((effect) => effect.kind === 'SetPrefsRpc'
-      && effect.prefs.subagentProviderTogglesBySession?.[RESOLVED]?.anthropic === false),
+      && effect.prefs.subagentProviderTogglesBySession?.[RESOLVED]?.anthropic === false
+      && effect.prefs.autonomousModeBySession?.[RESOLVED] === true),
     'the resolved-path preference is persisted and synchronized with runtime settings',
   );
 });

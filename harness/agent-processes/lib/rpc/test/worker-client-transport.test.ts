@@ -168,6 +168,78 @@ test('correlated requests have a deterministic deadline and clear their timers o
   }
 });
 
+test('a matching response arriving after its request timeout cannot settle or poison a later request', async () => {
+  const clock = new FakeClock();
+  const client = createClient('noise', {
+    scheduler: clock,
+    missedHeartbeatMs: 5_000,
+    requestTimeoutMs: 50,
+  });
+  try {
+    await client.start();
+
+    // Hold real worker responses at the dispatch seam so the deadline and
+    // response ordering are controlled without changing the inherited-FD
+    // transport or the fixture's sequence numbers.
+    const seam = client as unknown as {
+      handleMessage(message: unknown): void;
+      pending: Map<string, unknown>;
+    };
+    const dispatchMessage = seam.handleMessage.bind(client);
+    const delayedResponses = new Map<string, unknown>();
+    let delayResponses = true;
+    seam.handleMessage = (message) => {
+      if (delayResponses && message && typeof message === 'object') {
+        const frame = message as { kind?: unknown; requestId?: unknown };
+        if (frame.kind === 'response' && typeof frame.requestId === 'string') {
+          delayedResponses.set(frame.requestId, message);
+          return;
+        }
+      }
+      dispatchMessage(message);
+    };
+
+    const requestA = client.ping();
+    const [requestAId] = seam.pending.keys();
+    assert.ok(requestAId);
+    await waitUntil(() => delayedResponses.has(requestAId));
+
+    clock.advance(51);
+    await assert.rejects(
+      requestA,
+      (error) => error instanceof WorkerRequestTimeoutError
+        && error.requestKind === 'command'
+        && error.timeoutMs === 50,
+    );
+
+    let requestBSettled = false;
+    const requestB = client.ping().finally(() => { requestBSettled = true; });
+    const requestBId = [...seam.pending.keys()].find((requestId) => requestId !== requestAId);
+    assert.ok(requestBId);
+    await waitUntil(() => delayedResponses.has(requestBId));
+
+    const lateResponseA = delayedResponses.get(requestAId);
+    assert.ok(lateResponseA);
+    assert.equal((lateResponseA as { requestId: string }).requestId, requestAId);
+    dispatchMessage(lateResponseA);
+    await Promise.resolve();
+    assert.equal(requestBSettled, false, 'the expired request response must not settle the newer request');
+    assert.equal(seam.pending.has(requestBId), true, 'the newer request remains correlated and pending');
+    assert.notEqual(client.getSnapshot().status, 'failed', 'the late response must not fail the worker');
+
+    const responseB = delayedResponses.get(requestBId);
+    assert.ok(responseB);
+    assert.equal((responseB as { requestId: string }).requestId, requestBId);
+    dispatchMessage(responseB);
+    assert.deepEqual(await requestB, { kind: 'pong' });
+
+    delayResponses = false;
+    assert.deepEqual(await client.ping(), { kind: 'pong' }, 'subsequent correlated control traffic still works');
+  } finally {
+    await cleanup(client);
+  }
+});
+
 test('generic Phase 4 callbacks and dedicated response correlation share the bounded transport', async () => {
   const frames: string[] = [];
   const sessionPath = path.resolve('session-phase4.jsonl');

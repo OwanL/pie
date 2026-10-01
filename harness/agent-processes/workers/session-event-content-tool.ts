@@ -24,10 +24,8 @@ import { hasNestedToolFailure } from './subagent-result';
 import { LIVE_PIPELINE_LIMITS, LIVE_PIPELINE_PROTOCOL_VERSION } from '../lib/rpc/live-pipeline.js';
 import type { DurationClockDomain } from '../../../analytics/contracts/timing.js';
 import type { SdkSessionEvent } from '../lib/sdk-integration/sdk';
-import {
-  AGENT_MESSAGE_PROVENANCE_CUSTOM_TYPE,
-  isAgentSessionMessageLocalId,
-} from '../lib/rpc/message-contract.js';
+import { isAgentSessionMessageLocalId } from '../lib/rpc/message-contract.js';
+import { isSessionControlSender } from '../lib/rpc/session-control-attribution.js';
 import { FENCED_ENTRY_ID } from '../../session-storage/ownership/session-manager-fence';
 import { BackendLiveTurnAccumulator } from './live-turn-accumulator';
 import {
@@ -49,6 +47,7 @@ import { isAllZeroEmptyLengthMessage, isEstimatedContextOverflowMessage } from '
 import {
   clearSettledProviderIncident,
   emitLatestPruningResult,
+  reportAgentMessageProvenanceFailure,
   emitRejectedObservation,
   emitSemanticCandidate,
   logBackendDiagnostic,
@@ -69,35 +68,6 @@ export const TOOL_TERMINAL_PAYLOAD_MAX_BYTES = Math.min(
 
 const PROVIDER_TOOL_PROTOCOL_LEAK_BLOCK_LIMIT = 4;
 const PROVIDER_TOOL_PROTOCOL_LEAK_TAIL_CHARS = 64;
-
-interface AgentMessageProvenanceSidecarAppender {
-  appendCustomEntry(customType: string, data?: unknown): string;
-}
-
-function appendAgentMessageProvenanceSidecar(context: SessionContext, userEntryId: string): void {
-  const active = context.activeRequest;
-  if (!active || !isAgentSessionMessageLocalId(active.agentMessageLocalId)
-      || active.agentMessageProvenanceEntryId === userEntryId) return;
-  const manager = context.session.sessionManager as
-    (typeof context.session.sessionManager) & Partial<AgentMessageProvenanceSidecarAppender>;
-  if (typeof manager?.appendCustomEntry !== 'function') {
-    logBackendDiagnostic('warn', 'agentMessage.provenanceSidecarUnavailable', {
-      sessionPath: context.sessionPath,
-      userEntryId,
-    });
-    return;
-  }
-  try {
-    const sidecarEntryId = manager.appendCustomEntry(AGENT_MESSAGE_PROVENANCE_CUSTOM_TYPE, { userEntryId });
-    if (sidecarEntryId !== FENCED_ENTRY_ID) active.agentMessageProvenanceEntryId = userEntryId;
-  } catch (error) {
-    logBackendDiagnostic('warn', 'agentMessage.provenanceSidecarAppendFailed', {
-      sessionPath: context.sessionPath,
-      userEntryId,
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
-}
 
 function observedTimestampIso(value: unknown): string | undefined {
   const timestamp = typeof value === 'number'
@@ -907,9 +877,14 @@ function handleContentToolSessionEvent(
       // it is still a real transcript boundary. Terminalize the reply above the
       // queued row and create a fresh live owner so subsequent assistant output
       // renders as a separate reply below the now-delivered user message.
-      // The normal (non-queued) prompt does not emit user-role message_start in
-      // this subscribed stream, so this branch only handles injected messages.
       if (event.message?.role === 'user') {
+        const activeRequest = context.activeRequest;
+        // The pinned SDK also emits message_start for the initial prompt's user
+        // message. Before the first assistant message, messageIndex is still 0
+        // for ordinary and agent direct sends alike; preserve any queued identity
+        // until a user message arrives after assistant output has started.
+        if (activeRequest?.messageIndex === 0) return;
+
         const deliveredAt = Date.now();
         // Shift both delivery identities before opening the next segment so
         // that its semantic events own this queued follow-up operation.
@@ -917,9 +892,18 @@ function handleContentToolSessionEvent(
         const localId = queuedLocalIds && queuedLocalIds.length > 0
           ? queuedLocalIds.shift()
           : undefined;
+        const queuedAttributions = context.queuedCoordinatorAttributions;
+        const coordinatorAttribution = queuedAttributions && queuedAttributions.length > 0
+          ? queuedAttributions.shift()
+          : undefined;
         if (context.activeRequest) {
           context.activeRequest.agentMessageLocalId = isAgentSessionMessageLocalId(localId) ? localId : undefined;
           context.activeRequest.agentMessageProvenanceEntryId = undefined;
+          context.activeRequest.agentMessageDurabilityConfirmed = false;
+          context.activeRequest.agentMessageProvenanceFailureReported = false;
+          context.activeRequest.coordinatorAttribution = isSessionControlSender(coordinatorAttribution)
+            ? coordinatorAttribution
+            : undefined;
         }
         const queuedOperationIds = context.queuedOperationIds;
         const operationId = queuedOperationIds && queuedOperationIds.length > 0
@@ -1336,7 +1320,10 @@ function handleContentToolSessionEvent(
         emitDurableBranchObservation(deps, context, event.sessionEntryId);
       }
       if (event.message.role === 'user') {
-        if (event.sessionEntryId) appendAgentMessageProvenanceSidecar(context, event.sessionEntryId);
+        if (isAgentSessionMessageLocalId(context.activeRequest.agentMessageLocalId)
+          && (!event.sessionEntryId || event.sessionEntryId !== context.activeRequest.agentMessageProvenanceEntryId)) {
+          reportAgentMessageProvenanceFailure(deps, context, event.sessionEntryId, 'missing_user_entry');
+        }
         return;
       }
 

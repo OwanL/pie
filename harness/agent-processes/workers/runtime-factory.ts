@@ -67,6 +67,17 @@ function resolveExplicitModel(
   return model;
 }
 
+/** Resolve a durable thinking preference only when this branch records one.
+ * The SDK uses message presence to decide whether the session has prior state;
+ * for a message-empty session that would otherwise fall back to settings and
+ * append that default over its existing thinking-level entry.
+ */
+function resolveExplicitThinkingLevel(sessionManager: SdkSessionManager): string | undefined {
+  const hasThinkingEntry = sessionManager.getBranch().some((entry) => entry.type === 'thinking_level_change');
+  if (!hasThinkingEntry) return undefined;
+  return sessionManager.buildSessionContext?.().thinkingLevel;
+}
+
 /** Thrown by `ServiceLoadingGate` for work queued after (or refused during)
  *  server disposal. Distinct class so tests and callers can identify the
  *  shutdown path without string-matching. */
@@ -287,12 +298,14 @@ export function createRuntimeFactory(
     let created: Record<string, unknown>;
     try {
       const model = resolveExplicitModel(services, guardedSessionManager);
+      const thinkingLevel = resolveExplicitThinkingLevel(guardedSessionManager);
       const customTools = options.customTools?.(guardedSessionManager.getSessionFile?.());
       created = (await sdk.createAgentSessionFromServices({
         services,
         sessionManager: guardedSessionManager,
         sessionStartEvent,
         ...(model !== undefined ? { model } : {}),
+        ...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
         ...(customTools && customTools.length > 0 ? { customTools } : {}),
       })) as Record<string, unknown>;
     } catch (error) {

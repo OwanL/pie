@@ -619,6 +619,40 @@ test('process-exit recovery retires a stopping host and its orphaned writer leas
   }
 });
 
+test('process-exit recovery removes an orphaned lease from a stopped host without changing its record', () => {
+  const temp = tempDatabase();
+  const store = new SessionLifecycleStore(temp.databasePath);
+  const identity = {
+    hostInstanceId: 'host-stopped-process-exit', workspaceId: 'workspace-stopped-process-exit',
+    generationId: 'generation-stopped-process-exit', buildId: 'build-stopped-process-exit', processId: 203,
+  };
+  try {
+    store.registerAnalyticsHost({
+      ...identity, capabilities: ['authenticated-control', 'writer-fence'], registeredAtMs: '1',
+    });
+    const orphanLease = store.acquireAnalyticsWriterLease(identity, 0, 2);
+    const stopped = store.markAnalyticsHostState(
+      identity.hostInstanceId, identity.processId, identity.generationId, 'stopped', 3,
+    );
+    assert.deepEqual(store.listAnalyticsWriterLeases(identity.workspaceId), [orphanLease]);
+
+    assert.throws(
+      () => store.recoverAnalyticsHostAfterProcessExit({ ...identity, generationId: 'stale-generation' }, 4),
+      /identity is stale/,
+    );
+    assert.deepEqual(store.listAnalyticsWriterLeases(identity.workspaceId), [orphanLease]);
+    assert.deepEqual(store.getAnalyticsHost(identity.hostInstanceId), stopped);
+
+    assert.deepEqual(store.recoverAnalyticsHostAfterProcessExit(identity, 5), stopped);
+    assert.deepEqual(store.listAnalyticsWriterLeases(identity.workspaceId), []);
+    assert.deepEqual(store.recoverAnalyticsHostAfterProcessExit(identity, 6), stopped);
+    assert.deepEqual(store.getAnalyticsHost(identity.hostInstanceId), stopped);
+  } finally {
+    store.close();
+    rmSync(temp.root, { recursive: true, force: true });
+  }
+});
+
 test('pending-create origin survives private close, restart, and cleanup replay without resurrection', async () => {
   const temp = tempDatabase();
   const sessions = path.join(temp.root, 'sessions');

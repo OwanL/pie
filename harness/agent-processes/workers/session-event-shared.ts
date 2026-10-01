@@ -1,5 +1,6 @@
 import type { CustomMessagePayload } from '../lib/rpc/session-events.js';
 import { createOperationalIncident } from '../lib/rpc/incident-payload.js';
+import { isSessionControlSender } from '../lib/rpc/session-control-attribution.js';
 import type { TurnSemanticEnvelope } from '../lib/rpc/live-pipeline.js';
 import type { SdkSessionEvent } from '../lib/sdk-integration/sdk';
 import type { BackendSemanticCandidate } from './live-turn-accumulator';
@@ -42,6 +43,51 @@ export function clearSettledProviderIncident(context: SessionContext): void {
   const active = context.activeRequest;
   if (!active) return;
   active.latestProviderIncident = undefined;
+}
+
+export type AgentMessageProvenanceFailure = 'missing_user_entry' | 'append_failed' | 'fenced' | 'unflushed';
+
+export function reportAgentMessageProvenanceFailure(
+  deps: Pick<BackendSessionEventHandlerDeps, 'emit'>,
+  context: SessionContext,
+  userEntryId: string | undefined,
+  reason: AgentMessageProvenanceFailure,
+  error?: unknown,
+): void {
+  const active = context.activeRequest;
+  if (!active || active.agentMessageProvenanceFailureReported) return;
+  active.agentMessageProvenanceFailureReported = true;
+  active.agentMessageDurability?.settle(false);
+  const correlationId = userEntryId ?? active.agentMessageLocalId ?? active.id;
+  context.sendOperationLedger?.markFailedAfterCommit(
+    active.operationId ?? '',
+    'AGENT_MESSAGE_PROVENANCE_UNAVAILABLE',
+    'The message may have been delivered, but its durable sender attribution is unknown.',
+  );
+  const hasSender = isSessionControlSender(active.coordinatorAttribution);
+  logBackendDiagnostic('warn', `agentMessage.provenance.${reason}`, {
+    sessionPath: context.sessionPath,
+    ...(userEntryId ? { userEntryId } : {}),
+    localId: active.agentMessageLocalId,
+    ...(error !== undefined ? { error: error instanceof Error ? error.message : String(error) } : {}),
+  });
+  deps.emit('operational-error', createOperationalIncident({
+    incidentId: `agent-message-provenance:${context.sessionPath}:${correlationId}`,
+    dedupeKey: `agent-message-provenance:${context.sessionPath}:${correlationId}`,
+    code: 'AGENT_MESSAGE_PROVENANCE_UNAVAILABLE',
+    message: hasSender
+      ? 'The accepted agent message could not save its sender attribution; its sender and reply reference may be unavailable after reload.'
+      : 'The accepted agent message could not save its provenance marker; its agent-message attribution may be unavailable after reload.',
+    detail: `Durable sender provenance was not confirmed (${reason}).`,
+    sessionPath: context.sessionPath,
+    ...(active.operationId ? { operationId: active.operationId } : {}),
+    requestId: active.id,
+    ...(userEntryId ? { messageId: userEntryId } : {}),
+    severity: 'error',
+    certainty: 'ambiguous',
+    phase: 'settlement',
+    recovery: { showLogs: false },
+  }));
 }
 export interface BackendSessionEventHandlerDeps {
   emit(event: string, payload?: unknown): void;

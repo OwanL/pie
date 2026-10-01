@@ -106,6 +106,41 @@ function analyzeInvocation(inv: ShellInvocation): Safety | undefined {
 	return undefined;
 }
 
+function findNestedShellPayload(invocation: ShellInvocation): string | undefined {
+	const { name, args } = invocation;
+	if (name === "pwsh" || name === "powershell") {
+		const flagIndex = args.findIndex((arg) => arg === "-c" || /^-(?:command|encodedcommand)$/i.test(arg));
+		return flagIndex >= 0 ? args[flagIndex + 1] : undefined;
+	}
+	if (!["bash", "sh", "zsh"].includes(name)) return undefined;
+
+	let commandMode = false;
+	for (let argIndex = 0; argIndex < args.length; argIndex += 1) {
+		const arg = args[argIndex] ?? "";
+		if (arg === "--" || arg === "-") return commandMode ? args[argIndex + 1] : undefined;
+		if (!/^[-+]/.test(arg)) return commandMode ? arg : undefined;
+		if (arg.startsWith("--")) {
+			const optionName = arg.split("=", 1)[0];
+			if (["--init-file", "--rcfile"].includes(optionName ?? "") && !arg.includes("=")) argIndex += 1;
+			continue;
+		}
+
+		const shortOptions = arg.slice(1);
+		if (!/^[A-Za-z]+$/.test(shortOptions)) continue;
+		for (let optionIndex = 0; optionIndex < shortOptions.length; optionIndex += 1) {
+			const option = shortOptions[optionIndex];
+			if (option === "c") commandMode = true;
+			// Bash/sh consume a separate option name even when -o is in a
+			// cluster (e.g. -oc noclobber). Zsh also accepts attached names.
+			if (option === "o" || option === "O") {
+				if (name === "zsh" && optionIndex < shortOptions.length - 1) break;
+				argIndex += 1;
+			}
+		}
+	}
+	return undefined;
+}
+
 function analyzeBash(command: string, cwd: string, depth = 0): Safety {
 	const executableSyntax = maskShellData(command);
 	if (/(?:^|[;|&\n]\s*|\s)\d*>{1,2}\s*\/dev\/(?:sd[a-z]|nvme\d|hd[a-z]|vd[a-z])/i.test(executableSyntax)) {
@@ -134,9 +169,7 @@ function analyzeBash(command: string, cwd: string, depth = 0): Safety {
 
 	if (depth < 2) {
 		for (const invocation of invocations) {
-			if (!["bash", "sh", "zsh", "pwsh", "powershell"].includes(invocation.name)) continue;
-			const flagIndex = invocation.args.findIndex((arg) => arg === "-c" || /^-(?:command|encodedcommand)$/i.test(arg));
-			const payload = flagIndex >= 0 ? invocation.args[flagIndex + 1] : undefined;
+			const payload = findNestedShellPayload(invocation);
 			if (payload) {
 				const nested = analyzeBash(payload, cwd, depth + 1);
 				if (nested.action !== "allow") return nested;

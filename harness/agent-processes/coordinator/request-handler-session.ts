@@ -6,6 +6,7 @@ import type { DetailResult, LazyDetailRef } from '../lib/rpc/message-contract.js
 import type { RequestEnvelope } from '../lib/rpc/wire.js';
 import type { AuxiliaryLlmUsagePayload, SessionOpenedPayload } from '../lib/rpc/session-events.js';
 import { toErrorMessage } from '../../../lib/structured-logging/error-message.js';
+import { normalizeSessionControlBaseTitle } from './live-session-titles.js';
 import { boundTranscriptSnapshot } from '../../session-storage/transcripts/snapshot-boundary.js';
 import { generateSessionTitle } from '../workers/session-title-generator';
 import { appendAgentCreatedSessionProvenance } from '../../session-storage/metadata/session-provenance';
@@ -15,6 +16,7 @@ import type { SessionContext } from './server-types.js';
 import { BackendError } from './server-io.js';
 import {
   validateLoadTranscriptPage,
+  validateSessionCloseAcknowledgement,
   validateSessionCreate,
   validateSessionDuplicate,
   validateSessionOpen,
@@ -23,6 +25,10 @@ import {
   validateSessionTitleGenerate,
   validateTruncateAfter,
 } from '../lib/rpc/backend-rpc.js';
+import { validateHostLiveMembership } from '../lib/rpc/live-session-control.js';
+import {
+  validateSessionControlSettingsAcknowledgement,
+} from '../lib/rpc/session-control-settings.js';
 import {
   type BackendRequestHandlerDeps,
   type RequestHandler,
@@ -45,9 +51,12 @@ function createOperationIntentFingerprint(
   kind: 'session.create' | 'session.duplicate',
   pathIdentity: string,
   agentCreated?: boolean,
+  title?: string,
 ): string {
   return JSON.stringify(kind === 'session.create'
-    ? [kind, path.resolve(pathIdentity), agentCreated === true]
+    // The required title is part of the mutation intent: a retried create must
+    // never be deduped across a different requested base title.
+    ? [kind, path.resolve(pathIdentity), agentCreated === true, title === undefined ? null : title]
     : [kind, path.resolve(pathIdentity)]);
 }
 
@@ -89,6 +98,7 @@ async function publishCreatedSession(
   // runtime refreshes retain ordinary tab lifecycle semantics.
   if (params.agentCreated) payload.agentCreated = true;
   deps.emit('session.opened', payload);
+  deps.noteNewSessionPublished?.(sessionPath);
   void deps.emitSessionListChanged([payload.session]);
   return { sessionPath };
 }
@@ -136,11 +146,35 @@ async function duplicateColdSession(
   };
 }
 
+interface CreatedSessionTitleOutcome {
+  assigned: boolean;
+  title?: string;
+  error?: string;
+}
+
+/** Validate the required agent-create title eagerly: oversize or blank input
+ *  must fail closed before any durable session is created. */
+function normalizeCreateTitle(raw: string): string {
+  try {
+    return normalizeSessionControlBaseTitle(raw);
+  } catch (error) {
+    throw new BackendError(
+      'INVALID_PARAMS',
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
 async function handleSessionCreate(
   deps: BackendRequestHandlerDeps,
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateSessionCreate(request.params);
+  if (params.title !== undefined) normalizeCreateTitle(params.title);
+  // The assigned title is finalized (reserve → owner persistence → confirm)
+  // inside the create flow and before publication; capture the outcome so the
+  // acknowledgement can still report an explicit assignment failure.
+  let ledgerTitleOutcome: CreatedSessionTitleOutcome | undefined;
   markRequestValidated(deps);
   if (params.operationId !== undefined) {
     // §6.3 idempotent create: dedupe concurrent/retried RPCs by the stable
@@ -153,18 +187,30 @@ async function handleSessionCreate(
         'session.create',
         params.cwd || deps.startupCwd,
         params.agentCreated,
+        params.title,
       ),
       execute: async (registerDurablePath) => {
         const created = await createColdSession(deps, params.cwd, params.operationId, params.agentCreated);
         // The server callback installs the process-local manager handle before
         // returning. Only then may the ledger record the durable commit.
         registerDurablePath(created.sessionPath);
+        ledgerTitleOutcome = await assignCreatedSessionTitle(deps, created.sessionPath, params.title, request.id);
+        if (ledgerTitleOutcome && !ledgerTitleOutcome.assigned) {
+          throw new BackendError('LIVE_TITLE_ASSIGNMENT_FAILED', ledgerTitleOutcome.error ?? 'Title assignment failed.');
+        }
         return await publishCreatedSession(deps, created.sessionPath, params, request.id);
       },
       resume: async (durablePath) => {
+        ledgerTitleOutcome = await assignCreatedSessionTitle(deps, durablePath, params.title, request.id);
+        if (ledgerTitleOutcome && !ledgerTitleOutcome.assigned) {
+          throw new BackendError('LIVE_TITLE_ASSIGNMENT_FAILED', ledgerTitleOutcome.error ?? 'Title assignment failed.');
+        }
         return await publishCreatedSession(deps, durablePath, params, request.id);
       },
       republish: async (sessionPath) => {
+        // A titled retry first confirms its assignment below; never emit a
+        // nameless committed path from the ledger's eager republish callback.
+        if (params.title !== undefined) return;
         // Best-effort: the durable result is committed; a lost first
         // `session.opened` must not fail the retry ack.
         const payload = await deps.buildSessionOpenedPayload(
@@ -179,14 +225,63 @@ async function handleSessionCreate(
         );
         if (params.agentCreated) payload.agentCreated = true;
         deps.emit('session.opened', payload);
+        deps.noteNewSessionPublished?.(sessionPath);
         void deps.emitSessionListChanged([payload.session]);
       },
     });
-    return { ok: true, sessionPath: result.sessionPath };
+    // The ledger intentionally turns post-durable failures into committed
+    // creation. Assignment is a separate admission gate, not a nameless ack.
+    if (ledgerTitleOutcome && !ledgerTitleOutcome.assigned) {
+      throw new BackendError('LIVE_TITLE_ASSIGNMENT_FAILED', ledgerTitleOutcome.error ?? 'Title assignment failed.');
+    }
+    if (params.title !== undefined && !ledgerTitleOutcome) {
+      ledgerTitleOutcome = await assignCreatedSessionTitle(deps, result.sessionPath, params.title, request.id);
+      if (!ledgerTitleOutcome?.assigned) {
+        throw new BackendError('LIVE_TITLE_ASSIGNMENT_FAILED', ledgerTitleOutcome?.error ?? 'Title assignment failed.');
+      }
+      // A completed ledger entry cannot tell whether publication was lost.
+      // Re-emit only after confirmed assignment, best-effort as before.
+      try { await publishCreatedSession(deps, result.sessionPath, params, request.id); } catch { /* committed */ }
+    }
+    return {
+      ok: true,
+      sessionPath: result.sessionPath,
+      ...createdTitleResult(ledgerTitleOutcome),
+    };
   }
   const created = await createColdSession(deps, params.cwd, params.operationId, params.agentCreated);
+  const titleOutcome = await assignCreatedSessionTitle(deps, created.sessionPath, params.title, request.id);
+  if (titleOutcome && !titleOutcome.assigned) {
+    throw new BackendError('LIVE_TITLE_ASSIGNMENT_FAILED', titleOutcome.error ?? 'Title assignment failed.');
+  }
   const result = await publishCreatedSession(deps, created.sessionPath, params, request.id);
-  return { ok: true, sessionPath: result.sessionPath };
+  return {
+    ok: true,
+    sessionPath: result.sessionPath,
+    ...createdTitleResult(titleOutcome),
+  };
+}
+
+/** Flatten the create-flow assignment outcome into the acknowledgement so a
+ *  failed assignment stays explicit instead of silently dropping the required
+ *  title. */
+function createdTitleResult(outcome: CreatedSessionTitleOutcome | undefined): Record<string, unknown> {
+  if (!outcome) return {};
+  if (outcome.assigned) return { ...(outcome.title ? { title: outcome.title } : {}) };
+  return { titleAssigned: false, ...(outcome.error ? { titleError: outcome.error } : {}) };
+}
+
+async function assignCreatedSessionTitle(
+  deps: BackendRequestHandlerDeps,
+  sessionPath: string,
+  baseTitle: string | undefined,
+  requestId: string,
+): Promise<CreatedSessionTitleOutcome | undefined> {
+  if (baseTitle === undefined) return undefined;
+  if (!deps.assignCreatedSessionTitle) {
+    throw new BackendError('UNAVAILABLE', 'Live title assignment is unavailable.');
+  }
+  return await deps.assignCreatedSessionTitle(sessionPath, baseTitle, requestId);
 }
 
 async function handleSessionOpen(
@@ -209,6 +304,7 @@ async function handleSessionOpen(
     let openPayload: SessionOpenedPayload;
     const snapshotBuildStartedAt = performance.now();
     try {
+      await deps.admitOpenedSessionTitle?.(params.sessionPath, true);
       openPayload = await deps.buildSessionOpenedPayload(
         params.sessionPath,
         params.selectionToken,
@@ -302,9 +398,11 @@ async function handleSessionDuplicate(
           params.operationId,
         );
         registerDurablePath(duplicate.sessionPath);
+        await deps.admitOpenedSessionTitle?.(duplicate.sessionPath);
         return await publishCreatedSession(deps, duplicate.sessionPath, params, request.id);
       },
       resume: async (durablePath) => {
+        await deps.admitOpenedSessionTitle?.(durablePath);
         return await publishCreatedSession(deps, durablePath, params, request.id);
       },
       republish: async (sessionPath) => {
@@ -321,6 +419,7 @@ async function handleSessionDuplicate(
           request.id,
         );
         deps.emit('session.opened', payload);
+        deps.noteNewSessionPublished?.(sessionPath);
         void deps.emitSessionListChanged([payload.session]);
       },
     });
@@ -332,6 +431,7 @@ async function handleSessionDuplicate(
     request.id,
     params.operationId,
   );
+  await deps.admitOpenedSessionTitle?.(duplicate.sessionPath);
   const result = await publishCreatedSession(deps, duplicate.sessionPath, params, request.id);
   return { ok: true, sessionPath: result.sessionPath };
 }
@@ -391,6 +491,43 @@ async function handleSessionLifecycleClose(
     params.privacyMode,
   );
   return { sessionPath: params.sessionPath, closed: true, ...(lifecycle ?? {}) };
+}
+
+async function handleSessionCloseAcknowledgement(
+  deps: BackendRequestHandlerDeps,
+  request: RequestEnvelope,
+): Promise<unknown> {
+  const params = validateSessionCloseAcknowledgement(request.params);
+  markRequestValidated(deps);
+  if (!deps.handleSessionCloseAcknowledgement) {
+    throw new BackendError('UNAVAILABLE', 'The host close bridge is not available.');
+  }
+  return await deps.handleSessionCloseAcknowledgement(params);
+}
+
+async function handleSessionControlSettingsAcknowledgement(
+  deps: BackendRequestHandlerDeps,
+  request: RequestEnvelope,
+): Promise<unknown> {
+  const params = validateSessionControlSettingsAcknowledgement(request.params);
+  markRequestValidated(deps);
+  if (!deps.handleSessionControlSettingsAcknowledgement) {
+    throw new BackendError('UNAVAILABLE', 'The host session-settings bridge is not available.');
+  }
+  return await deps.handleSessionControlSettingsAcknowledgement(params);
+}
+
+async function handleHostLiveMembership(
+  deps: BackendRequestHandlerDeps,
+  request: RequestEnvelope,
+): Promise<unknown> {
+  const params = validateHostLiveMembership(request.params);
+  markRequestValidated(deps);
+  if (!deps.applyHostLiveMembership) {
+    throw new BackendError('UNAVAILABLE', 'The host live-membership bridge is not available.');
+  }
+  deps.applyHostLiveMembership(params);
+  return { ok: true, appliedRevision: params.revision };
 }
 
 async function handleSessionForget(
@@ -667,6 +804,9 @@ export const SESSION_REQUEST_HANDLERS: Readonly<Record<string, RequestHandler>> 
   'session.preload': handleSessionPreload,
   'session.lifecyclePrivacy': handleSessionLifecyclePrivacy,
   'session.lifecycleClose': handleSessionLifecycleClose,
+  'session.closeAcknowledgement': handleSessionCloseAcknowledgement,
+  'session.settingsAcknowledgement': handleSessionControlSettingsAcknowledgement,
+  'session.liveMembership': handleHostLiveMembership,
   'session.forget': handleSessionForget,
   'session.loadTranscriptPage': handleSessionLoadTranscriptPage,
   'session.loadDetail': handleSessionLoadDetail,

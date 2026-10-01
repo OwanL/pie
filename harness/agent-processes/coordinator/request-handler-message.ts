@@ -27,10 +27,16 @@ import {
   type InterruptOperationResult,
 } from './interrupt-operation-ledger.js';
 import { buildPromptText, lowerImageInputs } from './message-inputs.js';
+import {
+  formatSessionControlPrompt,
+  isSessionControlSender,
+  type SessionControlSender,
+} from '../lib/rpc/session-control-attribution.js';
 import { normalizeThinkingLevel } from '../../model-providers/catalog/thinking-level.js';
 import { buildSessionCapabilities, hasBillableSessionActivity } from '../workers/session-activity';
 import type { ActiveRequest, SessionContext } from './server-types.js';
 import { BackendLiveTurnAccumulator } from '../workers/live-turn-accumulator';
+import { reportAgentMessageProvenanceFailure } from '../workers/session-event-shared';
 import { BackendError } from './server-io.js';
 import {
   type BackendRequestHandlerDeps,
@@ -113,6 +119,7 @@ function reportPromptFailure(
       recovery: { showLogs: true },
     }),
   } satisfies ErrorPayload);
+  active?.agentMessageDurability?.settle(false);
   clearActiveRequest(context, requestId, expected);
   deps.emitBusyChanged(context, hasBillableSessionActivity(context));
 }
@@ -139,6 +146,7 @@ function emitPreflightFailed(
   const operationId = expected?.operationId ?? context.activeRequest?.operationId;
   const operationAttempt = expected?.operationAttempt ?? context.activeRequest?.operationAttempt;
   const agentMessageLocalId = expected?.agentMessageLocalId ?? context.activeRequest?.agentMessageLocalId;
+  (expected ?? context.activeRequest)?.agentMessageDurability?.settle(false);
   context.sendOperationLedger?.markFailed(operationId, 'MESSAGE_SEND_PRECOMMIT_FAILED', message);
   deps.emit('preflight.failed', {
     requestId,
@@ -179,12 +187,36 @@ function isProviderExplicitlyDisabled(provider: string | undefined): boolean {
   }
 }
 
+type CoordinatorAttributedMessageSendParams = ReturnType<typeof validateMessageSend> & {
+  coordinatorAttribution?: SessionControlSender;
+};
+
+/** Preserve sender metadata injected by the coordinator after its public RPC
+ * validator has stripped caller-supplied fields. `server.ts` must remain the
+ * sole issuer of this field and must overwrite, never trust, incoming DTOs. */
+function validateCoordinatorMessageSend(rawParams: unknown, trustedWorkerRoute: boolean): CoordinatorAttributedMessageSendParams {
+  const params = validateMessageSend(rawParams);
+  if (!trustedWorkerRoute) return params;
+  const raw = rawParams && typeof rawParams === 'object' && !Array.isArray(rawParams)
+    ? rawParams as Record<string, unknown>
+    : undefined;
+  const sender = raw?.coordinatorAttribution;
+  if (sender === undefined) return params;
+  if (!isAgentSessionMessageLocalId(params.localId) || !isSessionControlSender(sender)) {
+    throw new BackendError('INVALID_PARAMS', 'Coordinator sender attribution is valid only for a coordinator-originated agent message.');
+  }
+  return { ...params, coordinatorAttribution: sender };
+}
+
 async function handleMessageSend(
   deps: BackendRequestHandlerDeps,
   request: RequestEnvelope,
 ): Promise<unknown> {
-  const params = validateMessageSend(request.params);
+  const params = validateCoordinatorMessageSend(request.params, deps.allowCoordinatorAttribution === true);
   markRequestValidated(deps);
+  // A closing target cannot admit new execution: the fence covers both a
+  // promotion and a hot send joining an outstanding host-owned close request.
+  deps.assertSessionNotClosing?.(params.sessionPath);
   // An existing-hot lookup can resolve just before truncate/recovery reserves
   // the path. Rejoin that synchronously visible owner before claiming active
   // work; after this check activeRequest is installed without another await,
@@ -233,7 +265,7 @@ async function handleMessageSend(
 async function executeMessageSend(
   deps: BackendRequestHandlerDeps,
   context: SessionContext,
-  params: ReturnType<typeof validateMessageSend>,
+  params: CoordinatorAttributedMessageSendParams,
 ): Promise<{ operationId?: string; operationAttempt?: number; requestId?: string; queued?: boolean }> {
   if (isProviderExplicitlyDisabled(context.session.model?.provider)) {
     throw new BackendError(
@@ -263,22 +295,29 @@ async function executeMessageSend(
   // The SDK emits `message_start` (role 'user') when the loop injects the
   // queued message; the backend forwards that as `message.queuedDelivered` so
   // the host promotes the message from 'queued' to 'completed'.
+  const coordinatorAttribution = params.coordinatorAttribution;
+
   if (conversationActivity) {
     if ((context.queuedLocalIds?.length ?? 0) >= LIVE_PIPELINE_LIMITS.queuedMessageCorrelations) {
       throw new BackendError('QUEUE_CAPACITY_EXCEEDED', 'Too many queued follow-up messages. Wait for delivery or clear the queue before sending more.');
     }
     const queuedImages = lowerImageInputs(params.inputs);
     const queuedImagePayload = queuedImages.length > 0 ? queuedImages : undefined;
-    const queuedPromptText = buildPromptText(params.text, params.inputs);
+    const queuedText = coordinatorAttribution
+      ? formatSessionControlPrompt(params.text, coordinatorAttribution)
+      : params.text;
+    const queuedPromptText = buildPromptText(queuedText, params.inputs);
     // Register before entering the SDK: steer/followUp may synchronously emit
     // the delivery message_start before its promise settles.
     const deliveryLocalId = params.localId ?? '';
     const queuedLocalIds = context.queuedLocalIds ??= [];
     const queuedOperationIds = context.queuedOperationIds ??= [];
     const queuedOperationAttempts = context.queuedOperationAttempts ??= [];
+    const queuedCoordinatorAttributions = context.queuedCoordinatorAttributions ??= [];
     queuedLocalIds.push(deliveryLocalId);
     queuedOperationIds.push(params.operationId ?? '');
     queuedOperationAttempts.push(params.operationAttempt);
+    queuedCoordinatorAttributions.push(coordinatorAttribution);
     try {
       if (context.activeRequest && !context.session.isStreaming) {
         await context.session.followUp(queuedPromptText, queuedImagePayload);
@@ -295,6 +334,7 @@ async function executeMessageSend(
         queuedLocalIds.splice(index, 1);
         queuedOperationIds.splice(index, 1);
         queuedOperationAttempts.splice(index, 1);
+        queuedCoordinatorAttributions.splice(index, 1);
       }
       throw error;
     }
@@ -315,6 +355,7 @@ async function executeMessageSend(
   context.activeRequest = {
     id: requestId,
     ...(isAgentSessionMessageLocalId(params.localId) ? { agentMessageLocalId: params.localId } : {}),
+    ...(coordinatorAttribution ? { coordinatorAttribution } : {}),
     ...(params.operationId ? { operationId: params.operationId } : {}),
     ...(params.operationAttempt !== undefined ? { operationAttempt: params.operationAttempt } : {}),
     messageIndex: 0,
@@ -334,17 +375,25 @@ async function executeMessageSend(
     modelId,
     provider,
     thinkingLevel,
-    extensionCommand: params.text.startsWith('/'),
+    extensionCommand: !coordinatorAttribution && params.text.startsWith('/'),
     // The first turn has no preceding tool call, so its latency window opens at
     // prompt-send. Subsequent turns overwrite this on `tool_execution_end`.
     turnBoundaryAt: Date.now(),
     aborted: false,
   };
 
+  if (coordinatorAttribution) {
+    let settle!: (durable: boolean) => void;
+    const promise = new Promise<boolean>((resolve) => { settle = resolve; });
+    context.activeRequest.agentMessageDurability = { settle, promise };
+  }
   const images = lowerImageInputs(params.inputs);
   const imagePayload = images.length > 0 ? images : undefined;
-  const promptText = buildPromptText(params.text, params.inputs);
-  const isExtensionCommand = params.text.startsWith('/');
+  const attributedText = coordinatorAttribution
+    ? formatSessionControlPrompt(params.text, coordinatorAttribution)
+    : params.text;
+  const promptText = buildPromptText(attributedText, params.inputs);
+  const isExtensionCommand = !coordinatorAttribution && params.text.startsWith('/');
   // `WorkerRuntimeHost.bindSession` reuses the context object when an extension
   // command replaces the SDK session. Capture every part of the ownership
   // identity before invoking the SDK: a late preflight/final callback must not
@@ -381,6 +430,7 @@ async function executeMessageSend(
   // `preflightFailed` makes the failure emission one-shot so `preflightResult`
   // and a concurrent `session.prompt()` rejection cannot both emit.
   let preflightFailed = false;
+  let preflightAccepted = false;
 
   // No heuristic elapsed-time safety net: a queued prompt that has not yet
   // reached its first `message_start` is owned by the exact SDK prompt
@@ -408,6 +458,7 @@ async function executeMessageSend(
           if (!ownsRequest()) return;
           if (preflightFailed) return;
           if (success) {
+            preflightAccepted = true;
             // Explicit phase boundary for the host watchdog. This internal
             // custom event is not inserted into the visible transcript; the
             // durable pruning-result entry independently supplies the UI summary.
@@ -452,6 +503,12 @@ async function executeMessageSend(
         // `pending.promoted`. `preflightFailed` guards a double emit when
         // `preflightResult(false)` already settled.
         if (!ownsRequest() || preflightFailed) return;
+        if (preflightAccepted && coordinatorAttribution && !ownedRequest.agentMessageDurabilityConfirmed) {
+          reportAgentMessageProvenanceFailure(deps, context, ownedRequest.agentMessageProvenanceEntryId, 'unflushed');
+          clearActiveRequest(context, requestId, ownedRequest);
+          deps.emitBusyChanged(context, hasBillableSessionActivity(context));
+          return;
+        }
         if (ownedRequest.messageIndex > 0 || ownedRequest.lastAssistantMessageId || ownedRequest.currentMessageId) {
           reportPromptFailure(deps, context, requestId, error, ownedRequest);
           return;
@@ -467,6 +524,10 @@ async function executeMessageSend(
         );
       })
       .finally(() => {
+        if (coordinatorAttribution && ownsRequest() && preflightAccepted
+          && !ownedRequest.agentMessageDurabilityConfirmed) {
+          reportAgentMessageProvenanceFailure(deps, context, ownedRequest.agentMessageProvenanceEntryId, 'unflushed');
+        }
         // Extension commands are allowed to complete without an agent run.
         // They still received the early message.send ack, so close the exact
         // request here rather than leaving the host/backend busy forever. A
@@ -491,10 +552,16 @@ async function executeMessageSend(
     // `session.prompt` threw synchronously before returning a promise — treat
     // as a pre-ack failure: clear activeRequest and let the RPC reject so the
     // host dispatches `SendResult{ok:false}` and reverts via `pending.ops`.
+    ownedRequest.agentMessageDurability?.settle(false);
     clearActiveRequest(context, requestId, ownedRequest);
     throw syncError;
   }
 
+  if (ownedRequest.agentMessageDurability && !await ownedRequest.agentMessageDurability.promise) {
+    if (preflightFailed && !preflightAccepted) throw new BackendError('MESSAGE_SEND_PRECOMMIT_FAILED', 'The agent message was rejected before admission.');
+    throw new BackendError('AGENT_MESSAGE_PROVENANCE_UNAVAILABLE',
+      'The agent message may have been admitted, but durable sender attribution was not confirmed.');
+  }
   return {
     ...(params.operationId ? { operationId: params.operationId } : {}),
     ...(params.operationAttempt !== undefined ? { operationAttempt: params.operationAttempt } : {}),
@@ -527,6 +594,8 @@ async function handleMessageContinue(
 ): Promise<unknown> {
   const params = validateMessageOperation('message.continue', request.params);
   markRequestValidated(deps);
+  // A closing target cannot restart a continuation turn through the fence.
+  deps.assertSessionNotClosing?.(params.sessionPath);
   const context = await requireSessionTransition(deps, params.sessionPath);
   assertCurrentSessionMutationOwner(deps, params.sessionPath, context);
   if (params.operationId) {
@@ -776,6 +845,7 @@ async function executeMessageInterrupt(
     context.queuedLocalIds = [];
     context.queuedOperationIds = [];
     context.queuedOperationAttempts = [];
+    context.queuedCoordinatorAttributions = [];
     return { interrupted: false, alreadyStopped: true };
   }
   if (context.manualCompactionRequest) {
@@ -806,6 +876,7 @@ async function executeMessageInterrupt(
   context.queuedLocalIds = [];
   context.queuedOperationIds = [];
   context.queuedOperationAttempts = [];
+  context.queuedCoordinatorAttributions = [];
   // Hard-stop every billable window the SDK exposes BEFORE the un-awaited
   // `session.abort()` runs. `abort()` alone does NOT stop the post-agent_end
   // compaction / branch-summary / retry / bash LLM calls, so spend would keep
@@ -860,6 +931,7 @@ async function executeMessageInterrupt(
         userInitiated: true,
       } satisfies MessageAbortedPayload);
     }
+    abortRequest?.agentMessageDurability?.settle(false);
     context.activeRequest = undefined;
     deps.emitBusyChanged(context, hasBillableSessionActivity(context));
   };
@@ -910,6 +982,7 @@ async function executeMessageInterrupt(
     context.sessionManagerFence?.invalidate();
     context.uiBridge?.dispose();
     active?.pendingDurableToolTerminals?.clear();
+    active?.agentMessageDurability?.settle(false);
     if (active?.liveTurnAccumulator) {
       context.terminalLiveTurn = { accumulator: active.liveTurnAccumulator, expiresAt: Date.now() + 10_000 };
     }
@@ -1025,16 +1098,18 @@ async function handleMessageReplaceQueue(
     );
   }
 
+  const existingCoordinatorAttributions = context.queuedCoordinatorAttributions ?? [];
+  const attributionByLocalId = new Map<string, SessionControlSender | undefined>(
+    authoritativeLocalIds.map((localId, index) => [localId, existingCoordinatorAttributions[index]]),
+  );
   const enqueueAll = async (messages: typeof params.messages): Promise<void> => {
-    // Register every correlation first, then invoke every SDK enqueue without
-    // yielding. Current SDK steer/followUp implementations mutate their queues
-    // synchronously before returning a resolved promise, so clear + complete
-    // replacement occurs in one JavaScript turn and cannot expose a transient
-    // empty/partial queue to the agent loop.
     context.queuedLocalIds = messages.map((message) => message.localId);
+    context.queuedCoordinatorAttributions = messages.map((message) => attributionByLocalId.get(message.localId));
     const enqueues: Promise<void>[] = [];
     for (const message of messages) {
-      const promptText = buildPromptText(message.text, message.inputs);
+      const sender = attributionByLocalId.get(message.localId);
+      const text = sender ? formatSessionControlPrompt(message.text, sender) : message.text;
+      const promptText = buildPromptText(text, message.inputs);
       const images = lowerImageInputs(message.inputs);
       const imagePayload = images.length > 0 ? images : undefined;
       enqueues.push(context.session.steer
@@ -1058,6 +1133,7 @@ async function handleMessageReplaceQueue(
       context.queuedLocalIds = [];
       context.queuedOperationIds = [];
       context.queuedOperationAttempts = [];
+      context.queuedCoordinatorAttributions = [];
       return {
         updated: false,
         queueCleared: true,
@@ -1113,6 +1189,7 @@ async function handleMessageClearQueue(
   context.queuedLocalIds = [];
   context.queuedOperationIds = [];
   context.queuedOperationAttempts = [];
+  context.queuedCoordinatorAttributions = [];
   return { cleared };
 }
 

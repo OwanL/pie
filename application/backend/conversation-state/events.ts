@@ -39,7 +39,13 @@ import type {
   CompactionOutcome,
   CompactionReason,
   SessionCapabilityFacts,
+  ChatPrefs,
+  SessionControlSender,
 } from '../../lib/protocol/index.js';
+import type {
+  SessionControlSettingsAcknowledgement,
+  SessionControlSettingsRequest,
+} from '../../../harness/agent-processes/lib/rpc/session-control-settings.js';
 import type { OperationalIncident } from '../../../harness/agent-processes/lib/rpc/incident-payload.js';
 
 /** Wraps a `Command` so it can flow through the same event channel. */
@@ -242,6 +248,16 @@ export interface SetPrefsResultEvent {
   error?: string;
 }
 
+/** Completion of one host-owned settings bridge operation. `persistedPrefs`
+ * is internal reducer synchronization data and is never sent to the coordinator. */
+export interface SessionControlSettingsResultEvent {
+  kind: 'SessionControlSettingsResult';
+  corrId: string;
+  request: SessionControlSettingsRequest;
+  acknowledgement: SessionControlSettingsAcknowledgement;
+  persistedPrefs?: Pick<ChatPrefs, 'autonomousModeBySession' | 'subagentProviderTogglesBySession'>;
+}
+
 /** Backend answered `mcp.list` / `mcp.setServerEnabled`. On success
  *  (`ok: true`) `servers` replaces the effective list; `pendingApply` is set
  *  only by a toggle that actually wrote an override — a plain list read (or
@@ -384,6 +400,12 @@ export interface SessionTitleResultEvent {
   error?: string;
 }
 
+export interface SessionCloseResponseDeliveredEvent {
+  kind: 'SessionCloseResponseDelivered';
+  sessionPath: string;
+  requestId: string;
+}
+
 export interface CloseSessionResultEvent {
   kind: 'CloseSessionResult';
   corrId: string;
@@ -392,6 +414,8 @@ export interface CloseSessionResultEvent {
   ok: boolean;
   /** The closed session path, if ok. */
   sessionPath?: string;
+  /** Private deletion committed before a later host cleanup step failed. */
+  deletionCommitted?: boolean;
   error?: string;
 }
 
@@ -459,6 +483,7 @@ export type EffectResultEvent =
   | SetModelResultEvent
   | ModelSwitchConfirmResultEvent
   | SetPrefsResultEvent
+  | SessionControlSettingsResultEvent
   | FileDiffResultEvent
   | FileRevertResultEvent
   | LoadOlderTranscriptResultEvent
@@ -1096,6 +1121,7 @@ export interface AgentMessageReceivedEvent {
   text: string;
   status: 'queued' | 'completed';
   timestamp: number;
+  sender?: SessionControlSender;
 }
 
 /** Remove a session_control row rejected before the SDK accepted its prompt. */
@@ -1219,6 +1245,7 @@ export type HostEvent =
   | OpenTabsChangedEvent
   | PreflightFailedEvent
   | PreflightSupersededEvent
-  | SessionsInterruptedEvent;
+  | SessionsInterruptedEvent
+  | SessionCloseResponseDeliveredEvent;
 
 export type Event = CommandEvent | EffectResultEvent | BackendEvent | HostEvent;

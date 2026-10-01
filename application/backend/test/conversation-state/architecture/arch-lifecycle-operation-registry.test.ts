@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { initialArchState, reducer, type ArchState } from '../../../conversation-state/reducer';
+import { observeCloseOperationAcknowledgement } from '../../../conversation-state/reducers/helpers.js';
 import type { Event } from '../../../conversation-state/events';
 import type { SessionOpenedPayload, SessionSummary } from '../../../../lib/protocol/index.js';
 
@@ -281,16 +282,35 @@ const privateCloseOrders: readonly (readonly PrivateCloseAcknowledgement[])[] = 
   ['marker-removal', 'cleanup', 'initial-persist'],
 ];
 
-test('session.close running hide settles from tab persistence only', () => {
+test('session.close running waits for stop, tab persistence, and cleanup acknowledgements', () => {
   const started = reducer(baseState({ running: true }), closeCommand('close-running'));
-  assert.equal(started.state.operations['close-running']?.closeMode, 'running-hide');
-  assert.deepEqual(started.state.operations['close-running']?.acknowledgements, { 'persist-tabs': 'pending' });
-  assert.deepEqual(started.effects.map((effect) => effect.kind), ['PersistTabs', 'NotifySessionViewed']);
+  assert.equal(started.state.operations['close-running']?.closeMode, 'stop-cleanup');
+  assert.deepEqual(started.state.operations['close-running']?.acknowledgements, {
+    'persist-tabs': 'pending', cleanup: 'pending', stop: 'pending',
+  });
+  assert.deepEqual(started.effects.map((effect) => effect.kind), [
+    'PersistTabs', 'InterruptRpc', 'NotifySessionViewed',
+  ]);
 
-  const settledState = reducer(started.state, closeAck('PersistTabsResult', 'close-running')).state;
+  const persisted = reducer(started.state, closeAck('PersistTabsResult', 'close-running')).state;
+  const stopOperationId = persisted.operations['close-running']!.closeStopOperationId!;
+  const stoppedState: ArchState = {
+    ...persisted,
+    operations: {
+      ...persisted.operations,
+      [stopOperationId]: {
+        ...persisted.operations[stopOperationId],
+        terminal: { outcome: 'settled', reason: 'durable-commit-observed', recovery: 'none' },
+      },
+    },
+  };
+  const cleanup = observeCloseOperationAcknowledgement(stoppedState, 'close-running', 7, 'stop', true);
+  assert.equal(cleanup.state.operations['close-running']?.terminal, undefined);
+  assert.ok(cleanup.effects.some((effect) => effect.kind === 'CloseSession'));
+  const settledState = reducer(cleanup.state, closeAck('CloseSessionResult', 'close-running')).state;
   const settled = settledState.operations['close-running'];
   assert.equal(settled?.terminal?.outcome, 'settled');
-  const lateFailure = reducer(settledState, closeAck('PersistTabsResult', 'close-running', false)).state;
+  const lateFailure = reducer(settledState, closeAck('CloseSessionResult', 'close-running', false)).state;
   assert.deepEqual(lateFailure.operations['close-running']?.terminal, settled?.terminal);
 });
 
@@ -352,6 +372,21 @@ test('session.close private cleanup joins initial persistence, cleanup, and fina
       'persist-tabs': 'succeeded', cleanup: 'succeeded', 'privacy-marker-removal': 'succeeded',
     });
   }
+});
+
+test('session.close does not restore a private tab after deletion committed but later cleanup failed', () => {
+  const operationId = 'close-private-committed-failure';
+  let state = reducer(baseState({ private: true }), closeCommand(operationId)).state;
+  state = reducer(state, {
+    kind: 'CloseSessionResult', corrId: `${operationId}:corr`, sessionPath: SESSION,
+    operationId, backendGeneration: 7, ok: false, deletionCommitted: true, error: 'host cleanup failed after deletion',
+  }).state;
+  state = reducer(state, closeAck('PersistTabsResult', operationId)).state;
+  assert.equal(state.operations[operationId]?.terminal?.outcome, 'failed');
+  assert.equal(state.operations[operationId]?.closeDeletionCommitted, true);
+  assert.equal(state.sessions.openTabPaths.includes(SESSION), false);
+  assert.ok(state.sessions.sessions.some((item) => item.path === SESSION));
+  assert.equal(state.sessions.privacyModeBySession[SESSION], true);
 });
 
 test('session.close private final marker-removal failure never follows a prior success terminal', () => {

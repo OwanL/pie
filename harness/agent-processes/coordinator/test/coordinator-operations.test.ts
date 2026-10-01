@@ -66,9 +66,26 @@ test('cold create/duplicate/truncate stay runtime and extension free while hot p
       createAgentSessionServices: async () => { serviceCreations += 1; throw new Error('must not run'); },
       createAgentSessionRuntime: async () => { runtimeCreations += 1; throw new Error('must not run'); },
     };
-    server.readModelSettings = async () => ({ defaultModel: 'cold', defaultThinkingLevel: 'medium' });
+    await fs.writeFile(path.join(root, 'models.json'), JSON.stringify({
+      providers: { mock: { models: [{ id: 'cold', name: 'Cold', input: ['text'] }] } },
+    }), 'utf8');
+    server.readModelSettings = async () => ({
+      defaultModel: 'cold', defaultProvider: 'mock', defaultThinkingLevel: 'medium',
+    });
+    let inventoryDiscoveries = 0;
+    server.initialContextEstimateClient = {
+      discover: async () => { inventoryDiscoveries += 1; return null; },
+    };
     server.emit = () => undefined;
     server.emitSessionListChanged = async () => undefined;
+    await server.handleRequest({
+      v: 1,
+      id: 'startup-membership',
+      method: 'session.liveMembership',
+      params: { revision: 1, timestamp: Date.now(), sessions: [], closing: [] },
+    });
+    await server.titleNamespaceHydration;
+    assert.equal(server.liveSessionTitles.ready, true, 'the host startup snapshot establishes the live-title namespace');
 
     assert.equal((await server.handleRequest({ v: 1, id: 'ping', method: 'app.ping' })).sdkVersion, 'test');
     const created = await server.handleRequest({
@@ -83,8 +100,20 @@ test('cold create/duplicate/truncate stay runtime and extension free while hot p
       v: 1, id: 'truncate', method: 'session.truncateAfter',
       params: { sessionPath: duplicated.sessionPath, entryId: 'missing-entry' },
     });
-    const opened = await server.buildSessionOpenedPayload(created.sessionPath, 'open-token');
-    assert.equal(opened.runtimeReady, false);
+    const discoveriesBeforeOpen = inventoryDiscoveries;
+    await server.handleRequest({
+      v: 1, id: 'open', method: 'session.open', params: { sessionPath: created.sessionPath },
+    });
+    assert.equal(inventoryDiscoveries, discoveriesBeforeOpen + 1, 'public cold opens retain fresh inventory');
+
+    const discoveriesBeforeSettings = inventoryDiscoveries;
+    await assert.rejects(server.handleRequest({
+      v: 1,
+      id: 'cold-settings',
+      method: 'settings.set',
+      params: { sessionPath: created.sessionPath, defaultModel: 'missing', defaultProvider: 'mock' },
+    }), /Model not available/);
+    assert.equal(inventoryDiscoveries, discoveriesBeforeSettings, 'cold settings metadata reads do not launch discovery');
 
     for (const method of ['message.send', 'message.compact']) {
       await assert.rejects(

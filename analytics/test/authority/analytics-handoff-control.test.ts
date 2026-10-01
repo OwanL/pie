@@ -12,6 +12,7 @@ import {
   verifyAnalyticsHandoffResponse,
 } from '../../contracts/host-status-messages.js';
 import { AnalyticsHandoffControl } from '../../authority/analytics-handoff-control.js';
+import { recoverStaleAnalyticsHosts } from '../../authority/analytics-host-recovery.js';
 import { createSessionLifecycleWriterAdmission } from '../../authority/session-lifecycle-writer-store.js';
 import { SessionLifecycleStore } from '../../../harness/session-storage/lifecycle/session-lifecycle-store.js';
 
@@ -273,7 +274,8 @@ test('transient writer census rotation conflict leaves a fresh host registered, 
   }
 });
 
-test('stale stopping host recovery admits canonical recorder startup on the next boot', async () => {
+for (const staleState of ['stopping', 'stopped'] as const) {
+test(`stale ${staleState} host recovery clears its orphan lease, reconciles, and admits recorder startup`, async () => {
   const temporary = temporaryStore();
   const workspaceId = 'workspace-unit-stale-recovery';
   const predecessor = {
@@ -309,7 +311,10 @@ test('stale stopping host recovery admits canonical recorder startup on the next
     workspaceId, operationId: fence.operationId, purpose: 'analytics-activation',
     admittedHosts: [stale], nowMs: 8,
   });
-  temporary.store.markAnalyticsHostState(stale.hostInstanceId, stale.processId, stale.generationId, 'stopping', 9);
+  const staleAdmission = createSessionLifecycleWriterAdmission(temporary.store, stale, () => 9);
+  assert.equal(typeof staleAdmission.acquire(), 'function'); // abandoned with the dead recorder process
+  temporary.store.markAnalyticsHostState(stale.hostInstanceId, stale.processId, stale.generationId, staleState, 9);
+  assert.equal(temporary.store.listAnalyticsWriterLeases(workspaceId).length, 1);
 
   const identity = {
     hostInstanceId: 'host-unit-recovered', workspaceId,
@@ -325,11 +330,28 @@ test('stale stopping host recovery admits canonical recorder startup on the next
     now: () => 100,
     writerFence: { freeze: async () => { throw new Error('not used'); } },
     recoverStaleHosts: async () => {
-      temporary.store.recoverAnalyticsHostAfterProcessExit(stale, 99);
+      await recoverStaleAnalyticsHosts({
+        registry: temporary.store,
+        workspaceId,
+        readProcessCensus: async () => ({ processes: [], backendOwners: [], complete: true, reasons: [] }),
+        now: () => 99,
+      });
     },
   });
   try {
     await control.start();
+    assert.equal(temporary.store.getAnalyticsHost(stale.hostInstanceId)?.state, 'stopped');
+    assert.deepEqual(temporary.store.listAnalyticsWriterLeases(workspaceId), []);
+    const reconciled = temporary.store.getAnalyticsWriterFence(workspaceId);
+    assert.equal(reconciled?.fenceEpoch, 3);
+    assert.deepEqual(reconciled?.expectedHosts, [{
+      hostInstanceId: identity.hostInstanceId,
+      workspaceId: identity.workspaceId,
+      generationId: identity.generationId,
+      buildId: identity.buildId,
+      processId: identity.processId,
+    }]);
+
     const admission = createSessionLifecycleWriterAdmission(temporary.store, identity, () => 101);
     const release = admission.acquireStartup?.();
     assert.equal(typeof release, 'function');
@@ -342,6 +364,8 @@ test('stale stopping host recovery admits canonical recorder startup on the next
     rmSync(temporary.root, { recursive: true, force: true });
   }
 });
+
+}
 
 test('per-boot handoff keys are fresh, bounded capabilities', () => {
   const first = createPerBootAnalyticsHandoffKey();

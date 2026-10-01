@@ -300,18 +300,18 @@ export class SessionTabActions {
     causalParentOperationId?: string,
   ): Promise<void> {
     // Thin host-side cleanup — the reducer already did the tab-close +
-    // per-session map clearing + select-next-tab (via the CloseSession Command
-    // handler, which computed nextPath and passed it through the Effect). This
-    // method does ONLY the host-side work the reducer can't:
+    // select-next-tab (via the CloseSession Command handler, which computed
+    // nextPath and passed it through the Effect). Session maps remain until
+    // this cleanup is acknowledged so failure recovery can restore the tab.
+    // This method does ONLY the host-side work the reducer can't:
     //   - clearSelectionRequestsForPath (host-local selection timer cleanup)
     //   - onSessionClosed (disk-persisting analytics: finalize run as
     //     'closed' + dispatch ActiveRunSummaryChanged(null) —
-    //     redundant since the reducer already cleared the run summary, but
-    //     idempotent)
+    //     idempotent with the reducer's delayed cleanup acknowledgement)
     //   - clearSessionScope (host-local runtime state: busySeqMap,
     //     sessionOperationQueues, dataEpochs, etc. + dispatches
-    //     SessionScopeCleared{removeSessionSummary:false} — redundant since
-    //     the reducer already cleared the maps, but idempotent)
+    //     SessionScopeCleared{removeSessionSummary:false} — clears retained
+    //     reducer session maps as host cleanup begins)
     //   - evictInactiveTranscriptWindows (host-local LRU)
     //   - assertSelectionInvariant (debug assertion)
     //   - the recursive openSession(nextPath) when nextPath is not yet
@@ -343,7 +343,6 @@ export class SessionTabActions {
 
     this.state.clearSelectionRequestsForPath(sessionPath);
     this.runObserver.onSessionClosed(sessionPath);
-    this.state.clearSessionScope(sessionPath);
 
     // Recursive open: only when nextPath exists and is NOT already summarized
     // or pending (the edge case). The reducer already set activeSessionPath =
@@ -360,6 +359,7 @@ export class SessionTabActions {
 
     this.state.evictInactiveTranscriptWindows();
     this.state.assertSelectionInvariant('closeSession');
+    this.state.clearSessionScope(sessionPath);
     this.scheduleRender();
   }
 

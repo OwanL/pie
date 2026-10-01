@@ -2,10 +2,15 @@ import type { ArchState } from '../arch-state.js';
 import type { Command } from '../commands.js';
 import type { ModelInfo, SessionSummary } from '../../../lib/protocol/index.js';
 import type { ReducerResult } from './helpers.js';
-import { evictSession, removeFromArray, addToArray } from './helpers.js';
+import { evictSession, removeFromArray } from './helpers.js';
 import { getNextVisibleTabPathOnClose, moveOpenTabPath, insertTabRespectingPinnedPrefix, cleanPinnedTabGroups } from '../../../frontend/session-tabs/tab-behavior.js';
 import { isPendingTabPath } from '../../../../lib/session-path.js';
-import { retrySessionOperation, startSessionOperation } from '../operation-registry.js';
+import {
+  activeInterruptOperation,
+  retrySessionOperation,
+  settleSessionOperationCancelled,
+  startSessionOperation,
+} from '../operation-registry.js';
 import type { SessionOperation } from '../operation-types.js';
 
 /** Seed a pending picker from the last catalog known to the host. A duplicate
@@ -91,6 +96,8 @@ function startCloseOperation(
   cmd: Extract<Command, { kind: 'CloseSession' }>,
   mode: NonNullable<SessionOperation['closeMode']>,
   causalParentOperationId?: string,
+  privacyMode = mode === 'private-cleanup',
+  waitForCreate = false,
 ): SessionOperation | undefined {
   if (!cmd.operationId) return undefined;
   const backendGeneration = cmd.backendGeneration ?? 0;
@@ -110,11 +117,19 @@ function startCloseOperation(
     phase: 'awaiting-commit',
     acceptance: 'accepted',
     closeMode: mode,
-    acknowledgements: mode === 'running-hide'
-      ? { 'persist-tabs': 'pending' }
-      : mode === 'private-cleanup'
-        ? { 'persist-tabs': 'pending', cleanup: 'pending', 'privacy-marker-removal': 'pending' }
-        : { 'persist-tabs': 'pending', cleanup: 'pending' },
+    ...(cmd.closeRequestKey ? { closeRequestKey: cmd.closeRequestKey } : {}),
+    ...(cmd.closeRequestKey && cmd.selfHandoffRequired === true
+      ? { closeSelfHandoffRequired: true } : {}),
+    ...(privacyMode ? { closePrivacyMode: true } : {}),
+    ...(waitForCreate ? { closeWaitForCreate: true } : {}),
+    acknowledgements: {
+      ...(mode === 'stop-cleanup'
+        ? { 'persist-tabs': 'pending' as const, cleanup: 'pending' as const, stop: 'pending' as const }
+        : { 'persist-tabs': 'pending' as const, cleanup: 'pending' as const }),
+      ...(privacyMode ? { 'privacy-marker-removal': 'pending' as const } : {}),
+      ...(cmd.closeRequestKey && cmd.selfHandoffRequired === true
+        ? { 'caller-response': 'pending' as const } : {}),
+    },
   };
 }
 
@@ -352,15 +367,25 @@ export function handleSelectSession(state: ArchState, cmd: Extract<Command, { ki
 }
 
 export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kind: 'CloseSession' }>): ReducerResult {
-  const { sessionPath } = cmd;
-  if (cmd.operationId && state.operations[cmd.operationId]) return { state, effects: [] };
+  // Production callers already supply operation identity. The deterministic
+  // fallback keeps older host command producers on the same safe close path.
+  const closeCommand = cmd.operationId
+    ? cmd
+    : { ...cmd, operationId: `session.close:${cmd.corrId}`, operationAttempt: cmd.operationAttempt ?? 1 };
+  const { sessionPath } = closeCommand;
+  const closeOperationId = closeCommand.operationId!;
+  const privacyMode = closeCommand.privacyMode === true
+    || state.sessions.privacyModeBySession[sessionPath] === true;
+  const selfHandoffRequired = closeCommand.closeRequestKey !== undefined
+    && closeCommand.selfHandoffRequired === true;
+  if (state.operations[closeOperationId]) return { state, effects: [] };
   const pendingCreate = Object.values(state.operations)
     .find((operation) => (operation.kind === 'session.create' || operation.kind === 'session.duplicate')
       && operation.session.pendingPath === sessionPath && !operation.terminal);
   if (pendingCreate) {
-    // Hiding a delayed create is not definitive cancellation. Keep the ledger,
-    // queued sends, and selection request alive so a late matching opened event
-    // can resolve the hidden operation without reopening or focusing it.
+    // A pending create has no durable runtime to stop yet. Cancel queued work
+    // and remove its UI state now, retain the create tombstone, then clean up a
+    // late durable creation before the close operation can settle.
     const nextOpenTabPaths = state.sessions.openTabPaths.filter((path) => path !== sessionPath);
     const nextPinnedTabPaths = state.sessions.pinnedTabPaths.filter((path) => path !== sessionPath);
     const nextPinnedTabGroups = cleanPinnedTabGroups(state.sessions.pinnedTabGroups, nextPinnedTabPaths);
@@ -376,70 +401,138 @@ export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kin
       : state.sessions.activeSessionPath;
     const closeOperation = startCloseOperation(
       state,
-      cmd,
-      'running-hide',
+      closeCommand,
+      privacyMode ? 'private-cleanup' : 'idle-cleanup',
       pendingCreate.operationId,
+      privacyMode,
+      true,
     );
+    const pendingCloseOperation = closeOperation ? {
+      ...closeOperation,
+      closeNextPath: nextPath,
+      closeSelectionChanged: wasActive,
+    } : undefined;
+    // Ingress-fixed bridge acceptance precedes the deferred lifecycle. Only a
+    // self-close adds the response-delivery barrier; a foreign close continues
+    // as soon as this pending create resolves.
+    const acceptedAckEffect = closeCommand.closeRequestKey ? [{
+      kind: 'SessionCloseBridgeAck' as const,
+      corrId: closeCommand.corrId,
+      sessionPath,
+      requestKey: closeCommand.closeRequestKey,
+      phase: 'accepted' as const,
+    }] : [];
+    const evicted = evictSession(state, sessionPath, { removeSummary: false, removeTabs: true });
+    const operations = { ...evicted.state.operations };
+    for (const operation of Object.values(state.operations)) {
+      if (operation.kind !== 'message.send' || operation.terminal
+        || (operation.session.resolvedPath ?? operation.session.pendingPath) !== sessionPath) continue;
+      const cancelled = settleSessionOperationCancelled(operation, {
+        pendingPath: operation.session.pendingPath,
+        backendGeneration: operation.backendGeneration,
+        outcome: 'cancelled',
+        reason: 'queue-cleared',
+      });
+      if (cancelled) operations[operation.operationId] = cancelled;
+    }
+    operations[pendingCreate.operationId] = {
+      ...pendingCreate,
+      hidden: true,
+      ...(pendingCloseOperation ? { closeOperationId: pendingCloseOperation.operationId } : {}),
+    };
+    if (pendingCloseOperation) operations[pendingCloseOperation.operationId] = pendingCloseOperation;
     const nextState = {
-      ...state,
+      ...evicted.state,
       sessions: {
-        ...state.sessions,
-        openTabPaths: nextOpenTabPaths,
-        pinnedTabPaths: nextPinnedTabPaths,
-        pinnedTabGroups: nextPinnedTabGroups,
+        ...evicted.state.sessions,
+        ...(privacyMode ? {
+          privacyModeBySession: { ...evicted.state.sessions.privacyModeBySession, [sessionPath]: true },
+        } : {}),
         activeSessionPath: wasActive ? (nextPath ?? null) : state.sessions.activeSessionPath,
       },
-      operations: {
-        ...state.operations,
-        [pendingCreate.operationId]: { ...pendingCreate, hidden: true },
-        ...(closeOperation ? { [closeOperation.operationId]: closeOperation } : {}),
-      },
+      operations,
     };
     return {
       state: nextState,
-      effects: [{
-        kind: 'PersistTabs',
-        corrId: cmd.corrId,
-        ...(closeOperation ? {
-          operationId: closeOperation.operationId,
-          backendGeneration: closeOperation.backendGeneration,
-        } : {}),
-        openTabPaths: nextOpenTabPaths,
-        activeSessionPath: nextState.sessions.activeSessionPath,
-        pinnedTabPaths: nextPinnedTabPaths,
-        pinnedTabGroups: nextPinnedTabGroups,
-      }],
+      effects: [
+        ...acceptedAckEffect,
+        ...evicted.effects,
+        {
+          kind: 'PersistTabs',
+          corrId: closeCommand.corrId,
+          operationId: pendingCloseOperation?.operationId,
+          backendGeneration: pendingCloseOperation?.backendGeneration,
+          openTabPaths: nextOpenTabPaths,
+          activeSessionPath: nextState.sessions.activeSessionPath,
+          pinnedTabPaths: nextPinnedTabPaths,
+          pinnedTabGroups: nextPinnedTabGroups,
+          ...(privacyMode ? {
+            privateSessionPaths: [...new Set([
+              sessionPath,
+              ...Object.entries(nextState.sessions.privacyModeBySession)
+                .filter(([, enabled]) => enabled)
+                .map(([privatePath]) => privatePath),
+            ])],
+          } : {}),
+        },
+      ],
     };
   }
-  if (!state.sessions.openTabPaths.includes(sessionPath)) {
+  const hiddenLiveTarget = state.sessions.intentionallyHiddenRunningPaths.includes(sessionPath)
+    && state.sessions.runningSessionPaths.includes(sessionPath)
+    && !Object.values(state.operations).some((operation) =>
+      operation.kind === 'session.close' && !operation.terminal
+      && (operation.session.resolvedPath ?? operation.session.pendingPath) === sessionPath);
+  if (!state.sessions.openTabPaths.includes(sessionPath) && !hiddenLiveTarget) {
+    if (cmd.closeRequestKey) {
+      // A retained summary is only historical membership, not cleanup evidence.
+      // A no-tab close is complete only when the reducer retained a fully
+      // successful prior close barrier for this exact target, and the target
+      // has not acquired newer live/pending state since then.
+      const targetHasLiveState = state.sessions.runningSessionPaths.includes(sessionPath)
+        || state.sessions.intentionallyHiddenRunningPaths.includes(sessionPath)
+        || Object.values(state.operations).some((operation) =>
+          !operation.terminal
+          && (operation.session.resolvedPath ?? operation.session.pendingPath) === sessionPath,
+        );
+      const confirmedPriorClose = Object.values(state.operations).some((operation) =>
+        operation.kind === 'session.close'
+        && (operation.session.resolvedPath ?? operation.session.pendingPath) === sessionPath
+        && operation.phase === 'settled'
+        && operation.commit === 'committed'
+        && operation.terminal?.outcome === 'settled'
+        && operation.terminal.reason === 'durable-commit-observed'
+        && operation.acknowledgements !== undefined
+        && operation.acknowledgements.cleanup === 'succeeded'
+        && Object.values(operation.acknowledgements).every((acknowledgement) => acknowledgement === 'succeeded'),
+      );
+      // The accepted acknowledgement still precedes the terminal report so a
+      // self-close observes `close requested`, never `already closed`.
+      return {
+        state,
+        effects: [
+          {
+            kind: 'SessionCloseBridgeAck',
+            corrId: cmd.corrId,
+            sessionPath,
+            requestKey: cmd.closeRequestKey,
+            phase: 'accepted',
+          },
+          {
+            kind: 'SessionCloseBridgeAck',
+            corrId: cmd.corrId,
+            sessionPath,
+            requestKey: cmd.closeRequestKey,
+            phase: confirmedPriorClose && !targetHasLiveState ? 'completed' : 'unknown',
+          },
+        ],
+      };
+    }
     return { state, effects: [] };
   }
-  // The reducer owns the tab-close + per-session map clearing +
-  // select-next-tab; the runner owns the host-side cleanup
-  // (clearSelectionRequestsForPath, onSessionClosed, clearSessionScope,
-  // evict) + the recursive openSession(nextPath) when nextPath is not yet
-  // summarized. Mirrors the create/open/duplicate pattern but with a key
-  // difference: there is NO backend RPC for close — the Effect is a
-  // host-side cleanup descriptor, not a backend-RPC descriptor.
-  //
-  // DIFFERENCE from the pre-migration code: the old CloseSession handler
-  // called `removeSessionFromState` (full eviction: removed the summary,
-  // runningPaths, nulled activeSessionPath) BEFORE the runner's fat
-  // `service.closeSession()` could read the original activeSessionPath,
-  // so the next-tab selection was silently skipped (latent double-
-  // execution bug). The new handler computes nextPath FIRST (from the
-  // pre-close state), does the close + select-next, and passes nextPath
-  // to the runner via the Effect.
-  //
-  // Unlike create/duplicate (which target a NEW pending path → clear
-  // runningSessionPaths + activeRunSummaryBySession for the pending path),
-  // closeSession REMOVES a tab → mirror SessionScopeCleared{removeSession-
-  // Summary:false} (clear per-session maps but keep the summary for
-  // reopening, do NOT touch runningSessionPaths — the session may still be
-  // running in the backend even if its tab is closed). `evictSession` with
-  // `removeSummary:false` preserves both the summary and the running marker;
-  // `removeTabs:true` strips the tab arrays + nulls activeSessionPath (which
-  // the post-eviction override below re-points at the next tab).
+  // Compute the successor before the tab disappears, but keep all session data
+  // intact until host cleanup succeeds. A failed close can then restore the tab
+  // without refocusing it or requiring a lossy rehydration.
   const nextPath = getNextVisibleTabPathOnClose({
     closingPath: sessionPath,
     openTabPaths: state.sessions.openTabPaths,
@@ -449,34 +542,68 @@ export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kin
   });
   const wasActive = state.sessions.activeSessionPath === sessionPath;
   const nextActivePath = wasActive ? (nextPath ?? null) : state.sessions.activeSessionPath;
-  const privacyMode = state.sessions.privacyModeBySession[sessionPath] === true;
+  const nextOpenTabPaths = state.sessions.openTabPaths.filter((path) => path !== sessionPath);
+  const nextPinnedTabPaths = state.sessions.pinnedTabPaths.filter((path) => path !== sessionPath);
+  const nextPinnedTabGroups = cleanPinnedTabGroups(state.sessions.pinnedTabGroups, nextPinnedTabPaths);
 
-  if (state.sessions.runningSessionPaths.includes(sessionPath) && !privacyMode) {
-    const closeOperation = startCloseOperation(state, cmd, 'running-hide');
-    // Closing a running tab means hide, not teardown. Preserve transcript,
-    // live-pipeline, pending ownership, composer inputs, file changes, and run
-    // analytics while the backend continues. A later webview ready handshake
-    // restores only running tabs whose absence was accidental; an authoritative
-    // openSession request reopens an intentionally hidden session.
-    const nextOpenTabPaths = state.sessions.openTabPaths.filter((path) => path !== sessionPath);
-    const nextPinnedTabPaths = state.sessions.pinnedTabPaths.filter((path) => path !== sessionPath);
-    const nextPinnedTabGroups = cleanPinnedTabGroups(state.sessions.pinnedTabGroups, nextPinnedTabPaths);
-    const nextIntentionallyHiddenRunningPaths = addToArray(
-      state.sessions.intentionallyHiddenRunningPaths,
-      sessionPath,
+  if (state.sessions.runningSessionPaths.includes(sessionPath)) {
+    // UI, tool, and private closes share one stop/cleanup barrier. The only
+    // difference for private targets is that successful cleanup forgets the
+    // durable session instead of retaining it for reopening.
+    const closeOperation = startCloseOperation(state, closeCommand, 'stop-cleanup', undefined, privacyMode);
+    const competingStop = activeInterruptOperation(state.operations, sessionPath);
+    const abortSendCorrIds = Object.entries(state.pending.ops)
+      .filter(([, pending]) => pending.kind === 'send' && pending.sessionPath === sessionPath)
+      .map(([corrId]) => corrId);
+    const cancelQueuedOperationIds = Object.values(state.operations)
+      .filter((candidate) => candidate.kind === 'message.edit' && !candidate.terminal
+        && (candidate.session.resolvedPath ?? candidate.session.pendingPath) === sessionPath)
+      .map((candidate) => candidate.operationId);
+    const usePriorityLane = Object.values(state.operations).some((candidate) =>
+      !candidate.terminal
+      && candidate.kind !== 'message.send'
+      && candidate.kind !== 'message.interrupt'
+      && (candidate.session.resolvedPath ?? candidate.session.pendingPath) === sessionPath,
     );
+    const stopOperation = competingStop ?? (closeOperation
+      ? startSessionOperation({
+          operationId: `${closeOperation.operationId}:stop`,
+          kind: 'message.interrupt',
+          source: closeCommand.operationSource ?? { kind: 'host' },
+          pendingPath: sessionPath,
+          selectionToken: closeCommand.corrId,
+          backendGeneration: closeOperation.backendGeneration,
+          attempt: 1,
+          intentFingerprint: JSON.stringify({ kind: 'message.interrupt', sessionPath }),
+        })
+      : undefined);
+    const operations = {
+      ...state.operations,
+      ...(closeOperation ? {
+        [closeOperation.operationId]: {
+          ...closeOperation,
+          closeStopOperationId: stopOperation?.operationId,
+          closeStopDispatched: !selfHandoffRequired || !!competingStop,
+          ...(abortSendCorrIds.length > 0 ? { closeStopAbortSendCorrIds: abortSendCorrIds } : {}),
+          ...(cancelQueuedOperationIds.length > 0 ? { closeStopCancelQueuedOperationIds: cancelQueuedOperationIds } : {}),
+          ...(usePriorityLane ? { closeStopUsePriorityLane: true } : {}),
+          closeNextPath: nextPath,
+          closeSelectionChanged: wasActive,
+        },
+      } : {}),
+      ...(stopOperation ? { [stopOperation.operationId]: stopOperation } : {}),
+    };
     const nextState = {
       ...state,
-      operations: closeOperation
-        ? { ...state.operations, [closeOperation.operationId]: closeOperation }
-        : state.operations,
+      operations,
       sessions: {
         ...state.sessions,
         openTabPaths: nextOpenTabPaths,
         pinnedTabPaths: nextPinnedTabPaths,
         pinnedTabGroups: nextPinnedTabGroups,
+        unreadFinishedSessionPaths: removeFromArray(state.sessions.unreadFinishedSessionPaths, sessionPath),
+        intentionallyHiddenRunningPaths: removeFromArray(state.sessions.intentionallyHiddenRunningPaths, sessionPath),
         activeSessionPath: nextActivePath,
-        intentionallyHiddenRunningPaths: nextIntentionallyHiddenRunningPaths,
       },
     };
     return {
@@ -484,17 +611,45 @@ export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kin
       effects: [
         {
           kind: 'PersistTabs',
-          corrId: cmd.corrId,
+          corrId: closeCommand.corrId,
           ...(closeOperation ? { operationId: closeOperation.operationId, backendGeneration: closeOperation.backendGeneration } : {}),
           openTabPaths: nextOpenTabPaths,
           activeSessionPath: nextActivePath,
           pinnedTabPaths: nextPinnedTabPaths,
           pinnedTabGroups: nextPinnedTabGroups,
+          ...(privacyMode ? {
+            privateSessionPaths: [...new Set([
+              sessionPath,
+              ...Object.entries(nextState.sessions.privacyModeBySession)
+                .filter(([, enabled]) => enabled)
+                .map(([privatePath]) => privatePath),
+            ])],
+          } : {}),
         },
+        ...(closeCommand.closeRequestKey ? [{
+          kind: 'SessionCloseBridgeAck' as const,
+          corrId: closeCommand.corrId,
+          sessionPath,
+          requestKey: closeCommand.closeRequestKey,
+          phase: 'accepted' as const,
+        }] : []),
+        ...(stopOperation && !competingStop && !selfHandoffRequired
+          ? [{
+              kind: 'InterruptRpc' as const,
+              corrId: closeCommand.corrId,
+              operationId: stopOperation.operationId,
+              operationAttempt: 1,
+              backendGeneration: stopOperation.backendGeneration,
+              sessionPath,
+              ...(abortSendCorrIds.length > 0 ? { abortSendCorrIds } : {}),
+              ...(cancelQueuedOperationIds.length > 0 ? { cancelQueuedOperationIds } : {}),
+              ...(usePriorityLane ? { usePriorityLane: true } : {}),
+            }]
+          : []),
         ...(wasActive && nextActivePath && !isPendingTabPath(nextActivePath)
           ? [{
               kind: 'NotifySessionViewed' as const,
-              corrId: cmd.corrId,
+              corrId: closeCommand.corrId,
               sessionPath: nextActivePath,
               previousSessionPath: sessionPath,
             }]
@@ -503,36 +658,56 @@ export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kin
     };
   }
 
-  // Private sessions are forgotten even when their turn is still running. The
-  // backend forget operation retires/aborts that runtime before deleting its
-  // transcript, so closing the tab cannot leave a private session recoverable.
-  // Idle close performs the existing teardown. Clear per-session keyed maps +
-  // drop the tab arrays while retaining the durable session summary.
-  const closeOperation = startCloseOperation(state, cmd, privacyMode ? 'private-cleanup' : 'idle-cleanup');
-  const evicted = evictSession(state, sessionPath, { removeSummary: privacyMode, removeTabs: true });
+  const closeOperation = startCloseOperation(
+    state,
+    closeCommand,
+    privacyMode ? 'private-cleanup' : 'idle-cleanup',
+    undefined,
+    privacyMode,
+  );
+  const nextCloseOperation = closeOperation ? {
+    ...closeOperation,
+    closeNextPath: nextPath,
+    closeSelectionChanged: wasActive,
+    closeCleanupDispatched: !selfHandoffRequired,
+  } : undefined;
   const nextState = {
-    ...evicted.state,
-    operations: closeOperation
-      ? { ...evicted.state.operations, [closeOperation.operationId]: closeOperation }
-      : evicted.state.operations,
+    ...state,
+    operations: nextCloseOperation
+      ? { ...state.operations, [nextCloseOperation.operationId]: nextCloseOperation }
+      : state.operations,
     sessions: {
-      ...evicted.state.sessions,
+      ...state.sessions,
+      openTabPaths: nextOpenTabPaths,
+      pinnedTabPaths: nextPinnedTabPaths,
+      pinnedTabGroups: nextPinnedTabGroups,
+      unreadFinishedSessionPaths: removeFromArray(state.sessions.unreadFinishedSessionPaths, sessionPath),
+      intentionallyHiddenRunningPaths: removeFromArray(state.sessions.intentionallyHiddenRunningPaths, sessionPath),
       activeSessionPath: nextActivePath,
     },
   };
+  // Self-close cleanup stays deferred until coordinator response delivery;
+  // foreign agent closes and ordinary UI closes proceed without that handoff.
+  const agentCloseAcceptedEffects = closeCommand.closeRequestKey ? [{
+    kind: 'SessionCloseBridgeAck' as const,
+    corrId: closeCommand.corrId,
+    sessionPath,
+    requestKey: closeCommand.closeRequestKey,
+    phase: 'accepted' as const,
+  }] : [];
   return {
     state: nextState,
     effects: [
+      ...agentCloseAcceptedEffects,
       {
         kind: 'PersistTabs',
-        corrId: cmd.corrId,
-        ...(closeOperation ? { operationId: closeOperation.operationId, backendGeneration: closeOperation.backendGeneration } : {}),
+        corrId: closeCommand.corrId,
+        ...(nextCloseOperation ? { operationId: nextCloseOperation.operationId, backendGeneration: nextCloseOperation.backendGeneration } : {}),
         openTabPaths: nextState.sessions.openTabPaths,
         activeSessionPath: nextActivePath,
         pinnedTabPaths: nextState.sessions.pinnedTabPaths,
         pinnedTabGroups: nextState.sessions.pinnedTabGroups,
-        // Keep the marker durable until the backend forget succeeds. The
-        // service reopens the tab on failure so the user can retry deletion.
+        // Keep the marker durable until the backend forget succeeds.
         privateSessionPaths: privacyMode
           ? [...new Set([
               sessionPath,
@@ -542,14 +717,14 @@ export function handleCloseSession(state: ArchState, cmd: Extract<Command, { kin
             ])]
           : undefined,
       },
-      {
-        kind: 'CloseSession', corrId: cmd.corrId, sessionPath, nextPath, privacyMode, selectionChanged: wasActive,
-        ...(closeOperation ? { operationId: closeOperation.operationId, backendGeneration: closeOperation.backendGeneration } : {}),
-      },
+      ...(!selfHandoffRequired ? [{
+        kind: 'CloseSession' as const, corrId: closeCommand.corrId, sessionPath, nextPath, privacyMode, selectionChanged: wasActive,
+        ...(nextCloseOperation ? { operationId: nextCloseOperation.operationId, backendGeneration: nextCloseOperation.backendGeneration } : {}),
+      }] : []),
       ...(wasActive && nextActivePath && !isPendingTabPath(nextActivePath)
         ? [{
             kind: 'NotifySessionViewed' as const,
-            corrId: cmd.corrId,
+            corrId: closeCommand.corrId,
             sessionPath: nextActivePath,
             previousSessionPath: sessionPath,
           }]

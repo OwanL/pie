@@ -237,8 +237,10 @@ test('subagent model tooltip shows the exact inherited context packet', async ()
   assert.ok(tooltip, 'context tooltip should render the exact inherited packet');
   assert.match(tooltip.textContent ?? '', /Delegated taskdo the thing/);
   assert.match(tooltip.textContent ?? '', /Recorded clarification.*Add tests\?.*Yes/s);
-  assert.match(tooltip.textContent ?? '', /Requested model: provider\/requested-model/);
-  assert.match(tooltip.textContent ?? '', /Actual runtime model: provider\/runtime-model/);
+  assert.match(tooltip.textContent ?? '', /runtime-model/);
+  assert.match(tooltip.textContent ?? '', /Requested: requested-model/);
+  assert.doesNotMatch(tooltip.textContent ?? '', /provider\/requested-model|provider\/runtime-model/);
+  assert.equal(container.querySelector('.subagent-model-label')?.getAttribute('title'), null, 'model label must not duplicate the tooltip natively');
 });
 
 test('completed legacy subagent keeps model, reasoning, elapsed, cost, and recovery inline while detailed metrics move to the model tooltip', async () => {
@@ -274,14 +276,20 @@ test('completed legacy subagent keeps model, reasoning, elapsed, cost, and recov
     .at(-1);
   assert.ok(host, 'model hover should open the rich runtime tooltip');
   assert.equal(host?.getAttribute('role'), 'tooltip');
-  assert.match(host?.textContent ?? '', /Context1,500 \/ 200,000 tokens/);
-  assert.match(host?.textContent ?? '', /Input1,200 tokens/);
-  assert.match(host?.textContent ?? '', /Output300 tokens/);
-  assert.match(host?.textContent ?? '', /Cache read— tokens/);
-  assert.match(host?.textContent ?? '', /Latest generation.*300 output tokens.*1\.5s.*200\.0 tokens\/s/s);
-  assert.match(host?.textContent ?? '', /failed provider\/old-model/);
+  assert.match(host?.textContent ?? '', /Context1\.5k \/ 200k tok \(0\.8%\)/);
+  assert.match(host?.textContent ?? '', /Input1\.2k tok/);
+  assert.match(host?.textContent ?? '', /Output300 tok/);
+  assert.match(host?.textContent ?? '', /Latest generation.*1\.5s.*200\.0 tok\/s/s);
+  assert.match(host?.textContent ?? '', /failed old-model/);
   assert.match(host?.textContent ?? '', /Exact inherited parent context/);
-  assert.doesNotMatch(host?.textContent ?? '', /Cache read0 tokens/);
+  assert.doesNotMatch(host?.textContent ?? '', /Cache read|Cache write|Provider turns|Total tokens/);
+  const rowLabels = Array.from(host?.querySelectorAll<HTMLElement>('.subagent-detail-row') ?? [], (row) => row.firstElementChild?.textContent);
+  assert.ok(rowLabels.indexOf('Recovery') < rowLabels.indexOf('Context'), 'recovery remains high priority');
+  assert.ok(rowLabels.indexOf('Context') < rowLabels.indexOf('Cost'));
+  assert.ok(rowLabels.indexOf('Cost') < rowLabels.indexOf('Output'));
+  assert.ok(rowLabels.indexOf('Output') < rowLabels.indexOf('Latest generation'));
+  assert.ok(rowLabels.indexOf('Input') > rowLabels.indexOf('Latest generation'), 'input follows high-priority generation metrics');
+  assert.ok((host?.textContent ?? '').indexOf('Latest generation') < (host?.textContent ?? '').indexOf('Delegated task'), 'task and inherited packet follow runtime metrics');
 });
 
 test('live typed subagent preview retains model, reasoning, partial usage, and throughput in the model tooltip', async () => {
@@ -312,10 +320,9 @@ test('live typed subagent preview retains model, reasoning, partial usage, and t
     .filter((candidate) => candidate.style.display === 'block')
     .at(-1);
   assert.ok(host);
-  assert.match(host?.textContent ?? '', /Input— tokens/);
-  assert.match(host?.textContent ?? '', /Output42 tokens/);
-  assert.match(host?.textContent ?? '', /Latest generation.*42 output tokens.*1\.5s.*28\.0 tokens\/s/s);
-  assert.doesNotMatch(host?.textContent ?? '', /Cache read0 tokens/);
+  assert.match(host?.textContent ?? '', /Output42 tok/);
+  assert.match(host?.textContent ?? '', /Latest generation.*42 tok.*1\.5s.*28\.0 tok\/s/s);
+  assert.doesNotMatch(host?.textContent ?? '', /Input|Cache read|Cache write/);
 });
 
 /** Open the model-details tooltip and return the visible host element. */
@@ -367,6 +374,87 @@ function costEvidenceToolCall(usage: Record<string, number> | undefined): ToolCa
   } as unknown as ToolCall;
 }
 
+test('subagent tooltip omits unknown metrics but preserves known zero values', async () => {
+  const toolCall = costEvidenceToolCall({ output: 0, cacheRead: 0 });
+  mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }));
+  const host = await openModelTooltip();
+  assert.match(host.textContent ?? '', /Output0 tok/);
+  assert.match(host.textContent ?? '', /Cache read0 tok/);
+  const rowLabels = Array.from(host.querySelectorAll<HTMLElement>('.subagent-detail-row'), (row) => row.firstElementChild?.textContent);
+  assert.deepEqual(rowLabels, ['Output', 'Cache read'], 'unknown metrics are omitted while reported zero is preserved');
+});
+
+test('subagent tooltip distinguishes task-only, inherited, empty, and unavailable context concisely', async () => {
+  const cases = [
+    { name: 'task-only', expected: /Task only · no parent context requested/ },
+    { name: 'inherited', expected: /Inherited latest context · 1 user prompt/ },
+    { name: 'empty', expected: /Empty all context · task only/ },
+    { name: 'unavailable', expected: /Requested latest context · exact packet unavailable/ },
+  ] as const;
+
+  for (const entry of cases) {
+    const toolCall = costEvidenceToolCall(undefined);
+    toolCall.id = `context-${entry.name}`;
+    const child = (toolCall.result as any).details.results[0];
+    if (entry.name === 'inherited') {
+      child.parentUserContextMode = 'latest';
+      child.parentUserContext = '[User prompt]\nParent request';
+    } else if (entry.name === 'empty') {
+      child.parentUserContextMode = 'all';
+      child.parentUserContext = '';
+    } else if (entry.name === 'unavailable') {
+      (toolCall.input as any).userContext = 'latest';
+    }
+    act(() => render(null, container));
+    mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }));
+    const host = await openModelTooltip();
+    assert.match(host.textContent ?? '', entry.expected, `${entry.name} context summary`);
+    const summary = Array.from(host.querySelectorAll<HTMLElement>('.subagent-context-tooltip-summary'))
+      .find((item) => item.previousElementSibling?.textContent === 'Context handoff');
+    assert.ok(summary, `${entry.name} has a concise context summary line`);
+    assert.ok((summary.textContent?.length ?? Infinity) < 100, `${entry.name} summary should stay concise`);
+  }
+});
+
+test('subagent tooltip treats provider-prefix-only model differences as the same model and labels real fallback', async () => {
+  const toolCall = costEvidenceToolCall(undefined);
+  const child = (toolCall.result as any).details.results[0];
+  child.selectedModel = 'provider/worker-model';
+  child.model = 'worker-model';
+  child.thinkingLevel = 'high';
+  mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }));
+  const sameModelHost = await openModelTooltip();
+  assert.match(sameModelHost.textContent ?? '', /worker-model/);
+  assert.match(sameModelHost.textContent ?? '', /Provider provider · reasoning high/);
+  assert.doesNotMatch(sameModelHost.textContent ?? '', /Requested:|Actual runtime model:/);
+  assert.equal(container.querySelector('.subagent-model-label')?.getAttribute('title'), null);
+
+  act(() => render(null, container));
+  toolCall.id = 'model-identity-fallback';
+  child.selectedModel = 'provider/requested-model';
+  child.model = 'provider/runtime-model';
+  mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }));
+  const fallbackHost = await openModelTooltip();
+  assert.match(fallbackHost.textContent ?? '', /runtime-model/);
+  assert.match(fallbackHost.textContent ?? '', /Requested: requested-model/);
+  assert.doesNotMatch(fallbackHost.textContent ?? '', /provider\/requested-model|provider\/runtime-model/);
+});
+
+test('subagent tooltip keeps failure details ahead of lower-priority metrics', async () => {
+  const toolCall = costEvidenceToolCall({ input: 100, output: 20 });
+  const child = (toolCall.result as any).details.results[0];
+  child.exitCode = 1;
+  child.failureClass = 'provider';
+  child.stderr = 'upstream connection failed';
+  mount(toolCall, prefsWith({ autoExpandSubagentCalls: false }));
+
+  const host = await openModelTooltip();
+  const failure = host.querySelector<HTMLElement>('.subagent-detail-failure');
+  assert.ok(failure, 'failure remains visible even when runtime metrics are available');
+  assert.match(failure.textContent ?? '', /Failure: provider.*upstream connection failed/s);
+  assert.ok((host.textContent ?? '').indexOf('Failure: provider') < (host.textContent ?? '').indexOf('Usage & performance'));
+});
+
 test('subagent without cost evidence omits the inline cost and tooltip row', async () => {
   mount(costEvidenceToolCall({ input: 100, output: 20, cacheRead: 0, cacheWrite: 0, contextTokens: 100 }), prefsWith({ autoExpandSubagentCalls: false }));
 
@@ -374,7 +462,7 @@ test('subagent without cost evidence omits the inline cost and tooltip row', asy
   assert.equal(container.querySelector('.subagent-runtime-telemetry:not(.subagent-runtime-telemetry-stable)'), null);
 
   const host = await openModelTooltip();
-  assert.match(host.textContent ?? '', /Input100 tokens/);
+  assert.match(host.textContent ?? '', /Input100 tok/);
   assert.doesNotMatch(host.textContent ?? '', /Cost/);
 });
 

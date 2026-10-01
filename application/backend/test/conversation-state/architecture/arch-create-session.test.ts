@@ -134,7 +134,7 @@ test('a create timeout retains the delayed ledger, pending tab, queued sends, an
   if (retryEffect?.kind === 'CreateSession') assert.equal(retryEffect.operationId, operationId);
 });
 
-test('hiding a delayed create preserves its ledger and queued sends without reopening on late success', () => {
+test('closing a delayed create cancels queued sends and cleans up a late durable creation', () => {
   const operationId = 'create-op-hidden';
   const created = reducer(buildState(), createCmd('c-hidden', PENDING, PLACEHOLDER, '/w', 'tok-hidden', operationId));
   const delayed = reducer(created.state, {
@@ -155,12 +155,27 @@ test('hiding a delayed create preserves its ledger and queued sends without reop
   assert.equal(hidden.state.sessions.openTabPaths.includes(PENDING), false);
   assert.equal(hidden.state.sessions.activeSessionPath, OLD);
   assert.equal(hidden.state.operations[operationId]?.hidden, true);
-  assert.deepEqual(hidden.state.pending.sendQueueBySession[PENDING], queue);
-  assert.equal(hidden.effects.length, 1);
-  assert.equal(hidden.effects[0]?.kind, 'PersistTabs');
+  assert.equal(hidden.state.pending.sendQueueBySession[PENDING], undefined);
+  assert.ok(!hidden.effects.some((effect) => effect.kind === 'DrainPendingSendQueue'));
+  assert.equal(hidden.effects.at(-1)?.kind, 'PersistTabs');
+
+  const resolvedPath = '/workspace/late-created.jsonl';
+  const createSucceeded = reducer(hidden.state, {
+    kind: 'CreateOperationSucceeded', operationId, pendingPath: PENDING,
+    sessionPath: resolvedPath, attempt: 1, backendGeneration: 0,
+  });
+  const replaced = reducer(createSucceeded.state, {
+    kind: 'PendingPathReplaced', oldPendingPath: PENDING, newSessionPath: resolvedPath,
+  });
+  assert.deepEqual(replaced.state.sessions.openTabPaths, [OLD]);
+  assert.equal(replaced.state.sessions.activeSessionPath, OLD);
+  assert.equal(replaced.state.pending.sendQueueBySession[PENDING], undefined);
+  const cleanup = replaced.effects.find((effect) => effect.kind === 'CloseSession');
+  assert.equal(cleanup?.kind, 'CloseSession');
+  if (cleanup?.kind === 'CloseSession') assert.equal(cleanup.sessionPath, resolvedPath);
 });
 
-test('closing a pending create registers and settles a correlated close while preserving hidden create ownership', () => {
+test('closing a pending create keeps the close barrier until its late creation is cleaned up', () => {
   const createOperationId = 'create-op-hidden-correlated';
   const created = reducer(buildState(), {
     kind: 'Command',
@@ -192,7 +207,9 @@ test('closing a pending create registers and settles a correlated close while pr
   assert.equal(hidden.state.operations['close-op']?.causal.selectionToken, 'close-correlated');
   assert.equal(hidden.state.operations['close-op']?.backendGeneration, 11);
   assert.equal(hidden.state.operations['close-op']?.session.pendingPath, PENDING);
-  assert.deepEqual(hidden.state.operations['close-op']?.acknowledgements, { 'persist-tabs': 'pending' });
+  assert.deepEqual(hidden.state.operations['close-op']?.acknowledgements, {
+    'persist-tabs': 'pending', cleanup: 'pending',
+  });
   const persist = hidden.effects[0];
   assert.equal(persist?.kind, 'PersistTabs');
   if (persist?.kind === 'PersistTabs') {
@@ -204,9 +221,25 @@ test('closing a pending create registers and settles a correlated close while pr
     kind: 'PersistTabsResult', corrId: 'close-correlated', operationId: 'close-op',
     backendGeneration: 11, ok: true,
   });
-  assert.equal(settled.state.operations['close-op']?.terminal?.outcome, 'settled');
+  assert.equal(settled.state.operations['close-op']?.acknowledgements?.['persist-tabs'], 'succeeded');
+  assert.equal(settled.state.operations['close-op']?.terminal, undefined);
   assert.equal(settled.state.operations[createOperationId]?.hidden, true);
   assert.equal(settled.state.operations[createOperationId]?.terminal, undefined);
+
+  const resolvedPath = '/workspace/correlated-late.jsonl';
+  const succeededCreate = reducer(settled.state, {
+    kind: 'CreateOperationSucceeded', operationId: createOperationId, pendingPath: PENDING,
+    sessionPath: resolvedPath, attempt: 1, backendGeneration: 11,
+  });
+  const replaced = reducer(succeededCreate.state, {
+    kind: 'PendingPathReplaced', oldPendingPath: PENDING, newSessionPath: resolvedPath,
+  });
+  const cleanup = replaced.effects.find((effect) => effect.kind === 'CloseSession');
+  assert.equal(cleanup?.kind, 'CloseSession');
+  if (cleanup?.kind === 'CloseSession') assert.equal(cleanup.sessionPath, resolvedPath);
+  assert.deepEqual(replaced.state.sessions.openTabPaths, [OLD]);
+  assert.equal(replaced.state.sessions.activeSessionPath, OLD);
+  assert.equal(replaced.state.operations['close-op']?.closeCleanupDispatched, true);
 });
 
 test('the optimistic CreateSession setup is fully undone by the host-side failure path (SessionScopeCleared + SelectSession-fallback)', () => {

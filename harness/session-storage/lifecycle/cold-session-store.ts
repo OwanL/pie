@@ -11,7 +11,7 @@ import { LIVE_PIPELINE_LIMITS } from '../../agent-processes/lib/rpc/live-pipelin
 import type { ChatMessage, DetailResult, LazyDetailRef } from '../../agent-processes/lib/rpc/message-contract.js';
 import type { InitialContextEstimate, SessionOpenedPayload, SessionSummary, SystemPromptEntry, TranscriptMode, TranscriptPageDirection, TranscriptPagePayload } from '../../agent-processes/lib/rpc/session-events.js';
 import type { ModelInfo, ModelSettings } from '../../model-providers/catalog/model-contract.js';
-import type { ThinkingLevel } from '../../model-providers/catalog/thinking-level.js';
+import { normalizeThinkingLevel, type ThinkingLevel } from '../../model-providers/catalog/thinking-level.js';
 import type { LiveSubagentDetailAddress } from '../../agent-processes/lib/rpc/subagent-detail';
 import { SessionSnapshotTooLargeError, type SessionSnapshotTransport } from '../transcripts/snapshot-boundary.js';
 import {
@@ -471,6 +471,18 @@ export interface ColdSessionModelSettingsResult {
   thinkingLevelChanged: boolean;
 }
 
+export interface ColdSessionTitleResult {
+  /** False when the exact assigned title is already the durable session name. */
+  titleChanged: boolean;
+}
+
+export interface ColdSessionDurableMetadataSnapshot {
+  readonly cwd: string;
+  readonly modelId?: string;
+  readonly provider?: string;
+  readonly thinkingLevel?: string;
+}
+
 export type ColdSessionPageOptions = ColdBrowseHelperPageOptions;
 
 export interface ColdSessionTruncateResult extends ColdSessionManagerHandle {
@@ -717,6 +729,50 @@ export class ColdSessionStore {
       this.leases.assertCurrent(stamp);
       return payload;
     });
+  }
+
+  /** Read durable model/reasoning metadata and cwd for session-control
+   * inheritance. A hot-owned session cannot use the ordinary cold browse
+   * lease, but its current-v3 transcript remains readable under the ownership
+   * authority's stable hot-read fence. This path is strictly read-only; legacy
+   * migration and all other cold semantics stay with openSnapshot. */
+  async readDurableSessionMetadata(
+    sessionPath: string,
+    modelSettings: ModelSettings,
+  ): Promise<ColdSessionDurableMetadataSnapshot> {
+    const hotStamp = this.leases.captureHotRead(sessionPath);
+    if (!hotStamp) {
+      const opened = await this.openSnapshot(sessionPath, { modelSettings, transcript: 'skip' });
+      return {
+        cwd: opened.session.cwd || this.startupCwd,
+        ...(opened.session.modelId ? { modelId: opened.session.modelId } : {}),
+        ...(opened.session.provider ? { provider: opened.session.provider } : {}),
+        ...(opened.session.thinkingLevel ? { thinkingLevel: opened.session.thinkingLevel } : {}),
+      };
+    }
+
+    // Hot ownership is only compatible with the current read-only v3 format.
+    // Never invoke SessionManager migration semantics under a hot lease.
+    if (!isCurrentColdSessionHeader(readColdSessionHeaderSync(sessionPath))) {
+      throw new BackendError(
+        'SESSION_SETTINGS_UNAVAILABLE',
+        `Durable settings for hot session ${sessionPath} cannot be read without migration.`,
+      );
+    }
+    this.leases.assertHotReadCurrent(hotStamp);
+    const manager = this.sdk.SessionManager.open(sessionPath);
+    const branch = manager.getBranch();
+    const context = manager.buildSessionContext?.();
+    const explicitThinkingLevel = branch.some((entry) => entry.type === 'thinking_level_change');
+    const thinkingLevel = explicitThinkingLevel
+      ? normalizeThinkingLevel(context?.thinkingLevel) ?? modelSettings.defaultThinkingLevel
+      : modelSettings.defaultThinkingLevel;
+    this.leases.assertHotReadCurrent(hotStamp);
+    return {
+      cwd: manager.getCwd() || this.startupCwd,
+      ...(context?.model ? { modelId: context.model.modelId, provider: context.model.provider } : {}),
+      ...(thinkingLevel ? { thinkingLevel } : {}),
+    };
   }
 
   async loadPage(
@@ -1011,6 +1067,43 @@ export class ColdSessionStore {
     return this.withWriterAdmission(() => {
       const opened = this.openManagerWithMigrationLease(sessionPath);
       return this.applyModelSettings(opened.manager, opened.stamp, updates).result;
+    });
+  }
+
+  /** Persist the assigned session title through the same lease-fenced cold
+   * mutation boundary as {@link setModelSettings}. This is the cold half of
+   * the coordinator-owned title authority; hot-owned sessions are written by
+   * their owning worker, never from the coordinator. */
+  setSessionTitle(
+    sessionPath: string,
+    title: string,
+  ): ColdSessionTitleResult {
+    return this.withWriterAdmission(() => {
+      const opened = this.openManagerWithMigrationLease(sessionPath);
+      return this.applySessionTitle(opened.manager, opened.stamp, title).result;
+    });
+  }
+
+  /** Apply the same durable title mutation to a newly-created/forked/truncated
+   * manager retained for one-use promotion, updating its private handle stamp
+   * exactly like {@link setHandleModelSettings}. */
+  setHandleSessionTitle(
+    handle: ColdSessionManagerHandle,
+    title: string,
+  ): ColdSessionTitleResult {
+    return this.withWriterAdmission(() => {
+      const state = this.handleStates.get(handle);
+      if (!state || state.status !== 'available' || state.stamp.sessionPathKey !== handle.stamp.sessionPathKey) {
+        throw new Error(`Cold session manager handle is no longer available: ${handle.sessionPath}`);
+      }
+      const applied = this.applySessionTitle(
+        handle.manager,
+        state.stamp,
+        title,
+        (stamp) => { state.stamp = stamp; },
+      );
+      state.stamp = applied.stamp;
+      return applied.result;
     });
   }
 
@@ -1620,6 +1713,47 @@ export class ColdSessionStore {
   private refreshCatalog(): void {
     this.catalogMutationRevision += 1;
     this.catalog.refresh();
+  }
+
+  /** Append the assigned title as one lease-fenced durable session_info entry,
+   * mirroring {@link applyModelSettings}: identical commit, restamp, browse
+   * retirement, and catalog-refresh boundaries. The stored name is normalized
+   * exactly like the SDK's own appendSessionInfo seam so repeated writes are
+   * detected as no-ops. */
+  private applySessionTitle(
+    manager: SdkSessionManager,
+    initialStamp: ColdSessionOwnershipStamp,
+    title: string,
+    onRestamp?: (stamp: ColdSessionOwnershipStamp) => void,
+  ): {
+    result: ColdSessionTitleResult;
+    stamp: ColdSessionOwnershipStamp;
+  } {
+    const recorded = title.replace(/[\r\n]+/g, ' ').trim();
+    if (!recorded) {
+      throw new Error('An assigned session title must contain visible characters.');
+    }
+    const titleChanged = manager.getSessionName() !== recorded;
+    let stamp = initialStamp;
+    let committed = false;
+
+    try {
+      if (titleChanged) {
+        if (typeof manager.appendSessionInfo !== 'function') {
+          throw new Error('This Pi session manager does not support atomic durable session titles.');
+        }
+        this.leases.commitSync(stamp, () => manager.appendSessionInfo!(recorded));
+        committed = true;
+        stamp = this.leases.restamp(stamp);
+        onRestamp?.(stamp);
+      }
+    } finally {
+      if (committed) {
+        this.invalidateBrowsePath(initialStamp.sessionPath);
+        this.refreshCatalog();
+      }
+    }
+    return { result: { titleChanged }, stamp };
   }
 
   private applyModelSettings(

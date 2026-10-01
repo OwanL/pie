@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -11,6 +11,8 @@ import {
   validateAnalyticsLoadedGenerationReceipt,
 } from '../../../../analytics/authority/activation.js';
 import { ActivationStore } from '../../../../analytics/authority/activation-store.js';
+import { createSessionLifecycleWriterAdmission } from '../../../../analytics/authority/session-lifecycle-writer-store.js';
+import { SessionLifecycleStore } from '../../../../harness/session-storage/lifecycle/session-lifecycle-store.js';
 import { AnalyticsRuntime } from '../../composition/analytics-runtime.js';
 import {
   analyticsWorkspaceId,
@@ -110,6 +112,120 @@ test('canonical runtime reaches readiness with real recorder and query workers',
   } finally {
     await runtime.stop();
     assert.equal(runtime.isStopped, true);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('stop joins gated real-worker startup and releases its lifecycle startup lease before returning', { timeout: 30_000 }, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'pie-analytics-runtime-stop-startup-'));
+  const stateDir = path.join(root, 'state');
+  const loaderUrl = new URL('../../../hosts/vscode/node_modules/tsx/dist/loader.mjs', import.meta.url).href;
+  const recorderEntryUrl = new URL('../../../../analytics/recording/recorder-worker-entry.ts', import.meta.url).href;
+  const queryEntryUrl = new URL('../../../../analytics/queries/query-worker-entry.ts', import.meta.url).href;
+  const gateStarted = path.join(root, 'recorder-gate-started');
+  const gateRelease = path.join(root, 'recorder-gate-release');
+  const spawnLog = path.join(root, 'recorder-spawns');
+  const recorderExited = path.join(root, 'recorder-exited');
+  const gatedRecorder = path.join(root, 'gated-recorder-worker.mjs');
+  const queryWorker = path.join(root, 'query-worker.mjs');
+  writeFileSync(gatedRecorder, [
+    `import { appendFileSync, existsSync, writeFileSync } from 'node:fs';`,
+    `appendFileSync(${JSON.stringify(spawnLog)}, 'spawned\\n');`,
+    `process.once('exit', () => writeFileSync(${JSON.stringify(recorderExited)}, 'exited'));`,
+    `writeFileSync(${JSON.stringify(gateStarted)}, 'started');`,
+    `while (!existsSync(${JSON.stringify(gateRelease)})) await new Promise((resolve) => setTimeout(resolve, 10));`,
+    `await import(${JSON.stringify(loaderUrl)});`,
+    `await import(${JSON.stringify(recorderEntryUrl)});`,
+  ].join('\n'), 'utf8');
+  writeFileSync(queryWorker, `await import(${JSON.stringify(loaderUrl)});\nawait import(${JSON.stringify(queryEntryUrl)});\n`, 'utf8');
+
+  const store = new SessionLifecycleStore(path.join(root, 'state', 'session-lifecycle.sqlite'));
+  const writerIdentity = {
+    hostInstanceId: 'runtime-host-1',
+    workspaceId: 'workspace-stop-race',
+    generationId: GENERATION_ID,
+    buildId: 'build-1',
+    processId: process.pid,
+  };
+  const now = String(Date.now());
+  store.registerAnalyticsHost({
+    ...writerIdentity,
+    capabilities: ['host-discovery', 'authenticated-control', 'writer-fence'],
+    state: 'registered',
+    registeredAtMs: now,
+    heartbeatAtMs: now,
+    updatedAtMs: now,
+  });
+  const writerAdmission = createSessionLifecycleWriterAdmission(store, writerIdentity);
+  const runtime = new AnalyticsRuntime({
+    stateDir,
+    analyticsDir: path.join(root, 'analytics'),
+    recorderWorkerScript: gatedRecorder,
+    queryWorkerScript: queryWorker,
+    buildId: 'build-1',
+    workspaceId: writerIdentity.workspaceId,
+    processGeneration: 'process-stop-race',
+    writerAdmission,
+    timeZone: 'UTC',
+  });
+
+  let startup: Promise<unknown> | undefined;
+  try {
+    await writeManifest(stateDir, {
+      schemaVersion: ACTIVATION_SCHEMA_VERSION,
+      revision: 1,
+      previousSha256: null,
+      everActive: true,
+      activeGeneration: {
+        identity: { generationId: GENERATION_ID, buildId: 'build-1', qualificationSha256: SHA, trialSha256: SHA_B },
+        state: 'active',
+        activatedAt: ACTIVATED_AT,
+        retiredAt: null,
+        predecessorGenerationId: null,
+        cutoffReceiptSha256: null,
+      },
+      successor: null,
+      retiredHistory: [],
+    });
+
+    const startupPromise = runtime.start();
+    startup = startupPromise;
+    assert.equal(runtime.start(), startupPromise, 'concurrent start calls join the same startup operation');
+    const gateDeadline = Date.now() + 5_000;
+    while (!existsSync(gateStarted) && Date.now() < gateDeadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(existsSync(gateStarted), true, 'the real recorder worker reached its deliberate startup gate');
+    assert.equal(store.listAnalyticsWriterLeases(writerIdentity.workspaceId).length, 1,
+      'the recorder startup lease is durably held while its worker is gated');
+
+    let stopSettled = false;
+    const stopPromise = runtime.stop();
+    const stopping = stopPromise.then(() => { stopSettled = true; });
+    assert.equal(runtime.stop(), stopPromise, 'concurrent stop calls join the same stop operation');
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    assert.equal(stopSettled, false, 'stop must join startup while the helper can still initialize or write');
+    assert.equal(store.listAnalyticsWriterLeases(writerIdentity.workspaceId).length, 1,
+      'stop must not return or release startup admission while initialization is still gated');
+
+    writeFileSync(gateRelease, 'release');
+    await assert.rejects(startupPromise, /stopped during startup/u);
+    await stopping;
+    assert.equal(existsSync(recorderExited), true, 'stop waits for cleanup of the started recorder helper');
+    assert.equal(store.listAnalyticsWriterLeases(writerIdentity.workspaceId).length, 0,
+      'all startup admission leases are released before stop returns');
+    assert.equal(runtime.sink, undefined);
+    assert.equal(runtime.getReadiness(), undefined, 'stopped startup must not publish readiness');
+
+    await assert.rejects(runtime.start(), ActivationManifestError,
+      'a terminally stopped runtime cannot re-enable helper startup');
+    assert.equal(readFileSync(spawnLog, 'utf8').trim().split(/\\r?\\n/u).length, 1,
+      'a post-stop start attempt must not spawn another recorder worker');
+  } finally {
+    writeFileSync(gateRelease, 'release');
+    await startup?.catch(() => undefined);
+    await runtime.stop();
+    store.close();
     rmSync(root, { recursive: true, force: true });
   }
 });

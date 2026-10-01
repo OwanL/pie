@@ -17,6 +17,7 @@ import {
   SUBAGENT_BUCKETS_ENV,
   NESTED_ALLOWED_BUCKETS_ENV,
   SUBAGENT_BUCKET_CAN_SPAWN_ENV,
+  AUTONOMOUS_MODE_BY_SESSION_ENV,
 } from '../lib/rpc/settings.js';
 import { HISTORY_COMPACTION_ENV } from '../../session-storage/settings/history-compaction.js';
 import type { DetailResult, LazyDetailRef, ChatMessage } from '../lib/rpc/message-contract.js';
@@ -42,13 +43,18 @@ import { createRuntimeFactory, ServiceLoadingGate } from './runtime-factory';
 import { createBackendTools } from '../coordinator/backend-tools.js';
 import { subagentSettlementPricingResolver } from '../../model-providers/pricing/subagent-settlement-pricing';
 import { handleSdkSessionEvent } from './session-event-handler';
+import { reportAgentMessageProvenanceFailure } from './session-event-shared';
+import { attachAgentMessageProvenance } from './agent-message-provenance';
 import {
   buildSessionOpenedPayload as buildSessionOpenedPayloadHelper,
   ensureDisplayTranscriptCache,
 } from './session-opened.ts';
 import { sessionOpenedUnavailableForWorkerIpc } from '../lib/rpc/session-opened-transport.js';
 import { normalizeDanglingTranscript } from '../../session-storage/transcripts/normalize-dangling-transcript.ts';
-import { AUTONOMOUS_MODE_ENV } from '../../tool-and-skill-selection/settings/autonomous-mode.js';
+import {
+  AUTONOMOUS_MODE_ENV,
+  resolveAutonomousModeForSession,
+} from '../../tool-and-skill-selection/settings/autonomous-mode.js';
 import { ASK_USER_TOOL_NAME } from '../../tools/catalog/tool-names.js';
 import { buildPagedTranscriptWindow } from '../../session-storage/transcripts/transcript-window';
 import type {
@@ -222,7 +228,10 @@ export class WorkerRuntimeHost {
   private readonly committedAuthorizations = new Map<string, SdkSessionTransferAuthorization>();
   private readonly gate = new ServiceLoadingGate();
   private systemPromptModule?: Promise<SdkSystemPromptModule>;
+  /** Effective mode for the currently bound root session. */
   private autonomousMode = false;
+  private autonomousModeDefault = false;
+  private autonomousModeBySession: Record<string, boolean> = {};
   private mcpEnabled = true;
   /** Effective all-unchecked subagent provider policy for the hosted session:
    *  true while every provider in the session's toggle surface is unchecked
@@ -368,6 +377,49 @@ export class WorkerRuntimeHost {
           ? await this.lifecycleBarrier.runWriteMutationAsync(sourceSessionId, 'session.duplicateHot', duplicate)
           : await this.withAnalyticsWriterAdmission(duplicate);
       }
+      if (operation === 'session.title.assign') {
+        // Hot half of the coordinator-owned title authority: the owning worker
+        // is the only legal writer while its lease is live. The coordinator
+        // already reserved a unique title and only publishes its assignment
+        // after this durable write is acknowledged. An explicit name that
+        // arrived meanwhile always wins; the candidate is never authoritative.
+        const sessionPath = typeof params.sessionPath === 'string' ? params.sessionPath : undefined;
+        if (!sessionPath || !sameSessionPath(sessionPath, this.context!.sessionPath)) {
+          throw new Error('Hot title assignment path does not match the worker lease.');
+        }
+        if (typeof params.title !== 'string') throw new Error('The assigned session title must be a string.');
+        const recorded = params.title.replace(/[\r\n]+/g, ' ').trim();
+        if (!recorded) throw new Error('An assigned session title must contain visible characters.');
+        if (recorded.length > 16 * 1024) throw new Error('The assigned session title is unbounded.');
+        const context = this.context!;
+        const currentName = context.session.sessionManager.getSessionName?.();
+        // Reconciliation may replace exactly the durable colliding title
+        // observed at hydration, but never an intervening manual rename.
+        const expected = typeof params.replaceExpectedTitle === 'string'
+          ? params.replaceExpectedTitle : undefined;
+        if (expected !== undefined
+          ? currentName?.trim() !== expected
+          : Boolean(currentName?.trim())) {
+          return asWorkerJson({ assigned: false, changed: false, skipped: 'explicit-name' as const });
+        }
+        const sessionId = context.session.sessionManager.getSessionId?.();
+        // The pinned SDK's session adapter installs a durable name setter
+        // (`pi.setSessionName`), which Pie's `SdkSession` type does not declare;
+        // access it structurally and fail explicitly when the runtime lacks it.
+        const setNameCapable = context.session as unknown as {
+          setSessionName?: (name: string) => void;
+        };
+        const assigned = async () => {
+          if (typeof setNameCapable.setSessionName !== 'function') {
+            throw new Error('This Pi session runtime does not support durable session titles.');
+          }
+          setNameCapable.setSessionName(recorded);
+          return asWorkerJson({ assigned: true, changed: true, title: recorded });
+        };
+        return this.lifecycleBarrier && typeof sessionId === 'string' && sessionId
+          ? asWorkerJson(await this.lifecycleBarrier.runWriteMutationAsync(sessionId, 'session.title.assign', assigned))
+          : await assigned();
+      }
       if (operation === 'session.snapshot') {
         const sessionPath = typeof params.sessionPath === 'string' ? params.sessionPath : undefined;
         if (!sessionPath || !sameSessionPath(sessionPath, this.context.sessionPath)) {
@@ -493,6 +545,7 @@ export class WorkerRuntimeHost {
     context.queuedLocalIds = [];
     context.queuedOperationIds = [];
     context.queuedOperationAttempts = [];
+    context.queuedCoordinatorAttributions = [];
     if (!running) return { interrupted: false, alreadyStopped: true };
     if (context.manualCompactionRequest) context.manualCompactionRequest.cancelled = true;
     if (context.activeRequest) context.activeRequest.aborted = true;
@@ -529,6 +582,7 @@ export class WorkerRuntimeHost {
         reason: 'Extension command was interrupted before starting an agent turn.',
       });
       context.pendingExtensionCommand = undefined;
+      interruptedRequest?.agentMessageDurability?.settle(false);
       context.activeRequest = undefined;
       this.emitBusyChanged(context, false);
     }
@@ -574,6 +628,7 @@ export class WorkerRuntimeHost {
         });
       }
       interruptedRequest.pendingDurableToolTerminals?.clear();
+      interruptedRequest.agentMessageDurability?.settle(false);
       context.activeRequest = undefined;
       this.emitBusyChanged(context, false);
     };
@@ -894,8 +949,16 @@ export class WorkerRuntimeHost {
     try { context.unsubscribe(); } catch { /* initial placeholder or old subscription */ }
     try { context.uiBridge?.dispose(); } catch { /* old session UI is no longer authoritative */ }
     context.activeRequest?.pendingDurableToolTerminals?.clear();
+    context.activeRequest?.agentMessageDurability?.settle(false);
     context.session = session;
     context.sessionPath = sessionPath;
+    this.autonomousMode = resolveAutonomousModeForSession(
+      sessionPath,
+      this.autonomousModeDefault,
+      this.autonomousModeBySession,
+    );
+    process.env[AUTONOMOUS_MODE_ENV] = this.autonomousMode ? '1' : '0';
+    process.env[AUTONOMOUS_MODE_BY_SESSION_ENV] = JSON.stringify(this.autonomousModeBySession);
     context.activeRequest = undefined;
     context.manualCompactionRequest = undefined;
     context.overflowRecoveryCandidate = undefined;
@@ -908,6 +971,7 @@ export class WorkerRuntimeHost {
     context.queuedLocalIds = [];
     context.queuedOperationIds = [];
     context.queuedOperationAttempts = [];
+    context.queuedCoordinatorAttributions = [];
     context.terminalLiveTurn = undefined;
     context.autonomousModeAskUserWasActive = undefined;
     context.systemPromptToolsBeforeDisable = undefined;
@@ -1492,6 +1556,9 @@ export class WorkerRuntimeHost {
         this.options.server.failRuntime(new Error(reason));
         return true;
       },
+      // Worker IPC is an authenticated coordinator route; public envelopes
+      // have already had untrusted attribution removed at coordinator ingress.
+      allowCoordinatorAttribution: true,
       suppressRequestTrace: true,
     };
   }
@@ -1544,8 +1611,14 @@ export class WorkerRuntimeHost {
         void this.dispose().catch(() => undefined);
       },
     });
+    const attributedManager = attachAgentMessageProvenance(
+      guarded.manager,
+      () => this.context?.session.sessionManager === attributedManager ? this.context : undefined,
+      (context, reason, error) => reportAgentMessageProvenanceFailure({ emit: (name, payload) => this.emit(name, payload) }, context, undefined, reason, error),
+      () => guarded.fence.isInvalidated(),
+    );
     const record: SessionManagerFenceRecord = {
-      manager: guarded.manager,
+      manager: attributedManager,
       fence: guarded.fence,
       unregister: () => undefined,
     };
@@ -1729,9 +1802,28 @@ export class WorkerRuntimeHost {
         || values.subagentBuckets !== undefined)) {
       this.applySubagentProviderPolicy(this.context);
     }
-    if (typeof values.autonomousMode === 'boolean') {
-      process.env[AUTONOMOUS_MODE_ENV] = values.autonomousMode ? '1' : '0';
-      this.setAutonomousMode(values.autonomousMode);
+    const hasAutonomousModeDefault = typeof values.autonomousMode === 'boolean';
+    const rawAutonomousModeBySession = values.autonomousModeBySession;
+    const hasAutonomousModeOverrides = rawAutonomousModeBySession !== undefined;
+    if (hasAutonomousModeDefault) this.autonomousModeDefault = values.autonomousMode as boolean;
+    if (hasAutonomousModeOverrides) {
+      const overrides: Record<string, boolean> = {};
+      if (rawAutonomousModeBySession && typeof rawAutonomousModeBySession === 'object'
+          && !Array.isArray(rawAutonomousModeBySession)) {
+        for (const [sessionPath, enabled] of Object.entries(rawAutonomousModeBySession as Record<string, unknown>)) {
+          if (sessionPath && typeof enabled === 'boolean') overrides[sessionPath] = enabled;
+        }
+      }
+      this.autonomousModeBySession = overrides;
+    }
+    if (hasAutonomousModeDefault || hasAutonomousModeOverrides) {
+      process.env[AUTONOMOUS_MODE_BY_SESSION_ENV] = JSON.stringify(this.autonomousModeBySession);
+      const effective = this.context
+        ? resolveAutonomousModeForSession(this.context.sessionPath, this.autonomousModeDefault, this.autonomousModeBySession)
+        : this.autonomousModeDefault;
+      process.env[AUTONOMOUS_MODE_ENV] = effective ? '1' : '0';
+      if (this.context) this.setAutonomousMode(effective);
+      else this.autonomousMode = effective;
     }
     if (typeof values.mcpEnabled === 'boolean') {
       process.env['PIE_MCP_ENABLED'] = values.mcpEnabled ? '1' : '0';

@@ -29,6 +29,7 @@ import {
   setBackendLivePipelineTraceEnabled,
 } from '../live-pipeline-trace-runtime.js';
 import { readBackendRequestTracePhases } from '../../test/helpers/backend-live-pipeline-trace.js';
+import { createSessionControlSender } from '../../lib/rpc/session-control-attribution.js';
 
 class FakeTransitionClock {
   private nextId = 1;
@@ -94,6 +95,10 @@ function createHarness(overrides: {
   const modelSettings = overrides.modelSettings ?? { defaultModel: 'model-a', defaultThinkingLevel: 'medium' };
 
   const session = {
+    settingsManager: {
+      setDefaultModelAndProvider: (_provider: string, _id: string) => undefined,
+      setDefaultThinkingLevel: (_level: string) => undefined,
+    },
     isStreaming: false,
     model: { id: 'model-a' },
     thinkingLevel: 'medium',
@@ -123,7 +128,7 @@ function createHarness(overrides: {
         modelRegistry: {
           getAvailable: () => [
             { id: 'model-a', name: 'Model A', provider: 'mock', reasoning: true, input: ['text'] },
-            { id: 'model-b', name: 'Model B', provider: 'mock', reasoning: false, input: ['text', 'image'] },
+            { id: 'model-b', name: 'Model B', provider: 'mock', reasoning: true, input: ['text', 'image'] },
           ],
           find: (_provider: string, modelId: string) => ({ id: modelId }),
         },
@@ -137,6 +142,7 @@ function createHarness(overrides: {
   };
 
   const deps: BackendRequestHandlerDeps = {
+    allowCoordinatorAttribution: true,
     sdkPath: '/sdk',
     agentDir: '/agent',
     startupCwd: '/startup',
@@ -220,7 +226,10 @@ function createHarness(overrides: {
       return [{ path: context.sessionPath, cwd: '/repo', name: 'Session', modifiedAt: '2026-01-01T00:00:00.000Z', messageCount: 1 }];
     },
     listAvailableModels() {
-      return [{ id: 'model-a', name: 'Model A', provider: 'mock', reasoning: true, inputKinds: ['text'] }];
+      return [
+        { id: 'model-a', name: 'Model A', provider: 'mock', reasoning: true, inputKinds: ['text'] },
+        { id: 'model-a', name: 'Model A', provider: 'provider-b', reasoning: true, inputKinds: ['text'] },
+      ];
     },
     async readModelSettings() {
       return modelSettings;
@@ -331,7 +340,10 @@ test('handleBackendRequest covers handshake and session orchestration methods', 
     method: 'models.list',
     params: { sessionPath: '/repo/session.jsonl' },
   });
-  assert.deepEqual(models, [{ id: 'model-a', name: 'Model A', provider: 'mock', reasoning: true, inputKinds: ['text'] }]);
+  assert.deepEqual(models, [
+    { id: 'model-a', name: 'Model A', provider: 'mock', reasoning: true, inputKinds: ['text'] },
+    { id: 'model-a', name: 'Model A', provider: 'provider-b', reasoning: true, inputKinds: ['text'] },
+  ]);
 
   const settings = await handleBackendRequest(harness.deps, { id: '8', method: 'settings.get' });
   assert.deepEqual(settings, { defaultModel: 'model-a', defaultThinkingLevel: 'medium' });
@@ -822,6 +834,91 @@ test('concurrent cold message.send requests share one promotion', async () => {
   assert.equal(creations, 1);
   assert.ok((first as { requestId?: string }).requestId || (second as { requestId?: string }).requestId);
   assert.ok((first as { queued?: boolean }).queued || (second as { queued?: boolean }).queued);
+});
+
+test('idle user message.send retains the normal pruning prepass', async () => {
+  let promptCalls = 0;
+  const harness = createHarness({
+    sessionOverrides: {
+      prompt: async (_text: string, options?: { preflightResult?: (success: boolean) => void }) => {
+        promptCalls += 1;
+        assert.equal(typeof options?.preflightResult, 'function');
+        options?.preflightResult?.(true);
+      },
+    },
+  });
+
+  await handleBackendRequest(harness.deps, {
+    id: 'idle-user',
+    method: 'message.send',
+    params: { sessionPath: harness.context.sessionPath, text: 'ordinary user request', inputs: [], localId: 'local-user' },
+  });
+
+  assert.equal(promptCalls, 1, 'idle user requests must run the normal prompt prepass');
+});
+
+test('idle agent message.send attributes model input and retains the normal preflight path', async () => {
+  const sender = createSessionControlSender({ sessionId: 'source-session', identityFallback: false }, 'Source session');
+  let promptText = '';
+  let preflightCalls = 0;
+  const harness = createHarness({
+    sessionOverrides: {
+      prompt: (text: string, options?: { preflightResult?: (success: boolean) => void }) => {
+        promptText = text;
+        assert.equal(typeof options?.preflightResult, 'function', 'idle normal sends retain the pruning prepass callback');
+        options?.preflightResult?.(true);
+        preflightCalls += 1;
+        queueMicrotask(() => harness.context.activeRequest?.agentMessageDurability?.settle(true));
+        // A target may still be reasoning or waiting on the sender's tool;
+        // admission must not wait for its completed answer.
+        return new Promise<void>(() => undefined);
+      },
+    },
+  });
+  const result = await handleBackendRequest(harness.deps, {
+    id: 'attributed-idle',
+    method: 'message.send',
+    params: {
+      sessionPath: harness.context.sessionPath,
+      text: '/looks-like-a-command',
+      inputs: [],
+      localId: 'local:agent-session:idle-1',
+      coordinatorAttribution: sender,
+    },
+  }) as { requestId?: string };
+
+  assert.equal(typeof result.requestId, 'string');
+  assert.equal(preflightCalls, 1);
+  assert.ok(promptText.includes(sender.replyReference));
+  assert.ok(promptText.endsWith('/looks-like-a-command'));
+  assert.equal(harness.context.activeRequest?.extensionCommand, false,
+    'coordinator-originated agent body is not interpreted as an extension command');
+  assert.deepEqual(harness.context.activeRequest?.coordinatorAttribution, sender);
+});
+
+test('Stop settles an unflushed agent send without waiting for an SDK answer', async () => {
+  const sender = createSessionControlSender({ sessionId: 'source-session', identityFallback: false });
+  const harness = createHarness({
+    sessionOverrides: {
+      prompt: (_text: string, options?: { preflightResult?: (success: boolean) => void }) => {
+        options?.preflightResult?.(true);
+        return new Promise<void>(() => undefined);
+      },
+    },
+  });
+  const send = handleBackendRequest(harness.deps, {
+    id: 'agent-stop-send', method: 'message.send',
+    params: {
+      sessionPath: harness.context.sessionPath, text: 'request', inputs: [],
+      localId: 'local:agent-session:stop', coordinatorAttribution: sender,
+    },
+  });
+  for (let i = 0; i < 10 && !harness.context.activeRequest; i += 1) await Promise.resolve();
+  assert.ok(harness.context.activeRequest);
+  await handleBackendRequest(harness.deps, {
+    id: 'agent-stop', method: 'message.interrupt', params: { sessionPath: harness.context.sessionPath },
+  });
+  await assert.rejects(send, (error: unknown) => (error as { code?: string }).code === 'AGENT_MESSAGE_PROVENANCE_UNAVAILABLE');
 });
 
 test('registered message.send carries its operation attempt through active ownership and agent settlement', async () => {
@@ -2264,6 +2361,26 @@ test('cold session.truncateAfter delegates the durable rewrite without creating 
   });
 });
 
+test('cold settings.set skips initial context inventory for metadata-only session reads', async () => {
+  const harness = createHarness();
+  harness.deps.getSessionContext = () => undefined;
+  const buildCalls: unknown[][] = [];
+  harness.deps.buildSessionOpenedPayload = async (...args: any[]) => {
+    buildCalls.push(args);
+    return { session: { modelId: 'model-a', provider: 'mock' } } as any;
+  };
+  harness.deps.applyColdSessionModelSettings = async () => undefined;
+
+  await handleBackendRequest(harness.deps, {
+    id: 'settings-set-cold-inventory',
+    method: 'settings.set',
+    params: { sessionPath: '/repo/cold.jsonl', defaultProvider: 'mock' },
+  });
+
+  assert.equal(buildCalls.length, 1, 'cold settings reads session metadata once');
+  assert.equal(buildCalls[0]?.[8], false, 'metadata-only reads must opt out of initial context inventory');
+});
+
 test('settings.set applies live model changes and rolls back persisted settings on failure', async () => {
   const successHarness = createHarness();
   const updated = await handleBackendRequest(successHarness.deps, {
@@ -2456,6 +2573,7 @@ test('settings.set restores the previous live model when a switch reports the wr
       method: 'settings.set',
       params: {
         sessionPath: '/repo/session.jsonl',
+        persistenceScope: 'session',
         defaultModel: target.id,
         defaultProvider: target.provider,
       },
@@ -2465,6 +2583,7 @@ test('settings.set restores the previous live model when a switch reports the wr
 
   assert.deepEqual(setModelCalls, [target, previous]);
   assert.deepEqual(session.model, previous);
+  assert.deepEqual(harness.writtenSettings, [], 'session-scoped rollback must not touch shared defaults');
 });
 
 test('settings.set retires a runtime when exact live-model rollback fails', async () => {
@@ -2589,6 +2708,214 @@ test('settings.set persists cold per-session model and reasoning choices instead
       thinkingLevel: 'high',
     },
   }]);
+});
+
+test('settings.set session scope persists hot model/reasoning changes without touching shared defaults', async () => {
+  const harness = createHarness({
+    modelSettings: { defaultModel: 'model-a', defaultProvider: 'mock', defaultThinkingLevel: 'medium' },
+  });
+  const session = harness.context.session as unknown as {
+    model: { id: string; provider?: string };
+    setModel: (model: { id: string; provider?: string }) => Promise<void>;
+  };
+  session.model = { id: 'model-a', provider: 'mock' };
+  const registry = harness.context.runtime.services!.modelRegistry as unknown as {
+    find: (provider: string, modelId: string) => { id: string; provider: string } | undefined;
+  };
+  registry.find = (provider, modelId) => ({ id: modelId, provider });
+  const coldWrites: unknown[] = [];
+  harness.deps.applyColdSessionModelSettings = async (...args) => {
+    coldWrites.push(args);
+  };
+
+  const result = await handleBackendRequest(harness.deps, {
+    id: 'settings-session-hot',
+    method: 'settings.set',
+    params: {
+      sessionPath: '/repo/session.jsonl',
+      persistenceScope: 'session',
+      defaultModel: 'model-b',
+      defaultProvider: 'mock',
+      defaultThinkingLevel: 'high',
+    },
+  });
+
+  assert.deepEqual(result, {
+    defaultModel: 'model-b', defaultProvider: 'mock', defaultThinkingLevel: 'high',
+  });
+  assert.deepEqual(session.model, { id: 'model-b', provider: 'mock' });
+  assert.equal(harness.context.session.thinkingLevel, 'high');
+  assert.deepEqual(harness.writtenSettings, [], 'session scope must not write shared settings');
+  assert.deepEqual(coldWrites, [], 'hot session settings go through the owning SDK setters');
+  assert.equal(harness.emitContextUsageChangedCalls.length, 1);
+});
+
+test('session-scoped settings.set reports the SDK effective reasoning after clamping', async () => {
+  const harness = createHarness();
+  harness.context.session.setThinkingLevel = () => { harness.context.session.thinkingLevel = 'off'; };
+  const result = await handleBackendRequest(harness.deps, {
+    id: 'effective-reasoning', method: 'settings.set', params: {
+      sessionPath: harness.context.sessionPath, persistenceScope: 'session', defaultThinkingLevel: 'high',
+    },
+  }) as ModelSettings;
+  assert.equal(result.defaultThinkingLevel, 'off');
+  assert.deepEqual(harness.writtenSettings, []);
+});
+
+test('settings.set refuses unsupported reasoning before any settings or SDK write', async () => {
+  const harness = createHarness();
+  harness.context.session.model = { id: 'model-a', provider: 'mock' };
+  harness.deps.listAvailableModels = () => [{
+    id: 'model-a', name: 'Model A', provider: 'mock', reasoning: true,
+    thinkingLevels: ['off', 'low'], inputKinds: ['text'],
+  }];
+  await assert.rejects(handleBackendRequest(harness.deps, {
+    id: 'unsupported-reasoning', method: 'settings.set', params: {
+      sessionPath: harness.context.sessionPath, persistenceScope: 'session', defaultThinkingLevel: 'xhigh',
+    },
+  }), (error: { code?: string }) => error.code === 'THINKING_LEVEL_UNAVAILABLE');
+  assert.deepEqual(harness.writtenSettings, []);
+  assert.equal(harness.context.session.thinkingLevel, 'medium');
+});
+
+test('session-scoped live SDK callbacks cannot write shared defaults, including model-switch rollback', async () => {
+  const harness = createHarness({ modelSettings: {
+    defaultModel: 'model-a', defaultProvider: 'mock', defaultThinkingLevel: 'medium',
+  } });
+  const session = harness.context.session;
+  const writes: string[] = [];
+  session.model = { id: 'model-a', provider: 'mock' };
+  session.settingsManager = {
+    setDefaultModelAndProvider: () => { writes.push('model'); },
+    setDefaultThinkingLevel: () => { writes.push('thinking'); },
+  };
+  session.setModel = async (model: unknown) => {
+    const next = model as { id: string; provider: string };
+    session.model = next;
+    session.settingsManager!.setDefaultModelAndProvider(next.provider, next.id);
+    session.setThinkingLevel?.('high');
+  };
+  session.setThinkingLevel = (level) => {
+    session.thinkingLevel = level;
+    session.settingsManager!.setDefaultThinkingLevel(level);
+  };
+  const registry = harness.context.runtime.services!.modelRegistry as unknown as {
+    find(provider: string, id: string): unknown;
+  };
+  registry.find = (provider, id) => ({ provider, id });
+  const result = await handleBackendRequest(harness.deps, {
+    id: 'sdk-session-only', method: 'settings.set', params: {
+      sessionPath: harness.context.sessionPath, persistenceScope: 'session',
+      defaultModel: 'model-b', defaultProvider: 'mock', defaultThinkingLevel: 'high',
+    },
+  }) as ModelSettings;
+  assert.equal(result.defaultThinkingLevel, 'high');
+  assert.deepEqual(writes, []);
+  assert.deepEqual(harness.writtenSettings, []);
+  session.setThinkingLevel('low');
+  assert.deepEqual(writes, ['thinking'], 'the SDK default setters are restored after the mutation');
+});
+
+test('session-scoped failed SDK switch restores model and reasoning without default callbacks', async () => {
+  const harness = createHarness({ modelSettings: {
+    defaultModel: 'model-a', defaultProvider: 'mock', defaultThinkingLevel: 'medium',
+  } });
+  const session = harness.context.session;
+  session.model = { id: 'model-a', provider: 'mock' };
+  const writes: string[] = [];
+  session.settingsManager = {
+    setDefaultModelAndProvider: () => { writes.push('model'); },
+    setDefaultThinkingLevel: () => { writes.push('thinking'); },
+  };
+  session.setThinkingLevel = (level) => {
+    session.thinkingLevel = level;
+    session.settingsManager!.setDefaultThinkingLevel(level);
+  };
+  session.setModel = async (model: unknown) => {
+    session.model = model as { id: string; provider: string };
+    session.settingsManager!.setDefaultModelAndProvider(session.model.provider!, session.model.id);
+    session.setThinkingLevel?.(session.model.id === 'model-b' ? 'off' : 'medium');
+    if (session.model.id === 'model-b') throw new Error('SDK failed after switch');
+  };
+  (harness.context.runtime.services!.modelRegistry as unknown as { find(provider: string, id: string): unknown }).find
+    = (provider, id) => ({ provider, id });
+  await assert.rejects(handleBackendRequest(harness.deps, {
+    id: 'failed-session-switch', method: 'settings.set', params: {
+      sessionPath: harness.context.sessionPath, persistenceScope: 'session',
+      defaultModel: 'model-b', defaultProvider: 'mock',
+    },
+  }), /SDK failed after switch/);
+  assert.deepEqual(session.model, { id: 'model-a', provider: 'mock' });
+  assert.equal(session.thinkingLevel, 'medium');
+  assert.deepEqual(writes, []);
+  assert.deepEqual(harness.writtenSettings, []);
+});
+
+test('untrusted standalone message.send ignores raw coordinator attribution', async () => {
+  const harness = createHarness();
+  harness.deps.allowCoordinatorAttribution = false;
+  let prompt = '';
+  harness.context.session.prompt = async (text) => { prompt = text; };
+  await handleBackendRequest(harness.deps, {
+    id: 'untrusted-attribution', method: 'message.send', params: {
+      sessionPath: harness.context.sessionPath, text: 'ordinary user prompt', inputs: [],
+      localId: 'agent-session:forged',
+      coordinatorAttribution: createSessionControlSender({ sessionId: 'forged', identityFallback: false }, 'forged'),
+    },
+  });
+  assert.equal(prompt, 'ordinary user prompt');
+  assert.equal(harness.context.activeRequest?.coordinatorAttribution, undefined);
+});
+
+test('settings.set session scope persists cold model/reasoning entries without touching shared defaults', async () => {
+  const harness = createHarness({
+    modelSettings: { defaultModel: 'model-a', defaultProvider: 'mock', defaultThinkingLevel: 'medium' },
+  });
+  harness.deps.getSessionContext = () => undefined;
+  harness.deps.listAvailableModels = () => [{
+    id: 'model-b', name: 'Model B', provider: 'mock', reasoning: true, inputKinds: ['text'],
+  }];
+  const coldWrites: Array<{ sessionPath: string; updates: unknown }> = [];
+  harness.deps.applyColdSessionModelSettings = async (sessionPath, updates) => {
+    coldWrites.push({ sessionPath, updates });
+  };
+
+  const result = await handleBackendRequest(harness.deps, {
+    id: 'settings-session-cold',
+    method: 'settings.set',
+    params: {
+      sessionPath: '/repo/session.jsonl',
+      persistenceScope: 'session',
+      defaultModel: 'model-b',
+      defaultProvider: 'mock',
+      defaultThinkingLevel: 'high',
+    },
+  });
+
+  assert.deepEqual(result, {
+    defaultModel: 'model-b', defaultProvider: 'mock', defaultThinkingLevel: 'high',
+  });
+  assert.deepEqual(harness.writtenSettings, [], 'session scope must not write shared settings');
+  assert.deepEqual(coldWrites, [{
+    sessionPath: '/repo/session.jsonl',
+    updates: { model: { provider: 'mock', modelId: 'model-b' }, thinkingLevel: 'high' },
+  }]);
+});
+
+test('settings.set session scope requires a sessionPath and rejects invalid scope before writing', async () => {
+  const missingPathHarness = createHarness();
+  await assert.rejects(handleBackendRequest(missingPathHarness.deps, {
+    id: 'settings-session-no-path', method: 'settings.set',
+    params: { persistenceScope: 'session', defaultThinkingLevel: 'high' },
+  }), (error: unknown) => error instanceof BackendError && error.code === 'INVALID_PARAMS');
+  assert.deepEqual(missingPathHarness.writtenSettings, []);
+
+  const invalidScopeHarness = createHarness();
+  await assert.rejects(handleBackendRequest(invalidScopeHarness.deps, {
+    id: 'settings-invalid-scope', method: 'settings.set',
+    params: { sessionPath: '/repo/session.jsonl', persistenceScope: 'other', defaultThinkingLevel: 'high' },
+  }), (error: unknown) => error instanceof BackendError && error.code === 'INVALID_PARAMS');
+  assert.deepEqual(invalidScopeHarness.writtenSettings, []);
 });
 
 test('settings.set rolls back the global default when a cold per-session append fails', async () => {
@@ -3163,6 +3490,88 @@ test('message.send rejects changed intent for an existing operationId', async ()
   assert.equal(promptCalls, 1);
 });
 
+test('queued agent messages retain coordinator attribution without a pruning prepass', async () => {
+  const sender = createSessionControlSender({ sessionId: 'queued-source', identityFallback: true });
+  const steerCalls: string[] = [];
+  let promptCalls = 0;
+  const harness = createHarness({
+    sessionOverrides: {
+      isStreaming: true,
+      prompt: async () => { promptCalls += 1; },
+      steer: async (text: string) => { steerCalls.push(text); },
+    },
+  });
+  const result = await handleBackendRequest(harness.deps, {
+    id: 'queued-agent',
+    method: 'message.send',
+    params: {
+      sessionPath: harness.context.sessionPath,
+      text: 'queued body',
+      inputs: [],
+      localId: 'local:agent-session:queued-1',
+      coordinatorAttribution: sender,
+    },
+  }) as { queued?: boolean; requestId?: string };
+
+  assert.equal(result.queued, true);
+  assert.equal(result.requestId, undefined);
+  assert.equal(promptCalls, 0, 'queued delivery must not start a second idle pruning prepass');
+  assert.equal(steerCalls.length, 1);
+  assert.ok(steerCalls[0]?.includes(sender.replyReference));
+  assert.ok(steerCalls[0]?.endsWith('queued body'));
+  assert.deepEqual(harness.context.queuedCoordinatorAttributions, [sender]);
+});
+
+test('queued steering and follow-ups skip another pruning prepass for user and agent messages', async () => {
+  for (const origin of ['user', 'agent'] as const) {
+    for (const delivery of ['steer', 'follow-up'] as const) {
+      const agentMessage = origin === 'agent';
+      const isSteering = delivery === 'steer';
+      const sender = agentMessage
+        ? createSessionControlSender({ sessionId: `source-${delivery}`, identityFallback: true })
+        : undefined;
+      let promptCalls = 0;
+      const steerCalls: string[] = [];
+      const followUpCalls: string[] = [];
+      const harness = createHarness({
+        context: isSteering ? {} : {
+          activeRequest: { id: `active-${origin}`, messageIndex: 0, aborted: false },
+        },
+        sessionOverrides: {
+          isStreaming: isSteering,
+          prompt: async () => { promptCalls += 1; },
+          steer: async (text: string) => { steerCalls.push(text); },
+          followUp: async (text: string) => { followUpCalls.push(text); },
+        },
+      });
+      const localId = agentMessage ? `local:agent-session:${delivery}-${origin}` : `local-user-${delivery}`;
+      const result = await handleBackendRequest(harness.deps, {
+        id: `queued-${delivery}-${origin}`,
+        method: 'message.send',
+        params: {
+          sessionPath: harness.context.sessionPath,
+          text: 'queued body',
+          inputs: [],
+          localId,
+          ...(sender ? { coordinatorAttribution: sender } : {}),
+        },
+      }) as { queued?: boolean; requestId?: string };
+
+      assert.equal(result.queued, true, `${origin} ${delivery} should be queued`);
+      assert.equal(result.requestId, undefined, `${origin} ${delivery} should not start a new turn`);
+      assert.equal(promptCalls, 0, `${origin} ${delivery} must skip an additional pruning prepass`);
+      const queuedCalls = isSteering ? steerCalls : followUpCalls;
+      assert.equal(queuedCalls.length, 1);
+      assert.ok(queuedCalls[0]?.endsWith('queued body'));
+      if (sender) assert.ok(queuedCalls[0]?.includes(sender.replyReference));
+      else assert.equal(queuedCalls[0], 'queued body');
+      assert.equal(steerCalls.length, isSteering ? 1 : 0);
+      assert.equal(followUpCalls.length, isSteering ? 0 : 1);
+      assert.deepEqual(harness.context.queuedCoordinatorAttributions, [sender]);
+    }
+  }
+});
+
 test('queued message.send operations retain independent identities', async () => {
   const steerCalls: string[] = [];
   const harness = createHarness({
@@ -3187,6 +3596,8 @@ test('queued message.send operations retain independent identities', async () =>
   assert.equal((first as { operationId?: string }).operationId, 'op-queued-1');
   assert.equal((second as { operationId?: string }).operationId, 'op-queued-2');
   assert.deepEqual(harness.context.queuedOperationIds, ['op-queued-1', 'op-queued-2']);
+  assert.deepEqual(harness.context.queuedCoordinatorAttributions, [undefined, undefined],
+    'ordinary queued messages remain source-independent');
 
   await handleBackendRequest(harness.deps, {
     id: 'clear-queued', method: 'message.clearQueue', params: { sessionPath: harness.context.sessionPath },

@@ -1,6 +1,6 @@
 import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import { sessionMcpOverridePath } from '../../session-storage/settings/mcp-session-config';
 import * as path from 'node:path';
@@ -16,6 +16,8 @@ import { attachJsonlLineReader, JSONL_MAX_LINE_BYTES } from '../lib/rpc/jsonl.js
 import { toErrorMessage, parseJsonOrThrow } from '../../../lib/structured-logging/error-message';
 import { updateSettingsJsonObject } from '../../../lib/temporary-files/settings-json-update';
 import { boundTranscriptSnapshot } from '../../session-storage/transcripts/snapshot-boundary.js';
+import { projectSessionControlTranscript } from './session-control-transcript.js';
+import { WorkerRequestTimeoutError } from '../lib/rpc/worker-client.js';
 import {
   STORAGE_CUTOFF_AUTHORIZATION_ENV,
   STORAGE_CUTOFF_AUTHORIZATION_VALUE,
@@ -28,14 +30,38 @@ import {
   type LazyDetailRef,
 } from '../lib/rpc/message-contract.js';
 import type { ModelSettings } from '../../model-providers/catalog/model-contract.js';
-import type { ThinkingLevel } from '../../model-providers/catalog/thinking-level.js';
+import { isThinkingLevel, type ThinkingLevel } from '../../model-providers/catalog/thinking-level.js';
 import type {
+  AgentMessagePayload,
+  SessionCloseRequestedPayload,
+  SessionCloseResponseDeliveredPayload,
   SessionListChangedPayload,
   SessionOpenedPayload,
   SessionSummary,
   TranscriptPageDirection,
   TranscriptPagePayload,
 } from '../lib/rpc/session-events.js';
+import type { SessionCloseAcknowledgementParams } from '../lib/rpc/backend-rpc.js';
+import type {
+  HostLiveMembershipSnapshotParams,
+  LiveSessionClosingEntry,
+  LiveSessionMembershipEntry,
+} from '../lib/rpc/live-session-control.js';
+import {
+  SESSION_CONTROL_SETTINGS_REQUEST_EVENT,
+  validateSessionControlSettingsAcknowledgement,
+  validateSessionControlSettingsRequest,
+  type SessionControlExecutionSettings,
+  type SessionControlExecutionSettingsPatch,
+  type SessionControlSettingsAcknowledgement,
+} from '../lib/rpc/session-control-settings.js';
+import {
+  createSessionControlSender,
+  isSessionControlSender,
+  parseSessionReplyReference,
+  type SessionControlSender,
+  type SessionControlSenderIdentity,
+} from '../lib/rpc/session-control-attribution.js';
 import { PIE_BUILD_ID } from '../../../lib/build-identity.js';
 import { getDefaultAuthDir, ensureDir, isInsideGitWorkTree, migrateAuthFile } from '../../model-providers/authentication/auth.js';
 import {
@@ -54,13 +80,16 @@ import {
   validateMessageEdit,
   validateMessageInterrupt,
   validateOperationStatus,
+  validateSessionTitleGenerate,
+  validateSettingsSet,
+  validateSystemPromptTogglesSet,
   validateTruncateAfter,
   type MessageEditParams,
   type DetailFetchParams,
   type DetailSubscribeParams,
   type DetailUnsubscribeParams,
 } from '../lib/rpc/backend-rpc.js';
-import { backendSessionPathKey, resolveBackendSessionDir } from '../../session-storage/catalog/session-directory';
+import { backendSessionPathKey, resolveBackendSessionDir, statBackendSessionFile } from '../../session-storage/catalog/session-directory';
 import {
   loadAvailableModels,
   loadConfiguredModels,
@@ -131,9 +160,20 @@ import type { BackendDetailFence, LiveSubagentDetailAddress } from '../lib/rpc/s
 import { WorkerSupervisor } from '../lib/process-lifecycle/worker-supervisor.js';
 import { SessionOwnershipAuthority } from '../../session-storage/ownership/session-ownership-authority';
 import { WorkerRuntimeRouter } from './worker-runtime-router.js';
+import { deriveSessionNameFromText, NEW_SESSION_NAME } from '../../session-storage/metadata/session-name';
+import { readIndexedSessionMetadata } from '../../session-storage/metadata/session-metadata';
+import {
+  type LiveSessionTitleEntry,
+  LiveSessionTitleReservation,
+  LiveSessionTitles,
+  LiveTitleNamespaceUnavailableError,
+  normalizeSessionControlBaseTitle,
+} from './live-session-titles.js';
+
 import type {
   WorkerJsonObject,
   WorkerJsonValue,
+  WorkerSessionControlAction,
   WorkerSessionControlFrame,
 } from '../lib/rpc/worker-protocol.js';
 import type { WorkerSessionControlOutcome } from './worker-runtime-router.js';
@@ -148,6 +188,69 @@ const INTERRUPT_TRANSITION_WAIT_MS = 10_000;
 const AGENT_SESSION_CONTROL_MAX_LIST_ITEMS = 256;
 const AGENT_SESSION_CONTROL_MAX_RESULT_BYTES = 192 * 1024;
 const AGENT_SESSION_CONTROL_MAX_MESSAGE_BYTES = 64 * 1024;
+const LIVE_TITLE_NAMESPACE_RETRY_BASE_DELAY_MS = 100;
+const LIVE_TITLE_NAMESPACE_RETRY_MAX_DELAY_MS = 5_000;
+const LIVE_TITLE_NAMESPACE_RETRY_LIMIT = 5;
+
+/** Coordinator-side state for one outgoing host close request. `accepted`
+ *  resolves once the host has taken ownership of the close; `settled` resolves
+ *  exactly once with the typed terminal phase. Joiners share the same owner. */
+interface HostCloseRequestEntry {
+  sessionPath: string;
+  requestId: string;
+  delete: boolean;
+  acceptPromise: Promise<boolean>;
+  settlePromise: Promise<HostCloseOutcome>;
+  accept?: (ok: boolean) => void;
+  settle?: (outcome: HostCloseOutcome) => void;
+  /** Set once at terminal settlement so duplicate settle calls are no-ops. */
+  settled?: boolean;
+  /** Set when the host acknowledged the request; an accepted entry keeps its
+   *  admission fence and terminal-ack budget alive past a self-close return
+   *  until the terminal acknowledgement or its timeout arrives. */
+  accepted?: boolean;
+  handoffRequired?: boolean;
+  handoffReleased?: boolean;
+  handoffTimer?: ReturnType<typeof setTimeout>;
+  timers?: ReturnType<typeof setTimeout>[];
+}
+
+/** Terminal phases acknowledged by the host close bridge. `unknown` covers a
+ *  missing acknowledgement; it is never converted into success. */
+interface HostCloseOutcome {
+  phase: 'completed' | 'failed' | 'unknown';
+  error?: string;
+}
+
+interface HostSessionSettingsRequestEntry {
+  sessionPath: string;
+  action: 'capture' | 'apply';
+  resolve: (acknowledgement: SessionControlSettingsAcknowledgement | undefined) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+interface AgentSessionModelChoice {
+  provider: string;
+  id: string;
+}
+
+interface AgentSessionSettingsPatch {
+  model?: AgentSessionModelChoice;
+  reasoning?: ThinkingLevel;
+  autonomousMode?: boolean;
+  subagentProviderChoices?: Record<string, boolean>;
+  disabledSystemPromptEntries?: string[];
+}
+
+interface AgentSessionSettingsSnapshot extends SessionControlExecutionSettings {
+  model: AgentSessionModelChoice;
+  reasoning: ThinkingLevel;
+  disabledSystemPromptEntries: string[];
+}
+
+const HOST_SESSION_SETTINGS_ACK_TIMEOUT_MS = 20_000;
+const HOST_SESSION_SETTINGS_ERROR_MAX_CHARS = 1_000;
+const AGENT_SESSION_SETTINGS_MAX_DISABLED_PROMPTS = 256;
 
 function workerJson(value: unknown): WorkerJsonValue {
   const serialized = JSON.stringify(value);
@@ -511,6 +614,52 @@ export class BackendServer {
    * deferred off requests without allowing their completion to turn the
    * global trace back off. */
   private livePipelineTraceToggleGeneration = 0;
+  /** Outgoing coordinator→host close requests, keyed by the typed bridge
+   *  request ID. The host acknowledges through `session.closeAcknowledgement`;
+   *  every joiner receives its own self/foreign outcome. */
+  private readonly hostCloseRequests = new Map<string, HostCloseRequestEntry>();
+  /** Correlated coordinator→host settings capture/apply requests. A missing
+   * acknowledgement is unknown; mutations are never retried automatically. */
+  private readonly hostSessionSettingsRequests = new Map<string, HostSessionSettingsRequestEntry>();
+  private hostSessionSettingsRequestSequence = 0;
+  /** Closing-session admission fence, keyed by session path-identity. Present
+   *  exactly while one outstanding host-owned close request owns the path. */
+  private readonly closingSessionRequests = new Map<string, HostCloseRequestEntry>();
+  /** Bounded coordinator budgets for the typed host close bridge. */
+  private readonly hostCloseAcceptTimeoutMs: number;
+  private readonly hostCloseCompleteTimeoutMs: number;
+  private readonly hostCloseHandoffTimeoutMs: number;
+  /** Latest ordered host→coordinator live-membership snapshot (in memory
+   *  only; never a durable second list). Undefined until the first snapshot
+   *  arrives; undefined membership keeps legacy non-host embedders working. */
+  private hostMembershipSessions: {
+    revision: number;
+    sessions: Map<string, { entry: LiveSessionMembershipEntry }>;
+  } = { revision: 0, sessions: new Map() };
+  private hostMembershipClosing = new Map<string, LiveSessionClosingEntry>();
+  private hostMembershipRevision = 0;
+  private hostMembershipSeen = false;
+  /** Coordinator-owned unique live-title authority (agent session-control
+   *  §§1–2). Allocation and publication ownership; no coordinator JSONL write
+   *  while a worker owns a session's lease. */
+  private readonly liveSessionTitles = new LiveSessionTitles();
+  /** Initial namespace hydration from the first complete restored host
+   *  membership. The namespace stays unavailable (fail closed) until this
+   *  settles; transient failures get a finite, backoff-bounded retry budget. */
+  private titleNamespaceHydration?: Promise<void>;
+  private titleNamespaceRetryTimer?: ReturnType<typeof setTimeout>;
+  private titleNamespaceRetryAttempt = 0;
+  private titleAdmission?: Promise<void>;
+  private readonly pendingLiveTitlePaths = new Set<string>();
+  private readonly newCreatePublicationPaths = new Set<string>();
+  private readonly pendingOpenedTitleAdmissions = new Map<string, Promise<void>>();
+  /** Live+closing path union of the last snapshot applied after the namespace
+   *  became ready, keyed by the membership path key with the public path
+   *  spelling captured (a retired session no longer appears in later
+   *  snapshots). A session present in the previous set but absent from both
+   *  maps of a later complete snapshot is confirmed closed (failed closes
+   *  restore membership instead) and releases its assigned title. */
+  private authoritativeLiveTitlePaths = new Map<string, string>();
 
   constructor(options: {
     sdkPath: string;
@@ -529,6 +678,10 @@ export class BackendServer {
     sessionCatalog?: SessionCatalog;
     /** Canonical analytics descriptor from the extension host. */
     analyticsActivation?: AnalyticsBackendDescriptor;
+    /** Injected coordinator budgets for the typed host close bridge (tests). */
+    hostCloseAcceptTimeoutMs?: number;
+    hostCloseCompleteTimeoutMs?: number;
+    hostCloseHandoffTimeoutMs?: number;
   }) {
     this.sdkPath = options.sdkPath;
     this.startupCwd = options.cwd;
@@ -548,6 +701,9 @@ export class BackendServer {
       : undefined;
     this.hostPid = options.hostPid;
     this.lifetimeFd = options.lifetimeFd;
+    this.hostCloseAcceptTimeoutMs = options.hostCloseAcceptTimeoutMs ?? 15_000;
+    this.hostCloseCompleteTimeoutMs = options.hostCloseCompleteTimeoutMs ?? 120_000;
+    this.hostCloseHandoffTimeoutMs = options.hostCloseHandoffTimeoutMs ?? 15_000;
     this.workerEntryPath = options.workerEntryPath;
     this.coldBrowseHelperEntryPath = options.coldBrowseHelperEntryPath;
     this.initialContextEstimateEntryPath = options.initialContextEstimateEntryPath;
@@ -861,6 +1017,8 @@ export class BackendServer {
         emit: (event, payload) => this.emit(event, payload),
         emitDetail: (message) => this.emit('detail.stream', message as unknown as WorkerJsonObject),
         onSessionControl: (frame, source) => this.handleWorkerSessionControl(frame, source.sessionPath),
+        assertExecutionAdmissionOpen: (sessionPath) => this.assertSessionNotClosing(sessionPath),
+        assertSessionControlSendAdmissionOpen: (sessionPath) => this.assertSessionControlSendAdmissionOpen(sessionPath),
         onSessionReplaced: (sourcePath, destinationPath) => {
           if (this.viewedSessionPath && backendSessionPathKey(this.viewedSessionPath) === backendSessionPathKey(sourcePath)) {
             this.recordViewedSessionTransition(destinationPath, sourcePath);
@@ -2501,6 +2659,998 @@ export class BackendServer {
     return await this.withAnalyticsWriterAdmission(operation);
   }
 
+  /** Correlated coordinator→host execution-settings bridge. The request is
+   * registered before emit so an immediate host acknowledgement cannot race
+   * registration; a bounded missing response is explicitly unknown. */
+  private async requestHostSessionControlSettings(
+    sessionPath: string,
+    action: 'capture' | 'apply',
+    settings?: SessionControlExecutionSettingsPatch,
+  ): Promise<SessionControlSettingsAcknowledgement | undefined> {
+    const requestId = `agent-settings:${++this.hostSessionSettingsRequestSequence}:${randomUUID()}`;
+    const request = validateSessionControlSettingsRequest({
+      requestId,
+      sessionPath,
+      action,
+      ...(settings ? { settings } : {}),
+    });
+    let resolve!: HostSessionSettingsRequestEntry['resolve'];
+    const result = new Promise<SessionControlSettingsAcknowledgement | undefined>((settle) => {
+      resolve = settle;
+    });
+    const entry: HostSessionSettingsRequestEntry = {
+      sessionPath,
+      action,
+      resolve,
+      timer: setTimeout(() => {
+        if (this.hostSessionSettingsRequests.get(requestId) !== entry) return;
+        this.hostSessionSettingsRequests.delete(requestId);
+        entry.resolve(undefined);
+      }, HOST_SESSION_SETTINGS_ACK_TIMEOUT_MS),
+    };
+    this.hostSessionSettingsRequests.set(requestId, entry);
+    try {
+      this.emit(SESSION_CONTROL_SETTINGS_REQUEST_EVENT, request);
+    } catch (error) {
+      clearTimeout(entry.timer);
+      this.hostSessionSettingsRequests.delete(requestId);
+      throw error;
+    }
+    return await result;
+  }
+
+  private async acknowledgeHostSessionControlSettings(
+    acknowledgement: SessionControlSettingsAcknowledgement,
+  ): Promise<{ ok: boolean; acknowledged: boolean }> {
+    const validated = validateSessionControlSettingsAcknowledgement(acknowledgement);
+    const entry = this.hostSessionSettingsRequests.get(validated.requestId);
+    if (!entry
+      || entry.action !== validated.action
+      || backendSessionPathKey(entry.sessionPath) !== backendSessionPathKey(validated.sessionPath)) {
+      return { ok: true, acknowledged: false };
+    }
+    this.hostSessionSettingsRequests.delete(validated.requestId);
+    clearTimeout(entry.timer);
+    entry.resolve(validated);
+    return { ok: true, acknowledged: true };
+  }
+
+  /** Typed coordinator→host close bridge. Emits `session.close.requested` for
+   *  the host's reducer-owned close lifecycle and waits for the typed
+   *  `session.closeAcknowledgement` RPC. The request marks whether the target
+   *  is the requesting worker's own session: foreign closes start stopping
+   *  after host acceptance, while self-close waits until its result is sent
+   *  to the caller. A bounded handoff fallback keeps self-close cleanup alive
+   *  if the source worker disappears. Repeated close joins the owning request
+   *  under the same path admission fence. */
+  private async requestHostSessionClose(
+    sessionPath: string,
+    requestId: string,
+    deleteRequested: boolean,
+    selfRequester: boolean,
+  ): Promise<WorkerSessionControlOutcome> {
+    const fencingKey = backendSessionPathKey(sessionPath);
+    const existing = this.closingSessionRequests.get(fencingKey);
+    if (existing) {
+      if (!existing.settled && existing.delete !== deleteRequested) {
+        throw new BackendError(
+          'OPERATION_INTENT_MISMATCH',
+          'The session already has an owning close request with a different deletion intent.',
+        );
+      }
+      return await this.closeOutcomeForCaller(existing, selfRequester);
+    }
+    const entry: HostCloseRequestEntry = {
+      sessionPath,
+      requestId,
+      delete: deleteRequested,
+      acceptPromise: undefined as unknown as Promise<boolean>,
+      settlePromise: undefined as unknown as Promise<HostCloseOutcome>,
+    };
+    entry.acceptPromise = new Promise<boolean>((resolve) => {
+      entry.accept = resolve;
+    });
+    entry.settlePromise = new Promise<HostCloseOutcome>((resolve) => {
+      entry.settle = resolve;
+    });
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    if (this.hostCloseAcceptTimeoutMs > 0) {
+      timers.push(setTimeout(() => entry.accept?.(false), this.hostCloseAcceptTimeoutMs));
+    }
+    if (this.hostCloseCompleteTimeoutMs > 0) {
+      timers.push(setTimeout(() => {
+        if (entry.handoffRequired && !entry.handoffReleased) this.releaseHostCloseHandoff(entry);
+        this.settleHostCloseRequest(
+          entry,
+          { phase: 'unknown', error: 'The host close acknowledgement did not arrive within the request budget.' },
+        );
+      }, this.hostCloseCompleteTimeoutMs));
+    }
+    entry.timers = timers;
+    // Invalidate sends that captured this path before configuration began.
+    // This is an admission-generation fence only; it does not interrupt an
+    // already-running SDK operation or alter ordinary Stop policy.
+    this.workerRuntimeRouter?.invalidatePendingRuntimeOperations?.(sessionPath);
+    // Register the admission fence BEFORE the host is told about the close:
+    // the host processes the request synchronously (UI close admission +
+    // membership sync + ack effects), so every racing admission on this
+    // coordinator must already be fenced before the request crosses the
+    // bridge.
+    this.hostCloseRequests.set(requestId, entry);
+    this.closingSessionRequests.set(fencingKey, entry);
+    this.emit('session.close.requested', {
+      sessionPath,
+      requestId,
+      delete: deleteRequested,
+      selfHandoffRequired: selfRequester,
+    } satisfies SessionCloseRequestedPayload);
+    try {
+      return await this.closeOutcomeForCaller(entry, selfRequester);
+    } finally {
+      if (entry.settled) {
+        for (const timer of timers) clearTimeout(timer);
+      } else if (entry.accepted !== true) {
+        // The request ended without the host ever acknowledging it: release
+        // the fence so the session is not admission-blocked forever.
+        for (const timer of timers) clearTimeout(timer);
+        this.settleHostCloseRequest(entry, {
+          phase: 'unknown',
+          error: 'The host close request ended without a terminal acknowledgement.',
+        });
+      }
+      // Accepted but not yet terminal: the fence and the terminal-ack budget
+      // stay active so host cleanup keeps fencing new admission and a late
+      // acknowledgement still settles exactly once.
+    }
+  }
+
+  /** Close outcome for one caller, preserving the self/foreign rule: self
+   *  reports `closeRequested` and never claims completion; cross-session
+   *  close reports confirmed completion or an explicit failure/unknown. */
+  private closeRequestWorkerResult(
+    entry: HostCloseRequestEntry,
+    selfRequester: boolean,
+    accepted: boolean,
+    settled: HostCloseOutcome | undefined,
+  ): WorkerSessionControlOutcome {
+    if (selfRequester) {
+      if (!accepted) {
+        return { result: workerJson({
+          sessionPath: entry.sessionPath,
+          closed: false,
+          closeRequested: false,
+          unknown: true,
+          deletionRequested: entry.delete,
+        }) };
+      }
+      // Never claim the session has already closed: the host retains shutdown
+      // and failure handling after this acknowledgement.
+      return { result: workerJson({
+        sessionPath: entry.sessionPath,
+        closed: false,
+        closeRequested: true,
+        deletionRequested: entry.delete,
+      }) };
+    }
+    const outcome = settled ?? { phase: 'unknown' as const };
+    if (outcome.phase === 'failed') {
+      throw new BackendError(
+        'SESSION_CLOSE_FAILED',
+        outcome.error ?? 'The host-reported session close failed.',
+      );
+    }
+    return { result: workerJson({
+      sessionPath: entry.sessionPath,
+      closed: outcome.phase === 'completed',
+      ...(outcome.phase === 'completed' ? {} : { unknown: true }),
+      deletionRequested: entry.delete,
+    }) };
+  }
+
+  private async closeOutcomeForCaller(
+    entry: HostCloseRequestEntry,
+    selfRequester: boolean,
+  ): Promise<WorkerSessionControlOutcome> {
+    const accepted = await entry.acceptPromise;
+    if (selfRequester) {
+      entry.handoffRequired = true;
+      const outcome = this.closeRequestWorkerResult(entry, true, accepted, undefined);
+      if (!entry.settled && !entry.handoffReleased && this.hostCloseHandoffTimeoutMs > 0 && !entry.handoffTimer) {
+        entry.handoffTimer = setTimeout(
+          () => this.releaseHostCloseHandoff(entry),
+          this.hostCloseHandoffTimeoutMs,
+        );
+      }
+      return {
+        ...outcome,
+        afterResponse: () => this.releaseHostCloseHandoff(entry),
+      };
+    }
+    const settled = await entry.settlePromise;
+    return this.closeRequestWorkerResult(entry, false, accepted, settled);
+  }
+
+  /** Runs only after the coordinator has handed a self-close result back to
+   *  the worker, or after the bounded source-loss fallback expires. */
+  private releaseHostCloseHandoff(entry: HostCloseRequestEntry): void {
+    if (entry.handoffReleased) return;
+    if (entry.handoffTimer) {
+      clearTimeout(entry.handoffTimer);
+      entry.handoffTimer = undefined;
+    }
+    try {
+      this.emit('session.close.responseDelivered', {
+        sessionPath: entry.sessionPath,
+        requestId: entry.requestId,
+      } satisfies SessionCloseResponseDeliveredPayload);
+      entry.handoffReleased = true;
+    } catch (error) {
+      backendWarn('backend-session', 'close.responseHandoff.failed', {
+        requestId: entry.requestId,
+        error: toErrorMessage(error),
+      });
+    }
+  }
+
+  /** Resolve exactly one close entry and release its admission fence. Late
+   *  joiners still holding the resolved promises observe the same outcome. */
+  private settleHostCloseRequest(entry: HostCloseRequestEntry, outcome: HostCloseOutcome): void {
+    if (entry.settled) return;
+    entry.settled = true;
+    for (const timer of entry.timers ?? []) clearTimeout(timer);
+    entry.timers = [];
+    if (entry.handoffTimer && (entry.handoffReleased || outcome.phase !== 'unknown')) {
+      clearTimeout(entry.handoffTimer);
+      entry.handoffTimer = undefined;
+    }
+    const fencingKey = backendSessionPathKey(entry.sessionPath);
+    if (this.closingSessionRequests.get(fencingKey) === entry) {
+      this.closingSessionRequests.delete(fencingKey);
+    }
+    if (this.hostCloseRequests.get(entry.requestId) === entry) {
+      this.hostCloseRequests.delete(entry.requestId);
+    }
+    entry.settle?.(outcome);
+  }
+
+  /** Typed host close bridge acknowledgement RPC. Unknown or late request
+   *  identities are tolerated (`acknowledged: false`), never treated as
+   *  success for a different request. */
+  private acknowledgeHostCloseRequest(
+    params: SessionCloseAcknowledgementParams,
+  ): Promise<{ ok: boolean; acknowledged: boolean }> {
+    const entry = this.hostCloseRequests.get(params.requestId);
+    if (!entry || backendSessionPathKey(entry.sessionPath) !== backendSessionPathKey(params.sessionPath)) {
+      return Promise.resolve({ ok: true, acknowledged: false });
+    }
+    if (params.phase === 'accepted') {
+      entry.accepted = true;
+      entry.accept?.(true);
+    } else {
+      this.settleHostCloseRequest(entry, params.phase === 'unknown'
+        ? { phase: 'unknown' }
+        : { phase: params.phase, ...(params.error ? { error: params.error } : {}) });
+    }
+    return Promise.resolve({ ok: true, acknowledged: true });
+  }
+
+  /** Closing-session admission fence: a racing send/continue cannot promote,
+   *  start, or restart a session with an outstanding host-owned close command
+   *  (coordinator-requested or host-membership reported). */
+  private assertSessionNotClosing(sessionPath: string): void {
+    const key = backendSessionPathKey(sessionPath);
+    if (this.closingSessionRequests.has(key) || this.hostMembershipClosing.has(key)) {
+      throw new BackendError(
+        'SESSION_CLOSING',
+        'The target session is closing; new execution cannot be admitted for it.',
+      );
+    }
+  }
+
+  /** Session-control sends need a fresh live-membership check after their
+   *  asynchronous settings/configuration work. Reuse the same live-create
+   *  publication-gap authority as target resolution; ordinary UI sends keep
+   *  their existing route admission contract. */
+  private assertSessionControlSendAdmissionOpen(sessionPath: string): void {
+    this.assertSessionNotClosing(sessionPath);
+    this.resolveLiveSessionPath(sessionPath, sessionPath, 'message');
+  }
+
+  /** Ingest one ordered host live-membership snapshot. Application is
+   *  synchronous so the coordinator observes snapshots in the host's dispatch
+   *  order; stale revisions are dropped. Membership is authoritative live
+   *  state once seen and is never persisted. */
+  private applyHostLiveMembership(snapshot: HostLiveMembershipSnapshotParams): void {
+    if (this.hostMembershipRevision >= snapshot.revision) return;
+    const sessions = new Map<string, { entry: LiveSessionMembershipEntry }>();
+    for (const entry of snapshot.sessions) {
+      const key = backendSessionPathKey(entry.path);
+      if (sessions.has(key)) continue;
+      sessions.set(key, { entry });
+    }
+    const closing = new Map<string, LiveSessionClosingEntry>();
+    for (const entry of snapshot.closing) {
+      closing.set(backendSessionPathKey(entry.path), entry);
+    }
+    const previousSessions = this.hostMembershipSessions.sessions;
+    const previousClosing = this.hostMembershipClosing;
+    // Host-originated closes may not have an outgoing coordinator close
+    // request to invalidate old asynchronous sends. Fence live paths as they
+    // leave membership, and newly reported close reservations before replacing
+    // the authoritative projection. Repeated snapshots do not keep bumping a
+    // path that is already absent/closing.
+    for (const [key, { entry }] of previousSessions) {
+      if (!sessions.has(key) && !closing.has(key)) {
+        this.workerRuntimeRouter?.invalidatePendingRuntimeOperations?.(entry.path);
+      }
+    }
+    for (const [key, entry] of closing) {
+      if (!previousClosing.has(key)) {
+        this.workerRuntimeRouter?.invalidatePendingRuntimeOperations?.(entry.path);
+      }
+    }
+    this.hostMembershipSessions = { revision: snapshot.revision, sessions };
+    this.hostMembershipClosing = closing;
+    this.hostMembershipRevision = snapshot.revision;
+    this.hostMembershipSeen = true;
+    for (const key of sessions.keys()) this.newCreatePublicationPaths.delete(key);
+    if (!this.liveSessionTitles.ready && !this.titleNamespaceHydration) {
+      // A new authoritative snapshot starts a fresh finite retry budget, even
+      // if the prior snapshot exhausted all of its transient-failure attempts.
+      this.clearLiveTitleNamespaceRetry();
+    }
+    this.syncLiveSessionTitles();
+  }
+
+  /** Cancel the process-local bootstrap retry timer and discard its backoff. */
+  private clearLiveTitleNamespaceRetry(): void {
+    if (this.titleNamespaceRetryTimer) clearTimeout(this.titleNamespaceRetryTimer);
+    this.titleNamespaceRetryTimer = undefined;
+    this.titleNamespaceRetryAttempt = 0;
+  }
+
+  /** Retry only the initial namespace bootstrap: never queue a waiter or make
+   *  unrelated naming/admission work depend on this timer. An unchanged
+   *  membership gets a finite exponential-backoff budget; a later snapshot
+   *  starts a fresh bootstrap attempt in the same backend generation. */
+  private scheduleLiveTitleNamespaceRetry(generation: number): void {
+    if (this.disposed || generation !== this.backendGeneration || !this.hostMembershipSeen
+      || this.liveSessionTitles.ready || this.titleNamespaceRetryTimer
+      || this.titleNamespaceRetryAttempt >= LIVE_TITLE_NAMESPACE_RETRY_LIMIT) return;
+    const delay = Math.min(
+      LIVE_TITLE_NAMESPACE_RETRY_BASE_DELAY_MS * (2 ** this.titleNamespaceRetryAttempt),
+      LIVE_TITLE_NAMESPACE_RETRY_MAX_DELAY_MS,
+    );
+    this.titleNamespaceRetryAttempt += 1;
+    const timer = setTimeout(() => {
+      if (this.titleNamespaceRetryTimer !== timer) return;
+      this.titleNamespaceRetryTimer = undefined;
+      if (this.disposed || generation !== this.backendGeneration || this.liveSessionTitles.ready) return;
+      this.syncLiveSessionTitles();
+    }, delay);
+    timer.unref?.();
+    this.titleNamespaceRetryTimer = timer;
+  }
+
+  /** Establish or refresh the unique live-title namespace from the latest
+   *  applied membership snapshot. Initialization reads the resolved durable
+   *  identity (sessionId, durable header timestamp, existing assigned title)
+   *  directly from each live member's own transcript — never the archive
+   *  catalog — and fails closed until the full reconciliation settles. A
+   *  failed close restores membership instead of releasing; only a path
+   *  present in the previous snapshot yet absent from both live and closing
+   *  maps confirms its close and frees its assignment. */
+  private syncLiveSessionTitles(): void {
+    if (this.disposed) return;
+    if (!this.liveSessionTitles.ready) {
+      // A newer complete membership is a fresh chance to hydrate and must not
+      // wait out a retry scheduled for the prior snapshot.
+      if (this.titleNamespaceRetryTimer) this.clearLiveTitleNamespaceRetry();
+      if (this.titleNamespaceHydration) return;
+      const revision = this.hostMembershipRevision;
+      const generation = this.backendGeneration;
+      const hydration = this.initializeLiveTitleNamespace(generation)
+        .catch((error) => {
+          backendWarn('backend-live-titles', 'live title namespace hydration failed', {
+            error: toErrorMessage(error),
+          });
+        })
+        .finally(() => {
+          if (this.titleNamespaceHydration !== hydration) return;
+          this.titleNamespaceHydration = undefined;
+          if (this.disposed || generation !== this.backendGeneration) return;
+          if (this.liveSessionTitles.ready) {
+            this.clearLiveTitleNamespaceRetry();
+            return;
+          }
+          // A newer snapshot may have landed during header reads or a fenced
+          // write. Retry immediately from that complete latest membership.
+          if (this.hostMembershipRevision !== revision) {
+            this.titleNamespaceRetryAttempt = 0;
+            this.syncLiveSessionTitles();
+            return;
+          }
+          this.scheduleLiveTitleNamespaceRetry(generation);
+        });
+      this.titleNamespaceHydration = hydration;
+      return;
+    }
+    this.clearLiveTitleNamespaceRetry();
+    this.freeRetiredLiveSessionTitles();
+    for (const [key, { entry }] of this.hostMembershipSessions.sessions) {
+      if (!this.liveSessionTitles.assigned(entry.path)) this.pendingLiveTitlePaths.add(key);
+    }
+    if (this.titleAdmission) return;
+    const admission = this.admitNewLiveSessionTitles().catch((error) => {
+      backendWarn('backend-live-titles', 'live title admission refresh failed', {
+        error: toErrorMessage(error),
+      });
+    }).finally(() => {
+      if (this.titleAdmission === admission) this.titleAdmission = undefined;
+    });
+    this.titleAdmission = admission;
+  }
+
+  /** Read the resolved durable title facts for one live member from its own
+   *  transcript header and session_info entries: never the archive catalog nor
+   *  the tool-list page. Bounded re-reads tolerate an concurrently appending
+   *  hot worker; a persistently unstable read fails the whole hydration so the
+   *  namespace stays closed rather than partially claimed. */
+  private async readLiveSessionTitleEntry(
+    sessionPath: string,
+  ): Promise<LiveSessionTitleEntry> {
+    let fingerprint = await statBackendSessionFile(sessionPath);
+    if (!fingerprint) {
+      throw new BackendError('SESSION_NOT_FOUND', `A live session's transcript is unreadable: ${sessionPath}`);
+    }
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const read = await readIndexedSessionMetadata(fingerprint);
+      if (read.status === 'ok') {
+        const identity = resolveSessionIdentity(sessionPath);
+        return {
+          sessionPath,
+          sessionId: identity.sessionId,
+          ...(read.metadata.summary.headerTimestamp ? { headerTimestamp: read.metadata.summary.headerTimestamp } : {}),
+          ...(read.metadata.summary.isAssignedTitle === true && read.metadata.summary.name
+            ? { title: read.metadata.summary.name }
+            : {}),
+        };
+      }
+      if (read.status === 'invalid') {
+        throw new Error(`A live session's transcript is invalid: ${sessionPath}`);
+      }
+      const refreshed = await statBackendSessionFile(sessionPath);
+      if (!refreshed) {
+        throw new BackendError('SESSION_NOT_FOUND', `A live session's transcript is unreadable: ${sessionPath}`);
+      }
+      fingerprint = refreshed;
+    }
+    throw new Error(`A live session's transcript kept changing while its title facts were read: ${sessionPath}`);
+  }
+
+  /** Persist one assigned title through the owning writer: the hot worker
+   *  where its lease is live, otherwise the lease-fenced cold store. The
+   *  coordinator never writes session JSONL under a worker lease. */
+  private async persistAssignedSessionTitle(sessionPath: string, title: string, requestId: string, replaceExpectedTitle?: string): Promise<void> {
+    const router = this.workerRuntimeRouter;
+    if (router?.hasHotOwner(sessionPath)) {
+      const outcome = await router.assignSessionTitle(sessionPath, title, requestId, replaceExpectedTitle);
+      if (outcome.skipped === 'explicit-name' || outcome.assigned !== true) {
+        throw new BackendError(
+          'SESSION_OWNERSHIP_CONFLICT',
+          `The session already carries an explicit assigned title while live: ${sessionPath}`,
+        );
+      }
+      return;
+    }
+    await this.persistAssignedColdSessionTitle(sessionPath, title, replaceExpectedTitle);
+  }
+
+  /** Lease-fenced cold-store title persistence for sessions without a hot
+   *  runtime owner (newly created or restored cold members). */
+  private async persistAssignedColdSessionTitle(sessionPath: string, title: string, replaceExpectedTitle?: string): Promise<void> {
+    const store = this.initializeColdSessionStore();
+    await this.runColdSessionMutation(sessionPath, async () => {
+      const retained = this.coldSessionManagerHandles.get(this.coldManagerKey(sessionPath));
+      const durableName = retained
+        ? retained.handle.manager.getSessionName()
+        : this.sdk.SessionManager.open(sessionPath).getSessionName();
+      if (replaceExpectedTitle !== undefined
+        ? durableName?.trim() !== replaceExpectedTitle
+        : Boolean(durableName?.trim())) {
+        throw new BackendError('SESSION_OWNERSHIP_CONFLICT', 'An intervening assigned title must not be overwritten.');
+      }
+      if (retained) store.setHandleSessionTitle(retained.handle, title);
+      else store.setSessionTitle(sessionPath, title);
+    });
+  }
+
+  /** Reserve, durably persist on the owning owner, then confirm one unique
+   *  assigned title. Reservation conflicts with a meanwhile-restored durable
+   *  name release and retry under the resolved namespace; persisted titles are
+   *  appended by the owner and a later append re-records the retry, so no name
+   *  is ever claimed twice. Failures leave the session provisional and keep
+   *  the authority's namespace intact. */
+  private async assignCreatedSessionTitle(
+    sessionPath: string,
+    baseTitle: string,
+    _requestId: string,
+  ): Promise<{ assigned: boolean; title?: string; error?: string }> {
+    if (!this.liveSessionTitles.ready) {
+      throw new BackendError(
+        'LIVE_TITLE_NAMESPACE_UNAVAILABLE',
+        'The live session title namespace is not ready; creation with a title fails closed.',
+      );
+    }
+    let normalized: string;
+    try {
+      normalized = normalizeSessionControlBaseTitle(baseTitle);
+    } catch (error) {
+      return { assigned: false, error: `LIVE_TITLE_BASE_INVALID: ${toErrorMessage(error)}` };
+    }
+    const identity = resolveSessionIdentity(sessionPath);
+    const existing = this.liveSessionTitles.assigned(sessionPath);
+    if (existing) return { assigned: true, title: existing };
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      let reservation: LiveSessionTitleReservation;
+      try {
+        reservation = this.liveSessionTitles.reserve(normalized, {
+          sessionPath,
+          sessionId: identity.sessionId,
+        });
+      } catch (error) {
+        if (error instanceof LiveTitleNamespaceUnavailableError) {
+          throw new BackendError(
+            'LIVE_TITLE_NAMESPACE_UNAVAILABLE',
+            'The live session title namespace is not ready; creation with a title fails closed.',
+          );
+        }
+        return { assigned: false, error: `LIVE_TITLE_RESERVATION_FAILED: ${toErrorMessage(error)}` };
+      }
+      try {
+        await this.persistAssignedColdSessionTitle(sessionPath, reservation.title);
+        this.liveSessionTitles.confirm(reservation);
+        return { assigned: true, title: reservation.title };
+      } catch (error) {
+        try { this.liveSessionTitles.release(reservation); } catch { /* stale reservation already freed */ }
+        const conflict = /conflicts/.test(toErrorMessage(error));
+        if (!conflict || attempt === 2) {
+          return { assigned: false, error: `LIVE_TITLE_ASSIGNMENT_FAILED: ${toErrorMessage(error)}` };
+        }
+      }
+    }
+    return { assigned: false, error: 'LIVE_TITLE_ASSIGNMENT_FAILED: retries exhausted.' };
+  }
+
+  /** Admit a duplicated or reopened durable title before its opened event
+   *  reaches the host. Unlike background refresh, failures block publication. */
+  private async admitOpenedSessionTitle(sessionPath: string, allowStartupRestore = false): Promise<void> {
+    const key = this.coldManagerKey(sessionPath);
+    if (!this.liveSessionTitles.ready) {
+      // Startup restoration may open its existing tab while the complete
+      // snapshot is still hydrating. This is not a new admission; the
+      // namespace remains unavailable until that hydration succeeds.
+      if (allowStartupRestore && this.hostMembershipSessions.sessions.has(key)) return;
+      throw new LiveTitleNamespaceUnavailableError();
+    }
+    let admission = this.pendingOpenedTitleAdmissions.get(key);
+    if (!admission) {
+      admission = (async () => {
+        if (!this.liveSessionTitles.assigned(sessionPath)) {
+          const entry = await this.readLiveSessionTitleEntry(sessionPath);
+          await this.liveSessionTitles.admit([entry],
+            (path, title, expected) => this.persistAssignedSessionTitle(path, title, 'live-title-open', expected));
+        }
+      })();
+      this.pendingOpenedTitleAdmissions.set(key, admission);
+      void admission.finally(() => {
+        if (this.pendingOpenedTitleAdmissions.get(key) === admission) this.pendingOpenedTitleAdmissions.delete(key);
+      }).catch(() => undefined);
+    }
+    await admission;
+  }
+
+  /** Initial namespace establishment from the first complete restored
+   *  membership snapshot. */
+  private async initializeLiveTitleNamespace(generation: number): Promise<void> {
+    const snapshot = this.hostMembershipSessions;
+    const entries: LiveSessionTitleEntry[] = [];
+    for (const { entry } of snapshot.sessions.values()) {
+      if (this.disposed || generation !== this.backendGeneration) return;
+      entries.push(await this.readLiveSessionTitleEntry(entry.path));
+    }
+    if (this.disposed || generation !== this.backendGeneration || this.hostMembershipSessions !== snapshot) return;
+    await this.liveSessionTitles.reconcile(
+      entries,
+      (sessionPath, title, expected) => this.persistAssignedSessionTitle(sessionPath, title, 'live-title-hydration', expected),
+      () => !this.disposed && generation === this.backendGeneration && this.hostMembershipSessions === snapshot,
+    );
+    if (this.disposed || generation !== this.backendGeneration || this.hostMembershipSessions !== snapshot) return;
+    // Seed the removal basis exactly once per namespace generation.
+    this.authoritativeLiveTitlePaths = new Map([
+      ...[...snapshot.sessions.entries()].map(([key, { entry }]) => [key, entry.path] as [string, string]),
+      ...[...this.hostMembershipClosing.entries()].map(([key, entry]) => [key, entry.path] as [string, string]),
+    ]);
+  }
+
+  /** Confirmed-close release: previous live members that disappeared from both
+   *  live and closing maps freed their assigned names (identity is not
+   *  preserved; a reopen reclaims or re-suffixes below). Paths retained by an
+   *  in-flight creation (publication gap) are never present here. */
+  private freeRetiredLiveSessionTitles(): void {
+    for (const [key, publicPath] of this.authoritativeLiveTitlePaths) {
+      if (this.hostMembershipSessions.sessions.has(key)) continue;
+      if (this.hostMembershipClosing.has(key)) continue;
+      this.liveSessionTitles.retireLive(publicPath);
+      this.newCreatePublicationPaths.delete(key);
+      this.pendingLiveTitlePaths.delete(key);
+      this.authoritativeLiveTitlePaths.delete(key);
+    }
+    for (const [key, { entry }] of this.hostMembershipSessions.sessions) this.authoritativeLiveTitlePaths.set(key, entry.path);
+    for (const [key, entry] of this.hostMembershipClosing) this.authoritativeLiveTitlePaths.set(key, entry.path);
+  }
+
+  /** Publish durable assigned titles for newly admitted live members (a
+   *  reopened history session, a duplicate tab, or a just-created session
+   *  whose host snapshot was in flight during its assignment). Only entries
+   *  without a current assignment are admitted. */
+  private async admitNewLiveSessionTitles(): Promise<void> {
+    // Refresh each path through the same per-path admission gate as an open
+    // operation. A host snapshot that overtakes duplicate/reopen publication
+    // joins its in-flight persistence rather than allocating a second suffix.
+    let changed: boolean;
+    do {
+      const snapshot = this.hostMembershipSessions;
+      for (const [key, { entry }] of snapshot.sessions) {
+        if (snapshot !== this.hostMembershipSessions) break;
+        if (!this.liveSessionTitles.assigned(entry.path)) {
+          await this.admitOpenedSessionTitle(entry.path);
+        }
+        if (!this.hostMembershipSessions.sessions.has(key)
+          && !this.hostMembershipClosing.has(key)) {
+          this.liveSessionTitles.retireLive(entry.path);
+        }
+        this.pendingLiveTitlePaths.delete(key);
+      }
+      changed = snapshot !== this.hostMembershipSessions;
+      if (changed) this.freeRetiredLiveSessionTitles();
+    } while (changed);
+  }
+
+  /** Finalize one generated candidate through the title authority before it
+   *  is visible: gate on the namespace and any already-assigned title, reserve
+   *  the candidate, persist it on the owning hot worker, then confirm. A
+   *  fallback finalization applies the bounded first-prompt snippet when the
+   *  generation itself failed, so both endings finalize ownership-safe before
+   *  the response (or list) exposes a name. */
+  private async finalizeGeneratedLiveSessionTitle(
+    sessionPath: string,
+    prompt: string,
+    generation: { generated?: unknown; name?: unknown; reason?: unknown },
+    requestId: string,
+  ): Promise<unknown> {
+    const generated = generation.generated === true && typeof generation.name === 'string' && generation.name.trim();
+    // Startup's one-time namespace hydration is required for allocation;
+    // this does not wait for any unrelated naming model or archive scan.
+    if (!this.liveSessionTitles.ready) await this.titleNamespaceHydration;
+    try {
+      const result = generated
+        ? await this.finalizeCandidateSessionTitle(sessionPath, generation.name as string, requestId)
+        : await this.finalizeFallbackSessionTitle(sessionPath, prompt, requestId);
+      const base = generation && typeof generation === 'object' ? { ...generation } : {};
+      const assignedTitle = result.assigned && typeof result.title === 'string' ? result.title : undefined;
+      return assignedTitle ? { ...base, generated: true, name: assignedTitle } : base;
+    } catch (error) {
+      // Namespace/owner failures fail closed to the provisional snippet; the
+      // attempt is consumed rather than retried implicitly.
+      backendWarn('backend-live-titles', 'live title finalization failed', {
+        sessionPath,
+        error: toErrorMessage(error),
+      });
+      return generated
+        ? { generated: false, reason: 'assignment-failed' }
+        : { ...generation };
+    }
+  }
+
+  private async finalizeCandidateSessionTitle(
+    sessionPath: string,
+    candidate: string,
+    requestId: string,
+  ): Promise<{ assigned: boolean; title?: string }> {
+    if (!this.liveSessionTitles.ready) return { assigned: false };
+    // A durably assigned title always wins and must never be replaced by
+    // generation: the candidate is dropped when the session is already named.
+    if (this.liveSessionTitles.assigned(sessionPath)) return { assigned: false };
+    const identity = resolveSessionIdentity(sessionPath);
+    const reservation = this.liveSessionTitles.reserve(candidate, {
+      sessionPath,
+      sessionId: identity.sessionId,
+    });
+    try {
+      await this.persistAssignedSessionTitle(sessionPath, reservation.title, `${requestId}:title`);
+      const key = this.coldManagerKey(sessionPath);
+      if (this.hostMembershipSeen
+        && (!this.hostMembershipSessions.sessions.has(key) || this.hostMembershipClosing.has(key))) {
+        throw new BackendError('SESSION_CLOSING', 'Title assignment finished after the session stopped being live.');
+      }
+      this.liveSessionTitles.confirm(reservation);
+      return { assigned: true, title: reservation.title };
+    } catch (error) {
+      try { this.liveSessionTitles.release(reservation); } catch { /* already freed */ }
+      throw error;
+    }
+  }
+
+  private async finalizeFallbackSessionTitle(
+    sessionPath: string,
+    prompt: string,
+    requestId: string,
+  ): Promise<{ assigned: boolean; title?: string }> {
+    if (!this.liveSessionTitles.ready) return { assigned: false };
+    if (this.liveSessionTitles.assigned(sessionPath)) return { assigned: false };
+    const fallback = deriveSessionNameFromText(prompt).name;
+    if (!fallback || fallback === NEW_SESSION_NAME) return { assigned: false };
+    try {
+      return await this.finalizeCandidateSessionTitle(sessionPath, fallback, requestId);
+    } catch (error) {
+      backendWarn('backend-live-titles', 'fallback title finalization failed', {
+        sessionPath,
+        error: toErrorMessage(error),
+      });
+      return { assigned: false };
+    }
+  }
+
+  /** Host-owned live list projection, including emitted newly created tabs
+   *  during the interval before the next host membership snapshot. Closed
+   *  sessions and the durable catalog are never the source. */
+  private listLiveSessions(): WorkerJsonValue {
+    const now = Date.now();
+    const assignedTitles = this.liveSessionTitles;
+    const projection = (entries: Iterable<LiveSessionMembershipEntry>) => {
+      const allEntries = [...entries];
+      const rows = allEntries.slice(0, AGENT_SESSION_CONTROL_MAX_LIST_ITEMS).map((entry) => {
+        const route = this.workerRuntimeRouter?.getRoute(entry.path);
+        const busy = route !== undefined && route.state !== 'cold'
+          && (route.state !== 'hot' || route.checkpoint.requestId !== undefined);
+        // Only the coordinator's confirmed authority supplies addressable
+        // titles; a host-projected label cannot bypass pending hydration or
+        // an in-flight owner persistence acknowledgement.
+        const assignedTitle = assignedTitles.ready
+          ? assignedTitles.assigned(entry.path)
+          : undefined;
+        const projected = {
+          path: entry.path,
+          ...(entry.name !== undefined ? { name: entry.name } : {}),
+          ...(assignedTitle !== undefined ? { title: assignedTitle } : {}),
+          ...(entry.sessionId !== undefined ? { sessionId: entry.sessionId } : {}),
+          cwd: entry.cwd ?? '',
+          activity: entry.activity,
+          busy,
+          runtimeState: route?.state ?? 'cold',
+          ...(entry.hidden === true ? { hidden: true } : {}),
+          ...(entry.agentCreated === true ? { agentCreated: true } : {}),
+          ...(entry.runningTools !== undefined && entry.runningTools > 0
+            ? { runningTools: entry.runningTools } : {}),
+          ...(entry.runningSubagents !== undefined && entry.runningSubagents > 0
+            ? { runningSubagents: entry.runningSubagents } : {}),
+          ...(entry.requestStartedAt !== undefined ? {
+            requestStartedAt: entry.requestStartedAt,
+            elapsedMs: Math.max(0, now - entry.requestStartedAt),
+          } : {}),
+          ...((entry.usage?.workingTimeMs !== undefined
+            || entry.usage?.costUsd !== undefined
+            || entry.usage?.unpricedInvocations !== undefined
+            || entry.usage?.incompleteInvocations !== undefined
+            || entry.usage?.freshness !== undefined)
+            ? {
+              workingTime: {
+                ...(entry.usage.workingTimeMs !== undefined
+                  ? { workingTimeMs: entry.usage.workingTimeMs } : {}),
+                ...(entry.usage.costUsd !== undefined ? { costUsd: entry.usage.costUsd } : {}),
+                ...(entry.usage.costProvenance !== undefined
+                  ? { costProvenance: entry.usage.costProvenance } : {}),
+                ...(entry.usage.unpricedInvocations !== undefined
+                  ? { unpricedInvocations: entry.usage.unpricedInvocations } : {}),
+                ...(entry.usage.incompleteInvocations !== undefined
+                  ? { incompleteInvocations: entry.usage.incompleteInvocations } : {}),
+                ...(entry.usage.freshness !== undefined ? { freshness: entry.usage.freshness } : {}),
+              },
+            } : {}),
+          ...(entry.modelId ? { modelId: entry.modelId } : {}),
+          ...(entry.provider ? { provider: entry.provider } : {}),
+          ...(entry.thinkingLevel ? { thinkingLevel: entry.thinkingLevel } : {}),
+        } satisfies WorkerJsonObject;
+        return projected;
+      });
+      const allClosingEntries = [...this.hostMembershipClosing.values()];
+      const closingRows = allClosingEntries.slice(0, AGENT_SESSION_CONTROL_MAX_LIST_ITEMS)
+        .map((entry) => ({
+          path: entry.path,
+          operationId: entry.operationId,
+          ...(entry.privacyMode === true ? { deleteRequested: true } : {}),
+          ...(entry.source !== undefined ? { closedBy: entry.source } : {}),
+        } satisfies WorkerJsonObject));
+      const listEnvelope = (sessionRows: readonly WorkerJsonObject[], closingRows: readonly WorkerJsonObject[]) => {
+        const sessionsTruncated = allEntries.length > sessionRows.length;
+        const closingTruncated = allClosingEntries.length > closingRows.length;
+        return {
+          scope: 'current-extension-host',
+          membershipHydrated: this.hostMembershipSeen,
+          // This reports whether the unique assigned-title namespace has been
+          // initialized. Per-session provisional title reads are admission
+          // state, not namespace readiness; assigned titles remain addressable.
+          titleNamespaceReady: this.liveSessionTitles.ready,
+          sessions: sessionRows,
+          ...(closingRows.length > 0 ? { closing: closingRows } : {}),
+          totalCount: allEntries.length,
+          sessionsTruncated,
+          closingTotalCount: allClosingEntries.length,
+          closingTruncated,
+          truncated: sessionsTruncated || closingTruncated,
+        };
+      };
+      while ((rows.length > 0 || closingRows.length > 0)
+          && Buffer.byteLength(JSON.stringify(listEnvelope(rows, closingRows)), 'utf8')
+            > AGENT_SESSION_CONTROL_MAX_RESULT_BYTES) {
+        if (rows.length > 0) rows.pop();
+        else closingRows.pop();
+      }
+      return workerJson(listEnvelope(rows, closingRows));
+    };
+    const liveEntries = [...this.hostMembershipSessions.sessions.values()].map(({ entry }) => entry);
+    const assignedGapRecords = new Map(this.liveSessionTitles.list()
+      .filter((record) => record.state === 'assigned')
+      .map((record) => [this.coldManagerKey(record.sessionPath), record]));
+    for (const key of this.newCreatePublicationPaths) {
+      if (this.hostMembershipSessions.sessions.has(key) || this.hostMembershipClosing.has(key)) continue;
+      const retained = this.coldSessionManagerHandles.get(key);
+      const assignment = assignedGapRecords.get(key);
+      if (!assignment) continue;
+      liveEntries.push({
+        path: assignment.sessionPath,
+        name: assignment.title,
+        cwd: retained?.handle.manager.getCwd?.() ?? '',
+        activity: 'idle',
+      });
+    }
+    return projection(liveEntries);
+  }
+
+  /** Resolve an explicitly addressed session against the host live membership.
+   *  Live sessions are admitted targets; closing sessions are reservations and
+   *  remain fenced; anything the host has already closed (or never published)
+   *  is not addressable. While indexing catches up for a just-created session,
+   *  the coordinator's emitted-create marker and retained handle supply its
+   *  identity; retained historical managers are never admitted. */
+  /** Resolve one explicitly targeted session-control request against the
+   *  assigned-title authority and the host live membership. Existing-session
+   *  actions require exactly one target: an assigned `title` (resolved
+   *  exactly after trimming) or an explicit `self` selector (the caller's own
+   *  session, valid even while the caller is unnamed). There is no implicit
+   *  current-session or path default: an omitted or conflicting target is an
+   *  error, and an assigned title is never authority over retained closed
+   *  history. While the namespace is not ready, title targeting fails closed. */
+  private resolveSessionControlTarget(
+    action: 'read' | 'message' | 'settings.get' | 'settings.set' | 'close',
+    payload: Record<string, unknown>,
+    sourceSessionPath: string,
+  ): { status: 'live' | 'closing'; sessionPath: string; entry?: LiveSessionMembershipEntry } {
+    const rawTitle = payload['title'];
+    const hasSelf = payload['self'] === true;
+    const hasTitle = typeof rawTitle === 'string' && rawTitle.trim().length > 0;
+    if (hasTitle && hasSelf) {
+      throw new BackendError('INVALID_PARAMS', 'Targeting accepts exactly one of title or self.');
+    }
+    if (hasSelf) return this.resolveLiveSessionPath(sourceSessionPath, sourceSessionPath, action);
+    if (hasTitle) {
+      if (!boundedAgentString(rawTitle, 512)) {
+        throw new BackendError('INVALID_PARAMS', 'title must be a bounded string.');
+      }
+      const resolved = this.liveSessionTitles.resolve(rawTitle);
+      if (!resolved) {
+        throw new BackendError(
+          'SESSION_NOT_FOUND',
+          'No live session carries that assigned title; provisional labels never resolve as titles.',
+        );
+      }
+      return this.resolveLiveSessionPath(resolved.sessionPath, sourceSessionPath, action);
+    }
+    throw new BackendError(
+      'INVALID_PARAMS',
+      `${action} requires an explicit target: an assigned title or the self selector.`,
+    );
+  }
+
+  /** Resolve a reply address by stable identity, then re-check current host
+   * membership. The reference is never a title or an addressable session path. */
+  private resolveSessionControlReplyTarget(
+    payload: Record<string, unknown>,
+    sourceSessionPath: string,
+  ): { status: 'live'; sessionPath: string; entry?: LiveSessionMembershipEntry } {
+    if (payload.title !== undefined || payload.self !== undefined) {
+      throw new BackendError('INVALID_PARAMS', 'message.replyTo cannot be combined with title or self.');
+    }
+    const identity = parseSessionReplyReference(payload.replyTo);
+    if (!identity) throw new BackendError('INVALID_PARAMS', 'message.replyTo is not a valid bounded session reply reference.');
+
+    const candidates = new Map<string, LiveSessionMembershipEntry>();
+    if (this.hostMembershipSeen) {
+      for (const { entry } of this.hostMembershipSessions.sessions.values()) {
+        const key = backendSessionPathKey(entry.path);
+        if (this.hostMembershipClosing.has(key) || this.pendingLiveTitlePaths.has(key)) continue;
+        candidates.set(key, entry);
+      }
+    } else {
+      // Before the first host snapshot only the calling worker itself is
+      // authoritative; other identities cannot be guessed from catalog state.
+      const sourceIdentity = resolveSessionIdentity(sourceSessionPath);
+      if (sourceIdentity.sessionId === identity.sessionId
+        && sourceIdentity.identityFallback === identity.identityFallback) {
+        return { status: 'live', sessionPath: sourceSessionPath };
+      }
+    }
+    for (const entry of candidates.values()) {
+      const candidateIdentity = resolveSessionIdentity(entry.path);
+      if (candidateIdentity.sessionId === identity.sessionId
+        && candidateIdentity.identityFallback === identity.identityFallback) {
+        return { status: 'live', sessionPath: entry.path, entry };
+      }
+    }
+    throw new BackendError('SESSION_NOT_FOUND', 'The reply reference does not resolve to a live session.');
+  }
+
+  private resolveLiveSessionPath(
+    sessionPath: string,
+    _fallbackSourcePath: string,
+    action: 'read' | 'message' | 'settings.get' | 'settings.set' | 'close',
+  ): { status: 'live' | 'closing'; sessionPath: string; entry?: LiveSessionMembershipEntry } {
+    if (!boundedAgentString(sessionPath, 16 * 1024)) {
+      throw new BackendError('INVALID_PARAMS', 'sessionPath must be a bounded string.');
+    }
+    const key = backendSessionPathKey(sessionPath);
+    if (!this.hostMembershipSeen) {
+      return { status: 'live', sessionPath };
+    }
+    const live = this.hostMembershipSessions.sessions.get(key);
+    if (live) {
+      if (this.pendingLiveTitlePaths.has(key) && action !== 'close') {
+        throw new BackendError('LIVE_TITLE_NAMESPACE_UNAVAILABLE', 'This live session title is still being assigned.');
+      }
+      return { status: 'live', sessionPath: live.entry.path, entry: live.entry };
+    }
+    const closing = this.hostMembershipClosing.get(key);
+    if (closing && action === 'close') {
+      // The host-owned close operation already owns this path; a tool close
+      // either joins a coordinator-owned request (requestHostSessionClose) or
+      // reports the reservation without starting a second lifecycle.
+      return { status: 'closing', sessionPath: closing.path };
+    }
+    if (closing) {
+      throw new BackendError(
+        'SESSION_CLOSING',
+        'The target session is closing; new requests cannot be admitted for it.',
+      );
+    }
+    // Publication gap for a newly created session: the durable manager handle
+    // is already authoritative while the host snapshot for its new tab is in
+    // flight. This never applies to retained/revivable history.
+    const retainedCold = this.coldSessionManagerHandles.get(key);
+    if (this.newCreatePublicationPaths.has(key) && this.liveSessionTitles.assigned(sessionPath)
+      && (retainedCold?.creationReason === 'new' || this.workerRuntimeRouter?.hasHotOwner(sessionPath))) {
+      if (this.closingSessionRequests.has(key)) {
+        if (action === 'close') return { status: 'closing', sessionPath };
+        throw new BackendError('SESSION_CLOSING', 'The target session is closing.');
+      }
+      return { status: 'live', sessionPath: retainedCold?.handle.sessionPath ?? sessionPath };
+    }
+    throw new BackendError(
+      'SESSION_NOT_FOUND',
+      'The target session is not a live session of the current extension host; closed history is not addressable.',
+    );
+  }
+
   private async setSessionLifecyclePrivacy(sessionPath: string, enabled: boolean): Promise<void> {
     const { store, barrier } = this.initializeFilesystemLifecycle();
     const { sessionId } = resolveSessionIdentity(sessionPath);
@@ -2874,274 +4024,734 @@ export class BackendServer {
     return { interrupted: false, alreadyStopped: true, settled: true };
   }
 
+  private validateAgentSessionSettingsPatch(raw: unknown): AgentSessionSettingsPatch {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new BackendError('INVALID_PARAMS', 'settings must be an object.');
+    }
+    const value = raw as Record<string, unknown>;
+    const supported = new Set([
+      'model', 'reasoning', 'autonomousMode', 'subagentProviderChoices', 'disabledSystemPromptEntries',
+    ]);
+    const unexpected = Object.keys(value).find((key) => !supported.has(key));
+    if (unexpected) throw new BackendError('INVALID_PARAMS', `Unsupported settings field: ${unexpected}.`);
+    const patch: AgentSessionSettingsPatch = {};
+
+    if (value.model !== undefined) {
+      if (!value.model || typeof value.model !== 'object' || Array.isArray(value.model)) {
+        throw new BackendError('INVALID_PARAMS', 'settings.model must contain provider and id.');
+      }
+      const model = value.model as Record<string, unknown>;
+      if (Object.keys(model).some((key) => key !== 'provider' && key !== 'id')
+        || !boundedAgentString(model.provider, 256)
+        || !boundedAgentString(model.id, 512)) {
+        throw new BackendError('INVALID_PARAMS', 'settings.model requires bounded non-empty provider and id strings.');
+      }
+      patch.model = { provider: model.provider.trim(), id: model.id.trim() };
+    }
+    if (value.reasoning !== undefined) {
+      if (!isThinkingLevel(value.reasoning)) {
+        throw new BackendError('INVALID_PARAMS', 'settings.reasoning must be a supported reasoning level.');
+      }
+      patch.reasoning = value.reasoning;
+    }
+    if (value.autonomousMode !== undefined) {
+      if (typeof value.autonomousMode !== 'boolean') {
+        throw new BackendError('INVALID_PARAMS', 'settings.autonomousMode must be a boolean.');
+      }
+      patch.autonomousMode = value.autonomousMode;
+    }
+    if (value.subagentProviderChoices !== undefined) {
+      try {
+        const validated = validateSessionControlSettingsRequest({
+          requestId: 'settings-patch-validation',
+          sessionPath: 'settings-patch-validation',
+          action: 'apply',
+          settings: { subagentProviderChoices: value.subagentProviderChoices },
+        });
+        patch.subagentProviderChoices = validated.settings?.subagentProviderChoices;
+      } catch (error) {
+        throw new BackendError('INVALID_PARAMS', toErrorMessage(error));
+      }
+    }
+    if (value.disabledSystemPromptEntries !== undefined) {
+      if (!Array.isArray(value.disabledSystemPromptEntries)
+        || value.disabledSystemPromptEntries.length > AGENT_SESSION_SETTINGS_MAX_DISABLED_PROMPTS
+        || value.disabledSystemPromptEntries.some((entry) => !boundedAgentString(entry, 512))) {
+        throw new BackendError(
+          'INVALID_PARAMS',
+          `settings.disabledSystemPromptEntries must contain at most ${AGENT_SESSION_SETTINGS_MAX_DISABLED_PROMPTS} bounded non-empty entry ids.`,
+        );
+      }
+      patch.disabledSystemPromptEntries = [...new Set(value.disabledSystemPromptEntries as string[])];
+    }
+    try {
+      if (patch.model || patch.reasoning !== undefined) {
+        validateSettingsSet({
+          sessionPath: 'settings-patch-validation',
+          persistenceScope: 'session',
+          ...(patch.model ? { defaultModel: patch.model.id, defaultProvider: patch.model.provider } : {}),
+          ...(patch.reasoning !== undefined ? { defaultThinkingLevel: patch.reasoning } : {}),
+        });
+      }
+      if (patch.disabledSystemPromptEntries !== undefined) {
+        validateSystemPromptTogglesSet({
+          sessionPath: 'settings-patch-validation',
+          disabledEntries: patch.disabledSystemPromptEntries,
+        });
+      }
+      const executionPatch: SessionControlExecutionSettingsPatch = {
+        ...(patch.autonomousMode !== undefined ? { autonomousMode: patch.autonomousMode } : {}),
+        ...(patch.subagentProviderChoices !== undefined
+          ? { subagentProviderChoices: patch.subagentProviderChoices }
+          : {}),
+      };
+      if (Object.keys(executionPatch).length > 0) {
+        validateSessionControlSettingsRequest({
+          requestId: 'settings-patch-validation',
+          sessionPath: 'settings-patch-validation',
+          action: 'apply',
+          settings: executionPatch,
+        });
+      }
+    } catch (error) {
+      throw new BackendError('INVALID_PARAMS', toErrorMessage(error));
+    }
+    return patch;
+  }
+
+  private async assertSessionControlModelAvailable(model: AgentSessionModelChoice): Promise<void> {
+    const catalog = await loadConfiguredModels(this.agentDir, this.modelRegistry);
+    if (!catalog.ok) {
+      throw new BackendError('MODEL_CATALOG_UNAVAILABLE', `Unable to validate session model: ${catalog.error}`);
+    }
+    if (!catalog.models.some((candidate) => candidate.provider === model.provider && candidate.id === model.id)) {
+      throw new BackendError('MODEL_UNAVAILABLE', `Model not available for this session: ${model.provider}/${model.id}`);
+    }
+  }
+
+  private async captureSessionControlSettings(sessionPath: string): Promise<{
+    settings: AgentSessionSettingsSnapshot;
+    cwd: string;
+  }> {
+    // A hot opened payload projects the applied worker state. Inheritance
+    // instead reads the durable transcript under the cold-store hot-read lease
+    // and a fresh saved-default snapshot.
+    const modelSettings = await this.readModelSettings();
+    const durable = await this.initializeColdSessionStore().readDurableSessionMetadata(sessionPath, modelSettings);
+    const modelId = durable.modelId ?? modelSettings.defaultModel;
+    const provider = durable.provider ?? modelSettings.defaultProvider;
+    const reasoning = durable.thinkingLevel ?? modelSettings.defaultThinkingLevel;
+    if (!modelId || !provider || !isThinkingLevel(reasoning)) {
+      throw new BackendError(
+        'SESSION_SETTINGS_UNAVAILABLE',
+        'The source session has no complete durable model/reasoning configuration to inherit.',
+      );
+    }
+
+    const hostAcknowledgement = await this.requestHostSessionControlSettings(sessionPath, 'capture');
+    if (!hostAcknowledgement) {
+      throw new BackendError('SESSION_SETTINGS_UNKNOWN', 'The host execution-settings capture acknowledgement was not received.');
+    }
+    if (hostAcknowledgement.outcome !== 'succeeded' || !hostAcknowledgement.settings) {
+      throw new BackendError(
+        hostAcknowledgement.outcome === 'unknown' ? 'SESSION_SETTINGS_UNKNOWN' : 'SESSION_SETTINGS_CAPTURE_FAILED',
+        hostAcknowledgement.error ?? 'The host could not capture saved execution settings.',
+      );
+    }
+    const disabledSystemPromptEntries = await readSystemPromptTogglesForSession(sessionPath);
+    return {
+      settings: {
+        model: { provider, id: modelId },
+        reasoning,
+        autonomousMode: hostAcknowledgement.settings.autonomousMode,
+        subagentProviderChoices: { ...hostAcknowledgement.settings.subagentProviderChoices },
+        disabledSystemPromptEntries: [...new Set(disabledSystemPromptEntries)],
+      },
+      cwd: durable.cwd,
+    };
+  }
+
+  private async captureSessionControlProviderSurface(sessionPath: string): Promise<Record<string, boolean>> {
+    const acknowledgement = await this.requestHostSessionControlSettings(sessionPath, 'capture');
+    if (acknowledgement?.outcome !== 'succeeded' || !acknowledgement.settings) {
+      throw new BackendError('SESSION_SETTINGS_UNKNOWN',
+        acknowledgement?.error ?? 'The configured provider surface could not be confirmed.');
+    }
+    return acknowledgement.settings.subagentProviderChoices;
+  }
+
+  private static assertConfiguredProviderChoices(
+    choices: Record<string, boolean> | undefined,
+    surface: Record<string, boolean>,
+  ): void {
+    if (!choices) return;
+    for (const provider of Object.keys(choices)) {
+      if (!provider.trim() || !Object.hasOwn(surface, provider)) {
+        throw new BackendError('INVALID_PARAMS', `Provider is not in the configured subagent surface: ${provider}`);
+      }
+    }
+  }
+
+  private async configureSessionControlSettings(
+    sessionPath: string,
+    patch: AgentSessionSettingsPatch,
+    requestId: string,
+  ): Promise<WorkerJsonObject> {
+    const applied: string[] = [];
+    const fail = (setting: string, error: unknown, outcome: 'failed' | 'unknown' = 'failed'): WorkerJsonObject => ({
+      status: outcome,
+      applied,
+      failedSetting: setting,
+      error: toErrorMessage(error).slice(0, HOST_SESSION_SETTINGS_ERROR_MAX_CHARS),
+    });
+
+    if (patch.model || patch.reasoning !== undefined) {
+      try {
+        const settingsParams = validateSettingsSet({
+          sessionPath,
+          persistenceScope: 'session',
+          ...(patch.model ? { defaultModel: patch.model.id, defaultProvider: patch.model.provider } : {}),
+          ...(patch.reasoning !== undefined ? { defaultThinkingLevel: patch.reasoning } : {}),
+        });
+        const settingsResult = await this.handleRequest({
+          id: `${requestId}:model-settings`,
+          method: 'settings.set',
+          params: settingsParams as unknown as Record<string, unknown>,
+        }) as { defaultThinkingLevel?: unknown };
+        if (patch.reasoning !== undefined && !isThinkingLevel(settingsResult?.defaultThinkingLevel)) {
+          return fail('reasoning', new Error('The effective reasoning level was not confirmed.'), 'unknown');
+        }
+        if (patch.model) applied.push('model');
+        if (patch.reasoning !== undefined) {
+          applied.push('reasoning');
+          patch = { ...patch, reasoning: settingsResult.defaultThinkingLevel as AgentSessionSettingsPatch['reasoning'] };
+        }
+      } catch (error) {
+        const code = error instanceof BackendError ? error.code : '';
+        return fail(patch.model ? 'model' : 'reasoning', error,
+          error instanceof WorkerRequestTimeoutError || /TIMEOUT|GENERATION_ENDED|UNKNOWN/u.test(code) ? 'unknown' : 'failed');
+      }
+    }
+
+    if (patch.disabledSystemPromptEntries !== undefined) {
+      try {
+        const promptParams = validateSystemPromptTogglesSet({
+          sessionPath,
+          disabledEntries: patch.disabledSystemPromptEntries,
+        });
+        await this.handleRequest({
+          id: `${requestId}:system-prompts`,
+          method: 'systemPromptToggles.set',
+          params: promptParams as unknown as Record<string, unknown>,
+        });
+        applied.push('disabledSystemPromptEntries');
+      } catch (error) {
+        const code = error instanceof BackendError ? error.code : '';
+        return fail('disabledSystemPromptEntries', error,
+          error instanceof WorkerRequestTimeoutError || /TIMEOUT|GENERATION_ENDED|UNKNOWN/u.test(code) ? 'unknown' : 'failed');
+      }
+    }
+
+    const hostSettings: SessionControlExecutionSettingsPatch = {
+      ...(patch.autonomousMode !== undefined ? { autonomousMode: patch.autonomousMode } : {}),
+      ...(patch.subagentProviderChoices !== undefined
+        ? { subagentProviderChoices: patch.subagentProviderChoices }
+        : {}),
+    };
+    if (Object.keys(hostSettings).length > 0) {
+      let acknowledgement: SessionControlSettingsAcknowledgement | undefined;
+      try {
+        acknowledgement = await this.requestHostSessionControlSettings(sessionPath, 'apply', hostSettings);
+      } catch (error) {
+        return fail('hostExecutionSettings', error, 'unknown');
+      }
+      if (!acknowledgement) {
+        return fail('hostExecutionSettings', new Error('The host settings acknowledgement was not received.'), 'unknown');
+      }
+      if (acknowledgement.outcome !== 'succeeded') {
+        return fail(
+          'hostExecutionSettings',
+          new Error(acknowledgement.error ?? 'The host did not confirm execution-settings persistence.'),
+          acknowledgement.outcome === 'unknown' ? 'unknown' : 'failed',
+        );
+      }
+      applied.push('hostExecutionSettings');
+      if (acknowledgement.application === 'unknown') {
+        return fail(
+          'hostRuntimeApplication',
+          new Error('Execution settings were persisted, but runtime application is unknown.'),
+          'unknown',
+        );
+      }
+      if (acknowledgement.application === 'pending') applied.push('hostApplicationPending');
+    }
+    return {
+      status: 'succeeded',
+      applied,
+      ...(patch.model ? { model: { provider: patch.model.provider, id: patch.model.id } } : {}),
+      ...(patch.reasoning !== undefined ? { reasoning: patch.reasoning } : {}),
+      ...(patch.autonomousMode !== undefined ? { autonomousMode: patch.autonomousMode } : {}),
+      ...(patch.subagentProviderChoices !== undefined
+        ? { subagentProviderChoices: patch.subagentProviderChoices }
+        : {}),
+      ...(patch.disabledSystemPromptEntries !== undefined
+        ? { disabledSystemPromptEntries: patch.disabledSystemPromptEntries }
+        : {}),
+    };
+  }
+
+  private async sendSessionControlPrompt(
+    frame: WorkerSessionControlFrame,
+    sourceSessionPath: string,
+    targetSessionPath: string,
+    prompt: string,
+    operationId: string,
+    expectedCancellationGeneration?: number,
+  ): Promise<WorkerJsonObject> {
+    try {
+      if (expectedCancellationGeneration !== undefined
+        && this.workerRuntimeRouter?.operationCancellationGeneration?.(targetSessionPath)
+          !== expectedCancellationGeneration) {
+        throw new BackendError(
+          'SESSION_OPERATION_CANCELLED',
+          'The pending session-control send was invalidated by a close before admission.',
+        );
+      }
+      this.assertSessionControlSendAdmissionOpen(targetSessionPath);
+    } catch (error) {
+      // Settings and creation are durable operations: a later close rejects
+      // only delivery and never rolls either completed result back.
+      return {
+        status: 'rejected',
+        error: toErrorMessage(error).slice(0, HOST_SESSION_SETTINGS_ERROR_MAX_CHARS),
+      };
+    }
+    const sourceIdentity: SessionControlSenderIdentity = resolveSessionIdentity(sourceSessionPath);
+    const sender: SessionControlSender = createSessionControlSender(
+      sourceIdentity,
+      this.liveSessionTitles.assigned(sourceSessionPath),
+    );
+    if (!isSessionControlSender(sender)) throw new BackendError('INVALID_PARAMS', 'Unable to authenticate the source session.');
+    const localId = `${AGENT_SESSION_MESSAGE_LOCAL_ID_PREFIX}${frame.requestId}`;
+    const agentMessage: AgentMessagePayload = {
+      sessionPath: targetSessionPath,
+      localId,
+      text: prompt,
+      sender,
+      timestamp: Date.now(),
+      status: 'queued',
+    };
+    this.emit('message.agent', agentMessage);
+    try {
+      const result = await this.handleRequest({
+        id: `${frame.requestId}:message`,
+        method: 'message.send',
+        params: {
+          sessionPath: targetSessionPath,
+          text: prompt,
+          inputs: [],
+          operationId,
+          operationAttempt: 1,
+          localId,
+          coordinatorAttribution: sender,
+        },
+      }, undefined, undefined, undefined, true, expectedCancellationGeneration);
+      const queued = result !== null && typeof result === 'object' && !Array.isArray(result)
+        && (result as { queued?: unknown }).queued === true;
+      if (!queued) this.emit('message.agent', { ...agentMessage, status: 'completed' });
+      return {
+        status: 'accepted',
+        ...(queued ? { queued: true } : {}),
+        result: workerJson(result),
+      };
+    } catch (error) {
+      const code = error instanceof BackendError ? error.code : '';
+      const unknown = error instanceof WorkerRequestTimeoutError
+        || /TIMEOUT|GENERATION_ENDED|UNKNOWN|PROVENANCE_UNAVAILABLE/u.test(code);
+      if (!unknown) this.emit('message.agent', { ...agentMessage, status: 'rejected' });
+      return {
+        status: unknown ? 'unknown' : 'rejected',
+        error: toErrorMessage(error).slice(0, HOST_SESSION_SETTINGS_ERROR_MAX_CHARS),
+      };
+    }
+  }
+
+  private async sessionControlSettingsResult(sessionPath: string): Promise<WorkerJsonObject> {
+    const { settings } = await this.captureSessionControlSettings(sessionPath);
+    return workerJson(settings) as WorkerJsonObject;
+  }
+
+  /** Durable agent-created create through the ordinary create operation; the
+   *  required title is assigned inside that flow (reserve → owning-owner
+   *  persistence → confirm) before the created session is published. */
+  private async createAgentControlledSession(
+    requestId: string,
+    payload: Record<string, unknown>,
+    resolvedCwd: string,
+  ): Promise<WorkerSessionControlOutcome> {
+    const result = await this.handleRequest({
+      id: `${requestId}:create`,
+      method: 'session.create',
+      params: {
+        cwd: resolvedCwd,
+        title: payload['title'] as string,
+        agentCreated: true,
+        operationId: `agent-session:${requestId}`,
+        operationAttempt: 1,
+      },
+    });
+    return { result: workerJson(result) };
+  }
+
   private async handleWorkerSessionControl(
     frame: WorkerSessionControlFrame,
     sourceSessionPath: string,
   ): Promise<WorkerSessionControlOutcome> {
     const payload = frame.payload as Record<string, unknown>;
-    const allowedPayloadKeys: ReadonlySet<string> = new Set(
-      frame.action === 'list'
-        ? []
-        : frame.action === 'create'
-          ? ['cwd']
-          : frame.action === 'read'
-            ? ['sessionPath', 'direction', 'cursor', 'limit']
-            : frame.action === 'message'
-              ? ['sessionPath', 'text']
-              : ['sessionPath', 'delete'],
-    );
-    const unexpectedPayloadKey = Object.keys(payload).find((key) => !allowedPayloadKeys.has(key));
+    const allowedPayloadKeys: Readonly<Record<WorkerSessionControlAction, readonly string[]>> = {
+      list: [],
+      create: ['cwd', 'title', 'prompt', 'settings'],
+      read: ['title', 'self', 'direction', 'cursor', 'limit'],
+      message: ['title', 'self', 'replyTo', 'prompt', 'settings'],
+      'settings.get': ['title', 'self'],
+      'settings.set': ['title', 'self', 'settings'],
+      close: ['title', 'self', 'delete'],
+    };
+    const unexpectedPayloadKey = Object.keys(payload).find((key) => !allowedPayloadKeys[frame.action].includes(key));
     if (unexpectedPayloadKey) {
       throw new BackendError('INVALID_PARAMS', `Unexpected session_control payload key: ${unexpectedPayloadKey}`);
     }
     const operationId = `agent-session:${frame.requestId}`;
 
-    if (frame.action === 'list') {
-      const sessions = await this.listSessionSummaries();
-      const projected = sessions.slice(0, AGENT_SESSION_CONTROL_MAX_LIST_ITEMS).map((summary) => {
-        const route = this.workerRuntimeRouter?.getRoute(summary.path);
-        const busy = route !== undefined && route.state !== 'cold'
-          && (route.state !== 'hot' || route.checkpoint.requestId !== undefined);
-        return {
-          path: summary.path,
-          name: summary.name,
-          cwd: summary.cwd,
-          modifiedAt: summary.modifiedAt,
-          messageCount: summary.messageCount,
-          busy,
-          runtimeState: route?.state ?? 'cold',
-          ...(summary.modelId ? { modelId: summary.modelId } : {}),
-          ...(summary.provider ? { provider: summary.provider } : {}),
-          ...(summary.thinkingLevel ? { thinkingLevel: summary.thinkingLevel } : {}),
-          ...(summary.isPlaceholder !== undefined ? { isPlaceholder: summary.isPlaceholder } : {}),
-          ...(summary.sessionId ? { sessionId: summary.sessionId } : {}),
-        } satisfies WorkerJsonObject;
-      });
-      const listEnvelope = (rows: readonly WorkerJsonObject[]) => ({
-        scope: 'current-extension-host',
-        sessions: rows,
-        totalCount: sessions.length,
-        truncated: sessions.length > rows.length,
-      });
-      while (projected.length > 0
-          && Buffer.byteLength(JSON.stringify(listEnvelope(projected)), 'utf8') > AGENT_SESSION_CONTROL_MAX_RESULT_BYTES) {
-        projected.pop();
-      }
-      return { result: workerJson(listEnvelope(projected)) };
-    }
+    if (frame.action === 'list') return { result: this.listLiveSessions() };
 
     if (frame.action === 'create') {
-      if (payload.cwd !== undefined && !boundedAgentString(payload.cwd, 16 * 1024)) {
-        throw new BackendError('INVALID_PARAMS', 'create.cwd must be a bounded string.');
+      if (typeof payload.title !== 'string' || !boundedAgentString(payload.title, 512)) {
+        throw new BackendError('INVALID_PARAMS', 'create requires a bounded title of 1-25 characters after trimming.');
       }
-      const result = await this.handleRequest({
-        id: `${frame.requestId}:create`,
-        method: 'session.create',
-        params: {
-          ...(typeof payload.cwd === 'string' && payload.cwd.trim() ? { cwd: payload.cwd.trim() } : {}),
-          agentCreated: true,
-          operationId,
-          operationAttempt: 1,
-        },
+      let title: string;
+      try {
+        title = normalizeSessionControlBaseTitle(payload.title);
+      } catch (error) {
+        throw new BackendError('INVALID_PARAMS', toErrorMessage(error));
+      }
+      if (payload.prompt !== undefined
+        && (!boundedAgentString(payload.prompt, AGENT_SESSION_CONTROL_MAX_MESSAGE_BYTES) || !payload.prompt.trim())) {
+        throw new BackendError('INVALID_PARAMS', 'create.prompt must be non-empty and bounded when supplied.');
+      }
+      const explicitSettings = payload.settings === undefined
+        ? {}
+        : this.validateAgentSessionSettingsPatch(payload.settings);
+      if (payload.cwd !== undefined
+        && (!boundedAgentString(payload.cwd, 16 * 1024) || !payload.cwd.trim())) {
+        throw new BackendError('INVALID_PARAMS', 'create.cwd must be a bounded non-empty path when supplied.');
+      }
+      if (!this.liveSessionTitles.ready) {
+        throw new BackendError(
+          'LIVE_TITLE_NAMESPACE_UNAVAILABLE',
+          'The live session title namespace is not ready; creation fails closed until live membership hydration completes.',
+        );
+      }
+      // Capture the creator's saved settings once, before the durable create.
+      // Explicit settings override those captured values field-by-field.
+      let captured: { settings: AgentSessionSettingsSnapshot; cwd: string };
+      try {
+        captured = await this.captureSessionControlSettings(sourceSessionPath);
+      } catch (error) {
+        // No durable-create call was admitted. Distinguish this known absence
+        // from an unknown create acknowledgement so agents cannot assume a tab
+        // exists or retry an uncertain creation based on a generic error.
+        return { result: workerJson({
+          creation: {
+            status: 'not_created',
+            error: toErrorMessage(error).slice(0, HOST_SESSION_SETTINGS_ERROR_MAX_CHARS),
+          },
+          configuration: { status: 'not_started' },
+          message: { status: payload.prompt === undefined ? 'not_requested' : 'not_sent' },
+        } satisfies WorkerJsonObject) };
+      }
+      const inheritedSettings = captured.settings;
+      const settings = this.validateAgentSessionSettingsPatch({
+        ...inheritedSettings,
+        ...explicitSettings,
+        model: explicitSettings.model ?? inheritedSettings.model,
+        disabledSystemPromptEntries: explicitSettings.disabledSystemPromptEntries
+          ?? inheritedSettings.disabledSystemPromptEntries,
       });
-      return { result: workerJson(result) };
-    }
+      if (!settings.model) {
+        throw new BackendError('SESSION_SETTINGS_UNAVAILABLE', 'The complete inherited model settings are unavailable.');
+      }
+      await this.assertSessionControlModelAvailable(settings.model);
+      BackendServer.assertConfiguredProviderChoices(settings.subagentProviderChoices, inheritedSettings.subagentProviderChoices);
 
-    const sessions = await this.listSessionSummaries();
-    const requestedPath = payload.sessionPath;
-    if (requestedPath !== undefined && !boundedAgentString(requestedPath, 16 * 1024)) {
-      throw new BackendError('INVALID_PARAMS', 'sessionPath must be a bounded string.');
+      const explicitCwd = typeof payload.cwd === 'string' ? payload.cwd.trim() : undefined;
+      const resolvedCwd = explicitCwd || captured.cwd;
+      if (!resolvedCwd) {
+        throw new BackendError('SESSION_CWD_UNAVAILABLE', 'The source session has no durable working directory.');
+      }
+
+      let rawCreated: unknown;
+      try {
+        const created = await this.createAgentControlledSession(
+          frame.requestId,
+          { ...payload, title },
+          resolvedCwd,
+        );
+        rawCreated = created.result;
+      } catch (error) {
+        return { result: workerJson({
+          creation: {
+            status: error instanceof BackendError && /INVALID|TITLE/u.test(error.code) ? 'failed' : 'unknown',
+            error: toErrorMessage(error).slice(0, HOST_SESSION_SETTINGS_ERROR_MAX_CHARS),
+          },
+          configuration: { status: 'not_started' },
+          message: { status: payload.prompt === undefined ? 'not_requested' : 'not_sent' },
+        } satisfies WorkerJsonObject) };
+      }
+      if (!rawCreated || typeof rawCreated !== 'object' || Array.isArray(rawCreated)
+        || typeof (rawCreated as Record<string, unknown>).sessionPath !== 'string') {
+        return { result: workerJson({
+          creation: { status: 'unknown', error: 'The create acknowledgement did not include a session path.' },
+          configuration: { status: 'not_started' },
+          message: { status: payload.prompt === undefined ? 'not_requested' : 'not_sent' },
+        } satisfies WorkerJsonObject) };
+      }
+      const createdRecord = rawCreated as Record<string, unknown>;
+      const sessionPath = createdRecord.sessionPath as string;
+      // A create target does not exist until the durable create returns. Capture
+      // its path generation now, before any asynchronous configuration can
+      // yield to a close and same-path reopen.
+      const sendCancellationGeneration = this.workerRuntimeRouter
+        ?.operationCancellationGeneration?.(sessionPath);
+      const identity = resolveSessionIdentity(sessionPath);
+      const creation: WorkerJsonObject = {
+        status: 'created',
+        sessionPath,
+        titleAssigned: createdRecord.titleAssigned !== false,
+        ...(typeof createdRecord.title === 'string' ? { title: createdRecord.title } : { title }),
+        ...(typeof createdRecord.titleError === 'string'
+          ? { titleError: createdRecord.titleError.slice(0, HOST_SESSION_SETTINGS_ERROR_MAX_CHARS) }
+          : {}),
+        sessionId: identity.sessionId,
+        identityFallback: identity.identityFallback,
+      };
+      if (createdRecord.titleAssigned === false) {
+        return { result: workerJson({
+          creation,
+          configuration: { status: 'not_started', reason: 'title_assignment_failed' },
+          message: { status: payload.prompt === undefined ? 'not_requested' : 'not_sent' },
+        } satisfies WorkerJsonObject) };
+      }
+      const configuration = await this.configureSessionControlSettings(sessionPath, settings, frame.requestId);
+      const configurationSucceeded = configuration.status === 'succeeded';
+      const message = payload.prompt === undefined
+        ? { status: 'not_requested' }
+        : !configurationSucceeded
+          ? { status: 'not_sent', reason: configuration.status }
+          : await this.sendSessionControlPrompt(
+            frame,
+            sourceSessionPath,
+            sessionPath,
+            payload.prompt as string,
+            `${operationId}:send`,
+            sendCancellationGeneration,
+          );
+      return { result: workerJson({ creation, configuration, message } satisfies WorkerJsonObject) };
     }
-    const requested = (typeof requestedPath === 'string' && requestedPath.trim())
-      ? requestedPath.trim()
-      : sourceSessionPath;
-    const matchingSummary = sessions.find((summary) => (
-      backendSessionPathKey(summary.path) === backendSessionPathKey(requested)
-    ));
-    const sourceMatches = backendSessionPathKey(sourceSessionPath) === backendSessionPathKey(requested);
-    // Catalog publication is intentionally asynchronous. A create commits its
-    // durable manager before its list reconciliation can observe the file, so
-    // use the coordinator's retained cold handle as the addressability
-    // authority for that narrow gap. Do not turn this into an arbitrary
-    // filesystem/path probe: the fallback is already owned by the normal
-    // coordinator/cold-store authority.
-    const retainedCold = this.coldSessionManagerHandles.get(this.coldManagerKey(requested));
-    if (!matchingSummary && !sourceMatches && !retainedCold) {
-      throw new BackendError('SESSION_NOT_FOUND', 'The target session is not owned by the current extension host.');
-    }
-    const sessionPath = matchingSummary?.path
-      ?? (sourceMatches ? sourceSessionPath : retainedCold?.handle.sessionPath ?? requested);
 
     if (frame.action === 'read') {
-      const direction = payload.direction ?? 'latest';
-      if (direction !== 'older' && direction !== 'newer' && direction !== 'latest') {
-        throw new BackendError('INVALID_PARAMS', 'read.direction must be older, newer, or latest.');
+      const resolved = this.resolveSessionControlTarget('read', payload, sourceSessionPath);
+      return await this.executeSessionControlRead(frame, resolved.sessionPath);
+    }
+
+    if (frame.action === 'settings.get') {
+      const resolved = this.resolveSessionControlTarget('settings.get', payload, sourceSessionPath);
+      const settings = await this.sessionControlSettingsResult(resolved.sessionPath);
+      return { result: workerJson({ sessionPath: resolved.sessionPath, settings }) };
+    }
+
+    if (frame.action === 'settings.set') {
+      const patch = this.validateAgentSessionSettingsPatch(payload.settings);
+      if (Object.keys(patch).length === 0) {
+        throw new BackendError('INVALID_PARAMS', 'settings.set requires at least one supported setting.');
       }
-      const limit = payload.limit === undefined ? 32 : payload.limit;
-      if (!Number.isInteger(limit) || (limit as number) < 1 || (limit as number) > 64) {
-        throw new BackendError('INVALID_PARAMS', 'read.limit must be an integer from 1 through 64.');
+      if (patch.model) await this.assertSessionControlModelAvailable(patch.model);
+      const resolved = this.resolveSessionControlTarget('settings.set', payload, sourceSessionPath);
+      this.assertSessionNotClosing(resolved.sessionPath);
+      if (patch.subagentProviderChoices) {
+        const surface = await this.captureSessionControlProviderSurface(resolved.sessionPath);
+        BackendServer.assertConfiguredProviderChoices(patch.subagentProviderChoices, surface);
       }
-      const cursor = payload.cursor;
-      let loadedStart: number | undefined;
-      let loadedEnd: number | undefined;
-      if (cursor !== undefined) {
-        if (!cursor || typeof cursor !== 'object' || Array.isArray(cursor)) {
-          throw new BackendError('INVALID_PARAMS', 'read.cursor must be an object.');
-        }
-        const cursorRecord = cursor as Record<string, unknown>;
-        const unexpectedCursorKey = Object.keys(cursorRecord).find((key) => key !== 'start' && key !== 'end');
-        if (unexpectedCursorKey) {
-          throw new BackendError('INVALID_PARAMS', `Unexpected read.cursor key: ${unexpectedCursorKey}`);
-        }
-        if (!Number.isSafeInteger(cursorRecord.start) || (cursorRecord.start as number) < 0
-            || !Number.isSafeInteger(cursorRecord.end) || (cursorRecord.end as number) < 0
-            || (cursorRecord.start as number) > (cursorRecord.end as number)) {
-          throw new BackendError('INVALID_PARAMS', 'read.cursor must contain a non-inverted non-negative range.');
-        }
-        loadedStart = cursorRecord.start as number;
-        loadedEnd = cursorRecord.end as number;
-      } else if (direction !== 'latest') {
-        throw new BackendError('INVALID_PARAMS', `${direction} read requires a cursor.`);
-      }
-      const page = await this.handleRequest({
-        id: `${frame.requestId}:read`,
-        method: 'session.loadTranscriptPage',
-        params: {
-          sessionPath,
-          direction,
-          ...(loadedStart !== undefined ? { loadedStart } : {}),
-          ...(loadedEnd !== undefined ? { loadedEnd } : {}),
-        },
-      }) as TranscriptPagePayload;
-      const bounded = boundTranscriptSnapshot(page, {
-        transport: { kind: 'response', requestId: `${frame.requestId}:read` },
-        // The control page is the edge adjacent to the caller cursor: newer
-        // rows for an older request, and older rows for a newer request. Keep
-        // that edge when the expanded backend window must be bounded.
-        requestedEdge: direction === 'newer' ? 'older' : 'newer',
-        maxLineBytes: AGENT_SESSION_CONTROL_MAX_RESULT_BYTES,
-      });
-      const sourceStart = bounded.transcriptWindow.loadedStart;
-      const sourceEnd = bounded.transcriptWindow.loadedEnd;
-      const pageEdge = direction === 'older'
-        ? loadedStart ?? sourceEnd
-        : direction === 'newer'
-          ? loadedEnd ?? sourceStart
-          : sourceEnd;
-      const boundedEdge = Math.max(sourceStart, Math.min(sourceEnd, pageEdge));
-      const pageStart = direction === 'older'
-        ? Math.max(sourceStart, boundedEdge - (limit as number))
-        : direction === 'latest'
-          ? Math.max(sourceStart, sourceEnd - (limit as number))
-          : boundedEdge;
-      const pageEnd = direction === 'older'
-        ? boundedEdge
-        : Math.min(sourceEnd, pageStart + (limit as number));
-      const transcriptStart = pageStart - sourceStart;
-      const transcriptEnd = pageEnd - sourceStart;
-      const transcript = bounded.transcript.slice(transcriptStart, transcriptEnd);
-      const nextEnd = pageStart + transcript.length;
-      const nextWindow = {
-        ...bounded.transcriptWindow,
-        loadedStart: pageStart,
-        loadedEnd: nextEnd,
-        hasOlder: pageStart > 0,
-        hasNewer: nextEnd < bounded.transcriptWindow.totalCount,
-        isPartial: pageStart > 0 || nextEnd < bounded.transcriptWindow.totalCount,
-      };
-      return {
-        result: workerJson({
-          sessionPath: bounded.sessionPath,
-          transcript,
-          transcriptWindow: nextWindow,
-          busy: bounded.busy,
-          cursor: { start: pageStart, end: nextEnd },
-        }),
-      };
+      const configuration = await this.configureSessionControlSettings(resolved.sessionPath, patch, frame.requestId);
+      return { result: workerJson({ sessionPath: resolved.sessionPath, configuration }) };
     }
 
     if (frame.action === 'message') {
-      if (!boundedAgentString(payload.text, AGENT_SESSION_CONTROL_MAX_MESSAGE_BYTES) || !payload.text.trim()) {
-        throw new BackendError('INVALID_PARAMS', 'message.text must be non-empty and bounded.');
+      if (!boundedAgentString(payload.prompt, AGENT_SESSION_CONTROL_MAX_MESSAGE_BYTES) || !payload.prompt.trim()) {
+        throw new BackendError('INVALID_PARAMS', 'message.prompt must be non-empty and bounded.');
       }
-      const localId = `${AGENT_SESSION_MESSAGE_LOCAL_ID_PREFIX}${frame.requestId}`;
-      const agentMessage = {
-        sessionPath,
-        localId,
-        text: payload.text,
-        timestamp: Date.now(),
-      };
-      // Show the agent prompt immediately as pending. Route state is only a
-      // snapshot: promotion may finish before message.send is routed, making
-      // an initially inferred queue status stale. The send acknowledgement is
-      // authoritative; direct acceptance reconciles this row to completed.
-      this.emit('message.agent', { ...agentMessage, status: 'queued' });
-      try {
-        const result = await this.handleRequest({
-          id: `${frame.requestId}:message`,
-          method: 'message.send',
-          params: {
-            sessionPath,
-            text: payload.text,
-            inputs: [],
-            operationId,
-            operationAttempt: 1,
-            localId,
-          },
-        });
-        const response = workerJson({ sessionPath, result });
-        const acceptedQueued = result !== null && typeof result === 'object' && !Array.isArray(result)
-          && (result as { queued?: unknown }).queued === true;
-        if (!acceptedQueued) {
-          this.emit('message.agent', { ...agentMessage, status: 'completed' });
-        }
-        return { result: response };
-      } catch (error) {
-        this.emit('message.agent', { ...agentMessage, status: 'rejected' });
-        throw error;
+      const patch = payload.settings === undefined ? undefined : this.validateAgentSessionSettingsPatch(payload.settings);
+      if (patch && Object.keys(patch).length === 0) {
+        throw new BackendError('INVALID_PARAMS', 'message.settings must contain at least one supported setting.');
       }
+      if (patch?.model) await this.assertSessionControlModelAvailable(patch.model);
+      const resolved = payload.replyTo !== undefined
+        ? this.resolveSessionControlReplyTarget(payload, sourceSessionPath)
+        : this.resolveSessionControlTarget('message', payload, sourceSessionPath);
+      const sendCancellationGeneration = this.workerRuntimeRouter
+        ?.operationCancellationGeneration?.(resolved.sessionPath);
+      this.assertSessionNotClosing(resolved.sessionPath);
+      if (patch?.subagentProviderChoices) {
+        const surface = await this.captureSessionControlProviderSurface(resolved.sessionPath);
+        BackendServer.assertConfiguredProviderChoices(patch.subagentProviderChoices, surface);
+      }
+      const configuration = patch
+        ? await this.configureSessionControlSettings(resolved.sessionPath, patch, frame.requestId)
+        : { status: 'not_requested' };
+      const message = configuration.status === 'succeeded' || configuration.status === 'not_requested'
+        ? await this.sendSessionControlPrompt(
+          frame,
+          sourceSessionPath,
+          resolved.sessionPath,
+          payload.prompt,
+          operationId,
+          sendCancellationGeneration,
+        )
+        : { status: 'not_sent', reason: configuration.status };
+      return { result: workerJson({ sessionPath: resolved.sessionPath, configuration, message }) };
     }
 
-    const deleteRequested = payload.delete === true;
-    if (payload.delete !== undefined && typeof payload.delete !== 'boolean') {
+    const deletePayload = payload.delete;
+    if (deletePayload !== undefined && typeof deletePayload !== 'boolean') {
       throw new BackendError('INVALID_PARAMS', 'close.delete must be boolean.');
     }
-    const lifecycle = await this.handleRequest({
-      id: `${frame.requestId}:lifecycle-close`,
-      method: 'session.lifecycleClose',
+    const deleteRequested = deletePayload === true;
+    const resolvedClose = this.resolveSessionControlTarget('close', payload, sourceSessionPath);
+    const selfRequester = backendSessionPathKey(sourceSessionPath) === backendSessionPathKey(resolvedClose.sessionPath);
+    if (resolvedClose.status === 'closing') {
+      const owningClose = this.closingSessionRequests.get(backendSessionPathKey(resolvedClose.sessionPath));
+      if (owningClose) {
+        return await this.requestHostSessionClose(
+          resolvedClose.sessionPath,
+          `${frame.requestId}:close`,
+          deleteRequested,
+          selfRequester,
+        );
+      }
+      return { result: workerJson({
+        sessionPath: resolvedClose.sessionPath,
+        closed: false,
+        closeRequested: false,
+        unknown: true,
+        alreadyClosing: true,
+        deletionRequested: deleteRequested,
+      } satisfies WorkerJsonObject) };
+    }
+    return await this.requestHostSessionClose(
+      resolvedClose.sessionPath,
+      `${frame.requestId}:close`,
+      deleteRequested,
+      selfRequester,
+    );
+  }
+
+  /** Bounded transcript read for one addressable live session (shared by
+   *  the pre-bridge legacy path and membership resolution). */
+  private async executeSessionControlRead(
+    frame: WorkerSessionControlFrame,
+    sessionPath: string,
+  ): Promise<WorkerSessionControlOutcome> {
+    const payload = frame.payload as Record<string, unknown>;
+    const direction = payload.direction ?? 'latest';
+    if (direction !== 'older' && direction !== 'newer' && direction !== 'latest') {
+      throw new BackendError('INVALID_PARAMS', 'read.direction must be older, newer, or latest.');
+    }
+    const limit = payload.limit === undefined ? 32 : payload.limit;
+    if (!Number.isInteger(limit) || (limit as number) < 1 || (limit as number) > 64) {
+      throw new BackendError('INVALID_PARAMS', 'read.limit must be an integer from 1 through 64.');
+    }
+    const cursor = payload.cursor;
+    let loadedStart: number | undefined;
+    let loadedEnd: number | undefined;
+    if (cursor !== undefined) {
+      if (!cursor || typeof cursor !== 'object' || Array.isArray(cursor)) {
+        throw new BackendError('INVALID_PARAMS', 'read.cursor must be an object.');
+      }
+      const cursorRecord = cursor as Record<string, unknown>;
+      const unexpectedCursorKey = Object.keys(cursorRecord).find((key) => key !== 'start' && key !== 'end');
+      if (unexpectedCursorKey) {
+        throw new BackendError('INVALID_PARAMS', `Unexpected read.cursor key: ${unexpectedCursorKey}`);
+      }
+      if (!Number.isSafeInteger(cursorRecord.start) || (cursorRecord.start as number) < 0
+          || !Number.isSafeInteger(cursorRecord.end) || (cursorRecord.end as number) < 0
+          || (cursorRecord.start as number) > (cursorRecord.end as number)) {
+        throw new BackendError('INVALID_PARAMS', 'read.cursor must contain a non-inverted non-negative range.');
+      }
+      loadedStart = cursorRecord.start as number;
+      loadedEnd = cursorRecord.end as number;
+    } else if (direction !== 'latest') {
+      throw new BackendError('INVALID_PARAMS', `${direction} read requires a cursor.`);
+    }
+    const page = await this.handleRequest({
+      id: `${frame.requestId}:read`,
+      method: 'session.loadTranscriptPage',
       params: {
         sessionPath,
-        operationId,
-        privacyMode: deleteRequested,
+        direction,
+        ...(loadedStart !== undefined ? { loadedStart } : {}),
+        ...(loadedEnd !== undefined ? { loadedEnd } : {}),
       },
+    }) as TranscriptPagePayload;
+    const agentPage: TranscriptPagePayload = {
+      sessionPath: page.sessionPath,
+      transcript: projectSessionControlTranscript(page.transcript),
+      transcriptWindow: page.transcriptWindow,
+      busy: page.busy,
+    };
+    const bounded = boundTranscriptSnapshot(agentPage, {
+      transport: { kind: 'response', requestId: `${frame.requestId}:read` },
+      // The control page is the edge adjacent to the caller cursor: newer
+      // rows for an older request, and older rows for a newer request. Keep
+      // that edge when the expanded backend window must be bounded.
+      requestedEdge: direction === 'newer' ? 'older' : 'newer',
+      maxLineBytes: AGENT_SESSION_CONTROL_MAX_RESULT_BYTES,
     });
+    const sourceStart = bounded.transcriptWindow.loadedStart;
+    const sourceEnd = bounded.transcriptWindow.loadedEnd;
+    const pageEdge = direction === 'older'
+      ? loadedStart ?? sourceEnd
+      : direction === 'newer'
+        ? loadedEnd ?? sourceStart
+        : sourceEnd;
+    const boundedEdge = Math.max(sourceStart, Math.min(sourceEnd, pageEdge));
+    const pageStart = direction === 'older'
+      ? Math.max(sourceStart, boundedEdge - (limit as number))
+      : direction === 'latest'
+        ? Math.max(sourceStart, sourceEnd - (limit as number))
+        : boundedEdge;
+    const pageEnd = direction === 'older'
+      ? boundedEdge
+      : Math.min(sourceEnd, pageStart + (limit as number));
+    const transcriptStart = pageStart - sourceStart;
+    const transcriptEnd = pageEnd - sourceStart;
+    const transcript = bounded.transcript.slice(transcriptStart, transcriptEnd);
+    const nextEnd = pageStart + transcript.length;
+    const nextWindow = {
+      ...bounded.transcriptWindow,
+      loadedStart: pageStart,
+      loadedEnd: nextEnd,
+      hasOlder: pageStart > 0,
+      hasNewer: nextEnd < bounded.transcriptWindow.totalCount,
+      isPartial: pageStart > 0 || nextEnd < bounded.transcriptWindow.totalCount,
+    };
     return {
       result: workerJson({
-        sessionPath,
-        closed: true,
-        deletionRequested: deleteRequested,
-        deletion: deleteRequested ? 'scheduled' : 'not-requested',
-        lifecycle,
+        sessionPath: bounded.sessionPath,
+        transcript,
+        transcriptWindow: nextWindow,
+        busy: bounded.busy,
+        cursor: { start: pageStart, end: nextEnd },
       }),
-      ...(deleteRequested
-        ? {
-            afterResponse: async () => {
-              try {
-                await this.handleRequest({
-                  id: `${frame.requestId}:forget`,
-                  method: 'session.forget',
-                  params: { sessionPath, operationId },
-                });
-              } catch (error) {
-                backendWarn('backend-session-control', 'session deletion failed after acknowledgement', {
-                  sessionPath,
-                  requestId: frame.requestId,
-                  error: toErrorMessage(error),
-                });
-              }
-            },
-          }
-        : {}),
     };
   }
 
@@ -3150,7 +4760,17 @@ export class BackendServer {
     onRequestValidated?: () => void,
     livePipelineTraceToggleGeneration?: number,
     onSessionOpenTiming?: (sample: SessionOpenTimingSample) => void,
+    trustedSessionControlMessage = false,
+    expectedCancellationGeneration?: number,
   ): Promise<unknown> {
+    // This is the actual coordinator ingress, before either hot-worker routing
+    // or the standalone handler can inspect the raw envelope. Only the
+    // authenticated worker session_control send above may carry attribution.
+    if (request.method === 'message.send' && !trustedSessionControlMessage
+      && request.params && typeof request.params === 'object' && !Array.isArray(request.params)) {
+      const { coordinatorAttribution: _untrusted, ...params } = request.params as Record<string, unknown>;
+      request = { ...request, params };
+    }
     const router = this.workerRuntimeRouter;
     if (request.method === 'message.edit') {
       const params = validateMessageEdit(request.params);
@@ -3250,10 +4870,10 @@ export class BackendServer {
           );
         }
         let routeState = sessionPath ? router.getRoute(sessionPath) : undefined;
-        const operationCancellationGeneration = sessionPath
-          && ISOLATED_PROMOTION_METHODS.has(request.method)
-          ? router.operationCancellationGeneration(sessionPath)
-          : undefined;
+        const operationCancellationGeneration = expectedCancellationGeneration
+          ?? (sessionPath && ISOLATED_PROMOTION_METHODS.has(request.method)
+            ? router.operationCancellationGeneration(sessionPath)
+            : undefined);
         // Read/config commands do not initiate promotion, but once another
         // command has claimed the cold lease they must wait and reselect the
         // winning authority. Falling through to the coordinator while the
@@ -3357,7 +4977,51 @@ export class BackendServer {
           }
           const shouldPromote = ISOLATED_PROMOTION_METHODS.has(request.method);
           if (shouldPromote) return await router.route(request, operationCancellationGeneration);
-          if (router.hasHotOwner(sessionPath)) return await router.routeExisting(request);
+          if (router.hasHotOwner(sessionPath)) {
+            if (request.method === 'session.title.generate') {
+              const titleParams = validateSessionTitleGenerate(request.params);
+              if (titleParams.enabled === false) {
+                return await this.finalizeGeneratedLiveSessionTitle(
+                  sessionPath, titleParams.prompt, { generated: false, reason: 'disabled' }, request.id,
+                );
+              }
+            }
+            let routed: unknown;
+            try {
+              routed = await router.routeExisting(request);
+            } catch (error) {
+              if (request.method !== 'session.title.generate') throw error;
+              const titleParams = validateSessionTitleGenerate(request.params);
+              backendWarn('backend-live-titles', 'title model failed; finalizing snippet', {
+                sessionPath, error: toErrorMessage(error),
+              });
+              return await this.finalizeGeneratedLiveSessionTitle(
+                sessionPath, titleParams.prompt, { generated: false, reason: 'model-failed' }, request.id,
+              );
+            }
+            if (request.method !== 'session.title.generate') return routed;
+            // The worker returned a candidate-only generation result. The
+            // coordinator now owns unique allocation and ownership-safe
+            // persistence before the assigned name is exposed to the host.
+            const generation = routed && typeof routed === 'object'
+              ? (routed as { generated?: unknown; name?: unknown; reason?: unknown })
+              : { generated: false };
+            let generationPrompt = '';
+            try {
+              const titleParams = validateSessionTitleGenerate(request.params);
+              generationPrompt = titleParams.prompt;
+            } catch {
+              // A malformed request already failed at the worker; keep the
+              // wrapper transparent for the routed outcome instead of masking it.
+              return routed;
+            }
+            return await this.finalizeGeneratedLiveSessionTitle(
+              sessionPath,
+              generationPrompt,
+              generation,
+              request.id,
+            );
+          }
           if (request.method === 'operation.status') {
             const operationId = request.params && typeof request.params === 'object'
               && !Array.isArray(request.params)
@@ -3493,7 +5157,7 @@ export class BackendServer {
         this.setViewedSessionPathIfCurrent(sessionPath, revision)
       ),
       setViewedSessionPath: (sessionPath) => this.setViewedSessionPath(sessionPath),
-      buildSessionOpenedPayload: (sessionPath, selectionToken, transcript, transport, operationId, operationAttempt, systemPromptDisabledEntries, publicRequestId) => (
+      buildSessionOpenedPayload: (sessionPath, selectionToken, transcript, transport, operationId, operationAttempt, systemPromptDisabledEntries, publicRequestId, includeInitialContextInventory = true) => (
         this.buildSessionOpenedPayload(
           sessionPath,
           selectionToken,
@@ -3502,7 +5166,7 @@ export class BackendServer {
           operationId,
           operationAttempt,
           systemPromptDisabledEntries,
-          true,
+          includeInitialContextInventory,
           publicRequestId,
         )
       ),
@@ -3521,6 +5185,19 @@ export class BackendServer {
       closeSessionLifecycle: (sessionPath, operationId, privacyMode) => (
         this.closeSessionLifecycle(sessionPath, operationId, privacyMode)
       ),
+      handleSessionCloseAcknowledgement: (params) => this.acknowledgeHostCloseRequest(params),
+      handleSessionControlSettingsAcknowledgement: (params) => (
+        this.acknowledgeHostSessionControlSettings(params)
+      ),
+      assertSessionNotClosing: (sessionPath) => this.assertSessionNotClosing(sessionPath),
+      applyHostLiveMembership: (snapshot) => this.applyHostLiveMembership(snapshot),
+      assignCreatedSessionTitle: (sessionPath, baseTitle, requestId) => (
+        this.assignCreatedSessionTitle(sessionPath, baseTitle, requestId)
+      ),
+      noteNewSessionPublished: (sessionPath) => {
+        this.newCreatePublicationPaths.add(this.coldManagerKey(sessionPath));
+      },
+      admitOpenedSessionTitle: (sessionPath, allowStartupRestore) => this.admitOpenedSessionTitle(sessionPath, allowStartupRestore),
       forgetSession: (sessionPath, operationId) => this.forgetSession(sessionPath, operationId),
       loadTranscriptPage: (sessionPath, direction, loadedStart, loadedEnd, options) => (
         this.loadTranscriptPage(sessionPath, direction, loadedStart, loadedEnd, options)
@@ -3633,6 +5310,12 @@ export class BackendServer {
       pid: process.pid,
     });
     this.disposed = true;
+    this.clearLiveTitleNamespaceRetry();
+    for (const [requestId, entry] of this.hostSessionSettingsRequests) {
+      clearTimeout(entry.timer);
+      this.hostSessionSettingsRequests.delete(requestId);
+      entry.resolve(undefined);
+    }
     this.coldSessionManagerHandles.clear();
     this.pendingLivePipelineTraceDisables.clear();
     this.stopHostWatchdog();

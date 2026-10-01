@@ -24,6 +24,8 @@ import {
   validateWorkerIpcFrameDraft,
 } from '../../lib/rpc/worker-protocol.js';
 import { SESSION_SNAPSHOT_TOO_LARGE_CODE } from '../../lib/rpc/wire.js';
+import { AUTONOMOUS_MODE_BY_SESSION_ENV } from '../../lib/rpc/settings.js';
+import { AUTONOMOUS_MODE_ENV } from '../../../tool-and-skill-selection/settings/autonomous-mode.js';
 
 interface WorkerRuntimeHostInternals {
   sdk?: unknown;
@@ -52,6 +54,8 @@ interface WorkerRuntimeHostInternals {
   requestDeps: () => any;
   getSystemPromptModule: () => Promise<{ buildSystemPrompt: (...args: unknown[]) => unknown }>;
   autonomousMode: boolean;
+  autonomousModeDefault: boolean;
+  autonomousModeBySession: Record<string, boolean>;
   mcpEnabled: boolean;
   suppressNextReplacementOpened: boolean;
 }
@@ -208,6 +212,48 @@ test('worker settings rollback keeps provider deletion explicit on the coordinat
   }], 'omitting provider must preserve it rather than encode an implicit deletion');
 });
 
+test('worker settings command keeps session-only SDK defaults out of coordinator settings sync', async () => {
+  const requests: unknown[] = [];
+  const host = new WorkerRuntimeHost({
+    server: {
+      requestFrame: async (body: unknown) => { requests.push(body); throw new Error('unexpected shared settings write'); },
+      sendFrame: () => true, sendLiveSemanticFrame: () => true,
+      sendDetailFrame: () => true, onDetailDrain: () => () => undefined,
+      failRuntime: () => undefined,
+    } as never,
+    owner: { coordinatorGeneration: 1, workerId: 'settings-worker', workerGeneration: 1 },
+    patchIdentity: { relativePath: 'dist/core/session-manager.js', patchVersion: 1, sha256: 'a'.repeat(64) },
+  });
+  const internals = getInternals(host);
+  const path = '/repo/settings-session.jsonl';
+  const context = makeSessionEventContext(path);
+  context.activeRequest = undefined;
+  const callbacks: string[] = [];
+  context.session = {
+    model: { id: 'model-a', provider: 'mock' }, thinkingLevel: 'medium', isStreaming: false,
+    settingsManager: {
+      setDefaultModelAndProvider: () => { callbacks.push('model'); },
+      setDefaultThinkingLevel: () => { callbacks.push('thinking'); },
+    },
+    setThinkingLevel: (level: string) => {
+      context.session.thinkingLevel = level;
+      context.session.settingsManager!.setDefaultThinkingLevel(level);
+    },
+  } as SessionContext['session'];
+  internals.sdk = { VERSION: 'test' };
+  internals.context = context;
+  host.applySync('settings', 1, { values: { defaultModel: 'model-a', defaultProvider: 'mock', defaultThinkingLevel: 'medium' } });
+  const result = await host.command('settings.set', {
+    params: { sessionPath: path, persistenceScope: 'session', defaultThinkingLevel: 'high' },
+  }, 'session-only') as Record<string, unknown>;
+  assert.equal(result.defaultThinkingLevel, 'high');
+  assert.deepEqual(requests, []);
+  assert.deepEqual(callbacks, []);
+  assert.deepEqual(await internals.requestDeps().readModelSettings(), {
+    defaultModel: 'model-a', defaultProvider: 'mock', defaultThinkingLevel: 'medium',
+  });
+});
+
 test('worker manager-fence command drains admitted persistence and rejects retired writes', async () => {
   const { host } = makeHost();
   const internals = getInternals(host);
@@ -274,13 +320,110 @@ test('worker fails closed and disposes on an unexpected durable admission failur
   assert.equal(unsubscribed, 1);
 });
 
+test('initial session attach applies a previously synced root-session autonomous override', async () => {
+  const { host } = makeHost();
+  const internals = getInternals(host);
+  internals.sdk = {};
+  internals.getSystemPromptModule = async () => ({ buildSystemPrompt: () => '' });
+  internals.mcpEnabled = true;
+  const rootPath = '/sessions/initial-root.jsonl';
+  const previousAutonomousMode = process.env[AUTONOMOUS_MODE_ENV];
+  const previousOverrides = process.env[AUTONOMOUS_MODE_BY_SESSION_ENV];
+  let activeTools = ['ask_user', 'bash'];
+
+  try {
+    host.applySync('runtimePrefs', 1, {
+      values: { autonomousMode: false, autonomousModeBySession: { [rootPath]: true } },
+    });
+    const previousPath = '/sessions/previous-root.jsonl';
+    const context = {
+      runtime: {
+        newSession: async () => undefined,
+        fork: async () => ({ cancelled: false }),
+        switchSession: async () => undefined,
+        dispose: async () => undefined,
+      } as unknown as SessionContext['runtime'],
+      session: makeReplacementSession(makeFenceManager(previousPath), previousPath),
+      sessionPath: previousPath,
+      unsubscribe: () => undefined,
+      busySeq: 0,
+    } as SessionContext;
+    internals.context = context;
+    const rootSession = Object.assign(
+      makeReplacementSession(makeFenceManager(rootPath), rootPath),
+      {
+        getActiveToolNames: () => activeTools,
+        setActiveToolsByName: (names: string[]) => { activeTools = [...names]; },
+      },
+    );
+
+    await internals.bindSession(context, rootSession);
+
+    assert.equal(internals.autonomousMode, true, 'the root override takes precedence over the synced default');
+    assert.equal(process.env[AUTONOMOUS_MODE_ENV], '1');
+    assert.ok(!activeTools.includes('ask_user'), 'initial attach applies the resolved root mode to tools');
+  } finally {
+    if (previousAutonomousMode === undefined) delete process.env[AUTONOMOUS_MODE_ENV];
+    else process.env[AUTONOMOUS_MODE_ENV] = previousAutonomousMode;
+    if (previousOverrides === undefined) delete process.env[AUTONOMOUS_MODE_BY_SESSION_ENV];
+    else process.env[AUTONOMOUS_MODE_BY_SESSION_ENV] = previousOverrides;
+    await host.dispose();
+  }
+});
+
+test('runtime preference sync resolves autonomous mode per current root path and restores ask_user', () => {
+  const { host } = makeHost();
+  const internals = getInternals(host);
+  const context = makeSessionEventContext('/sessions/root.jsonl');
+  let activeTools = ['ask_user', 'bash'];
+  context.session = {
+    getActiveToolNames: () => activeTools,
+    setActiveToolsByName: (names: string[]) => { activeTools = [...names]; },
+  } as unknown as SessionContext['session'];
+  internals.context = context;
+  const previousAutonomousMode = process.env[AUTONOMOUS_MODE_ENV];
+  const previousOverrides = process.env[AUTONOMOUS_MODE_BY_SESSION_ENV];
+
+  try {
+    host.applySync('runtimePrefs', 1, {
+      values: { autonomousMode: true, autonomousModeBySession: { [context.sessionPath]: false } },
+    });
+    assert.equal(internals.autonomousMode, false);
+    assert.equal(process.env[AUTONOMOUS_MODE_ENV], '0');
+    assert.ok(activeTools.includes('ask_user'), 'a root-session opt-out keeps ask_user active');
+
+    host.applySync('runtimePrefs', 2, {
+      values: { autonomousMode: false, autonomousModeBySession: { [context.sessionPath]: true } },
+    });
+    assert.equal(internals.autonomousMode, true);
+    assert.equal(process.env[AUTONOMOUS_MODE_ENV], '1');
+    assert.ok(!activeTools.includes('ask_user'), 'a root-session opt-in removes ask_user');
+
+    host.applySync('runtimePrefs', 3, {
+      values: { autonomousMode: false, autonomousModeBySession: {} },
+    });
+    assert.equal(internals.autonomousMode, false, 'clearing the override restores the shared default');
+    assert.equal(process.env[AUTONOMOUS_MODE_ENV], '0');
+    assert.ok(activeTools.includes('ask_user'), 'turning off effective autonomy restores ask_user');
+  } finally {
+    if (previousAutonomousMode === undefined) delete process.env[AUTONOMOUS_MODE_ENV];
+    else process.env[AUTONOMOUS_MODE_ENV] = previousAutonomousMode;
+    if (previousOverrides === undefined) delete process.env[AUTONOMOUS_MODE_BY_SESSION_ENV];
+    else process.env[AUTONOMOUS_MODE_BY_SESSION_ENV] = previousOverrides;
+  }
+});
+
 test('replacement and disposal retain manager fences at both retirement boundaries', async () => {
   const { host } = makeHost();
   const internals = getInternals(host);
   internals.sdk = {};
   internals.getSystemPromptModule = async () => ({ buildSystemPrompt: () => '' });
   internals.autonomousMode = false;
+  internals.autonomousModeDefault = false;
+  internals.autonomousModeBySession = {};
   internals.mcpEnabled = true;
+  const previousAutonomousMode = process.env[AUTONOMOUS_MODE_ENV];
+  const previousOverrides = process.env[AUTONOMOUS_MODE_BY_SESSION_ENV];
 
   let releasePersist!: () => void;
   const sessionRoot = path.join(os.tmpdir(), `pie-worker-rebind-${process.pid}`);
@@ -309,7 +452,12 @@ test('replacement and disposal retain manager fences at both retirement boundari
 
   const pending = oldGuarded._persist({ kind: 'message' });
   const nextManager = makeFenceManager(newPath);
-  const replacement = makeReplacementSession(nextManager, newPath);
+  internals.autonomousModeBySession = { [newPath]: true };
+  let activeTools = ['ask_user', 'bash'];
+  const replacement = Object.assign(makeReplacementSession(nextManager, newPath), {
+    getActiveToolNames: () => activeTools,
+    setActiveToolsByName: (names: string[]) => { activeTools = [...names]; },
+  });
   const rebinding = internals.bindSession(context, replacement);
   await waitForAsyncEvent();
   assert.equal(oldGuarded.appendMessage({ role: 'late' }), '__pie:fenced__');
@@ -317,8 +465,14 @@ test('replacement and disposal retain manager fences at both retirement boundari
   await pending;
   await rebinding;
   assert.notEqual(context.session.sessionManager, oldGuarded);
+  assert.equal(internals.autonomousMode, true, 'replacement binding resolves its own session override');
+  assert.ok(!activeTools.includes('ask_user'), 'the replacement tool guard applies the effective mode');
 
   await host.dispose();
+  if (previousAutonomousMode === undefined) delete process.env[AUTONOMOUS_MODE_ENV];
+  else process.env[AUTONOMOUS_MODE_ENV] = previousAutonomousMode;
+  if (previousOverrides === undefined) delete process.env[AUTONOMOUS_MODE_BY_SESSION_ENV];
+  else process.env[AUTONOMOUS_MODE_BY_SESSION_ENV] = previousOverrides;
   assert.equal((context.session.sessionManager as MutableSdkSessionManager).appendMessage({ role: 'retired' }), '__pie:fenced__');
 });
 
@@ -354,6 +508,29 @@ test('context source observations qualify prompt footprints separately from disp
     assert.equal(payload.modelId, 'source-model');
     assert.equal(payload.provider, 'source-provider');
   }
+});
+
+test('hot title assignment replaces only the expected durable collision, never an intervening rename', async () => {
+  const { host } = makeHost();
+  const internals = getInternals(host);
+  let name = 'Review';
+  internals.sdk = {};
+  const written: string[] = [];
+  internals.context = {
+    sessionPath: '/sessions/current.jsonl',
+    session: {
+      sessionManager: { getSessionName: () => name, getSessionId: () => 'sid-current' },
+      setSessionName: (title: string) => { name = title; written.push(title); },
+    },
+  } as unknown as SessionContext;
+  assert.deepEqual(await host.command('session.title.assign', {
+    params: { sessionPath: '/sessions/current.jsonl', title: 'Review (2)', replaceExpectedTitle: 'Review' },
+  }, 'suffix'), { assigned: true, changed: true, title: 'Review (2)' });
+  assert.deepEqual(written, ['Review (2)']);
+  assert.deepEqual(await host.command('session.title.assign', {
+    params: { sessionPath: '/sessions/current.jsonl', title: 'Review (3)', replaceExpectedTitle: 'Review' },
+  }, 'stale'), { assigned: false, changed: false, skipped: 'explicit-name' });
+  assert.deepEqual(written, ['Review (2)']);
 });
 
 test('hot duplicate runs through the owning runtime replacement and suppresses its intermediate event', async () => {

@@ -1,6 +1,7 @@
 import type { AssistantUsage } from '../../../../analytics/contracts/legacy-run-analytics-contracts.js';
 import type { ThinkingLevel } from '../../../model-providers/catalog/thinking-level.js';
 import type { DurationClockDomain } from '../../../../analytics/contracts/timing.js';
+import type { SessionControlSender } from './session-control-attribution.js';
 
 export const COMPACTION_METRICS_CUSTOM_TYPE = 'pie.compaction-metrics';
 
@@ -167,6 +168,8 @@ export interface ChatMessage {
   markdown: string;
   /** Ordered user content blocks when the message contains structured user input (e.g. pasted images). */
   userParts?: UserContentPart[];
+  /** Coordinator-authenticated sender for durable cross-session agent messages. */
+  sender?: SessionControlSender;
   /** Ordered assistant content blocks as emitted by the agent. */
   parts?: ChatMessagePart[];
   /** Accumulated reasoning/thinking content (only present on assistant messages from reasoning models). */

@@ -1,4 +1,4 @@
-import { EXTENSION_TOGGLES_ENV, NESTED_ALLOWED_BUCKETS_ENV, PROVIDER_TOGGLES_ENV, SUBAGENT_BUCKET_CAN_SPAWN_ENV, SUBAGENT_BUCKETS_ENV, SUBAGENT_PROVIDER_DEFAULTS_ENV, SUBAGENT_PROVIDER_TOGGLES_ENV, SUBAGENT_ROUTE_AROUND_SATURATED_PROVIDERS_ENV, SUBAGENT_FALLBACK_ON_PROVIDER_FAILURE_ENV } from '../lib/rpc/settings.js';
+import { EXTENSION_TOGGLES_ENV, NESTED_ALLOWED_BUCKETS_ENV, PROVIDER_TOGGLES_ENV, SUBAGENT_BUCKET_CAN_SPAWN_ENV, SUBAGENT_BUCKETS_ENV, SUBAGENT_PROVIDER_DEFAULTS_ENV, SUBAGENT_PROVIDER_TOGGLES_ENV, SUBAGENT_ROUTE_AROUND_SATURATED_PROVIDERS_ENV, SUBAGENT_FALLBACK_ON_PROVIDER_FAILURE_ENV, type SettingsPersistenceScope } from '../lib/rpc/settings.js';
 import { HISTORY_COMPACTION_ENV } from '../../session-storage/settings/history-compaction.js';
 import { PROTOCOL_VERSION, type RequestEnvelope } from '../lib/rpc/wire.js';
 import type { ModelSettings } from '../../model-providers/catalog/model-contract.js';
@@ -299,13 +299,61 @@ function liveModelIdentityEqual(
   return left?.id === right?.id && left?.provider === right?.provider;
 }
 
+function readSettingsPersistenceScope(
+  rawParams: unknown,
+  validatedSessionPath: string | undefined,
+): SettingsPersistenceScope {
+  const rawScope = rawParams && typeof rawParams === 'object' && !Array.isArray(rawParams)
+    ? (rawParams as Record<string, unknown>)['persistenceScope']
+    : undefined;
+  if (rawScope !== undefined && rawScope !== 'session' && rawScope !== 'global') {
+    throw new BackendError('INVALID_PARAMS', 'Invalid params for settings.set: persistenceScope must be session or global.');
+  }
+  if (rawScope === 'session' && !validatedSessionPath) {
+    throw new BackendError('INVALID_PARAMS', 'Invalid params for settings.set: session persistence requires sessionPath.');
+  }
+  return rawScope === 'session' ? 'session' : 'global';
+}
+
+/** The pinned AgentSession.setModel/setThinkingLevel call SettingsManager's shared
+ * default setters even for a session-only choice. Suppress only those callbacks
+ * for the duration of this session mutation (including rollback); Pi still
+ * appends its durable per-session model/thinking records. */
+async function withSessionOnlySdkDefaults<T>(session: { settingsManager?: unknown }, mutation: () => Promise<T>): Promise<T> {
+  const manager = session.settingsManager as {
+    setDefaultModelAndProvider?: (provider: string, id: string) => void;
+    setDefaultThinkingLevel?: (level: string) => void;
+  } | undefined;
+  if (!manager || typeof manager.setDefaultModelAndProvider !== 'function'
+    || typeof manager.setDefaultThinkingLevel !== 'function') {
+    throw new BackendError('MODEL_SWITCH_UNSUPPORTED', 'The session runtime cannot isolate shared model defaults.');
+  }
+  const modelSetter = manager.setDefaultModelAndProvider;
+  const thinkingSetter = manager.setDefaultThinkingLevel;
+  manager.setDefaultModelAndProvider = () => undefined;
+  manager.setDefaultThinkingLevel = () => undefined;
+  try {
+    return await mutation();
+  } finally {
+    manager.setDefaultModelAndProvider = modelSetter;
+    manager.setDefaultThinkingLevel = thinkingSetter;
+  }
+}
+
 async function handleSettingsSet(
   deps: BackendRequestHandlerDeps,
   request: RequestEnvelope,
 ): Promise<unknown> {
   const params = validateSettingsSet(request.params);
+  const persistenceScope = readSettingsPersistenceScope(request.params, params.sessionPath);
   markRequestValidated(deps);
-  const { sessionPath, ...rawUpdates } = params;
+  const { sessionPath } = params;
+  const rawUpdates: Partial<ModelSettings> = { ...params };
+  // `settings.set` scope and address are transport metadata, never Pi model
+  // settings. Keep this explicit even when the backend validator's additive
+  // scope support is wired separately.
+  delete (rawUpdates as Partial<ModelSettings> & { sessionPath?: string }).sessionPath;
+  delete (rawUpdates as Partial<ModelSettings> & { persistenceScope?: SettingsPersistenceScope }).persistenceScope;
   const previousSettings = await deps.readModelSettings();
   // A hot session resolves its existing runtime and uses the SDK's live
   // setters. A cold session has no runtime, but still receives the exact same
@@ -320,8 +368,21 @@ async function handleSettingsSet(
   // `modelRegistry.find(defaultProvider, defaultModel)`. When `defaultProvider`
   // is omitted (e.g. a thinking-level-only change), keep the current provider.
   const currentSessionModel = targetContext?.session.model;
-  const currentProvider = currentSessionModel?.provider ?? previousSettings.defaultProvider;
-  const currentId = currentSessionModel?.id ?? previousSettings.defaultModel;
+  const durableSession = sessionPath && !targetContext
+    ? (await deps.buildSessionOpenedPayload(
+      sessionPath,
+      undefined,
+      'skip',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+    )).session
+    : undefined;
+  const currentProvider = currentSessionModel?.provider ?? durableSession?.provider ?? previousSettings.defaultProvider;
+  const currentId = currentSessionModel?.id ?? durableSession?.modelId ?? previousSettings.defaultModel;
   const requestedId = params.defaultModel ?? currentId;
   const requestedProvider = params.defaultProvider ?? currentProvider;
   const currentThinkingLevel = targetContext?.session.thinkingLevel ?? previousSettings.defaultThinkingLevel;
@@ -359,6 +420,32 @@ async function handleSettingsSet(
     if (params.defaultModel !== undefined
       && previousSettings.defaultProvider !== coldModel.provider) {
       hasPersistedChanges = true;
+    }
+  }
+
+  // Validate even provider-only and no-op requests against the configured
+  // surface before any shared-settings or durable session write.
+  if (hasRequestedModelIdentity && !coldModel && !targetContext) {
+    const available = await deps.listAvailableModels();
+    if (!available.some((model) => (requestedProvider === undefined || model.provider === requestedProvider) && model.id === requestedId)) {
+      throw new BackendError('MODEL_UNAVAILABLE', `Model not available for this session: ${requestedProvider}/${requestedId}`);
+    }
+  }
+
+  if (params.defaultThinkingLevel !== undefined) {
+    const models = await deps.listAvailableModels(targetContext);
+    const selected = models.find((model) => model.id === requestedId
+      && (requestedProvider === undefined || model.provider === requestedProvider));
+    if (!selected && !targetContext) {
+      throw new BackendError('MODEL_UNAVAILABLE',
+        `Cannot validate reasoning for unavailable model: ${requestedProvider}/${requestedId}.`);
+    }
+    const supported = selected?.thinkingLevels;
+    if (selected && (supported?.length
+      ? !supported.includes(params.defaultThinkingLevel)
+      : !selected.reasoning && params.defaultThinkingLevel !== 'off')) {
+      throw new BackendError('THINKING_LEVEL_UNAVAILABLE',
+        `Reasoning level ${params.defaultThinkingLevel} is not supported by ${selected.provider}/${selected.id}.`);
     }
   }
 
@@ -411,14 +498,20 @@ async function handleSettingsSet(
       ?? (typeof resolvedProvider === 'string' ? resolvedProvider : undefined);
   }
 
-  const persistedSettings = hasPersistedChanges
+  const persistedSettings = persistenceScope === 'global' && hasPersistedChanges
     ? await deps.writeModelSettings(settingsUpdates)
     : undefined;
-  const result = persistedSettings ?? previousSettings;
+  // Session scope returns the requested effective patch without pretending it
+  // changed shared defaults. Omitted/explicit global scope retain the historic
+  // settings.json response exactly.
+  const result = persistenceScope === 'session'
+    ? { ...previousSettings, ...settingsUpdates }
+    : persistedSettings ?? previousSettings;
   let liveModelSwitchAttempted = false;
   let previousLiveModel = targetContext?.session.model;
+  const previousLiveThinkingLevel = targetContext?.session.thinkingLevel;
 
-  try {
+  const applySessionMutation = async () => {
     if (targetContext && (params.defaultModel !== undefined
       || params.defaultProvider !== undefined
       || params.defaultThinkingLevel !== undefined)) {
@@ -469,6 +562,17 @@ async function handleSettingsSet(
       });
     }
 
+  };
+  try {
+    if (persistenceScope === 'session' && targetContext && (isChangingModel || isChangingThinkingLevel)) {
+      await withSessionOnlySdkDefaults(targetContext.session, applySessionMutation);
+    } else {
+      await applySessionMutation();
+    }
+    const effectiveThinking = targetContext?.session.thinkingLevel ?? params.defaultThinkingLevel;
+    if (persistenceScope === 'session' && effectiveThinking !== undefined) {
+      result.defaultThinkingLevel = effectiveThinking as ModelSettings['defaultThinkingLevel'];
+    }
     // The only path that can change a session's chat model is fully silent on
     // success; without this line an unintended picker commit (previously
     // possible via an auto-highlighted first entry) left no attribution in
@@ -489,7 +593,8 @@ async function handleSettingsSet(
       },
       changingModel: isChangingModel,
       changingThinkingLevel: isChangingThinkingLevel,
-      persistedGlobally: hasPersistedChanges,
+      persistenceScope,
+      persistedGlobally: persistenceScope === 'global' && hasPersistedChanges,
     });
 
     return result;
@@ -506,7 +611,11 @@ async function handleSettingsSet(
           liveRollbackError = new Error('The previous live model is unavailable for rollback.');
         } else {
           try {
-            await targetContext.session.setModel(previousLiveModel);
+            if (persistenceScope === 'session') {
+              await withSessionOnlySdkDefaults(targetContext.session, () => targetContext.session.setModel!(previousLiveModel));
+            } else {
+              await targetContext.session.setModel(previousLiveModel);
+            }
             if (!liveModelIdentityEqual(targetContext.session.model, previousLiveModel)) {
               liveRollbackError = new Error('The live model rollback did not restore the exact predecessor.');
             }
@@ -516,6 +625,24 @@ async function handleSettingsSet(
               : new Error(String(rollbackError));
           }
         }
+      }
+    }
+
+    if (persistenceScope === 'session' && targetContext
+      && previousLiveThinkingLevel !== undefined
+      && targetContext.session.thinkingLevel !== previousLiveThinkingLevel) {
+      try {
+        await withSessionOnlySdkDefaults(targetContext.session, async () => {
+          if (typeof targetContext.session.setThinkingLevel !== 'function') {
+            throw new Error('The previous reasoning level is unavailable for rollback.');
+          }
+          targetContext.session.setThinkingLevel(previousLiveThinkingLevel);
+        });
+        if (targetContext.session.thinkingLevel !== previousLiveThinkingLevel) {
+          throw new Error('The reasoning rollback did not restore the exact predecessor.');
+        }
+      } catch (rollbackError) {
+        liveRollbackError ??= rollbackError instanceof Error ? rollbackError : new Error(String(rollbackError));
       }
     }
 

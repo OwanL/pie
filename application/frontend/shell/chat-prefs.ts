@@ -1,3 +1,4 @@
+import { resolveAutonomousModeForSession } from '../../lib/protocol/settings.js';
 import type { ChatPrefs, ModelInfo, SubagentBucketAssignment } from '../../lib/protocol/index.js';
 
 export type BooleanPrefKey =
@@ -151,6 +152,23 @@ export function setProviderEnabled(prefs: ChatPrefs, provider: string, enabled: 
       [provider]: enabled,
     },
   };
+}
+
+/** Effective autonomous preference for the currently viewed root session. */
+export function getAutonomousModeForSession(prefs: ChatPrefs, sessionPath?: string | null): boolean {
+  return resolveAutonomousModeForSession(prefs, sessionPath);
+}
+
+/** Toggle one root session without changing the shared default. With no
+ * durable session target, the control edits the shared default as before. */
+export function setAutonomousModeForSession(
+  prefs: ChatPrefs,
+  sessionPath: string | undefined,
+  enabled: boolean,
+): Partial<ChatPrefs> {
+  return sessionPath
+    ? { autonomousModeBySession: { [sessionPath]: enabled } }
+    : { autonomousMode: enabled };
 }
 
 /** Providers represented by at least one model in a configured subagent bucket.

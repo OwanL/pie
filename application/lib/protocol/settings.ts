@@ -42,6 +42,7 @@ export {
   ALL_NESTED_BUCKETS_ALLOWED,
   ALL_SUBAGENT_BUCKETS_CAN_SPAWN,
   EMPTY_SUBAGENT_BUCKETS,
+  AUTONOMOUS_MODE_BY_SESSION_ENV,
   EXTENSION_TOGGLES_ENV,
   NESTED_ALLOWED_BUCKETS_ENV,
   PROVIDER_TOGGLES_ENV,
@@ -52,6 +53,12 @@ export {
   SUBAGENT_PROVIDER_TOGGLES_ENV,
   SUBAGENT_ROUTE_AROUND_SATURATED_PROVIDERS_ENV,
 } from '../../../harness/agent-processes/lib/rpc/settings.js';
+export type {
+  SessionControlExecutionSettings,
+  SessionControlExecutionSettingsPatch,
+  SessionControlSettingsRequest,
+  SessionControlSettingsAcknowledgement,
+} from '../../../harness/agent-processes/lib/rpc/session-control-settings.js';
 export type {
   HistoryCompactionModelProfile,
   HistoryCompactionModelSelector,
@@ -233,8 +240,12 @@ export interface ChatPrefs {
   suppressCompletionNotifications: boolean;
   showPruningMessages: boolean;
   /** Hands-off operation: ask_user is removed from the pruning prepass and from
-   * every provider-visible main-agent tool set. */
+   * every provider-visible main-agent tool set. This is the shared default. */
   autonomousMode: boolean;
+  /** Optional per-root-session autonomous override. Missing paths inherit
+   * `autonomousMode`; session lifecycle code rekeys and removes entries with
+   * their owning session. */
+  autonomousModeBySession?: Record<string, boolean>;
   /** When true, the pi-mcp-adapter's tools (`mcp` proxy + `mcpScript`) are
    * exposed to the model. When false, a backend guard strips them from every
    * active tool set, so MCP servers stay configured in their mcp.json files
@@ -484,6 +495,7 @@ export const DEFAULT_CHAT_PREFS: ChatPrefs = {
   providerToggles: {},
   subagentProviderDefaults: {},
   subagentProviderTogglesBySession: {},
+  autonomousModeBySession: {},
   providerConcurrency: {},
   activityTailLines: 5,
   uiMessageRailSize: 20,
@@ -812,6 +824,7 @@ export function resolveChatPrefs(prefs?: Partial<ChatPrefs> | null): ChatPrefs {
     },
     subagentProviderDefaults: normalizeBooleanMap(storedPrefs.subagentProviderDefaults),
     subagentProviderTogglesBySession: normalizeNestedBooleanMap(storedPrefs.subagentProviderTogglesBySession),
+    autonomousModeBySession: normalizeBooleanMap(storedPrefs.autonomousModeBySession),
     providerConcurrency: normalizeProviderConcurrency(storedPrefs.providerConcurrency),
     historyCompaction: resolveHistoryCompactionSettings(storedPrefs.historyCompaction),
     subagentBuckets: normalizeSubagentBuckets(storedPrefs.subagentBuckets),
@@ -845,6 +858,12 @@ export function mergeChatPrefs(current: ChatPrefs, updates: Partial<ChatPrefs>):
       subagentProviderDefaults: {
         ...current.subagentProviderDefaults,
         ...updates.subagentProviderDefaults,
+      },
+    }),
+    ...(updates.autonomousModeBySession && {
+      autonomousModeBySession: {
+        ...(current.autonomousModeBySession ?? {}),
+        ...updates.autonomousModeBySession,
       },
     }),
     ...(updates.subagentProviderTogglesBySession && {
@@ -894,6 +913,54 @@ export function normalizeNestedBooleanMap(value: unknown): Record<string, Record
   return result;
 }
 
+/** Resolve the autonomous preference for a root session. Session overrides
+ * are intentionally local to that root and do not mutate the shared default. */
+export function resolveAutonomousModeForSession(
+  prefs: Pick<ChatPrefs, 'autonomousMode' | 'autonomousModeBySession'>,
+  sessionPath?: string | null,
+): boolean {
+  const override = sessionPath ? prefs.autonomousModeBySession?.[sessionPath] : undefined;
+  return typeof override === 'boolean' ? override : prefs.autonomousMode;
+}
+
+/** Effective provider choices for the configured subagent-provider surface.
+ * Includes qualified bucket providers, legacy bucket IDs resolved through
+ * the supplied model catalog, defaults, and explicit session overrides. */
+export function resolveSubagentProviderChoices(
+  prefs: Pick<ChatPrefs, 'subagentBuckets' | 'subagentProviderDefaults' | 'subagentProviderTogglesBySession'>,
+  sessionPath: string,
+  availableModels: ReadonlyArray<{ id?: unknown; provider?: unknown }> = [],
+): Record<string, boolean> {
+  const providers = new Set<string>();
+  for (const bucket of [prefs.subagentBuckets.small, prefs.subagentBuckets.medium, prefs.subagentBuckets.frontier]) {
+    for (const assignment of bucket) {
+      const model = assignment.model;
+      const slash = model.indexOf('/');
+      if (slash > 0 && slash < model.length - 1) {
+        providers.add(model.slice(0, slash));
+      } else {
+        for (const available of availableModels) {
+          if (available.id === model && typeof available.provider === 'string' && available.provider) {
+            providers.add(available.provider);
+          }
+        }
+      }
+    }
+  }
+  const sessionChoices = prefs.subagentProviderTogglesBySession[sessionPath] ?? {};
+  for (const [provider, enabled] of Object.entries(prefs.subagentProviderDefaults)) {
+    if (typeof enabled === 'boolean') providers.add(provider);
+  }
+  for (const [provider, enabled] of Object.entries(sessionChoices)) {
+    if (typeof enabled === 'boolean') providers.add(provider);
+  }
+  const choices: Record<string, boolean> = {};
+  for (const provider of [...providers].sort((left, right) => left.localeCompare(right))) {
+    choices[provider] = sessionChoices[provider] ?? prefs.subagentProviderDefaults[provider] ?? true;
+  }
+  return choices;
+}
+
 export function buildRuntimePrefsPayload(prefs: ChatPrefs): RuntimePrefsSetParams & {
   subagentMaxInflightSource: SubagentMaxInflightSource;
 } {
@@ -905,6 +972,7 @@ export function buildRuntimePrefsPayload(prefs: ChatPrefs): RuntimePrefsSetParam
     mcpEnabled: prefs.mcpEnabled,
     subagentProviderDefaults: prefs.subagentProviderDefaults,
     subagentProviderTogglesBySession: prefs.subagentProviderTogglesBySession,
+    autonomousModeBySession: prefs.autonomousModeBySession ?? {},
     extensionToggles: prefs.extensionToggles,
     subagentAlwaysParentModel: prefs.subagentAlwaysParentModel,
     subagentRouteAroundSaturatedProviders: prefs.subagentRouteAroundSaturatedProviders,

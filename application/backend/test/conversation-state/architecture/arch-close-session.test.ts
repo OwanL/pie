@@ -4,18 +4,17 @@
  *
  * Mirrors `arch-create-session.test.ts` / `arch-open-session.test.ts` /
  * `arch-duplicate-session.test.ts`. The reducer owns the tab-close + per-
- * session map clearing + select-next-tab; the runner owns the host-side
- * cleanup (clearSelectionRequests, onSessionClosed, clearSessionScope,
- * evict) + the recursive openSession(nextPath) edge case.
+ * select-next-tab; the runner owns host cleanup (clearSelectionRequests,
+ * onSessionClosed, clearSessionScope, evict) and the recursive
+ * openSession(nextPath) edge case. Session state remains intact until cleanup
+ * succeeds so a failed close can restore the tab safely.
  *
  * KEY DIFFERENCE from create/open/duplicate: there is NO backend RPC for
  * close — the Effect is a host-side cleanup descriptor. And unlike
  * create/duplicate (which target a NEW pending path → clear
- * runningSessionPaths + activeRunSummaryBySession), closeSession REMOVES a
- * tab → mirror SessionScopeCleared{removeSessionSummary:false} (clear
- * per-session maps but KEEP the summary for reopening, do NOT touch
- * runningSessionPaths — the session may still be running in the backend
- * even if its tab is closed).
+ * runningSessionPaths + activeRunSummaryBySession), closeSession removes its
+ * tab immediately but retains session state until the stop/cleanup barrier
+ * succeeds.
  *
  * Also pins the fix for the latent double-execution bug: the old
  * CloseSession handler called `removeSessionFromState` (full eviction,
@@ -82,7 +81,7 @@ function closeCmd(corrId: string, sessionPath: string): Event {
   return { kind: 'Command', cmd: { kind: 'CloseSession', corrId, sessionPath } };
 }
 
-test('CloseSession removes the tab, selects the next tab, and emits persistence, cleanup, and viewed-transition effects', () => {
+test('CloseSession removes the tab, selects the next tab, and retains session state until cleanup', () => {
   // [A, B] with active=A. Closing A → nextPath=B (the remaining tab slides left).
   const state = buildState({
     openTabs: [A, B],
@@ -93,8 +92,8 @@ test('CloseSession removes the tab, selects the next tab, and emits persistence,
 
   // Tab A removed from openTabPaths; B remains.
   assert.deepEqual(out.state.sessions.openTabPaths, [B]);
-  // A's transcript cleared (SessionScopeCleared semantics).
-  assert.equal(A in out.state.transcript.bySession, false);
+  // Session data survives until the host cleanup effect succeeds.
+  assert.equal(A in out.state.transcript.bySession, true);
   // Summary is NOT removed — the session persists for reopening.
   assert.deepEqual(out.state.sessions.sessions, [SUMMARY_A, SUMMARY_B]);
   // Next tab B selected (wasActive=true, nextPath=B).
@@ -122,7 +121,7 @@ test('CloseSession does NOT remove the session summary (unlike removeSessionFrom
   assert.deepEqual(out.state.sessions.sessions, [SUMMARY_A, SUMMARY_B]);
 });
 
-test('CloseSession hides a running tab without clearing recoverable state or finalizing its run', () => {
+test('UI close of a running tab stops before cleanup without evicting recoverable state', () => {
   const state = buildState({
     runningPaths: [A], activePath: B, openTabs: [A, B],
     transcripts: { [A]: SAMPLE_MESSAGES },
@@ -132,10 +131,53 @@ test('CloseSession hides a running tab without clearing recoverable state or fin
 
   assert.deepEqual(out.state.sessions.openTabPaths, [B]);
   assert.deepEqual(out.state.sessions.runningSessionPaths, [A]);
-  assert.deepEqual(out.state.sessions.intentionallyHiddenRunningPaths, [A]);
+  assert.deepEqual(out.state.sessions.intentionallyHiddenRunningPaths, []);
   assert.deepEqual(out.state.transcript.bySession[A], SAMPLE_MESSAGES);
   assert.deepEqual(out.state.composer.activeRunSummaryBySession[A], STALE_RUN_SUMMARY);
-  assert.deepEqual(out.effects.map((effect) => effect.kind), ['PersistTabs']);
+  assert.deepEqual(out.effects.map((effect) => effect.kind), ['PersistTabs', 'InterruptRpc']);
+  assert.equal(out.state.operations['session.close:c3']?.closeMode, 'stop-cleanup');
+});
+
+test('a failed running close restores the tab without taking focus and retains the running session', () => {
+  const state = buildState({ runningPaths: [A], activePath: B, openTabs: [A, B] });
+  const started = reducer(state, closeCmd('c3-failed', A));
+  const operationId = 'session.close:c3-failed';
+  const interrupt = started.effects.find((effect) => effect.kind === 'InterruptRpc');
+  assert.equal(interrupt?.kind, 'InterruptRpc');
+  if (interrupt?.kind !== 'InterruptRpc') return;
+
+  const persisted = reducer(started.state, {
+    kind: 'PersistTabsResult', corrId: 'c3-failed', operationId, backendGeneration: 0, ok: true,
+  });
+  const failed = reducer(persisted.state, {
+    kind: 'InterruptResult', corrId: 'c3-failed', operationId: interrupt.operationId,
+    operationAttempt: 1, backendGeneration: interrupt.backendGeneration,
+    sessionPath: A, ok: false, error: 'stop failed',
+  });
+
+  assert.equal(failed.state.operations[operationId]?.terminal?.outcome, 'failed');
+  assert.deepEqual(failed.state.sessions.openTabPaths, [B, A]);
+  assert.equal(failed.state.sessions.activeSessionPath, B);
+  assert.deepEqual(failed.state.sessions.runningSessionPaths, [A]);
+  assert.ok(failed.effects.some((effect) => effect.kind === 'PersistTabs'));
+  assert.ok(!failed.effects.some((effect) => effect.kind === 'NotifySessionViewed'));
+});
+
+test('failed idle cleanup restores its surviving tab without refocusing it', () => {
+  const started = reducer(buildState({ activePath: B, openTabs: [A, B] }), closeCmd('c-idle-failed', A));
+  const operationId = 'session.close:c-idle-failed';
+  const persisted = reducer(started.state, {
+    kind: 'PersistTabsResult', corrId: 'c-idle-failed', operationId, backendGeneration: 0, ok: true,
+  });
+  const failed = reducer(persisted.state, {
+    kind: 'CloseSessionResult', corrId: 'c-idle-failed', operationId,
+    backendGeneration: 0, sessionPath: A, ok: false, error: 'cleanup failed',
+  });
+
+  assert.equal(failed.state.operations[operationId]?.terminal?.outcome, 'failed');
+  assert.deepEqual(failed.state.sessions.openTabPaths, [B, A]);
+  assert.equal(failed.state.sessions.activeSessionPath, B);
+  assert.ok(failed.effects.some((effect) => effect.kind === 'PersistTabs'));
 });
 
 test('duplicate or stale CloseSession command for an already hidden tab is idempotent', () => {
@@ -147,15 +189,17 @@ test('duplicate or stale CloseSession command for an already hidden tab is idemp
   assert.deepEqual(duplicate.effects, []);
 });
 
-test('CloseSession clears the active-run summary for the closed session (mirror onSessionClosed)', () => {
+test('SessionScopeCleared after close cleanup clears the active-run summary', () => {
   const state = buildState({
     activeRunSummaries: { [A]: STALE_RUN_SUMMARY },
     activePath: B,
     openTabs: [A, B],
   });
-  const out = reducer(state, closeCmd('c4', A));
+  const closed = reducer(state, closeCmd('c4', A));
+  const out = reducer(closed.state, {
+    kind: 'SessionScopeCleared', sessionPath: A, removeSessionSummary: false,
+  });
 
-  // A's run summary cleared (handleSessionScopeCleared clears activeRunSummaryBySession).
   assert.equal(A in out.state.composer.activeRunSummaryBySession, false);
 });
 
@@ -207,7 +251,7 @@ test('CloseSession clears unreadFinishedSessionPaths for the closed session', ()
   assert.deepEqual(out.state.sessions.unreadFinishedSessionPaths, []);
 });
 
-test('CloseSession clears per-session keyed maps (transcript, windows, paging, models, context, composer, fileChanges, setModel pending)', () => {
+test('host cleanup clears per-session keyed maps after close retains them', () => {
   const state: ArchState = {
     ...buildState({ openTabs: [A, B], activePath: B, transcripts: { [A]: SAMPLE_MESSAGES } }),
     transcript: {
@@ -231,7 +275,11 @@ test('CloseSession clears per-session keyed maps (transcript, windows, paging, m
       bySession: { [A]: [] },
     },
   };
-  const out = reducer(state, closeCmd('c9', A));
+  const closed = reducer(state, closeCmd('c9', A));
+  assert.equal(A in closed.state.transcript.bySession, true);
+  const out = reducer(closed.state, {
+    kind: 'SessionScopeCleared', sessionPath: A, removeSessionSummary: false,
+  });
 
   assert.equal(A in out.state.transcript.bySession, false);
   assert.equal(A in out.state.transcript.windowBySession, false);

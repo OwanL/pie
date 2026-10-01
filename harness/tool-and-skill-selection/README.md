@@ -102,6 +102,14 @@ Built-in `timeoutMs` defaults (calibrated for reasoning models like `gpt-5-mini`
 - `before_agent_start` — one pruning pass for a main-agent turn and, when enabled, one independent launch pass per child session/registration. Child selections use the child's task assignment and agent definition. Child tools are pruned only when `request_capability` is initially permitted; skills can still be pruned without it. Any unexpected error fails open: the prompt and active tools are left untouched and the error is surfaced in the pruning-result message. Global `mode: "off"` and the extension toggle still disable both scopes.
 - `tool_call(read)` — tracks skill file reads for analytics
 
+Queued steering and follow-up messages continue the active request without a
+separate skill-pruning prepass or new `pruning-result` entry; they retain the
+active tool/skill selection. This is source-independent: user and agent-originated
+messages use the same rule. A message starting a new idle-session request uses
+normal pruning. Merely waiting for transport, startup, or host-side dispatch does
+not make a new request a queued continuation. Tool-result pruning and history
+compaction are separate and unchanged.
+
 A `pruning-result` custom message is rendered in the transcript showing what was kept/pruned and estimated tokens saved; the agent turn then proceeds normally (no input handler is needed to continue).
 
 ## Recovery

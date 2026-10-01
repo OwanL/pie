@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import test from 'node:test';
 import { Writable } from 'node:stream';
 
@@ -13,6 +16,8 @@ import type { SdkSession, SdkSessionEvent, SdkSessionManager } from '../../lib/s
 import type { SessionContext } from '../../coordinator/server-types.js';
 import { FENCED_ENTRY_ID } from '../../../session-storage/ownership/session-manager-fence';
 import { BackendLiveTurnAccumulator } from '../live-turn-accumulator';
+import { createSessionControlSender } from '../../lib/rpc/session-control-attribution.js';
+import { AGENT_MESSAGE_PERSISTED_PROVENANCE_KEY, attachAgentMessageProvenance } from '../agent-message-provenance.js';
 import { OrderedJsonlWriter } from '../../coordinator/server-io.js';
 import { SendOperationLedger, canonicalSendIntentFingerprint } from '../../coordinator/send-operation-ledger.js';
 
@@ -1951,69 +1956,196 @@ test('assistant message events ignore non-assistant roles and incomplete streami
   assert.equal(context.activeRequest?.currentMessageId, undefined);
 });
 
-test('idle agent-originated user prompts persist agent provenance linked to their durable entry', () => {
-  const appended: Array<{ customType: string; data: unknown }> = [];
-  const { deps } = createDeps();
-  const context = createContext({
-    session: {
-      sessionManager: {
-        appendCustomEntry(customType: string, data?: unknown) {
-          appended.push({ customType, data });
-          return `custom-${appended.length}`;
-        },
+test('initial user message_start preserves the direct agent attribution before hot and fresh appends', async (t) => {
+  const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'pie-agent-message-start-'));
+  t.after(() => fs.rmSync(tempDirectory, { recursive: true, force: true }));
+
+  for (const mode of ['hot', 'fresh'] as const) {
+    const sessionFile = path.join(tempDirectory, `${mode}.jsonl`);
+    fs.writeFileSync(sessionFile, '');
+    const entries: Array<{ id: string; message: Record<string, unknown> }> = [];
+    const writeEntries = () => fs.writeFileSync(sessionFile, `${entries.map((entry) => JSON.stringify(entry)).join('\n')}\n`);
+    const baseManager = {
+      flushed: mode === 'hot',
+      appendMessage(message: unknown): string {
+        const id = `entry-${entries.length + 1}`;
+        entries.push({ id, message: message as Record<string, unknown> });
+        if (baseManager.flushed) writeEntries();
+        return id;
       },
-    } as unknown as SessionContext['session'],
-    activeRequest: {
-      id: 'agent-request',
-      messageIndex: 0,
-      agentMessageLocalId: 'local:agent-session:control-1',
-      aborted: false,
-    },
-  });
-  const userEvent = {
-    type: 'message_end' as const,
-    sessionEntryId: 'durable-user-1',
-    message: { role: 'user' as const, content: 'please continue' } as any,
-  };
+      isPersisted: () => true,
+      getSessionFile: () => sessionFile,
+      _rewriteFile: writeEntries,
+    };
+    const initialSender = createSessionControlSender({ sessionId: `initial-${mode}`, identityFallback: false }, 'Initial');
+    const queuedSender = createSessionControlSender({ sessionId: `queued-${mode}`, identityFallback: true }, 'Queued');
+    let settleDurability!: (durable: boolean) => void;
+    const durabilityPromise = new Promise<boolean>((resolve) => { settleDurability = resolve; });
+    const { deps, emitted } = createDeps();
+    const context = createContext({
+      activeRequest: {
+        id: `direct-${mode}`,
+        messageIndex: 0,
+        agentMessageLocalId: 'local:agent-session:initial',
+        coordinatorAttribution: initialSender,
+        agentMessageDurability: { settle: settleDurability, promise: durabilityPromise },
+        aborted: false,
+      },
+      queuedLocalIds: ['local:agent-session:queued'],
+      queuedCoordinatorAttributions: [queuedSender],
+    });
+    const manager = attachAgentMessageProvenance(
+      baseManager as any,
+      () => context,
+      () => assert.fail('the durable append should not fail'),
+    );
+    context.session = { sessionManager: manager } as unknown as SessionContext['session'];
 
-  handleSdkSessionEvent(deps, context, userEvent);
-  handleSdkSessionEvent(deps, context, userEvent);
+    handleSdkSessionEvent(deps, context, { type: 'message_start', message: { role: 'user' } as any });
+    const initialEntryId = context.session.sessionManager!.appendMessage({ role: 'user', content: 'direct request' });
+    handleSdkSessionEvent(deps, context, {
+      type: 'message_end', sessionEntryId: initialEntryId,
+      message: { role: 'user', content: 'direct request' } as any,
+    });
 
-  assert.deepEqual(appended, [{
-    customType: 'pie.agent-message-provenance',
-    data: { userEntryId: 'durable-user-1' },
-  }]);
+    assert.equal(await durabilityPromise, true, `${mode} initial append confirms the fresh durability hook`);
+    assert.equal(context.activeRequest?.agentMessageProvenanceEntryId, initialEntryId, mode);
+    assert.equal(context.activeRequest?.agentMessageDurabilityConfirmed, true, mode);
+    assert.equal(context.activeRequest?.agentMessageLocalId, 'local:agent-session:initial', mode);
+    assert.deepEqual(context.activeRequest?.coordinatorAttribution, initialSender, mode);
+    assert.deepEqual(context.queuedLocalIds, ['local:agent-session:queued'], `${mode} initial start does not consume queued identity`);
+    assert.equal(emitted.some((entry) => entry.event === 'message.queuedDelivered'), false, `${mode} initial start is not queued delivery`);
+    assert.deepEqual(entries[0]?.message[AGENT_MESSAGE_PERSISTED_PROVENANCE_KEY], { sender: initialSender }, mode);
+
+    handleSdkSessionEvent(deps, context, { type: 'message_start', message: { role: 'assistant' } as any });
+    handleSdkSessionEvent(deps, context, { type: 'message_start', message: { role: 'user' } as any });
+    assert.equal(context.activeRequest?.agentMessageLocalId, 'local:agent-session:queued', `${mode} queued start consumes queued identity`);
+    assert.deepEqual(context.activeRequest?.coordinatorAttribution, queuedSender, mode);
+    assert.equal((emitted.find((entry) => entry.event === 'message.queuedDelivered')?.payload as { localId?: string })?.localId,
+      'local:agent-session:queued', mode);
+
+    context.session.sessionManager!.appendMessage({ role: 'user', content: 'queued request' });
+    assert.deepEqual(entries[1]?.message[AGENT_MESSAGE_PERSISTED_PROVENANCE_KEY], { sender: queuedSender }, mode);
+  }
 });
 
-test('busy queued agent-originated user prompts retain provenance through queued delivery', () => {
-  const appended: Array<{ customType: string; data: unknown }> = [];
+test('idle agent user message_end accepts the exact entry already attributed by the append wrapper', () => {
+  const sender = createSessionControlSender({ sessionId: 'source-session', identityFallback: false }, 'Source');
   const { deps, emitted } = createDeps();
   const context = createContext({
-    session: {
-      sessionManager: {
-        appendCustomEntry(customType: string, data?: unknown) {
-          appended.push({ customType, data });
-          return `custom-${appended.length}`;
-        },
-      },
-    } as unknown as SessionContext['session'],
-    activeRequest: { id: 'active-request', messageIndex: 1, aborted: false },
-    queuedLocalIds: ['local:agent-session:control-2'],
+    activeRequest: {
+      id: 'agent-request', messageIndex: 0,
+      agentMessageLocalId: 'local:agent-session:control-1',
+      agentMessageProvenanceEntryId: 'durable-user-1',
+      agentMessageDurabilityConfirmed: true,
+      coordinatorAttribution: sender, aborted: false,
+    },
+  });
+  handleSdkSessionEvent(deps, context, {
+    type: 'message_end', sessionEntryId: 'durable-user-1',
+    message: { role: 'user', content: 'please continue' } as any,
+  });
+  assert.equal(emitted.some((entry) => entry.event === 'operational-error'), false);
+});
+
+test('ordinary initial user message_start preserves queued agent identity until after assistant start', () => {
+  const queuedSender = createSessionControlSender({ sessionId: 'queued-source', identityFallback: true });
+  const { deps, emitted } = createDeps();
+  const queuedLocalId = 'local:agent-session:queued';
+  const context = createContext({
+    activeRequest: { id: 'direct-request', messageIndex: 0, aborted: false },
+    queuedLocalIds: [queuedLocalId],
+    queuedCoordinatorAttributions: [queuedSender],
   });
 
   handleSdkSessionEvent(deps, context, { type: 'message_start', message: { role: 'user' } as any });
-  handleSdkSessionEvent(deps, context, {
-    type: 'message_end',
-    sessionEntryId: 'durable-user-2',
-    message: { role: 'user', content: 'queued instruction' } as any,
-  });
+  assert.equal(context.activeRequest?.messageIndex, 0);
+  assert.deepEqual(context.queuedLocalIds, [queuedLocalId]);
+  assert.deepEqual(context.queuedCoordinatorAttributions, [queuedSender]);
+  assert.equal(emitted.some((entry) => entry.event === 'message.queuedDelivered'), false);
 
+  handleSdkSessionEvent(deps, context, { type: 'message_start', message: { role: 'assistant' } as any });
+  assert.equal(context.activeRequest?.messageIndex, 1);
+  handleSdkSessionEvent(deps, context, { type: 'message_start', message: { role: 'user' } as any });
+  assert.equal(context.activeRequest?.agentMessageLocalId, queuedLocalId);
+  assert.deepEqual(context.activeRequest?.coordinatorAttribution, queuedSender);
+  assert.equal(context.activeRequest?.messageIndex, 1, 'queued segment keeps the cumulative assistant message index');
+  assert.equal((emitted.find((entry) => entry.event === 'message.queuedDelivered')?.payload as { localId?: string })?.localId,
+    queuedLocalId);
+
+  handleSdkSessionEvent(deps, context, { type: 'message_start', message: { role: 'assistant' } as any });
+  assert.equal(context.activeRequest?.messageIndex, 2, 'assistant indexing remains cumulative across queued segments');
+});
+
+test('queued agent delivery selects the sender and resets the previous segment durability', () => {
+  const sender = createSessionControlSender({ sessionId: 'queued-source', identityFallback: true });
+  const { deps, emitted } = createDeps();
+  const context = createContext({
+    activeRequest: { id: 'active-request', messageIndex: 1, aborted: false, agentMessageDurabilityConfirmed: true },
+    queuedLocalIds: ['local:agent-session:control-2'],
+    queuedCoordinatorAttributions: [sender],
+  });
+  handleSdkSessionEvent(deps, context, { type: 'message_start', message: { role: 'user' } as any });
+  assert.equal(context.activeRequest?.agentMessageDurabilityConfirmed, false);
+  assert.deepEqual(context.activeRequest?.coordinatorAttribution, sender);
   assert.equal((emitted.find((entry) => entry.event === 'message.queuedDelivered')?.payload as { localId: string }).localId,
     'local:agent-session:control-2');
-  assert.deepEqual(appended, [{
-    customType: 'pie.agent-message-provenance',
-    data: { userEntryId: 'durable-user-2' },
-  }]);
+  context.activeRequest!.agentMessageProvenanceEntryId = 'durable-user-2';
+  context.activeRequest!.agentMessageDurabilityConfirmed = true;
+  handleSdkSessionEvent(deps, context, {
+    type: 'message_end', sessionEntryId: 'durable-user-2',
+    message: { role: 'user', content: 'queued instruction' } as any,
+  });
+  assert.equal(emitted.some((entry) => entry.event === 'operational-error'), false);
+});
+
+test('agent message reports partial/unknown provenance when user append identity is missing or mismatched', async () => {
+  const cases = ['missing_user_entry', 'mismatch'] as const;
+
+  for (const name of cases) {
+    const sender = createSessionControlSender({ sessionId: `source-${name}`, identityFallback: false });
+    const { deps, emitted } = createDeps();
+    const ledger = new SendOperationLedger();
+    await ledger.run(`operation-${name}`, `intent-${name}`, async () => ({ operationId: `operation-${name}` }));
+    ledger.markCommitted(`operation-${name}`);
+    const context = createContext({
+      sendOperationLedger: ledger,
+      activeRequest: {
+        id: `request-${name}`,
+        operationId: `operation-${name}`,
+        messageIndex: 0,
+        agentMessageLocalId: `local:agent-session:${name}`,
+        ...(name === 'mismatch' ? { agentMessageProvenanceEntryId: 'different-user-entry' } : {}),
+        coordinatorAttribution: sender,
+        aborted: false,
+      },
+    });
+
+    assert.doesNotThrow(() => handleSdkSessionEvent(deps, context, {
+      type: 'message_end',
+      ...(name === 'missing_user_entry' ? {} : { sessionEntryId: `durable-user-${name}` }),
+      message: { role: 'user', content: 'accepted request' } as any,
+    }));
+
+    const incident = emitted.find((entry) => entry.event === 'operational-error')?.payload as {
+      code?: string;
+      certainty?: string;
+      message?: string;
+      messageId?: string;
+    } | undefined;
+    assert.equal(incident?.code, 'AGENT_MESSAGE_PROVENANCE_UNAVAILABLE', name);
+    assert.equal(incident?.certainty, 'ambiguous', name);
+    assert.match(incident?.message ?? '', /sender and reply reference may be unavailable after reload/iu, name);
+    assert.equal(incident?.messageId, name === 'missing_user_entry' ? undefined : `durable-user-${name}`);
+    assert.equal(context.activeRequest?.agentMessageProvenanceEntryId, name === 'mismatch' ? 'different-user-entry' : undefined);
+    assert.deepEqual(ledger.status(`operation-${name}`), {
+      operationId: `operation-${name}`,
+      state: 'failed', code: 'AGENT_MESSAGE_PROVENANCE_UNAVAILABLE',
+      message: 'The message may have been delivered, but its durable sender attribution is unknown.',
+      outcome: 'failed', committed: true,
+    });
+    assert.equal((incident as { severity?: string }).severity, 'error');
+  }
 });
 
 test('message_update emits thinking content from the explicit thinking field and skips empty tool execution state', () => {

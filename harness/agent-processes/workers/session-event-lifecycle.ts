@@ -13,7 +13,7 @@ import type {
   RetryStartedPayload,
 } from '../lib/rpc/session-events.js';
 import type { CompactionSummaryDetails } from '../lib/rpc/message-contract.js';
-import { COMPACTION_METRICS_CUSTOM_TYPE } from '../lib/rpc/message-contract.js';
+import { COMPACTION_METRICS_CUSTOM_TYPE, isAgentSessionMessageLocalId } from '../lib/rpc/message-contract.js';
 import { LIVE_PIPELINE_PROTOCOL_VERSION } from '../lib/rpc/live-pipeline.js';
 import type { SdkSessionEvent } from '../lib/sdk-integration/sdk';
 import { BackendLiveTurnAccumulator } from './live-turn-accumulator';
@@ -27,6 +27,7 @@ import {
   logBackendDiagnostic,
   nonEmptyTrimmed,
   readTokenCount,
+  reportAgentMessageProvenanceFailure,
   resolveUnexpectedInterruptReason,
   type BackendSessionEventHandler,
   type BackendSessionEventHandlerDeps,
@@ -367,6 +368,14 @@ function handleLifecycleSessionEvent(
       deps.emitContextUsageChanged(context);
 
       context.overflowRecoveryCandidate = undefined;
+      // An admitted agent prompt without a durable user append cannot claim
+      // sender durability merely because the SDK run settled.
+      if (settledRequest && isAgentSessionMessageLocalId(settledRequest.agentMessageLocalId)
+        && !settledRequest.agentMessageDurabilityConfirmed
+        && !settledRequest.agentMessageProvenanceFailureReported) {
+        reportAgentMessageProvenanceFailure(deps, context, settledRequest.agentMessageProvenanceEntryId, 'unflushed');
+      }
+      settledRequest?.agentMessageDurability?.settle(false);
       // Clear activeRequest only at full SDK settlement. agent_end above is not
       // sufficient evidence because Pi can continue automatically afterwards.
       context.activeRequest = undefined;

@@ -14,6 +14,7 @@ import type { SessionService as SessionServiceType } from '../../session-actions
 import type { BackendClient as BackendClientType } from '../../agent-connection/client';
 import { createOperationalIncident } from '../../../../harness/agent-processes/lib/rpc/incident-payload.js';
 import type { ChatPrefs } from '../../../lib/protocol/index.js';
+import type { SessionControlSettingsRequest } from '../../../../harness/agent-processes/lib/rpc/session-control-settings.js';
 
 function createPlatform(context: ReturnType<typeof createExtensionContext>) {
   return {
@@ -86,6 +87,28 @@ function makeHarness(runObserver = NOOP_RUN_OBSERVER) {
 
   return { context, backend, service, dispatched, archState, getArchState };
 }
+
+test('session close bridge forwards the explicit self-handoff requirement to CloseSession', () => {
+  const harness = makeHarness();
+  const events = (harness.service as any).events as { handleBackendEvent(event: unknown): void };
+  for (const selfHandoffRequired of [false, true]) {
+    events.handleBackendEvent({
+      event: 'session.close.requested',
+      payload: {
+        sessionPath: '/session-close-bridge.jsonl',
+        requestId: `close-${selfHandoffRequired}`,
+        delete: false,
+        selfHandoffRequired,
+      },
+    });
+  }
+  const closeCommands = harness.dispatched
+    .filter((event) => event.kind === 'Command' && event.cmd.kind === 'CloseSession')
+    .map((event) => event.kind === 'Command' && event.cmd.kind === 'CloseSession'
+      ? event.cmd.selfHandoffRequired : undefined);
+  assert.deepEqual(closeCommands, [false, true]);
+  harness.service.dispose();
+});
 
 test('stale agent settlement owner is rejected before analytics observation', () => {
   const settled: string[] = [];
@@ -281,6 +304,102 @@ test('setPrefs marks explicit subagent concurrency saved and preserves provenanc
   assert.equal(persisted?.subagentMaxInflightSource, 'saved-preference');
   const runtimePrefs = requests.filter((request) => request.method === 'runtimePrefs.set').at(-1)?.params as Record<string, unknown>;
   assert.equal(runtimePrefs.subagentMaxInflightSource, 'saved-preference');
+  service.dispose();
+});
+
+test('session-control capture reads durable execution prefs and apply persists then awaits runtime sync', async () => {
+  const { service, backend, context, archState } = makeHarness();
+  const source = '/session/source.jsonl';
+  const target = '/session/target.jsonl';
+  archState.sessions.sessions = [{ path: source }, { path: target }] as any;
+  context.globalState.values.set('chatPrefs', {
+    autonomousMode: false,
+    autonomousModeBySession: { [source]: true },
+    subagentBuckets: { small: [{ model: 'openai/gpt-test', thinkingLevel: 'off' }], medium: [], frontier: [] },
+    subagentProviderDefaults: { anthropic: false },
+    subagentProviderTogglesBySession: { [source]: { openai: false } },
+  });
+  archState.settings.prefs.autonomousMode = true;
+  archState.settings.prefs.autonomousModeBySession = { [source]: false };
+  const requests: Array<{ method: string; params: unknown }> = [];
+  backend.request = async <TResult = unknown>(method: string, params?: unknown): Promise<TResult> => {
+    requests.push({ method, params });
+    return {} as TResult;
+  };
+  archState.settings.backendReady = true;
+
+  const captured = await service.sessionControlSettings({
+    requestId: 'capture-1', sessionPath: source, action: 'capture',
+  });
+  assert.equal(captured.acknowledgement.outcome, 'succeeded');
+  assert.deepEqual(captured.acknowledgement.settings, {
+    autonomousMode: true,
+    subagentProviderChoices: { anthropic: false, openai: false },
+  }, 'capture uses durable values, not conflicting optimistic reducer prefs');
+
+  const applied = await service.sessionControlSettings({
+    requestId: 'apply-1',
+    sessionPath: target,
+    action: 'apply',
+    settings: { autonomousMode: false, subagentProviderChoices: { openai: true } },
+  });
+  assert.equal(applied.acknowledgement.outcome, 'succeeded');
+  assert.equal(applied.acknowledgement.application, 'applied');
+  const persisted = context.globalState.get('chatPrefs') as ChatPrefs;
+  assert.equal(persisted.autonomousModeBySession?.[target], false);
+  assert.deepEqual(persisted.subagentProviderTogglesBySession[target], { openai: true });
+  const runtimePrefs = requests.find((request) => request.method === 'runtimePrefs.set')?.params as Record<string, unknown>;
+  assert.deepEqual(runtimePrefs.autonomousModeBySession, persisted.autonomousModeBySession);
+  assert.deepEqual(runtimePrefs.subagentProviderTogglesBySession, persisted.subagentProviderTogglesBySession);
+  service.dispose();
+});
+
+test('session-control rejects unknown and blank provider choices before any preferences write', async () => {
+  const { service, context, archState } = makeHarness();
+  const target = '/session/target.jsonl';
+  archState.sessions.sessions = [{ path: target }] as any;
+  context.globalState.values.set('chatPrefs', {
+    subagentBuckets: { small: [{ model: 'openai/gpt-test', thinkingLevel: 'off' }], medium: [], frontier: [] },
+    subagentProviderDefaults: { anthropic: true },
+  });
+  const before = context.globalState.get('chatPrefs');
+  for (const provider of ['unknown-provider', '   ']) {
+    const result = await service.sessionControlSettings({
+      requestId: `invalid-${provider}`, sessionPath: target, action: 'apply',
+      settings: { autonomousMode: true, subagentProviderChoices: { [provider]: true } },
+    });
+    assert.equal(result.acknowledgement.outcome, 'failed');
+    assert.equal(context.globalState.get('chatPrefs'), before);
+  }
+  service.dispose();
+});
+
+test('session-control settings reject closing targets and malformed patches before writes', async () => {
+  const { service, context, archState } = makeHarness();
+  const sessionPath = '/session/closing.jsonl';
+  archState.sessions.sessions = [{ path: sessionPath }] as any;
+  archState.operations['closing-operation'] = {
+    operationId: 'closing-operation',
+    kind: 'session.close',
+    terminal: undefined,
+    session: { pendingPath: sessionPath },
+  } as any;
+  const request: SessionControlSettingsRequest = {
+    requestId: 'apply-closed',
+    sessionPath,
+    action: 'apply',
+    settings: { autonomousMode: true },
+  };
+  const closing = await service.sessionControlSettings(request);
+  assert.equal(closing.acknowledgement.outcome, 'failed');
+  assert.equal(context.globalState.get('chatPrefs'), undefined);
+
+  await assert.rejects(service.sessionControlSettings({
+    ...request,
+    requestId: 'invalid-patch',
+    settings: { autonomousMode: true, unexpected: true } as any,
+  }));
+  assert.equal(context.globalState.get('chatPrefs'), undefined);
   service.dispose();
 });
 
@@ -537,7 +656,7 @@ test('authorized private close transports the persisted create origin instead of
   }
 });
 
-test('private close retains its retry marker and reopens when backend deletion fails', async () => {
+test('private close retains its retry marker and never reopens a possibly-durably-deleted path', async () => {
   const context = createExtensionContext();
   const archState = createInitialArchState();
   const dispatched: Event[] = [];
@@ -561,7 +680,11 @@ test('private close retains its retry marker and reopens when backend deletion f
 
   await assert.rejects(service.closeSession('/sessions/private.jsonl', null, true), /delete failed/);
 
-  assert.deepEqual(tabCalls, ['open:/sessions/private.jsonl']);
+  // The cleanup effect never reopens a session whose deletion may already
+  // have committed (deletion evidence is set before the forget await); the
+  // surviving-tab restoration for a non-committed failure is reducer-owned
+  // through the close operation barrier, not a legacy reopen here.
+  assert.deepEqual(tabCalls, []);
   assert.ok(dispatched.some((event) => event.kind === 'Command'
     && event.cmd.kind === 'SetPrivacyMode'
     && event.cmd.enabled === true));

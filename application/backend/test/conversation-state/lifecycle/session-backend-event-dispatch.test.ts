@@ -46,6 +46,21 @@ function createHandlers() {
   return { handlers, calls };
 }
 
+test('dispatchSessionBackendEvent validates the self-close response-delivery handoff', () => {
+  const { handlers } = createHandlers();
+  const received: unknown[] = [];
+  const payload = { sessionPath: '/workspace/session.jsonl', requestId: 'close-1' };
+  dispatchSessionBackendEvent({ event: 'session.close.responseDelivered', payload }, {
+    ...handlers,
+    onSessionCloseResponseDelivered: (value) => received.push(value),
+  });
+  dispatchSessionBackendEvent({ event: 'session.close.responseDelivered', payload: { ...payload, requestId: 7 } }, {
+    ...handlers,
+    onSessionCloseResponseDelivered: (value) => received.push(value),
+  });
+  assert.deepEqual(received, [payload]);
+});
+
 test('dispatchSessionBackendEvent validates sequenced live envelopes', () => {
   const { handlers, calls } = createHandlers();
   const payload = {

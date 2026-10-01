@@ -19,7 +19,7 @@ import { chatMessageEqual } from '../../../transcript/message-equal';
 import type { ChatMessage, ToolCall } from '../../../../lib/protocol/index.js';
 
 const CHAT_MESSAGE_TOP_LEVEL_FIELDS = [
-  'id', 'renderIdentity', 'role', 'createdAt', 'markdown', 'userParts', 'parts',
+  'id', 'renderIdentity', 'role', 'createdAt', 'markdown', 'userParts', 'sender', 'parts',
   'thinking', 'thinkingDetailRef', 'draftingToolCall', 'modelId', 'provider',
   'thinkingLevel', 'status', 'errorDetail', 'toolCalls', 'toolStateRevision',
   'durationMs', 'turnLatencyMs', 'overheadMs', 'providerLatencyMs',
@@ -45,6 +45,7 @@ function makeBaseMessage(): ChatMessage {
     createdAt: '2026-01-01T00:00:00.000Z',
     markdown: 'Hello **world**.',
     userParts: undefined,
+    sender: undefined,
     parts: [
       { kind: 'text', text: 'Hello **world**.' },
       { kind: 'reasoning', text: 'deciding what to say' },
@@ -146,6 +147,7 @@ test('detects thinking / errorDetail / customType / latency / duration / usage d
     { field: 'thinking', value: 'changed reasoning' },
     { field: 'errorDetail', value: 'boom' },
     { field: 'customType', value: 'pruning-result' },
+    { field: 'sender', value: { identity: { sessionId: 'source', identityFallback: false }, replyReference: 'pie-reply:v1:W10' } },
     { field: 'toolStateRevision', value: 4 },
     { field: 'durationMs', value: 999 },
     { field: 'turnLatencyMs', value: 1 },

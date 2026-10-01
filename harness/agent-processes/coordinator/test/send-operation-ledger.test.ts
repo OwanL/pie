@@ -7,6 +7,7 @@ import {
 } from '../send-operation-ledger.js';
 import { BackendError } from '../server-io.js';
 import type { ComposerInput } from '../../lib/rpc/message-contract.js';
+import { createSessionControlSender } from '../../lib/rpc/session-control-attribution.js';
 
 const intent: { sessionPath: string; text: string; inputs: ComposerInput[]; localId: string } = {
   sessionPath: '/repo/session.jsonl',
@@ -50,6 +51,21 @@ test('send ledger rejects operationId reuse with a changed canonical intent', as
       async () => ({ operationId: 'op-1' }),
     ),
     (error: unknown) => error instanceof BackendError && error.code === 'OPERATION_INTENT_MISMATCH',
+  );
+});
+
+test('send intent binds coordinator-authenticated sender attribution', () => {
+  const sender = createSessionControlSender({ sessionId: 'source-session', identityFallback: false }, 'Source');
+  assert.notEqual(
+    canonicalSendIntentFingerprint({ ...intent, coordinatorAttribution: sender }),
+    canonicalSendIntentFingerprint(intent),
+  );
+  assert.notEqual(
+    canonicalSendIntentFingerprint({ ...intent, coordinatorAttribution: sender }),
+    canonicalSendIntentFingerprint({
+      ...intent,
+      coordinatorAttribution: createSessionControlSender({ sessionId: 'other-source', identityFallback: false }, 'Other'),
+    }),
   );
 });
 

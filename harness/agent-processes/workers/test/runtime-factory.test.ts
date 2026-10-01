@@ -32,6 +32,7 @@ test('runtime factory passes the configured provider-qualified default to new se
 
   const sessionManager = {
     getSessionFile: () => '/sessions/new.jsonl',
+    getBranch: () => [],
     buildSessionContext: () => ({ messages: [], thinkingLevel: 'medium', model: null }),
   } as any;
   const factory = createRuntimeFactory(sdk, {}, '/workspace', new ServiceLoadingGate());
@@ -46,4 +47,5 @@ test('runtime factory passes the configured provider-qualified default to new se
   assert.deepEqual(findCalls, [{ provider: 'provider-b', modelId: 'shared-model' }]);
   assert.equal(createOptions.length, 1);
   assert.equal(createOptions[0].model, selectedModel);
+  assert.equal('thinkingLevel' in createOptions[0], false);
 });

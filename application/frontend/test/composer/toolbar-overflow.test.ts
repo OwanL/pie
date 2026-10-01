@@ -388,7 +388,7 @@ test('overflowed callbacks are reused and nested browser popovers stay open unti
   mount(toolbarProps);
   const popover = openOverflow();
   click(popover.querySelector('[aria-label^="Enable autonomous mode"]'));
-  assert.deepEqual(preferenceWrites, [{ autonomousMode: true }]);
+  assert.deepEqual(preferenceWrites, [{ autonomousModeBySession: { '/session/test.jsonl': true } }]);
 
   click(popover.querySelector('[aria-label="Browser network access"]'));
   const browserPopover = document.body.querySelector<HTMLElement>('.browser-server-popover');

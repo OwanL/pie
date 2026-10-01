@@ -1,9 +1,29 @@
 import type { SdkPatchIdentity } from '../lib/sdk-integration/sdk-patch-barrier';
 import { validateSdkPatchBarrier } from '../lib/sdk-integration/sdk-patch-barrier';
 import { installProviderTrafficObserver } from '../../model-providers/traffic-observation/provider-traffic-observer';
-import type { WorkerJsonObject, WorkerRuntimePromoteFrame } from '../lib/rpc/worker-protocol.js';
+import type {
+  WorkerError,
+  WorkerErrorCode,
+  WorkerJsonObject,
+  WorkerRuntimePromoteFrame,
+} from '../lib/rpc/worker-protocol.js';
 import { WorkerRuntimeHost, type WorkerRuntimePromotionPayload } from './worker-runtime-host';
 import { openWorkerServerTransport, parseWorkerServerArgs, WorkerServer } from '../lib/rpc/worker-server.js';
+
+export function serializeRuntimeCommandError(error: unknown): WorkerError {
+  const candidateCode = error && typeof error === 'object' && 'code' in error
+    ? (error as { code?: unknown }).code
+    : undefined;
+  const code: WorkerErrorCode = candidateCode === 'OPERATION_INTENT_MISMATCH'
+    || candidateCode === 'AGENT_MESSAGE_PROVENANCE_UNAVAILABLE'
+    ? candidateCode
+    : 'RUNTIME_COMMAND_FAILED';
+  return {
+    code,
+    message: error instanceof Error ? error.message : String(error),
+    retryable: false,
+  };
+}
 
 function main(): void {
   // Provider traffic originates in the isolated worker, not the coordinator.
@@ -56,19 +76,11 @@ function main(): void {
             result: { kind: 'runtime.command', payload: result },
           });
         } catch (error) {
-          const code = error && typeof error === 'object' && 'code' in error
-            && (error as { code?: unknown }).code === 'OPERATION_INTENT_MISMATCH'
-            ? 'OPERATION_INTENT_MISMATCH' as const
-            : 'RUNTIME_COMMAND_FAILED' as const;
           currentServer.sendFrame({
             kind: 'response',
             requestId: frame.requestId,
             ok: false,
-            error: {
-              code,
-              message: error instanceof Error ? error.message : String(error),
-              retryable: false,
-            },
+            error: serializeRuntimeCommandError(error),
           });
         }
         return;

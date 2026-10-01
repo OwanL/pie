@@ -3,6 +3,7 @@ import { produce } from 'immer';
 import type { ArchState } from '../arch-state.js';
 import type { Effect } from '../effects/effects.js';
 import type { ReducerResult } from './helpers.js';
+import { observeCloseOperationAcknowledgement } from './helpers.js';
 import {
   addToArray,
   appendLocalUserMessage,
@@ -26,6 +27,7 @@ import { isPendingTabPath } from '../../../../lib/session-path.js';
 import { handleFileRevertResult } from './file-handlers.js';
 import { interruptLivePipelineForSession } from './live-pipeline-handlers.js';
 import type { SessionOperation } from '../operation-types.js';
+import { resolveChatPrefs } from '../../../lib/protocol/settings.js';
 import {
   markSessionOperationAccepted,
   markSessionOperationAmbiguous,
@@ -206,22 +208,52 @@ export function handleInterruptResult(state: ArchState, event: Extract<Event, { 
         }
       }
       draft.sessions.compactingSessionPaths = removeFromArray(draft.sessions.compactingSessionPaths, event.sessionPath);
-    } else {
-      draft.sessions.runningSessionPaths = removeFromArray(draft.sessions.runningSessionPaths, event.sessionPath);
     }
   });
+  const closeStopResolution = closeStopAcknowledgement(nextState, operationId!, updated, event);
   return {
-    state: nextState,
-    effects: updated.terminal
-      ? [
-          releaseOperationResourcesEffect(operation),
-          ...(!event.ok ? [{
-            kind: 'Log' as const, corrId: event.corrId, level: 'error' as const,
-            message: `Interrupt failed for session ${event.sessionPath}`, data: { error: event.error },
-          }] : []),
-        ]
-      : [reconciliationEffect!],
+    state: closeStopResolution.state,
+    effects: [
+      ...closeStopResolution.effects,
+      ...(updated.terminal
+        ? [
+            releaseOperationResourcesEffect(operation),
+            ...(!event.ok ? [{
+              kind: 'Log' as const, corrId: event.corrId, level: 'error' as const,
+              message: `Interrupt failed for session ${event.sessionPath}`, data: { error: event.error },
+            }] : []),
+          ]
+        : [reconciliationEffect!]),
+    ],
   };
+}
+
+/** A settled (or failed) interrupt releases the deferred stop-cleanup close
+ *  lifecycle through the close operation's `stop` acknowledgement. */
+function closeStopAcknowledgement(
+  state: ArchState,
+  operationId: string,
+  updated: SessionOperation,
+  _event: Extract<Event, { kind: 'InterruptResult' }>,
+): ReducerResult {
+  const closeOperation = Object.values(state.operations).find(
+    (candidate) => candidate.kind === 'session.close' && !candidate.terminal
+      && candidate.closeStopOperationId === operationId,
+  );
+  if (!closeOperation) return { state, effects: [] };
+  const settled = updated.terminal?.outcome === 'settled';
+  if (!settled && !updated.terminal) {
+    // Interrupt still reconciling after an accepted stop: nothing to release yet.
+    return { state, effects: [] };
+  }
+  return observeCloseOperationAcknowledgement(
+    state,
+    closeOperation.operationId,
+    closeOperation.backendGeneration,
+    'stop',
+    settled,
+    updated.terminal?.detail,
+  );
 }
 
 export function handleReplaceQueueResult(state: ArchState, event: Extract<Event, { kind: 'ReplaceQueueResult' }>): ReducerResult {
@@ -1123,6 +1155,33 @@ export function handleMcpSessionServersUpdated(state: ArchState, event: Extract<
   };
 }
 
+export function handleSessionControlSettingsResult(
+  state: ArchState,
+  event: Extract<Event, { kind: 'SessionControlSettingsResult' }>,
+): ReducerResult {
+  const nextState = event.persistedPrefs
+    ? {
+        ...state,
+        settings: {
+          ...state.settings,
+          prefs: resolveChatPrefs({
+            ...state.settings.prefs,
+            autonomousModeBySession: event.persistedPrefs.autonomousModeBySession,
+            subagentProviderTogglesBySession: event.persistedPrefs.subagentProviderTogglesBySession,
+          }),
+        },
+      }
+    : state;
+  return {
+    state: nextState,
+    effects: [{
+      kind: 'SessionControlSettingsBridgeAck',
+      corrId: event.corrId,
+      acknowledgement: event.acknowledgement,
+    }],
+  };
+}
+
 export function handleEffectResult(state: ArchState, event: Exclude<EffectResultEvent, { kind: 'TruncateResult' } | { kind: 'ClearQueueResult' } | { kind: 'ReplaceQueueResult' } | { kind: 'OpenSessionResult' } | { kind: 'CreateSessionResult' } | { kind: 'DuplicateSessionResult' } | { kind: 'CloseSessionResult' } | { kind: 'PersistTabsResult' } | { kind: 'BackendRestartResult' } | { kind: 'ModelSwitchConfirmResult' } | { kind: 'LiveTurnCheckpointResult' }>): ReducerResult {
   switch (event.kind) {
     case 'ContinueResult':
@@ -1228,6 +1287,8 @@ export function handleEffectResult(state: ArchState, event: Exclude<EffectResult
       return handleSetModelResult(state, event);
     case 'SetPrefsResult':
       return handleSetPrefsResult(state, event);
+    case 'SessionControlSettingsResult':
+      return handleSessionControlSettingsResult(state, event);
     case 'LoadOlderTranscriptResult':
     case 'LoadNewerTranscriptResult':
     case 'JumpToLatestTranscriptResult': {

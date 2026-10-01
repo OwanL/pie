@@ -5,7 +5,9 @@ import {
   compactSessionTitleInput,
   generateSessionTitle,
   sanitizeGeneratedSessionTitle,
+  SESSION_TITLE_MAX_CHARS,
   SESSION_TITLE_MAX_INPUT_CHARS,
+  SESSION_TITLE_SYSTEM_PROMPT,
 } from '../session-title-generator';
 import type { SessionContext } from '../../coordinator/server-types.js';
 
@@ -55,7 +57,7 @@ function fakeContext(options: { explicitName?: string; explicitPropertyName?: st
   };
 }
 
-test('generates and durably writes a bounded title through Ollama native chat', async () => {
+test('returns a bounded candidate only; it never performs the final durable write', async () => {
   const fake = fakeContext();
   const result = await generateSessionTitle(fake.context, {
     sdkPath: '/sdk',
@@ -65,7 +67,7 @@ test('generates and durably writes a bounded title through Ollama native chat', 
   }, { fetchFn: fake.fetchFn as typeof fetch });
 
   assert.deepEqual(result, { generated: true, name: 'Fix Slow MCP Settings' });
-  assert.equal(fake.writtenName, 'Fix Slow MCP Settings');
+  assert.equal(fake.writtenName, undefined, 'candidate generation must not persist the title itself');
   assert.equal(fake.fetchCalls, 1);
 });
 
@@ -128,7 +130,7 @@ test('passes the selected thinking budget to Ollama native chat', async () => {
   assert.equal(result.generated, true);
 });
 
-test('a manual rename racing inference wins immediately before durable write', async () => {
+test('a manual rename racing inference prevents any candidate or durable write', async () => {
   const fake = fakeContext({ nameAfterFetch: 'Manual Race Winner' });
   const result = await generateSessionTitle(fake.context, {
     sdkPath: '/sdk',
@@ -169,12 +171,22 @@ test('generation is bounded by a short fail-open timeout', async () => {
   assert.equal(fake.writtenName, undefined);
 });
 
-test('output sanitizer accepts only the compact title contract', () => {
+test('output sanitizer accepts only the compact 25-character candidate contract', () => {
+  assert.equal(SESSION_TITLE_MAX_CHARS, 25);
+  assert.match(SESSION_TITLE_SYSTEM_PROMPT, /at most 25 characters/);
+  for (const example of [...SESSION_TITLE_SYSTEM_PROMPT.matchAll(/^Title: (.+)$/gmu)]) {
+    assert.ok(example[1]!.trim().length <= SESSION_TITLE_MAX_CHARS, example[1]);
+  }
   assert.equal(sanitizeGeneratedSessionTitle('Title: Review PR #208\n'), 'Review PR #208');
   assert.equal(sanitizeGeneratedSessionTitle('One'), undefined);
   assert.equal(sanitizeGeneratedSessionTitle('Review PR #208\nAdditional explanation'), undefined);
   assert.equal(sanitizeGeneratedSessionTitle('Review\u0007 PR #208'), undefined);
   assert.equal(sanitizeGeneratedSessionTitle('This title has far too many words to be accepted safely'), undefined);
+  assert.equal(
+    sanitizeGeneratedSessionTitle('Review Session Control Plus'),
+    undefined,
+    'a 26+ character candidate is invalid, like any oversize base title',
+  );
 });
 
 test('input compaction removes fenced code and keeps bounded beginning and end context', () => {

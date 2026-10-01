@@ -16,6 +16,7 @@ import { cleanPinnedTabGroups } from '../../../frontend/session-tabs/tab-behavio
 import { startNextDeferredSetModel } from './set-model-handlers.js';
 import {
   clearRetiredInterruptEventFence,
+  observeSessionOperationAcknowledgement,
   settleSessionOperationSucceeded,
 } from '../operation-registry.js';
 
@@ -174,6 +175,7 @@ export function startSessionTitleGeneration(
     effects: [{
       kind: 'GenerateSessionTitle',
       corrId,
+      ...(state.settings.sessionTitlesSettings.enabled ? {} : { enabled: false }),
       sessionPath,
       prompt: generation.prompt,
       provider: state.settings.sessionTitlesSettings.provider,
@@ -323,6 +325,16 @@ export function evictSession(
   const { [sp]: _mcpOverrides, ...remainingMcpSessionOverrides } = state.settings.mcpSessionOverridesBySession;
   const { [sp]: _mcpPendingApply, ...remainingMcpPendingApply } = state.settings.mcpPendingApplyBySession;
   const { [sp]: _eui, ...remainingExtUI } = state.settings.pendingExtensionUIRequestsBySession;
+  const remainingAutonomousModeBySession = { ...(state.settings.prefs.autonomousModeBySession ?? {}) };
+  const remainingSubagentProviderTogglesBySession = { ...state.settings.prefs.subagentProviderTogglesBySession };
+  const hadSessionExecutionPrefs = removeSummary && (
+    Object.prototype.hasOwnProperty.call(remainingAutonomousModeBySession, sp)
+    || Object.prototype.hasOwnProperty.call(remainingSubagentProviderTogglesBySession, sp)
+  );
+  if (removeSummary) {
+    delete remainingAutonomousModeBySession[sp];
+    delete remainingSubagentProviderTogglesBySession[sp];
+  }
   const { [sp]: _ci, ...remainingComposer } = state.composer.pendingComposerInputsBySession;
   const { [sp]: _rs, ...remainingRunSummaries } = state.composer.activeRunSummaryBySession;
   const { [sp]: _dt, ...remainingDraftText } = state.composer.draftTextBySession;
@@ -476,6 +488,13 @@ export function evictSession(
         mcpSessionOverridesBySession: remainingMcpSessionOverrides,
         mcpPendingApplyBySession: remainingMcpPendingApply,
         pendingExtensionUIRequestsBySession: remainingExtUI,
+        ...(removeSummary ? {
+          prefs: {
+            ...state.settings.prefs,
+            autonomousModeBySession: remainingAutonomousModeBySession,
+            subagentProviderTogglesBySession: remainingSubagentProviderTogglesBySession,
+          },
+        } : {}),
       },
       composer: {
         ...state.composer,
@@ -518,6 +537,20 @@ export function evictSession(
         prepassBySession: remainingPrepass,
       },
     };
+  if (hadSessionExecutionPrefs) {
+    effects.push({
+      kind: 'SetPrefsRpc',
+      corrId: `prefs:session-removed:${sp}`,
+      prefs: {
+        ...(Object.prototype.hasOwnProperty.call(state.settings.prefs.autonomousModeBySession ?? {}, sp)
+          ? { autonomousModeBySession: { [sp]: undefined } as unknown as Record<string, boolean> }
+          : {}),
+        ...(Object.prototype.hasOwnProperty.call(state.settings.prefs.subagentProviderTogglesBySession, sp)
+          ? { subagentProviderTogglesBySession: { [sp]: undefined } as unknown as Record<string, Record<string, boolean>> }
+          : {}),
+      },
+    });
+  }
   const modelDrain = startNextDeferredSetModel(evictedState);
   return {
     state: modelDrain.state,
@@ -577,6 +610,7 @@ export function appendLocalUserMessage(
    *  the backend. */
   customType?: string,
   customDetails?: unknown,
+  sender?: ChatMessage['sender'],
 ) {
   const list = draft.transcript.bySession[sessionPath] ?? [];
   const existingIndex = list.findIndex((m: ChatMessage) => m.id === id);
@@ -588,6 +622,7 @@ export function appendLocalUserMessage(
       markdown: markdownFromUserParts(userParts, text),
       userParts,
       status,
+      ...(sender !== undefined ? { sender } : {}),
       ...(customType !== undefined ? { customType } : {}),
       ...(customDetails !== undefined ? { customDetails } : {}),
     };
@@ -599,6 +634,7 @@ export function appendLocalUserMessage(
       markdown: markdownFromUserParts(userParts, text),
       userParts,
       status,
+      ...(sender !== undefined ? { sender } : {}),
       ...(customType !== undefined ? { customType } : {}),
       ...(customDetails !== undefined ? { customDetails } : {}),
     });
@@ -735,4 +771,191 @@ export function restoreRemovedTail(
     }
     draft.transcript.windowBySession[sessionPath] = nextWindow;
   }
+}
+
+// ─── Typed agent close bridge acknowledgement barrier ──────────────────────────
+
+/** Observe one close-operation acknowledgement and produce the side effects a
+ *  settling close operation requires: release deferred stop/create cleanup,
+ *  report the terminal bridge outcome, restore failed tabs without changing
+ *  focus, and commit private summary eviction only after deletion succeeds. */
+export function observeCloseOperationAcknowledgement(
+  state: ArchState,
+  operationId: string | undefined,
+  backendGeneration: number | undefined,
+  acknowledgement: string,
+  ok: boolean,
+  error?: string,
+  deletionCommitted = false,
+): ReducerResult {
+  if (!operationId) return { state, effects: [] };
+  const operation = state.operations[operationId];
+  if (!operation || operation.kind !== 'session.close'
+    || operation.backendGeneration !== backendGeneration) return { state, effects: [] };
+  let updated = observeSessionOperationAcknowledgement(operation, acknowledgement, ok, error);
+  if (!updated) return { state, effects: [] };
+  if (acknowledgement === 'cleanup' && deletionCommitted) {
+    updated = { ...updated, closeDeletionCommitted: true };
+  }
+  // Either failed prerequisite makes deferred cleanup unreachable. Still wait
+  // for the other acknowledgement so stop completion is not guessed.
+  if ((acknowledgement === 'stop'
+    || (acknowledgement === 'persist-tabs' && updated.closeMode === 'stop-cleanup'))
+    && !ok && !updated.terminal && !updated.closeCleanupDispatched) {
+    updated = observeSessionOperationAcknowledgement(updated, 'cleanup', false, error) ?? updated;
+  }
+  if (updated.closePrivacyMode === true && updated.acknowledgements?.cleanup === 'failed'
+    && updated.acknowledgements['privacy-marker-removal'] === 'pending') {
+    updated = observeSessionOperationAcknowledgement(
+      updated, 'privacy-marker-removal', false, 'Privacy marker retained because close cleanup did not complete.',
+    ) ?? updated;
+  }
+  const operations: ArchState['operations'] = { ...state.operations };
+  const effects: Effect[] = [];
+
+  const callerResponseReleased = updated.closeSelfHandoffRequired !== true
+    || updated.acknowledgements?.['caller-response'] === 'succeeded';
+  const stopReleased = updated.closeMode === 'stop-cleanup'
+    && updated.acknowledgements?.stop === 'succeeded'
+    && updated.acknowledgements?.['persist-tabs'] === 'succeeded'
+    && callerResponseReleased;
+  const createReleased = updated.closeWaitForCreate === true
+    && !!updated.session.resolvedPath
+    && callerResponseReleased;
+  const idleAgentCloseReleased = updated.closeMode !== 'stop-cleanup'
+    && updated.closeRequestKey !== undefined
+    && callerResponseReleased
+    && updated.closeWaitForCreate !== true;
+  const releaseDeferredStop = acknowledgement === 'caller-response'
+    && ok
+    && updated.closeMode === 'stop-cleanup'
+    && updated.closeSelfHandoffRequired === true
+    && updated.closeStopDispatched !== true
+    && updated.closeStopOperationId !== undefined;
+  if (releaseDeferredStop) {
+    const stopOperation = state.operations[updated.closeStopOperationId!];
+    if (stopOperation && !stopOperation.terminal) {
+      effects.push({
+        kind: 'InterruptRpc',
+        corrId: updated.causal.selectionToken,
+        operationId: stopOperation.operationId,
+        operationAttempt: stopOperation.attempt,
+        backendGeneration: stopOperation.backendGeneration,
+        sessionPath: updated.session.resolvedPath ?? updated.session.pendingPath,
+        ...(updated.closeStopAbortSendCorrIds?.length
+          ? { abortSendCorrIds: updated.closeStopAbortSendCorrIds } : {}),
+        ...(updated.closeStopCancelQueuedOperationIds?.length
+          ? { cancelQueuedOperationIds: updated.closeStopCancelQueuedOperationIds } : {}),
+        ...(updated.closeStopUsePriorityLane ? { usePriorityLane: true } : {}),
+      });
+      updated = { ...updated, closeStopDispatched: true };
+    }
+  }
+  if (!updated.terminal && !updated.closeCleanupDispatched && (stopReleased || createReleased || idleAgentCloseReleased)) {
+    const lifecycleOperation: typeof updated = { ...updated, closeCleanupDispatched: true };
+    operations[operationId] = lifecycleOperation;
+    effects.push({
+      kind: 'CloseSession',
+      corrId: updated.causal.selectionToken,
+      sessionPath: lifecycleOperation.session.resolvedPath ?? lifecycleOperation.session.pendingPath,
+      nextPath: lifecycleOperation.closeNextPath ?? null,
+      privacyMode: lifecycleOperation.closePrivacyMode === true,
+      selectionChanged: lifecycleOperation.closeSelectionChanged === true,
+      operationId,
+      backendGeneration: lifecycleOperation.backendGeneration,
+    });
+  } else {
+    operations[operationId] = updated;
+  }
+
+  // Private cleanup irreversibly deletes the transcript. Drop the retained
+  // summary only after that cleanup acknowledgement, not at close ingress.
+  let resultState: ArchState = { ...state, operations };
+  if (acknowledgement === 'privacy-marker-removal' && ok) {
+    const privatePath = updated.session.resolvedPath ?? updated.session.pendingPath;
+    const { [privatePath]: _removedPrivacyMarker, ...privacyModeBySession } = resultState.sessions.privacyModeBySession;
+    resultState = {
+      ...resultState,
+      sessions: { ...resultState.sessions, privacyModeBySession },
+    };
+  }
+  if (acknowledgement === 'cleanup' && ok && updated.closePrivacyMode) {
+    const closedPath = updated.session.resolvedPath ?? updated.session.pendingPath;
+    const evicted = evictSession(resultState, closedPath, { removeSummary: true, removeTabs: false });
+    resultState = evicted.state;
+    effects.push(...evicted.effects);
+  }
+  if (updated.terminal) {
+    const lifecycleAcknowledgements = Object.entries(updated.acknowledgements ?? {})
+      .filter(([name]) => name !== 'caller-response')
+      .map(([, acknowledgement]) => acknowledgement);
+    const succeededCount = lifecycleAcknowledgements.filter((ack) => ack === 'succeeded').length;
+    const phase: 'completed' | 'failed' | 'unknown' = updated.terminal.outcome === 'settled'
+      ? 'completed'
+      : succeededCount === 0
+        ? 'failed'
+        : 'unknown';
+    const deletionCommitted = updated.closePrivacyMode === true
+      && (updated.closeDeletionCommitted === true || updated.acknowledgements?.cleanup === 'succeeded');
+    const restoredPath = updated.session.resolvedPath ?? updated.session.pendingPath;
+    const canRestore = phase !== 'completed'
+      && updated.acknowledgements?.cleanup !== 'succeeded'
+      && !deletionCommitted
+      && resultState.sessions.sessions.some((summary) => summary.path === restoredPath)
+      && !resultState.sessions.openTabPaths.includes(restoredPath);
+    if (canRestore) {
+      const nextOpenTabPaths = [...resultState.sessions.openTabPaths, restoredPath];
+      const parentOperation = updated.causal.parentOperationId
+        ? resultState.operations[updated.causal.parentOperationId]
+        : undefined;
+      if (parentOperation && (parentOperation.kind === 'session.create' || parentOperation.kind === 'session.duplicate')) {
+        const { closeOperationId: _closeOperationId, ...parent } = parentOperation;
+        operations[parentOperation.operationId] = { ...parent, hidden: false };
+        resultState = { ...resultState, operations };
+      }
+      effects.push({
+        kind: 'PersistTabs',
+        corrId: updated.causal.selectionToken,
+        openTabPaths: nextOpenTabPaths,
+        activeSessionPath: resultState.sessions.activeSessionPath,
+        pinnedTabPaths: resultState.sessions.pinnedTabPaths,
+        pinnedTabGroups: resultState.sessions.pinnedTabGroups,
+        ...(updated.closePrivacyMode ? {
+          privateSessionPaths: [...new Set([
+            restoredPath,
+            ...Object.entries(resultState.sessions.privacyModeBySession)
+              .filter(([, enabled]) => enabled)
+              .map(([privatePath]) => privatePath),
+          ])],
+        } : {}),
+      });
+      resultState = {
+        ...resultState,
+        sessions: {
+          ...resultState.sessions,
+          openTabPaths: nextOpenTabPaths,
+          intentionallyHiddenRunningPaths: removeFromArray(
+            resultState.sessions.intentionallyHiddenRunningPaths,
+            restoredPath,
+          ),
+          ...(updated.closePrivacyMode ? {
+            privacyModeBySession: { ...resultState.sessions.privacyModeBySession, [restoredPath]: true },
+          } : {}),
+        },
+      };
+    }
+    if (updated.closeRequestKey) {
+      effects.push({
+        kind: 'SessionCloseBridgeAck',
+        corrId: updated.causal.selectionToken,
+        sessionPath: restoredPath,
+        requestKey: updated.closeRequestKey,
+        phase,
+        ...(phase === 'completed' ? {} : (error ?? updated.terminal.detail
+          ? { error: error ?? updated.terminal.detail }
+          : {})),
+      });
+    }
+  }
+  return { state: resultState, effects };
 }

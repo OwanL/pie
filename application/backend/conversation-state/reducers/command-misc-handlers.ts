@@ -908,6 +908,38 @@ export function handleSetPrefs(state: ArchState, cmd: Extract<Command, { kind: '
   };
 }
 
+export function handleSessionControlSettingsRequest(
+  state: ArchState,
+  cmd: Extract<Command, { kind: 'SessionControlSettingsRequest' }>,
+): ReducerResult {
+  const { request } = cmd;
+  const live = state.sessions.sessions.some((session) => session.path === request.sessionPath);
+  const closing = Object.values(state.operations).some((operation) =>
+    operation.kind === 'session.close'
+    && !operation.terminal
+    && (operation.session.resolvedPath ?? operation.session.pendingPath) === request.sessionPath);
+  if (!live || closing) {
+    return {
+      state,
+      effects: [{
+        kind: 'SessionControlSettingsBridgeAck',
+        corrId: cmd.corrId,
+        acknowledgement: {
+          requestId: request.requestId,
+          sessionPath: request.sessionPath,
+          action: request.action,
+          outcome: 'failed',
+          error: live ? 'The target session is closing.' : 'The target session is not live.'
+        },
+      }],
+    };
+  }
+  return {
+    state,
+    effects: [{ kind: 'SessionControlSettingsRpc', corrId: cmd.corrId, request }],
+  };
+}
+
 export function handleMcpListRequested(state: ArchState, cmd: Extract<Command, { kind: 'McpListRequested' }>): ReducerResult {
   return {
     state: {

@@ -116,7 +116,7 @@ test('DuplicateSession timeout retry keeps one operation identity and the pendin
   }
 });
 
-test('closing a pending duplicate settles a correlated close without cancelling the duplicate ledger', () => {
+test('closing a pending duplicate cancels queued work and waits for late creation cleanup before settling', () => {
   const duplicateOperationId = 'duplicate-op-hidden';
   const duplicated = reducer(buildState(), {
     kind: 'Command',
@@ -127,7 +127,18 @@ test('closing a pending duplicate settles a correlated close without cancelling 
       selectionToken: 'duplicate-hidden-selection',
     },
   });
-  const hidden = reducer(duplicated.state, {
+  const queued = reducer(duplicated.state, {
+    kind: 'Command',
+    cmd: {
+      kind: 'Send', corrId: 'queued-during-duplicate', operationId: 'queued-send-op', operationAttempt: 1,
+      operationSource: { kind: 'host' }, backendGeneration: 13, sessionPath: PENDING,
+      text: 'queued work', inputs: [], composedText: 'queued work', localId: 'queued-send-local',
+      previousSummary: null, timestamp: 1,
+    },
+  });
+  assert.equal(queued.state.pending.sendQueueBySession[PENDING]?.[0]?.operationId, 'queued-send-op');
+
+  const hidden = reducer(queued.state, {
     kind: 'Command',
     cmd: {
       kind: 'CloseSession', corrId: 'close-duplicate', operationId: 'close-duplicate-op',
@@ -136,19 +147,52 @@ test('closing a pending duplicate settles a correlated close without cancelling 
   });
   assert.equal(hidden.state.operations[duplicateOperationId]?.hidden, true);
   assert.equal(hidden.state.operations[duplicateOperationId]?.terminal, undefined);
+  assert.equal(hidden.state.operations['queued-send-op']?.terminal?.outcome, 'cancelled');
+  assert.equal(hidden.state.operations['queued-send-op']?.terminal?.reason, 'queue-cleared');
+  assert.equal(hidden.state.pending.sendQueueBySession[PENDING], undefined);
+  assert.ok(!hidden.effects.some((effect) => effect.kind === 'DrainPendingSendQueue'));
   assert.equal(hidden.state.operations['close-duplicate-op']?.kind, 'session.close');
   assert.equal(hidden.state.operations['close-duplicate-op']?.causal.parentOperationId, duplicateOperationId);
-  const persist = hidden.effects[0];
+  const persist = hidden.effects.find((effect) => effect.kind === 'PersistTabs');
   assert.ok(persist?.kind === 'PersistTabs'
     && persist.operationId === 'close-duplicate-op'
     && persist.backendGeneration === 13);
 
-  const settled = reducer(hidden.state, {
+  const persisted = reducer(hidden.state, {
     kind: 'PersistTabsResult', corrId: 'close-duplicate', operationId: 'close-duplicate-op',
     backendGeneration: 13, ok: true,
   });
-  assert.equal(settled.state.operations['close-duplicate-op']?.terminal?.outcome, 'settled');
-  assert.equal(settled.state.operations[duplicateOperationId]?.hidden, true);
+  assert.equal(persisted.state.operations['close-duplicate-op']?.acknowledgements?.['persist-tabs'], 'succeeded');
+  assert.equal(persisted.state.operations['close-duplicate-op']?.terminal, undefined,
+    'tab persistence alone cannot settle close while creation may still commit');
+  assert.equal(persisted.state.operations['close-duplicate-op']?.acknowledgements?.cleanup, 'pending');
+  assert.equal(persisted.state.operations[duplicateOperationId]?.hidden, true);
+  assert.equal(persisted.state.operations[duplicateOperationId]?.terminal, undefined);
+
+  const resolvedPath = '/workspace/late-duplicate.jsonl';
+  const created = reducer(persisted.state, {
+    kind: 'CreateOperationSucceeded', operationId: duplicateOperationId, pendingPath: PENDING,
+    sessionPath: resolvedPath, attempt: 1, backendGeneration: 13,
+  });
+  assert.equal(created.state.operations[duplicateOperationId]?.terminal?.outcome, 'settled');
+  const replaced = reducer(created.state, {
+    kind: 'PendingPathReplaced', oldPendingPath: PENDING, newSessionPath: resolvedPath,
+  });
+  assert.deepEqual(replaced.state.sessions.openTabPaths, [OLD]);
+  assert.equal(replaced.state.sessions.activeSessionPath, OLD);
+  assert.ok(!replaced.effects.some((effect) => effect.kind === 'DrainPendingSendQueue'));
+  const cleanup = replaced.effects.find((effect) => effect.kind === 'CloseSession');
+  assert.ok(cleanup?.kind === 'CloseSession' && cleanup.sessionPath === resolvedPath);
+  assert.equal(replaced.state.operations['close-duplicate-op']?.session.resolvedPath, resolvedPath);
+  assert.equal(replaced.state.operations['close-duplicate-op']?.closeCleanupDispatched, true);
+  assert.equal(replaced.state.operations['close-duplicate-op']?.terminal, undefined);
+
+  const cleaned = reducer(replaced.state, {
+    kind: 'CloseSessionResult', corrId: 'close-duplicate', operationId: 'close-duplicate-op',
+    backendGeneration: 13, sessionPath: resolvedPath, ok: true,
+  });
+  assert.equal(cleaned.state.operations['close-duplicate-op']?.terminal?.outcome, 'settled');
+  assert.equal(cleaned.state.operations['close-duplicate-op']?.acknowledgements?.cleanup, 'succeeded');
 });
 
 test('DuplicateSession does not duplicate the summary or tab if the pending path is already present', () => {

@@ -61,6 +61,7 @@ interface MessageItemHeaderProps {
   /** Host-side synthetic-send tag. Surfaces a label on the user bubble
    *  when the message is host-injected rather than typed. */
   customType?: string;
+  sender?: ChatMessage['sender'];
 }
 
 export function MessageItemHeader({
@@ -72,13 +73,19 @@ export function MessageItemHeader({
   requestCreatedAt,
   actions,
   customType,
+  sender,
 }: MessageItemHeaderProps) {
   // Agent-originated session messages keep the user-role bubble but carry an
   // explicit bot cue. Other host-injected messages retain their Auto-resume tag.
   const userLabel = role !== 'user'
     ? null
     : customType === AGENT_MESSAGE_CUSTOM_TYPE
-      ? <span class="inline-flex items-center gap-1"><AgentIcon compact />Agent</span>
+      ? (
+        <span class="inline-flex items-center gap-1">
+          <AgentIcon compact />Agent
+          {sender && <span class="transcript-header-summary-subtle">· {sender.title ?? 'Unnamed session'}</span>}
+        </span>
+      )
       : customType !== undefined ? 'Auto-resume' : null;
   const requestTime = role === 'assistant' ? formatRequestTime(requestCreatedAt) : null;
   return (

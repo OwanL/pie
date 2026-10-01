@@ -10,6 +10,7 @@ import type { BackendLiveTurnAccumulator } from '../workers/live-turn-accumulato
 import type { ProviderIncident } from '../../model-providers/traffic-observation/provider-incident.js';
 import type { SendOperationLedger } from './send-operation-ledger.js';
 import type { InterruptOperationLedger } from './interrupt-operation-ledger.js';
+import type { SessionControlSender } from '../lib/rpc/session-control-attribution.js';
 
 export interface ActiveRequest {
   id: string;
@@ -19,6 +20,12 @@ export interface ActiveRequest {
   agentMessageLocalId?: string;
   /** Last durable user entry linked to agent provenance, for duplicate event guards. */
   agentMessageProvenanceEntryId?: string;
+  /** Idle agent sends wait for the SDK user append before claiming acceptance. */
+  agentMessageDurability?: { settle: (durable: boolean) => void; promise: Promise<boolean> };
+  agentMessageDurabilityConfirmed?: boolean;
+  agentMessageProvenanceFailureReported?: boolean;
+  /** Coordinator-authenticated sender persisted beside this agent message. */
+  coordinatorAttribution?: SessionControlSender;
   /** Host acknowledgement attempt which established this backend owner. */
   operationAttempt?: number;
   /** First provider-turn semantic start crossed the mutation commit boundary. */
@@ -202,6 +209,8 @@ export interface SessionContext {
   queuedOperationIds?: string[];
   /** Transport attempts aligned with queuedOperationIds. */
   queuedOperationAttempts?: Array<number | undefined>;
+  /** Coordinator attribution aligned with queuedLocalIds; undefined marks user sends. */
+  queuedCoordinatorAttributions?: Array<SessionControlSender | undefined>;
   /** Generation-scoped mutation idempotency authority for this hot session. */
   sendOperationLedger?: SendOperationLedger;
   /** Legacy in-process interrupt authority. Production interrupt ownership is

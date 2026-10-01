@@ -164,15 +164,22 @@ function subagentErrorDetail(result: SubagentSingleResult): string | undefined {
   return parts.join(': ');
 }
 
+/** Keep provider-qualified model ids compact in the header and tooltip. */
+function shortModelName(model: string): string {
+  return model.includes('/') ? model.split('/').pop()! : model;
+}
+
+function normalizedSubagentModelName(model: string, provider?: string): string {
+  return provider && model.startsWith(`${provider}/`) ? model.slice(provider.length + 1) : model;
+}
+
 /** Compact model label shown in the subagent header. Detailed runtime and
  * handoff data is available from the keyboard-focusable model trigger below. */
 function ModelLabel({ result, requestedMode, displayCost }: { result: SubagentSingleResult; requestedMode?: ParentUserContextMode; displayCost?: SubagentDisplayCost }) {
   const model = result.selectedModel ?? result.model;
   if (!model) return null;
-  // Show short name: last segment after '/' or full if no slash.
-  const short = model.includes('/') ? model.split('/').pop()! : model;
+  const short = shortModelName(model);
   const reasoning = result.thinkingLevel;
-  const title = reasoning ? `${model} (reasoning: ${reasoning})` : model;
   const accessibleLabel = `Show ${model}${reasoning ? `, reasoning ${reasoning}` : ''} and subagent runtime details`;
   return (
     <Tooltip
@@ -187,7 +194,7 @@ function ModelLabel({ result, requestedMode, displayCost }: { result: SubagentSi
         onClick={(event) => event.stopPropagation()}
         onKeyDown={(event) => event.stopPropagation()}
       >
-        <span class="subagent-model-label transcript-header-summary-subtle" title={title}>
+        <span class="subagent-model-label transcript-header-summary-subtle">
           {short}{reasoning ? ` · ${reasoning}` : ''}
         </span>
       </span>
@@ -242,27 +249,32 @@ function contextHandoffExplanation(summary: ContextHandoffSummary): string {
     summary.clarificationCount > 0 ? `${summary.clarificationCount} recorded ${summary.clarificationCount === 1 ? 'clarification' : 'clarifications'}` : undefined,
   ].filter(Boolean).join(' · ');
   return summary.state === 'inherited'
-    ? `${sourceSummary || 'Parent user context'} inserted into the isolated child prompt.`
+    ? `Inherited${summary.mode ? ` ${summary.mode}` : ''} context${sourceSummary ? ` · ${sourceSummary}` : ''}`
     : summary.state === 'empty'
-      ? `The ${summary.mode} mode was requested, but no eligible parent prompt or completed clarification was available; only the task was sent.`
+      ? `Empty ${summary.mode} context · task only`
       : summary.state === 'unavailable'
-        ? `The tool requested ${summary.mode} context. The exact inherited packet is not available in this live-start or older saved result.`
-        : 'No parent user context was requested; the child received only the delegated task.';
+        ? `Requested ${summary.mode} context · exact packet unavailable`
+        : 'Task only · no parent context requested';
 }
 
 function knownNonNegative(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
-function formatDetailTokens(value: unknown): string {
-  const known = knownNonNegative(value);
-  return known === undefined ? '—' : known.toLocaleString();
+function formatDetailTokens(value: number): string {
+  if (value < 1_000) return value.toLocaleString();
+  const units = [
+    { threshold: 1_000_000_000, suffix: 'b' },
+    { threshold: 1_000_000, suffix: 'm' },
+    { threshold: 1_000, suffix: 'k' },
+  ];
+  const unit = units.find((candidate) => value >= candidate.threshold)!;
+  const compact = (value / unit.threshold).toFixed(1).replace(/\.0$/, '');
+  return `${compact}${unit.suffix}`;
 }
 
-function formatDetailDuration(value: unknown): string {
-  const known = knownNonNegative(value);
-  if (known === undefined) return '—';
-  return known < 1_000 ? `${Math.round(known)}ms` : `${(known / 1_000).toFixed(1)}s`;
+function formatDetailDuration(value: number): string {
+  return value < 1_000 ? `${Math.round(value)}ms` : `${(value / 1_000).toFixed(1)}s`;
 }
 
 function latestThroughputSample(result: SubagentSingleResult) {
@@ -278,7 +290,7 @@ function ContextHandoffDetails({ result, requestedMode }: { result: SubagentSing
   const summary = subagentContextHandoffSummary(result, requestedMode);
   return (
     <>
-      <div class="subagent-context-tooltip-section">Context handoff · {summary.label}</div>
+      <div class="subagent-context-tooltip-section">Context handoff</div>
       <div class="subagent-context-tooltip-summary">{contextHandoffExplanation(summary)}</div>
       <div class="subagent-context-tooltip-section">Delegated task</div>
       <pre class="subagent-context-tooltip-content">{result.task}</pre>
@@ -293,85 +305,106 @@ function ContextHandoffDetails({ result, requestedMode }: { result: SubagentSing
 }
 
 function SubagentModelDetailsTooltip({ result, requestedMode, displayCost }: { result: SubagentSingleResult; requestedMode?: ParentUserContextMode; displayCost?: SubagentDisplayCost }) {
-  const model = result.selectedModel ?? result.model;
+  const requestedModel = result.selectedModel?.trim() || undefined;
+  const actualModel = result.model?.trim() || undefined;
+  const model = actualModel ?? requestedModel;
+  const modelsDiffer = requestedModel !== undefined
+    && actualModel !== undefined
+    && normalizedSubagentModelName(requestedModel, result.provider) !== normalizedSubagentModelName(actualModel, result.provider);
   const usage = result.usage;
-  const tokenValues = [usage?.input, usage?.output, usage?.cacheRead, usage?.cacheWrite];
-  const hasTokenData = tokenValues.some((value) => knownNonNegative(value) !== undefined);
-  const hasCompleteTokenData = tokenValues.every((value) => knownNonNegative(value) !== undefined);
   const contextTokens = knownNonNegative(usage?.contextTokens);
   const contextWindow = knownNonNegative(result.contextWindow);
-  const hasContextData = contextTokens !== undefined || contextWindow !== undefined;
   const contextPercent = contextTokens !== undefined && contextWindow !== undefined && contextWindow > 0
     ? formatContextPercent(contextTokens, contextWindow)
     : undefined;
+  const inputTokens = knownNonNegative(usage?.input);
+  const outputTokensUsed = knownNonNegative(usage?.output);
+  const cacheReadTokens = knownNonNegative(usage?.cacheRead);
+  const cacheWriteTokens = knownNonNegative(usage?.cacheWrite);
   const turns = knownNonNegative(usage?.turns);
   const throughput = latestThroughputSample(result);
-  const outputTokens = throughput ? knownNonNegative(throughput.outputTokens)! : undefined;
-  const generationDurationMs = throughput ? knownNonNegative(throughput.generationDurationMs)! : undefined;
-  const tokensPerSecond = outputTokens !== undefined && generationDurationMs !== undefined && generationDurationMs > 0
-    ? outputTokens / (generationDurationMs / 1_000)
+  const generationOutputTokens = throughput ? knownNonNegative(throughput.outputTokens) : undefined;
+  const generationDurationMs = throughput ? knownNonNegative(throughput.generationDurationMs) : undefined;
+  const tokensPerSecond = generationOutputTokens !== undefined && generationDurationMs !== undefined && generationDurationMs > 0
+    ? generationOutputTokens / (generationDurationMs / 1_000)
     : undefined;
+  const hasContextData = contextTokens !== undefined || contextWindow !== undefined;
+  const hasPrimaryMetrics = hasContextData || displayCost !== undefined || outputTokensUsed !== undefined
+    || throughput !== undefined && tokensPerSecond !== undefined;
+  const hasAdditionalMetrics = inputTokens !== undefined || cacheReadTokens !== undefined
+    || cacheWriteTokens !== undefined || turns !== undefined;
   const retryCount = knownNonNegative(result.retryCount);
   const failedModel = result.failedModel?.trim() || undefined;
   const recovered = result.exitCode === 0
     && !isSubagentSingleResultRunning(result)
     && (retryCount !== undefined && retryCount > 0 || result.fallback === true);
-  const hasFailure = result.exitCode !== -1 && (result.exitCode !== 0 || result.stopReason === 'error' || result.stopReason === 'aborted');
+  const hasRecovery = retryCount !== undefined && retryCount > 0 || result.fallback === true;
+  const hasFailure = isFailed(result);
+  const failureLabel = result.failureClass
+    ? `Failure: ${result.failureClass}`
+    : result.stopReason === 'aborted'
+      ? 'Interrupted'
+      : result.exitCode > 0
+        ? `Failed · exit ${result.exitCode}`
+        : 'Failed';
+  const identity = [
+    result.provider ? `Provider ${result.provider}` : undefined,
+    result.thinkingLevel ? `reasoning ${result.thinkingLevel}` : undefined,
+  ].filter(Boolean).join(' · ');
 
   return (
     <div class="subagent-model-details-tooltip subagent-context-tooltip">
-      <div class="subagent-context-tooltip-title">{model ?? 'Model unavailable'}{result.thinkingLevel ? ` · reasoning ${result.thinkingLevel}` : ''}</div>
-      {result.provider && <div class="subagent-context-tooltip-summary">Provider: {result.provider}</div>}
-      {result.selectedModel && result.model && result.selectedModel !== result.model && (
-        <>
-          <div class="subagent-context-tooltip-summary">Requested model: {result.selectedModel}</div>
-          <div class="subagent-context-tooltip-summary">Actual runtime model: {result.model}</div>
-        </>
+      <div class="subagent-context-tooltip-title">{model ? shortModelName(model) : 'Model unavailable'}</div>
+      {identity && <div class="subagent-context-tooltip-summary">{identity}</div>}
+      {modelsDiffer && requestedModel && (
+        <div class="subagent-context-tooltip-summary">Requested: {shortModelName(requestedModel)}</div>
       )}
 
-      <div class="subagent-context-tooltip-section">Runtime details</div>
+      {hasRecovery && (
+        <div class="subagent-detail-row subagent-detail-recovery">
+          <span>{recovered ? 'Recovery' : 'Provider attempts'}</span>
+          <span>{recovered
+            ? `Recovered${retryCount !== undefined && retryCount > 0 ? ` after ${retryCount} ${retryCount === 1 ? 'retry' : 'retries'}` : ' via fallback'}${failedModel ? ` · failed ${shortModelName(failedModel)}` : ''}`
+            : `${retryCount ?? 0} ${retryCount === 1 ? 'retry' : 'retries'}${result.fallback ? ' · fallback available' : ''}${failedModel ? ` · failed ${shortModelName(failedModel)}` : ''}`}</span>
+        </div>
+      )}
+      {hasFailure && (
+        <div class="subagent-detail-failure">
+          <div>{failureLabel}</div>
+          {(result.errorMessage || result.stderr) && <pre class="subagent-context-tooltip-content">{result.errorMessage ?? result.stderr}</pre>}
+        </div>
+      )}
+
+      {hasPrimaryMetrics && <div class="subagent-context-tooltip-section">Usage &amp; performance</div>}
       {hasContextData && (
         <div class="subagent-detail-row">
           <span>Context</span>
-          <span>{formatDetailTokens(contextTokens)} / {formatDetailTokens(contextWindow)} tokens{contextPercent ? ` (${contextPercent})` : ''}</span>
+          <span>{contextTokens !== undefined
+            ? `${formatDetailTokens(contextTokens)}${contextWindow !== undefined ? ` / ${formatDetailTokens(contextWindow)}` : ''} tok${contextPercent ? ` (${contextPercent})` : ''}`
+            : `${formatDetailTokens(contextWindow!)} tok window`}</span>
         </div>
       )}
-      {hasTokenData && (
-        <>
-          <div class="subagent-detail-row"><span>Input</span><span>{formatDetailTokens(usage?.input)} tokens</span></div>
-          <div class="subagent-detail-row"><span>Output</span><span>{formatDetailTokens(usage?.output)} tokens</span></div>
-          <div class="subagent-detail-row"><span>Cache read</span><span>{formatDetailTokens(usage?.cacheRead)} tokens</span></div>
-          <div class="subagent-detail-row"><span>Cache write</span><span>{formatDetailTokens(usage?.cacheWrite)} tokens</span></div>
-          <div class="subagent-detail-row"><span>Total tokens</span><span>{hasCompleteTokenData ? tokenValues.reduce<number>((total, value) => total + knownNonNegative(value)!, 0).toLocaleString() : '—'}</span></div>
-        </>
-      )}
-      {turns !== undefined && <div class="subagent-detail-row"><span>Provider turns</span><span>{formatDetailTokens(turns)}</span></div>}
       {displayCost !== undefined && (
         <div class="subagent-detail-row">
           <span>{displayCost.estimated ? 'Estimated cost' : 'Cost'}</span>
           <span>{displayCost.estimated ? '~' : ''}${displayCost.cost.toFixed(4)}</span>
         </div>
       )}
-      {throughput && tokensPerSecond !== undefined && (
+      {outputTokensUsed !== undefined && (
+        <div class="subagent-detail-row"><span>Output</span><span>{formatDetailTokens(outputTokensUsed)} tok</span></div>
+      )}
+      {throughput && tokensPerSecond !== undefined && generationOutputTokens !== undefined && generationDurationMs !== undefined && (
         <div class="subagent-detail-row">
           <span>Latest generation{throughput.status !== 'completed' ? ` (${throughput.status})` : ''}</span>
-          <span>{formatDetailTokens(outputTokens)} output tokens / {formatDetailDuration(generationDurationMs)} · {tokensPerSecond.toFixed(1)} tokens/s</span>
+          <span>{formatDetailTokens(generationOutputTokens)} tok · {formatDetailDuration(generationDurationMs)} · {tokensPerSecond.toFixed(1)} tok/s</span>
         </div>
       )}
-      {(retryCount !== undefined && retryCount > 0 || result.fallback === true) && (
-        <div class="subagent-detail-row subagent-detail-recovery">
-          <span>{recovered ? 'Recovery' : 'Provider attempts'}</span>
-          <span>{recovered
-            ? `Recovered${retryCount !== undefined && retryCount > 0 ? ` after ${retryCount} ${retryCount === 1 ? 'retry' : 'retries'}` : ' via fallback'}${failedModel ? ` · failed ${failedModel}` : ''}`
-            : `${retryCount ?? 0} ${retryCount === 1 ? 'retry' : 'retries'}${result.fallback ? ' · fallback available' : ''}${failedModel ? ` · failed ${failedModel}` : ''}`}</span>
-        </div>
-      )}
-      {hasFailure && (result.failureClass || result.errorMessage || result.stderr) && (
-        <div class="subagent-detail-failure">
-          {result.failureClass && <div>Failure: {result.failureClass}</div>}
-          {(result.errorMessage || result.stderr) && <pre class="subagent-context-tooltip-content">{result.errorMessage ?? result.stderr}</pre>}
-        </div>
-      )}
+
+      {hasAdditionalMetrics && <div class="subagent-context-tooltip-section">More usage</div>}
+      {inputTokens !== undefined && <div class="subagent-detail-row"><span>Input</span><span>{formatDetailTokens(inputTokens)} tok</span></div>}
+      {cacheReadTokens !== undefined && <div class="subagent-detail-row"><span>Cache read</span><span>{formatDetailTokens(cacheReadTokens)} tok</span></div>}
+      {cacheWriteTokens !== undefined && <div class="subagent-detail-row"><span>Cache write</span><span>{formatDetailTokens(cacheWriteTokens)} tok</span></div>}
+      {turns !== undefined && <div class="subagent-detail-row"><span>Provider turns</span><span>{formatDetailTokens(turns)}</span></div>}
       <ContextHandoffDetails result={result} requestedMode={requestedMode} />
     </div>
   );

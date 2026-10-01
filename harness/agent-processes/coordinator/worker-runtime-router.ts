@@ -10,6 +10,7 @@ import {
 import { getMaxInflightResolution } from '../../tools/subagent/concurrency-limit.js';
 import type { RequestEnvelope } from '../lib/rpc/wire.js';
 import type { SessionOpenedPayload } from '../lib/rpc/session-events.js';
+import { isSessionControlSender } from '../lib/rpc/session-control-attribution.js';
 import { sessionOpenedMetadataForWorkerIpc } from '../lib/rpc/session-opened-transport.js';
 import type { ModelSettingsUnsetKey } from './request-handler-shared';
 import type {
@@ -222,6 +223,16 @@ export interface WorkerRuntimeRouterOptions {
   broadcastSyncAckTimeoutMs?: number;
   runtimeReadyTimeoutMs?: number;
   scheduler?: WorkerClientScheduler;
+  /** Coordinator-owned execution admission recheck: throws (typically
+   *  SESSION_CLOSING) when the host's live-membership projection has admitted
+   *  a close reservation for the target path. Consulted immediately before
+   *  promotion/admission and rechecked after every async promotion/wait, so a
+   *  close that starts mid-promotion cannot be crossed by a racing send. */
+  assertExecutionAdmissionOpen?(sessionPath: string): void;
+  /** Revalidate authoritative live membership for coordinator-authenticated
+   *  session-control sends only; ordinary raw UI sends are not constrained by
+   *  this cross-session admission check. */
+  assertSessionControlSendAdmissionOpen?(sessionPath: string): void;
   emit(event: string, payload?: unknown): void;
   /** Handle the narrowly scoped worker-originated agent session-control
    * request after the route identity fence has accepted its frame. */
@@ -493,16 +504,21 @@ export class WorkerRuntimeRouter {
     return this.operationCancellationGenerations.get(routeKey(sessionPath)) ?? 0;
   }
 
+  /** Invalidate admissions captured by operations that have not reached their
+   *  runtime yet. Close ownership uses this without interrupting an active SDK
+   *  operation; reopening naturally admits work against the new generation. */
+  invalidatePendingRuntimeOperations(sessionPath: string): number {
+    const generation = this.operationCancellationGeneration(sessionPath) + 1;
+    this.operationCancellationGenerations.set(routeKey(sessionPath), generation);
+    return generation;
+  }
+
   cancelPendingRuntimeOperations(sessionPath: string): boolean {
     const route = this.getRoute(sessionPath);
     const state = route.state;
     if (state !== 'promoting' && state !== 'retiring' && state !== 'transitioning') return false;
     if (route.state === 'transitioning') route.cancelled = true;
-    const key = routeKey(sessionPath);
-    this.operationCancellationGenerations.set(
-      key,
-      this.operationCancellationGeneration(sessionPath) + 1,
-    );
+    this.invalidatePendingRuntimeOperations(sessionPath);
     return true;
   }
 
@@ -598,6 +614,45 @@ export class WorkerRuntimeRouter {
       throw new Error(`Hot session duplicate returned an invalid result for ${sourceSessionPath}.`);
     }
     return { sessionPath: result.sessionPath };
+  }
+
+  /** Hot title-assignment owner seam. The coordinator reserves the unique
+   * title and this routing asks the sole hot owner to durably persist it
+   * (SDK `setSessionName`) and acknowledge before publication. Cold sessions
+   * never route here; the coordinator persists through its ColdSessionStore
+   * seam instead. */
+  async assignSessionTitle(
+    sessionPath: string,
+    title: string,
+    publicRequestId: string,
+    replaceExpectedTitle?: string,
+  ): Promise<{ assigned: boolean; changed: boolean; skipped?: 'explicit-name' }> {
+    const hot = this.requireHot(sessionPath);
+    this.assertCurrentOwner(hot, sessionPath);
+    const response = await hot.worker.client.requestFrame!({
+      kind: 'runtime.command',
+      operation: 'session.title.assign',
+      payload: asWorkerJsonObject({
+        params: { sessionPath, title, ...(replaceExpectedTitle !== undefined ? { replaceExpectedTitle } : {}) },
+        publicRequestId,
+      }),
+    }, 'response');
+    if (!response.ok) throw new BackendError(response.error.code, response.error.message);
+    if (response.result.kind !== 'runtime.command'
+      || !response.result.payload
+      || typeof response.result.payload !== 'object'
+      || Array.isArray(response.result.payload)) {
+      throw new Error(`Hot session title assignment returned an invalid result for ${sessionPath}.`);
+    }
+    const result = response.result.payload as Record<string, unknown>;
+    if (result.assigned !== true && result.skipped !== 'explicit-name') {
+      throw new Error(`Hot session title assignment returned an invalid result for ${sessionPath}.`);
+    }
+    return {
+      assigned: result.assigned === true,
+      changed: result.changed === true,
+      ...(result.skipped === 'explicit-name' ? { skipped: 'explicit-name' as const } : {}),
+    };
   }
 
   /** Build an immutable snapshot inside the sole hot owner. Used after a hot
@@ -701,6 +756,27 @@ export class WorkerRuntimeRouter {
     }
   }
 
+  /** Coordinator-owned execution admission recheck (host membership-closing
+   *  fence). Thrown before and after every async promotion wait. */
+  private assertExecutionAdmissionOpen(sessionPath: string | undefined): void {
+    if (!sessionPath || !this.options.assertExecutionAdmissionOpen) return;
+    this.options.assertExecutionAdmissionOpen(sessionPath);
+  }
+
+  /** The public coordinator ingress strips untrusted attribution before
+   *  routing, so a valid sender here identifies the narrow session-control
+   *  path whose live target must survive any asynchronous promotion wait. */
+  private assertSessionControlSendAdmissionOpen(
+    request: RequestEnvelope,
+    sessionPath: string | undefined,
+  ): void {
+    const params = request.params;
+    if (request.method !== 'message.send' || !sessionPath
+      || !params || typeof params !== 'object' || Array.isArray(params)
+      || !isSessionControlSender((params as Record<string, unknown>).coordinatorAttribution)) return;
+    this.options.assertSessionControlSendAdmissionOpen?.(sessionPath);
+  }
+
   private async routeCommand(
     request: RequestEnvelope,
     promoteIfCold: boolean,
@@ -711,6 +787,8 @@ export class WorkerRuntimeRouter {
     }
     const sessionPath = readSessionPath(request.params);
     this.assertSessionAdmissionOpen(sessionPath);
+    this.assertExecutionAdmissionOpen(sessionPath);
+    this.assertSessionControlSendAdmissionOpen(request, sessionPath);
     const operationCancellationGeneration = expectedCancellationGeneration
       ?? this.operationCancellationGeneration(sessionPath);
     const hot = promoteIfCold ? await this.promote(sessionPath) : this.requireHot(sessionPath);
@@ -722,6 +800,8 @@ export class WorkerRuntimeRouter {
       );
     }
     this.assertSessionAdmissionOpen(sessionPath);
+    this.assertExecutionAdmissionOpen(sessionPath);
+    this.assertSessionControlSendAdmissionOpen(request, sessionPath);
     this.assertCurrentOwner(hot, sessionPath);
     return await this.dispatchRuntimeCommand(hot, request);
   }

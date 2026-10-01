@@ -49,6 +49,39 @@ test('runtime lease release stays behind awaited production backend shutdown', a
   assert.match(entry, /await extension\?\.shutdown\(\)/u);
 });
 
+test('agent session-control docs track current selectors, outcomes, provenance, titles, and deferred scope', async () => {
+  const agentContract = await readFile(new URL('../../docs/contracts/AGENT-SESSION-CONTROL.md', import.meta.url), 'utf8');
+  const titleContract = await readFile(new URL('../../docs/contracts/SESSION-TITLES.md', import.meta.url), 'utf8');
+  assert.match(agentContract, /create.*Requires `title` \(a non-empty single line of 1–25 characters after trimming\); optional `cwd`, `prompt`, and `settings`/u);
+  assert.match(agentContract, /exactly one of `title`, `self: true`, or `replyTo`/u);
+  assert.match(agentContract, /`settings.get`.*`model: \{provider,id\}`.*`disabledSystemPromptEntries`/u);
+  assert.match(agentContract, /A configuration failure.*prevents that call's prompt from being sent/u);
+  assert.match(agentContract, /never automatically replayed/u);
+  assert.match(agentContract, /`creation.status` is `not_created`.*no new session or tab exists/u);
+  assert.match(agentContract, /retained history alone cannot prove completion/u);
+  assert.match(agentContract, /projection is applied before the page byte budget/u);
+  const stateContract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
+  assert.match(stateContract, /no open tab still starts stop-cleanup for an intentionally hidden running target/u);
+  assert.match(stateContract, /retained session history alone reports unknown/u);
+  assert.match(stateContract, /initial user `message_start` retains the direct request identity and never consumes queued identities/u);
+  assert.match(agentContract, /Worker acknowledgement deadlines and unconfirmed durable sender attribution report message `unknown`/u);
+  assert.match(agentContract, /Transcript display removes exactly one canonical sender envelope only when it matches validated persisted sender metadata/u);
+  assert.match(stateContract, /Optimistic Agent rows reconcile one-to-one with their normalized durable echoes/u);
+  assert.match(agentContract, /Agent-send admission is rechecked against authoritative live membership after configuration and again after asynchronous runtime promotion/u);
+  assert.match(stateContract, /a completed close cannot be bypassed by a late initial prompt/u);
+  assert.match(agentContract, /closing invalidates it even if the same durable session is later reopened/u);
+  assert.match(agentContract, /tool-level `outcome: unknown`/u);
+  assert.match(stateContract, /reopening the same path cannot resurrect pre-close delivery/u);
+  assert.match(agentContract, /Model\/reasoning and prompt-toggle worker acknowledgement deadlines likewise report configuration `unknown`/u);
+  assert.match(agentContract, /coordinator derives sender identity from the calling worker/u);
+  assert.match(agentContract, /`replyTo` resolves that stable sender identity only while its original session is live/u);
+  assert.match(agentContract, /MCP inheritance, inspection, and update are deferred/u);
+  assert.match(agentContract, /Queued steering\/follow-up delivery keeps the active tool\/skill selection without another skill-pruning prepass, regardless of whether the message came from a user or an agent/u);
+  assert.match(agentContract, /bounded.*view of live membership.*Closed history is not listed/u);
+  assert.match(titleContract, /model output is never published or written as a final name by the generation seam/u);
+  assert.match(titleContract, /1–25 characters after trimming; automatic collision suffixes are additional/u);
+});
+
 test('protocol v11 browser-server network state remains host-global and separates actual from configured intent', async () => {
   const contract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
   assert.match(contract, /Browser Server Network State/u);
@@ -77,9 +110,11 @@ test('agent session-control messages retain user-role provenance through queue d
   const stateContract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
   const agentContract = await readFile(new URL('../../docs/contracts/AGENT-SESSION-CONTROL.md', import.meta.url), 'utf8');
   assert.match(stateContract, /Agent-originated `session_control` messages are user-role rows/u);
-  assert.match(stateContract, /`pie\.agent-message-provenance` custom sidecar linked to the durable user session-entry ID/u);
+  assert.match(stateContract, /persisted with the SDK user message at its append boundary/u);
+  assert.match(stateContract, /legacy `pie\.agent-message-provenance` sidecars remain readable/u);
+  assert.match(stateContract, /explicitly flushing a fresh session at user append rather than waiting for an assistant response/u);
   assert.match(stateContract, /Duplicate observations cannot downgrade a delivered row/u);
-  assert.match(agentContract, /Each accepted message appears as a user-role transcript row/u);
+  assert.match(agentContract, /publishes an Agent-attributed user-role transcript row/u);
 });
 
 test('PROTOCOL_VERSION is a positive integer', () => {
@@ -456,6 +491,36 @@ test('host-webview sync carries session.open/session.close and lifecycle transit
     Object.values(sessionCapabilitiesBySession).slice(0, 2).map((capabilities) => capabilities.primaryOperation?.kind),
     ['session.open', 'session.close'],
   );
+});
+
+test('typed agent close bridge: stop-cleanup mode, coordinator-side fence, typed host acknowledgement, and host membership stay in contract', async () => {
+  const contract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
+  // Running-session close removes the tab and stops work; intentional hide is
+  // a separate renderer-recovery mechanism, not the close behavior.
+  assert.match(contract, /Closing a \*\*running\*\* session removes and persists its tab immediately/u);
+  assert.match(contract, /UI ×, tool, and private closes stop active and queued work rather than hiding a running session/u);
+  assert.match(contract, /intentional-hide intent/u);
+  assert.match(contract, /typed agent close \(`agent-session-control` source\)/u);
+  assert.match(contract, /is fenced by the coordinator against new execution admission/u);
+  assert.match(contract, /coordinator emits `session\.close\.requested`/u);
+  assert.match(contract, /bounded `session\.closeAcknowledgement` RPC/u);
+  assert.match(contract, /reported as close requested, never as already closed/u);
+  assert.match(contract, /The accepted acknowledgement is an ingress-fixed reducer effect/u);
+  assert.match(contract, /For self-close, the caller receives `close requested`, then `session\.close\.responseDelivered` releases host-owned stop\/cleanup/u);
+  assert.match(contract, /Closing a pending create\/duplicate cancels queued sends/u);
+  assert.match(contract, /late durable creation is cleaned up rather than reopened/u);
+  // Host open-tab membership is the single live authority, projected through
+  // the ordered snapshot; the coordinator never consults closed history.
+  assert.match(contract, /open-tab list plus its non-terminal close operations are the only live-membership authority/u);
+  assert.match(contract, /ordered `session\.liveMembership` snapshot/u);
+  assert.match(contract, /closed history is never revived \(ordinary user reopen restores admission\)/u);
+  assert.match(contract, /a non-terminal close reservation remains visible for close joining but fences other new requests/u);
+  // Close modes stay ingress-fixed; stop-cleanup joins the existing reducer
+  // barrier instead of a parallel ledger.
+  assert.match(contract, /`session\.close` fixes its mode at ingress/u);
+  assert.match(contract, /joins an already-active reducer interrupt or starts one/u);
+  assert.match(contract, /typed host close bridge acknowledgement effect exactly once/u);
+  assert.match(contract, /restores the surviving tab without stealing focus or reissuing the close, while committed deletions are never restored/u);
 });
 
 // ---------------------------------------------------------------------------

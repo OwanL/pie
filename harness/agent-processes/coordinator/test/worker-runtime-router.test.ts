@@ -9,6 +9,7 @@ import {
   validateWorkerIpcFrameDraft,
 } from '../../lib/rpc/worker-protocol.js';
 import { BackendError } from '../server-io.js';
+import { createSessionControlSender } from '../../lib/rpc/session-control-attribution.js';
 import { sessionOpenedUnavailableForWorkerIpc } from '../../lib/rpc/session-opened-transport.js';
 import { SESSION_SNAPSHOT_TOO_LARGE_CODE } from '../../lib/rpc/wire.js';
 
@@ -517,6 +518,74 @@ test('replacement commit rekeys destination ownership and leaves source independ
   assert.equal(router.getRoute(source).state, 'hot');
 });
 
+test('self-close handoff waits for acceptance and invokes the host release only after result send', async () => {
+  const sessionPath = '/workspace/response-handoff.jsonl';
+  const order: string[] = [];
+  let acceptOutcome: ((outcome: any) => void) | undefined;
+  const client = {
+    getSnapshot: () => ({ status: 'ready' as const, stdoutTail: '', stderrTail: '' }),
+    requestFrame: async (body: any) => body.kind === 'sync'
+      ? { kind: 'sync.ack', domain: body.domain, revision: body.revision }
+      : { kind: 'runtime.ready', runtimeMetadata: { mode: 'phase4', startedAt: 1 } },
+    sendFrame: (frame: any) => {
+      if (frame.kind === 'session.control.result') order.push('result-sent');
+      return true;
+    },
+  };
+  const router = new WorkerRuntimeRouter({
+    supervisor: {
+      startWorker: async (root: string, prepare: any) => {
+        await prepare({ workerId: 'handoff-worker', workerGeneration: 1, sessionPath: root });
+        return { workerId: 'handoff-worker', workerGeneration: 1, sessionPath: root, client };
+      },
+      stopWorker: async () => undefined,
+    } as any,
+    coldStore: {
+      serializePromotionGrant: (target: string) => ({ grantId: 'handoff-grant', coordinatorGeneration: 1, sessionPath: target, sessionPathKey: target, fingerprint: 'f', creationReason: 'resume' }),
+      consumePromotionGrant: (grant: any) => grant,
+      abortPromotionGrant: () => undefined,
+    } as any,
+    ownership: {
+      registerHot: async (target: string, owner: any) => ({ ...owner, canonicalSessionPath: target, ownershipRevision: 1, nonce: 'handoff-lease' }),
+      reconcileCrash: async () => undefined,
+    } as any,
+    emit: () => undefined,
+    buildPromotionSnapshot: async () => ({
+      sdkPath: '/sdk', agentDir: '/agent', startupCwd: '/', sessionDir: '/sessions',
+      openedPayload: opened(sessionPath) as any,
+      modelSettings: { defaultModel: 'm', defaultThinkingLevel: 'off' },
+    }),
+    onSessionControl: async () => new Promise((resolve) => { acceptOutcome = resolve; }),
+  });
+  const route = await router.promote(sessionPath);
+  const handling = router.handleWorkerFrame(sessionPath, {
+    ipcVersion: WORKER_IPC_VERSION,
+    coordinatorGeneration: 1,
+    workerId: route.owner.workerId,
+    workerGeneration: route.owner.workerGeneration,
+    workerPid: 1,
+    rootSessionPath: sessionPath,
+    leasePath: sessionPath,
+    leaseRevision: route.currentLeaseRevision,
+    sessionPath,
+    seq: 1,
+    kind: 'session.control',
+    requestId: 'self-close',
+    action: 'close',
+    payload: { self: true },
+  } as any);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(typeof acceptOutcome, 'function', 'the close request is waiting on host acceptance');
+  assert.deepEqual(order, [], 'no result send or stop handoff occurs before acceptance returns');
+
+  acceptOutcome?.({
+    result: { sessionPath, closed: false, closeRequested: true },
+    afterResponse: () => { order.push('stop-handoff'); },
+  });
+  await handling;
+  assert.deepEqual(order, ['result-sent', 'stop-handoff']);
+});
+
 test('confirmed worker crash reconciles only checkpointed live identities and clears busy without replay', async () => {
   const sessionPath = `${process.cwd()}/crash-session.jsonl`;
   const emitted: Array<[string, any]> = [];
@@ -666,4 +735,214 @@ test('worker router drops stale and cross-session events', async () => {
     kind: 'runtime.event', event: 'busy.changed', payload: { sessionPath: '/other', busy: true },
   });
   assert.deepEqual(emitted, []);
+});
+
+
+test('session-control send admission is rechecked after async promotion without fencing ordinary sends', async () => {
+  const sessionPath = `${process.cwd()}/admission-fence.jsonl`;
+  let starts = 0;
+  const runtimeCommands: string[] = [];
+  let fence: string | undefined = 'closing';
+  let sessionControlTargetLive = true;
+  let markPromotionSnapshotStarted!: () => void;
+  let resumePromotion!: () => void;
+  const promotionSnapshotStarted = new Promise<void>((resolve) => { markPromotionSnapshotStarted = resolve; });
+  const promotionContinues = new Promise<void>((resolve) => { resumePromotion = resolve; });
+  const client = {
+    start: async () => ({ mode: 'phase2' as const, startedAt: 1 }),
+    ping: async () => ({ kind: 'pong' as const }),
+    interrupt: async () => ({ kind: 'interrupted' as const }),
+    shutdown: async () => ({ kind: 'shutting-down' as const }),
+    forceKill: async () => undefined,
+    waitForConfirmedExit: async () => ({ code: 0, signal: null }),
+    getSnapshot: () => ({ status: 'ready' as const, stdoutTail: '', stderrTail: '' }),
+    requestFrame: async (body: any) => {
+      if (body.kind === 'sync') return { kind: 'sync.ack', requestId: 'x', domain: body.domain, revision: body.revision };
+      if (body.kind === 'runtime.promote') return { kind: 'runtime.ready', requestId: 'x', runtimeMetadata: { mode: 'phase4', startedAt: 1 } };
+      runtimeCommands.push(body.operation);
+      return { kind: 'response', requestId: 'x', ok: true, result: { kind: 'runtime.command', payload: { requestId: 'run' } } };
+    },
+    sendFrame: () => true,
+    updateLeaseIdentity: () => undefined,
+  };
+  const supervisor = {
+    startWorker: async (root: string, prepare: any) => {
+      starts += 1;
+      await prepare({ workerId: 'worker-1', workerGeneration: 1, sessionPath: root });
+      return { workerId: 'worker-1', workerGeneration: 1, sessionPath: root, client };
+    },
+    stopWorker: async () => undefined,
+  };
+  const coldStore = {
+    serializePromotionGrant: (target: string) => ({ grantId: 'grant', coordinatorGeneration: 1, sessionPath: target, sessionPathKey: target, fingerprint: 'f', creationReason: 'resume' }),
+    consumePromotionGrant: (grant: any) => grant,
+    abortPromotionGrant: () => undefined,
+  };
+  const ownership = {
+    registerHot: async (target: string, owner: any) => ({ ...owner, canonicalSessionPath: target, ownershipRevision: 1, nonce: 'lease' }),
+    reconcileCrash: async () => undefined,
+  };
+  const router = new WorkerRuntimeRouter({
+    supervisor: supervisor as any,
+    coldStore: coldStore as any,
+    ownership: ownership as any,
+    emit: () => undefined,
+    assertExecutionAdmissionOpen(target: string) {
+      if (fence) throw new BackendError('SESSION_CLOSING', `The target session is closing (${target}).`);
+    },
+    assertSessionControlSendAdmissionOpen(target: string) {
+      if (!sessionControlTargetLive) {
+        throw new BackendError('SESSION_NOT_FOUND', `The session-control target is no longer live (${target}).`);
+      }
+    },
+    buildPromotionSnapshot: async () => {
+      // The close reservation lands while the awaitable promotion is open.
+      markPromotionSnapshotStarted();
+      await promotionContinues;
+      return {
+        sdkPath: '/sdk', agentDir: '/agent', startupCwd: '/', sessionDir: '/sessions',
+        openedPayload: opened(sessionPath) as any,
+        modelSettings: { defaultModel: 'm', defaultThinkingLevel: 'off' },
+      };
+    },
+  });
+  const request = { id: 'public', method: 'message.send', params: { sessionPath, text: 'x', inputs: [] } };
+  const sessionControlRequest = {
+    id: 'agent-send', method: 'message.send', params: {
+      sessionPath, text: 'x', inputs: [], localId: 'local:agent-session:send',
+      coordinatorAttribution: createSessionControlSender({ sessionId: 'source', identityFallback: false }),
+    },
+  };
+
+  // The fence fires before admission: no worker process is ever started and
+  // the route remains cold.
+  await assert.rejects(
+    router.route(request),
+    (error: unknown) => error instanceof BackendError && error.code === 'SESSION_CLOSING',
+  );
+  assert.equal(starts, 0);
+  assert.equal(router.getRoute(sessionPath).state, 'cold');
+
+  // The close lands mid-promotion: the post-promotion recheck rejects before
+  // any runtime command is dispatched.
+  fence = undefined;
+  const racing = router.route(sessionControlRequest);
+  await promotionSnapshotStarted;
+  // The host's completed-close membership snapshot removes the target while
+  // the runtime is still being promoted; the general UI-send fence stays open.
+  sessionControlTargetLive = false;
+  resumePromotion();
+  await assert.rejects(
+    racing,
+    (error: unknown) => error instanceof BackendError && error.code === 'SESSION_NOT_FOUND',
+  );
+  assert.ok(starts <= 1);
+  assert.deepEqual(runtimeCommands, []);
+
+  // The stronger live-target admission is exclusive to coordinator-attributed
+  // session-control sends; ordinary raw UI sends retain their existing route.
+  await assert.doesNotReject(router.routeExisting(request));
+  assert.deepEqual(runtimeCommands, ['message.send']);
+  sessionControlTargetLive = true;
+  await assert.doesNotReject(router.routeExisting(sessionControlRequest));
+  assert.deepEqual(runtimeCommands, ['message.send', 'message.send']);
+});
+
+test('session-control send retains its pre-promotion generation across close and same-path reopen', async () => {
+  const sessionPath = `${process.cwd()}/close-reopen-promotion.jsonl`;
+  let closing = false;
+  let targetLive = true;
+  let markPromotionStarted!: () => void;
+  let resumePromotion!: () => void;
+  const promotionStarted = new Promise<void>((resolve) => { markPromotionStarted = resolve; });
+  const promotionGate = new Promise<void>((resolve) => { resumePromotion = resolve; });
+  const runtimeCommands: string[] = [];
+  const client = {
+    start: async () => ({ mode: 'phase2' as const, startedAt: 1 }),
+    ping: async () => ({ kind: 'pong' as const }),
+    interrupt: async () => ({ kind: 'interrupted' as const }),
+    shutdown: async () => ({ kind: 'shutting-down' as const }),
+    forceKill: async () => undefined,
+    waitForConfirmedExit: async () => ({ code: 0, signal: null }),
+    getSnapshot: () => ({ status: 'ready' as const, stdoutTail: '', stderrTail: '' }),
+    requestFrame: async (body: any) => {
+      if (body.kind === 'sync') return { kind: 'sync.ack', requestId: 'sync', domain: body.domain, revision: body.revision };
+      if (body.kind === 'runtime.promote') return { kind: 'runtime.ready', requestId: 'promote', runtimeMetadata: { mode: 'phase4', startedAt: 1 } };
+      runtimeCommands.push(body.operation);
+      return { kind: 'response', requestId: 'send', ok: true, result: {
+        kind: 'runtime.command', payload: { requestId: 'send' },
+      } };
+    },
+    sendFrame: () => true,
+    updateLeaseIdentity: () => undefined,
+  };
+  const router = new WorkerRuntimeRouter({
+    supervisor: {
+      startWorker: async (root: string, prepare: any) => {
+        await prepare({ workerId: 'close-reopen-worker', workerGeneration: 1, sessionPath: root });
+        return { workerId: 'close-reopen-worker', workerGeneration: 1, sessionPath: root, client };
+      },
+      stopWorker: async () => undefined,
+    } as any,
+    coldStore: {
+      serializePromotionGrant: (target: string) => ({
+        grantId: 'close-reopen-grant', coordinatorGeneration: 1, sessionPath: target,
+        sessionPathKey: target, fingerprint: 'f', creationReason: 'resume',
+      }),
+      consumePromotionGrant: (grant: any) => grant,
+      abortPromotionGrant: () => undefined,
+    } as any,
+    ownership: {
+      registerHot: async (target: string, owner: any) => ({
+        ...owner, canonicalSessionPath: target, ownershipRevision: 1, nonce: 'close-reopen-lease',
+      }),
+      reconcileCrash: async () => undefined,
+    } as any,
+    emit: () => undefined,
+    assertExecutionAdmissionOpen(target) {
+      if (closing) throw new BackendError('SESSION_CLOSING', `closing ${target}`);
+    },
+    assertSessionControlSendAdmissionOpen(target) {
+      if (!targetLive) throw new BackendError('SESSION_NOT_FOUND', `not live ${target}`);
+    },
+    buildPromotionSnapshot: async () => {
+      markPromotionStarted();
+      await promotionGate;
+      return {
+        sdkPath: '/sdk', agentDir: '/agent', startupCwd: '/', sessionDir: '/sessions',
+        openedPayload: opened(sessionPath) as any,
+        modelSettings: { defaultModel: 'm', defaultThinkingLevel: 'off' },
+      };
+    },
+  });
+  const oldRequest = {
+    id: 'old-send', method: 'message.send', params: {
+      sessionPath, text: 'old prompt', inputs: [], operationId: 'old-operation',
+      coordinatorAttribution: createSessionControlSender({ sessionId: 'source', identityFallback: false }),
+    },
+  };
+  const oldSend = router.route(oldRequest as any);
+  await promotionStarted;
+
+  closing = true;
+  targetLive = false;
+  router.invalidatePendingRuntimeOperations(sessionPath);
+  // A confirmed close releases admission, and the same path is republished
+  // before the old promotion/configuration wait completes.
+  closing = false;
+  targetLive = true;
+  resumePromotion();
+  await assert.rejects(oldSend, (error: unknown) => (
+    error instanceof BackendError && error.code === 'SESSION_OPERATION_CANCELLED'
+  ));
+  assert.deepEqual(runtimeCommands, [], 'the old prompt never reaches the promoted worker');
+
+  const freshRequest = {
+    id: 'fresh-send', method: 'message.send', params: {
+      sessionPath, text: 'fresh prompt', inputs: [], operationId: 'fresh-operation',
+      coordinatorAttribution: createSessionControlSender({ sessionId: 'source', identityFallback: false }),
+    },
+  };
+  await assert.doesNotReject(router.route(freshRequest as any));
+  assert.deepEqual(runtimeCommands, ['message.send'], 'a new post-reopen operation is admitted');
 });

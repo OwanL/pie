@@ -6,6 +6,12 @@ import {
   AGENT_MESSAGE_PROVENANCE_CUSTOM_TYPE,
   COMPACTION_METRICS_CUSTOM_TYPE,
 } from '../../agent-processes/lib/rpc/message-contract.js';
+import {
+  isSessionControlSender,
+  sessionControlPromptPrefix,
+  type SessionControlSender,
+} from '../../agent-processes/lib/rpc/session-control-attribution.js';
+import { AGENT_MESSAGE_PERSISTED_PROVENANCE_KEY } from '../../agent-processes/workers/agent-message-provenance.js';
 import { NEW_SESSION_NAME } from '../metadata/session-name';
 import { formatToolResult } from './tool-result-format.js';
 import {
@@ -228,7 +234,7 @@ interface MapLoopState {
    *  `compaction-summary` ChatMessage. Sidecars themselves never render. */
   compactionMetricsByEntryId: Map<string, CompactionSummaryDetails>;
   /** Agent provenance sidecars keyed by their durable user-entry identity. */
-  agentMessageEntryIds: Set<string>;
+  agentMessageAttributionByEntryId: Map<string, SessionControlSender | undefined>;
 }
 
 type MapResult =
@@ -241,14 +247,56 @@ type MapResult =
  *  `deferred-trigger` tag from this stable prefix. */
 const DEFERRED_TRIGGER_PREFIX = '[deferred trigger fired: ';
 
+/** Remove one canonical sender envelope from the display-only user content.
+ * Only validated persisted sender metadata supplies the exact prefix; body text
+ * is never inspected to derive identity, and the durable SDK message is untouched. */
+function stripSessionControlPromptEnvelope(
+  content: MessageLike['content'],
+  sender: SessionControlSender | undefined,
+): MessageLike['content'] {
+  const prefix = sender ? sessionControlPromptPrefix(sender) : undefined;
+  if (!prefix || content === undefined) return content;
+  if (typeof content === 'string') {
+    return content.startsWith(prefix) ? content.slice(prefix.length) : content;
+  }
+  if (!Array.isArray(content)) return content;
+
+  let matched = 0;
+  const replacements = new Map<number, string | undefined>();
+  for (let index = 0; index < content.length && matched < prefix.length; index += 1) {
+    const part = content[index];
+    if (part?.type !== 'text' || typeof part.text !== 'string') return content;
+    if (part.text.length === 0) continue;
+
+    const remaining = prefix.length - matched;
+    const comparedLength = Math.min(part.text.length, remaining);
+    if (part.text.slice(0, comparedLength) !== prefix.slice(matched, matched + comparedLength)) return content;
+    matched += comparedLength;
+    replacements.set(index, part.text.length > comparedLength ? part.text.slice(comparedLength) : undefined);
+  }
+  if (matched !== prefix.length) return content;
+
+  return content.flatMap((part, index) => {
+    if (!replacements.has(index)) return [part];
+    const remainingText = replacements.get(index);
+    return remainingText === undefined ? [] : [{ ...part, text: remainingText }];
+  });
+}
+
 /** Append a user-role message and return a `push` directive. */
-function mapUserMessage(entry: SessionEntryLike, message: MessageLike, isAgentMessage: boolean): MapResult {
-  const userParts = userPartsFromContent(message.content);
+function mapUserMessage(
+  entry: SessionEntryLike,
+  message: MessageLike,
+  isAgentMessage: boolean,
+  sender?: SessionControlSender,
+): MapResult {
+  const displayContent = stripSessionControlPromptEnvelope(message.content, sender);
+  const userParts = userPartsFromContent(displayContent);
   const hasImageParts = userParts?.some((part) => part.kind === 'image') ?? false;
   const markdown =
-    typeof message.content === 'string'
-      ? message.content
-      : textFromParts(message.content);
+    typeof displayContent === 'string'
+      ? displayContent
+      : textFromParts(displayContent);
   // Re-derive the deferred-trigger tag from the wake-up text prefix so the
   // webview differentiation survives transcript reload (the SDK writes user
   // messages without customType). Parse the reason up to the closing bracket.
@@ -274,6 +322,7 @@ function mapUserMessage(entry: SessionEntryLike, message: MessageLike, isAgentMe
       markdown,
       userParts: hasImageParts ? userParts : undefined,
       status: 'completed',
+      ...(sender ? { sender } : {}),
       ...(customType !== undefined ? { customType } : {}),
       ...(customDetails !== undefined ? { customDetails } : {}),
     },
@@ -484,8 +533,22 @@ function dispatchMessageEntry(
   state: MapLoopState,
 ): MapResult {
   switch (message.role) {
-    case 'user':
-      return mapUserMessage(entry, message, state.agentMessageEntryIds.has(entry.id));
+    case 'user': {
+      const embedded = (message as unknown as Record<string, unknown>)[AGENT_MESSAGE_PERSISTED_PROVENANCE_KEY];
+      const marker = embedded && typeof embedded === 'object' && !Array.isArray(embedded)
+        ? embedded as Record<string, unknown> : undefined;
+      const hasEmbedded = marker !== undefined
+        && Object.keys(marker).every((key) => key === 'sender')
+        && (!('sender' in marker) || isSessionControlSender(marker.sender));
+      const sender = hasEmbedded && isSessionControlSender(marker.sender)
+        ? marker.sender : state.agentMessageAttributionByEntryId.get(entry.id);
+      return mapUserMessage(
+        entry,
+        message,
+        hasEmbedded || state.agentMessageAttributionByEntryId.has(entry.id),
+        sender,
+      );
+    }
     case 'assistant':
       return mapAssistantTurn(entry, message, state);
     case 'toolResult':
@@ -600,17 +663,20 @@ function scanCompactionMetricsSidecars(
 }
 
 /** Read durable agent-message markers before dispatching their user entries. */
-function scanAgentMessageProvenance(entries: SessionEntryLike[]): Set<string> {
-  const userEntryIds = new Set<string>();
+function scanAgentMessageProvenance(entries: SessionEntryLike[]): Map<string, SessionControlSender | undefined> {
+  const attributionByEntryId = new Map<string, SessionControlSender | undefined>();
   for (const entry of entries) {
     if (entry.type !== 'custom' || entry.customType !== AGENT_MESSAGE_PROVENANCE_CUSTOM_TYPE) continue;
     const data = entry.data;
-    const userEntryId = data && typeof data === 'object' && !Array.isArray(data)
-      ? (data as Record<string, unknown>).userEntryId
+    const marker = data && typeof data === 'object' && !Array.isArray(data)
+      ? data as Record<string, unknown>
       : undefined;
-    if (typeof userEntryId === 'string' && userEntryId.length > 0) userEntryIds.add(userEntryId);
+    const userEntryId = marker?.userEntryId;
+    if (typeof userEntryId !== 'string' || userEntryId.length === 0) continue;
+    const sender = isSessionControlSender(marker?.sender) ? marker.sender : undefined;
+    if (sender || !attributionByEntryId.has(userEntryId)) attributionByEntryId.set(userEntryId, sender);
   }
-  return userEntryIds;
+  return attributionByEntryId;
 }
 
 function dispatchSummaryEntry(
@@ -656,7 +722,7 @@ export function mapTranscript(entries: SessionEntryLike[]): ChatMessage[] {
     currentProvider: undefined,
     currentThinkingLevel: undefined,
     compactionMetricsByEntryId: scanCompactionMetricsSidecars(entries),
-    agentMessageEntryIds: scanAgentMessageProvenance(entries),
+    agentMessageAttributionByEntryId: scanAgentMessageProvenance(entries),
   };
 
   for (const entry of entries) {

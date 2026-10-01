@@ -46,6 +46,8 @@ sessionTitles:
   thinkingLevel: off
   timeoutSec: 15
 profileOrder:
+  - provider: github-copilot
+    id: gpt-6.1-sol
   - claude-sonnet-5.5
   - claude-opus-5.5
   - provider: github-copilot
@@ -81,6 +83,8 @@ profileOrder:
     id: gpt-6-astra
   - provider: openai-codex
     id: gpt-6-sol
+  - provider: openai-codex
+    id: gpt-6.1-sol
   - provider: openai-codex
     id: gpt-6-luna
   - provider: openai-codex
@@ -1372,6 +1376,43 @@ providers:
           - xhigh
           - max
         disabledReason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
+      - id: gpt-6.1-sol
+        name: "Copilot: GPT-6.1 Sol"
+        api: openai-responses
+        reasoning: true
+        input:
+          - text
+          - image
+        contextWindow: 272000
+        maxTokens: 128000
+        thinkingLevelMap:
+          off: null
+          low: low
+          medium: medium
+          high: high
+          xhigh: xhigh
+          max: max
+          minimal: low
+        pricing:
+          input: 2
+          output: 10
+          cacheRead: 0.1
+          cacheWrite: 2.5
+          tiers:
+            - inputTokensAbove: 272000
+              input: 4
+              output: 15
+              cacheRead: 0.2
+              cacheWrite: 5
+        eligible: false
+        thinking:
+          - minimal
+          - low
+          - medium
+          - high
+          - xhigh
+          - max
+        disabledReason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
       - id: gpt-6-astra
         name: "Copilot: GPT-6 Astra"
         api: openai-responses
@@ -1717,6 +1758,48 @@ providers:
               input: 4
               output: 15
               cacheRead: 0.4
+              cacheWrite: 5
+        eligible: true
+        thinking:
+          - minimal
+          - low
+          - medium
+          - high
+          - xhigh
+          - max
+        disabledReason: null
+      - id: gpt-6.1-sol
+        name: GPT-6.1 Sol
+        api: openai-codex-responses
+        reasoning: true
+        input:
+          - text
+          - image
+        contextWindow: 1050000
+        maxTokens: 128000
+        thinkingLevelMap:
+          off: null
+          minimal: low
+          low: low
+          medium: medium
+          high: high
+          xhigh: xhigh
+          max: max
+        compat:
+          supportsOpenAIGrammarTools: true
+          supportsAdditionalTools: true
+          supportsToolSearch: true
+          supportsMidConvoSystemMessages: true
+        pricing:
+          input: 2
+          output: 10
+          cacheRead: 0.1
+          cacheWrite: 2.5
+          tiers:
+            - inputTokensAbove: 272000
+              input: 4
+              output: 15
+              cacheRead: 0.2
               cacheWrite: 5
         eligible: true
         thinking:

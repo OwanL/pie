@@ -36,6 +36,8 @@ export type {
   RetryStartedPayload,
   RetryStatus,
   SessionCatalogProgress,
+  SessionCloseRequestedPayload,
+  SessionCloseResponseDeliveredPayload,
   SessionOpenedPayload,
   SessionUsageSnapshot,
   SystemPromptAvailability,

@@ -62,6 +62,7 @@ import {
 import { deriveSessionNameFromText } from '../../../harness/session-storage/metadata/session-name.js';
 import { isPendingTabPath } from '../../../lib/session-path.js';
 import { appendPieLog } from '../../../lib/structured-logging/pie-logger.js';
+import { HostLiveMembershipSync } from '../agent-connection/live-session-membership.js';
 import { CanonicalAnalyticsCapture } from '../../../analytics/capture/canonical-capture.js';
 import { ActivationStore } from '../../../analytics/authority/activation-store.js';
 import {
@@ -81,6 +82,7 @@ import {
   type RuntimeGenerationIdentity,
 } from '../../../analytics/authority/analytics-handoff-discovery.js';
 import { readProcessCensus } from '../../../analytics/authority/process-census.js';
+import { recoverStaleAnalyticsHosts } from '../../../analytics/authority/analytics-host-recovery.js';
 import { createPerBootAnalyticsHandoffKey } from '../../../analytics/contracts/host-status-messages.js';
 import { createSessionLifecycleWriterAdmission } from '../../../analytics/authority/session-lifecycle-writer-store.js';
 import {
@@ -124,7 +126,11 @@ export class HostRuntime {
   readonly browserServer: BrowserServerService;
   /** Canonical/legacy analytics accounting authority seam. */
   readonly statsService: StatsServicePort;
+  /** Ordered host→coordinator live-membership projection bridge. */
+  readonly liveMembershipSync: HostLiveMembershipSync;
 
+  private startupPromise: Promise<void> | null = null;
+  private shutdownRequested = false;
   private shutdownPromise: Promise<void> | null = null;
   /** Coalesce command-palette, notice-action, and browser requests that can
    * arrive before the first restart projection disables renderer controls. */
@@ -229,71 +235,14 @@ export class HostRuntime {
         ...successorCapabilities,
       ],
     };
-    const recoverStaleAnalyticsHosts = async (): Promise<void> => {
-      const processCensus = await readProcessCensus();
-      if (!processCensus.complete) {
-        appendPieLog('warn', 'analytics-handoff', 'stale-host recovery skipped; process census is incomplete', {
-          reasonCodes: processCensus.reasons.map(({ code }) => code).slice(0, 16),
-        });
-        return;
-      }
-      const processById = new Map(processCensus.processes.map((entry) => [entry.processId, entry] as const));
-      const recorderWorkers = processCensus.processes.filter(
-        (entry) => entry.analyticsRecorderWorkerParentProcessId !== undefined,
-      );
-      let recoveredCount = 0;
-      let cursor: string | undefined;
-      while (true) {
-        const page = analyticsHandoffRegistry.listAnalyticsHosts(analyticsWorkspaceId, {
-          ...(cursor ? { cursor } : {}),
-        });
-        for (const host of page.hosts) {
-          if (host.state === 'stopped') continue;
-          const process = processById.get(host.processId);
-          let registeredAtMs: bigint;
-          try {
-            registeredAtMs = BigInt(host.registeredAtMs);
-          } catch {
-            // Invalid lifecycle timestamps are not enough evidence to retire a
-            // writer identity. Leave it in the census for explicit repair.
-            continue;
-          }
-          const sameHostProcessIsLive = process !== undefined
-            && (process.processCreatedAtMs === null
-              || BigInt(process.processCreatedAtMs) <= registeredAtMs + 2_000n);
-          const backendMayStillWrite = processCensus.backendOwners.some((owner) =>
-            owner.hostProcessId === host.processId
-            && (!owner.analyticsHostInstanceId || owner.analyticsHostInstanceId === host.hostInstanceId));
-          // A recorder child may still be completing an admitted SQLite write
-          // after its extension-host parent exits. Compare both process birth
-          // times so PID reuse cannot confuse an old child with a new host.
-          const recorderWorkerMayStillWrite = recorderWorkers.some((worker) => {
-            if (worker.analyticsRecorderWorkerParentProcessId !== host.processId) return false;
-            if (!process) return true;
-            if (process.processCreatedAtMs === null || worker.processCreatedAtMs === null) return true;
-            return worker.processCreatedAtMs < process.processCreatedAtMs;
-          });
-          if (sameHostProcessIsLive || backendMayStillWrite || recorderWorkerMayStillWrite) continue;
-          try {
-            analyticsHandoffRegistry.recoverAnalyticsHostAfterProcessExit({
-              hostInstanceId: host.hostInstanceId,
-              workspaceId: host.workspaceId,
-              generationId: host.generationId,
-              buildId: host.buildId,
-              processId: host.processId,
-            }, Date.now());
-            recoveredCount += 1;
-          } catch (error) {
-            appendPieLog('warn', 'analytics-handoff', 'stale host could not be retired', {
-              state: host.state,
-              error: toErrorMessage(error),
-            });
-          }
-        }
-        if (!page.truncated || !page.nextCursor) break;
-        cursor = page.nextCursor;
-      }
-      if (recoveredCount > 0) appendPieLog('info', 'analytics-handoff', 'retired stale writer hosts', { count: recoveredCount });
+    const recoverAnalyticsHosts = async (): Promise<void> => {
+      await recoverStaleAnalyticsHosts({
+        registry: analyticsHandoffRegistry,
+        workspaceId: analyticsWorkspaceId,
+        readProcessCensus,
+        now: Date.now,
+        log: (level, message, data) => appendPieLog(level, 'analytics-handoff', message, data),
+      });
     };
     const analyticsWriterAdmission = createSessionLifecycleWriterAdmission(
       analyticsHandoffRegistry,
@@ -360,7 +309,7 @@ export class HostRuntime {
           }
         },
       }),
-      recoverStaleHosts: recoverStaleAnalyticsHosts,
+      recoverStaleHosts: recoverAnalyticsHosts,
       key: analyticsHandoffKey,
       readInventory: async () => {
         if (!runtimeIdentity) {
@@ -590,6 +539,27 @@ export class HostRuntime {
       },
       () => this.analyticsRuntime.backendDescriptor(),
     );
+
+    this.liveMembershipSync = new HostLiveMembershipSync(this.archState, {
+      // `session.liveMembership` travels on the same ordered FIFO request
+      // channel as every later host mutation, so a close reservation — and
+      // the typed accepted ack — always precedes any admission-relevant
+      // mutation written afterwards.
+      request: (params) => this.backend
+        .request('session.liveMembership', params, { timeoutMs: 5000 })
+        .catch((error) => {
+          appendPieLog('warn', 'session', 'host live-membership sync rejected', {
+            error: toErrorMessage(error),
+          });
+          throw error;
+        }),
+      getBackendGeneration: () => this.service.getBackendGeneration(),
+      log: (message) => appendPieLog('warn', 'session', message),
+    }, {
+      getWorkingTime: (sessionPath) => this.statsService.getWorkingTimeBySession()[sessionPath],
+      getSessionUsage: (sessionPath) => this.statsService.getSessionUsage(sessionPath),
+      getOpenRuns: () => this.statsService.getOpenRuns(),
+    });
 
     this.tokenRateService = new TokenRateService({
       getArchState: () => this.archState,
@@ -856,9 +826,16 @@ export class HostRuntime {
     }
   }
 
-  async start(): Promise<void> {
+  start(): Promise<void> {
+    if (this.shutdownRequested) return Promise.reject(new Error('Pie host is shutting down.'));
+    if (!this.startupPromise) this.startupPromise = this.startInternal();
+    return this.startupPromise;
+  }
+
+  private async startInternal(): Promise<void> {
     this.reportStatus('Starting');
     await this.analyticsHandoffControl?.start();
+    if (this.shutdownRequested) return;
     // Try canonical analytics before services can produce captures. A failed
     // analytics helper must not take down Pie's primary session/backend
     // harness; its capture closures remain fail-closed and never write to the
@@ -866,8 +843,10 @@ export class HostRuntime {
     // probe so a degraded host cannot claim canonical readiness.
     try {
       await this.analyticsRuntime.start();
+      if (this.shutdownRequested) return;
       this.analyticsRuntime.recordLoadedGeneration();
     } catch (error) {
+      if (this.shutdownRequested) return;
       const message = toErrorMessage(error);
       appendPieLog('warn', 'extension', 'analytics unavailable; continuing Pie startup without canonical capture', {
         error: message,
@@ -880,11 +859,14 @@ export class HostRuntime {
     this.tokenRateService.start();
     this.aggregateStatsService.start();
     await this.statsService.start();
+    if (this.shutdownRequested) return;
     await this.service.start();
+    if (this.shutdownRequested) return;
     // Start the browser server only after the host can build a
     // valid initial `ViewState`. Backend readiness is a field in that state;
     // the HTTP shell does not wait for provider/backend startup.
     await this.browserServer.start();
+    if (this.shutdownRequested) return;
     // A helper-issued nonce requests terminal cutover evidence. Write it only
     // after the complete host readiness sequence, including the browser
     // endpoint, has succeeded; ordinary boots remain marker-only.
@@ -965,6 +947,12 @@ export class HostRuntime {
         recordLivePipelineTrace(semanticTrace);
       }
     }
+    // Ordered live-membership sync: the coordinator receives the host's tab
+    // and close-reservation state before any effect from this transition runs
+    // (close acknowledgements, stop/interrupt, persistence notifications). A
+    // UI close therefore closes coordinator-side execution admission before
+    // the close's own host-side work begins.
+    this.liveMembershipSync.afterDispatch(this.archState);
     for (const effect of result.effects) {
       this.effectRunner.run(effect);
     }
@@ -1309,7 +1297,12 @@ export class HostRuntime {
       return;
     }
 
+    this.shutdownRequested = true;
     this.shutdownPromise = (async () => {
+      // Startup can still own writer admissions or be awaiting process census.
+      // Fence later startup phases and drain the current phase before closing
+      // its dependencies. Never mark stopped while a late startup can write.
+      await this.startupPromise?.catch(() => undefined);
       // Stop accepting authenticated handoff requests before host producers
       // drain. The registry retains this identity as stopping evidence: the
       // endpoint closing is not proof that backend/recorder writers drained,

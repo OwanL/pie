@@ -26,14 +26,16 @@ export function handleAgentMessageReceived(
   const existing = (state.transcript.bySession[event.sessionPath] ?? [])
     .find((message) => message.id === event.localId);
   if (existing) {
-    if (event.status !== 'completed' || existing.role !== 'user'
-      || existing.customType !== AGENT_MESSAGE_CUSTOM_TYPE || existing.status !== 'queued') {
-      return { state, effects: [] };
-    }
+    const canPromote = event.status === 'completed' && existing.role === 'user'
+      && existing.customType === AGENT_MESSAGE_CUSTOM_TYPE && existing.status === 'queued';
+    const canAttachSender = event.sender !== undefined && existing.sender === undefined
+      && existing.role === 'user' && existing.customType === AGENT_MESSAGE_CUSTOM_TYPE;
+    if (!canPromote && !canAttachSender) return { state, effects: [] };
     const nextState = produce(state, (draft) => {
       const row = draft.transcript.bySession[event.sessionPath]?.find((message) => message.id === event.localId);
-      if (row?.role === 'user' && row.customType === AGENT_MESSAGE_CUSTOM_TYPE && row.status === 'queued') {
-        row.status = 'completed';
+      if (row?.role === 'user' && row.customType === AGENT_MESSAGE_CUSTOM_TYPE) {
+        if (canPromote && row.status === 'queued') row.status = 'completed';
+        if (canAttachSender && event.sender) row.sender = event.sender;
       }
     });
     return { state: nextState, effects: [] };
@@ -48,6 +50,8 @@ export function handleAgentMessageReceived(
       new Date(event.timestamp).toISOString(),
       event.status,
       AGENT_MESSAGE_CUSTOM_TYPE,
+      undefined,
+      event.sender,
     );
   });
   return { state: nextState, effects: [] };

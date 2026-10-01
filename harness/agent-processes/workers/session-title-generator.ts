@@ -12,14 +12,16 @@ import type { ThinkingLevel } from '../../model-providers/catalog/thinking-level
 
 export const SESSION_TITLE_TIMEOUT_MS = 15_000;
 export const SESSION_TITLE_MAX_INPUT_CHARS = 4_000;
-export const SESSION_TITLE_MAX_CHARS = 40;
+/** Base-title budget shared with the coordinator title authority. Automatic
+ * collision suffixes are outside this candidate allowance. */
+export const SESSION_TITLE_MAX_CHARS = 25;
 export const SESSION_TITLE_MAX_WORDS = 6;
 export const SESSION_TITLE_MAX_OUTPUT_TOKENS = 48;
 
 export const SESSION_TITLE_SYSTEM_PROMPT = `Write a short title for a coding-agent session from its first user request.
 
 Return only the title, with no quotes, label, punctuation, or explanation.
-- Use 3 to 6 words and at most 40 characters.
+- Use 3 to 6 words and at most 25 characters.
 - Capture the primary task, problem, or question, not the conversational framing.
 - Ignore workflow instructions such as using subagents, reading files first, asking questions, being read-only, or making the smallest change.
 - Preserve useful identifiers such as ticket IDs, PR numbers, filenames, APIs, and product names.
@@ -28,9 +30,9 @@ Return only the title, with no quotes, label, punctuation, or explanation.
 
 Examples:
 User: Could you use subagents to investigate why our Windows tests are flaky?
-Title: Investigate Flaky Windows Tests
+Title: Fix Flaky Windows Tests
 User: I'm deciding between SQLite and JSON for our cache. Compare their trade-offs.
-Title: Compare SQLite and JSON Caches
+Title: Compare SQLite JSON Cache
 User: Review https://github.com/acme/app/pull/42. Do not make changes.
 Title: Review PR #42`;
 
@@ -44,7 +46,6 @@ interface AuxiliaryModel {
 interface TitleCapableSession {
   sessionName?: string;
   sessionManager: { getSessionName(): string | undefined };
-  setSessionName?: (name: string) => void;
   _modelRegistry?: { find(provider: string, id: string): unknown };
   _getCompactionRequestAuth?: (model: unknown) => Promise<{
     apiKey?: string;
@@ -278,7 +279,11 @@ function hasExplicitSessionName(session: TitleCapableSession): boolean {
   return Boolean(session.sessionName?.trim() || session.sessionManager.getSessionName()?.trim());
 }
 
-/** Generate and durably append one title. Every expected failure leaves the prompt snippet untouched. */
+/** Generate one candidate title without a final durable write. Every expected
+ * failure leaves the prompt snippet untouched. Publication is owned by the
+ * coordinator title authority: it reserves a unique name and the owning worker
+ * persists the assigned title, so this seam never calls setSessionName and the
+ * returned candidate is not authoritative until that flow publishes it. */
 export async function generateSessionTitle(
   context: SessionContext,
   options: { sdkPath: string; prompt: string; provider: string; model: string; thinkingLevel?: ThinkingLevel; timeoutSec?: number; signal?: AbortSignal },
@@ -322,14 +327,13 @@ export async function generateSessionTitle(
       endedAt: new Date((deps.now ?? Date.now)()).toISOString(),
       outcome: 'succeeded',
     });
-    const name = sanitizeGeneratedSessionTitle(completion.text);
-    if (!name) return { generated: false, reason: 'invalid-output' };
+    const candidate = sanitizeGeneratedSessionTitle(completion.text);
+    if (!candidate) return { generated: false, reason: 'invalid-output' };
 
-    // A TUI/manual rename that landed while the model was running always wins.
+    // A TUI/manual rename that landed while the model was running always wins;
+    // the candidate is only ever a suggestion, never a durable write.
     if (hasExplicitSessionName(session)) return { generated: false, reason: 'explicit-name' };
-    if (!session.setSessionName) return { generated: false, reason: 'unsupported-runtime' };
-    session.setSessionName(name);
-    return { generated: true, name };
+    return { generated: true, name: candidate };
   } catch (error) {
     if (!settled) {
       deps.onSettled?.({

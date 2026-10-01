@@ -2,7 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { resolveSessionOpenedTranscript } from '../../transcript-delivery/session-opened-transcript';
+import { reducer, createInitialArchState } from '../../conversation-state/reducer';
 import type { ChatMessage, TranscriptWindow } from '../../../lib/protocol/index.js';
+import {
+  createSessionControlSender,
+  formatSessionControlPrompt,
+} from '../../../../harness/agent-processes/lib/rpc/session-control-attribution.js';
+import { AGENT_MESSAGE_PERSISTED_PROVENANCE_KEY } from '../../../../harness/agent-processes/workers/agent-message-provenance.js';
+import { mapTranscript, type SessionEntryLike } from '../../../../harness/session-storage/transcripts/transcript.js';
 
 function userMessage(id: string, markdown: string): ChatMessage {
   return {
@@ -35,6 +42,64 @@ function window(overrides: Partial<TranscriptWindow> = {}): TranscriptWindow {
     hasUserMessages: true,
     ...overrides,
   };
+}
+
+const AGENT_SESSION_PATH = '/workspace/recipient-session.jsonl';
+const AGENT_SENDER = createSessionControlSender(
+  { sessionId: 'coordinator-session-id', identityFallback: false },
+  'Coordinator session',
+);
+
+function hostAgentRows(messages: Array<{
+  localId: string;
+  text: string;
+  status: 'queued' | 'completed';
+  timestamp: number;
+  sender?: typeof AGENT_SENDER;
+}>, deliveredLocalIds: string[] = []): ChatMessage[] {
+  let state = createInitialArchState();
+  for (const message of messages) {
+    state = reducer(state, {
+      kind: 'AgentMessageReceived',
+      sessionPath: AGENT_SESSION_PATH,
+      ...message,
+    }).state;
+  }
+  for (const localId of deliveredLocalIds) {
+    state = reducer(state, {
+      kind: 'QueuedDelivered',
+      sessionPath: AGENT_SESSION_PATH,
+      localId,
+      text: messages.find((message) => message.localId === localId)?.text ?? '',
+    }).state;
+  }
+  return state.transcript.bySession[AGENT_SESSION_PATH] ?? [];
+}
+
+function durableAgentEntry(id: string, text: string): { entry: SessionEntryLike; formattedModelInput: string } {
+  const formattedModelInput = formatSessionControlPrompt(text, AGENT_SENDER);
+  const message = Object.assign(
+    {
+      role: 'user' as const,
+      content: formattedModelInput,
+      timestamp: Date.parse('2026-01-01T00:00:00.000Z'),
+    },
+    { [AGENT_MESSAGE_PERSISTED_PROVENANCE_KEY]: { sender: AGENT_SENDER } },
+  );
+  return {
+    entry: {
+      id,
+      parentId: null,
+      timestamp: '2026-01-01T00:00:00.000Z',
+      type: 'message',
+      message: message as SessionEntryLike['message'],
+    },
+    formattedModelInput,
+  };
+}
+
+function completeWindow(count: number): TranscriptWindow {
+  return window({ totalCount: count, loadedStart: 0, loadedEnd: count, hasUserMessages: count > 0 });
 }
 
 test('busy session.opened keeps the local streaming transcript', () => {
@@ -696,4 +761,166 @@ test('session.opened restores deduplicated tool result mirrors from complete ord
     fullSubagentResult,
   );
   assert.match(JSON.stringify(result.transcript), /child reasoning/);
+});
+
+test('session.opened reconciles a direct agent send with its attributed durable SDK row', () => {
+  const body = 'Inspect the recipient session';
+  const durable = durableAgentEntry('sdk-direct-agent-user', body);
+  const incomingTranscript = mapTranscript([durable.entry]);
+  const localTranscript = hostAgentRows([{
+    localId: 'local:agent-session:direct-send',
+    text: body,
+    status: 'completed',
+    timestamp: Date.parse('2026-01-01T00:00:00.000Z'),
+    sender: AGENT_SENDER,
+  }]);
+
+  assert.equal(durable.entry.message?.content, durable.formattedModelInput,
+    'the SDK model input retains the authenticated wrapper verbatim');
+  assert.equal(incomingTranscript[0]?.markdown, body,
+    'only the display row omits the authenticated envelope; the SDK input stays intact');
+  assert.deepEqual(incomingTranscript[0]?.sender, AGENT_SENDER);
+  assert.deepEqual(localTranscript[0]?.sender, AGENT_SENDER);
+
+  const result = resolveSessionOpenedTranscript({
+    busy: true,
+    localTranscript,
+    incomingTranscript,
+    incomingTranscriptWindow: completeWindow(1),
+    localTranscriptWindow: completeWindow(1),
+  });
+
+  assert.deepEqual(result.transcript.map((message) => message.id), ['sdk-direct-agent-user']);
+  assert.deepEqual(result.transcript[0]?.sender, AGENT_SENDER);
+  assert.equal(result.transcript[0]?.markdown, body);
+});
+
+test('session.opened preserves a queued agent row before delivery and deduplicates its durable echo', () => {
+  const body = 'Summarize the changed files';
+  const localId = 'local:agent-session:queued-send';
+  const queuedMessages = [{
+    localId,
+    text: body,
+    status: 'queued' as const,
+    timestamp: Date.parse('2026-01-01T00:00:00.000Z'),
+    sender: AGENT_SENDER,
+  }];
+  const queuedLocalTranscript = hostAgentRows(queuedMessages);
+  const beforeDelivery = resolveSessionOpenedTranscript({
+    busy: true,
+    localTranscript: queuedLocalTranscript,
+    incomingTranscript: [],
+    incomingTranscriptWindow: completeWindow(0),
+    localTranscriptWindow: completeWindow(1),
+  });
+
+  assert.deepEqual(beforeDelivery.transcript, queuedLocalTranscript,
+    'an accepted queued message remains visible until the SDK delivers it');
+  assert.deepEqual(beforeDelivery.transcript[0]?.sender, AGENT_SENDER);
+
+  const durable = durableAgentEntry('sdk-queued-agent-user', body);
+  const incomingTranscript = mapTranscript([durable.entry]);
+  const deliveredLocalTranscript = hostAgentRows(queuedMessages, [localId]);
+  assert.equal(durable.entry.message?.content, durable.formattedModelInput);
+  assert.equal(incomingTranscript[0]?.markdown, body);
+  assert.deepEqual(incomingTranscript[0]?.sender, AGENT_SENDER);
+  assert.deepEqual(deliveredLocalTranscript[0]?.sender, AGENT_SENDER);
+  assert.equal(deliveredLocalTranscript[0]?.status, 'completed');
+
+  const afterDelivery = resolveSessionOpenedTranscript({
+    busy: true,
+    localTranscript: deliveredLocalTranscript,
+    incomingTranscript,
+    incomingTranscriptWindow: completeWindow(1),
+    localTranscriptWindow: completeWindow(1),
+  });
+
+  assert.deepEqual(afterDelivery.transcript.map((message) => message.id), ['sdk-queued-agent-user']);
+  assert.deepEqual(afterDelivery.transcript[0]?.sender, AGENT_SENDER);
+  assert.equal(afterDelivery.transcript[0]?.markdown, body);
+});
+
+test('idle SessionOpened replaces all four optimistic agent cards with their displayed SDK echoes', () => {
+  const bodies = ['Initial instruction', 'Wait then continue', 'Queued marker', 'Reply-reference instruction'];
+  const durable = bodies.map((body, index) => durableAgentEntry(`sdk-agent-${index}`, body));
+  const entries = durable.map(({ entry, formattedModelInput }) => ({
+    ...entry,
+    message: { ...entry.message, role: 'user' as const, content: [{ type: 'text', text: formattedModelInput }] },
+  }));
+  const incomingTranscript = mapTranscript(entries);
+  const state = createInitialArchState();
+  state.transcript.bySession[AGENT_SESSION_PATH] = hostAgentRows(bodies.map((text, index) => ({
+    localId: `local:agent-session:card-${index}`, text, status: 'completed',
+    timestamp: Date.parse('2026-01-01T00:00:00.000Z') + index, sender: AGENT_SENDER,
+  })));
+  state.transcript.windowBySession[AGENT_SESSION_PATH] = completeWindow(bodies.length);
+
+  const opened = reducer(state, {
+    kind: 'SessionOpened', sessionPath: AGENT_SESSION_PATH,
+    backendGeneration: 0, modelWriteFence: 0, modelHydrationRevision: 0, catalogHydrationRevision: 0,
+    payload: {
+      session: { path: AGENT_SESSION_PATH, name: 'Recipient', cwd: '/workspace', modifiedAt: '', messageCount: bodies.length },
+      busy: false, transcript: incomingTranscript, transcriptWindow: completeWindow(bodies.length),
+    },
+  }).state;
+  const rows = opened.transcript.bySession[AGENT_SESSION_PATH] ?? [];
+
+  assert.deepEqual(rows.map((row) => row.id), durable.map(({ entry }) => entry.id));
+  assert.deepEqual(rows.map((row) => row.markdown), bodies);
+  assert.deepEqual(rows.map((row) => row.sender), bodies.map(() => AGENT_SENDER));
+  assert.deepEqual(entries.map((entry) => entry.message.content[0]?.text),
+    durable.map(({ formattedModelInput }) => formattedModelInput), 'SDK model input is unchanged');
+});
+
+test('session.opened reconciles identical agent prompts one-to-one without collapsing either send', () => {
+  const body = 'Continue with the next item';
+  const localMessages = [1, 2].map((sequence) => ({
+    localId: `local:agent-session:repeat-${sequence}`,
+    text: body,
+    status: 'completed' as const,
+    timestamp: Date.parse('2026-01-01T00:00:00.000Z') + sequence,
+    sender: AGENT_SENDER,
+  }));
+  const localTranscript = hostAgentRows(localMessages);
+  const firstDurable = durableAgentEntry('sdk-repeat-agent-user-1', body);
+  const secondDurable = durableAgentEntry('sdk-repeat-agent-user-2', body);
+  const firstEcho = mapTranscript([firstDurable.entry]);
+  const bothEchoes = mapTranscript([firstDurable.entry, secondDurable.entry]);
+
+  assert.equal(firstDurable.entry.message?.content, firstDurable.formattedModelInput);
+  assert.equal(secondDurable.entry.message?.content, secondDurable.formattedModelInput);
+  assert.deepEqual(firstEcho[0]?.sender, AGENT_SENDER);
+  assert.deepEqual(bothEchoes.map((message) => message.markdown), [body, body]);
+  assert.deepEqual(localTranscript.map((message) => message.sender), [AGENT_SENDER, AGENT_SENDER]);
+
+  const afterOneEcho = resolveSessionOpenedTranscript({
+    busy: true,
+    localTranscript,
+    incomingTranscript: firstEcho,
+    incomingTranscriptWindow: completeWindow(1),
+    localTranscriptWindow: completeWindow(2),
+  });
+  assert.deepEqual(afterOneEcho.transcript.map((message) => message.id), [
+    'sdk-repeat-agent-user-1',
+    'local:agent-session:repeat-2',
+  ], 'one SDK echo reconciles only one of two same-text sends');
+  assert.deepEqual(afterOneEcho.transcript.map((message) => message.sender), [AGENT_SENDER, AGENT_SENDER]);
+
+  const afterBothEchoes = resolveSessionOpenedTranscript({
+    busy: true,
+    localTranscript,
+    incomingTranscript: bothEchoes,
+    incomingTranscriptWindow: completeWindow(2),
+    localTranscriptWindow: completeWindow(2),
+  });
+  assert.deepEqual(afterBothEchoes.transcript.map((message) => message.id), [
+    'sdk-repeat-agent-user-1',
+    'sdk-repeat-agent-user-2',
+  ]);
+  assert.deepEqual(afterBothEchoes.transcript.map((message) => message.sender), [AGENT_SENDER, AGENT_SENDER]);
+  assert.deepEqual(afterBothEchoes.transcript.map((message) => message.markdown), [body, body]);
+  assert.equal(firstDurable.entry.message?.content, firstDurable.formattedModelInput,
+    'reconciliation must not rewrite the first durable model input');
+  assert.equal(secondDurable.entry.message?.content, secondDurable.formattedModelInput,
+    'reconciliation must not rewrite the second durable model input');
 });

@@ -6,7 +6,7 @@ import { selectViewState } from '../../../conversation-state/projections/project
 import { reducer } from '../../../conversation-state/reducer';
 import {
   deriveSessionNameFromText,
-  MAX_SESSION_NAME_LENGTH,
+  MAX_SESSION_NAME_SNIPPET_LENGTH,
   NEW_SESSION_NAME,
 } from '../../../../../harness/session-storage/metadata/session-name';
 
@@ -34,7 +34,7 @@ test('blank input remains New Session', () => {
 
 test('uses a normalized literal snippet instead of a semantic heuristic', () => {
   assert.deepEqual(deriveSessionNameFromText('  please   investigate\nwhy auth fails  '), {
-    name: 'please investigate why auth fails',
+    name: 'please investigate why a…',
     isPlaceholder: true,
   });
 });
@@ -43,8 +43,8 @@ test('truncates long prompt snippets to the tab-name budget', () => {
   const result = deriveSessionNameFromText(
     'I wonder if we could improve the title sessions get assigned to easily, what do you think?',
   );
-  assert.equal(result.name, 'I wonder if we could improve the title…');
-  assert.ok(result.name.length <= MAX_SESSION_NAME_LENGTH);
+  assert.equal(result.name, 'I wonder if we could imp…');
+  assert.ok(result.name.length <= MAX_SESSION_NAME_SNIPPET_LENGTH);
   assert.equal(result.isPlaceholder, true);
 });
 
@@ -65,7 +65,7 @@ test('SessionNameDerived arms LLM generation while keeping the snippet replaceab
   });
 });
 
-test('disabled LLM titles leave only the prompt snippet', () => {
+test('disabled LLM titles still arm durable snippet assignment without model generation', () => {
   const state = stateWithPlaceholder();
   state.settings.sessionTitlesSettings.enabled = false;
   const result = reducer(state, {
@@ -76,7 +76,9 @@ test('disabled LLM titles leave only the prompt snippet', () => {
     sourcePrompt: 'Explain OAuth2 refresh token rotation.',
   });
   assert.equal(result.state.sessions.sessions[0].name, 'Explain OAuth2 refresh token rotation');
-  assert.equal(result.state.sessions.titleGenerationBySession[SESSION_PATH], undefined);
+  assert.deepEqual(result.state.sessions.titleGenerationBySession[SESSION_PATH], {
+    status: 'armed', prompt: 'Explain OAuth2 refresh token rotation.',
+  });
 });
 
 test('the first assistant start launches title generation and projects a spinner', () => {

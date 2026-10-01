@@ -85,6 +85,78 @@ describe('isSafe – obvious safe commands are allowed', () => {
 	});
 });
 
+describe('nested POSIX shell command flags', () => {
+	test('inspects exact and combined command flags for bash, sh, and zsh', async () => {
+		const { isSafe } = await loadSafeguard();
+		for (const command of [
+			"bash -c 'rm -rf /'",
+			"bash -lc 'rm -rf /'",
+			"bash -ic 'rm -rf /'",
+			"bash -cl 'rm -rf /'",
+			"bash -ilc 'rm -rf /'",
+			"bash +e -c 'rm -rf /'",
+			"bash +c 'rm -rf /'",
+			"bash +lc 'rm -rf /'",
+			"bash -lc -e 'rm -rf /'",
+			"bash -oc noclobber 'rm -rf /'",
+			"bash -co noclobber 'rm -rf /'",
+			"sh -lc 'rm -rf /'",
+			"zsh -ic 'rm -rf /'",
+		]) {
+			assert.equal(isSafe(command), false, `must inspect nested command: ${command}`);
+		}
+	});
+
+	test('allows safe payloads and dangerous-looking quoted examples', async () => {
+		const { isSafe } = await loadSafeguard();
+		assert.equal(isSafe("bash -lc 'echo hello'"), true);
+		assert.equal(isSafe("sh -ic 'printf \\\"hello\\\\n\\\"'"), true);
+		assert.equal(isSafe('echo "bash -lc \'rm -rf /\'"'), true);
+	});
+
+	test('does not treat positional arguments, option terminators, or option values as command flags', async () => {
+		const { isSafe } = await loadSafeguard();
+		for (const command of [
+			"bash script.sh -lc 'rm -rf /'",
+			"bash -- -lc 'rm -rf /'",
+			"bash --norc 'rm -rf /'",
+			"bash --rcfile -lc 'rm -rf /'",
+			"bash -o -lc 'rm -rf /'",
+		]) {
+			assert.equal(isSafe(command), true, `must not infer a command flag: ${command}`);
+		}
+		assert.equal(isSafe("bash --rcfile /tmp/bashrc -c 'rm -rf /'"), false,
+			'a command flag after an option value is still recognized');
+	});
+
+	test('preserves PowerShell command flag matching without POSIX short-cluster expansion', async () => {
+		const { isSafe } = await loadSafeguard();
+		assert.equal(isSafe("pwsh -Command 'rm -rf /'"), false);
+		assert.equal(isSafe("pwsh -c 'rm -rf /'"), false);
+		assert.equal(isSafe("pwsh -lc 'rm -rf /'"), true);
+	});
+
+	test('nested hard blocks cannot be confirmed away and nested prompts still request confirmation', async () => {
+		const mod = await loadSafeguard();
+		const handler = registerToolCallHandler(mod);
+		const hardBlock = makeCtx({ hasUI: true, confirmResult: true });
+		const blocked = await handler(
+			{ toolName: 'bash', input: { command: "bash -lc 'rm -rf /'" } },
+			hardBlock.ctx,
+		);
+		assert.equal((blocked as any)?.block, true);
+		assert.equal(hardBlock.confirmations.length, 0, 'hard blocks never open a confirmation dialog');
+
+		const prompt = makeCtx({ hasUI: true, confirmResult: false });
+		const denied = await handler(
+			{ toolName: 'bash', input: { command: "bash -lc 'sudo apt remove vim'" } },
+			prompt.ctx,
+		);
+		assert.equal((denied as any)?.block, true);
+		assert.equal(prompt.confirmations.length, 1, 'nested prompt-class commands retain confirmation behavior');
+	});
+});
+
 describe('guardCommand reuses bash analysis and confirmation', () => {
 	test('allows benign predicates', async () => {
 		const mod = await loadSafeguard();

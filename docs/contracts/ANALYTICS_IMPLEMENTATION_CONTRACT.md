@@ -30,6 +30,17 @@ model only under canonical authority; `queryRunAnalytics()` returns an explicit 
 layer under canonical authority (canonical usage comes from the canonical read model); and the
 canonical activity/facet projections are omitted under legacy authority.
 
+Host startup automatically reconciles stale writer identities before opening recorder admission.
+Candidates are snapshotted before collecting a complete OS process census. Recovery requires evidence
+that the original host, backend owners, and recorder children can no longer write; unknown process
+births or an incomplete census prohibit cleanup. This includes orphaned leases attached to hosts
+already marked stopped. Cleanup removes only exact-identity writer leases, not analytics or sessions.
+
+Shutdown fences later host startup phases and drains in-flight startup before marking the host
+stopped or closing its lifecycle registry. Analytics stop also joins helper startup and its admission
+release; helpers cannot publish readiness after stop. A failed analytics start leaves capture closed
+while the primary Pie host remains usable, with a warning, rather than selecting legacy capture.
+
 The switch is exclusive and fail-closed:
 
 - Capture is never a dual-write. Under canonical authority a settlement is submitted to the

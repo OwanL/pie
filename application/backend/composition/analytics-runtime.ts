@@ -180,6 +180,8 @@ export class AnalyticsRuntime implements AnalyticsRuntimePort {
   private readonly timeZone: string;
   private preparedDailyProjectionKey: string | undefined;
   private preparingDailyProjection: Promise<void> | undefined;
+  private starting: Promise<AnalyticsRuntimeReadiness> | undefined;
+  private stopping: Promise<void> | undefined;
   private stopped = false;
 
   constructor(private readonly options: AnalyticsRuntimeOptions) {
@@ -261,7 +263,22 @@ export class AnalyticsRuntime implements AnalyticsRuntimePort {
 
   /** Start helpers only if canonical authority is active. Returns the readiness
    * snapshot; `recorderReady` is false under legacy authority by design. */
-  async start(): Promise<AnalyticsRuntimeReadiness> {
+  start(): Promise<AnalyticsRuntimeReadiness> {
+    if (this.stopped) return Promise.reject(new ActivationManifestError('Analytics runtime has stopped.'));
+    if (this.starting) return this.starting;
+    if (this.readiness) return Promise.resolve(this.readiness);
+
+    const startup = this.startInternal();
+    this.starting = startup;
+    void startup.then(
+      () => { if (this.starting === startup) this.starting = undefined; },
+      () => { if (this.starting === startup) this.starting = undefined; },
+    );
+    return startup;
+  }
+
+  private async startInternal(): Promise<AnalyticsRuntimeReadiness> {
+    if (this.stopped) throw new ActivationManifestError('Analytics runtime has stopped.');
     const activation = this.readActivation();
     this.authority.assertStartupActivationUnchanged(activation);
     const { manifest, sha256, authority } = activation;
@@ -301,18 +318,17 @@ export class AnalyticsRuntime implements AnalyticsRuntimePort {
       );
     }
     this.authority.setDescriptor(descriptor);
+    let helpers: AnalyticsHelperStartup | undefined;
     try {
-      const helpers = await startAnalyticsHelpers({
+      helpers = await startAnalyticsHelpers({
         label: 'Canonical',
         recorderWorkerScript: this.options.recorderWorkerScript,
         queryWorkerScript: this.options.queryWorkerScript,
         databasePath: this.databasePath,
         writerAdmission: this.options.writerAdmission,
       });
-      this.recorder = helpers.recorder;
-      this.queryClient = helpers.queryClient;
-      const recorderSchemaVersion = helpers.recorderSchemaVersion;
-      const projectionRevision = helpers.projectionRevision;
+      if (this.stopped) throw new ActivationManifestError('Analytics runtime stopped during startup.');
+
       // The helper probe may have yielded while the activation writer replaced
       // the manifest. Never publish readiness for a descriptor that no longer
       // names the current authority snapshot.
@@ -326,21 +342,36 @@ export class AnalyticsRuntime implements AnalyticsRuntimePort {
           'Analytics activation changed while canonical helpers were starting; refusing readiness.',
         );
       }
+      if (this.stopped) throw new ActivationManifestError('Analytics runtime stopped during startup.');
+
+      // Publish helpers and readiness together only after every startup gate has
+      // passed. Until this point they remain local to the in-flight startup.
+      this.recorder = helpers.recorder;
+      this.queryClient = helpers.queryClient;
       this.readiness = {
         authority,
         manifestRevision: manifest!.revision,
         manifestSha256: sha256,
         generationId: descriptor.generationId,
-        recorderSchemaVersion,
-        projectionRevision,
+        recorderSchemaVersion: helpers.recorderSchemaVersion,
+        projectionRevision: helpers.projectionRevision,
         recorderReady: true,
         queryReady: true,
       };
       return this.readiness;
     } catch (error) {
-      // A failed activation must not leave a half-started helper behind.
-      await this.stop();
-      this.options.onError?.(error, 'canonical-startup');
+      // Startup owns helpers until publication. Clean them here rather than
+      // calling stop(), which would wait for this very startup operation.
+      if (helpers) await helpers.recorder.shutdown().catch(() => { /* preserve startup error */ });
+      this.recorder = undefined;
+      this.queryClient = undefined;
+      this.readiness = undefined;
+      if (!this.stopped) {
+        this.stopped = true;
+        this.authority.clearDescriptor();
+        this.preparedDailyProjectionKey = undefined;
+        this.options.onError?.(error, 'canonical-startup');
+      }
       throw error;
     }
   }
@@ -424,14 +455,24 @@ export class AnalyticsRuntime implements AnalyticsRuntimePort {
   /** Stop every helper. Terminal and idempotent: never restarts workers.
    * The query client is stateless — each request forks a disposable child that
    * terminates with its response — so only the recorder needs shutting down. */
-  async stop(): Promise<void> {
+  stop(): Promise<void> {
+    if (this.stopping) return this.stopping;
     this.stopped = true;
     this.authority.clearDescriptor();
     this.preparedDailyProjectionKey = undefined;
-    const recorder = this.recorder;
-    this.recorder = undefined;
-    this.queryClient = undefined;
-    if (recorder) await recorder.shutdown().catch(() => { /* preserve caller error */ });
+    this.readiness = undefined;
+
+    const startup = this.starting;
+    this.stopping = (async () => {
+      // Startup retains ownership of helpers and its durable startup admission
+      // until it either publishes successfully or performs its own cleanup.
+      await startup?.catch(() => undefined);
+      const recorder = this.recorder;
+      this.recorder = undefined;
+      this.queryClient = undefined;
+      if (recorder) await recorder.shutdown().catch(() => { /* preserve caller error */ });
+    })();
+    return this.stopping;
   }
 
   get isStopped(): boolean {

@@ -2,15 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { reducer, createInitialArchState } from '../../../conversation-state/reducer';
+import { createSessionControlSender } from '../../../../../harness/agent-processes/lib/rpc/session-control-attribution.js';
 
 const SESSION = '/workspace/session.jsonl';
+const SENDER = createSessionControlSender({ sessionId: 'source-session', identityFallback: false }, 'Source session');
 const LOCAL_ID = 'local:agent-session:request-1';
 
 function dispatch(state: ReturnType<typeof createInitialArchState>, event: Parameters<typeof reducer>[1]) {
   return reducer(state, event).state;
 }
 
-test('agent-originated idle prompts become tagged user transcript rows', () => {
+test('agent-originated idle prompts retain sender attribution in the optimistic user row', () => {
   const state = dispatch(createInitialArchState(), {
     kind: 'AgentMessageReceived',
     sessionPath: SESSION,
@@ -18,6 +20,7 @@ test('agent-originated idle prompts become tagged user transcript rows', () => {
     text: 'please inspect this session',
     status: 'completed',
     timestamp: 1_800_000_000_000,
+    sender: SENDER,
   });
   const [row] = state.transcript.bySession[SESSION] ?? [];
 
@@ -25,6 +28,7 @@ test('agent-originated idle prompts become tagged user transcript rows', () => {
   assert.equal(row?.role, 'user');
   assert.equal(row?.markdown, 'please inspect this session');
   assert.equal(row?.customType, 'agent-message');
+  assert.deepEqual(row?.sender, SENDER);
   assert.equal(row?.status, 'completed');
 });
 

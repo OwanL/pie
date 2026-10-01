@@ -94,6 +94,9 @@ test('session-control frames are typed, bounded, and identity-fenced', () => {
     result: { sessionPath: base.sessionPath, transcript: [], cursor: { start: 0, end: 0 } },
   };
   assert.equal(parseWorkerToCoordinatorFrame(request, expected).status, 'accepted');
+  for (const action of ['settings.get', 'settings.set'] as const) {
+    assert.equal(parseWorkerToCoordinatorFrame({ ...request, action }, expected).status, 'accepted');
+  }
   assert.equal(parseCoordinatorToWorkerFrame(result, expected).status, 'accepted');
   assert.equal(
     parseWorkerToCoordinatorFrame({ ...result, workerGeneration: result.workerGeneration + 1 }, expected).status,
@@ -148,6 +151,27 @@ test('Phase 2 protocol accepts only its closed coordinator and worker variants',
   for (const frame of workerFrames) assert.equal(parseWorkerToCoordinatorFrame(frame, expected).status, 'accepted');
   assert.equal(parseWorkerToCoordinatorFrame(coordinatorFrames[1], expected).status, 'invalid', 'direction is closed');
   assert.equal(parseCoordinatorToWorkerFrame(workerFrames[0], expected).status, 'invalid', 'direction is closed');
+});
+
+test('worker responses preserve only the explicit provenance-unknown code', () => {
+  const response = {
+    ...base,
+    kind: 'response',
+    requestId: 'runtime-command',
+    ok: false,
+    error: {
+      code: 'AGENT_MESSAGE_PROVENANCE_UNAVAILABLE',
+      message: 'sender durability was not confirmed',
+      retryable: false,
+    },
+  };
+  assert.equal(parseWorkerToCoordinatorFrame(response, expected).status, 'accepted');
+
+  const passthroughCode = parseWorkerToCoordinatorFrame({
+    ...response,
+    error: { ...response.error, code: 'ARBITRARY_BACKEND_ERROR' },
+  }, expected);
+  assert.equal(passthroughCode.status, 'invalid', 'worker errors remain a closed code set');
 });
 
 test('Phase 4 protocol accepts every closed runtime, ownership, provider, and sync frame family', () => {

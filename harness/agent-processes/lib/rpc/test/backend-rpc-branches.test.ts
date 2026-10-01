@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { validateHostLiveMembership } from '../live-session-control.js';
 import { MAX_IMAGE_INPUT_BYTES, validateLoadTranscriptPage, validateMessageSend, validateRuntimePrefsSet, validateSessionCreate, validateSessionDuplicate, validateSessionOpen, validateSessionPath, validateSessionViewed, validateSettingsSet, validateSystemPromptTogglesSet, validateTruncateAfter } from '../backend-rpc.js';
 
 test('validateSessionPath handles required path form and rejects pending pseudo-paths', () => {
@@ -105,4 +106,63 @@ test('runtime prefs and settings validators reject invalid object shapes', () =>
   assert.throws(() => validateSettingsSet({ defaultModel: 123 }), /defaultModel must be a string/);
   assert.deepEqual(validateSettingsSet({ defaultThinkingLevel: 'max' }), { defaultThinkingLevel: 'max' });
   assert.throws(() => validateSettingsSet({ defaultThinkingLevel: 'extreme' }), /defaultThinkingLevel must be one of/);
+});
+
+test('settings.set accepts an additive session persistence scope and requires its sessionPath', () => {
+  // Global scope (and omission) keep the shared default behavior.
+  assert.deepEqual(validateSettingsSet({ persistenceScope: 'global' }), { persistenceScope: 'global' });
+  assert.deepEqual(validateSettingsSet({}), {});
+  assert.throws(() => validateSettingsSet({ persistenceScope: 'workspace' }), /persistenceScope must be session or global/);
+  // Session scope must address one session.
+  assert.throws(() => validateSettingsSet({ persistenceScope: 'session' }), /session persistence requires sessionPath/);
+  const sessionScoped = validateSettingsSet({ persistenceScope: 'session', sessionPath: 'C:\\repo\\live.jsonl', defaultModel: 'gpt-x' });
+  assert.deepEqual(sessionScoped, {
+    persistenceScope: 'session', sessionPath: 'C:\\repo\\live.jsonl', defaultModel: 'gpt-x',
+  });
+});
+
+test('host live membership snapshots validate shape, bounds, and monotonic revisions', () => {
+  const snapshot = validateHostLiveMembership({
+    revision: 3,
+    timestamp: 1234,
+    sessions: [{
+      path: '/workspace/live.jsonl',
+      name: 'Live',
+      title: 'Assigned',
+      activity: 'running',
+      requestStartedAt: 10,
+      runningTools: 2,
+      usage: { workingTimeMs: 42, costUsd: 0.25, costProvenance: 'reported', freshness: 'fresh' },
+    }],
+    closing: [{ path: '/workspace/closing.jsonl', operationId: 'op-1', privacyMode: true, source: 'agent' }],
+  });
+  assert.equal(snapshot.sessions[0]?.activity, 'running');
+  assert.equal(snapshot.closing[0]?.privacyMode, true);
+  assert.equal(snapshot.closing[0]?.source, 'agent');
+
+  assert.throws(() => validateHostLiveMembership({}), /revision must be a positive integer/);
+  assert.throws(() => validateHostLiveMembership({
+    revision: 1, timestamp: 0, sessions: 'x', closing: [],
+  }), /sessions must be an array/);
+  assert.throws(() => validateHostLiveMembership({
+    revision: 1, timestamp: 0,
+    sessions: [{ path: '/workspace/live.jsonl', activity: 'busy' }],
+    closing: [],
+  }), /activity must be idle, running, or waiting-user-input/);
+  assert.throws(() => validateHostLiveMembership({
+    revision: 1, timestamp: 0,
+    sessions: [{ path: '/workspace/live.jsonl', activity: 'idle', usage: { costUsd: -1 } }],
+    closing: [],
+  }), /usage.costUsd/);
+  assert.throws(() => validateHostLiveMembership({
+    revision: 1, timestamp: 0, sessions: [], closing: [{ path: '/x' }],
+  }), /operationId/);
+  assert.throws(() => validateHostLiveMembership({
+    revision: 1, timestamp: 0,
+    sessions: Array.from({ length: 257 }, () => ({ path: '/x', activity: 'idle' })),
+    closing: [],
+  }), /at most 256/);
+  assert.throws(() => validateHostLiveMembership({
+    revision: 1, timestamp: 0, sessions: [], closing: [{ path: '/x', operationId: 'o', source: 'tool' }],
+  }), /source must be agent or host/);
 });

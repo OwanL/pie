@@ -1,9 +1,8 @@
 import type { ArchState } from '../arch-state.js';
 import type { Event } from '../events.js';
-import type { ReducerResult } from './helpers.js';
+import { observeCloseOperationAcknowledgement, type ReducerResult } from './helpers.js';
 import {
   markSessionOperationAmbiguous,
-  observeSessionOperationAcknowledgement,
   retrySessionOperation,
   settleSessionOperationFailed,
   settleSessionOperationSucceeded,
@@ -145,7 +144,25 @@ export function handleOpenSessionReconciliationDue(
 }
 
 export function handleCloseSessionResult(state: ArchState, event: Extract<Event, { kind: 'CloseSessionResult' }>): ReducerResult {
-  return observeCloseAcknowledgement(state, event.operationId, event.backendGeneration, 'cleanup', event.ok, event.error);
+  return observeCloseAcknowledgement(
+    state, event.operationId, event.backendGeneration, 'cleanup', event.ok, event.error, event.deletionCommitted,
+  );
+}
+
+export function handleSessionCloseResponseDelivered(
+  state: ArchState,
+  event: Extract<Event, { kind: 'SessionCloseResponseDelivered' }>,
+): ReducerResult {
+  const operation = Object.values(state.operations).find((candidate) =>
+    candidate.kind === 'session.close'
+      && candidate.closeRequestKey === event.requestId
+      && candidate.session.pendingPath === event.sessionPath
+      && !candidate.terminal,
+  );
+  if (!operation) return { state, effects: [] };
+  return observeCloseOperationAcknowledgement(
+    state, operation.operationId, operation.backendGeneration, 'caller-response', true,
+  );
 }
 
 export function handlePersistTabsResult(state: ArchState, event: Extract<Event, { kind: 'PersistTabsResult' }>): ReducerResult {
@@ -166,14 +183,19 @@ function observeCloseAcknowledgement(
   acknowledgement: 'persist-tabs' | 'cleanup' | 'privacy-marker-removal',
   ok: boolean,
   error?: string,
+  deletionCommitted = false,
 ): ReducerResult {
   if (!operationId) return { state, effects: [] };
   const operation = state.operations[operationId];
   if (!operation || operation.kind !== 'session.close'
     || operation.backendGeneration !== backendGeneration) return { state, effects: [] };
-  const updated = observeSessionOperationAcknowledgement(operation, acknowledgement, ok, error);
-  if (!updated) return { state, effects: [] };
-  return { state: { ...state, operations: { ...state.operations, [operationId]: updated } }, effects: [] };
+  // Shared close-barrier resolution: emits the typed agent close bridge ack
+  // when the barrier settles, dispatches the deferred stop-cleanup lifecycle
+  // after a successful stop, and restores surviving tabs on non-committed
+  // agent close failures.
+  return observeCloseOperationAcknowledgement(
+    state, operationId, backendGeneration, acknowledgement, ok, error, deletionCommitted,
+  );
 }
 
 export function handleBackendRestartDrainCompleted(

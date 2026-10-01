@@ -1,5 +1,15 @@
+import * as crypto from 'node:crypto';
+
 import { BackendClient } from '../agent-connection/client';
-import { buildRuntimePrefsPayload, mergeChatPrefs, resolveChatPrefs } from '../../lib/protocol/index.js';
+import { toErrorMessage } from '../../../lib/structured-logging/error-message';
+import { auditLog } from '../../../lib/structured-logging/pie-logger';
+import {
+  buildRuntimePrefsPayload,
+  mergeChatPrefs,
+  resolveAutonomousModeForSession,
+  resolveChatPrefs,
+  resolveSubagentProviderChoices,
+} from '../../lib/protocol/index.js';
 import {
   STORAGE_CUTOFF_AUTHORIZATION_ENV,
   STORAGE_CUTOFF_AUTHORIZATION_VALUE,
@@ -28,6 +38,18 @@ import { DeferredTriggerRegistry } from '../deferred-triggers/registry';
 import { startSessionBackend } from '../agent-connection/startup';
 import { setRuntimeAuditLogEnabled } from '../../../lib/structured-logging/pie-logger';
 import { SessionTabActions } from './tab-actions';
+import type {
+  SessionCloseRequestedPayload,
+  SessionCloseResponseDeliveredPayload,
+} from '../../../harness/agent-processes/lib/rpc/session-events.js';
+import {
+  SESSION_CONTROL_SETTINGS_ACK_METHOD,
+  validateSessionControlSettingsAcknowledgement,
+  validateSessionControlSettingsRequest,
+  type SessionControlExecutionSettings,
+  type SessionControlSettingsAcknowledgement,
+  type SessionControlSettingsRequest,
+} from '../../../harness/agent-processes/lib/rpc/session-control-settings.js';
 import type { OnSessionCompleted, PostImperative, ScheduleRender } from './types';
 import type { Event } from '../conversation-state/events';
 import type { ArchState } from '../conversation-state/arch-state';
@@ -203,6 +225,9 @@ export class SessionService implements HostDisposable {
       dispatchArch,
       getArchState,
       triggers: this.triggers,
+      onSessionCloseRequested: (payload) => this.onSessionCloseRequested(payload),
+      onSessionCloseResponseDelivered: (payload) => this.onSessionCloseResponseDelivered(payload),
+      onSessionControlSettingsRequested: (payload) => this.onSessionControlSettingsRequested(payload),
       onDetailStream: (message) => this.detailSubscriptions.handleStream(message),
     });
     this.tabs = new SessionTabActions({
@@ -490,6 +515,14 @@ export class SessionService implements HostDisposable {
     backendGeneration?: number,
   ): Promise<void> {
     this.clearDetailCacheForSession(sessionPath);
+    let deletionMayHaveCommitted = false;
+    const preservePrivateDeletionEvidence = (error: unknown): Error => {
+      const preserved = error instanceof Error ? error : new Error(toErrorMessage(error));
+      if (deletionMayHaveCommitted) {
+        Object.assign(preserved, { sessionCloseDeletionCommitted: true });
+      }
+      return preserved;
+    };
     const filesystemLifecycleAuthorized = process.env[STORAGE_CUTOFF_AUTHORIZATION_ENV] === STORAGE_CUTOFF_AUTHORIZATION_VALUE;
     if (filesystemLifecycleAuthorized && !privacyMode) {
       await this.backend.request('session.lifecycleClose', {
@@ -499,11 +532,9 @@ export class SessionService implements HostDisposable {
       });
     }
     if (privacyMode) {
-      // The reducer evicts the privacy marker before this effect runs, so
-      // explicitly scrub the observer before the ordinary close callback can
-      // finalize anything. Reopen only while the transcript still exists: a
-      // successful session.forget is the irreversible deletion boundary.
-      let forgetCommitted = false;
+      // Keep the privacy marker in reducer state until deletion succeeds, and
+      // scrub the observer before the ordinary close callback can finalize
+      // anything. Failure recovery is reducer-owned and never changes focus.
       try {
         const closeOperationId = operationId?.trim() || `private-close:${sessionPath}`;
         let pendingCreateOperationId: string | undefined;
@@ -531,11 +562,11 @@ export class SessionService implements HostDisposable {
         } else {
           await this.runObserver.setSessionPrivacy?.(sessionPath, true);
         }
+        deletionMayHaveCommitted = true;
         await this.backend.request('session.forget', {
           sessionPath,
           ...(filesystemLifecycleAuthorized ? { operationId: closeOperationId } : {}),
         });
-        forgetCommitted = true;
         // Runtime disposal can emit a final warm-bash/session summary. Treat
         // its scrub as part of private-close success; the observer keeps the
         // close fence active until this awaited pass settles.
@@ -545,39 +576,255 @@ export class SessionService implements HostDisposable {
           kind: 'Command',
           cmd: { kind: 'SetPrivacyMode', corrId: `privacy-retry:${Date.now()}`, sessionPath, enabled: true },
         });
-        // Reopen only while the transcript still exists. Once forget has
-        // committed, retain the retry marker and report failure without trying
-        // to resurrect a deleted session path.
-        if (!filesystemLifecycleAuthorized && !forgetCommitted) this.tabs.openSession(sessionPath);
-        throw error;
+        // Retain the retry marker. If deletion may already have committed, do
+        // not restore a tab that could expose a deleted/private session.
+        throw preservePrivateDeletionEvidence(error);
       }
     }
-    await this.tabs.closeSession(sessionPath, nextPath, selectionChanged, operationId);
-    if (privacyMode) {
-      // The close effect initially persisted the marker as a retry guard;
-      // clear it only after backend deletion and host cleanup both succeed.
-      const archState = this.getArchState();
-      this.dispatchArch({
-        kind: 'Command',
-        cmd: {
-          kind: 'PersistTabs',
-          corrId: `private-cleared:${Date.now()}`,
-          ...(operationId ? { operationId, backendGeneration } : {}),
-          acknowledgementKey: 'privacy-marker-removal',
-          openTabPaths: archState.sessions.openTabPaths,
-          activeSessionPath: archState.sessions.activeSessionPath,
-          pinnedTabPaths: archState.sessions.pinnedTabPaths,
-          pinnedTabGroups: archState.sessions.pinnedTabGroups,
-          privateSessionPaths: Object.entries(archState.sessions.privacyModeBySession)
-            .filter(([privatePath, enabled]) => enabled && privatePath !== sessionPath)
-            .map(([privatePath]) => privatePath),
-        },
-      });
+    try {
+      await this.tabs.closeSession(sessionPath, nextPath, selectionChanged, operationId);
+      if (privacyMode) {
+        // The close effect initially persisted the marker as a retry guard;
+        // clear it only after backend deletion and host cleanup both succeed.
+        const archState = this.getArchState();
+        this.dispatchArch({
+          kind: 'Command',
+          cmd: {
+            kind: 'PersistTabs',
+            corrId: `private-cleared:${Date.now()}`,
+            ...(operationId ? { operationId, backendGeneration } : {}),
+            acknowledgementKey: 'privacy-marker-removal',
+            openTabPaths: archState.sessions.openTabPaths,
+            activeSessionPath: archState.sessions.activeSessionPath,
+            pinnedTabPaths: archState.sessions.pinnedTabPaths,
+            pinnedTabGroups: archState.sessions.pinnedTabGroups,
+            privateSessionPaths: Object.entries(archState.sessions.privacyModeBySession)
+              .filter(([privatePath, enabled]) => enabled && privatePath !== sessionPath)
+              .map(([privatePath]) => privatePath),
+          },
+        });
+      }
+    } catch (error) {
+      throw preservePrivateDeletionEvidence(error);
     }
   }
 
   duplicateSession(sessionPath: string, source?: RendererCommandContext): void {
     this.tabs.duplicateSession(sessionPath, source);
+  }
+
+  /** Typed coordinator→host close bridge: a tool closed a target session.
+   *  Dispatches the reducer-owned CloseSession command (tab removal, stop,
+   *  and cleanup run under that operation); the host's `accepted`
+   *  acknowledgement is the reducer's ingress-fixed close-bridge effect and
+   *  precedes any foreign-target stop. A self-target instead waits for the
+   *  coordinator's response-delivered handoff. Delete uses the existing
+   *  privacy/deletion lifecycle. */
+  private onSessionCloseRequested(payload: SessionCloseRequestedPayload): void {
+    const sessionPath = payload.sessionPath;
+    const archState = this.getArchState();
+    const privacyMode = payload.delete === true
+      || archState.sessions.privacyModeBySession[sessionPath] === true;
+    this.dispatchArch({
+      kind: 'Command',
+      cmd: {
+        kind: 'CloseSession',
+        corrId: crypto.randomUUID(),
+        operationId: crypto.randomUUID(),
+        operationAttempt: 1,
+        operationSource: { kind: 'agent-session-control' },
+        backendGeneration: this.state.getBackendGeneration(),
+        sessionPath,
+        privacyMode,
+        closeRequestKey: payload.requestId,
+        selfHandoffRequired: payload.selfHandoffRequired,
+      },
+    });
+  }
+
+  private onSessionCloseResponseDelivered(payload: SessionCloseResponseDeliveredPayload): void {
+    this.dispatchArch({
+      kind: 'SessionCloseResponseDelivered',
+      sessionPath: payload.sessionPath,
+      requestId: payload.requestId,
+    });
+  }
+
+  /** Terminal close bridge report. Best-effort: a delivery failure leaves the
+   *  coordinator's outcome unknown, never silently successful. */
+  sessionCloseBridgeAck(requestKey: string, sessionPath: string, phase: 'accepted' | 'completed' | 'failed' | 'unknown', detail?: string): void {
+    void this.backend.request(
+      'session.closeAcknowledgement',
+      {
+        sessionPath,
+        requestId: requestKey,
+        phase,
+        ...(detail ? { error: detail } : {}),
+      },
+      { timeoutMs: 15_000 },
+    ).catch((error) => {
+      auditLog('session-service', 'session.closeAcknowledgement.failed', {
+        requestKey,
+        phase,
+        message: toErrorMessage(error),
+      });
+    });
+  }
+
+  private onSessionControlSettingsRequested(request: SessionControlSettingsRequest): void {
+    this.dispatchArch({
+      kind: 'Command',
+      cmd: {
+        kind: 'SessionControlSettingsRequest',
+        corrId: request.requestId,
+        request,
+      },
+    });
+  }
+
+  /** Execute one validated bridge request. Capture reads globalState directly,
+   * never the reducer's potentially optimistic chatPrefs snapshot. */
+  async sessionControlSettings(request: SessionControlSettingsRequest): Promise<{
+    acknowledgement: SessionControlSettingsAcknowledgement;
+    persistedPrefs?: Pick<ChatPrefs, 'autonomousModeBySession' | 'subagentProviderTogglesBySession'>;
+  }> {
+    const validated = validateSessionControlSettingsRequest(request);
+    const { requestId, sessionPath, action } = validated;
+    if (!this.isSessionSettingsTargetLive(sessionPath) || this.isSessionSettingsTargetClosing(sessionPath)) {
+      return {
+        acknowledgement: {
+          requestId,
+          sessionPath,
+          action,
+          outcome: 'failed',
+          error: this.isSessionSettingsTargetLive(sessionPath)
+            ? 'The target session is closing.'
+            : 'The target session is not live.',
+        },
+      };
+    }
+
+    const readSavedPrefs = (): ChatPrefs => resolveChatPrefs(
+      this.platform.storage.get<Partial<ChatPrefs>>(PREFS_STORAGE_KEY),
+    );
+    const configuredProviders = (prefs: ChatPrefs): Record<string, boolean> => resolveSubagentProviderChoices(
+      { ...prefs, subagentProviderTogglesBySession: {} },
+      sessionPath,
+      this.getArchState().settings.availableModelsBySession[sessionPath] ?? [],
+    );
+    const readExecutionSettings = (prefs: ChatPrefs): SessionControlExecutionSettings => {
+      const surface = configuredProviders(prefs);
+      const choices = resolveSubagentProviderChoices(prefs, sessionPath,
+        this.getArchState().settings.availableModelsBySession[sessionPath] ?? []);
+      return {
+        autonomousMode: resolveAutonomousModeForSession(prefs, sessionPath),
+        subagentProviderChoices: Object.fromEntries(Object.keys(surface).map((provider) => [provider, choices[provider]])),
+      };
+    };
+    const persistedPrefs = (prefs: ChatPrefs): Pick<ChatPrefs, 'autonomousModeBySession' | 'subagentProviderTogglesBySession'> => ({
+      autonomousModeBySession: prefs.autonomousModeBySession ?? {},
+      subagentProviderTogglesBySession: prefs.subagentProviderTogglesBySession,
+    });
+
+    if (action === 'capture') {
+      const saved = readSavedPrefs();
+      return {
+        acknowledgement: {
+          requestId,
+          sessionPath,
+          action,
+          outcome: 'succeeded',
+          settings: readExecutionSettings(saved),
+        },
+      };
+    }
+
+    // Validate the entire patch above, before constructing writes. Only the
+    // two explicitly supported per-session execution overrides are writable.
+    const patch = validated.settings!;
+    if (patch.subagentProviderChoices !== undefined) {
+      const surface = configuredProviders(readSavedPrefs());
+      const unknown = Object.keys(patch.subagentProviderChoices).find((provider) =>
+        !provider.trim() || !Object.hasOwn(surface, provider));
+      if (unknown !== undefined) {
+        return { acknowledgement: {
+          requestId, sessionPath, action, outcome: 'failed',
+          error: `Provider is not in the configured subagent surface: ${unknown}`,
+        } };
+      }
+    }
+    const updates: Partial<ChatPrefs> = {
+      ...(patch.autonomousMode !== undefined
+        ? { autonomousModeBySession: { [sessionPath]: patch.autonomousMode } }
+        : {}),
+      ...(patch.subagentProviderChoices !== undefined
+        ? { subagentProviderTogglesBySession: { [sessionPath]: patch.subagentProviderChoices } }
+        : {}),
+    };
+    const backendReady = this.getArchState().settings.backendReady;
+    try {
+      await this.setPrefs(updates);
+      const saved = readSavedPrefs();
+      return {
+        acknowledgement: {
+          requestId,
+          sessionPath,
+          action,
+          outcome: 'succeeded',
+          settings: readExecutionSettings(saved),
+          application: backendReady ? 'applied' : 'pending',
+        },
+        persistedPrefs: persistedPrefs(saved),
+      };
+    } catch (error) {
+      const saved = readSavedPrefs();
+      const autoPersisted = patch.autonomousMode === undefined
+        || saved.autonomousModeBySession?.[sessionPath] === patch.autonomousMode;
+      const providersPersisted = patch.subagentProviderChoices === undefined
+        || (() => {
+          const actual = saved.subagentProviderTogglesBySession[sessionPath] ?? {};
+          const expected = patch.subagentProviderChoices!;
+          const actualKeys = Object.keys(actual);
+          return actualKeys.length === Object.keys(expected).length
+            && Object.entries(expected).every(([provider, enabled]) => actual[provider] === enabled);
+        })();
+      const persisted = autoPersisted && providersPersisted;
+      return {
+        acknowledgement: {
+          requestId,
+          sessionPath,
+          action,
+          outcome: persisted ? 'unknown' : 'failed',
+          ...(persisted ? {
+            settings: readExecutionSettings(saved),
+            application: 'unknown' as const,
+          } : {}),
+          error: toErrorMessage(error).slice(0, 1000),
+        },
+        ...(persisted ? { persistedPrefs: persistedPrefs(saved) } : {}),
+      };
+    }
+  }
+
+  /** Send the reducer-produced correlated acknowledgement to its waiting
+   * coordinator request. The coordinator decides whether an absent response
+   * is unknown; the host never retries a settings mutation automatically. */
+  async sessionControlSettingsAcknowledgement(
+    acknowledgement: SessionControlSettingsAcknowledgement,
+  ): Promise<void> {
+    const validated = validateSessionControlSettingsAcknowledgement(acknowledgement);
+    await this.backend.request(SESSION_CONTROL_SETTINGS_ACK_METHOD, validated, { timeoutMs: 15_000 });
+  }
+
+  private isSessionSettingsTargetLive(sessionPath: string): boolean {
+    return this.getArchState().sessions.sessions.some((session) => session.path === sessionPath);
+  }
+
+  private isSessionSettingsTargetClosing(sessionPath: string): boolean {
+    return Object.values(this.getArchState().operations).some((operation) =>
+      operation.kind === 'session.close'
+      && !operation.terminal
+      && (operation.session.resolvedPath ?? operation.session.pendingPath) === sessionPath);
   }
 
   async addFilesystemPaths(
@@ -684,7 +931,10 @@ export class SessionService implements HostDisposable {
   }
 
   async setPrefs(prefs: Partial<ChatPrefs>): Promise<void> {
-    const current = this.getArchState().settings.prefs;
+    // globalState is the persistence authority. Reducer state may contain a
+    // not-yet-saved optimistic UI patch and must not leak into snapshots or
+    // overwrite unrelated durable preferences from this write.
+    const current = resolveChatPrefs(this.platform.storage.get<Partial<ChatPrefs>>(PREFS_STORAGE_KEY));
     const merged = resolveChatPrefs(mergeChatPrefs(current, prefs));
     // Apply the runtime-audit-log toggle to the audit module so emit decisions
     // take effect immediately on live updates AND on cold-start restore (which

@@ -19,6 +19,10 @@
 
 import type { ComposerInput, ModelSettings, ChatPrefs, HostToWebviewMessage, PruningMode, ThinkingLevel, UserContentPart, RendererCommandContext } from '../../../lib/protocol/index.js';
 import type { LiveSubagentDetailAddress, DetailCursor, DetailPageRef } from '../../../../harness/agent-processes/lib/rpc/subagent-detail';
+import type {
+  SessionControlSettingsAcknowledgement,
+  SessionControlSettingsRequest,
+} from '../../../../harness/agent-processes/lib/rpc/session-control-settings.js';
 import type { BackendReadyQueueEntry, DeferredSetModelEntry, PendingSendQueueEntry } from '../arch-state';
 
 export interface EffectBase {
@@ -49,6 +53,7 @@ export interface SendRpcEffect extends EffectBase {
 
 export interface GenerateSessionTitleEffect extends EffectBase {
   kind: 'GenerateSessionTitle';
+  enabled?: boolean;
   sessionPath: string;
   prompt: string;
   provider: string;
@@ -247,6 +252,19 @@ export interface ShowModelSwitchConfirmEffect extends EffectBase {
 export interface SetPrefsRpcEffect extends EffectBase {
   kind: 'SetPrefsRpc';
   prefs: Partial<ChatPrefs>;
+}
+
+/** Capture/apply host-owned execution settings through the serialized prefs
+ * queue; the reducer retains the correlated request while I/O is pending. */
+export interface SessionControlSettingsRpcEffect extends EffectBase {
+  kind: 'SessionControlSettingsRpc';
+  request: SessionControlSettingsRequest;
+}
+
+/** Deliver the reducer-produced correlated outcome back to the coordinator. */
+export interface SessionControlSettingsBridgeAckEffect extends EffectBase {
+  kind: 'SessionControlSettingsBridgeAck';
+  acknowledgement: SessionControlSettingsAcknowledgement;
 }
 
 /** Persist a per-server `disabled` override via the backend's
@@ -456,6 +474,19 @@ export interface CloseSessionEffect extends EffectBase {
   selectionChanged?: boolean;
 }
 
+/** Typed-agent close bridge acknowledgement: the reducer emits an ingress
+ *  `accepted` before any stop/cleanup effect (so a self-close observes
+ *  `close requested` before its worker is interrupted), and a terminal
+ *  phase once the close operation carrying `closeRequestKey` reaches its
+ *  terminal outcome. */
+export interface SessionCloseBridgeAckEffect extends EffectBase {
+  kind: 'SessionCloseBridgeAck';
+  sessionPath: string;
+  requestKey: string;
+  phase: 'accepted' | 'completed' | 'failed' | 'unknown';
+  error?: string;
+}
+
 export interface RestartBackendEffect extends EffectBase {
   kind: 'RestartBackend';
   operationId: string;
@@ -499,6 +530,8 @@ export type Effect =
   | LogEffect
   | SetModelRpcEffect
   | SetPrefsRpcEffect
+  | SessionControlSettingsRpcEffect
+  | SessionControlSettingsBridgeAckEffect
   | McpListRpcEffect
   | McpSetServerRpcEffect
   | McpSetSessionServerRpcEffect
@@ -530,6 +563,7 @@ export type Effect =
   | SetToolResultPruningSettingsEffect
   | SetSessionTitlesSettingsEffect
   | CloseSessionEffect
+  | SessionCloseBridgeAckEffect
   | RestartBackendEffect
   | DuplicateSessionEffect
   | DrainPendingSendQueueEffect

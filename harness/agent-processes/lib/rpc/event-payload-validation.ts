@@ -43,6 +43,8 @@ import type {
   RetryEndedPayload,
   RetryMeasuredPayload,
   RetryStartedPayload,
+  SessionCloseRequestedPayload,
+  SessionCloseResponseDeliveredPayload,
   SessionListChangedPayload,
   SessionOpenedPayload,
   ToolFinishedPayload,
@@ -52,6 +54,7 @@ import type {
 import type { ExtensionUIRequestPayload } from './extension-ui.js';
 import { isToolPreview } from './live-pipeline.js';
 import { isAgentSessionMessageLocalId } from './message-contract.js';
+import { isSessionControlSender } from './session-control-attribution.js';
 import { isFiniteNumber } from '../../../../lib/validation/type-guards.js';
 
 // ─── shared primitives ───────────────────────────────────────────────────────
@@ -476,12 +479,31 @@ export function isPreflightFailedPayload(value: unknown): value is PreflightFail
   );
 }
 
+export function isSessionCloseRequestedPayload(value: unknown): value is SessionCloseRequestedPayload {
+  return (
+    isObject(value)
+    && isString(value.sessionPath)
+    && isString(value.requestId)
+    && isBoolean(value.delete)
+    && isBoolean(value.selfHandoffRequired)
+  );
+}
+
+export function isSessionCloseResponseDeliveredPayload(value: unknown): value is SessionCloseResponseDeliveredPayload {
+  return (
+    isObject(value)
+    && isString(value.sessionPath)
+    && isString(value.requestId)
+  );
+}
+
 export function isAgentMessagePayload(value: unknown): value is AgentMessagePayload {
   return (
     isObject(value)
     && isString(value.sessionPath)
     && isAgentSessionMessageLocalId(value.localId)
     && isString(value.text)
+    && (value.sender === undefined || isSessionControlSender(value.sender))
     && (value.status === 'queued' || value.status === 'completed' || value.status === 'rejected')
     && isFiniteNumber(value.timestamp)
   );

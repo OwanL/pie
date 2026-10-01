@@ -5,6 +5,7 @@ import type { TranscriptMode, TranscriptPageDirection } from './session-events.j
 import type {
   NestedAllowedBuckets,
   RuntimePrefsSetParams,
+  SettingsPersistenceScope,
   SubagentBucketCanSpawn,
   SubagentBuckets,
 } from './settings.js';
@@ -47,6 +48,13 @@ export interface SessionPathParams {
   sessionPath: string;
 }
 
+export interface SessionCloseAcknowledgementParams {
+  sessionPath: string;
+  requestId: string;
+  phase: 'accepted' | 'completed' | 'failed' | 'unknown';
+  error?: string;
+}
+
 export interface LiveTurnCheckpointParams extends SessionPathParams {
   turnId?: string;
   attemptId?: string;
@@ -54,6 +62,7 @@ export interface LiveTurnCheckpointParams extends SessionPathParams {
 
 export interface SessionTitleGenerateParams {
   sessionPath: string;
+  enabled?: boolean;
   prompt: string;
   provider: string;
   model: string;
@@ -130,6 +139,11 @@ export interface SessionCreateParams {
   /** Internal provenance marker used only by the agent session_control create
    *  path; persisted in the new session and never inferred from lineage. */
   agentCreated?: boolean;
+  /** Required coordinator-reserved base title for the agent-create path (the
+   *  session_control tool always supplies it). Assigned uniquely by the
+   *  coordinator title authority before the created session is published.
+   *  Omitted for ordinary host/UI creates, which stay provisional. */
+  title?: string;
 }
 
 export interface SessionOpenParams extends SessionPathParams {
@@ -179,6 +193,30 @@ function isObj(value: unknown): value is Record<string, unknown> {
 
 function fail(method: string, detail: string): never {
   throw new BackendError('INVALID_PARAMS', `Invalid params for ${method}: ${detail}`);
+}
+
+/** Typed coordinator→host close bridge acknowledgement. The host echoes the
+ *  exact close-request identity; late/unknown request IDs are tolerated by
+ *  the coordinator, never silently treated as success. */
+export function validateSessionCloseAcknowledgement(params: unknown): SessionCloseAcknowledgementParams {
+  if (!isObj(params)) fail('session.closeAcknowledgement', 'expected an object');
+  const { sessionPath } = validateSessionPath('session.closeAcknowledgement', params);
+  if (typeof params['requestId'] !== 'string' || !params['requestId']) {
+    fail('session.closeAcknowledgement', 'requires a non-empty requestId');
+  }
+  if (params['phase'] !== 'accepted' && params['phase'] !== 'completed'
+    && params['phase'] !== 'failed' && params['phase'] !== 'unknown') {
+    fail('session.closeAcknowledgement', 'phase must be accepted, completed, failed, or unknown');
+  }
+  if (params['error'] !== undefined && (typeof params['error'] !== 'string' || !params['error'])) {
+    fail('session.closeAcknowledgement', 'error must be a non-empty string when provided');
+  }
+  return {
+    sessionPath,
+    requestId: params['requestId'] as string,
+    phase: params['phase'] as SessionCloseAcknowledgementParams['phase'],
+    ...(params['error'] !== undefined ? { error: params['error'] as string } : {}),
+  };
 }
 
 function readSelectionToken(method: string, params: Record<string, unknown>): string | undefined {
@@ -253,12 +291,17 @@ export function validateSessionCreate(params: unknown): SessionCreateParams {
   if (agentCreated !== undefined && typeof agentCreated !== 'boolean') {
     fail('session.create', 'agentCreated must be a boolean when provided');
   }
+  const title = (params as Record<string, unknown>)['title'];
+  if (title !== undefined && typeof title !== 'string') {
+    fail('session.create', 'title must be a string when provided');
+  }
   return {
     cwd: cwd as string | undefined,
     selectionToken: readSelectionToken('session.create', params),
     ...(operationId !== undefined ? { operationId } : {}),
     ...(operationAttempt !== undefined ? { operationAttempt } : {}),
     ...(agentCreated === true ? { agentCreated: true } : {}),
+    ...(title !== undefined ? { title: title as string } : {}),
   };
 }
 
@@ -479,7 +522,9 @@ export function validateSessionTitleGenerate(params: unknown): SessionTitleGener
   if (typeof model !== 'string' || !model.trim()) fail(method, 'requires a non-empty model');
   if (!isThinkingLevel(thinkingLevel)) fail(method, 'requires a valid thinkingLevel');
   if (!Number.isInteger(timeoutSec) || (timeoutSec as number) < 1 || (timeoutSec as number) > 60) fail(method, 'requires timeoutSec from 1 to 60');
-  return { sessionPath, prompt, provider, model, thinkingLevel, timeoutSec: timeoutSec as number };
+  if (value.enabled !== undefined && typeof value.enabled !== 'boolean') fail(method, 'enabled must be boolean');
+  return { sessionPath, prompt, provider, model, thinkingLevel, timeoutSec: timeoutSec as number,
+    ...(value.enabled === false ? { enabled: false } : {}) };
 }
 
 function validateMessageContent(
@@ -633,6 +678,10 @@ export function validateOperationStatus(params: unknown): OperationStatusParams 
 
 export interface SettingsSetParams extends Partial<ModelSettings> {
   sessionPath?: string;
+  /** Additive persistence-scope discriminator; omission preserves the shared
+   *  default ('global') behavior. A session-scoped write addresses one
+   *  session's settings and must never change shared defaults. */
+  persistenceScope?: SettingsPersistenceScope;
 }
 
 export interface RuntimePrefsSetParamsWithConcurrencySource extends RuntimePrefsSetParams {
@@ -1092,6 +1141,16 @@ export function validateSettingsSet(params: unknown): SettingsSetParams {
     }
     rejectPendingSessionPath('settings.set', sessionPath);
     out.sessionPath = sessionPath;
+  }
+  const persistenceScope = (params as Record<string, unknown>)['persistenceScope'];
+  if (persistenceScope !== undefined) {
+    if (persistenceScope !== 'session' && persistenceScope !== 'global') {
+      fail('settings.set', 'persistenceScope must be session or global when provided');
+    }
+    if (persistenceScope === 'session' && sessionPath === undefined) {
+      fail('settings.set', 'session persistence requires sessionPath');
+    }
+    out.persistenceScope = persistenceScope;
   }
   const dm = (params as Record<string, unknown>)['defaultModel'];
   if (dm !== undefined) {

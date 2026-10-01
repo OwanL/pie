@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import type { ComposerInput } from '../lib/rpc/message-contract.js';
+import type { SessionControlSender } from '../lib/rpc/session-control-attribution.js';
 import { BackendError } from './server-io.js';
 
 export interface SendOperationAcceptance {
@@ -214,6 +215,7 @@ export function canonicalSendIntentFingerprint(input: {
   text: string;
   inputs: ComposerInput[];
   localId?: string;
+  coordinatorAttribution?: SessionControlSender;
 }): string {
   return canonicalFingerprint({
     kind: 'message.send',
@@ -221,6 +223,7 @@ export function canonicalSendIntentFingerprint(input: {
     text: input.text,
     inputs: input.inputs,
     localId: input.localId ?? null,
+    coordinatorAttribution: input.coordinatorAttribution ?? null,
   });
 }
 

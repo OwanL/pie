@@ -67,7 +67,7 @@ test('deriveSessionName prefers explicit sdk names and falls back to user conten
       },
     },
   }));
-  assert.equal(derivedFromUser.name, 'Fix the broken extension tests before r…');
+  assert.equal(derivedFromUser.name, 'Fix the broken extension…');
   assert.equal(derivedFromUser.isPlaceholder, true);
 
   const placeholder = deriveSessionName(makeContext({
@@ -106,24 +106,33 @@ test('buildCurrentSummary falls back to startup cwd and normalizes thinking leve
   }), '/startup');
 
   assert.equal(summary.cwd, '/startup');
-  assert.equal(summary.name, 'Add coverage-focused tests now');
+  assert.equal(summary.name, 'Add coverage-focused tes…');
   assert.equal(summary.isPlaceholder, true);
+  assert.equal(summary.isAssignedTitle, false);
   assert.equal(summary.messageCount, 2);
   assert.equal(summary.modelId, 'claude-test');
   assert.equal(summary.provider, undefined);
   assert.equal(summary.thinkingLevel, 'max');
 });
 
-test('buildCurrentSummary forwards the stable SDK session identity', () => {
+test('buildCurrentSummary forwards the stable SDK session identity and durable header timestamp', () => {
   const summary = buildCurrentSummary(makeContext({
     session: {
       ...makeContext().session,
+      sessionName: 'Generated Candidate',
       sessionManager: {
         ...makeContext().session.sessionManager,
         getSessionId: () => '  stable-session-id  ',
+        getHeader: () => ({ type: 'session', version: 3, id: 'stable-session-id', timestamp: '2026-01-01T00:00:00.000Z', cwd: '/repo' }),
       },
     },
   }), '/startup');
 
   assert.equal(summary.sessionId, 'stable-session-id');
+  assert.equal(summary.headerTimestamp, '2026-01-01T00:00:00.000Z');
+  assert.equal(summary.isAssignedTitle, true);
+
+  const unnamed = buildCurrentSummary(makeContext(), '/startup');
+  assert.equal(unnamed.headerTimestamp, undefined);
+  assert.equal(unnamed.isAssignedTitle, false);
 });

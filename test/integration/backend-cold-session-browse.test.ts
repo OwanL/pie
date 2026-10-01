@@ -176,6 +176,26 @@ async function makeColdServer(options: { sessionCatalog?: any; contextThinkingLe
   };
 }
 
+async function seedLiveMembership(server: any, paths: readonly string[]): Promise<void> {
+  await server.handleRequest({
+    id: 'test-live-membership',
+    method: 'session.liveMembership',
+    params: {
+      revision: 1,
+      timestamp: Date.now(),
+      sessions: paths.map((sessionPath) => ({
+        path: sessionPath,
+        name: path.basename(sessionPath),
+        cwd: path.dirname(sessionPath),
+        activity: 'idle',
+      })),
+      closing: [],
+    },
+  });
+  await server.titleNamespaceHydration;
+  assert.equal(server.liveSessionTitles.ready, true, "the host's startup membership establishes live-title admission");
+}
+
 test('cold open/preload/page/detail projections remain runtime-free and pages revalidate durable state', async () => {
   const h = await makeColdServer();
   try {
@@ -677,6 +697,7 @@ test('cold forget routes through the store and removes the durable session witho
 test('duplicate of a hot session forks through its owner and retains coordinator idempotency', async () => {
   const h = await makeColdServer();
   try {
+    await seedLiveMembership(h.server, [h.sessionPath]);
     const duplicatePath = path.join(h.dir, 'hot-duplicate.jsonl');
     let releasePromotion!: () => void;
     const promotion = new Promise<void>((resolve) => { releasePromotion = resolve; });
@@ -714,6 +735,7 @@ test('duplicate of a hot session forks through its owner and retains coordinator
         assert.equal(sourceSessionPath, h.sessionPath);
         duplicateCalls += 1;
         privateRequestIds.push(`duplicate:${publicRequestId}`);
+        fsSync.copyFileSync(sourceSessionPath, duplicatePath);
         sourceHot = false;
         duplicateHot = true;
         return { sessionPath: duplicatePath };
@@ -794,6 +816,7 @@ test('duplicate of a hot session forks through its owner and retains coordinator
 test('distinct concurrent duplicate requests serialize at a hot source and create two durable copies', async () => {
   const h = await makeColdServer();
   try {
+    await seedLiveMembership(h.server, [h.sessionPath]);
     const hotDuplicatePath = path.join(h.dir, 'concurrent-hot-duplicate.jsonl');
     const coldDuplicatePath = path.join(h.dir, 'concurrent-cold-duplicate.jsonl');
     const sourceBefore = await fs.readFile(h.sessionPath, 'utf8');
@@ -1106,6 +1129,9 @@ test('a slow create cannot overwrite a newer host-local viewed transition', asyn
 
 test('a slow cold session.open cannot overwrite a newer host-local viewed transition', async () => {
   const h = await makeColdServer();
+  let releaseMembershipRead: () => void = () => undefined;
+  let releaseOpen: () => void = () => undefined;
+  let titleNamespaceHydration: Promise<void> | undefined;
   try {
     const b = h.sessionPath;
     const c = path.join(h.dir, 'c.jsonl');
@@ -1114,13 +1140,41 @@ test('a slow cold session.open cannot overwrite a newer host-local viewed transi
     h.server.emit = () => undefined;
     h.server.emitSessionListChanged = async () => undefined;
 
-    let releaseOpen!: () => void;
+    let membershipReadStarted!: () => void;
+    const membershipReadGate = new Promise<void>((resolve) => { releaseMembershipRead = resolve; });
+    const membershipStarted = new Promise<void>((resolve) => { membershipReadStarted = resolve; });
+    const originalReadLiveSessionTitleEntry = h.server.readLiveSessionTitleEntry.bind(h.server);
+    h.server.readLiveSessionTitleEntry = async (sessionPath: string) => {
+      if (sessionPath === b) {
+        membershipReadStarted();
+        await membershipReadGate;
+      }
+      return await originalReadLiveSessionTitleEntry(sessionPath);
+    };
+    await h.server.handleRequest({
+      id: 'startup-membership',
+      method: 'session.liveMembership',
+      params: {
+        revision: 1,
+        timestamp: Date.now(),
+        sessions: [
+          { path: b, name: 'session.jsonl', cwd: h.dir, activity: 'idle' },
+          { path: c, name: 'c.jsonl', cwd: h.dir, activity: 'idle' },
+        ],
+        closing: [],
+      },
+    });
+    titleNamespaceHydration = h.server.titleNamespaceHydration as Promise<void>;
+    await membershipStarted;
+
     let openStarted!: () => void;
+    let openPayloadStarted = false;
     const blocked = new Promise<void>((resolve) => { releaseOpen = resolve; });
     const started = new Promise<void>((resolve) => { openStarted = resolve; });
     const originalBuild = h.server.buildSessionOpenedPayload.bind(h.server);
     h.server.buildSessionOpenedPayload = async (...args: unknown[]) => {
       if (args[0] === c) {
+        openPayloadStarted = true;
         openStarted();
         await blocked;
       }
@@ -1131,15 +1185,24 @@ test('a slow cold session.open cannot overwrite a newer host-local viewed transi
       id: 'open-c', method: 'session.open', params: { sessionPath: c, selectionToken: 'open-c' },
     });
     await started;
+    assert.equal(openPayloadStarted, true, 'an already-admitted host tab can open during title membership hydration');
+    assert.equal(h.server.liveSessionTitles.ready, false, 'the test holds only title membership hydration');
+    const ping = await h.server.handleRequest({ id: 'ping-during-title-hydration', method: 'app.ping' });
+    assert.equal(ping.sdkVersion, 'test-sdk', 'ordinary requests do not wait on title or archive startup work');
     await h.server.handleRequest({
       id: 'back-b', method: 'session.viewed', params: { sessionPath: b, previousSessionPath: c },
     });
     releaseOpen();
     await openC;
+    releaseMembershipRead();
+    await titleNamespaceHydration;
 
     assert.equal(h.server.viewedSessionPath, b);
     assert.equal(h.server.browsePreviousSessionFiles.get(b), c);
   } finally {
+    releaseMembershipRead();
+    releaseOpen();
+    await titleNamespaceHydration?.catch(() => undefined);
     await fs.rm(h.dir, { recursive: true, force: true });
   }
 });

@@ -52,7 +52,7 @@ test('listSessions derives placeholder names from the session file and sorts by 
     assert.equal(sessions.length, 2);
     assert.equal(sessions[0]?.name, 'Named Session');
     assert.equal(sessions[0]?.isPlaceholder, false);
-    assert.equal(sessions[1]?.name, 'Refactor the analytics pipeline now');
+    assert.equal(sessions[1]?.name, 'Refactor the analytics p…');
     assert.equal(sessions[1]?.isPlaceholder, true);
   });
 });
@@ -73,7 +73,7 @@ test('listSessions derives names from SDK metadata without rereading the transcr
 
   const sessions = await listSessions(sdk);
 
-  assert.equal(sessions[0]?.name, 'Make session switching fast and transpa…');
+  assert.equal(sessions[0]?.name, 'Make session switching f…');
   assert.equal(sessions[0]?.isPlaceholder, true);
 });
 

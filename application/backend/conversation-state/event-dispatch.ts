@@ -21,6 +21,8 @@ import type {
   RetryEndedPayload,
   RetryMeasuredPayload,
   RetryStartedPayload,
+  SessionCloseRequestedPayload,
+  SessionCloseResponseDeliveredPayload,
   SessionListChangedPayload,
   SessionOpenedPayload,
   ToolFinishedPayload,
@@ -56,6 +58,8 @@ import {
   isRetryEndedPayload,
   isRetryMeasuredPayload,
   isRetryStartedPayload,
+  isSessionCloseRequestedPayload,
+  isSessionCloseResponseDeliveredPayload,
   isSessionListChangedPayload,
   isSessionOpenedPayload,
   isToolFinishedPayload,
@@ -66,9 +70,21 @@ import { appendPieLog } from '../../../lib/structured-logging/pie-logger.js';
 import { isLivePipelineTraceEnabled, recordLivePipelineTrace } from '../agent-connection/live-pipeline-trace-runtime.js';
 import { isLiveLifecycleWatermark, isTurnSemanticEnvelope, type LiveLifecycleWatermark, type TurnSemanticEnvelope } from '../../lib/protocol/live-pipeline.js';
 import { isCoordinatorToHostDetailMessage, type CoordinatorToHostDetailMessage } from '../../../harness/agent-processes/lib/rpc/subagent-detail.js';
+import {
+  isSessionControlSettingsRequest,
+  SESSION_CONTROL_SETTINGS_REQUEST_EVENT,
+  type SessionControlSettingsRequest,
+} from '../../../harness/agent-processes/lib/rpc/session-control-settings.js';
 
 export interface SessionBackendEventHandlers {
   onSessionOpened(payload: SessionOpenedPayload): void;
+  /** Typed coordinator→host close bridge request. Optional so standalone
+   *  handler/test fakes without the bridge stay valid; guarded at dispatch. */
+  onSessionCloseRequested?(payload: SessionCloseRequestedPayload): void;
+  /** Coordinator confirms the agent caller's closeRequested response was sent. */
+  onSessionCloseResponseDelivered?(payload: SessionCloseResponseDeliveredPayload): void;
+  /** Typed coordinator→host execution-settings capture/apply request. */
+  onSessionControlSettingsRequested?(payload: SessionControlSettingsRequest): void;
   onTurnSemantic(payload: TurnSemanticEnvelope): void;
   onLiveLifecycle(payload: LiveLifecycleWatermark): void;
   onSessionListChanged(payload: SessionListChangedPayload): void;
@@ -145,6 +161,21 @@ export function dispatchSessionBackendEvent(
       return;
     case 'session.opened':
       dispatch(event, isSessionOpenedPayload, handlers.onSessionOpened);
+      return;
+    case 'session.close.requested':
+      if (handlers.onSessionCloseRequested) {
+        dispatch(event, isSessionCloseRequestedPayload, handlers.onSessionCloseRequested);
+      }
+      return;
+    case 'session.close.responseDelivered':
+      if (handlers.onSessionCloseResponseDelivered) {
+        dispatch(event, isSessionCloseResponseDeliveredPayload, handlers.onSessionCloseResponseDelivered);
+      }
+      return;
+    case SESSION_CONTROL_SETTINGS_REQUEST_EVENT:
+      if (handlers.onSessionControlSettingsRequested) {
+        dispatch(event, isSessionControlSettingsRequest, handlers.onSessionControlSettingsRequested);
+      }
       return;
     case 'session.list.changed':
       dispatch(event, isSessionListChangedPayload, handlers.onSessionListChanged);

@@ -10,6 +10,9 @@ import type {
 import type { ProviderGateMetrics } from '../../model-providers/concurrency/provider-gate.js';
 import type { SubagentConcurrencyStatus } from '../../../lib/concurrency-config.js';
 import { CreateOperationLedger } from './create-operation-ledger.js';
+import type { SessionCloseAcknowledgementParams } from '../lib/rpc/backend-rpc.js';
+import type { HostLiveMembershipSnapshotParams } from '../lib/rpc/live-session-control.js';
+import type { SessionControlSettingsAcknowledgement } from '../lib/rpc/session-control-settings.js';
 import type { SdkModule, SdkSessionManager } from '../lib/sdk-integration/sdk';
 import type { SessionContext, SessionContextCreationReason } from './server-types.js';
 import { BackendError } from './server-io.js';
@@ -105,6 +108,9 @@ export interface BackendRequestHandlerDeps {
   ): { sessionPath: string } | Promise<{ sessionPath: string }>;
   truncateColdSessionAfter?(sessionPath: string, entryId: string): Promise<{ sessionPath: string }>;
   isSessionTransitionPending?(sessionPath: string): boolean;
+  /** Only authenticated coordinator-to-worker command routes may consume
+   * coordinator-injected message attribution after public RPC validation. */
+  allowCoordinatorAttribution?: boolean;
   /** Synchronous generation/ownership fence checked immediately before a
    * session mutation enters the SDK. Isolated workers use this to reject a
    * context revoked while an async transition wait was settling. */
@@ -148,6 +154,7 @@ export interface BackendRequestHandlerDeps {
     operationAttempt?: number,
     systemPromptDisabledEntries?: readonly string[],
     publicRequestId?: string,
+    includeInitialContextInventory?: boolean,
   ): Promise<SessionOpenedPayload>;
   /** Build from the replacement installed by the transition currently owning
    * this path; bypasses joining that transition's own promise. */
@@ -159,6 +166,18 @@ export interface BackendRequestHandlerDeps {
    *  scoped to this deps object (two deps configurations never share an
    *  operation ledger). */
   createOperationLedger?: CreateOperationLedger;
+  /** Reserve, durably persist on the owning owner, and confirm one unique
+   * assigned title for the agent-create path through the coordinator title
+   * authority. The created session must already exist durably; persistence is
+   * fenced and precedes the caller's publication. A false result carries the
+   * explicit failure reason and leaves the session provisional. */
+  admitOpenedSessionTitle?(sessionPath: string, allowStartupRestore?: boolean): Promise<void>;
+  noteNewSessionPublished?(sessionPath: string): void;
+  assignCreatedSessionTitle?(
+    sessionPath: string,
+    baseTitle: string,
+    requestId: string,
+  ): Promise<{ assigned: boolean; title?: string; error?: string }>;
   /** Apply a complete disabled-entry set for a session: persist to the sidecar,
    *  rewrite the SDK base prompt, and re-emit `session.opened`. */
   applySystemPromptToggles(
@@ -192,6 +211,23 @@ export interface BackendRequestHandlerDeps {
     operationId: string,
     privacyMode: boolean,
   ): Promise<{ rootSessionId: string; pendingCreateOperationId?: string } | void>;
+  /** Typed host close bridge acknowledgement for the agent `session_control`
+   *  close action. Resolves or fails the coordinator's waiting close request;
+   *  unknown or late request IDs are tolerated, never treated as success. */
+  handleSessionCloseAcknowledgement?(params: SessionCloseAcknowledgementParams): Promise<{ ok: boolean; acknowledged: boolean }>;
+  /** Correlated execution-settings acknowledgement from the host; late or
+   *  unknown request IDs are tolerated and never treated as success. */
+  handleSessionControlSettingsAcknowledgement?(
+    params: SessionControlSettingsAcknowledgement,
+  ): Promise<{ ok: boolean; acknowledged: boolean }>;
+  /** Reject execution admission for a session with an outstanding host-owned
+   *  close request. Optional so standalone handlers/tests without the bridge
+   *  keep working. */
+  assertSessionNotClosing?(sessionPath: string): void;
+  /** Ingest the latest ordered host live-membership snapshot: the single
+   *  addressability authority once seen. Optional so standalone handlers and
+   *  tests without the host bridge keep working. */
+  applyHostLiveMembership?(snapshot: HostLiveMembershipSnapshotParams): void;
   /** Retire a session runtime and delete its transcript/sidecars. */
   forgetSession?(sessionPath: string, operationId?: string): Promise<void>;
   loadTranscriptPage(
