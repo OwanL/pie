@@ -17,7 +17,7 @@ import {
   resolveSdkPackages,
   resolveTypeScriptCompiler,
 } from '../package-resolution.mjs';
-import { runWithConcurrency } from '../../verification/run-typechecks.mjs';
+import { runProject, runWithConcurrency } from '../../verification/run-typechecks.mjs';
 import { buildTsxArgs, runGroup } from '../../verification/run-test-files.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
@@ -73,6 +73,20 @@ function runNode(args, cwd) {
   assert.equal(result.error, undefined, result.error?.message);
   assert.equal(result.status, 0, [result.stdout, result.stderr].filter(Boolean).join('\n'));
   return result.stdout.trim();
+}
+
+function resolveNativeOwnerControls(options, specifiers, { helper = false } = {}) {
+  // Observe native owner lookup outside the outer TSX candidate-alias hooks.
+  // spawnSync starts Node without forwarding process.execArgv; retain the
+  // environment so external-network denial preloads still apply.
+  const helperUrl = new URL('../package-resolution.mjs', import.meta.url).href;
+  return JSON.parse(runNode(['--input-type=module', '--eval', `
+import { createOwnerRequire, resolveOwnerModule } from ${JSON.stringify(helperUrl)};
+const options = ${JSON.stringify(options)};
+const ownerRequire = createOwnerRequire(options);
+console.log(JSON.stringify(${JSON.stringify(specifiers)}.map((name) => ${helper
+    ? 'resolveOwnerModule(name, options)' : 'ownerRequire.resolve(name)'})));
+`], options.dependencyOwnerRoot));
 }
 
 function writeFixturePackage(modulesRoot, name, manifest = {}, files = {}) {
@@ -266,7 +280,7 @@ test('explicit sdkPath resolves its nested and hoisted candidate graph for all P
   assert.equal(resolved.piAi.root, candidate.roots['@earendil-works/pi-ai']);
   assert.equal(resolved.packages['@earendil-works/pi-tui'].root, candidate.roots['@earendil-works/pi-tui']);
   assert.equal(resolved.packages.typebox.root, candidate.roots.typebox);
-  assert.equal(createOwnerRequire({ dependencyOwnerRoot: fakeOwner }).resolve('@earendil-works/pi-ai'),
+  assert.equal(resolveNativeOwnerControls({ dependencyOwnerRoot: fakeOwner }, ['@earendil-works/pi-ai'])[0],
     path.join(fakeOwner, 'node_modules', '@earendil-works', 'pi-ai', 'index.js'));
   assert.notEqual(resolved.piAi.root, path.join(fakeOwner, 'node_modules', '@earendil-works', 'pi-ai'));
 
@@ -312,7 +326,8 @@ test('explicit sdkPath resolves its nested and hoisted candidate graph for all P
   assert.ok(tsxPaths.typebox[0].startsWith(candidate.roots.typebox));
   assert.equal(tsxPaths['@sinclair/typebox'][0], tsxPaths.typebox[0]);
   assert.ok(typePaths['typebox/value'][0].startsWith(candidate.roots.typebox));
-  assert.equal(resolveOwnerModule('preact', options), path.join(fakeOwner, 'node_modules', 'preact', 'dist', 'preact.js'));
+  assert.equal(resolveNativeOwnerControls(options, ['preact'], { helper: true })[0],
+    path.join(fakeOwner, 'node_modules', 'preact', 'dist', 'preact.js'));
 
   const viteAliases = createViteAliases(options);
   const findAlias = (specifier) => viteAliases.find(({ find }) => (
@@ -488,11 +503,24 @@ test('candidate overlays add SDK and TypeBox aliases across inherited paths with
     assert.ok(paths[name][0].startsWith(root), `${name} points into the candidate graph`);
   }
   assert.equal(paths['candidate-runtime'], undefined,
-    'unaliased direct dependencies remain resolvable through candidate package ancestry');
+    'compiler declaration resolution is unchanged by executable import aliases');
   assert.equal(paths['candidate-transitive'], undefined,
-    'unaliased transitive dependencies are not globally flattened');
+    'multiple transitive roots must not be flattened by direct owner aliases');
+  assert.equal(paths.ws, undefined, 'compiler keeps declaration/@types lookup rather than a JS-only alias');
   assert.ok(paths['owner-tool'][0].startsWith(path.join(fakeOwner, 'node_modules', 'owner-tool')));
   assert.ok(paths.preact[0].startsWith(candidate.roots.preact), 'candidate Preact is not split from the SDK graph');
+});
+
+test('direct owner imports missing from the candidate graph never retain the installed copy', (t) => {
+  const { fixtureRoot, sourceRoot } = makeFixture(t);
+  const candidate = makeSdkCandidateGraph(fixtureRoot);
+  const fakeOwner = makeCandidateOwner(fixtureRoot);
+  rmSync(candidate.roots.ws, { recursive: true, force: true });
+  assert.throws(() => createTsconfigOverlay(writeTsConfig(sourceRoot, {}), {
+    dependencyOwnerRoot: fakeOwner,
+    sdkPath: candidate.sdkRoot,
+    includeOwnerDependencies: true,
+  }), /Candidate SDK graph.*cannot resolve Pie-source import ws/);
 });
 
 test('explicit sdkPath fails on invalid or incomplete candidate graphs instead of falling back to the owner', (t) => {
@@ -574,7 +602,20 @@ test('candidate overlays leave unaliased nested dependencies native and reject a
   t.after(() => overlay.dispose());
   const paths = JSON.parse(readFileSync(overlay.configPath, 'utf8')).compilerOptions.paths;
   assert.equal(paths.retry, undefined, 'unaliased nested retry versions remain resolvable by candidate package ancestry');
-  assert.equal(paths['candidate-transitive'], undefined, 'ordinary unaliased transitive dependencies are not flattened');
+  assert.equal(paths['candidate-transitive'], undefined,
+    'multiple transitive roots remain native instead of being flattened');
+  assert.deepEqual(paths.ws, [path.join(candidate.roots.ws, 'index.js')]);
+  assert.deepEqual(paths['candidate-runtime'], [path.join(candidate.roots['candidate-runtime'], 'index.js')]);
+
+  const entry = path.join(sourceRoot, 'candidate-imports.ts');
+  writeFileSync(entry, [
+    "import { marker } from 'ws';",
+    "import { nestedVersion } from 'candidate-runtime';",
+    'console.log(JSON.stringify([marker, nestedVersion]));',
+  ].join('\n'));
+  assert.deepEqual(JSON.parse(runNode([tsxCli, '--tsconfig', overlay.configPath, entry], sourceRoot)),
+    ['candidate ws', 'nested candidate transitive'],
+    'ordinary Pie imports use the artifact while package issuers retain their nested versions');
 
   const retryAliasConfig = writeTsConfig(sourceRoot, { paths: { retry: ['./host-retry.js'] } });
   const overlayDirectories = () => new Set(readdirSync(os.tmpdir()).filter((entry) => entry.startsWith('pie-tsx-overlay-')));
@@ -605,40 +646,52 @@ function writeHoistedCompetitor(fixtureRoot, packageName) {
 test('resolveOwnerModule forces canonical SDK identity even when the owner hoists a competitor copy', (t) => {
   const fixtureRoot = mkdtempSync(path.join(os.tmpdir(), 'pie-package-resolution-hoisted-'));
   t.after(() => rmSync(fixtureRoot, { recursive: true, force: true }));
-  const realSdk = resolveSdkPackages({ dependencyOwnerRoot: ownerRoot });
+  const candidate = makeSdkCandidateGraph(fixtureRoot);
+  // Native realpath identity assertions need actual fixture entry files.
+  for (const [root, entry] of [
+    [candidate.roots.typebox, 'build/index.mjs'],
+    [candidate.roots['@earendil-works/pi-ai'], 'dist/index.js'],
+    [candidate.roots['@earendil-works/pi-ai'], 'dist/compat.js'],
+  ]) {
+    const entryPath = path.join(root, entry);
+    mkdirSync(path.dirname(entryPath), { recursive: true });
+    writeFileSync(entryPath, 'export {};\n');
+  }
 
-  // Isolated fake owner outside the checkout: it links the real SDK package
-  // (junction/symlink, so the SDK's private nested graph stays canonical) and
-  // hoists competitor copies of every identity-sensitive spelling.
+  // Isolated fake owner links the synthetic SDK graph, preserving its nested
+  // canonical identity, and hoists competitors of each sensitive spelling.
   const fixtureNodeModules = path.join(fixtureRoot, 'node_modules');
   const fixtureSdkRoot = path.join(fixtureNodeModules, '@earendil-works', 'pi-coding-agent');
   mkdirSync(path.dirname(fixtureSdkRoot), { recursive: true });
-  symlinkSync(realSdk.sdk.root, fixtureSdkRoot, process.platform === 'win32' ? 'junction' : 'dir');
+  symlinkSync(candidate.sdkRoot, fixtureSdkRoot, process.platform === 'win32' ? 'junction' : 'dir');
   const competitorNames = ['typebox', '@sinclair/typebox', '@earendil-works/pi-ai', '@mariozechner/pi-ai', 'preact'];
   const competitors = Object.fromEntries(competitorNames.map((name) => [name, writeHoistedCompetitor(fixtureRoot, name)]));
-  const fixtureOptions = { dependencyOwnerRoot: fixtureRoot };
+  const fixtureOptions = { dependencyOwnerRoot: fixtureRoot, sdkPath: candidate.sdkRoot };
 
   // The competitors are genuinely owner-resolvable, so the old owner-first
   // resolution would have handed back these copies instead of SDK identity.
-  const ownerRequire = createOwnerRequire(fixtureOptions);
-  for (const [name, packageRoot] of Object.entries(competitors)) {
-    assert.equal(ownerRequire.resolve(name), path.join(packageRoot, 'index.js'));
+  const nativeControls = resolveNativeOwnerControls(fixtureOptions, competitorNames);
+  for (const [index, name] of competitorNames.entries()) {
+    assert.equal(nativeControls[index], path.join(competitors[name], 'index.js'));
   }
 
   // Canonical SDK nested identity wins for every identity-sensitive spelling,
   // whatever spelling or hoisted copy exists in the fake owner.
-  const realOwnerOptions = { dependencyOwnerRoot: ownerRoot };
-  const canonicalTypebox = realpathSync(resolveSdkModule('typebox', realOwnerOptions));
-  const canonicalPiAi = realpathSync(resolveSdkModule('@earendil-works/pi-ai', realOwnerOptions));
+  const candidateOptions = { sdkPath: candidate.sdkRoot, dependencyOwnerRoot: fixtureRoot };
+  const canonicalTypebox = realpathSync(path.join(candidate.roots.typebox, 'build/index.mjs'));
+  const canonicalPiAi = realpathSync(path.join(candidate.roots['@earendil-works/pi-ai'], 'dist/index.js'));
+  assert.equal(realpathSync(resolveSdkModule('typebox', candidateOptions)), canonicalTypebox);
+  assert.equal(realpathSync(resolveSdkModule('@earendil-works/pi-ai', candidateOptions)), canonicalPiAi);
   assert.equal(realpathSync(resolveOwnerModule('typebox', fixtureOptions)), canonicalTypebox);
   assert.equal(realpathSync(resolveOwnerModule('@sinclair/typebox', fixtureOptions)), canonicalTypebox);
   assert.equal(realpathSync(resolveOwnerModule('@earendil-works/pi-ai', fixtureOptions)), canonicalPiAi);
   assert.equal(realpathSync(resolveOwnerModule('@mariozechner/pi-ai', fixtureOptions)), canonicalPiAi);
   assert.equal(realpathSync(resolveOwnerModule('@earendil-works/pi-ai/compat', fixtureOptions)),
-    realpathSync(path.join(realSdk.piAi.root, 'dist', 'compat.js')));
+    realpathSync(path.join(candidate.roots['@earendil-works/pi-ai'], 'dist', 'compat.js')));
 
   // No global catch-all: non-owned specifiers still resolve owner-first.
-  assert.equal(resolveOwnerModule('preact', fixtureOptions), path.join(competitors.preact, 'index.js'));
+  assert.equal(resolveNativeOwnerControls(fixtureOptions, ['preact'], { helper: true })[0],
+    path.join(competitors.preact, 'index.js'));
 });
 
 test('the real TypeScript compiler resolves future TSX roots, owner type roots, Pi aliases, and Preact subpaths through the integrated typecheck caller', { timeout: 120_000 }, async (t) => {
@@ -666,8 +719,9 @@ const component = () => {
 const types: [ExtensionAPI, LegacyExtensionAPI, Model<any>, LegacyModel<any>, PiTuiText] | undefined = undefined;
 void [schema, element, component, types];
 `);
-  const typeResolution = createTypeScriptResolution({ dependencyOwnerRoot: ownerRoot });
-  const piTuiRoot = path.join(ownerRoot, 'node_modules', '@earendil-works', 'pi-coding-agent', 'node_modules', '@earendil-works', 'pi-tui');
+  const { sourceDescriptor } = await import('../../../harness/agent-processes/lib/sdk-integration/test/source-fixture.ts');
+  const typeResolution = createTypeScriptResolution({ dependencyOwnerRoot: ownerRoot, sdkPath: sourceDescriptor.sdkPath });
+  const piTuiRoot = path.join(sourceDescriptor.artifactDir, 'node_modules', '@earendil-works', 'pi-tui');
   assert.equal(typeResolution.paths['@earendil-works/pi-tui'][0], path.join(piTuiRoot, 'dist', 'index.d.ts'));
   const configPath = writeTsConfig(sourceRoot, typeResolution);
   // The future-root proof exercises the integrated typecheck caller (the same
@@ -678,7 +732,7 @@ void [schema, element, component, types];
     id: 'package-resolution-compiler-proof',
     config: configPath,
     compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc',
-  }], 1);
+  }], 1, (project, signal) => runProject(project, signal, sourceDescriptor));
   assert.equal(result.code, 0, result.output);
 });
 
@@ -778,18 +832,25 @@ test('future-root tsx overlay resolves one owner identity', () => {
       ['@sinclair/typebox', [placeholder]],
       ['@earendil-works/pi-tui', [placeholder]],
       ['preact/hooks', [placeholder]],
+      ['preact/jsx-runtime', [placeholder]],
     ]),
   });
-  const overlay = createTsconfigOverlay(baseConfigPath, { dependencyOwnerRoot: ownerRoot });
+  const { sourceDescriptor } = await import('../../../harness/agent-processes/lib/sdk-integration/test/source-fixture.ts');
+  const overlay = createTsconfigOverlay(baseConfigPath, {
+    dependencyOwnerRoot: ownerRoot, sdkPath: sourceDescriptor.sdkPath,
+  });
   t.after(() => overlay.dispose());
   const overlayConfig = JSON.parse(readFileSync(overlay.configPath, 'utf8'));
   assert.equal(overlayConfig.extends, baseConfigPath);
   assert.equal(overlayConfig.compilerOptions.strict, undefined);
   assert.equal(overlayConfig.compilerOptions.include, undefined);
-  for (const specifier of ['@earendil-works/pi-ai', '@mariozechner/pi-ai', 'typebox', '@sinclair/typebox', '@earendil-works/pi-tui', 'preact/hooks']) {
+  const declaredAliases = Object.keys(JSON.parse(readFileSync(baseConfigPath, 'utf8')).compilerOptions.paths);
+  assert.ok(declaredAliases.includes('preact/jsx-runtime'), 'every imported Preact subpath is explicitly declared');
+  for (const specifier of declaredAliases) {
     const [target] = overlayConfig.compilerOptions.paths[specifier];
     assert.ok(path.isAbsolute(target), `${specifier} must have an explicit absolute owner path`);
-    assert.ok(target.startsWith(ownerRoot), `${specifier} must resolve under the dependency owner`);
+    const expectedRoot = specifier.startsWith('preact/') ? ownerRoot : sourceDescriptor.artifactDir;
+    assert.ok(target.startsWith(expectedRoot), `${specifier} must resolve under its explicit owner`);
   }
 
   assert.equal(existsSync(tsxCli), true);
@@ -1201,6 +1262,42 @@ test('owner dependency overlay validates installed manifests but does not invent
   assert.throws(makeOverlay, /Expected missing package manifest/);
 });
 
+test('TypeScript overlays preserve default base-config type ancestry without owner dependency aliases', (t) => {
+  const { fixtureRoot, sourceRoot } = makeFixture(t);
+  const candidate = makeSdkCandidateGraph(fixtureRoot);
+  const typeRoot = path.join(fixtureRoot, 'node_modules', '@types');
+  writeFixturePackage(typeRoot, 'fixture-global', { types: './index.d.ts' }, {
+    'index.d.ts': 'declare const fixtureGlobal: string;\n',
+  });
+  writeFileSync(path.join(sourceRoot, 'proof.ts'), 'const proof: string = fixtureGlobal; void proof;\n');
+  const inheritedPath = path.join(sourceRoot, 'inherited.json');
+  writeFileSync(inheritedPath, JSON.stringify({ compilerOptions: { types: ['fixture-global'] } }));
+  const baseConfigPath = writeTsConfig(sourceRoot, {});
+  const baseConfig = JSON.parse(readFileSync(baseConfigPath, 'utf8'));
+  delete baseConfig.compilerOptions.types;
+  baseConfig.extends = './inherited.json';
+  writeFileSync(baseConfigPath, JSON.stringify(baseConfig));
+  const options = { typescript: true, sdkPath: candidate.sdkRoot, dependencyOwnerRoot: ownerRoot };
+  const overlay = createTsconfigOverlay(baseConfigPath, options);
+  t.after(() => overlay.dispose());
+  const generated = JSON.parse(readFileSync(overlay.configPath, 'utf8')).compilerOptions;
+  assert.ok(generated.typeRoots.includes(typeRoot), 'base ancestry survives relocation to OS temp');
+  assert.equal(generated.typeRoots.includes(path.join(ownerRoot, 'node_modules', '@types')), false,
+    'includeOwnerDependencies:false does not substitute an unrelated owner');
+  assert.equal(generated.types, undefined, 'inherited explicit types remain unchanged');
+  assert.equal(generated.paths['candidate-transitive'], undefined, 'nested graphs are not flattened');
+  runNode([tscCli, '--project', overlay.configPath, '--pretty', 'false'], sourceRoot);
+
+  writeFileSync(inheritedPath, JSON.stringify({ compilerOptions: {
+    types: ['fixture-global'], typeRoots: [typeRoot],
+  } }));
+  const explicitOverlay = createTsconfigOverlay(baseConfigPath, options);
+  t.after(() => explicitOverlay.dispose());
+  assert.equal(JSON.parse(readFileSync(explicitOverlay.configPath, 'utf8')).compilerOptions.typeRoots, undefined,
+    'explicit inherited typeRoots are not overridden');
+  runNode([tscCli, '--project', explicitOverlay.configPath, '--pretty', 'false'], sourceRoot);
+});
+
 test('createTsconfigOverlay passes through base configs without their own paths', (t) => {
   const { sourceRoot } = makeFixture(t);
   const baseConfigPath = writeTsConfig(sourceRoot, {});
@@ -1216,8 +1313,15 @@ test('the integrated run-test-files wrapper keeps current-layout tsxConfig packa
   // Old layout stays operational: the full integrated wrapper (registry
   // classification -> generated overlay -> package-local tsx) runs a real
   // registered test that depends on the redirected nested SDK identity.
-  const { spawnSync } = await import('node:child_process');
-  const result = spawnSync(process.execPath, ['scripts/verification/run-test-files.mjs', 'harness/tools/subagent/test/schema.test.ts'], {
+  // This fixture derives all Pi roots from the outer TSX overlay and verifies
+  // the immutable artifact independently in native Node. Missing or mismatched
+  // selection throws before any nested runner can acquire a fresh artifact.
+  const { sourceDescriptor } = await import('../../../harness/agent-processes/lib/sdk-integration/test/source-fixture.ts');
+  const result = spawnSync(process.execPath, [
+    'scripts/verification/run-test-files.mjs',
+    'harness/tools/subagent/test/schema.test.ts',
+    '--pi-runtime', sourceDescriptor.artifactDir,
+  ], {
     cwd: repoRoot,
     encoding: 'utf8',
     timeout: 120_000,

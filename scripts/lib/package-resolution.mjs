@@ -619,7 +619,7 @@ function candidateRuntimeDependencyPaths(options, conditions, declaredPaths = {}
   // owner, or helper config; native ancestry preserves nested transitive versions.
   const exposedAliasKeys = new Set([
     ...Object.keys(declaredPaths ?? {}),
-    ...Object.keys(ownerPaths ?? {}),
+    ...Object.keys(ownerPaths ?? {}).filter((key) => ![...names].some((name) => key === name || key.startsWith(`${name}/`))),
     ...Object.keys(helperPaths ?? {}),
   ]);
   const dependencyForAlias = (aliasKey) => [...names]
@@ -661,7 +661,9 @@ function candidateRuntimeDependencyPaths(options, conditions, declaredPaths = {}
 function ownerDependencyPaths(options, conditions) {
   const ownerRoot = resolveOwnerRoot(options);
   const manifest = JSON.parse(readFileSync(path.join(ownerRoot, 'package.json'), 'utf8'));
-  const sdkDependencies = sdkRuntimeDependencyGraph(options).names;
+  const sdkGraph = sdkRuntimeDependencyGraph(options);
+  const sdkDependencies = sdkGraph.names;
+  const candidate = options.sdkPath !== undefined ? resolveSdkPackages(options) : undefined;
   const paths = {};
   for (const name of new Set([
     ...Object.keys(manifest.dependencies ?? {}),
@@ -669,7 +671,27 @@ function ownerDependencyPaths(options, conditions) {
   ])) {
     // SDK identities and candidate SDK runtime dependencies must not be
     // redirected to a potentially different host-owner copy.
-    if (isSdkIdentitySpecifier(name) || sdkDependencies.has(name)) continue;
+    if (isSdkIdentitySpecifier(name)) continue;
+    if (sdkDependencies.has(name)) {
+      // Compiler declaration resolution keeps its existing @types/package
+      // ancestry. These extra aliases are only for ordinary executable imports.
+      if (conditions.includes('types')) continue;
+      // Relocated Pie sources need direct owner imports even when candidate
+      // mode excludes the owner's installed copy. Only alias a single graph
+      // root: tsx also applies paths to workspace package issuers, so exposing
+      // a dependency with nested versions would flatten their resolution.
+      if ((sdkGraph.roots.get(name)?.size ?? 0) > 1) continue;
+      const root = packageRootFromRequire(candidate.sdkRequire, name, candidate.sdk.root, { allowMissing: true });
+      if (!root || !sdkGraph.roots.get(name)?.has(root)) {
+        throw new Error(`Candidate SDK graph at ${candidate.sdk.root} cannot resolve Pie-source import ${name}`);
+      }
+      const info = packageInfoAt(root, name, undefined, { allowEntryless: true });
+      for (const mapping of exportMappings(info, name, runtimeConditionsForPackage(name, conditions))) {
+        paths[mapping.key] = [mapping.replacement];
+      }
+      if (!info.manifest.exports) paths[`${name}/*`] = [path.join(root, '*')];
+      continue;
+    }
     // Owner dependency enumeration includes config-only packages without an entry.
     // Still require the installed manifest; SDK identity resolution remains strict.
     const packageInfo = packageInfoFromOwner(ownerRoot, name, { allowEntryless: true });
@@ -747,8 +769,9 @@ function effectiveTsconfigOptions(configPath, options) {
  * exactly the specifiers the checked-in config redirects. Explicit `sdkPath`
  * mode additionally adds every candidate SDK and TypeBox mapping, including
  * inherited config paths, and maps only candidate runtime dependencies
- * exposed by inherited, owner, or helper aliases, so unaliased transitive
- * dependencies retain native candidate ancestry. For
+ * exposed by inherited or helper aliases, plus executable direct owner imports
+ * selected from the SDK context only when the graph has one root for that name.
+ * Dependencies with nested versions retain native candidate ancestry. For
  * extension source still outside its package owner, `includeOwnerDependencies`
  * additionally maps owner dependencies which are not in the candidate SDK
  * runtime dependency closure (including the compiler's declaration exports
@@ -775,7 +798,7 @@ export function createTsconfigOverlay(baseConfigPath, options = {}) {
     const declaredPaths = readTsconfigJson(absoluteBase).compilerOptions?.paths;
     const candidateSdk = options.sdkPath !== undefined;
     const helperPaths = options.typescript ? createTypeScriptResolution(options).paths : createTsxResolution(options).paths;
-    const effectiveOptions = declaredPaths || options.includeOwnerDependencies || candidateSdk
+    const effectiveOptions = declaredPaths || options.includeOwnerDependencies || candidateSdk || options.typescript
       ? effectiveTsconfigOptions(absoluteBase, options) : undefined;
     const basePaths = options.includeOwnerDependencies || candidateSdk ? effectiveOptions?.paths ?? declaredPaths : declaredPaths;
     const conditions = options.typescript
@@ -807,13 +830,21 @@ export function createTsconfigOverlay(baseConfigPath, options = {}) {
     // Keep inherited typeRoots (already absolute after TS parses `extends`) and
     // leave the inherited `types` list unchanged.
     const ownerModules = path.join(resolveOwnerRoot(options), 'node_modules');
+    // With no explicit typeRoots, relocating a TS config also relocates its
+    // default @types ancestry. Preserve the base config's native search roots,
+    // not the temporary overlay's ancestry or an unrelated dependency owner.
+    const defaultTypeRoots = options.typescript && effectiveOptions?.typeRoots === undefined
+      ? createOwnerRequire(options)('typescript').getEffectiveTypeRoots(effectiveOptions ?? {}, {
+        getCurrentDirectory: () => path.dirname(absoluteBase),
+      })?.map((root) => path.normalize(root))
+      : undefined;
     const typeRoots = options.includeOwnerDependencies && options.typescript
       ? [...new Set([
         ...(effectiveOptions?.typeRoots ?? []).map((root) => path.normalize(root)),
         path.join(ownerModules, '@types'),
         ...(effectiveOptions?.types?.includes('vite/client') ? [ownerModules] : []),
       ])]
-      : undefined;
+      : defaultTypeRoots;
     const configPath = path.join(directory, 'tsconfig.overlay.json');
     writeFileSync(configPath, JSON.stringify({
       extends: absoluteBase,
