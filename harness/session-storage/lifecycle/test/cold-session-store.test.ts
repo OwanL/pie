@@ -17,18 +17,13 @@ import {
   ColdBrowseHelperRequestError,
   type ColdBrowseHelper,
 } from '../../../agent-processes/cold-browse-helper/cold-browse-helper-client';
-import { ensureSdkPatchBarrier, loadSdk, type SdkSessionManager } from '../../../agent-processes/lib/sdk-integration/sdk';
+import { loadSdk, type SdkSessionManager } from '../../../agent-processes/lib/sdk-integration/sdk';
+import { sourceDescriptor, sourceLoadMode } from '../../../agent-processes/lib/sdk-integration/test/source-fixture.js';
 import { SessionSnapshotTooLargeError } from '../../transcripts/snapshot-boundary.js';
 
-const pinnedSdkPath = path.join(process.cwd(), 'application', 'hosts', 'vscode', 'node_modules', '@earendil-works', 'pi-coding-agent');
-const previousTrustedSdkRoot = process.env.PIE_TRUSTED_SDK_ROOT;
-// This fixture intentionally loads the repository-pinned SDK. Establish only
-// that exact package as trusted; production path validation remains unchanged.
-process.env.PIE_TRUSTED_SDK_ROOT = pinnedSdkPath;
-test.after(() => {
-  if (previousTrustedSdkRoot === undefined) delete process.env.PIE_TRUSTED_SDK_ROOT;
-  else process.env.PIE_TRUSTED_SDK_ROOT = previousTrustedSdkRoot;
-});
+// The source fixture verifies the explicitly selected artifact before exposing
+// its descriptor and rehashes the artifact in its after hook.
+const coldSourceLoadMode = { ...sourceLoadMode, surface: 'cold' as const };
 
 function header(cwd: string, version: number | undefined = 3, id = 'session-test') {
   return {
@@ -91,11 +86,11 @@ async function readJsonl(filePath: string): Promise<any[]> {
 let sessionManagerPromise: Promise<any> | undefined;
 
 function realSdkPath(): string {
-  return pinnedSdkPath;
+  return sourceDescriptor.sdkPath;
 }
 
 async function getRealSessionManager(): Promise<any> {
-  sessionManagerPromise ??= loadSdk(realSdkPath(), { mode: 'cold-coordinator' })
+  sessionManagerPromise ??= loadSdk(realSdkPath(), coldSourceLoadMode)
     .then((sdk) => sdk.SessionManager);
   return await sessionManagerPromise;
 }
@@ -151,12 +146,11 @@ const browseOpenOptions: ColdSessionOpenOptions = {
   }],
 };
 
-test('production cold SDK load mode remains within the explicit one-time in-process startup budget', async () => {
-  // Measure module loading, not the patch barrier: production always completes
-  // that coordinator-owned barrier before importing any SDK module. A sampling
-  // interval runs across the fresh cold import and receives one post-import turn
-  // so synchronous module evaluation is represented in max event-loop drift.
-  await ensureSdkPatchBarrier(realSdkPath());
+test('production cold SDK load mode remains within the explicit one-time in-process startup budget', async (t) => {
+  // Initial source-fixture verification occurs before this test. This measured
+  // load includes descriptor re-verification and fresh cold module import; the
+  // loader does not expose separate timings. No patch barrier runs. Sampling
+  // includes both phases and one post-load turn for synchronous evaluation.
   const sampleIntervalMs = 10;
   let nextSampleAt = performance.now() + sampleIntervalMs;
   let maxEventLoopDelayMs = 0;
@@ -170,12 +164,13 @@ test('production cold SDK load mode remains within the explicit one-time in-proc
   const startedAt = performance.now();
   let sdk: Awaited<ReturnType<typeof loadSdk>>;
   try {
-    sdk = await loadSdk(realSdkPath(), { mode: 'cold-coordinator' });
+    sdk = await loadSdk(realSdkPath(), coldSourceLoadMode);
     await new Promise<void>((resolve) => setImmediate(resolve));
   } finally {
     clearInterval(sampler);
   }
   const importDurationMs = performance.now() - startedAt;
+  t.diagnostic(`cold source descriptor verification + import: ${importDurationMs.toFixed(1)}ms; max event-loop delay: ${maxEventLoopDelayMs.toFixed(1)}ms (initial fixture verification excluded)`);
 
   assert.equal(typeof sdk.SessionManager?.open, 'function');
   assert.equal(typeof sdk.AuthStorage?.create, 'function');
