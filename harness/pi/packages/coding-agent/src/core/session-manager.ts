@@ -6,10 +6,13 @@ import {
 	closeSync,
 	createReadStream,
 	existsSync,
+	fsyncSync,
+	linkSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
 	readSync,
+	rmSync,
 	statSync,
 	writeFileSync,
 } from "fs";
@@ -36,6 +39,51 @@ export interface SessionHeader {
 	timestamp: string;
 	cwd: string;
 	parentSession?: string;
+}
+
+function persistCreatedSessionHeader(manager: SessionManager): void {
+	const sessionFile = manager.getSessionFile();
+	const header = manager.getHeader();
+	if (!sessionFile || !header || header.type !== "session" || header.version !== CURRENT_SESSION_VERSION) {
+		throw new Error("SessionManager.create did not produce a v3 session header and path");
+	}
+	const temporaryPath = `${sessionFile}.pie-create-${process.pid}-${randomUUID()}.tmp`;
+	let fileDescriptor: number | undefined;
+	let ownsTemporaryFile = false;
+	let published = false;
+	try {
+		fileDescriptor = openSync(temporaryPath, "wx", 0o600);
+		ownsTemporaryFile = true;
+		writeFileSync(fileDescriptor, `${JSON.stringify(header)}\n`, "utf8");
+		fsyncSync(fileDescriptor);
+		closeSync(fileDescriptor);
+		fileDescriptor = undefined;
+		// Hard-link publication is same-filesystem atomic and fails with
+		// EEXIST instead of replacing another session.
+		linkSync(temporaryPath, sessionFile);
+		published = true;
+		rmSync(temporaryPath);
+		let directoryDescriptor: number | undefined;
+		try {
+			directoryDescriptor = openSync(resolve(sessionFile, ".."), "r");
+			fsyncSync(directoryDescriptor);
+		} catch (error) {
+			if (process.platform !== "win32") throw error;
+		} finally {
+			if (directoryDescriptor !== undefined) closeSync(directoryDescriptor);
+		}
+	} catch (error) {
+		// A post-publication durability failure is not a commit. Remove the
+		// destination before rethrowing.
+		if (published) rmSync(sessionFile, { force: true });
+		throw error;
+	} finally {
+		try {
+			if (fileDescriptor !== undefined) closeSync(fileDescriptor);
+		} finally {
+			if (ownsTemporaryFile) rmSync(temporaryPath, { force: true });
+		}
+	}
 }
 
 export interface NewSessionOptions {
@@ -807,6 +855,7 @@ export class SessionManager {
 		sessionFile: string | undefined,
 		persist: boolean,
 		newSessionOptions?: NewSessionOptions,
+		preloadedEntries?: FileEntry[],
 	) {
 		this.cwd = resolvePath(cwd);
 		this.sessionDir = normalizePath(sessionDir);
@@ -816,17 +865,17 @@ export class SessionManager {
 		}
 
 		if (sessionFile) {
-			this.setSessionFile(sessionFile);
+			this.setSessionFile(sessionFile, preloadedEntries);
 		} else {
 			this.newSession(newSessionOptions);
 		}
 	}
 
 	/** Switch to a different session file (used for resume and branching) */
-	setSessionFile(sessionFile: string): void {
+	setSessionFile(sessionFile: string, preloadedEntries?: FileEntry[]): void {
 		this.sessionFile = resolvePath(sessionFile);
 		if (existsSync(this.sessionFile)) {
-			this.fileEntries = loadEntriesFromFile(this.sessionFile);
+			this.fileEntries = preloadedEntries ?? loadEntriesFromFile(this.sessionFile);
 
 			// If file was empty, initialize it with a valid session header. If it was
 			// non-empty but did not parse as a pi session, fail without modifying it.
@@ -1440,7 +1489,10 @@ export class SessionManager {
 	 */
 	static create(cwd: string, sessionDir?: string, options?: NewSessionOptions): SessionManager {
 		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd);
-		return new SessionManager(cwd, dir, undefined, true, options);
+		const manager = new SessionManager(cwd, dir, undefined, true, options);
+		persistCreatedSessionHeader(manager);
+		manager.flushed = true;
+		return manager;
 	}
 
 	/**
@@ -1457,7 +1509,7 @@ export class SessionManager {
 		const cwd = cwdOverride ?? header?.cwd ?? process.cwd();
 		// If no sessionDir provided, derive from file's parent directory
 		const dir = sessionDir ? normalizePath(sessionDir) : resolve(resolvedPath, "..");
-		return new SessionManager(cwd, dir, resolvedPath, true);
+		return new SessionManager(cwd, dir, resolvedPath, true, undefined, entries);
 	}
 
 	/**
