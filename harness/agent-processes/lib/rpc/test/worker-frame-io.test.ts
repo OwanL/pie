@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { PassThrough } from 'node:stream';
 
+import { SDK_PATCH_IDENTITY_VERSION } from '../../sdk-integration/sdk-patch-barrier.js';
 import {
   attachBoundedWorkerIpcReader,
   BoundedWorkerIpcWriter,
@@ -27,6 +28,20 @@ const frameBase = {
   leasePath: '/session.jsonl',
   leaseRevision: 1,
   sessionPath: '/session.jsonl',
+};
+
+const sdkRuntime = {
+  kind: 'legacy-patched' as const,
+  patchIdentity: {
+    identityVersion: SDK_PATCH_IDENTITY_VERSION,
+    sdkPath: '/sdk',
+    sdkVersion: 'fixture',
+    terminalDurability: { patchVersion: 1, relativePath: 'agent.js', sha256: 'a'.repeat(64) },
+    retryClassifier: { patchVersion: 1, relativePath: 'retry.js', sha256: 'b'.repeat(64) },
+    coldCreateDurability: { patchVersion: 1, relativePath: 'manager.js', sha256: 'c'.repeat(64) },
+    sessionOwnershipAdapter: { patchVersion: 1, relativePath: 'manager.js', sha256: 'd'.repeat(64) },
+    sessionReplacementAdapter: { patchVersion: 1, relativePath: 'runtime.js', sha256: 'e'.repeat(64) },
+  },
 };
 
 const command = (requestId: string): WorkerIpcFrameDraft => ({
@@ -424,7 +439,7 @@ test('writer admits a single large control frame that exceeds the lane capacity'
     operationId: 'operation-1',
     payload: {
       sdkPath: '/sdk', agentDir: '/agent', startupCwd: '/work', sessionDir: '/sessions',
-      sessionPath: '/session.jsonl', creationReason: 'resume',
+      sessionPath: '/session.jsonl', creationReason: 'resume', sdkRuntime,
       writeLease: {
         coordinatorGeneration: 1, workerId: 'worker', workerGeneration: 1,
         canonicalSessionPath: '/session.jsonl', ownershipRevision: 1, nonce: 'nonce',

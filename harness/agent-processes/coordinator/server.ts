@@ -116,6 +116,7 @@ import {
   type SdkAuthStorage,
   type SdkModelRegistry,
 } from '../lib/sdk-integration/sdk';
+import { verifySdkRuntimeSelection, sdkRuntimeLoadMode, type SdkRuntimeSelection } from '../lib/sdk-integration/sdk-runtime-selection';
 import { ProviderGate, type ProviderConcurrencyConfig } from '../../model-providers/concurrency/provider-gate.js';
 import { resolveProviderMaxConcurrentRequests } from '../../model-providers/concurrency/provider-concurrency.js';
 import { markDisabledEntries } from '../../agent-instructions/prompt-assembly/system-prompts.js';
@@ -478,6 +479,8 @@ function installBackendFatalHandlers(): void {
 export class BackendServer {
   private sdk!: ColdCoordinatorSdkModule;
   private readonly sdkPath: string;
+  private readonly sourceArtifactDescriptor: unknown;
+  private sdkRuntime!: SdkRuntimeSelection;
   private readonly startupCwd: string;
   /** Host-authoritative generation shared by backend, coordinator, worker, and detail fences. */
   private readonly backendGeneration: number;
@@ -663,6 +666,8 @@ export class BackendServer {
 
   constructor(options: {
     sdkPath: string;
+    /** Explicit candidate opt-in only. Host startup does not supply this. */
+    sourceArtifactDescriptor?: unknown;
     cwd: string;
     backendGeneration?: number;
     hostPid?: number;
@@ -684,6 +689,10 @@ export class BackendServer {
     hostCloseHandoffTimeoutMs?: number;
   }) {
     this.sdkPath = options.sdkPath;
+    if (Object.hasOwn(options, 'sourceArtifactDescriptor') && options.sourceArtifactDescriptor === undefined) {
+      throw new TypeError('Explicit sourceArtifactDescriptor must not be undefined.');
+    }
+    this.sourceArtifactDescriptor = options.sourceArtifactDescriptor;
     this.startupCwd = options.cwd;
     this.backendGeneration = options.backendGeneration ?? 1;
     if (!Number.isSafeInteger(this.backendGeneration) || this.backendGeneration <= 0) {
@@ -803,12 +812,15 @@ export class BackendServer {
     // Create the generation-scoped supervisor and verify the stable worker
     // artifact. The coordinator owns the patching barrier and workers only
     // validate it.
-    const sdkPatchIdentity = await ensureSdkPatchBarrier(this.sdkPath);
+    const sdkRuntime: SdkRuntimeSelection = this.sourceArtifactDescriptor === undefined
+      ? { kind: 'legacy-patched', patchIdentity: await ensureSdkPatchBarrier(this.sdkPath) }
+      : await verifySdkRuntimeSelection(this.sdkPath, { kind: 'source-artifact', descriptor: this.sourceArtifactDescriptor });
+    this.sdkRuntime = sdkRuntime;
     if (this.initialContextEstimateEntryPath) {
       this.initialContextEstimateClient = new InitialContextEstimateClient({
         entryPath: this.initialContextEstimateEntryPath,
         sdkPath: this.sdkPath,
-        sdkPatchIdentity,
+        sdkRuntime,
         onDiagnostic: (chunk) => backendWarn('backend-initial-context-inventory', 'worker diagnostic', { chunk }),
         onTiming: (sample) => backendLog('info', 'backend-timing', 'initial-context-inventory.stage', { ...sample }),
       });
@@ -817,7 +829,7 @@ export class BackendServer {
       this.coldBrowseHelper = new ColdBrowseHelperClient({
         entryPath: this.coldBrowseHelperEntryPath,
         sdkPath: this.sdkPath,
-        sdkPatchIdentity,
+        sdkRuntime,
         startupCwd: this.startupCwd,
         parentPid: process.pid,
         onDiagnostic: (chunk) => backendWarn('backend-cold-browse-helper', 'helper diagnostic', { chunk }),
@@ -834,7 +846,7 @@ export class BackendServer {
     this.workerSupervisor = new WorkerSupervisor({
       workerEntryPath: this.workerEntryPath!,
       coordinatorGeneration: this.backendGeneration,
-      sdkPatchIdentity,
+      sdkRuntime,
       mcpConfigPathFor: (sessionPath) => {
         const overridePath = sessionMcpOverridePath(sessionPath);
         try {
@@ -880,7 +892,9 @@ export class BackendServer {
       await timed('start.loadSdk', async () => {
         this.sdk = await loadSdk(
           this.sdkPath,
-          { mode: 'cold-coordinator' },
+          sdkRuntime.kind === 'source-artifact'
+            ? sdkRuntimeLoadMode(sdkRuntime, 'cold')
+            : { mode: 'cold-coordinator' },
         );
         this.agentDir = this.sdk.getAgentDir();
         this.analyticsAuthority?.validate();
@@ -1047,6 +1061,7 @@ export class BackendServer {
           );
           return {
             sdkPath: this.sdkPath,
+            sdkRuntime: this.sdkRuntime,
             agentDir: this.agentDir,
             startupCwd: this.startupCwd,
             sessionDir: this.getSessionDir() ?? path.join(this.agentDir, 'sessions'),

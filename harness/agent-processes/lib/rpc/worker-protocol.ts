@@ -22,7 +22,10 @@ import type {
   SdkSessionTransferAuthorization,
   SdkSessionWriteLease,
 } from '../sdk-integration/sdk.js';
-import { SDK_PATCH_IDENTITY_VERSION, type SdkPatchIdentity } from '../sdk-integration/sdk-patch-barrier.js';
+import {
+  validateSdkRuntimeSelectionShape,
+  type SdkRuntimeSelection,
+} from '../sdk-integration/sdk-runtime-selection.js';
 import {
   parseAnalyticsTransportAcknowledgement,
   parseAnalyticsCaptureSubject,
@@ -37,8 +40,8 @@ import {
 } from '../../../../analytics/contracts/branch-observation.js';
 
 /** Private coordinator/worker protocol. It is intentionally independent from the public RPC protocol. */
-/** v2 adds the typed `analytics.branch` runtime event. */
-export const WORKER_IPC_VERSION = 2 as const;
+/** v3 carries an explicit, closed SDK runtime route on bootstrap and promotion. */
+export const WORKER_IPC_VERSION = 3 as const;
 export const WORKER_IPC_MAX_FRAME_BYTES = JSONL_MAX_LINE_BYTES;
 export const WORKER_IPC_MAX_ORDINARY_FRAME_BYTES = 256 * 1024;
 export const WORKER_IPC_MAX_HEARTBEAT_FRAME_BYTES = 16 * 1024;
@@ -153,7 +156,7 @@ export type WorkerProviderObservationClassification = 'success' | 'http-error' |
 export interface WorkerBootstrapFrame extends WorkerFrameBase {
   kind: 'bootstrap';
   heartbeatIntervalMs: number;
-  sdkPatchIdentity: SdkPatchIdentity;
+  sdkRuntime: SdkRuntimeSelection;
 }
 
 export interface WorkerCommandFrame extends WorkerFrameBase {
@@ -951,45 +954,10 @@ function baseKeys(requireSeq: boolean): readonly string[] {
 }
 
 function validateBootstrap(value: Record<string, unknown>, requireSeq: boolean): string | undefined {
-  const extra = exactKeys(value, [...baseKeys(requireSeq), 'heartbeatIntervalMs', 'sdkPatchIdentity']);
+  const extra = exactKeys(value, [...baseKeys(requireSeq), 'heartbeatIntervalMs', 'sdkRuntime']);
   if (extra) return extra;
   if (!isSafePositiveInteger(value.heartbeatIntervalMs) || value.heartbeatIntervalMs > 60_000) return 'heartbeatIntervalMs must be a safe integer from 1 through 60000.';
-  return validateSdkPatchIdentityShape(value.sdkPatchIdentity);
-}
-
-function validateSdkPatchIdentityShape(value: unknown): string | undefined {
-  if (!isRecord(value)) return 'sdkPatchIdentity must be an object.';
-  const root = exactKeys(value, [
-    'identityVersion',
-    'sdkPath',
-    'sdkVersion',
-    'terminalDurability',
-    'retryClassifier',
-    'coldCreateDurability',
-    'sessionOwnershipAdapter',
-    'sessionReplacementAdapter',
-  ]);
-  if (root) return `sdkPatchIdentity ${root}`;
-  if (value.identityVersion !== SDK_PATCH_IDENTITY_VERSION) {
-    return `sdkPatchIdentity.identityVersion must be ${SDK_PATCH_IDENTITY_VERSION}.`;
-  }
-  if (!boundedString(value.sdkPath, MAX_SESSION_PATH_BYTES)) return 'sdkPatchIdentity.sdkPath must be a bounded non-empty string.';
-  if (!boundedString(value.sdkVersion, MAX_ID_BYTES)) return 'sdkPatchIdentity.sdkVersion must be a bounded non-empty string.';
-  for (const [name, file] of [
-    ['terminalDurability', value.terminalDurability],
-    ['retryClassifier', value.retryClassifier],
-    ['coldCreateDurability', value.coldCreateDurability],
-    ['sessionOwnershipAdapter', value.sessionOwnershipAdapter],
-    ['sessionReplacementAdapter', value.sessionReplacementAdapter],
-  ] as const) {
-    if (!isRecord(file)) return `sdkPatchIdentity.${name} must be an object.`;
-    const nested = exactKeys(file, ['patchVersion', 'relativePath', 'sha256']);
-    if (nested) return `sdkPatchIdentity.${name} ${nested}`;
-    if (!isSafePositiveInteger(file.patchVersion)) return `sdkPatchIdentity.${name}.patchVersion must be a positive safe integer.`;
-    if (!boundedString(file.relativePath, MAX_SESSION_PATH_BYTES)) return `sdkPatchIdentity.${name}.relativePath must be a bounded non-empty string.`;
-    if (!boundedString(file.sha256, 64) || !/^[a-f0-9]{64}$/u.test(file.sha256)) return `sdkPatchIdentity.${name}.sha256 must be a lowercase SHA-256 digest.`;
-  }
-  return undefined;
+  return validateSdkRuntimeSelectionShape(value.sdkRuntime);
 }
 
 function validateCommand(value: Record<string, unknown>, requireSeq: boolean): string | undefined {
@@ -1029,13 +997,15 @@ function validateRuntimePromote(value: Record<string, unknown>, requireSeq: bool
   if (!boundedString(value.operationId, MAX_ID_BYTES)) return 'operationId must be a bounded non-empty string.';
   if (!isRecord(value.payload)) return 'runtime.promote.payload must be an object.';
   const payloadKeys = exactKeys(value.payload, [
-    'sdkPath', 'agentDir', 'startupCwd', 'sessionDir', 'sessionPath', 'creationReason',
+    'sdkPath', 'sdkRuntime', 'agentDir', 'startupCwd', 'sessionDir', 'sessionPath', 'creationReason',
     'writeLease', 'openedPayload', 'modelSettings',
   ], ['analytics']);
   if (payloadKeys) return `runtime.promote.payload ${payloadKeys}`;
   for (const key of ['sdkPath', 'agentDir', 'startupCwd', 'sessionDir', 'sessionPath'] as const) {
     if (!boundedString(value.payload[key], MAX_SESSION_PATH_BYTES)) return `runtime.promote.payload.${key} must be a bounded non-empty string.`;
   }
+  const sdkRuntimeError = validateSdkRuntimeSelectionShape(value.payload.sdkRuntime);
+  if (sdkRuntimeError) return `runtime.promote.payload.sdkRuntime ${sdkRuntimeError}`;
   if (value.payload.creationReason !== 'new' && value.payload.creationReason !== 'resume') return 'runtime.promote.payload.creationReason is invalid.';
   const leaseError = validateLease(value.payload.writeLease, value, true);
   if (leaseError) return `runtime.promote.payload.writeLease ${leaseError}`;

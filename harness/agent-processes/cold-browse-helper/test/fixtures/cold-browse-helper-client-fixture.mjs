@@ -1,7 +1,7 @@
 import readline from 'node:readline';
 
 const mode = process.argv[2] ?? 'success';
-const protocolVersion = 1;
+const protocolVersion = 2;
 const lines = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 let delayedQueue = Promise.resolve();
 
@@ -11,7 +11,9 @@ function send(value) {
 
 lines.on('line', (line) => {
   const frame = JSON.parse(line);
+  if (frame.protocolVersion !== protocolVersion) process.exit(4);
   if (frame.kind === 'initialize') {
+    if (!frame.sdkRuntime || Object.hasOwn(frame, 'sdkPatchIdentity')) process.exit(3);
     if (mode === 'hang-ready') return;
     send({ protocolVersion, kind: 'ready' });
     return;

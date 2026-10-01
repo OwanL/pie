@@ -17,7 +17,14 @@ import type {
   SdkToolInfo,
 } from '../lib/sdk-integration/sdk.js';
 import { loadSdk, loadSdkInternalModule } from '../lib/sdk-integration/sdk.js';
-import { validateSdkPatchBarrier, type SdkPatchIdentity } from '../lib/sdk-integration/sdk-patch-barrier.js';
+import {
+  assertSdkRuntimeAgreement,
+  parseSdkRuntimeSelection,
+  sdkRuntimeLoadMode,
+  validateSdkRuntimeSelectionShape,
+  verifySdkRuntimeSelection,
+  type SdkRuntimeSelection,
+} from '../lib/sdk-integration/sdk-runtime-selection.js';
 import {
   INITIAL_CONTEXT_INVENTORY_PROTOCOL_VERSION,
   type InitialContextEstimateWorkerInitialization,
@@ -44,7 +51,7 @@ export interface InitialContextEstimateWorkerInput {
   protocolVersion: typeof INITIAL_CONTEXT_INVENTORY_PROTOCOL_VERSION;
   kind: 'discover';
   sdkPath: string;
-  sdkPatchIdentity: SdkPatchIdentity;
+  sdkRuntime: SdkRuntimeSelection;
   cwd: string;
   agentDir: string;
   model: { provider: string; id: string };
@@ -56,7 +63,7 @@ export interface InitialContextInventory {
 }
 
 export interface InitialContextEstimateWorkerTimings {
-  /** Coordinator-issued SDK barrier validation and both dynamic module imports. */
+  /** Selected SDK runtime validation and both dynamic module imports. */
   sdkImportDurationMs?: number;
   /** SDK runtime creation, resource loading, and extension session_start binding. */
   resourceDiscoveryDurationMs?: number;
@@ -386,24 +393,26 @@ async function bindInventoryExtensions(
   void runtime;
 }
 
-function isInitialization(value: unknown): value is InitialContextEstimateWorkerInitialization {
+export function isInitialization(value: unknown): value is InitialContextEstimateWorkerInitialization {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const frame = value as Record<string, unknown>;
   return frame.protocolVersion === INITIAL_CONTEXT_INVENTORY_PROTOCOL_VERSION
     && frame.kind === 'initialize'
     && typeof frame.sdkPath === 'string'
-    && !!frame.sdkPatchIdentity && typeof frame.sdkPatchIdentity === 'object'
+    && !Object.hasOwn(frame, 'sdkPatchIdentity')
+    && validateSdkRuntimeSelectionShape(frame.sdkRuntime) === undefined
     && Number.isSafeInteger(frame.parentPid) && (frame.parentPid as number) > 0;
 }
 
-function isInput(value: unknown): value is InitialContextEstimateWorkerInput {
+export function isInput(value: unknown): value is InitialContextEstimateWorkerInput {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const frame = value as Record<string, unknown>;
   const model = frame.model as Record<string, unknown> | undefined;
   return frame.protocolVersion === INITIAL_CONTEXT_INVENTORY_PROTOCOL_VERSION
     && frame.kind === 'discover'
     && typeof frame.sdkPath === 'string'
-    && !!frame.sdkPatchIdentity && typeof frame.sdkPatchIdentity === 'object'
+    && !Object.hasOwn(frame, 'sdkPatchIdentity')
+    && validateSdkRuntimeSelectionShape(frame.sdkRuntime) === undefined
     && typeof frame.cwd === 'string'
     && typeof frame.agentDir === 'string'
     && !!model && typeof model.provider === 'string' && typeof model.id === 'string';
@@ -478,21 +487,35 @@ async function main(): Promise<void> {
       'initial-context inventory initialization',
     );
     stopWatchdog = startParentWatchdog(initialization.parentPid);
+    const sdkRuntime = parseSdkRuntimeSelection(initialization.sdkRuntime);
     const sdkImportStartedAt = performance.now();
     let sdk: SdkModule;
     let systemPromptModule: SdkSystemPromptModule;
     try {
+      const verifiedRuntime = await verifySdkRuntimeSelection(initialization.sdkPath, sdkRuntime);
       // Preload only validated SDK code. Resource and user extension discovery
       // starts only after the separate request-specific frame arrives.
-      sdk = await loadSdk(initialization.sdkPath, {
-        mode: 'worker',
-        patchIdentity: initialization.sdkPatchIdentity,
-      });
-      systemPromptModule = await loadSdkInternalModule<SdkSystemPromptModule>(
-        initialization.sdkPath,
-        path.join('core', 'system-prompt.js'),
-        { mode: 'worker', patchIdentity: initialization.sdkPatchIdentity },
-      );
+      const selectedMode = sdkRuntimeLoadMode(verifiedRuntime, 'full');
+      if (selectedMode.mode === 'source-artifact') {
+        const mode = { ...selectedMode, surface: 'full' as const };
+        // The inventory consumes only the common public services surface; the
+        // source loader has already selected and verified its typed factories.
+        sdk = await loadSdk(initialization.sdkPath, mode) as unknown as SdkModule;
+        systemPromptModule = await loadSdkInternalModule<SdkSystemPromptModule>(
+          initialization.sdkPath,
+          path.join('core', 'system-prompt.js'),
+          mode,
+        );
+      } else if (selectedMode.mode === 'worker') {
+        sdk = await loadSdk(initialization.sdkPath, selectedMode);
+        systemPromptModule = await loadSdkInternalModule<SdkSystemPromptModule>(
+          initialization.sdkPath,
+          path.join('core', 'system-prompt.js'),
+          selectedMode,
+        );
+      } else {
+        throw new Error('Initial-context inventory requires a full SDK worker load mode.');
+      }
     } finally {
       workerTimings.sdkImportDurationMs = Math.max(0, performance.now() - sdkImportStartedAt);
     }
@@ -503,13 +526,10 @@ async function main(): Promise<void> {
     });
 
     const input = await readFrame(inputStream, isInput, 'initial-context inventory discovery request');
-    if (input.sdkPath !== initialization.sdkPath
-      || JSON.stringify(input.sdkPatchIdentity) !== JSON.stringify(initialization.sdkPatchIdentity)) {
-      throw new Error('Initial-context inventory SDK identity changed after preload.');
-    }
-    // Revalidate immediately before request-specific discovery as the installed
-    // SDK may have changed while this one-use spare was idle.
-    await validateSdkPatchBarrier(input.sdkPath, initialization.sdkPatchIdentity);
+    assertSdkRuntimeAgreement(input.sdkPath, sdkRuntime, input.sdkRuntime);
+    // Revalidate immediately before request-specific discovery as the selected
+    // runtime may have changed while this one-use spare was idle.
+    await verifySdkRuntimeSelection(input.sdkPath, sdkRuntime);
     process.chdir(input.cwd);
     const inventory = await collectInitialContextInventory(
       sdk,

@@ -63,6 +63,7 @@ const sdkPatchIdentity = {
   sessionOwnershipAdapter: { patchVersion: 1, relativePath: 'session-manager.js', sha256: 'c'.repeat(64) },
   sessionReplacementAdapter: { patchVersion: 7, relativePath: 'agent-session-runtime.js', sha256: 'd'.repeat(64) },
 };
+const sdkRuntime = { kind: 'legacy-patched' as const, patchIdentity: sdkPatchIdentity };
 
 async function createHarness() {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-supervisor-'));
@@ -73,7 +74,7 @@ async function createHarness() {
   const supervisor = new WorkerSupervisor({
     workerEntryPath: artifact,
     coordinatorGeneration: 1,
-    sdkPatchIdentity,
+    sdkRuntime,
     scheduler: clock,
     softInterruptGraceMs: 100,
     shutdownGraceMs: 100,
@@ -136,7 +137,7 @@ test('mcpConfigPathFor resolves the per-session MCP override path at spawn time'
     supervisor = new WorkerSupervisor({
       workerEntryPath: artifact,
       coordinatorGeneration: 1,
-      sdkPatchIdentity,
+      sdkRuntime,
       scheduler: clock,
       softInterruptGraceMs: 100,
       shutdownGraceMs: 100,

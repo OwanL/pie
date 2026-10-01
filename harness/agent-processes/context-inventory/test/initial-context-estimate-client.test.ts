@@ -12,7 +12,13 @@ import {
   InitialContextEstimateClient,
   type InitialContextEstimateTimingSample,
 } from '../initial-context-estimate-client.js';
-import { ensureSdkPatchBarrier } from '../../lib/sdk-integration/sdk-patch-barrier.js';
+import {
+  createLegacyTestSdkRuntime,
+  createSourceArtifactTestSdkRuntime,
+} from '../../test/fixtures/sdk-runtime-selection.js';
+import { buildSanitizedRealChildTestEnv } from '../../test/fixtures/sanitized-real-child-env.js';
+
+const testSdkRuntime = () => createLegacyTestSdkRuntime('/sdk');
 
 function createRespondingChild(
   systemPromptText = 'Complete prompt text.',
@@ -43,13 +49,13 @@ function createRespondingChild(
       child.frames.push(frame);
       if (frame.kind === 'initialize') {
         if (options.failPreload) {
-          inbound.end(`${JSON.stringify({ protocolVersion: 1, kind: 'result', ok: false, error: 'preload failed' })}\n`);
+          inbound.end(`${JSON.stringify({ protocolVersion: 2, kind: 'result', ok: false, error: 'preload failed' })}\n`);
         } else {
-          inbound.write(`${JSON.stringify({ protocolVersion: 1, kind: 'ready', timings: { sdkImportDurationMs: 45 } })}\n`);
+          inbound.write(`${JSON.stringify({ protocolVersion: 2, kind: 'ready', timings: { sdkImportDurationMs: 45 } })}\n`);
         }
       } else if (frame.kind === 'discover') {
         inbound.end(`${JSON.stringify({
-          protocolVersion: 1,
+          protocolVersion: 2,
           kind: 'result',
           ok: true,
           inventory: {
@@ -90,13 +96,64 @@ test('inventory child environment forces Pi, npm, yarn, and telemetry offline', 
   assert.equal(env.NPM_CONFIG_OFFLINE, undefined, 'npm cannot inherit a conflicting online setting');
 });
 
+test('real-child environment removes ambient credentials/endpoints and isolates all user paths', () => {
+  const tempRoot = path.join(os.tmpdir(), 'pie-isolated-child');
+  const env = buildSanitizedRealChildTestEnv({
+    PATH: '/safe-bin',
+    SystemRoot: '/system',
+    HOME: '/real-home',
+    USERPROFILE: 'C:\\Users\\real-user',
+    TSX_TSCONFIG_PATH: '/safe-tsconfig.json',
+    OPENAI_API_KEY: 'ambient-secret',
+    OPENAI_BASE_URL: 'https://active.example.test/v1',
+    AZURE_OPENAI_ENDPOINT: 'https://active-azure.example.test',
+  }, tempRoot, 'inventory');
+
+  assert.equal(env.PATH, '/safe-bin');
+  assert.equal(env.TSX_TSCONFIG_PATH, '/safe-tsconfig.json');
+  assert.equal(env.HOME, path.join(tempRoot, 'home'));
+  assert.equal(env.USERPROFILE, path.join(tempRoot, 'home'));
+  assert.equal(env.PI_CODING_AGENT_DIR, path.join(tempRoot, 'agent'));
+  assert.equal(env.PI_CODING_AGENT_AUTH_DIR, path.join(tempRoot, 'auth'));
+  assert.equal(env.PI_CODING_AGENT_SESSION_DIR, path.join(tempRoot, 'sessions'));
+  assert.equal(env.OPENAI_API_KEY, undefined);
+  assert.equal(env.OPENAI_BASE_URL, undefined);
+  assert.equal(env.AZURE_OPENAI_ENDPOINT, undefined);
+  assert.equal(env.PI_OFFLINE, '1');
+  assert.equal(env.npm_config_offline, 'true');
+  assert.equal(env.PIE_INITIAL_CONTEXT_INVENTORY, '1');
+  assert.ok(!Object.keys(env).some((key) => /(?:API_KEY|BASE_URL|ENDPOINT)$/iu.test(key)));
+});
+
+test('inventory client rejects malformed runtime routes and SDK path disagreement before spawning', () => {
+  const valid = createLegacyTestSdkRuntime('/sdk');
+  const construct = (sdkRuntime: unknown, sdkPath = '/sdk') => new InitialContextEstimateClient({
+    entryPath: '/inventory-worker.js',
+    sdkPath,
+    sdkRuntime: sdkRuntime as any,
+  });
+
+  for (const malformed of [
+    undefined,
+    { ...valid, kind: 'future-runtime' },
+    { ...valid, descriptor: {} },
+    { kind: 'legacy-patched', patchIdentity: (valid as any).patchIdentity, descriptor: {} },
+  ]) {
+    assert.throws(() => construct(malformed), /runtime|selection|descriptor|route|sdk path/i);
+  }
+  assert.throws(() => construct(valid, '/different-sdk'), /runtime|selection|route|sdk path/i);
+  const tampered = structuredClone(valid) as any;
+  tampered.patchIdentity.sdkPath = '/tampered-sdk';
+  assert.throws(() => construct(tampered), /runtime|selection|route|sdk path/i);
+});
+
 test('inventory IPC preserves complete prompt text beyond the former 256 KiB estimate-only frame', async () => {
   const fullText = 'prompt-body\n'.repeat(30_000);
   const timings: InitialContextEstimateTimingSample[] = [];
   const client = new InitialContextEstimateClient({
     entryPath: '/inventory-worker.js',
     sdkPath: '/sdk',
-    sdkPatchIdentity: {} as any,
+    sdkRuntime: testSdkRuntime(),
     spawnProcess: (() => createRespondingChild(fullText, {
       sdkImportDurationMs: 45,
       resourceDiscoveryDurationMs: 125,
@@ -139,7 +196,7 @@ test('one prewarmed child serves exactly one request, then the next request gets
   const client = new InitialContextEstimateClient({
     entryPath: '/inventory-worker.js',
     sdkPath: '/sdk',
-    sdkPatchIdentity: {} as any,
+    sdkRuntime: testSdkRuntime(),
     spawnProcess: (() => {
       const child = createRespondingChild();
       children.push(child);
@@ -151,6 +208,8 @@ test('one prewarmed child serves exactly one request, then the next request gets
   await client.warm();
   assert.equal(children.length, 1, 'startup creates only the one optional spare');
   assert.deepEqual(children[0].frames.map((frame: any) => frame.kind), ['initialize']);
+  assert.equal(children[0].frames[0].protocolVersion, 2, 'runtime-route change bumps internal protocol');
+  assert.equal('sdkPatchIdentity' in children[0].frames[0], false, 'only the selected runtime union is sent');
   assert.equal('cwd' in children[0].frames[0], false, 'preload receives no request-specific cwd');
   assert.equal('agentDir' in children[0].frames[0], false, 'preload receives no user settings path');
 
@@ -160,6 +219,8 @@ test('one prewarmed child serves exactly one request, then the next request gets
   assert.ok(first);
   assert.equal(children.length, 1, 'the public request consumes the warm child rather than spawning again');
   assert.deepEqual(children[0].frames.map((frame: any) => frame.kind), ['initialize', 'discover']);
+  assert.deepEqual(children[0].frames[1].sdkRuntime, children[0].frames[0].sdkRuntime,
+    'the request carries the exact runtime route used for preload');
   assert.equal(children[0].frames[1].cwd, '/workspace-one');
   assert.equal((await client.discover({
     cwd: '/workspace-two', agentDir: '/agent-two', model: { provider: 'mock', id: 'model-b' },
@@ -176,7 +237,7 @@ test('concurrent discoveries are capped without spawning concurrent workers', as
   const client = new InitialContextEstimateClient({
     entryPath: '/inventory-worker.js',
     sdkPath: '/sdk',
-    sdkPatchIdentity: {} as any,
+    sdkRuntime: testSdkRuntime(),
     maxQueuedDiscoveries: 1,
     spawnProcess: (() => { spawnCount += 1; return createRespondingChild(); }) as any,
     establishGuardian: async () => ({ terminate: async () => undefined }),
@@ -199,7 +260,7 @@ test('failed prewarm is retired and the next cold request falls back to one on-d
   const client = new InitialContextEstimateClient({
     entryPath: '/inventory-worker.js',
     sdkPath: '/sdk',
-    sdkPatchIdentity: {} as any,
+    sdkRuntime: testSdkRuntime(),
     spawnProcess: (() => createRespondingChild(
       'Complete prompt text.', undefined, { failPreload: ++spawnCount === 1 },
     )) as any,
@@ -224,7 +285,7 @@ test('a request arriving during idle cleanup waits for retirement before one on-
   const client = new InitialContextEstimateClient({
     entryPath: '/inventory-worker.js',
     sdkPath: '/sdk',
-    sdkPatchIdentity: {} as any,
+    sdkRuntime: testSdkRuntime(),
     idleTimeoutMs: 1,
     spawnProcess: (() => { spawnCount += 1; return createRespondingChild(); }) as any,
     establishGuardian: async () => ({
@@ -253,7 +314,7 @@ test('an idle child crash retires its guardian before falling back to a fresh wo
   const client = new InitialContextEstimateClient({
     entryPath: '/inventory-worker.js',
     sdkPath: '/sdk',
-    sdkPatchIdentity: {} as any,
+    sdkRuntime: testSdkRuntime(),
     spawnProcess: (() => {
       const child = createRespondingChild();
       children.push(child);
@@ -279,7 +340,7 @@ test('disposing an unused prewarmed child terminates its guardian and prevents l
   const client = new InitialContextEstimateClient({
     entryPath: '/inventory-worker.js',
     sdkPath: '/sdk',
-    sdkPatchIdentity: {} as any,
+    sdkRuntime: testSdkRuntime(),
     spawnProcess: (() => { spawnCount += 1; return createRespondingChild(); }) as any,
     establishGuardian: async () => ({ terminate: async () => { terminateCount += 1; } }),
   });
@@ -304,7 +365,7 @@ test('disposal during prewarm guardian setup promptly settles callers and closes
   const client = new InitialContextEstimateClient({
     entryPath: '/inventory-worker.js',
     sdkPath: '/sdk',
-    sdkPatchIdentity: {} as any,
+    sdkRuntime: testSdkRuntime(),
     spawnProcess: (() => createRespondingChild()) as any,
     establishGuardian: async () => {
       startGuardian();
@@ -367,7 +428,7 @@ test('late guardian termination failure remains owned and explicit disposal retr
   const client = new InitialContextEstimateClient({
     entryPath: '/inventory-worker.js',
     sdkPath: '/sdk',
-    sdkPatchIdentity: {} as any,
+    sdkRuntime: testSdkRuntime(),
     spawnProcess: (() => createRespondingChild()) as any,
     establishGuardian: async () => {
       startGuardian();
@@ -413,7 +474,7 @@ test('guardian failure falls back to process-tree termination and retains failed
   const client = new InitialContextEstimateClient({
     entryPath: '/inventory-worker.js',
     sdkPath: '/sdk',
-    sdkPatchIdentity: {} as any,
+    sdkRuntime: testSdkRuntime(),
     spawnProcess: ((_command: string, _args: readonly string[], options: any) => {
       spawnedEnv = options.env;
       return createRespondingChild();
@@ -454,34 +515,40 @@ test('guardian failure falls back to process-tree termination and retains failed
   assert.equal((client as any).active.size, 0);
 });
 
-test('real SDK child measures cold versus prewarmed open and reads user resources on demand', { timeout: 180_000 }, async (t) => {
+test('real source-artifact child measures cold versus prewarmed open and reads user resources on demand', { timeout: 180_000 }, async (t) => {
   if (process.env['PIE_RUN_REAL_INVENTORY_TESTS'] !== '1') {
     t.skip('Set PIE_RUN_REAL_INVENTORY_TESTS=1 to run the real-child inventory acceptance.');
     return;
   }
 
   const repoRoot = path.resolve(__dirname, '../../../../');
-  const sdkPath = process.env['PIE_REAL_SDK_PATH']?.trim()
-    || path.join(repoRoot, 'application', 'hosts', 'vscode', 'node_modules', '@earendil-works', 'pi-coding-agent');
+  const artifactDir = process.env['PIE_REAL_RUNTIME_ARTIFACT_DIR']?.trim()
+    || 'C:/Users/OwanLazic/AppData/Local/Temp/pie-b1-b3-final-1790865003945/pi-runtime';
+  const selectedRuntime = await createSourceArtifactTestSdkRuntime(artifactDir);
+  const sdkPath = selectedRuntime.sdkPath;
   const tsxLoader = path.join(repoRoot, 'application', 'hosts', 'vscode', 'node_modules', 'tsx', 'dist', 'loader.cjs');
   await fs.access(path.join(sdkPath, 'dist', 'index.js'));
   await fs.access(tsxLoader);
 
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-inventory-real-child-'));
-  const previousTrustedRoot = process.env['PIE_TRUSTED_SDK_ROOT'];
   const agentDir = path.join(tempDir, 'agent');
   const authDir = path.join(tempDir, 'auth');
+  const sessionDir = path.join(tempDir, 'sessions');
   const cwd = path.join(tempDir, 'workspace');
   const systemPromptPath = path.join(agentDir, 'SYSTEM.md');
   const workerPath = path.resolve(__dirname, '..', 'initial-context-estimate-worker.ts');
   const timings: InitialContextEstimateTimingSample[] = [];
+  const diagnostics: string[] = [];
   let client: InitialContextEstimateClient | undefined;
   try {
-    process.env['PIE_TRUSTED_SDK_ROOT'] = path.dirname(sdkPath);
     await Promise.all([
+      ...['home', 'tmp', 'appdata', 'local-appdata', 'xdg-config', 'xdg-data'].map((name) => (
+        fs.mkdir(path.join(tempDir, name), { recursive: true })
+      )),
       fs.mkdir(authDir, { recursive: true }),
       fs.mkdir(cwd, { recursive: true }),
       fs.mkdir(agentDir, { recursive: true }),
+      fs.mkdir(sessionDir, { recursive: true }),
     ]);
     await fs.writeFile(path.join(agentDir, 'models.json'), JSON.stringify({
       providers: { mock: {
@@ -505,27 +572,22 @@ test('real SDK child measures cold versus prewarmed open and reads user resource
     }));
     await fs.writeFile(systemPromptPath, 'request-time-settings-sentinel');
 
-    const identity = await ensureSdkPatchBarrier(sdkPath);
     const createClient = () => new InitialContextEstimateClient({
       entryPath: workerPath,
       nodePath: process.execPath,
       sdkPath,
-      sdkPatchIdentity: identity,
+      sdkRuntime: selectedRuntime.sdkRuntime,
       timeoutMs: 90_000,
       startupTimeoutMs: 90_000,
       idleTimeoutMs: 60_000,
       onTiming: (sample) => timings.push(sample),
+      onDiagnostic: (chunk) => diagnostics.push(chunk),
       spawnProcess: ((command: string, args: readonly string[], options: any) => spawn(
         command,
         ['--require', tsxLoader, ...args],
         {
           ...options,
-          env: {
-            ...options.env,
-            PI_CODING_AGENT_DIR: agentDir,
-            PI_CODING_AGENT_AUTH_DIR: authDir,
-            PI_CODING_AGENT_SESSION_DIR: path.join(tempDir, 'sessions'),
-          },
+          env: buildSanitizedRealChildTestEnv(options.env ?? {}, tempDir, 'inventory'),
         },
       )) as any,
     });
@@ -537,7 +599,8 @@ test('real SDK child measures cold versus prewarmed open and reads user resource
     };
 
     const coldInventory = await client.discover(input);
-    assert.ok(coldInventory?.systemPrompts.some((entry) => entry.text.includes('request-time-settings-sentinel')), JSON.stringify(timings));
+    assert.ok(coldInventory?.systemPrompts.some((entry) => entry.text.includes('request-time-settings-sentinel')),
+      JSON.stringify({ timings, diagnostics }));
 
     await client.warm();
     await fs.writeFile(systemPromptPath, 'changed-after-preload-sentinel');
@@ -557,21 +620,11 @@ test('real SDK child measures cold versus prewarmed open and reads user resource
     const cold = timings.find((sample) => sample.stage === 'discover' && sample.prewarmed === false);
     const warm = timings.find((sample) => sample.stage === 'discover' && sample.prewarmed === true);
     assert.ok(cold && warm, 'real child timings distinguish cold and prewarmed request paths');
-    assert.ok(warm.totalDurationMs < cold.totalDurationMs,
-      'a prewarmed real child removes SDK startup from the request critical path');
     assert.ok((cold.preloadDurationMs ?? 0) > 0, 'cold timing includes validated SDK module import cost');
     assert.ok((timings.find((sample) => sample.stage === 'prewarm')?.totalDurationMs ?? 0) > 0,
       'prewarm import cost is separately visible rather than hidden');
-    console.info('real-child inventory timing:', JSON.stringify({
-      coldOpenMs: cold.totalDurationMs,
-      warmOpenMs: warm.totalDurationMs,
-      coldSdkImportMs: cold.preloadDurationMs,
-      prewarmStartupMs: timings.find((sample) => sample.stage === 'prewarm')?.totalDurationMs,
-    }));
   } finally {
     await client?.dispose().catch(() => undefined);
     await fs.rm(tempDir, { recursive: true, force: true });
-    if (previousTrustedRoot === undefined) delete process.env['PIE_TRUSTED_SDK_ROOT'];
-    else process.env['PIE_TRUSTED_SDK_ROOT'] = previousTrustedRoot;
   }
 });

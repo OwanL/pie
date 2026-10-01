@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import test from 'node:test';
 
@@ -8,13 +11,22 @@ import {
   type ColdBrowseHelperClientOptions,
   type ColdBrowseHelperTimingSample,
 } from '../cold-browse-helper-client';
-import type { ColdBrowseHelperFence } from '../cold-browse-helper-protocol';
+import {
+  readColdBrowseFingerprintSync,
+  type ColdBrowseHelperFence,
+} from '../cold-browse-helper-protocol';
 import {
   DurableDetailNotAddressableError,
   DurableDetailNotFoundError,
 } from '../../../session-storage/transcripts/durable-detail-store';
 import { SessionSnapshotTooLargeError } from '../../../session-storage/transcripts/snapshot-boundary.js';
+import {
+  createLegacyTestSdkRuntime,
+  createSourceArtifactTestSdkRuntime,
+} from '../../test/fixtures/sdk-runtime-selection.js';
+import { buildSanitizedRealChildTestEnv } from '../../test/fixtures/sanitized-real-child-env.js';
 
+const testSdkRuntime = () => createLegacyTestSdkRuntime(process.cwd());
 const fixturePath = path.join(process.cwd(), 'harness', 'agent-processes', 'cold-browse-helper', 'test', 'fixtures', 'cold-browse-helper-client-fixture.mjs');
 const fence: ColdBrowseHelperFence = {
   coordinatorGeneration: 1,
@@ -28,6 +40,23 @@ const openOptions = {
   availableModels: [],
 };
 
+test('client rejects malformed runtime routes and SDK path disagreement before spawn', () => {
+  const valid = testSdkRuntime();
+  const construct = (sdkRuntime: unknown, sdkPath = process.cwd()) => new ColdBrowseHelperClient({
+    entryPath: fixturePath,
+    sdkPath,
+    sdkRuntime: sdkRuntime as any,
+    startupCwd: process.cwd(),
+  });
+  for (const malformed of [
+    undefined,
+    { ...valid, kind: 'unknown' },
+    { ...valid, descriptor: {} },
+    { kind: 'legacy-patched', patchIdentity: (valid as any).patchIdentity, descriptor: {} },
+  ]) assert.throws(() => construct(malformed), /runtime|selection|descriptor|route|sdk path/i);
+  assert.throws(() => construct(valid, `${process.cwd()}-mismatch`), /runtime|selection|route|sdk path/i);
+});
+
 function client(
   mode: string,
   overrides: Partial<ColdBrowseHelperClientOptions> = {},
@@ -36,7 +65,7 @@ function client(
     entryPath: fixturePath,
     entryArgs: [mode],
     sdkPath: process.cwd(),
-    sdkPatchIdentity: {} as any,
+    sdkRuntime: testSdkRuntime(),
     startupCwd: process.cwd(),
     requestTimeoutMs: 2_000,
     ...overrides,
@@ -227,7 +256,7 @@ test('invalidation does not spawn a helper before the first browse', async () =>
   const helper = new ColdBrowseHelperClient({
     entryPath: fixturePath,
     sdkPath: process.cwd(),
-    sdkPatchIdentity: {} as any,
+    sdkRuntime: testSdkRuntime(),
     startupCwd: process.cwd(),
     spawnProcess: (() => {
       spawnCalls += 1;
@@ -292,6 +321,79 @@ test('concurrent dispose callers join confirmed helper exit', async () => {
     assert.equal(isProcessAlive(childPid), false);
   } finally {
     await firstDisposal;
+  }
+});
+
+test('real source-artifact child initializes cold transport and opens only a sanitized temporary session', {
+  timeout: 180_000,
+}, async (t) => {
+  if (process.env['PIE_RUN_REAL_COLD_HELPER_TESTS'] !== '1') {
+    t.skip('Set PIE_RUN_REAL_COLD_HELPER_TESTS=1 to run the real source-artifact cold-helper acceptance.');
+    return;
+  }
+  const repoRoot = path.resolve(__dirname, '../../../../');
+  const artifactDir = process.env['PIE_REAL_RUNTIME_ARTIFACT_DIR']?.trim()
+    || 'C:/Users/OwanLazic/AppData/Local/Temp/pie-b1-b3-final-1790865003945/pi-runtime';
+  const selectedRuntime = await createSourceArtifactTestSdkRuntime(artifactDir);
+  const tsxLoader = path.join(repoRoot, 'application', 'hosts', 'vscode', 'node_modules', 'tsx', 'dist', 'loader.cjs');
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-cold-source-child-'));
+  const agentDir = path.join(tempDir, 'agent');
+  const authDir = path.join(tempDir, 'auth');
+  const sessionDir = path.join(tempDir, 'sessions');
+  const sessionPath = path.join(tempDir, 'session.jsonl');
+  let helper: ColdBrowseHelperClient | undefined;
+  try {
+    await Promise.all([
+      ...['home', 'tmp', 'appdata', 'local-appdata', 'xdg-config', 'xdg-data'].map((name) => (
+        fs.mkdir(path.join(tempDir, name), { recursive: true })
+      )),
+      fs.mkdir(agentDir, { recursive: true }),
+      fs.mkdir(authDir, { recursive: true }),
+      fs.mkdir(sessionDir, { recursive: true }),
+    ]);
+    await fs.writeFile(sessionPath, `${JSON.stringify({
+      type: 'session', version: 3, id: 'sanitized-cold-test',
+      timestamp: '2026-10-02T00:00:00.000Z', cwd: tempDir,
+    })}\n${JSON.stringify({
+      type: 'message', id: 'temporary-user-message', parentId: null,
+      timestamp: '2026-10-02T00:00:01.000Z',
+      message: { role: 'user', content: 'offline cold browse fixture', timestamp: 1 },
+    })}\n`, 'utf8');
+    const fence: ColdBrowseHelperFence = {
+      coordinatorGeneration: 1,
+      sessionPath,
+      sessionPathKey: process.platform === 'win32' ? path.resolve(sessionPath).toLowerCase() : path.resolve(sessionPath),
+      ownershipRevision: 0,
+      fingerprint: readColdBrowseFingerprintSync(sessionPath),
+    };
+    helper = new ColdBrowseHelperClient({
+      entryPath: path.resolve(__dirname, '..', 'cold-browse-helper-entry.ts'),
+      sdkPath: selectedRuntime.sdkPath,
+      sdkRuntime: selectedRuntime.sdkRuntime,
+      startupCwd: tempDir,
+      nodePath: process.execPath,
+      startupTimeoutMs: 90_000,
+      requestTimeoutMs: 90_000,
+      shutdownTimeoutMs: 5_000,
+      spawnProcess: ((command: string, args: readonly string[], options: any) => spawn(
+        command,
+        ['--require', tsxLoader, ...args],
+        {
+          ...options,
+          env: buildSanitizedRealChildTestEnv(options.env ?? {}, tempDir, 'cold-helper'),
+        },
+      )) as any,
+    });
+    await helper.warm();
+    const opened = await helper.openSnapshot(fence, {
+      modelSettings: { defaultModel: 'offline-model', defaultThinkingLevel: 'medium' },
+      availableModels: [],
+    });
+    assert.equal(opened.session.path, sessionPath);
+    assert.ok(opened.transcript.some((message) => message.id === 'temporary-user-message'));
+  } finally {
+    await helper?.dispose().catch(() => undefined);
+    await fs.rm(tempDir, { recursive: true, force: true });
   }
 });
 

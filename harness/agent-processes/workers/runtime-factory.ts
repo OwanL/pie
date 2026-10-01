@@ -8,8 +8,13 @@ import { centralAppendSystemPromptOverride } from '../../agent-instructions/prom
 import { backendInfo } from '../../../lib/structured-logging/backend-log';
 import { recordBackendLivePipelineTrace } from '../coordinator/live-pipeline-trace-runtime.js';
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent';
-import type { CompactionHooks, ContextMessageOmissionsResolver } from '../../pi/packages/coding-agent/dist/index.js';
-import type { SdkModule, SdkSessionEvent, SdkSessionManager } from '../lib/sdk-integration/sdk';
+import type { CompactionHooks, ContextMessageOmissionsResolver } from '@earendil-works/pi-coding-agent';
+import type {
+  SdkModule,
+  SdkSessionEvent,
+  SdkSessionManager,
+  SourceArtifactSdkModule,
+} from '../lib/sdk-integration/sdk';
 
 /** Arguments the SDK passes into the runtime factory callback. */
 interface RuntimeFactoryArgs {
@@ -169,12 +174,17 @@ export class ServiceLoadingGate {
 // `SdkModule.createAgentSessionServices` types its entire `options` bag as `unknown`,
 // and `SdkModule.AuthStorage.create` returns `unknown`, so a narrower type here would lie.
 export function createRuntimeFactory(
-  sdk: SdkModule,
+  sdk: SdkModule | SourceArtifactSdkModule,
   authStorage: unknown,
   _startupCwd: string,
   gate: ServiceLoadingGate,
   options: RuntimeFactoryOptions = {},
 ) {
+  // E2 source artifacts arrive through the explicitly typed policy/ownership
+  // adapter. The implementation below consumes only the shared narrow SDK
+  // service seam; casting here preserves the adapter object and its wrapped
+  // factory behavior rather than unwrapping or bypassing its callbacks.
+  const runtimeSdk = sdk as unknown as SdkModule;
   return async ({ cwd, agentDir, sessionManager, sessionStartEvent, contextMessageOmissions, compactionHooks }: RuntimeFactoryArgs) => {
     const guardedSessionManager = options.wrapSessionManager?.(sessionManager) ?? sessionManager;
     const startedAt = performance.now();
@@ -202,7 +212,7 @@ export function createRuntimeFactory(
     // generation. Every admitted call still creates unique fresh services.
     let services: Record<string, unknown>;
     try {
-      services = (await gate.run(() => sdk.createAgentSessionServices({
+      services = (await gate.run(() => runtimeSdk.createAgentSessionServices({
       cwd,
       agentDir,
       authStorage,
@@ -303,7 +313,7 @@ export function createRuntimeFactory(
       const model = resolveExplicitModel(services, guardedSessionManager);
       const thinkingLevel = resolveExplicitThinkingLevel(guardedSessionManager);
       const customTools = options.customTools?.(guardedSessionManager.getSessionFile?.());
-      created = (await sdk.createAgentSessionFromServices({
+      created = (await runtimeSdk.createAgentSessionFromServices({
         services,
         sessionManager: guardedSessionManager,
         sessionStartEvent,

@@ -8,7 +8,11 @@ import {
   terminateProcessTree,
   type WindowsProcessTreeGuardian,
 } from '../lib/process-lifecycle/process-tree.js';
-import type { SdkPatchIdentity } from '../lib/sdk-integration/sdk-patch-barrier.js';
+import {
+  assertSdkRuntimeAgreement,
+  parseSdkRuntimeSelection,
+  type SdkRuntimeSelection,
+} from '../lib/sdk-integration/sdk-runtime-selection.js';
 import {
   INITIAL_CONTEXT_INVENTORY_PROTOCOL_VERSION,
   type InitialContextEstimateWorkerInitialization,
@@ -40,7 +44,7 @@ export interface InitialContextEstimateTimingSample extends InitialContextEstima
 export interface InitialContextEstimateClientOptions {
   entryPath: string;
   sdkPath: string;
-  sdkPatchIdentity: SdkPatchIdentity;
+  sdkRuntime: SdkRuntimeSelection;
   nodePath?: string;
   timeoutMs?: number;
   startupTimeoutMs?: number;
@@ -116,6 +120,7 @@ export class InitialContextEstimateClient {
   private readonly idleTimeoutMs: number;
   private readonly cleanupTimeoutMs: number;
   private readonly maxQueuedDiscoveries: number;
+  private readonly sdkRuntime: SdkRuntimeSelection;
   private readonly active = new Set<ActiveChild>();
   private current?: ActiveChild;
   private starting?: Promise<ActiveChild>;
@@ -133,6 +138,8 @@ export class InitialContextEstimateClient {
     this.idleTimeoutMs = options.idleTimeoutMs ?? 60_000;
     this.cleanupTimeoutMs = options.cleanupTimeoutMs ?? 2_000;
     this.maxQueuedDiscoveries = options.maxQueuedDiscoveries ?? DEFAULT_DISCOVERY_QUEUE_LIMIT;
+    this.sdkRuntime = parseSdkRuntimeSelection(options.sdkRuntime);
+    assertSdkRuntimeAgreement(options.sdkPath, this.sdkRuntime);
     for (const [name, value] of [
       ['request', this.timeoutMs],
       ['startup', this.startupTimeoutMs],
@@ -244,7 +251,7 @@ export class InitialContextEstimateClient {
         protocolVersion: INITIAL_CONTEXT_INVENTORY_PROTOCOL_VERSION,
         kind: 'discover',
         sdkPath: this.options.sdkPath,
-        sdkPatchIdentity: this.options.sdkPatchIdentity,
+        sdkRuntime: this.sdkRuntime,
         cwd: input.cwd,
         agentDir: input.agentDir,
         model: input.model,
@@ -420,7 +427,7 @@ export class InitialContextEstimateClient {
         protocolVersion: INITIAL_CONTEXT_INVENTORY_PROTOCOL_VERSION,
         kind: 'initialize',
         sdkPath: this.options.sdkPath,
-        sdkPatchIdentity: this.options.sdkPatchIdentity,
+        sdkRuntime: this.sdkRuntime,
         parentPid: process.pid,
       };
       const wire = `${JSON.stringify(initialization)}\n`;

@@ -49,6 +49,7 @@ const sdkPatchIdentity = {
   sessionOwnershipAdapter: { patchVersion: 1, relativePath: 'session-manager.js', sha256: 'c'.repeat(64) },
   sessionReplacementAdapter: { patchVersion: 7, relativePath: 'agent-session-runtime.js', sha256: 'd'.repeat(64) },
 };
+const sdkRuntime = { kind: 'legacy-patched' as const, patchIdentity: sdkPatchIdentity };
 
 async function waitUntil(predicate: () => boolean, timeoutMs = 15_000): Promise<void> {
   // Generous Windows CI headroom: these polls wait for causal frame receipt
@@ -92,7 +93,7 @@ test('worker server admits soft interrupt on the priority path while a runtime c
     inbound.write(`${JSON.stringify({ ...frameBase, seq, ...body })}\n`);
   };
   try {
-    send(1, { kind: 'bootstrap', heartbeatIntervalMs: 60_000, sdkPatchIdentity });
+    send(1, { kind: 'bootstrap', heartbeatIntervalMs: 60_000, sdkRuntime });
     await waitUntil(() => frames.some((frame) => frame.kind === 'ready'));
     send(2, {
       kind: 'runtime.command', requestId: 'active-command', operation: 'message.send',
@@ -139,7 +140,7 @@ test('worker server does not publish successful shutdown when the lifecycle hook
     inbound.write(`${JSON.stringify({ ...frameBase, seq, ...body })}\n`);
   };
   try {
-    send(1, { kind: 'bootstrap', heartbeatIntervalMs: 60_000, sdkPatchIdentity });
+    send(1, { kind: 'bootstrap', heartbeatIntervalMs: 60_000, sdkRuntime });
     await waitUntil(() => frames.some((frame) => frame.kind === 'ready'));
     send(2, { kind: 'shutdown', requestId: 'shutdown-incomplete', reason: 'test incomplete drain' });
     await waitUntil(() => frames.some((frame) => frame.kind === 'fatal'));
@@ -188,7 +189,7 @@ test('worker server joins an exact equal-revision sync retry and applies it once
     inbound.write(`${JSON.stringify({ ...frameBase, seq, ...body })}\n`);
   };
   try {
-    send(1, { kind: 'bootstrap', heartbeatIntervalMs: 60_000, sdkPatchIdentity });
+    send(1, { kind: 'bootstrap', heartbeatIntervalMs: 60_000, sdkRuntime });
     await waitUntil(() => frames.some((frame) => frame.kind === 'ready'));
     const sync = { domain: 'runtimePrefs', revision: 7, payload: { values: { autonomousMode: true } } };
     send(2, { kind: 'sync', requestId: 'prefs-original', ...sync });
@@ -251,7 +252,7 @@ test('a late analytics rebound after its non-gating timeout is fenced without cl
   };
 
   try {
-    send(1, { kind: 'bootstrap', heartbeatIntervalMs: 60_000, sdkPatchIdentity });
+    send(1, { kind: 'bootstrap', heartbeatIntervalMs: 60_000, sdkRuntime });
     await waitUntil(() => frames.some((frame) => frame.kind === 'ready'));
 
     const rebind = server.requestAnalyticsSubjectRebind({ kind: 'session', rootSessionId: 'replacement-root' });
@@ -308,7 +309,7 @@ test('worker server callback/request plumbing correlates Phase 4 frames and fenc
   };
 
   try {
-    send(1, { kind: 'bootstrap', heartbeatIntervalMs: 60_000, sdkPatchIdentity });
+    send(1, { kind: 'bootstrap', heartbeatIntervalMs: 60_000, sdkRuntime });
     await waitUntil(() => frames.some((frame) => frame.kind === 'ready'));
 
     const grantedPromise = server.requestFrame({
@@ -401,7 +402,7 @@ test('worker server reports rejected runtime frames before exiting', async () =>
   };
 
   try {
-    send(1, { kind: 'bootstrap', heartbeatIntervalMs: 60_000, sdkPatchIdentity });
+    send(1, { kind: 'bootstrap', heartbeatIntervalMs: 60_000, sdkRuntime });
     await waitUntil(() => frames.some((frame) => frame.kind === 'ready'));
 
     assert.equal(server.sendFrame({
@@ -523,7 +524,7 @@ test('worker server keeps timer heartbeats admissible while ordinary transport i
   server.start();
 
   try {
-    inbound.write(`${JSON.stringify({ ...frameBase, seq: 1, kind: 'bootstrap', heartbeatIntervalMs: 5, sdkPatchIdentity })}\n`);
+    inbound.write(`${JSON.stringify({ ...frameBase, seq: 1, kind: 'bootstrap', heartbeatIntervalMs: 5, sdkRuntime })}\n`);
     await waitUntil(() => target.written.length > 0);
 
     let droppedSeq = 0;

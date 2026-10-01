@@ -40,6 +40,7 @@ const sdkPatchIdentity = {
   sessionOwnershipAdapter: { patchVersion: 1, relativePath: 'dist/core/session-manager.js', sha256: 'c'.repeat(64) },
   sessionReplacementAdapter: { patchVersion: 7, relativePath: 'dist/core/agent-session-runtime.js', sha256: 'd'.repeat(64) },
 };
+const sdkRuntime = { kind: 'legacy-patched' as const, patchIdentity: sdkPatchIdentity };
 
 const expected: WorkerFrameExpectation = {
   coordinatorGeneration: 4,
@@ -134,7 +135,7 @@ test('settings conditional mutations require a complete typed expected identity'
 
 test('Phase 2 protocol accepts only its closed coordinator and worker variants', () => {
   const coordinatorFrames = [
-    { ...base, kind: 'bootstrap', heartbeatIntervalMs: 1_000, sdkPatchIdentity },
+    { ...base, kind: 'bootstrap', heartbeatIntervalMs: 1_000, sdkRuntime },
     { ...base, kind: 'command', requestId: 'request-ping', operation: 'ping' },
     { ...base, kind: 'interrupt', requestId: 'request-interrupt', targetRequestId: 'request-ping', reason: 'user' },
     { ...base, kind: 'shutdown', requestId: 'request-shutdown', reason: 'coordinator shutdown' },
@@ -212,7 +213,7 @@ test('Phase 4 protocol accepts every closed runtime, ownership, provider, and sy
       ...base, kind: 'runtime.promote', requestId: 'promote', operationId: 'operation-1',
       payload: {
         sdkPath: 'C:/sdk', agentDir: 'C:/agent', startupCwd: 'C:/work', sessionDir: 'C:/sessions',
-        sessionPath: base.leasePath, creationReason: 'resume', writeLease: lease,
+        sessionPath: base.leasePath, creationReason: 'resume', sdkRuntime, writeLease: lease,
         openedPayload: { runtimeReady: false }, modelSettings: { defaultModel: 'gpt' },
         analytics: {
           generationId: 'analytics-generation-1',
@@ -433,6 +434,36 @@ test('worker IPC carries the durable analytics branch shape through draft and de
   }
 });
 
+test('SDK runtime selection is a required closed wire union on bootstrap and promotion', () => {
+  const bootstrap = { ...base, kind: 'bootstrap', heartbeatIntervalMs: 1_000, sdkRuntime };
+  assert.equal(parseCoordinatorToWorkerFrame(bootstrap, expected).status, 'accepted');
+  assert.equal(parseCoordinatorToWorkerFrame({ ...bootstrap, sdkRuntime: undefined }, expected).status, 'invalid');
+  assert.equal(parseCoordinatorToWorkerFrame({
+    ...bootstrap,
+    sdkRuntime: { kind: 'future-route', patchIdentity: sdkPatchIdentity },
+  }, expected).status, 'invalid');
+  assert.equal(parseCoordinatorToWorkerFrame({
+    ...bootstrap,
+    sdkRuntime: { ...sdkRuntime, descriptor: {} },
+  }, expected).status, 'invalid');
+  assert.equal(parseCoordinatorToWorkerFrame({
+    ...base,
+    kind: 'bootstrap',
+    heartbeatIntervalMs: 1_000,
+    sdkPatchIdentity,
+  }, expected).status, 'invalid', 'the removed field is not a legacy fallback');
+  assert.equal(parseCoordinatorToWorkerFrame({
+    ...base,
+    kind: 'runtime.promote',
+    requestId: 'promote',
+    operationId: 'operation-1',
+    payload: {
+      sdkPath: 'C:/sdk', agentDir: 'C:/agent', startupCwd: 'C:/work',
+      sessionDir: 'C:/sessions', sessionPath: base.leasePath,
+    },
+  }, expected).status, 'invalid', 'promotion also requires an explicit runtime selection');
+});
+
 test('protocol rejects exact extra fields, malformed correlated unions, and unsafe integers', () => {
   const extraRoot = parseCoordinatorToWorkerFrame({
     ...base, kind: 'command', requestId: 'request', operation: 'ping', payload: {},
@@ -458,12 +489,12 @@ test('protocol rejects exact extra fields, malformed correlated unions, and unsa
   }, expected).status, 'invalid');
   assert.equal(parseCoordinatorToWorkerFrame({
     ...base, kind: 'bootstrap', heartbeatIntervalMs: 1_000,
-    sdkPatchIdentity: { ...sdkPatchIdentity, extra: true },
+    sdkRuntime: { kind: 'legacy-patched', patchIdentity: { ...sdkPatchIdentity, extra: true } },
   }, expected).status, 'invalid');
   const { coldCreateDurability: _missingColdCreate, ...missingColdCreateIdentity } = sdkPatchIdentity;
   assert.equal(parseCoordinatorToWorkerFrame({
     ...base, kind: 'bootstrap', heartbeatIntervalMs: 1_000,
-    sdkPatchIdentity: missingColdCreateIdentity,
+    sdkRuntime: { kind: 'legacy-patched', patchIdentity: missingColdCreateIdentity },
   }, expected).status, 'invalid');
   assert.equal(parseCoordinatorToWorkerFrame({
     ...base, kind: 'provider.rejected', requestId: 'provider',
@@ -547,7 +578,7 @@ test('protocol allows large control and session.opened frames up to the wire cap
     operationId: 'operation-1',
     payload: {
       sdkPath: 'C:/sdk', agentDir: 'C:/agent', startupCwd: 'C:/work', sessionDir: 'C:/sessions',
-      sessionPath: base.leasePath, creationReason: 'resume', writeLease: lease,
+      sessionPath: base.leasePath, creationReason: 'resume', sdkRuntime, writeLease: lease,
       openedPayload: { runtimeReady: false, transcript: [{ role: 'user', text: largeTranscript }] },
       modelSettings: { defaultModel: 'gpt' },
     },

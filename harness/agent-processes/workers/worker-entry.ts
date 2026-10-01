@@ -1,5 +1,8 @@
-import type { SdkPatchIdentity } from '../lib/sdk-integration/sdk-patch-barrier';
-import { validateSdkPatchBarrier } from '../lib/sdk-integration/sdk-patch-barrier';
+import {
+  sdkRuntimeSdkPath,
+  verifySdkRuntimeSelection,
+  type SdkRuntimeSelection,
+} from '../lib/sdk-integration/sdk-runtime-selection.js';
 import { installProviderTrafficObserver } from '../../model-providers/traffic-observation/provider-traffic-observer';
 import type {
   WorkerError,
@@ -32,17 +35,17 @@ function main(): void {
   // session that owns the request and the UI falls back to opaque SDK errors.
   installProviderTrafficObserver();
   const identity = parseWorkerServerArgs(process.argv.slice(2));
-  let patchIdentity: SdkPatchIdentity | undefined;
+  let sdkRuntime: SdkRuntimeSelection | undefined;
   let host: WorkerRuntimeHost | undefined;
   const pendingSync = new Map<string, { revision: number; payload: WorkerJsonObject }>();
   const server = new WorkerServer(identity, process, openWorkerServerTransport(identity), {
     validateBootstrap: async (frame) => {
-      await validateSdkPatchBarrier(frame.sdkPatchIdentity.sdkPath, frame.sdkPatchIdentity);
-      patchIdentity = frame.sdkPatchIdentity;
+      const sdkPath = sdkRuntimeSdkPath(frame.sdkRuntime);
+      sdkRuntime = await verifySdkRuntimeSelection(sdkPath, frame.sdkRuntime);
     },
     onFrame: async (frame, currentServer) => {
       if (frame.kind === 'runtime.promote') {
-        if (!patchIdentity) throw new Error('Worker runtime promotion arrived before SDK patch validation.');
+        if (!sdkRuntime) throw new Error('Worker runtime promotion arrived before SDK runtime validation.');
         host ??= new WorkerRuntimeHost({
           server: currentServer,
           owner: {
@@ -50,7 +53,7 @@ function main(): void {
             workerId: identity.workerId,
             workerGeneration: identity.workerGeneration,
           },
-          patchIdentity,
+          sdkRuntime,
         });
         for (const [domain, sync] of pendingSync) host.applySync(domain, sync.revision, sync.payload);
         pendingSync.clear();

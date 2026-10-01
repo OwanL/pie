@@ -12,9 +12,9 @@ import type {
 } from '../lib/rpc/session-events.js';
 import type { SessionSnapshotTransport } from '../../session-storage/transcripts/snapshot-boundary.js';
 import type { LiveSubagentDetailAddress } from '../lib/rpc/subagent-detail';
-import type { SdkPatchIdentity } from '../lib/sdk-integration/sdk-patch-barrier';
+import type { SdkRuntimeSelection } from '../lib/sdk-integration/sdk-runtime-selection.js';
 
-export const COLD_BROWSE_HELPER_PROTOCOL_VERSION = 1 as const;
+export const COLD_BROWSE_HELPER_PROTOCOL_VERSION = 2 as const;
 export const COLD_BROWSE_HELPER_MAX_FRAME_BYTES = 32 * 1024 * 1024;
 
 export interface ColdBrowseHelperFence {
@@ -87,7 +87,7 @@ export interface ColdBrowseHelperInitializeFrame {
   readonly protocolVersion: typeof COLD_BROWSE_HELPER_PROTOCOL_VERSION;
   readonly kind: 'initialize';
   readonly sdkPath: string;
-  readonly sdkPatchIdentity: SdkPatchIdentity;
+  readonly sdkRuntime: SdkRuntimeSelection;
   readonly startupCwd: string;
   readonly parentPid: number;
   readonly maxSourceBytes?: number;

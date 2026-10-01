@@ -5,8 +5,48 @@ import { buildPieSystemPrompt } from '../../../agent-instructions/prompt-assembl
 import {
   collectInitialContextInventory,
   installInventoryProviderDenyBoundary,
+  isInitialization,
+  isInput,
 } from '../initial-context-estimate-worker.js';
+import { INITIAL_CONTEXT_INVENTORY_PROTOCOL_VERSION } from '../initial-context-estimate-protocol.js';
+import { createLegacyTestSdkRuntime } from '../../test/fixtures/sdk-runtime-selection.js';
 import { estimateTextTokens } from '../../../../lib/token-estimation.js';
+
+test('inventory frames reject missing, mixed, unknown, and legacy-discriminator runtime routes', () => {
+  const sdkRuntime = createLegacyTestSdkRuntime('/sdk');
+  const initialization = {
+    protocolVersion: INITIAL_CONTEXT_INVENTORY_PROTOCOL_VERSION,
+    kind: 'initialize',
+    sdkPath: '/sdk',
+    sdkRuntime,
+    parentPid: 123,
+  };
+  const request = {
+    protocolVersion: INITIAL_CONTEXT_INVENTORY_PROTOCOL_VERSION,
+    kind: 'discover',
+    sdkPath: '/sdk',
+    sdkRuntime,
+    cwd: '/tmp/workspace',
+    agentDir: '/tmp/agent',
+    model: { provider: 'mock', id: 'model' },
+  };
+  assert.equal(isInitialization(initialization), true);
+  assert.equal(isInput(request), true);
+  assert.equal(isInitialization({ ...initialization, protocolVersion: 1 }), false);
+  assert.equal(isInput({ ...request, protocolVersion: 1 }), false);
+  for (const malformed of [
+    { ...initialization, sdkRuntime: undefined },
+    { ...initialization, sdkRuntime: { ...sdkRuntime, descriptor: {} } },
+    { ...initialization, sdkRuntime: { ...sdkRuntime, kind: 'unknown' } },
+    { ...initialization, sdkPatchIdentity: (sdkRuntime as any).patchIdentity },
+  ]) assert.equal(isInitialization(malformed), false);
+  for (const malformed of [
+    { ...request, sdkRuntime: undefined },
+    { ...request, sdkRuntime: { ...sdkRuntime, descriptor: {} } },
+    { ...request, sdkRuntime: { ...sdkRuntime, kind: 'unknown' } },
+    { ...request, sdkPatchIdentity: (sdkRuntime as any).patchIdentity },
+  ]) assert.equal(isInput(malformed), false);
+});
 
 test('fresh inventory binds resources, counts the unfiltered catalog, and disposes without prompting', async () => {
   let disposed = false;

@@ -26,7 +26,7 @@ import {
   type WorkerToCoordinatorFrameBody,
   type WorkerToCoordinatorRequestBody,
 } from './worker-protocol';
-import { validateSdkPatchBarrier } from '../sdk-integration/sdk-patch-barrier.js';
+import { sdkRuntimeSdkPath, verifySdkRuntimeSelection } from '../sdk-integration/sdk-runtime-selection.js';
 import type { AnalyticsTransportPacket } from '../../../../analytics/contracts/transport.js';
 import type { AnalyticsCaptureSubject } from '../../../../analytics/contracts/contracts.js';
 import type { AnalyticsTransportFrameSettlement } from '../../workers/analytics-worker-transport.js';
@@ -549,7 +549,7 @@ export class WorkerServer {
       // Worker startup imports no Pi runtime. Only the coordinator-prepared immutable
       // patch identity is verified before a future runtime import.
       if (this.handlers.validateBootstrap) await this.handlers.validateBootstrap(frame);
-      else await validateSdkPatchBarrier(frame.sdkPatchIdentity.sdkPath, frame.sdkPatchIdentity);
+      else await verifySdkRuntimeSelection(sdkRuntimeSdkPath(frame.sdkRuntime), frame.sdkRuntime);
     } catch (error) {
       this.failProtocol(error instanceof Error ? error.message : String(error), 'BOOTSTRAP_FAILED', 'bootstrap');
       return;

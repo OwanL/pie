@@ -4,15 +4,30 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import test from 'node:test';
-import { fileURLToPath } from 'node:url';
 
-import { isParentProcessAlive, startParentProcessWatchdog } from '../cold-browse-helper-entry';
-import { readColdBrowseFingerprintSync, type ColdBrowseHelperFence } from '../cold-browse-helper-protocol';
+import {
+  isParentProcessAlive,
+  parseColdBrowseHelperInputFrame,
+  startParentProcessWatchdog,
+} from '../cold-browse-helper-entry';
+import {
+  COLD_BROWSE_HELPER_PROTOCOL_VERSION,
+  readColdBrowseFingerprintSync,
+  type ColdBrowseHelperFence,
+} from '../cold-browse-helper-protocol';
+import {
+  createLegacyTestSdkRuntime,
+  createSourceArtifactTestSdkRuntime,
+} from '../../test/fixtures/sdk-runtime-selection.js';
 import {
   ColdBrowseHelperResponseTooLargeError,
   ColdBrowseHelperRuntime,
 } from '../cold-browse-helper-runtime';
 import { loadSdk } from '../../lib/sdk-integration/sdk';
+import {
+  sdkRuntimeLoadMode,
+  verifySdkRuntimeSelection,
+} from '../../lib/sdk-integration/sdk-runtime-selection.js';
 import { sessionSnapshotLineBytes, SessionSnapshotTooLargeError } from '../../../session-storage/transcripts/snapshot-boundary.js';
 
 const pageOptions = { transport: { kind: 'response', requestId: 'runtime-page' } } as const;
@@ -49,24 +64,17 @@ function fence(sessionPath: string): ColdBrowseHelperFence {
   };
 }
 
-test('helper owns a manager-free projection cache and fences changes around every response', async () => {
+test('helper owns a manager-free projection cache and fences changes around every response', { skip: !process.env['PIE_REAL_RUNTIME_ARTIFACT_DIR']?.trim() }, async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-cold-helper-runtime-'));
   try {
     const sessionPath = path.join(root, 'session.jsonl');
     await writeRows(sessionPath, [header(root), user('one', 'one')]);
-    // The SDK is owned by the distribution package, not extension/ after the
-    // package move. Trust this pinned install only for the fixture load.
-    const sdkPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)),
-      '../../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent');
-    const previousTrustedRoot = process.env.PIE_TRUSTED_SDK_ROOT;
-    let sdk: Awaited<ReturnType<typeof loadSdk>>;
-    try {
-      process.env.PIE_TRUSTED_SDK_ROOT = sdkPath;
-      sdk = await loadSdk(sdkPath, { mode: 'cold-coordinator' });
-    } finally {
-      if (previousTrustedRoot === undefined) delete process.env.PIE_TRUSTED_SDK_ROOT;
-      else process.env.PIE_TRUSTED_SDK_ROOT = previousTrustedRoot;
-    }
+    const artifactDir = process.env['PIE_REAL_RUNTIME_ARTIFACT_DIR']!.trim();
+    const selectedRuntime = await createSourceArtifactTestSdkRuntime(artifactDir);
+    const verifiedRuntime = await verifySdkRuntimeSelection(selectedRuntime.sdkPath, selectedRuntime.sdkRuntime);
+    const mode = sdkRuntimeLoadMode(verifiedRuntime, 'cold');
+    if (mode.mode !== 'source-artifact') throw new Error('Real cold helper test requires a source artifact runtime.');
+    const sdk = await loadSdk(selectedRuntime.sdkPath, { ...mode, surface: 'cold' });
     let opens = 0;
     const runtime = new ColdBrowseHelperRuntime({
       sdk: {
@@ -267,6 +275,26 @@ test('helper durable-detail resolution matches the pure durable address and refu
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
+});
+
+test('cold helper initialization rejects missing, mixed, unknown, and legacy-discriminator runtime routes', () => {
+  const sdkRuntime = createLegacyTestSdkRuntime('/sdk');
+  const initialization = {
+    protocolVersion: COLD_BROWSE_HELPER_PROTOCOL_VERSION,
+    kind: 'initialize',
+    sdkPath: '/sdk',
+    sdkRuntime,
+    startupCwd: '/tmp/cold-helper',
+    parentPid: 123,
+  };
+  assert.equal(parseColdBrowseHelperInputFrame(initialization)?.kind, 'initialize');
+  assert.equal(parseColdBrowseHelperInputFrame({ ...initialization, protocolVersion: 1 }), undefined);
+  for (const malformed of [
+    { ...initialization, sdkRuntime: undefined },
+    { ...initialization, sdkRuntime: { ...sdkRuntime, descriptor: {} } },
+    { ...initialization, sdkRuntime: { ...sdkRuntime, kind: 'unknown' } },
+    { ...initialization, sdkPatchIdentity: (sdkRuntime as any).patchIdentity },
+  ]) assert.equal(parseColdBrowseHelperInputFrame(malformed), undefined);
 });
 
 test('parent watchdog liveness probe recognizes the current process and a missing pid', () => {

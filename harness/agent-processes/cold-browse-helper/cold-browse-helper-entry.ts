@@ -13,6 +13,12 @@ import {
 } from '../../session-storage/transcripts/durable-detail-store';
 import { ColdBrowseHelperResponseTooLargeError, ColdBrowseHelperRuntime } from './cold-browse-helper-runtime';
 import { loadSdk } from '../lib/sdk-integration/sdk';
+import {
+  parseSdkRuntimeSelection,
+  sdkRuntimeLoadMode,
+  validateSdkRuntimeSelectionShape,
+  verifySdkRuntimeSelection,
+} from '../lib/sdk-integration/sdk-runtime-selection.js';
 
 const PARENT_WATCHDOG_INTERVAL_MS = 1_000;
 
@@ -56,13 +62,16 @@ async function main(): Promise<void> {
         disposeRuntime();
         process.exit(0);
       });
-      // `cold-worker` is the read-only barrier branch: it validates the exact
-      // coordinator identity before importing SessionManager and never calls
-      // the coordinator patch/ensure path.
-      const sdk = await loadSdk(frame.sdkPath, {
-        mode: 'cold-worker',
-        patchIdentity: frame.sdkPatchIdentity,
-      });
+      // Validate the selected runtime against this child process before importing
+      // SessionManager. Legacy verification is a read-only patch-barrier check.
+      const sdkRuntime = parseSdkRuntimeSelection(frame.sdkRuntime);
+      const verifiedRuntime = await verifySdkRuntimeSelection(frame.sdkPath, sdkRuntime);
+      const selectedMode = sdkRuntimeLoadMode(verifiedRuntime, 'cold');
+      const sdk = selectedMode.mode === 'source-artifact'
+        ? await loadSdk(frame.sdkPath, { ...selectedMode, surface: 'cold' })
+        : selectedMode.mode === 'cold-worker'
+          ? await loadSdk(frame.sdkPath, selectedMode)
+          : (() => { throw new Error('Cold browse helper requires a cold SDK worker load mode.'); })();
       runtime = new ColdBrowseHelperRuntime({
         sdk,
         startupCwd: frame.startupCwd,
@@ -141,7 +150,7 @@ async function main(): Promise<void> {
       fatal(new Error(`Malformed cold browse helper JSONL: ${toErrorMessage(error)}`));
       return;
     }
-    const frame = parseInputFrame(value);
+    const frame = parseColdBrowseHelperInputFrame(value);
     if (!frame) {
       fatal(new Error('Cold browse helper received an invalid protocol frame.'));
       return;
@@ -184,7 +193,7 @@ async function writeOutput(frame: ColdBrowseHelperOutputFrame): Promise<void> {
   });
 }
 
-function parseInputFrame(value: unknown): ColdBrowseHelperInputFrame | undefined {
+export function parseColdBrowseHelperInputFrame(value: unknown): ColdBrowseHelperInputFrame | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const frame = value as Record<string, unknown>;
   if (frame.protocolVersion !== COLD_BROWSE_HELPER_PROTOCOL_VERSION || typeof frame.kind !== 'string') return undefined;
@@ -193,8 +202,8 @@ function parseInputFrame(value: unknown): ColdBrowseHelperInputFrame | undefined
     return typeof frame.sdkPath === 'string'
       && typeof frame.startupCwd === 'string'
       && typeof frame.parentPid === 'number'
-      && !!frame.sdkPatchIdentity
-      && typeof frame.sdkPatchIdentity === 'object'
+      && !Object.hasOwn(frame, 'sdkPatchIdentity')
+      && validateSdkRuntimeSelectionShape(frame.sdkRuntime) === undefined
       ? value as ColdBrowseHelperInputFrame
       : undefined;
   }

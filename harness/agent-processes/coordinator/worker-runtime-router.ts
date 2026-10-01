@@ -161,6 +161,7 @@ export interface WorkerRuntimePromotionSnapshot {
   startupCwd: string;
   sessionDir: string;
   sdkPath: string;
+  sdkRuntime: import('../lib/sdk-integration/sdk-runtime-selection').SdkRuntimeSelection;
   creationReason?: 'new' | 'resume';
   /** Exact durable handle path. Never substitute the caller's alias. */
   exactSessionPath?: string;
@@ -1953,6 +1954,7 @@ export class WorkerRuntimeRouter {
           operationId: grant.grantId,
           payload: asWorkerJsonObject({
             sdkPath: snapshot.sdkPath,
+            sdkRuntime: snapshot.sdkRuntime,
             agentDir: snapshot.agentDir,
             startupCwd: snapshot.startupCwd,
             sessionDir: snapshot.sessionDir,

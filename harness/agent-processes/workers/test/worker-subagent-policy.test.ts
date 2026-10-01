@@ -15,6 +15,7 @@ import {
   SUBAGENT_PROVIDER_TOGGLES_ENV,
 } from '../../lib/rpc/settings.js';
 import { WorkerRuntimeHost } from '../worker-runtime-host';
+import { createLegacyTestSdkRuntime } from '../../test/fixtures/sdk-runtime-selection.js';
 
 interface WorkerRuntimeHostInternals {
   context?: SessionContext;
@@ -48,6 +49,8 @@ function makeSessionDouble(initialActive: string[]): {
   return { session, appliedLog, activeNames: () => active };
 }
 
+const sdkRuntime = createLegacyTestSdkRuntime('/sdk');
+
 function makeHostWithContext(
   sessionPath: string,
   initialActive: string[],
@@ -71,7 +74,7 @@ function makeHostWithContext(
   const host = new WorkerRuntimeHost({
     server,
     owner: { coordinatorGeneration: 1, workerId: 'host-worker', workerGeneration: 1 },
-    patchIdentity: { relativePath: 'dist/core/session-manager.js', patchVersion: 1, sha256: 'a'.repeat(64) },
+    sdkRuntime,
   } as never);
   const double = makeSessionDouble(initialActive);
   const context = {

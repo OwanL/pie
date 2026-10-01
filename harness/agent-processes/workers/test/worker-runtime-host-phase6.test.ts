@@ -26,6 +26,9 @@ import {
 import { SESSION_SNAPSHOT_TOO_LARGE_CODE } from '../../lib/rpc/wire.js';
 import { AUTONOMOUS_MODE_BY_SESSION_ENV } from '../../lib/rpc/settings.js';
 import { AUTONOMOUS_MODE_ENV } from '../../../tool-and-skill-selection/settings/autonomous-mode.js';
+import { createLegacyTestSdkRuntime } from '../../test/fixtures/sdk-runtime-selection.js';
+
+const sdkRuntime = createLegacyTestSdkRuntime('/sdk');
 
 interface WorkerRuntimeHostInternals {
   sdk?: unknown;
@@ -82,7 +85,7 @@ function makeHost(): {
   const host = new WorkerRuntimeHost({
     server,
     owner: { coordinatorGeneration: 1, workerId: 'host-worker', workerGeneration: 1 },
-    patchIdentity: { relativePath: 'dist/core/session-manager.js', patchVersion: 1, sha256: 'a'.repeat(64) },
+    sdkRuntime,
   } as never);
   return { host, sent, runtimeFailures };
 }
@@ -183,7 +186,7 @@ test('worker settings rollback keeps provider deletion explicit on the coordinat
       failRuntime: () => undefined,
     } as never,
     owner: { coordinatorGeneration: 1, workerId: 'settings-worker', workerGeneration: 1 },
-    patchIdentity: { relativePath: 'dist/core/session-manager.js', patchVersion: 1, sha256: 'a'.repeat(64) },
+    sdkRuntime,
   } as never);
   const internals = getInternals(host);
   internals.sdk = { VERSION: 'test' };
@@ -222,7 +225,7 @@ test('worker settings command keeps session-only SDK defaults out of coordinator
       failRuntime: () => undefined,
     } as never,
     owner: { coordinatorGeneration: 1, workerId: 'settings-worker', workerGeneration: 1 },
-    patchIdentity: { relativePath: 'dist/core/session-manager.js', patchVersion: 1, sha256: 'a'.repeat(64) },
+    sdkRuntime,
   });
   const internals = getInternals(host);
   const path = '/repo/settings-session.jsonl';
@@ -1628,7 +1631,7 @@ test('live.semantic emission uses the recoverable-drop seam while other events s
   const host = new WorkerRuntimeHost({
     server,
     owner: { coordinatorGeneration: 1, workerId: 'host-worker', workerGeneration: 1 },
-    patchIdentity: { relativePath: 'dist/core/session-manager.js', patchVersion: 1, sha256: 'a'.repeat(64) },
+    sdkRuntime,
   } as never);
   const emitter = host as unknown as { emit(event: string, payload?: unknown): void };
 

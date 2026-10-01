@@ -17,7 +17,7 @@ import type {
   WorkerToCoordinatorFrame,
   WorkerToCoordinatorResponseFrame,
 } from '../rpc/worker-protocol.js';
-import type { SdkPatchIdentity } from '../sdk-integration/sdk-patch-barrier.js';
+import type { SdkRuntimeSelection } from '../sdk-integration/sdk-runtime-selection.js';
 
 export interface SupervisedWorkerClient {
   start(): Promise<{ mode: 'phase2'; startedAt: number }>;
@@ -39,7 +39,7 @@ export interface SupervisedWorkerClient {
 export interface WorkerSupervisorOptions {
   workerEntryPath: string;
   coordinatorGeneration: number;
-  sdkPatchIdentity: SdkPatchIdentity;
+  sdkRuntime: SdkRuntimeSelection;
   heartbeatIntervalMs?: number;
   missedHeartbeatMs?: number;
   startupTimeoutMs?: number;
@@ -134,7 +134,7 @@ export class WorkerSupervisor {
       mcpConfigPath: this.options.mcpConfigPathFor?.(sessionPath),
       leasePath: assignment?.leasePath ?? sessionPath,
       leaseRevision: assignment?.leaseRevision ?? 1,
-      sdkPatchIdentity: this.options.sdkPatchIdentity,
+      sdkRuntime: this.options.sdkRuntime,
       heartbeatIntervalMs: this.options.heartbeatIntervalMs,
       missedHeartbeatMs: this.options.missedHeartbeatMs,
       startupTimeoutMs: this.options.startupTimeoutMs,

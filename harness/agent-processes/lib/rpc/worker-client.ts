@@ -28,7 +28,7 @@ import {
   type WorkerToCoordinatorFrame,
   type WorkerToCoordinatorResponseFrame,
 } from './worker-protocol';
-import type { SdkPatchIdentity } from '../sdk-integration/sdk-patch-barrier.js';
+import type { SdkRuntimeSelection } from '../sdk-integration/sdk-runtime-selection.js';
 
 export type WorkerClientStatus = 'new' | 'starting' | 'ready' | 'unresponsive' | 'stopping' | 'failed' | 'exited';
 
@@ -54,7 +54,7 @@ export interface WorkerClientOptions {
   rootSessionPath?: string;
   leasePath?: string;
   leaseRevision?: number;
-  sdkPatchIdentity: SdkPatchIdentity;
+  sdkRuntime: SdkRuntimeSelection;
   /** Session-scoped MCP override artifact forwarded as `--mcp-config` so the
    *  adapter's config discovery substitutes its highest-precedence layer for
    *  this session only. Optional — absent means default discovery. */
@@ -339,7 +339,7 @@ export class WorkerClient {
       ...this.frameBase,
       kind: 'bootstrap',
       heartbeatIntervalMs: this.heartbeatIntervalMs,
-      sdkPatchIdentity: this.options.sdkPatchIdentity,
+      sdkRuntime: this.options.sdkRuntime,
     });
     return await this.ready.promise;
   }

@@ -28,7 +28,11 @@ import {
   DurableDetailNotFoundError,
   type ResolvedDurableDetail,
 } from '../../session-storage/transcripts/durable-detail-store';
-import type { SdkPatchIdentity } from '../lib/sdk-integration/sdk-patch-barrier';
+import {
+  assertSdkRuntimeAgreement,
+  parseSdkRuntimeSelection,
+  type SdkRuntimeSelection,
+} from '../lib/sdk-integration/sdk-runtime-selection.js';
 
 export interface ColdBrowseHelper {
   warm(): Promise<void>;
@@ -113,7 +117,7 @@ export interface ColdBrowseHelperClientOptions {
   /** Additional child arguments for isolated transport fixtures only. */
   readonly entryArgs?: readonly string[];
   readonly sdkPath: string;
-  readonly sdkPatchIdentity: SdkPatchIdentity;
+  readonly sdkRuntime: SdkRuntimeSelection;
   readonly startupCwd: string;
   readonly nodePath?: string;
   readonly parentPid?: number;
@@ -133,6 +137,7 @@ export class ColdBrowseHelperClient implements ColdBrowseHelper {
   private readonly startupTimeoutMs: number;
   private readonly requestTimeoutMs: number;
   private readonly shutdownTimeoutMs: number;
+  private readonly sdkRuntime: SdkRuntimeSelection;
   private current?: HelperGeneration;
   private starting?: Promise<HelperGeneration>;
   private disposal?: Promise<void>;
@@ -143,6 +148,8 @@ export class ColdBrowseHelperClient implements ColdBrowseHelper {
     this.startupTimeoutMs = options.startupTimeoutMs ?? 30_000;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
     this.shutdownTimeoutMs = options.shutdownTimeoutMs ?? 1_000;
+    this.sdkRuntime = parseSdkRuntimeSelection(options.sdkRuntime);
+    assertSdkRuntimeAgreement(options.sdkPath, this.sdkRuntime);
     for (const [name, value] of [
       ['startup', this.startupTimeoutMs],
       ['request', this.requestTimeoutMs],
@@ -415,7 +422,7 @@ export class ColdBrowseHelperClient implements ColdBrowseHelper {
       protocolVersion: COLD_BROWSE_HELPER_PROTOCOL_VERSION,
       kind: 'initialize',
       sdkPath: this.options.sdkPath,
-      sdkPatchIdentity: this.options.sdkPatchIdentity,
+      sdkRuntime: this.sdkRuntime,
       startupCwd: this.options.startupCwd,
       parentPid: this.options.parentPid ?? process.pid,
       maxSourceBytes: this.options.maxSourceBytes,

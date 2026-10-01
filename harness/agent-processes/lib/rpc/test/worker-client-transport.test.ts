@@ -24,6 +24,7 @@ const sdkPatchIdentity = {
   sessionOwnershipAdapter: { patchVersion: 1, relativePath: 'dist/core/session-manager.js', sha256: 'c'.repeat(64) },
   sessionReplacementAdapter: { patchVersion: 7, relativePath: 'dist/core/agent-session-runtime.js', sha256: 'd'.repeat(64) },
 };
+const sdkRuntime = { kind: 'legacy-patched' as const, patchIdentity: sdkPatchIdentity };
 
 class FakeClock implements WorkerClientScheduler {
   private current = 0;
@@ -63,7 +64,7 @@ function createClient(mode: string, extra: Partial<ConstructorParameters<typeof 
     workerId: `fixture-${mode}`,
     workerGeneration: 1,
     sessionPath: path.resolve(`session-${uniqueMode}.jsonl`),
-    sdkPatchIdentity,
+    sdkRuntime,
     heartbeatIntervalMs: 1_000,
     startupTimeoutMs: 5_000,
     diagnosticByteLimit: 1_024,
@@ -263,6 +264,7 @@ test('generic Phase 4 callbacks and dedicated response correlation share the bou
       operationId: 'operation-1',
       payload: {
         sdkPath: sdkPatchIdentity.sdkPath,
+        sdkRuntime,
         agentDir: path.resolve('agent'),
         startupCwd: process.cwd(),
         sessionDir: path.resolve('sessions'),
