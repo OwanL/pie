@@ -2,9 +2,11 @@ import { realpath } from 'node:fs/promises';
 import * as path from 'node:path';
 import {
   verifyPiRuntimeArtifact,
-  type PiRuntimeManifest,
+  type GenerationPiRuntimeDescriptor,
   type PiRuntimeTarget,
 } from '../../../lib/pi-runtime/artifact.mjs';
+
+export type { GenerationPiRuntimeDescriptor } from '../../../lib/pi-runtime/artifact.mjs';
 
 export interface GenerationPiRuntimeDevelopmentOverride {
   artifactDir: string;
@@ -21,16 +23,6 @@ export interface ResolveGenerationPiRuntimeOptions {
   /** Backend Node target, not necessarily the editor/host Node target. */
   target: GenerationPiRuntimeBackendNodeTarget;
   developmentOverride?: GenerationPiRuntimeDevelopmentOverride;
-}
-
-/** Minimal JSON-serializable descriptor suitable for carrying into a later generation stage. */
-export interface GenerationPiRuntimeDescriptor {
-  schemaVersion: 1;
-  artifactDir: string;
-  sdkPath: string;
-  cliPath: string;
-  identity: string;
-  manifest: PiRuntimeManifest;
 }
 
 export type GenerationPiRuntimePolicyErrorCode = 'development-override-not-opted-in';

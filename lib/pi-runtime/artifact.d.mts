@@ -19,6 +19,16 @@ export interface PiRuntimeManifest extends PiRuntimeProvenance {
   payloadSha256: string;
 }
 
+/** Minimal JSON-serializable descriptor for independently verifying a Pi runtime artifact. */
+export interface GenerationPiRuntimeDescriptor {
+  schemaVersion: 1;
+  artifactDir: string;
+  sdkPath: string;
+  cliPath: string;
+  identity: string;
+  manifest: PiRuntimeManifest;
+}
+
 export interface VerifiedPiRuntimeArtifact {
   manifest: PiRuntimeManifest;
   /** SHA-256 of canonical manifest JSON, including provenance. */
