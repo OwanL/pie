@@ -1,5 +1,5 @@
 import * as path from 'node:path';
-import { readFileSync, statSync } from 'node:fs';
+import { statSync } from 'node:fs';
 
 import { BackendClient } from './client';
 import { buildRestoredSessionPlan, filterRestorableStoredTabs } from '../conversation-state/restored-session-plan';
@@ -7,11 +7,11 @@ import { normalizeStoredTabPaths, normalizeStoredPinnedTabGroups } from '../../f
 import { createCommandExecutor } from '../../hosts/lib/command-execution';
 
 import {
-  minimumNodeVersionFromEngine,
-  resolveCompatibleNodePath,
+  probeBackendNodeTarget,
   resolveNodePath,
-  resolveSdkPath,
 } from '../../hosts/lib/runtime-resolution';
+import { resolveGenerationPiRuntime } from '../../hosts/lib/pi-runtime-resolution';
+import type { GenerationPiRuntimeDescriptor } from '../../hosts/lib/pi-runtime-resolution';
 import { resolveAgentDir } from '../../hosts/lib/agent-dir-resolution';
 import { buildRuntimePrefsPayload } from '../../lib/protocol/index.js';
 import type { ChatPrefs, SessionSummary } from '../../lib/protocol/index.js';
@@ -30,7 +30,8 @@ import type { Event } from '../conversation-state/events';
 import type { SessionHostPlatform } from '../../hosts/lib/platform-contracts/session-platform';
 
 const PREFS_STORAGE_KEY = 'chatPrefs';
-const SDK_PATH_CACHE_KEY = 'resolvedSdkPath';
+const DEVELOPMENT_RUNTIME_PATH_ENV = 'PIE_DEVELOPMENT_PI_RUNTIME';
+const ALLOW_DEVELOPMENT_RUNTIME_ENV = 'PIE_ALLOW_DEVELOPMENT_RUNTIME';
 
 /** Only classify an explicitly private path as missing when the filesystem
  * confirms ENOENT/ENOTDIR. Sharing violations and other transient stat errors
@@ -202,79 +203,46 @@ function bootLogRestorePrepared(
   });
 }
 
-/**
- * Read the build-generated `out/sdk-local-path.json` pointing at the SDK
- * pinned in this checkout's `node_modules`. Returns undefined when the
- * manifest is absent (or stale after a checkout move), resolution tries the
- * loaded package's own dependency, then the globalState cache and `npm root -g`.
- */
-function readSdkLocalManifest(runtimeOutDir: string): string | undefined {
-  const manifestPath = path.join(runtimeOutDir, 'sdk-local-path.json');
-  try {
-    const parsed = JSON.parse(readFileSync(manifestPath, 'utf8')) as { sdkPath?: unknown };
-    const sdkPath = typeof parsed.sdkPath === 'string' ? parsed.sdkPath.trim() : '';
-    return sdkPath || undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-async function resolveAndCacheRuntimePaths(options: StartSessionBackendOptions): Promise<{ nodePath: string; sdkPath: string } | null> {
+async function resolveRuntimePaths(options: StartSessionBackendOptions): Promise<{
+  nodePath: string;
+  sdkPath: string;
+  sourceArtifactDescriptor: GenerationPiRuntimeDescriptor;
+} | null> {
   try {
     const configuredNodePath = options.platform.getSetting<string>('nodePath', 'nodePath');
-    const configuredSdkPath = options.platform.getSetting<string>('sdkPath', 'sdkPath');
-    const envSdkPath = process.env.PI_SDK_PATH?.trim() || undefined;
-    // The build manifest points at the checkout's distribution dependency;
-    // a packaged install (or dev host) can also own the SDK locally. A stale
-    // checkout manifest must not mask a valid installed package dependency.
-    const localCandidatePath = readSdkLocalManifest(options.platform.getRuntimeOutputDirectory());
-    const packageCandidatePath = path.join(
-      options.platform.extensionPath, 'node_modules', '@earendil-works', 'pi-coding-agent',
-    );
-    const shouldUseSdkCache = !configuredSdkPath && !envSdkPath;
-    const cachedSdkPath = shouldUseSdkCache
-      ? options.platform.storage.get<string>(SDK_PATH_CACHE_KEY)
-      : undefined;
-
-    const exec = createCommandExecutor();
-    const sdkPath = await resolveSdkPath({
-      configuredPath: configuredSdkPath,
-      cachedPath: cachedSdkPath,
-      localCandidatePath,
-      localCandidatePaths: [packageCandidatePath],
+    const nodePath = path.resolve(resolveNodePath({
+      configuredPath: configuredNodePath,
       env: process.env as NodeJS.ProcessEnv,
-      exec,
-    });
-    const sdkPackage = JSON.parse(
-      readFileSync(path.join(sdkPath, 'package.json'), 'utf8'),
-    ) as { engines?: { node?: unknown } };
-    const sdkNodeEngine = typeof sdkPackage.engines?.node === 'string'
-      ? sdkPackage.engines.node
-      : undefined;
-    const minimumNodeVersion = minimumNodeVersionFromEngine(sdkNodeEngine);
-    const nodePath = minimumNodeVersion
-      ? await resolveCompatibleNodePath({
-          configuredPath: configuredNodePath,
-          env: process.env as NodeJS.ProcessEnv,
-          exec,
-          minimumVersion: minimumNodeVersion,
-        })
-      : resolveNodePath({
-          configuredPath: configuredNodePath,
-          env: process.env as NodeJS.ProcessEnv,
-        });
-    // The local candidates are re-discovered on every start; never cache a
-    // checkout path that would go stale when the package or repo is relocated.
-    if (shouldUseSdkCache && sdkPath !== localCandidatePath && sdkPath !== packageCandidatePath) {
-      void Promise.resolve(options.platform.storage.update(SDK_PATH_CACHE_KEY, sdkPath)).catch((error) => {
-        appendPieLog('warn', 'startup', 'globalState.update failed for resolvedSdkPath', { error: toErrorMessage(error) });
-      });
+    }));
+    const exec = createCommandExecutor();
+    const target = await probeBackendNodeTarget(nodePath, { exec });
+
+    const developmentArtifactDir = process.env[DEVELOPMENT_RUNTIME_PATH_ENV]?.trim();
+    if (developmentArtifactDir && process.env[ALLOW_DEVELOPMENT_RUNTIME_ENV] !== '1') {
+      throw new Error(
+        `${DEVELOPMENT_RUNTIME_PATH_ENV} requires ${ALLOW_DEVELOPMENT_RUNTIME_ENV}=1.`,
+      );
     }
-    return { nodePath, sdkPath };
+    const runtime = await resolveGenerationPiRuntime({
+      runtimeOutDir: options.platform.getRuntimeOutputDirectory(),
+      target,
+      ...(developmentArtifactDir ? {
+        developmentOverride: {
+          artifactDir: developmentArtifactDir,
+          allowDevelopmentRuntime: true,
+        },
+      } : {}),
+    });
+    return {
+      nodePath,
+      sdkPath: runtime.sdkPath,
+      sourceArtifactDescriptor: runtime,
+    };
   } catch (err) {
     options.dispatchArch({ kind: 'NoticeShown', notice:
       `pie setup error: ${toErrorMessage(err)}. ` +
-        'Set pie.nodePath and pie.sdkPath in settings.',
+        'Set pie.nodePath to a usable Node executable and ensure this generation contains a matching out/pi-runtime artifact. ' +
+        `A verified development artifact requires ${DEVELOPMENT_RUNTIME_PATH_ENV} and ${ALLOW_DEVELOPMENT_RUNTIME_ENV}=1.`,
     });
     return null;
   }
@@ -356,6 +324,7 @@ async function startBackendWithLogging(
   options: StartSessionBackendOptions,
   nodePath: string,
   sdkPath: string,
+  sourceArtifactDescriptor: GenerationPiRuntimeDescriptor,
   backendPath: string,
   workspaceCwd: string,
   restoredStartupPath: string | null,
@@ -375,6 +344,7 @@ async function startBackendWithLogging(
     await options.backend.start({
       nodePath,
       sdkPath,
+      sourceArtifactDescriptor,
       backendPath,
       cwd: workspaceCwd,
       analyticsActivation: options.getAnalyticsBackendDescriptor?.(),
@@ -412,12 +382,20 @@ async function startBackendWithLogging(
  *  globalThis.fetch at BackendServer.start() time. */
 export async function spawnBackend(
   options: StartSessionBackendOptions,
-  backendArgs: { nodePath: string; sdkPath: string; backendPath: string; cwd: string; restoredStartupPath: string | null },
+  backendArgs: {
+    nodePath: string;
+    sdkPath: string;
+    sourceArtifactDescriptor: GenerationPiRuntimeDescriptor;
+    backendPath: string;
+    cwd: string;
+    restoredStartupPath: string | null;
+  },
 ): Promise<{ started: boolean }> {
   const started = await startBackendWithLogging(
     options,
     backendArgs.nodePath,
     backendArgs.sdkPath,
+    backendArgs.sourceArtifactDescriptor,
     backendArgs.backendPath,
     backendArgs.cwd,
     backendArgs.restoredStartupPath,
@@ -550,12 +528,12 @@ export async function startSessionBackend(options: StartSessionBackendOptions): 
 
   bootLogRestorePrepared(restoredStartupPath, cachedSessions.length, droppedPaths.length, restoredTabs.length, preloadPaths.length);
 
-  const paths = await resolveAndCacheRuntimePaths(options);
+  const paths = await resolveRuntimePaths(options);
   if (!paths) {
     options.scheduleRender();
     return;
   }
-  const { nodePath, sdkPath } = paths;
+  const { nodePath, sdkPath, sourceArtifactDescriptor } = paths;
 
   const backendPath = path.join(options.platform.getRuntimeOutputDirectory(), 'backend.js');
   setupAgentDirEnv(options);
@@ -577,7 +555,7 @@ export async function startSessionBackend(options: StartSessionBackendOptions): 
   // BackendServer.start() time — no separate proxy process needed.
   const { started } = await spawnBackend(
     options,
-    { nodePath, sdkPath, backendPath, cwd: workspaceCwd, restoredStartupPath },
+    { nodePath, sdkPath, sourceArtifactDescriptor, backendPath, cwd: workspaceCwd, restoredStartupPath },
   );
   if (!started) {
     options.events.detach();

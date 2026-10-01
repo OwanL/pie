@@ -1,15 +1,29 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
 import path from 'node:path';
 
 import { resolveCommandInvocation } from '../command-invocation';
 import { createCommandExecutor } from '../command-execution';
+import { verifyPiRuntimeArtifact } from '../../../../lib/pi-runtime/artifact.mjs';
 import {
   minimumNodeVersionFromEngine,
+  probeBackendNodeTarget,
   resolveCompatibleNodePath,
   resolveNodePath,
   resolveSdkPath,
 } from '../runtime-resolution';
+
+// Opt-in materialized-artifact evidence; ordinary fast tests use private fixtures.
+const SUPPLIED_PI_RUNTIME_ARTIFACT = process.env.PIE_TEST_PI_RUNTIME_ARTIFACT;
+const SUPPLIED_PI_RUNTIME_IDENTITY = process.env.PIE_TEST_PI_RUNTIME_IDENTITY;
+
+function createTempRoot(t: { after: (fn: () => void) => void }, prefix: string): string {
+  const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
+  t.after(() => fs.rmSync(tempRoot, { recursive: true, force: true }));
+  return tempRoot;
+}
 
 test('resolveCommandInvocation wraps npm with cmd.exe on Windows', () => {
   const invocation = resolveCommandInvocation('npm', ['root', '-g'], {
@@ -112,6 +126,106 @@ test('resolveNodePath rejects missing configured and environment paths and error
       exists: () => false,
     }),
     /Could not find a standalone Node\.js runtime/,
+  );
+});
+
+test('probeBackendNodeTarget runs the selected executable with bounded sanitized environment', async () => {
+  const originalEnv = {
+    ...process.env,
+    NODE_OPTIONS: '--require injected.js',
+    NODE_PATH: '/ambient/modules',
+    node_options: '--require case-insensitive.js',
+  };
+  let invocation: { command: string; args: string[]; options?: { env?: NodeJS.ProcessEnv; timeout?: number; maxBuffer?: number } } | undefined;
+  const expected = { platform: 'win32', arch: 'arm64', nodeAbi: '127' };
+
+  const target = await probeBackendNodeTarget('/selected/node.exe', {
+    env: originalEnv,
+    exec: async (command, args, options) => {
+      invocation = { command, args, options };
+      return { stdout: JSON.stringify(expected), stderr: '', exitCode: 0 };
+    },
+  });
+
+  assert.deepEqual(target, expected);
+  assert.equal(invocation?.command, '/selected/node.exe');
+  assert.deepEqual(invocation?.args, ['-e', 'process.stdout.write(JSON.stringify({platform:process.platform,arch:process.arch,nodeAbi:process.versions.modules}))']);
+  assert.equal(invocation?.options?.timeout, 5_000);
+  assert.equal(invocation?.options?.maxBuffer, 16 * 1024);
+  assert.equal(invocation?.options?.env?.NODE_OPTIONS, undefined);
+  assert.equal(invocation?.options?.env?.NODE_PATH, undefined);
+  assert.equal(invocation?.options?.env?.node_options, undefined);
+  assert.equal(originalEnv.NODE_OPTIONS, '--require injected.js', 'the parent environment is not mutated');
+});
+
+test('probeBackendNodeTarget reports the running Node target and rejects failed or malformed probes', async () => {
+  assert.deepEqual(await probeBackendNodeTarget(process.execPath), {
+    platform: process.platform,
+    arch: process.arch,
+    nodeAbi: process.versions.modules,
+  });
+  await assert.rejects(probeBackendNodeTarget('/bad/node', {
+    exec: async () => ({ stdout: '', stderr: 'timed out', exitCode: 1 }),
+  }), /Could not probe backend Node target/);
+  await assert.rejects(probeBackendNodeTarget('/bad/node', {
+    exec: async () => ({ stdout: '{}', stderr: '', exitCode: 0 }),
+  }), /invalid target/);
+});
+
+test('probeBackendNodeTarget runs a real selected child without ambient preloads and reports its target', async (t) => {
+  const tempRoot = createTempRoot(t, 'pie-node-probe-');
+  const preloadPath = path.join(tempRoot, 'hostile-preload.cjs');
+  fs.writeFileSync(preloadPath, "throw new Error('hostile NODE_OPTIONS preload executed');\n");
+  const env = {
+    ...process.env,
+    NODE_OPTIONS: `--require "${preloadPath}"`,
+    NODE_PATH: tempRoot,
+  };
+
+  const target = await probeBackendNodeTarget(process.execPath, { env });
+
+  assert.deepEqual(target, {
+    platform: process.platform,
+    arch: process.arch,
+    nodeAbi: process.versions.modules,
+  }, 'the selected executable child must report its own platform, architecture and ABI');
+  assert.equal(env.NODE_OPTIONS, `--require "${preloadPath}"`, 'probe sanitization must not mutate the caller environment');
+});
+
+test('command executor bounds a real subprocess that does not exit', async () => {
+  const startedAt = Date.now();
+  const result = await createCommandExecutor()(
+    process.execPath,
+    ['-e', 'setTimeout(() => {}, 30_000)'],
+    { timeout: 150, maxBuffer: 16 * 1024 },
+  );
+
+  assert.notEqual(result.exitCode, 0, 'the child must be terminated by the configured timeout');
+  assert.ok(Date.now() - startedAt < 5_000, 'the real subprocess must fail within a bounded interval');
+});
+
+test('a private copy of the supplied runtime keeps its verified identity and rejects tampering', async (t) => {
+  if (!SUPPLIED_PI_RUNTIME_ARTIFACT || !SUPPLIED_PI_RUNTIME_IDENTITY) {
+    t.skip('set PIE_TEST_PI_RUNTIME_ARTIFACT and PIE_TEST_PI_RUNTIME_IDENTITY for copied artifact evidence');
+    return;
+  }
+
+  const tempRoot = createTempRoot(t, 'pie-runtime-copy-');
+  const target = { platform: process.platform, arch: process.arch, nodeAbi: process.versions.modules };
+  const sourceManifest = JSON.parse(fs.readFileSync(path.join(SUPPLIED_PI_RUNTIME_ARTIFACT, 'manifest.json'), 'utf8'));
+
+  const privateCopy = path.join(tempRoot, 'pi-runtime');
+  await fs.promises.cp(SUPPLIED_PI_RUNTIME_ARTIFACT, privateCopy, { recursive: true, errorOnExist: true, force: false });
+  const copiedVerification = await verifyPiRuntimeArtifact(privateCopy, { target });
+  assert.equal(copiedVerification.identity, SUPPLIED_PI_RUNTIME_IDENTITY, 'copying must preserve the stable supplied artifact identity');
+  assert.deepEqual(copiedVerification.manifest, sourceManifest, 'the verified private copy must retain the supplied manifest');
+  assert.notEqual(copiedVerification.artifactDir, path.resolve(SUPPLIED_PI_RUNTIME_ARTIFACT), 'verification must use the private copy');
+
+  const privateSdkFile = path.join(privateCopy, 'node_modules', '@earendil-works', 'pi-coding-agent', 'dist', 'index.js');
+  await fs.promises.appendFile(privateSdkFile, '\n// private-copy tamper\n');
+  await assert.rejects(
+    verifyPiRuntimeArtifact(privateCopy, { target }),
+    /package hash mismatch/,
   );
 });
 

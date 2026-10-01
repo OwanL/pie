@@ -1341,6 +1341,12 @@ export class HostRuntime {
       this.analyticsHandoffRegistry?.close();
       this.service.dispose();
       await disposeLivePipelineTrace();
+      // Coordinator exit still permits stop/manual restart, but forced or
+      // unknown descendant teardown must not release immutable runtime files.
+      // Report only after other owned teardown, including analytics, finishes.
+      if (!this.backend.isRuntimeLifetimeTeardownConfirmed()) {
+        throw new Error('Backend runtime lifetime teardown is unconfirmed; generation lease must be retained.');
+      }
     })();
 
     await this.shutdownPromise;

@@ -49,6 +49,18 @@ test('runtime lease release stays behind awaited production backend shutdown', a
   assert.match(entry, /await extension\?\.shutdown\(\)/u);
 });
 
+test('host artifact delivery binds Pi to verified output and distinguishes standalone lifetimes', async () => {
+  const contract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
+  assert.match(contract, /Pi runtime packages, dependencies, and assets are contained in that output's verified `pi-runtime` artifact and share its lifetime/u);
+  assert.match(contract, /selected backend Node executable's platform, architecture, and modules ABI/u);
+  assert.match(contract, /missing, tampered, or incompatible artifacts fail setup without an external SDK pointer, cache, registry, or global-install fallback/u);
+  assert.match(contract, /development-only and requires explicit opt-in/u);
+  assert.match(contract, /acquiring before artifact\/runtime use and releasing only after confirmed owned teardown; uncertain teardown retains the lease/u);
+  assert.match(contract, /Packaged flat output has package-install lifetime, not generation-GC lease protection/u);
+  assert.match(contract, /Explicit standalone output is caller-owned and must remain immutable and available until confirmed shutdown/u);
+  assert.match(contract, /Settings, credentials, sessions, and other user data remain outside runtime generations/u);
+});
+
 test('agent session-control docs track current selectors, outcomes, provenance, titles, and deferred scope', async () => {
   const agentContract = await readFile(new URL('../../docs/contracts/AGENT-SESSION-CONTROL.md', import.meta.url), 'utf8');
   const titleContract = await readFile(new URL('../../docs/contracts/SESSION-TITLES.md', import.meta.url), 'utf8');

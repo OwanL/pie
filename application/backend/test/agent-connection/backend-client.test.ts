@@ -7,6 +7,7 @@ import { PassThrough } from 'node:stream';
 import test from 'node:test';
 
 import { deriveTrustedSdkRoot } from '../../agent-connection/trusted-sdk-root';
+import type { GenerationPiRuntimeDescriptor } from '../../../hosts/lib/pi-runtime-resolution';
 import { PROTOCOL_VERSION } from '../../../../harness/agent-processes/lib/rpc/wire.js';
 
 test('deriveTrustedSdkRoot trusts the containing node_modules tree only', () => {
@@ -136,11 +137,20 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
 
   const { BackendClient } = await import('../../agent-connection/client');
   const client = new BackendClient({ editorVersion: '1.102.3-test', orphanReaper: noOrphans });
+  const sourceArtifactDescriptor = {
+    schemaVersion: 1,
+    artifactDir: '/mock/pi-runtime',
+    sdkPath: '/mock/sdk',
+    cliPath: '/mock/sdk/dist/cli.js',
+    identity: 'a'.repeat(64),
+    manifest: {} as GenerationPiRuntimeDescriptor['manifest'],
+  } as GenerationPiRuntimeDescriptor;
   try {
     const payload = await client.start({
       nodePath: '/mock/node',
       backendPath: '/mock/backend.js',
       sdkPath: '/mock/sdk',
+      sourceArtifactDescriptor,
       cwd: '/mock/cwd',
     });
 
@@ -151,6 +161,9 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
       '--backendGeneration', '1',
       '--lifetimeFd', '3',
     ]);
+    const sourceDescriptorIndex = spawnArgs?.indexOf('--sourceArtifactDescriptor') ?? -1;
+    assert.ok(sourceDescriptorIndex >= 0, 'the source artifact descriptor is passed explicitly on the CLI');
+    assert.equal(spawnArgs?.[sourceDescriptorIndex + 1], JSON.stringify(sourceArtifactDescriptor));
     assert.deepEqual(spawnOptions?.stdio, ['pipe', 'pipe', 'pipe', 'pipe']);
     assert.equal((spawnOptions?.env as NodeJS.ProcessEnv | undefined)?.PIE_EDITOR_VERSION, '1.102.3-test');
     assert.equal((spawnOptions?.env as NodeJS.ProcessEnv | undefined)?.PIE_TRUSTED_SDK_ROOT, undefined);
@@ -318,6 +331,67 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
     await Promise.all([acceptedWrite, gracefulStop]);
     assert.equal(stopSettled, true);
     assert.equal(drainingProc.killCount, 0, 'a responsive backend exits through stdin EOF without forced termination');
+    assert.equal(drainingClient.isRuntimeLifetimeTeardownConfirmed(), true,
+      'orderly stdin-drain completion confirms generation lifetime');
+
+    const forceProc = new FakeChildProcess();
+    nextProc = forceProc as unknown as cp.ChildProcess;
+    await drainingClient.start({ nodePath: '/mock/node', backendPath: '/mock/backend.js', sdkPath: '/mock/sdk', cwd: '/mock/cwd' });
+    assert.equal(drainingClient.isRuntimeLifetimeTeardownConfirmed(), false, 'a live generation is unconfirmed');
+    forceProc.stdin.destroy();
+    await drainingClient.stop();
+    assert.equal(forceProc.killCount, 1);
+    assert.equal(drainingClient.isRuntimeLifetimeTeardownConfirmed(), false,
+      'forced exit, even with code 0, confirms only coordinator exit');
+    const replacementProc = new DrainingChildProcess();
+    nextProc = replacementProc as unknown as cp.ChildProcess;
+    await drainingClient.start({ nodePath: '/mock/node', backendPath: '/mock/backend.js', sdkPath: '/mock/sdk', cwd: '/mock/cwd' });
+    replacementProc.releaseRequest();
+    await drainingClient.stop();
+    assert.equal(drainingClient.isRuntimeLifetimeTeardownConfirmed(), false,
+      'a later clean restart cannot erase an earlier uncertain generation');
+    drainingClient.dispose();
+
+    const unexpectedProc = new FakeChildProcess();
+    nextProc = unexpectedProc as unknown as cp.ChildProcess;
+    const unexpectedClient = new BackendClient({ orphanReaper: noOrphans });
+    assert.equal(unexpectedClient.isRuntimeLifetimeTeardownConfirmed(), true, 'no child ever spawned is safe');
+    await unexpectedClient.start({ nodePath: '/mock/node', backendPath: '/mock/backend.js', sdkPath: '/mock/sdk', cwd: '/mock/cwd' });
+    unexpectedProc.emit('exit', 0);
+    await unexpectedClient.stop();
+    assert.equal(unexpectedClient.isRuntimeLifetimeTeardownConfirmed(), false, 'arbitrary exit 0 is not complete-drain evidence');
+    unexpectedClient.dispose();
+
+    const failedSpawnProc = new NeverReadyChildProcess();
+    nextProc = failedSpawnProc as unknown as cp.ChildProcess;
+    const failedSpawnClient = new BackendClient({ orphanReaper: noOrphans });
+    const failedSpawn = failedSpawnClient.start({ nodePath: '/mock/node', backendPath: '/mock/backend.js', sdkPath: '/mock/sdk', cwd: '/mock/cwd' });
+    failedSpawnProc.emit('error', new Error('ENOENT'));
+    await assert.rejects(failedSpawn, /ENOENT/);
+    await failedSpawnClient.stop();
+    assert.equal(failedSpawnClient.isRuntimeLifetimeTeardownConfirmed(), true, 'OS spawn failure with no PID consumed no child lifetime');
+    failedSpawnClient.dispose();
+
+    const unknownProc = new NeverReadyChildProcess();
+    Object.defineProperty(unknownProc, 'pid', { value: 424242 }); // synthetic only
+    nextProc = unknownProc as unknown as cp.ChildProcess;
+    const unknownClient = new BackendClient({ orphanReaper: noOrphans });
+    const unknownStart = unknownClient.start({ nodePath: '/mock/node', backendPath: '/mock/backend.js', sdkPath: '/mock/sdk', cwd: '/mock/cwd' });
+    unknownProc.emit('error', new Error('synthetic error after PID allocation'));
+    await assert.rejects(unknownStart, /after PID allocation/);
+    assert.equal(unknownClient.isRuntimeLifetimeTeardownConfirmed(), false,
+      'error after PID allocation is not evidence that the owned tree exited');
+    const afterUnknownProc = new DrainingChildProcess();
+    nextProc = afterUnknownProc as unknown as cp.ChildProcess;
+    await unknownClient.start({ nodePath: '/mock/node', backendPath: '/mock/backend.js', sdkPath: '/mock/sdk', cwd: '/mock/cwd' });
+    afterUnknownProc.releaseRequest();
+    await unknownClient.stop();
+    assert.equal(unknownClient.isRuntimeLifetimeTeardownConfirmed(), false,
+      'a previous unconfirmed generation remains pending after a clean replacement');
+    unknownProc.emit('exit', 0);
+    assert.equal(unknownClient.isRuntimeLifetimeTeardownConfirmed(), false,
+      'late arbitrary exit of the earlier generation cannot become orderly drain evidence');
+    unknownClient.dispose();
 
     Object.defineProperty(fakeProc.stdin, 'write', {
       configurable: true,
@@ -340,6 +414,7 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
         /Timed out waiting for the pie backend to become ready/,
       );
       assert.equal(stalledProc.killCount, 1, 'a startup timeout terminates the unusable child');
+      assert.equal(stalledClient.isRuntimeLifetimeTeardownConfirmed(), false, 'forced startup failure retains lifetime uncertainty');
       await assert.rejects(stalledClient.request('app.ping'), /Backend is not running/);
     } finally {
       stalledClient.dispose();

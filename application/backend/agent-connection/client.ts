@@ -26,6 +26,7 @@ import { deriveTrustedSdkRoot } from './trusted-sdk-root';
 import type { CommitAwareRequestOptions } from '../conversation-state/effects/effect-runner';
 import { createOperationalIncident, type OperationalIncident } from '../../../harness/agent-processes/lib/rpc/incident-payload.js';
 import type { AnalyticsBackendDescriptor } from '../../../analytics/authority/activation.js';
+import type { GenerationPiRuntimeDescriptor } from '../../hosts/lib/pi-runtime-resolution';
 import { assertProtocolVersion, isEventEnvelope, isResponseEnvelope } from '../../../harness/agent-processes/lib/rpc/wire.js';
 import type { EventEnvelope, ResponseEnvelope } from '../../../harness/agent-processes/lib/rpc/wire.js';
 import type { BackendReadyPayload } from '../../../harness/agent-processes/lib/rpc/session-events.js';
@@ -35,6 +36,8 @@ export interface BackendStartOptions {
   backendPath: string;
   sdkPath: string;
   cwd: string;
+  /** Verified generation-local Pi runtime selected by host startup. */
+  sourceArtifactDescriptor?: GenerationPiRuntimeDescriptor;
   /** Immutable canonical analytics authority snapshot for this generation. */
   analyticsActivation?: AnalyticsBackendDescriptor;
 }
@@ -162,7 +165,7 @@ function utf8Tail(value: string, maxBytes: number): string {
 
 /** Time to wait for the backend process to exit after SIGTERM before escalating
  *  to SIGKILL. Exported so lifecycle callers budget their own confirmed-exit
- *  waits (a resolved stop() is the only proof the backend is dead). */
+ *  waits (a resolved stop() confirms coordinator exit, not tree teardown). */
 export const STOP_KILL_TIMEOUT_MS = 5_000;
 
 /**
@@ -309,6 +312,11 @@ export class BackendClient implements Disposable {
   private stopPromise?: Promise<void>;
   private generation = 0;
   private readonly intentionalStops = new WeakSet<cp.ChildProcess>();
+  private readonly forcedStops = new WeakSet<cp.ChildProcess>();
+  private pendingLifetimeGenerations = 0;
+  /** Sticky across restart: a later clean coordinator cannot prove an earlier
+   * generation's descendants exited. */
+  private uncertainLifetimeGeneration = false;
   /** Validate a ready descriptor before any public event listener (including
    * the retained analytics transport) can re-arm the new coordinator. */
   private readyValidation?: {
@@ -326,6 +334,19 @@ export class BackendClient implements Disposable {
   /** Host-authoritative generation allocated for the latest spawn attempt. */
   getGeneration(): number {
     return this.generation;
+  }
+
+  /** Conservative generation-file lifetime evidence, separate from stop()'s
+   * coordinator-exit/restart semantics. Successful stdin drain exits rely on
+   * the coordinator's existing complete-drain disposal contract, not arbitrary
+   * exit code 0. No process census or force-kill completion is inferred here. */
+  isRuntimeLifetimeTeardownConfirmed(): boolean {
+    return this.pendingLifetimeGenerations === 0 && !this.uncertainLifetimeGeneration;
+  }
+
+  private terminateOwnedProcess(proc: cp.ChildProcess, signal?: NodeJS.Signals): void {
+    this.forcedStops.add(proc);
+    terminateProcessTree(proc, signal);
   }
 
   /**
@@ -365,9 +386,9 @@ export class BackendClient implements Disposable {
     this.stderrBuffer = '';
     this.stderrLineBuffer = '';
     // The backend's assertAllowedSdkPath only loads SDKs under trusted roots
-    // (user profile / program files / npm prefix). VS Code's extension host
-    // doesn't always set NPM_CONFIG_PREFIX, so derive the trusted root from
-    // the sdkPath we already resolved via `npm root -g` and pass it through.
+    // (user profile / program files / npm prefix). Generation-local artifacts
+    // may live outside the extension host's npm prefix, so derive the trusted
+    // root from the already verified sdkPath and pass it through.
     const trustedRoot = deriveTrustedSdkRoot(options.sdkPath);
     const trustedRootEnv = trustedRoot ? { PIE_TRUSTED_SDK_ROOT: trustedRoot } : {};
     const {
@@ -430,6 +451,9 @@ export class BackendClient implements Disposable {
     // identity the host uses to reject stale traffic after restart.
     const generation = this.generation + 1;
     this.generation = generation;
+    const sourceArtifactArgs = options.sourceArtifactDescriptor
+      ? ['--sourceArtifactDescriptor', JSON.stringify(options.sourceArtifactDescriptor)]
+      : [];
     const analyticsArgs = options.analyticsActivation
       ? [
           '--analyticsGenerationId', options.analyticsActivation.generationId,
@@ -445,6 +469,7 @@ export class BackendClient implements Disposable {
       [
         options.backendPath,
         '--sdkPath', options.sdkPath,
+        ...sourceArtifactArgs,
         '--cwd', options.cwd,
         '--hostPid', String(process.pid),
         '--backendGeneration', String(generation),
@@ -485,6 +510,7 @@ export class BackendClient implements Disposable {
     });
 
     this.proc = proc;
+    this.pendingLifetimeGenerations += 1;
 
     if (!proc.stdout || !proc.stderr || !proc.stdin) {
       this.proc = undefined;
@@ -505,11 +531,17 @@ export class BackendClient implements Disposable {
         generation,
         error: toErrorMessage(error),
       });
-      terminateProcessTree(proc);
+      this.terminateOwnedProcess(proc);
     });
 
-    proc.on('exit', (code) => {
+    let lifetimeSettled = false;
+    proc.once('exit', (code, signal) => {
       const intentional = this.intentionalStops.has(proc);
+      if (!lifetimeSettled) this.pendingLifetimeGenerations -= 1;
+      lifetimeSettled = true;
+      if (!intentional || this.forcedStops.has(proc) || code !== 0 || signal != null) {
+        this.uncertainLifetimeGeneration = true;
+      }
       if (this.killEscalationProcess === proc && this.killEscalationTimer) {
         clearTimeout(this.killEscalationTimer);
         this.killEscalationTimer = undefined;
@@ -544,6 +576,12 @@ export class BackendClient implements Disposable {
     });
 
     proc.on('error', (error) => {
+      // A failed OS spawn with no assigned PID consumed no runtime files in a
+      // child. Errors after a PID was assigned cannot prove tree teardown.
+      if (proc.pid === undefined && !lifetimeSettled) {
+        this.pendingLifetimeGenerations -= 1;
+        lifetimeSettled = true;
+      }
       if (generation === this.generation) this.requests.rejectAll(error);
     });
 
@@ -662,7 +700,7 @@ export class BackendClient implements Disposable {
             maxLineBytes,
             preview,
           });
-          if (this.proc === proc) terminateProcessTree(proc);
+          if (this.proc === proc) this.terminateOwnedProcess(proc);
         },
       });
     });
@@ -816,14 +854,14 @@ export class BackendClient implements Disposable {
         this.killEscalationProcess = undefined;
       }
       appendPieLog('warn', 'backend', 'backend did not exit after stdin close, escalating to forced termination');
-      terminateProcessTree(proc, 'SIGKILL');
+      this.terminateOwnedProcess(proc, 'SIGKILL');
     }, STOP_KILL_TIMEOUT_MS);
 
     try {
-      if (!proc.stdin || proc.stdin.destroyed) terminateProcessTree(proc);
+      if (!proc.stdin || proc.stdin.destroyed) this.terminateOwnedProcess(proc);
       else proc.stdin.end();
     } catch {
-      terminateProcessTree(proc);
+      this.terminateOwnedProcess(proc);
     }
     await exited;
   }
@@ -834,7 +872,7 @@ export class BackendClient implements Disposable {
     const proc = this.proc;
     this.intentionalStops.add(proc);
     this.proc = undefined;
-    terminateProcessTree(proc, 'SIGKILL');
+    this.terminateOwnedProcess(proc, 'SIGKILL');
   }
 
   private handleLine(line: string): void {

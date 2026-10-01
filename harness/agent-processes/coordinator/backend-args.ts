@@ -1,4 +1,6 @@
 import type { AnalyticsBackendDescriptor } from '../../../analytics/authority/activation.js';
+import type { GenerationPiRuntimeDescriptor } from '../../../lib/pi-runtime/artifact.mjs';
+import { parseSdkRuntimeSelection } from '../lib/sdk-integration/sdk-runtime-selection';
 
 // ─── Argument parsing ────────────────────────────────────────────────────────
 
@@ -11,6 +13,8 @@ export interface BackendArgs {
   hostPid?: number;
   /** Dedicated inherited descriptor whose EOF proves the host disappeared. */
   lifetimeFd?: number;
+  /** Verified generation-local Pi artifact selected by the production host. */
+  sourceArtifactDescriptor?: GenerationPiRuntimeDescriptor;
   /** Immutable canonical analytics authority snapshot, supplied only by the
    * production host after its readiness probe succeeds. */
   analyticsActivation?: AnalyticsBackendDescriptor;
@@ -34,10 +38,35 @@ export function parseArgs(argv: string[]): BackendArgs {
   let lifetimeFd: number | undefined;
   let backendGeneration = 1;
   const analyticsValues: Record<string, string> = {};
+  let sourceArtifactDescriptor: GenerationPiRuntimeDescriptor | undefined;
+  let sourceArtifactDescriptorSeen = false;
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     const value = argv[index + 1];
+    if (arg === '--sourceArtifactDescriptor') {
+      if (sourceArtifactDescriptorSeen) throw new Error('Duplicate --sourceArtifactDescriptor argument.');
+      sourceArtifactDescriptorSeen = true;
+      if (!value || value.startsWith('--')) {
+        throw new Error('Missing value for --sourceArtifactDescriptor.');
+      }
+      let descriptor: unknown;
+      try {
+        descriptor = JSON.parse(value);
+      } catch {
+        throw new Error('Malformed JSON for --sourceArtifactDescriptor.');
+      }
+      try {
+        const selection = parseSdkRuntimeSelection({ kind: 'source-artifact', descriptor });
+        if (selection.kind !== 'source-artifact') throw new Error('Expected a source-artifact selection.');
+        sourceArtifactDescriptor = selection.descriptor;
+      } catch (error) {
+        const detail = error instanceof Error ? ` ${error.message}` : '';
+        throw new Error(`Invalid --sourceArtifactDescriptor argument.${detail}`);
+      }
+      index += 1;
+      continue;
+    }
     if (ANALYTICS_DESCRIPTOR_FLAGS.has(arg)) {
       if (!value || ANALYTICS_DESCRIPTOR_FLAGS.has(value)) {
         throw new Error(`Missing value for ${arg}.`);
@@ -130,6 +159,7 @@ export function parseArgs(argv: string[]): BackendArgs {
     backendGeneration,
     ...(hostPid === undefined ? {} : { hostPid }),
     ...(lifetimeFd === undefined ? {} : { lifetimeFd }),
+    ...(sourceArtifactDescriptor === undefined ? {} : { sourceArtifactDescriptor }),
     ...(analyticsActivation === undefined ? {} : { analyticsActivation }),
   };
 }

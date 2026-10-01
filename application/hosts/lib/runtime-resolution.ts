@@ -1,12 +1,35 @@
 import * as path from 'node:path';
 
+import { createCommandExecutor } from './command-execution';
+import type { GenerationPiRuntimeBackendNodeTarget } from './pi-runtime-resolution';
+
 export interface CommandResult {
   stdout: string;
   stderr: string;
   exitCode: number;
 }
 
-export type CommandExecutor = (command: string, args: string[]) => Promise<CommandResult>;
+export interface CommandExecutorOptions {
+  env?: NodeJS.ProcessEnv;
+  timeout?: number;
+  maxBuffer?: number;
+}
+
+export type CommandExecutor = (
+  command: string,
+  args: string[],
+  options?: CommandExecutorOptions,
+) => Promise<CommandResult>;
+
+export interface ProbeBackendNodeTargetOptions {
+  /** Injectable command seam; the production executor is bounded by defaults below. */
+  exec?: CommandExecutor;
+  /** Environment to copy before removing Node module/preload inference variables. */
+  env?: NodeJS.ProcessEnv;
+}
+
+const BACKEND_NODE_PROBE_TIMEOUT_MS = 5_000;
+const BACKEND_NODE_PROBE_MAX_BUFFER_BYTES = 16 * 1024;
 
 interface CommonOptions {
   env: NodeJS.ProcessEnv;
@@ -142,6 +165,58 @@ interface NodeVersion {
   major: number;
   minor: number;
   patch: number;
+}
+
+function sanitizedNodeProbeEnv(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env = { ...source };
+  for (const key of Object.keys(env)) {
+    if (key.toUpperCase() === 'NODE_OPTIONS' || key.toUpperCase() === 'NODE_PATH') {
+      delete env[key];
+    }
+  }
+  return env;
+}
+
+/**
+ * Probe the exact Node executable selected for the backend. The child reports
+ * its own artifact target (platform, architecture and modules ABI); ambient
+ * NODE_OPTIONS/NODE_PATH cannot preload code or redirect module resolution.
+ */
+export async function probeBackendNodeTarget(
+  nodePath: string,
+  options: ProbeBackendNodeTargetOptions = {},
+): Promise<GenerationPiRuntimeBackendNodeTarget> {
+  if (typeof nodePath !== 'string' || nodePath.trim().length === 0) {
+    throw new TypeError('Backend nodePath must be a nonempty executable path.');
+  }
+  const exec = options.exec ?? createCommandExecutor();
+  const code = 'process.stdout.write(JSON.stringify({platform:process.platform,arch:process.arch,nodeAbi:process.versions.modules}))';
+  const result = await exec(nodePath, ['-e', code], {
+    env: sanitizedNodeProbeEnv(options.env ?? process.env),
+    timeout: BACKEND_NODE_PROBE_TIMEOUT_MS,
+    maxBuffer: BACKEND_NODE_PROBE_MAX_BUFFER_BYTES,
+  });
+  if (result.exitCode !== 0) {
+    const detail = (result.stderr || result.stdout).trim();
+    throw new Error(`Could not probe backend Node target with ${nodePath}${detail ? `: ${detail}` : '.'}`);
+  }
+
+  let target: unknown;
+  try {
+    target = JSON.parse(result.stdout.trim());
+  } catch {
+    throw new Error(`Backend Node target probe returned malformed JSON for ${nodePath}.`);
+  }
+  if (!target || typeof target !== 'object' || Array.isArray(target)) {
+    throw new Error(`Backend Node target probe returned an invalid target for ${nodePath}.`);
+  }
+  const fields = target as Record<string, unknown>;
+  if (typeof fields.platform !== 'string' || !/^[a-z0-9_-]+$/u.test(fields.platform)
+    || typeof fields.arch !== 'string' || !/^[a-z0-9_-]+$/u.test(fields.arch)
+    || typeof fields.nodeAbi !== 'string' || !/^\d+$/u.test(fields.nodeAbi)) {
+    throw new Error(`Backend Node target probe returned an invalid target for ${nodePath}.`);
+  }
+  return { platform: fields.platform, arch: fields.arch, nodeAbi: fields.nodeAbi };
 }
 
 function parseNodeVersion(value: string): NodeVersion | undefined {

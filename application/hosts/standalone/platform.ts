@@ -182,7 +182,7 @@ export function createStandaloneHostRuntimePlatform(
   return {
     createBrowserServer: (serverOptions) => createBrowserServer({
       ...serverOptions,
-      assetDir: path.join(options.extensionPath, 'out', 'webview', 'panel'),
+      assetDir: path.join(options.runtimeOutputDirectory, 'webview', 'panel'),
       rendererSelection: {
         fallbackDir: path.join(options.runtimeOutputDirectory, 'webview', 'panel'),
         notBefore: 0,

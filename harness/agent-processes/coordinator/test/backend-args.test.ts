@@ -3,6 +3,24 @@ import test from 'node:test';
 
 import { parseArgs } from '../backend-args.js';
 
+const sourceArtifactDescriptor = {
+  schemaVersion: 1,
+  artifactDir: '/runtime/pi-runtime',
+  sdkPath: '/runtime/pi-runtime/node_modules/@earendil-works/pi-coding-agent',
+  cliPath: '/runtime/pi-runtime/node_modules/@earendil-works/pi-coding-agent/dist/cli.js',
+  identity: 'a'.repeat(64),
+  manifest: {
+    schemaVersion: 1,
+    upstreamVersion: '0.80.6',
+    upstreamCommit: 'b'.repeat(40),
+    sourceTreeSha256: 'c'.repeat(64),
+    lockSha256: 'd'.repeat(64),
+    target: { platform: 'win32', arch: 'x64', nodeAbi: '127' },
+    packages: {},
+    payloadSha256: 'e'.repeat(64),
+  },
+};
+
 test('parseArgs carries the host-authoritative backend generation and validates it', () => {
   assert.deepEqual(
     parseArgs(['--sdkPath', '/sdk', '--cwd', '/work', '--backendGeneration', '7', '--hostPid', '123', '--lifetimeFd', '3']),
@@ -16,6 +34,38 @@ test('parseArgs carries the host-authoritative backend generation and validates 
   assert.throws(
     () => parseArgs(['--sdkPath', '/sdk', '--lifetimeFd', '2']),
     /Invalid --lifetimeFd/,
+  );
+});
+
+test('parseArgs carries a source artifact descriptor and rejects missing, duplicate, malformed, or invalid values', () => {
+  const encoded = JSON.stringify(sourceArtifactDescriptor);
+  assert.deepEqual(
+    parseArgs(['--sdkPath', sourceArtifactDescriptor.sdkPath, '--sourceArtifactDescriptor', encoded]).sourceArtifactDescriptor,
+    sourceArtifactDescriptor,
+  );
+  assert.throws(
+    () => parseArgs(['--sdkPath', '/sdk', '--sourceArtifactDescriptor']),
+    /Missing value for --sourceArtifactDescriptor/,
+  );
+  assert.throws(
+    () => parseArgs(['--sdkPath', '/sdk', '--sourceArtifactDescriptor', '--cwd', '/work']),
+    /Missing value for --sourceArtifactDescriptor/,
+  );
+  assert.throws(
+    () => parseArgs(['--sdkPath', '/sdk', '--sourceArtifactDescriptor', '{']),
+    /Malformed JSON for --sourceArtifactDescriptor/,
+  );
+  assert.throws(
+    () => parseArgs(['--sdkPath', '/sdk', '--sourceArtifactDescriptor', '{}']),
+    /Invalid --sourceArtifactDescriptor argument/,
+  );
+  assert.throws(
+    () => parseArgs([
+      '--sdkPath', '/sdk',
+      '--sourceArtifactDescriptor', encoded,
+      '--sourceArtifactDescriptor', encoded,
+    ]),
+    /Duplicate --sourceArtifactDescriptor argument/,
   );
 });
 

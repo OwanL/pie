@@ -39,8 +39,8 @@ const BACKEND_STOP_CONFIRM_TIMEOUT_MS = STOP_KILL_TIMEOUT_MS + 5_000;
 
 /** After the backend exit is confirmed, give the remaining HostRuntime
  *  teardown a short bounded grace before the coordinator port is handed to a
- *  waiting host. This wait can no longer delay or skip the release on a hung
- *  producer: the backend invariant is already proven at this point. */
+ *  waiting host. A missed grace retains the generation lease, even though the
+ *  backend confirmation still permits machine-wide ownership release. */
 const OWNERSHIP_RELEASE_DRAIN_GRACE_MS = 250;
 
 const DEFAULT_EXIT_CODES: Record<'SIGINT' | 'SIGTERM', number> = {
@@ -155,21 +155,23 @@ export function createStandaloneBackendClient(): BackendClient {
 /** Surfaces the owned standalone shutdown needs. Structural so tests can
  *  inject fakes; `HostRuntime`/`BrowserServer`/`BackendClient` satisfy them. */
 export interface OwnedStandaloneShutdownSurfaces {
-  runtime: { shutdown(): Promise<void>; backend: Pick<BackendClient, 'stop' | 'dispose'> };
+  runtime: { shutdown(): Promise<void>; backend: Pick<BackendClient, 'stop' | 'dispose'> & Partial<Pick<BackendClient, 'isRuntimeLifetimeTeardownConfirmed'>> };
   browserServer: { stop(): Promise<void>; dispose(): void };
   ownership: PieHostOwnership;
   restoreEnvironment: () => void;
   shutdownTimeoutMs?: number;
   backendStopConfirmTimeoutMs?: number;
+  runtimeLease?: NonNullable<StandaloneEnvironment['runtimeLease']>;
 }
 
 export interface OwnedStandaloneStartupFailureSurfaces {
-  runtime?: { shutdown(): Promise<void>; backend: Pick<BackendClient, 'stop' | 'dispose'> };
-  browserServer?: { dispose(): void };
+  runtime?: { shutdown(): Promise<void>; backend: Pick<BackendClient, 'stop' | 'dispose'> & Partial<Pick<BackendClient, 'isRuntimeLifetimeTeardownConfirmed'>> };
+  browserServer?: { stop?(): Promise<void>; dispose(): void };
   ownership: PieHostOwnership;
   restoreEnvironment: () => void;
   shutdownTimeoutMs?: number;
   backendStopConfirmTimeoutMs?: number;
+  runtimeLease?: NonNullable<StandaloneEnvironment['runtimeLease']>;
 }
 
 /**
@@ -212,8 +214,10 @@ export async function confirmBackendProcessExit(
  * every case machine-wide ownership is released ONLY after the owned
  * backend's process exit is confirmed (see {@link confirmBackendProcessExit})
  * — and never released at all when that confirmation fails. A graceful
- * shutdown error is rethrown after the confirmed-stopped release so the
- * ownership handling cannot mask it.
+ * generation lease additionally requires explicit backend lifetime teardown
+ * evidence across every spawned generation, plus runtime shutdown and browser
+ * stop within the shutdown/grace bounds. A shutdown error is rethrown
+ * after ownership handling so it cannot mask the teardown result.
  */
 export async function shutdownOwnedStandaloneHost(surfaces: OwnedStandaloneShutdownSurfaces): Promise<void> {
   const { runtime, browserServer, ownership, restoreEnvironment } = surfaces;
@@ -232,10 +236,12 @@ export async function shutdownOwnedStandaloneHost(surfaces: OwnedStandaloneShutd
   // after teardown) instead of surfacing as an unhandled rejection.
   shutdown.catch(() => undefined);
   let timedOut = false;
+  let shutdownConfirmed = false;
   let shutdownError: unknown;
   try {
     const result = await Promise.race([shutdown, timeout]);
     if (result === 'timeout') timedOut = true;
+    else shutdownConfirmed = true;
   } catch (error) {
     shutdownError = error;
   } finally {
@@ -243,7 +249,7 @@ export async function shutdownOwnedStandaloneHost(surfaces: OwnedStandaloneShutd
   }
   if (timedOut || shutdownError !== undefined) {
     // BackendClient performs its own SIGTERM/SIGKILL escalation; the fence
-    // below is the final owned-tree authority if another runtime producer
+    // below confirms only coordinator exit if another runtime producer
     // prevented HostRuntime from reaching backend shutdown.
     browserServer.dispose();
   }
@@ -273,11 +279,33 @@ export async function shutdownOwnedStandaloneHost(surfaces: OwnedStandaloneShutd
   if (timedOut) {
     // The backend is confirmed dead; give the remaining HostRuntime teardown
     // a bounded grace to finish before the port is handed over. This cannot
-    // delay or skip the release on a hung producer.
-    await Promise.race([
-      shutdown.catch(() => undefined),
-      new Promise<void>((resolve) => setTimeout(resolve, OWNERSHIP_RELEASE_DRAIN_GRACE_MS)),
-    ]);
+    // delay or skip the ownership release on a hung producer. The generation
+    // lease is stricter: it is released only if runtime shutdown and browser
+    // stop both complete within this grace.
+    let graceTimer: ReturnType<typeof setTimeout> | undefined;
+    const grace = new Promise<'grace-expired'>((resolve) => {
+      graceTimer = setTimeout(() => resolve('grace-expired'), OWNERSHIP_RELEASE_DRAIN_GRACE_MS);
+    });
+    try {
+      const result = await Promise.race([
+        shutdown.then(() => 'stopped' as const, () => 'failed' as const),
+        grace,
+      ]);
+      if (result === 'stopped') shutdownConfirmed = true;
+    } finally {
+      if (graceTimer) clearTimeout(graceTimer);
+    }
+  }
+  let leaseReleaseError: unknown;
+  if (shutdownConfirmed && runtime.backend.isRuntimeLifetimeTeardownConfirmed?.() === true) {
+    try {
+      await surfaces.runtimeLease?.release();
+    } catch (error) {
+      leaseReleaseError = error;
+    }
+  } else if (surfaces.runtimeLease) {
+    appendPieLog('warn', 'host-coordinator',
+      'standalone shutdown could not confirm runtime, browser, and backend lifetime teardown; generation lease retained', {});
   }
   try {
     await ownership.release();
@@ -285,13 +313,16 @@ export async function shutdownOwnedStandaloneHost(surfaces: OwnedStandaloneShutd
     restoreEnvironment();
   }
   if (shutdownError !== undefined) throw shutdownError;
+  if (leaseReleaseError !== undefined) throw leaseReleaseError;
 }
 
 /**
  * Startup-failure teardown for a standalone host that already owns the
  * machine-wide coordinator. Bounds the runtime's own shutdown, force-disposes
  * the browser server on shutdown timeout or failure, CONFIRMS the backend
- * process exit, and only then aborts ownership. Fails closed when the exit
+ * process exit, and only then aborts ownership. A generation lease is released
+ * only with explicit backend lifetime evidence and successful runtime/browser stop;
+ * with no runtime, it can be released directly. Fails closed when the exit
  * cannot be confirmed: ownership is retained and a combined error is thrown.
  * Always throws — either the original `error` (after the confirmed teardown)
  * or the fail-closed error. `restoreEnvironment` still runs on the fail-closed
@@ -304,9 +335,16 @@ export async function teardownAfterStandaloneStartupFailure(
   error: unknown,
 ): Promise<never> {
   try {
+    let fullShutdownConfirmed = surfaces.runtime === undefined;
     if (surfaces.runtime) {
       let runtimeShutdownFailed = false;
-      const shutdown = surfaces.runtime.shutdown().catch(() => {
+      const shutdown = (async () => {
+        await surfaces.runtime!.shutdown();
+        if (!surfaces.browserServer?.stop) {
+          throw new Error('Standalone startup teardown cannot confirm browser server stop.');
+        }
+        await surfaces.browserServer.stop();
+      })().catch(() => {
         runtimeShutdownFailed = true;
       });
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -315,7 +353,8 @@ export async function teardownAfterStandaloneStartupFailure(
       });
       try {
         const result = await Promise.race([shutdown.then(() => 'settled' as const), timeout]);
-        if (result === 'timeout' || runtimeShutdownFailed) {
+        fullShutdownConfirmed = result === 'settled' && !runtimeShutdownFailed;
+        if (!fullShutdownConfirmed) {
           surfaces.browserServer?.dispose();
         }
       } finally {
@@ -341,8 +380,24 @@ export async function teardownAfterStandaloneStartupFailure(
     } else {
       surfaces.browserServer?.dispose();
     }
-    // Nothing that needs draining ever started under this handle, and every
-    // owned process is confirmed dead: immediate crash-path teardown.
+    // With no runtime, no generation-consuming producers were constructed.
+    // Otherwise release only after bounded runtime shutdown and browser stop
+    // both succeeded as well as the confirmed backend exit above.
+    if (fullShutdownConfirmed && (surfaces.runtime === undefined
+      || surfaces.runtime.backend.isRuntimeLifetimeTeardownConfirmed?.() === true)) {
+      try {
+        await surfaces.runtimeLease?.release();
+      } catch (leaseError) {
+        // A stale lease is safe (it only delays collection); it must not strand
+        // machine-wide ownership after every owned process is confirmed dead.
+        appendPieLog('warn', 'host-coordinator', 'standalone startup teardown could not release runtime generation lease', {
+          error: toErrorMessage(leaseError),
+        });
+      }
+    } else if (surfaces.runtimeLease) {
+      appendPieLog('warn', 'host-coordinator',
+        'standalone startup teardown could not confirm runtime, browser, and backend lifetime teardown; generation lease retained', {});
+    }
     surfaces.ownership.abort();
   } finally {
     surfaces.restoreEnvironment();
@@ -476,13 +531,15 @@ export async function startStandalone(options: StandaloneStartOptions): Promise<
   let restoreEnvironment: () => void = () => undefined;
   let browserServer: BrowserServer | undefined;
   let runtime: HostRuntime | undefined;
+  let environment: StandaloneEnvironment | undefined;
   let shutdownPromise: Promise<void> | undefined;
   try {
-    const environment = options.environment ?? await resolveStandaloneEnvironment({
-      extensionPath: options.extensionPath ?? defaultExtensionPath(),
-      ...(options.runtimeOutputDirectory ? { runtimeOutputDirectory: options.runtimeOutputDirectory } : {}),
+    environment = await resolveStandaloneEnvironment({
+      extensionPath: options.extensionPath ?? options.environment?.paths.extensionPath ?? defaultExtensionPath(),
+      ...(options.runtimeOutputDirectory !== undefined ? { runtimeOutputDirectory: options.runtimeOutputDirectory } : {}),
       ...(options.dataRoot ? { dataRoot: options.dataRoot } : {}),
       ...(options.dependencies ? { dependencies: options.dependencies } : {}),
+      ...(options.environment ? { environment: options.environment } : {}),
       ...(options.skipValidation !== undefined ? { skipValidation: options.skipValidation } : {}),
     } satisfies ResolveStandaloneEnvironmentOptions);
     validateStandaloneRuntimeIdentity(environment);
@@ -538,6 +595,7 @@ export async function startStandalone(options: StandaloneStartOptions): Promise<
           browserServer: browserServer!,
           ownership,
           restoreEnvironment,
+          ...(environment!.runtimeLease ? { runtimeLease: environment!.runtimeLease } : {}),
           ...(options.shutdownTimeoutMs !== undefined ? { shutdownTimeoutMs: options.shutdownTimeoutMs } : {}),
         });
         return shutdownPromise;
@@ -557,6 +615,7 @@ export async function startStandalone(options: StandaloneStartOptions): Promise<
       browserServer,
       ownership,
       restoreEnvironment,
+      ...(environment?.runtimeLease ? { runtimeLease: environment.runtimeLease } : {}),
       ...(options.shutdownTimeoutMs !== undefined ? { shutdownTimeoutMs: options.shutdownTimeoutMs } : {}),
     }, error);
     throw error;
