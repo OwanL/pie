@@ -260,6 +260,39 @@ test('source-artifact loader validates and loads cold and full surfaces without 
   });
 });
 
+test('source-artifact loader rejects verified SDKs missing required cold or full exports without fallback', async (t) => {
+  for (const surface of ['cold', 'full'] as const) {
+    const current = await fixture(t);
+    const relative = surface === 'cold' ? 'dist/config.js' : 'dist/core/sdk.js';
+    const exportName = surface === 'cold' ? 'VERSION' : 'createAgentSessionRuntime';
+    const file = path.join(current.sdkPath, relative);
+    const source = await readFile(file, 'utf8');
+    const declaration = surface === 'cold' ? 'export const VERSION' : 'export async function createAgentSessionRuntime';
+    assert.ok(source.includes(declaration));
+    await writeFile(file, source.replace(declaration, declaration.replace(exportName, `missing_${exportName}`)));
+    if (surface === 'full') {
+      const index = path.join(current.sdkPath, 'dist/index.js');
+      const indexSource = await readFile(index, 'utf8');
+      assert.ok(indexSource.includes(', createAgentSessionRuntime }'));
+      await writeFile(index, indexSource.replace(', createAgentSessionRuntime }', ' }'));
+    }
+    // Missing exports are a contract failure, not an integrity failure: seal and
+    // independently verify this private fixture before requesting the surface.
+    await writePiRuntimeManifest(current.artifactDir, provenance);
+    const descriptor = await descriptorFor(current.artifactDir, target);
+    const before = await snapshot(current.artifactDir);
+    await assertRejectsMessage(
+      loadSdk(current.sdkPath, surface === 'cold'
+        ? sourceMode(descriptor, target, 'cold') : sourceMode(descriptor, target, 'full')),
+      surface === 'cold' ? /missing required cold coordinator exports/ : /missing required source exports/,
+    );
+    const record = importRecord(current.marker);
+    assert.ok(record?.imports.includes(surface === 'cold' ? 'config' : 'index'),
+      'the verified synthetic SDK was evaluated, but no installed SDK was returned');
+    assert.deepEqual(await snapshot(current.artifactDir), before);
+  }
+});
+
 test('source-artifact beforeCompact bridge uses public session APIs and Pie summary settings', async (t) => {
   const envKey = 'PIE_HISTORY_COMPACTION_JSON';
   const previousSettings = process.env[envKey];
@@ -484,7 +517,13 @@ test('source-artifact loader rejects tampered payloads and backend target mismat
     `globalThis[${JSON.stringify(tampered.marker)}] = { imports: ['tampered'], prototypes: [] };\n`,
   );
   const tamperedBefore = await snapshot(tampered.artifactDir);
-  await assertRejectsMessage(loadSdk(tampered.sdkPath, sourceMode(tamperedDescriptor)), /hash mismatch/);
+  for (const surface of ['cold', 'full'] as const) {
+    await assertRejectsMessage(loadSdk(tampered.sdkPath, surface === 'cold'
+      ? sourceMode(tamperedDescriptor, target, 'cold') : sourceMode(tamperedDescriptor, target, 'full')), /hash mismatch/);
+  }
+  await assertRejectsMessage(loadSdkInternalModule(
+    tampered.sdkPath, 'core/compaction/index.js', sourceMode(tamperedDescriptor),
+  ), /hash mismatch/);
   assert.equal(importRecord(tampered.marker), undefined);
   assert.deepEqual(await snapshot(tampered.artifactDir), tamperedBefore);
 
