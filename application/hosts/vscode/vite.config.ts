@@ -16,7 +16,9 @@ const repoDir = path.resolve(rootDir, '../../..');
 const vscodeHostDir = path.join(repoDir, 'application', 'hosts', 'vscode');
 const hostsDir = path.join(repoDir, 'application', 'hosts');
 const frontendDir = path.join(repoDir, 'application', 'frontend');
-const outDir = path.join(rootDir, 'out');
+// Internal propagation from build.mjs's validated --output-dir boundary.
+const isolatedOutputDir = process.env.PIE_BUILD_OUTPUT_DIR;
+const outDir = isolatedOutputDir || path.join(rootDir, 'out');
 
 /**
  * Package imports resolve through the explicit dependency owner, never the
@@ -132,6 +134,7 @@ export default defineConfig(({ mode }) => {
   if (mode === 'node') {
     return {
       root: vscodeHostDir,
+      ...(isolatedOutputDir ? { cacheDir: path.join(outDir, '.cache', 'vite-node') } : {}),
       publicDir: false,
       define,
       plugins: [createBuildIdentityPlugin()],
@@ -184,6 +187,7 @@ export default defineConfig(({ mode }) => {
 
   return {
     root: frontendDir,
+    ...(isolatedOutputDir ? { cacheDir: path.join(outDir, '.cache', 'vite-webview') } : {}),
     publicDir: false,
     define,
     plugins: [createBuildIdentityPlugin()],

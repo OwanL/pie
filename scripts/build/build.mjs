@@ -1,5 +1,5 @@
-import { watch as fsWatch } from 'node:fs';
-import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { watch as fsWatch, mkdirSync } from 'node:fs';
+import { lstat, mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -13,13 +13,24 @@ import { createTsconfigOverlay, resolveOwnerModule, resolvePackageRoots, resolve
 
 // The distribution root follows the planned package layout: the VS Code host
 // package and its dependency owner live under application/hosts/vscode.
-const { distributionRoot: rootDir } = resolvePackageRoots('planned');
-const outDir = path.join(rootDir, 'out');
+const { distributionRoot: rootDir, repositoryRoot } = resolvePackageRoots('planned');
 
+// An isolated validation owns a NEW external directory. Never clean an existing
+// caller directory, the checkout, dependencies, or an installed extension.
+// This is a one-shot CLI boundary, not an ambient environment override.
+const outputOptions = process.argv.slice(2).filter((arg) => arg === '--output-dir' || arg.startsWith('--output-dir='));
+if (outputOptions.length > 1) throw new Error('--output-dir may only be supplied once.');
+const outputOption = outputOptions[0];
+const requestedOutput = outputOption === '--output-dir'
+  ? process.argv[process.argv.indexOf(outputOption) + 1]
+  : outputOption?.slice('--output-dir='.length);
+const isolatedOutput = outputOption !== undefined;
 const watchMode = process.argv.includes('--watch');
 const skipTypecheck = process.argv.includes('--skip-typecheck');
-const noSync = process.argv.includes('--no-sync');
+const noSync = isolatedOutput || process.argv.includes('--no-sync');
 const activate = process.argv.includes('--activate');
+if (isolatedOutput && (activate || watchMode)) throw new Error('--output-dir cannot be combined with --activate or --watch.');
+const outDir = isolatedOutput ? await validateOutputDirectory(requestedOutput) : path.join(rootDir, 'out');
 if (activate && noSync) throw new Error('--activate and --no-sync are mutually exclusive.');
 if (activate && watchMode) throw new Error('--activate is a one-shot explicit boundary and cannot run in watch mode.');
 const webviewViewName = 'panel';
@@ -43,6 +54,47 @@ function installedExtensionRoots() {
     path.join(os.homedir(), '.vscode', 'extensions'),
     path.join(os.homedir(), '.vscode-insiders', 'extensions'),
   ];
+}
+
+function containsPath(parent, child) {
+  const relative = path.relative(parent, child);
+  return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
+}
+
+async function canonicalPath(candidate) {
+  try {
+    return await realpath(candidate);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    const parent = path.dirname(candidate);
+    if (parent === candidate) throw error;
+    return path.join(await canonicalPath(parent), path.basename(candidate));
+  }
+}
+
+async function validateOutputDirectory(requested) {
+  if (!requested || !path.isAbsolute(requested) || (process.platform === 'win32' && path.parse(path.normalize(requested)).root.length <= 1)) {
+    throw new Error('--output-dir requires an absolute path (including a drive or UNC share on Windows).');
+  }
+  const output = path.resolve(requested);
+  const canonical = await canonicalPath(output);
+  const checkout = await canonicalPath(repositoryRoot);
+  const installedRoots = await Promise.all(installedExtensionRoots().map(canonicalPath));
+  if (containsPath(checkout, canonical) || containsPath(canonical, checkout)
+    || installedRoots.some((root) => containsPath(root, canonical) || containsPath(canonical, root))
+    || canonical.split(path.sep).some((part) => part.toLowerCase() === 'node_modules')) {
+    throw new Error('--output-dir must be outside the checkout, node_modules, and installed extension trees.');
+  }
+  try {
+    await lstat(output);
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      if (!(await stat(path.dirname(canonical))).isDirectory()) throw new Error('--output-dir requires an existing parent directory.');
+      return canonical;
+    }
+    throw error;
+  }
+  throw new Error('--output-dir must name a new directory that does not already exist.');
 }
 
 async function resolveCompatibleInstalledExtension(pkg) {
@@ -153,6 +205,9 @@ function spawnLocalCli(cli, args, label) {
   console.log(`[build] ${label}...`);
   return spawn(process.execPath, [cli, ...args], {
     cwd: rootDir,
+    // Only this validated invocation can select isolated config output. Clear
+    // inherited values so ordinary builds retain their established behavior.
+    env: { ...process.env, PIE_BUILD_OUTPUT_DIR: isolatedOutput ? outDir : '' },
     stdio: 'inherit',
     windowsHide: true,
   });
@@ -169,7 +224,9 @@ function waitForChild(child, label) {
 }
 
 function runViteBuild(args = []) {
-  const child = spawnLocalCli(viteCli, ['build', ...args], `Running Vite build ${args.join(' ')}`.trim());
+  // The default bundled config loader writes node_modules/.vite-temp before
+  // evaluating config. Runner evaluates it in memory instead.
+  const child = spawnLocalCli(viteCli, ['build', ...(isolatedOutput ? ['--configLoader', 'runner'] : []), ...args], `Running Vite build ${args.join(' ')}`.trim());
   return waitForChild(child, 'Vite build');
 }
 
@@ -181,15 +238,21 @@ function runViteWatch(mode) {
 }
 
 function createBuildTypecheckOverlay() {
+  const directory = isolatedOutput ? path.join(outDir, '.cache', 'typecheck') : undefined;
+  if (directory) mkdirSync(directory, { recursive: true });
   return createTsconfigOverlay(path.join(rootDir, 'tsconfig.json'), {
     layout: 'planned', typescript: true, includeOwnerDependencies: true,
+    ...(directory ? { directory } : {}),
   });
 }
 
 async function runTypecheck(label) {
   const overlay = createBuildTypecheckOverlay();
   try {
-    await waitForChild(spawnLocalCli(tscCli, ['--noEmit', '--project', overlay.configPath], label), 'TypeScript check');
+    const buildInfoArgs = isolatedOutput
+      ? ['--tsBuildInfoFile', path.join(outDir, '.cache', 'typecheck', 'extension.tsbuildinfo')]
+      : [];
+    await waitForChild(spawnLocalCli(tscCli, ['--noEmit', '--project', overlay.configPath, ...buildInfoArgs], label), 'TypeScript check');
   } finally {
     overlay.dispose();
   }
@@ -238,8 +301,14 @@ async function typecheck() {
 }
 
 async function buildOnce() {
-  await rm(outDir, { recursive: true, force: true });
-  await mkdir(outDir, { recursive: true });
+  if (isolatedOutput) {
+    // Claim the leaf exclusively before any build writes. No recursive cleanup
+    // in isolated mode, even if another process creates it after validation.
+    await mkdir(outDir);
+  } else {
+    await rm(outDir, { recursive: true, force: true });
+    await mkdir(outDir, { recursive: true });
+  }
 
   await typecheck();
 

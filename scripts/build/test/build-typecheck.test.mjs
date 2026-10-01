@@ -22,6 +22,8 @@ function write(root, relative, content) {
 test('build preflight resolves moved extension source through the owner overlay', (t) => {
   const fixture = mkdtempSync(path.join(os.tmpdir(), 'pie-build-typecheck-'));
   t.after(() => rmSync(fixture, { recursive: true, force: true }));
+  const privateBuilds = mkdtempSync(path.join(os.tmpdir(), 'pie-build-typecheck-output-'));
+  t.after(() => rmSync(privateBuilds, { recursive: true, force: true }));
   const owner = path.join(fixture, 'application', 'hosts', 'vscode');
   const modules = path.join(owner, 'node_modules');
   for (const file of ['build.mjs', 'publication.mjs', 'runtime-publication.mjs']) {
@@ -34,7 +36,8 @@ test('build preflight resolves moved extension source through the owner overlay'
   write(fixture, 'application/hosts/vscode/tsconfig.json', JSON.stringify({
     compilerOptions: {
       noEmit: true, strict: true, module: 'preserve', moduleResolution: 'bundler',
-      target: 'ES2021', types: ['node'],
+      target: 'ES2021', types: ['node'], incremental: true,
+      tsBuildInfoFile: './node_modules/.cache/typecheck/shared.tsbuildinfo',
     },
     include: ['../../../extension/src/**/*.ts'],
   }));
@@ -54,7 +57,7 @@ test('build preflight resolves moved extension source through the owner overlay'
   write(fixture, 'application/hosts/vscode/node_modules/vite/bin/vite.js', `
     const fs = require('node:fs');
     const path = require('node:path');
-    const out = path.resolve(process.cwd(), 'out');
+    const out = process.env.PIE_BUILD_OUTPUT_DIR || path.resolve(process.cwd(), 'out');
     const id = '0123456789abcdefabcd';
     fs.mkdirSync(out, { recursive: true });
     if (process.argv.includes('node')) {
@@ -77,11 +80,29 @@ test('build preflight resolves moved extension source through the owner overlay'
   assert.match(result.stdout, /Running TypeScript check/);
   assert.match(result.stdout, /Coordinated host\/webview identity/);
 
+  // Real compiler writes, including its inherited incremental build-info path,
+  // must follow the isolated boundary rather than the dependency owner.
+  write(owner, 'out/preserved.txt', 'shared output');
+  write(owner, 'node_modules/.cache/typecheck/shared.tsbuildinfo', 'shared incremental state');
+  const isolatedOutput = path.join(privateBuilds, 'valid output');
+  const isolated = spawnSync(process.execPath, [path.join(fixture, 'scripts', 'build', 'build.mjs'), '--output-dir', isolatedOutput], {
+    cwd: owner, encoding: 'utf8', timeout: 60_000,
+  });
+  assert.equal(isolated.status, 0, `${isolated.stdout}\n${isolated.stderr}`);
+  assert.ok(existsSync(path.join(isolatedOutput, '.cache', 'typecheck', 'extension.tsbuildinfo')));
+  assert.ok(existsSync(path.join(isolatedOutput, '.cache', 'typecheck', 'tsconfig.overlay.json')));
+  assert.equal(readFileSync(path.join(owner, 'out', 'preserved.txt'), 'utf8'), 'shared output');
+  assert.equal(readFileSync(path.join(modules, '.cache', 'typecheck', 'shared.tsbuildinfo'), 'utf8'), 'shared incremental state');
+
   // The build must still enforce the owner's declaration, not skip checking.
   write(fixture, 'extension/src/entry.ts', "import { owned } from 'owner-only';\nexport const result: number = owned();\n");
-  const invalid = spawnSync(process.execPath, [path.join(fixture, 'scripts', 'build', 'build.mjs'), '--no-sync'], {
+  const invalidOutput = path.join(privateBuilds, 'invalid output');
+  const invalid = spawnSync(process.execPath, [path.join(fixture, 'scripts', 'build', 'build.mjs'), '--output-dir', invalidOutput], {
     cwd: owner, encoding: 'utf8', timeout: 60_000,
   });
   assert.equal(invalid.status, 1, `${invalid.stdout}\n${invalid.stderr}`);
   assert.match(invalid.stdout, /Type 'string' is not assignable to type 'number'/);
+  assert.equal(existsSync(path.join(invalidOutput, 'extension.js')), false);
+  assert.equal(readFileSync(path.join(owner, 'out', 'preserved.txt'), 'utf8'), 'shared output');
+  assert.equal(readFileSync(path.join(modules, '.cache', 'typecheck', 'shared.tsbuildinfo'), 'utf8'), 'shared incremental state');
 });
