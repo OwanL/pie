@@ -18,8 +18,8 @@ const hostsDir = path.join(repoDir, 'application', 'hosts');
 const frontendDir = path.join(repoDir, 'application', 'frontend');
 // Internal propagation from build.mjs's validated --output-dir boundary.
 const isolatedOutputDir = process.env.PIE_BUILD_OUTPUT_DIR;
-const isolatedPiRuntimeSdkPath = isolatedOutputDir ? process.env.PIE_BUILD_PI_RUNTIME_SDK_PATH || undefined : undefined;
-const isolatedPiRuntimeIdentity = isolatedOutputDir ? process.env.PIE_BUILD_PI_RUNTIME_IDENTITY || undefined : undefined;
+const selectedPiRuntimeSdkPath = process.env.PIE_BUILD_PI_RUNTIME_SDK_PATH || undefined;
+const selectedPiRuntimeIdentity = process.env.PIE_BUILD_PI_RUNTIME_IDENTITY || undefined;
 const outDir = isolatedOutputDir || path.join(rootDir, 'out');
 
 /**
@@ -33,12 +33,12 @@ const outDir = isolatedOutputDir || path.join(rootDir, 'out');
  */
 const packageAliases = createViteAliases({
   layout: 'planned',
-  ...(isolatedPiRuntimeSdkPath ? { sdkPath: isolatedPiRuntimeSdkPath } : {}),
+  ...(selectedPiRuntimeSdkPath ? { sdkPath: selectedPiRuntimeSdkPath } : {}),
 });
 const nodePackageAliases = createViteAliases({
   layout: 'planned',
   conditions: ['node', 'require', 'import', 'default'],
-  ...(isolatedPiRuntimeSdkPath ? { sdkPath: isolatedPiRuntimeSdkPath } : {}),
+  ...(selectedPiRuntimeSdkPath ? { sdkPath: selectedPiRuntimeSdkPath } : {}),
 });
 
 const webviewOutDir = path.join(outDir, 'webview', 'panel');
@@ -121,7 +121,7 @@ function computeBuildId(inputs = buildIdentityInputs(), identityRoot = rootDir, 
  */
 export function createBuildIdentityPlugin(
   identityRoot = rootDir,
-  runtimeIdentity = identityRoot === rootDir ? isolatedPiRuntimeIdentity : undefined,
+  runtimeIdentity = identityRoot === rootDir ? selectedPiRuntimeIdentity : undefined,
 ): Plugin {
   let buildId = '';
   return {

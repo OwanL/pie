@@ -134,10 +134,26 @@ function makeBuildFixture(t) {
     export async function publishRuntimeGeneration() { throw new Error('unexpected runtime publication'); }
     export async function resolveRuntimeGeneration() { throw new Error('unexpected runtime lookup'); }
   `);
-  for (const helper of ['package-resolution.mjs', 'pi-runtime-artifact.mjs', 'traversal-policy.mjs']) {
+  for (const helper of ['package-resolution.mjs', 'pi-runtime-artifact.mjs', 'pi-runtime-context.mjs', 'traversal-policy.mjs']) {
     write(repo, `scripts/lib/${helper}`, readFileSync(path.join(repositoryRoot, 'scripts/lib', helper)));
   }
   write(repo, 'lib/pi-runtime/artifact.mjs', readFileSync(path.join(repositoryRoot, 'lib/pi-runtime/artifact.mjs')));
+  write(repo, 'scripts/build/pi-runtime.mjs', `
+    import { cp, mkdir, readFile, writeFile } from 'node:fs/promises';
+    import path from 'node:path';
+    import { verifyPiRuntimeArtifact } from '../lib/pi-runtime-artifact.mjs';
+    const source = ${JSON.stringify(artifactDir)};
+    const counterFile = ${JSON.stringify(path.join(directory, 'acquisition-count.txt'))};
+    export async function buildPiRuntime({ output }) {
+      await mkdir(output, { recursive: true });
+      let count = 0;
+      try { count = Number(await readFile(counterFile, 'utf8')); } catch {}
+      await writeFile(counterFile, String(count + 1));
+      const artifactDir = path.join(output, 'pi-runtime');
+      await cp(source, artifactDir, { recursive: true });
+      return verifyPiRuntimeArtifact(artifactDir);
+    }
+  `);
   write(repo, 'application/hosts/vscode/vite.config.ts', readFileSync(path.join(repositoryRoot, 'application/hosts/vscode/vite.config.ts')));
   write(repo, 'harness/tools/execution-safety/traversal-policy.ts', readFileSync(path.join(repositoryRoot, 'harness/tools/execution-safety/traversal-policy.ts')));
 
@@ -262,7 +278,25 @@ test('source-bound isolated build selects candidate graph and materializes a com
   assert.equal(copied.identity, artifact.identity, 'the complete copied artifact re-verifies to the source identity');
 });
 
-test('Pi runtime option requires isolated output and invalid artifacts fail before any writes', async (t) => {
+test('ordinary source-default build acquires once and selects its SDK graph', async (t) => {
+  const fixture = makeBuildFixture(t);
+  const runtime = await writePiRuntimeManifest(fixture.artifactDir, {
+    upstreamVersion: '0.80.6',
+    upstreamCommit: '2b3fda9921b5590f285165287bd442a25817f17b',
+    sourceTreeSha256: '9'.repeat(64),
+    lockSha256: '8'.repeat(64),
+    target: { platform: process.platform, arch: process.arch, nodeAbi: process.versions.modules },
+  });
+
+  const result = runBuild(fixture, ['--no-sync']);
+  assertBuildSucceeded(result);
+  assert.match(result.stdout, /Running TypeScript check/);
+  assert.match(readFileSync(path.join(fixture.owner, 'out', 'extension.js'), 'utf8'), /verified-candidate-sdk-graph/);
+  assert.equal(readFileSync(path.join(fixture.directory, 'acquisition-count.txt'), 'utf8'), '1', 'typecheck and both bundles reuse one source-default acquisition');
+  assert.equal(runtime.identity.length, 64);
+});
+
+test('source-default acquisition and private artifact reuse coexist with invalid-artifact preflight', async (t) => {
   const fixture = makeBuildFixture(t);
   const valid = await writePiRuntimeManifest(fixture.artifactDir, {
     upstreamVersion: '0.80.6',
@@ -273,11 +307,15 @@ test('Pi runtime option requires isolated output and invalid artifacts fail befo
   });
   const sharedOutput = path.join(fixture.owner, 'out');
   write(sharedOutput, 'shared-sentinel.txt', 'must remain untouched\n');
+  rmSync(sharedOutput, { recursive: true, force: true });
 
-  const withoutOutput = runBuild(fixture, ['--pi-runtime', fixture.artifactDir, '--skip-typecheck']);
-  assertBuildRejected(withoutOutput);
-  assert.match(`${withoutOutput.stdout}\n${withoutOutput.stderr}`, /requires a safe --output-dir/u);
-  assert.equal(readFileSync(path.join(sharedOutput, 'shared-sentinel.txt'), 'utf8'), 'must remain untouched\n');
+  const reusedWithoutOutput = runBuild(fixture, ['--pi-runtime', fixture.artifactDir, '--skip-typecheck', '--no-sync']);
+  assertBuildSucceeded(reusedWithoutOutput);
+  assert.ok(existsSync(path.join(sharedOutput, 'extension.js')), 'a private fixture can reuse an explicit artifact with its default output');
+  assert.ok(existsSync(path.join(sharedOutput, 'pi-runtime', 'manifest.json')));
+  assert.equal(existsSync(path.join(fixture.directory, 'acquisition-count.txt')), false, 'explicit reuse does not acquire a second artifact');
+  rmSync(sharedOutput, { recursive: true, force: true });
+  write(sharedOutput, 'shared-sentinel.txt', 'must remain untouched\n');
 
   const wrongTargetDir = path.join(fixture.directory, 'wrong-target', 'pi-runtime');
   makeArtifact(wrongTargetDir);

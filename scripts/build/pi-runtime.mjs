@@ -143,25 +143,88 @@ async function copyTree(source, destination, exclude = []) {
     else { check(entry.isFile(), 'Unsupported file type'); await copyFile(path.join(source, entry.name), path.join(destination, entry.name)); }
   }
 }
-async function snapshotSource(destination, env) {
+function ordinaryPiSourceFile(repositoryRoot, relative) {
+  const segments = ['harness', 'pi', ...relative.split('/')];
+  let current = repositoryRoot;
+  for (let index = 0; index < segments.length; index++) {
+    current = path.join(current, segments[index]);
+    let info;
+    try { info = lstatSync(current); }
+    catch (error) { if (error.code === 'ENOENT') return undefined; throw error; }
+    check(!info.isSymbolicLink(), `Not an ordinary source file: ${current}`);
+    check(index === segments.length - 1 ? info.isFile() : info.isDirectory(), `Not an ordinary source file: ${current}`);
+  }
+  return current;
+}
+
+/** Only observed source mutation is retryable; invalid inputs and access failures are not. */
+export class PiRuntimeSourceInstabilityError extends Error {
+  constructor(relative, options) {
+    super(`Source changed while snapshotting: ${relative}; retry with stable inputs`, options);
+    this.name = 'PiRuntimeSourceInstabilityError';
+  }
+}
+
+async function readObservedSource(file, relative, read = readFile) {
+  try { return await read(file); }
+  catch (error) {
+    if (error.code === 'ENOENT') throw new PiRuntimeSourceInstabilityError(relative, { cause: error });
+    throw error;
+  }
+}
+
+async function sourceTreeSha256(repositoryRoot = REPOSITORY, env = process.env, destination, dependencies = {}) {
   // Git-aware inventory includes current tracked modifications and nonignored new source,
   // never traversing mutable dist/node_modules. Read-only Git, no index mutations.
-  const inventory = execFileSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', 'harness/pi'], { cwd: REPOSITORY, env, encoding: 'utf8' });
+  const inventory = dependencies.inventory ?? execFileSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', 'harness/pi'], { cwd: repositoryRoot, env, encoding: 'utf8' });
   const names = [...new Set(inventory.split('\0').filter(Boolean))].sort();
-  check(names.length > 0, 'Imported Pi source is missing');
   const records = [];
   for (const name of names) {
     const relative = name.slice('harness/pi/'.length);
+    check(name.startsWith('harness/pi/') && relative.length > 0, `Unexpected Pi source inventory entry: ${name}`);
     check(!relative.split('/').some(part => ['node_modules', 'dist', '.git'].includes(part)), `Generated source inventory entry: ${name}`);
-    const original = path.join(REPOSITORY, name);
-    check(lstatSync(original).isFile() && !lstatSync(original).isSymbolicLink(), `Not an ordinary source file: ${name}`);
-    const bytes = await readFile(original);
-    const target = path.join(destination, relative);
-    await mkdir(path.dirname(target), { recursive: true }); await writeFile(target, bytes);
+    const original = ordinaryPiSourceFile(repositoryRoot, relative);
+    if (!original) continue; // A tracked deletion is absent from the current source tree.
+    const bytes = await readObservedSource(original, relative, dependencies.readSource);
+    if (destination) {
+      const target = path.join(destination, ...relative.split('/'));
+      await mkdir(path.dirname(target), { recursive: true }); await writeFile(target, bytes);
+    }
     records.push([relative, sha(bytes)]);
   }
-  for (const [relative, digest] of records) check(sha(await readFile(path.join(SOURCE, relative))) === digest, `Source changed while snapshotting: ${relative}; retry with stable inputs`);
+  check(records.length > 0, 'Imported Pi source is missing');
+  for (const [relative, digest] of records) {
+    const original = ordinaryPiSourceFile(repositoryRoot, relative);
+    if (!original || sha(await readObservedSource(original, relative, dependencies.readSource)) !== digest) {
+      throw new PiRuntimeSourceInstabilityError(relative);
+    }
+  }
   return sha(JSON.stringify(records));
+}
+async function snapshotSource(destination, env) {
+  return sourceTreeSha256(REPOSITORY, env, destination);
+}
+
+/** Fingerprint the exact source and target inputs used when adopting a built Pi runtime.
+ * The second argument injects inventory/source reads for deterministic private-fixture races only.
+ */
+export async function computePiRuntimeInputFingerprint({
+  repositoryRoot = REPOSITORY,
+  env = process.env,
+  target = { platform: process.platform, arch: process.arch, nodeAbi: process.versions.modules },
+  nodeVersion = process.version,
+} = {}, dependencies = {}) {
+  check(target && typeof target.platform === 'string' && typeof target.arch === 'string' && typeof target.nodeAbi === 'string', 'Invalid Pi runtime fingerprint target');
+  check(typeof nodeVersion === 'string', 'Invalid Pi runtime fingerprint Node version');
+  const sourceTree = await sourceTreeSha256(repositoryRoot, env, undefined, dependencies);
+  const packageManifest = await readFile(path.join(repositoryRoot, 'harness/pi-runtime/package.json'));
+  const runtimeLock = await readFile(path.join(repositoryRoot, 'harness/pi-runtime/package-lock.json'));
+  return sha(JSON.stringify(canonical({
+    sourceTree,
+    runtimeOwner: { packageManifest: sha(packageManifest), runtimeLock: sha(runtimeLock) },
+    target: { platform: target.platform, arch: target.arch, nodeAbi: target.nodeAbi },
+    nodeVersion,
+  })));
 }
 async function prepareStubs(root, manifests) {
   await mkdir(path.join(root, 'tarballs'), { recursive: true });

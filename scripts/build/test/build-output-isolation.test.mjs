@@ -15,6 +15,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { writePiRuntimeManifest } from '../../lib/pi-runtime-artifact.mjs';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const vscodeDependencies = path.join(repositoryRoot, 'application', 'hosts', 'vscode', 'node_modules');
@@ -28,7 +29,66 @@ function write(root, relative, content) {
   return file;
 }
 
-function makeFixture(t) {
+const runtimePackages = [
+  '@earendil-works/pi-tui',
+  '@earendil-works/pi-ai',
+  '@earendil-works/pi-agent-core',
+  '@earendil-works/pi-coding-agent',
+];
+const sdkAssets = [
+  'dist/cli.js', 'dist/rpc-entry.js',
+  'dist/modes/interactive/theme/dark.json', 'dist/modes/interactive/theme/light.json',
+  'dist/modes/interactive/theme/theme-schema.json', 'dist/modes/interactive/assets/clankolas.png',
+  'dist/core/export-html/template.html', 'dist/core/export-html/template.css', 'dist/core/export-html/template.js',
+  'dist/core/export-html/vendor/marked.min.js', 'dist/core/export-html/vendor/highlight.min.js',
+];
+
+async function makeRuntimeArtifact(root) {
+  for (const name of runtimePackages) {
+    const sdk = name === '@earendil-works/pi-coding-agent';
+    write(root, `node_modules/${name}/package.json`, JSON.stringify({
+      name, version: '0.80.6', type: 'module', main: './dist/index.js', types: './dist/index.d.ts',
+      exports: { '.': { types: './dist/index.d.ts', import: './dist/index.js', require: './dist/index.js' } },
+    }) + '\n');
+    write(root, `node_modules/${name}/LICENSE`, 'MIT License\n');
+    write(root, `node_modules/${name}/dist/index.js`, sdk ? "export function candidateOnly() { return 'candidate-sdk'; }\n" : 'export {}\n');
+    write(root, `node_modules/${name}/dist/index.d.ts`, sdk ? "export declare function candidateOnly(): 'candidate-sdk';\n" : 'export {};\n');
+    if (sdk) for (const asset of sdkAssets) write(root, `node_modules/${name}/${asset}`, `fixture asset: ${asset}\n`);
+  }
+  write(root, 'node_modules/typebox/package.json', JSON.stringify({
+    name: 'typebox', version: '1.0.0', type: 'module', main: './index.js', types: './index.d.ts',
+    exports: { '.': { types: './index.d.ts', import: './index.js', require: './index.js' } },
+  }) + '\n');
+  write(root, 'node_modules/typebox/index.js', 'export {};\n');
+  write(root, 'node_modules/typebox/index.d.ts', 'export {};\n');
+  return writePiRuntimeManifest(root, {
+    upstreamVersion: '0.80.6',
+    upstreamCommit: '2b3fda9921b5590f285165287bd442a25817f17b',
+    sourceTreeSha256: 'a'.repeat(64), lockSha256: 'b'.repeat(64),
+    target: { platform: process.platform, arch: process.arch, nodeAbi: process.versions.modules },
+  });
+}
+
+function installFakeAcquisition(repo, sourceArtifact, counter) {
+  write(repo, 'scripts/build/pi-runtime.mjs', `
+    import { cp, mkdir, readFile, writeFile } from 'node:fs/promises';
+    import path from 'node:path';
+    import { verifyPiRuntimeArtifact } from '../lib/pi-runtime-artifact.mjs';
+    const source = ${JSON.stringify(sourceArtifact)};
+    const counterFile = ${JSON.stringify(counter)};
+    export async function buildPiRuntime({ output }) {
+      await mkdir(output, { recursive: true });
+      let count = 0;
+      try { count = Number(await readFile(counterFile, 'utf8')); } catch {}
+      await writeFile(counterFile, String(count + 1));
+      const artifactDir = path.join(output, 'pi-runtime');
+      await cp(source, artifactDir, { recursive: true });
+      return verifyPiRuntimeArtifact(artifactDir);
+    }
+  `);
+}
+
+async function makeFixture(t) {
   // Windows temp can use an 8.3 spelling; compare canonical paths just as the
   // build boundary does when resolving junction ancestors.
   const directory = realpathSync.native(mkdtempSync(path.join(os.tmpdir(), 'pie-build-output-isolation-')));
@@ -43,6 +103,9 @@ function makeFixture(t) {
   write(owner, 'package.json', '{"name":"pie-output-fixture","version":"1.0.0"}\n');
   write(owner, 'tsconfig.json', '{"compilerOptions":{}}\n');
   write(repo, 'scripts/build/build.mjs', readFileSync(buildEntry));
+  write(repo, 'scripts/lib/pi-runtime-context.mjs', readFileSync(path.join(repositoryRoot, 'scripts', 'lib', 'pi-runtime-context.mjs')));
+  write(repo, 'scripts/lib/pi-runtime-artifact.mjs', readFileSync(path.join(repositoryRoot, 'scripts', 'lib', 'pi-runtime-artifact.mjs')));
+  write(repo, 'lib/pi-runtime/artifact.mjs', readFileSync(path.join(repositoryRoot, 'lib', 'pi-runtime', 'artifact.mjs')));
   write(repo, 'scripts/build/publication.mjs', `
     export async function findCompatibleInstalledExtensionDir() { throw new Error('unexpected installed-extension lookup'); }
     export async function publishRendererGeneration() { throw new Error('unexpected renderer publication'); }
@@ -142,7 +205,11 @@ function makeFixture(t) {
   mkdirSync(modules, { recursive: true });
   mkdirSync(outputRoot, { recursive: true });
   mkdirSync(home, { recursive: true });
-  return { directory, repo, owner, modules, outputRoot, home };
+  const sourceArtifact = path.join(directory, 'source-pi-runtime');
+  const runtime = await makeRuntimeArtifact(sourceArtifact);
+  const acquisitionCount = path.join(directory, 'acquisition-count.txt');
+  installFakeAcquisition(repo, sourceArtifact, acquisitionCount);
+  return { directory, repo, owner, modules, outputRoot, home, sourceArtifact, runtime, acquisitionCount };
 }
 
 function runBuild(fixture, args, extraEnv = {}, timeout = 30_000) {
@@ -184,8 +251,8 @@ function installSharedOutputSentinels(fixture) {
   return sharedOut;
 }
 
-test('build --output-dir isolates output, typecheck state, child environment, and publication', (t) => {
-  const fixture = makeFixture(t);
+test('build --output-dir isolates output, typecheck state, child environment, and publication', async (t) => {
+  const fixture = await makeFixture(t);
   const installed = installHomeSentinels(fixture);
   const sharedOut = installSharedOutputSentinels(fixture);
   const output = path.join(fixture.outputRoot, 'isolated-build');
@@ -206,8 +273,8 @@ test('build --output-dir isolates output, typecheck state, child environment, an
 
   const typecheckRecord = JSON.parse(readFileSync(path.join(output, 'fixture-typecheck.json'), 'utf8'));
   assert.equal(typecheckRecord.envOutputDir, output, 'typecheck child receives the output override');
-  assert.equal(typecheckRecord.envPiRuntimeSdkPath, '', 'typecheck child does not inherit an unselected SDK');
-  assert.equal(typecheckRecord.envPiRuntimeIdentity, '', 'typecheck child does not inherit an unselected SDK identity');
+  assert.equal(path.basename(typecheckRecord.envPiRuntimeSdkPath), 'pi-coding-agent', 'typecheck selects the source-default SDK');
+  assert.equal(typecheckRecord.envPiRuntimeIdentity, fixture.runtime.identity, 'typecheck child receives the verified source-default identity');
   const buildInfoAt = typecheckRecord.args.indexOf('--tsBuildInfoFile');
   assert.notEqual(buildInfoAt, -1, 'typecheck uses a private incremental-state file');
   const buildInfo = path.resolve(typecheckRecord.args[buildInfoAt + 1]);
@@ -222,8 +289,8 @@ test('build --output-dir isolates output, typecheck state, child environment, an
     const record = JSON.parse(readFileSync(path.join(output, `fixture-vite-${mode}.json`), 'utf8'));
     assert.equal(record.outputDir, output);
     assert.equal(record.envOutputDir, output, `${mode} Vite child receives the output override`);
-    assert.equal(record.envPiRuntimeSdkPath, '', `${mode} Vite child does not inherit an unselected SDK`);
-    assert.equal(record.envPiRuntimeIdentity, '', `${mode} Vite child does not inherit an unselected SDK identity`);
+    assert.equal(path.basename(record.envPiRuntimeSdkPath), 'pi-coding-agent', `${mode} Vite child selects the source-default SDK`);
+    assert.equal(record.envPiRuntimeIdentity, fixture.runtime.identity, `${mode} Vite child receives the source-default identity`);
     assert.ok(record.args.includes('--configLoader') && record.args[record.args.indexOf('--configLoader') + 1] === 'runner', `${mode} build uses Vite's runner config loader`);
   }
 
@@ -233,10 +300,11 @@ test('build --output-dir isolates output, typecheck state, child environment, an
   assert.equal(existsSync(path.join(output, 'sdk-local-path.json')), false, 'isolated builds do not write SDK pointers');
   assert.deepEqual(readdirSync(sharedOut).sort(), ['sdk-local-path.json', 'shared-sentinel.txt']);
   assert.deepEqual(readdirSync(installed), ['preserved.txt']);
+  assert.equal(readFileSync(fixture.acquisitionCount, 'utf8'), '1', 'one source-default acquisition is shared by typecheck and both Vite children');
 });
 
-test('build clears inherited output override for the default child output path', (t) => {
-  const fixture = makeFixture(t);
+test('build clears inherited output override for the default child output path', async (t) => {
+  const fixture = await makeFixture(t);
   const ignored = path.join(fixture.outputRoot, 'inherited-but-ignored');
   const result = runBuild(fixture, ['--skip-typecheck', '--no-sync'], {
     PIE_BUILD_OUTPUT_DIR: ignored,
@@ -253,14 +321,15 @@ test('build clears inherited output override for the default child output path',
     const record = JSON.parse(readFileSync(path.join(defaultOut, `fixture-vite-${mode}.json`), 'utf8'));
     assert.equal(record.outputDir, defaultOut);
     assert.equal(record.envOutputDir, '', 'default Vite children receive a cleared override');
-    assert.equal(record.envPiRuntimeSdkPath, '', 'default Vite children clear an inherited candidate SDK path');
-    assert.equal(record.envPiRuntimeIdentity, '', 'default Vite children clear an inherited candidate identity');
+    assert.equal(path.basename(record.envPiRuntimeSdkPath), 'pi-coding-agent', 'default Vite children use the source-default SDK');
+    assert.equal(record.envPiRuntimeIdentity, fixture.runtime.identity, 'default Vite children use the verified source-default identity');
     assert.equal(record.args.includes('--configLoader'), false, 'default config loading is unchanged');
   }
+  assert.equal(readFileSync(fixture.acquisitionCount, 'utf8'), '1', 'both Vite children share one source-default acquisition');
 });
 
-test('build accepts --output-dir=<absolute-path>', (t) => {
-  const fixture = makeFixture(t);
+test('build accepts --output-dir=<absolute-path>', async (t) => {
+  const fixture = await makeFixture(t);
   const output = path.join(fixture.outputRoot, 'equals-form');
   assert.equal(existsSync(output), false);
   const result = runBuild(fixture, [`--output-dir=${output}`, '--skip-typecheck']);
@@ -269,8 +338,8 @@ test('build accepts --output-dir=<absolute-path>', (t) => {
   assert.ok(existsSync(path.join(output, 'webview', 'panel', '.vite', 'manifest.json')));
 });
 
-test('build rejects unsafe, existing, or incompatible output destinations before writing', (t) => {
-  const fixture = makeFixture(t);
+test('build rejects unsafe, existing, or incompatible output destinations before writing', async (t) => {
+  const fixture = await makeFixture(t);
   const installed = path.join(fixture.home, '.vscode', 'extensions');
   mkdirSync(installed, { recursive: true });
   const insiderExtensions = path.join(fixture.home, '.vscode-insiders', 'extensions');
@@ -326,10 +395,11 @@ test('build rejects unsafe, existing, or incompatible output destinations before
     assert.match(`${result.stdout}\n${result.stderr}`, new RegExp(incompatible.slice(2), 'iu'));
     assert.equal(existsSync(output), false, `${incompatible} was rejected before output creation`);
   }
+  assert.equal(existsSync(fixture.acquisitionCount), false, 'rejected output destinations do not acquire a Pi runtime');
 });
 
-test('Windows drive paths are parsed as native absolute paths', (t) => {
-  const fixture = makeFixture(t);
+test('Windows drive paths are parsed as native absolute paths', async (t) => {
+  const fixture = await makeFixture(t);
   const unique = `pie-build-output-isolation-${process.pid}-${Date.now()}`;
   const winTarget = process.platform === 'win32'
     ? path.win32.resolve(fixture.outputRoot, unique)
@@ -355,8 +425,8 @@ test('Windows drive paths are parsed as native absolute paths', (t) => {
   }
 });
 
-test('actual copied Vite config builds a tiny fixture into the override with runner and no Vite cache', (t) => {
-  const fixture = makeFixture(t);
+test('actual copied Vite config builds a tiny fixture into the override with runner and no Vite cache', async (t) => {
+  const fixture = await makeFixture(t);
   const hostModules = fixture.modules;
   rmSync(path.join(hostModules, 'typescript'), { recursive: true, force: true });
   rmSync(path.join(hostModules, 'vite'), { recursive: true, force: true });

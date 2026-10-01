@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { gunzipSync } from 'node:zlib';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -10,6 +10,7 @@ import {
   buildChildEnvironment,
   createManifestTarball,
   createRuntimeOwnerManifest,
+  computePiRuntimeInputFingerprint,
   sanitizePackageManifest,
 } from '../pi-runtime.mjs';
 
@@ -83,6 +84,36 @@ function makeValidLock(packageManifests = manifests) {
     };
   }
   return { name: 'pie-private-pi-runtime', lockfileVersion: 3, packages };
+}
+
+function createFingerprintFixture(t) {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'pie-pi-runtime-fingerprint-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const write = (relative, contents) => {
+    const file = path.join(root, ...relative.split('/'));
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, contents);
+    return file;
+  };
+  write('harness/pi/package-lock.json', '{"name":"pi-source","lockfileVersion":3}\n');
+  write('harness/pi/packages/coding-agent/src/index.ts', 'export const value = 1;\n');
+  write('harness/pi-runtime/package.json', '{"name":"runtime-owner","version":"1"}\n');
+  write('harness/pi-runtime/package-lock.json', '{"name":"runtime-owner","lockfileVersion":3}\n');
+  // Private fixture inventory only: exercise source reads without invoking Git.
+  const tracked = ['harness/pi/package-lock.json', 'harness/pi/packages/coding-agent/src/index.ts'];
+  const inventory = () => {
+    const names = [...tracked];
+    const visit = relative => {
+      for (const entry of readdirSync(path.join(root, relative), { withFileTypes: true })) {
+        const name = `${relative}/${entry.name}`;
+        if (entry.isDirectory()) visit(name);
+        else names.push(name); // Links are passed to ordinary-file validation.
+      }
+    };
+    visit('harness/pi');
+    return [...new Set(names)].join('\0');
+  };
+  return { root, write, computePiRuntimeInputFingerprint: options => computePiRuntimeInputFingerprint(options, { inventory: inventory() }) };
 }
 
 function readTarEntries(tarball) {
@@ -199,6 +230,68 @@ test('assertRuntimeLock rejects wrong Pi versions, registry/nested/duplicate/ext
   const changedOptionalDependenciesLock = makeValidLock();
   changedOptionalDependenciesLock.packages[`node_modules/${piNames[0]}`].optionalDependencies['optional-fixture'] = '9.0.0';
   assert.throws(() => assertRuntimeLock(changedOptionalDependenciesLock, manifests));
+});
+
+test('computePiRuntimeInputFingerprint tracks live source, owner locks, and Node target inputs', async (t) => {
+  const { root, write, computePiRuntimeInputFingerprint } = createFingerprintFixture(t);
+  const options = { repositoryRoot: root };
+  const initial = await computePiRuntimeInputFingerprint(options);
+  assert.equal(await computePiRuntimeInputFingerprint(options), initial, 'identical inputs have a stable fingerprint');
+
+  const sourceFile = path.join(root, 'harness/pi/packages/coding-agent/src/index.ts');
+  write('harness/pi/packages/coding-agent/src/index.ts', 'export const value = 2;\n');
+  assert.notEqual(await computePiRuntimeInputFingerprint(options), initial, 'tracked source edits change the fingerprint');
+  write('harness/pi/packages/coding-agent/src/index.ts', 'export const value = 1;\n');
+  assert.equal(await computePiRuntimeInputFingerprint(options), initial);
+
+  write('harness/pi/packages/coding-agent/src/new-source.ts', 'export {};\n');
+  const withAddedSource = await computePiRuntimeInputFingerprint(options);
+  assert.notEqual(withAddedSource, initial, 'nonignored untracked source is included');
+  unlinkSync(path.join(root, 'harness/pi/packages/coding-agent/src/new-source.ts'));
+  assert.equal(await computePiRuntimeInputFingerprint(options), initial, 'removing added source restores the original inventory');
+
+  unlinkSync(sourceFile);
+  assert.notEqual(await computePiRuntimeInputFingerprint(options), initial, 'tracked source deletion changes the current inventory');
+  write('harness/pi/packages/coding-agent/src/index.ts', 'export const value = 1;\n');
+  assert.equal(await computePiRuntimeInputFingerprint(options), initial);
+
+  write('harness/pi/package-lock.json', '{"name":"pi-source","lockfileVersion":3,"changed":true}\n');
+  assert.notEqual(await computePiRuntimeInputFingerprint(options), initial, 'the Pi build lock is bound through the source inventory');
+  write('harness/pi/package-lock.json', '{"name":"pi-source","lockfileVersion":3}\n');
+  write('harness/pi-runtime/package.json', '{"name":"runtime-owner","version":"2"}\n');
+  assert.notEqual(await computePiRuntimeInputFingerprint(options), initial, 'runtime owner manifest changes are included');
+  write('harness/pi-runtime/package.json', '{"name":"runtime-owner","version":"1"}\n');
+  write('harness/pi-runtime/package-lock.json', '{"name":"runtime-owner","lockfileVersion":3,"changed":true}\n');
+  assert.notEqual(await computePiRuntimeInputFingerprint(options), initial, 'runtime dependency lock changes are included');
+  write('harness/pi-runtime/package-lock.json', '{"name":"runtime-owner","lockfileVersion":3}\n');
+
+  const target = { platform: process.platform, arch: process.arch, nodeAbi: process.versions.modules };
+  for (const changed of [
+    { ...target, platform: target.platform === 'win32' ? 'linux' : 'win32' },
+    { ...target, arch: `${target.arch}-other` },
+    { ...target, nodeAbi: `${target.nodeAbi}0` },
+  ]) {
+    assert.notEqual(await computePiRuntimeInputFingerprint({ ...options, target: changed }), initial, 'platform, architecture, and Node ABI are bound');
+  }
+  assert.notEqual(await computePiRuntimeInputFingerprint({ ...options, nodeVersion: 'v0.0.0' }), initial, 'Node version is bound separately from its ABI');
+});
+
+test('computePiRuntimeInputFingerprint rejects generated and linked Pi source entries', async (t) => {
+  const { root, write, computePiRuntimeInputFingerprint } = createFingerprintFixture(t);
+  const options = { repositoryRoot: root };
+  const generated = write('harness/pi/packages/coding-agent/dist/generated.js', 'export {};\n');
+  await assert.rejects(computePiRuntimeInputFingerprint(options), /Generated source inventory entry/);
+  unlinkSync(generated);
+  rmSync(path.dirname(generated), { recursive: true, force: true });
+
+  const target = path.join(root, 'linked-source-target');
+  mkdirSync(target);
+  write('linked-source-target/index.ts', 'export const linked = true;\n');
+  const sourceDirectory = path.join(root, 'harness/pi/packages/coding-agent/src');
+  unlinkSync(path.join(sourceDirectory, 'index.ts'));
+  rmSync(sourceDirectory, { recursive: true, force: true });
+  symlinkSync(target, sourceDirectory, process.platform === 'win32' ? 'junction' : 'dir');
+  await assert.rejects(computePiRuntimeInputFingerprint(options), /Not an ordinary source file/);
 });
 
 test('assertPrivateOutput rejects protected locations, existing outputs, and symlink ancestors', (t) => {
