@@ -4,14 +4,14 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { pathToFileURL } from 'node:url';
 
 import {
   buildPieSystemPrompt,
   installPieSystemPromptRebuildGuard,
   type PieSystemPromptOptions,
 } from '../../harness/agent-instructions/prompt-assembly/pie-harness-prompt.js';
-import { loadSdk } from '../../harness/agent-processes/lib/sdk-integration/sdk.js';
+import { loadSdk, loadSdkInternalModule } from '../../harness/agent-processes/lib/sdk-integration/sdk.js';
+import { sourceDescriptor, sourceLoadMode } from '../../harness/agent-processes/lib/sdk-integration/test/source-fixture.js';
 
 interface CapturedRequest {
   messages?: Array<{ role?: string; content?: unknown }>;
@@ -35,9 +35,7 @@ async function close(server: http.Server): Promise<void> {
 async function loadPinnedSystemPrompt(sdkPath: string): Promise<{
   buildSystemPrompt(options: PieSystemPromptOptions): string;
 }> {
-  return await import(pathToFileURL(path.join(sdkPath, 'dist', 'core', 'system-prompt.js')).href) as {
-    buildSystemPrompt(options: PieSystemPromptOptions): string;
-  };
+  return await loadSdkInternalModule(sdkPath, 'core/system-prompt.js', sourceLoadMode);
 }
 
 test('real SDK raw picker state omits both system message and tool schemas', {
@@ -102,13 +100,13 @@ test('real SDK raw picker state omits both system message and tool schemas', {
       },
     }));
 
-    const sdkPath = path.resolve(process.cwd(), '..', 'application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent');
-    const sdk = await loadSdk(sdkPath);
+    const sdkPath = sourceDescriptor.sdkPath;
+    const sdk = await loadSdk(sdkPath, sourceLoadMode);
     const authStorage = sdk.AuthStorage.create(path.join(agentDir, 'auth.json'));
     const services = await sdk.createAgentSessionServices({ cwd, agentDir, authStorage }) as any;
     const created = await sdk.createAgentSessionFromServices({
       services,
-      sessionManager: sdk.SessionManager.create(cwd),
+      sessionManager: sdk.SessionManager.create(cwd, path.join(tempDir, 'sessions')),
     }) as any;
     const session = created.session as any;
     session.setActiveToolsByName([]);
@@ -201,14 +199,14 @@ test('real SDK provider payload carries Pie ownership, dynamic guidance, and the
       },
     }));
 
-    const sdkPath = path.resolve(process.cwd(), '..', 'application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent');
-    const sdk = await loadSdk(sdkPath);
+    const sdkPath = sourceDescriptor.sdkPath;
+    const sdk = await loadSdk(sdkPath, sourceLoadMode);
     const sdkPrompt = await loadPinnedSystemPrompt(sdkPath);
     const authStorage = sdk.AuthStorage.create(path.join(agentDir, 'auth.json'));
     const services = await sdk.createAgentSessionServices({ cwd, agentDir, authStorage }) as any;
     const created = await sdk.createAgentSessionFromServices({
       services,
-      sessionManager: sdk.SessionManager.create(cwd),
+      sessionManager: sdk.SessionManager.create(cwd, path.join(tempDir, 'sessions')),
     }) as any;
     const session = created.session as any;
     const options: PieSystemPromptOptions = {

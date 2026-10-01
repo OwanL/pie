@@ -7,14 +7,10 @@ import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 
 import { loadSdk } from '../../harness/agent-processes/lib/sdk-integration/sdk';
+import { sourceDescriptor, sourceLoadMode } from '../../harness/agent-processes/lib/sdk-integration/test/source-fixture.js';
 import { mapTranscript } from '../../harness/session-storage/transcripts/transcript';
 
-const SDK_ROOT = path.resolve(
-  process.cwd(),
-  'node_modules',
-  '@earendil-works',
-  'pi-coding-agent',
-);
+const artifactVerifierUrl = new URL('../../lib/pi-runtime/artifact.mjs', import.meta.url).href;
 
 async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-sdk-terminal-durability-'));
@@ -31,8 +27,8 @@ test('fresh SDK reopen retains terminal entries when the writer exits before pub
     : 'run npm run test:integration to exercise cross-process SDK durability',
 }, async () => {
   await withTempDir(async (tempDir) => {
-    const sdk = await loadSdk(SDK_ROOT);
-    const sdkModuleUrl = pathToFileURL(path.join(SDK_ROOT, 'dist', 'index.js')).href;
+    const sdk = await loadSdk(sourceDescriptor.sdkPath, sourceLoadMode);
+    const sdkModuleUrl = pathToFileURL(path.join(sourceDescriptor.sdkPath, 'dist', 'core', 'session-manager.js')).href;
     const cwd = path.join(tempDir, 'workspace');
     const sessions = path.join(tempDir, 'sessions');
     const handoff = path.join(tempDir, 'handoff.json');
@@ -40,7 +36,18 @@ test('fresh SDK reopen retains terminal entries when the writer exits before pub
 
     const childScript = String.raw`
       import fs from 'node:fs';
-      const [sdkUrl, cwd, sessions, handoff] = process.argv.slice(1);
+      import path from 'node:path';
+      import { pathToFileURL } from 'node:url';
+      const [sdkUrl, cwd, sessions, handoff, verifierUrl, serializedDescriptor] = process.argv.slice(1);
+      const { verifyPiRuntimeArtifact } = await import(verifierUrl);
+      const descriptor = JSON.parse(serializedDescriptor);
+      const verified = await verifyPiRuntimeArtifact(descriptor.artifactDir, {
+        target: { platform: process.platform, arch: process.arch, nodeAbi: process.versions.modules },
+      });
+      if (verified.identity !== descriptor.identity || verified.sdkPath !== descriptor.sdkPath
+        || sdkUrl !== pathToFileURL(path.join(verified.sdkPath, 'dist/core/session-manager.js')).href) {
+        throw new Error('Writer SDK descriptor disagreement');
+      }
       const { SessionManager } = await import(sdkUrl);
       const manager = SessionManager.create(cwd, sessions);
       const assistantId = manager.appendMessage({
@@ -66,7 +73,8 @@ test('fresh SDK reopen retains terminal entries when the writer exits before pub
 
     const child = spawnSync(
       process.execPath,
-      ['--input-type=module', '--eval', childScript, sdkModuleUrl, cwd, sessions, handoff],
+      ['--input-type=module', '--eval', childScript, sdkModuleUrl, cwd, sessions, handoff,
+        artifactVerifierUrl, JSON.stringify(sourceDescriptor)],
       { encoding: 'utf8', timeout: 30_000 },
     );
     assert.equal(child.status, 86, child.stderr || child.stdout);

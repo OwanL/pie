@@ -6,6 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { loadSdk } from '../../harness/agent-processes/lib/sdk-integration/sdk';
+import { sourceDescriptor, sourceLoadMode } from '../../harness/agent-processes/lib/sdk-integration/test/source-fixture.js';
 
 interface CapturedRequest {
   tools?: Array<{ function?: { name?: string } }>;
@@ -110,8 +111,6 @@ test('setActiveTools inside a recovery tool exposes the recovered schema on the 
   });
   const port = await listen(server);
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-dynamic-tool-'));
-  const previousTrustedSdkRoot = process.env.PIE_TRUSTED_SDK_ROOT;
-  let sdkTestRoot: string | undefined;
   let session: any;
 
   try {
@@ -134,51 +133,7 @@ test('setActiveTools inside a recovery tool exposes the recovered schema on the 
       },
     }));
 
-    const installedSdkPath = path.resolve(
-      import.meta.dirname,
-      '..',
-      '..',
-      'application',
-      'hosts',
-      'vscode',
-      'node_modules',
-      '@earendil-works',
-      'pi-coding-agent',
-    );
-    sdkTestRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-dynamic-sdk-'));
-    const sdkNodeModules = path.join(sdkTestRoot, 'node_modules');
-    const sdkPath = path.join(sdkNodeModules, '@earendil-works', 'pi-coding-agent');
-    await fs.mkdir(path.dirname(sdkPath), { recursive: true });
-    await fs.cp(installedSdkPath, sdkPath, {
-      recursive: true,
-      filter: (source) => path.basename(source) !== 'node_modules',
-    });
-    const installedDependencies = path.join(installedSdkPath, 'node_modules');
-    const sdkDependencies = path.join(sdkPath, 'node_modules');
-    await fs.mkdir(sdkDependencies, { recursive: true });
-    for (const dependency of await fs.readdir(installedDependencies)) {
-      const source = path.join(installedDependencies, dependency);
-      const destination = path.join(sdkDependencies, dependency);
-      if (dependency !== '@earendil-works') {
-        await fs.symlink(source, destination, process.platform === 'win32' ? 'junction' : 'dir');
-        continue;
-      }
-      await fs.mkdir(destination);
-      for (const scopedDependency of await fs.readdir(source)) {
-        const scopedSource = path.join(source, scopedDependency);
-        const scopedDestination = path.join(destination, scopedDependency);
-        if (scopedDependency === 'pi-ai') {
-          await fs.cp(scopedSource, scopedDestination, {
-            recursive: true,
-            filter: (entry) => path.basename(entry) !== 'node_modules',
-          });
-        } else {
-          await fs.symlink(scopedSource, scopedDestination, process.platform === 'win32' ? 'junction' : 'dir');
-        }
-      }
-    }
-    process.env.PIE_TRUSTED_SDK_ROOT = sdkNodeModules;
-    const sdk = await loadSdk(sdkPath) as any;
+    const sdk = await loadSdk(sourceDescriptor.sdkPath, sourceLoadMode);
     const authStorage = sdk.AuthStorage.create(path.join(agentDir, 'auth.json'));
     const modelRegistry = sdk.ModelRegistry.create(authStorage, path.join(agentDir, 'models.json'));
     const model = modelRegistry.find('mock-provider', 'mock-model');
@@ -269,11 +224,8 @@ test('setActiveTools inside a recovery tool exposes the recovered schema on the 
     assert.equal(hiddenToolCalls, 1);
     assert.equal(beforeAgentStartCalls, 1, 'the recovery flow must remain inside one top-level agent run');
   } finally {
-    if (previousTrustedSdkRoot === undefined) delete process.env.PIE_TRUSTED_SDK_ROOT;
-    else process.env.PIE_TRUSTED_SDK_ROOT = previousTrustedSdkRoot;
     await session?.dispose?.();
     await close(server);
     await fs.rm(tempDir, { recursive: true, force: true });
-    if (sdkTestRoot) await fs.rm(sdkTestRoot, { recursive: true, force: true });
   }
 });

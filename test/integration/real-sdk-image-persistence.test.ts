@@ -1,16 +1,15 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import http from 'node:http';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
 import { loadSdk } from '../../harness/agent-processes/lib/sdk-integration/sdk';
+import { sourceDescriptor, sourceLoadMode } from '../../harness/agent-processes/lib/sdk-integration/test/source-fixture.js';
 import { mapTranscript } from '../../harness/session-storage/transcripts/transcript';
 
 const PNG_1X1_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+cY9sAAAAASUVORK5CYII=';
-
-declare const __dirname: string;
 
 async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-real-sdk-image-'));
@@ -21,41 +20,64 @@ async function withTempDir(run: (dir: string) => Promise<void>): Promise<void> {
   }
 }
 
-function resolveRealSdkPath(): string {
-  const configured = process.env['PIE_REAL_SDK_PATH']?.trim();
-  if (configured) {
-    return configured;
-  }
-
-  if (process.platform === 'win32' && process.env['APPDATA']) {
-    return path.join(process.env['APPDATA'], 'npm', 'node_modules', '@mariozechner', 'pi-coding-agent');
-  }
-
-  const npmRoot = execFileSync('npm', ['root', '-g'], { encoding: 'utf8' }).trim();
-  return path.join(npmRoot, '@mariozechner', 'pi-coding-agent');
+async function mockImageProvider(): Promise<{ server: http.Server; port: number; requests: any[] }> {
+  const requests: any[] = [];
+  const server = http.createServer((request, response) => {
+    let body = '';
+    request.setEncoding('utf8');
+    request.on('data', (chunk) => { body += chunk; });
+    request.on('end', () => {
+      requests.push(JSON.parse(body));
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      for (const [delta, finish_reason] of [
+        [{ role: 'assistant', content: 'ok' }, null], [{}, 'stop'],
+      ]) {
+        response.write(`data: ${JSON.stringify({
+          id: 'image-test', object: 'chat.completion.chunk', created: 1, model: 'mock-image',
+          choices: [{ index: 0, delta, finish_reason }],
+        })}\n\n`);
+      }
+      response.end('data: [DONE]\n\n');
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  return { server, port: address.port, requests };
 }
 
 test('real SDK persists committed user images in canonical session history', { timeout: 240_000 }, async (t) => {
-  if (process.env['PIE_RUN_REAL_SDK_TESTS'] !== '1') {
-    t.skip('Set PIE_RUN_REAL_SDK_TESTS=1 to run the real SDK image persistence verification.');
+  if (process.env['PIE_RUN_REAL_SDK_TESTS'] !== '1' && process.env.PIE_RUN_INTEGRATION_TESTS !== '1') {
+    t.skip('Set PIE_RUN_INTEGRATION_TESTS=1 to run the source SDK image persistence verification.');
     return;
   }
 
   await withTempDir(async (tempDir) => {
-    const sdk = await loadSdk(resolveRealSdkPath());
+    const sdk = await loadSdk(sourceDescriptor.sdkPath, sourceLoadMode);
     const agentDir = path.join(tempDir, 'agent');
     const cwd = path.join(tempDir, 'workspace');
-    const authSource = path.resolve(__dirname, '..', '..', '..', '..', 'auth.json');
-
     await fs.mkdir(agentDir, { recursive: true });
     await fs.mkdir(cwd, { recursive: true });
-    await fs.copyFile(authSource, path.join(agentDir, 'auth.json'));
+    const { server, port, requests } = await mockImageProvider();
+    t.after(() => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
+    await fs.writeFile(path.join(agentDir, 'models.json'), JSON.stringify({ providers: {
+      'mock-provider': {
+        baseUrl: `http://127.0.0.1:${port}/v1`, api: 'openai-completions', apiKey: 'mock-key',
+        models: [{ id: 'mock-image', name: 'Mock Image', reasoning: false, input: ['text', 'image'],
+          contextWindow: 8192, maxTokens: 128,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
+      },
+    } }));
     await fs.writeFile(
       path.join(agentDir, 'settings.json'),
       JSON.stringify({
-        defaultProvider: 'github-copilot',
-        defaultModel: 'claude-haiku-4.5',
-        defaultThinkingLevel: 'minimal',
+        defaultProvider: 'mock-provider',
+        defaultModel: 'mock-image',
+        defaultThinkingLevel: 'off',
+        compaction: { enabled: false }, retry: { enabled: false }, packages: [],
       }, null, 2),
       'utf8',
     );
@@ -66,7 +88,10 @@ test('real SDK persists committed user images in canonical session history', { t
         cwd,
         agentDir,
         authStorage,
-        resourceLoaderOptions: {},
+        resourceLoaderOptions: {
+          noExtensions: true, noSkills: true, noPromptTemplates: true,
+          noThemes: true, noContextFiles: true,
+        },
       });
       const created = await sdk.createAgentSessionFromServices({
         services,
@@ -76,7 +101,7 @@ test('real SDK persists committed user images in canonical session history', { t
       return Object.assign({ services }, created as Record<string, unknown>);
     };
 
-    const sessionManager = sdk.SessionManager.create(cwd);
+    const sessionManager = sdk.SessionManager.create(cwd, path.join(tempDir, 'sessions'));
     const runtime = await sdk.createAgentSessionRuntime(createRuntime, { cwd, agentDir, sessionManager });
 
     try {
@@ -89,7 +114,8 @@ test('real SDK persists committed user images in canonical session history', { t
         assert.ok(resolvedModel, 'expected to resolve the selected image-capable model from the registry');
         await runtime.session.setModel(resolvedModel);
       }
-      runtime.session.setThinkingLevel?.('minimal');
+      runtime.session.setThinkingLevel?.('off');
+      runtime.session.setActiveToolsByName([]);
 
       let preflightAccepted = false;
       const waitForAgentEnd = new Promise<void>((resolve, reject) => {
@@ -117,6 +143,9 @@ test('real SDK persists committed user images in canonical session history', { t
 
       await waitForAgentEnd;
       assert.equal(preflightAccepted, true, 'the real SDK prompt should pass preflight acceptance');
+      assert.equal(requests.length, 1, 'the SDK must send exactly one request to the local provider');
+      assert.ok(JSON.stringify(requests[0]).includes(`data:image/png;base64,${PNG_1X1_BASE64}`),
+        'the real provider payload must carry the committed image');
 
       const sessionFile = runtime.session.sessionFile ?? runtime.session.sessionManager.getSessionFile();
       assert.ok(sessionFile, 'the real SDK session should persist to a session file');

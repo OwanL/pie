@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
+import { loadSdkInternalModule } from '../../harness/agent-processes/lib/sdk-integration/sdk.js';
+import { sourceDescriptor, sourceLoadMode } from '../../harness/agent-processes/lib/sdk-integration/test/source-fixture.js';
 
 import {
   buildPieSystemPrompt,
@@ -25,26 +27,12 @@ const piIntro = 'You are an expert coding assistant operating inside pi, a codin
 const pieIntro = 'You are a coding assistant operating inside Pie, a development harness built on the Pi runtime. Pie provides project-aware guidance, specialized agents, dynamically available tools and skills, and session workflows.';
 const pieRole = 'You may be assisting the user directly or completing a delegated task. Follow the assigned task and any role-specific instructions.';
 const pieCapabilities = "The current tool definitions and guidance describe this session's capabilities. Do not assume upstream Pi features are available in Pie.";
-const repoRoot = path.resolve(process.cwd(), '..', '..', '..');
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
 async function loadSdkPrompt(): Promise<{
   buildSystemPrompt(options: PieSystemPromptOptions): string;
 }> {
-  const modulePath = path.join(
-    repoRoot,
-    'application',
-    'hosts',
-    'vscode',
-    'node_modules',
-    '@earendil-works',
-    'pi-coding-agent',
-    'dist',
-    'core',
-    'system-prompt.js',
-  );
-  return await import(pathToFileURL(modulePath).href) as {
-    buildSystemPrompt(options: PieSystemPromptOptions): string;
-  };
+  return await loadSdkInternalModule(sourceDescriptor.sdkPath, 'core/system-prompt.js', sourceLoadMode);
 }
 
 test('root AGENTS policy mirror cannot drift from the canonical prompt', () => {
