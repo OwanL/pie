@@ -1,0 +1,11 @@
+{
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "file:tarballs/pi-agent-core.tgz",
+    "@earendil-works/pi-ai": "file:tarballs/pi-ai.tgz",
+    "@earendil-works/pi-coding-agent": "file:tarballs/pi-coding-agent.tgz",
+    "@earendil-works/pi-tui": "file:tarballs/pi-tui.tgz"
+  },
+  "name": "pie-private-pi-runtime",
+  "private": true,
+  "version": "1.0.0"
+}

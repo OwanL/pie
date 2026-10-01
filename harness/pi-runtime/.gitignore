@@ -1,0 +1,3 @@
+# Derived only inside an explicitly addressed private build owner.
+node_modules/
+tarballs/
