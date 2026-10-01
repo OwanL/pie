@@ -12,6 +12,7 @@ import {
 	openSync,
 	readdirSync,
 	readSync,
+	renameSync,
 	rmSync,
 	statSync,
 	writeFileSync,
@@ -22,6 +23,11 @@ import { createInterface } from "readline";
 import { StringDecoder } from "string_decoder";
 import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
+import type {
+	SessionOwnershipAdapter,
+	SessionTransferAuthorization,
+	SessionWriteLease,
+} from "./session-ownership.ts";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
@@ -31,6 +37,108 @@ import {
 } from "./messages.ts";
 
 export const CURRENT_SESSION_VERSION = 3;
+
+export class StaleSessionWriteLeaseError extends Error {
+	readonly code = "STALE_SESSION_WRITE_LEASE";
+
+	constructor(message: string) {
+		super(message);
+		this.name = "StaleSessionWriteLeaseError";
+	}
+}
+
+function resolvedPathKey(value: string): string {
+	const resolved = resolvePath(value);
+	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function assertSessionWriteLease(lease: SessionWriteLease, canonicalPath: string, seam: string): void {
+	if (
+		!lease ||
+		typeof lease !== "object" ||
+		!Number.isSafeInteger(lease.coordinatorGeneration) ||
+		lease.coordinatorGeneration <= 0 ||
+		typeof lease.workerId !== "string" ||
+		lease.workerId.length === 0 ||
+		!Number.isSafeInteger(lease.workerGeneration) ||
+		lease.workerGeneration <= 0 ||
+		!Number.isSafeInteger(lease.ownershipRevision) ||
+		lease.ownershipRevision <= 0 ||
+		typeof lease.nonce !== "string" ||
+		lease.nonce.length === 0 ||
+		typeof lease.canonicalSessionPath !== "string" ||
+		resolvedPathKey(lease.canonicalSessionPath) !== resolvedPathKey(canonicalPath)
+	) {
+		throw new StaleSessionWriteLeaseError(`Invalid or wrong-path session write lease at ${seam}.`);
+	}
+}
+
+function copyPieSessionFile(sourcePath: string, destinationPath: string): void {
+	let sourceFd: number | undefined;
+	let destinationFd: number | undefined;
+	let ownsDestination = false;
+	const buffer = Buffer.allocUnsafe(64 * 1024);
+	let failed = false;
+	let failure: unknown;
+	try {
+		sourceFd = openSync(sourcePath, "r");
+		destinationFd = openSync(destinationPath, "wx", 0o600);
+		ownsDestination = true;
+		while (true) {
+			const bytesRead = readSync(sourceFd, buffer, 0, buffer.length, null);
+			if (bytesRead === 0) break;
+			writeFileSync(destinationFd, buffer.subarray(0, bytesRead));
+		}
+	} catch (error) {
+		failed = true;
+		failure = error;
+	}
+	try {
+		if (destinationFd !== undefined) closeSync(destinationFd);
+	} catch (error) {
+		failed = true;
+		failure ??= error;
+	}
+	try {
+		if (sourceFd !== undefined) closeSync(sourceFd);
+	} catch (error) {
+		failed = true;
+		failure ??= error;
+	}
+	if (failed) {
+		if (ownsDestination) rmSync(destinationPath, { force: true });
+		throw failure;
+	}
+}
+
+function sessionNeedsLineSeparator(sessionPath: string): boolean {
+	const size = statSync(sessionPath).size;
+	if (size === 0) return false;
+	const fd = openSync(sessionPath, "r");
+	const lastByte = Buffer.allocUnsafe(1);
+	try {
+		readSync(fd, lastByte, 0, 1, size - 1);
+		return lastByte[0] !== 10;
+	} finally {
+		closeSync(fd);
+	}
+}
+
+function renamePieFileWithTransientRetry(sourcePath: string, targetPath: string): void {
+	const retryDelays = [10, 25, 50, 100, 250, 500, 1000, 2000, 4000];
+	const waitArray = new Int32Array(new SharedArrayBuffer(4));
+	for (let attempt = 0; ; attempt++) {
+		try {
+			renameSync(sourcePath, targetPath);
+			return;
+		} catch (error) {
+			const code = error && typeof error === "object" ? (error as NodeJS.ErrnoException).code : undefined;
+			const delay = retryDelays[attempt];
+			if (!(code === "EACCES" || code === "EBUSY" || code === "EPERM") || delay === undefined) throw error;
+			Atomics.wait(waitArray, 0, 0, delay);
+		}
+	}
+}
 
 export interface SessionHeader {
 	type: "session";
@@ -848,6 +956,11 @@ export class SessionManager {
 	private labelsById: Map<string, string> = new Map();
 	private labelTimestampsById: Map<string, string> = new Map();
 	private leafId: string | null = null;
+	private pieOwnershipAdapter: SessionOwnershipAdapter | undefined;
+	private pieWriteLease: SessionWriteLease | undefined;
+	private piePreparedKind: "create" | "open" | "branch" | "import" | undefined;
+	private piePreparedNeedsWrite = false;
+	private piePreparedWriteMode: "w" | "wx" = "w";
 
 	private constructor(
 		cwd: string,
@@ -873,6 +986,11 @@ export class SessionManager {
 
 	/** Switch to a different session file (used for resume and branching) */
 	setSessionFile(sessionFile: string, preloadedEntries?: FileEntry[]): void {
+		if (this.pieOwnershipAdapter) {
+			throw new StaleSessionWriteLeaseError(
+				"Worker session manager cannot change paths without a replacement transfer.",
+			);
+		}
 		this.sessionFile = resolvePath(sessionFile);
 		if (existsSync(this.sessionFile)) {
 			this.fileEntries = preloadedEntries ?? loadEntriesFromFile(this.sessionFile);
@@ -908,6 +1026,11 @@ export class SessionManager {
 	}
 
 	newSession(options?: NewSessionOptions): string | undefined {
+		if (this.pieOwnershipAdapter) {
+			throw new StaleSessionWriteLeaseError(
+				"Worker session manager cannot allocate a new path without a replacement reservation.",
+			);
+		}
 		if (options?.id !== undefined) {
 			assertValidSessionId(options.id);
 		}
@@ -958,14 +1081,102 @@ export class SessionManager {
 
 	private _rewriteFile(): void {
 		if (!this.persist || !this.sessionFile) return;
-		const fd = openSync(this.sessionFile, "w");
-		try {
-			for (const entry of this.fileEntries) {
-				writeFileSync(fd, `${JSON.stringify(entry)}\n`);
+		this._runPieWriteMutation("_rewriteFile", () => {
+			const fd = openSync(this.sessionFile!, this.piePreparedWriteMode);
+			try {
+				for (const entry of this.fileEntries) {
+					writeFileSync(fd, `${JSON.stringify(entry)}\n`);
+				}
+			} finally {
+				closeSync(fd);
 			}
-		} finally {
-			closeSync(fd);
+		});
+	}
+
+	private _assertPieWriteLease(seam: string): void {
+		const adapter = this.pieOwnershipAdapter;
+		if (!adapter) return;
+		const sessionFile = this.getSessionFile();
+		const lease = this.pieWriteLease;
+		if (!sessionFile || !lease) {
+			throw new StaleSessionWriteLeaseError(`Stale session write lease at ${seam}.`);
 		}
+		assertSessionWriteLease(lease, sessionFile, seam);
+		adapter.assertWriteLease(lease, resolvePath(sessionFile), seam);
+	}
+
+	private _runPieWriteMutation<T>(seam: string, mutation: () => T): T {
+		this._assertPieWriteLease(seam);
+		const adapter = this.pieOwnershipAdapter;
+		if (!adapter || typeof adapter.runWriteMutation !== "function") return mutation();
+		const sessionFile = this.getSessionFile();
+		const lease = this.pieWriteLease;
+		if (!sessionFile || !lease) {
+			throw new StaleSessionWriteLeaseError(`Stale session write lease at ${seam}.`);
+		}
+		return adapter.runWriteMutation(lease, resolvePath(sessionFile), seam, this.sessionId, mutation);
+	}
+
+	attachPieWriteLease(adapter: SessionOwnershipAdapter, lease: SessionWriteLease): void {
+		if (!adapter || typeof adapter.assertWriteLease !== "function") {
+			throw new StaleSessionWriteLeaseError("Worker session ownership adapter is missing.");
+		}
+		const sessionFile = this.getSessionFile();
+		if (!sessionFile) {
+			throw new StaleSessionWriteLeaseError("Worker session manager has no canonical session path.");
+		}
+		assertSessionWriteLease(lease, sessionFile, "attachPieWriteLease");
+		adapter.assertWriteLease(lease, resolvePath(sessionFile), "attachPieWriteLease");
+		this.pieOwnershipAdapter = adapter;
+		this.pieWriteLease = lease;
+	}
+
+	revokePieWriteLease(): void {
+		this.pieWriteLease = undefined;
+	}
+
+	bindPiePreparedPath(canonicalPath: string): void {
+		if (!this.pieOwnershipAdapter || !this.piePreparedKind || this.pieWriteLease) {
+			throw new StaleSessionWriteLeaseError("Session manager is not an inactive prepared destination.");
+		}
+		this.sessionFile = resolvePath(canonicalPath);
+	}
+
+	async activatePiePrepared(authorization: SessionTransferAuthorization): Promise<SessionWriteLease> {
+		const adapter = this.pieOwnershipAdapter;
+		if (!adapter || !this.piePreparedKind || this.pieWriteLease) {
+			throw new StaleSessionWriteLeaseError("Session manager is not an inactive prepared destination.");
+		}
+		const sessionFile = this.getSessionFile();
+		if (
+			!sessionFile ||
+			!authorization ||
+			resolvedPathKey(authorization.canonicalDestinationPath) !== resolvedPathKey(sessionFile)
+		) {
+			throw new StaleSessionWriteLeaseError("Transfer authorization is for the wrong prepared destination.");
+		}
+		const lease = await adapter.consumeTransferAuthorization(authorization, resolvePath(sessionFile));
+		assertSessionWriteLease(lease, sessionFile, "activatePiePrepared");
+		this.pieWriteLease = lease;
+		this._runPieWriteMutation("activatePiePrepared", () => {
+			const preparedKind = this.piePreparedKind;
+			if (preparedKind === "create" || this.piePreparedNeedsWrite) {
+				// Preparation is read-only, including absent destination directories.
+				// Only the consumed lease permits their creation.
+				mkdirSync(resolve(sessionFile, ".."), { recursive: true });
+			}
+			if (preparedKind === "create") {
+				persistCreatedSessionHeader(this);
+				this.flushed = true;
+			} else if (this.piePreparedNeedsWrite) {
+				this._rewriteFile();
+				this.flushed = true;
+			}
+			this.piePreparedKind = undefined;
+			this.piePreparedNeedsWrite = false;
+			this.piePreparedWriteMode = "w";
+		});
+		return lease;
 	}
 
 	isPersisted(): boolean {
@@ -994,38 +1205,42 @@ export class SessionManager {
 
 	_persist(entry: SessionEntry): void {
 		if (!this.persist || !this.sessionFile) return;
-
-		const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
-		if (!hasAssistant) {
-			if (this.flushed) {
-				appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
-			} else {
-				// Mark as not flushed so when assistant arrives, all entries get written
-				this.flushed = false;
-			}
-			return;
-		}
-
-		if (!this.flushed) {
-			const fd = openSync(this.sessionFile, "wx");
-			try {
-				for (const e of this.fileEntries) {
-					writeFileSync(fd, `${JSON.stringify(e)}\n`);
+		this._runPieWriteMutation("_persist", () => {
+			const sessionFile = this.sessionFile!;
+			const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
+			if (!hasAssistant) {
+				if (this.flushed) {
+					appendFileSync(sessionFile, `${JSON.stringify(entry)}\n`);
+				} else {
+					// Mark as not flushed so when assistant arrives, all entries get written
+					this.flushed = false;
 				}
-			} finally {
-				closeSync(fd);
+				return;
 			}
-			this.flushed = true;
-		} else {
-			appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
-		}
+
+			if (!this.flushed) {
+				const fd = openSync(sessionFile, "wx");
+				try {
+					for (const e of this.fileEntries) {
+						writeFileSync(fd, `${JSON.stringify(e)}\n`);
+					}
+				} finally {
+					closeSync(fd);
+				}
+				this.flushed = true;
+			} else {
+				appendFileSync(sessionFile, `${JSON.stringify(entry)}\n`);
+			}
+		});
 	}
 
 	private _appendEntry(entry: SessionEntry): void {
-		this.fileEntries.push(entry);
-		this.byId.set(entry.id, entry);
-		this.leafId = entry.id;
-		this._persist(entry);
+		this._runPieWriteMutation("_appendEntry", () => {
+			this.fileEntries.push(entry);
+			this.byId.set(entry.id, entry);
+			this.leafId = entry.id;
+			this._persist(entry);
+		});
 	}
 
 	/** Append a message as child of current leaf, then advance leaf. Returns entry id.
@@ -1071,6 +1286,99 @@ export class SessionManager {
 		};
 		this._appendEntry(entry);
 		return entry.id;
+	}
+
+	appendPieModelSettingsChange(
+		provider: string | undefined,
+		modelId: string | undefined,
+		thinkingLevel: string | undefined,
+	): { modelChangeId?: string; thinkingLevelChangeId?: string } {
+		return this._runPieWriteMutation("appendPieModelSettingsChange", () => {
+			if ((provider === undefined) !== (modelId === undefined)) {
+				throw new Error("appendPieModelSettingsChange requires both provider and modelId.");
+			}
+			const stagedIds = new Set(this.byId.keys());
+			const stagedEntries: SessionEntry[] = [];
+			const modelChange: ModelChangeEntry | undefined =
+				provider === undefined
+					? undefined
+					: {
+						type: "model_change",
+						id: generateId(stagedIds),
+						parentId: this.leafId,
+						timestamp: new Date().toISOString(),
+						provider,
+						modelId: modelId!,
+					};
+			if (modelChange) {
+				stagedEntries.push(modelChange);
+				stagedIds.add(modelChange.id);
+			}
+			const thinkingChange: ThinkingLevelChangeEntry | undefined =
+				thinkingLevel === undefined
+					? undefined
+					: {
+						type: "thinking_level_change",
+						id: generateId(stagedIds),
+						parentId: modelChange?.id ?? this.leafId,
+						timestamp: new Date().toISOString(),
+						thinkingLevel,
+					};
+			if (thinkingChange) stagedEntries.push(thinkingChange);
+			if (stagedEntries.length === 0) return {};
+
+			const sessionFile = this.sessionFile;
+			if (this.persist && sessionFile) {
+				const temporaryPath = `${sessionFile}.pie-model-settings-${process.pid}-${randomUUID()}.tmp`;
+				let ownsTemporaryFile = false;
+				try {
+					copyPieSessionFile(sessionFile, temporaryPath);
+					ownsTemporaryFile = true;
+					const fd = openSync(temporaryPath, "a");
+					try {
+						const separator = sessionNeedsLineSeparator(temporaryPath) ? "\n" : "";
+						const suffix =
+							separator + stagedEntries.map((entry) => JSON.stringify(entry)).join("\n") + "\n";
+						writeFileSync(fd, suffix, "utf8");
+						fsyncSync(fd);
+					} finally {
+						closeSync(fd);
+					}
+					renamePieFileWithTransientRetry(temporaryPath, sessionFile);
+					ownsTemporaryFile = false;
+
+					let directoryFd: number | undefined;
+					try {
+						directoryFd = openSync(resolve(sessionFile, ".."), "r");
+						fsyncSync(directoryFd);
+					} catch {
+						// The file fsync and rename are the commit; directory sync is best effort.
+					} finally {
+						if (directoryFd !== undefined) {
+							try {
+								closeSync(directoryFd);
+							} catch {
+								// Directory-handle cleanup is best effort after commit.
+							}
+						}
+					}
+				} finally {
+					if (ownsTemporaryFile) rmSync(temporaryPath, { force: true });
+				}
+			}
+
+			// The rename is the commit point; in-memory state follows publication.
+			this.fileEntries.push(...stagedEntries);
+			for (const entry of stagedEntries) {
+				this.byId.set(entry.id, entry);
+				this.leafId = entry.id;
+			}
+			this.flushed = true;
+			return {
+				modelChangeId: modelChange?.id,
+				thinkingLevelChangeId: thinkingChange?.id,
+			};
+		});
 	}
 
 	/** Append a compaction summary as child of current leaf, then advance leaf. Returns entry id. */
@@ -1208,26 +1516,28 @@ export class SessionManager {
 	 * Pass undefined or empty string to clear the label.
 	 */
 	appendLabelChange(targetId: string, label: string | undefined): string {
-		if (!this.byId.has(targetId)) {
-			throw new Error(`Entry ${targetId} not found`);
-		}
-		const entry: LabelEntry = {
-			type: "label",
-			id: generateId(this.byId),
-			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
-			targetId,
-			label,
-		};
-		this._appendEntry(entry);
-		if (label) {
-			this.labelsById.set(targetId, label);
-			this.labelTimestampsById.set(targetId, entry.timestamp);
-		} else {
-			this.labelsById.delete(targetId);
-			this.labelTimestampsById.delete(targetId);
-		}
-		return entry.id;
+		return this._runPieWriteMutation("appendLabelChange", () => {
+			if (!this.byId.has(targetId)) {
+				throw new Error(`Entry ${targetId} not found`);
+			}
+			const entry: LabelEntry = {
+				type: "label",
+				id: generateId(this.byId),
+				parentId: this.leafId,
+				timestamp: new Date().toISOString(),
+				targetId,
+				label,
+			};
+			this._appendEntry(entry);
+			if (label) {
+				this.labelsById.set(targetId, label);
+				this.labelTimestampsById.set(targetId, entry.timestamp);
+			} else {
+				this.labelsById.delete(targetId);
+				this.labelTimestampsById.delete(targetId);
+			}
+			return entry.id;
+		});
 	}
 
 	/**
@@ -1336,10 +1646,12 @@ export class SessionManager {
 	 * are not modified or deleted.
 	 */
 	branch(branchFromId: string): void {
-		if (!this.byId.has(branchFromId)) {
-			throw new Error(`Entry ${branchFromId} not found`);
-		}
-		this.leafId = branchFromId;
+		this._runPieWriteMutation("branch", () => {
+			if (!this.byId.has(branchFromId)) {
+				throw new Error(`Entry ${branchFromId} not found`);
+			}
+			this.leafId = branchFromId;
+		});
 	}
 
 	/**
@@ -1348,7 +1660,9 @@ export class SessionManager {
 	 * Use this when navigating to re-edit the first user message.
 	 */
 	resetLeaf(): void {
-		this.leafId = null;
+		this._runPieWriteMutation("resetLeaf", () => {
+			this.leafId = null;
+		});
 	}
 
 	/**
@@ -1357,22 +1671,24 @@ export class SessionManager {
 	 * context from the abandoned conversation path.
 	 */
 	branchWithSummary(branchFromId: string | null, summary: string, details?: unknown, fromHook?: boolean): string {
-		if (branchFromId !== null && !this.byId.has(branchFromId)) {
-			throw new Error(`Entry ${branchFromId} not found`);
-		}
-		this.leafId = branchFromId;
-		const entry: BranchSummaryEntry = {
-			type: "branch_summary",
-			id: generateId(this.byId),
-			parentId: branchFromId,
-			timestamp: new Date().toISOString(),
-			fromId: branchFromId ?? "root",
-			summary,
-			details,
-			fromHook,
-		};
-		this._appendEntry(entry);
-		return entry.id;
+		return this._runPieWriteMutation("branchWithSummary", () => {
+			if (branchFromId !== null && !this.byId.has(branchFromId)) {
+				throw new Error(`Entry ${branchFromId} not found`);
+			}
+			this.leafId = branchFromId;
+			const entry: BranchSummaryEntry = {
+				type: "branch_summary",
+				id: generateId(this.byId),
+				parentId: branchFromId,
+				timestamp: new Date().toISOString(),
+				fromId: branchFromId ?? "root",
+				summary,
+				details,
+				fromHook,
+			};
+			this._appendEntry(entry);
+			return entry.id;
+		});
 	}
 
 	/**
@@ -1381,6 +1697,11 @@ export class SessionManager {
 	 * Returns the new session file path, or undefined if not persisting.
 	 */
 	createBranchedSession(leafId: string): string | undefined {
+		if (this.pieOwnershipAdapter) {
+			throw new StaleSessionWriteLeaseError(
+				"Worker branch destinations require preparePieBranched and a transfer authorization.",
+			);
+		}
 		const previousSessionFile = this.sessionFile;
 		const path = this.getBranch(leafId);
 		if (path.length === 0) {
@@ -1480,6 +1801,135 @@ export class SessionManager {
 		this.sessionId = newSessionId;
 		this._buildIndex();
 		return undefined;
+	}
+
+	static preparePieCreate(
+		cwd: string,
+		sessionDir: string | undefined,
+		options: NewSessionOptions | undefined,
+		adapter: SessionOwnershipAdapter,
+	): SessionManager {
+		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDirPath(cwd);
+		const manager = new SessionManager(cwd, "", undefined, false, options);
+		manager.sessionDir = dir;
+		manager.persist = true;
+		const header = manager.getHeader();
+		if (!header) throw new Error("Prepared session create did not produce a session header.");
+		const fileTimestamp = header.timestamp.replace(/[:.]/g, "-");
+		manager.sessionFile = join(dir, `${fileTimestamp}_${manager.sessionId}.jsonl`);
+		manager.pieOwnershipAdapter = adapter;
+		manager.piePreparedKind = "create";
+		manager.piePreparedWriteMode = "wx";
+		return manager;
+	}
+
+	static preparePieOpen(
+		sessionPath: string,
+		sessionDir: string | undefined,
+		cwdOverride: string | undefined,
+		adapter: SessionOwnershipAdapter,
+	): SessionManager {
+		const resolvedPath = resolvePath(sessionPath);
+		const entries = loadEntriesFromFile(resolvedPath);
+		const existing = existsSync(resolvedPath);
+		if (existing && entries.length === 0 && statSync(resolvedPath).size > 0) {
+			throw new Error(`Session file is not a valid pi session: ${resolvedPath}`);
+		}
+		const header = entries.find((entry) => entry.type === "session") as SessionHeader | undefined;
+		const cwd = cwdOverride ?? header?.cwd ?? process.cwd();
+		const dir = sessionDir ? normalizePath(sessionDir) : resolve(resolvedPath, "..");
+		const manager = new SessionManager(cwd, "", undefined, false);
+		manager.sessionDir = dir;
+		manager.persist = true;
+		manager.sessionFile = resolvedPath;
+		manager.pieOwnershipAdapter = adapter;
+		manager.piePreparedKind = "open";
+		if (entries.length === 0) {
+			manager.piePreparedNeedsWrite = true;
+			manager.piePreparedWriteMode = existing ? "w" : "wx";
+		} else {
+			manager.fileEntries = entries;
+			manager.sessionId = header?.id ?? createSessionId();
+			manager.piePreparedNeedsWrite = migrateToCurrentVersion(manager.fileEntries);
+			manager.piePreparedWriteMode = "w";
+			manager._buildIndex();
+			manager.flushed = !manager.piePreparedNeedsWrite;
+		}
+		return manager;
+	}
+
+	static preparePieBranched(
+		source: SessionManager,
+		leafId: string,
+		adapter: SessionOwnershipAdapter,
+	): SessionManager {
+		source._assertPieWriteLease("preparePieBranched:source");
+		const branchPath = source.getBranch(leafId);
+		if (branchPath.length === 0) throw new Error(`Entry ${leafId} not found`);
+		const manager = SessionManager.preparePieCreate(
+			source.cwd,
+			source.getSessionDir(),
+			{ parentSession: source.sessionFile },
+			adapter,
+		);
+		const header = manager.getHeader();
+		if (!header) throw new Error("Prepared branched session did not produce a session header.");
+		const retained: SessionEntry[] = [];
+		let parentId: string | null = null;
+		for (const entry of branchPath) {
+			if (entry.type === "label") continue;
+			retained.push({ ...entry, parentId });
+			parentId = entry.id;
+		}
+		const retainedIds = new Set(retained.map((entry) => entry.id));
+		const labels: LabelEntry[] = [];
+		for (const [targetId, label] of source.labelsById) {
+			if (!retainedIds.has(targetId)) continue;
+			const labelEntry: LabelEntry = {
+				type: "label",
+				id: generateId(new Set([...retainedIds, ...labels.map((entry) => entry.id)])),
+				parentId,
+				timestamp: source.labelTimestampsById.get(targetId)!,
+				targetId,
+				label,
+			};
+			labels.push(labelEntry);
+			parentId = labelEntry.id;
+		}
+		manager.fileEntries = [header, ...retained, ...labels];
+		manager._buildIndex();
+		manager.piePreparedKind = "branch";
+		manager.piePreparedNeedsWrite = true;
+		manager.piePreparedWriteMode = "wx";
+		return manager;
+	}
+
+	static preparePieImport(
+		sourcePath: string,
+		destinationPath: string,
+		sessionDir: string,
+		cwdOverride: string | undefined,
+		adapter: SessionOwnershipAdapter,
+	): SessionManager {
+		const sourceEntries = loadEntriesFromFile(sourcePath);
+		if (sourceEntries.length === 0) {
+			throw new Error(`Cannot import empty or invalid session: ${sourcePath}`);
+		}
+		const header = sourceEntries.find((entry) => entry.type === "session") as SessionHeader | undefined;
+		if (!header) throw new Error(`Cannot import session without a header: ${sourcePath}`);
+		const manager = new SessionManager(cwdOverride ?? header.cwd ?? process.cwd(), "", undefined, false);
+		manager.sessionDir = normalizePath(sessionDir);
+		manager.persist = true;
+		manager.sessionFile = resolvePath(destinationPath);
+		manager.fileEntries = sourceEntries;
+		migrateToCurrentVersion(manager.fileEntries);
+		manager.sessionId = header.id;
+		manager._buildIndex();
+		manager.pieOwnershipAdapter = adapter;
+		manager.piePreparedKind = "import";
+		manager.piePreparedNeedsWrite = true;
+		manager.piePreparedWriteMode = "wx";
+		return manager;
 	}
 
 	/**

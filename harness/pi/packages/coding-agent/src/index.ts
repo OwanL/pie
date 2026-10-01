@@ -242,7 +242,18 @@ export {
 	type SessionTreeNode,
 	sessionEntryToContextMessages,
 	type ThinkingLevelChangeEntry,
+	StaleSessionWriteLeaseError,
 } from "./core/session-manager.ts";
+export type {
+	SessionOwnershipAdapter,
+	SessionOwnershipFingerprint,
+	SessionOwnershipReservation,
+	SessionReplacementIntent,
+	SessionReplacementReason,
+	SessionTransferAuthorization,
+	SessionWorkerOwnershipIdentity,
+	SessionWriteLease,
+} from "./core/session-ownership.ts";
 export {
 	type CompactionSettings,
 	type DefaultProjectTrust,
