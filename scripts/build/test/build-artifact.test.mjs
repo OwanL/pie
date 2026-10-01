@@ -137,6 +137,7 @@ function makeBuildFixture(t) {
   for (const helper of ['package-resolution.mjs', 'pi-runtime-artifact.mjs', 'traversal-policy.mjs']) {
     write(repo, `scripts/lib/${helper}`, readFileSync(path.join(repositoryRoot, 'scripts/lib', helper)));
   }
+  write(repo, 'lib/pi-runtime/artifact.mjs', readFileSync(path.join(repositoryRoot, 'lib/pi-runtime/artifact.mjs')));
   write(repo, 'application/hosts/vscode/vite.config.ts', readFileSync(path.join(repositoryRoot, 'application/hosts/vscode/vite.config.ts')));
   write(repo, 'harness/tools/execution-safety/traversal-policy.ts', readFileSync(path.join(repositoryRoot, 'harness/tools/execution-safety/traversal-policy.ts')));
 
