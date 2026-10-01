@@ -28,7 +28,7 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { createTsconfigOverlay, resolveOwnerTsx } from '../lib/package-resolution.mjs';
+import { createTsconfigOverlay, resolveOwnerTsx, resolveSdkPackages } from '../lib/package-resolution.mjs';
 import { PACKAGE_DIRECTIVES, resolvePackageEntry } from '../lib/test-packages.mjs';
 import { withoutGitRepositoryEnv } from '../lib/git-environment.mjs';
 import { withoutPiHarnessEnv } from '../lib/pi-harness-env.mjs';
@@ -45,6 +45,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // process budget so one npm test invocation cannot start every package runner
 // at once (each runner may itself parallelize test files).
 export const DEFAULT_GROUP_CONCURRENCY = 3;
+const DEFAULT_SDK_TSCONFIG = 'application/hosts/vscode/tsconfig.json';
 
 /**
  * Run package groups with a bounded number of active package test processes.
@@ -244,7 +245,24 @@ export function buildTsxArgs(group) {
 }
 
 /**
- * @typedef {{ files: string[], help: boolean, filesFromStdin: boolean }} ParsedArgs
+ * Create the config overlay used by a focused package group. Explicit SDK
+ * candidates need aliases even for groups without a registry tsconfig, so
+ * those groups inherit the application owner's root SDK config.
+ * @param {string} repoRoot
+ * @param {{ tsxConfig?: string, includeOwnerDependencies?: boolean }} group
+ * @param {{ sdkPath?: string }} [options]
+ */
+export function createGroupTsconfigOverlay(repoRoot, group, { sdkPath } = {}) {
+  if (!group.tsxConfig && sdkPath === undefined) return undefined;
+  const baseConfig = path.join(repoRoot, group.tsxConfig ?? DEFAULT_SDK_TSCONFIG);
+  return createTsconfigOverlay(baseConfig, {
+    includeOwnerDependencies: group.includeOwnerDependencies === true,
+    ...(sdkPath === undefined ? {} : { sdkPath }),
+  });
+}
+
+/**
+ * @typedef {{ files: string[], help: boolean, filesFromStdin: boolean, sdkPath?: string }} ParsedArgs
  */
 
 /**
@@ -255,8 +273,10 @@ export function parseArgs(argv) {
   const files = [];
   let help = false;
   let filesFromStdin = false;
+  let sdkPath;
   let onlyFiles = false;
-  for (const arg of argv) {
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
     if (!onlyFiles && (arg === '--help' || arg === '-h')) {
       help = true;
       continue;
@@ -269,9 +289,18 @@ export function parseArgs(argv) {
       filesFromStdin = true;
       continue;
     }
+    if (!onlyFiles && (arg === '--sdk-path' || arg.startsWith('--sdk-path='))) {
+      if (sdkPath !== undefined) throw new Error('--sdk-path may be specified only once.');
+      const value = arg === '--sdk-path' ? argv[++index] : arg.slice('--sdk-path='.length);
+      if (!value || value === '--' || (arg === '--sdk-path' && value.startsWith('--'))) {
+        throw new Error('--sdk-path requires a candidate coding-agent package directory.');
+      }
+      sdkPath = value;
+      continue;
+    }
     files.push(arg);
   }
-  return { files, help, filesFromStdin };
+  return { files, help, filesFromStdin, ...(sdkPath === undefined ? {} : { sdkPath }) };
 }
 
 function printHelp() {
@@ -284,6 +313,8 @@ function printHelp() {
       `Options:\n` +
       `  --help, -h          Show this help.\n` +
       `  --files-from-stdin  Read a JSON array of file paths from stdin.\n` +
+      `  --sdk-path <dir>    Use a candidate Pi coding-agent package directory.\n` +
+      `  --sdk-path=<dir>    Equivalent form of --sdk-path.\n` +
       `  --                  Treat the rest of the args as file paths.\n\n` +
       `Examples:\n` +
       `  node scripts/verification/run-test-files.mjs application/frontend/test/components/app-smoke.test.ts\n` +
@@ -347,11 +378,32 @@ export async function readFilesFromStdin(stream = process.stdin) {
 
 async function main() {
   const repoRoot = inferRepoRoot();
-  const { files: argFiles, help, filesFromStdin } = parseArgs(process.argv.slice(2));
+  let parsedArgs;
+  try {
+    parsedArgs = parseArgs(process.argv.slice(2));
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exitCode = 1;
+    return;
+  }
+  const { files: argFiles, help, filesFromStdin, sdkPath: sdkPathArgument } = parsedArgs;
 
   if (help) {
     printHelp();
     return;
+  }
+
+  let sdkPath;
+  if (sdkPathArgument !== undefined) {
+    sdkPath = path.resolve(repoRoot, sdkPathArgument);
+    try {
+      resolveSdkPackages({ sdkPath });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      console.error(`Invalid --sdk-path candidate "${sdkPathArgument}": ${detail}`);
+      process.exitCode = 1;
+      return;
+    }
   }
 
   let files = argFiles;
@@ -381,20 +433,18 @@ async function main() {
     return;
   }
 
-  // Packages with registry tsxConfig entries run through generated overlay
-  // configs (owner-relative aliases over the checked-in base config) instead
-  // of the raw repo-relative config path. Overlays are private OS-temp files
-  // and are always disposed after the run.
+  // Registry-configured groups keep their base tsconfig. Candidate SDK mode
+  // also overlays unconfigured groups from the application owner's root SDK
+  // tsconfig so every Pi and TypeBox spelling resolves to the candidate.
+  // Overlays are private OS-temp files and are always disposed after the run.
   const overlays = new Map();
   const processAbort = abortOnProcessSignals();
   const failures = [];
   let passedGroups = 0;
   try {
     for (const group of groups) {
-      if (!group.tsxConfig) continue;
-      overlays.set(group.id, createTsconfigOverlay(path.join(repoRoot, group.tsxConfig), {
-        includeOwnerDependencies: group.includeOwnerDependencies === true,
-      }));
+      const overlay = createGroupTsconfigOverlay(repoRoot, group, { sdkPath });
+      if (overlay) overlays.set(group.id, overlay);
     }
     const results = await runGroupQueue(groups, async (group) => {
       const overlay = overlays.get(group.id);

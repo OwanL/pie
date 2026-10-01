@@ -75,6 +75,162 @@ function runNode(args, cwd) {
   return result.stdout.trim();
 }
 
+function writeFixturePackage(modulesRoot, name, manifest = {}, files = {}) {
+  const packageRoot = path.join(modulesRoot, ...name.split('/'));
+  mkdirSync(packageRoot, { recursive: true });
+  writeFileSync(path.join(packageRoot, 'package.json'), JSON.stringify({ name, ...manifest }, null, 2));
+  for (const [relativePath, content] of Object.entries(files)) {
+    const filePath = path.join(packageRoot, relativePath);
+    mkdirSync(path.dirname(filePath), { recursive: true });
+    writeFileSync(filePath, content);
+  }
+  return packageRoot;
+}
+
+function makeSdkCandidateGraph(fixtureRoot, { omit = [] } = {}) {
+  const workspaceRoot = path.join(fixtureRoot, 'candidate-workspace');
+  const sdkRoot = path.join(workspaceRoot, 'packages', 'coding-agent');
+  const sdkManifest = {
+    name: '@earendil-works/pi-coding-agent',
+    type: 'module',
+    main: './dist/index.js',
+    types: './dist/index.d.ts',
+    exports: {
+      '.': { types: './dist/index.d.ts', import: './dist/index.js' },
+      './rpc-entry': { import: './dist/rpc-entry.js' },
+    },
+    dependencies: {
+      '@earendil-works/pi-agent-core': '*',
+      '@earendil-works/pi-ai': '*',
+      '@earendil-works/pi-tui': '*',
+      typebox: '*',
+      'candidate-runtime': '*',
+      ws: '*',
+      marked: '*',
+      yaml: '*',
+      immer: '*',
+      preact: '*',
+    },
+  };
+  mkdirSync(sdkRoot, { recursive: true });
+  writeFileSync(path.join(sdkRoot, 'package.json'), JSON.stringify(sdkManifest, null, 2));
+
+  const simpleExports = { '.': { types: './dist/index.d.ts', import: './dist/index.js' } };
+  const agentRoot = writeFixturePackage(path.join(workspaceRoot, 'node_modules'), '@earendil-works/pi-agent-core', {
+    type: 'module', exports: simpleExports, dependencies: { 'candidate-transitive': '*' },
+  });
+  const aiRoot = writeFixturePackage(path.join(sdkRoot, 'node_modules'), '@earendil-works/pi-ai', {
+    type: 'module', exports: {
+      '.': { types: './dist/index.d.ts', import: './dist/index.js' },
+      './compat': { types: './dist/compat.d.ts', import: './dist/compat.js' },
+      './providers/*': { types: './dist/providers/*.d.ts', import: './dist/providers/*.js' },
+    },
+  });
+  const tuiRoot = writeFixturePackage(path.join(workspaceRoot, 'packages', 'node_modules'), '@earendil-works/pi-tui', {
+    type: 'module', main: './dist/index.js', types: './dist/index.d.ts',
+  });
+  const typeboxRoot = writeFixturePackage(path.join(workspaceRoot, 'node_modules'), 'typebox', {
+    type: 'module', exports: {
+      '.': { types: './build/index.d.ts', import: './build/index.mjs' },
+      './value': { types: './build/value/index.d.ts', import: './build/value/index.mjs' },
+    },
+  });
+  const runtimeRoot = writeFixturePackage(path.join(workspaceRoot, 'packages'), 'candidate-runtime', {
+    type: 'module', main: './index.js', dependencies: { 'candidate-transitive': '*' },
+  }, {
+    'index.js': "export { version as nestedVersion } from 'candidate-transitive';",
+    'lib/core.js': "export const marker = 'candidate extensionless subpath';",
+  });
+  symlinkSync(runtimeRoot, path.join(workspaceRoot, 'node_modules', 'candidate-runtime'),
+    process.platform === 'win32' ? 'junction' : 'dir');
+  writeFixturePackage(path.join(runtimeRoot, 'node_modules'), 'candidate-transitive', {
+    type: 'module', main: './index.js',
+  }, { 'index.js': "export const version = 'nested candidate transitive';" });
+  const wsRoot = writeFixturePackage(path.join(workspaceRoot, 'node_modules'), 'ws', {
+    type: 'module', exports: { '.': { browser: './browser.js', import: './index.js' } },
+  }, { 'browser.js': "export const marker = 'candidate ws browser';", 'index.js': "export const marker = 'candidate ws';" });
+  const markedRoot = writeFixturePackage(path.join(workspaceRoot, 'node_modules'), 'marked', {
+    type: 'module', exports: { '.': { browser: './browser.js', import: './index.js' } },
+  }, { 'browser.js': "export const marker = 'candidate marked browser';", 'index.js': "export const marker = 'candidate marked';" });
+  const yamlRoot = writeFixturePackage(path.join(sdkRoot, 'node_modules'), 'yaml', {
+    type: 'module', exports: {
+      '.': { types: './dist/index.d.ts', browser: './dist/browser.mjs', import: './dist/index.mjs' },
+      './*': { types: './dist/*.d.ts', browser: './dist/*.mjs', import: './dist/*.mjs' },
+    },
+  }, {
+    'dist/browser.mjs': "export const marker = 'candidate yaml browser';",
+    'dist/index.mjs': "export const marker = 'candidate yaml';",
+  });
+  const immerRoot = writeFixturePackage(path.join(sdkRoot, 'node_modules'), 'immer', {
+    type: 'module', exports: {
+      '.': { types: './dist/index.d.ts', import: './dist/index.mjs' },
+      './*': { types: './dist/*.d.ts', import: './dist/*.mjs' },
+    },
+  });
+  const preactRoot = writeFixturePackage(path.join(sdkRoot, 'node_modules'), 'preact', {
+    type: 'module', exports: {
+      '.': { types: './dist/index.d.ts', import: './dist/index.mjs', require: './dist/index.cjs' },
+      './*': { types: './dist/*.d.ts', import: './dist/*.mjs', require: './dist/*.cjs' },
+    },
+  });
+  const transitiveRoot = writeFixturePackage(path.join(workspaceRoot, 'node_modules'), 'candidate-transitive', {
+    type: 'module', main: './index.js',
+  }, { 'index.js': "export const version = 'candidate root transitive';" });
+  const roots = {
+    '@earendil-works/pi-coding-agent': sdkRoot,
+    '@earendil-works/pi-agent-core': agentRoot,
+    '@earendil-works/pi-ai': aiRoot,
+    '@earendil-works/pi-tui': tuiRoot,
+    typebox: typeboxRoot,
+    'candidate-runtime': runtimeRoot,
+    'candidate-transitive': transitiveRoot,
+    ws: wsRoot,
+    marked: markedRoot,
+    yaml: yamlRoot,
+    immer: immerRoot,
+    preact: preactRoot,
+  };
+  for (const name of omit) {
+    rmSync(roots[name], { recursive: true, force: true });
+  }
+  return { workspaceRoot, sdkRoot, roots };
+}
+
+function makeCandidateOwner(fixtureRoot) {
+  const fakeOwnerRoot = path.join(fixtureRoot, 'candidate-owner');
+  const modulesRoot = path.join(fakeOwnerRoot, 'node_modules');
+  mkdirSync(modulesRoot, { recursive: true });
+  for (const name of ['typescript']) {
+    const target = path.join(modulesRoot, ...name.split('/'));
+    mkdirSync(path.dirname(target), { recursive: true });
+    symlinkSync(path.join(ownerRoot, 'node_modules', ...name.split('/')), target,
+      process.platform === 'win32' ? 'junction' : 'dir');
+  }
+  const dependencies = ['preact', 'owner-tool', 'candidate-runtime', 'candidate-transitive', 'ws', 'marked', 'yaml', 'immer'];
+  writeFileSync(path.join(fakeOwnerRoot, 'package.json'), JSON.stringify({ dependencies: Object.fromEntries(dependencies.map((name) => [name, '*'])) }, null, 2));
+  writeFixturePackage(modulesRoot, 'preact', {
+    type: 'module', exports: {
+      '.': { types: './dist/preact.d.ts', import: './dist/preact.mjs', require: './dist/preact.js' },
+      './*': { types: './*.d.ts', import: './*.mjs', require: './*.js' },
+    },
+  }, { 'dist/preact.js': 'module.exports = {};', 'dist/preact.mjs': 'export {};'});
+  for (const name of ['owner-tool', 'candidate-runtime', 'candidate-transitive', 'ws', 'marked', 'yaml', 'immer']) {
+    writeFixturePackage(modulesRoot, name, { type: 'module', main: './index.js' }, {
+      'index.js': `export const marker = 'host ${name}'; export const version = 'host ${name}';`,
+    });
+  }
+  writeFixturePackage(modulesRoot, 'tailwindcss', {
+    exports: { '.': { import: './index.js' }, './style.css': { style: './index.css' } },
+  });
+  for (const name of [
+    '@earendil-works/pi-coding-agent', '@earendil-works/pi-agent-core',
+    '@earendil-works/pi-ai', '@earendil-works/pi-tui', 'typebox',
+  ]) {
+    writeFixturePackage(modulesRoot, name, { main: './index.js' }, { 'index.js': 'module.exports = {};' });
+  }
+  return fakeOwnerRoot;
+}
+
 test('resolves current and planned package roots explicitly, and pins the SDK nested identity', () => {
   const current = resolvePackageRoots('current');
   const planned = resolvePackageRoots('planned');
@@ -96,6 +252,341 @@ test('resolves current and planned package roots explicitly, and pins the SDK ne
     path.join(sdk.piAi.root, 'dist', 'providers', 'all.js'));
   assert.equal(createOwnerRequire({ dependencyOwnerRoot: ownerRoot }).resolve('preact'),
     path.join(ownerRoot, 'node_modules', 'preact', 'dist', 'preact.js'));
+});
+
+test('explicit sdkPath resolves its nested and hoisted candidate graph for all Pi aliases and exports', (t) => {
+  const { fixtureRoot } = makeFixture(t);
+  const candidate = makeSdkCandidateGraph(fixtureRoot);
+  const fakeOwner = makeCandidateOwner(fixtureRoot);
+  const options = { sdkPath: candidate.sdkRoot, dependencyOwnerRoot: fakeOwner };
+  const resolved = resolveSdkPackages(options);
+
+  assert.equal(resolved.sdk.root, candidate.sdkRoot);
+  assert.equal(resolved.packages['@earendil-works/pi-agent-core'].root, candidate.roots['@earendil-works/pi-agent-core']);
+  assert.equal(resolved.piAi.root, candidate.roots['@earendil-works/pi-ai']);
+  assert.equal(resolved.packages['@earendil-works/pi-tui'].root, candidate.roots['@earendil-works/pi-tui']);
+  assert.equal(resolved.packages.typebox.root, candidate.roots.typebox);
+  assert.equal(createOwnerRequire({ dependencyOwnerRoot: fakeOwner }).resolve('@earendil-works/pi-ai'),
+    path.join(fakeOwner, 'node_modules', '@earendil-works', 'pi-ai', 'index.js'));
+  assert.notEqual(resolved.piAi.root, path.join(fakeOwner, 'node_modules', '@earendil-works', 'pi-ai'));
+
+  for (const [canonical, legacy] of [
+    ['@earendil-works/pi-coding-agent', '@mariozechner/pi-coding-agent'],
+    ['@earendil-works/pi-agent-core', '@mariozechner/pi-agent-core'],
+    ['@earendil-works/pi-ai', '@mariozechner/pi-ai'],
+    ['@earendil-works/pi-tui', '@mariozechner/pi-tui'],
+  ]) {
+    assert.equal(resolveSdkModule(canonical, options), resolveSdkModule(legacy, options), `${canonical} and ${legacy}`);
+    assert.ok(resolveSdkModule(canonical, options).startsWith(candidate.sdkRoot)
+      || Object.values(candidate.roots).some((root) => resolveSdkModule(canonical, options).startsWith(root)));
+  }
+  assert.equal(resolveSdkModule('@earendil-works/pi-ai/compat', options),
+    path.join(candidate.roots['@earendil-works/pi-ai'], 'dist', 'compat.js'));
+  assert.equal(resolveSdkModule('@mariozechner/pi-ai/compat', options),
+    path.join(candidate.roots['@earendil-works/pi-ai'], 'dist', 'compat.js'));
+  assert.equal(resolveSdkModule('@mariozechner/pi-ai/providers/all', options),
+    path.join(candidate.roots['@earendil-works/pi-ai'], 'dist', 'providers', 'all.js'));
+
+  const tsxPaths = createTsxResolution(options).paths;
+  const typePaths = createTypeScriptResolution(options).paths;
+  for (const name of [
+    '@earendil-works/pi-coding-agent', '@mariozechner/pi-coding-agent',
+    '@earendil-works/pi-agent-core', '@mariozechner/pi-agent-core',
+    '@earendil-works/pi-ai', '@mariozechner/pi-ai',
+    '@earendil-works/pi-tui', '@mariozechner/pi-tui',
+  ]) {
+    const root = name.endsWith('/pi-coding-agent')
+      ? candidate.sdkRoot
+      : name.endsWith('/pi-agent-core') ? candidate.roots['@earendil-works/pi-agent-core']
+        : name.endsWith('/pi-ai') ? candidate.roots['@earendil-works/pi-ai']
+          : candidate.roots['@earendil-works/pi-tui'];
+    assert.ok(tsxPaths[name][0].startsWith(root), `${name} runtime alias uses the candidate`);
+    assert.ok(typePaths[name][0].startsWith(root), `${name} type alias uses the candidate`);
+  }
+  assert.equal(tsxPaths['@earendil-works/pi-ai/compat'][0],
+    path.join(candidate.roots['@earendil-works/pi-ai'], 'dist', 'compat.js'));
+  assert.equal(tsxPaths['@mariozechner/pi-ai/compat'][0], tsxPaths['@earendil-works/pi-ai/compat'][0]);
+  assert.equal(typePaths['@earendil-works/pi-ai/compat'][0],
+    path.join(candidate.roots['@earendil-works/pi-ai'], 'dist', 'compat.d.ts'));
+  assert.equal(typePaths['@mariozechner/pi-ai/compat'][0], typePaths['@earendil-works/pi-ai/compat'][0]);
+  assert.ok(tsxPaths.typebox[0].startsWith(candidate.roots.typebox));
+  assert.equal(tsxPaths['@sinclair/typebox'][0], tsxPaths.typebox[0]);
+  assert.ok(typePaths['typebox/value'][0].startsWith(candidate.roots.typebox));
+  assert.equal(resolveOwnerModule('preact', options), path.join(fakeOwner, 'node_modules', 'preact', 'dist', 'preact.js'));
+
+  const viteAliases = createViteAliases(options);
+  const findAlias = (specifier) => viteAliases.find(({ find }) => (
+    typeof find === 'string' ? find === specifier : find.test(specifier)
+  ));
+  for (const name of [
+    '@earendil-works/pi-coding-agent', '@mariozechner/pi-coding-agent',
+    '@earendil-works/pi-agent-core', '@mariozechner/pi-agent-core',
+    '@earendil-works/pi-ai', '@mariozechner/pi-ai',
+    '@earendil-works/pi-tui', '@mariozechner/pi-tui',
+  ]) {
+    const root = name.endsWith('/pi-coding-agent') ? candidate.sdkRoot
+      : name.endsWith('/pi-agent-core') ? candidate.roots['@earendil-works/pi-agent-core']
+        : name.endsWith('/pi-ai') ? candidate.roots['@earendil-works/pi-ai']
+          : candidate.roots['@earendil-works/pi-tui'];
+    assert.ok(findAlias(name).replacement.startsWith(root), `${name} Vite alias uses the candidate`);
+  }
+  assert.equal(findAlias('@earendil-works/pi-ai/compat').replacement,
+    path.join(candidate.roots['@earendil-works/pi-ai'], 'dist', 'compat.js'));
+  assert.equal(findAlias('@mariozechner/pi-ai/compat').replacement,
+    findAlias('@earendil-works/pi-ai/compat').replacement);
+  for (const name of ['candidate-runtime', 'ws', 'marked']) {
+    const alias = findAlias(name);
+    assert.ok(alias.replacement.startsWith(candidate.roots[name]), `${name} Vite alias uses the candidate graph`);
+    assert.equal(typeof alias.customResolver, 'function', `${name} Vite alias is importer-aware`);
+  }
+});
+
+test('Vite redirects Pie source imports across repository roots and preserves workspace dependency resolution', { timeout: 120_000 }, async (t) => {
+  const { fixtureRoot } = makeFixture(t);
+  t.after(() => {
+    delete globalThis.__candidateViteBrowserProof;
+    delete globalThis.__candidateViteFrontendProof;
+    delete globalThis.__candidateViteSubagentProof;
+  });
+  const candidate = makeSdkCandidateGraph(fixtureRoot);
+  const fakeOwner = makeCandidateOwner(fixtureRoot);
+  const applicationRoot = path.join(fixtureRoot, 'application');
+  const browserSource = path.join(applicationRoot, 'hosts', 'browser', 'http', 'browser-server.ts');
+  const frontendSource = path.join(applicationRoot, 'frontend', 'lib', 'components', 'selection-copy.ts');
+  const subagentSource = path.join(fixtureRoot, 'harness', 'tools', 'subagent', 'subagent-profiles.ts');
+  mkdirSync(path.dirname(browserSource), { recursive: true });
+  mkdirSync(path.dirname(frontendSource), { recursive: true });
+  mkdirSync(path.dirname(subagentSource), { recursive: true });
+  writeFileSync(browserSource, `
+import { marker as wsMarker } from 'ws';
+import { version as appVersion } from 'candidate-transitive';
+import { nestedVersion } from 'candidate-runtime';
+import { marker as extensionlessMarker } from 'candidate-runtime/lib/core';
+import { marker as yamlMarker } from 'yaml';
+globalThis.__candidateViteBrowserProof = [wsMarker, appVersion, nestedVersion, extensionlessMarker, yamlMarker];
+`);
+  writeFileSync(frontendSource, `
+import { marker as markedMarker } from 'marked';
+globalThis.__candidateViteFrontendProof = markedMarker;
+`);
+  writeFileSync(subagentSource, `
+import { version as harnessVersion } from 'candidate-transitive';
+import { marker as yamlMarker } from 'yaml';
+globalThis.__candidateViteSubagentProof = [harnessVersion, yamlMarker];
+`);
+  const outputRoot = path.join(fixtureRoot, 'vite-candidate-out');
+  const vite = await import(pathToFileURL(viteNodeEntry).href);
+  const resolutionOptions = {
+    dependencyOwnerRoot: fakeOwner,
+    repositoryRoot: fixtureRoot,
+    sdkPath: candidate.sdkRoot,
+  };
+  const aliases = createViteAliases(resolutionOptions);
+  const buildResult = await vite.build({
+    configFile: false,
+    root: fixtureRoot,
+    resolve: { alias: aliases },
+    build: {
+      target: 'es2022',
+      outDir: outputRoot,
+      emptyOutDir: true,
+      rollupOptions: { input: { browserServer: browserSource, selectionCopy: frontendSource, subagentProfiles: subagentSource } },
+    },
+  });
+  const output = Array.isArray(buildResult) ? buildResult[0] : buildResult;
+  const browserFile = output.output.find((item) => item.name === 'browserServer' && item.isEntry).fileName;
+  const frontendFile = output.output.find((item) => item.name === 'selectionCopy' && item.isEntry).fileName;
+  const subagentFile = output.output.find((item) => item.name === 'subagentProfiles' && item.isEntry).fileName;
+  await import(pathToFileURL(path.join(outputRoot, browserFile)).href);
+  await import(pathToFileURL(path.join(outputRoot, frontendFile)).href);
+  await import(pathToFileURL(path.join(outputRoot, subagentFile)).href);
+  assert.deepEqual(globalThis.__candidateViteBrowserProof, [
+    'candidate ws browser', 'candidate root transitive', 'nested candidate transitive',
+    'candidate extensionless subpath', 'candidate yaml browser',
+  ]);
+  assert.equal(globalThis.__candidateViteFrontendProof, 'candidate marked browser');
+  assert.deepEqual(globalThis.__candidateViteSubagentProof, ['candidate root transitive', 'candidate yaml browser']);
+
+  const runtimeAlias = aliases.find(({ find }) => (
+    typeof find === 'string' ? find === 'candidate-runtime/missing' : find.test('candidate-runtime/missing')
+  ));
+  const missingTarget = path.join(candidate.roots['candidate-runtime'], 'missing');
+  const missingImporter = path.join(applicationRoot, 'frontend', 'missing-import.ts');
+  const resolveCalls = [];
+  await assert.rejects(runtimeAlias.customResolver.call({
+    async resolve(...args) {
+      resolveCalls.push(args);
+      return null;
+    },
+  }, missingTarget, missingImporter),
+  /Candidate SDK package candidate-runtime could not resolve Pie-source import candidate-runtime\/missing/);
+  assert.deepEqual(resolveCalls, [[missingTarget, missingImporter, { skipSelf: true }]]);
+});
+
+test('candidate overlays add SDK and TypeBox aliases across inherited paths without aliasing candidate dependencies to the host', (t) => {
+  const { fixtureRoot } = makeFixture(t);
+  const candidate = makeSdkCandidateGraph(fixtureRoot);
+  const fakeOwner = makeCandidateOwner(fixtureRoot);
+  const configRoot = path.join(fixtureRoot, 'configs');
+  const configChild = path.join(configRoot, 'child');
+  mkdirSync(configChild, { recursive: true });
+  const inheritedConfig = path.join(configRoot, 'tsconfig.shared.json');
+  const baseConfig = path.join(configChild, 'tsconfig.json');
+  writeFileSync(inheritedConfig, JSON.stringify({
+    compilerOptions: {
+      baseUrl: '.',
+      paths: {
+        'local-inherited-alias': ['./local.js'],
+        '@mariozechner/pi-ai/compat': ['./old-sdk-placeholder.js'],
+        yaml: ['./host-yaml.d.ts'],
+        'yaml/browser': ['./host-yaml-browser.d.ts'],
+        'yaml/browser/*': ['./host-yaml/browser/*.d.ts'],
+        'yaml/*': ['./host-yaml/*.d.ts'],
+        immer: ['./host-immer.d.ts'],
+        'immer/*': ['./host-immer/*.d.ts'],
+        preact: ['./host-preact.d.ts'],
+        'preact/*': ['./host-preact/*.d.ts'],
+        'preact/hooks': ['./host-preact-hooks.d.ts'],
+      },
+    },
+  }, null, 2));
+  writeFileSync(baseConfig, JSON.stringify({ extends: '../tsconfig.shared.json' }, null, 2));
+
+  const overlay = createTsconfigOverlay(baseConfig, {
+    dependencyOwnerRoot: fakeOwner,
+    sdkPath: candidate.sdkRoot,
+    includeOwnerDependencies: true,
+    typescript: true,
+  });
+  t.after(() => overlay.dispose());
+  const paths = JSON.parse(readFileSync(overlay.configPath, 'utf8')).compilerOptions.paths;
+  assert.deepEqual(paths['local-inherited-alias'], [path.join(configRoot, 'local.js')]);
+  assert.equal(paths['@mariozechner/pi-ai/compat'][0],
+    path.join(candidate.roots['@earendil-works/pi-ai'], 'dist', 'compat.d.ts'));
+  assert.deepEqual(paths.yaml, [path.join(candidate.roots.yaml, 'dist', 'index.d.ts')]);
+  assert.deepEqual(paths['yaml/browser'], [path.join(candidate.roots.yaml, 'dist', 'browser.d.ts')]);
+  assert.deepEqual(paths['yaml/browser/*'], [path.join(candidate.roots.yaml, 'dist', 'browser', '*.d.ts')]);
+  assert.deepEqual(paths['yaml/*'], [path.join(candidate.roots.yaml, 'dist', '*.d.ts')]);
+  assert.deepEqual(paths.immer, [path.join(candidate.roots.immer, 'dist', 'index.d.ts')]);
+  assert.deepEqual(paths['immer/*'], [path.join(candidate.roots.immer, 'dist', '*.d.ts')]);
+  assert.deepEqual(paths.preact, [path.join(candidate.roots.preact, 'dist', 'index.d.ts')],
+    'candidate runtime Preact wins the inherited and owner Preact alias');
+  assert.deepEqual(paths['preact/*'], [path.join(candidate.roots.preact, 'dist', '*.d.ts')]);
+  assert.deepEqual(paths['preact/hooks'], [path.join(candidate.roots.preact, 'dist', 'hooks.d.ts')]);
+
+  for (const name of [
+    '@earendil-works/pi-coding-agent', '@mariozechner/pi-coding-agent',
+    '@earendil-works/pi-agent-core', '@mariozechner/pi-agent-core',
+    '@earendil-works/pi-ai', '@mariozechner/pi-ai',
+    '@earendil-works/pi-tui', '@mariozechner/pi-tui', 'typebox', '@sinclair/typebox',
+  ]) {
+    assert.ok(paths[name]?.[0], `candidate overlay includes ${name} even though the base does not declare it`);
+    const root = name.includes('pi-coding-agent') ? candidate.sdkRoot
+      : name.includes('pi-agent-core') ? candidate.roots['@earendil-works/pi-agent-core']
+        : name.includes('pi-ai') ? candidate.roots['@earendil-works/pi-ai']
+          : name.includes('pi-tui') ? candidate.roots['@earendil-works/pi-tui'] : candidate.roots.typebox;
+    assert.ok(paths[name][0].startsWith(root), `${name} points into the candidate graph`);
+  }
+  assert.equal(paths['candidate-runtime'], undefined,
+    'unaliased direct dependencies remain resolvable through candidate package ancestry');
+  assert.equal(paths['candidate-transitive'], undefined,
+    'unaliased transitive dependencies are not globally flattened');
+  assert.ok(paths['owner-tool'][0].startsWith(path.join(fakeOwner, 'node_modules', 'owner-tool')));
+  assert.ok(paths.preact[0].startsWith(candidate.roots.preact), 'candidate Preact is not split from the SDK graph');
+});
+
+test('explicit sdkPath fails on invalid or incomplete candidate graphs instead of falling back to the owner', (t) => {
+  const { fixtureRoot } = makeFixture(t);
+  const fakeOwner = makeCandidateOwner(fixtureRoot);
+  assert.throws(() => resolveSdkPackages({ sdkPath: 'relative/candidate', dependencyOwnerRoot: fakeOwner }), /sdkPath must be an absolute path/);
+  assert.throws(() => resolveSdkPackages({ sdkPath: path.join(fixtureRoot, 'missing'), dependencyOwnerRoot: fakeOwner }),
+    /Expected @earendil-works\/pi-coding-agent package manifest/);
+
+  const incomplete = makeSdkCandidateGraph(fixtureRoot, { omit: ['@earendil-works/pi-ai'] });
+  assert.throws(() => resolveSdkPackages({ sdkPath: incomplete.sdkRoot, dependencyOwnerRoot: fakeOwner }),
+    /Candidate SDK graph.*cannot resolve @earendil-works\/pi-ai/);
+});
+
+test('candidate Pi package owners must resolve one coherent TypeBox instance', (t) => {
+  const { fixtureRoot } = makeFixture(t);
+  const candidate = makeSdkCandidateGraph(fixtureRoot);
+  const nestedTypebox = writeFixturePackage(path.join(candidate.roots['@earendil-works/pi-ai'], 'node_modules'), 'typebox', {
+    main: './index.js',
+  }, { 'index.js': 'module.exports = {};' });
+  assert.ok(existsSync(path.join(nestedTypebox, 'package.json')));
+
+  assert.throws(() => resolveSdkPackages({ sdkPath: candidate.sdkRoot }),
+    /Incoherent SDK TypeBox resolution: @earendil-works\/pi-ai resolves typebox at .* but @earendil-works\/pi-coding-agent resolves it at/);
+});
+
+test('candidate Pi owners reject declared dependencies resolved to divergent nested package roots', (t) => {
+  const { fixtureRoot } = makeFixture(t);
+  const candidate = makeSdkCandidateGraph(fixtureRoot);
+  const agentManifestPath = path.join(candidate.roots['@earendil-works/pi-agent-core'], 'package.json');
+  const agentManifest = JSON.parse(readFileSync(agentManifestPath, 'utf8'));
+  agentManifest.dependencies['@earendil-works/pi-ai'] = '*';
+  writeFileSync(agentManifestPath, JSON.stringify(agentManifest, null, 2));
+  const competingPiAi = writeFixturePackage(
+    path.join(candidate.roots['@earendil-works/pi-agent-core'], 'node_modules'),
+    '@earendil-works/pi-ai',
+    { main: './index.js' },
+    { 'index.js': 'module.exports = {};' },
+  );
+
+  assert.throws(() => resolveSdkPackages({ sdkPath: candidate.sdkRoot }),
+    (error) => error.message.includes('Incoherent SDK Pi package resolution: @earendil-works/pi-agent-core resolves @earendil-works/pi-ai')
+      && error.message.includes(realpathSync(competingPiAi))
+      && error.message.includes(realpathSync(candidate.roots['@earendil-works/pi-ai'])));
+});
+
+test('candidate overlays leave unaliased nested dependencies native and reject ambiguous exposed dependencies', (t) => {
+  const { fixtureRoot, sourceRoot } = makeFixture(t);
+  const candidate = makeSdkCandidateGraph(fixtureRoot);
+  const fakeOwner = makeCandidateOwner(fixtureRoot);
+  const sdkManifestPath = path.join(candidate.sdkRoot, 'package.json');
+  const sdkManifest = JSON.parse(readFileSync(sdkManifestPath, 'utf8'));
+  sdkManifest.dependencies['proper-lockfile'] = '*';
+  sdkManifest.dependencies.harness = '*';
+  writeFileSync(sdkManifestPath, JSON.stringify(sdkManifest, null, 2));
+
+  const properLockfile = writeFixturePackage(path.join(candidate.sdkRoot, 'node_modules'), 'proper-lockfile', {
+    dependencies: { retry: '*' },
+  });
+  writeFixturePackage(path.join(properLockfile, 'node_modules'), 'retry', {
+    version: '1.0.0', main: './index.js',
+  }, { 'index.js': 'module.exports = { version: 1 };' });
+  const harness = writeFixturePackage(path.join(candidate.sdkRoot, 'node_modules'), 'harness', {
+    dependencies: { pi: '*' },
+  });
+  const pi = writeFixturePackage(path.join(harness, 'node_modules'), 'pi', {
+    dependencies: { retry: '*' },
+  });
+  writeFixturePackage(path.join(pi, 'node_modules'), 'retry', {
+    version: '2.0.0', main: './index.js',
+  }, { 'index.js': 'module.exports = { version: 2 };' });
+
+  const baseConfig = writeTsConfig(sourceRoot, {});
+  const overlay = createTsconfigOverlay(baseConfig, {
+    dependencyOwnerRoot: fakeOwner,
+    sdkPath: candidate.sdkRoot,
+    includeOwnerDependencies: true,
+  });
+  t.after(() => overlay.dispose());
+  const paths = JSON.parse(readFileSync(overlay.configPath, 'utf8')).compilerOptions.paths;
+  assert.equal(paths.retry, undefined, 'unaliased nested retry versions remain resolvable by candidate package ancestry');
+  assert.equal(paths['candidate-transitive'], undefined, 'ordinary unaliased transitive dependencies are not flattened');
+
+  const retryAliasConfig = writeTsConfig(sourceRoot, { paths: { retry: ['./host-retry.js'] } });
+  const overlayDirectories = () => new Set(readdirSync(os.tmpdir()).filter((entry) => entry.startsWith('pie-tsx-overlay-')));
+  const beforeFailure = overlayDirectories();
+  assert.throws(() => createTsconfigOverlay(retryAliasConfig, {
+    dependencyOwnerRoot: fakeOwner,
+    sdkPath: candidate.sdkRoot,
+    includeOwnerDependencies: true,
+  }), (error) => error.message.includes('Ambiguous candidate SDK runtime dependency retry:')
+    && error.message.includes('proper-lockfile')
+    && error.message.includes(`${path.join('harness', 'node_modules', 'pi')}`));
+  assert.deepEqual(overlayDirectories(), beforeFailure, 'failed overlay generation removes its owned temporary directory');
 });
 
 function writeHoistedCompetitor(fixtureRoot, packageName) {

@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -146,12 +146,89 @@ function packageInfoFromOwner(ownerRoot, packageName, options) {
   return packageInfoAt(path.join(ownerRoot, 'node_modules', ...packageName.split('/')), packageName, undefined, options);
 }
 
+/** Find a package root through the supplied require context's Node search paths. */
+function packageRootFromRequire(packageRequire, packageName, context, { allowMissing = false } = {}) {
+  const searchPaths = packageRequire.resolve.paths(packageName) ?? [];
+  for (const modulesRoot of searchPaths) {
+    const packageRoot = path.join(modulesRoot, ...packageName.split('/'));
+    const manifestPath = path.join(packageRoot, 'package.json');
+    if (!existsSync(manifestPath)) continue;
+    let manifest;
+    try {
+      manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    } catch (error) {
+      throw new Error(`Invalid ${packageName} manifest in candidate SDK graph at ${manifestPath}: ${error.message}`, { cause: error });
+    }
+    if (manifest.name !== packageName) {
+      throw new Error(`Expected ${packageName} in candidate SDK graph at ${manifestPath}, found ${manifest.name ?? '(unnamed package)'}`);
+    }
+    return realpathSync(packageRoot);
+  }
+  if (allowMissing) return undefined;
+  throw new Error(`Candidate SDK graph at ${context} cannot resolve ${packageName} through its Node module search paths (${searchPaths.join(path.delimiter)})`);
+}
+
+function coherentPiPackageDependencies(sdk, piPackages) {
+  const selectedRoots = new Map(PI_PACKAGE_NAMES.map((name) => [
+    name,
+    realpathSync(name === sdk.name ? sdk.root : piPackages[name].root),
+  ]));
+  const owners = PI_PACKAGE_NAMES.map((name) => [name, name === sdk.name ? sdk : piPackages[name]]);
+  for (const [ownerName, ownerPackage] of owners) {
+    const ownerRequire = createRequire(path.join(ownerPackage.root, 'package.json'));
+    for (const dependencyName of Object.keys(ownerPackage.manifest.dependencies ?? {})) {
+      const selectedRoot = selectedRoots.get(dependencyName);
+      if (!selectedRoot) continue;
+      const resolvedRoot = packageRootFromRequire(ownerRequire, dependencyName, ownerPackage.root);
+      if (resolvedRoot !== selectedRoot) {
+        throw new Error(`Incoherent SDK Pi package resolution: ${ownerName} resolves ${dependencyName} at ${resolvedRoot}, but the selected SDK root is ${selectedRoot}`);
+      }
+    }
+  }
+}
+
+function coherentTypeboxPackage(sdk, sdkRequire, piPackages) {
+  const typeboxPackage = packageInfoAt(packageRootFromRequire(sdkRequire, 'typebox', sdk.root), 'typebox');
+  const typeboxRoot = realpathSync(typeboxPackage.root);
+  for (const [ownerName, ownerPackage] of [
+    ['@earendil-works/pi-coding-agent', sdk],
+    ...Object.entries(piPackages).filter(([name]) => name !== 'typebox'),
+  ]) {
+    const ownerRequire = createRequire(path.join(ownerPackage.root, 'package.json'));
+    const ownerTypeboxRoot = packageRootFromRequire(ownerRequire, 'typebox', ownerPackage.root);
+    if (ownerTypeboxRoot !== typeboxRoot) {
+      throw new Error(`Incoherent SDK TypeBox resolution: ${ownerName} resolves typebox at ${ownerTypeboxRoot}, but @earendil-works/pi-coding-agent resolves it at ${typeboxRoot}`);
+    }
+  }
+  return typeboxPackage;
+}
+
 /**
- * Resolve the exact SDK and its private dependency graph through the SDK's
- * own Node resolution context. In particular, pi-ai is not resolved from an
- * accidental top-level copy in the application owner.
+ * Resolve the exact SDK and its private dependency graph. An explicit sdkPath
+ * is the candidate's package directory; all of its Pi packages and TypeBox
+ * must resolve from that package's own Node context, never from the host owner.
  */
 export function resolveSdkPackages(options = {}) {
+  if (options.sdkPath !== undefined) {
+    const sdkPath = resolveAbsoluteRoot(options.sdkPath, 'sdkPath');
+    const sdk = packageInfoAt(sdkPath, '@earendil-works/pi-coding-agent');
+    const sdkRequire = createRequire(path.join(sdk.root, 'package.json'));
+    const nested = Object.fromEntries(
+      PI_PACKAGE_NAMES.slice(1).map((name) => [name, packageInfoAt(
+        packageRootFromRequire(sdkRequire, name, sdk.root),
+        name,
+      )]),
+    );
+    coherentPiPackageDependencies(sdk, nested);
+    nested.typebox = coherentTypeboxPackage(sdk, sdkRequire, nested);
+    return Object.freeze({
+      sdk,
+      sdkRequire,
+      packages: Object.freeze(nested),
+      piAi: nested['@earendil-works/pi-ai'],
+    });
+  }
+
   const ownerRoot = resolveOwnerRoot(options);
   const sdk = packageInfoFromOwner(ownerRoot, '@earendil-works/pi-coding-agent');
   const sdkRequire = createRequire(sdk.entry);
@@ -384,16 +461,215 @@ function runtimeConditionsForPackage(name, conditions) {
     ? ['require', 'default'] : conditions;
 }
 
+/** Runtime dependencies of the candidate SDK and their package roots. */
+function sdkRuntimeDependencyGraph(options) {
+  if (options.sdkPath === undefined) return { names: new Set(), roots: new Map(), packageRoots: new Set() };
+  const { sdk } = resolveSdkPackages(options);
+  const names = new Set();
+  const roots = new Map();
+  const visitedRoots = new Set();
+  const pending = [sdk.root];
+  while (pending.length > 0) {
+    const packageRoot = pending.pop();
+    const canonicalRoot = realpathSync(packageRoot);
+    if (visitedRoots.has(canonicalRoot)) continue;
+    visitedRoots.add(canonicalRoot);
+    const manifestPath = path.join(canonicalRoot, 'package.json');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    const packageRequire = createRequire(manifestPath);
+    for (const name of new Set([
+      ...Object.keys(manifest.dependencies ?? {}),
+      ...Object.keys(manifest.optionalDependencies ?? {}),
+      ...Object.keys(manifest.peerDependencies ?? {}),
+    ])) {
+      names.add(name);
+      const dependencyRoot = packageRootFromRequire(packageRequire, name, canonicalRoot, { allowMissing: true });
+      if (!dependencyRoot) continue;
+      if (!roots.has(name)) roots.set(name, new Set());
+      roots.get(name).add(dependencyRoot);
+      pending.push(dependencyRoot);
+    }
+  }
+  return { names, roots, packageRoots: visitedRoots };
+}
+
+function isWithinDirectory(filePath, directory) {
+  const relative = path.relative(directory, filePath);
+  return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+function vitePieSourceImporter(importer, sourceRoot, candidatePackageRoots) {
+  if (typeof importer !== 'string' || importer.startsWith('\0')) return false;
+  const importerPath = path.resolve(importer.split('?', 1)[0]);
+  if (!isWithinDirectory(importerPath, sourceRoot)) return false;
+
+  const issuerPaths = [importerPath];
+  try {
+    issuerPaths.push(realpathSync(importerPath));
+  } catch {
+    // Vite virtualized or not-yet-written files are still classified by their
+    // resolved source path; ordinary package issuers are real files.
+  }
+  if (issuerPaths.some((issuerPath) => issuerPath.split(path.sep).includes('node_modules'))) return false;
+  for (const packageRoot of candidatePackageRoots) {
+    if (issuerPaths.some((issuerPath) => isWithinDirectory(issuerPath, packageRoot))) return false;
+  }
+  return true;
+}
+
+function candidateViteDependencyAliases(options, conditions, sdkGraph) {
+  if (options.sdkPath === undefined) return [];
+  const { sdk, sdkRequire } = resolveSdkPackages(options);
+  const sourceRoot = resolvePackageRoots(options.layout ?? 'current', {
+    repositoryRoot: options.repositoryRoot ?? repositoryRoot,
+  }).repositoryRoot;
+  const aliases = [];
+  for (const name of [...sdkGraph.names].sort()) {
+    // Pi and TypeBox aliases are identity-sensitive; Preact retains its
+    // established owner-wide alias. Ordinary SDK dependencies are scoped to
+    // Pie-owned repository sources so package issuers keep native nested resolution.
+    if (isSdkIdentitySpecifier(name) || name === 'preact') continue;
+    const packageRoot = packageRootFromRequire(sdkRequire, name, sdk.root, { allowMissing: true });
+    const aliasRoot = packageRoot ?? path.join(sdk.root, 'node_modules', ...name.split('/'));
+    const packageInfo = packageRoot
+      ? packageInfoAt(packageRoot, name, conditions, { allowEntryless: true })
+      : undefined;
+    const escapedName = name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+    const find = new RegExp(`^${escapedName}(?:/(.*))?$`);
+    aliases.push({
+      find,
+      replacement: path.join(aliasRoot, '$1'),
+      async customResolver(source, importer) {
+        const queryIndex = source.indexOf('?');
+        const sourcePath = queryIndex < 0 ? source : source.slice(0, queryIndex);
+        const query = queryIndex < 0 ? '' : source.slice(queryIndex);
+        const relative = path.relative(aliasRoot, path.resolve(sourcePath));
+        if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+          throw new Error(`Invalid candidate Vite alias target for ${name}: ${source}`);
+        }
+        const suffix = relative.split(path.sep).filter(Boolean).join('/');
+        const specifier = `${name}${suffix ? `/${suffix}` : ''}`;
+        if (!vitePieSourceImporter(importer, sourceRoot, sdkGraph.packageRoots)) {
+          const resolved = await this.resolve(specifier + query, importer, { skipSelf: true });
+          if (resolved) return resolved;
+          throw new Error(`Native importer resolution failed for ${specifier} from ${importer ?? '(entry)'}`);
+        }
+        if (!packageInfo) {
+          throw new Error(`Candidate SDK graph at ${sdk.root} cannot resolve Pie-source import ${specifier}`);
+        }
+        let target;
+        if (packageInfo.manifest.exports) {
+          target = resolvePackageExport(packageInfo, suffix, conditions);
+          if (!target && !suffix && typeof packageInfo.manifest.exports === 'string') target = packageInfo.entry;
+          if (!target) {
+            throw new Error(`Candidate SDK package ${name} does not export Pie-source import ${specifier}`);
+          }
+        } else if (suffix) {
+          target = path.resolve(packageInfo.root, ...suffix.split('/'));
+        } else {
+          target = packageInfo.entry ?? packageInfo.root;
+        }
+        const resolved = await this.resolve(target + query, importer, { skipSelf: true });
+        if (!resolved) {
+          throw new Error(`Candidate SDK package ${name} could not resolve Pie-source import ${specifier} to ${target}`);
+        }
+        return resolved;
+      },
+    });
+  }
+  return aliases;
+}
+
+function candidateMappingForAliasKey(aliasKey, mappings) {
+  const exact = mappings.find((mapping) => mapping.key === aliasKey);
+  if (exact) return exact.replacement;
+  const aliasStar = aliasKey.indexOf('*');
+  const aliasPrefix = aliasStar < 0 ? aliasKey : aliasKey.slice(0, aliasStar);
+  const aliasSuffix = aliasStar < 0 ? '' : aliasKey.slice(aliasStar + 1);
+  const matches = [];
+  for (const mapping of mappings) {
+    const star = mapping.key.indexOf('*');
+    if (star < 0) continue;
+    const prefix = mapping.key.slice(0, star);
+    const suffix = mapping.key.slice(star + 1);
+    if (aliasStar < 0) {
+      if (!aliasKey.startsWith(prefix) || !aliasKey.endsWith(suffix)) continue;
+      const capture = aliasKey.slice(prefix.length, aliasKey.length - suffix.length);
+      matches.push({ score: prefix.length + suffix.length, target: path.normalize(mapping.replacement.replaceAll('*', capture)) });
+    } else {
+      if (!aliasPrefix.startsWith(prefix) || !aliasSuffix.endsWith(suffix)) continue;
+      const capture = `${aliasPrefix.slice(prefix.length)}*${aliasSuffix.slice(0, aliasSuffix.length - suffix.length)}`;
+      matches.push({ score: prefix.length + suffix.length, target: path.normalize(mapping.replacement.replaceAll('*', capture)) });
+    }
+  }
+  matches.sort((left, right) => right.score - left.score);
+  if (matches.length > 1 && matches[0].score === matches[1].score && matches[0].target !== matches[1].target) {
+    throw new Error(`Ambiguous candidate SDK path aliases for ${aliasKey}: ${matches.filter(({ score }) => score === matches[0].score).map(({ target }) => target).join(', ')}`);
+  }
+  return matches[0]?.target;
+}
+
+function candidateRuntimeDependencyPaths(options, conditions, declaredPaths = {}, ownerPaths = {}, helperPaths = {}) {
+  const { names, roots } = sdkRuntimeDependencyGraph(options);
+  const ownerRoot = resolveOwnerRoot(options);
+  const ownerRequire = createOwnerRequire(options);
+  const paths = {};
+  const mappingsByName = new Map();
+  // Restrict candidate redirects to aliases already exposed by the base,
+  // owner, or helper config; native ancestry preserves nested transitive versions.
+  const exposedAliasKeys = new Set([
+    ...Object.keys(declaredPaths ?? {}),
+    ...Object.keys(ownerPaths ?? {}),
+    ...Object.keys(helperPaths ?? {}),
+  ]);
+  const dependencyForAlias = (aliasKey) => [...names]
+    .filter((candidateName) => (!isSdkIdentitySpecifier(candidateName) || candidateName === 'typebox')
+      && (aliasKey === candidateName || aliasKey.startsWith(`${candidateName}/`)))
+    .sort((left, right) => right.length - left.length)[0];
+  const neededNames = new Set([...exposedAliasKeys].map(dependencyForAlias).filter(Boolean));
+  for (const name of neededNames) {
+    const packageRoots = roots.get(name);
+    if (!packageRoots?.size) {
+      const hostRoot = packageRootFromRequire(ownerRequire, name, ownerRoot, { allowMissing: true });
+      if (hostRoot) {
+        throw new Error(`Candidate SDK graph declares runtime dependency ${name} but cannot resolve it; the host owner also resolves it at ${hostRoot}`);
+      }
+      continue;
+    }
+    if (packageRoots.size > 1) {
+      throw new Error(`Ambiguous candidate SDK runtime dependency ${name}: resolved to ${[...packageRoots].join(', ')}`);
+    }
+    if (isSdkIdentitySpecifier(name) && name !== 'typebox') continue;
+    const packageInfo = packageInfoAt([...packageRoots][0], name, undefined, { allowEntryless: true });
+    const mappings = exportMappings(packageInfo, name, runtimeConditionsForPackage(name, conditions));
+    if (!packageInfo.manifest.exports) mappings.push({ key: `${name}/*`, replacement: path.join(packageInfo.root, '*') });
+    mappingsByName.set(name, mappings);
+    for (const mapping of mappings) paths[mapping.key] = [mapping.replacement];
+  }
+  for (const aliasKey of exposedAliasKeys) {
+    const name = dependencyForAlias(aliasKey);
+    if (!name) continue;
+    const replacement = candidateMappingForAliasKey(aliasKey, mappingsByName.get(name) ?? []);
+    if (!replacement) {
+      throw new Error(`Candidate SDK runtime dependency ${name} cannot resolve exposed path alias ${aliasKey}; refusing to retain its host target`);
+    }
+    paths[aliasKey] = [replacement];
+  }
+  return paths;
+}
+
 function ownerDependencyPaths(options, conditions) {
   const ownerRoot = resolveOwnerRoot(options);
   const manifest = JSON.parse(readFileSync(path.join(ownerRoot, 'package.json'), 'utf8'));
+  const sdkDependencies = sdkRuntimeDependencyGraph(options).names;
   const paths = {};
   for (const name of new Set([
     ...Object.keys(manifest.dependencies ?? {}),
     ...Object.keys(manifest.devDependencies ?? {}),
   ])) {
-    // SDK identities must come from the pinned private graph, never a hoisted copy.
-    if (isSdkIdentitySpecifier(name)) continue;
+    // SDK identities and candidate SDK runtime dependencies must not be
+    // redirected to a potentially different host-owner copy.
+    if (isSdkIdentitySpecifier(name) || sdkDependencies.has(name)) continue;
     // Owner dependency enumeration includes config-only packages without an entry.
     // Still require the installed manifest; SDK identity resolution remains strict.
     const packageInfo = packageInfoFromOwner(ownerRoot, name, { allowEntryless: true });
@@ -425,7 +701,8 @@ function readTsconfigJson(configPath) {
  * Overlay paths keep the base redirection set: helper-derived absolute
  * targets where the helper covers the specifier, and otherwise targets
  * resolved against the same baseUrl (or declaring config directory) as the
- * checked-in config. Never introduces keys the base config does not declare.
+ * checked-in config. Candidate SDK mode also adds every SDK and TypeBox
+ * mapping, including when the base config does not declare those aliases.
  */
 function overlayPathsFromBase(declaredPaths, helperPaths, pathsBase) {
   const paths = {};
@@ -467,14 +744,19 @@ function effectiveTsconfigOptions(configPath, options) {
  * paths under the dependency owner), and any specifier the helper does not
  * model keeps its base target anchored to the original config semantics. No
  * new aliases are added by default, so test-time module hooks keep intercepting
- * exactly the specifiers the checked-in config redirects. For extension source
- * still outside its package owner, `includeOwnerDependencies` additionally maps
- * every owner dependency and SDK/Preact subpath to the owner (including the
- * compiler's declaration exports when `typescript` is true). The runtime
- * Preact dependency closure selects require exports consistently.
+ * exactly the specifiers the checked-in config redirects. Explicit `sdkPath`
+ * mode additionally adds every candidate SDK and TypeBox mapping, including
+ * inherited config paths, and maps only candidate runtime dependencies
+ * exposed by inherited, owner, or helper aliases, so unaliased transitive
+ * dependencies retain native candidate ancestry. For
+ * extension source still outside its package owner, `includeOwnerDependencies`
+ * additionally maps owner dependencies which are not in the candidate SDK
+ * runtime dependency closure (including the compiler's declaration exports
+ * when `typescript` is true). The runtime Preact dependency closure selects
+ * require exports consistently.
  *
  * A base config without its own `paths` produces a passthrough overlay unless
- * owner dependencies were explicitly requested. When `options.directory` is supplied
+ * owner dependencies or an explicit candidate `sdkPath` were requested. When `options.directory` is supplied
  * the overlay is written there and the caller owns cleanup (the fast batch
  * runner writes into its existing temp directory); otherwise a private
  * OS-temp directory is created and `dispose()` removes it again.
@@ -488,61 +770,82 @@ export function createTsconfigOverlay(baseConfigPath, options = {}) {
   const directory = ownsDirectory
     ? mkdtempSync(path.join(os.tmpdir(), 'pie-tsx-overlay-'))
     : resolveAbsoluteRoot(options.directory, 'directory');
-  const declaredPaths = readTsconfigJson(absoluteBase).compilerOptions?.paths;
-  const helperPaths = options.typescript ? createTypeScriptResolution(options).paths : createTsxResolution(options).paths;
-  const effectiveOptions = declaredPaths || options.includeOwnerDependencies
-    ? effectiveTsconfigOptions(absoluteBase, options) : undefined;
-  const basePaths = options.includeOwnerDependencies ? effectiveOptions?.paths ?? declaredPaths : declaredPaths;
-  const ownerPaths = options.includeOwnerDependencies ? ownerDependencyPaths(options, options.typescript
-    ? ['types', 'import', 'default', 'require'] : ['import', 'require', 'default']) : {};
-  const overlayPaths = basePaths || options.includeOwnerDependencies
-    ? {
-      ...ownerPaths,
-      ...overlayPathsFromBase(
-        basePaths ?? {},
-        { ...ownerPaths, ...helperPaths },
-        effectiveOptions?.baseUrl ?? effectiveOptions?.pathsBasePath ?? path.dirname(absoluteBase),
-      ),
-      ...(options.includeOwnerDependencies ? helperPaths : {}),
-    }
-    : undefined;
-  // TS resolves `types` references from the config/source ancestry, not from
-  // compilerOptions.paths. Detached source and temp overlays need the owner's
-  // @types explicitly; vite/client is a package subpath rather than an @types
-  // package, so only configs which request it also need the owner module root.
-  // Keep inherited typeRoots (already absolute after TS parses `extends`) and
-  // leave the inherited `types` list unchanged.
-  const ownerModules = path.join(resolveOwnerRoot(options), 'node_modules');
-  const typeRoots = options.includeOwnerDependencies && options.typescript
-    ? [...new Set([
-      ...(effectiveOptions?.typeRoots ?? []).map((root) => path.normalize(root)),
-      path.join(ownerModules, '@types'),
-      ...(effectiveOptions?.types?.includes('vite/client') ? [ownerModules] : []),
-    ])]
-    : undefined;
-  const configPath = path.join(directory, 'tsconfig.overlay.json');
-  writeFileSync(configPath, JSON.stringify({
-    extends: absoluteBase,
-    ...(overlayPaths || typeRoots ? { compilerOptions: {
-      ...(overlayPaths ? { paths: overlayPaths } : {}),
-      ...(typeRoots ? { typeRoots } : {}),
-    } } : {}),
-  }, null, 2));
-  let disposed = false;
-  return Object.freeze({
-    configPath,
-    directory,
-    dispose() {
-      if (!ownsDirectory || disposed) return;
-      disposed = true;
-      rmSync(directory, { recursive: true, force: true });
-    },
-  });
+  let generated = false;
+  try {
+    const declaredPaths = readTsconfigJson(absoluteBase).compilerOptions?.paths;
+    const candidateSdk = options.sdkPath !== undefined;
+    const helperPaths = options.typescript ? createTypeScriptResolution(options).paths : createTsxResolution(options).paths;
+    const effectiveOptions = declaredPaths || options.includeOwnerDependencies || candidateSdk
+      ? effectiveTsconfigOptions(absoluteBase, options) : undefined;
+    const basePaths = options.includeOwnerDependencies || candidateSdk ? effectiveOptions?.paths ?? declaredPaths : declaredPaths;
+    const conditions = options.typescript
+      ? ['types', 'import', 'default', 'require'] : ['import', 'require', 'default'];
+    const ownerPaths = options.includeOwnerDependencies ? ownerDependencyPaths(options, conditions) : {};
+    const candidateRuntimePaths = candidateSdk
+      ? candidateRuntimeDependencyPaths(options, conditions, basePaths ?? {}, ownerPaths, helperPaths)
+      : {};
+    const candidateSdkPaths = candidateSdk
+      ? Object.fromEntries(Object.entries(helperPaths).filter(([specifier]) => isSdkIdentitySpecifier(specifier)))
+      : {};
+    const overlayPaths = basePaths || options.includeOwnerDependencies || candidateSdk
+      ? {
+        ...ownerPaths,
+        ...overlayPathsFromBase(
+          basePaths ?? {},
+          { ...ownerPaths, ...helperPaths, ...candidateRuntimePaths },
+          effectiveOptions?.baseUrl ?? effectiveOptions?.pathsBasePath ?? path.dirname(absoluteBase),
+        ),
+        ...(options.includeOwnerDependencies ? helperPaths : {}),
+        ...candidateRuntimePaths,
+        ...candidateSdkPaths,
+      }
+      : undefined;
+    // TS resolves `types` references from the config/source ancestry, not from
+    // compilerOptions.paths. Detached source and temp overlays need the owner's
+    // @types explicitly; vite/client is a package subpath rather than an @types
+    // package, so only configs which request it also need the owner module root.
+    // Keep inherited typeRoots (already absolute after TS parses `extends`) and
+    // leave the inherited `types` list unchanged.
+    const ownerModules = path.join(resolveOwnerRoot(options), 'node_modules');
+    const typeRoots = options.includeOwnerDependencies && options.typescript
+      ? [...new Set([
+        ...(effectiveOptions?.typeRoots ?? []).map((root) => path.normalize(root)),
+        path.join(ownerModules, '@types'),
+        ...(effectiveOptions?.types?.includes('vite/client') ? [ownerModules] : []),
+      ])]
+      : undefined;
+    const configPath = path.join(directory, 'tsconfig.overlay.json');
+    writeFileSync(configPath, JSON.stringify({
+      extends: absoluteBase,
+      ...(overlayPaths || typeRoots ? { compilerOptions: {
+        ...(overlayPaths ? { paths: overlayPaths } : {}),
+        ...(typeRoots ? { typeRoots } : {}),
+      } } : {}),
+    }, null, 2));
+    let disposed = false;
+    const overlay = Object.freeze({
+      configPath,
+      directory,
+      dispose() {
+        if (!ownsDirectory || disposed) return;
+        disposed = true;
+        rmSync(directory, { recursive: true, force: true });
+      },
+    });
+    generated = true;
+    return overlay;
+  } finally {
+    if (!generated && ownsDirectory) rmSync(directory, { recursive: true, force: true });
+  }
 }
 
 /**
  * Rollup/Vite aliases for package imports from any source root. Export maps
  * preserve the host owner's installed package files and JSX/runtime subpaths.
+ * Candidate SDK runtime aliases use Vite's alias-entry `customResolver` to
+ * redirect Pie-owned repository sources outside dependency/package roots;
+ * dependency importers resume native resolution. The result remains the alias
+ * array consumed by Vite configs.
  */
 export function createViteAliases(options = {}) {
   const ownerRoot = resolveOwnerRoot(options);
@@ -568,11 +871,13 @@ export function createViteAliases(options = {}) {
   // the host manifest, while leaving SDK identities and native sidecar owners
   // on their existing resolution paths.
   const ownerManifest = JSON.parse(readFileSync(path.join(ownerRoot, 'package.json'), 'utf8'));
+  const sdkGraph = sdkRuntimeDependencyGraph(options);
+  const sdkDependencies = sdkGraph.names;
   for (const name of new Set([
     ...Object.keys(ownerManifest.dependencies ?? {}),
     ...Object.keys(ownerManifest.devDependencies ?? {}),
   ])) {
-    if (name === 'preact' || name === 'tailwindcss' || isSdkIdentitySpecifier(name)) continue;
+    if (name === 'preact' || name === 'tailwindcss' || isSdkIdentitySpecifier(name) || sdkDependencies.has(name)) continue;
     addPackageMappings(name, packageInfoFromOwner(ownerRoot, name, { allowEntryless: true }));
   }
   // The relocated frontend stylesheet cannot resolve the package owner's CSS
@@ -581,6 +886,7 @@ export function createViteAliases(options = {}) {
   for (const mapping of exportMappings(tailwindcss, 'tailwindcss', ['style'])) {
     aliases.push({ find: mapping.key, replacement: mapping.replacement });
   }
+  aliases.push(...candidateViteDependencyAliases(options, conditions, sdkGraph));
   aliases.sort((left, right) => String(right.find).length - String(left.find).length);
   return aliases;
 }

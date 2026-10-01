@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import { isBuiltin, registerHooks, syncBuiltinESMExports } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
-import test from 'node:test';
+import test, { before } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 // Import the private candidate distribution directly. Do not load the installed
@@ -46,7 +46,10 @@ registerHooks({
   },
 });
 
-const { SessionManager } = await import(pathToFileURL(codingAgentEntry).href);
+let SessionManager: typeof import('../../../../pi/packages/coding-agent/dist/core/session-manager.js').SessionManager;
+before(async () => {
+  ({ SessionManager } = await import(pathToFileURL(codingAgentEntry).href));
+});
 
 type FsOverride = 'openSync' | 'writeFileSync' | 'fsyncSync' | 'linkSync' | 'closeSync';
 
