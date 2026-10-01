@@ -8,14 +8,9 @@ import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 // Import the private candidate distribution directly and constrain its full
-// runtime graph to this checked-out Pi tree and its approved private packages.
-const piRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../../pi');
-const packageRoots = {
-  ai: realpathSync(path.join(piRoot, 'packages/ai')),
-  agent: realpathSync(path.join(piRoot, 'packages/agent')),
-  tui: realpathSync(path.join(piRoot, 'packages/tui')),
-  codingAgent: realpathSync(path.join(piRoot, 'packages/coding-agent')),
-};
+// runtime graph to the selected source graph and its approved private packages.
+import { sourceFixture } from './source-fixture.js';
+const { piRoot, packageRoots } = sourceFixture;
 const runtimeEntry = path.join(packageRoots.codingAgent, 'dist/core/agent-session-runtime.js');
 const managerEntry = path.join(packageRoots.codingAgent, 'dist/core/session-manager.js');
 const approvedPackages: Readonly<Record<string, string>> = {

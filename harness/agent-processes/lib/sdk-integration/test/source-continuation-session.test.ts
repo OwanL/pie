@@ -15,13 +15,8 @@ import type {
 import { classifyInterruptedContinuationTail } from '../sdk';
 
 // Exercise only the privately built source graph; never load the installed SDK.
-const piRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../../pi');
-const packageRoots = {
-  ai: realpathSync(path.join(piRoot, 'packages/ai')),
-  agent: realpathSync(path.join(piRoot, 'packages/agent')),
-  tui: realpathSync(path.join(piRoot, 'packages/tui')),
-  codingAgent: realpathSync(path.join(piRoot, 'packages/coding-agent')),
-};
+import { sourceFixture } from './source-fixture.js';
+const { piRoot, packageRoots } = sourceFixture;
 const approvedPackages: Readonly<Record<string, string>> = {
   '@earendil-works/pi-ai': packageRoots.ai,
   '@earendil-works/pi-agent-core': packageRoots.agent,

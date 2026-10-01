@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
-import { registerHooks } from 'node:module';
+import { isBuiltin, registerHooks } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -8,32 +8,57 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { AgentEvent, AgentMessage } from '../../../../pi/packages/agent/dist/types.js';
 import type { AssistantMessage } from '../../../../pi/packages/ai/dist/types.js';
 import type { AgentSessionEvent } from '../../../../pi/packages/coding-agent/dist/core/agent-session.js';
+import { sourceFixture } from './source-fixture.js';
 
 // Never use loadSdk: these tests exercise only the privately built source graph.
-const piRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../../pi');
-const codingEntry = path.join(piRoot, 'packages/coding-agent/dist/core/agent-session.js');
-const corePackages = { 'pi-ai': 'ai', 'pi-agent-core': 'agent', 'pi-tui': 'tui', 'pi-coding-agent': 'coding-agent' };
+const { piRoot, packageRoots } = sourceFixture;
+const codingEntry = path.join(packageRoots.codingAgent, 'dist/core/agent-session.js');
+const corePackages = {
+  'pi-ai': packageRoots.ai,
+  'pi-agent-core': packageRoots.agent,
+  'pi-tui': packageRoots.tui,
+  'pi-coding-agent': packageRoots.codingAgent,
+};
+const isWithin = (file: string, root: string): boolean => file.startsWith(`${root}${path.sep}`);
+const graphRoot = realpathSync(piRoot);
 registerHooks({
   resolve(specifier, context, nextResolve) {
+    if (isBuiltin(specifier)) return nextResolve(specifier, context);
     const result = nextResolve(specifier, context);
     for (const [name, dir] of Object.entries(corePackages)) {
       const packageName = `@earendil-works/${name}`;
       if (specifier !== packageName && !specifier.startsWith(`${packageName}/`)) continue;
       const resolved = realpathSync(fileURLToPath(result.url));
-      assert.ok(resolved.startsWith(realpathSync(path.join(piRoot, 'packages', dir)) + path.sep), `Core graph escape: ${resolved}`);
+      assert.ok(isWithin(resolved, dir), `Core graph escape: ${resolved}`);
+      return result;
+    }
+
+    // Constrain ordinary imports made by the SDK artifact while leaving
+    // test-runner/tooling resolution outside that graph untouched.
+    const parent = context.parentURL?.startsWith('file:')
+      ? realpathSync(fileURLToPath(context.parentURL))
+      : undefined;
+    if (parent !== undefined && isWithin(parent, graphRoot)) {
+      assert.ok(result.url.startsWith('file:'), `Unexpected non-file runtime dependency: ${specifier} -> ${result.url}`);
+      const resolved = realpathSync(fileURLToPath(result.url));
+      // TSX may resolve declaration-only tooling imports from the host install;
+      // they are not part of the SDK runtime artifact graph.
+      if (!resolved.endsWith('.d.ts')) {
+        assert.ok(isWithin(resolved, graphRoot), `Core runtime graph escape for ${specifier}: ${resolved}`);
+      }
     }
     return result;
   },
 });
 const candidate = (async () => {
   const { AgentSession } = await import(pathToFileURL(codingEntry).href);
-  const { Agent } = await import(pathToFileURL(path.join(piRoot, 'packages/agent/dist/index.js')).href);
-  const { EventStream, getModel } = await import(pathToFileURL(path.join(piRoot, 'packages/ai/dist/compat.js')).href);
-  const { SessionManager } = await import(pathToFileURL(path.join(piRoot, 'packages/coding-agent/dist/core/session-manager.js')).href);
-  const { SettingsManager } = await import(pathToFileURL(path.join(piRoot, 'packages/coding-agent/dist/core/settings-manager.js')).href);
-  const { AuthStorage } = await import(pathToFileURL(path.join(piRoot, 'packages/coding-agent/dist/core/auth-storage.js')).href);
-  const { ModelRegistry } = await import(pathToFileURL(path.join(piRoot, 'packages/coding-agent/dist/core/model-registry.js')).href);
-  const { createExtensionRuntime, loadExtensionFromFactory } = await import(pathToFileURL(path.join(piRoot, 'packages/coding-agent/dist/core/extensions/loader.js')).href);
+  const { Agent } = await import(pathToFileURL(path.join(packageRoots.agent, 'dist/index.js')).href);
+  const { EventStream, getModel } = await import(pathToFileURL(path.join(packageRoots.ai, 'dist/compat.js')).href);
+  const { SessionManager } = await import(pathToFileURL(path.join(packageRoots.codingAgent, 'dist/core/session-manager.js')).href);
+  const { SettingsManager } = await import(pathToFileURL(path.join(packageRoots.codingAgent, 'dist/core/settings-manager.js')).href);
+  const { AuthStorage } = await import(pathToFileURL(path.join(packageRoots.codingAgent, 'dist/core/auth-storage.js')).href);
+  const { ModelRegistry } = await import(pathToFileURL(path.join(packageRoots.codingAgent, 'dist/core/model-registry.js')).href);
+  const { createExtensionRuntime, loadExtensionFromFactory } = await import(pathToFileURL(path.join(packageRoots.codingAgent, 'dist/core/extensions/loader.js')).href);
   return { AgentSession, Agent, EventStream, getModel, SessionManager, SettingsManager, AuthStorage, ModelRegistry, createExtensionRuntime, loadExtensionFromFactory };
 })();
 

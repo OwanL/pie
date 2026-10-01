@@ -9,13 +9,8 @@ import type { SessionManager as SessionManagerInstance } from '../../../../pi/pa
 
 // Import the private candidate distribution directly; no installed SDK or
 // patch-barrier path is involved in source ownership tests.
-const piRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../../pi');
-const packageRoots = {
-  ai: fs.realpathSync(path.join(piRoot, 'packages/ai')),
-  agent: fs.realpathSync(path.join(piRoot, 'packages/agent')),
-  tui: fs.realpathSync(path.join(piRoot, 'packages/tui')),
-  codingAgent: fs.realpathSync(path.join(piRoot, 'packages/coding-agent')),
-};
+import { sourceFixture } from './source-fixture.js';
+const { piRoot, packageRoots } = sourceFixture;
 const codingAgentEntry = path.join(packageRoots.codingAgent, 'dist/core/session-manager.js');
 const approvedPackages: Readonly<Record<string, string>> = {
   '@earendil-works/pi-ai': packageRoots.ai,

@@ -2,29 +2,17 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pathToFileURL } from 'node:url';
+import { sourceFixture } from './source-fixture.js';
 
-const harnessPiRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../../pi');
-const candidateDistPath = path.join(
-  harnessPiRoot,
-  'node_modules',
-  '@earendil-works',
-  'pi-ai',
-  'dist',
-  'utils',
-  'retry.js',
-);
-const workspaceDistPath = path.join(harnessPiRoot, 'packages', 'ai', 'dist', 'utils', 'retry.js');
+const candidateDistPath = path.join(sourceFixture.packageRoots.ai, 'dist', 'utils', 'retry.js');
 
 test('source pi-ai dist retries terminal response cuts and provider-gate stalls', async () => {
-  const [candidateRealPath, workspaceRealPath] = await Promise.all([
-    fs.realpath(candidateDistPath),
-    fs.realpath(workspaceDistPath),
-  ]);
-  assert.equal(
-    candidateRealPath,
-    workspaceRealPath,
-    'the candidate dist import must resolve to the harness/pi workspace package',
+  const candidateRealPath = await fs.realpath(candidateDistPath);
+  const candidatePackageRoot = await fs.realpath(sourceFixture.packageRoots.ai);
+  assert.ok(
+    candidateRealPath.startsWith(`${candidatePackageRoot}${path.sep}`),
+    'the candidate dist import must resolve within the selected source graph',
   );
 
   const { isRetryableAssistantError } = await import(pathToFileURL(candidateDistPath).href);
