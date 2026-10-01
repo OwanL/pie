@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { tmpdir } from 'node:os';
 import test from 'node:test';
 
 import {
@@ -15,7 +15,8 @@ import type {
   SdkSessionWriteLease,
   SdkWorkerOwnershipIdentity,
 } from '../../../agent-processes/lib/sdk-integration/sdk';
-import { ensureSdkPatchBarrier } from '../../../agent-processes/lib/sdk-integration/sdk-patch-barrier';
+import { loadSdk } from '../../../agent-processes/lib/sdk-integration/sdk';
+import { sourceDescriptor, sourceLoadMode } from '../../../agent-processes/lib/sdk-integration/test/source-fixture';
 import {
   SessionOwnershipAuthority,
   SessionOwnershipConflictError,
@@ -23,39 +24,17 @@ import {
   StaleSessionWriteLeaseError,
 } from '../session-ownership-authority';
 
-// The pinned SDK lives in the B2 distribution/package owner's node_modules
-// (application/hosts/vscode); extension/test remains the retained test root.
-const distributionRoot = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  '..', '..', '..', '..', 'application', 'hosts', 'vscode',
-);
-const pinnedSdkPath = path.join(distributionRoot, 'node_modules', '@earendil-works', 'pi-coding-agent');
-
-interface PatchedSdkModules {
+// The shared fixture verifies the explicitly selected immutable source graph
+// before loading and rehashes it after these tests complete.
+interface SourceSdkModules {
   SessionManager: any;
   createAgentSessionRuntime: (factory: unknown, options: unknown) => Promise<any>;
 }
 
-let modulesPromise: Promise<PatchedSdkModules> | undefined;
+let modulesPromise: Promise<SourceSdkModules> | undefined;
 
-async function patchedSdk(): Promise<PatchedSdkModules> {
-  modulesPromise ??= (async () => {
-    const previousTrustedRoot = process.env.PIE_TRUSTED_SDK_ROOT;
-    process.env.PIE_TRUSTED_SDK_ROOT = distributionRoot;
-    try {
-      await ensureSdkPatchBarrier(pinnedSdkPath);
-    } finally {
-      if (previousTrustedRoot === undefined) delete process.env.PIE_TRUSTED_SDK_ROOT;
-      else process.env.PIE_TRUSTED_SDK_ROOT = previousTrustedRoot;
-    }
-    const nonce = `phase4=${Date.now()}`;
-    const managerModule = await import(`${pathToFileURL(path.join(pinnedSdkPath, 'dist', 'core', 'session-manager.js')).href}?${nonce}`);
-    const runtimeModule = await import(`${pathToFileURL(path.join(pinnedSdkPath, 'dist', 'core', 'agent-session-runtime.js')).href}?${nonce}`);
-    return {
-      SessionManager: managerModule.SessionManager,
-      createAgentSessionRuntime: runtimeModule.createAgentSessionRuntime,
-    };
-  })();
+async function sourceSdk(): Promise<SourceSdkModules> {
+  modulesPromise ??= loadSdk(sourceDescriptor.sdkPath, sourceLoadMode) as Promise<SourceSdkModules>;
   return await modulesPromise;
 }
 
@@ -64,7 +43,7 @@ function owner(workerId = 'worker-a', workerGeneration = 1): SdkWorkerOwnershipI
 }
 
 async function tempSessionRoot(): Promise<string> {
-  return await fs.mkdtemp(path.join(distributionRoot, '.pie-phase4-ownership-test-'));
+  return await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'pie-source-ownership-test-')));
 }
 
 function intent(
@@ -90,7 +69,7 @@ function assertStale(error: unknown): boolean {
 test('authority reserves exact canonical intent, transfers once, and rejects stale/replayed/wrong-path writes', async () => {
   const root = await tempSessionRoot();
   try {
-    const { SessionManager } = await patchedSdk();
+    const { SessionManager } = await sourceSdk();
     const sessionDir = path.join(root, 'sessions');
     const sourceManager = SessionManager.create(root, sessionDir);
     const sourcePath = sourceManager.getSessionFile();
@@ -156,7 +135,7 @@ test('authority reserves exact canonical intent, transfers once, and rejects sta
 test('shared cold authority fences sorted canonical paths and rejects a real cold write between reserve and commit', async () => {
   const root = await tempSessionRoot();
   try {
-    const { SessionManager } = await patchedSdk();
+    const { SessionManager } = await sourceSdk();
     const sessionDir = path.join(root, 'sessions');
     const source = SessionManager.create(root, sessionDir);
     const destination = SessionManager.create(root, sessionDir);
@@ -241,7 +220,7 @@ test('shared cold authority fences sorted canonical paths and rejects a real col
 test('authority aborts precommit safely and detects conflicts and destination fingerprint changes', async () => {
   const root = await tempSessionRoot();
   try {
-    const { SessionManager } = await patchedSdk();
+    const { SessionManager } = await sourceSdk();
     const sessionDir = path.join(root, 'sessions');
     const source = SessionManager.create(root, sessionDir);
     const authority = new SessionOwnershipAuthority();
@@ -289,7 +268,7 @@ test('authority aborts precommit safely and detects conflicts and destination fi
 test('crash reconciliation distinguishes pre-transfer and post-transfer ownership and requires confirmed death', async () => {
   const root = await tempSessionRoot();
   try {
-    const { SessionManager } = await patchedSdk();
+    const { SessionManager } = await sourceSdk();
     const sessionDir = path.join(root, 'sessions');
 
     const beforeAuthority = new SessionOwnershipAuthority();
@@ -361,6 +340,14 @@ function fakeSession(manager: any, trace: string[], cancelNext: { value: boolean
     sessionManager: manager,
     sessionFile: manager.getSessionFile(),
     isStreaming: false,
+    isCompacting: false,
+    isRetrying: false,
+    isBashRunning: false,
+    clearQueue: () => undefined,
+    abortCompaction: () => undefined,
+    abortBranchSummary: () => undefined,
+    abortBash: () => undefined,
+    abortRetry: () => undefined,
     agent: {
       state: { messages: manager.buildSessionContext().messages },
       waitForIdle: async () => { trace.push('quiesced'); },
@@ -383,10 +370,10 @@ function fakeSession(manager: any, trace: string[], cancelNext: { value: boolean
   return session;
 }
 
-test('patched runtime serializes new/switch/root fork/branch/clone/import/self-reopen and preserves lifecycle readiness order', async () => {
+test('source runtime serializes new/switch/root fork/branch/clone/import/self-reopen and preserves lifecycle readiness order', async () => {
   const root = await tempSessionRoot();
   try {
-    const { SessionManager, createAgentSessionRuntime } = await patchedSdk();
+    const { SessionManager, createAgentSessionRuntime } = await sourceSdk();
     const sessionDir = path.join(root, 'sessions');
     const importDir = path.join(root, 'imports');
     const source = SessionManager.create(root, sessionDir);
@@ -529,10 +516,10 @@ test('patched runtime serializes new/switch/root fork/branch/clone/import/self-r
   }
 });
 
-test('patched runtime fails worker ownership closed after an ambiguous transfer failure', async () => {
+test('source runtime fails worker ownership closed after an ambiguous transfer failure', async () => {
   const root = await tempSessionRoot();
   try {
-    const { SessionManager, createAgentSessionRuntime } = await patchedSdk();
+    const { SessionManager, createAgentSessionRuntime } = await sourceSdk();
     const sessionDir = path.join(root, 'sessions');
     const source = SessionManager.create(root, sessionDir);
     const authority = new SessionOwnershipAuthority();
@@ -578,7 +565,7 @@ test('patched runtime fails worker ownership closed after an ambiguous transfer 
 test('failClosed revokes a hot lease before awaiting durable fingerprint reconciliation', async () => {
   const root = await tempSessionRoot();
   try {
-    const { SessionManager } = await patchedSdk();
+    const { SessionManager } = await sourceSdk();
     const source = SessionManager.create(root, path.join(root, 'sessions'));
     const authority = new SessionOwnershipAuthority();
     const identity = owner('synchronous-fence');

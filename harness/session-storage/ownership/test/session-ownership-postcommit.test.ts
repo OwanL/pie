@@ -1,31 +1,22 @@
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { tmpdir } from 'node:os';
 import test from 'node:test';
 
 import type { SdkSessionOwnershipAdapter } from '../../../agent-processes/lib/sdk-integration/sdk';
-import { ensureSdkPatchBarrier } from '../../../agent-processes/lib/sdk-integration/sdk-patch-barrier';
+import { loadSdk } from '../../../agent-processes/lib/sdk-integration/sdk';
+import { sourceDescriptor, sourceLoadMode } from '../../../agent-processes/lib/sdk-integration/test/source-fixture';
 import {
   SessionOwnershipAuthority,
   SessionOwnershipFailClosedError,
 } from '../session-ownership-authority';
 
-const extensionRoot = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  '..', '..', '..', '..', 'application', 'hosts', 'vscode',
-);
-const sdkPath = path.join(extensionRoot, 'node_modules', '@earendil-works', 'pi-coding-agent');
-
 test('a failure after transfer consumption leaves the destination retiring and the worker closed', async () => {
-  const root = await fs.mkdtemp(path.join(extensionRoot, '.pie-phase4-postcommit-test-'));
-  const previousTrustedRoot = process.env.PIE_TRUSTED_SDK_ROOT;
-  process.env.PIE_TRUSTED_SDK_ROOT = extensionRoot;
+  const root = await fs.realpath(await fs.mkdtemp(path.join(tmpdir(), 'pie-source-postcommit-test-')));
   try {
-    await ensureSdkPatchBarrier(sdkPath);
-    const nonce = Date.now();
-    const { SessionManager } = await import(`${pathToFileURL(path.join(sdkPath, 'dist', 'core', 'session-manager.js')).href}?postcommit=${nonce}`);
-    const { createAgentSessionRuntime } = await import(`${pathToFileURL(path.join(sdkPath, 'dist', 'core', 'agent-session-runtime.js')).href}?postcommit=${nonce}`);
+    // Verification and the final artifact rehash are owned by source-fixture.
+    const { SessionManager, createAgentSessionRuntime } = await loadSdk(sourceDescriptor.sdkPath, sourceLoadMode) as any;
     const sessionDir = path.join(root, 'sessions');
     const source = SessionManager.create(root, sessionDir);
     const authority = new SessionOwnershipAuthority();
@@ -46,6 +37,14 @@ test('a failure after transfer consumption leaves the destination retiring and t
         sessionManager: options.sessionManager,
         sessionFile: options.sessionManager.getSessionFile(),
         isStreaming: false,
+        isCompacting: false,
+        isRetrying: false,
+        isBashRunning: false,
+        clearQueue: () => undefined,
+        abortCompaction: () => undefined,
+        abortBranchSummary: () => undefined,
+        abortBash: () => undefined,
+        abortRetry: () => undefined,
         agent: { state: { messages: [] }, waitForIdle: async () => undefined },
         extensionRunner: { hasHandlers: () => false, emit: async () => undefined },
         abort: async () => undefined,
@@ -67,8 +66,6 @@ test('a failure after transfer consumption leaves the destination retiring and t
     assert.equal((await authority.inspect(transferredPath!))?.state, 'retiring');
     await assert.rejects(runtime.newSession(), /failed closed/i);
   } finally {
-    if (previousTrustedRoot === undefined) delete process.env.PIE_TRUSTED_SDK_ROOT;
-    else process.env.PIE_TRUSTED_SDK_ROOT = previousTrustedRoot;
     await fs.rm(root, { recursive: true, force: true });
   }
 });
