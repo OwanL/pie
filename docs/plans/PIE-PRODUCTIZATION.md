@@ -1,6 +1,6 @@
 # Pie productization: runtime ownership, providers and sessions
 
-**Working document. Updated 2026-10-01.** Use this as the single discussion and planning authority for this initiative. It is not an implemented contract or permission to deploy changes.
+**Working document. Updated 2026-10-01.** Use this as the single discussion and planning authority for this initiative. Implementation is authorized; this is not an implemented contract. Deployment must be noninterrupting and respect the active manager session.
 
 ## How to use this document
 
@@ -13,13 +13,17 @@
 
 **Decision (2026-10-01):** fully migrate Pi runtime source ownership into Pie from upstream **0.80.6**, as one coherent, versioned dependency, rather than fork one package and install the remaining Pi packages from npm. Build the required Pi packages locally from this single baseline; ordinary third-party dependencies can still come from npm. The selected destination is the complete staged migration through parity, delivery and deliberate cutover—not a source-only spike as the entire scope.
 
+**Current implementation status (2026-10-01):** The user authorized full package-to-source migration from Pi 0.80.6 into `harness/pi/` and accepts retaining the license notice after explanation. The pristine upstream subtree is committed as `44caef3a15f1cba7d6e23c1333fa87fcdcb4e42f` (subtree squash commit `f7979c415246a6562b0c25e579a9ac9c53714949`); its Git tree `f9837ef1ebcd94df34dfcea70121e05db3f36a28` exactly matches the tree at upstream tag commit `2b3fda9921b5590f285165287bd442a25817f17b`. The MIT notice, including `Copyright (c) 2025 Mario Zechner`, is retained verbatim. The source import is separate from all semantic ports.
+
+The primary manager session coordinates bounded child work and is the sole Git owner after import. The private pristine-build proof and read-only migration audit are complete: all four core packages compile without source edits, and offline SDK imports resolve to that source graph. The first semantic port (retry classification and durable terminal-event ordering) is underway; the materialized artifact/build contract is being settled. **Do not interrupt the active manager session.** The user allows noninterrupting deployment, but current manager policy forbids mutating the active SDK or publishing/restarting hosts; safe immutable staging will be evaluated later. No runtime switch, runtime installation, parity proof or deployment has occurred.
+
 **Source ownership and modification scope are separate.** Importing all Pi source does not mean rewriting every package. Preserve upstream structure and concentrate Pie changes where required for existing behavior. Do not flatten the source into unrelated Pie files or replace the agent engine at the same time.
 
 There are three related but independent workstreams:
 
 | Workstream | Intended outcome | Current state |
 | --- | --- | --- |
-| Runtime source ownership | Make core changes in typed source, not installed-file transformations and private-method patches. | Full in-tree source migration from Pi 0.80.6 selected. Pre-migration checkpoint `11afa129` is pushed to `master`; branch `feat/pi-source-0.80.6` is created in the main checkout. Import/build/update design remains open. Preparation only is currently authorized; no source import or live cutover has begun. |
+| Runtime source ownership | Make core changes in typed source, not installed-file transformations and private-method patches. | Full Pi 0.80.6 migration authorized on `feat/pi-source-0.80.6`; pristine subtree import committed at `44caef3a`. Private pristine-build/import proof and the read-only audit are complete; semantic ports and permanent artifact design are underway. No semantic parity, runtime switch, installation or deployment yet. |
 | Provider/model management | Users connect accounts/endpoints and manage models without editing the checkout. | Research/proposal only. No new setup flow or migration implemented. |
 | Session responsiveness | Ordinary browsing does not wait on avoidable runtime/inventory initialization. | Retained logs inspected. Controlled deferred-inventory experiment and live UI verification not performed. |
 
@@ -98,7 +102,7 @@ npm --prefix application/hosts/vscode run typecheck:agent-processes-sdk-integrat
 
 ### Isolation for further work
 
-Keep implementation experiments in the clone, with private dependencies and disposable fixture data. Do not start a host, attach to live coordinator endpoints, use real credentials/sessions or publish to the installed extension. Do not run publishing builds, activation, renderer publication, bootstrap or installation scripts; use `extension:build:validate` if needed. The clone's `AGENTS.md` retains these operating restrictions and points here for planning. The completed probes used in-memory credentials/providers and network-denied execution tests; no real session operation or deployment occurred.
+The restrictions above describe the completed AgentHarness compatibility experiment in its clone, not the now-authorized source migration. Migration work is on `feat/pi-source-0.80.6`; candidate checks use private artifacts. The pristine-build proof made no tracked-source edits; subsequent semantic ports deliberately change owned source files. Current manager policy forbids mutating the active SDK or publishing/restarting hosts. Evaluate safe immutable staging later, without interrupting the active manager session. The completed probes used in-memory credentials/providers and network-denied execution tests; no real session operation or deployment occurred.
 
 The clone baseline may now lag active development. Select a later committed baseline explicitly before porting current fixes; do not copy another agent's partially edited checkout indiscriminately.
 
@@ -106,7 +110,7 @@ The clone baseline may now lag active development. Select a later committed base
 
 ### Runtime source ownership
 
-1. Import Pi source from an exact upstream revision with provenance, license, useful upstream tests and original package boundaries intact.
+1. Keep the imported Pi source tied to an exact upstream revision with provenance, license, useful upstream tests and original package boundaries intact.
 2. Build the required Pi runtime packages locally as one matched set. Target no published Pi runtime packages in the shipped graph; retain ordinary third-party npm dependencies. Avoid competing package identities/schema registries in workers, tools and extensions.
 3. Port existing transforms/prototype behavior into source with parity tests, one semantic change at a time. Preserve SDK-facing APIs, history format, ownership, event ordering, continuation and runtime replacement initially.
 4. Remove startup mutation/prototype patches only when local source supplies their behavior. Preserve runtime identity verification and immutable deployment safeguards that remain useful.
@@ -116,9 +120,9 @@ Pi's [0.80.6 MIT license](https://github.com/earendil-works/pi/blob/v0.80.6/LICE
 
 ### Migration planning context: 2026-10-01
 
-**Decisions from discussion:** the user selected a **full migration to Pi 0.80.6 source inside Pie**, rather than a separate fork repository or a limited compatibility spike as the final scope. This keeps source-level runtime and Pie integration changes in the same checkout and review. The migration branch is `feat/pi-source-0.80.6` in the main checkout, created from the pushed pre-migration checkpoint `11afa12952495ec3bb1261d61bd5e9df668b2485`. The exact directory, Git import mechanism, npm/build layout and deployment design remain open.
+**Initial planning record (2026-10-01):** the user selected a **full migration to Pi 0.80.6 source inside Pie**, rather than a separate fork repository or a limited compatibility spike as the final scope. The migration branch is `feat/pi-source-0.80.6`, created from pre-migration checkpoint `11afa12952495ec3bb1261d61bd5e9df668b2485`. At that point, directory, import method, build layout and implementation authorization were unresolved. The later authorization and completed subtree import supersede those status details; see the current status above and implementation readiness below.
 
-**Current authorization is preparation only.** Do not import source, begin runtime implementation or perform a live cutover until separately authorized. Preparation must preserve concurrent work and establish the migration branch/baseline safely; no tests, deployment or implementation are implied by this decision.
+**Historical authorization at initial planning:** preparation only was authorized then. This is superseded: full implementation is now authorized, with current noninterrupting-deployment restrictions stated above.
 
 #### What the migration actually replaces
 
@@ -133,19 +137,25 @@ Checkout inspection on October 1, not evidence of the currently loaded runtime:
 
 This inventory was recorded while the checkout had substantial concurrent uncommitted work, including SDK integration changes. At the user's explicit request, all pending Pie changes were checkpointed and pushed as `11afa129` before creating the migration branch. Use that committed Pie baseline when reconciling the required patch delta; do not substitute the older experimental clone's source snapshot.
 
-#### In-tree import choices
+#### In-tree import choices considered
 
 | Mechanism | Benefit | Cost / question |
 | --- | --- | --- |
-| Git subtree-style import | One checkout and atomic Pie/runtime changes; upstream merges retain an explicit source boundary. | Establish prefix, upstream history policy and a repeatable merge/conflict workflow. Trial the update procedure before committing to it. |
+| Git subtree-style import | One checkout and atomic Pie/runtime changes; upstream merges retain an explicit source boundary. | **Selected at `harness/pi/`.** Validate the repeatable upstream update/conflict workflow. |
 | Tracked source snapshot with exact provenance | Simple checkout and no extra Git tooling for ordinary development. | Updates need an explicit three-way baseline/delta process; replacing a directory from a tarball must not erase local changes or make their history opaque. |
 | Submodule or separately released fork | Separate upstream history or artifact release boundary. | Not the selected direction: adds separate-repository commits/initialization or publishing before Pie can consume changes. Revisit only if in-tree maintenance proves unsuitable. |
 
-**Proposal, not a decision:** evaluate a subtree-style import under a dedicated path such as `vendor/pi/`, with upstream layout, license and useful tests intact. The path and merge strategy remain placeholders. Importing the source set does not require building/shipping unrelated upstream frontends or changing Pie's application architecture.
+**Decision and completed import:** use a Git subtree-style import at `harness/pi/`, preserving upstream layout, license and useful tests. The pristine 0.80.6 import is committed as `44caef3a15f1cba7d6e23c1333fa87fcdcb4e42f` from squash commit `f7979c415246a6562b0c25e579a9ac9c53714949`; tree `f9837ef1ebcd94df34dfcea70121e05db3f36a28` matches the tree at upstream tag commit `2b3fda9921b5590f285165287bd442a25817f17b`. This replaces the earlier `vendor/pi/` location proposal. Importing source does not require building/shipping unrelated upstream frontends or changing Pie's application architecture.
 
 Keep the clean upstream import and each Pie semantic change reviewable separately. Record the upstream URL, exact commit/tag, import method, local change rationale and retained test commands. The selected source baseline is Pi **0.80.6**, tag commit `2b3fda9921b5590f285165287bd442a25817f17b` (see the dated comparison below). Newer-release research remains historical rationale for this choice, not an open baseline selection or a request to reconsider the target absent new evidence.
 
-Initially preserve package names and public SDK imports if feasible, while making installation resolve them to the local matched set. Renaming every import is a separate cost, not a prerequisite for ownership. Confirm that package manifests, shrinkwraps, export maps, extension loading and build aliases cannot pull an upstream Pi package back into the shipped graph. Avoid maintaining two editable copies of source or generated `dist` code.
+Preserve the four public Pi package names and existing SDK imports while making installation resolve them to the local matched set. Renaming every import is a separate cost, not a prerequisite for ownership. Confirm that package manifests, shrinkwraps, export maps, extension loading and build aliases cannot pull an upstream Pi package back into the shipped graph. Avoid maintaining two editable copies of source or generated `dist` code.
+
+**Selected artifact direction:** materialize the four core packages, ordinary dependencies, assets and notices at `<generation>/out/pi-runtime/{manifest.json,node_modules/}`, without workspace symlinks. The SDK package is `pi-runtime/node_modules/@earendil-works/pi-coding-agent`; its `dist/cli.js` supplies the local CLI. Production hosts must verify and use their generation's artifact, not fall back to registry/global/cached Pi. An explicit development override must identify another verified artifact. Keep old complete generations for rollback. The artifact manifest binds upstream provenance, source and lock fingerprints, target platform/architecture/Node ABI, package hashes and payload hash; the containing generation also hashes it.
+
+Keep the imported upstream lock as build-tool authority and a dedicated `harness/pi-runtime` lock as runtime-dependency authority. The runtime install mechanism is being prototyped: it must strip upstream shrinkwrap/lifecycle behavior, avoid duplicate Pi packages, and not require lock refresh on ordinary TypeScript edits. Prefer dependency-only local package inputs with compiled code/assets copied afterward and covered by artifact hashes. Do not add a second editable source or package-manifest authority.
+
+A separate bounded task is adding explicit nonpublishing output isolation to Pie's build. Existing `extension:build:validate` alone is not safe while sessions are active because it overwrites shared `out`.
 
 #### Baseline comparison: historical rationale for the selected 0.80.6 source
 
@@ -220,7 +230,7 @@ Maintain an explicit delta per adopted change: upstream commit/tag, prerequisite
 
 Track important deferred fixes and periodically compare the cumulative backport burden with a coordinated upstream merge. Providers/OAuth need ongoing review even when no feature is requested. Subtree import does not make this automatic: selective ports may conflict or duplicate work on a later merge, so reconcile them explicitly. This is ordinary source maintenance with provenance, not a new collection of startup rewrite scripts.
 
-Next planning gate: decide the in-tree prefix/import and build approach against the prepared Pie baseline `11afa129`. Once implementation is authorized, proceed in stages, beginning with an isolated clean-source build before semantic ports, delivery and cutover. API history/compare requests hit GitHub rate limits during research, so no complete commit-dependency graph, all-fix inventory or measured port-effort estimate is claimed. The upstream baseline is selected; implementation authorization remains limited to preparation.
+Current gates: turn the completed private pristine-build/import proof into reproducible materialized artifacts, settle the shared identity/resolution contract, and port the semantic delta in bounded slices. Import, prefix and upstream baseline are settled; behavioral parity, portable distribution and safe staging are not yet proved. The audit found network-backed catalog generation in upstream default builds, registry Pi siblings in coding-agent shrinkwrap, and shared-output writes even in Pie's validation-only build; the candidate pipeline must avoid those paths. API history/compare requests hit GitHub rate limits during research, so no complete commit-dependency graph, all-fix inventory or measured port-effort estimate is claimed.
 
 ##### Rough effort budget
 
@@ -235,7 +245,7 @@ For **0.80.6 source adoption with existing behavior preserved**, budget roughly 
 | Bind SDK delivery/identity to runtime generations; adapt resolution, installer/doctor and rollback | 2–4 days |
 | Integration verification, packaged/standalone checks, failure cases and cleanup | 3–6 days |
 
-A **1–3 day isolated feasibility slice**, included in that budget, should first attempt a clean source build and one real session persistence/event-ordering path with disposable fixtures. It is a re-estimation checkpoint, not a usable migration. Keep packaging/Windows dependency issues, private-runtime seam changes and ownership/replacement failures visible; any of these can move the total outside the range.
+The original **1–3 day feasibility-slice** allowance covered clean source builds and one real session persistence/event-ordering path with disposable fixtures. Private pristine-build/import proof is complete; semantic parity is not proved. Re-estimate after these gates rather than treating the initial allowance as remaining work. Keep packaging/Windows dependency issues, private-runtime seam changes and ownership/replacement failures visible; any of these can move the total outside the range.
 
 A direct **0.99.2 adoption** has a provisional **20–40 engineering-day / 4–8 week** allowance because auth/service construction, context/history compatibility and newer event/build contracts join the same effort. Confidence is lower still: the treatment of `context_edit` and rollback must be decided before this becomes a scoped estimate. This is not an estimate for implementing all new upstream features.
 
@@ -268,25 +278,25 @@ These tests are starting evidence, not a claim they were run in this planning se
 
 No session-format migration is approved. Reopening the same disposable fixture sessions with the prior matched runtime must check equivalent context/branch semantics, not merely successful parsing; newer upstream can add meaningful entries without changing the format version. Never test rollback on live user data or interpret retaining an old host build as proof its externally resolved SDK is unchanged.
 
-#### Implementation readiness
+#### Implementation readiness and current gates
 
-**October 1 assessment:** the destination and upstream baseline are selected: full migration to Pi 0.80.6 source inside Pie. The implementation is **not authorized yet**; current authorization is preparation only, with no source import, runtime work or live cutover. More broad version research is not a prerequisite.
+**Initial readiness assessment (2026-10-01, historical):** the destination and 0.80.6 baseline were selected while implementation was still unauthorized. That status is superseded by the current implementation authorization and completed import recorded above.
 
-The user authorized committing and pushing all pending Pie changes, creating the migration branch and cleaning task-owned temporary files. Checkpoint `11afa12952495ec3bb1261d61bd5e9df668b2485` is pushed to `origin/master`; `feat/pi-source-0.80.6` was created from it in the main checkout. The affected development tests passed (35 package groups), and generated model configuration passed its drift check. This is checkpoint evidence, not source-fork parity or release qualification.
+The pre-migration checkpoint `11afa12952495ec3bb1261d61bd5e9df668b2485` was pushed to `origin/master`, and branch `feat/pi-source-0.80.6` was created from it. The affected development tests passed (35 package groups), and generated model configuration passed its drift check at that checkpoint. This is historical checkpoint evidence, not source-fork parity or release qualification; no claim is made here about later pushes.
 
-The experimental clone remains at `2ed00053` with its instruction changes and two compatibility probes preserved as evidence, not disposable temporary files. Its source snapshot is older than the migration baseline. `vendor/pi/` with a subtree-style upstream boundary remains a recommendation; the import method and build layout still need settling before source import. No runtime migration or deployment was performed during preparation.
+The experimental clone remains at `2ed00053` with its instruction changes and two compatibility probes preserved as evidence. Its source snapshot is older than the migration baseline. The earlier `vendor/pi/` suggestion is superseded by the completed subtree import at `harness/pi/`. The pristine source-build/import proof is complete; portable materialization, full package/resolution design and the update workflow remain to be proved or settled.
 
-The first implementation stage, once separately authorized, should build the required matched 0.80.6 source packages with private dependencies; demonstrate fixture SDK imports resolve to that graph; and port/test one real session persistence/terminal-event path without mutating installed SDK files. This is a feasibility and parity checkpoint, not the whole selected migration: full session ownership/continuation parity, distribution, installer/doctor transition, rollback and deliberate cutover remain later stages. No live host, credentials, sessions, publication or activation are authorized by this plan. Choose and document a stable Pie baseline before claiming the complete patch inventory has been ported.
+**Current next gates:** complete the materialized artifact/identity design and required semantic ports, using the completed pristine-build proof and read-only audit. Keep child edit ownership bounded and non-overlapping; prove parity, distribution and rollback. Full session ownership/continuation parity remains required. No runtime switch, runtime installation, parity proof or deployment has occurred. The user permits noninterrupting deployment, but current manager policy forbids active-SDK mutation and host publication/restart; evaluate safe immutable staging later, without interrupting the active manager session.
 
-Final distribution, installer transition and rollback design must be resolved before integration/cutover. The Pi source baseline and committed Pie checkpoint are selected; the import method and build layout remain design questions. This readiness assessment authorizes preparation only, not implementation.
+Distribution, installer/doctor transition and rollback design remain open before integration/cutover. The source baseline, Pie checkpoint, import path and subtree method are selected; build layout, runtime resolution and the safe immutable staging approach remain to be determined.
 
-#### Staged migration sequence; implementation not yet authorized
+#### Staged migration sequence and gates
 
-1. **Preparation:** checkpoint and branch creation are complete at `11afa129`. Decide the in-tree prefix/import and build method, verify the selected 0.80.6 source/build graph and provenance, and name the upstream-update owner. This stage does not import source.
-2. **Import and clean build:** once separately authorized, import unmodified Pi 0.80.6 source and demonstrate clean local package builds, controlled resolution and a distributable matched graph. This is packaging evidence, not Pie behavioral parity; the existing patch barrier need not accept rebuilt bytes.
+1. **Preparation and pristine import — complete:** branch from checkpoint `11afa129`; subtree import at `harness/pi/`, with provenance and matching upstream tree, committed as recorded above.
+2. **Private clean build/import proof — complete; materialization pending:** `pi-tui`, `pi-ai`, `pi-agent-core` and `pi-coding-agent` compile in that order from retained 0.80.6 catalogs. Offline headless import observed 76 core-resolution edges inside `harness/pi`; tracked source and sampled live SDK fingerprints were unchanged. Portable dependency materialization and permanent tooling remain pending. This is not Pie behavioral parity; do not mutate the active SDK.
 3. **Port the semantic delta in small slices:** add typed seams where needed, retain behavioral fixtures and run real source-runtime paths. Keep patched npm runtime and candidate runtime as separate test configurations; never patch the fork a second time to make it pass. Complete required session ownership, continuation and event-ordering parity; this is not optional scope for the full migration.
 4. **Prove delivery and rollback:** package without checkout/global-SDK dependencies, bind SDK identity to runtime identity, verify both host routes and old/new fixture compatibility. Keep the known-good matched runtime available until acceptance.
-5. **Remove redundant machinery and cut over deliberately:** retire installed-file/prototype patching only after parity. Update installer/doctor/version reporting and development docs together. Live deployment/cutover remains a separate approval, not a side effect of preparation or a feasibility checkpoint.
+5. **Evaluate immutable staging and complete deliberate cutover:** retire installed-file/prototype patching only after parity. Update installer/doctor/version reporting and development docs together. Noninterrupting deployment is authorized, but no active SDK mutation or host publication/restart is permitted under current manager policy; evaluate a safe immutable staging route later. Never interrupt the active manager session.
 
 For ongoing maintenance, propose small reviewable upstream integrations, triggered by relevant fixes/provider changes plus a periodic review whose cadence is still open. Each update should show the upstream revision, local-delta disposition, affected API/history/provider behavior, focused parity results and a recoverable prior artifact. Preserve notices. General fixes can be proposed upstream; Pie-specific policy need not be. Owning source replaces brittle patch mechanics with ordinary maintenance; it does not eliminate that work.
 
@@ -347,19 +357,17 @@ Proposed behavior: publish valid history promptly and load optional inventory af
 
 ## Planning gates and unresolved questions
 
-Proposed stages and separate workstreams, not an approved delivery schedule or implementation authorization:
+The full Pi 0.80.6 source migration is authorized; this is not a delivery schedule. The pristine source import at `harness/pi/` is complete. Private pristine-build/import proof and read-only semantic-delta/build/deployment-safety audits are complete; semantic ports and artifact design are underway. Behavior-preserving parity, distribution and safe immutable staging remain unproved. Noninterrupting deployment is authorized, but current manager policy forbids active-SDK mutation and host publication/restart; the active manager session must not be interrupted.
 
-1. **Preparation (current authorization):** full in-tree migration and the 0.80.6 baseline are selected; the main checkout is on `feat/pi-source-0.80.6`, created from pushed checkpoint `11afa129`. Choose the prefix/import mechanism and locally built package set; define provenance, update ownership, retained upstream tests and how published-Pi fallback will be excluded from the candidate runtime.
-2. **Behavior-preserving source migration:** once separately authorized, import/build the selected source and demonstrate current extension/runtime/history/continuation/write semantics with local builds; remove patch machinery only when genuinely redundant. Keep rollback to the existing packaged runtime. Do not combine with a storage-format change.
-3. **Independent session-readiness workstream (not a prerequisite for Pi source ownership):** demonstrate reduced transcript-ready latency without stale/mixed inventory, changed execution semantics or live deployment.
-4. **Independent provider bridge workstream:** prove one dynamic provider and one OAuth connection, account-ID mapping, shared revisions, unknown-price accounting and offline behavior. Provider productization can proceed separately from the selected source migration.
-5. **Provider configuration migration (if authorized as its own work):** preview/import with backup and rollback; preserve selections, policy, compatibility and pricing evidence. Disable the old discovery writer only when activating the new authority, then deliver one complete setup/refresh flow before adding more adapters.
+1. **Portable artifact and controlled resolution:** build on the pristine compile/import proof to materialize the matched package graph and exclude published-Pi fallback without modifying the active SDK.
+2. **Behavior-preserving source migration:** port the required extension/runtime/history/continuation/write semantics in reviewable slices; remove patch machinery only when genuinely redundant. Keep rollback to the existing packaged runtime. Do not combine with a storage-format change.
+3. **Delivery and staging:** establish package/build layout, runtime identity, installer/doctor transition, and a safe immutable staging/rollback path. Prove any eventual deployment does not interrupt the active manager session.
+4. **Independent session-readiness workstream (not a prerequisite for Pi source ownership):** demonstrate reduced transcript-ready latency without stale/mixed inventory or changed execution semantics.
+5. **Independent provider bridge/configuration workstream:** prove one dynamic provider and OAuth connection, account-ID mapping, shared revisions, unknown-price accounting, offline behavior and a reversible configuration migration before broader rollout.
 
 Questions to resolve:
 
-- Which in-tree prefix and import/update mechanism preserve a clean upstream baseline plus reviewable Pie changes?
-- Which committed Pie baseline supplies the required delta, and how do we incorporate concurrent agents' completed work safely without sweeping in unfinished changes?
-- Which packages must be built/shipped, and how do build/package/module resolution and immutable runtime identity change?
+- Which packages must be built/shipped, and how should build/package/module resolution and immutable runtime identity work?
 - Who owns upstream updates, what triggers them, and what tests are the release/rollback gate?
 - Which existing patches represent required product semantics versus replaceable implementation workarounds?
 - What is the user-config schema/location and OAuth connection-ID mapping? What live Codex discovery mechanism is supported?
