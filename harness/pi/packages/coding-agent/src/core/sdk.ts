@@ -3,7 +3,7 @@ import { Agent, type AgentMessage, type ThinkingLevel } from "@earendil-works/pi
 import { clampThinkingLevel, type Message, type Model, streamSimple } from "@earendil-works/pi-ai/compat";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
-import { AgentSession } from "./agent-session.ts";
+import { AgentSession, type CompactionHooks } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { AuthStorage } from "./auth-storage.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
@@ -77,6 +77,8 @@ export interface CreateAgentSessionOptions {
 	sessionManager?: SessionManager;
 	/** Synchronous caller-owned context projection policy, evaluated on each branch build. */
 	contextMessageOmissions?: ContextMessageOmissionsResolver;
+	/** Optional caller-owned history-compaction policy and customization hooks. */
+	compactionHooks?: CompactionHooks;
 
 	/** Settings manager. Default: SettingsManager.create(cwd, agentDir) */
 	settingsManager?: SettingsManager;
@@ -96,6 +98,14 @@ export interface CreateAgentSessionResult {
 
 // Re-exports
 
+export { prepareCompaction } from "./compaction/index.ts";
+export type { CompactionPreparation } from "./compaction/index.ts";
+export type {
+	CompactionHooks,
+	CompactionRequestAuth,
+	CompactionThresholdCheck,
+	EstimatedContextOverflowCheck,
+} from "./agent-session.ts";
 export * from "./agent-session-runtime.ts";
 export type {
 	ExtensionAPI,
@@ -401,6 +411,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		excludedToolNames,
 		extensionRunnerRef,
 		sessionStartEvent: options.sessionStartEvent,
+		compactionHooks: options.compactionHooks,
 	});
 	const extensionsResult = resourceLoader.getExtensions();
 

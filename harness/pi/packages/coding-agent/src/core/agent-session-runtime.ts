@@ -10,7 +10,7 @@ import type {
 	SessionStartEvent,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
-import type { CreateAgentSessionResult } from "./sdk.ts";
+import type { CompactionHooks, CreateAgentSessionResult } from "./sdk.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
 import { SessionManager, type ContextMessageOmissionsResolver } from "./session-manager.ts";
 import type {
@@ -45,6 +45,7 @@ export type CreateAgentSessionRuntimeFactory = (options: {
 	sessionStartEvent?: SessionStartEvent;
 	projectTrustContext?: ProjectTrustContext;
 	contextMessageOmissions?: ContextMessageOmissionsResolver;
+	compactionHooks?: CompactionHooks;
 }) => Promise<CreateAgentSessionRuntimeResult>;
 
 /** Initial target and caller-owned policies for a shared session runtime. */
@@ -54,6 +55,7 @@ export interface CreateAgentSessionRuntimeOptions {
 	sessionManager: SessionManager;
 	sessionStartEvent?: SessionStartEvent;
 	contextMessageOmissions?: ContextMessageOmissionsResolver;
+	compactionHooks?: CompactionHooks;
 	ownershipAdapter?: SessionOwnershipAdapter;
 	writeLease?: SessionWriteLease;
 }
@@ -818,14 +820,19 @@ export async function createAgentSessionRuntime(
 	if (options.ownershipAdapter && options.writeLease) {
 		options.sessionManager.attachPieWriteLease(options.ownershipAdapter, options.writeLease);
 	}
-	// Keep the caller's synchronous context policy on the shared factory so all
-	// replacement, self-reopen, and rebuild paths receive the same resolver.
-	const sharedFactory: CreateAgentSessionRuntimeFactory = options.contextMessageOmissions
+	// Keep caller-owned context and compaction policies on the shared factory so
+	// replacement, self-reopen, and rebuild paths receive the same configuration.
+	const sharedFactory: CreateAgentSessionRuntimeFactory = options.contextMessageOmissions || options.compactionHooks
 		? (runtimeOptions) => {
-				runtimeOptions.sessionManager.setContextMessageOmissionsResolver(options.contextMessageOmissions);
+				if (options.contextMessageOmissions) {
+					runtimeOptions.sessionManager.setContextMessageOmissionsResolver(options.contextMessageOmissions);
+				}
 				return createRuntime({
 					...runtimeOptions,
-					contextMessageOmissions: options.contextMessageOmissions,
+					...(options.contextMessageOmissions
+						? { contextMessageOmissions: options.contextMessageOmissions }
+						: {}),
+					...(options.compactionHooks ? { compactionHooks: options.compactionHooks } : {}),
 				});
 			}
 		: createRuntime;

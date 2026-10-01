@@ -63,6 +63,8 @@ export interface CreateAgentSessionFromServicesOptions {
 	excludeTools?: CreateAgentSessionOptions["excludeTools"];
 	noTools?: CreateAgentSessionOptions["noTools"];
 	customTools?: ToolDefinition[];
+	contextMessageOmissions?: CreateAgentSessionOptions["contextMessageOmissions"];
+	compactionHooks?: CreateAgentSessionOptions["compactionHooks"];
 }
 
 /**
@@ -202,6 +204,8 @@ export async function createAgentSessionFromServices(
 		excludeTools: options.excludeTools,
 		noTools: options.noTools,
 		customTools: options.customTools,
+		contextMessageOmissions: options.contextMessageOmissions,
+		compactionHooks: options.compactionHooks,
 		sessionStartEvent: options.sessionStartEvent,
 	});
 }
