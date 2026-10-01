@@ -28,8 +28,9 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { createTsconfigOverlay, resolveOwnerTsx, resolveSdkPackages } from '../lib/package-resolution.mjs';
+import { createTsconfigOverlay, resolveOwnerTsx } from '../lib/package-resolution.mjs';
 import { PACKAGE_DIRECTIVES, resolvePackageEntry } from '../lib/test-packages.mjs';
+import { extractRuntimeArgs, resolveRuntimeSelection, verificationChildEnv, withVerificationRuntime } from './verification-runtime.mjs';
 import { withoutGitRepositoryEnv } from '../lib/git-environment.mjs';
 import { withoutPiHarnessEnv } from '../lib/pi-harness-env.mjs';
 import {
@@ -336,7 +337,7 @@ export function runGroup(group, args, signal) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [group.tsxBin, ...args], withProcessTreeIsolation({
       cwd: group.cwd,
-      env: withoutPiHarnessEnv(withoutGitRepositoryEnv(process.env)),
+      env: verificationChildEnv(withoutPiHarnessEnv(withoutGitRepositoryEnv(process.env))),
       stdio: 'inherit',
       windowsHide: true,
     }));
@@ -356,7 +357,8 @@ export function runGroup(group, args, signal) {
     });
     child.on('close', async (code) => {
       const cleanup = await watchdog.settle().catch(() => ({ gone: false }));
-      resolve(watchdog.timedOut || watchdog.aborted || !cleanup.gone ? 1 : (code ?? 0));
+      if (!cleanup.gone) { reject(new Error('Focused test tree teardown is unconfirmed')); return; }
+      resolve(watchdog.timedOut || watchdog.aborted ? 1 : (code ?? 0));
     });
   });
 }
@@ -376,34 +378,29 @@ export async function readFilesFromStdin(stream = process.stdin) {
   return parsed;
 }
 
-async function main() {
+export async function main() {
   const repoRoot = inferRepoRoot();
   let parsedArgs;
+  let selection;
   try {
-    parsedArgs = parseArgs(process.argv.slice(2));
+    selection = extractRuntimeArgs(process.argv.slice(2), { allowSdkPath: true });
+    parsedArgs = parseArgs(selection.args);
   } catch (err) {
     console.error(err instanceof Error ? err.message : String(err));
     process.exitCode = 1;
     return;
   }
-  const { files: argFiles, help, filesFromStdin, sdkPath: sdkPathArgument } = parsedArgs;
+  const { files: argFiles, help, filesFromStdin } = parsedArgs;
 
   if (help) {
     printHelp();
     return;
   }
 
-  let sdkPath;
-  if (sdkPathArgument !== undefined) {
-    sdkPath = path.resolve(repoRoot, sdkPathArgument);
-    try {
-      resolveSdkPackages({ sdkPath });
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      console.error(`Invalid --sdk-path candidate "${sdkPathArgument}": ${detail}`);
-      process.exitCode = 1;
-      return;
-    }
+  if (selection.sdkPath !== undefined) {
+    selection.sdkPath = path.resolve(repoRoot, selection.sdkPath);
+    try { selection = { ...selection, ...await resolveRuntimeSelection(selection), sdkPath: undefined }; }
+    catch (error) { throw new Error(`Invalid --sdk-path candidate: ${error.message}`); }
   }
 
   let files = argFiles;
@@ -442,31 +439,33 @@ async function main() {
   const failures = [];
   let passedGroups = 0;
   try {
-    for (const group of groups) {
-      const overlay = createGroupTsconfigOverlay(repoRoot, group, { sdkPath });
-      if (overlay) overlays.set(group.id, overlay);
-    }
-    const results = await runGroupQueue(groups, async (group) => {
-      const overlay = overlays.get(group.id);
-      const args = buildTsxArgs(overlay ? { ...group, tsxConfig: overlay.configPath } : group);
-      const fileWord = group.files.length === 1 ? 'file' : 'files';
-      console.log(`\n▶ ${group.id} (${group.files.length} ${fileWord})`);
-      const code = await runGroup(group, args, processAbort.signal);
-      if (code === 0) {
-        passedGroups += 1;
-        console.log(`✓ ${group.id}`);
-      } else {
-        console.log(`✖ ${group.id} (exit ${code})`);
+    await withVerificationRuntime(selection, processAbort.signal, async (runtime) => {
+      for (const group of groups) {
+        const overlay = createGroupTsconfigOverlay(repoRoot, group, { sdkPath: runtime.sdkPath });
+        if (overlay) overlays.set(group.id, overlay);
+      }
+      const results = await runGroupQueue(groups, async (group) => {
+        const overlay = overlays.get(group.id);
+        const args = buildTsxArgs(overlay ? { ...group, tsxConfig: overlay.configPath } : group);
+        const fileWord = group.files.length === 1 ? 'file' : 'files';
+        console.log(`\n▶ ${group.id} (${group.files.length} ${fileWord})`);
+        const code = await runGroup(group, args, processAbort.signal);
+        if (code === 0) {
+          passedGroups += 1;
+          console.log(`✓ ${group.id}`);
+        } else {
+          console.log(`✖ ${group.id} (exit ${code})`);
+          failures.push(group.id);
+        }
+        return code;
+      }, { signal: processAbort.signal });
+      for (let index = 0; index < results.length; index += 1) {
+        if (results[index] !== undefined) continue;
+        const group = groups[index];
+        console.log(`\n✖ ${group.id} (not started: aborted)`);
         failures.push(group.id);
       }
-      return code;
-    }, { signal: processAbort.signal });
-    for (let index = 0; index < results.length; index += 1) {
-      if (results[index] !== undefined) continue;
-      const group = groups[index];
-      console.log(`\n✖ ${group.id} (not started: aborted)`);
-      failures.push(group.id);
-    }
+    });
   } finally {
     processAbort.dispose();
     for (const overlay of overlays.values()) overlay.dispose();
@@ -486,5 +485,5 @@ async function main() {
 const invokedDirectly = process.argv[1] &&
   pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
 if (invokedDirectly) {
-  await main();
+  await main().catch((error) => { console.error(error.message); process.exitCode = 1; });
 }

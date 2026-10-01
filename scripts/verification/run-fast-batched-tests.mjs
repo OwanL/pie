@@ -28,6 +28,9 @@ import {
   TEST_FILE_MARKER,
 } from './test-reporter.mjs';
 
+import { extractRuntimeArgs, verificationChildEnv, withVerificationRuntime } from './verification-runtime.mjs';
+import { abortOnProcessSignals, watchChildProcess, withProcessTreeIsolation, resolveChildProcessTimeoutMs } from '../lib/process-watchdog.mjs';
+
 const REPORT_PREFIX = '__PI_TEST_SUMMARY__';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const reporter = pathToFileURL(path.join(repoRoot, 'scripts', 'verification', 'test-reporter.mjs')).href;
@@ -73,22 +76,34 @@ async function writeBatch(tempDir, index, files) {
   return batchPath;
 }
 
-function run(command, args, cwd, extraEnv = {}) {
+function run(command, args, cwd, extraEnv = {}, signal) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
+    const child = spawn(command, args, withProcessTreeIsolation({
       cwd,
-      env: withoutPiHarnessEnv({ ...process.env, FORCE_COLOR: '0', ...extraEnv }),
+      env: verificationChildEnv(withoutPiHarnessEnv({ ...process.env, FORCE_COLOR: '0', ...extraEnv })),
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
-    });
+    }));
+    const watchdog = watchChildProcess(child, { signal, timeoutMs: resolveChildProcessTimeoutMs(), label: 'fast batch tests' });
     let stdout = '';
     let stderr = '';
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', (chunk) => { stdout += chunk; });
     child.stderr.on('data', (chunk) => { stderr += chunk; });
-    child.on('error', reject);
-    child.on('close', (code, signal) => resolve({ code: code ?? 1, signal, stdout, stderr }));
+    child.on('error', async (error) => {
+      const cleanup = await watchdog.settle().catch(() => ({ gone: false }));
+      if (!cleanup.gone) error.teardownUnconfirmed = true;
+      reject(error);
+    });
+    child.on('close', async (code, closeSignal) => {
+      const cleanup = await watchdog.settle().catch(() => ({ gone: false }));
+      if (!cleanup.gone) {
+        reject(Object.assign(new Error('Batch test tree teardown is unconfirmed'), { teardownUnconfirmed: true }));
+        return;
+      }
+      resolve({ code: watchdog.timedOut || watchdog.aborted ? 1 : (code ?? 1), signal: closeSignal, stdout, stderr });
+    });
   });
 }
 
@@ -258,19 +273,33 @@ export function parseFastBatchArgs(argv) {
   return { mode, testConcurrency };
 }
 
-async function main() {
-  const { mode, testConcurrency } = parseFastBatchArgs(process.argv.slice(2));
+export async function runSuite({ mode, testConcurrency }, runtime, signal, dependencies = {}) {
   if (!mode) throw new Error('Usage: run-fast-batched-tests.mjs <root|analysis|subagent|computer-use|playwright> [--test-concurrency <n>]');
   const startedAt = performance.now();
   const tempDir = await mkdtemp(path.join(os.tmpdir(), `pie-${mode}-tests-`));
+  const runs = [];
+  let failed = false;
+  let firstError;
+  let teardownUnconfirmed = false;
+  const launch = (...args) => {
+    // Observe failure immediately without unwinding while a sibling is alive.
+    runs.push(Promise.resolve().then(() => (dependencies.run ?? run)(...args)).then(
+      (result) => result,
+      (error) => {
+        if (!failed) firstError = error;
+        failed = true;
+        teardownUnconfirmed ||= error?.teardownUnconfirmed === true;
+      },
+    ));
+  };
   try {
-    const plan = await buildPlan(mode, tempDir);
+    const plan = await (dependencies.buildPlan ?? buildPlan)(mode, tempDir);
     // Registry-declared tsx configs run through a generated overlay (owner-
     // relative aliases extending the checked-in base config) written into the
     // same temp directory the batch files already live in; main() removes it.
-    const tsxOverlay = plan.tsxConfig
-      ? createTsconfigOverlay(path.join(repoRoot, plan.tsxConfig), { directory: tempDir })
-      : null;
+    const tsxOverlay = (dependencies.createTsconfigOverlay ?? createTsconfigOverlay)(path.join(repoRoot, plan.tsxConfig ?? 'application/hosts/vscode/tsconfig.json'), {
+      directory: tempDir, sdkPath: runtime.sdkPath,
+    });
     const tsxCli = path.join(plan.cwd, 'node_modules', 'tsx', 'dist', 'cli.mjs');
     const configArgs = tsxOverlay ? [`--tsconfig=${tsxOverlay.configPath}`] : [];
     const common = [tsxCli, '--test', ...configArgs, `--test-reporter=${reporter}`];
@@ -285,27 +314,39 @@ async function main() {
       plan.directFiles,
       primaryWrappers,
     );
-    const runs = [run(
+    // Prepare both contexts before launching either child.
+    const forceExitContext = plan.forceExitFiles.length > 0
+      ? await writeAccountingContext(tempDir, 'force-exit', plan.forceExitFiles, plan.forceExitFiles)
+      : null;
+    launch(
       process.execPath,
       [...common, `--test-concurrency=${Math.min(testConcurrency ?? plan.batches.length, plan.batches.length)}`, ...plan.batches],
       plan.cwd,
-      { [TEST_FILE_ACCOUNTING_ENV]: primaryContext },
-    )];
+      { [TEST_FILE_ACCOUNTING_ENV]: primaryContext, TSX_TSCONFIG_PATH: tsxOverlay.configPath }, signal,
+    );
     if (plan.forceExitFiles.length > 0) {
-      const forceExitContext = await writeAccountingContext(tempDir, 'force-exit', plan.forceExitFiles, plan.forceExitFiles);
-      runs.push(run(
+      launch(
         process.execPath,
         [...common, '--test-force-exit', ...plan.forceExitFiles],
         plan.cwd,
-        { [TEST_FILE_ACCOUNTING_ENV]: forceExitContext },
-      ));
+        { [TEST_FILE_ACCOUNTING_ENV]: forceExitContext, TSX_TSCONFIG_PATH: tsxOverlay.configPath }, signal,
+      );
     }
     const results = await Promise.all(runs);
+    if (failed) {
+      if (teardownUnconfirmed) {
+        firstError = Object.assign(new Error(String(firstError?.message ?? firstError), { cause: firstError }), { teardownUnconfirmed: true });
+      }
+      throw firstError;
+    }
     const report = merge(results, performance.now() - startedAt, plan.expectedFiles);
     process.stdout.write(`${REPORT_PREFIX}${JSON.stringify(report)}\n`);
     if (!report.summary.success) process.exitCode = 1;
   } finally {
-    await rm(tempDir, { recursive: true, force: true });
+    // Also drain on setup/dispatch errors. Unknown tree state retains all
+    // batch/config/accounting files, just as runtime selection retains artifacts.
+    await Promise.all(runs);
+    if (!teardownUnconfirmed) await rm(tempDir, { recursive: true, force: true });
   }
 }
 
@@ -313,4 +354,21 @@ async function main() {
 // unit-tested (drift check) via `import` without side effects.
 const invokedDirectly = process.argv[1]
   && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
-if (invokedDirectly) await main();
+if (invokedDirectly) {
+  const abort = abortOnProcessSignals();
+  let teardownUnconfirmed = false;
+  try {
+    const selection = extractRuntimeArgs(process.argv.slice(2));
+    if (selection.args.some((arg) => ['--help', '-h', '--list'].includes(arg))) {
+      console.log('Usage: run-fast-batched-tests.mjs <mode> [--pi-runtime <absolute artifact root>]');
+    } else {
+      const args = parseFastBatchArgs(selection.args);
+      if (!args.mode) throw new Error('A fast batch mode is required');
+      await withVerificationRuntime(selection, abort.signal, (runtime) => runSuite(args, runtime, abort.signal));
+    }
+  } catch (error) {
+    teardownUnconfirmed = error?.teardownUnconfirmed === true;
+    console.error(error.message);
+    process.exitCode = 1;
+  } finally { if (!teardownUnconfirmed) abort.dispose(); }
+}

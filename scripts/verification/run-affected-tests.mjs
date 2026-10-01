@@ -16,13 +16,15 @@ import {
   withProcessTreeIsolation,
 } from '../lib/process-watchdog.mjs';
 
+import { extractRuntimeArgs, runtimeArgs, verificationChildEnv, withVerificationRuntime } from './verification-runtime.mjs';
+
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
 function runNodeScript(script, args, signal, stdin) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [script, ...args], withProcessTreeIsolation({
       cwd: repoRoot,
-      env: withoutPiHarnessEnv(withoutGitRepositoryEnv(process.env)),
+      env: verificationChildEnv(withoutPiHarnessEnv(withoutGitRepositoryEnv(process.env))),
       stdio: stdin === undefined ? 'inherit' : ['pipe', 'inherit', 'inherit'],
       windowsHide: true,
     }));
@@ -37,7 +39,8 @@ function runNodeScript(script, args, signal, stdin) {
     });
     child.on('close', async (code) => {
       const cleanup = await watchdog.settle().catch(() => ({ gone: false }));
-      resolve(watchdog.timedOut || watchdog.aborted || !cleanup.gone ? 1 : (code ?? 0));
+      if (!cleanup.gone) { reject(new Error('Affected-test tree teardown is unconfirmed')); return; }
+      resolve(watchdog.timedOut || watchdog.aborted ? 1 : (code ?? 0));
     });
     if (stdin !== undefined) {
       child.stdin.on('error', () => {});
@@ -55,8 +58,23 @@ export async function buildAffectedTestPlan(root = repoRoot) {
   return { changedFiles, plan: planAffectedTests(root, changedFiles) };
 }
 
+export async function runAffectedSelection(plan, selection, signal, run = runNodeScript, dependencies = {}) {
+  if (plan.mode === 'none') return 0;
+  return withVerificationRuntime(selection, signal, (runtime) => {
+    if (plan.mode === 'full') return run(path.join(repoRoot, 'scripts/verification/run-tests.mjs'), ['--fast', ...runtimeArgs(runtime)], signal);
+    const invocation = buildTestFilesInvocation(plan.testFiles);
+    return run(path.join(repoRoot, 'scripts/verification/run-test-files.mjs'), [...invocation.args, ...runtimeArgs(runtime)], signal, invocation.stdin);
+  }, dependencies);
+}
+
 async function main() {
-  const forceAll = process.argv.slice(2).includes('--all');
+  const selection = extractRuntimeArgs(process.argv.slice(2));
+  if (selection.args.some((arg) => arg === '--help' || arg === '-h' || arg === '--list')) {
+    console.log('Usage: run-affected-tests.mjs [--all] [--pi-runtime <absolute artifact root>]');
+    return;
+  }
+  if (selection.args.some((arg) => arg !== '--all')) throw new Error('Unknown affected-test argument');
+  const forceAll = selection.args.includes('--all');
   const { changedFiles, plan } = forceAll
     ? { changedFiles: [], plan: { mode: 'full', testFiles: [], reasons: ['--all requested'] } }
     : await buildAffectedTestPlan();
@@ -71,20 +89,12 @@ async function main() {
   const abort = abortOnProcessSignals();
   let exitCode;
   try {
-    if (plan.mode === 'full') {
-      console.log(`Running the full fast suite (${plan.reasons.join('; ')}).`);
-      exitCode = await runNodeScript(path.join(repoRoot, 'scripts', 'verification', 'run-tests.mjs'), ['--fast'], abort.signal);
-    } else {
+    if (plan.mode === 'full') console.log(`Running the full fast suite (${plan.reasons.join('; ')}).`);
+    else {
       console.log(`Running ${plan.testFiles.length} affected test file(s) in parallel.`);
       for (const reason of plan.reasons) console.log(`- ${reason}`);
-      const invocation = buildTestFilesInvocation(plan.testFiles);
-      exitCode = await runNodeScript(
-        path.join(repoRoot, 'scripts', 'verification', 'run-test-files.mjs'),
-        invocation.args,
-        abort.signal,
-        invocation.stdin,
-      );
     }
+    exitCode = await runAffectedSelection(plan, selection, abort.signal);
   } finally {
     abort.dispose();
   }
@@ -93,4 +103,4 @@ async function main() {
 
 const invokedDirectly = process.argv[1]
   && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
-if (invokedDirectly) await main();
+if (invokedDirectly) await main().catch((error) => { console.error(error.message); process.exitCode = 1; });

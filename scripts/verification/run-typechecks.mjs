@@ -14,6 +14,8 @@ import {
 import { createTsconfigOverlay, resolveTypeScriptCompiler } from '../lib/package-resolution.mjs';
 import { TYPECHECK_PROJECTS } from '../lib/test-packages.mjs';
 
+import { extractRuntimeArgs, withVerificationRuntime } from './verification-runtime.mjs';
+
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
 // Typecheck projects (ids, tsconfigs, per-project compiler selection) are
@@ -91,23 +93,27 @@ export function resolveProjectCompiler(project, projectRoot = repoRoot) {
   return resolveTypeScriptCompiler({ dependencyOwnerRoot: ownerRoot });
 }
 
-function runProject(project, signal) {
+export function runProject(project, signal, runtime, dependencies = {}) {
   const started = performance.now();
   const configPath = path.isAbsolute(project.config) ? project.config : path.join(repoRoot, project.config);
-  const overlay = project.includeOwnerDependencies
-    ? createTsconfigOverlay(configPath, { typescript: true, includeOwnerDependencies: true })
-    : null;
-  return new Promise((resolve) => {
-    const child = spawn(process.execPath, [
+  const overlay = (dependencies.createTsconfigOverlay ?? createTsconfigOverlay)(configPath, {
+    typescript: true,
+    includeOwnerDependencies: project.includeOwnerDependencies === true,
+    sdkPath: runtime.sdkPath,
+  });
+  let launched = false;
+  return new Promise((resolve, reject) => {
+    const child = (dependencies.spawn ?? spawn)(process.execPath, [
       resolveProjectCompiler(project),
       '--noEmit',
       '--project', overlay?.configPath ?? configPath,
       '--incremental',
-      '--tsBuildInfoFile', path.join(repoRoot, 'node_modules', '.cache', 'typecheck', `${project.id}.tsbuildinfo`),
+      '--tsBuildInfoFile', path.join(overlay.directory, `${project.id}.tsbuildinfo`),
     ], withProcessTreeIsolation({ cwd: repoRoot, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }));
+    launched = true;
     let output = '';
     const timeoutMs = resolveChildProcessTimeoutMs();
-    const watchdog = watchChildProcess(child, {
+    const watchdog = (dependencies.watchChildProcess ?? watchChildProcess)(child, {
       timeoutMs,
       signal,
       label: `${project.id} typecheck`,
@@ -119,13 +125,18 @@ function runProject(project, signal) {
     child.stdout.on('data', (chunk) => { output += chunk; });
     child.stderr.on('data', (chunk) => { output += chunk; });
     child.on('error', async (error) => {
-      await watchdog.settle().catch(() => {});
-      overlay?.dispose();
-      resolve({ project, code: 1, output: String(error), durationMs: performance.now() - started });
+      const cleanup = await watchdog.settle().catch(() => ({ gone: false }));
+      if (cleanup.gone) overlay.dispose();
+      else error.teardownUnconfirmed = true;
+      reject(error);
     });
     child.on('close', async (code) => {
       const cleanup = await watchdog.settle().catch(() => ({ gone: false }));
-      overlay?.dispose();
+      if (!cleanup.gone) {
+        reject(Object.assign(new Error(`${project.id}: typecheck tree teardown is unconfirmed`), { teardownUnconfirmed: true }));
+        return;
+      }
+      overlay.dispose();
       resolve({
         project,
         code: watchdog.timedOut || watchdog.aborted || !cleanup.gone ? 1 : (code ?? 1),
@@ -133,19 +144,41 @@ function runProject(project, signal) {
         durationMs: performance.now() - started,
       });
     });
+  }).catch((error) => {
+    // Synchronous setup failure launched no process. Unconfirmed trees retain
+    // their overlay, even when the error/close events have both fired.
+    if (!launched) overlay.dispose();
+    throw error;
   });
 }
 
 export async function runWithConcurrency(projects, concurrency, run = runProject, signal) {
   const results = new Array(projects.length);
   let next = 0;
+  let failed = false;
+  let firstError;
+  let teardownUnconfirmed = false;
   async function worker() {
-    while (next < projects.length && !signal?.aborted) {
+    while (next < projects.length && !signal?.aborted && !failed) {
       const index = next++;
-      results[index] = await run(projects[index], signal);
+      try {
+        results[index] = await run(projects[index], signal);
+      } catch (error) {
+        if (!failed) firstError = error;
+        failed = true;
+        teardownUnconfirmed ||= error?.teardownUnconfirmed === true;
+      }
     }
   }
+  // A failed worker stops new dispatch, but every already-launched sibling
+  // must finish teardown before the caller disposes signals/runtime resources.
   await Promise.all(Array.from({ length: Math.min(concurrency, projects.length) }, worker));
+  if (failed) {
+    if (teardownUnconfirmed) {
+      firstError = Object.assign(new Error(String(firstError?.message ?? firstError), { cause: firstError }), { teardownUnconfirmed: true });
+    }
+    throw firstError;
+  }
   return results;
 }
 
@@ -155,7 +188,8 @@ function printHelp() {
 
 async function main() {
   try {
-    const args = parseArgs(process.argv.slice(2));
+    const selection = extractRuntimeArgs(process.argv.slice(2));
+    const args = parseArgs(selection.args);
     if (args.help) return printHelp();
     if (args.list) {
       for (const project of TYPECHECK_PROJECTS) console.log(project.id);
@@ -165,10 +199,15 @@ async function main() {
     const started = performance.now();
     const processAbort = abortOnProcessSignals();
     let results;
+    let teardownUnconfirmed = false;
     try {
-      results = await runWithConcurrency(projects, args.concurrency, runProject, processAbort.signal);
+      results = await withVerificationRuntime(selection, processAbort.signal, (runtime) =>
+        runWithConcurrency(projects, args.concurrency, (project, signal) => runProject(project, signal, runtime), processAbort.signal));
+    } catch (error) {
+      teardownUnconfirmed = error?.teardownUnconfirmed === true;
+      throw error;
     } finally {
-      processAbort.dispose();
+      if (!teardownUnconfirmed) processAbort.dispose();
     }
     for (const result of results.filter(Boolean)) {
       const status = result.code === 0 ? '✓' : '✖';

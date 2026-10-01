@@ -24,6 +24,8 @@ import {
   withProcessTreeIsolation,
 } from '../lib/process-watchdog.mjs';
 
+import { extractRuntimeArgs, runtimeArgs, verificationChildEnv, withVerificationRuntime } from './verification-runtime.mjs';
+
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
 /**
@@ -63,7 +65,7 @@ function runRunner(script, args, signal) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [path.join(repoRoot, 'scripts', 'verification', script), ...args], withProcessTreeIsolation({
       cwd: repoRoot,
-      env: withoutPiHarnessEnv(withoutGitRepositoryEnv(process.env)),
+      env: verificationChildEnv(withoutPiHarnessEnv(withoutGitRepositoryEnv(process.env))),
       stdio: 'inherit',
       windowsHide: true,
     }));
@@ -78,13 +80,21 @@ function runRunner(script, args, signal) {
     });
     child.on('close', async (code) => {
       const cleanup = await watchdog.settle().catch(() => ({ gone: false }));
-      resolve(watchdog.timedOut || watchdog.aborted || !cleanup.gone ? 1 : (code ?? 0));
+      if (!cleanup.gone) { reject(new Error('Package-group tree teardown is unconfirmed')); return; }
+      resolve(watchdog.timedOut || watchdog.aborted ? 1 : (code ?? 0));
     });
   });
 }
 
+export async function runPackageGroup(selection, invocation, signal, dependencies = {}) {
+  const run = dependencies.runRunner ?? runRunner;
+  return withVerificationRuntime(selection, signal, (runtime) =>
+    run(invocation.script, [...runtimeArgs(runtime), ...invocation.args], signal), dependencies);
+}
+
 async function main() {
-  const [runner, group, ...forwarded] = process.argv.slice(2);
+  const selection = extractRuntimeArgs(process.argv.slice(2));
+  const [runner, group, ...forwarded] = selection.args;
   if (!runner || !group || runner === '--help' || runner === '-h') {
     printHelp();
     if (!runner || runner === '--help' || runner === '-h') return;
@@ -104,7 +114,10 @@ async function main() {
 
   const abort = abortOnProcessSignals();
   try {
-    const exitCode = await runRunner(invocation.script, invocation.args, abort.signal);
+    const informational = forwarded.some((arg) => ['--help', '-h', '--list'].includes(arg));
+    const exitCode = informational
+      ? await runRunner(invocation.script, invocation.args, abort.signal)
+      : await runPackageGroup(selection, invocation, abort.signal);
     if (exitCode !== 0) process.exitCode = exitCode;
   } finally {
     abort.dispose();
@@ -113,4 +126,4 @@ async function main() {
 
 const invokedDirectly = process.argv[1]
   && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
-if (invokedDirectly) await main();
+if (invokedDirectly) await main().catch((error) => { console.error(error.message); process.exitCode = 1; });

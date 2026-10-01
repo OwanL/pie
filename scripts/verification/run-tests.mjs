@@ -19,6 +19,8 @@ import { createTsconfigOverlay, resolveOwnerTsx } from '../lib/package-resolutio
 import { PACKAGE_REGISTRY, ROOT_BATCH_PACKAGE_IDS } from '../lib/test-packages.mjs';
 import { resolveLocalTsx } from './run-test-files.mjs';
 
+import { extractRuntimeArgs, runtimeArgs, verificationChildEnv, withVerificationRuntime } from './verification-runtime.mjs';
+
 const REPORT_PREFIX = '__PI_TEST_SUMMARY__';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '../..');
@@ -663,7 +665,7 @@ export function groupFastPackageConfigs(configs) {
   });
 }
 
-function repoTestFingerprint() {
+function repoTestFingerprint(runtimeIdentity) {
   const git = (...args) => {
     const result = spawnSync('git', ['-C', repoRoot, ...args], { encoding: 'buffer', windowsHide: true });
     if (result.status !== 0) {
@@ -673,6 +675,7 @@ function repoTestFingerprint() {
   };
   const hash = createHash('sha256');
   hash.update(process.version);
+  hash.update(runtimeIdentity);
   hash.update(git('rev-parse', 'HEAD'));
   hash.update(git('diff', '--binary', 'HEAD'));
   const untracked = git('ls-files', '--others', '--exclude-standard', '-z')
@@ -910,7 +913,7 @@ function runChildProcess(command, args, cwd, signal, envOverrides = {}, verifyCl
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, withProcessTreeIsolation({
       cwd,
-      env: { ...withoutPiHarnessEnv(withoutGitRepositoryEnv(process.env)), FORCE_COLOR: '0', ...envOverrides },
+      env: verificationChildEnv({ ...withoutPiHarnessEnv(withoutGitRepositoryEnv(process.env)), FORCE_COLOR: '0', ...envOverrides }),
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     }));
@@ -952,7 +955,10 @@ function runChildProcess(command, args, cwd, signal, envOverrides = {}, verifyCl
       } else {
         cleanup = await watchdog.settle().catch((error) => ({ gone: false, survivors: [], diagnostics: [String(error)] }));
       }
-      if (!cleanup.gone) stderr += `\nProcess-tree cleanup failed; surviving owned PIDs: ${cleanup.survivors.join(', ')}.\n`;
+      if (!cleanup.gone) {
+        reject(new Error(`Test tree teardown is unconfirmed: ${cleanup.survivors.join(', ')}`));
+        return;
+      }
       resolve({
         exitCode: watchdog.timedOut || watchdog.aborted || !cleanup.gone ? 1 : (exitCode ?? 0),
         signal: closeSignal,
@@ -965,7 +971,7 @@ function runChildProcess(command, args, cwd, signal, envOverrides = {}, verifyCl
   });
 }
 
-async function runPackage(config, fast = false, integration = false, testArgs = [], signal) {
+async function runPackage(config, fast = false, integration = false, testArgs = [], signal, runtime) {
   const useFastRunner = fast && (config.fastRunner || config.fastBatchMode) && testArgs.length === 0;
   const fastRunner = config.fastRunner ?? path.join(repoRoot, 'scripts', 'verification', 'run-fast-batched-tests.mjs');
   const fastRunnerArgs = buildFastRunnerArgs(config);
@@ -973,9 +979,10 @@ async function runPackage(config, fast = false, integration = false, testArgs = 
   // (owner-relative aliases extending the checked-in base tsconfig) instead of
   // the raw repo-relative path; dedicated fast-batch modes overlay inside
   // their own runner. The overlay is disposed after the run in all paths.
-  const tsxOverlay = !useFastRunner && config.tsxConfig
-    ? createTsconfigOverlay(path.join(repoRoot, config.tsxConfig), {
+  const tsxOverlay = !useFastRunner
+    ? createTsconfigOverlay(path.join(repoRoot, config.tsxConfig ?? 'application/hosts/vscode/tsconfig.json'), {
       includeOwnerDependencies: config.includeOwnerDependencies === true,
+      sdkPath: runtime.sdkPath,
     })
     : null;
   // Invoke the registry-selected tsx CLI directly rather than routing through
@@ -989,11 +996,11 @@ async function runPackage(config, fast = false, integration = false, testArgs = 
       : config.id === 'extension' ? resolveOwnerTsx() : resolveLocalTsx(config.cwd);
     rawResult = await runChildProcess(
       process.execPath,
-      useFastRunner ? [fastRunner, ...fastRunnerArgs] : [tsxCli, ...args],
+      useFastRunner ? [fastRunner, ...fastRunnerArgs, ...runtimeArgs(runtime)] : [tsxCli, ...args],
       config.cwd,
       signal,
       integration ? { PIE_RUN_INTEGRATION_TESTS: '1' } : {},
-      config.id === 'extension' || integration,
+      true,
     );
   } finally {
     tsxOverlay?.dispose();
@@ -1099,7 +1106,7 @@ function aggregateCounts(results) {
  * keeps the original failure (with its diagnostics) — this never masks a real
  * regression, it only absorbs load-induced noise.
  */
-export async function attemptFlakyRerun(result, fast, integration, testArgs, signal, rerunFiles = runFailedFiles) {
+export async function attemptFlakyRerun(result, fast, integration, testArgs, signal, rerunFiles = runFailedFiles, runtime) {
   // The reporter (including the batched runner's aggregate) treats missing or
   // duplicate test-file dispatch as a failure independent of test assertions.
   // A selective rerun can only validate attributed tests, not the original
@@ -1128,7 +1135,7 @@ export async function attemptFlakyRerun(result, fast, integration, testArgs, sig
   if (failedFiles.length === 0) {
     // No file attribution (infrastructure failure / missing summary) — rerun
     // the whole package so the same load conditions apply.
-    const rerun = await runPackage(result.config, fast, integration, testArgs, signal);
+    const rerun = await runPackage(result.config, fast, integration, testArgs, signal, runtime);
     if (rerun.passed) {
       console.log(`⚠ ${result.config.id} failed under parallel load but passed on a full-package rerun — treated as flaky.`);
       return { ...rerun, flakyRerun: true };
@@ -1137,7 +1144,7 @@ export async function attemptFlakyRerun(result, fast, integration, testArgs, sig
     return result;
   }
 
-  const rerun = await rerunFiles(failedFiles, signal);
+  const rerun = await rerunFiles(failedFiles, signal, runtime);
   if (rerun.passed) {
     console.log(`⚠ ${result.config.id}: ${failedFiles.length} failing test file(s) (${failedFiles.join(', ')}) passed on rerun — treated as flaky, not cached.`);
     for (const failure of result.failures) console.log(indent(formatFailureDetails(failure), '    '));
@@ -1164,14 +1171,14 @@ export async function attemptFlakyRerun(result, fast, integration, testArgs, sig
 }
 
 /** Re-run specific repo-relative test files through the tight dev-loop runner. */
-async function runFailedFiles(files, signal) {
+async function runFailedFiles(files, signal, runtime) {
   const rawResult = await runChildProcess(
     process.execPath,
-    [path.join(repoRoot, 'scripts', 'verification', 'run-test-files.mjs'), ...files],
+    [path.join(repoRoot, 'scripts', 'verification', 'run-test-files.mjs'), ...files, ...runtimeArgs(runtime)],
     repoRoot,
     signal,
     {},
-    false,
+    true,
   );
   return {
     passed: rawResult.exitCode === 0 && !rawResult.timedOut && !rawResult.aborted && rawResult.signal === null,
@@ -1180,8 +1187,10 @@ async function runFailedFiles(files, signal) {
 
 async function main() {
   let parsedArgs;
+  let selection;
   try {
-    parsedArgs = parseArgs(process.argv.slice(2));
+    selection = extractRuntimeArgs(process.argv.slice(2));
+    parsedArgs = parseArgs(selection.args);
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     printHelp();
@@ -1208,6 +1217,16 @@ async function main() {
     return;
   }
 
+  const processAbort = abortOnProcessSignals();
+  try {
+    await withVerificationRuntime(selection, processAbort.signal, (runtime) =>
+      runSelectedPackages(parsedArgs, selectedPackages, runtime, processAbort.signal));
+  } finally {
+    processAbort.dispose();
+  }
+}
+
+async function runSelectedPackages(parsedArgs, selectedPackages, runtime, signal) {
   const cacheable = parsedArgs.fast
     && parsedArgs.selected.length === 0
     && !parsedArgs.integration
@@ -1216,7 +1235,7 @@ async function main() {
   let fingerprint;
   if (cacheable) {
     try {
-      fingerprint = repoTestFingerprint();
+      fingerprint = repoTestFingerprint(runtime.identity);
       const cached = await readFastCache(fingerprint);
       if (cached) {
         const totals = cached.totals;
@@ -1236,39 +1255,36 @@ async function main() {
   // across the four resulting runners.
   const executionConfigs = parsedArgs.fast ? groupFastPackageConfigs(selectedPackages) : selectedPackages;
 
-  const processAbort = abortOnProcessSignals();
-  let results;
-  try {
-    const runConfig = (config) => runPackage(
-      config,
-      parsedArgs.fast,
-      parsedArgs.integration,
-      parsedArgs.testArgs,
-      processAbort.signal,
-    );
-    const isBroadFastSuite = parsedArgs.fast
-      && parsedArgs.selected.length === 0
-      && parsedArgs.testArgs.length === 0;
-    results = isBroadFastSuite
-      ? await runFastPackageQueue(executionConfigs, runConfig)
-      : await Promise.all(executionConfigs.map(runConfig));
-    // Absorb load-induced flakiness in the fast loop: re-run failed packages
-    // once under minimal contention before declaring a red suite. Coverage
-    // (verify) runs, integration runs, and pattern-filtered runs stay strict.
-    if (parsedArgs.fast && parsedArgs.testArgs.length === 0 && !parsedArgs.integration) {
-      results = await Promise.all(results.map(async (result) => {
-        if (result.passed) return result;
-        return await attemptFlakyRerun(
-          result,
-          parsedArgs.fast,
-          parsedArgs.integration,
-          parsedArgs.testArgs,
-          processAbort.signal,
-        );
-      }));
-    }
-  } finally {
-    processAbort.dispose();
+  const runConfig = (config) => runPackage(
+    config,
+    parsedArgs.fast,
+    parsedArgs.integration,
+    parsedArgs.testArgs,
+    signal,
+    runtime,
+  );
+  const isBroadFastSuite = parsedArgs.fast
+    && parsedArgs.selected.length === 0
+    && parsedArgs.testArgs.length === 0;
+  let results = isBroadFastSuite
+    ? await runFastPackageQueue(executionConfigs, runConfig)
+    : await Promise.all(executionConfigs.map(runConfig));
+  // Absorb load-induced flakiness in the fast loop: re-run failed packages
+  // once under minimal contention before declaring a red suite. Coverage
+  // (verify) runs, integration runs, and pattern-filtered runs stay strict.
+  if (parsedArgs.fast && parsedArgs.testArgs.length === 0 && !parsedArgs.integration) {
+    results = await Promise.all(results.map(async (result) => {
+      if (result.passed) return result;
+      return await attemptFlakyRerun(
+        result,
+        parsedArgs.fast,
+        parsedArgs.integration,
+        parsedArgs.testArgs,
+        signal,
+        runFailedFiles,
+        runtime,
+      );
+    }));
   }
   for (const result of results) {
     printPackageResult(result);
@@ -1290,7 +1306,7 @@ async function main() {
     if (fingerprint && !results.some((result) => result.flakyRerun)) {
       try {
         // Do not cache a pass if files changed while the suite was running.
-        if (repoTestFingerprint() === fingerprint) {
+        if (repoTestFingerprint(runtime.identity) === fingerprint) {
           await writeFastCache(fingerprint, totals);
         }
       } catch {
@@ -1310,5 +1326,5 @@ async function main() {
 const invokedDirectly = process.argv[1]
   && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
 if (invokedDirectly) {
-  await main();
+  await main().catch((error) => { console.error(error.message); process.exitCode = 1; });
 }

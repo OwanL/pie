@@ -131,7 +131,7 @@ test('candidate overlay for an unconfigured group uses root SDK config and binds
   assert.equal(code, 0, 'detached fixture must execute imports through the candidate aliases');
 });
 
-test('CLI resolves relative SDK paths from repoRoot and rejects invalid candidates before test discovery', (t) => {
+test('CLI rejects unpublished SDK fixtures and relative workspace candidates before discovery', (t) => {
   const fixtureRoot = makeFixture(t);
   const sdkPath = makeCandidateSdk(fixtureRoot);
   const missing = spawnSync(process.execPath, [runnerPath, '--sdk-path'], {
@@ -139,7 +139,7 @@ test('CLI resolves relative SDK paths from repoRoot and rejects invalid candidat
   });
   assert.equal(missing.error, undefined, missing.error?.message);
   assert.equal(missing.status, 1);
-  assert.match(`${missing.stdout}\n${missing.stderr}`, /--sdk-path requires a candidate coding-agent package directory/);
+  assert.match(`${missing.stdout}\n${missing.stderr}`, /--sdk-path requires an artifact path/);
 
   const invalidCandidate = path.join(fixtureRoot, 'not-an-sdk');
   const invalid = spawnSync(process.execPath, [
@@ -153,7 +153,7 @@ test('CLI resolves relative SDK paths from repoRoot and rejects invalid candidat
   assert.equal(invalid.status, 1);
   const invalidOutput = `${invalid.stdout}\n${invalid.stderr}`;
   assert.match(invalidOutput, /Invalid --sdk-path candidate/);
-  assert.match(invalidOutput, /Expected @earendil-works\/pi-coding-agent package manifest/);
+  assert.match(invalidOutput, /verified materialized/i);
   assert.doesNotMatch(invalidOutput, /Test file not found/);
 
   const relativeCandidate = path.relative(repoRoot, sdkPath);
@@ -165,6 +165,7 @@ test('CLI resolves relative SDK paths from repoRoot and rejects invalid candidat
   assert.equal(valid.error, undefined, valid.error?.message);
   assert.equal(valid.status, 1);
   const validOutput = `${valid.stdout}\n${valid.stderr}`;
-  assert.doesNotMatch(validOutput, /Invalid --sdk-path candidate/);
-  assert.match(validOutput, /Test file not found: scripts\/verification\/test\/does-not-exist\.test\.mjs/);
+  assert.match(validOutput, /Invalid --sdk-path candidate/);
+  assert.match(validOutput, /verified materialized/i);
+  assert.doesNotMatch(validOutput, /Test file not found/);
 });

@@ -2,7 +2,7 @@
 
 import { spawn } from 'node:child_process';
 import { writeFileSync, readFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
+import { createRequire, isBuiltin } from 'node:module';
 import { mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -20,6 +20,9 @@ import {
   TEST_FILE_ACCOUNTING_ENV,
   TEST_FILE_MARKER,
 } from './test-reporter.mjs';
+
+import { extractRuntimeArgs, verificationChildEnv, withVerificationRuntime } from './verification-runtime.mjs';
+import { abortOnProcessSignals, killProcessTree, watchChildProcess, withProcessTreeIsolation, resolveChildProcessTimeoutMs } from '../lib/process-watchdog.mjs';
 
 const REPORT_PREFIX = '__PI_TEST_SUMMARY__';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -150,14 +153,15 @@ function parseReport(output) {
   return line ? JSON.parse(line.slice(REPORT_PREFIX.length)) : null;
 }
 
-function run(command, args, cwd, onSpawn = undefined, extraEnv = {}) {
+function run(command, args, cwd, onSpawn = undefined, extraEnv = {}, signal) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
+    const child = spawn(command, args, withProcessTreeIsolation({
       cwd,
-      env: withoutPiHarnessEnv({ ...process.env, FORCE_COLOR: '0', ...extraEnv }),
+      env: verificationChildEnv(withoutPiHarnessEnv({ ...process.env, FORCE_COLOR: '0', ...extraEnv })),
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
-    });
+    }));
+    const watchdog = watchChildProcess(child, { signal, timeoutMs: resolveChildProcessTimeoutMs(), label: 'bundled extension tests' });
     onSpawn?.(child);
     let stdout = '';
     let stderr = '';
@@ -165,8 +169,12 @@ function run(command, args, cwd, onSpawn = undefined, extraEnv = {}) {
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', (chunk) => { stdout += chunk; });
     child.stderr.on('data', (chunk) => { stderr += chunk; });
-    child.on('error', reject);
-    child.on('close', (code, signal) => resolve({ code: code ?? 1, signal, stdout, stderr }));
+    child.on('error', async (error) => { await watchdog.settle().catch(() => {}); reject(error); });
+    child.on('close', async (code, closeSignal) => {
+      const cleanup = await watchdog.settle().catch(() => ({ gone: false }));
+      if (!cleanup.gone) { reject(new Error('Extension test tree teardown is unconfirmed')); return; }
+      resolve({ code: watchdog.timedOut || watchdog.aborted ? 1 : (code ?? 1), signal: closeSignal, stdout, stderr });
+    });
   });
 }
 
@@ -340,7 +348,7 @@ function mergeReports(results, durationMs, tempDir, bundledSourceFiles, enumerat
   };
 }
 
-async function main() {
+async function runSuite(runtime, signal) {
   const startedAt = performance.now();
   const discoveredTestFiles = [];
   for (const { relativeDir, root } of EXTENSION_TEST_ROOTS) {
@@ -376,6 +384,7 @@ async function main() {
     const bundleSourcePath = (bundledFilePath) => sourceFilesByBundleOutput.get(comparablePath(bundledFilePath))
       ?? path.relative(tempDir, bundledFilePath).replace(/\\/gu, '/').replace(/\.js$/u, '.ts');
     let unsafeChild;
+    let unsafeRun;
     try {
     const standaloneSources = safe.filter((file) => !batchable.has(file) && !scopedBatchable.has(file));
     const standaloneBundles = standaloneSources.map((file) => extensionBundleOutputPath(tempDir, file));
@@ -388,14 +397,14 @@ async function main() {
     );
     const tsxCli = resolveOwnerTsx();
     const tsxOverlay = createTsconfigOverlay(path.join(ownerRoot, 'tsconfig.json'), {
-      directory: tempDir, includeOwnerDependencies: true,
+      directory: tempDir, includeOwnerDependencies: true, sdkPath: runtime.sdkPath,
     });
     const reporterArg = `--test-reporter=${reporterSpecifier}`;
     const bundledArgs = ['--test', '--test-force-exit', '--test-concurrency=16', reporterArg];
     const isolatedArgs = ['--test', '--test-force-exit', '--test-concurrency=10', reporterArg];
     // The small isolated tsx subset can run while esbuild prepares the bundled
     // wave, hiding both compiler and tsx startup latency.
-    const unsafeRun = run(
+    unsafeRun = run(
       process.execPath,
       [tsxCli, `--tsconfig=${tsxOverlay.configPath}`, ...isolatedArgs, ...unsafe.map(resolveExtensionTestArgument)],
       extensionPackageRoot,
@@ -403,9 +412,13 @@ async function main() {
       {
         PIE_LIVE_PIPELINE_TRACE_DIR: traceDirs[1],
         [TEST_FILE_ACCOUNTING_ENV]: unsafeAccountingContext,
-      },
+        TSX_TSCONFIG_PATH: tsxOverlay.configPath,
+      }, signal,
     );
 
+    // Preserve the rejection for the join below without an unhandled rejection
+    // while esbuild is still preparing the other wave.
+    void unsafeRun.catch(() => {});
     const { build } = ownerRequire('esbuild');
     const bundlePiPackageDeps = {
       name: 'bundle-pi-package-deps',
@@ -415,7 +428,22 @@ async function main() {
         // dependency owner's node_modules. Resolve from that anchor so we can tell
         // which bare imports the runtime will and will not find.
         const bundleAnchorRequire = createRequire(path.join(ownerRoot, 'node_modules', '.pi-anchor.cjs'));
+        const aliases = JSON.parse(readFileSync(tsxOverlay.configPath, 'utf8')).compilerOptions.paths;
         esbuild.onResolve({ filter: /^[^./]/ }, (args) => {
+          if (isBuiltin(args.path)) return null;
+          const exact = aliases[args.path]?.[0];
+          const wildcard = Object.keys(aliases).find((key) => key.endsWith('/*') && args.path.startsWith(key.slice(0, -1)));
+          const selected = exact ?? (wildcard ? aliases[wildcard][0].replace('*', args.path.slice(wildcard.length - 1)) : undefined);
+          if (selected?.startsWith(runtime.artifactDir + path.sep)) return { path: selected, external: false };
+          if (/^(?:@earendil-works|@mariozechner)\/pi-(?:ai|agent-core|tui|coding-agent)(?:\/|$)/u.test(args.path)
+            || /^(?:@sinclair\/)?typebox(?:\/|$)/u.test(args.path)) {
+            throw new Error(`Missing verified artifact alias: ${args.path}`);
+          }
+          if (args.resolveDir.startsWith(runtime.artifactDir + path.sep)) {
+            const resolved = createRequire(path.join(args.resolveDir, '.pi-anchor.cjs')).resolve(args.path);
+            if (!resolved.startsWith(runtime.artifactDir + path.sep)) throw new Error(`Artifact dependency escaped: ${args.path}`);
+            return { path: resolved, external: false };
+          }
           // The owner overlay maps bare vite to an absolute dependency file.
           // Keep Vite external: its own import.meta.url must resolve relative to
           // its installed package, not to the temporary CJS test bundle.
@@ -517,7 +545,8 @@ async function main() {
       run(process.execPath, [...bundledArgs, ...bundledFiles], extensionPackageRoot, undefined, {
         PIE_LIVE_PIPELINE_TRACE_DIR: traceDirs[0],
         [TEST_FILE_ACCOUNTING_ENV]: bundledAccountingContext,
-      }),
+        TSX_TSCONFIG_PATH: tsxOverlay.configPath,
+      }, signal),
       unsafeRun,
     ]);
     const report = mergeReports(
@@ -530,11 +559,27 @@ async function main() {
     process.stdout.write(`${REPORT_PREFIX}${JSON.stringify(report)}\n`);
     if (!report.summary.success) process.exitCode = 1;
     } finally {
-      if (unsafeChild?.exitCode === null && unsafeChild?.signalCode === null) unsafeChild.kill();
+      if (unsafeChild?.exitCode === null && unsafeChild?.signalCode === null) {
+        const cleanup = await killProcessTree(unsafeChild);
+        if (!cleanup.gone) throw new Error('Unsafe extension wave teardown is unconfirmed');
+      }
+      await unsafeRun;
     }
   });
 }
 
 const invokedDirectly = process.argv[1]
   && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
-if (invokedDirectly) await main();
+if (invokedDirectly) {
+  const abort = abortOnProcessSignals();
+  try {
+    const selection = extractRuntimeArgs(process.argv.slice(2));
+    if (selection.args.some((arg) => ['--help', '-h', '--list'].includes(arg))) {
+      console.log('Usage: run-fast-extension-tests.mjs [--pi-runtime <absolute artifact root>]');
+    } else {
+      if (selection.args.length) throw new Error('Unknown fast extension runner argument');
+      await withVerificationRuntime(selection, abort.signal, (runtime) => runSuite(runtime, abort.signal));
+    }
+  } catch (error) { console.error(error.message); process.exitCode = 1; }
+  finally { abort.dispose(); }
+}
