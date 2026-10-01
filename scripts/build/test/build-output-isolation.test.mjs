@@ -101,6 +101,8 @@ function makeFixture(t) {
       args: process.argv.slice(2),
       outputDir: path.resolve(outDir),
       envOutputDir: process.env.PIE_BUILD_OUTPUT_DIR ?? null,
+      envPiRuntimeSdkPath: process.env.PIE_BUILD_PI_RUNTIME_SDK_PATH ?? null,
+      envPiRuntimeIdentity: process.env.PIE_BUILD_PI_RUNTIME_IDENTITY ?? null,
     };
     fs.writeFileSync(path.join(outDir, 'fixture-vite-' + (nodeMode ? 'node' : 'webview') + '.json'), JSON.stringify(record, null, 2));
     const buildId = '0123456789abcdefabcd';
@@ -127,6 +129,8 @@ function makeFixture(t) {
       args,
       outputDir: path.resolve(outputDir),
       envOutputDir: process.env.PIE_BUILD_OUTPUT_DIR ?? null,
+      envPiRuntimeSdkPath: process.env.PIE_BUILD_PI_RUNTIME_SDK_PATH ?? null,
+      envPiRuntimeIdentity: process.env.PIE_BUILD_PI_RUNTIME_IDENTITY ?? null,
     }, null, 2));
     const infoAt = args.indexOf('--tsBuildInfoFile');
     if (infoAt >= 0 && args[infoAt + 1]) {
@@ -188,7 +192,10 @@ test('build --output-dir isolates output, typecheck state, child environment, an
   assert.equal(existsSync(output), false);
 
   // No --no-sync is supplied: output isolation itself must disable all publication.
-  const result = runBuild(fixture, ['--output-dir', output]);
+  const result = runBuild(fixture, ['--output-dir', output], {
+    PIE_BUILD_PI_RUNTIME_SDK_PATH: path.join(fixture.directory, 'inherited-sdk'),
+    PIE_BUILD_PI_RUNTIME_IDENTITY: 'inherited-runtime-identity',
+  });
   assertBuildSucceeded(result);
 
   for (const name of ['extension.js', 'backend.js', 'worker-entry.js', 'analytics-recorder-worker.js', 'analytics-query-worker.js', 'pie-build-id.txt']) {
@@ -199,6 +206,8 @@ test('build --output-dir isolates output, typecheck state, child environment, an
 
   const typecheckRecord = JSON.parse(readFileSync(path.join(output, 'fixture-typecheck.json'), 'utf8'));
   assert.equal(typecheckRecord.envOutputDir, output, 'typecheck child receives the output override');
+  assert.equal(typecheckRecord.envPiRuntimeSdkPath, '', 'typecheck child does not inherit an unselected SDK');
+  assert.equal(typecheckRecord.envPiRuntimeIdentity, '', 'typecheck child does not inherit an unselected SDK identity');
   const buildInfoAt = typecheckRecord.args.indexOf('--tsBuildInfoFile');
   assert.notEqual(buildInfoAt, -1, 'typecheck uses a private incremental-state file');
   const buildInfo = path.resolve(typecheckRecord.args[buildInfoAt + 1]);
@@ -213,6 +222,8 @@ test('build --output-dir isolates output, typecheck state, child environment, an
     const record = JSON.parse(readFileSync(path.join(output, `fixture-vite-${mode}.json`), 'utf8'));
     assert.equal(record.outputDir, output);
     assert.equal(record.envOutputDir, output, `${mode} Vite child receives the output override`);
+    assert.equal(record.envPiRuntimeSdkPath, '', `${mode} Vite child does not inherit an unselected SDK`);
+    assert.equal(record.envPiRuntimeIdentity, '', `${mode} Vite child does not inherit an unselected SDK identity`);
     assert.ok(record.args.includes('--configLoader') && record.args[record.args.indexOf('--configLoader') + 1] === 'runner', `${mode} build uses Vite's runner config loader`);
   }
 
@@ -227,7 +238,11 @@ test('build --output-dir isolates output, typecheck state, child environment, an
 test('build clears inherited output override for the default child output path', (t) => {
   const fixture = makeFixture(t);
   const ignored = path.join(fixture.outputRoot, 'inherited-but-ignored');
-  const result = runBuild(fixture, ['--skip-typecheck', '--no-sync'], { PIE_BUILD_OUTPUT_DIR: ignored });
+  const result = runBuild(fixture, ['--skip-typecheck', '--no-sync'], {
+    PIE_BUILD_OUTPUT_DIR: ignored,
+    PIE_BUILD_PI_RUNTIME_SDK_PATH: path.join(fixture.directory, 'inherited-sdk'),
+    PIE_BUILD_PI_RUNTIME_IDENTITY: 'inherited-runtime-identity',
+  });
   assertBuildSucceeded(result);
 
   const defaultOut = path.join(fixture.owner, 'out');
@@ -238,6 +253,8 @@ test('build clears inherited output override for the default child output path',
     const record = JSON.parse(readFileSync(path.join(defaultOut, `fixture-vite-${mode}.json`), 'utf8'));
     assert.equal(record.outputDir, defaultOut);
     assert.equal(record.envOutputDir, '', 'default Vite children receive a cleared override');
+    assert.equal(record.envPiRuntimeSdkPath, '', 'default Vite children clear an inherited candidate SDK path');
+    assert.equal(record.envPiRuntimeIdentity, '', 'default Vite children clear an inherited candidate identity');
     assert.equal(record.args.includes('--configLoader'), false, 'default config loading is unchanged');
   }
 });

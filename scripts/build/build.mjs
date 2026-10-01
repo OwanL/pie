@@ -1,5 +1,5 @@
 import { watch as fsWatch, mkdirSync } from 'node:fs';
-import { lstat, mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -18,18 +18,32 @@ const { distributionRoot: rootDir, repositoryRoot } = resolvePackageRoots('plann
 // An isolated validation owns a NEW external directory. Never clean an existing
 // caller directory, the checkout, dependencies, or an installed extension.
 // This is a one-shot CLI boundary, not an ambient environment override.
-const outputOptions = process.argv.slice(2).filter((arg) => arg === '--output-dir' || arg.startsWith('--output-dir='));
+const cliArgs = process.argv.slice(2);
+const outputOptions = cliArgs.filter((arg) => arg === '--output-dir' || arg.startsWith('--output-dir='));
 if (outputOptions.length > 1) throw new Error('--output-dir may only be supplied once.');
 const outputOption = outputOptions[0];
 const requestedOutput = outputOption === '--output-dir'
-  ? process.argv[process.argv.indexOf(outputOption) + 1]
+  ? cliArgs[cliArgs.indexOf(outputOption) + 1]
   : outputOption?.slice('--output-dir='.length);
 const isolatedOutput = outputOption !== undefined;
-const watchMode = process.argv.includes('--watch');
-const skipTypecheck = process.argv.includes('--skip-typecheck');
-const noSync = isolatedOutput || process.argv.includes('--no-sync');
-const activate = process.argv.includes('--activate');
+const piRuntimeOptions = cliArgs.filter((arg) => arg === '--pi-runtime' || arg.startsWith('--pi-runtime='));
+if (piRuntimeOptions.length > 1) throw new Error('--pi-runtime may only be supplied once.');
+const piRuntimeOption = piRuntimeOptions[0];
+const requestedPiRuntime = piRuntimeOption === '--pi-runtime'
+  ? cliArgs[cliArgs.indexOf(piRuntimeOption) + 1]
+  : piRuntimeOption?.slice('--pi-runtime='.length);
+const watchMode = cliArgs.includes('--watch');
+const skipTypecheck = cliArgs.includes('--skip-typecheck');
+const noSync = isolatedOutput || cliArgs.includes('--no-sync');
+const activate = cliArgs.includes('--activate');
 if (isolatedOutput && (activate || watchMode)) throw new Error('--output-dir cannot be combined with --activate or --watch.');
+if (piRuntimeOption !== undefined && !isolatedOutput) throw new Error('--pi-runtime requires a safe --output-dir.');
+if (piRuntimeOption !== undefined && (!requestedPiRuntime || requestedPiRuntime.startsWith('--'))) {
+  throw new Error('--pi-runtime requires an artifact root.');
+}
+if (piRuntimeOption !== undefined && !path.isAbsolute(requestedPiRuntime)) {
+  throw new Error('--pi-runtime requires an absolute artifact root.');
+}
 const outDir = isolatedOutput ? await validateOutputDirectory(requestedOutput) : path.join(rootDir, 'out');
 if (activate && noSync) throw new Error('--activate and --no-sync are mutually exclusive.');
 if (activate && watchMode) throw new Error('--activate is a one-shot explicit boundary and cannot run in watch mode.');
@@ -97,6 +111,17 @@ async function validateOutputDirectory(requested) {
   throw new Error('--output-dir must name a new directory that does not already exist.');
 }
 
+let verifyPiRuntimeArtifact;
+let selectedPiRuntime;
+if (piRuntimeOption !== undefined) {
+  ({ verifyPiRuntimeArtifact } = await import('../lib/pi-runtime-artifact.mjs'));
+  selectedPiRuntime = await verifyPiRuntimeArtifact(requestedPiRuntime);
+  const canonicalOutput = await canonicalPath(outDir);
+  if (containsPath(selectedPiRuntime.artifactDir, canonicalOutput) || containsPath(canonicalOutput, selectedPiRuntime.artifactDir)) {
+    throw new Error('--output-dir must not overlap the verified --pi-runtime artifact.');
+  }
+}
+
 async function resolveCompatibleInstalledExtension(pkg) {
   const extDir = await findCompatibleInstalledExtensionDir(installedExtensionRoots(), pkg);
   if (extDir) return extDir;
@@ -154,6 +179,47 @@ async function verifyCoordinatedBuildIdentity(buildDir = outDir) {
   console.log(`[build] Coordinated host/webview identity ${hostBuildId}`);
 }
 
+async function copyArtifactEntries(source, destination) {
+  for (const entry of await readdir(source, { withFileTypes: true })) {
+    const from = path.join(source, entry.name);
+    const to = path.join(destination, entry.name);
+    const info = await lstat(from);
+    if (info.isSymbolicLink()) throw new Error(`Refusing to copy Pi runtime symlink: ${from}`);
+    if (info.isDirectory()) {
+      await mkdir(to);
+      await copyArtifactEntries(from, to);
+    } else if (info.isFile()) {
+      await copyFile(from, to);
+    } else {
+      throw new Error(`Refusing to copy non-regular Pi runtime entry: ${from}`);
+    }
+  }
+}
+
+async function materializeSelectedPiRuntime() {
+  if (!selectedPiRuntime) return;
+  const sourceBeforeCopy = await verifyPiRuntimeArtifact(selectedPiRuntime.artifactDir);
+  if (sourceBeforeCopy.identity !== selectedPiRuntime.identity) {
+    throw new Error('Verified --pi-runtime source identity changed during the build.');
+  }
+
+  const copiedDirectory = path.join(outDir, 'pi-runtime');
+  await mkdir(copiedDirectory);
+  await copyArtifactEntries(sourceBeforeCopy.artifactDir, copiedDirectory);
+
+  const [sourceAfterCopy, copied] = await Promise.all([
+    verifyPiRuntimeArtifact(selectedPiRuntime.artifactDir),
+    verifyPiRuntimeArtifact(copiedDirectory),
+  ]);
+  if (sourceAfterCopy.identity !== selectedPiRuntime.identity) {
+    throw new Error('Verified --pi-runtime source identity changed while it was copied.');
+  }
+  if (copied.identity !== selectedPiRuntime.identity) {
+    throw new Error(`Copied Pi runtime identity mismatch (${copied.identity} != ${selectedPiRuntime.identity}).`);
+  }
+  console.log(`[build] Materialized verified Pi runtime ${copied.identity} → ${copiedDirectory}`);
+}
+
 async function publishToInstalledExtension() {
   if (noSync) return;
 
@@ -207,7 +273,12 @@ function spawnLocalCli(cli, args, label) {
     cwd: rootDir,
     // Only this validated invocation can select isolated config output. Clear
     // inherited values so ordinary builds retain their established behavior.
-    env: { ...process.env, PIE_BUILD_OUTPUT_DIR: isolatedOutput ? outDir : '' },
+    env: {
+      ...process.env,
+      PIE_BUILD_OUTPUT_DIR: isolatedOutput ? outDir : '',
+      PIE_BUILD_PI_RUNTIME_SDK_PATH: selectedPiRuntime?.sdkPath ?? '',
+      PIE_BUILD_PI_RUNTIME_IDENTITY: selectedPiRuntime?.identity ?? '',
+    },
     stdio: 'inherit',
     windowsHide: true,
   });
@@ -243,6 +314,7 @@ function createBuildTypecheckOverlay() {
   return createTsconfigOverlay(path.join(rootDir, 'tsconfig.json'), {
     layout: 'planned', typescript: true, includeOwnerDependencies: true,
     ...(directory ? { directory } : {}),
+    ...(selectedPiRuntime ? { sdkPath: selectedPiRuntime.sdkPath } : {}),
   });
 }
 
@@ -316,6 +388,7 @@ async function buildOnce() {
     runViteBuild(['--mode', 'node', '--emptyOutDir=false']),
     runViteBuild(),
   ]);
+  await materializeSelectedPiRuntime();
   await verifyCoordinatedBuildIdentity();
   await publishToInstalledExtension();
 }

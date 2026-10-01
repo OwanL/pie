@@ -18,6 +18,8 @@ const hostsDir = path.join(repoDir, 'application', 'hosts');
 const frontendDir = path.join(repoDir, 'application', 'frontend');
 // Internal propagation from build.mjs's validated --output-dir boundary.
 const isolatedOutputDir = process.env.PIE_BUILD_OUTPUT_DIR;
+const isolatedPiRuntimeSdkPath = isolatedOutputDir ? process.env.PIE_BUILD_PI_RUNTIME_SDK_PATH || undefined : undefined;
+const isolatedPiRuntimeIdentity = isolatedOutputDir ? process.env.PIE_BUILD_PI_RUNTIME_IDENTITY || undefined : undefined;
 const outDir = isolatedOutputDir || path.join(rootDir, 'out');
 
 /**
@@ -29,10 +31,14 @@ const outDir = isolatedOutputDir || path.join(rootDir, 'out');
  * their respective package export conditions so Node-only dependencies such
  * as ws never resolve to a browser stub in the host bundle.
  */
-const packageAliases = createViteAliases({ layout: 'planned' });
+const packageAliases = createViteAliases({
+  layout: 'planned',
+  ...(isolatedPiRuntimeSdkPath ? { sdkPath: isolatedPiRuntimeSdkPath } : {}),
+});
 const nodePackageAliases = createViteAliases({
   layout: 'planned',
   conditions: ['node', 'require', 'import', 'default'],
+  ...(isolatedPiRuntimeSdkPath ? { sdkPath: isolatedPiRuntimeSdkPath } : {}),
 });
 
 const webviewOutDir = path.join(outDir, 'webview', 'panel');
@@ -90,12 +96,17 @@ function buildIdentityInputs(identityRoot = rootDir): string[] {
   ].filter((input) => fs.existsSync(input)).sort((left, right) => left.localeCompare(right));
 }
 
-function computeBuildId(inputs = buildIdentityInputs(), identityRoot = rootDir): string {
+function computeBuildId(inputs = buildIdentityInputs(), identityRoot = rootDir, runtimeIdentity?: string): string {
   const hash = crypto.createHash('sha256');
   for (const input of inputs) {
     hash.update(path.relative(identityRoot, input).replaceAll('\\', '/'));
     hash.update('\0');
     hash.update(fs.readFileSync(input));
+    hash.update('\0');
+  }
+  if (runtimeIdentity) {
+    hash.update('verified-pi-runtime\0');
+    hash.update(runtimeIdentity);
     hash.update('\0');
   }
   return hash.digest('hex').slice(0, 20);
@@ -108,13 +119,16 @@ function computeBuildId(inputs = buildIdentityInputs(), identityRoot = rootDir):
  * identity input set also makes both bundle graphs rebuild together, even when
  * a changed file is exclusive to the other graph.
  */
-export function createBuildIdentityPlugin(identityRoot = rootDir): Plugin {
+export function createBuildIdentityPlugin(
+  identityRoot = rootDir,
+  runtimeIdentity = identityRoot === rootDir ? isolatedPiRuntimeIdentity : undefined,
+): Plugin {
   let buildId = '';
   return {
     name: 'pie-build-identity',
     buildStart() {
       const inputs = buildIdentityInputs(identityRoot);
-      buildId = computeBuildId(inputs, identityRoot);
+      buildId = computeBuildId(inputs, identityRoot, runtimeIdentity);
       for (const input of inputs) this.addWatchFile(input);
     },
     renderChunk(code) {
