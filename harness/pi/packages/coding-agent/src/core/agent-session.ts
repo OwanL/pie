@@ -125,7 +125,8 @@ export function parseSkillBlock(text: string): ParsedSkillBlock | null {
 
 /** Session-specific events that extend the core AgentEvent */
 export type AgentSessionEvent =
-	| Exclude<AgentEvent, { type: "agent_end" }>
+	| Exclude<AgentEvent, { type: "agent_end" | "message_end" }>
+	| (Extract<AgentEvent, { type: "message_end" }> & { sessionEntryId?: string })
 	| {
 			type: "agent_end";
 			messages: AgentMessage[];
@@ -568,30 +569,59 @@ export class AgentSession {
 			}
 		}
 
+		// A reasoning-only successful response is incomplete even when usage is reported.
+		// Classify it before extensions, persistence, and post-run retry handling observe it.
+		if (event.type === "message_end" && event.message.role === "assistant" && event.message.stopReason === "stop") {
+			const content = Array.isArray(event.message.content) ? event.message.content : [];
+			const hasReasoning = content.some(
+				(part) => part?.type === "thinking" && typeof part.thinking === "string" && part.thinking.trim().length > 0,
+			);
+			const hasVisibleResult = content.some(
+				(part) =>
+					(part?.type === "text" && typeof part.text === "string" && part.text.trim().length > 0) ||
+					part?.type === "toolCall",
+			);
+			if (hasReasoning && !hasVisibleResult) {
+				this._replaceMessageInPlace(event.message, {
+					...event.message,
+					stopReason: "error",
+					errorMessage:
+						"Provider returned an incomplete successful response: Stream ended before a terminal response event",
+				});
+			}
+		}
+
 		// Emit to extensions first
 		await this._emitExtensionEvent(event);
 
-		// Notify all listeners
-		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
+		// Terminal notifications follow a successful append, with its stable entry ID.
+		// Extension handlers above retain their pre-persistence message replacement semantics.
+		if (event.type !== "message_end") {
+			this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
+		}
 
 		// Handle session persistence
 		if (event.type === "message_end") {
 			// Check if this is a custom message from extensions
 			if (event.message.role === "custom") {
 				// Persist as CustomMessageEntry
-				this.sessionManager.appendCustomMessageEntry(
+				const sessionEntryId = this.sessionManager.appendCustomMessageEntry(
 					event.message.customType,
 					event.message.content,
 					event.message.display,
 					event.message.details,
 				);
+				this._emit({ ...event, sessionEntryId });
 			} else if (
 				event.message.role === "user" ||
 				event.message.role === "assistant" ||
 				event.message.role === "toolResult"
 			) {
 				// Regular LLM message - persist as SessionMessageEntry
-				this.sessionManager.appendMessage(event.message);
+				const sessionEntryId = this.sessionManager.appendMessage(event.message);
+				this._emit({ ...event, sessionEntryId });
+			} else {
+				this._emit(event);
 			}
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
