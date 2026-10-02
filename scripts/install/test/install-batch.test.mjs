@@ -37,7 +37,7 @@ function runBat(args, { env: extraEnv = {}, cwd } = {}) {
     encoding: 'utf8',
     windowsVerbatimArguments: true,
   });
-  return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+  return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', signal: r.signal ?? null, error: r.error ?? null };
 }
 
 /** Lines that are NOT REM comments (so forbidden-tool scans skip explanatory comments). */
@@ -104,7 +104,10 @@ test('--check runs the real shared runner and reports drift + would-do (read-onl
   // happens to match the pins, 1 on drift), so assert only on stable substrings
   // that are always present regardless of drift direction.
   const r = runBat(['--check']);
-  assert.ok([0, 1].includes(r.status), `unexpected exit ${r.status}`);
+  assert.ok([
+    0,
+    1,
+  ].includes(r.status), `unexpected exit ${r.status} (signal: ${r.signal ?? 'none'}, error: ${r.error ?? 'none'})\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
   assert.match(r.stdout, /install\.bat --check - dry run/);
   assert.match(r.stdout, /Toolchain verification/);
   assert.match(r.stdout, /Would-do - run install\.bat without --check/);

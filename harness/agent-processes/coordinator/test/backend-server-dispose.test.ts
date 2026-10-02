@@ -1,13 +1,18 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { resolve } from 'node:path';
 import { BackendServer } from '../index.js';
+import { createSyntheticSourceTestSdkRuntime } from '../../test/fixtures/sdk-runtime-selection.js';
 import { ColdSessionLeaseAuthority } from '../../../session-storage/lifecycle/cold-session-store';
+
+const sourceArtifactDescriptor = createSyntheticSourceTestSdkRuntime(resolve('/sdk')).descriptor;
 
 test('BackendServer disposal retires cold leases after later backend generations', async () => {
   const leases = new ColdSessionLeaseAuthority(7);
   const server = new BackendServer({
     sdkPath: '/sdk',
+    sourceArtifactDescriptor,
     cwd: '/workspace',
     workerEntryPath: '/worker-entry.js',
     backendGeneration: 7,
@@ -37,6 +42,7 @@ test('BackendServer disposal keeps hot ownership fences current through runtime 
   const order: string[] = [];
   const server = new BackendServer({
     sdkPath: '/sdk',
+    sourceArtifactDescriptor,
     cwd: '/workspace',
     workerEntryPath: '/worker-entry.js',
     backendGeneration: 7,
@@ -69,6 +75,7 @@ test('BackendServer disposal still rejects genuine runtime reconciliation failur
   const leases = new ColdSessionLeaseAuthority(7);
   const server = new BackendServer({
     sdkPath: '/sdk',
+    sourceArtifactDescriptor,
     cwd: '/workspace',
     workerEntryPath: '/worker-entry.js',
     backendGeneration: 7,

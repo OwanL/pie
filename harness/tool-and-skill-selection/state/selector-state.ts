@@ -13,9 +13,18 @@ import { randomUUID } from "node:crypto";
  * the object by reference rather than copying static values. All modules
  * read and write through the same `state` object.
  */
+/** Lazy completion-entry cache.
+ *
+ * `root pi-ai 0.80.x` no longer exports completeSimple; the public
+ * `@earendil-works/pi-ai/compat` entrypoint does, and the prepass's lazy import
+ * resolves that subpath. The cache holds that exact typed callable so the
+ * adapter passes its locally-built/validated model, Context, and options
+ * through the real contract instead of an erased `unknown` boundary. */
+export type PiAiCompatCompleteSimple = typeof import("@earendil-works/pi-ai/compat")["completeSimple"];
+
 export const state = {
-	/** Lazily-resolved reference to @earendil-works/pi-ai's completeSimple. */
-	_piCompleteSimple: undefined as ((model: unknown, context: unknown, options: unknown) => Promise<unknown>) | null | undefined,
+	/** Lazily-resolved reference to @earendil-works/pi-ai/compat's completeSimple. */
+	_piCompleteSimple: undefined as PiAiCompatCompleteSimple | null | undefined,
 
 	configOverrideForTesting: null as PruningConfig | null,
 	formatSkillsForPromptImpl: formatSkillsForPrompt as (skills: Skill[]) => string,

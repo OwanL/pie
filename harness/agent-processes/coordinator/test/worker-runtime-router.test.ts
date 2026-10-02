@@ -12,7 +12,8 @@ import { BackendError } from '../server-io.js';
 import { createSessionControlSender } from '../../lib/rpc/session-control-attribution.js';
 import { sessionOpenedUnavailableForWorkerIpc } from '../../lib/rpc/session-opened-transport.js';
 import { SESSION_SNAPSHOT_TOO_LARGE_CODE } from '../../lib/rpc/wire.js';
-import { createLegacyTestSdkRuntime } from '../../test/fixtures/sdk-runtime-selection.js';
+import { resolve } from 'node:path';
+import { createSyntheticSourceTestSdkRuntime } from '../../test/fixtures/sdk-runtime-selection.js';
 
 function opened(sessionPath: string) {
   return {
@@ -29,7 +30,8 @@ function opened(sessionPath: string) {
 
 test('cold promotion omits an oversized transcript at the actual worker protocol seam', async () => {
   const sessionPath = `${process.cwd()}/router-oversized.jsonl`;
-  const sdkRuntime = createLegacyTestSdkRuntime('/sdk');
+  const sdkPath = resolve('/sdk');
+  const sdkRuntime = createSyntheticSourceTestSdkRuntime(sdkPath);
   const oversizedTranscript = Array.from({ length: 30_000 }, (_, index) => ({
     id: `tool-${index}`,
     role: 'assistant',
@@ -80,7 +82,7 @@ test('cold promotion omits an oversized transcript at the actual worker protocol
     requestId: 'promote-request',
     operationId: 'grant-oversized',
     payload: {
-      sdkPath: '/sdk', agentDir: '/agent', startupCwd: '/', sessionDir: '/sessions',
+      sdkPath, agentDir: '/agent', startupCwd: '/', sessionDir: '/sessions',
       sessionPath, creationReason: 'resume' as const, sdkRuntime,
       writeLease: {
         coordinatorGeneration: 1, workerId: 'worker-oversized', workerGeneration: 1,
@@ -161,7 +163,7 @@ test('cold promotion omits an oversized transcript at the actual worker protocol
     ownership: ownership as any,
     emit: () => undefined,
     buildPromotionSnapshot: async () => ({
-      sdkPath: '/sdk', sdkRuntime, agentDir: '/agent', startupCwd: '/', sessionDir: '/sessions',
+      sdkPath, sdkRuntime, agentDir: '/agent', startupCwd: '/', sessionDir: '/sessions',
       openedPayload,
       modelSettings: { defaultModel: 'm', defaultThinkingLevel: 'off' },
     }),

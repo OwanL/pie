@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { parseArgs } from '../backend-args.js';
+import { BackendServer } from '../server.js';
 
 const sourceArtifactDescriptor = {
   schemaVersion: 1,
@@ -21,12 +22,17 @@ const sourceArtifactDescriptor = {
   },
 };
 
+const sourceArgs = [
+  '--sdkPath', sourceArtifactDescriptor.sdkPath,
+  '--sourceArtifactDescriptor', JSON.stringify(sourceArtifactDescriptor),
+];
+
 test('parseArgs carries the host-authoritative backend generation and validates it', () => {
   assert.deepEqual(
-    parseArgs(['--sdkPath', '/sdk', '--cwd', '/work', '--backendGeneration', '7', '--hostPid', '123', '--lifetimeFd', '3']),
-    { sdkPath: '/sdk', cwd: '/work', backendGeneration: 7, hostPid: 123, lifetimeFd: 3 },
+    parseArgs([...sourceArgs, '--cwd', '/work', '--backendGeneration', '7', '--hostPid', '123', '--lifetimeFd', '3']),
+    { sdkPath: sourceArtifactDescriptor.sdkPath, sourceArtifactDescriptor, cwd: '/work', backendGeneration: 7, hostPid: 123, lifetimeFd: 3 },
   );
-  assert.equal(parseArgs(['--sdkPath', '/sdk']).backendGeneration, 1);
+  assert.equal(parseArgs(sourceArgs).backendGeneration, 1);
   assert.throws(
     () => parseArgs(['--sdkPath', '/sdk', '--backendGeneration', '0']),
     /Invalid --backendGeneration/,
@@ -69,9 +75,30 @@ test('parseArgs carries a source artifact descriptor and rejects missing, duplic
   );
 });
 
+test('coordinator boundaries reject missing and legacy artifact input without SDK startup', () => {
+  assert.throws(() => parseArgs(['--sdkPath', '/sdk']), /Missing required --sourceArtifactDescriptor/);
+  assert.throws(() => parseArgs([]), /Missing required --sdkPath/);
+  const legacy = { kind: 'legacy-patched', patchIdentity: {} };
+  assert.throws(
+    () => parseArgs(['--sdkPath', '/sdk', '--sourceArtifactDescriptor', JSON.stringify(legacy)]),
+    /Invalid --sourceArtifactDescriptor argument/,
+  );
+  for (const descriptor of [undefined, null, {}, legacy]) {
+    assert.throws(
+      () => new BackendServer({ sdkPath: '/sdk', cwd: '/work', sourceArtifactDescriptor: descriptor }),
+      /descriptor is invalid/,
+    );
+  }
+  assert.throws(
+    // Exercise an untyped caller omitting the now-required constructor field.
+    () => new BackendServer({ sdkPath: '/sdk', cwd: '/work' } as ConstructorParameters<typeof BackendServer>[0]),
+    /descriptor is invalid/,
+  );
+});
+
 test('parseArgs carries a complete analytics descriptor and rejects partial or malformed snapshots', () => {
   const args = [
-    '--sdkPath', '/sdk', '--cwd', '/work',
+    ...sourceArgs, '--cwd', '/work',
     '--analyticsGenerationId', '2f6e2b1c-9d4a-4e7b-8c3f-1a2b3c4d5e6f',
     '--analyticsBuildId', 'build-1',
     '--analyticsManifestRevision', '4',

@@ -26,9 +26,9 @@ import {
 import { SESSION_SNAPSHOT_TOO_LARGE_CODE } from '../../lib/rpc/wire.js';
 import { AUTONOMOUS_MODE_BY_SESSION_ENV } from '../../lib/rpc/settings.js';
 import { AUTONOMOUS_MODE_ENV } from '../../../tool-and-skill-selection/settings/autonomous-mode.js';
-import { createLegacyTestSdkRuntime } from '../../test/fixtures/sdk-runtime-selection.js';
+import { createSyntheticSourceTestSdkRuntime } from '../../test/fixtures/sdk-runtime-selection.js';
 
-const sdkRuntime = createLegacyTestSdkRuntime('/sdk');
+const sdkRuntime = createSyntheticSourceTestSdkRuntime('/sdk');
 
 interface WorkerRuntimeHostInternals {
   sdk?: unknown;

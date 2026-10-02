@@ -117,7 +117,7 @@ export function resolveOwnerModule(specifier, options = {}) {
   return createOwnerRequire(options).resolve(specifier);
 }
 
-function packageInfoAt(root, packageName, conditions = ['import', 'require', 'default'], { allowEntryless = false } = {}) {
+function packageInfoAt(root, packageName, conditions = ['import', 'require', 'node', 'default'], { allowEntryless = false } = {}) {
   const absoluteRoot = path.resolve(root);
   const manifestPath = path.join(absoluteRoot, 'package.json');
   if (!existsSync(manifestPath)) {
@@ -269,7 +269,7 @@ export function resolveOwnerTsx(options = {}) {
 }
 
 /** Resolve a runtime module from the selected SDK's own dependency graph. */
-function resolvePackageExport(packageInfo, suffix, conditions = ['import', 'require', 'default']) {
+function resolvePackageExport(packageInfo, suffix, conditions = ['import', 'require', 'node', 'default']) {
   const exports = packageInfo.manifest.exports;
   if (!exports || typeof exports !== 'object' || Array.isArray(exports)) return undefined;
   const exportKey = suffix ? `.${suffix}` : '.';
@@ -432,7 +432,7 @@ export function createTsxResolution(options = {}) {
   const ownerRoot = resolveOwnerRoot(options);
   const preact = packageInfoFromOwner(ownerRoot, 'preact');
   const paths = {};
-  const addPackageMappings = (packageName, packageInfo, conditions = ['import', 'require', 'default']) => {
+  const addPackageMappings = (packageName, packageInfo, conditions = ['import', 'require', 'node', 'default']) => {
     for (const mapping of exportMappings(packageInfo, packageName, conditions)) {
       paths[mapping.key] = [mapping.replacement];
     }
@@ -458,7 +458,7 @@ const PREACT_RUNTIME_PACKAGES = new Set(['preact', 'preact-render-to-string', '@
 
 function runtimeConditionsForPackage(name, conditions) {
   return !conditions.includes('types') && PREACT_RUNTIME_PACKAGES.has(name)
-    ? ['require', 'default'] : conditions;
+    ? ['require', 'node', 'default'] : conditions;
 }
 
 /** Runtime dependencies of the candidate SDK and their package roots. */
@@ -715,8 +715,14 @@ function ownerDependencyPaths(options, conditions) {
   return paths;
 }
 
-function readTsconfigJson(configPath) {
-  return JSON.parse(readFileSync(configPath, 'utf8'));
+function readTsconfigJson(configPath, options) {
+  const typescript = createOwnerRequire(options)('typescript');
+  // TypeScript requires slash-normalized filenames when attaching parse diagnostics.
+  const { config, error } = typescript.readConfigFile(configPath.split(path.sep).join('/'), typescript.sys.readFile);
+  if (error) {
+    throw new Error(`Invalid tsconfig at ${configPath}: ${typescript.flattenDiagnosticMessageText(error.messageText, '\n')}`);
+  }
+  return config;
 }
 
 /**
@@ -795,14 +801,14 @@ export function createTsconfigOverlay(baseConfigPath, options = {}) {
     : resolveAbsoluteRoot(options.directory, 'directory');
   let generated = false;
   try {
-    const declaredPaths = readTsconfigJson(absoluteBase).compilerOptions?.paths;
+    const declaredPaths = readTsconfigJson(absoluteBase, options).compilerOptions?.paths;
     const candidateSdk = options.sdkPath !== undefined;
     const helperPaths = options.typescript ? createTypeScriptResolution(options).paths : createTsxResolution(options).paths;
     const effectiveOptions = declaredPaths || options.includeOwnerDependencies || candidateSdk || options.typescript
       ? effectiveTsconfigOptions(absoluteBase, options) : undefined;
     const basePaths = options.includeOwnerDependencies || candidateSdk ? effectiveOptions?.paths ?? declaredPaths : declaredPaths;
     const conditions = options.typescript
-      ? ['types', 'import', 'default', 'require'] : ['import', 'require', 'default'];
+      ? ['types', 'import', 'default', 'require'] : ['import', 'require', 'node', 'default'];
     const ownerPaths = options.includeOwnerDependencies ? ownerDependencyPaths(options, conditions) : {};
     const candidateRuntimePaths = candidateSdk
       ? candidateRuntimeDependencyPaths(options, conditions, basePaths ?? {}, ownerPaths, helperPaths)

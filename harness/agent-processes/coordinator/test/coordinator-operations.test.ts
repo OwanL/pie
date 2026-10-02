@@ -6,10 +6,13 @@ import * as path from 'node:path';
 import test from 'node:test';
 
 import { BackendServer } from '../server.js';
+import { createSyntheticSourceTestSdkRuntime } from '../../test/fixtures/sdk-runtime-selection.js';
 import { isCoordinatorOperationAllowed } from '../coordinator-operations.js';
 
+const sourceArtifactDescriptor = createSyntheticSourceTestSdkRuntime(path.resolve('/sdk')).descriptor;
+
 test('backend construction fails closed without a bundled worker artifact path', () => {
-  assert.throws(() => new BackendServer({ sdkPath: '/sdk', cwd: '/cwd' }), /requires a bundled worker entry path/);
+  assert.throws(() => new BackendServer({ sdkPath: '/sdk', sourceArtifactDescriptor, cwd: '/cwd' }), /requires a bundled worker entry path/);
 });
 
 test('coordinator operation catalog includes runtime-free durable mutations only', () => {
@@ -41,6 +44,7 @@ test('cold create/duplicate/truncate stay runtime and extension free while hot p
     let nextId = 0;
     const server = new BackendServer({
       sdkPath: '/sdk',
+      sourceArtifactDescriptor,
       cwd: root,
       workerEntryPath: '/worker-entry.js',
     }) as any;
@@ -132,7 +136,7 @@ function editServer(options: {
   truncate(onCommit: () => void): Promise<{ sessionPath: string }>;
   send?(): Promise<Record<string, unknown>>;
 }) {
-  const server = new BackendServer({ sdkPath: '/sdk', cwd: '/cwd', workerEntryPath: '/worker-entry.js' }) as any;
+  const server = new BackendServer({ sdkPath: '/sdk', sourceArtifactDescriptor, cwd: '/cwd', workerEntryPath: '/worker-entry.js' }) as any;
   let truncateCalls = 0;
   let sendCalls = 0;
   server.agentDir = '/agent';
@@ -243,7 +247,7 @@ test('message.edit joins/replays retries and rejects changed intent without anot
 });
 
 test('hot message.edit keeps interrupt, truncate, promotion, and replacement send in one router transition', async () => {
-  const server = new BackendServer({ sdkPath: '/sdk', cwd: '/cwd', workerEntryPath: '/worker-entry.js' }) as any;
+  const server = new BackendServer({ sdkPath: '/sdk', sourceArtifactDescriptor, cwd: '/cwd', workerEntryPath: '/worker-entry.js' }) as any;
   const order: string[] = [];
   let downstreamStatus: Record<string, unknown> = { operationId: 'hot-edit', state: 'accepted', committed: false };
   server.agentDir = '/agent';
@@ -313,7 +317,7 @@ test('message.edit requires stable operation identity and attempt', async () => 
 });
 
 test('message.interrupt joins concurrent retries, replays one terminal, and rejects changed intent', async () => {
-  const server = new BackendServer({ sdkPath: '/sdk', cwd: '/cwd', workerEntryPath: '/worker-entry.js' }) as any;
+  const server = new BackendServer({ sdkPath: '/sdk', sourceArtifactDescriptor, cwd: '/cwd', workerEntryPath: '/worker-entry.js' }) as any;
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
   let interruptCalls = 0;
@@ -361,7 +365,7 @@ test('message.interrupt joins concurrent retries, replays one terminal, and reje
 });
 
 test('message.interrupt reports confirmed forced recovery and treats idle as a successful no-op', async () => {
-  const server = new BackendServer({ sdkPath: '/sdk', cwd: '/cwd', workerEntryPath: '/worker-entry.js' }) as any;
+  const server = new BackendServer({ sdkPath: '/sdk', sourceArtifactDescriptor, cwd: '/cwd', workerEntryPath: '/worker-entry.js' }) as any;
   let hot = true;
   server.workerRuntimeRouter = {
     getRoute: () => hot
@@ -396,7 +400,7 @@ test('message.interrupt reports confirmed forced recovery and treats idle as a s
 });
 
 test('cold truncate retains its replacement inside the mutation owner and rejects a competing mutation without invalidating it', async () => {
-  const server = new BackendServer({ sdkPath: '/sdk', cwd: '/cwd', workerEntryPath: '/worker-entry.js' }) as any;
+  const server = new BackendServer({ sdkPath: '/sdk', sourceArtifactDescriptor, cwd: '/cwd', workerEntryPath: '/worker-entry.js' }) as any;
   server.agentDir = '/agent';
   server.sdk = { VERSION: 'test', SessionManager: {} };
   server.emit = () => undefined;

@@ -5,26 +5,33 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test, { describe } from 'node:test';
 
-import { SDK_PATCH_IDENTITY_VERSION } from '../../sdk-integration/sdk-patch-barrier.js';
+import { createSyntheticSourceTestSdkRuntime } from '../../../test/fixtures/sdk-runtime-selection.js';
 import {
   WorkerClient,
   WorkerRequestTimeoutError,
   type WorkerClientScheduler,
 } from '../worker-client.js';
-import { WORKER_IPC_VERSION } from '../worker-protocol.js';
+import {
+  WORKER_IPC_VERSION,
+  type WorkerJsonObject,
+} from '../worker-protocol.js';
 
 const fixture = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../workers/test/fixtures/phase2-worker-fixture.mjs');
-const sdkPatchIdentity = {
-  identityVersion: SDK_PATCH_IDENTITY_VERSION,
-  sdkPath: path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..', 'application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent'),
-  sdkVersion: 'fixture',
-  terminalDurability: { patchVersion: 1, relativePath: 'dist/core/agent-session.js', sha256: 'a'.repeat(64) },
-  retryClassifier: { patchVersion: 1, relativePath: 'dist/utils/retry.js', sha256: 'b'.repeat(64) },
-  coldCreateDurability: { patchVersion: 2, relativePath: 'dist/core/session-manager.js', sha256: 'c'.repeat(64) },
-  sessionOwnershipAdapter: { patchVersion: 1, relativePath: 'dist/core/session-manager.js', sha256: 'c'.repeat(64) },
-  sessionReplacementAdapter: { patchVersion: 7, relativePath: 'dist/core/agent-session-runtime.js', sha256: 'd'.repeat(64) },
-};
-const sdkRuntime = { kind: 'legacy-patched' as const, patchIdentity: sdkPatchIdentity };
+// The child is a transport-only fixture: it neither verifies nor imports an SDK.
+const sdkRuntime = createSyntheticSourceTestSdkRuntime(path.resolve('/sdk'));
+// runtime.promote payloads are WorkerJsonObject (string-indexed JSON values).
+// The typed fixture is interface-based, so a structural spread of every nested
+// interface produces an identical JSON value shape the index signature accepts.
+const sdkRuntimeJson = {
+  kind: sdkRuntime.kind,
+  descriptor: {
+    ...sdkRuntime.descriptor,
+    manifest: {
+      ...sdkRuntime.descriptor.manifest,
+      target: { ...sdkRuntime.descriptor.manifest.target },
+    },
+  },
+} satisfies WorkerJsonObject;
 
 class FakeClock implements WorkerClientScheduler {
   private current = 0;
@@ -263,8 +270,8 @@ test('generic Phase 4 callbacks and dedicated response correlation share the bou
       kind: 'runtime.promote',
       operationId: 'operation-1',
       payload: {
-        sdkPath: sdkPatchIdentity.sdkPath,
-        sdkRuntime,
+        sdkPath: sdkRuntime.descriptor.sdkPath,
+        sdkRuntime: sdkRuntimeJson,
         agentDir: path.resolve('agent'),
         startupCwd: process.cwd(),
         sessionDir: path.resolve('sessions'),

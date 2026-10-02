@@ -1,8 +1,14 @@
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import test from 'node:test';
+import { resolve } from 'node:path';
 
 import { BackendServer } from '../../harness/agent-processes/coordinator/server.js';
+import { createSyntheticSourceTestSdkRuntime } from '../../harness/agent-processes/test/fixtures/sdk-runtime-selection.js';
+
+// Shape-only synthetic runtime: these tests mock the SDK surface and never
+// verify, import, or spawn a real SDK.
+const sourceArtifactDescriptor = createSyntheticSourceTestSdkRuntime(resolve('/sdk')).descriptor;
 import {
   flushBackendLivePipelineTrace,
   getBackendLivePipelineTracePath,
@@ -12,7 +18,7 @@ import {
 import { readBackendRequestTracePhases } from '../../harness/agent-processes/test/helpers/backend-live-pipeline-trace.js';
 
 test('BackendServer defers diagnostics off until the exact handleLine completion and stops its monitor', async () => {
-  const server = new BackendServer({ workerEntryPath: '/worker-entry.js', sdkPath: '/sdk', cwd: '/workspace' }) as any;
+  const server = new BackendServer({ workerEntryPath: '/worker-entry.js', sdkPath: '/sdk', cwd: '/workspace', sourceArtifactDescriptor }) as any;
   const before = await fs.readFile(getBackendLivePipelineTracePath(), 'utf8').catch(() => '');
   const wasEnabled = isBackendLivePipelineTraceEnabled();
   const monitorCalls: string[] = [];
@@ -81,7 +87,7 @@ test('BackendServer defers diagnostics off until the exact handleLine completion
 });
 
 test('BackendServer keeps pending diagnostics disables keyed by request and clears them on failure/dispose', async () => {
-  const server = new BackendServer({ workerEntryPath: '/worker-entry.js', sdkPath: '/sdk', cwd: '/workspace' }) as any;
+  const server = new BackendServer({ workerEntryPath: '/worker-entry.js', sdkPath: '/sdk', cwd: '/workspace', sourceArtifactDescriptor }) as any;
   const wasEnabled = isBackendLivePipelineTraceEnabled();
   const originalWrite = process.stdout.write;
   server.startEventLoopMonitor = () => undefined;
@@ -137,7 +143,7 @@ test('BackendServer keeps pending diagnostics disables keyed by request and clea
 });
 
 test('BackendServer orders concurrent diagnostics toggles by receipt: an older off settling after a newer on never disables tracing or the monitor', async () => {
-  const server = new BackendServer({ workerEntryPath: '/worker-entry.js', sdkPath: '/sdk', cwd: '/workspace' }) as any;
+  const server = new BackendServer({ workerEntryPath: '/worker-entry.js', sdkPath: '/sdk', cwd: '/workspace', sourceArtifactDescriptor }) as any;
   const before = await fs.readFile(getBackendLivePipelineTracePath(), 'utf8').catch(() => '');
   const wasEnabled = isBackendLivePipelineTraceEnabled();
   const monitorCalls: string[] = [];
@@ -228,7 +234,7 @@ test('BackendServer orders concurrent diagnostics toggles by receipt: an older o
 });
 
 test('BackendServer applies a newer off after its own handler_finished even when an older on settles first', async () => {
-  const server = new BackendServer({ workerEntryPath: '/worker-entry.js', sdkPath: '/sdk', cwd: '/workspace' }) as any;
+  const server = new BackendServer({ workerEntryPath: '/worker-entry.js', sdkPath: '/sdk', cwd: '/workspace', sourceArtifactDescriptor }) as any;
   const wasEnabled = isBackendLivePipelineTraceEnabled();
   const monitorCalls: string[] = [];
   server.startEventLoopMonitor = () => { monitorCalls.push('on'); };

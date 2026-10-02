@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { PassThrough } from 'node:stream';
 
-import { SDK_PATCH_IDENTITY_VERSION } from '../../sdk-integration/sdk-patch-barrier.js';
+import * as path from 'node:path';
+import { createSyntheticSourceTestSdkRuntime } from '../../../test/fixtures/sdk-runtime-selection.js';
 import {
   attachBoundedWorkerIpcReader,
   BoundedWorkerIpcWriter,
@@ -16,6 +17,7 @@ import {
   WORKER_IPC_VERSION,
   type WorkerIpcFrame,
   type WorkerIpcFrameDraft,
+  type WorkerJsonObject,
 } from '../worker-protocol.js';
 
 const frameBase = {
@@ -30,19 +32,20 @@ const frameBase = {
   sessionPath: '/session.jsonl',
 };
 
-const sdkRuntime = {
-  kind: 'legacy-patched' as const,
-  patchIdentity: {
-    identityVersion: SDK_PATCH_IDENTITY_VERSION,
-    sdkPath: '/sdk',
-    sdkVersion: 'fixture',
-    terminalDurability: { patchVersion: 1, relativePath: 'agent.js', sha256: 'a'.repeat(64) },
-    retryClassifier: { patchVersion: 1, relativePath: 'retry.js', sha256: 'b'.repeat(64) },
-    coldCreateDurability: { patchVersion: 1, relativePath: 'manager.js', sha256: 'c'.repeat(64) },
-    sessionOwnershipAdapter: { patchVersion: 1, relativePath: 'manager.js', sha256: 'd'.repeat(64) },
-    sessionReplacementAdapter: { patchVersion: 1, relativePath: 'runtime.js', sha256: 'e'.repeat(64) },
+const sdkRuntime = createSyntheticSourceTestSdkRuntime(path.resolve('/sdk'));
+// Frame payloads are WorkerJsonObject (string-indexed JSON values). The typed
+// fixture is interface-based, so a structural spread of every nested interface
+// produces an identical JSON value shape the index signature accepts.
+const sdkRuntimeJson = {
+  kind: sdkRuntime.kind,
+  descriptor: {
+    ...sdkRuntime.descriptor,
+    manifest: {
+      ...sdkRuntime.descriptor.manifest,
+      target: { ...sdkRuntime.descriptor.manifest.target },
+    },
   },
-};
+} satisfies WorkerJsonObject;
 
 const command = (requestId: string): WorkerIpcFrameDraft => ({
   ...frameBase, kind: 'command', requestId, operation: 'ping',
@@ -439,7 +442,7 @@ test('writer admits a single large control frame that exceeds the lane capacity'
     operationId: 'operation-1',
     payload: {
       sdkPath: '/sdk', agentDir: '/agent', startupCwd: '/work', sessionDir: '/sessions',
-      sessionPath: '/session.jsonl', creationReason: 'resume', sdkRuntime,
+      sessionPath: '/session.jsonl', creationReason: 'resume', sdkRuntime: sdkRuntimeJson,
       writeLease: {
         coordinatorGeneration: 1, workerId: 'worker', workerGeneration: 1,
         canonicalSessionPath: '/session.jsonl', ownershipRevision: 1, nonce: 'nonce',

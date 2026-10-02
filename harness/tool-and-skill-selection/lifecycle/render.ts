@@ -1,17 +1,28 @@
+import type { MessageRenderOptions, MessageRenderer, Theme } from "@earendil-works/pi-coding-agent";
 import type { PruningResult } from "../settings/config-types.js";
 import { Box, Text } from "@earendil-works/pi-tui";
 import { formatLatencyNote } from "../prepass/message-builders.js";
 
+/** The message shape Pi passes to this customType's registered renderer. */
+type PruningFeedbackMessageShape = Parameters<MessageRenderer<PruningResult>>[0];
+
+/** Render the permitted message-content union (string or content blocks).
+ *  Pruning feedback always sends a string; content blocks are flattened to
+ *  their text (image blocks are acknowledged rather than silently dropped). */
+function messageText(message: PruningFeedbackMessageShape): string {
+	if (typeof message.content === "string") return message.content;
+	return message.content
+		.map((part) => (part.type === "text" ? part.text : `[image: ${part.mimeType}]`))
+		.join("");
+}
+
 export const pruningResultRenderer = {
 	messageType: "pruning-result" as const,
-	render: (message: { content: string; details?: unknown }, { expanded }: { expanded: boolean }, theme: {
-		bg: (key: string, child: unknown) => unknown;
-		fg: (key: string, text: string) => string;
-	}) => {
-		const details = message.details as PruningResult | undefined;
+	render: (message: PruningFeedbackMessageShape, { expanded }: MessageRenderOptions, theme: Theme) => {
+		const details = message.details;
 		if (!details) {
-			const box = new Box(1, 1, (t: unknown) => theme.bg("customMessageBg", t));
-			box.addChild(new Text(String(message.content), 0, 0));
+			const box = new Box(1, 1, (text: string) => theme.bg("customMessageBg", text));
+			box.addChild(new Text(messageText(message), 0, 0));
 			return box;
 		}
 
@@ -35,7 +46,7 @@ export const pruningResultRenderer = {
 			const compact = hasError
 				? `${modeLabel}${theme.fg("error", "Pruning error")}${errorNote}`
 				: `${modeLabel}${parts.join(", ")}${tokenNote}${latencyNote}${cacheNote}`;
-			const box = new Box(1, 1, (t: unknown) => theme.bg("customMessageBg", t));
+			const box = new Box(1, 1, (text: string) => theme.bg("customMessageBg", text));
 			box.addChild(new Text(compact, 0, 0));
 			return box;
 		}
@@ -65,7 +76,7 @@ export const pruningResultRenderer = {
 		}
 		if (details.cacheHit) lines.push(theme.fg("dim", "  Prepass: cached"));
 
-		const box = new Box(1, 1, (t: unknown) => theme.bg("customMessageBg", t));
+		const box = new Box(1, 1, (text: string) => theme.bg("customMessageBg", text));
 		const header = hasError ? "Pruning Results (prepass failed — kept all)" : "Pruning Results";
 		box.addChild(new Text(`${modeLabel}${header}\n${lines.join("\n")}`, 0, 0));
 		return box;

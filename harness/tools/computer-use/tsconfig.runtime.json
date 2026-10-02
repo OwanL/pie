@@ -3,7 +3,6 @@
   "compilerOptions": {
     "paths": {
       "typebox": ["application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox/build/index.mjs"],
-      "typebox/*": ["application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox/build/*/index.mjs"],
       "@earendil-works/pi-ai": ["application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/index.js"],
       "@earendil-works/pi-coding-agent": ["application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/dist/index.js"]
     }

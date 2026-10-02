@@ -141,7 +141,6 @@ test('model-settings replacement frames against the temporary image and retries 
   const manager = SessionManager.open(sessionPath);
   attachLease(manager, sessionPath);
   const previousEntries = manager.getEntries();
-  const previousLeaf = manager.getLeafId();
   const originalRename = fs.renameSync;
   const originalOpenSync = fs.openSync;
   const retryDelays = [10, 25, 50, 100, 250, 500, 1000, 2000, 4000];

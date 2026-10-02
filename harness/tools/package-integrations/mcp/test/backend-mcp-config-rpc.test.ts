@@ -7,6 +7,7 @@ import * as path from 'node:path';
 import { handleBackendRequest, type BackendRequestHandlerDeps } from '../../../../agent-processes/coordinator/request-handler';
 import { validateMcpSetServerEnabled } from '../../../../agent-processes/lib/rpc/backend-rpc.js';
 import { BackendServer } from '../../../../agent-processes/coordinator/server';
+import { createSyntheticSourceTestSdkRuntime } from '../../../../agent-processes/test/fixtures/sdk-runtime-selection.js';
 import type { McpServerEntryView } from '../mcp-config.js';
 
 /** Minimal deps: the mcp RPC handlers only read `startupCwd`. */
@@ -127,7 +128,16 @@ test('mcp RPCs reach the backend through BackendServer.handleRequest without a h
   // runtime. The host MCP UI RPCs must still be served by the coordinator
   // (they are runtime-free config reads/writes), not rejected as
   // isolated-runtime operations.
-  const server = new BackendServer({ sdkPath: '/sdk', cwd, workerEntryPath: '/worker-entry.js' }) as any;
+  // Coordinator-only server: the synthetic descriptor satisfies the required
+  // source runtime selection shape; no SDK import or verification runs because
+  // these RPCs are runtime-free config reads/writes.
+  const sdkPath = path.resolve('/sdk');
+  const server = new BackendServer({
+    sdkPath,
+    sourceArtifactDescriptor: createSyntheticSourceTestSdkRuntime(sdkPath).descriptor,
+    cwd,
+    workerEntryPath: '/worker-entry.js',
+  }) as any;
   server.agentDir = cwd;
   server.sessionDir = cwd;
   server.sessionDirResolved = true;

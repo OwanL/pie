@@ -614,8 +614,12 @@ test('BrowserServer construction stays in concrete hosts; PieExtension stays a t
     'the browser host factory constructs the concrete server');
   assert.ok(vscodePlatformSource.includes("assetDir: path.join(context.extensionPath, 'out', 'webview', 'panel')"),
     'VS Code asset paths stay in its concrete adapter');
-  assert.ok(standalonePlatformSource.includes("assetDir: path.join(options.extensionPath, 'out', 'webview', 'panel')"),
-    'standalone asset paths stay in its concrete adapter');
+  assert.ok(standalonePlatformSource.includes("assetDir: path.join(options.runtimeOutputDirectory, 'webview', 'panel')"),
+    'standalone asset paths stay in its concrete adapter (runtime output directory)');
+  assert.ok(standalonePlatformSource.includes("fallbackDir: path.join(options.runtimeOutputDirectory, 'webview', 'panel')"),
+    'standalone renderer asset selection stays in its concrete adapter (runtime output directory)');
+  assert.ok(standalonePlatformSource.includes("iconPath: path.join(options.extensionPath, 'media', 'icon.svg')"),
+    'the standalone adapter keeps its host-owned icon path on the extension path');
   assert.ok(!adapterSource.includes('dispatch(this.archState'),
     'the reducer dispatch point must live in the shared runtime, not the adapter');
   assert.ok(runtimeSource.includes('dispatch(this.archState, event)'),

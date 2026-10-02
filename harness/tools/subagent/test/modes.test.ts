@@ -12,7 +12,7 @@
 import test, { afterEach, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import Module, { createRequire } from "node:module";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -51,14 +51,14 @@ function assistantMsg(text: string): any {
 // execute* mode tests
 // ---------------------------------------------------------------------------
 // modes.ts execute* functions call `runSingleAgent` (../runner.js), which lazily
-// does `import("@mariozechner/pi-coding-agent")`. That bare specifier does not
-// resolve from the repo root under tsx, and `node:test`'s `mock.module` is not
-// available in this Node. So we register an ESM `resolve` hook via
-// `module.register()` (callable at runtime, no CLI flag) that redirects the
-// specifier to an in-memory mock SDK. The mock reads its per-prompt behaviour
-// from `globalThis.__MOCK_SDK_BEHAVIOR__`, so each test drives success / failure
-// without any real LLM or network. `selectionCtx.alwaysParentModel = true` keeps
-// `resolveModel` pure (no analytics I/O). Every case is sub-200ms.
+// imports the SDK. The shared TSX config maps canonical and legacy SDK
+// specifiers to the selected artifact's same dist/index.js, so the ESM resolve
+// hook must match that exact configured path as well as intentional bare SDK
+// identities. `node:test`'s `mock.module` is not available in this Node; the
+// in-memory mock reads its per-prompt behaviour from
+// `globalThis.__MOCK_SDK_BEHAVIOR__`, keeping each case network-free.
+// `selectionCtx.alwaysParentModel = true` keeps `resolveModel` pure (no
+// analytics I/O).
 
 const MOCK_SDK_SOURCE = [
 	"export class DefaultResourceLoader { constructor(a){ this.a = a; } async reload(){} }",
@@ -86,12 +86,23 @@ const MOCK_SDK_SOURCE = [
 const __mockSdkDir = mkdtempSync(path.join(tmpdir(), "modes-mock-sdk-"));
 const __mockSdkPath = path.join(__mockSdkDir, "mock-sdk.mjs");
 writeFileSync(__mockSdkPath, MOCK_SDK_SOURCE, "utf-8");
+const __tsxConfigPath = process.env.TSX_TSCONFIG_PATH;
+if (!__tsxConfigPath) throw new Error("modes.test.ts requires the shared TSX config");
+const __tsxConfig = JSON.parse(readFileSync(path.resolve(__tsxConfigPath), "utf-8"));
+const __sdkPaths = __tsxConfig.compilerOptions?.paths;
+const __canonicalSdkPath = __sdkPaths?.["@earendil-works/pi-coding-agent"]?.[0];
+const __legacySdkPath = __sdkPaths?.["@mariozechner/pi-coding-agent"]?.[0];
+if (typeof __canonicalSdkPath !== "string" || typeof __legacySdkPath !== "string" || !path.isAbsolute(__canonicalSdkPath) || path.resolve(__canonicalSdkPath) !== path.resolve(__legacySdkPath)) {
+	throw new Error("The shared TSX config must map canonical and legacy coding-agent aliases to the same selected module");
+}
+const __selectedSdkPath = path.resolve(__canonicalSdkPath);
+const __selectedSdkUrl = pathToFileURL(__selectedSdkPath).href;
 const __hookPath = path.join(__mockSdkDir, "hook.mjs");
 writeFileSync(
 	__hookPath,
 	[
 		"export async function resolve(specifier, context, nextResolve){",
-		`  if (specifier === '@mariozechner/pi-coding-agent') return { url: ${JSON.stringify(pathToFileURL(__mockSdkPath).href)}, shortCircuit: true };`,
+		`  if (specifier === '@earendil-works/pi-coding-agent' || specifier === '@mariozechner/pi-coding-agent' || specifier === ${JSON.stringify(__selectedSdkPath)} || specifier === ${JSON.stringify(__selectedSdkUrl)} || specifier.startsWith(${JSON.stringify(`${__selectedSdkUrl}?tsx-namespace=`)})) return { url: ${JSON.stringify(pathToFileURL(__mockSdkPath).href)}, shortCircuit: true };`,
 		"  return nextResolve(specifier, context);",
 		"}",
 	].join("\n"),

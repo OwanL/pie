@@ -5,8 +5,13 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { BackendServer } from '../../harness/agent-processes/coordinator/index.js';
+import { createSyntheticSourceTestSdkRuntime } from '../../harness/agent-processes/test/fixtures/sdk-runtime-selection.js';
 import { ProviderGate } from '../../harness/model-providers/concurrency/provider-gate.js';
 import { SessionLifecycleStore } from '../../harness/session-storage/lifecycle/session-lifecycle-store';
+
+// Shape-only synthetic runtime: tests stub the SDK surface and lifecycle
+// seams below; no real SDK is verified, imported, or spawned.
+const sourceArtifactDescriptor = createSyntheticSourceTestSdkRuntime(path.resolve('/unused')).descriptor;
 
 type PollingTestServer = {
   agentDir: string;
@@ -44,7 +49,7 @@ test('pending-create replay resolves the already-registered transcript after pro
     store.registerTranscript('durable-root', 'created.jsonl', 1);
     store.registerPendingCreateOperation('durable-root', 'durable-create-origin', 2);
     const server = new BackendServer({
-      workerEntryPath: '/worker-entry.js', sdkPath: '/unused', cwd: root,
+      workerEntryPath: '/worker-entry.js', sdkPath: '/unused', cwd: root, sourceArtifactDescriptor,
     }) as any;
     server.sessionDir = sessions;
     server.sessionDirResolved = true;
@@ -64,7 +69,7 @@ test('pending-create replay resolves the already-registered transcript after pro
 });
 
 function createPollingTestServer(): PollingTestServer {
-  const server = new BackendServer({ workerEntryPath: '/worker-entry.js', sdkPath: '/unused', cwd: '/workspace' }) as unknown as PollingTestServer;
+  const server = new BackendServer({ workerEntryPath: '/worker-entry.js', sdkPath: '/unused', cwd: '/workspace', sourceArtifactDescriptor }) as unknown as PollingTestServer;
   server.agentDir = path.resolve('/agent');
   server.sessionDir = path.resolve('/configured/sessions');
   server.sessionDirResolved = true;
@@ -98,6 +103,7 @@ test('backend RPCs use the configured directory while explicit legacy opens keep
       sdkPath: '/unused',
       cwd: '/workspace',
       sessionCatalog: sessionCatalog as any,
+      sourceArtifactDescriptor,
     }) as any;
     server.agentDir = path.resolve('/agent');
     server.sdk = {

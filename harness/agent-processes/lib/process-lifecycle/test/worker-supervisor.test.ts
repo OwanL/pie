@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import test from 'node:test';
 
-import { SDK_PATCH_IDENTITY_VERSION } from '../../sdk-integration/sdk-patch-barrier.js';
+import { createSyntheticSourceTestSdkRuntime } from '../../../test/fixtures/sdk-runtime-selection.js';
 import type { WorkerClientOptions, WorkerClientScheduler, WorkerClientSnapshot } from '../../rpc/worker-client.js';
 import { WorkerSupervisor, type SupervisedWorkerClient } from '../worker-supervisor.js';
 import type { WorkerResponseResult } from '../../rpc/worker-protocol.js';
@@ -53,17 +53,7 @@ class FakeClient implements SupervisedWorkerClient {
   getSnapshot(): WorkerClientSnapshot { return { status: 'ready', pid: 1234, stdoutTail: '', stderrTail: '' }; }
 }
 
-const sdkPatchIdentity = {
-  identityVersion: SDK_PATCH_IDENTITY_VERSION,
-  sdkPath: '/sdk',
-  sdkVersion: 'fixture',
-  terminalDurability: { patchVersion: 1, relativePath: 'agent.js', sha256: 'a'.repeat(64) },
-  retryClassifier: { patchVersion: 1, relativePath: 'retry.js', sha256: 'b'.repeat(64) },
-  coldCreateDurability: { patchVersion: 2, relativePath: 'session-manager.js', sha256: 'c'.repeat(64) },
-  sessionOwnershipAdapter: { patchVersion: 1, relativePath: 'session-manager.js', sha256: 'c'.repeat(64) },
-  sessionReplacementAdapter: { patchVersion: 7, relativePath: 'agent-session-runtime.js', sha256: 'd'.repeat(64) },
-};
-const sdkRuntime = { kind: 'legacy-patched' as const, patchIdentity: sdkPatchIdentity };
+const sdkRuntime = createSyntheticSourceTestSdkRuntime(path.resolve('/sdk'));
 
 async function createHarness() {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-supervisor-'));

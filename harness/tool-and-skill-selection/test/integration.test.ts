@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { ExtensionAPI, Skill, ToolInfo } from "@earendil-works/pi-coding-agent";
+import { askUserSchema } from "../../tools/ask-user/types.js";
 import type { PruningConfig } from "../settings/config-types.js";
 
 installSdkResolverForTests();
@@ -106,12 +107,14 @@ function escapeXml(value: string): string {
 }
 
 function skill(name: string, description: string, overrides: Partial<Skill> = {}): Skill {
+	const filePath = `/repo/skills/${name}/SKILL.md`;
+	const baseDir = `/repo/skills/${name}`;
 	return {
 		name,
 		description,
-		filePath: `/repo/skills/${name}/SKILL.md`,
-		baseDir: `/repo/skills/${name}`,
-		sourceInfo: {} as Skill["sourceInfo"],
+		filePath,
+		baseDir,
+		sourceInfo: { path: filePath, source: "test", scope: "temporary", origin: "top-level", baseDir },
 		disableModelInvocation: false,
 		...overrides,
 	};
@@ -159,15 +162,16 @@ function registerLifecycleAskUser(pi: ExtensionAPI): void {
 		name: "ask_user",
 		label: "Ask user",
 		description: "Ask one clarifying question with preset answers and an optional free-form reply.",
-		parameters: { type: "object", properties: {} },
-		async execute(
-			toolCallId: string,
-			params: Parameters<typeof runAsk>[0],
-			signal: AbortSignal,
-			_onUpdate: unknown,
-			ctx: { ui: Parameters<typeof runAsk>[1]["ui"] },
-		) {
-			return runAsk(params, { ui: ctx.ui, signal, toolCallId });
+		parameters: askUserSchema,
+		async execute(toolCallId, params, signal, _onUpdate, ctx) {
+			return runAsk(params, {
+				ui: {
+					select: (title, options, opts) => ctx.ui.select(title, options, opts),
+					input: (title, placeholder, opts) => ctx.ui.input(title, placeholder, opts),
+				},
+				signal,
+				toolCallId,
+			});
 		},
 	});
 }
@@ -1619,7 +1623,14 @@ test("request_capability loads a hidden trusted skill immediately", async () => 
 	const dir = mkdtempSync(path.join(tmpdir(), "skill-recovery-"));
 	const filePath = path.join(dir, "SKILL.md");
 	writeFileSync(filePath, "---\nname: hidden-skill\ndescription: hidden\n---\n\n# Secret procedure\n\nFollow this exactly.\n");
-	const skill = { name: "hidden-skill", description: "hidden", filePath, baseDir: dir, source: "test" } as Skill;
+	const skill: Skill = {
+		name: "hidden-skill",
+		description: "hidden",
+		filePath,
+		baseDir: dir,
+		sourceInfo: { path: filePath, source: "test", scope: "temporary", origin: "top-level", baseDir: dir },
+		disableModelInvocation: false,
+	};
 	const logPath = path.join(dir, "pruning.jsonl");
 	const { registeredTools } = register(config(), logPath);
 	const toolDef = registeredTools.get("request_capability");
@@ -1643,7 +1654,14 @@ test("request_capability disambiguates a hidden tool and skill with the same nam
 	const dir = mkdtempSync(path.join(tmpdir(), "skill-recovery-collision-"));
 	const filePath = path.join(dir, "SKILL.md");
 	writeFileSync(filePath, "---\nname: playwright\ndescription: browser skill\n---\n\n# Playwright procedure\n");
-	const skill = { name: "playwright", description: "browser skill", filePath, baseDir: dir, source: "test" } as Skill;
+	const skill: Skill = {
+		name: "playwright",
+		description: "browser skill",
+		filePath,
+		baseDir: dir,
+		sourceInfo: { path: filePath, source: "test", scope: "temporary", origin: "top-level", baseDir: dir },
+		disableModelInvocation: false,
+	};
 	const { registeredTools } = register(config({}, "auto", { ceiling: 3 }));
 	const toolDef = registeredTools.get("request_capability");
 	assert.ok(toolDef);

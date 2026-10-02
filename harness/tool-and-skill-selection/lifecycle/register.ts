@@ -16,6 +16,7 @@ import { rootSessionAttribution } from "../../../lib/session-attribution.js";
 import { getPieBaseSystemPrompt, rebasePieToolPrompt } from "../../agent-instructions/prompt-assembly/pie-harness-prompt.js";
 import { createRequestCapabilityDefinition, type PiToolSeams } from "../recovery/request-capability-ports.js";
 import { getCodeVersion, prewarmCodeVersion } from "./version.js";
+import type { PruningResult } from "../settings/config-types.js";
 import {
 	buildPrepassFingerprint,
 	cacheSuccessfulPrepass,
@@ -65,11 +66,12 @@ export default function register(pi: ExtensionAPI) {
 
 	// Keep pruning telemetry as a custom message so the host can track prepass
 	// completion and usage, but remove it from every provider request below.
-	pi.registerMessageRenderer("pruning-result", (message: { content: string; details?: unknown }, { expanded }: { expanded: boolean }, theme: { bg: (key: string, child: unknown) => unknown; fg: (key: string, text: string) => string }) => {
-		return pruningResultRenderer.render(message, { expanded }, theme);
-	});
+	// The generic pins T to PruningResult so `message.details` is the real
+	// payload type and the renderer/context seam keeps Pi's public shapes.
+	pi.registerMessageRenderer<PruningResult>("pruning-result", (message, options, theme) =>
+		pruningResultRenderer.render(message, options, theme));
 
-	pi.on("context", (event: { messages: Array<{ role?: string; customType?: string }> }) => ({
+	pi.on("context", (event) => ({
 		messages: event.messages.filter((message) => message.role !== "custom" || message.customType !== "pruning-result"),
 	}));
 

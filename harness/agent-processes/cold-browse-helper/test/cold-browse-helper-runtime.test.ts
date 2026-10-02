@@ -16,7 +16,7 @@ import {
   type ColdBrowseHelperFence,
 } from '../cold-browse-helper-protocol';
 import {
-  createLegacyTestSdkRuntime,
+  createSyntheticSourceTestSdkRuntime,
   createSourceArtifactTestSdkRuntime,
 } from '../../test/fixtures/sdk-runtime-selection.js';
 import {
@@ -28,6 +28,7 @@ import {
   sdkRuntimeLoadMode,
   verifySdkRuntimeSelection,
 } from '../../lib/sdk-integration/sdk-runtime-selection.js';
+import { sourceDescriptor } from '../../lib/sdk-integration/test/source-fixture.js';
 import { sessionSnapshotLineBytes, SessionSnapshotTooLargeError } from '../../../session-storage/transcripts/snapshot-boundary.js';
 
 const pageOptions = { transport: { kind: 'response', requestId: 'runtime-page' } } as const;
@@ -64,12 +65,12 @@ function fence(sessionPath: string): ColdBrowseHelperFence {
   };
 }
 
-test('helper owns a manager-free projection cache and fences changes around every response', { skip: !process.env['PIE_REAL_RUNTIME_ARTIFACT_DIR']?.trim() }, async () => {
+test('helper owns a manager-free projection cache and fences changes around every response', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-cold-helper-runtime-'));
   try {
     const sessionPath = path.join(root, 'session.jsonl');
     await writeRows(sessionPath, [header(root), user('one', 'one')]);
-    const artifactDir = process.env['PIE_REAL_RUNTIME_ARTIFACT_DIR']!.trim();
+    const artifactDir = sourceDescriptor.artifactDir;
     const selectedRuntime = await createSourceArtifactTestSdkRuntime(artifactDir);
     const verifiedRuntime = await verifySdkRuntimeSelection(selectedRuntime.sdkPath, selectedRuntime.sdkRuntime);
     const mode = sdkRuntimeLoadMode(verifiedRuntime, 'cold');
@@ -278,7 +279,7 @@ test('helper durable-detail resolution matches the pure durable address and refu
 });
 
 test('cold helper initialization rejects missing, mixed, unknown, and legacy-discriminator runtime routes', () => {
-  const sdkRuntime = createLegacyTestSdkRuntime('/sdk');
+  const sdkRuntime = createSyntheticSourceTestSdkRuntime('/sdk');
   const initialization = {
     protocolVersion: COLD_BROWSE_HELPER_PROTOCOL_VERSION,
     kind: 'initialize',
@@ -293,7 +294,9 @@ test('cold helper initialization rejects missing, mixed, unknown, and legacy-dis
     { ...initialization, sdkRuntime: undefined },
     { ...initialization, sdkRuntime: { ...sdkRuntime, descriptor: {} } },
     { ...initialization, sdkRuntime: { ...sdkRuntime, kind: 'unknown' } },
-    { ...initialization, sdkPatchIdentity: (sdkRuntime as any).patchIdentity },
+    { ...initialization, sdkRuntime: { ...sdkRuntime, patchIdentity: {} } },
+    { ...initialization, sdkRuntime: { kind: 'legacy-patched', patchIdentity: {} } },
+    { ...initialization, sdkPatchIdentity: {} },
   ]) assert.equal(parseColdBrowseHelperInputFrame(malformed), undefined);
 });
 

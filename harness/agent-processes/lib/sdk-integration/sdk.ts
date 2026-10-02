@@ -13,36 +13,10 @@ import {
   resolveHistoryCompactionThresholdTokens,
 } from '../../../session-storage/settings/history-compaction.js';
 import type { HistoryCompactionSettings } from '../../../session-storage/settings/history-compaction.js';
-import type { ThinkingLevel } from '../../../model-providers/catalog/thinking-level.js';
 import { backendWarn } from '../../../../lib/structured-logging/backend-log';
-import {
-  consumedOverflowMessageEntryIds,
-  isAllZeroEmptyLengthMessage,
-  isContextOverflowMessage,
-  isEstimatedContextOverflowMessage,
-} from '../../workers/history-compaction';
-import {
-  ensureSdkPatchBarrier,
-  validateSdkPatchBarrier,
-  type SdkPatchIdentity,
-} from './sdk-patch-barrier';
+import { isContextOverflowMessage } from '../../workers/history-compaction';
 import type { SessionEntryLike } from '../../../session-storage/transcripts/transcript';
 import type { MessageLike } from '../../../session-storage/transcripts/types';
-
-export {
-  SDK_PATCH_IDENTITY_VERSION,
-  applySdkRetryHotPatch,
-  applySdkTerminalDurabilityPatch,
-  ensureSdkPatchBarrier,
-  resolveSdkPatchBarrierLockPath,
-  validateSdkPatchBarrier,
-  type SdkPatchBarrierOptions,
-  type SdkPatchFileIdentity,
-  type SdkRetryHotPatchResult,
-  type SdkTerminalDurabilityPatchResult,
-  type SdkColdCreateDurabilityPatchResult,
-} from './sdk-patch-barrier';
-export type { SdkPatchIdentity } from './sdk-patch-barrier';
 
 // ─── Minimal SDK contract ────────────────────────────────────────────────────
 // We type only the surface the backend actually consumes. SDK breaking changes
@@ -112,7 +86,7 @@ export interface SdkSessionEvent {
   /** Session lifecycle or history-compaction reason metadata. */
   reason?: 'manual' | 'threshold' | 'overflow' | 'new' | 'resume' | 'fork' | 'startup' | 'reload' | 'quit';
   previousSessionFile?: string;
-  /** Stable SDK session-entry ID, attached by Pie's persistence-order patch. */
+  /** Stable SDK session-entry ID emitted after source-owned persistence. */
   sessionEntryId?: string;
 }
 
@@ -175,8 +149,8 @@ export interface SdkSessionTransferAuthorization {
   destinationLease: SdkSessionWriteLease;
 }
 
-/** Supported Pie adapter consumed by the patched pinned SDK in worker mode.
- * Legacy/cold callers omit it and retain the SDK's ordinary durable behavior. */
+/** Supported Pie adapter consumed by the source SDK in worker mode.
+ * Cold callers omit it and retain the SDK's ordinary durable behavior. */
 export interface SdkSessionOwnershipAdapter {
   reserveReplacement(intent: SdkSessionReplacementIntent): Promise<SdkSessionOwnershipReservation>;
   abortPrecommit(reservation: SdkSessionOwnershipReservation, reason: string): Promise<void>;
@@ -190,7 +164,7 @@ export interface SdkSessionOwnershipAdapter {
   ): Promise<SdkSessionWriteLease>;
   assertWriteLease(lease: SdkSessionWriteLease, canonicalPath: string, seam: string): void;
   /** Optional until the P7b storage cutoff is explicitly authorized. When
-   * installed, the patched SDK encloses the complete same-session mutation in
+   * installed, the source SDK encloses the complete same-session mutation in
    * this cross-process lifecycle critical section. */
   runWriteMutation?<T>(
     lease: SdkSessionWriteLease,
@@ -337,8 +311,8 @@ export interface SdkSession {
   reload: () => Promise<void>;
   prompt: (text: string, options?: SdkPromptOptions) => Promise<void>;
   /** Resume an interrupted turn without appending a new user message or running
-   * the before_agent_start prompt preflight. Installed by Pie's runtime adapter
-   * over the pinned SDK's internal continuation seam. */
+   * the before_agent_start prompt preflight. Adapted by Pie's source policy
+   * through the SDK's public continuation decision API. */
   continueAfterInterruption?: () => Promise<void>;
   /** Manually summarize older history to free context. */
   compact: (customInstructions?: string) => Promise<unknown>;
@@ -423,7 +397,7 @@ export interface SdkSystemPromptModule {
 
 export interface SdkRuntime {
   session: SdkSession;
-  /** Present only on the patched pinned SDK runtime. */
+  /** Source SDK runtime ownership adapter. */
   ownershipAdapter?: SdkSessionOwnershipAdapter;
   services: {
     modelRegistry: SdkModelRegistry;
@@ -478,20 +452,9 @@ export interface SdkSessionInfo {
 
 export interface SdkModule {
   VERSION: string;
-  AgentSession?: { prototype: Record<string, unknown> };
   /** Pure SDK compaction functions used by Pie's supported before-compact customization. */
-  prepareCompaction?: (entries: unknown[], settings: SdkCompactionSettings) => SdkCompactionPreparation | undefined;
-  compact?: (
-    preparation: SdkCompactionPreparation,
-    model: PatchableModel,
-    apiKey: string | undefined,
-    headers: Record<string, string> | undefined,
-    customInstructions: string | undefined,
-    signal: AbortSignal | undefined,
-    thinkingLevel: ThinkingLevel | undefined,
-    streamFn: unknown,
-    env: Record<string, string> | undefined,
-  ) => Promise<SdkCompactionResult>;
+  prepareCompaction?: typeof SourceSdk.prepareCompaction;
+  compact?: typeof SourceSdk.compact;
   getAgentDir: () => string;
   formatSkillsForPrompt?: (skills: SdkSkill[]) => string;
   AuthStorage: {
@@ -501,7 +464,8 @@ export interface SdkModule {
     create: (authStorage: SdkAuthStorage, modelsJsonPath?: string) => SdkModelRegistry;
   };
   SessionManager: {
-    prototype?: Record<string, unknown>;
+    /** Public class prototype, exposed for contract inspection only. */
+    prototype?: typeof SourceSdk.SessionManager.prototype;
     continueRecent: (cwd: string) => SdkSessionManager;
     create: (cwd: string, sessionDir?: string) => SdkSessionManager;
     /** Ephemeral manager used by temporary inventory workers. */
@@ -565,92 +529,11 @@ interface HistoryCompactionUsage {
   contextWindow: number;
 }
 
-interface PatchableModel {
-  id: string;
-  provider: string;
-  contextWindow?: number;
-  maxTokens?: number;
-  reasoning?: boolean;
-}
+type HistoryCompactionModel = NonNullable<SourceSdk.AgentSession['model']>;
+type BeforeCompactEvent = Parameters<NonNullable<SourceSdk.CompactionHooks['beforeCompact']>>[0];
+type CompactionPolicySession = Pick<SourceSdk.AgentSession,
+  'model' | 'thinkingLevel' | 'settingsManager' | 'agent' | 'modelRegistry' | 'getCompactionRequestAuth'>;
 
-interface SdkCompactionSettings {
-  enabled: boolean;
-  reserveTokens: number;
-  keepRecentTokens: number;
-}
-
-interface SdkCompactionPreparation {
-  firstKeptEntryId: string;
-  tokensBefore: number;
-  [key: string]: unknown;
-}
-
-interface SdkCompactionResult {
-  summary: string;
-  firstKeptEntryId: string;
-  tokensBefore: number;
-  estimatedTokensAfter?: number;
-  details?: unknown;
-}
-
-interface BeforeCompactEvent {
-  type: 'session_before_compact';
-  preparation: SdkCompactionPreparation;
-  branchEntries: unknown[];
-  customInstructions?: string;
-  reason: 'manual' | 'threshold' | 'overflow';
-  willRetry: boolean;
-  signal?: AbortSignal;
-}
-
-interface PatchableExtensionRunner {
-  __pieHistoryCompactionCustomizationInstalled?: boolean;
-  hasHandlers(eventType: string): boolean;
-  emit(event: unknown): Promise<unknown>;
-}
-
-interface PatchableModelRegistry {
-  find(provider: string, id: string): PatchableModel | undefined;
-}
-
-interface PatchableAgentSession {
-  agent: {
-    prepareNextTurnWithContext?: (turn: {
-      context: Record<string, unknown>;
-      message?: { content?: unknown[] };
-      toolResults?: unknown[];
-    }, signal?: AbortSignal) => Promise<Record<string, unknown> | undefined>;
-    state: { messages: unknown[] };
-    streamFn?: unknown;
-    hasQueuedMessages?: () => boolean;
-  };
-  continueAfterInterruption?: () => Promise<void>;
-  model?: PatchableModel;
-  thinkingLevel?: ThinkingLevel;
-  settingsManager?: { getCompactionSettings(): SdkCompactionSettings };
-  sessionManager: { getBranch(): Array<{ type?: string; id?: string }> };
-  _modelRegistry?: PatchableModelRegistry;
-  _extensionRunner?: PatchableExtensionRunner;
-  _getCompactionRequestAuth?: (model: PatchableModel) => Promise<{
-    apiKey?: string;
-    headers?: Record<string, string>;
-    env?: Record<string, string>;
-  }>;
-  _isAgentRunActive?: boolean;
-  _runAgentPrompt?: (messages: unknown[]) => Promise<void>;
-  _handlePostAgentRun(): Promise<boolean>;
-  _overflowRecoveryAttempted?: boolean;
-  _emit?: (event: unknown) => void;
-  _installAgentNextTurnRefresh(): void;
-  _buildRuntime?: (...args: unknown[]) => unknown;
-  _checkCompaction(assistantMessage: PatchableAssistantMessage, skipAbortedCheck?: boolean): Promise<boolean>;
-  _runAutoCompaction(reason: 'threshold' | 'overflow', willRetry: boolean): Promise<boolean>;
-  getContextUsage(): HistoryCompactionUsage | undefined;
-}
-
-export type SdkHistoryCompactionPatchResult = 'patched' | 'already-present' | 'missing-target' | 'unsupported-shape';
-export type SdkInterruptedContinuationPatchResult = 'patched' | 'already-present' | 'missing-target' | 'unsupported-shape';
-export type SdkOverflowCompactionContextPatchResult = 'patched' | 'already-present' | 'missing-target' | 'unsupported-shape';
 export type InterruptedContinuationTail =
   | 'aborted-assistant'
   | 'overflow-assistant'
@@ -676,112 +559,12 @@ export function classifyInterruptedContinuationTail(
   const role = (last as { role?: unknown }).role;
   if (role === 'user' || role === 'toolResult') return 'open-provider-turn';
   if (role !== 'assistant') return undefined;
-  const assistant = last as PatchableAssistantMessage;
+  const assistant = last as ContinuationAssistantMessage;
   if (assistant.stopReason === 'aborted') return 'aborted-assistant';
   if (isContextOverflowMessage(assistant as MessageLike, contextWindow)) return 'overflow-assistant';
   if ((assistant.stopReason === 'stop' || assistant.stopReason === 'length')
       && !hasAssistantToolCall(assistant)) return 'completed-assistant';
   return undefined;
-}
-
-/** Install the narrow continuation API Pie needs without changing the pinned
- * SDK on disk. The SDK already owns the complete run lifecycle in
- * `_runAgentPrompt`; passing an empty prompt list reaches agent-core's
- * continuation loop without emitting a user message or `before_agent_start`.
- * A provider-started aborted assistant and an overflow tail are removed from
- * provider context, a completed assistant reply is preserved there, and an
- * interruption before the next provider message resumes directly from its
- * trailing user/tool-result boundary. Durable history remains unchanged: the
- * completed reply was persisted by the ordinary message_end path, so no new
- * user or assistant row is written for the continuation itself. */
-export function applySdkInterruptedContinuationRuntimePatch(sdk: {
-  AgentSession?: { prototype?: Record<string, unknown> };
-}): SdkInterruptedContinuationPatchResult {
-  const rawPrototype = sdk.AgentSession?.prototype;
-  if (!rawPrototype) return 'missing-target';
-  const prototype = rawPrototype as unknown as PatchableAgentSession;
-  if (typeof prototype.continueAfterInterruption === 'function') return 'already-present';
-  if (typeof prototype._runAgentPrompt !== 'function') return 'unsupported-shape';
-
-  prototype.continueAfterInterruption = async function continueAfterInterruption(
-    this: PatchableAgentSession,
-  ): Promise<void> {
-    const messages = this.agent?.state?.messages;
-    const tail = classifyInterruptedContinuationTail(messages, this.model?.contextWindow);
-    if (!tail) {
-      throw new Error('The session does not end at a supported continuation point.');
-    }
-    if (tail === 'aborted-assistant' || tail === 'overflow-assistant') {
-      this.agent.state.messages = messages.slice(0, -1);
-    }
-    // An explicit user continuation starts a fresh bounded overflow-recovery
-    // attempt even though it deliberately adds no new user message.
-    this._overflowRecoveryAttempted = false;
-    await this._runAgentPrompt!([]);
-  };
-  return 'patched';
-}
-
-/** Keep native provider-overflow recovery's live and durable prompt shapes
- * identical. Pi persists the failed assistant before deciding to compact, then
- * removes it only from the current in-memory prompt. Reopen, duplicate and
- * truncate rebuild through SessionManager and would otherwise reintroduce it. */
-export function applySdkOverflowCompactionContextPatch(sdk: {
-  SessionManager?: { prototype?: Record<string, unknown> };
-}): SdkOverflowCompactionContextPatchResult {
-  const prototype = sdk.SessionManager?.prototype as (Record<string, unknown> & {
-    __pieOverflowCompactionContextPatched?: boolean;
-  }) | undefined;
-  if (!prototype) return 'missing-target';
-  if (prototype.__pieOverflowCompactionContextPatched) return 'already-present';
-  const originalBuild = prototype.buildSessionContext;
-  const buildEntries = prototype.buildContextEntries;
-  if (typeof originalBuild !== 'function' || typeof buildEntries !== 'function') return 'unsupported-shape';
-
-  prototype.buildSessionContext = function patchedBuildSessionContext(
-    this: SdkSessionManager,
-  ): ReturnType<NonNullable<SdkSessionManager['buildSessionContext']>> {
-    const context = (originalBuild as () => ReturnType<NonNullable<SdkSessionManager['buildSessionContext']>>).call(this);
-    const branch = this.getBranch();
-    const consumedIds = consumedOverflowMessageEntryIds(branch);
-    if (consumedIds.size === 0) return context;
-    const messages = context.messages.slice();
-    const consumedMessages = branch
-      .filter((entry) => consumedIds.has(entry.id) && entry.message)
-      .map((entry) => entry.message!);
-    for (const consumed of consumedMessages) {
-      let matchedIndex = -1;
-      for (let index = messages.length - 1; index >= 0; index -= 1) {
-        const candidate = messages[index];
-        if (candidate === consumed) {
-          matchedIndex = index;
-          break;
-        }
-        if (!candidate || typeof candidate !== 'object') continue;
-        const message = candidate as MessageLike;
-        // SessionManager normalizes a legacy null/missing content field by
-        // cloning the message, so retain a structural identity fallback for
-        // that one supported rebuild shape.
-        if (message.role === consumed.role
-            && message.timestamp === consumed.timestamp
-            && message.provider === consumed.provider
-            && message.model === consumed.model
-            && message.stopReason === consumed.stopReason
-            && message.errorMessage === consumed.errorMessage) {
-          matchedIndex = index;
-          break;
-        }
-      }
-      if (matchedIndex >= 0) messages.splice(matchedIndex, 1);
-    }
-    return { ...context, messages };
-  };
-  Object.defineProperty(prototype, '__pieOverflowCompactionContextPatched', {
-    value: true,
-    enumerable: false,
-    configurable: false,
-  });
-  return 'patched';
 }
 
 function readLiveHistoryCompactionSettings(): HistoryCompactionSettings | undefined {
@@ -794,13 +577,13 @@ function readLiveHistoryCompactionSettings(): HistoryCompactionSettings | undefi
   }
 }
 
-function historyCompactionModelKey(model: Pick<PatchableModel, 'provider' | 'id'> | undefined): string | undefined {
+function historyCompactionModelKey(model: Pick<HistoryCompactionModel, 'provider' | 'id'> | undefined): string | undefined {
   return model?.provider && model.id ? `${model.provider}/${model.id}` : undefined;
 }
 
 function effectiveHistoryCompactionSettings(
   settings: HistoryCompactionSettings,
-  model: Pick<PatchableModel, 'provider' | 'id'> | undefined,
+  model: Pick<HistoryCompactionModel, 'provider' | 'id'> | undefined,
 ): HistoryCompactionSettings {
   const key = historyCompactionModelKey(model);
   if (!key) return settings;
@@ -808,42 +591,19 @@ function effectiveHistoryCompactionSettings(
   return { ...settings, ...effective };
 }
 
-/** Pure threshold decision shared by the runtime patch and focused tests. */
+/** Pure threshold decision shared by the source policy and workers. */
 export function shouldRunHistoryCompaction(
   settings: HistoryCompactionSettings | undefined,
   usage: HistoryCompactionUsage | undefined,
   trigger: 'soft' | 'hard',
-  model?: Pick<PatchableModel, 'provider' | 'id'>,
+  model?: Pick<HistoryCompactionModel, 'provider' | 'id'>,
 ): boolean {
   if (!settings?.enabled || !usage || usage.tokens === null || usage.contextWindow <= 0) return false;
   const effective = effectiveHistoryCompactionSettings(settings, model);
   return usage.tokens >= resolveHistoryCompactionThresholdTokens(effective, usage.contextWindow, trigger);
 }
 
-function latestCompactionId(session: PatchableAgentSession): string | undefined {
-  const branch = session.sessionManager.getBranch();
-  for (let index = branch.length - 1; index >= 0; index -= 1) {
-    const entry = branch[index];
-    if (entry?.type === 'compaction') return entry.id;
-  }
-  return undefined;
-}
-
-async function runPatchedHistoryCompaction(
-  session: PatchableAgentSession,
-  trigger: 'soft' | 'hard',
-  continueRun: boolean,
-): Promise<boolean> {
-  const settings = readLiveHistoryCompactionSettings();
-  if (!shouldRunHistoryCompaction(settings, session.getContextUsage(), trigger, session.model)) {
-    return false;
-  }
-  const before = latestCompactionId(session);
-  await session._runAutoCompaction('threshold', continueRun);
-  return latestCompactionId(session) !== before;
-}
-
-interface PatchableAssistantMessage {
+interface ContinuationAssistantMessage {
   stopReason?: string;
   content?: unknown[];
   provider?: string;
@@ -855,66 +615,10 @@ interface PatchableAssistantMessage {
   };
 }
 
-function hasAssistantToolCall(message: PatchableAssistantMessage | undefined): boolean {
+function hasAssistantToolCall(message: ContinuationAssistantMessage | undefined): boolean {
   return Array.isArray(message?.content)
     && message.content.some((part) =>
       !!part && typeof part === 'object' && (part as { type?: unknown }).type === 'toolCall');
-}
-
-function isSilentContextOverflow(
-  message: PatchableAssistantMessage,
-  contextWindow: number | undefined,
-): boolean {
-  if (!contextWindow || contextWindow <= 0 || !message.usage) return false;
-  const input = (message.usage.input ?? 0) + (message.usage.cacheRead ?? 0);
-  if (message.stopReason === 'stop') return input > contextWindow;
-  return message.stopReason === 'length'
-    && (message.usage.output ?? 0) === 0
-    && input >= contextWindow * 0.99;
-}
-
-async function recoverEstimatedContextOverflow(
-  session: PatchableAgentSession,
-  assistantMessage: PatchableAssistantMessage,
-): Promise<boolean | undefined> {
-  const model = session.model;
-  const sameModel = !!model
-    && assistantMessage.provider === model.provider
-    && assistantMessage.model === model.id;
-  if (!sameModel || !isAllZeroEmptyLengthMessage(assistantMessage)) return undefined;
-
-  const usage = session.getContextUsage();
-  if (!isEstimatedContextOverflowMessage(
-    assistantMessage,
-    model.contextWindow,
-    usage?.tokens,
-  )) return undefined;
-
-  if (session._overflowRecoveryAttempted) {
-    session._emit?.({
-      type: 'compaction_end',
-      reason: 'overflow',
-      result: undefined,
-      aborted: false,
-      willRetry: false,
-      errorMessage: 'Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model.',
-    });
-    return false;
-  }
-
-  session._overflowRecoveryAttempted = true;
-  const messages = session.agent.state.messages;
-  const last = messages[messages.length - 1];
-  if (last && typeof last === 'object' && (last as { role?: unknown }).role === 'assistant') {
-    session.agent.state.messages = messages.slice(0, -1);
-  }
-  return await session._runAutoCompaction('overflow', true);
-}
-
-function isBeforeCompactEvent(event: unknown): event is BeforeCompactEvent {
-  return !!event && typeof event === 'object'
-    && (event as { type?: unknown }).type === 'session_before_compact'
-    && Array.isArray((event as { branchEntries?: unknown }).branchEntries);
 }
 
 function mergeCompactionInstructions(persistent: string, oneTime: string | undefined): string | undefined {
@@ -933,12 +637,12 @@ function mergeCompactionDetails(
 }
 
 type CustomizedCompactionDecision =
-  | { compaction: SdkCompactionResult }
+  | { compaction: SourceSdk.CompactionResult }
   | { cancel: true };
 
 function blockActiveModelCompactionFallback(
   settings: HistoryCompactionSettings,
-  activeModel: PatchableModel | undefined,
+  activeModel: HistoryCompactionModel | undefined,
   reason: string,
 ): CustomizedCompactionDecision | undefined {
   if (!settings.summaryModel) return undefined;
@@ -954,7 +658,7 @@ function blockActiveModelCompactionFallback(
 
 async function createCustomizedCompaction(
   sdk: Pick<SdkModule, 'prepareCompaction' | 'compact'>,
-  session: PatchableAgentSession,
+  session: CompactionPolicySession,
   event: BeforeCompactEvent,
 ): Promise<CustomizedCompactionDecision | undefined> {
   const activeModel = session.model;
@@ -986,18 +690,18 @@ async function createCustomizedCompaction(
 
   let summaryModel = activeModel;
   if (settings.summaryModel) {
-    const selected = session._modelRegistry?.find(settings.summaryModel.provider, settings.summaryModel.id);
+    const selected = session.modelRegistry?.find(settings.summaryModel.provider, settings.summaryModel.id);
     if (!selected) {
       return blockActiveModelCompactionFallback(settings, activeModel, 'configured-model-unavailable');
     }
     summaryModel = selected;
   }
-  if (!session._getCompactionRequestAuth) {
+  if (!session.getCompactionRequestAuth) {
     return blockActiveModelCompactionFallback(settings, activeModel, 'compaction-auth-unavailable');
   }
 
   try {
-    const auth = await session._getCompactionRequestAuth(summaryModel);
+    const auth = await session.getCompactionRequestAuth(summaryModel);
     const thinkingLevel = settings.summaryThinkingLevel === 'inherit'
       ? session.thinkingLevel
       : settings.summaryThinkingLevel;
@@ -1036,159 +740,6 @@ async function createCustomizedCompaction(
   }
 }
 
-function installHistoryCompactionCustomization(
-  sdk: Pick<SdkModule, 'prepareCompaction' | 'compact'>,
-  session: PatchableAgentSession,
-): boolean {
-  const runner = session._extensionRunner;
-  if (!runner) return false;
-  if (runner.__pieHistoryCompactionCustomizationInstalled) return true;
-  const originalEmit = runner.emit;
-  const originalHasHandlers = runner.hasHandlers;
-  if (typeof originalEmit !== 'function' || typeof originalHasHandlers !== 'function') return false;
-
-  // The SDK avoids constructing before-compact events unless at least one
-  // extension handler exists. Advertise Pie's synthetic final handler so the
-  // supported event path is actually invoked; preserve all native answers for
-  // every other event type.
-  runner.hasHandlers = function pieHistoryCompactionHasHandlers(eventType: string): boolean {
-    return eventType === 'session_before_compact' || originalHasHandlers.call(this, eventType);
-  };
-  runner.emit = async function pieHistoryCompactionEmit(event: unknown): Promise<unknown> {
-    const existing = await originalEmit.call(this, event);
-    if (!isBeforeCompactEvent(event)) return existing;
-    if (existing && typeof existing === 'object') {
-      const prior = existing as { cancel?: unknown; compaction?: unknown };
-      if (prior.cancel || prior.compaction) return existing;
-    }
-    const decision = await createCustomizedCompaction(sdk, session, event);
-    return decision ?? existing;
-  };
-  Object.defineProperty(runner, '__pieHistoryCompactionCustomizationInstalled', {
-    value: true,
-    enumerable: false,
-    configurable: false,
-  });
-  return true;
-}
-
-/**
- * Add Pie's proactive soft/hard scheduler and supported before-compact
- * customization to the pinned SDK without changing its persisted session
- * format. Hard checks run from the SDK's awaited prepare-next-turn barrier
- * (after all tool results, before another provider request). While the
- * proactive policy is enabled, its thresholds replace pi's native near-window
- * threshold; provider overflow/error recovery remains delegated to pi.
- */
-export function applySdkHistoryCompactionRuntimePatch(
-  sdk: Pick<SdkModule, 'AgentSession' | 'prepareCompaction' | 'compact'>,
-): SdkHistoryCompactionPatchResult {
-  const prototype = sdk.AgentSession?.prototype as (Record<string, unknown> & {
-    __pieHistoryCompactionPatched?: boolean;
-  }) | undefined;
-  if (!prototype) return 'missing-target';
-  if (prototype.__pieHistoryCompactionPatched) return 'already-present';
-  const originalInstall = prototype._installAgentNextTurnRefresh;
-  const originalBuildRuntime = prototype._buildRuntime;
-  const originalCheck = prototype._checkCompaction;
-  if (typeof originalInstall !== 'function'
-      || typeof originalCheck !== 'function') return 'unsupported-shape';
-  const hasCompactionCustomization = typeof sdk.prepareCompaction === 'function'
-    && typeof sdk.compact === 'function';
-  if (hasCompactionCustomization && typeof originalBuildRuntime !== 'function') return 'unsupported-shape';
-
-  if (typeof originalBuildRuntime === 'function' && hasCompactionCustomization) {
-    prototype._buildRuntime = function patchedBuildRuntime(
-      this: PatchableAgentSession,
-      ...args: unknown[]
-    ): unknown {
-      const result = (originalBuildRuntime as (...runtimeArgs: unknown[]) => unknown).apply(this, args);
-      if (!installHistoryCompactionCustomization(sdk, this)) {
-        throw new Error('SDK history-compaction patch failed: extension runner unavailable.');
-      }
-      return result;
-    };
-  }
-
-  prototype._installAgentNextTurnRefresh = function patchedInstall(this: PatchableAgentSession): void {
-    (originalInstall as (this: PatchableAgentSession) => void).call(this);
-    const previousPrepare = this.agent.prepareNextTurnWithContext;
-    if (typeof previousPrepare !== 'function') return;
-    this.agent.prepareNextTurnWithContext = async (turn, signal) => {
-      const previousSnapshot = await previousPrepare.call(this.agent, turn, signal);
-      // A hard-threshold check runs after every provider turn, including a
-      // normal terminal response. Only tools or an already-queued user message
-      // prove the agent loop has more work. Compaction after completed output
-      // alone is maintenance for the next user turn and must not manufacture a
-      // zero-prompt provider call.
-      const hasNaturalContinuation = (turn.toolResults?.length ?? 0) > 0
-        || hasAssistantToolCall(turn.message)
-        || this.agent.hasQueuedMessages?.() === true;
-      const compacted = await runPatchedHistoryCompaction(this, 'hard', hasNaturalContinuation);
-      if (!compacted) return previousSnapshot;
-      const baseContext = (previousSnapshot?.context ?? turn.context) as Record<string, unknown>;
-      return {
-        ...(previousSnapshot ?? {}),
-        context: {
-          ...baseContext,
-          messages: this.agent.state.messages.slice(),
-        },
-      };
-    };
-  };
-
-  prototype._checkCompaction = async function patchedCheck(
-    this: PatchableAgentSession,
-    assistantMessage: PatchableAssistantMessage,
-    skipAbortedCheck = true,
-  ): Promise<boolean> {
-    // Some providers return an empty length stop with all usage counters zero
-    // when the prompt exhausts their context. Native pi cannot recognize that
-    // shape because its overflow classifier requires direct input usage, so
-    // recover it here from the SDK's last-valid-usage context estimate.
-    const estimatedOverflowRecovery = await recoverEstimatedContextOverflow(this, assistantMessage);
-    if (estimatedOverflowRecovery !== undefined) return estimatedOverflowRecovery;
-
-    // Provider errors and silent overflow signals must reach pi's native
-    // classifier first so overflow compacts, removes a truncated assistant
-    // where required, and performs its one bounded retry. Normal successful
-    // responses continue to use Pie's proactive soft/hard timing.
-    if (assistantMessage.stopReason === 'error'
-        || isSilentContextOverflow(assistantMessage, this.model?.contextWindow)
-        || (skipAbortedCheck && assistantMessage.stopReason === 'aborted')) {
-      return await (originalCheck as PatchableAgentSession['_checkCompaction']).call(
-        this,
-        assistantMessage,
-        skipAbortedCheck,
-      );
-    }
-    const trigger = this._isAgentRunActive ? 'soft' : 'hard';
-    // `_checkCompaction(..., true)` is the post-agent-run seam. A successful
-    // response is complete: threshold compaction prepares the next user turn
-    // and, unlike provider-overflow recovery, never calls agent.continue().
-    const compacted = await runPatchedHistoryCompaction(this, trigger, false);
-    if (compacted) return false;
-    // Any valid live Pie policy owns normal threshold timing completely,
-    // including enabled=false. Native error/overflow handling was delegated
-    // above; falling through while disabled would silently re-enable pi's
-    // default `contextWindow - reserveTokens` threshold and ignore the user's
-    // toggle. Only an absent/unreadable policy delegates normal timing.
-    if (readLiveHistoryCompactionSettings()) return false;
-    return await (originalCheck as PatchableAgentSession['_checkCompaction']).call(
-      this,
-      assistantMessage,
-      skipAbortedCheck,
-    );
-  };
-
-  Object.defineProperty(prototype, '__pieHistoryCompactionPatched', {
-    value: true,
-    enumerable: false,
-    configurable: false,
-  });
-  return 'patched';
-}
-
 /** Source factories preserve authoritative typed ownership and policy options. */
 export type SourceArtifactSdkModule = Omit<typeof SourceSdk,
   'createAgentSession' | 'createAgentSessionFromServices' | 'createAgentSessionRuntime'> & {
@@ -1205,12 +756,7 @@ export interface SourceSdkLoadMode {
   surface?: 'cold' | 'full';
 }
 
-export type SdkLoadMode =
-  | SourceSdkLoadMode
-  | { mode: 'coordinator' }
-  | { mode: 'cold-coordinator' }
-  | { mode: 'cold-worker'; patchIdentity: unknown }
-  | { mode: 'worker'; patchIdentity: unknown };
+export type SdkLoadMode = SourceSdkLoadMode;
 
 export async function loadSdk(
   sdkPath: string,
@@ -1218,113 +764,39 @@ export async function loadSdk(
 ): Promise<SourceArtifactSdkModule>;
 export async function loadSdk(
   sdkPath: string,
-  mode: { mode: 'cold-coordinator' } | { mode: 'cold-worker'; patchIdentity: unknown } | (SourceSdkLoadMode & { surface: 'cold' }),
+  mode: SourceSdkLoadMode & { surface: 'cold' },
 ): Promise<ColdCoordinatorSdkModule>;
 export async function loadSdk(
   sdkPath: string,
-  mode?: { mode: 'coordinator' } | { mode: 'worker'; patchIdentity: unknown },
-): Promise<SdkModule>;
+  mode: SdkLoadMode,
+): Promise<ColdCoordinatorSdkModule | SourceArtifactSdkModule>;
 export async function loadSdk(
   sdkPath: string,
   mode: SdkLoadMode,
-): Promise<SdkModule | ColdCoordinatorSdkModule | SourceArtifactSdkModule>;
-export async function loadSdk(
-  sdkPath: string,
-  mode: SdkLoadMode = { mode: 'coordinator' },
-): Promise<SdkModule | ColdCoordinatorSdkModule | SourceArtifactSdkModule> {
-  if (mode.mode === 'source-artifact') return loadSourceSdk(sdkPath, mode);
-  // This is the mandatory pre-import boundary. Coordinators may patch while
-  // holding the shared lock; workers receive the resulting closed identity and
-  // are read-only validators. Keep every dynamic SDK import below this await.
-  const patchIdentity: SdkPatchIdentity = mode.mode === 'worker' || mode.mode === 'cold-worker'
-    ? await validateSdkPatchBarrier(sdkPath, mode.patchIdentity)
-    : await ensureSdkPatchBarrier(sdkPath);
-  const verifiedSdkPath = patchIdentity.sdkPath;
+): Promise<ColdCoordinatorSdkModule | SourceArtifactSdkModule> {
+  return loadSourceSdk(sdkPath, mode);
+}
 
-  if (mode.mode === 'cold-coordinator' || mode.mode === 'cold-worker') {
-    const [config, auth, models, sessions] = await Promise.all([
-      dynamicImport(pathToFileURL(path.join(verifiedSdkPath, 'dist', 'config.js')).href),
-      dynamicImport(pathToFileURL(path.join(verifiedSdkPath, 'dist', 'core', 'auth-storage.js')).href),
-      dynamicImport(pathToFileURL(path.join(verifiedSdkPath, 'dist', 'core', 'model-registry.js')).href),
-      dynamicImport(pathToFileURL(path.join(verifiedSdkPath, 'dist', 'core', 'session-manager.js')).href),
-    ]) as [Partial<SdkModule>, Partial<SdkModule>, Partial<SdkModule>, Partial<SdkModule>];
-    const cold = {
-      VERSION: config.VERSION,
-      getAgentDir: config.getAgentDir,
-      AuthStorage: auth.AuthStorage,
-      ModelRegistry: models.ModelRegistry,
-      SessionManager: sessions.SessionManager,
-    } as Partial<ColdCoordinatorSdkModule>;
-    if (typeof cold.VERSION !== 'string'
-        || typeof cold.getAgentDir !== 'function'
-        || typeof cold.AuthStorage?.create !== 'function'
-        || typeof cold.ModelRegistry?.create !== 'function'
-        || typeof cold.SessionManager?.create !== 'function'
-        || typeof cold.SessionManager?.open !== 'function'
-        || typeof cold.SessionManager?.forkFrom !== 'function'
-        || typeof cold.SessionManager?.listAll !== 'function') {
-      throw new Error(
-        `SDK at ${verifiedSdkPath} is missing required cold coordinator exports.`,
-      );
-    }
-    const contextPatch = applySdkOverflowCompactionContextPatch({ SessionManager: cold.SessionManager });
-    if (contextPatch === 'missing-target' || contextPatch === 'unsupported-shape') {
-      throw new Error(`SDK overflow-compaction context patch failed: ${contextPatch}.`);
-    }
-    return cold as ColdCoordinatorSdkModule;
+function assertSourceLoadMode(mode: SourceSdkLoadMode): void {
+  if (!mode || mode.mode !== 'source-artifact') {
+    throw new TypeError('An explicit source-artifact SDK descriptor selection is required.');
   }
-
-  const entryUrl = pathToFileURL(path.join(verifiedSdkPath, 'dist', 'index.js')).href;
-  const mod = (await dynamicImport(entryUrl)) as Partial<SdkModule>;
-
-  if (
-    typeof mod.VERSION !== 'string' ||
-    typeof mod.getAgentDir !== 'function' ||
-    typeof mod.SessionManager?.listAll !== 'function' ||
-    typeof mod.SessionManager?.inMemory !== 'function' ||
-    typeof mod.createAgentSessionRuntime !== 'function'
-  ) {
-    throw new Error(
-      `SDK at ${verifiedSdkPath} is missing required exports (expected pi-coding-agent contract).`,
-    );
+  if (mode.surface !== undefined && mode.surface !== 'cold' && mode.surface !== 'full') {
+    throw new TypeError('Source SDK surface must be cold or full.');
   }
-
-  const typed = mod as SdkModule;
-  // The pinned SDK documents and ships compaction as an internal module, but
-  // does not re-export prepareCompaction from dist/index.js. Loading only the
-  // package root leaves that value undefined, so the model-override hook is
-  // never installed and pi silently compacts with the active chat model.
-  const compactionModule = typed.prepareCompaction && typed.compact
-    ? typed
-    : await loadSdkInternalModule<Pick<SdkModule, 'prepareCompaction' | 'compact'>>(
-        verifiedSdkPath,
-        path.join('core', 'compaction', 'index.js'),
-        mode,
-      );
-  if (typeof compactionModule.prepareCompaction !== 'function'
-      || typeof compactionModule.compact !== 'function') {
-    throw new Error('SDK history-compaction patch failed: compaction functions are unavailable.');
-  }
-  const contextPatch = applySdkOverflowCompactionContextPatch({ SessionManager: typed.SessionManager });
-  if (contextPatch === 'missing-target' || contextPatch === 'unsupported-shape') {
-    throw new Error(`SDK overflow-compaction context patch failed: ${contextPatch}.`);
-  }
-  const historyCompactionPatch = applySdkHistoryCompactionRuntimePatch({
-    AgentSession: typed.AgentSession,
-    prepareCompaction: compactionModule.prepareCompaction,
-    compact: compactionModule.compact,
-  });
-  if (historyCompactionPatch === 'missing-target' || historyCompactionPatch === 'unsupported-shape') {
-    throw new Error(`SDK history-compaction patch failed: ${historyCompactionPatch}.`);
-  }
-  const continuationPatch = applySdkInterruptedContinuationRuntimePatch({ AgentSession: typed.AgentSession });
-  if (continuationPatch === 'missing-target' || continuationPatch === 'unsupported-shape') {
-    throw new Error(`SDK interrupted-continuation patch failed: ${continuationPatch}.`);
-  }
-  return typed;
 }
 
 async function verifiedSourceSdkPath(sdkPath: string, mode: SourceSdkLoadMode): Promise<string> {
+  assertSourceLoadMode(mode);
+  if (!mode.backendTarget) throw new TypeError('An explicit source SDK backend target is required.');
+  const executingTarget: PiRuntimeTarget = {
+    platform: process.platform, arch: process.arch, nodeAbi: process.versions.modules,
+  };
+  for (const key of ['platform', 'arch', 'nodeAbi'] as const) {
+    if (mode.backendTarget[key] !== executingTarget[key]) {
+      throw new Error(`Source SDK backend target.${key} mismatch with executing process.`);
+    }
+  }
   const descriptor = await verifySdkRuntimeArtifactDescriptor(mode.descriptor, mode.backendTarget);
   if (!path.isAbsolute(sdkPath) || await realpath(sdkPath) !== descriptor.sdkPath) {
     throw new Error('Explicit SDK path does not match the verified source artifact.');
@@ -1348,24 +820,11 @@ async function sourceInternalPath(sdkPath: string, relativePath: string): Promis
   return canonical;
 }
 
-async function loadSourceSdk(sdkPath: string, mode: SourceSdkLoadMode): Promise<SdkModule | ColdCoordinatorSdkModule> {
+async function loadSourceSdk(sdkPath: string, mode: SourceSdkLoadMode): Promise<SourceArtifactSdkModule | ColdCoordinatorSdkModule> {
   const verifiedPath = await verifiedSourceSdkPath(sdkPath, mode);
   const policy = createSourceSdkPolicyAdapter({
     readHistoryCompactionSettings: readLiveHistoryCompactionSettings,
-    beforeCompact: async (event, session) => {
-      // A value-only facade reuses Pie's summary policy through public source
-      // APIs. No source instance internals or prototypes are intercepted.
-      const facade = {
-        model: session.model,
-        thinkingLevel: session.thinkingLevel,
-        settingsManager: session.settingsManager,
-        agent: session.agent,
-        _modelRegistry: session.modelRegistry,
-        _getCompactionRequestAuth: session.getCompactionRequestAuth.bind(session),
-      } as unknown as PatchableAgentSession;
-      return await createCustomizedCompaction(compaction, facade, event as unknown as BeforeCompactEvent) as
-        Awaited<ReturnType<NonNullable<SourceSdk.CompactionHooks['beforeCompact']>>>;
-    },
+    beforeCompact: (event, session) => createCustomizedCompaction(compaction, session, event),
   });
   const compaction: Pick<SdkModule, 'prepareCompaction' | 'compact'> = {};
   let exports: Partial<SdkModule>;
@@ -1380,7 +839,7 @@ async function loadSourceSdk(sdkPath: string, mode: SourceSdkLoadMode): Promise<
   }
   if (typeof exports.VERSION !== 'string' || typeof exports.getAgentDir !== 'function'
       || typeof exports.AuthStorage?.create !== 'function' || typeof exports.ModelRegistry?.create !== 'function'
-      || ['create', 'open', 'forkFrom', 'listAll', 'inMemory'].some(key =>
+      || ['create', 'open', 'forkFrom', 'listAll', 'inMemory', 'continueRecent'].some(key =>
         typeof (exports.SessionManager as unknown as Record<string, unknown>)?.[key] !== 'function')) {
     throw new Error(`SDK at ${verifiedPath} is missing required cold coordinator exports.`);
   }
@@ -1426,22 +885,15 @@ async function loadSourceSdk(sdkPath: string, mode: SourceSdkLoadMode): Promise<
         contextMessageOmissions: policy.contextMessageOmissions(options.contextMessageOmissions),
         compactionHooks: policy.compactionHooks(options.compactionHooks),
       }),
-  } as unknown as SdkModule;
+  } as unknown as SourceArtifactSdkModule;
 }
 
 export async function loadSdkInternalModule<TModule>(
   sdkPath: string,
   relativePath: string,
-  mode: SdkLoadMode = { mode: 'coordinator' },
+  mode: SdkLoadMode,
 ): Promise<TModule> {
-  if (mode.mode === 'source-artifact') {
-    const verifiedPath = await verifiedSourceSdkPath(sdkPath, mode);
-    const entry = await sourceInternalPath(verifiedPath, relativePath);
-    return await dynamicImport(pathToFileURL(entry).href) as TModule;
-  }
-  const patchIdentity = mode.mode === 'worker' || mode.mode === 'cold-worker'
-    ? await validateSdkPatchBarrier(sdkPath, mode.patchIdentity)
-    : await ensureSdkPatchBarrier(sdkPath);
-  const entryUrl = pathToFileURL(path.join(patchIdentity.sdkPath, 'dist', relativePath)).href;
-  return (await dynamicImport(entryUrl)) as TModule;
+  const verifiedPath = await verifiedSourceSdkPath(sdkPath, mode);
+  const entry = await sourceInternalPath(verifiedPath, relativePath);
+  return await dynamicImport(pathToFileURL(entry).href) as TModule;
 }

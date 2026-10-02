@@ -133,14 +133,52 @@ test('open reads a durable session once and preserves the stored cwd and request
   const sessionPath = path.join(root, 'existing.jsonl');
   fs.mkdirSync(storedCwd);
   fs.mkdirSync(sessionDir);
-  writeJsonl(sessionPath, [sessionHeader(storedCwd, 3), userEntry('user-1', null, 'hello')]);
+  const header = sessionHeader(storedCwd, 3, 'single-read-session');
+  const user = userEntry('user-1', null, 'hello');
+  const assistant = {
+    type: 'message', id: 'assistant-1', parentId: 'user-1',
+    timestamp: '2026-08-25T00:00:02.000Z',
+    message: {
+      role: 'assistant', content: [{ type: 'text', text: 'hi' }],
+      api: 'test', provider: 'test', model: 'model-a',
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: {} },
+      stopReason: 'stop', timestamp: 2,
+    },
+  };
+  writeJsonl(sessionPath, [header, user, assistant]);
 
   const opened = withSessionReadCount(sessionPath, () => SessionManager.open(sessionPath, sessionDir));
   assert.equal(opened.reads, 1);
   assert.equal(opened.value.getSessionFile(), path.resolve(sessionPath));
   assert.equal(opened.value.getSessionDir(), path.resolve(sessionDir));
   assert.equal(opened.value.getCwd(), path.resolve(storedCwd));
-  assert.equal(opened.value.getEntries().length, 1);
+  // The legacy parity snapshot is explicit here: no installed SDK baseline
+  // or patch-derived fixture is needed to define the expected public state.
+  assert.deepEqual(JSON.parse(JSON.stringify({
+    sessionFile: opened.value.getSessionFile(),
+    sessionDir: opened.value.getSessionDir(),
+    sessionId: opened.value.getSessionId(),
+    cwd: opened.value.getCwd(),
+    header: opened.value.getHeader(),
+    entries: opened.value.getEntries(),
+    branch: opened.value.getBranch(),
+    tree: opened.value.getTree(),
+    context: opened.value.buildSessionContext(),
+  })), {
+    sessionFile: path.resolve(sessionPath),
+    sessionDir: path.resolve(sessionDir),
+    sessionId: header.id,
+    cwd: path.resolve(storedCwd),
+    header,
+    entries: [user, assistant],
+    branch: [user, assistant],
+    tree: [{ entry: user, children: [{ entry: assistant, children: [] }] }],
+    context: {
+      messages: [user.message, assistant.message],
+      thinkingLevel: 'off',
+      model: { provider: 'test', modelId: 'model-a' },
+    },
+  });
 });
 
 test('open leaves missing paths absent, initializes an empty file once, and preserves invalid bytes', { concurrency: false }, (t) => {
@@ -154,10 +192,14 @@ test('open leaves missing paths absent, initializes an empty file once, and pres
   assert.equal(fs.existsSync(missingPath), false);
 
   const emptyPath = path.join(root, 'empty.jsonl');
+  const overrideCwd = path.join(root, 'override-cwd');
+  fs.mkdirSync(overrideCwd);
   fs.writeFileSync(emptyPath, '', 'utf8');
-  const empty = withSessionReadCount(emptyPath, () => SessionManager.open(emptyPath));
+  const empty = withSessionReadCount(emptyPath, () => SessionManager.open(emptyPath, undefined, overrideCwd));
   assert.equal(empty.reads, 1);
   assert.equal(empty.value.getSessionFile(), path.resolve(emptyPath));
+  assert.equal(empty.value.getCwd(), path.resolve(overrideCwd));
+  assert.equal(fs.readFileSync(emptyPath, 'utf8').trim().length > 0, true);
   const emptyHeader = empty.value.getHeader();
   assert.ok(emptyHeader);
   assert.equal(emptyHeader.version, 3);
@@ -265,6 +307,21 @@ test('create eagerly publishes exactly its v3 header and subsequent appends do n
   assert.equal(rows.filter((row) => row.type === 'session').length, 1);
   assert.deepEqual(rows[0], JSON.parse(JSON.stringify(manager.getHeader())));
   assert.deepEqual(rows.slice(1).map((row) => row.message?.role), ['user', 'assistant']);
+});
+
+test('direct create writes parent ownership into the one canonical durable initial header', { concurrency: false }, (t) => {
+  const root = tempRoot(t);
+  const sessionDir = path.join(root, 'parent-sessions');
+  fs.mkdirSync(sessionDir);
+  const manager = SessionManager.create(root, sessionDir, { parentSession: 'canonical-parent.jsonl' });
+  const sessionPath = manager.getSessionFile();
+  assert.ok(sessionPath);
+  const rows = readJsonl(sessionPath);
+
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].parentSession, 'canonical-parent.jsonl');
+  assert.deepEqual(rows[0], JSON.parse(JSON.stringify(manager.getHeader())));
+  assert.equal(fs.readdirSync(sessionDir).length, 1);
 });
 
 test('an EEXIST publication collision preserves the pre-existing destination and removes the staged file', { concurrency: false }, (t) => {

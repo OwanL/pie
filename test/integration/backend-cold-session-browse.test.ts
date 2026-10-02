@@ -6,6 +6,9 @@ import * as path from 'node:path';
 import test from 'node:test';
 
 import { BackendServer } from '../../harness/agent-processes/coordinator/index.js';
+import { createSyntheticSourceTestSdkRuntime } from '../../harness/agent-processes/test/fixtures/sdk-runtime-selection.js';
+
+const sdkRuntime = createSyntheticSourceTestSdkRuntime(path.resolve('/unused'));
 import {
   SESSION_SETTINGS_DIR_ENV,
   readSystemPromptTogglesForSession,
@@ -68,7 +71,8 @@ async function makeColdServer(options: { sessionCatalog?: any; contextThinkingLe
   let managerOpens = 0;
   let nextEntryId = 0;
   const server = new BackendServer({ workerEntryPath: '/worker-entry.js',
-    sdkPath: '/unused',
+    sdkPath: sdkRuntime.descriptor.sdkPath,
+    sourceArtifactDescriptor: sdkRuntime.descriptor,
     cwd: dir,
     sessionCatalog: options.sessionCatalog,
   }) as any;

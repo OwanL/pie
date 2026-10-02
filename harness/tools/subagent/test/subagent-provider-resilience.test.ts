@@ -19,7 +19,7 @@
 import test, { afterEach, after } from "node:test";
 import assert from "node:assert/strict";
 import Module from "node:module";
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -27,8 +27,8 @@ import { execute } from "../execute.js";
 import { OrphanCleanupRegistry, type CleanupScheduler } from "../cleanup.js";
 import type { RetryClock } from "../retry.js";
 
-// ESM resolve hook — redirects @mariozechner/pi-coding-agent to an in-memory mock.
-// Registered globally so all execute() calls see the mock. Guarded against
+// ESM resolve hook — redirects the selected shared-TSX-config SDK alias target
+// to an in-memory mock. Registered globally so all execute() calls see the mock. Guarded against
 // double-registration (modes.test.ts may have run first).
 const MOCK_SDK_SOURCE = [
 	"export class DefaultResourceLoader { constructor(a){ this.a = a; } async reload(){} }",
@@ -60,12 +60,22 @@ const MOCK_SDK_SOURCE = [
 const __mockDir = mkdtempSync(path.join(tmpdir(), "resilience-mock-sdk-"));
 const __mockSdkPath = path.join(__mockDir, "mock-sdk.mjs");
 writeFileSync(__mockSdkPath, MOCK_SDK_SOURCE, "utf-8");
+const __tsxConfigPath = process.env.TSX_TSCONFIG_PATH;
+if (!__tsxConfigPath) throw new Error("subagent-provider-resilience.test.ts requires the shared TSX config");
+const __sdkPaths = JSON.parse(readFileSync(path.resolve(__tsxConfigPath), "utf-8")).compilerOptions?.paths;
+const __canonicalSdkPath = __sdkPaths?.["@earendil-works/pi-coding-agent"]?.[0];
+const __legacySdkPath = __sdkPaths?.["@mariozechner/pi-coding-agent"]?.[0];
+if (typeof __canonicalSdkPath !== "string" || typeof __legacySdkPath !== "string" || !path.isAbsolute(__canonicalSdkPath) || path.resolve(__canonicalSdkPath) !== path.resolve(__legacySdkPath)) {
+	throw new Error("The shared TSX config must map canonical and legacy coding-agent aliases to the same selected module");
+}
+const __selectedSdkPath = path.resolve(__canonicalSdkPath);
+const __selectedSdkUrl = pathToFileURL(__selectedSdkPath).href;
 const __hookPath = path.join(__mockDir, "hook.mjs");
 const __hookContent =
 	"export async function resolve(specifier, context, nextResolve){" +
-	"  if (specifier === '@mariozechner/pi-coding-agent') return { url: '" +
-	pathToFileURL(__mockSdkPath).href +
-	"', shortCircuit: true };" +
+	"  if (specifier === '@earendil-works/pi-coding-agent' || specifier === '@mariozechner/pi-coding-agent' || specifier === " + JSON.stringify(__selectedSdkPath) + " || specifier === " + JSON.stringify(__selectedSdkUrl) + " || specifier.startsWith(" + JSON.stringify(`${__selectedSdkUrl}?tsx-namespace=`) + ")) return { url: " +
+	JSON.stringify(pathToFileURL(__mockSdkPath).href) +
+	", shortCircuit: true };" +
 	"  return nextResolve(specifier, context);" +
 	"}";
 writeFileSync(__hookPath, __hookContent, "utf-8");

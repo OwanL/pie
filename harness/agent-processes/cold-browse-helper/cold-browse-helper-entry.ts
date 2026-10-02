@@ -63,15 +63,11 @@ async function main(): Promise<void> {
         process.exit(0);
       });
       // Validate the selected runtime against this child process before importing
-      // SessionManager. Legacy verification is a read-only patch-barrier check.
+      // SessionManager.
       const sdkRuntime = parseSdkRuntimeSelection(frame.sdkRuntime);
       const verifiedRuntime = await verifySdkRuntimeSelection(frame.sdkPath, sdkRuntime);
       const selectedMode = sdkRuntimeLoadMode(verifiedRuntime, 'cold');
-      const sdk = selectedMode.mode === 'source-artifact'
-        ? await loadSdk(frame.sdkPath, { ...selectedMode, surface: 'cold' })
-        : selectedMode.mode === 'cold-worker'
-          ? await loadSdk(frame.sdkPath, selectedMode)
-          : (() => { throw new Error('Cold browse helper requires a cold SDK worker load mode.'); })();
+      const sdk = await loadSdk(frame.sdkPath, selectedMode);
       runtime = new ColdBrowseHelperRuntime({
         sdk,
         startupCwd: frame.startupCwd,

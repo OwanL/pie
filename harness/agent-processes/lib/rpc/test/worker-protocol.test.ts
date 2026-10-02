@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { SDK_PATCH_IDENTITY_VERSION } from '../../sdk-integration/sdk-patch-barrier.js';
+import * as path from 'node:path';
+import { createSyntheticSourceTestSdkRuntime } from '../../../test/fixtures/sdk-runtime-selection.js';
 import { deriveAnalyticsIdempotencyKey, type AnalyticsObservation } from '../../../../../analytics/contracts/contracts.js';
 import { createAnalyticsFactPacket } from '../../../../../analytics/contracts/transport.js';
 import type { AnalyticsBranchObservedPayload } from '../../../../../analytics/contracts/branch-observation.js';
@@ -30,17 +31,7 @@ const base: WorkerFrameBase = {
   seq: 11,
 };
 
-const sdkPatchIdentity = {
-  identityVersion: SDK_PATCH_IDENTITY_VERSION,
-  sdkPath: 'C:/sdk',
-  sdkVersion: '0.80.6',
-  terminalDurability: { patchVersion: 1, relativePath: 'dist/core/agent-session.js', sha256: 'a'.repeat(64) },
-  retryClassifier: { patchVersion: 1, relativePath: 'dist/utils/retry.js', sha256: 'b'.repeat(64) },
-  coldCreateDurability: { patchVersion: 2, relativePath: 'dist/core/session-manager.js', sha256: 'c'.repeat(64) },
-  sessionOwnershipAdapter: { patchVersion: 1, relativePath: 'dist/core/session-manager.js', sha256: 'c'.repeat(64) },
-  sessionReplacementAdapter: { patchVersion: 7, relativePath: 'dist/core/agent-session-runtime.js', sha256: 'd'.repeat(64) },
-};
-const sdkRuntime = { kind: 'legacy-patched' as const, patchIdentity: sdkPatchIdentity };
+const sdkRuntime = createSyntheticSourceTestSdkRuntime(path.resolve('C:/sdk'));
 
 const expected: WorkerFrameExpectation = {
   coordinatorGeneration: 4,
@@ -434,23 +425,35 @@ test('worker IPC carries the durable analytics branch shape through draft and de
   }
 });
 
-test('SDK runtime selection is a required closed wire union on bootstrap and promotion', () => {
+test('SDK runtime selection is source-only and required on bootstrap and promotion', () => {
   const bootstrap = { ...base, kind: 'bootstrap', heartbeatIntervalMs: 1_000, sdkRuntime };
   assert.equal(parseCoordinatorToWorkerFrame(bootstrap, expected).status, 'accepted');
   assert.equal(parseCoordinatorToWorkerFrame({ ...bootstrap, sdkRuntime: undefined }, expected).status, 'invalid');
   assert.equal(parseCoordinatorToWorkerFrame({
     ...bootstrap,
-    sdkRuntime: { kind: 'future-route', patchIdentity: sdkPatchIdentity },
+    sdkRuntime: { kind: 'legacy-patched', patchIdentity: {} },
+  }, expected).status, 'invalid', 'the legacy discriminator is rejected');
+  assert.equal(parseCoordinatorToWorkerFrame({
+    ...bootstrap,
+    sdkRuntime: { ...sdkRuntime, descriptor: { ...sdkRuntime.descriptor, schemaVersion: 2 } },
+  }, expected).status, 'invalid', 'unsupported source descriptor versions are rejected');
+  assert.equal(parseCoordinatorToWorkerFrame({
+    ...bootstrap,
+    sdkRuntime: { ...sdkRuntime, descriptor: { ...sdkRuntime.descriptor, sdkPath: 'relative/sdk' } },
+  }, expected).status, 'invalid', 'source descriptor SDK paths must be absolute');
+  assert.equal(parseCoordinatorToWorkerFrame({
+    ...bootstrap,
+    sdkRuntime: { kind: 'future-route', descriptor: sdkRuntime.descriptor },
   }, expected).status, 'invalid');
   assert.equal(parseCoordinatorToWorkerFrame({
     ...bootstrap,
-    sdkRuntime: { ...sdkRuntime, descriptor: {} },
+    sdkRuntime: { ...sdkRuntime, patchIdentity: {} },
   }, expected).status, 'invalid');
   assert.equal(parseCoordinatorToWorkerFrame({
     ...base,
     kind: 'bootstrap',
     heartbeatIntervalMs: 1_000,
-    sdkPatchIdentity,
+    sdkPatchIdentity: {},
   }, expected).status, 'invalid', 'the removed field is not a legacy fallback');
   assert.equal(parseCoordinatorToWorkerFrame({
     ...base,
@@ -489,12 +492,12 @@ test('protocol rejects exact extra fields, malformed correlated unions, and unsa
   }, expected).status, 'invalid');
   assert.equal(parseCoordinatorToWorkerFrame({
     ...base, kind: 'bootstrap', heartbeatIntervalMs: 1_000,
-    sdkRuntime: { kind: 'legacy-patched', patchIdentity: { ...sdkPatchIdentity, extra: true } },
+    sdkRuntime: { ...sdkRuntime, descriptor: { ...sdkRuntime.descriptor, extra: true } },
   }, expected).status, 'invalid');
-  const { coldCreateDurability: _missingColdCreate, ...missingColdCreateIdentity } = sdkPatchIdentity;
+  const { manifest: _missingManifest, ...missingManifestDescriptor } = sdkRuntime.descriptor;
   assert.equal(parseCoordinatorToWorkerFrame({
     ...base, kind: 'bootstrap', heartbeatIntervalMs: 1_000,
-    sdkRuntime: { kind: 'legacy-patched', patchIdentity: missingColdCreateIdentity },
+    sdkRuntime: { ...sdkRuntime, descriptor: missingManifestDescriptor },
   }, expected).status, 'invalid');
   assert.equal(parseCoordinatorToWorkerFrame({
     ...base, kind: 'provider.rejected', requestId: 'provider',

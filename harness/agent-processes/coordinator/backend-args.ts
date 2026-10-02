@@ -14,7 +14,7 @@ export interface BackendArgs {
   /** Dedicated inherited descriptor whose EOF proves the host disappeared. */
   lifetimeFd?: number;
   /** Verified generation-local Pi artifact selected by the production host. */
-  sourceArtifactDescriptor?: GenerationPiRuntimeDescriptor;
+  sourceArtifactDescriptor: GenerationPiRuntimeDescriptor;
   /** Immutable canonical analytics authority snapshot, supplied only by the
    * production host after its readiness probe succeeds. */
   analyticsActivation?: AnalyticsBackendDescriptor;
@@ -58,7 +58,6 @@ export function parseArgs(argv: string[]): BackendArgs {
       }
       try {
         const selection = parseSdkRuntimeSelection({ kind: 'source-artifact', descriptor });
-        if (selection.kind !== 'source-artifact') throw new Error('Expected a source-artifact selection.');
         sourceArtifactDescriptor = selection.descriptor;
       } catch (error) {
         const detail = error instanceof Error ? ` ${error.message}` : '';
@@ -116,6 +115,9 @@ export function parseArgs(argv: string[]): BackendArgs {
   if (!sdkPath) {
     throw new Error('Missing required --sdkPath argument.');
   }
+  if (!sourceArtifactDescriptor) {
+    throw new Error('Missing required --sourceArtifactDescriptor argument.');
+  }
 
   const analyticsFlagNames = [
     '--analyticsGenerationId',
@@ -159,7 +161,7 @@ export function parseArgs(argv: string[]): BackendArgs {
     backendGeneration,
     ...(hostPid === undefined ? {} : { hostPid }),
     ...(lifetimeFd === undefined ? {} : { lifetimeFd }),
-    ...(sourceArtifactDescriptor === undefined ? {} : { sourceArtifactDescriptor }),
+    sourceArtifactDescriptor,
     ...(analyticsActivation === undefined ? {} : { analyticsActivation }),
   };
 }

@@ -144,7 +144,7 @@ test('setActiveTools inside a recovery tool exposes the recovered schema on the 
     const settingsManager = sdk.SettingsManager.inMemory({
       compaction: { enabled: false },
       retry: { enabled: false },
-      defaultProjectTrust: false,
+      defaultProjectTrust: 'never',
     }, { projectTrusted: false });
     const resourceLoader = new sdk.DefaultResourceLoader({
       cwd,

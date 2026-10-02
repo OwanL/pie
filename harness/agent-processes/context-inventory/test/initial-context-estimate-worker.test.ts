@@ -9,11 +9,11 @@ import {
   isInput,
 } from '../initial-context-estimate-worker.js';
 import { INITIAL_CONTEXT_INVENTORY_PROTOCOL_VERSION } from '../initial-context-estimate-protocol.js';
-import { createLegacyTestSdkRuntime } from '../../test/fixtures/sdk-runtime-selection.js';
+import { createSyntheticSourceTestSdkRuntime } from '../../test/fixtures/sdk-runtime-selection.js';
 import { estimateTextTokens } from '../../../../lib/token-estimation.js';
 
 test('inventory frames reject missing, mixed, unknown, and legacy-discriminator runtime routes', () => {
-  const sdkRuntime = createLegacyTestSdkRuntime('/sdk');
+  const sdkRuntime = createSyntheticSourceTestSdkRuntime('/sdk');
   const initialization = {
     protocolVersion: INITIAL_CONTEXT_INVENTORY_PROTOCOL_VERSION,
     kind: 'initialize',
@@ -38,13 +38,17 @@ test('inventory frames reject missing, mixed, unknown, and legacy-discriminator 
     { ...initialization, sdkRuntime: undefined },
     { ...initialization, sdkRuntime: { ...sdkRuntime, descriptor: {} } },
     { ...initialization, sdkRuntime: { ...sdkRuntime, kind: 'unknown' } },
-    { ...initialization, sdkPatchIdentity: (sdkRuntime as any).patchIdentity },
+    { ...initialization, sdkRuntime: { ...sdkRuntime, patchIdentity: {} } },
+    { ...initialization, sdkRuntime: { kind: 'legacy-patched', patchIdentity: {} } },
+    { ...initialization, sdkPatchIdentity: {} },
   ]) assert.equal(isInitialization(malformed), false);
   for (const malformed of [
     { ...request, sdkRuntime: undefined },
     { ...request, sdkRuntime: { ...sdkRuntime, descriptor: {} } },
     { ...request, sdkRuntime: { ...sdkRuntime, kind: 'unknown' } },
-    { ...request, sdkPatchIdentity: (sdkRuntime as any).patchIdentity },
+    { ...request, sdkRuntime: { ...sdkRuntime, patchIdentity: {} } },
+    { ...request, sdkRuntime: { kind: 'legacy-patched', patchIdentity: {} } },
+    { ...request, sdkPatchIdentity: {} },
   ]) assert.equal(isInput(malformed), false);
 });
 

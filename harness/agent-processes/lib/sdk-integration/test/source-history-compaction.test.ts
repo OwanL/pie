@@ -267,6 +267,8 @@ test('post-run soft threshold compacts a completed response without retrying it'
   assert.deepEqual(triggers, ['hard', 'hard', 'soft']);
   assert.equal(f.streamCalls.length, 1, 'a completed answer is never continued by threshold maintenance');
   assert.equal(f.events.filter((event: any) => event.type === 'compaction_end' && event.willRetry).length, 0);
+  assert.equal(f.agent.state.messages.at(-1)?.role, 'assistant',
+    'the completed answer remains the provider-context tail after soft compaction');
 });
 
 test('full prompt awaits hard between-turn compaction before executing and continuing a tool call', async (t) => {
@@ -337,6 +339,66 @@ test('full prompt awaits hard between-turn compaction before executing and conti
   assert.equal(f.events.filter((event: any) => event.type === 'agent_settled').length, 1);
 });
 
+test('hard compaction during a terminating tool batch does not add an outer-loop continuation', async (t) => {
+  denyNetwork(t);
+  const modules = await sourceModules;
+  let toolExecutions = 0;
+  let willRetry: boolean | undefined;
+  const f = await fixture(t, {
+    // Retain this short tool exchange without retaining the entire fixture history.
+    compaction: { keepRecentTokens: 20 },
+    baseTools: {
+      finish: {
+        name: 'finish', label: 'Finish', description: 'Terminate this tool batch.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+        execute: async () => {
+          toolExecutions += 1;
+          return { content: [{ type: 'text', text: 'finished' }], details: {}, terminate: true };
+        },
+      },
+    },
+    hooks: {
+      shouldCompact: ({ trigger, phase }) => trigger === 'hard' && phase === 'between-turn',
+      beforeCompact: (event) => { willRetry = event.willRetry; return extensionCompaction(event); },
+    },
+    streamFn: (model) => fakeAssistantResponse(modules, model,
+      Object.assign(assistant(model.provider, model.id, '', { stopReason: 'toolUse' }), {
+        content: [{ type: 'toolCall', id: 'finish-call', name: 'finish', arguments: {} }],
+      })),
+  });
+  await f.session.prompt('finish the batch');
+  assert.equal(toolExecutions, 1);
+  assert.equal(willRetry, true, 'the hard barrier preserves tool-continuation intent');
+  assert.equal(f.manager.getBranch().filter((entry: any) => entry.type === 'compaction').length, 1);
+  assert.equal(f.streamCalls.length, 1, 'terminating tool results prevent any manufactured continuation');
+  assert.equal(f.events.filter((event: any) => event.type === 'agent_settled').length, 1);
+});
+
+for (const scenario of [
+  { stopReason: 'length', input: 99, output: 0, willRetry: true },
+  { stopReason: 'stop', input: 101, output: 10, willRetry: false },
+]) {
+  test(`silent nonzero ${scenario.stopReason} overflow delegates to native recovery`, async (t) => {
+    let thresholdCalls = 0;
+    const f = await fixture(t, {
+      contextWindow: 100,
+      hooks: {
+        shouldCompact: () => { thresholdCalls += 1; return false; },
+        beforeCompact: (event) => extensionCompaction(event),
+      },
+    });
+    const overflow = assistant(f.model.provider, f.model.id, '', scenario);
+    f.agent.state.messages.push(overflow);
+    assert.equal(await f.session._checkCompaction(overflow), scenario.willRetry);
+    assert.equal(thresholdCalls, 0, 'silent overflow bypasses proactive threshold policy');
+    const endings = f.events.filter((event: any) => event.type === 'compaction_end');
+    assert.equal(endings.length, 1);
+    assert.equal(endings[0].reason, 'overflow');
+    assert.equal(endings[0].willRetry, scenario.willRetry);
+    assert.equal(f.manager.getBranch().filter((entry: any) => entry.type === 'compaction').length, 1);
+  });
+}
+
 test('full prompt hard-compacts a queued follow-up once and does not duplicate its continuation', async (t) => {
   denyNetwork(t);
   const modules = await sourceModules;
@@ -402,6 +464,10 @@ for (const scenario of [
       newMessages: [],
     });
     assert.equal(willRetry, scenario.expectedRetry);
+    if (scenario.name === 'terminal response') {
+      assert.equal(f.agent.state.messages.at(-1)?.role, 'assistant',
+        'the completed assistant response remains the provider-context tail');
+    }
     assert.deepEqual(snapshot.context.messages, f.agent.state.messages,
       'the awaited continuation barrier replaces its stale message snapshot');
     assert.equal(f.manager.getBranch().filter((entry: any) => entry.type === 'compaction').length, 1);
@@ -891,7 +957,6 @@ test('services factory forwards compaction hooks and installs initial context om
     compaction: { enabled: true, reserveTokens: 20, keepRecentTokens: 1 },
   });
   const extensionRuntime = modules.createExtensionRuntime();
-  let session: any;
   let startupContents: string[] | undefined;
   const extension = await modules.loadExtensionFromFactory((api: any) => {
     api.on('session_start', () => {
@@ -930,7 +995,7 @@ test('services factory forwards compaction hooks and installs initial context om
     compactionHooks,
     sessionStartEvent: { type: 'session_start', reason: 'startup' },
   });
-  session = created.session;
+  const session: any = created.session;
   t.after(() => session?.dispose());
 
   const initialContents = session.agent.state.messages.map((message: any) => typeof message.content === 'string'

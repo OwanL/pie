@@ -5,7 +5,12 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { BackendServer } from '../../harness/agent-processes/coordinator/index.js';
+import { createSyntheticSourceTestSdkRuntime } from '../../harness/agent-processes/test/fixtures/sdk-runtime-selection.js';
 import { SESSION_SNAPSHOT_MAX_LINE_BYTES, sessionSnapshotLineBytes } from '../../harness/session-storage/transcripts/snapshot-boundary.js';
+
+// Shape-only synthetic runtime: the SDK surface is stubbed below and no real
+// SDK is verified, imported, or spawned.
+const sourceArtifactDescriptor = createSyntheticSourceTestSdkRuntime(path.resolve('/unused')).descriptor;
 
 const MODELS = [
   {
@@ -75,7 +80,7 @@ function makeServerWithSession(branch: unknown[] = []): { server: any; sessionPa
     JSON.stringify({ type: 'session', id: 'test-session', version: 3, cwd: agentDir }),
     ...branch.map((row) => JSON.stringify(row)),
   ].join('\n') + '\n');
-  const server = new BackendServer({ workerEntryPath: '/worker-entry.js', sdkPath: '/unused', cwd: agentDir }) as any;
+  const server = new BackendServer({ workerEntryPath: '/worker-entry.js', sdkPath: '/unused', cwd: agentDir, sourceArtifactDescriptor }) as any;
   server.agentDir = agentDir;
   server.sdk = {
     VERSION: 'test-sdk',

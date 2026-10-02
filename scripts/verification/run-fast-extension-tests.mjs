@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process';
-import { writeFileSync, readFileSync } from 'node:fs';
+import { realpathSync, readFileSync } from 'node:fs';
 import { createRequire, isBuiltin } from 'node:module';
 import { mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -28,6 +28,9 @@ const REPORT_PREFIX = '__PI_TEST_SUMMARY__';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const EXTENSION_PACKAGE = resolvePackageEntry('extension');
 const extensionPackageRoot = path.join(repoRoot, EXTENSION_PACKAGE.dir);
+const SOURCE_FIXTURE_SOURCE = path.join(
+  repoRoot, 'harness', 'agent-processes', 'lib', 'sdk-integration', 'test', 'source-fixture.ts',
+);
 export const EXTENSION_TEST_ROOTS = packageTestRoots(EXTENSION_PACKAGE).map((testRoot) => testRoot.startsWith('test/')
   ? { relativeDir: `repo/${testRoot}`, root: repoRoot }
   : { relativeDir: testRoot, root: repoRoot });
@@ -129,6 +132,18 @@ export function isBundleSafeTest(relativePath, source) {
   return !UNSAFE_BUNDLE_ENTRIES.has(relativePath.replace(/\\/gu, '/')) && !UNSAFE_SOURCE.test(source);
 }
 
+export function hasDirectSourceFixtureImport(source) {
+  return /(?:\bfrom\s*|\bimport\s*(?:\(\s*)?)['"](?:[^'"]*\/)?source-fixture(?:\.[cm]?[jt]s)?['"]/u.test(source);
+}
+
+export function partitionSourceFixtureTests(files, sourceFixtureFiles) {
+  const sourceFixtureSet = new Set(sourceFixtureFiles);
+  return {
+    normal: files.filter((file) => !sourceFixtureSet.has(file)),
+    sourceFixture: files.filter((file) => sourceFixtureSet.has(file)),
+  };
+}
+
 export function classifyExtensionTest(relativePath, source) {
   const normalizedPath = relativePath.replace(/\\/gu, '/');
   if (normalizedPath.startsWith('application/hosts/') || normalizedPath.endsWith('.test.mjs')) return 'tsx';
@@ -153,6 +168,12 @@ function parseReport(output) {
   return line ? JSON.parse(line.slice(REPORT_PREFIX.length)) : null;
 }
 
+function unconfirmedTeardownError(message) {
+  const error = new Error(message);
+  error.processTreeTeardownUnconfirmed = true;
+  return error;
+}
+
 function run(command, args, cwd, onSpawn = undefined, extraEnv = {}, signal) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, withProcessTreeIsolation({
@@ -169,10 +190,13 @@ function run(command, args, cwd, onSpawn = undefined, extraEnv = {}, signal) {
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', (chunk) => { stdout += chunk; });
     child.stderr.on('data', (chunk) => { stderr += chunk; });
-    child.on('error', async (error) => { await watchdog.settle().catch(() => {}); reject(error); });
+    child.on('error', async (error) => {
+      const cleanup = await watchdog.settle().catch(() => ({ gone: false }));
+      reject(cleanup.gone ? error : unconfirmedTeardownError('Extension test tree teardown is unconfirmed'));
+    });
     child.on('close', async (code, closeSignal) => {
       const cleanup = await watchdog.settle().catch(() => ({ gone: false }));
-      if (!cleanup.gone) { reject(new Error('Extension test tree teardown is unconfirmed')); return; }
+      if (!cleanup.gone) { reject(unconfirmedTeardownError('Extension test tree teardown is unconfirmed')); return; }
       resolve({ code: watchdog.timedOut || watchdog.aborted ? 1 : (code ?? 1), signal: closeSignal, stdout, stderr });
     });
   });
@@ -238,10 +262,58 @@ function balancedBuckets(files, costTable) {
   return buckets;
 }
 
+function pathIsInside(root, candidate) {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+/** Resolve aliases selected from the verified artifact without applying package exports. */
+export function resolveArtifactAliasPath(selected, runtime) {
+  const artifactRoot = realpathSync(runtime.artifactDir);
+  const absoluteSelected = path.resolve(selected);
+  if (!pathIsInside(runtime.artifactDir, absoluteSelected)) {
+    throw new Error(`Verified artifact alias is outside selected artifact: ${selected}`);
+  }
+
+  let resolved;
+  try {
+    // The path is absolute, so Node's CJS exports conditions are not consulted;
+    // the candidate SDK anchor still owns the resolver context.
+    resolved = createRequire(path.join(runtime.sdkPath, 'package.json')).resolve(absoluteSelected);
+  } catch (error) {
+    throw new Error(`Could not resolve verified artifact alias: ${selected}`, { cause: error });
+  }
+  const canonical = realpathSync(resolved);
+  if (!pathIsInside(artifactRoot, canonical)) {
+    throw new Error(`Verified artifact alias escaped selected artifact: ${selected}`);
+  }
+  return canonical;
+}
+
 function comparablePath(value) {
   if (typeof value !== 'string' || value.length === 0) return null;
   const resolved = path.resolve(value).replace(/\\/gu, '/');
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+function resolvedMetafilePath(value) {
+  return comparablePath(path.isAbsolute(value) ? value : path.resolve(repoRoot, value));
+}
+
+export function sourceFixtureConsumersFromMetafile(metafile, tempDir, sourceFiles) {
+  const sourcesByOutput = new Map(sourceFiles.map((sourceFile) => [
+    comparablePath(extensionBundleOutputPath(tempDir, sourceFile)), sourceFile,
+  ]));
+  const fixturePath = comparablePath(SOURCE_FIXTURE_SOURCE);
+  const consumers = new Set();
+  for (const [outputPath, output] of Object.entries(metafile?.outputs ?? {})) {
+    const sourceFile = sourcesByOutput.get(resolvedMetafilePath(outputPath));
+    if (!sourceFile) continue;
+    if (Object.keys(output.inputs ?? {}).some((inputPath) => resolvedMetafilePath(inputPath) === fixturePath)) {
+      consumers.add(sourceFile);
+    }
+  }
+  return sourceFiles.filter((sourceFile) => consumers.has(sourceFile));
 }
 
 /**
@@ -295,19 +367,26 @@ export function createPreserveSourceUrls(sourceRoot = repoRoot) {
 
 export async function withFastRunnerTempDirs(action, tempRoot = os.tmpdir()) {
   let tempDir;
+  let teardownConfirmed = true;
   const traceDirs = [];
   try {
     tempDir = await mkdtemp(path.join(tempRoot, 'pie-extension-fast-'));
     traceDirs.push(await mkdtemp(path.join(tempRoot, 'pie-extension-fast-traces-bundled-')));
     traceDirs.push(await mkdtemp(path.join(tempRoot, 'pie-extension-fast-traces-unsafe-')));
+    traceDirs.push(await mkdtemp(path.join(tempRoot, 'pie-extension-fast-traces-source-fixture-')));
     return await action(tempDir, traceDirs);
+  } catch (error) {
+    if (error?.processTreeTeardownUnconfirmed) teardownConfirmed = false;
+    throw error;
   } finally {
-    await Promise.all([...(tempDir ? [tempDir] : []), ...traceDirs]
-      .map((dir) => rm(dir, { recursive: true, force: true })));
+    if (teardownConfirmed) {
+      await Promise.all([...(tempDir ? [tempDir] : []), ...traceDirs]
+        .map((dir) => rm(dir, { recursive: true, force: true })));
+    }
   }
 }
 
-function mergeReports(results, durationMs, tempDir, bundledSourceFiles, enumeratedFiles) {
+export function mergeReports(results, durationMs, tempDir, bundledSourceFiles, enumeratedFiles) {
   const counts = emptyCounts();
   const failures = [];
   const executedFiles = [];
@@ -348,6 +427,12 @@ function mergeReports(results, durationMs, tempDir, bundledSourceFiles, enumerat
   };
 }
 
+export async function runSerializedExtensionWaves(normalWave, sourceFixtureWave) {
+  const results = await Promise.all(normalWave);
+  for (const start of sourceFixtureWave) results.push(await start());
+  return results;
+}
+
 async function runSuite(runtime, signal) {
   const startedAt = performance.now();
   const discoveredTestFiles = [];
@@ -359,10 +444,12 @@ async function runSuite(runtime, signal) {
 
   const safe = [];
   const unsafe = [];
+  const directSourceFixtureFiles = new Set();
   const batchable = new Set();
   const scopedBatchable = new Set();
   for (const relativePath of testFiles) {
     const source = await readFile(resolveExtensionTestPath(relativePath), 'utf8');
+    if (hasDirectSourceFixtureImport(source)) directSourceFixtureFiles.add(relativePath);
     const classification = classifyExtensionTest(relativePath, source);
     if (classification === 'tsx') {
       unsafe.push(relativePath);
@@ -385,16 +472,21 @@ async function runSuite(runtime, signal) {
       ?? path.relative(tempDir, bundledFilePath).replace(/\\/gu, '/').replace(/\.js$/u, '.ts');
     let unsafeChild;
     let unsafeRun;
+    let bundledRun;
+    let sourceFixtureRun;
     try {
-    const standaloneSources = safe.filter((file) => !batchable.has(file) && !scopedBatchable.has(file));
-    const standaloneBundles = standaloneSources.map((file) => extensionBundleOutputPath(tempDir, file));
-    const unsafeSourceFiles = unsafe.map(resolveExtensionTestPath);
-    const unsafeAccountingContext = await writeAccountingContext(
-      tempDir,
-      'unsafe',
-      unsafeSourceFiles,
-      unsafeSourceFiles.map((file) => [file, file]),
+    const { normal: normalUnsafe, sourceFixture: sourceFixtureUnsafe } = partitionSourceFixtureTests(
+      unsafe, directSourceFixtureFiles,
     );
+    const unsafeSourceFiles = normalUnsafe.map(resolveExtensionTestPath);
+    const unsafeAccountingContext = unsafeSourceFiles.length
+      ? await writeAccountingContext(
+        tempDir,
+        'unsafe',
+        unsafeSourceFiles,
+        unsafeSourceFiles.map((file) => [file, file]),
+      )
+      : undefined;
     const tsxCli = resolveOwnerTsx();
     const tsxOverlay = createTsconfigOverlay(path.join(ownerRoot, 'tsconfig.json'), {
       directory: tempDir, includeOwnerDependencies: true, sdkPath: runtime.sdkPath,
@@ -404,21 +496,23 @@ async function runSuite(runtime, signal) {
     const isolatedArgs = ['--test', '--test-force-exit', '--test-concurrency=10', reporterArg];
     // The small isolated tsx subset can run while esbuild prepares the bundled
     // wave, hiding both compiler and tsx startup latency.
-    unsafeRun = run(
-      process.execPath,
-      [tsxCli, `--tsconfig=${tsxOverlay.configPath}`, ...isolatedArgs, ...unsafe.map(resolveExtensionTestArgument)],
-      extensionPackageRoot,
-      (child) => { unsafeChild = child; },
-      {
-        PIE_LIVE_PIPELINE_TRACE_DIR: traceDirs[1],
-        [TEST_FILE_ACCOUNTING_ENV]: unsafeAccountingContext,
-        TSX_TSCONFIG_PATH: tsxOverlay.configPath,
-      }, signal,
-    );
+    if (normalUnsafe.length > 0) {
+      unsafeRun = run(
+        process.execPath,
+        [tsxCli, `--tsconfig=${tsxOverlay.configPath}`, ...isolatedArgs, ...normalUnsafe.map(resolveExtensionTestArgument)],
+        extensionPackageRoot,
+        (child) => { unsafeChild = child; },
+        {
+          PIE_LIVE_PIPELINE_TRACE_DIR: traceDirs[1],
+          [TEST_FILE_ACCOUNTING_ENV]: unsafeAccountingContext,
+          TSX_TSCONFIG_PATH: tsxOverlay.configPath,
+        }, signal,
+      );
 
-    // Preserve the rejection for the join below without an unhandled rejection
-    // while esbuild is still preparing the other wave.
-    void unsafeRun.catch(() => {});
+      // Preserve the rejection for the join below without an unhandled rejection
+      // while esbuild is still preparing the other wave.
+      void unsafeRun.catch(() => {});
+    }
     const { build } = ownerRequire('esbuild');
     const bundlePiPackageDeps = {
       name: 'bundle-pi-package-deps',
@@ -434,7 +528,10 @@ async function runSuite(runtime, signal) {
           const exact = aliases[args.path]?.[0];
           const wildcard = Object.keys(aliases).find((key) => key.endsWith('/*') && args.path.startsWith(key.slice(0, -1)));
           const selected = exact ?? (wildcard ? aliases[wildcard][0].replace('*', args.path.slice(wildcard.length - 1)) : undefined);
-          if (selected?.startsWith(runtime.artifactDir + path.sep)) return { path: selected, external: false };
+          if (typeof selected === 'string' && path.isAbsolute(selected)
+            && pathIsInside(runtime.artifactDir, selected)) {
+            return { path: resolveArtifactAliasPath(selected, runtime), external: false };
+          }
           if (/^(?:@earendil-works|@mariozechner)\/pi-(?:ai|agent-core|tui|coding-agent)(?:\/|$)/u.test(args.path)
             || /^(?:@sinclair\/)?typebox(?:\/|$)/u.test(args.path)) {
             throw new Error(`Missing verified artifact alias: ${args.path}`);
@@ -498,7 +595,8 @@ async function runSuite(runtime, signal) {
         });
       },
     };
-    await build({
+    const bundleBuild = await build({
+      absWorkingDir: repoRoot,
       entryPoints: safe.map(resolveExtensionTestPath),
       outdir: tempDir,
       outbase: repoRoot,
@@ -513,9 +611,20 @@ async function runSuite(runtime, signal) {
       // guards so imported backend modules do not start the real server.
       define: { 'require.main': 'undefined' },
       logLevel: 'silent',
+      metafile: true,
     });
     await symlink(path.join(ownerRoot, 'node_modules'), path.join(tempDir, 'node_modules'), 'junction');
 
+    const sourceFixtureConsumerSet = new Set([
+      ...directSourceFixtureFiles,
+      ...sourceFixtureConsumersFromMetafile(bundleBuild.metafile, tempDir, safe),
+    ]);
+    const { normal: normalSafe, sourceFixture: sourceFixtureSafe } = partitionSourceFixtureTests(
+      safe, sourceFixtureConsumerSet,
+    );
+    const standaloneSources = normalSafe.filter((file) => !batchable.has(file) && !scopedBatchable.has(file));
+    const standaloneBundles = standaloneSources.map((file) => extensionBundleOutputPath(tempDir, file));
+    const sourceFixtureBundles = sourceFixtureSafe.map((file) => extensionBundleOutputPath(tempDir, file));
     const compiledBatchFile = (file) => extensionBundleOutputPath(tempDir, file);
     const bucketToBatch = (buckets, prefix) => Promise.all(buckets.map(async (files, index) => {
       const batchPath = path.join(tempDir, `${prefix}-${index}.mjs`);
@@ -526,29 +635,79 @@ async function runSuite(runtime, signal) {
       await writeFile(batchPath, `import { describe } from 'node:test';\n${suites.join('\n')}`, 'utf8');
       return batchPath;
     }));
-    const batchFiles = await bucketToBatch(balancedBuckets([...batchable], costTable), 'bundle-batch');
-    const scopedBatchFiles = await bucketToBatch(balancedBuckets([...scopedBatchable], costTable), 'scoped-bundle-batch');
+    const normalBatchable = [...batchable].filter((file) => !sourceFixtureConsumerSet.has(file));
+    const normalScopedBatchable = [...scopedBatchable].filter((file) => !sourceFixtureConsumerSet.has(file));
+    const batchFiles = await bucketToBatch(balancedBuckets(normalBatchable, costTable), 'bundle-batch');
+    const scopedBatchFiles = await bucketToBatch(balancedBuckets(normalScopedBatchable, costTable), 'scoped-bundle-batch');
     const bundledFiles = [...standaloneBundles, ...batchFiles, ...scopedBatchFiles];
     const bundledAccountingContext = await writeAccountingContext(
       tempDir,
       'bundled',
-      safe.map(resolveExtensionTestPath),
+      normalSafe.map(resolveExtensionTestPath),
       standaloneBundles.map((bundle, index) => [bundle, resolveExtensionTestPath(standaloneSources[index])]),
       [...batchFiles, ...scopedBatchFiles],
     );
+    const sourceFixtureBundleAccountingContext = sourceFixtureBundles.length
+      ? await writeAccountingContext(
+        tempDir,
+        'source-fixture-bundled',
+        sourceFixtureSafe.map(resolveExtensionTestPath),
+        sourceFixtureBundles.map((bundle, index) => [bundle, resolveExtensionTestPath(sourceFixtureSafe[index])]),
+      )
+      : undefined;
+    const sourceFixtureUnsafeFiles = sourceFixtureUnsafe.map(resolveExtensionTestPath);
+    const sourceFixtureUnsafeAccountingContext = sourceFixtureUnsafeFiles.length
+      ? await writeAccountingContext(
+        tempDir,
+        'source-fixture-unsafe',
+        sourceFixtureUnsafeFiles,
+        sourceFixtureUnsafeFiles.map((file) => [file, file]),
+      )
+      : undefined;
 
     if (costTable) {
       const weight = (file) => costTable[file.replace(/\\/gu, '/')] ?? 0;
       bundledFiles.sort((a, b) => weight(bundleSourcePath(b)) - weight(bundleSourcePath(a)));
     }
-    const results = await Promise.all([
-      run(process.execPath, [...bundledArgs, ...bundledFiles], extensionPackageRoot, undefined, {
+    if (bundledFiles.length > 0) {
+      bundledRun = run(process.execPath, [...bundledArgs, ...bundledFiles], extensionPackageRoot, undefined, {
         PIE_LIVE_PIPELINE_TRACE_DIR: traceDirs[0],
         [TEST_FILE_ACCOUNTING_ENV]: bundledAccountingContext,
         TSX_TSCONFIG_PATH: tsxOverlay.configPath,
-      }, signal),
-      unsafeRun,
-    ]);
+      }, signal);
+    }
+    const sourceFixtureArgs = ['--test', '--test-force-exit', '--test-concurrency=1', reporterArg];
+    const sourceFixtureWave = [];
+    if (sourceFixtureBundles.length > 0) {
+      sourceFixtureWave.push(() => {
+        sourceFixtureRun = run(process.execPath, [...sourceFixtureArgs, ...sourceFixtureBundles], extensionPackageRoot, undefined, {
+          PIE_LIVE_PIPELINE_TRACE_DIR: traceDirs[2],
+          [TEST_FILE_ACCOUNTING_ENV]: sourceFixtureBundleAccountingContext,
+          TSX_TSCONFIG_PATH: tsxOverlay.configPath,
+        }, signal);
+        return sourceFixtureRun;
+      });
+    }
+    if (sourceFixtureUnsafe.length > 0) {
+      sourceFixtureWave.push(() => {
+        sourceFixtureRun = run(
+          process.execPath,
+          [tsxCli, `--tsconfig=${tsxOverlay.configPath}`, ...sourceFixtureArgs, ...sourceFixtureUnsafe.map(resolveExtensionTestArgument)],
+          extensionPackageRoot,
+          undefined,
+          {
+            PIE_LIVE_PIPELINE_TRACE_DIR: traceDirs[2],
+            [TEST_FILE_ACCOUNTING_ENV]: sourceFixtureUnsafeAccountingContext,
+            TSX_TSCONFIG_PATH: tsxOverlay.configPath,
+          }, signal,
+        );
+        return sourceFixtureRun;
+      });
+    }
+    const results = await runSerializedExtensionWaves(
+      [bundledRun, unsafeRun].filter(Boolean),
+      sourceFixtureWave,
+    );
     const report = mergeReports(
       results,
       performance.now() - startedAt,
@@ -559,11 +718,17 @@ async function runSuite(runtime, signal) {
     process.stdout.write(`${REPORT_PREFIX}${JSON.stringify(report)}\n`);
     if (!report.summary.success) process.exitCode = 1;
     } finally {
+      let unsafeTeardownError;
       if (unsafeChild?.exitCode === null && unsafeChild?.signalCode === null) {
-        const cleanup = await killProcessTree(unsafeChild);
-        if (!cleanup.gone) throw new Error('Unsafe extension wave teardown is unconfirmed');
+        const cleanup = await killProcessTree(unsafeChild).catch(() => ({ gone: false }));
+        if (!cleanup.gone) unsafeTeardownError = unconfirmedTeardownError('Unsafe extension wave teardown is unconfirmed');
       }
-      await unsafeRun;
+      const settledRuns = await Promise.allSettled([unsafeRun, bundledRun, sourceFixtureRun].filter(Boolean));
+      const unconfirmedRun = settledRuns.find((result) => (
+        result.status === 'rejected' && result.reason?.processTreeTeardownUnconfirmed
+      ));
+      if (unsafeTeardownError) throw unsafeTeardownError;
+      if (unconfirmedRun) throw unconfirmedRun.reason;
     }
   });
 }

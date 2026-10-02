@@ -92,6 +92,9 @@ test('manifest is deterministic across enumeration order and relocatable, with o
   assert.equal(a.identity, b.identity);
   assert.match(a.identity, /^[a-f0-9]{64}$/);
   assert.equal(a.sdkPath, path.join(a.artifactDir, PI_RUNTIME_SDK_RELATIVE_PATH));
+  const changedProvenance = await writePiRuntimeManifest(second, { ...provenance, lockSha256: 'c'.repeat(64) });
+  assert.equal(changedProvenance.manifest.payloadSha256, a.manifest.payloadSha256);
+  assert.notEqual(changedProvenance.identity, a.identity);
   const relocated = path.join(path.dirname(first), 'elsewhere');
   await cp(first, relocated, { recursive: true });
   await rm(first, { recursive: true });
@@ -235,4 +238,21 @@ test('symlinked payload directories and artifact roots are rejected without foll
   const rootLink = path.join(path.dirname(root), 'root-link');
   await symlink(root, rootLink, process.platform === 'win32' ? 'junction' : 'dir');
   await assert.rejects(verifyPiRuntimeArtifact(rootLink), /artifact root must be a real directory/);
+});
+
+test('parallel inspection drains sibling file reads before failure cleanup', async (t) => {
+  const root = await fixture(t);
+  const ordinary = path.join(root, 'node_modules', 'ordinary');
+  await rm(ordinary, { recursive: true });
+  await mkdir(ordinary);
+  const payload = Buffer.alloc(8 * 1024 * 1024, 0x5a);
+  await Promise.all(['read-a.bin', 'read-b.bin', 'read-c.bin'].map((name) => writeFile(path.join(ordinary, name), payload)));
+  const outside = path.join(path.dirname(root), 'outside');
+  await mkdir(outside);
+  await symlink(outside, path.join(ordinary, 'linked'), process.platform === 'win32' ? 'junction' : 'dir');
+
+  await assert.rejects(verifyPiRuntimeArtifact(root), /symlink forbidden/);
+  await rm(root, { recursive: true, maxRetries: 0 });
+  await rm(outside, { recursive: true });
+  assert.deepEqual(await readdir(path.dirname(root)), []);
 });

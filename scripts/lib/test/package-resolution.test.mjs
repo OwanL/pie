@@ -168,12 +168,12 @@ function makeSdkCandidateGraph(fixtureRoot, { omit = [] } = {}) {
   }, { 'browser.js': "export const marker = 'candidate marked browser';", 'index.js': "export const marker = 'candidate marked';" });
   const yamlRoot = writeFixturePackage(path.join(sdkRoot, 'node_modules'), 'yaml', {
     type: 'module', exports: {
-      '.': { types: './dist/index.d.ts', browser: './dist/browser.mjs', import: './dist/index.mjs' },
-      './*': { types: './dist/*.d.ts', browser: './dist/*.mjs', import: './dist/*.mjs' },
+      '.': { types: './dist/index.d.ts', node: './dist/node.cjs', default: './dist/browser.mjs' },
+      './*': { types: './dist/*.d.ts', node: './dist/*.cjs', default: './dist/*.mjs' },
     },
   }, {
     'dist/browser.mjs': "export const marker = 'candidate yaml browser';",
-    'dist/index.mjs': "export const marker = 'candidate yaml';",
+    'dist/node.cjs': "module.exports = { marker: 'candidate yaml node' };",
   });
   const immerRoot = writeFixturePackage(path.join(sdkRoot, 'node_modules'), 'immer', {
     type: 'module', exports: {
@@ -605,16 +605,19 @@ test('candidate overlays leave unaliased nested dependencies native and reject a
   assert.equal(paths['candidate-transitive'], undefined,
     'multiple transitive roots remain native instead of being flattened');
   assert.deepEqual(paths.ws, [path.join(candidate.roots.ws, 'index.js')]);
+  assert.deepEqual(paths.yaml, [path.join(candidate.roots.yaml, 'dist', 'node.cjs')],
+    'Node runtime overlays prefer the node export over the browser-oriented default');
   assert.deepEqual(paths['candidate-runtime'], [path.join(candidate.roots['candidate-runtime'], 'index.js')]);
 
   const entry = path.join(sourceRoot, 'candidate-imports.ts');
   writeFileSync(entry, [
     "import { marker } from 'ws';",
+    "import { marker as yamlMarker } from 'yaml';",
     "import { nestedVersion } from 'candidate-runtime';",
-    'console.log(JSON.stringify([marker, nestedVersion]));',
+    'console.log(JSON.stringify([marker, nestedVersion, yamlMarker]));',
   ].join('\n'));
   assert.deepEqual(JSON.parse(runNode([tsxCli, '--tsconfig', overlay.configPath, entry], sourceRoot)),
-    ['candidate ws', 'nested candidate transitive'],
+    ['candidate ws', 'nested candidate transitive', 'candidate yaml node'],
     'ordinary Pie imports use the artifact while package issuers retain their nested versions');
 
   const retryAliasConfig = writeTsConfig(sourceRoot, { paths: { retry: ['./host-retry.js'] } });
@@ -1296,6 +1299,62 @@ test('TypeScript overlays preserve default base-config type ancestry without own
   assert.equal(JSON.parse(readFileSync(explicitOverlay.configPath, 'utf8')).compilerOptions.typeRoots, undefined,
     'explicit inherited typeRoots are not overridden');
   runNode([tscCli, '--project', explicitOverlay.configPath, '--pretty', 'false'], sourceRoot);
+});
+
+test('tsconfig overlays accept JSONC comments and trailing commas without changing own or inherited paths', (t) => {
+  const { sourceRoot } = makeFixture(t);
+  const parentConfig = path.join(sourceRoot, 'shared.json');
+  const childRoot = path.join(sourceRoot, 'child');
+  mkdirSync(childRoot);
+  const baseConfig = path.join(childRoot, 'tsconfig.json');
+  writeFileSync(parentConfig, `{
+    // Inherited aliases stay anchored to the declaring config.
+    "compilerOptions": {
+      "paths": { "inherited-local": ["./parent.ts",], },
+      "typeRoots": ["./custom-types",],
+    },
+  }`);
+  writeFileSync(baseConfig, `{
+    /* No own paths: ordinary runtime overlays remain passthrough. */
+    "extends": "../shared.json",
+    "compilerOptions": { "strict": true, },
+  }`);
+  const options = { dependencyOwnerRoot: ownerRoot };
+  const runtimeOverlay = createTsconfigOverlay(baseConfig, options);
+  const inheritedOverlay = createTsconfigOverlay(baseConfig, { ...options, typescript: true, includeOwnerDependencies: true });
+  t.after(() => runtimeOverlay.dispose());
+  t.after(() => inheritedOverlay.dispose());
+  assert.equal(JSON.parse(readFileSync(runtimeOverlay.configPath, 'utf8')).compilerOptions, undefined);
+  const inherited = JSON.parse(readFileSync(inheritedOverlay.configPath, 'utf8')).compilerOptions;
+  assert.deepEqual(inherited.paths['inherited-local'], [path.join(sourceRoot, 'parent.ts')]);
+  assert.ok(inherited.typeRoots.includes(path.join(sourceRoot, 'custom-types')));
+
+  writeFileSync(baseConfig, `{
+    "extends": "../shared.json",
+    "compilerOptions": {
+      // An own paths object replaces rather than merges inherited aliases.
+      "paths": { "own-local": ["./child.ts",], },
+    },
+  }`);
+  const ownOverlay = createTsconfigOverlay(baseConfig, options);
+  t.after(() => ownOverlay.dispose());
+  const own = JSON.parse(readFileSync(ownOverlay.configPath, 'utf8')).compilerOptions.paths;
+  assert.deepEqual(own['own-local'], [path.join(childRoot, 'child.ts')]);
+  assert.equal(own['inherited-local'], undefined);
+});
+
+test('tsconfig overlays reject malformed JSONC with a config-specific parser error', (t) => {
+  const { sourceRoot } = makeFixture(t);
+  const baseConfig = path.join(sourceRoot, 'tsconfig.json');
+  writeFileSync(baseConfig, `{
+    // Comments are valid, but a missing property separator is not.
+    "compilerOptions": { "strict": true "noEmit": true, },
+  }`);
+  for (const typescript of [false, true]) {
+    assert.throws(() => createTsconfigOverlay(baseConfig, { dependencyOwnerRoot: ownerRoot, typescript }),
+      (error) => error.message.includes(`Invalid tsconfig at ${baseConfig}:`)
+        && error.message.includes("',' expected."));
+  }
 });
 
 test('createTsconfigOverlay passes through base configs without their own paths', (t) => {

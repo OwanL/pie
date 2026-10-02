@@ -5,7 +5,9 @@ import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { PI_RUNTIME_PACKAGES, PI_RUNTIME_SDK_RELATIVE_PATH, verifyPiRuntimeArtifact } from '../../../../../lib/pi-runtime/artifact.mjs';
 import { writePiRuntimeManifest } from '../../../../../scripts/lib/pi-runtime-artifact.mjs';
-import { assertSdkRuntimeAgreement, currentBackendTarget, parseSdkRuntimeSelection, sdkRuntimeLoadMode, verifySdkRuntimeSelection, type SdkRuntimeSelection } from '../sdk-runtime-selection';
+import { assertSdkRuntimeAgreement, currentBackendTarget, parseSdkRuntimeSelection, sdkRuntimeLoadMode, sdkRuntimeSdkPath, verifySdkRuntimeSelection, type SdkRuntimeSelection } from '../sdk-runtime-selection';
+import { loadSdk, loadSdkInternalModule, type SdkLoadMode } from '../sdk';
+import { createSyntheticSourceTestSdkRuntime } from '../../../test/fixtures/sdk-runtime-selection';
 
 async function fixture(t: TestContext, target = currentBackendTarget()) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'pie-runtime-selection-'));
@@ -27,10 +29,36 @@ async function fixture(t: TestContext, target = currentBackendTarget()) {
   return { root, descriptor, selection: { kind: 'source-artifact', descriptor } as SdkRuntimeSelection };
 }
 
-test('closed selection rejects missing, mixed and unknown identity routes', async t => {
-  const { selection } = await fixture(t);
-  for (const value of [undefined, {}, { descriptor: (selection as any).descriptor }, { ...selection, kind: 'unknown' }, { ...selection, patchIdentity: {} }, { kind: 'legacy-patched', descriptor: (selection as any).descriptor }, { ...selection, backendTarget: currentBackendTarget() }]) assert.throws(() => parseSdkRuntimeSelection(value));
+test('closed selection rejects missing, legacy, mixed and unknown identity routes', () => {
+  // Shape-only descriptor. Never use this selection for artifact verification or loading.
+  const selection = createSyntheticSourceTestSdkRuntime(path.join(os.tmpdir(), 'pie-shape-only-sdk'));
+  for (const value of [undefined, {}, { descriptor: selection.descriptor }, { ...selection, kind: 'unknown' }, { ...selection, patchIdentity: {} }, { kind: 'legacy-patched', descriptor: selection.descriptor }, { kind: 'legacy-patched', patchIdentity: {} }, { ...selection, backendTarget: currentBackendTarget() }]) assert.throws(() => parseSdkRuntimeSelection(value));
   assert.equal(parseSdkRuntimeSelection(selection), selection);
+  assert.equal(sdkRuntimeSdkPath(selection), selection.descriptor.sdkPath);
+  for (const surface of ['cold', 'full'] as const) {
+    const mode = surface === 'cold' ? sdkRuntimeLoadMode(selection, 'cold') : sdkRuntimeLoadMode(selection, 'full');
+    assert.deepEqual(mode, { mode: 'source-artifact', descriptor: selection.descriptor,
+      backendTarget: currentBackendTarget(), surface });
+  }
+});
+
+test('source-only loaders reject missing and legacy modes before any SDK import or mutation', async t => {
+  const { descriptor } = await fixture(t);
+  const before = await readFile(descriptor.cliPath);
+  for (const mode of [undefined, null, {}, { mode: 'coordinator' }, { mode: 'cold-coordinator' },
+    { mode: 'worker', patchIdentity: {} }, { mode: 'cold-worker', patchIdentity: {} }]) {
+    await assert.rejects(loadSdk(descriptor.sdkPath, mode as SdkLoadMode), /explicit source-artifact/);
+    await assert.rejects(loadSdkInternalModule(descriptor.sdkPath, 'index.js', mode as SdkLoadMode), /explicit source-artifact/);
+  }
+  await assert.rejects(loadSdk(descriptor.sdkPath, { mode: 'source-artifact',
+    descriptor: undefined, backendTarget: currentBackendTarget() }), /Invalid Pi runtime descriptor/);
+  for (const key of ['platform', 'arch', 'nodeAbi'] as const) {
+    const mode = { mode: 'source-artifact' as const, descriptor,
+      backendTarget: { ...currentBackendTarget(), [key]: 'not-the-executing-target' } };
+    await assert.rejects(loadSdk(descriptor.sdkPath, mode), new RegExp(`target\\.${key} mismatch`));
+    await assert.rejects(loadSdkInternalModule(descriptor.sdkPath, 'index.js', mode), new RegExp(`target\\.${key} mismatch`));
+  }
+  assert.deepEqual(await readFile(descriptor.cliPath), before);
 });
 
 test('source selection verifies own target, immutable payload and canonical SDK path', async t => {

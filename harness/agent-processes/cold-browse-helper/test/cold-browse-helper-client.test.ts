@@ -21,12 +21,13 @@ import {
 } from '../../../session-storage/transcripts/durable-detail-store';
 import { SessionSnapshotTooLargeError } from '../../../session-storage/transcripts/snapshot-boundary.js';
 import {
-  createLegacyTestSdkRuntime,
+  createSyntheticSourceTestSdkRuntime,
   createSourceArtifactTestSdkRuntime,
 } from '../../test/fixtures/sdk-runtime-selection.js';
 import { buildSanitizedRealChildTestEnv } from '../../test/fixtures/sanitized-real-child-env.js';
+import { sourceDescriptor } from '../../lib/sdk-integration/test/source-fixture.js';
 
-const testSdkRuntime = () => createLegacyTestSdkRuntime(process.cwd());
+const testSdkRuntime = () => createSyntheticSourceTestSdkRuntime(process.cwd());
 const fixturePath = path.join(process.cwd(), 'harness', 'agent-processes', 'cold-browse-helper', 'test', 'fixtures', 'cold-browse-helper-client-fixture.mjs');
 const fence: ColdBrowseHelperFence = {
   coordinatorGeneration: 1,
@@ -52,7 +53,8 @@ test('client rejects malformed runtime routes and SDK path disagreement before s
     undefined,
     { ...valid, kind: 'unknown' },
     { ...valid, descriptor: {} },
-    { kind: 'legacy-patched', patchIdentity: (valid as any).patchIdentity, descriptor: {} },
+    { ...valid, patchIdentity: {} },
+    { kind: 'legacy-patched', patchIdentity: {} },
   ]) assert.throws(() => construct(malformed), /runtime|selection|descriptor|route|sdk path/i);
   assert.throws(() => construct(valid, `${process.cwd()}-mismatch`), /runtime|selection|route|sdk path/i);
 });
@@ -326,14 +328,9 @@ test('concurrent dispose callers join confirmed helper exit', async () => {
 
 test('real source-artifact child initializes cold transport and opens only a sanitized temporary session', {
   timeout: 180_000,
-}, async (t) => {
-  if (process.env['PIE_RUN_REAL_COLD_HELPER_TESTS'] !== '1') {
-    t.skip('Set PIE_RUN_REAL_COLD_HELPER_TESTS=1 to run the real source-artifact cold-helper acceptance.');
-    return;
-  }
+}, async () => {
   const repoRoot = path.resolve(__dirname, '../../../../');
-  const artifactDir = process.env['PIE_REAL_RUNTIME_ARTIFACT_DIR']?.trim()
-    || 'C:/Users/OwanLazic/AppData/Local/Temp/pie-b1-b3-final-1790865003945/pi-runtime';
+  const artifactDir = sourceDescriptor.artifactDir;
   const selectedRuntime = await createSourceArtifactTestSdkRuntime(artifactDir);
   const tsxLoader = path.join(repoRoot, 'application', 'hosts', 'vscode', 'node_modules', 'tsx', 'dist', 'loader.cjs');
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-cold-source-child-'));

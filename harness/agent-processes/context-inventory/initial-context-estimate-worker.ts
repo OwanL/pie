@@ -496,26 +496,14 @@ async function main(): Promise<void> {
       // Preload only validated SDK code. Resource and user extension discovery
       // starts only after the separate request-specific frame arrives.
       const selectedMode = sdkRuntimeLoadMode(verifiedRuntime, 'full');
-      if (selectedMode.mode === 'source-artifact') {
-        const mode = { ...selectedMode, surface: 'full' as const };
-        // The inventory consumes only the common public services surface; the
-        // source loader has already selected and verified its typed factories.
-        sdk = await loadSdk(initialization.sdkPath, mode) as unknown as SdkModule;
-        systemPromptModule = await loadSdkInternalModule<SdkSystemPromptModule>(
-          initialization.sdkPath,
-          path.join('core', 'system-prompt.js'),
-          mode,
-        );
-      } else if (selectedMode.mode === 'worker') {
-        sdk = await loadSdk(initialization.sdkPath, selectedMode);
-        systemPromptModule = await loadSdkInternalModule<SdkSystemPromptModule>(
-          initialization.sdkPath,
-          path.join('core', 'system-prompt.js'),
-          selectedMode,
-        );
-      } else {
-        throw new Error('Initial-context inventory requires a full SDK worker load mode.');
-      }
+      // The inventory consumes only the common public services surface; the
+      // source loader has already selected and verified its typed factories.
+      sdk = await loadSdk(initialization.sdkPath, selectedMode) as unknown as SdkModule;
+      systemPromptModule = await loadSdkInternalModule<SdkSystemPromptModule>(
+        initialization.sdkPath,
+        path.join('core', 'system-prompt.js'),
+        selectedMode,
+      );
     } finally {
       workerTimings.sdkImportDurationMs = Math.max(0, performance.now() - sdkImportStartedAt);
     }

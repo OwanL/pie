@@ -13,12 +13,13 @@ import {
   type InitialContextEstimateTimingSample,
 } from '../initial-context-estimate-client.js';
 import {
-  createLegacyTestSdkRuntime,
+  createSyntheticSourceTestSdkRuntime,
   createSourceArtifactTestSdkRuntime,
 } from '../../test/fixtures/sdk-runtime-selection.js';
 import { buildSanitizedRealChildTestEnv } from '../../test/fixtures/sanitized-real-child-env.js';
+import { sourceDescriptor } from '../../lib/sdk-integration/test/source-fixture.js';
 
-const testSdkRuntime = () => createLegacyTestSdkRuntime('/sdk');
+const testSdkRuntime = () => createSyntheticSourceTestSdkRuntime('/sdk');
 
 function createRespondingChild(
   systemPromptText = 'Complete prompt text.',
@@ -126,7 +127,7 @@ test('real-child environment removes ambient credentials/endpoints and isolates 
 });
 
 test('inventory client rejects malformed runtime routes and SDK path disagreement before spawning', () => {
-  const valid = createLegacyTestSdkRuntime('/sdk');
+  const valid = testSdkRuntime();
   const construct = (sdkRuntime: unknown, sdkPath = '/sdk') => new InitialContextEstimateClient({
     entryPath: '/inventory-worker.js',
     sdkPath,
@@ -137,13 +138,14 @@ test('inventory client rejects malformed runtime routes and SDK path disagreemen
     undefined,
     { ...valid, kind: 'future-runtime' },
     { ...valid, descriptor: {} },
-    { kind: 'legacy-patched', patchIdentity: (valid as any).patchIdentity, descriptor: {} },
+    { ...valid, patchIdentity: {} },
+    { kind: 'legacy-patched', patchIdentity: {} },
   ]) {
     assert.throws(() => construct(malformed), /runtime|selection|descriptor|route|sdk path/i);
   }
   assert.throws(() => construct(valid, '/different-sdk'), /runtime|selection|route|sdk path/i);
   const tampered = structuredClone(valid) as any;
-  tampered.patchIdentity.sdkPath = '/tampered-sdk';
+  tampered.descriptor.sdkPath = '/tampered-sdk';
   assert.throws(() => construct(tampered), /runtime|selection|route|sdk path/i);
 });
 
@@ -515,15 +517,10 @@ test('guardian failure falls back to process-tree termination and retains failed
   assert.equal((client as any).active.size, 0);
 });
 
-test('real source-artifact child measures cold versus prewarmed open and reads user resources on demand', { timeout: 180_000 }, async (t) => {
-  if (process.env['PIE_RUN_REAL_INVENTORY_TESTS'] !== '1') {
-    t.skip('Set PIE_RUN_REAL_INVENTORY_TESTS=1 to run the real-child inventory acceptance.');
-    return;
-  }
+test('real source-artifact child measures cold versus prewarmed open and reads user resources on demand', { timeout: 180_000 }, async () => {
 
   const repoRoot = path.resolve(__dirname, '../../../../');
-  const artifactDir = process.env['PIE_REAL_RUNTIME_ARTIFACT_DIR']?.trim()
-    || 'C:/Users/OwanLazic/AppData/Local/Temp/pie-b1-b3-final-1790865003945/pi-runtime';
+  const artifactDir = sourceDescriptor.artifactDir;
   const selectedRuntime = await createSourceArtifactTestSdkRuntime(artifactDir);
   const sdkPath = selectedRuntime.sdkPath;
   const tsxLoader = path.join(repoRoot, 'application', 'hosts', 'vscode', 'node_modules', 'tsx', 'dist', 'loader.cjs');

@@ -16,21 +16,16 @@ import {
   type SdkRuntimeSelection,
 } from '../../lib/sdk-integration/sdk-runtime-selection.js';
 import { WorkerRuntimeHost, type WorkerRuntimePromotionPayload } from '../worker-runtime-host';
-import {
-  createLegacyTestSdkRuntime,
-  createSourceArtifactTestSdkRuntime,
-} from '../../test/fixtures/sdk-runtime-selection.js';
+import { createSourceArtifactTestSdkRuntime } from '../../test/fixtures/sdk-runtime-selection.js';
+import { sourceDescriptor } from '../../lib/sdk-integration/test/source-fixture.js';
 
-const REAL_RUNTIME_ARTIFACT_DIR = process.env.PIE_REAL_RUNTIME_ARTIFACT_DIR?.trim();
 const SOURCE_RUNTIME_CHILD = path.resolve('harness/agent-processes/workers/test/fixtures/source-runtime-child.ts');
-const WORKER_IPC_ACCEPTANCE_CHILD = path.resolve('harness/agent-processes/workers/test/fixtures/worker-ipc-acceptance-child.ts');
 const WORKER_ENTRY = path.resolve('harness/agent-processes/workers/worker-entry.ts');
 const TSX_LOADER = path.resolve('application/hosts/vscode/node_modules/tsx/dist/loader.mjs');
 
 let sourceRuntimePromise: ReturnType<typeof createSourceArtifactTestSdkRuntime> | undefined;
 function sourceRuntime() {
-  if (!REAL_RUNTIME_ARTIFACT_DIR) throw new Error('Explicit PIE_REAL_RUNTIME_ARTIFACT_DIR is required.');
-  sourceRuntimePromise ??= createSourceArtifactTestSdkRuntime(REAL_RUNTIME_ARTIFACT_DIR);
+  sourceRuntimePromise ??= createSourceArtifactTestSdkRuntime(sourceDescriptor.artifactDir);
   return sourceRuntimePromise;
 }
 
@@ -100,7 +95,7 @@ function buildSanitizedWorkerEnv(root: string, preload?: string): NodeJS.Process
     PI_CODING_AGENT_DIR: path.join(root, 'agent'),
     PI_CODING_AGENT_AUTH_DIR: path.join(root, 'auth'),
     PI_CODING_AGENT_SESSION_DIR: path.join(root, 'sessions'),
-    TSX_TSCONFIG_PATH: path.resolve('harness/agent-processes/workers/tsconfig.json'),
+    TSX_TSCONFIG_PATH: process.env.TSX_TSCONFIG_PATH,
     PIE_TEST_FORCE_OFFLINE: '1',
     PI_OFFLINE: '1',
     PI_SKIP_VERSION_CHECK: '1',
@@ -147,30 +142,6 @@ async function runChild(
   });
 }
 
-function makeSourceBootstrapSelection(root: string): SdkRuntimeSelection {
-  const sdkPath = path.join(root, 'source-sdk');
-  return {
-    kind: 'source-artifact',
-    descriptor: {
-      schemaVersion: 1,
-      artifactDir: path.join(root, 'source-artifact'),
-      sdkPath,
-      cliPath: path.join(sdkPath, 'dist', 'cli.js'),
-      identity: 'a'.repeat(64),
-      manifest: {
-        schemaVersion: 1,
-        upstreamVersion: '0.80.6',
-        upstreamCommit: 'b'.repeat(40),
-        sourceTreeSha256: 'c'.repeat(64),
-        lockSha256: 'd'.repeat(64),
-        target: { platform: process.platform, arch: process.arch, nodeAbi: process.versions.modules },
-        packages: {},
-        payloadSha256: 'e'.repeat(64),
-      },
-    },
-  };
-}
-
 interface WorkerBootstrapProbe {
   status: 'ready' | 'failed';
   failure?: string;
@@ -184,7 +155,7 @@ async function probeWorkerBootstrap(
 ): Promise<WorkerBootstrapProbe> {
   const sessionPath = path.join(root, 'sessions', 'ipc-probe.jsonl');
   const client = new WorkerClient({
-    workerEntryPath: WORKER_IPC_ACCEPTANCE_CHILD,
+    workerEntryPath: WORKER_ENTRY,
     coordinatorGeneration: 41,
     workerId: `ipc-probe-${sdkRuntime.kind}`,
     workerGeneration: 1,
@@ -220,7 +191,7 @@ async function probeWorkerBootstrap(
   }
 }
 
-test('WorkerClient source and legacy bootstrap selections reach the same production inherited-fd boundary', async (t) => {
+test('WorkerClient source bootstrap reaches the production inherited-fd boundary', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-worker-ipc-classification-'));
   try {
     await Promise.all([
@@ -229,33 +200,19 @@ test('WorkerClient source and legacy bootstrap selections reach the same product
       fs.mkdir(path.join(root, 'home'), { recursive: true }),
     ]);
     const env = buildSanitizedWorkerEnv(root);
-    const legacy = createLegacyTestSdkRuntime(path.join(root, 'legacy-sdk'));
-    const source = makeSourceBootstrapSelection(root);
-    const legacyProbe = await probeWorkerBootstrap(root, legacy, env);
-    const sourceProbe = await probeWorkerBootstrap(root, source, env);
+    const { sdkRuntime } = await sourceRuntime();
+    const sourceProbe = await probeWorkerBootstrap(root, sdkRuntime, env);
     t.diagnostic(JSON.stringify({
       boundary: 'WorkerClient stdio [ignore, pipe, pipe, pipe, pipe] -> WorkerServer.openWorkerServerTransport',
-      legacy: legacyProbe,
       source: sourceProbe,
     }, null, 2));
-    assert.equal(sourceProbe.status, legacyProbe.status, 'selection kind must not change inherited descriptor acceptance');
-    if (legacyProbe.status === 'failed' && sourceProbe.status === 'failed') {
-      assert.equal(sourceProbe.failure, legacyProbe.failure, 'both selections must fail at the same WorkerClient startup boundary');
-      if (process.platform === 'win32') {
-        assert.match(legacyProbe.stderr, /ERR_INVALID_FD_TYPE/);
-        assert.match(sourceProbe.stderr, /ERR_INVALID_FD_TYPE/);
-        assert.match(legacyProbe.stderr, /openWorkerServerTransport/);
-        assert.match(sourceProbe.stderr, /openWorkerServerTransport/);
-      } else {
-        assert.fail(`WorkerClient bootstrap failed outside the classified Windows fd failure: ${sourceProbe.failure}\n${sourceProbe.stderr}`);
-      }
-    }
+    assert.equal(sourceProbe.status, 'ready', `Source bootstrap failed: ${sourceProbe.failure}\n${sourceProbe.stderr}`);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
 });
 
-test('source runtime rejects tampered, missing, mixed, unknown, and mismatched promotion selections before loading', { skip: !REAL_RUNTIME_ARTIFACT_DIR }, async () => {
+test('source runtime rejects tampered, missing, mixed, unknown, and mismatched promotion selections before loading', async () => {
   const selected = await sourceRuntime();
   const { sdkPath, sdkRuntime } = selected;
 
@@ -271,7 +228,7 @@ test('source runtime rejects tampered, missing, mixed, unknown, and mismatched p
   assert.throws(() => parseSdkRuntimeSelection(mixed), /unsupported fields/);
 
   const unknown = { ...structuredClone(sdkRuntime), kind: 'unknown-runtime' };
-  assert.throws(() => parseSdkRuntimeSelection(unknown), /kind must be legacy-patched or source-artifact/);
+  assert.throws(() => parseSdkRuntimeSelection(unknown), /kind must be source-artifact/);
 
   const mismatched = structuredClone(sdkRuntime) as Extract<SdkRuntimeSelection, { kind: 'source-artifact' }>;
   mismatched.descriptor.sdkPath = path.join(os.tmpdir(), 'not-the-selected-sdk');
@@ -294,7 +251,7 @@ test('source runtime rejects tampered, missing, mixed, unknown, and mismatched p
   );
 });
 
-test('WorkerClient bootstraps and promotes the read-only source artifact through production worker entry offline', { timeout: 180_000, skip: !REAL_RUNTIME_ARTIFACT_DIR }, async (t) => {
+test('WorkerClient bootstraps and promotes the read-only source artifact through production worker entry offline', { timeout: 180_000 }, async (t) => {
   const selected = await sourceRuntime();
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-worker-source-runtime-'));
   const cwd = path.join(root, 'workspace');

@@ -107,46 +107,47 @@ export function createRequestCapabilityTool(ports: RequestCapabilityPorts) {
 
       if (!capabilityType && !capabilityName) {
         if (hiddenToolNames.length === 0 && hiddenSkillNames.length === 0) {
-          return { content: [{ type: 'text' as const, text: 'No capabilities are hidden by the latest pruning decision.' }] };
+          return { content: [{ type: 'text' as const, text: 'No capabilities are hidden by the latest pruning decision.' }], details: undefined };
         }
-        return { content: [{ type: 'text' as const, text: `tools\t${commaList(hiddenToolNames)}\nskills\t${commaList(hiddenSkillNames)}` }] };
+        return { content: [{ type: 'text' as const, text: `tools\t${commaList(hiddenToolNames)}\nskills\t${commaList(hiddenSkillNames)}` }], details: undefined };
       }
       if (!capabilityType || !capabilityName) {
         return {
           content: [{ type: 'text' as const, text: 'Provide both capabilityType and capabilityName, or omit both to list hidden capabilities.' }],
+          details: undefined,
           isError: true,
         };
       }
       if (capabilityType !== 'tool' && capabilityType !== 'skill') {
-        return { content: [{ type: 'text' as const, text: "capabilityType must be 'tool' or 'skill'." }], isError: true };
+        return { content: [{ type: 'text' as const, text: "capabilityType must be 'tool' or 'skill'." }], details: undefined, isError: true };
       }
       if (autonomousMode && capabilityType === 'tool' && capabilityName === ports.askUserToolName) {
-        return { content: [{ type: 'text' as const, text: 'ask_user is unavailable while autonomous mode is active.' }], isError: true };
+        return { content: [{ type: 'text' as const, text: 'ask_user is unavailable while autonomous mode is active.' }], details: undefined, isError: true };
       }
 
       if (capabilityType === 'skill') {
         const skill = hiddenSkills.get(capabilityName);
         if (!skill || loadedSkills.has(capabilityName)) {
           if (hiddenToolNames.includes(capabilityName)) {
-            return { content: [{ type: 'text' as const, text: `'${capabilityName}' is a hidden tool, not a skill. Use capabilityType='tool'.` }], isError: true };
+            return { content: [{ type: 'text' as const, text: `'${capabilityName}' is a hidden tool, not a skill. Use capabilityType='tool'.` }], details: undefined, isError: true };
           }
-          return { content: [{ type: 'text' as const, text: `No hidden skill named '${capabilityName}'. Poll without arguments for exact names.` }], isError: true };
+          return { content: [{ type: 'text' as const, text: `No hidden skill named '${capabilityName}'. Poll without arguments for exact names.` }], details: undefined, isError: true };
         }
         try {
           const text = formatSkill(skill);
           ports.recordLoadedSkill(sessionId, capabilityName);
           ports.recordSkillRecovery(sessionId, capabilityName, rootSessionId);
-          return { content: [{ type: 'text' as const, text }] };
+          return { content: [{ type: 'text' as const, text }], details: undefined };
         } catch (error) {
-          return { content: [{ type: 'text' as const, text: `Failed to load hidden skill '${capabilityName}': ${error instanceof Error ? error.message : String(error)}` }], isError: true };
+          return { content: [{ type: 'text' as const, text: `Failed to load hidden skill '${capabilityName}': ${error instanceof Error ? error.message : String(error)}` }], details: undefined, isError: true };
         }
       }
 
       if (!hiddenToolNames.includes(capabilityName)) {
         if (hiddenSkillNames.includes(capabilityName)) {
-          return { content: [{ type: 'text' as const, text: `'${capabilityName}' is a hidden skill, not a tool. Use capabilityType='skill'.` }], isError: true };
+          return { content: [{ type: 'text' as const, text: `'${capabilityName}' is a hidden skill, not a tool. Use capabilityType='skill'.` }], details: undefined, isError: true };
         }
-        return { content: [{ type: 'text' as const, text: `No hidden tool named '${capabilityName}'. Poll without arguments for exact names.` }], isError: true };
+        return { content: [{ type: 'text' as const, text: `No hidden tool named '${capabilityName}'. Poll without arguments for exact names.` }], details: undefined, isError: true };
       }
 
       const pruned = ports.getPrunedTools(sessionId);
@@ -163,7 +164,7 @@ export function createRequestCapabilityTool(ports: RequestCapabilityPorts) {
       const newActiveTools = [...enabled];
       ports.setActiveTools(newActiveTools);
       ports.recordToolRecovery(sessionId, capabilityName, rootSessionId);
-      return { content: [{ type: 'text' as const, text: `Enabled tool '${capabilityName}'; it is available on the next model step.` }] };
+      return { content: [{ type: 'text' as const, text: `Enabled tool '${capabilityName}'; it is available on the next model step.` }], details: undefined };
     },
   };
 }

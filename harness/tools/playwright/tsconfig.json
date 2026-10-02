@@ -15,7 +15,6 @@
     "baseUrl": "../../..",
     "paths": {
       "typebox": ["application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox/build/index.d.mts"],
-      "typebox/*": ["application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox/build/*/index.d.mts"],
       "@earendil-works/pi-ai": ["application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/index.d.ts"],
       "@earendil-works/pi-coding-agent": ["application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts"]
     }

@@ -6,6 +6,7 @@ import * as os from 'node:os';
 import * as pathMod from 'node:path';
 
 import { BackendServer } from '../server.js';
+import { createSyntheticSourceTestSdkRuntime } from '../../test/fixtures/sdk-runtime-selection.js';
 import { BackendError } from '../server-io.js';
 import { handleBackendRequest, type BackendRequestHandlerDeps } from '../request-handler.js';
 import type { TranscriptPagePayload } from '../../lib/rpc/session-events.js';
@@ -19,6 +20,8 @@ import { ColdSessionLeaseAuthority, ColdSessionStore } from '../../../session-st
 import { parseWorkerToCoordinatorFrame, WORKER_IPC_VERSION } from '../../lib/rpc/worker-protocol.js';
 import { serializeRuntimeCommandError } from '../../workers/worker-entry.js';
 import { WorkerRequestTimeoutError } from '../../lib/rpc/worker-client.js';
+
+const sourceArtifactDescriptor = createSyntheticSourceTestSdkRuntime(pathMod.resolve('/sdk')).descriptor;
 
 type FakeServer = {
   handleWorkerSessionControl(frame: unknown, sourceSessionPath: string): Promise<{
@@ -36,7 +39,7 @@ type FakeServer = {
 };
 
 function serverForTests(): FakeServer {
-  return new BackendServer({ sdkPath: '/sdk', cwd: '/workspace', workerEntryPath: '/worker.js' }) as unknown as FakeServer;
+  return new BackendServer({ sdkPath: '/sdk', sourceArtifactDescriptor, cwd: '/workspace', workerEntryPath: '/worker.js' }) as unknown as FakeServer;
 }
 
 function frame(action: string, payload: Record<string, unknown> = {}): unknown {
@@ -1650,7 +1653,7 @@ test('agent close emits a typed host bridge request and reports acceptance for t
 
 test('self-close source loss releases the host close after the bounded response-handoff timeout', async () => {
   const server = new BackendServer({
-    sdkPath: '/sdk', cwd: '/workspace', workerEntryPath: '/worker.js', hostCloseHandoffTimeoutMs: 10,
+    sdkPath: '/sdk', sourceArtifactDescriptor, cwd: '/workspace', workerEntryPath: '/worker.js', hostCloseHandoffTimeoutMs: 10,
   }) as unknown as FakeServer;
   const events: Array<{ event: string; payload?: unknown }> = [];
   (server as unknown as { emit(event: string, payload?: unknown): void }).emit = (event, payload) => {

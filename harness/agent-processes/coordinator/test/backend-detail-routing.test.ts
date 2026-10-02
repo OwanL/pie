@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { resolve } from 'node:path';
 import { BackendServer } from '../server.js';
+import { createSyntheticSourceTestSdkRuntime } from '../../test/fixtures/sdk-runtime-selection.js';
 import { BackendError } from '../server-io.js';
 import type { RequestEnvelope } from '../../lib/rpc/wire.js';
 import type { CoordinatorToHostDetailMessage, LiveSubagentDetailAddress } from '../../lib/rpc/subagent-detail.js';
+
+const sourceArtifactDescriptor = createSyntheticSourceTestSdkRuntime(resolve('/sdk')).descriptor;
 
 interface ServerDetailTestPort {
   handleRequest(
@@ -35,6 +39,7 @@ const ADDRESS: LiveSubagentDetailAddress = {
 function createIsolatedServer() {
   const server = new BackendServer({
     sdkPath: '/sdk',
+    sourceArtifactDescriptor,
     cwd: '/repo',
     workerEntryPath: '/worker.js',
   });
@@ -117,7 +122,7 @@ test('isolated server rejects malformed detail payloads with INVALID_PARAMS', as
 });
 
 test('detail RPCs fail closed without an initialized worker router', async () => {
-  const server = new BackendServer({ sdkPath: '/sdk', cwd: '/repo', workerEntryPath: '/worker.js' });
+  const server = new BackendServer({ sdkPath: '/sdk', sourceArtifactDescriptor, cwd: '/repo', workerEntryPath: '/worker.js' });
   const port = server as unknown as ServerDetailTestPort;
   // Without `start()` the coordinator has no router; the detail RPCs are not
   // in the coordinator operation catalog, so they fail closed as unavailable

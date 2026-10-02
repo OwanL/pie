@@ -1,8 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { resolve } from 'node:path';
 
 import { BackendServer } from '../../harness/agent-processes/coordinator/server.js';
 import { BackendError } from '../../harness/agent-processes/coordinator/server-io.js';
+import { createSyntheticSourceTestSdkRuntime } from '../../harness/agent-processes/test/fixtures/sdk-runtime-selection.js';
+
+// Shape-only synthetic runtime: the request handler is mocked and no real SDK
+// is verified, imported, or spawned.
+const sourceArtifactDescriptor = createSyntheticSourceTestSdkRuntime(resolve('/sdk')).descriptor;
 
 function captureJsonlWrites(stream: NodeJS.WriteStream): {
   readonly chunks: string[];
@@ -31,7 +37,7 @@ function parseBackendRecords(chunks: readonly string[]): Array<Record<string, un
 }
 
 test('expected pre-ack session cancellation is debug telemetry while the typed RPC rejection is preserved', async () => {
-  const server = new BackendServer({ workerEntryPath: '/worker-entry.js', sdkPath: '/sdk', cwd: '/workspace' }) as any;
+  const server = new BackendServer({ workerEntryPath: '/worker-entry.js', sdkPath: '/sdk', cwd: '/workspace', sourceArtifactDescriptor }) as any;
   server.handleRequest = async () => {
     throw new BackendError(
       'SESSION_OPERATION_CANCELLED',

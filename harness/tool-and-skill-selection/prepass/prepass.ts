@@ -7,6 +7,10 @@ import {
 } from "./llm-scorer.js";
 import type { PruningConfig } from "../settings/config-types.js";
 import { state, getCompleteFnOverride } from "../state/selector-state.js";
+// Type-only import: the completion API surface the prepass lazily resolves lives
+// on pi-ai's public compat entrypoint (root pi-ai 0.80.x no longer exports
+// completeSimple; the resolution fallback policy below owns the runtime import).
+import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai/compat";
 import {
 	ensureCopilotHeaders,
 	withCopilotHeaders,
@@ -272,6 +276,49 @@ export function isOllamaModel(model: unknown): boolean {
 	return (model as { provider?: unknown }).provider === "ollama";
 }
 
+/** Structural guard for the registry-resolved model against pi-ai's Model
+ * shape at the completion boundary. Validating the fields the boundary relies
+ * on lets the value narrow honestly into `Model<Api>` without an opaque cast;
+ * a model missing them can never reach a provider stream, so callers reject it
+ * with a clear diagnostic. */
+function isCompletionModel(value: unknown): value is Model<Api> {
+	if (typeof value !== "object" || value === null) return false;
+	const candidate = value as Record<string, unknown>;
+	const isModelCost = (cost: unknown): boolean => {
+		if (typeof cost !== "object" || cost === null) return false;
+		const rates = cost as Record<string, unknown>;
+		return typeof rates.input === "number" && typeof rates.output === "number"
+			&& typeof rates.cacheRead === "number" && typeof rates.cacheWrite === "number";
+	};
+	return typeof candidate.id === "string" && candidate.id.length > 0
+		&& typeof candidate.name === "string"
+		&& typeof candidate.api === "string" && candidate.api.length > 0
+		&& typeof candidate.provider === "string" && candidate.provider.length > 0
+		&& typeof candidate.baseUrl === "string"
+		&& typeof candidate.reasoning === "boolean"
+		&& Array.isArray(candidate.input)
+		&& typeof candidate.contextWindow === "number"
+		&& typeof candidate.maxTokens === "number"
+		&& isModelCost(candidate.cost);
+}
+
+/** Expose the locally-built completion options at pi-ai's typed
+ * `SimpleStreamOptions` boundary. The prepass owns every field it sets
+ * (reasoning, maxRetries, maxTokens, temperature, signal, apiKey, plus the
+ * provider-gate class header); pi API adapters also read option keys beyond the
+ * published TS surface (e.g. openai-responses `maxRetries`), so the remaining
+ * record keys keep flowing through unchanged. The locally-set signal and
+ * apiKey are validated here so the narrowing can't mask their misuse. */
+function toSimpleStreamOptions(options: Record<string, unknown>): SimpleStreamOptions & Record<string, unknown> {
+	if (options.signal !== undefined && !(options.signal instanceof AbortSignal)) {
+		throw new TypeError("Prepass completion options.signal must be an AbortSignal");
+	}
+	if (options.apiKey !== undefined && typeof options.apiKey !== "string") {
+		throw new TypeError("Prepass completion options.apiKey must be a string");
+	}
+	return options as SimpleStreamOptions & Record<string, unknown>;
+}
+
 export function getCompleteFn(_ctx: unknown): CompleteSimpleFn | null {
 	const override = getCompleteFnOverride();
 	if (override === false) return null;
@@ -283,7 +330,10 @@ export function getCompleteFn(_ctx: unknown): CompleteSimpleFn | null {
 		}
 		if (state._piCompleteSimple === undefined) {
 			try {
-				const piAi = await import("@earendil-works/pi-ai");
+				// Root pi-ai 0.80.x no longer exports completeSimple; the public
+				// compat entrypoint (which also owns the api registry the lazy
+				// provider wrappers dispatch through) is the supported surface.
+				const piAi = await import("@earendil-works/pi-ai/compat");
 				state._piCompleteSimple = piAi.completeSimple;
 			} catch {
 				state._piCompleteSimple = null;
@@ -296,34 +346,30 @@ export function getCompleteFn(_ctx: unknown): CompleteSimpleFn | null {
 		}
 		const systemMsg = context.find((m) => m.role === "system");
 		const nonSystemMsgs = context.filter((m) => m.role !== "system");
-		const piContext = {
+		// Build the pi Context at its own typed boundary. Only text blocks ever
+		// enter the prepass context. The parse-recovery replay sends the previous
+		// response as assistant history; pi provider adapters read only
+		// role/content from history turns, so that synthetic turn needs no
+		// usage/catalog metadata (the narrowing below documents it).
+		const piContext: Context = {
 			systemPrompt: systemMsg?.content ?? "",
-			messages: nonSystemMsgs.map((m) => ({
-				role: m.role,
-				content: [{ type: "text" as const, text: m.content }],
-				timestamp: Date.now(),
-			})),
+			messages: nonSystemMsgs.map((m) => {
+				const content = [{ type: "text" as const, text: m.content }];
+				if (m.role === "assistant") {
+					return { role: "assistant" as const, content, timestamp: Date.now() } as AssistantMessage;
+				}
+				return { role: "user" as const, content, timestamp: Date.now() };
+			}),
 		};
 
-		const safeModel = ensureCopilotHeaders(model as Record<string, unknown>);
-		const safeOptions = withCopilotOptions(options, model as Record<string, unknown>);
+		const prepassModel = ensureCopilotHeaders(model as Record<string, unknown>);
+		if (!isCompletionModel(prepassModel)) {
+			throw new TypeError(`Prepass model '${String((prepassModel as Record<string, unknown>).id ?? "(unknown)")}' does not expose the pi-ai Model shape required for provider dispatch`);
+		}
+		const completionOptions = toSimpleStreamOptions(withCopilotOptions(options, model as Record<string, unknown>));
 
-		const result = await state._piCompleteSimple(safeModel, piContext, safeOptions);
-		const assistantMessage = result as {
-			content?: Array<{ type: string; text?: string; thinking?: string }>;
-			stopReason?: string;
-			errorMessage?: string;
-			usage?: {
-				input?: number;
-				output?: number;
-				cacheRead?: number;
-				cacheWrite?: number;
-				reportedCostUsd?: number;
-				providerReportedCostUsd?: number;
-				cost?: { total?: number; reportedCostUsd?: number; providerReportedCostUsd?: number };
-			};
-		};
-		const content = assistantMessage.content ?? [];
+		const result = await state._piCompleteSimple(prepassModel, piContext, completionOptions);
+		const content = result.content ?? [];
 		const text = content
 			.filter((block) => block.type === "text")
 			.map((block) => block.text ?? "")
@@ -332,17 +378,17 @@ export function getCompleteFn(_ctx: unknown): CompleteSimpleFn | null {
 			.filter((block) => block.type === "thinking")
 			.map((block) => block.thinking ?? "")
 			.join("");
-		const providerCost = providerReportedCostUsd(assistantMessage.usage);
-		const input = validUsageNumber(assistantMessage.usage?.input);
-		const output = validUsageNumber(assistantMessage.usage?.output);
-		const cacheRead = validUsageNumber(assistantMessage.usage?.cacheRead);
-		const cacheWrite = validUsageNumber(assistantMessage.usage?.cacheWrite);
+		const providerCost = providerReportedCostUsd(result.usage);
+		const input = validUsageNumber(result.usage.input);
+		const output = validUsageNumber(result.usage.output);
+		const cacheRead = validUsageNumber(result.usage.cacheRead);
+		const cacheWrite = validUsageNumber(result.usage.cacheWrite);
 		return {
 			text,
 			thinking,
-			stopReason: assistantMessage.stopReason,
-			errorMessage: assistantMessage.errorMessage,
-			usage: !assistantMessage.usage ? undefined : {
+			stopReason: result.stopReason,
+			errorMessage: result.errorMessage,
+			usage: {
 				...(input === undefined ? {} : { input }),
 				...(output === undefined ? {} : { output }),
 				...(cacheRead === undefined ? {} : { cacheRead }),

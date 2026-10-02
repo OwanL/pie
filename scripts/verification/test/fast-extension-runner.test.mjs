@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, readdir, rm, writeFile, mkdir } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile, mkdir, symlink } from 'node:fs/promises';
 import os from 'node:os';
 import test from 'node:test';
 
@@ -12,10 +12,16 @@ import { createTestFileExecutionCollector, normalizeTestFileIdentity, TEST_FILE_
 import {
   bundledSuiteMarker,
   classifyExtensionTest,
+  hasDirectSourceFixtureImport,
+  mergeReports,
+  partitionSourceFixtureTests,
+  runSerializedExtensionWaves,
+  sourceFixtureConsumersFromMetafile,
   extensionBundleOutputPath,
   createPreserveSourceUrls,
   EXTENSION_TEST_ROOTS,
   recoverBundledFailureSourceFiles,
+  resolveArtifactAliasPath,
   resolveExtensionTestPath,
   withFastRunnerTempDirs,
 } from '../run-fast-extension-tests.mjs';
@@ -113,6 +119,87 @@ test('classifyExtensionTest batches ordinary bundles and approved type-import fi
   );
 });
 
+test('source-fixture consumers are partitioned from shared batches using direct imports and bundle metadata', () => {
+  const repoRoot = path.resolve(import.meta.dirname, '../../..');
+  const tempDir = path.join(os.tmpdir(), 'pie-fast-source-fixture-meta');
+  const files = ['test/ordinary.test.ts', 'test/direct.test.ts', 'test/transitive.test.ts'];
+  const fixtureSource = path.join(repoRoot, 'harness/agent-processes/lib/sdk-integration/test/source-fixture.ts');
+  const directSource = "import { sourceFixture } from './source-fixture.js';";
+
+  assert.equal(hasDirectSourceFixtureImport(directSource), true);
+  assert.equal(hasDirectSourceFixtureImport("await import('./source-fixture.js');"), true);
+  assert.equal(hasDirectSourceFixtureImport("import { sourceDescriptor } from '../../harness/agent-processes/lib/sdk-integration/test/source-fixture.js';"), true);
+  assert.equal(hasDirectSourceFixtureImport("import './other-fixture.js';"), false);
+  const transitiveBundle = extensionBundleOutputPath(tempDir, files[2]);
+  const metadataConsumers = sourceFixtureConsumersFromMetafile({ outputs: {
+    [transitiveBundle]: { inputs: {
+      [path.relative(repoRoot, resolveExtensionTestPath(files[2]))]: {},
+      [path.relative(repoRoot, fixtureSource)]: {},
+    } },
+  } }, tempDir, files);
+  const fixtureConsumers = new Set([
+    ...files.filter((file) => file === files[1] && hasDirectSourceFixtureImport(directSource)),
+    ...metadataConsumers,
+  ]);
+  const partition = partitionSourceFixtureTests(files, fixtureConsumers);
+
+  assert.deepEqual(metadataConsumers, [files[2]]);
+  assert.deepEqual(partition, { normal: [files[0]], sourceFixture: [files[1], files[2]] });
+  assert.deepEqual([...partition.normal, ...partition.sourceFixture].sort(), files.slice().sort());
+});
+
+test('source-fixture waves wait for both normal waves and run serially afterward', async () => {
+  let finishBundle;
+  let finishTsx;
+  const bundleWave = new Promise((resolve) => { finishBundle = resolve; });
+  const tsxWave = new Promise((resolve) => { finishTsx = resolve; });
+  const started = [];
+  const scheduled = runSerializedExtensionWaves([bundleWave, tsxWave], [
+    async () => { started.push('source-fixture-bundle'); return 'fixture-bundle'; },
+    async () => { started.push('source-fixture-tsx'); return 'fixture-tsx'; },
+  ]);
+
+  await Promise.resolve();
+  assert.deepEqual(started, []);
+  finishBundle('bundle');
+  await Promise.resolve();
+  assert.deepEqual(started, []);
+  finishTsx('tsx');
+  assert.deepEqual(await scheduled, ['bundle', 'tsx', 'fixture-bundle', 'fixture-tsx']);
+  assert.deepEqual(started, ['source-fixture-bundle', 'source-fixture-tsx']);
+});
+
+test('mergeReports accounts for normal and serialized child results exactly once', () => {
+  const repoRoot = path.resolve(import.meta.dirname, '../../..');
+  const tempDir = path.join(os.tmpdir(), 'pie-fast-source-fixture-accounting');
+  const expectedFiles = [
+    path.join(repoRoot, 'test/normal.test.ts'),
+    path.join(repoRoot, 'harness/source-fixture-bundle.test.ts'),
+    path.join(repoRoot, 'harness/source-fixture-tsx.test.ts'),
+  ];
+  const reportFor = (executedFiles) => ({
+    summary: { counts: { tests: 1, passed: 1 } },
+    failures: [],
+    fileAccounting: { success: true, executedFiles },
+  });
+  const results = [
+    [expectedFiles[0]], [expectedFiles[1]], [expectedFiles[2]],
+  ].map((executedFiles) => ({
+    code: 0,
+    signal: null,
+    stdout: `__PI_TEST_SUMMARY__${JSON.stringify(reportFor(executedFiles))}`,
+    stderr: '',
+  }));
+
+  const merged = mergeReports(results, 10, tempDir, [], expectedFiles);
+  assert.equal(merged.summary.success, true);
+  assert.equal(merged.fileAccounting.success, true);
+  assert.equal(merged.fileAccounting.enumerated, 3);
+  assert.equal(merged.fileAccounting.executed, 3);
+  assert.deepEqual(merged.fileAccounting.missing, []);
+  assert.deepEqual(merged.fileAccounting.duplicates, []);
+});
+
 test('classifyExtensionTest scopes hook and environment users in suites', () => {
   assert.equal(classifyExtensionTest('test/hooked.test.ts', 'beforeEach(() => {});'), 'scoped-batch');
   assert.equal(classifyExtensionTest('test/env.test.ts', 'process.env.EXAMPLE = \'1\';'), 'scoped-batch');
@@ -160,6 +247,50 @@ test('preserve-source-urls leaves dependency and generated template strings inta
   assert.doesNotMatch(compiled, /createRequire\(file:/u);
   const { result } = createOwnerRequire({ dependencyOwnerRoot: root })(output);
   assert.deepEqual(result, [pathToFileURL(sourcePath).href, viteSnippet, viteSnippet, viteSnippet, pathToFileURL(publicationPath).href]);
+});
+
+test('artifact aliases resolve extensionless .js files without package exports and stay inside the artifact', async (t) => {
+  const fixture = await mkdtemp(path.join(os.tmpdir(), 'pie-fast-artifact-alias-'));
+  t.after(() => rm(fixture, { recursive: true, force: true }));
+  const artifactDir = path.join(fixture, 'artifact');
+  const sdkPath = path.join(artifactDir, 'node_modules', '@earendil-works', 'pi-coding-agent');
+  const packageRoot = path.join(artifactDir, 'node_modules', 'highlight.js');
+  const sdkManifest = path.join(sdkPath, 'package.json');
+  const coreFile = path.join(packageRoot, 'lib', 'core.js');
+  await Promise.all([
+    mkdir(sdkPath, { recursive: true }),
+    mkdir(path.dirname(coreFile), { recursive: true }),
+  ]);
+  await Promise.all([
+    writeFile(sdkManifest, JSON.stringify({ name: '@earendil-works/pi-coding-agent' })),
+    writeFile(path.join(packageRoot, 'package.json'), JSON.stringify({
+      name: 'highlight.js',
+      exports: {
+        '.': { import: './index.js' },
+        './lib/core': { import: './lib/core.js' },
+      },
+    })),
+    writeFile(path.join(packageRoot, 'index.js'), 'export default {};'),
+    writeFile(coreFile, 'module.exports = {};'),
+  ]);
+
+  const runtime = { artifactDir, sdkPath };
+  const candidateRequire = createOwnerRequire({ dependencyOwnerRoot: sdkPath });
+  assert.throws(() => candidateRequire.resolve('highlight.js/lib/core'), { code: 'ERR_PACKAGE_PATH_NOT_EXPORTED' });
+  assert.equal(resolveArtifactAliasPath(path.join(packageRoot, 'lib', 'core'), runtime), coreFile);
+  assert.throws(
+    () => resolveArtifactAliasPath(path.join(packageRoot, 'lib', 'missing'), runtime),
+    /Could not resolve verified artifact alias/u,
+  );
+
+  const outside = path.join(fixture, 'outside');
+  await mkdir(outside, { recursive: true });
+  await writeFile(path.join(outside, 'core.js'), 'module.exports = {};');
+  await symlink(outside, path.join(packageRoot, 'linked-lib'), 'junction');
+  assert.throws(
+    () => resolveArtifactAliasPath(path.join(packageRoot, 'linked-lib', 'core'), runtime),
+    /escaped selected artifact/u,
+  );
 });
 
 test('fast runner removes OS temp directories when bundle build throws', async (t) => {

@@ -373,7 +373,6 @@ test('typed SDK context omission option filters initial, replacement, and self-r
     };
 
     const runtime = modules.createExtensionRuntime();
-    let session: any;
     const extension = await modules.loadExtensionFromFactory((api: any) => {
       api.on('session_start', (event: { reason: string }) => {
         const messages = session.agent.state.messages as any[];
@@ -401,7 +400,7 @@ test('typed SDK context omission option filters initial, replacement, and self-r
       model, resourceLoader, sessionStartEvent, contextMessageOmissions: runtimeOmissions,
     };
     const created = await modules.createAgentSession(sdkOptions);
-    session = created.session;
+    const session: any = created.session;
     session.agent.streamFn = () => { throw new Error('Inference forbidden in startup observation test'); };
     await session.bindExtensions({});
     return {
@@ -469,7 +468,7 @@ test('typed SDK context omission option filters initial, replacement, and self-r
   assert.equal(factoryOrder.filter((event) => event === 'resolver-evaluated').length, 3);
 });
 
-test('SessionManager context omission resolver re-evaluates current branch without changing entries', async (t) => {
+test('SessionManager context omission resolver re-evaluates current branch without changing entries', async (_t) => {
   const modules = await sourceModules;
   const manager = modules.SessionManager.inMemory();
   manager.appendMessage(assistant([], 'error', 'prompt is too long: 201000 tokens > 200000 maximum') as never);

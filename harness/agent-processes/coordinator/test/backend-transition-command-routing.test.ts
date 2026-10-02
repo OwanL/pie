@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { resolve } from 'node:path';
 import { BackendServer } from '../server.js';
+import { createSyntheticSourceTestSdkRuntime } from '../../test/fixtures/sdk-runtime-selection.js';
 import type { RequestEnvelope } from '../../lib/rpc/wire.js';
 
 interface TransitionRoute {
@@ -32,7 +34,7 @@ function createServer(
   router: Omit<TransitionRouterStub, 'cancelPendingRuntimeOperations'>
     & Partial<Pick<TransitionRouterStub, 'cancelPendingRuntimeOperations'>>,
 ): ServerTransitionTestPort {
-  const server = new BackendServer({ sdkPath: '/sdk', cwd: '/repo', workerEntryPath: '/worker.js' });
+  const server = new BackendServer({ sdkPath: '/sdk', sourceArtifactDescriptor: createSyntheticSourceTestSdkRuntime(resolve('/sdk')).descriptor, cwd: '/repo', workerEntryPath: '/worker.js' });
   const port = server as unknown as ServerTransitionTestPort;
   port.workerRuntimeRouter = { cancelPendingRuntimeOperations: () => false, ...router };
   return port;

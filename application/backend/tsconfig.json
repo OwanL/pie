@@ -13,7 +13,7 @@
     "incremental": true,
     "tsBuildInfoFile": "../hosts/vscode/node_modules/.cache/typecheck/application-backend.tsbuildinfo",
     "types": ["node", "vscode"],
-    "typeRoots": ["../hosts/vscode/node_modules/@types"],
+    "typeRoots": ["../hosts/vscode/node_modules/@types", "../hosts/vscode/node_modules"],
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "baseUrl": ".",
     "paths": {

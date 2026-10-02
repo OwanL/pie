@@ -11,6 +11,7 @@ import { artifactDirectory as computerUseArtifactDirectory } from '../../../tool
 import { artifactDirectory as playwrightArtifactDirectory } from '../../../tools/playwright/artifacts.js';
 import { STORAGE_CUTOFF_AUTHORIZATION_ENV } from '../../../../analytics/authority/storage-cutoff-authorization.js';
 import { BackendServer } from '../server.js';
+import { createSyntheticSourceTestSdkRuntime } from '../../test/fixtures/sdk-runtime-selection.js';
 import { WorkerRuntimeRouter } from '../worker-runtime-router.js';
 
 function createServer(sessionDirectory: string): {
@@ -19,6 +20,7 @@ function createServer(sessionDirectory: string): {
 } {
   const server = new BackendServer({
     sdkPath: '/sdk',
+    sourceArtifactDescriptor: createSyntheticSourceTestSdkRuntime(path.resolve('/sdk')).descriptor,
     cwd: sessionDirectory,
     workerEntryPath: '/worker.js',
   }) as unknown as {

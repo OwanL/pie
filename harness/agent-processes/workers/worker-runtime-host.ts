@@ -72,7 +72,6 @@ import {
   loadSdkInternalModule,
   type SdkModule,
   type SourceArtifactSdkModule,
-  type SourceSdkLoadMode,
 } from '../lib/sdk-integration/sdk';
 import {
   assertSdkRuntimeAgreement,
@@ -80,7 +79,6 @@ import {
   sdkRuntimeSdkPath,
   type SdkRuntimeSelection,
 } from '../lib/sdk-integration/sdk-runtime-selection.js';
-import type { SdkPatchIdentity } from '../lib/sdk-integration/sdk-patch-barrier';
 import type { SessionContext, SessionContextCreationReason, SessionPromptState } from '../coordinator/server-types.js';
 import {
   createSessionManagerFence,
@@ -206,7 +204,6 @@ type LiveTurnCheckpointOwner = {
 
 export class WorkerRuntimeHost {
   private sdk?: SdkModule;
-  private sourceSdk?: SourceArtifactSdkModule;
   private context?: SessionContext;
   private promotion?: Promise<void>;
   private runtimeReady = false;
@@ -824,20 +821,8 @@ export class WorkerRuntimeHost {
     assertSdkRuntimeAgreement(payload.sdkPath, this.options.sdkRuntime, payload.sdkRuntime);
     const selectedSdkPath = sdkRuntimeSdkPath(this.options.sdkRuntime);
     const loadMode = sdkRuntimeLoadMode(this.options.sdkRuntime, 'full');
-    if (this.options.sdkRuntime.kind === 'source-artifact') {
-      const sourceSdk: SourceArtifactSdkModule = await loadSdk(
-        selectedSdkPath,
-        loadMode as SourceSdkLoadMode & { surface: 'full' },
-      );
-      this.sourceSdk = sourceSdk;
-      this.sdk = sourceSdk as unknown as SdkModule;
-    } else {
-      this.sourceSdk = undefined;
-      this.sdk = await loadSdk(
-        selectedSdkPath,
-        loadMode as { mode: 'worker'; patchIdentity: SdkPatchIdentity },
-      );
-    }
+    const sourceSdk: SourceArtifactSdkModule = await loadSdk(selectedSdkPath, loadMode);
+    this.sdk = sourceSdk as unknown as SdkModule;
     // Isolated workers perform provider I/O but never install an independent
     // ProviderGate admission/circuit. The coordinator lease above is the sole
     // cross-worker capacity and circuit authority.
@@ -865,7 +850,7 @@ export class WorkerRuntimeHost {
     const manager = this.sdk.SessionManager.open(this.currentLease.canonicalSessionPath);
     const guardedManager = this.fenceSessionManager(manager);
     const runtime = await this.sdk.createAgentSessionRuntime(
-      createRuntimeFactory(this.sourceSdk ?? this.sdk!, authStorage, this.startupCwd, this.gate, {
+      createRuntimeFactory(this.sdk, authStorage, this.startupCwd, this.gate, {
         wrapSessionManager: (candidate) => this.fenceSessionManager(candidate),
         customTools: () => createBackendTools({
           kind: 'primary',
@@ -1677,7 +1662,7 @@ export class WorkerRuntimeHost {
     }
     const authStorage = this.sdk.AuthStorage.create(this.syncedAuthPath ?? resolveAuthPath(this.agentDir));
     const runtime = await this.sdk.createAgentSessionRuntime(
-      createRuntimeFactory(this.sourceSdk ?? this.sdk!, authStorage, this.startupCwd, this.gate, {
+      createRuntimeFactory(this.sdk, authStorage, this.startupCwd, this.gate, {
         wrapSessionManager: (candidate) => this.fenceSessionManager(candidate),
         customTools: () => createBackendTools({
           kind: 'primary',

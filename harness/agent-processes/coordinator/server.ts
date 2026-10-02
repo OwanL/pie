@@ -110,13 +110,12 @@ import {
   writeSystemPromptTogglesForSession,
 } from '../../session-storage/settings/session-settings-store';
 import {
-  ensureSdkPatchBarrier,
   loadSdk,
   type ColdCoordinatorSdkModule,
   type SdkAuthStorage,
   type SdkModelRegistry,
 } from '../lib/sdk-integration/sdk';
-import { verifySdkRuntimeSelection, sdkRuntimeLoadMode, type SdkRuntimeSelection } from '../lib/sdk-integration/sdk-runtime-selection';
+import { parseSdkRuntimeSelection, verifySdkRuntimeSelection, sdkRuntimeLoadMode, type SdkRuntimeSelection } from '../lib/sdk-integration/sdk-runtime-selection';
 import { ProviderGate, type ProviderConcurrencyConfig } from '../../model-providers/concurrency/provider-gate.js';
 import { resolveProviderMaxConcurrentRequests } from '../../model-providers/concurrency/provider-concurrency.js';
 import { markDisabledEntries } from '../../agent-instructions/prompt-assembly/system-prompts.js';
@@ -666,8 +665,8 @@ export class BackendServer {
 
   constructor(options: {
     sdkPath: string;
-    /** Explicit candidate opt-in only. Host startup does not supply this. */
-    sourceArtifactDescriptor?: unknown;
+    /** Required generation-local Pi artifact forwarded by the host. */
+    sourceArtifactDescriptor: unknown;
     cwd: string;
     backendGeneration?: number;
     hostPid?: number;
@@ -689,10 +688,8 @@ export class BackendServer {
     hostCloseHandoffTimeoutMs?: number;
   }) {
     this.sdkPath = options.sdkPath;
-    if (Object.hasOwn(options, 'sourceArtifactDescriptor') && options.sourceArtifactDescriptor === undefined) {
-      throw new TypeError('Explicit sourceArtifactDescriptor must not be undefined.');
-    }
-    this.sourceArtifactDescriptor = options.sourceArtifactDescriptor;
+    const selection = parseSdkRuntimeSelection({ kind: 'source-artifact', descriptor: options.sourceArtifactDescriptor });
+    this.sourceArtifactDescriptor = selection.descriptor;
     this.startupCwd = options.cwd;
     this.backendGeneration = options.backendGeneration ?? 1;
     if (!Number.isSafeInteger(this.backendGeneration) || this.backendGeneration <= 0) {
@@ -809,12 +806,12 @@ export class BackendServer {
     // Install fatal handlers first so even an early spawn-time rejection is
     // surfaced. Idempotent (module-level guard).
     installBackendFatalHandlers();
-    // Create the generation-scoped supervisor and verify the stable worker
-    // artifact. The coordinator owns the patching barrier and workers only
-    // validate it.
-    const sdkRuntime: SdkRuntimeSelection = this.sourceArtifactDescriptor === undefined
-      ? { kind: 'legacy-patched', patchIdentity: await ensureSdkPatchBarrier(this.sdkPath) }
-      : await verifySdkRuntimeSelection(this.sdkPath, { kind: 'source-artifact', descriptor: this.sourceArtifactDescriptor });
+    // Independently verify the host-selected artifact against this executing
+    // Node target before importing the SDK or starting any owned child.
+    const sdkRuntime = await verifySdkRuntimeSelection(
+      this.sdkPath,
+      { kind: 'source-artifact', descriptor: this.sourceArtifactDescriptor },
+    );
     this.sdkRuntime = sdkRuntime;
     if (this.initialContextEstimateEntryPath) {
       this.initialContextEstimateClient = new InitialContextEstimateClient({
@@ -892,9 +889,7 @@ export class BackendServer {
       await timed('start.loadSdk', async () => {
         this.sdk = await loadSdk(
           this.sdkPath,
-          sdkRuntime.kind === 'source-artifact'
-            ? sdkRuntimeLoadMode(sdkRuntime, 'cold')
-            : { mode: 'cold-coordinator' },
+          sdkRuntimeLoadMode(sdkRuntime, 'cold'),
         );
         this.agentDir = this.sdk.getAgentDir();
         this.analyticsAuthority?.validate();

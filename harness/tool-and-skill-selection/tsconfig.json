@@ -1,6 +1,6 @@
 {
   // Bundler resolution supports import.meta and .js imports without changing
-  // package type. Runtime-provided peers are stubbed in types-global.d.ts.
+  // package type. SDK types resolve through the runner's selected source aliases.
   "compilerOptions": {
     "target": "ES2022",
     "module": "preserve",

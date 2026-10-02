@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
 
-import { SDK_PATCH_IDENTITY_VERSION } from '../../sdk-integration/sdk-patch-barrier.js';
+import * as path from 'node:path';
+import { createSyntheticSourceTestSdkRuntime } from '../../../test/fixtures/sdk-runtime-selection.js';
 import {
   WORKER_IPC_VERSION,
   type WorkerIpcFrame,
@@ -39,17 +40,7 @@ const frameBase = {
   sessionPath: identity.rootSessionPath,
 };
 
-const sdkPatchIdentity = {
-  identityVersion: SDK_PATCH_IDENTITY_VERSION,
-  sdkPath: '/sdk',
-  sdkVersion: 'fixture',
-  terminalDurability: { patchVersion: 1, relativePath: 'agent-session.js', sha256: 'a'.repeat(64) },
-  retryClassifier: { patchVersion: 1, relativePath: 'retry.js', sha256: 'b'.repeat(64) },
-  coldCreateDurability: { patchVersion: 2, relativePath: 'session-manager.js', sha256: 'c'.repeat(64) },
-  sessionOwnershipAdapter: { patchVersion: 1, relativePath: 'session-manager.js', sha256: 'c'.repeat(64) },
-  sessionReplacementAdapter: { patchVersion: 7, relativePath: 'agent-session-runtime.js', sha256: 'd'.repeat(64) },
-};
-const sdkRuntime = { kind: 'legacy-patched' as const, patchIdentity: sdkPatchIdentity };
+const sdkRuntime = createSyntheticSourceTestSdkRuntime(path.resolve('/sdk'));
 
 async function waitUntil(predicate: () => boolean, timeoutMs = 15_000): Promise<void> {
   // Generous Windows CI headroom: these polls wait for causal frame receipt

@@ -44,6 +44,7 @@ type ImportRecord = {
   prototypes: Array<[string, Record<string, PropertyDescriptor>]>;
   preparations: Array<{ entries: unknown[]; settings: Record<string, unknown> }>;
   compactions: unknown[][];
+  failCompaction?: boolean;
   runtimeCalls: Array<{ factory: unknown; options: unknown }>;
 };
 
@@ -98,6 +99,7 @@ export function prepareCompaction(entries, settings) {
 }
 export async function compact(...args) {
   globalThis[${JSON.stringify(key)}].compactions.push(args);
+  if (globalThis[${JSON.stringify(key)}].failCompaction) throw new Error('synthetic summary provider failed');
   return { summary: 'synthetic Pie summary', firstKeptEntryId: 'kept-entry', tokensBefore: 123, details: { source: 'synthetic' } };
 }
 `;
@@ -293,6 +295,26 @@ test('source-artifact loader rejects verified SDKs missing required cold or full
   }
 });
 
+test('both source SDK surfaces reject a missing required continueRecent factory', async (t) => {
+  for (const surface of ['cold', 'full'] as const) {
+    const current = await fixture(t);
+    const file = path.join(current.sdkPath, 'dist/core/session-manager.js');
+    const source = await readFile(file, 'utf8');
+    assert.ok(source.includes('static continueRecent()'));
+    await writeFile(file, source.replace('static continueRecent()', 'static missing_continueRecent()'));
+    await writePiRuntimeManifest(current.artifactDir, provenance);
+    const descriptor = await descriptorFor(current.artifactDir, target);
+    const before = await snapshot(current.artifactDir);
+    await assertRejectsMessage(
+      loadSdk(current.sdkPath, surface === 'cold'
+        ? sourceMode(descriptor, target, 'cold') : sourceMode(descriptor, target, 'full')),
+      /missing required cold coordinator exports/,
+    );
+    assert.ok(importRecord(current.marker)?.imports.includes('session-manager'));
+    assert.deepEqual(await snapshot(current.artifactDir), before);
+  }
+});
+
 test('source-artifact beforeCompact bridge uses public session APIs and Pie summary settings', async (t) => {
   const envKey = 'PIE_HISTORY_COMPACTION_JSON';
   const previousSettings = process.env[envKey];
@@ -423,6 +445,25 @@ test('source-artifact beforeCompact bridge uses public session APIs and Pie summ
   assert.deepEqual(unavailable.calls.modelLookups, [['summary-provider', 'summary-model']]);
   assert.equal(unavailable.calls.authModels.length, 0);
   assert.equal(record.compactions.length, 1, 'no compact request is made with the active model as fallback');
+
+  record.compactions.length = 0;
+  record.failCompaction = true;
+  assert.deepEqual(await invokeBeforeCompact(createSession(true).session), { cancel: true },
+    'configured summary request failure cancels instead of falling back to the active model');
+  assert.deepEqual(record.compactions.map((args) => args[1]), [summaryModel]);
+
+  const settings = JSON.parse(process.env[envKey]!);
+  process.env[envKey] = JSON.stringify({ ...settings, summaryModel: null });
+  record.compactions.length = 0;
+  assert.equal(await invokeBeforeCompact(createSession(true).session), undefined,
+    'explicit Active model selection preserves native fallback after request failure');
+  assert.deepEqual(record.compactions.map((args) => args[1]), [activeModel]);
+
+  process.env[envKey] = '{invalid';
+  record.compactions.length = 0;
+  assert.deepEqual(await invokeBeforeCompact(createSession(true).session), { cancel: true },
+    'malformed policy cancels rather than issuing an unconfigured summary request');
+  assert.deepEqual(record.compactions, []);
 });
 
 test('source-artifact runtime route forwards its compaction hooks once', async (t) => {
