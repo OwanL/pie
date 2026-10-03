@@ -5,6 +5,7 @@
 !runtime/*.cjs
 !out/*.js
 !out/pie-build-id.txt
+!out/pi-runtime/**
 !out/webview/panel/pie-build-id.txt
 !out/assets/**
 !out/webview/panel/.vite/manifest.json

@@ -10,16 +10,15 @@
 //   node scripts/install/run.mjs merge-auth <in-tree-auth.json> <secure-auth.json>
 //   node scripts/install/run.mjs relocate-auth <src-auth.json> <dest-auth.json>
 //   node scripts/install/run.mjs configure-sessions <repoRoot>
-//   node scripts/install/run.mjs resolve-pi
+//   node scripts/install/run.mjs validate-auth-dir <repoRoot> <savedDir>
 //   node scripts/install/run.mjs pinned-versions
-//   node scripts/install/run.mjs package-sources <settings.json>
 //   node scripts/install/run.mjs verify-toolchain [--json]
 //   node scripts/install/run.mjs write-vscode-agent-dir <repoRoot>
 //   node scripts/install/run.mjs readiness --auth <path> [--in-tree-auth <path>] [--auth-dir <dir>] [--repo-root <dir>] [--vscode-agent-dir-expected <dir>]
 //   node scripts/install/run.mjs has-jsonl <path> [--no-recurse]
 //
-// `verify-toolchain` is a dry run: it reports pinned-vs-actual drift and the
-// install commands the wrapper WOULD run, but never installs anything.
+// `verify-toolchain` is a dry run: it reports Node/npm drift plus Pi source
+// provenance, but never installs anything or requires a global Pi CLI.
 
 import { spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
@@ -30,18 +29,17 @@ import { fileURLToPath } from 'node:url';
 import { readJsonFile, writeJsonFile } from './lib/json.mjs';
 import { repairExtensionPaths } from './lib/settings-repair.mjs';
 import { mergeAuthProviders, readAuthProviders, relocateAuthFile } from './lib/auth.mjs';
-import { lookupOnPath, resolvePiBinary } from './lib/pi-binary.mjs';
 import { mergeAgentDirSetting, resolveVscodeSettingsDirs } from './lib/vscode-settings.mjs';
 import { checkAuthReadiness, checkSplitBrain, checkVscodeAgentDir } from './lib/readiness.mjs';
-import { readConfiguredPackageSources } from './lib/packages.mjs';
 import { readPinnedVersions, verifyToolchain } from './lib/toolchain.mjs';
 import { directoryHasJsonlFiles } from './lib/sessions.mjs';
 import { configureSessions } from './lib/sessions-config.mjs';
+import { validateAuthDirectory } from './lib/auth-directory.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '..', '..');
 
-// Run a CLI command portably: on Windows, npm/pi/etc. are .cmd shims that
+// Run a CLI command portably: on Windows, npm and other CLIs are .cmd shims that
 // spawnSync (shell:false) cannot resolve directly, so route through cmd.exe,
 // matching scripts/lib/subprocess.mjs's spawnCliSync for these command shims.
 function run(command, args, cwd = repoRoot) {
@@ -56,12 +54,6 @@ function npmConfigGetPrefix() {
   return (result.stdout ?? '').trim();
 }
 
-function resolvePiOnPath() {
-  // Manual PATH search (no `which`/`where.exe` dependency); on Windows PATHEXT
-  // resolves `pi` to the runnable `pi.cmd`, skipping any extensionless shim.
-  return lookupOnPath({ name: 'pi', platform: process.platform, env: process.env });
-}
-
 function printHelp() {
   console.log(`Usage: node scripts/install/run.mjs <command> [args]
 
@@ -70,10 +62,9 @@ Commands:
   merge-auth <in-tree> <secure>         Merge split-brain in-tree auth.json into the secure location and remove the in-tree copy.
   relocate-auth <src> <dest>            Atomically copy auth.json to the secure location with SHA-256 verification (no in-tree removal/ACL/env).
   configure-sessions <repoRoot>        Rewrite settings.json#sessionDir to the canonical store and migrate legacy session history.
-  resolve-pi                            Print the resolved pi binary path (or empty line).
-  pinned-versions                       Print the pinned Node/npm/pi versions (one per line).
-  package-sources <settings.json>       Print configured package sources (one per line).
-  verify-toolchain [--json]             Dry-run: report pinned-vs-actual Node/npm/pi drift (never installs).
+  validate-auth-dir <repoRoot> <savedDir> Require the saved auth directory to be outside the Git checkout.
+  pinned-versions                       Print pinned Node/npm/Pi source versions (one per line).
+  verify-toolchain [--json]             Dry-run: report Node/npm drift and Pi source provenance (never installs).
   write-vscode-agent-dir <repoRoot>     Write pie.agentDir into each existing VS Code User settings.json.
   readiness --auth <path> [...]         Print auth/provider/split-brain (and optional pie.agentDir) readiness checks.
   has-jsonl <path> [--no-recurse]       Print 1 if the dir contains *.jsonl, else 0.`);
@@ -141,12 +132,6 @@ function cmdMergeAuth(args) {
   rmSync(inTreePath, { force: true });
 }
 
-function cmdResolvePi() {
-  const prefix = npmConfigGetPrefix();
-  const bin = resolvePiBinary({ platform: process.platform, prefix, onPath: resolvePiOnPath() });
-  process.stdout.write(`${bin || ''}\n`);
-}
-
 function cmdRelocateAuth(args) {
   const [src, dest] = args;
   if (!src || !dest) { console.error('relocate-auth: requires <src-auth.json> <dest-auth.json>'); process.exit(2); }
@@ -180,16 +165,7 @@ function cmdVerifyToolchain(args) {
   const npmResult = run('npm', ['--version']);
   const actualNpm = ((npmResult.stdout || '').trim() || (npmResult.stderr || '').trim());
 
-  const piBin = resolvePiBinary({ platform: process.platform, prefix: npmConfigGetPrefix(), onPath: resolvePiOnPath() });
-  let actualPi = '';
-  if (piBin) {
-    const piResult = run(piBin, ['--version']);
-    // `pi --version` may write to stderr (e.g. the Windows .cmd shim), so fall
-    // back to stderr to detect the actually-installed version correctly.
-    actualPi = ((piResult.stdout || '').trim() || (piResult.stderr || '').trim());
-  }
-
-  const status = verifyToolchain({ pinned, actual: { node: actualNode, npm: actualNpm, pi: actualPi } });
+  const status = verifyToolchain({ pinned, actual: { node: actualNode, npm: actualNpm } });
 
   if (asJson) {
     process.stdout.write(`${JSON.stringify({ pinned, ...status })}\n`);
@@ -204,9 +180,8 @@ function cmdVerifyToolchain(args) {
   };
   console.log(fmtLine('Node', status.node));
   console.log(fmtLine('npm ', status.npm));
-  console.log(fmtLine('pi  ', status.pi));
+  console.log(`  Pi source ${status.piSource.version || 'unavailable'} (${status.piSource.provenance})`);
   if (status.npm.installCommand) console.log(`  would run: ${status.npm.installCommand.join(' ')}`);
-  if (status.pi.installCommand) console.log(`  would run: ${status.pi.installCommand.join(' ')}`);
   if (!status.allOk) process.exitCode = 1;
 }
 
@@ -297,25 +272,30 @@ function cmdHasJsonl(args) {
   process.stdout.write(directoryHasJsonlFiles(target, { recursive }) ? '1\n' : '0\n');
 }
 
-function cmdPinnedVersions() {
-  // Single source of truth for the three pinned versions, read via the shared
-  // scripts/install/toolchain.mjs helpers so install.bat does not need to parse
-  // .node-version, package.json, or the extension lockfile.
-  // Prints node, npm, pi (one per line). Exits non-zero if any pin is missing.
-  const { node, npm, pi } = readPinnedVersions(repoRoot);
-  if (!node || !npm || !pi) {
-    console.error('Could not resolve all pinned versions (node/npm/pi).');
+function cmdValidateAuthDir(args) {
+  const [root, savedDir] = args;
+  if (!root || !savedDir) {
+    console.error('validate-auth-dir: requires <repoRoot> <savedDir>');
+    process.exit(2);
+  }
+
+  // This command is intentionally read-only and never opens auth.json.
+  const validation = validateAuthDirectory({ repoRoot: root, authDir: savedDir });
+  if (!validation.valid) {
+    console.error(`PI_CODING_AGENT_AUTH_DIR ${validation.reason}. Choose an external directory, preserve or move auth.json there, update the User-scope PI_CODING_AGENT_AUTH_DIR, and rerun install.bat.`);
     process.exit(1);
   }
-  process.stdout.write(`${node}\n${npm}\n${pi}\n`);
 }
 
-function cmdPackageSources(args) {
-  const settingsPath = args[0];
-  if (!settingsPath) { console.error('package-sources: missing settings.json path'); process.exit(2); }
-  for (const source of readConfiguredPackageSources(settingsPath)) {
-    process.stdout.write(`${source}\n`);
+function cmdPinnedVersions() {
+  // Single source of truth for Node/npm pins and the Pi source version. Prints
+  // those values one per line; the Pi version is provenance, not a CLI check.
+  const { node, npm, piSource } = readPinnedVersions(repoRoot);
+  if (!node || !npm || !piSource) {
+    console.error('Could not resolve pinned Node/npm/Pi source versions.');
+    process.exit(1);
   }
+  process.stdout.write(`${node}\n${npm}\n${piSource}\n`);
 }
 
 const commands = {
@@ -323,10 +303,9 @@ const commands = {
   'merge-auth': cmdMergeAuth,
   'relocate-auth': cmdRelocateAuth,
   'configure-sessions': cmdConfigureSessions,
-  'resolve-pi': cmdResolvePi,
+  'validate-auth-dir': cmdValidateAuthDir,
   'verify-toolchain': cmdVerifyToolchain,
   'pinned-versions': cmdPinnedVersions,
-  'package-sources': cmdPackageSources,
   'write-vscode-agent-dir': cmdWriteVscodeAgentDir,
   'readiness': cmdReadiness,
   'has-jsonl': cmdHasJsonl,

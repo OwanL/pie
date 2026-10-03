@@ -1,5 +1,9 @@
 # Development Rules
 
+## Source Provenance
+
+The upstream 0.80.6 import, subtree provenance, and Pie semantic-delta boundary are recorded in the [Pie productization plan](../../docs/plans/PIE-PRODUCTIZATION.md); use it rather than duplicating provenance or baseline guidance here.
+
 ## Conversational Style
 
 - Keep answers short and concise

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, symlinkSync, mkdtempSync, writeFileSync } from 'node:fs';
 
 import path from 'node:path';
 import { tmpdir } from 'node:os';
@@ -7,7 +7,28 @@ import { test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { resolveSdkModule } from '../../../../scripts/lib/package-resolution.mjs';
 
-const sdkModuleUrl = pathToFileURL(resolveSdkModule('@earendil-works/pi-coding-agent')).href;
+function selectedSdkPathFromTsxConfig() {
+  const tsconfigPath = process.env.TSX_TSCONFIG_PATH;
+  assert.ok(tsconfigPath, 'SDK loader tests require the verified wrapper TSX_TSCONFIG_PATH selection');
+  const paths = JSON.parse(readFileSync(path.resolve(tsconfigPath), 'utf8')).compilerOptions?.paths;
+  assert.ok(paths?.typebox?.[0], 'SDK loader tests require candidate TypeBox aliases');
+  const entry = paths['@earendil-works/pi-coding-agent']?.[0];
+  assert.ok(entry && path.isAbsolute(entry), 'wrapper config must select an absolute Pi SDK alias');
+  let directory = path.dirname(realpathSync(entry));
+  while (directory !== path.dirname(directory)) {
+    const manifestPath = path.join(directory, 'package.json');
+    if (existsSync(manifestPath)) {
+      const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+      if (manifest.name === '@earendil-works/pi-coding-agent') return realpathSync(directory);
+    }
+    directory = path.dirname(directory);
+  }
+  assert.fail(`Could not find the selected Pi SDK package root above ${entry}`);
+}
+
+const sdkModuleUrl = pathToFileURL(resolveSdkModule('@earendil-works/pi-coding-agent', {
+  sdkPath: selectedSdkPathFromTsxConfig(),
+})).href;
 const { loadSkills, DefaultResourceLoader } = await import(sdkModuleUrl);
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..');

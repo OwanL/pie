@@ -95,16 +95,16 @@ Choose focused tests while iterating, then run checks proportionate to the chang
 - [`docs/contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md`](../../../../docs/contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md) — analytics authority, data root, privacy, and the gated storage cutoff
 - [UI design philosophy](../../../../docs/architecture/UI-DESIGN-PHILOSOPHY.md) and [GUI development](../../../../docs/operations/GUI-DEVELOPMENT.md)
 
-### Pi runtime documentation (locked local version)
+### Pi runtime documentation (in-tree source)
 
-For Pi API work, use the topic that owns the API being changed. [Pi's README](../../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/README.md) provides an overview when needed:
+For Pi API work, use the topic that owns the API being changed. The in-tree coding-agent source is based on upstream Pi 0.80.6 plus Pie's local semantic changes; use its [README](../../../../harness/pi/packages/coding-agent/README.md), docs, and examples as the API references. The [Pie productization plan](../../../../docs/plans/PIE-PRODUCTIZATION.md) owns source provenance and the local-change boundary.
 
-- [extensions](../../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/docs/extensions.md) and [extension examples](../../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/examples/extensions/)
-- [skills](../../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/docs/skills.md)
-- [SDK](../../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/docs/sdk.md) and [SDK examples](../../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/examples/sdk/)
-- [RPC protocol](../../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/docs/rpc.md)
-- [custom providers](../../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/docs/custom-provider.md) and [models](../../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/docs/models.md)
-- [settings](../../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/docs/settings.md), [packages](../../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/docs/packages.md), and [prompt templates](../../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/docs/prompt-templates.md)
-- [TUI](../../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/docs/tui.md) and [keybindings](../../../../application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent/docs/keybindings.md)
+- [extensions](../../../../harness/pi/packages/coding-agent/docs/extensions.md) and [extension examples](../../../../harness/pi/packages/coding-agent/examples/extensions/)
+- [skills](../../../../harness/pi/packages/coding-agent/docs/skills.md)
+- [SDK](../../../../harness/pi/packages/coding-agent/docs/sdk.md) and [SDK examples](../../../../harness/pi/packages/coding-agent/examples/sdk/)
+- [RPC protocol](../../../../harness/pi/packages/coding-agent/docs/rpc.md)
+- [custom providers](../../../../harness/pi/packages/coding-agent/docs/custom-provider.md) and [models](../../../../harness/pi/packages/coding-agent/docs/models.md)
+- [settings](../../../../harness/pi/packages/coding-agent/docs/settings.md), [packages](../../../../harness/pi/packages/coding-agent/docs/packages.md), and [prompt templates](../../../../harness/pi/packages/coding-agent/docs/prompt-templates.md)
+- [TUI](../../../../harness/pi/packages/coding-agent/docs/tui.md) and [keybindings](../../../../harness/pi/packages/coding-agent/docs/keybindings.md)
 
-These checked-out docs match the runtime pinned by `application/hosts/vscode/package-lock.json`; prefer them over assumptions based on another Pi release. The upstream landing page is [pi.dev](https://pi.dev/).
+A Pi package version alone does not identify a built runtime: use the verified artifact's `pi-runtime/manifest.json` identity, which includes source and lock fingerprints, target, package trees, and payload hash. See the [runtime artifact guide](../../../../harness/pi-runtime/README.md). The upstream landing page is [pi.dev](https://pi.dev/).

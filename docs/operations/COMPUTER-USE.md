@@ -89,7 +89,7 @@ Evaluation run `cu-20260725-01` used dependency-managed disposable candidates an
 
 ## Install and verification
 
-Root bootstrap installs the independently locked package:
+Root bootstrap restores the independently locked computer-use dependencies and configured Pi packages, using one verified source Pi artifact for package restore, build, and doctor. It does not install or require a global `pi` CLI. The Windows installer invokes bootstrap with `--package` to also create and install the VS Code extension package; see the [README migration/setup notes](../../README.md#multi-machine-workflow) for its read-only doctor routes and active-manager safety restriction.
 
 ```bash
 npm run bootstrap

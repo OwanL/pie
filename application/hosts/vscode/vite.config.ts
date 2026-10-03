@@ -24,23 +24,13 @@ const outDir = isolatedOutputDir || path.join(rootDir, 'out');
 
 /**
  * Package imports resolve through the explicit dependency owner, never the
- * config's working directory: current and legacy Pi spellings map to the SDK's
- * nested graph (including the private pi-ai/TypeBox identity), and Preact
- * keeps its owner-installed files and subpaths. Native tools keep their own
- * sidecar owners and stay unaliased. The Node host and browser renderer use
- * their respective package export conditions so Node-only dependencies such
- * as ws never resolve to a browser stub in the host bundle.
+ * config's working directory: current and legacy Pi spellings map to the
+ * explicitly selected SDK's nested graph (including the private pi-ai/TypeBox
+ * identity), and Preact keeps its owner-installed files and subpaths. Native
+ * tools keep their own sidecar owners and stay unaliased. The Node host and
+ * browser renderer use their respective package export conditions so Node-only
+ * dependencies such as ws never resolve to a browser stub in the host bundle.
  */
-const packageAliases = createViteAliases({
-  layout: 'planned',
-  ...(selectedPiRuntimeSdkPath ? { sdkPath: selectedPiRuntimeSdkPath } : {}),
-});
-const nodePackageAliases = createViteAliases({
-  layout: 'planned',
-  conditions: ['node', 'require', 'import', 'default'],
-  ...(selectedPiRuntimeSdkPath ? { sdkPath: selectedPiRuntimeSdkPath } : {}),
-});
-
 const webviewOutDir = path.join(outDir, 'webview', 'panel');
 const BUILD_ID_SENTINEL = '__PIE_COMPILED_BUILD_ID_REPLACE__';
 
@@ -142,6 +132,18 @@ export function createBuildIdentityPlugin(
 }
 
 export default defineConfig(({ mode }) => {
+  if (!selectedPiRuntimeSdkPath) {
+    throw new Error('Vite production requires PIE_BUILD_PI_RUNTIME_SDK_PATH from an explicitly selected Pi runtime; refusing to resolve Pi from the host owner.');
+  }
+  const packageAliases = createViteAliases({
+    layout: 'planned',
+    sdkPath: selectedPiRuntimeSdkPath,
+  });
+  const nodePackageAliases = createViteAliases({
+    layout: 'planned',
+    conditions: ['node', 'require', 'import', 'default'],
+    sdkPath: selectedPiRuntimeSdkPath,
+  });
   const define = {
     __PIE_BUILD_ID__: JSON.stringify(BUILD_ID_SENTINEL),
   };

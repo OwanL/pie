@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { readPinnedSdkVersion } from "../lib/sdk-version.mjs";
+import { readPinnedPiSourceVersion as readSourceVersion } from "../lib/sdk-version.mjs";
 
 export const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -16,6 +16,6 @@ export function readPinnedNpmVersion() {
   return match[1];
 }
 
-export function readPinnedPiVersion() {
-  return readPinnedSdkVersion(repoRoot);
+export function readPinnedPiSourceVersion(root = repoRoot) {
+  return readSourceVersion(root);
 }

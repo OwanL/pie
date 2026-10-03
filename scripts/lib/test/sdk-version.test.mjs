@@ -1,12 +1,12 @@
 // Focused unit tests for scripts/lib/sdk-version.mjs: version-coercion and
-// lockfile-reading helpers used by bootstrap.mjs, doctor.mjs, and install.bat
-// to pin the global `pi` CLI to the VS Code host's locked SDK.
+// in-tree Pi source-version authority.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import {
-  readPinnedSdkVersion,
-  readDeclaredSdkRange,
+  readPinnedPiSourceVersion,
   coerceVersion,
   compareVersions,
   gte,
@@ -45,23 +45,31 @@ test('gte matches the documented boundary behavior', () => {
   assert.equal(gte('^24.16.0', '24.16.0'), true);
 });
 
-test('readPinnedSdkVersion returns the exact locked SDK version from application/hosts/vscode/package-lock.json', () => {
-  const v = readPinnedSdkVersion(repoRoot);
+test('readPinnedPiSourceVersion reads the matched in-tree Pi package versions', () => {
+  const v = readPinnedPiSourceVersion(repoRoot);
   assert.match(v, /^\d+\.\d+\.\d+$/);
-  // The audit pins 0.80.6; the lockfile currently resolves to exactly that.
   assert.equal(v, '0.80.6');
 });
 
-test('readDeclaredSdkRange returns the package.json range (^x.y.z)', () => {
-  const r = readDeclaredSdkRange(repoRoot);
-  assert.ok(r, 'expected a declared range');
-  assert.equal(r.startsWith('^'), true);
-  assert.equal(coerceVersion(r).join('.'), '0.80.6');
+function createPiSourceFixture(t, { missing = null, mismatch = false } = {}) {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'pie-pi-source-version-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  for (const directory of ['tui', 'ai', 'agent', 'coding-agent']) {
+    if (directory === missing) continue;
+    const manifestPath = path.join(root, 'harness', 'pi', 'packages', directory, 'package.json');
+    mkdirSync(path.dirname(manifestPath), { recursive: true });
+    const version = mismatch && directory === 'coding-agent' ? '0.80.7' : '0.80.6';
+    writeFileSync(manifestPath, JSON.stringify({ name: `fixture-${directory}`, version }));
+  }
+  return root;
+}
+
+test('readPinnedPiSourceVersion rejects a missing source package manifest', (t) => {
+  const root = createPiSourceFixture(t, { missing: 'agent' });
+  assert.throws(() => readPinnedPiSourceVersion(root), /Could not read Pi source package manifest.*agent.*package\.json/);
 });
 
-test('readPinnedSdkVersion throws a clear error for a missing lockfile', () => {
-  assert.throws(
-    () => readPinnedSdkVersion(path.join(repoRoot, 'scripts')),
-    /Could not read VS Code host lockfile/,
-  );
+test('readPinnedPiSourceVersion rejects package versions that do not match', (t) => {
+  const root = createPiSourceFixture(t, { mismatch: true });
+  assert.throws(() => readPinnedPiSourceVersion(root), /Pi source package versions do not match:.*coding-agent=0\.80\.7/);
 });

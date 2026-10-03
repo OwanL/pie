@@ -9,6 +9,7 @@ Pie is a coding-agent application built around the Pi runtime. VS Code and stand
 | Application runtime | State, effects, session actions, renderer projection, and lifecycle composition through injected platform ports | `application/backend/`; composition starts in `composition/host-runtime.ts` |
 | Host adapters | VS Code integration or standalone startup, browser serving, editor/file capabilities, and notifications | `application/hosts/{vscode,standalone,browser,lib}/` |
 | Renderers | Shared passive Preact UI in the sidebar or browser | `application/frontend/` |
+| Pi runtime source | One matched upstream baseline with typed Pie semantic changes; public Pi package boundaries remain intact | `harness/pi/`; runtime dependency lock in `harness/pi-runtime/` |
 | Agent coordinator | Cold session operations, settings/catalog authority, worker routing, and provider-network admission | `harness/agent-processes/coordinator/` |
 | Root workers | One isolated process per hot root, owning its Pi session/runtime, tools, and write lease | `harness/agent-processes/workers/` |
 | Cold browse helper | Read-only durable transcript projection off the coordinator event loop | `harness/agent-processes/cold-browse-helper/` |
@@ -73,6 +74,14 @@ The [state contract](../contracts/STATE_CONTRACT.md) owns synchronization, lifec
 - Contracts stay with their owner and have one definition. These boundaries apply to type-only imports too.
 
 Session persistence belongs to `harness/session-storage/`; provider catalog, pricing, and request policy belong to `harness/model-providers/`. Tools live under `harness/tools/`, while `extensions/` supplies Pi discovery adapters. Authored instructions and their discovery live under `harness/agent-instructions/`; shared tool/skill selection orchestration lives under `harness/tool-and-skill-selection/`.
+
+### Pi source and immutable delivery
+
+Pi source and package metadata are owned in `harness/pi/`, not an installed SDK. `scripts/build/pi-runtime.mjs` derives the four-package runtime graph with locked ordinary dependencies; its output is a verified, nonsymlinked artifact at `out/pi-runtime/{manifest.json,node_modules/}`. The manifest binds source/lock fingerprints, upstream provenance, Node target and payload identity. A version string alone is not runtime identity.
+
+Both hosts select and verify their generation-local artifact; coordinator, workers and helpers independently verify transported identity and paths. Production has no published/global-SDK fallback. Explicit development reuse must also name a verified artifact. Core runtime semantics stay in Pi source with typed policy seams; Pie session authority, analytics and model policy remain in their existing owners.
+
+Host code, Pi packages, dependencies and assets form one immutable rollback unit. Generations remain leased until child teardown is confirmed; forced or uncertain exit cannot release a lease. Deliberate re-selection is supported, but startup does not automatically retry an older runtime after activation may have had side effects. See the [migration plan](../plans/PIE-PRODUCTIZATION.md) for acceptance and rollout status.
 
 ## Storage and analytics
 

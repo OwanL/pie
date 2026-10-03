@@ -23,6 +23,28 @@ import { buildTsxArgs, runGroup } from '../../verification/run-test-files.mjs';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const currentRoots = resolvePackageRoots('current');
 const ownerRoot = currentRoots.dependencyOwnerRoot;
+
+function selectedSdkPathFromTsxConfig() {
+  const tsconfigPath = process.env.TSX_TSCONFIG_PATH;
+  assert.ok(tsconfigPath, 'SDK-resolution tests require the verified wrapper TSX_TSCONFIG_PATH selection');
+  const paths = JSON.parse(readFileSync(path.resolve(tsconfigPath), 'utf8')).compilerOptions?.paths;
+  assert.ok(paths?.typebox?.[0], 'SDK-resolution tests require candidate TypeBox aliases');
+  const entry = paths['@earendil-works/pi-coding-agent']?.[0];
+  assert.ok(entry && path.isAbsolute(entry), 'wrapper config must select an absolute Pi SDK alias');
+  let directory = path.dirname(realpathSync(entry));
+  while (directory !== path.dirname(directory)) {
+    const manifestPath = path.join(directory, 'package.json');
+    if (existsSync(manifestPath)) {
+      const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+      if (manifest.name === '@earendil-works/pi-coding-agent') return realpathSync(directory);
+    }
+    directory = path.dirname(directory);
+  }
+  assert.fail(`Could not find the selected Pi SDK package root above ${entry}`);
+}
+
+const selectedSdkPath = selectedSdkPathFromTsxConfig();
+const selectedSdkOptions = { dependencyOwnerRoot: ownerRoot, sdkPath: selectedSdkPath };
 const tsxCli = path.join(ownerRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');
 const tscCli = path.join(ownerRoot, 'node_modules', 'typescript', 'bin', 'tsc');
 const viteCli = path.join(ownerRoot, 'node_modules', 'vite', 'bin', 'vite.js');
@@ -245,7 +267,7 @@ function makeCandidateOwner(fixtureRoot) {
   return fakeOwnerRoot;
 }
 
-test('resolves current and planned package roots explicitly, and pins the SDK nested identity', () => {
+test('resolves current and planned package roots explicitly, and pins the explicitly selected SDK graph', () => {
   const current = resolvePackageRoots('current');
   const planned = resolvePackageRoots('planned');
   assert.equal(current.repositoryRoot, repoRoot);
@@ -255,26 +277,67 @@ test('resolves current and planned package roots explicitly, and pins the SDK ne
   assert.equal(planned.dependencyOwnerRoot, path.join(repoRoot, 'application', 'hosts', 'vscode'));
   assert.throws(() => resolvePackageRoots('current', { repositoryRoot: '.' }), /absolute path/);
 
-  const sdk = resolveSdkPackages({ dependencyOwnerRoot: ownerRoot });
-  assert.equal(sdk.sdk.root, path.join(ownerRoot, 'node_modules', '@earendil-works', 'pi-coding-agent'));
-  assert.equal(sdk.piAi.root, path.join(sdk.sdk.root, 'node_modules', '@earendil-works', 'pi-ai'));
+  const sdk = resolveSdkPackages(selectedSdkOptions);
+  assert.equal(sdk.sdk.root, selectedSdkPath);
+  const selectedPiAiRoots = (sdk.sdkRequire.resolve.paths('@earendil-works/pi-ai') ?? [])
+    .map((modulesRoot) => path.join(modulesRoot, '@earendil-works', 'pi-ai'))
+    .filter((packageRoot) => existsSync(path.join(packageRoot, 'package.json')))
+    .map((packageRoot) => realpathSync(packageRoot));
+  assert.ok(selectedPiAiRoots.includes(sdk.piAi.root),
+    'pi-ai must resolve through the explicitly selected SDK graph, whether nested or hoisted');
   assert.equal(resolveOwnerModule('preact/jsx-runtime', { dependencyOwnerRoot: ownerRoot }),
     path.join(ownerRoot, 'node_modules', 'preact', 'jsx-runtime', 'dist', 'jsxRuntime.js'));
-  assert.equal(resolveSdkModule('@earendil-works/pi-ai/compat', { dependencyOwnerRoot: ownerRoot }),
+  assert.equal(resolveSdkModule('@earendil-works/pi-ai/compat', selectedSdkOptions),
     path.join(sdk.piAi.root, 'dist', 'compat.js'));
-  assert.equal(resolveSdkModule('@mariozechner/pi-ai/providers/all', { dependencyOwnerRoot: ownerRoot }),
+  assert.equal(resolveSdkModule('@mariozechner/pi-ai/providers/all', selectedSdkOptions),
     path.join(sdk.piAi.root, 'dist', 'providers', 'all.js'));
   assert.equal(createOwnerRequire({ dependencyOwnerRoot: ownerRoot }).resolve('preact'),
     path.join(ownerRoot, 'node_modules', 'preact', 'dist', 'preact.js'));
+});
+
+test('SDK identities require explicit selection while ordinary owner resolution remains available', () => {
+  const ownerOnly = { dependencyOwnerRoot: ownerRoot };
+  assert.throws(() => resolveSdkPackages(ownerOnly), /sdkPath is required/);
+  assert.throws(() => resolveOwnerModule('@earendil-works/pi-ai', ownerOnly), /sdkPath is required/);
+  assert.throws(() => resolveOwnerModule('typebox', ownerOnly), /sdkPath is required/);
+  assert.equal(resolveOwnerModule('preact/jsx-runtime', ownerOnly),
+    path.join(ownerRoot, 'node_modules', 'preact', 'jsx-runtime', 'dist', 'jsxRuntime.js'));
+
+  for (const paths of [
+    createTypeScriptResolution(ownerOnly).paths,
+    createTsxResolution(ownerOnly).paths,
+  ]) {
+    assert.equal(paths['@earendil-works/pi-coding-agent'], undefined);
+    assert.equal(paths['@mariozechner/pi-ai'], undefined);
+    assert.equal(paths.typebox, undefined);
+    assert.ok(paths.preact, 'owner Preact alias remains available without an SDK selection');
+  }
+  const aliases = createViteAliases(ownerOnly);
+  const findAlias = (name) => aliases.find(({ find }) => find === name);
+  assert.equal(findAlias('@earendil-works/pi-coding-agent'), undefined);
+  assert.equal(findAlias('@mariozechner/pi-ai'), undefined);
+  assert.equal(findAlias('typebox'), undefined);
+  assert.ok(findAlias('preact'), 'owner Preact alias remains available without an SDK selection');
 });
 
 test('explicit sdkPath resolves its nested and hoisted candidate graph for all Pi aliases and exports', (t) => {
   const { fixtureRoot } = makeFixture(t);
   const candidate = makeSdkCandidateGraph(fixtureRoot);
   const fakeOwner = makeCandidateOwner(fixtureRoot);
+  const viteOwnerManifestPath = path.join(fakeOwner, 'package.json');
+  const viteOwnerManifest = JSON.parse(readFileSync(viteOwnerManifestPath, 'utf8'));
+  delete viteOwnerManifest.dependencies['candidate-runtime'];
+  delete viteOwnerManifest.dependencies['candidate-transitive'];
+  writeFileSync(viteOwnerManifestPath, JSON.stringify(viteOwnerManifest, null, 2));
   const options = { sdkPath: candidate.sdkRoot, dependencyOwnerRoot: fakeOwner };
   const resolved = resolveSdkPackages(options);
 
+  const sdkLink = path.join(fixtureRoot, 'selected-sdk-link');
+  symlinkSync(candidate.sdkRoot, sdkLink, process.platform === 'win32' ? 'junction' : 'dir');
+  const linkedResolution = resolveSdkPackages({ ...options, sdkPath: sdkLink });
+  assert.equal(linkedResolution.sdk.root, realpathSync(candidate.sdkRoot),
+    'explicit SDK selection is canonical even when selected through a junction');
+  assert.equal(linkedResolution.piAi.root, candidate.roots['@earendil-works/pi-ai']);
   assert.equal(resolved.sdk.root, candidate.sdkRoot);
   assert.equal(resolved.packages['@earendil-works/pi-agent-core'].root, candidate.roots['@earendil-works/pi-agent-core']);
   assert.equal(resolved.piAi.root, candidate.roots['@earendil-works/pi-ai']);
@@ -349,10 +412,15 @@ test('explicit sdkPath resolves its nested and hoisted candidate graph for all P
     path.join(candidate.roots['@earendil-works/pi-ai'], 'dist', 'compat.js'));
   assert.equal(findAlias('@mariozechner/pi-ai/compat').replacement,
     findAlias('@earendil-works/pi-ai/compat').replacement);
-  for (const name of ['candidate-runtime', 'ws', 'marked']) {
+  const runtimeAlias = findAlias('candidate-runtime');
+  assert.ok(runtimeAlias.replacement.startsWith(candidate.roots['candidate-runtime']),
+    'undeclared candidate dependencies resolve from the SDK graph');
+  assert.equal(typeof runtimeAlias.customResolver, 'function', 'candidate runtime alias is importer-aware');
+  for (const name of ['ws', 'marked']) {
     const alias = findAlias(name);
-    assert.ok(alias.replacement.startsWith(candidate.roots[name]), `${name} Vite alias uses the candidate graph`);
-    assert.equal(typeof alias.customResolver, 'function', `${name} Vite alias is importer-aware`);
+    assert.equal(alias.replacement, path.join(fakeOwner, 'node_modules', name, 'index.js'),
+      `${name} imports from Pie source retain the dependency owner`);
+    assert.equal(typeof alias.customResolver, 'function', `${name} SDK imports retain native artifact resolution`);
   }
 });
 
@@ -365,6 +433,11 @@ test('Vite redirects Pie source imports across repository roots and preserves wo
   });
   const candidate = makeSdkCandidateGraph(fixtureRoot);
   const fakeOwner = makeCandidateOwner(fixtureRoot);
+  const ownerManifestPath = path.join(fakeOwner, 'package.json');
+  const ownerManifest = JSON.parse(readFileSync(ownerManifestPath, 'utf8'));
+  delete ownerManifest.dependencies['candidate-runtime'];
+  delete ownerManifest.dependencies['candidate-transitive'];
+  writeFileSync(ownerManifestPath, JSON.stringify(ownerManifest, null, 2));
   const applicationRoot = path.join(fixtureRoot, 'application');
   const browserSource = path.join(applicationRoot, 'hosts', 'browser', 'http', 'browser-server.ts');
   const frontendSource = path.join(applicationRoot, 'frontend', 'lib', 'components', 'selection-copy.ts');
@@ -372,13 +445,18 @@ test('Vite redirects Pie source imports across repository roots and preserves wo
   mkdirSync(path.dirname(browserSource), { recursive: true });
   mkdirSync(path.dirname(frontendSource), { recursive: true });
   mkdirSync(path.dirname(subagentSource), { recursive: true });
+  writeFileSync(path.join(candidate.roots['candidate-runtime'], 'index.js'), `
+import { marker as nestedWsMarker } from 'ws';
+export { version as nestedVersion } from 'candidate-transitive';
+export { nestedWsMarker };
+`);
   writeFileSync(browserSource, `
 import { marker as wsMarker } from 'ws';
 import { version as appVersion } from 'candidate-transitive';
-import { nestedVersion } from 'candidate-runtime';
+import { nestedVersion, nestedWsMarker } from 'candidate-runtime';
 import { marker as extensionlessMarker } from 'candidate-runtime/lib/core';
 import { marker as yamlMarker } from 'yaml';
-globalThis.__candidateViteBrowserProof = [wsMarker, appVersion, nestedVersion, extensionlessMarker, yamlMarker];
+globalThis.__candidateViteBrowserProof = [wsMarker, appVersion, nestedVersion, nestedWsMarker, extensionlessMarker, yamlMarker];
 `);
   writeFileSync(frontendSource, `
 import { marker as markedMarker } from 'marked';
@@ -397,6 +475,26 @@ globalThis.__candidateViteSubagentProof = [harnessVersion, yamlMarker];
     sdkPath: candidate.sdkRoot,
   };
   const aliases = createViteAliases(resolutionOptions);
+  const wsAlias = aliases.find(({ find }) => (
+    typeof find === 'string' ? find === 'ws' : find.test('ws')
+  ));
+  const wsAliasCalls = [];
+  const resolveWsAlias = wsAlias.customResolver;
+  wsAlias.customResolver = async function (source, importer, resolveOptions) {
+    const resolutions = [];
+    const context = new Proxy(this, {
+      get(target, key, receiver) {
+        if (key === 'resolve') return (...args) => {
+          resolutions.push(args[0]);
+          return Reflect.apply(target.resolve, target, args);
+        };
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    const result = await resolveWsAlias.call(context, source, importer, resolveOptions);
+    wsAliasCalls.push({ source, importer, resolutions });
+    return result;
+  };
   const buildResult = await vite.build({
     configFile: false,
     root: fixtureRoot,
@@ -415,12 +513,18 @@ globalThis.__candidateViteSubagentProof = [harnessVersion, yamlMarker];
   await import(pathToFileURL(path.join(outputRoot, browserFile)).href);
   await import(pathToFileURL(path.join(outputRoot, frontendFile)).href);
   await import(pathToFileURL(path.join(outputRoot, subagentFile)).href);
+  const runtimeWsCall = wsAliasCalls.find(({ importer }) => importer
+    && importer.toLowerCase().includes('/candidate-workspace/packages/candidate-runtime/index.js'));
+  assert.ok(runtimeWsCall, `candidate runtime's ws import must pass through its importer-aware owner alias: ${JSON.stringify(wsAliasCalls)}`);
+  assert.ok(runtimeWsCall.resolutions.some((target) => (
+    target.replace(/[\\/]/gu, '/').toLowerCase().includes('/candidate-workspace/node_modules/ws/browser.js')
+  )), `candidate runtime ws must resolve from the selected artifact, not the owner: ${JSON.stringify(runtimeWsCall)}`);
   assert.deepEqual(globalThis.__candidateViteBrowserProof, [
-    'candidate ws browser', 'candidate root transitive', 'nested candidate transitive',
-    'candidate extensionless subpath', 'candidate yaml browser',
+    'host ws', 'candidate root transitive', 'nested candidate transitive', 'candidate ws browser',
+    'candidate extensionless subpath', 'host yaml',
   ]);
-  assert.equal(globalThis.__candidateViteFrontendProof, 'candidate marked browser');
-  assert.deepEqual(globalThis.__candidateViteSubagentProof, ['candidate root transitive', 'candidate yaml browser']);
+  assert.equal(globalThis.__candidateViteFrontendProof, 'host marked');
+  assert.deepEqual(globalThis.__candidateViteSubagentProof, ['candidate root transitive', 'host yaml']);
 
   const runtimeAlias = aliases.find(({ find }) => (
     typeof find === 'string' ? find === 'candidate-runtime/missing' : find.test('candidate-runtime/missing')
@@ -776,7 +880,7 @@ export default {
   await vite.build({
     configFile: false,
     root: sourceRoot,
-    resolve: { alias: createViteAliases({ dependencyOwnerRoot: ownerRoot }) },
+    resolve: { alias: createViteAliases(selectedSdkOptions) },
     build: {
       target: 'node22',
       ssr: runtimeSourcePath,
@@ -869,7 +973,7 @@ test('detached source and a Preact-consuming dependency share the owner require 
   const fakeOwner = path.join(fixtureRoot, 'owner');
   const modules = path.join(fakeOwner, 'node_modules');
   mkdirSync(modules, { recursive: true });
-  for (const name of ['@earendil-works/pi-coding-agent', 'preact', 'preact-render-to-string', 'typescript']) {
+  for (const name of ['preact', 'preact-render-to-string', 'typescript']) {
     const target = path.join(modules, ...name.split('/'));
     mkdirSync(path.dirname(target), { recursive: true });
     symlinkSync(path.join(ownerRoot, 'node_modules', ...name.split('/')), target,
@@ -950,7 +1054,7 @@ export default (pi: ExtensionAPI) => {
   });
 };
 `);
-  const { sdk } = resolveSdkPackages({ dependencyOwnerRoot: ownerRoot });
+  const { sdk } = resolveSdkPackages(selectedSdkOptions);
   const loaderPath = path.join(sdk.root, 'dist', 'core', 'extensions', 'loader.js');
   const loader = await import(pathToFileURL(loaderPath).href);
   const result = await loader.loadExtensions([extensionPath], sourceRoot);
@@ -959,9 +1063,18 @@ export default (pi: ExtensionAPI) => {
   assert.equal(result.extensions[0].commands.get('package-resolution-proof').description, 'true,true,true,true,true');
 });
 
-test('the Vite host and browser graphs use owner aliases with their respective export conditions', { timeout: 120_000 }, async () => {
+test('the Vite host and browser graphs require and use the selected SDK aliases', { timeout: 120_000 }, async (t) => {
   const vite = await import(pathToFileURL(viteNodeEntry).href);
   const extensionConfigPath = path.join(currentRoots.distributionRoot, 'vite.config.ts');
+  const previousSdkPath = process.env.PIE_BUILD_PI_RUNTIME_SDK_PATH;
+  t.after(() => {
+    if (previousSdkPath === undefined) delete process.env.PIE_BUILD_PI_RUNTIME_SDK_PATH;
+    else process.env.PIE_BUILD_PI_RUNTIME_SDK_PATH = previousSdkPath;
+  });
+  delete process.env.PIE_BUILD_PI_RUNTIME_SDK_PATH;
+  await assert.rejects(vite.resolveConfig({ configFile: extensionConfigPath }, 'build', 'node'),
+    /requires PIE_BUILD_PI_RUNTIME_SDK_PATH.*explicitly selected/);
+  process.env.PIE_BUILD_PI_RUNTIME_SDK_PATH = selectedSdkPath;
   const nodeResolved = await vite.resolveConfig({ configFile: extensionConfigPath }, 'build', 'node');
   const webviewResolved = await vite.resolveConfig({ configFile: extensionConfigPath }, 'build', 'production');
 
@@ -974,17 +1087,17 @@ test('the Vite host and browser graphs use owner aliases with their respective e
   assert.equal(findFor(browserAliases, 'ws').replacement, path.join(ownerRoot, 'node_modules', 'ws', 'browser.js'),
     'the renderer retains ws package browser conditions');
 
-  // Current and legacy SDK package aliases resolve through the canonical
-  // dependency owner's installed SDK, not the retired extension source tree.
-  const canonicalSdkRoot = path.join(ownerRoot, 'node_modules', '@earendil-works', 'pi-coding-agent');
+  // Current and legacy SDK aliases resolve through the wrapper-selected
+  // immutable candidate, never an owner-installed package.
   assert.equal(findFor(aliases, '@earendil-works/pi-coding-agent').replacement,
-    path.join(canonicalSdkRoot, 'dist', 'index.js'));
+    path.join(selectedSdkPath, 'dist', 'index.js'));
   assert.equal(findFor(aliases, '@mariozechner/pi-coding-agent').replacement,
-    path.join(canonicalSdkRoot, 'dist', 'index.js'));
+    path.join(selectedSdkPath, 'dist', 'index.js'));
 
-  // Current and legacy Pi spellings rewrite into the canonical nested SDK
+  // Current and legacy Pi spellings rewrite into the selected nested SDK
   // graph, including wildcard subpaths.
-  const nestedPiAi = path.join(ownerRoot, 'node_modules', '@earendil-works', 'pi-coding-agent', 'node_modules', '@earendil-works', 'pi-ai', 'dist');
+  const selectedSdk = resolveSdkPackages(selectedSdkOptions);
+  const nestedPiAi = path.join(selectedSdk.piAi.root, 'dist');
   assert.equal(findFor(aliases, '@earendil-works/pi-ai').replacement, path.join(nestedPiAi, 'index.js'));
   assert.equal(findFor(aliases, '@mariozechner/pi-ai').replacement, path.join(nestedPiAi, 'index.js'));
   const legacyProviders = findFor(aliases, '@mariozechner/pi-ai/providers/all');
@@ -993,7 +1106,7 @@ test('the Vite host and browser graphs use owner aliases with their respective e
 
   // TypeBox spellings share the SDK's nested identity; Preact keeps its
   // owner-installed files and subpaths.
-  const nestedTypebox = path.join(ownerRoot, 'node_modules', '@earendil-works', 'pi-coding-agent', 'node_modules', 'typebox');
+  const nestedTypebox = selectedSdk.packages.typebox.root;
   assert.equal(findFor(aliases, 'typebox').replacement, findFor(aliases, '@sinclair/typebox').replacement);
   assert.ok(findFor(aliases, 'typebox').replacement.startsWith(nestedTypebox));
   assert.ok(findFor(aliases, 'preact').replacement.startsWith(path.join(ownerRoot, 'node_modules', 'preact', 'dist')));
@@ -1022,6 +1135,12 @@ export function createWebSocketServer() {
 
   const vite = await import(pathToFileURL(viteNodeEntry).href);
   const extensionConfigPath = path.join(currentRoots.distributionRoot, 'vite.config.ts');
+  const previousSdkPath = process.env.PIE_BUILD_PI_RUNTIME_SDK_PATH;
+  t.after(() => {
+    if (previousSdkPath === undefined) delete process.env.PIE_BUILD_PI_RUNTIME_SDK_PATH;
+    else process.env.PIE_BUILD_PI_RUNTIME_SDK_PATH = previousSdkPath;
+  });
+  process.env.PIE_BUILD_PI_RUNTIME_SDK_PATH = selectedSdkPath;
   const hostConfig = await vite.resolveConfig({ configFile: extensionConfigPath }, 'build', 'node');
   await vite.build({
     configFile: false,
@@ -1055,6 +1174,7 @@ test('createTsconfigOverlay preserves the base redirection set and inherits comp
       '@earendil-works/pi-coding-agent': [placeholder],
       'typebox/value': [placeholder],
       'custom-tool-alias': [placeholder],
+      'preact/hooks': [placeholder],
     },
   });
   const overlay = createTsconfigOverlay(baseConfigPath, { dependencyOwnerRoot: ownerRoot });
@@ -1067,15 +1187,15 @@ test('createTsconfigOverlay preserves the base redirection set and inherits comp
   assert.equal(parsed.compilerOptions.include, undefined);
   assert.equal(parsed.compilerOptions.exclude, undefined);
 
-  // Helper-covered specifiers are re-pointed to explicit absolute owner paths.
+  // Without an explicit SDK selection, SDK aliases are kept at their declared
+  // base targets rather than redirected to the owner's installed Pi graph.
   const paths = parsed.compilerOptions.paths;
-  assert.equal(Object.keys(paths).length, 4, 'overlay must not add aliases the base does not declare');
-  assert.equal(paths['@mariozechner/pi-ai'][0],
-    path.join(ownerRoot, 'node_modules', '@earendil-works', 'pi-coding-agent', 'node_modules', '@earendil-works', 'pi-ai', 'dist', 'index.js'));
-  assert.equal(paths['typebox/value'][0],
-    path.join(ownerRoot, 'node_modules', '@earendil-works', 'pi-coding-agent', 'node_modules', 'typebox', 'build', 'value', 'index.mjs'));
-  assert.equal(paths['@earendil-works/pi-coding-agent'][0],
-    path.join(ownerRoot, 'node_modules', '@earendil-works', 'pi-coding-agent', 'dist', 'index.js'));
+  assert.equal(Object.keys(paths).length, 5, 'overlay must not add aliases the base does not declare');
+  for (const name of ['@mariozechner/pi-ai', '@earendil-works/pi-coding-agent', 'typebox/value']) {
+    assert.deepEqual(paths[name], [path.resolve(sourceRoot, placeholder)], `${name} keeps its declared base target`);
+  }
+  assert.ok(paths['preact/hooks'][0].startsWith(path.join(ownerRoot, 'node_modules', 'preact')),
+    'the existing Preact helper alias still resolves through the owner');
 
   // Specifiers outside the helper's model keep their base target semantics;
   // no-baseUrl paths are anchored to the declaring config, not the temp overlay.
@@ -1236,7 +1356,7 @@ test('owner dependency overlay validates installed manifests but does not invent
   const fakeOwner = path.join(fixtureRoot, 'owner');
   const modules = path.join(fakeOwner, 'node_modules');
   mkdirSync(modules, { recursive: true });
-  for (const name of ['@earendil-works/pi-coding-agent', 'preact', 'typescript']) {
+  for (const name of ['preact', 'typescript']) {
     const from = path.join(ownerRoot, 'node_modules', ...name.split('/'));
     const to = path.join(modules, ...name.split('/'));
     mkdirSync(path.dirname(to), { recursive: true });

@@ -30,7 +30,7 @@ import { PACKAGE_CONFIGS } from '../run-tests.mjs';
 import { fastBatchDefinitions, resolveExistingBatchRoots, rootBatchDirs, rootBatchFiles } from '../run-fast-batched-tests.mjs';
 import { buildRunnerInvocation } from '../run-package-group.mjs';
 import { classifyTestFile, inferRepoRoot, resolveLocalTsx } from '../run-test-files.mjs';
-import { createTsconfigOverlay, resolvePackageRoots, resolveTypeScriptCompiler } from '../../lib/package-resolution.mjs';
+import { createTsconfigOverlay, createTsxResolution, resolvePackageRoots, resolveTypeScriptCompiler } from '../../lib/package-resolution.mjs';
 import { resolveProjectCompiler } from '../run-typechecks.mjs';
 import { isProtectedDirectoryName } from '../../lib/traversal-policy.mjs';
 
@@ -394,8 +394,13 @@ test('runner scripts and the group adapter stay classified as global test infras
   }
 });
 
-test('registry tsx configs run through generated owner-relative overlays', () => {
+test('registry tsx configs preserve base paths without synthesizing unselected SDK aliases', () => {
   const ownerRoot = resolvePackageRoots('current').dependencyOwnerRoot;
+  const helperPaths = createTsxResolution().paths;
+  assert.equal(helperPaths['@earendil-works/pi-coding-agent'], undefined);
+  assert.equal(helperPaths['@mariozechner/pi-ai'], undefined);
+  assert.equal(helperPaths.typebox, undefined);
+  assert.ok(helperPaths.preact, 'owner Preact aliases remain available without SDK selection');
   const tsxConfigEntries = PACKAGE_REGISTRY.filter((entry) => entry.tsxConfig);
   assert.ok(tsxConfigEntries.length >= 4, 'expected the tsxConfig packages to stay registered');
   for (const entry of tsxConfigEntries) {
@@ -410,10 +415,10 @@ test('registry tsx configs run through generated owner-relative overlays', () =>
       assert.equal(parsed.compilerOptions?.exclude, undefined, `${entry.id} overlay must not duplicate exclude`);
       const overlayPaths = parsed.compilerOptions?.paths ?? {};
       const basePaths = baseConfig.compilerOptions?.paths ?? {};
-      // The overlay preserves the base redirection set exactly: every declared
-      // alias keeps a redirection, helper-covered keys re-point to explicit
-      // absolute owner paths, everything else stays verbatim, and no new
-      // aliases appear (test-time module hooks keep their interception set).
+      // The overlay preserves the base redirection set exactly: owner aliases
+      // covered by the helper (notably Preact) become absolute owner paths,
+      // while unselected SDK aliases retain their checked-in config targets.
+      // No SDK aliases are added and test-time hooks keep their interception set.
       assert.deepEqual(Object.keys(overlayPaths).sort(), Object.keys(basePaths).sort(), `${entry.id} overlay redirection set`);
       for (const [specifier, targets] of Object.entries(basePaths)) {
         const overlayTargets = overlayPaths[specifier];
@@ -423,9 +428,8 @@ test('registry tsx configs run through generated owner-relative overlays', () =>
           assert.deepEqual(overlayTargets, targets, `${entry.id}:${specifier} must keep its base target verbatim`);
         }
       }
-      for (const spelling of ['@earendil-works/pi-ai', '@mariozechner/pi-ai', 'typebox']) {
-        if (!basePaths[spelling]) continue;
-        assert.ok(overlayPaths[spelling]?.[0]?.startsWith(ownerRoot), `${entry.id}:${spelling} must resolve under the dependency owner`);
+      if (basePaths.preact) {
+        assert.ok(overlayPaths.preact?.[0]?.startsWith(ownerRoot), `${entry.id}:preact must resolve under the dependency owner`);
       }
     } finally {
       overlay.dispose();

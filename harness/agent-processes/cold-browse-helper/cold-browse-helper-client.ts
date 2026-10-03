@@ -402,7 +402,13 @@ export class ColdBrowseHelperClient implements ColdBrowseHelper {
     child.once('exit', (code, signal) => {
       clearTimeout(generation.startupTimer);
       generation.exited.resolve(undefined);
-      if (!generation.shutdownRequested) {
+      if (!generation.readySeen) {
+        const reason = code ?? signal ?? 'unknown';
+        const message = generation.shutdownRequested
+          ? `Cold browse helper exited before readiness during shutdown (${reason}).`
+          : `Cold browse helper exited unexpectedly before readiness (${reason}).`;
+        this.failGeneration(generation, new Error(message), false);
+      } else if (!generation.shutdownRequested) {
         this.failGeneration(
           generation,
           new Error(`Cold browse helper exited unexpectedly (${code ?? signal ?? 'unknown'}).`),
@@ -446,7 +452,9 @@ export class ColdBrowseHelperClient implements ColdBrowseHelper {
       return;
     }
     if (value.kind === 'ready') {
-      if (generation.readySeen || generation.shutdownRequested) {
+      // Shutdown can be queued while initialization is still running in the child;
+      // it must still emit its one initial readiness frame before acknowledging shutdown.
+      if (generation.readySeen) {
         this.failGeneration(generation, new Error('Cold browse helper returned duplicate readiness.'), true);
         return;
       }

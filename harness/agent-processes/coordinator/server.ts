@@ -158,6 +158,7 @@ import { InitialContextEstimateClient } from '../context-inventory/initial-conte
 import { DurableDetailStore, type ResolvedDurableDetail } from '../../session-storage/transcripts/durable-detail-store';
 import type { BackendDetailFence, LiveSubagentDetailAddress } from '../lib/rpc/subagent-detail';
 import { WorkerSupervisor } from '../lib/process-lifecycle/worker-supervisor.js';
+import { watchHostLifetimePipe, type HostLifetimePipeWatcher } from './host-lifetime-pipe.js';
 import { SessionOwnershipAuthority } from '../../session-storage/ownership/session-ownership-authority';
 import { WorkerRuntimeRouter } from './worker-runtime-router.js';
 import { deriveSessionNameFromText, NEW_SESSION_NAME } from '../../session-storage/metadata/session-name';
@@ -597,7 +598,7 @@ export class BackendServer {
   private hostWatchdogTimer?: ReturnType<typeof setInterval>;
   private readonly hostPid?: number;
   private readonly lifetimeFd?: number;
-  private hostLifetimeStream?: fsSync.ReadStream;
+  private hostLifetimeWatcher?: HostLifetimePipeWatcher;
   private hostLossHandled = false;
   private eventLoopDelayMonitor?: ReturnType<typeof monitorEventLoopDelay>;
   private eventLoopHistogram?: BoundedEventLoopHistogram;
@@ -1485,17 +1486,16 @@ export class BackendServer {
     const lifetimeFd = this.lifetimeFd;
     if (lifetimeFd === undefined) return;
     try {
-      const stream = fsSync.createReadStream('', { fd: lifetimeFd, autoClose: true });
-      this.hostLifetimeStream = stream;
-      stream.once('end', () => this.handleHostLoss('lifetime-pipe-eof', { lifetimeFd }));
-      stream.once('error', (error) => {
-        if (this.disposed) return;
-        backendWarn('backend', 'host lifetime pipe failed; PID watchdog remains active', {
-          lifetimeFd,
-          error: toErrorMessage(error),
-        });
+      this.hostLifetimeWatcher = watchHostLifetimePipe(lifetimeFd, {
+        onEof: () => this.handleHostLoss('lifetime-pipe-eof', { lifetimeFd }),
+        onError: (error) => {
+          if (this.disposed) return;
+          backendWarn('backend', 'host lifetime pipe failed; PID watchdog remains active', {
+            lifetimeFd,
+            error: toErrorMessage(error),
+          });
+        },
       });
-      stream.resume();
     } catch (error) {
       backendWarn('backend', 'could not open host lifetime pipe; PID watchdog remains active', {
         lifetimeFd,
@@ -1505,9 +1505,9 @@ export class BackendServer {
   }
 
   private stopHostLifetimeWatch(): void {
-    const stream = this.hostLifetimeStream;
-    this.hostLifetimeStream = undefined;
-    stream?.destroy();
+    const watcher = this.hostLifetimeWatcher;
+    this.hostLifetimeWatcher = undefined;
+    watcher?.dispose();
   }
 
   private handleHostLoss(source: string, details: Record<string, unknown>): void {

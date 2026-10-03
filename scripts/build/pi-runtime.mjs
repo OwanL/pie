@@ -9,12 +9,12 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gzipSync } from 'node:zlib';
 import { PI_RUNTIME_PACKAGES, writePiRuntimeManifest, verifyPiRuntimeArtifact } from '../lib/pi-runtime-artifact.mjs';
+import { readPinnedPiSourceVersion } from '../lib/sdk-version.mjs';
 
 const REPOSITORY = fileURLToPath(new URL('../../', import.meta.url));
 const OWNER = path.join(REPOSITORY, 'harness/pi-runtime');
 const SOURCE = path.join(REPOSITORY, 'harness/pi');
 const PACKAGE_DIRS = ['tui', 'ai', 'agent', 'coding-agent'];
-const VERSION = '0.80.6';
 const UPSTREAM = '2b3fda9921b5590f285165287bd442a25817f17b';
 const sha = (bytes, algorithm = 'sha256', encoding = 'hex') => createHash(algorithm).update(bytes).digest(encoding);
 const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object'
@@ -23,6 +23,22 @@ const jsonText = value => `${JSON.stringify(canonical(value), null, 2)}\n`;
 const readJson = async file => JSON.parse(await readFile(file, 'utf8'));
 const check = (condition, message) => { if (!condition) throw new Error(message); };
 const slug = name => name.slice(name.lastIndexOf('/') + 1);
+
+/** Resolve the required helper for the current native target; Linux has none. */
+export function resolveNativeModifierHelper(runtimeRoot, platform, arch, fileExists = existsSync) {
+  if (platform === 'linux') return undefined;
+  if (platform !== 'win32' && platform !== 'darwin') {
+    throw new Error(`Unsupported native modifier helper platform: ${platform}`);
+  }
+  if (arch !== 'x64' && arch !== 'arm64') {
+    throw new Error(`Unsupported native modifier helper target: ${platform}-${arch}`);
+  }
+  const filename = platform === 'win32' ? 'win32-console-mode.node' : 'darwin-modifiers.node';
+  const helper = path.join(runtimeRoot, 'node_modules', '@earendil-works', 'pi-tui', 'native', platform,
+    'prebuilds', `${platform}-${arch}`, filename);
+  if (!fileExists(helper)) throw new Error(`Required native modifier helper missing for ${platform}-${arch}: ${helper}`);
+  return helper;
+}
 
 /** Derived metadata only: runtime source package.json remains its sole editable authority. */
 export function sanitizePackageManifest(manifest) {
@@ -47,9 +63,9 @@ export function createManifestTarball(manifest) {
   return compressed;
 }
 
-function validateManifests(manifests) {
+function validateManifests(manifests, expectedVersion = readPinnedPiSourceVersion(REPOSITORY)) {
   check(manifests.length === 4 && JSON.stringify(manifests.map(m => m.name).sort()) === JSON.stringify([...PI_RUNTIME_PACKAGES].sort()), 'Expected exactly four local Pi manifests');
-  for (const manifest of manifests) check(manifest.version === VERSION, `Unexpected ${manifest.name} version`);
+  for (const manifest of manifests) check(manifest.version === expectedVersion, `Unexpected ${manifest.name} version; expected in-tree Pi source version ${expectedVersion}`);
 }
 export function createRuntimeOwnerManifest(manifests) {
   validateManifests(manifests);
@@ -271,6 +287,7 @@ net.connect=net.createConnection=net.Socket.prototype.connect=tls.connect=http.r
 for(const key of ['lookup','resolve','resolve4','resolve6']){dns[key]=deny;dns.promises[key]=deny;}
 globalThis.fetch=deny;globalThis.WebSocket=class{constructor(){deny();}};syncBuiltinESMExports();\n`;
 const SMOKE = `import assert from 'node:assert/strict'; import {createRequire} from 'node:module'; import {realpathSync,existsSync} from 'node:fs'; import path from 'node:path'; import {pathToFileURL,fileURLToPath} from 'node:url';
+${resolveNativeModifierHelper.toString()}
 assert.throws(()=>fetch('https://network-denied.invalid'),/Network denied/);
 const root=path.resolve(process.argv[2]), require=createRequire(path.join(root,'smoke-owner.cjs'));
 const resolve=(name,from=root)=>fileURLToPath(import.meta.resolve(name,pathToFileURL(path.join(from,'smoke-owner.mjs')).href));
@@ -284,7 +301,7 @@ loaded['@earendil-works/pi-coding-agent'].initTheme('dark',false);
 for(const rel of ['dist/core/agent-session.js','dist/core/session-manager.js','dist/core/agent-session-runtime.js','dist/core/compaction/compaction.js'])await import(pathToFileURL(path.join(sdk,rel)).href);
 const photon=require('@silvia-odwyer/photon-node');const image=new photon.PhotonImage(new Uint8Array([255,0,0,255]),1,1);assert.equal(image.get_width(),1);image.free();
 assert.ok(existsSync(path.join(sdk,'dist/core/export-html/vendor/marked.min.js')));
-const platform=process.platform,arch=process.arch;if(['win32','darwin'].includes(platform)){const base=path.join(root,'node_modules/@earendil-works/pi-tui/native',platform,'prebuilds',platform+'-'+arch);const filename=platform==='win32'?'win32-console-mode.node':'darwin-modifiers.node';if(existsSync(path.join(base,filename)))require(path.join(base,filename));}
+const nativeHelper=resolveNativeModifierHelper(root,process.platform,process.arch);if(nativeHelper)require(nativeHelper);
 console.log('Pi runtime offline import/identity/theme/Photon/native smoke passed');\n`;
 async function smoke(runtime, work, env) {
   const deny = path.join(work, 'deny-network.mjs'); const entry = path.join(work, 'smoke.mjs');
@@ -304,8 +321,9 @@ export async function buildPiRuntime({ output, refreshLock = false }) {
   for (const name of ['user.npmrc', 'global.npmrc']) await writeFile(path.join(work, name), '');
   const source = path.join(work, 'source');
   const sourceTreeSha256 = await snapshotSource(source, env);
+  const piSourceVersion = readPinnedPiSourceVersion(REPOSITORY);
   const manifests = await Promise.all(PACKAGE_DIRS.map(dir => readJson(path.join(source, 'packages', dir, 'package.json'))));
-  validateManifests(manifests);
+  validateManifests(manifests, piSourceVersion);
   const install = path.join(work, 'runtime-install'); await prepareStubs(install, manifests);
   const lockFile = path.join(OWNER, 'package-lock.json');
   if (refreshLock) {
@@ -339,7 +357,7 @@ export async function buildPiRuntime({ output, refreshLock = false }) {
   await copyTree(path.join(install, 'node_modules'), path.join(runtime, 'node_modules'));
   await copyRuntimeFiles(source, runtime);
   await smoke(runtime, work, env);
-  const verified = await writePiRuntimeManifest(runtime, { upstreamVersion: VERSION, upstreamCommit: UPSTREAM,
+  const verified = await writePiRuntimeManifest(runtime, { upstreamVersion: piSourceVersion, upstreamCommit: UPSTREAM,
     sourceTreeSha256, lockSha256: sha(lockBytes), target: { platform: process.platform, arch: process.arch, nodeAbi: process.versions.modules } });
   await verifyPiRuntimeArtifact(runtime);
   await writeFile(path.join(output, 'build-evidence.json'), jsonText({ identity: verified.identity, sdkPath: verified.sdkPath,

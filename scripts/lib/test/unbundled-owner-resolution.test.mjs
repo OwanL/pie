@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -21,7 +21,29 @@ import {
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const ownerRoot = resolvePackageRoots('current').dependencyOwnerRoot;
-const sdkPackages = resolveSdkPackages({ dependencyOwnerRoot: ownerRoot });
+
+function selectedSdkPathFromTsxConfig() {
+  const tsconfigPath = process.env.TSX_TSCONFIG_PATH;
+  assert.ok(tsconfigPath, 'SDK-resolution tests require the verified wrapper TSX_TSCONFIG_PATH selection');
+  const paths = JSON.parse(readFileSync(path.resolve(tsconfigPath), 'utf8')).compilerOptions?.paths;
+  assert.ok(paths?.typebox?.[0], 'SDK-resolution tests require candidate TypeBox aliases');
+  const entry = paths['@earendil-works/pi-coding-agent']?.[0];
+  assert.ok(entry && path.isAbsolute(entry), 'wrapper config must select an absolute Pi SDK alias');
+  let directory = path.dirname(realpathSync(entry));
+  while (directory !== path.dirname(directory)) {
+    const manifestPath = path.join(directory, 'package.json');
+    if (existsSync(manifestPath)) {
+      const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+      if (manifest.name === '@earendil-works/pi-coding-agent') return realpathSync(directory);
+    }
+    directory = path.dirname(directory);
+  }
+  assert.fail(`Could not find the selected Pi SDK package root above ${entry}`);
+}
+
+const selectedSdkPath = selectedSdkPathFromTsxConfig();
+const repoSdkOptions = { dependencyOwnerRoot: ownerRoot, sdkPath: selectedSdkPath };
+const sdkPackages = resolveSdkPackages(repoSdkOptions);
 const repoOwnerOptions = { repositoryRoot };
 
 function linkDirectory(source, destination) {
@@ -136,7 +158,7 @@ export default (pi: ExtensionAPI) => pi.registerCommand('unbundled-alias-proof',
 });
 `);
 
-  const ownerOptions = { dependencyOwnerRoot: ownerRoot };
+  const ownerOptions = repoSdkOptions;
   const coreEntry = resolveSdkModule('@earendil-works/pi-ai', ownerOptions);
   const compatEntry = resolveSdkModule('@earendil-works/pi-ai/compat', ownerOptions);
   const core = await import(pathToFileURL(coreEntry).href);

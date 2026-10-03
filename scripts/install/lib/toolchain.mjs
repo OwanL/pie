@@ -1,39 +1,39 @@
 // Shared toolchain verification for the Windows installer.
 //
-// Node, npm, and the global `pi` CLI are pinned by `.node-version`,
-// `package.json#packageManager`, and the VS Code host lockfile respectively. The
-// version-reading helpers live in scripts/install/toolchain.mjs; this module
-// owns the comparison and installation-decision logic.
+// Node and npm are pinned by `.node-version` and `package.json#packageManager`.
+// The Pi source version comes from the matched in-tree Pi package manifests;
+// host dependency ranges/lockfiles and global `pi` executables are not authority.
+// The version-reading helpers live in scripts/install/toolchain.mjs; this
+// module owns the comparison and installation-decision logic.
 //
 // `verifyToolchain` is a pure comparison — it NEVER installs anything. The
-// shell wrappers act on the returned `installCommands` (or the CLI runner
-// prints a dry-run report). This makes the shared verifier safe to invoke in
-// tests and in a "doctor/install dry-run" without mutating user state.
+// shell wrappers act on the returned npm install command or print a dry-run
+// report. This makes the shared verifier safe to invoke in tests and
+// `install.bat --check` without mutating user state.
 
-import { readPinnedNodeVersion, readPinnedNpmVersion, readPinnedPiVersion } from '../toolchain.mjs';
+import { readPinnedNodeVersion, readPinnedNpmVersion, readPinnedPiSourceVersion } from '../toolchain.mjs';
 
 /**
- * Read all three pinned versions for a repo.
+ * Read Node/npm pins and the pinned Pi source version for a repo.
  * @param {string} repoRoot
- * @returns {{ node: string, npm: string, pi: string }}
+ * @returns {{ node: string, npm: string, piSource: string }}
  */
 export function readPinnedVersions(repoRoot) {
   return {
     node: readPinnedNodeVersion(),
     npm: readPinnedNpmVersion(),
-    pi: readPinnedPiVersion(repoRoot),
+    piSource: readPinnedPiSourceVersion(repoRoot),
   };
 }
 
 /**
- * Compare pinned vs actual versions and report what (if anything) the installer
- * would install. No side effects.
+ * Compare actual Node/npm versions and include Pi source provenance. No side effects.
  *
- * @param {{ pinned: { node: string, npm: string, pi: string }, actual: { node: string, npm: string, pi: string } }} input
+ * @param {{ pinned: { node: string, npm: string, piSource?: string }, actual: { node: string, npm: string } }} input
  * @returns {{
  *   node: { ok: boolean, actual: string, pinned: string },
  *   npm: { ok: boolean, actual: string, pinned: string, installCommand: string[] | null },
- *   pi: { ok: boolean, actual: string, pinned: string, installCommand: string[] | null },
+ *   piSource: { version: string, provenance: string },
  *   allOk: boolean,
  * }}
  */
@@ -45,13 +45,9 @@ export function verifyToolchain({ pinned, actual }) {
     pinned: pinned.npm,
     installCommand: actual.npm === pinned.npm ? null : ['npm', 'install', '-g', `npm@${pinned.npm}`],
   };
-  const pi = {
-    ok: !!actual.pi && actual.pi === pinned.pi,
-    actual: actual.pi || '',
-    pinned: pinned.pi,
-    installCommand: !actual.pi || actual.pi !== pinned.pi
-      ? ['npm', 'install', '-g', `@earendil-works/pi-coding-agent@${pinned.pi}`]
-      : null,
+  const piSource = {
+    version: pinned.piSource ?? '',
+    provenance: 'harness/pi/packages/{tui,ai,agent,coding-agent}/package.json',
   };
-  return { node, npm, pi, allOk: node.ok && npm.ok && pi.ok };
+  return { node, npm, piSource, allOk: node.ok && npm.ok };
 }

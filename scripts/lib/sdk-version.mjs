@@ -1,67 +1,44 @@
-// Pure helpers for reading the pi SDK pin from the VS Code host lockfile and
-// comparing semver-ish versions. Consumed by the install toolchain
-// (scripts/install/toolchain.mjs).
-//
-// The application/hosts/vscode lock is the source of truth for the SDK the pie backend loads;
-// the global `pi` CLI is pinned to that same exact version so a `npm i -g`
-// upgrade (or a different version on another machine) cannot silently swap
-// the SDK out from under the backend. See README.md → "SDK version drift".
+// Pure helpers for reading the Pi source version and comparing semver-ish
+// versions. The in-tree package manifests are authoritative; host dependency
+// ranges and lockfiles do not define the source-built Pi runtime version.
+// Consumed by scripts/install/toolchain.mjs and scripts/build/pi-runtime.mjs.
 
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
 
-export const SDK_PACKAGE = '@earendil-works/pi-coding-agent';
+const PI_SOURCE_PACKAGE_DIRS = ['tui', 'ai', 'agent', 'coding-agent'];
 
 /**
- * Read the exact version of the pi SDK that the VS Code host lock pins.
+ * Read the shared Pi source version from its four in-tree package manifests.
  * @param {string} repoRoot - absolute path to the repo root
  * @returns {string} e.g. "0.80.6"
- * @throws if the lockfile or package entry is missing/malformed
+ * @throws if any source manifest/version is missing or the versions disagree
  */
-export function readPinnedSdkVersion(repoRoot) {
-  const lockPath = path.join(repoRoot, 'application', 'hosts', 'vscode', 'package-lock.json');
-  let lock;
-  try {
-    lock = JSON.parse(readFileSync(lockPath, 'utf8'));
-  } catch (err) {
-    throw new Error(`Could not read VS Code host lockfile (${lockPath}): ${err.message}`);
-  }
+export function readPinnedPiSourceVersion(repoRoot) {
+  const manifests = PI_SOURCE_PACKAGE_DIRS.map((directory) => {
+    const manifestPath = path.join(repoRoot, 'harness', 'pi', 'packages', directory, 'package.json');
+    let manifest;
+    try {
+      manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    } catch (err) {
+      throw new Error(`Could not read Pi source package manifest (${manifestPath}): ${err.message}`);
+    }
+    const version = manifest && typeof manifest === 'object' ? manifest.version : undefined;
+    if (typeof version !== 'string' || version.length === 0) {
+      throw new Error(`Pi source package manifest has no version (${manifestPath})`);
+    }
+    return { directory, version };
+  });
 
-  // npm v3 lockfile shape: packages["node_modules/@earendil-works/pi-coding-agent"].version
-  const packages = lock && typeof lock === 'object' ? lock.packages : undefined;
-  if (packages && packages[`node_modules/${SDK_PACKAGE}`]) {
-    const v = packages[`node_modules/${SDK_PACKAGE}`].version;
-    if (typeof v === 'string' && v.length > 0) return v;
+  const version = manifests[0].version;
+  const mismatches = manifests.filter((manifest) => manifest.version !== version);
+  if (mismatches.length > 0) {
+    const detail = manifests.map(({ directory, version: value }) => `${directory}=${value}`).join(', ');
+    throw new Error(`Pi source package versions do not match: ${detail}`);
   }
-  // npm v1/legacy lockfile shape: dependencies["@earendil-works/pi-coding-agent"].version
-  if (lock && lock.dependencies && lock.dependencies[SDK_PACKAGE]) {
-    const v = lock.dependencies[SDK_PACKAGE].version;
-    if (typeof v === 'string' && v.length > 0) return v;
-  }
-
-  throw new Error(
-    `${SDK_PACKAGE} not found in VS Code host lockfile (${lockPath}). Run \`npm install\` in application/hosts/vscode/ first.`,
-  );
-}
-
-/**
- * Read the declared (range) dependency from application/hosts/vscode/package.json, e.g. "^0.80.6".
- * Used by doctor to surface declared-vs-locked drift.
- * @param {string} repoRoot
- * @returns {string | null}
- */
-export function readDeclaredSdkRange(repoRoot) {
-  const pkgPath = path.join(repoRoot, 'application', 'hosts', 'vscode', 'package.json');
-  let pkg;
-  try {
-    pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
-  } catch {
-    return null;
-  }
-  const v = pkg && pkg.dependencies ? pkg.dependencies[SDK_PACKAGE] : undefined;
-  return typeof v === 'string' && v.length > 0 ? v : null;
+  return version;
 }
 
 /**
@@ -108,14 +85,14 @@ export function inferRepoRoot() {
   return path.resolve(here, '..', '..');
 }
 
-// When invoked directly as `node scripts/lib/sdk-version.mjs`, print the pinned
-// version for command-line inspection.
+// When invoked directly as `node scripts/lib/sdk-version.mjs`, print the
+// in-tree Pi source version for command-line inspection.
 const invokedDirectly = process.argv[1] &&
   pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
 if (invokedDirectly) {
   const root = inferRepoRoot();
   try {
-    process.stdout.write(`${readPinnedSdkVersion(root)}\n`);
+    process.stdout.write(`${readPinnedPiSourceVersion(root)}\n`);
   } catch (err) {
     console.error(String(err && err.message ? err.message : err));
     process.exit(1);

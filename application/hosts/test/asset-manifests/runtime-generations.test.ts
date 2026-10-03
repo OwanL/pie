@@ -98,6 +98,61 @@ test('publishes a verified full-output content generation, not just the build ID
   assert.ok(selected.publishedAt > 0);
 }));
 
+test('explicitly re-selects an earlier immutable generation while a later lease stays protected', { timeout: 30_000 }, async () => withTempRoot(async (root) => {
+  const extensionDir = path.join(root, 'extension');
+  const hostInteractionsPath = path.join(root, 'host-interactions.log');
+  const extensionContents = [
+    "const fs = require('node:fs');",
+    `const interactionsPath = ${JSON.stringify(hostInteractionsPath)};`,
+    "fs.appendFileSync(interactionsPath, 'module-loaded\\n');",
+    'module.exports = {',
+    '  activate: async () => {',
+    "    fs.appendFileSync(interactionsPath, 'activate\\n');",
+    "    return { deactivate: async () => fs.appendFileSync(interactionsPath, 'deactivate\\n') };",
+    '  },',
+    '};',
+  ].join('\n');
+  const sourceA = await createRuntimeSource(root, 'rollback-a', { extensionContents });
+  const sourceB = await createRuntimeSource(root, 'rollback-b', { extensionContents });
+  const sourceC = await createRuntimeSource(root, 'rollback-c', { extensionContents });
+  const first = await runtime.publishRuntimeGeneration({ sourceOutDir: sourceA, extensionDir, identity: IDENTITY });
+  const second = await runtime.publishRuntimeGeneration({ sourceOutDir: sourceB, extensionDir, identity: IDENTITY });
+  assert.notEqual(second.generation, first.generation);
+
+  const leaseB = await runtime.acquireRuntimeGeneration({ extensionDir, identity: IDENTITY });
+  assert.equal(leaseB.generation, second.generation);
+  try {
+    // This is an explicit re-selection by publishing known-good A, not an automatic fallback/retry path.
+    const reselected = await runtime.publishRuntimeGeneration({ sourceOutDir: sourceA, extensionDir, identity: IDENTITY });
+    assert.equal(reselected.generation, first.generation, 'identical content keeps A\'s immutable generation identity');
+    assert.equal(reselected.outDir, first.outDir, 're-selection reuses A\'s immutable output directory');
+
+    const resolved = await runtime.resolveRuntimeGeneration({ extensionDir, identity: IDENTITY });
+    assert.deepEqual(resolved, reselected, 'resolution selects the newly published marker for A');
+    assert.equal(await readFile(path.join(resolved.outDir, 'shared', 'dependency.js'), 'utf8'), 'shared-rollback-a');
+    assert.equal(await readFile(path.join(second.outDir, 'shared', 'dependency.js'), 'utf8'), 'shared-rollback-b');
+
+    const third = await runtime.publishRuntimeGeneration({ sourceOutDir: sourceC, extensionDir, identity: IDENTITY });
+    assert.notEqual(third.generation, first.generation);
+    assert.notEqual(third.generation, second.generation);
+    const generationsDir = path.join(extensionDir, 'pie-runtime', 'generations');
+    assert.equal(
+      await exists(path.join(generationsDir, second.generation, 'out')),
+      true,
+      'B remains retained by its lease after it falls outside current+prior selection retention',
+    );
+  } finally {
+    await leaseB.release();
+  }
+
+  assert.equal(
+    await exists(path.join(extensionDir, 'pie-runtime', 'generations', second.generation, 'out')),
+    false,
+    'releasing the lease makes now-unselected B reclaimable',
+  );
+  assert.equal(await exists(hostInteractionsPath), false, 'generation publication and re-selection do not load or activate host code');
+}));
+
 test('skips torn or damaged newest markers and rejects manifest traversal', async () => withTempRoot(async (root) => {
   const extensionDir = path.join(root, 'extension');
   const sourceA = await createRuntimeSource(root, 'a');

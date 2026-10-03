@@ -1,15 +1,19 @@
 import fs from "node:fs";
 import path from "node:path";
-import { repoRoot, readPinnedNodeVersion, readPinnedNpmVersion, readPinnedPiVersion } from "../install/toolchain.mjs";
+import { repoRoot, readPinnedNodeVersion, readPinnedNpmVersion, readPinnedPiSourceVersion } from "../install/toolchain.mjs";
 import { collectEnvironmentDiagnostics } from "./doctor-environment.mjs";
 import { collectStrandedLegacySessions } from "./doctor-sessions.mjs";
 import { collectPostMigrationOutcomeDrift } from "./doctor-outcomes.mjs";
 import { spawnCliSync } from "../lib/subprocess.mjs";
+import { collectPiRuntimeArtifactRoute, parsePiRuntimeRoute, resolvePiRuntimeRoute } from "./doctor-pi-runtime.mjs";
 import { inspectManagedPackages, managedPackagePinsReady } from "../install/lib/managed-packages.mjs";
 import { resolvePieDataPaths } from "../../lib/data-root/pie-data-root-core.mjs";
 
 const ci = process.argv.includes("--ci");
 const skipModelCheck = process.argv.includes("--skip-model-check");
+// Runtime checks use the checkout's built artifact by default; an explicit
+// --pi-runtime path overrides it and is never a fallback target.
+const piRuntimeRoute = resolvePiRuntimeRoute(parsePiRuntimeRoute(process.argv), repoRoot);
 let failures = 0;
 const ok = (message) => console.log(`  [ok] ${message}`);
 const fail = (message) => { failures++; console.error(`  [FAIL] ${message}`); };
@@ -40,7 +44,7 @@ for (const message of diagnostics.pathWarnings) warn(message);
 
 const pinnedNode = readPinnedNodeVersion();
 const pinnedNpm = readPinnedNpmVersion();
-const pinnedPi = readPinnedPiVersion();
+const pinnedPiSourceVersion = readPinnedPiSourceVersion();
 process.versions.node === pinnedNode ? ok(`Node ${pinnedNode}`) : fail(`Node ${process.versions.node}; expected ${pinnedNode}`);
 const npm = run("npm", ["--version"]);
 const actualNpm = npm.stdout?.trim() ?? "";
@@ -128,6 +132,31 @@ if (skipModelCheck) {
   modelCheck.status === 0 ? ok("generated model configuration is in sync") : fail(`model configuration drift: ${(modelCheck.stderr || modelCheck.stdout).trim()}`);
 }
 
+if (piRuntimeRoute.usageError) {
+  fail(`pi runtime artifact route rejected: ${piRuntimeRoute.usageError}`);
+} else if (ci && !piRuntimeRoute.explicit) {
+  ok(`CI skipped the implicit checkout pi runtime artifact check; pass --pi-runtime <absolute artifact root> to verify one explicitly`);
+} else {
+  // Read-only full-payload verification bound to this Node process; the
+  // artifact and its manifest are never rebuilt, extended or executed here.
+  const route = await collectPiRuntimeArtifactRoute({ artifactDir: piRuntimeRoute.artifactDir });
+  if (route.status === "ready") {
+    const targetSummary = `${route.target.platform}/${route.target.arch}/modules ${route.target.nodeAbi}`;
+    if (route.version !== pinnedPiSourceVersion) {
+      fail(`pi runtime artifact version ${route.version}; expected pinned Pi source version ${pinnedPiSourceVersion}`);
+    } else {
+      ok(`pi runtime artifact ${route.version} (upstream ${route.upstreamVersion}) verified read-only for Node ${targetSummary}; identity ${route.identity}`);
+      ok(piRuntimeRoute.explicit
+        ? "explicit pi-runtime artifact route; no global pi CLI lookup or fallback"
+        : `checkout-built pi runtime artifact selected (${route.artifactDir}); no global pi CLI lookup or fallback`);
+    }
+  } else if (!piRuntimeRoute.explicit) {
+    fail(`checkout pi runtime artifact at ${piRuntimeRoute.artifactDir} could not be verified read-only: ${route.detail}. Build the checkout's VS Code application under normal safe conditions, or pass --pi-runtime <absolute artifact root>.`);
+  } else {
+    fail(`explicit pi runtime artifact failed read-only verification for the executing Node target: ${route.detail}`);
+  }
+}
+
 if (!ci) {
   const expectedAgent = normalize(repoRoot);
   const agentDir = process.env.PI_CODING_AGENT_DIR;
@@ -139,16 +168,8 @@ if (!ci) {
   if (!authDir) warn("PI_CODING_AGENT_AUTH_DIR is unset");
   else if (normalize(authDir) === expectedAgent || normalize(authDir).startsWith(`${expectedAgent}/`)) fail("PI_CODING_AGENT_AUTH_DIR must be outside the Git checkout");
   else ok("PI_CODING_AGENT_AUTH_DIR is outside the checkout");
-
-  const npmRoot = run("npm", ["root", "-g"]);
-  const globalPiManifest = npmRoot.status === 0
-    ? path.join(npmRoot.stdout.trim(), "@earendil-works", "pi-coding-agent", "package.json")
-    : "";
-  let installedPi = "";
-  try { installedPi = JSON.parse(fs.readFileSync(globalPiManifest, "utf8")).version; } catch {}
-  installedPi === pinnedPi ? ok(`pi CLI ${pinnedPi}`) : fail(`pi CLI ${installedPi || "unavailable"}; expected ${pinnedPi}`);
 } else {
-  ok(`CI skipped machine-local env/auth checks; pinned pi SDK is ${pinnedPi}`);
+  ok(`CI skipped machine-local env/auth checks; pinned Pi source version is ${pinnedPiSourceVersion}`);
 }
 
 if (failures) {

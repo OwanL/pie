@@ -11,6 +11,7 @@ import {
   createManifestTarball,
   createRuntimeOwnerManifest,
   computePiRuntimeInputFingerprint,
+  resolveNativeModifierHelper,
   sanitizePackageManifest,
 } from '../pi-runtime.mjs';
 
@@ -183,6 +184,14 @@ test('createRuntimeOwnerManifest points exactly four Pi packages at local tarbal
   }
 });
 
+test('createRuntimeOwnerManifest rejects versions that drift from the in-tree source authority', () => {
+  const mismatched = manifests.map((manifest, index) => index === 3 ? { ...manifest, version: '0.80.7' } : manifest);
+  assert.throws(
+    () => createRuntimeOwnerManifest(mismatched),
+    /Unexpected @earendil-works\/pi-coding-agent version; expected in-tree Pi source version 0\.80\.6/,
+  );
+});
+
 test('assertRuntimeLock accepts matching local tarballs and dependency metadata', () => {
   assert.doesNotThrow(() => assertRuntimeLock(makeValidLock(), manifests));
 });
@@ -230,6 +239,28 @@ test('assertRuntimeLock rejects wrong Pi versions, registry/nested/duplicate/ext
   const changedOptionalDependenciesLock = makeValidLock();
   changedOptionalDependenciesLock.packages[`node_modules/${piNames[0]}`].optionalDependencies['optional-fixture'] = '9.0.0';
   assert.throws(() => assertRuntimeLock(changedOptionalDependenciesLock, manifests));
+});
+
+test('resolveNativeModifierHelper requires the current Windows/macOS target helper', (t) => {
+  const runtime = mkdtempSync(path.join(os.tmpdir(), 'pie-pi-runtime-native-'));
+  t.after(() => rmSync(runtime, { recursive: true, force: true }));
+  const addHelper = (platform, arch, filename) => {
+    const helper = path.join(runtime, 'node_modules', '@earendil-works', 'pi-tui', 'native', platform,
+      'prebuilds', `${platform}-${arch}`, filename);
+    mkdirSync(path.dirname(helper), { recursive: true });
+    writeFileSync(helper, 'fixture helper; never loaded as native code');
+    return helper;
+  };
+
+  assert.throws(() => resolveNativeModifierHelper(runtime, 'win32', 'x64'), /Required native modifier helper missing for win32-x64/);
+  const windowsX64 = addHelper('win32', 'x64', 'win32-console-mode.node');
+  assert.equal(resolveNativeModifierHelper(runtime, 'win32', 'x64'), windowsX64,
+    'Windows x64 retains its source runtime helper path and filename');
+  const darwinArm64 = addHelper('darwin', 'arm64', 'darwin-modifiers.node');
+  assert.equal(resolveNativeModifierHelper(runtime, 'darwin', 'arm64'), darwinArm64,
+    'macOS selects only the matching platform/architecture helper');
+  assert.throws(() => resolveNativeModifierHelper(runtime, 'win32', 'ia32'), /Unsupported native modifier helper target: win32-ia32/);
+  assert.throws(() => resolveNativeModifierHelper(runtime, 'freebsd', 'x64'), /Unsupported native modifier helper platform: freebsd/);
 });
 
 test('computePiRuntimeInputFingerprint tracks live source, owner locks, and Node target inputs', async (t) => {

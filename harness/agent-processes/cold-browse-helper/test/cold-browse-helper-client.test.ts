@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { PassThrough } from 'node:stream';
 import test from 'node:test';
 
 import {
@@ -12,6 +14,7 @@ import {
   type ColdBrowseHelperTimingSample,
 } from '../cold-browse-helper-client';
 import {
+  COLD_BROWSE_HELPER_PROTOCOL_VERSION,
   readColdBrowseFingerprintSync,
   type ColdBrowseHelperFence,
 } from '../cold-browse-helper-protocol';
@@ -73,6 +76,119 @@ function client(
     ...overrides,
   });
 }
+
+function createControlledHelperChild(): any {
+  const child = new EventEmitter() as any;
+  child.stdin = new PassThrough();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.exitCode = null;
+  child.signalCode = null;
+  child.killCalls = 0;
+  child.frames = [] as Array<Record<string, unknown>>;
+  child.exitPromise = new Promise<void>((resolve) => child.once('exit', resolve));
+  child.stdinFinished = new Promise<void>((resolve) => child.stdin.once('finish', resolve));
+  let buffered = '';
+  child.stdin.on('data', (chunk: Buffer | string) => {
+    buffered += chunk.toString();
+    for (;;) {
+      const newline = buffered.indexOf('\n');
+      if (newline < 0) break;
+      const frame = JSON.parse(buffered.slice(0, newline)) as Record<string, unknown>;
+      buffered = buffered.slice(newline + 1);
+      child.frames.push(frame);
+      child.emit('frame', frame);
+    }
+  });
+  child.waitForFrame = (kind: string): Promise<Record<string, unknown>> => {
+    const existing = child.frames.find((frame: Record<string, unknown>) => frame.kind === kind);
+    if (existing) return Promise.resolve(existing);
+    return new Promise((resolve) => {
+      const listener = (frame: Record<string, unknown>) => {
+        if (frame.kind !== kind) return;
+        child.off('frame', listener);
+        resolve(frame);
+      };
+      child.on('frame', listener);
+    });
+  };
+  child.writeOutput = (frame: unknown) => child.stdout.write(`${JSON.stringify(frame)}\n`);
+  child.confirmExit = (code: number | null = 0, signal: NodeJS.Signals | null = null) => {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    child.exitCode = code;
+    child.signalCode = signal;
+    child.emit('exit', code, signal);
+    child.emit('close', code, signal);
+  };
+  child.kill = () => {
+    child.killCalls += 1;
+    setImmediate(() => child.confirmExit(null, 'SIGTERM'));
+    return true;
+  };
+  return child;
+}
+
+test('disposing during startup accepts its first readiness frame and confirms child exit', async () => {
+  const child = createControlledHelperChild();
+  const helper = new ColdBrowseHelperClient({
+    entryPath: fixturePath,
+    sdkPath: process.cwd(),
+    sdkRuntime: testSdkRuntime(),
+    startupCwd: process.cwd(),
+    startupTimeoutMs: 2_000,
+    shutdownTimeoutMs: 2_000,
+    spawnProcess: (() => child) as any,
+  });
+  const warming = helper.warm();
+  let disposalSettled = false;
+  let disposal: Promise<void> | undefined;
+  try {
+    await child.waitForFrame('initialize');
+    disposal = helper.dispose().then(() => { disposalSettled = true; });
+    await child.waitForFrame('shutdown');
+
+    child.writeOutput({ protocolVersion: COLD_BROWSE_HELPER_PROTOCOL_VERSION, kind: 'ready' });
+    await warming;
+    child.writeOutput({ protocolVersion: COLD_BROWSE_HELPER_PROTOCOL_VERSION, kind: 'shutdown-complete' });
+    await child.stdinFinished;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(disposalSettled, false, 'shutdown acknowledgement and stdin close do not prove child exit');
+    assert.equal(child.killCalls, 0, 'a valid first readiness frame must not trigger protocol-failure termination');
+
+    child.confirmExit();
+    await disposal;
+    assert.equal(disposalSettled, true);
+    assert.equal(child.killCalls, 0, 'confirmed graceful teardown needs no forced kill');
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.confirmExit();
+    await (disposal ?? helper.dispose()).catch(() => undefined);
+  }
+});
+
+test('client still terminates a helper that emits genuinely duplicate readiness', async () => {
+  const child = createControlledHelperChild();
+  const helper = new ColdBrowseHelperClient({
+    entryPath: fixturePath,
+    sdkPath: process.cwd(),
+    sdkRuntime: testSdkRuntime(),
+    startupCwd: process.cwd(),
+    startupTimeoutMs: 2_000,
+    shutdownTimeoutMs: 2_000,
+    spawnProcess: (() => child) as any,
+  });
+  try {
+    const warming = helper.warm();
+    await child.waitForFrame('initialize');
+    child.writeOutput({ protocolVersion: COLD_BROWSE_HELPER_PROTOCOL_VERSION, kind: 'ready' });
+    await warming;
+    child.writeOutput({ protocolVersion: COLD_BROWSE_HELPER_PROTOCOL_VERSION, kind: 'ready' });
+    await child.exitPromise;
+    assert.equal(child.killCalls, 1, 'a second readiness frame still fails closed');
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.confirmExit();
+    await helper.dispose().catch(() => undefined);
+  }
+});
 
 test('helper timing records readiness and request durations without browse payloads', async () => {
   const timings: ColdBrowseHelperTimingSample[] = [];

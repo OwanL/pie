@@ -61,17 +61,54 @@ if "%NODE_MISSING%"=="1" goto :no_node
 where npm >nul 2>nul || goto :no_npm
 set "PIN_NODE="
 set "PIN_NPM="
-set "PIN_PI="
+set "PIN_PI_SOURCE="
 for /f "delims=" %%L in ('node "%RUNNER%" pinned-versions 2^>nul') do if not defined PIN_NODE set "PIN_NODE=%%L"
 for /f "skip=1 delims=" %%L in ('node "%RUNNER%" pinned-versions 2^>nul') do if not defined PIN_NPM set "PIN_NPM=%%L"
-for /f "skip=2 delims=" %%L in ('node "%RUNNER%" pinned-versions 2^>nul') do if not defined PIN_PI set "PIN_PI=%%L"
+for /f "skip=2 delims=" %%L in ('node "%RUNNER%" pinned-versions 2^>nul') do if not defined PIN_PI_SOURCE set "PIN_PI_SOURCE=%%L"
 if not defined PIN_NODE goto :pins_failed
 if not defined PIN_NPM goto :pins_failed
-if not defined PIN_PI goto :pins_failed
+if not defined PIN_PI_SOURCE goto :pins_failed
 if /i not "%NODE_VERSION%"=="%PIN_NODE%" (
   echo ==^> Node.js %PIN_NODE% is required for reproducible installs; found %NODE_VERSION%. See .node-version.
   goto :error
 )
+
+REM --- auth relocation consent preflight (read-only) ------------------------
+REM Bootstrap rejects credentials in the checkout. Decide before setx or any
+REM session/data migration, including when legacy auth would first be copied in.
+set "OLD_AUTH=%USERPROFILE%\.pi\agent\auth.json"
+set "NEW_AUTH=%REPO_ROOT%\auth.json"
+set "IN_TREE_AUTH=%REPO_ROOT%\auth.json"
+set "TARGET_AUTH_DIR=%LOCALAPPDATA%\pie"
+set "TARGET_AUTH=%TARGET_AUTH_DIR%\auth.json"
+call :read_user_env PI_CODING_AGENT_AUTH_DIR
+set "AUTH_DIR_ENV=%USER_ENV_VALUE%"
+if defined AUTH_DIR_ENV (
+  node "%RUNNER%" validate-auth-dir "%REPO_ROOT%" "%AUTH_DIR_ENV%" || goto :invalid_saved_auth_dir
+)
+set "AUTH_RELOCATION_REQUIRED=0"
+if exist "%IN_TREE_AUTH%" set "AUTH_RELOCATION_REQUIRED=1"
+if exist "%OLD_AUTH%" if not exist "%NEW_AUTH%" set "AUTH_RELOCATION_REQUIRED=1"
+set "AUTH_RELOCATION_APPROVED=0"
+if not "%AUTH_RELOCATION_REQUIRED%"=="1" goto :auth_consent_done
+if defined AUTH_DIR_ENV goto :auth_consent_done
+
+echo.
+echo ==^> SECURITY: auth.json must be kept outside the working tree.
+echo     Target location: %TARGET_AUTH%
+set "MOVE_CHOICE="
+if defined CI goto :auth_consent_ci
+echo     Declining aborts installation before persistent changes.
+set /p MOVE_CHOICE="    Move auth.json to the secure OS user-data directory? [Y/n] "
+if /i "%MOVE_CHOICE%"=="Y" goto :auth_consent_yes
+if "%MOVE_CHOICE%"=="" goto :auth_consent_yes
+echo ==^> INSTALL ABORTED: auth relocation was declined; no persistent changes were made.
+goto :error
+:auth_consent_ci
+set "MOVE_CHOICE=Y"
+:auth_consent_yes
+set "AUTH_RELOCATION_APPROVED=1"
+:auth_consent_done
 
 REM ===========================================================================
 REM  FULL INSTALL
@@ -82,8 +119,6 @@ call :setx_user PI_CODING_AGENT_DIR "%REPO_ROOT%" || goto :error
 set "PI_CODING_AGENT_DIR=%REPO_ROOT%"
 
 REM --- migrate auth.json from the old default location if needed -------------
-set "OLD_AUTH=%USERPROFILE%\.pi\agent\auth.json"
-set "NEW_AUTH=%REPO_ROOT%\auth.json"
 if exist "%OLD_AUTH%" (
   if not exist "%NEW_AUTH%" (
     echo ==^> Migrating auth.json from '%OLD_AUTH%'
@@ -93,7 +128,7 @@ if exist "%OLD_AUTH%" (
   if exist "%NEW_AUTH%" (
     echo ==^> auth.json already present in repo - skipping migration
   ) else (
-    echo ==^> No existing auth.json found - you will need to authenticate PI on first run
+    echo ==^> No existing auth.json found - you will need to authenticate a provider in Pie on first run
   )
 )
 
@@ -132,42 +167,14 @@ if /i not "%ACTUAL_NPM%"=="%PIN_NPM%" (
   call npm install -g "npm@%PIN_NPM%" || goto :error
 )
 
-REM --- resolve + pin the pi CLI ---------------------------------------------
-set "PI_CMD="
-for /f "delims=" %%P in ('node "%RUNNER%" resolve-pi 2^>nul') do set "PI_CMD=%%P"
-if not defined PI_CMD goto :install_pi
-call "%PI_CMD%" --version > "%TEMP%\pie_piver.txt" 2>&1
-set "INSTALLED_PI="
-set /p INSTALLED_PI=<"%TEMP%\pie_piver.txt"
-del "%TEMP%\pie_piver.txt" >nul 2>nul
-if /i not "%INSTALLED_PI%"=="%PIN_PI%" goto :install_pi
-echo ==^> pi CLI is pinned at %PIN_PI%
-goto :pi_done
-:install_pi
-echo ==^> Installing pinned @earendil-works/pi-coding-agent@%PIN_PI% (found '%INSTALLED_PI%')
-call npm install -g "@earendil-works/pi-coding-agent@%PIN_PI%" || goto :error
-set "PI_CMD="
-for /f "delims=" %%P in ('node "%RUNNER%" resolve-pi 2^>nul') do set "PI_CMD=%%P"
-if not defined PI_CMD (
-  echo ==^> @earendil-works/pi-coding-agent installed but 'pi' could not be resolved on PATH or under the npm prefix. Open a new terminal and re-run.
-  goto :error
-)
-echo ==^> Installed pi %PIN_PI% to '%PI_CMD%'
-:pi_done
-
 REM --- repair absolute extension paths in settings.json ---------------------
 node "%RUNNER%" repair-settings "%REPO_ROOT%\settings.json" || goto :error
 
 REM --- relocate auth.json out of the working tree ---------------------------
-set "IN_TREE_AUTH=%REPO_ROOT%\auth.json"
-set "TARGET_AUTH_DIR=%LOCALAPPDATA%\pie"
-set "TARGET_AUTH=%TARGET_AUTH_DIR%\auth.json"
-call :read_user_env PI_CODING_AGENT_AUTH_DIR
-set "AUTH_DIR_ENV=%USER_ENV_VALUE%"
 if exist "%IN_TREE_AUTH%" goto :auth_in_tree
 if defined AUTH_DIR_ENV goto :auth_dir_ready
 REM A clean install has no in-tree auth.json to trigger relocation. Still set
-REM and persist the secure location now so future `pi login` writes outside git.
+REM and persist the secure location now so future Pie authentication stays outside git.
 set "AUTH_DIR_ENV=%TARGET_AUTH_DIR%"
 if not exist "%AUTH_DIR_ENV%" mkdir "%AUTH_DIR_ENV%" || goto :error
 call :setx_user PI_CODING_AGENT_AUTH_DIR "%AUTH_DIR_ENV%" || goto :error
@@ -178,15 +185,8 @@ goto :after_relocate
 
 :auth_in_tree
 if defined AUTH_DIR_ENV goto :merge_auth
-echo.
-echo ==^> SECURITY: auth.json is inside the working tree.
-echo     Target location: %TARGET_AUTH%
-set "MOVE_CHOICE="
-if defined CI ( set "MOVE_CHOICE=Y" ) else set /p MOVE_CHOICE="    Move auth.json to the secure OS user-data directory? [Y/n] "
-if /i "%MOVE_CHOICE%"=="Y" goto :do_relocate
-if "%MOVE_CHOICE%"=="" goto :do_relocate
-echo ==^> WARN: auth.json remains in the working tree. See SECURITY.md for recommended hardening.
-goto :after_relocate
+if not "%AUTH_RELOCATION_APPROVED%"=="1" goto :auth_not_approved
+goto :do_relocate
 :do_relocate
 node "%RUNNER%" relocate-auth "%IN_TREE_AUTH%" "%TARGET_AUTH%" || goto :error
 icacls "%TARGET_AUTH%" /inheritance:r /grant:r "%USERDOMAIN%\%USERNAME%:F" >nul 2>&1
@@ -208,42 +208,20 @@ node "%RUNNER%" merge-auth "%IN_TREE_AUTH%" "%SECURE_AUTH%" || goto :error
 echo     in-tree auth.json removed to prevent future split-brain; backend reads from PI_CODING_AGENT_AUTH_DIR
 :after_relocate
 
-REM --- restore pi packages without self-updating the CLI --------------------
-REM Pinned npm sources are intentionally skipped by `pi update`, so install each
-REM configured source explicitly. `pi install` preserves an existing filtered
-REM package object in settings.json and is idempotent for an installed version.
-echo ==^> Restoring packages from settings.json
-set "PACKAGE_SOURCES_FILE=%TEMP%\pie_package_sources_%RANDOM%_%RANDOM%.txt"
-node "%RUNNER%" package-sources "%REPO_ROOT%\settings.json" > "%PACKAGE_SOURCES_FILE%"
-if errorlevel 1 (
-  del "%PACKAGE_SOURCES_FILE%" >nul 2>nul
-  goto :error
-)
-for /f "usebackq delims=" %%P in ("%PACKAGE_SOURCES_FILE%") do (
-  echo ==^> Installing %%P
-  call "%PI_CMD%" install "%%P"
-  if errorlevel 1 (
-    del "%PACKAGE_SOURCES_FILE%" >nul 2>nul
-    goto :error
-  )
-)
-del "%PACKAGE_SOURCES_FILE%" >nul 2>nul
-
-REM --- build, package, and install the pie VSCode extension ----------------
+REM --- source bootstrap: root ci, package restore, build and VSIX package ----
+REM Bootstrap owns runtime acquisition and package/build ordering. Run after
+REM auth relocation so it can enforce credential-location protections.
 echo.
-echo ==^> Building pie VSCode extension
+echo ==^> Bootstrapping and packaging the pie VSCode extension
 set "VSCODE_HOST_DIR=%REPO_ROOT%\application\hosts\vscode"
-set "EXT_FAILED=0"
-pushd "%REPO_ROOT%"
-call npm ci --include=dev || set "EXT_FAILED=1"
-if "%EXT_FAILED%"=="1" ( popd & echo ==^> npm ci failed for the repository dependency trees & goto :ext_failed )
-pushd "%VSCODE_HOST_DIR%"
-call npm run build || set "EXT_FAILED=1"
-if "%EXT_FAILED%"=="1" ( popd & popd & echo ==^> build failed in application\hosts\vscode\ & goto :ext_failed )
-call npm run package || set "EXT_FAILED=1"
+pushd "%REPO_ROOT%" || goto :error
+call npm run bootstrap -- --package
+set "BOOTSTRAP_RC=%ERRORLEVEL%"
 popd
-popd
-if "%EXT_FAILED%"=="1" ( echo ==^> vsce package failed in application\hosts\vscode\ & goto :ext_failed )
+if not "%BOOTSTRAP_RC%"=="0" (
+  echo ==^> Source bootstrap/package failed with exit code %BOOTSTRAP_RC%
+  goto :ext_failed
+)
 
 set "VSIX="
 set "VSIX_NAME="
@@ -289,7 +267,7 @@ echo ==^> Post-install verification:
 call :read_user_env PI_CODING_AGENT_DIR
 set "USER_AGENT_DIR=%USER_ENV_VALUE%"
 if /i "%USER_AGENT_DIR%"=="%REPO_ROOT%" (
-  echo   [OK] PI_CODING_AGENT_DIR set at User scope -^> pi CLI reads repo config
+  echo   [OK] PI_CODING_AGENT_DIR set at User scope -^> source Pi runtime reads repo config
 ) else (
   echo   [!] PI_CODING_AGENT_DIR not set at User scope. Open a new terminal after install.
 )
@@ -306,7 +284,7 @@ echo Session JSONL contains raw transcripts, so treat it as sensitive local data
 echo.
 echo ==^> Next steps:
 echo   1. Reload VS Code (Developer: Reload Window) to activate the pie panel.
-echo   2. Open a new terminal so PI_CODING_AGENT_DIR / PI_CODING_AGENT_AUTH_DIR take effect before running pi.
+echo   2. Open a new terminal so PI_CODING_AGENT_DIR / PI_CODING_AGENT_AUTH_DIR take effect before using Pie.
 echo   3. If models don't appear or you get 401, see README.md -^> Troubleshooting.
 
 goto :done
@@ -332,9 +310,8 @@ echo   - setx PI_CODING_AGENT_DIR / PI_CODING_AGENT_SESSION_DIR at User scope
 echo   - configure global outcomes: sessions + reviews + completed run analytics
 echo   - repair extension paths in settings.json
 echo   - relocate/merge auth.json if present
-echo   - npm install -g pinned npm/pi if drifted
-echo   - restore every package pinned in settings.json
-echo   - npm ci + build/package pie VSIX + code --install-extension
+echo   - npm install -g pinned npm if drifted
+echo   - source bootstrap: restore packages + build/package pie VSIX + code --install-extension
 echo   - write pie.agentDir to VS Code User settings
 exit /b %TOOLCHAIN_RC%
 
@@ -361,7 +338,16 @@ echo ==^> npm is required but was not found on PATH. npm ships with Node.js: htt
 goto :error
 
 :pins_failed
-echo ==^> Could not resolve the pinned toolchain versions - node/npm/pi.
+echo ==^> Could not resolve pinned Node/npm or the Pi source version.
+goto :error
+
+:auth_not_approved
+echo ==^> SECURITY: auth.json appeared in the working tree after preflight; refusing to bootstrap with in-tree credentials.
+goto :error
+
+:invalid_saved_auth_dir
+echo ==^> SECURITY: saved PI_CODING_AGENT_AUTH_DIR must be outside the checkout.
+echo     Choose an external directory (for example %LOCALAPPDATA%\pie), preserve or move auth.json there, update the User-scope variable, and rerun install.bat.
 goto :error
 
 :node_hint
@@ -434,8 +420,8 @@ exit /b 0
 :help
 echo Usage: install.bat [--check] [--help] [--no-pause]
 echo.
-echo   no args    Full install: configure env/sessions, pin Node/npm/pi, relocate
-echo              auth, restore packages, build and install the pie VS Code extension.
+echo   no args    Full install: configure env/sessions, pin Node/npm, relocate auth,
+echo              bootstrap Pi from source, build and install the pie VS Code extension.
 echo   --check    Dry run: verify the pinned toolchain and readiness without mutating
 echo              anything - no setx, no installs, no builds.
 echo   --help     Show this help and exit.

@@ -34,7 +34,7 @@ Pie is currently developed and tested on Windows only. Other operating systems m
 - npm **11.13.0**, pinned by `packageManager` in `package.json`
 - VS Code, for interactive extension work
 
-The installer pins the optional standalone `pi` CLI to the exact SDK version resolved by `application/hosts/vscode/package-lock.json`. The VS Code backend always prefers that repo-local locked SDK, so a global package upgrade cannot silently change it.
+Pi is built from the repository's pinned source and shipped with the extension as a verified `pi-runtime` artifact. Setup does not install a global `pi` CLI or rely on a host-local locked SDK.
 
 ## Install
 
@@ -54,16 +54,15 @@ Double-clicking `install.bat` also works; it pauses at the end so the window doe
 
 The installer is idempotent and safe to re-run. On each run it:
 
-1. **Sets `PI_CODING_AGENT_DIR`** to the repo root as a Windows User environment variable so the `pi` CLI reads `settings.json` and `models.json` from here.
-2. **Pins `PI_CODING_AGENT_SESSION_DIR`** to this checkout's `data/outcomes/sessions/` so standalone `pi` writes session JSONL to the repo-local store even when launched outside the checkout.
-3. **Pins `pi`** ([`@earendil-works/pi-coding-agent`](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)) globally to the exact version in `application/hosts/vscode/package-lock.json`, then restores each configured package source with `pi install` without self-updating the CLI.
-4. **Configures the auth directory** at `%LOCALAPPDATA%\pie\` and sets `PI_CODING_AGENT_AUTH_DIR`, even before the first login. Existing custom User-scope auth directories are preserved; any in-tree `auth.json` is relocated or merged.
-5. **Merges split-brain auth** — if a *new* in-tree `auth.json` appears after relocation (from running `pi` in a shell without `PI_CODING_AGENT_AUTH_DIR`), the installer merges its credentials into the secure location and removes the in-tree copy.
-6. **Writes `pie.agentDir`** to VS Code User settings so the extension host forwards the correct config dir to the backend, even before VS Code picks up the new User env vars (which only happens on a full restart, not a window reload).
-7. **Repairs extension paths** in `settings.json` (committed paths may reference another machine's npm global tree).
-8. **Migrates session history** from legacy `~/.pi/agent/sessions/`, `data/sessions/`, and `<repo>/sessions/` roots into the current checkout's local `data/outcomes/sessions/` store.
-9. **Installs dependencies with `npm ci`**, then builds, packages, and installs the pie VS Code extension when the VS Code CLI is available.
-10. **Runs post-install verification** for auth, paths, versions, and split-brain credentials.
+1. **Sets `PI_CODING_AGENT_DIR`** to the repo root as a Windows User environment variable so Pie reads `settings.json` and `models.json` from here.
+2. **Pins `PI_CODING_AGENT_SESSION_DIR`** to this checkout's `data/outcomes/sessions/` for Pie's machine-local session JSONL store.
+3. **Configures the auth directory** at `%LOCALAPPDATA%\pie\` and sets `PI_CODING_AGENT_AUTH_DIR`. Existing custom User-scope auth directories are preserved; any in-tree `auth.json` is relocated or merged.
+4. **Merges split-brain auth** if credentials are found in an in-tree `auth.json`, then removes the in-tree copy after merging.
+5. **Writes `pie.agentDir`** to VS Code User settings so the extension host forwards the correct config directory, even before VS Code picks up updated User environment variables.
+6. **Repairs extension paths** in `settings.json` (committed paths may reference another machine's npm global tree).
+7. **Migrates session history** from legacy `~/.pi/agent/sessions/`, `data/sessions/`, and `<repo>/sessions/` roots into the current checkout's local `data/outcomes/sessions/` store.
+8. **Runs `npm run bootstrap -- --package`**. Bootstrap starts with root `npm ci` (whose postinstall restores the additional locked dependency trees), then acquires one verified source Pi artifact, restores configured Pi package sources through its local Node CLI, checks generated model files, builds and packages the VS Code extension, and checks that same artifact with doctor. No global Pi is installed or required.
+9. **Installs the resulting VSIX** when the VS Code CLI is available and runs post-install readiness checks for auth, paths, versions, and split-brain credentials.
 
 Configuration comes from Git, while credentials, sessions, logs, analytics, dependencies, and build outputs remain local to each machine.
 
@@ -80,9 +79,9 @@ Do not edit `models.json` or `model-profiles.yaml` directly. Change active chat 
 
 ## Authentication
 
-Remote providers need credentials before the pie panel can send messages through them. There are two ways to authenticate:
+Remote providers need credentials before the pie panel can send messages through them. Configure a provider API key as a User environment variable, or keep using credentials already present in `auth.json`:
 
-### Option A: Provider API key (env var)
+### Provider API key (environment variable)
 
 Set a provider API key as a persistent environment variable. The backend reads it automatically.
 
@@ -93,15 +92,7 @@ REM then open a NEW terminal for it to take effect
 
 Set the environment variable for the provider you use. Examples (not an exhaustive list) include `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `GEMINI_API_KEY`.
 
-### Option B: Interactive `pi` login (writes auth.json)
-
-Start `pi`, enter `/login`, and select a subscription provider:
-
-```bash
-pi
-```
-
-> **Important:** Run this in a terminal that has `PI_CODING_AGENT_AUTH_DIR` set (open a new terminal after install). Otherwise `pi` writes `auth.json` back to the repo root, creating a split-brain where the backend reads the secure (empty) location and returns 401. If this happens, **re-run the installer** — it will auto-merge the in-tree creds into the secure location.
+The installer does not install a global `pi` CLI, and `pi /login` is no longer a setup step. It migrates an existing `%USERPROFILE%\.pi\agent\auth.json` when present; this source-runtime migration does not add replacement interactive subscription-login onboarding. For a new setup, use a provider API key as described above.
 
 ### Where auth.json lives
 
@@ -115,11 +106,11 @@ pi
 
 ### No models appear in the pie panel
 
-**Cause:** The backend's `agentDir` resolved to the default `~/.pi/agent` instead of the repo root, so `models.json` was not loaded.
+**Cause:** The selected agent/config directory from `pie.agentDir` or `PI_CODING_AGENT_DIR` is stale or does not point to this checkout, so its `models.json` is not loaded.
 
-**Fix:** The installer writes `pie.agentDir` to VS Code User settings to prevent this. If models still don't appear:
+**Fix:** The installer writes `pie.agentDir` to VS Code User settings and sets `PI_CODING_AGENT_DIR`. If models still don't appear:
 
-1. Open VS Code Settings (JSON) and verify `"pie.agentDir": "C:\path\to\pie"` is present.
+1. Open VS Code Settings (JSON) and verify `"pie.agentDir": "C:\path\to\pie"` points to this checkout.
 2. Reload the VS Code window (Developer: Reload Window) — not just the panel.
 3. If running the extension from source, rebuild with `npm run extension:build` from the repository root.
 
@@ -127,7 +118,7 @@ pi
 
 **Cause:** The backend reads `auth.json` from `PI_CODING_AGENT_AUTH_DIR` (the secure location), but it's empty `{}` while real credentials are stranded in the repo-root `auth.json`.
 
-This happens when `pi` was run in a shell that didn't inherit `PI_CODING_AGENT_AUTH_DIR`.
+This can happen when an older `pi` CLI was run in a shell that didn't inherit `PI_CODING_AGENT_AUTH_DIR`.
 
 **Fix:** Re-run the installer; it safely merges in-tree credentials into the secure location:
 
@@ -135,47 +126,47 @@ This happens when `pi` was run in a shell that didn't inherit `PI_CODING_AGENT_A
 .\install.bat
 ```
 
-### Backend fails to start: "SDK path not allowed"
+### Pi runtime artifact missing or rejected
 
-**Cause:** The SDK is installed under a path not in the `isPathAllowed` allowlist.
+The backend verifies the `pi-runtime` artifact bundled with its built output for the selected Node target; it does not fall back to a global or host-local SDK. `pie.sdkPath` and `PI_SDK_PATH` are not supported runtime selectors.
 
-**Fix:** The extension host derives `PIE_TRUSTED_SDK_ROOT` from the resolved `sdkPath` and passes it to the backend, and the repo-local pinned SDK (`application/hosts/vscode/node_modules/@earendil-works/pi-coding-agent`) is trusted by construction. If overriding with a custom SDK location, set `pie.sdkPath` in VS Code *User* settings (or the `PI_SDK_PATH` env var) to the SDK package directory — avoid committing an absolute `pie.sdkPath` to the tracked `.vscode/settings.json`, since it is machine-specific and breaks other machines on pull.
+Run `npm run doctor` to verify the checkout-built artifact at `application/hosts/vscode/out/pi-runtime`. To check another artifact without changing it, pass an absolute path:
 
-### SDK version drift / backend breaks after a pull
-
-**Cause:** The extension backend previously loaded whatever `@earendil-works/pi-coding-agent` `npm root -g` resolved, so a `npm i -g` upgrade (or a different version on another machine) could silently swap the SDK out from under the backend.
-
-**Fix:** The SDK is now a pinned `application/hosts/vscode/package.json` dependency. From the repository root, run `npm ci`; its postinstall restores the locked dependency trees, including the exact SDK version under `application/hosts/vscode/node_modules/`. The backend resolves that copy first.
-
-### `pi` command not found after install
-
-**Cause:** `npm install -g` added `pi` to the npm prefix bin dir, but the current shell's PATH hasn't refreshed.
-
-**Fix:** Open a new terminal. Or verify manually:
 ```bash
-npm config get prefix   # shows where pi was installed
+npm run doctor -- --pi-runtime "<absolute artifact directory>"
 ```
+
+Doctor only verifies the selected artifact read-only; it does not build, acquire, or execute Pi. Under normal safe maintenance conditions, `npm run bootstrap` rebuilds and checks the checkout's artifact.
 
 ### VS Code env vars not taking effect
 
 **Cause:** VS Code only picks up new User-scope environment variables on a **full restart**, not on window reload. The installer sets `PI_CODING_AGENT_DIR` and `PI_CODING_AGENT_AUTH_DIR` at User scope.
 
-**Fix:** The installer also writes `pie.agentDir` to VS Code User settings (which works immediately on reload) as a belt-and-suspenders fix. But for the `pi` CLI in integrated terminals, you still need to either restart VS Code fully or open a new integrated terminal.
+**Fix:** The installer also writes `pie.agentDir` to VS Code User settings, which applies on window reload. A new integrated terminal or full VS Code restart is needed for processes to inherit changed User-scope environment variables.
 
 ## Multi-machine workflow
 
-Use Git—not Dropbox, OneDrive, or copied working directories—to move configuration between Windows machines. Clone to the final location, select the pinned Node version, and run `install.bat`. Authenticate each machine independently; never transfer `auth.json`.
+Use Git—not Dropbox, OneDrive, or copied working directories—to move configuration between Windows machines. Clone to the final location, select the pinned Node version, and run `install.bat`. Configure provider credentials independently on each machine; never transfer `auth.json`.
 
-For a deterministic dependency/build refresh after pulling, first close all VS Code windows using pie (Windows locks the running extension's native/esbuild files), then run from an external terminal:
+For a deterministic dependency/build refresh after pulling, first close all VS Code windows using Pie (Windows may lock running extension dependency files), then run from an external terminal:
 
 ```bash
 npm run bootstrap
 ```
 
-This runs a root `npm ci`; its `postinstall` also restores the additional locked dependency trees. It then installs the locked pi CLI, restores pi packages without updating the CLI, checks generated model files, builds the extension, and runs the doctor. For a non-destructive check:
+Bootstrap runs root `npm ci`, restores configured Pi packages through a verified local source CLI, checks generated model files, then reuses one verified source artifact for the extension build and doctor. It does not install or require global Pi. Pass `--package` to also create a VSIX (`install.bat` uses this flow and installs the resulting package):
+
+```bash
+npm run bootstrap -- --package
+```
+
+To reuse an existing verified artifact, pass `npm run bootstrap -- --pi-runtime "<absolute artifact directory>"`. The source-runtime installer/bootstrap and doctor routes are implemented in this checkout; they do not establish a deployed runtime or completed cutover. During the active-manager safety gate, do not run `install.bat` or bootstrap, stage/publish an extension runtime, install the VSIX, or restart VS Code. Keep the active manager session uninterrupted. See the [migration plan](docs/plans/PIE-PRODUCTIZATION.md).
+
+`npm run doctor` verifies the checkout-built artifact at `application/hosts/vscode/out/pi-runtime` by default. An explicit `--pi-runtime` path overrides that selection for a read-only full-payload check against the executing Node target; neither route uses a global-Pi fallback or mutates the artifact:
 
 ```bash
 npm run doctor
+npm run doctor -- --pi-runtime "<absolute artifact directory>"
 ```
 
 Dependency updates arrive as monthly Dependabot pull requests for each tracked lockfile root. Review and test those changes; do not run unpinned global upgrades independently on each machine.
@@ -249,7 +240,7 @@ Ordinary build/watch publication stages a complete immutable runtime under the m
 
 Older installations need `npm run extension:activate` once, or a new VSIX installation, to install the startup loader. This setup publishes immutable loader files and changes the next-start entrypoint, so even Windows does not need locked host files replaced. Restart VS Code when convenient afterward. Routine code changes need only a build and a normal restart, not another manual installation. Extension manifest/SDK dependency upgrades remain explicit installation work.
 
-Full-runtime publication retains the current and prior generations plus leased generations. A crashed host's lease is retained conservatively because orphan workers may still need its files; it is not automatically reclaimed merely because its parent PID disappeared. Pi packages, runtime dependencies, and assets are verified inside each output's `pi-runtime` artifact and share its lifetime. Startup checks the selected backend Node target and does not fall back to an external SDK installation. A verified development override requires both `PIE_DEVELOPMENT_PI_RUNTIME=<absolute artifact directory>` and `PIE_ALLOW_DEVELOPMENT_RUNTIME=1`. Settings, credentials, sessions, and other user data remain outside runtime generations.
+Full-runtime publication retains the current and prior generations plus leased generations. A crashed host's lease is retained conservatively because orphan workers may still need its files; it is not automatically reclaimed merely because its parent PID disappeared. Pi packages, runtime dependencies, and assets are verified inside each output's `pi-runtime` artifact and share its lifetime. Startup checks the selected backend Node target and does not fall back to an external SDK installation. Development can select another verified artifact only with both `PIE_DEVELOPMENT_PI_RUNTIME=<absolute artifact directory>` and `PIE_ALLOW_DEVELOPMENT_RUNTIME=1`; `pie.sdkPath` and `PI_SDK_PATH` are not fallback selectors. Settings, credentials, sessions, and other user data remain outside runtime generations.
 
 Keep **built**, **staged**, **loaded**, and **behavior verified** distinct. Staged files are not evidence that existing windows have loaded the update.
 
