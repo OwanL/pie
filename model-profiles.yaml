@@ -78,24 +78,6 @@ profiles:
       - max
     disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
   - provider: github-copilot
-    id: gemini-3.5-flash
-    eligible: false
-    thinking:
-      - minimal
-      - low
-      - medium
-      - high
-    disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
-  - provider: github-copilot
-    id: gemini-3.6-flash
-    eligible: false
-    thinking:
-      - minimal
-      - low
-      - medium
-      - high
-    disabled_reason: Auto-discovered from GitHub Copilot; not yet vetted for subagents
-  - provider: github-copilot
     id: gemini-3.8-flash
     eligible: false
     thinking:

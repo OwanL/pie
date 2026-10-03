@@ -96,6 +96,10 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+# Machine-generated PowerShell cache and local test-output scratch file
+/Microsoft/Windows/PowerShell/ModuleAnalysisCache
+/conflist
+
 # OS artifacts
 Thumbs.db
 .DS_Store
