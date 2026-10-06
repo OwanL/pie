@@ -29,20 +29,31 @@ export function verificationStages(mode, runtime, root = repoRoot) {
   ];
 }
 
-function runChild(args, signal, root) {
-  return new Promise((resolve, reject) => {
+function unconfirmedTeardown(message, cause) {
+  return Object.assign(new Error(message, { cause }), { teardownUnconfirmed: true });
+}
+
+export async function runChild(args, signal, root, { spawnImpl = spawn, watchChildProcessImpl = watchChildProcess } = {}) {
     const native = args[0] === 'proto';
-    const child = spawn(native ? 'proto' : process.execPath, native ? args.slice(1) : args, withProcessTreeIsolation({
+    const child = spawnImpl(native ? 'proto' : process.execPath, native ? args.slice(1) : args, withProcessTreeIsolation({
       cwd: root, env: verificationChildEnv(withoutPiHarnessEnv(withoutGitRepositoryEnv(process.env))), stdio: 'inherit', windowsHide: true,
     }));
-    const watchdog = watchChildProcess(child, { signal, timeoutMs: resolveChildProcessTimeoutMs(), label: args[0] });
-    child.on('error', async (error) => { await watchdog.settle().catch(() => {}); reject(error); });
-    child.on('close', async (code) => {
-      const cleanup = await watchdog.settle().catch(() => ({ gone: false }));
-      if (!cleanup.gone) { reject(new Error('Verification tree teardown is unconfirmed')); return; }
-      resolve(watchdog.timedOut || watchdog.aborted ? 1 : (code ?? 1));
-    });
-  });
+    let spawnError;
+    child.on('error', (error) => { spawnError = error; });
+    const closed = new Promise((resolve) => child.once('close', (code) => resolve(code)));
+    let watchdog;
+    try {
+      watchdog = watchChildProcessImpl(child, { signal, timeoutMs: resolveChildProcessTimeoutMs(), label: args[0] });
+    } catch (error) {
+      throw unconfirmedTeardown('Verification child launched without a process-tree watchdog', error);
+    }
+    const code = await closed;
+    let cleanup;
+    try { cleanup = await watchdog.settle(); }
+    catch (error) { throw unconfirmedTeardown('Verification tree teardown could not be confirmed', error); }
+    if (!cleanup.gone) throw unconfirmedTeardown(`Verification tree teardown is unconfirmed: ${(cleanup.diagnostics ?? []).join('; ')}; survivors: ${(cleanup.survivors ?? []).join(', ') || 'unknown'}`);
+    if (code === 125) throw unconfirmedTeardown('Nested verification tree teardown is unconfirmed');
+    return spawnError || watchdog.timedOut || watchdog.aborted ? 1 : (code ?? 1);
 }
 
 export async function runVerification(mode, selection, signal, { root = repoRoot, run = runChild, ...dependencies } = {}) {
@@ -59,6 +70,8 @@ export async function runVerification(mode, selection, signal, { root = repoRoot
     for (const args of verificationStages(mode, runtime, root)) {
       signal?.throwIfAborted();
       const code = await run(args, signal, root);
+      // A clean outer census cannot prove an inner runner's retained lifetime.
+      if (code === 125) throw unconfirmedTeardown('Nested verification tree teardown is unconfirmed');
       if (code !== 0) return code;
     }
     return 0;
@@ -76,6 +89,6 @@ if (directlyInvoked) {
       if (selection.args.length !== 1) throw new Error('Expected one verification mode');
       process.exitCode = await runVerification(selection.args[0], selection, abort.signal);
     }
-  } catch (error) { console.error(error.message); process.exitCode = 1; }
+  } catch (error) { console.error(error.message); process.exitCode = error.teardownUnconfirmed === true ? 125 : 1; }
   finally { abort.dispose(); }
 }

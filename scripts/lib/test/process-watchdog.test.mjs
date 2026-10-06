@@ -107,6 +107,61 @@ test('killProcessTree gives Windows a grace window then uses identity-checked ta
   assert.deepEqual(result.survivorProcesses, []);
 });
 
+test('Windows ownership query projects only ancestry and preserves precise provider creation identities', () => {
+  const identity = '20261007002935.227617+780';
+  let call;
+  const rows = snapshotProcessTree(4321, {
+    platform: 'win32',
+    spawnSyncImpl: (command, args, options) => {
+      call = { command, args, options };
+      return { status: 0, stdout: `4321|1|${identity}\n` };
+    },
+  });
+  assert.equal(call.command, 'powershell.exe');
+  const script = call.args.at(-1);
+  assert.ok(script.includes('[wmisearcher]'));
+  assert.ok(script.includes('SELECT ProcessId,ParentProcessId,CreationDate FROM Win32_Process'));
+  assert.ok(!script.includes('Get-CimInstance'));
+  assert.equal(call.options.timeout, 5_000);
+  assert.equal(rows[0].identity, identity);
+});
+
+test('real Windows census returns a stable precise identity for this owned test process', { skip: process.platform !== 'win32' }, () => {
+  const first = snapshotProcessTree(process.pid)[0];
+  const second = snapshotProcessTree(process.pid)[0];
+  assert.match(first.identity, /^\d{14}\.\d{6}[+-]\d{3}$/u);
+  assert.equal(second.identity, first.identity);
+});
+
+test('killProcessTree confirms absent Windows identities despite a later live PID probe', async () => {
+  let queries = 0;
+  const result = await killProcessTree(fakeChild(4321), {
+    platform: 'win32', gracefulMs: 1, forceMs: 1,
+    spawnSyncImpl: (command) => {
+      if (command === 'taskkill') return { status: 0 };
+      queries += 1;
+      return { status: 0, stdout: queries < 3 ? '4321|1|captured-root\n7654|4321|captured-child\n' : '' };
+    },
+    // Model PID reuse after the final census: the later probe sees a new
+    // process, but absence already proves the captured identity gone.
+    killImpl: () => {},
+  });
+  assert.equal(result.gone, true);
+  assert.deepEqual(result.survivors, []);
+});
+
+test('killProcessTree keeps an uncaptured Windows identity unknown despite an absent final row', async () => {
+  let queries = 0;
+  const result = await killProcessTree(fakeChild(4321), {
+    platform: 'win32', gracefulMs: 1, forceMs: 1,
+    spawnSyncImpl: () => ({ status: 0, stdout: ++queries === 1 ? '4321|1|\n' : '' }),
+    killImpl: () => {},
+  });
+  assert.equal(result.gone, false);
+  assert.deepEqual(result.survivors, [4321]);
+  assert.ok(result.diagnostics.some((message) => message.includes('captured creation identity is unknown')));
+});
+
 test('killProcessTree skips Windows taskkill when process enumeration fails', async () => {
   let alive = true;
   const calls = [];
@@ -454,7 +509,10 @@ integrationTest('Windows watchdog kills a real grandchild process tree', { skip:
     } finally {
       if (closeTimer) clearTimeout(closeTimer);
     }
-    watchdog.cleanup();
+    const cleanup = await watchdog.settle();
+    assert.equal(cleanup.gone, true, cleanup.diagnostics.join('; '));
+    assert.ok(cleanup.ownedPids.includes(grandchildPid));
+    assert.ok(cleanup.ownedProcesses.every((entry) => entry.identity != null));
     assert.equal(watchdog.timedOut, true);
 
     let alive = true;
@@ -469,7 +527,7 @@ integrationTest('Windows watchdog kills a real grandchild process tree', { skip:
     assert.equal(alive, false, `grandchild ${grandchildPid} survived taskkill /T`);
   } finally {
     watchdog?.cleanup();
-    killProcessTree(root);
+    await killProcessTree(root);
     await rm(tempDir, { recursive: true, force: true });
   }
 });

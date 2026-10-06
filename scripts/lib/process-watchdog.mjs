@@ -24,8 +24,11 @@ function queryProcessRows(platform = process.platform, spawnSyncImpl = spawnSync
   const unavailable = (reason) => ({ rows: [], available: false, reason });
   try {
     if (platform === 'win32') {
-      // Deliberately query only identity and ancestry: never inspect command lines.
-      const script = "$ErrorActionPreference='Stop'; Get-CimInstance Win32_Process | ForEach-Object { '{0}|{1}|{2}' -f $_.ProcessId,$_.ParentProcessId,$_.CreationDate }";
+      // Local WMI avoids CIM module/transport startup and projects only the
+      // three ownership fields (not command lines or executable paths). Keep
+      // CreationDate in its raw DMTF form: PowerShell's DateTime formatting is
+      // culture-dependent and discards the provider's sub-second precision.
+      const script = "$ErrorActionPreference='Stop'; $q=[wmisearcher]'SELECT ProcessId,ParentProcessId,CreationDate FROM Win32_Process'; try { foreach ($p in $q.Get()) { '{0}|{1}|{2}' -f $p.ProcessId,$p.ParentProcessId,$p.CreationDate } } finally { $q.Dispose() }";
       const result = spawnSyncImpl('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
         encoding: 'utf8', windowsHide: true, timeout: 5_000, maxBuffer: 8 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'],
       });
@@ -230,6 +233,14 @@ export async function terminateProcessTree(child, {
         survivors = survivors.filter((entry) => {
           if (!isAlive(entry.pid, killImpl)) return false;
           const now = current.get(entry.pid);
+          // A successful census proves a captured identity absent even if a
+          // later PID probe is live (e.g. PID reuse after the census).
+          // This is distinct from a present row lacking CreationDate, which
+          // remains unknown; failed initial capture also remains fail-closed.
+          if (entry.identity != null && !now) {
+            diagnostics.push(`Windows captured PID ${entry.pid} identity ${entry.identity} is absent from the final process census`);
+            return false;
+          }
           if (entry.identity != null && now?.identity != null && now.identity !== entry.identity) {
             diagnostics.push(`Windows captured PID ${entry.pid} identity ${entry.identity} is gone; current PID identity is ${now.identity}`);
             return false;

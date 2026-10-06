@@ -1,14 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { EventEmitter } from 'node:events';
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { withPiRuntime } from '../../lib/pi-runtime-context.mjs';
 import { PI_RUNTIME_PACKAGES, PI_RUNTIME_SDK_RELATIVE_PATH, writePiRuntimeManifest, verifyPiRuntimeArtifact } from '../../lib/pi-runtime-artifact.mjs';
 import { extractRuntimeArgs, resolveRuntimeSelection, withVerificationRuntime } from '../verification-runtime.mjs';
-import { runVerification, verificationStages } from '../run-verification.mjs';
+import { runChild, runVerification, verificationStages } from '../run-verification.mjs';
 import { createGroupTsconfigOverlay, buildTsxArgs, resolveLocalTsx, runGroup } from '../run-test-files.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
@@ -119,6 +120,47 @@ test('failure stops later stages; uncertain teardown never confirms cleanup', as
   await assert.rejects(runVerification('verify:release', {}, undefined, { ...dependencies, run: async () => { throw new Error('uncertain teardown'); } }), /uncertain/);
   assert.equal(confirmed, 1);
   await assert.rejects(runVerification('bad', {}, undefined, dependencies), /Unknown/);
+});
+
+test('retained coverage nested status 125 keeps the private runtime even after confirmed outer teardown', async (t) => {
+  let owned;
+  let confirmations = 0;
+  let dispatched = 0;
+  const dependencies = {
+    withPiRuntime: (options, run) => withPiRuntime(options, (context) => run({ ...context,
+      confirmChildCompletion: () => { confirmations += 1; context.confirmChildCompletion(); },
+    }), {
+      buildPiRuntime: async ({ output }) => {
+        owned = path.dirname(output);
+        t.after(() => rm(owned, { recursive: true, force: true }));
+        return { artifactDir: output };
+      },
+      verifyPiRuntimeArtifact: async (artifactDir) => ({ artifactDir, sdkPath: '/fixture', identity: 'fixture' }),
+    }),
+    run: async (args, signal, cwd) => {
+      dispatched += 1;
+      return runChild(args, signal, cwd, {
+        spawnImpl: () => {
+          const child = new EventEmitter();
+          queueMicrotask(() => child.emit('close', 125));
+          return child;
+        },
+        watchChildProcessImpl: () => ({ settle: async () => ({ gone: true }) }),
+      });
+    },
+  };
+  await assert.rejects(runVerification('verify:release', {}, undefined, dependencies),
+    (error) => error.teardownUnconfirmed === true);
+  assert.equal(dispatched, 1);
+  assert.equal(confirmations, 0);
+  await access(owned);
+
+  // Injected stage runners must preserve the same reserved status contract.
+  await assert.rejects(runVerification('verify:release', {}, undefined, {
+    withPiRuntime: async (_options, run) => run({ confirmChildCompletion: () => { confirmations += 1; } }),
+    run: async () => 125,
+  }), (error) => error.teardownUnconfirmed === true);
+  assert.equal(confirmations, 0);
 });
 
 test('--sdk-path accepts only a verified materialized artifact, not a workspace/installed-shaped tree', async (t) => {

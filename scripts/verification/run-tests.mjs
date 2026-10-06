@@ -781,66 +781,67 @@ function indent(text, prefix = '  ') {
     .join('\n');
 }
 
-function runChildProcess(command, args, cwd, signal, envOverrides = {}, verifyCleanExit = false) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, withProcessTreeIsolation({
-      cwd,
-      env: verificationChildEnv({ ...withoutPiHarnessEnv(withoutGitRepositoryEnv(process.env)), FORCE_COLOR: '0', ...envOverrides }),
-      stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true,
-    }));
+export async function runChildProcess(command, args, cwd, signal, envOverrides = {}, verifyCleanExit = false, {
+  spawnImpl = spawn, watchChildProcessImpl = watchChildProcess,
+} = {}) {
+  const child = spawnImpl(command, args, withProcessTreeIsolation({
+    cwd,
+    env: verificationChildEnv({ ...withoutPiHarnessEnv(withoutGitRepositoryEnv(process.env)), FORCE_COLOR: '0', ...envOverrides }),
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  }));
 
-    let stdout = '';
-    let stderr = '';
-    const timeoutMs = resolveChildProcessTimeoutMs();
-    const watchdog = watchChildProcess(child, {
+  let stdout = '';
+  let stderr = '';
+  let spawnError;
+  child.on('error', (error) => { spawnError = error; });
+  const closed = new Promise((resolve) => child.once('close', (exitCode, closeSignal) => resolve({ exitCode, closeSignal })));
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => { stdout += chunk; });
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+
+  const timeoutMs = resolveChildProcessTimeoutMs();
+  let watchdog;
+  try {
+    watchdog = watchChildProcessImpl(child, {
       timeoutMs,
       signal,
       label: `${path.basename(cwd)} tests`,
       onTerminate: ({ reason }) => {
         const detail = reason === 'timeout' ? ` after ${timeoutMs}ms` : '';
-        stderr += `\nTest process ${reason === 'timeout' ? 'timed out' : 'was aborted'}${detail}; killed process tree.\n`;
+        stderr += `\nTest process ${reason === 'timeout' ? 'timed out' : 'was aborted'}${detail}; terminating process tree.\n`;
       },
     });
+  } catch (error) {
+    return { exitCode: 125, signal: null, stdout, stderr, teardownConfirmed: false, diagnostics: [String(error)] };
+  }
 
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-
-    child.stdout.on('data', (chunk) => {
-      stdout += chunk;
-    });
-    child.stderr.on('data', (chunk) => {
-      stderr += chunk;
-    });
-    child.on('error', async (error) => {
-      await watchdog.settle().catch(() => {});
-      reject(error);
-    });
-    child.on('close', async (exitCode, closeSignal) => {
-      let cleanup;
-      if (closeSignal === null && !watchdog.terminationStarted && !verifyCleanExit) {
-        // A normally closed node:test parent has already joined its workers.
-        // Avoid an expensive Windows process-tree census for packages whose
-        // tests never spawn descendants; abort/timeout always verifies cleanup.
-        watchdog.cleanup();
-        cleanup = { gone: true, survivors: [] };
-      } else {
-        cleanup = await watchdog.settle().catch((error) => ({ gone: false, survivors: [], diagnostics: [String(error)] }));
-      }
-      if (!cleanup.gone) {
-        reject(new Error(`Test tree teardown is unconfirmed: ${cleanup.survivors.join(', ')}`));
-        return;
-      }
-      resolve({
-        exitCode: watchdog.timedOut || watchdog.aborted || !cleanup.gone ? 1 : (exitCode ?? 0),
-        signal: closeSignal,
-        stdout,
-        stderr,
-        timedOut: watchdog.timedOut,
-        aborted: watchdog.aborted,
-      });
-    });
-  });
+  const { exitCode, closeSignal } = await closed;
+  let cleanup;
+  if (closeSignal === null && !watchdog.terminationStarted && !verifyCleanExit) {
+    // A normally closed node:test parent has already joined its workers.
+    // Avoid an expensive Windows process-tree census for packages whose
+    // tests never spawn descendants; abort/timeout always verifies cleanup.
+    watchdog.cleanup();
+    cleanup = { gone: true, survivors: [] };
+  } else {
+    cleanup = await watchdog.settle().catch((error) => ({ gone: false, survivors: [], diagnostics: [String(error)] }));
+  }
+  const teardownConfirmed = cleanup.gone && exitCode !== 125;
+  return {
+    exitCode: !teardownConfirmed ? 125 : spawnError || watchdog.timedOut || watchdog.aborted ? 1 : (exitCode ?? 1),
+    teardownConfirmed,
+    diagnostics: [...(cleanup.diagnostics ?? []),
+      ...(!cleanup.gone ? [`Test tree teardown is unconfirmed; survivors: ${(cleanup.survivors ?? []).join(', ') || 'unknown'}`] : []),
+      ...(exitCode === 125 ? ['Nested test tree teardown is unconfirmed'] : []),
+      ...(spawnError ? [String(spawnError)] : [])],
+    signal: closeSignal,
+    stdout,
+    stderr,
+    timedOut: watchdog.timedOut,
+    aborted: watchdog.aborted,
+  };
 }
 
 export function buildNativePackageArgs(config, runtime, testArgs = []) {
@@ -865,13 +866,17 @@ export function buildNativePackageArgs(config, runtime, testArgs = []) {
   ];
 }
 
-async function runPackage(config, fast = false, integration = false, testArgs = [], signal, runtime) {
+export async function runPackage(config, fast = false, integration = false, testArgs = [], signal, runtime, {
+  createOverlay = createTsconfigOverlay, runChild = runChildProcess,
+  resolveTsx = (owner) => owner.testTsx === 'root' ? resolveLocalTsx(repoRoot)
+    : owner.id === 'extension' ? resolveOwnerTsx() : resolveLocalTsx(owner.cwd),
+} = {}) {
   // Packages with a registry tsxConfig run through a generated overlay config
   // (owner-relative aliases extending the checked-in base tsconfig) instead of
   // the raw repo-relative path. Native fast runs manage their own overlay.
-  // The coverage overlay is disposed after the run in all paths.
+  // Retain aliases while any child lifetime remains unconfirmed.
   const tsxOverlay = !fast
-    ? createTsconfigOverlay(path.join(repoRoot, config.tsxConfig ?? 'application/hosts/vscode/tsconfig.json'), {
+    ? createOverlay(path.join(repoRoot, config.tsxConfig ?? 'application/hosts/vscode/tsconfig.json'), {
       includeOwnerDependencies: config.includeOwnerDependencies === true,
       sdkPath: runtime.sdkPath,
     })
@@ -880,13 +885,14 @@ async function runPackage(config, fast = false, integration = false, testArgs = 
   // npx and a platform shell. This preserves regexes/spaces in forwarded
   // node:test arguments and avoids command-resolution differences between cwd/shells.
   let rawResult;
+  let teardownConfirmed = true;
   try {
     const args = fast ? buildNativePackageArgs(config, runtime, testArgs) : [
-      config.testTsx === 'root' ? resolveLocalTsx(repoRoot)
-        : config.id === 'extension' ? resolveOwnerTsx() : resolveLocalTsx(config.cwd),
+      resolveTsx(config),
       ...buildTestArgs({ ...config, tsxConfig: tsxOverlay.configPath }, false, testArgs),
     ];
-    rawResult = await runChildProcess(
+    teardownConfirmed = false;
+    rawResult = await runChild(
       process.execPath,
       args,
       fast ? repoRoot : config.cwd,
@@ -894,10 +900,17 @@ async function runPackage(config, fast = false, integration = false, testArgs = 
       integration ? { PIE_RUN_INTEGRATION_TESTS: '1' } : {},
       true,
     );
+    teardownConfirmed = rawResult.teardownConfirmed === true && rawResult.exitCode !== 125;
+  } catch (error) {
+    rawResult = { stdout: '', stderr: '', signal: null, ...error.rawResult,
+      exitCode: teardownConfirmed ? 1 : 125, teardownConfirmed,
+      diagnostics: [String(error), ...(error.rawResult?.diagnostics ?? [])] };
   } finally {
-    tsxOverlay?.dispose();
+    if (teardownConfirmed) tsxOverlay?.dispose();
   }
-  const report = parseReporterOutput(rawResult.stdout, rawResult.stderr);
+  let report;
+  try { report = parseReporterOutput(rawResult.stdout, rawResult.stderr); }
+  catch (error) { rawResult.diagnostics = [...(rawResult.diagnostics ?? []), `Invalid test summary: ${error}`]; }
   const summary = report?.summary ?? null;
   const coverage = report?.coverage ?? null;
   const failures = report?.failures ?? [];
@@ -905,11 +918,13 @@ async function runPackage(config, fast = false, integration = false, testArgs = 
   const coverageFailures = fast ? [] : summarizeCoverageFailures(config, coverage);
 
   const hasTestFailures = Boolean(summary && (!summary.success || (summary.counts?.failed ?? 0) > 0 || failures.length > 0));
-  const hasInfrastructureFailure = !summary || rawResult.signal !== null || rawResult.timedOut || rawResult.aborted || (rawResult.exitCode !== 0 && !hasTestFailures);
+  const hasInfrastructureFailure = !teardownConfirmed || !summary || rawResult.signal !== null || rawResult.timedOut || rawResult.aborted || (rawResult.exitCode !== 0 && !hasTestFailures);
   const passed = !hasInfrastructureFailure && !hasTestFailures && coverageFailures.length === 0;
 
   return {
     config,
+    teardownConfirmed,
+    retainedOverlay: !teardownConfirmed ? tsxOverlay?.configPath : undefined,
     rawResult,
     summary,
     coverage,
@@ -944,6 +959,8 @@ function printPackageResult(result) {
   }
 
   if (hasInfrastructureFailure) {
+    for (const diagnostic of rawResult.diagnostics ?? []) console.log(indent(`- ${diagnostic}`, '    '));
+    if (!result.teardownConfirmed) console.log(indent(`- retaining runtime${result.retainedOverlay ? ` and coverage overlay ${result.retainedOverlay}` : ''}: child lifetime unconfirmed`, '    '));
     const rawOutput = stripReporterLines(`${rawResult.stdout}\n${rawResult.stderr}`);
     if (rawOutput.trim().length > 0) {
       console.log(indent('runner output:'));
@@ -1027,31 +1044,47 @@ async function main() {
   }
 }
 
-async function runSelectedPackages(parsedArgs, selectedPackages, runtime, signal) {
+export async function runSelectedPackages(parsedArgs, selectedPackages, runtime, signal, {
+  runPackageImpl = runPackage, printResult = printPackageResult,
+} = {}) {
   // Keep each registry owner's config and selection intact. Native file
   // concurrency is bounded by test-node; run owners sequentially in fast mode
   // instead of multiplying that budget or merging incompatible owner aliases.
   const executionConfigs = selectedPackages;
 
-  const runConfig = (config) => runPackage(
-    config,
-    parsedArgs.fast,
-    parsedArgs.integration,
-    parsedArgs.testArgs,
-    signal,
-    runtime,
-  );
+  const runConfig = async (config) => {
+    try {
+      return await runPackageImpl(
+        config,
+        parsedArgs.fast,
+        parsedArgs.integration,
+        parsedArgs.testArgs,
+        signal,
+        runtime,
+      );
+    } catch (error) {
+      // A rejected owner cannot supply a teardown proof. Join siblings before
+      // propagating uncertainty, and preserve any attached process evidence.
+      return { config, passed: false, teardownConfirmed: false, hasInfrastructureFailure: true,
+        summary: null, coverage: null, failures: [], coverageFailures: [],
+        rawResult: { stdout: '', stderr: '', signal: null, ...error.rawResult,
+          exitCode: 125, teardownConfirmed: false, diagnostics: [String(error), ...(error.rawResult?.diagnostics ?? [])] } };
+    }
+  };
   let results;
   if (parsedArgs.fast) {
     results = [];
     for (const config of executionConfigs) results.push(await runConfig(config));
   } else {
+    // Each job converts rejection to an outcome: Promise.all explicitly joins
+    // every launched owner instead of failing fast and losing sibling evidence.
     results = await Promise.all(executionConfigs.map(runConfig));
   }
   for (const result of results) {
-    printPackageResult(result);
+    printResult(result);
   }
 
+  const uncertain = results.some((result) => !result.teardownConfirmed);
   const totals = aggregateCounts(results);
   const failedResults = results.filter((result) => !result.passed);
   const passedCount = results.length - failedResults.length;
@@ -1066,6 +1099,7 @@ async function runSelectedPackages(parsedArgs, selectedPackages, runtime, signal
   const failedPackageIds = failedResults.map((result) => result.config.id).join(', ');
   console.log(`Summary: ${passedCount}/${results.length} ${packageWord} passed — ${totals.passed} passed, ${totals.failed} failed, ${totals.skipped} skipped.`);
   console.log(`Failed packages: ${failedPackageIds}`);
+  if (uncertain) throw Object.assign(new Error('Package child teardown is unconfirmed; retaining verification runtime'), { teardownUnconfirmed: true });
   process.exitCode = 1;
 }
 
@@ -1073,5 +1107,5 @@ async function runSelectedPackages(parsedArgs, selectedPackages, runtime, signal
 const invokedDirectly = process.argv[1]
   && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url;
 if (invokedDirectly) {
-  await main().catch((error) => { console.error(error.message); process.exitCode = 1; });
+  await main().catch((error) => { console.error(error.message); process.exitCode = error.teardownUnconfirmed === true ? 125 : 1; });
 }

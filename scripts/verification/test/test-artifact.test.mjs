@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { extractRuntimeArgs } from '../verification-runtime.mjs';
 import { withPiRuntime as acquirePiRuntime } from '../../lib/pi-runtime-context.mjs';
-import { ARTIFACT_TEST_GLOB, DEFAULT_ARTIFACT_SELECTORS, runArtifactTests } from '../test-artifact.mjs';
+import { ARTIFACT_TEST_GLOB, DEFAULT_ARTIFACT_SELECTORS, main, runArtifactTests } from '../test-artifact.mjs';
 import { resolveTestFiles } from '../test-node.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
@@ -175,6 +175,22 @@ test('reserved inner teardown status retains the private SDK even after the oute
   await assert.rejects(runArtifactTests({ args: selectors }, undefined, dependencies), { teardownUnconfirmed: true });
   assert.equal(state.confirmed, 0, 'the uncertain child is never declared complete');
   assert.equal(existsSync(ownedRoot), true, 'private SDK storage survives despite outer-tree disappearance');
+});
+
+test('artifact CLI propagates inner or outer uncertainty as reserved exit 125', async (t) => {
+  const previousCode = process.exitCode;
+  const previousError = console.error;
+  const messages = [];
+  console.error = message => messages.push(message);
+  t.after(() => { process.exitCode = previousCode; console.error = previousError; });
+  for (const [code, gone, expected] of [[125, true, 125], [0, false, 125], [1, true, 1], [0, true, 0]]) {
+    const { state, dependencies } = fixture(t, { code, gone });
+    dependencies.abortOnProcessSignals = () => ({ signal: undefined, dispose() {} });
+    await main(selectors, dependencies);
+    assert.equal(process.exitCode, expected);
+    assert.equal(state.confirmed, expected === 125 ? 0 : 1);
+  }
+  assert.equal(messages.length, 2);
 });
 
 test('a prelaunch failure confirms safely because no child could read the artifact', async (t) => {

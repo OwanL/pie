@@ -106,7 +106,7 @@ export async function main(argv = process.argv.slice(2), dependencies = {}) {
   catch (error) { console.error(error.message); process.exitCode = 1; return; }
   const abort = (dependencies.abortOnProcessSignals ?? abortOnProcessSignals)();
   try { process.exitCode = await runArtifactTests(selection, abort.signal, dependencies); }
-  catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = 1; }
+  catch (error) { console.error(error instanceof Error ? error.message : String(error)); process.exitCode = error.teardownUnconfirmed === true ? TEST_TEARDOWN_UNCONFIRMED_EXIT_CODE : 1; }
   finally { abort.dispose(); }
 }
 

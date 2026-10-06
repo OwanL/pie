@@ -241,9 +241,8 @@ test('symlinked payload directories and artifact roots are rejected without foll
   await assert.rejects(verifyPiRuntimeArtifact(rootLink), /artifact root must be a real directory/);
 });
 
-test('rolling inspection refills freed slots and drains started siblings on failure', async (t) => {
-  // Inject only the filesystem import, leaving the production scanner unchanged
-  // and avoiding timing assumptions about disk speed or OS file locks.
+async function injectedInspection() {
+  // Inject only the filesystem import, leaving the production scanner unchanged.
   const moduleUrl = (source) => `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
   const fsUrl = moduleUrl(`
     let fs;
@@ -256,11 +255,75 @@ test('rolling inspection refills freed slots and drains started siblings on fail
   const injectedFs = await import(fsUrl);
   const source = await readFile(new URL('../../../lib/pi-runtime/artifact.mjs', import.meta.url), 'utf8');
   const { preparePiRuntimeManifest } = await import(moduleUrl(source.replace("'node:fs/promises'", JSON.stringify(fsUrl))));
-  const deferred = () => {
-    let resolve, reject;
-    const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
-    return { promise, resolve, reject };
-  };
+  return { injectedFs, preparePiRuntimeManifest };
+}
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+test('rolling inspection uses free slots across directory boundaries', { timeout: 10000 }, async (t) => {
+  const { injectedFs, preparePiRuntimeManifest } = await injectedInspection();
+  const root = await fixture(t);
+  await put(root, 'rolling-a/held', 'a');
+  for (const name of ['a', 'b', 'c', 'd']) await put(root, `rolling-b/${name}`, name);
+  const canonicalRoot = await fs.realpath(root);
+  const rollingStats = new Map();
+  for (const relative of ['node_modules', 'rolling-a', 'rolling-b', 'rolling-a/held', ...['a', 'b', 'c', 'd'].map((name) => `rolling-b/${name}`)]) {
+    rollingStats.set(path.join(canonicalRoot, relative), await fs.lstat(path.join(canonicalRoot, relative)));
+  }
+  const held = deferred();
+  const firstStarted = deferred();
+  const secondStarted = deferred();
+  const admitted = [];
+  let active = 0;
+  let peak = 0;
+  injectedFs.setFs({
+    ...fs,
+    async lstat(file) { return rollingStats.get(file) ?? fs.lstat(file); },
+    async readdir(file) {
+      if (file === canonicalRoot) return ['rolling-a', 'rolling-b', 'node_modules'];
+      if (file === path.join(canonicalRoot, 'node_modules')) await held.promise;
+      if (file === path.join(canonicalRoot, 'rolling-a')) return ['held'];
+      if (file === path.join(canonicalRoot, 'rolling-b')) return ['a', 'b', 'c', 'd'];
+      return fs.readdir(file);
+    },
+    async readFile(file, ...args) {
+      const relative = path.relative(canonicalRoot, file).split(path.sep).join('/');
+      if (!relative.startsWith('rolling-')) return fs.readFile(file, ...args);
+      admitted.push(relative);
+      peak = Math.max(peak, ++active);
+      if (relative === 'rolling-a/held') firstStarted.resolve();
+      else secondStarted.resolve();
+      try {
+        await held.promise;
+        return await fs.readFile(file, ...args);
+      } finally { active -= 1; }
+    },
+  });
+  const inspection = preparePiRuntimeManifest(root, provenance);
+  const observed = inspection.then((value) => ({ value }), (error) => ({ error }));
+  t.after(async () => { held.resolve(); await observed; });
+  await firstStarted.promise;
+  // A deterministic event-loop gate, not a disk-speed threshold: the other
+  // directory must be admitted while the first directory's read is still held.
+  await Promise.race([
+    secondStarted.promise,
+    new Promise((resolve) => setImmediate(() => setImmediate(resolve))),
+  ]);
+  assert.ok(admitted.some((name) => name.startsWith('rolling-b/')), 'free slots must cross the held directory barrier');
+  held.resolve();
+  const result = await observed;
+  assert.ifError(result.error);
+  assert.ok(peak <= 4);
+  assert.equal(active, 0);
+  injectedFs.setFs(fs);
+  assert.deepEqual(result.value, await preparePiRuntimeManifest(root, provenance));
+});
+
+test('rolling inspection refills freed slots and drains started siblings on failure', async (t) => {
+  const { injectedFs, preparePiRuntimeManifest } = await injectedInspection();
   for (const fail of [false, true]) {
     await t.test(fail ? 'failure drains siblings' : 'success refills a slot', { timeout: 10000 }, async (t) => {
       const root = await fixture(t);
@@ -319,8 +382,12 @@ test('rolling inspection refills freed slots and drains started siblings on fail
         assert.equal(finished, false);
         assert.equal(active, 3);
         assert.deepEqual(admitted, initialAdmissions);
-        for (const index of [0, 2, 3]) gates[index].resolve();
-        assert.equal((await observed).error, failure);
+        // A lower-path sibling fails later: selection must not depend on which
+        // rejection happened first, and neither rejection may admit more work.
+        const earlierPathFailure = new Error('injected lower-path read failure');
+        gates[0].reject(earlierPathFailure);
+        for (const index of [2, 3]) gates[index].resolve();
+        assert.equal((await observed).error, earlierPathFailure);
         assert.equal(active, 0);
         assert.deepEqual(admitted, initialAdmissions);
       } else {

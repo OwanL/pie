@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { parseArgs as parseNativeArgs, resolveTestFiles } from '../test-node.mjs';
 
 import {
@@ -9,6 +11,9 @@ import {
   PACKAGE_CONFIGS,
   buildTestArgs,
   parseArgs,
+  runChildProcess,
+  runPackage,
+  runSelectedPackages,
 } from '../run-tests.mjs';
 
 test('parseArgs forwards name filters without requiring a second separator', () => {
@@ -102,4 +107,82 @@ test('buildTestArgs can run infrastructure tests without coverage collection', (
   assert.equal(args.includes('--experimental-test-coverage'), false);
   assert.equal(args.some((arg) => arg.startsWith('--test-coverage-include=')), false);
   assert.ok(args.includes('--test-concurrency=1'));
+});
+
+function fakeChild(code = 0, output = 'captured stdout', errorOutput = 'captured stderr') {
+  const child = new EventEmitter();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  queueMicrotask(() => {
+    child.stdout.write(output);
+    child.stderr.write(errorOutput);
+    child.emit('close', code, null);
+  });
+  return child;
+}
+
+const lifetimeConfig = { id: 'fixture', cwd: process.cwd(), coverage: false,
+  testGlobs: ['unused.test.ts'], coverageIncludes: [] };
+
+test('retained coverage preserves uncertain child diagnostics and both output streams', async () => {
+  const result = await runChildProcess('unused', [], process.cwd(), undefined, {}, true, {
+    spawnImpl: () => fakeChild(),
+    watchChildProcessImpl: () => ({ settle: async () => ({ gone: false, survivors: [321], diagnostics: ['census denied'] }) }),
+  });
+  assert.equal(result.exitCode, 125);
+  assert.equal(result.teardownConfirmed, false);
+  assert.equal(result.stdout, 'captured stdout');
+  assert.equal(result.stderr, 'captured stderr');
+  assert.ok(result.diagnostics.includes('census denied'));
+  assert.match(result.diagnostics.join(';'), /321/);
+});
+
+test('retained coverage keeps overlays on unconfirmed or nested teardown, but disposes confirmed failures', async () => {
+  for (const [code, gone, retained] of [[0, false, true], [125, true, true], [1, true, false]]) {
+    let disposed = 0;
+    const result = await runPackage(lifetimeConfig, false, false, [], undefined, { sdkPath: '/fixture' }, {
+      createOverlay: () => ({ configPath: '/fixture/overlay.json', dispose: () => { disposed += 1; } }),
+      resolveTsx: () => '/unused/tsx',
+      runChild: (...args) => runChildProcess(...args, {
+        spawnImpl: () => fakeChild(code),
+        watchChildProcessImpl: () => ({ settle: async () => ({ gone, survivors: [], diagnostics: ['proof'] }) }),
+      }),
+    });
+    assert.equal(disposed, retained ? 0 : 1);
+    assert.equal(result.teardownConfirmed, !retained);
+    assert.equal(result.rawResult.exitCode, retained ? 125 : 1);
+  }
+});
+
+test('retained coverage joins launched siblings and prints their evidence before propagating uncertainty', async (t) => {
+  const lines = [];
+  t.mock.method(console, 'log', (...args) => lines.push(args.join(' ')));
+  let release;
+  let siblingStarted;
+  const started = new Promise((resolve) => { siblingStarted = resolve; });
+  const delayed = new Promise((resolve) => { release = resolve; });
+  let settled = false;
+  const running = runSelectedPackages({ fast: false, testArgs: [] },
+    [{ ...lifetimeConfig, id: 'uncertain' }, { ...lifetimeConfig, id: 'sibling' }], {}, undefined, {
+      runPackageImpl: async (config) => {
+        if (config.id === 'uncertain') throw Object.assign(new Error('inner teardown denied'), {
+          rawResult: { stdout: 'uncertain stdout', stderr: 'uncertain stderr' },
+        });
+        siblingStarted();
+        await delayed;
+        return { config, passed: false, teardownConfirmed: true, hasInfrastructureFailure: true,
+          summary: null, coverage: null, failures: [], coverageFailures: [],
+          rawResult: { stdout: 'sibling stdout', stderr: 'sibling stderr', diagnostics: ['sibling proof'] } };
+      },
+    });
+  const observed = running.catch((error) => { settled = true; return error; });
+  await started;
+  await Promise.resolve();
+  assert.equal(settled, false, 'uncertain owner must not escape before its launched sibling');
+  release();
+  const error = await observed;
+  assert.equal(error.teardownUnconfirmed, true);
+  for (const evidence of ['uncertain stdout', 'uncertain stderr', 'inner teardown denied', 'sibling stdout', 'sibling stderr', 'sibling proof']) {
+    assert.ok(lines.join('\n').includes(evidence), evidence);
+  }
 });
