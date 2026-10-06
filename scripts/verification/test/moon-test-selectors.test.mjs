@@ -190,6 +190,9 @@ test('Moon Node selectors partition ordinary suites from artifact and framework-
     'SDK independence is not inferred from a directory or filename pattern');
 
   const registryFiles = resolveRegistryTestFiles();
+  const autonomousModeTest = 'harness/tool-and-skill-selection/test/autonomous-mode.test.ts';
+  assert.ok(registryFiles.has(autonomousModeTest), 'autonomous mode stays in the registered selector test root');
+  assert.ok(fastFiles.has(autonomousModeTest), 'Moon native selectors retain autonomous mode coverage');
   assert.ok(registryFiles.has(SELECTOR_REGRESSION_TEST), 'new scripts tests remain in the dynamic registry inventory');
   for (const file of INTENTIONAL_UNREGISTERED_FAST_FILES) {
     assert.ok(fastFiles.has(file), `${file} is an intentional Moon-only fast suite`);
@@ -197,6 +200,10 @@ test('Moon Node selectors partition ordinary suites from artifact and framework-
   const expectedFiles = new Set([...registryFiles, ...INTENTIONAL_UNREGISTERED_FAST_FILES,
     'scripts/development/test/refresh.artifact.test.mjs']);
   const actualFiles = new Set([...fastFiles, ...artifactFiles]);
+  assert.deepEqual({
+    unregistered: [...actualFiles].filter((file) => !expectedFiles.has(file)).sort(),
+    unselected: [...expectedFiles].filter((file) => !actualFiles.has(file)).sort(),
+  }, { unregistered: [], unselected: [] }, 'inventory partition has no unregistered or unselected files');
   assert.deepEqual([...actualFiles].sort(), [...expectedFiles].sort(),
     'fast and artifact selectors partition the registered inventory, six ordinary extras and private refresh acceptance');
 });

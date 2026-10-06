@@ -6,7 +6,7 @@ const require = createRequire(import.meta.url);
 const {
   AUTONOMOUS_MODE_ENV, AUTONOMOUS_MODE_BY_SESSION_ENV,
   isAutonomousModeEnabled, resolveAutonomousModeForSession, readAutonomousModeBySession,
-} = require('../autonomous-mode.ts') as typeof import('../autonomous-mode.js');
+} = require('../settings/autonomous-mode.ts') as typeof import('../settings/autonomous-mode.js');
 
 test('autonomous process mode accepts only the explicit enabled flag', () => {
   for (const value of [undefined, '', '0', 'true', 'false', ' 1']) {

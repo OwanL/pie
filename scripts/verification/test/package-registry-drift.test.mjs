@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { runInNewContext } from 'node:vm';
 
 import {
   ALL_PACKAGE_IDS,
@@ -23,7 +24,7 @@ import {
   resolvePackageEntry,
   typecheckProjectFor,
 } from '../../lib/test-packages.mjs';
-import { PACKAGE_CONFIGS, buildTestArgs } from '../run-tests.mjs';
+import { PACKAGE_CONFIGS, runPackage } from '../run-tests.mjs';
 import { buildRunnerInvocation } from '../run-package-group.mjs';
 import { classifyTestFile, inferRepoRoot, resolveLocalTsx } from '../run-test-files.mjs';
 import { createTsconfigOverlay, createTsxResolution, resolvePackageRoots, resolveTypeScriptCompiler } from '../../lib/package-resolution.mjs';
@@ -177,7 +178,22 @@ test('extension tests run from the relocated package owner', () => {
   assert.equal(entry.dir, 'application/hosts/vscode');
 });
 
-test('retained extension coverage follows relocated frontend and host implementations', () => {
+// Evaluate the collector's actual eligibility predicate without loading its
+// conversion dependencies or compiling an SDK. Fail closed if its seam changes.
+function sourceCoverageMatcher({ root, cwd, includes }) {
+  const source = readFileSync(new URL('../source-coverage.mjs', import.meta.url), 'utf8');
+  const exclusions = source.match(/const excluded = new Set\(\[[\s\S]*?\]\);/u)?.[0];
+  const predicate = source.match(/  const included = filename => \{[\s\S]*?\n  \};/u)?.[0];
+  assert.ok(exclusions && predicate, 'source collector eligibility seam must exist');
+  return runInNewContext(`${exclusions}\n${predicate}\nincluded`, { path, root, cwd, includes });
+}
+
+function assertCoverageOwnership(config, files) {
+  const included = sourceCoverageMatcher({ root: repoRoot, cwd: config.cwd, includes: config.coverageIncludes });
+  for (const file of files) assert.ok(included(path.join(repoRoot, file)), `${file} must reach the raw source collector`);
+}
+
+test('retained extension coverage follows relocated frontend and host implementations', async () => {
   const config = PACKAGE_CONFIGS.find((candidate) => candidate.id === 'extension');
   const originalIncludes = ['../../frontend/**/*.ts', '../../frontend/**/*.tsx',
     '**/*.ts', '**/*.tsx', '../**/*.ts', '../**/*.tsx'];
@@ -194,7 +210,30 @@ test('retained extension coverage follows relocated frontend and host implementa
     ['application/hosts/lib/renderer-delivery/renderer-view-state.ts', 'application/lib/renderer-delivery/renderer-view-state.ts'],
     ['application/hosts/lib/renderer-delivery/stream-telemetry.ts', 'application/lib/stream-telemetry.ts'],
   ];
-  const coverageArgs = buildTestArgs(config);
+  let collectorOptions;
+  let captureEnv;
+  await runPackage(config, false, false, [], undefined, { sdkPath: undefined }, {
+    createOverlay: () => ({ configPath: 'unused-overlay', dispose() {} }),
+    resolveTsx: () => 'unused-tsx',
+    createCoverageScope: () => ({ directory: path.join(repoRoot, 'unused-capture'), dispose() {} }),
+    runChild: async (_command, _args, cwd, _signal, env) => {
+      assert.equal(cwd, config.cwd);
+      captureEnv = env;
+      return { stdout: '', stderr: '', exitCode: 0, signal: null, teardownConfirmed: true };
+    },
+    collectCoverage: async (options) => {
+      collectorOptions = options;
+      return { files: [{ path: 'stub' }] };
+    },
+  });
+  assert.equal(collectorOptions.root, repoRoot);
+  assert.equal(collectorOptions.cwd, config.cwd);
+  assert.deepEqual(collectorOptions.includes, config.coverageIncludes);
+  assert.equal(captureEnv.PIE_TEST_COVERAGE_ROOT, collectorOptions.root);
+  assert.equal(captureEnv.PIE_TEST_COVERAGE_CWD, collectorOptions.cwd);
+  assert.deepEqual(JSON.parse(captureEnv.PIE_TEST_COVERAGE_INCLUDES), collectorOptions.includes);
+  assert.match(captureEnv.NODE_OPTIONS, /coverage-capture\.cjs/u);
+  const included = sourceCoverageMatcher(collectorOptions);
   for (const [original, relocated] of relocations) {
     assert.ok(originalIncludes.some((glob) => globMatchesFile(glob, config.cwd, path.join(repoRoot, original))),
       `${original} was in the retained denominator`);
@@ -204,15 +243,20 @@ test('retained extension coverage follows relocated frontend and host implementa
       `${relocated} escapes the old frontend/host roots and needs an explicit include`);
     assert.ok(config.coverageIncludes.some((glob) => globMatchesFile(glob, config.cwd, absolute)),
       `${relocated} must remain in the retained denominator`);
-    assert.ok(coverageArgs.some((arg) => arg.startsWith('--test-coverage-include=')
-      && globMatchesFile(arg.slice('--test-coverage-include='.length), config.cwd, absolute)),
-      `${relocated} must reach the legacy coverage runner`);
+    assert.ok(included(absolute), `${relocated} must reach the pinned raw source collector`);
   }
   const movedTest = 'application/lib/test/renderer-delivery/renderer-view-state.test.ts';
   assert.ok(existsSync(path.join(repoRoot, movedTest)));
   assert.ok(config.testGlobs.some((glob) => globMatchesFile(glob, config.cwd, path.join(repoRoot, movedTest))),
     'the relocated renderer-view-state test must still run in the retained suite');
-  assert.ok(coverageArgs.includes('--experimental-test-coverage'));
+  assertCoverageOwnership(config, relocations.map(([, relocated]) => relocated));
+  for (const copy of ['application/lib/composer/node_modules/image-constraints.ts',
+    'application/lib/composer/out-dev/image-constraints.ts',
+    'application/lib/composer/coverage/image-constraints.ts']) {
+    assert.equal(included(path.join(repoRoot, copy)), false, `${copy} is not source coverage`);
+  }
+  assert.equal(included(path.resolve(repoRoot, '../application/lib/composer/image-constraints.ts')), false,
+    'a copy outside the repository is not source coverage');
   assert.deepEqual(config.thresholds, { lines: 80, branches: 75 });
   // Backend extractions were outside the frontend/host glob scope; do not turn
   // this correction into a new general application/lib coverage gate.
@@ -220,6 +264,17 @@ test('retained extension coverage follows relocated frontend and host implementa
     'application/lib/protocol/token-rate.ts', 'application/lib/file-changes/contracts.ts']) {
     assert.ok(!config.coverageIncludes.some((glob) => globMatchesFile(glob, config.cwd, path.join(repoRoot, file))), file);
   }
+});
+
+test('retained coverage ownership rejects a mask that drops a relocated implementation', () => {
+  const config = PACKAGE_CONFIGS.find((candidate) => candidate.id === 'extension');
+  const file = 'application/lib/composer/image-constraints.ts';
+  const coverageIncludes = config.coverageIncludes.filter((glob) =>
+    !globMatchesFile(glob, config.cwd, path.join(repoRoot, file)));
+  assert.ok(coverageIncludes.length > 0, 'the mutation retains unrelated coverage masks');
+  assertCoverageOwnership(config, [file]);
+  assert.throws(() => assertCoverageOwnership({ ...config, coverageIncludes }, [file]),
+    /image-constraints\.ts must reach the raw source collector/u);
 });
 
 test('explicit retired source roots remain routed for rename/delete analysis', () => {
