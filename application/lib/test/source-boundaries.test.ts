@@ -28,7 +28,7 @@ function sourceFiles(owners: readonly string[]): string[] {
 
 function importEdges(source: string): ImportEdge[] {
   const edges: ImportEdge[] = [];
-  const fromClause = /\b(import|export)\s+(type\s+)?([^;'\"]*?)\s+from\s*(['\"])([^'\"]+)\4/g;
+  const fromClause = /\b(import|export)\s+(type\s+)?([^;'"]*?)\s+from\s*(['"])([^'"]+)\4/g;
   for (const match of source.matchAll(fromClause)) {
     const clause = match[3].trim();
     const namedBindings = clause.startsWith('{') && clause.endsWith('}')
@@ -40,9 +40,9 @@ function importEdges(source: string): ImportEdge[] {
   }
 
   const literalImports = [
-    /\bimport\s*(['\"])([^'\"]+)\1/g,
-    /\bimport\s*\(\s*(['\"])([^'\"]+)\1\s*\)/g,
-    /\brequire\s*\(\s*(['\"])([^'\"]+)\1\s*\)/g,
+    /\bimport\s*(['"])([^'"]+)\1/g,
+    /\bimport\s*\(\s*(['"])([^'"]+)\1\s*\)/g,
+    /\brequire\s*\(\s*(['"])([^'"]+)\1\s*\)/g,
   ];
   for (const pattern of literalImports) {
     for (const match of source.matchAll(pattern)) {

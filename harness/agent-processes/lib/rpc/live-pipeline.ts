@@ -1,10 +1,7 @@
 import type { ChatMessage, ToolCall } from './message-contract.js';
 export type { SubagentBillingCaptureReceipt } from '../../../../analytics/contracts/subagent-billing-capture-receipt.js';
 import type {
-  SubagentBillingAttempt,
   SubagentBillingEntry,
-  SubagentBillingInvocation,
-  SubagentBillingUsage,
 } from '../../../../analytics/contracts/subagent-observation.js';
 export type {
   SubagentBillingAttempt,

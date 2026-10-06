@@ -26,8 +26,6 @@
 // these names so existing pricing-core consumers retain the same public API.
 import type {
   ModelPricingPeakWindow,
-  ModelPricingPeakWindowOverride,
-  ModelPricingRecord,
   ModelTokenPricing,
   ModelTokenPricingTier,
   PricingIntervalEvidence,

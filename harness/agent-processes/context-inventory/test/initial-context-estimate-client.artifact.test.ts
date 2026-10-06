@@ -584,11 +584,12 @@ test('real source-artifact child measures cold versus prewarmed open and reads u
   const timings: InitialContextEstimateTimingSample[] = [];
   const diagnostics: string[] = [];
   const spawnedChildren: TrackedChildProcess[] = [];
-  let client: InitialContextEstimateClient | undefined;
+  // Register cleanup before awaited setup; the client is created only afterward.
+  const cleanup: { client?: InitialContextEstimateClient } = {};
   t.after(async () => {
     let disposalError: unknown;
     try {
-      await client?.dispose();
+      await cleanup.client?.dispose();
     } catch (error) {
       disposalError = error;
     }
@@ -673,7 +674,8 @@ test('real source-artifact child measures cold versus prewarmed open and reads u
         return child;
       }) as any,
     });
-    client = createClient();
+    const client = createClient();
+    cleanup.client = client;
     const input = {
       cwd,
       agentDir,

@@ -7,6 +7,7 @@ export default tseslint.config(
     ignores: [
       '**/node_modules/**',
       'application/hosts/vscode/out/**',
+      'application/hosts/vscode/out-dev/**',
       'application/hosts/vscode/.tmp/**',
       'application/hosts/vscode/.pie-sdk-*/**',
       'application/hosts/vscode/*.vsix',

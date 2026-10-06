@@ -14,7 +14,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import { loadModelPricing } from './pricing.js';
-import type { CapturedPricingFacts, ModelPricingRecord } from '../../../analytics/contracts/model-pricing-facts.js';
+import type { CapturedPricingFacts } from '../../../analytics/contracts/model-pricing-facts.js';
 
 export type { CapturedPricingFacts } from '../../../analytics/contracts/model-pricing-facts.js';
 
