@@ -183,6 +183,8 @@ test('qualified accounting replaces Node aggregates after joined child and clean
         assert.match(env.NODE_OPTIONS, /--inspect-port=0/u);
         assert.equal(env.PIE_RUN_INTEGRATION_TESTS, '1');
         assert.equal(env.PIE_TEST_COVERAGE_DIR, '/private/coverage');
+        assert.equal(env.PIE_TEST_COVERAGE_CWD, coveredConfig.cwd);
+        assert.deepEqual(JSON.parse(env.PIE_TEST_COVERAGE_INCLUDES), coveredConfig.coverageIncludes);
         assert.equal(env.NODE_V8_COVERAGE, path.join('/private/coverage', 'v8'));
         assert.ok(path.isAbsolute(env.PIE_TEST_COVERAGE_ROOT));
         events.push('joined');

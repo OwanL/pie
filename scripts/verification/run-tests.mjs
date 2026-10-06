@@ -935,6 +935,8 @@ export async function runPackage(config, fast = false, integration = false, test
             ...(!config.singleProcessCoverage ? ['--inspect-port=0'] : [])].filter(Boolean).join(' '),
           PIE_TEST_COVERAGE_DIR: coverageScope.directory,
           PIE_TEST_COVERAGE_ROOT: repoRoot,
+          PIE_TEST_COVERAGE_CWD: config.cwd,
+          PIE_TEST_COVERAGE_INCLUDES: JSON.stringify(config.coverageIncludes),
           NODE_V8_COVERAGE: path.join(coverageScope.directory, 'v8'),
         } : {}),
       },

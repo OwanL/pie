@@ -30,6 +30,8 @@ function fixture(t) {
     NODE_V8_COVERAGE: path.join(directory, 'v8'),
   };
   delete env.NODE_TEST_CONTEXT;
+  delete env.PIE_TEST_COVERAGE_CWD;
+  delete env.PIE_TEST_COVERAGE_INCLUDES;
   const runs = [];
   const run = (args, extra = {}) => {
     const before = Date.now();
@@ -253,6 +255,107 @@ test('captures inline repo provenance at generated URLs without rewriting URLs o
       && record.functions.some(fn => fn.ranges.some(range => range.count > 0))), item.url);
   }
 });
+
+test('captures only owner-selected scripts and inline origins with inherited fixed CWD', t => {
+  const f = fixture(t);
+  const owner = path.join(f.root, 'owner');
+  const other = path.join(f.root, 'other');
+  mkdirSync(owner);
+  mkdirSync(other);
+  mkdirSync(path.join(owner, 'src'));
+  const selected = path.join(owner, 'src', 'selected.cjs');
+  const unselected = path.join(other, 'loaded.cjs');
+  const selectedCode = 'globalThis.selectedWasRun = true;\n';
+  const unselectedCode = 'globalThis.otherWasRun = true;\n';
+  writeFileSync(selected, selectedCode);
+  writeFileSync(unselected, unselectedCode);
+  const mapURL = source => `data:application/json;base64,${Buffer.from(JSON.stringify({
+    version: 3, sources: [pathToFileURL(source).href], sourcesContent: ['const value: number = 1;'],
+    names: [], mappings: 'AAAA',
+  })).toString('base64')}`;
+  const cases = [
+    { origin: path.join(owner, 'src', 'mapped.ts'), capture: true },
+    { origin: path.join(other, 'mapped.ts'), capture: false },
+    { origin: path.join(owner, 'src', 'generated', 'mapped.ts'), capture: false },
+    { origin: path.join(f.temporary, 'foreign.ts'), capture: false },
+  ].map((item, index) => {
+    const url = pathToFileURL(path.join(f.root, 'out-dev', `generated-${index}.js`)).href;
+    const map = mapURL(item.origin);
+    return { ...item, url, map, code: `globalThis.mappedValue = ${index};\n//# sourceMappingURL=${map}\n//# sourceURL=${url}` };
+  });
+  const child = path.join(f.root, 'child.cjs');
+  writeFileSync(child, `
+    process.chdir(${JSON.stringify(other)});
+    require(${JSON.stringify(selected)});
+    require(${JSON.stringify(unselected)});
+    if (!globalThis.selectedWasRun || !globalThis.otherWasRun) throw new Error('sources did not execute');
+    ${cases.map(item => `require('node:vm').runInThisContext(${JSON.stringify(item.code)});`).join('\n')}
+  `);
+  const entry = path.join(f.root, 'parent.cjs');
+  writeFileSync(entry, `
+    process.chdir(${JSON.stringify(other)});
+    const result = require('node:child_process').spawnSync(process.execPath, [${JSON.stringify(child)}], { stdio: 'inherit' });
+    if (result.status !== 0) process.exitCode = result.status;
+  `);
+  const result = f.run([entry], { env: {
+    ...f.env, PIE_TEST_COVERAGE_CWD: owner,
+    PIE_TEST_COVERAGE_INCLUDES: JSON.stringify(['src\\\\**\\\\*.{cjs,ts}', '../../foreign.ts']),
+  } });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, '');
+  assert.ok(!readdirSync(f.directory).some(name => name.startsWith('recorder-error-')));
+  const records = f.records();
+  const scripts = records.flatMap(record => record.scripts);
+  assert.ok(records.some(record => record.pid !== result.pid));
+  assert.equal(scripts.find(script => sameFile(script.url, selected))?.code, selectedCode);
+  for (const filename of [unselected, entry, child]) {
+    assert.ok(!scripts.some(script => sameFile(script.url, filename)), filename);
+  }
+  for (const item of cases) {
+    const script = scripts.find(script => script.url === item.url);
+    assert.equal(Boolean(script), item.capture, item.url);
+    if (item.capture) {
+      assert.equal(script.code, item.code);
+      assert.equal(script.sourceMapURL, item.map);
+    }
+  }
+});
+
+test('empty owner includes retain accounting full-root semantics', t => {
+  const f = fixture(t);
+  const entry = path.join(f.root, 'entry.cjs');
+  writeFileSync(entry, 'globalThis.ran = true;');
+  const result = f.run([entry], { env: {
+    ...f.env, PIE_TEST_COVERAGE_CWD: f.root, PIE_TEST_COVERAGE_INCLUDES: '[]',
+  } });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(f.records().flatMap(record => record.scripts).find(script => sameFile(script.url, entry))?.code,
+    'globalThis.ran = true;');
+});
+
+for (const [name, configuration] of [
+  ['missing includes', root => ({ PIE_TEST_COVERAGE_CWD: root })],
+  ['missing CWD', () => ({ PIE_TEST_COVERAGE_INCLUDES: '["**/*.cjs"]' })],
+  ['relative CWD', () => ({ PIE_TEST_COVERAGE_CWD: '.', PIE_TEST_COVERAGE_INCLUDES: '[]' })],
+  ['empty CWD', () => ({ PIE_TEST_COVERAGE_CWD: '', PIE_TEST_COVERAGE_INCLUDES: '[]' })],
+  ['invalid JSON', root => ({ PIE_TEST_COVERAGE_CWD: root, PIE_TEST_COVERAGE_INCLUDES: '[' })],
+  ['non-array includes', root => ({ PIE_TEST_COVERAGE_CWD: root, PIE_TEST_COVERAGE_INCLUDES: '{}' })],
+  ['non-string glob', root => ({ PIE_TEST_COVERAGE_CWD: root, PIE_TEST_COVERAGE_INCLUDES: '[null]' })],
+]) {
+  test(`fails closed on owner capture configuration: ${name}`, t => {
+    const f = fixture(t);
+    const entry = path.join(f.root, 'entry.cjs');
+    writeFileSync(entry, 'globalThis.ran = true;');
+    const result = f.run([entry], { env: { ...f.env, ...configuration(f.root) } });
+    assert.equal(result.status, 125, result.stderr);
+    assert.equal(result.stdout, '');
+    const errors = readdirSync(f.directory).filter(name => name.startsWith('recorder-error-'));
+    assert.equal(errors.length, 1);
+    const record = JSON.parse(readFileSync(path.join(f.directory, errors[0]), 'utf8'));
+    assert.ok(record.errors.some(error => error.stage === 'initialize'));
+    assert.ok(f.records().every(record => record.scripts.length === 0));
+  });
+}
 
 test('fails closed on an unparseable inline map only for an already eligible URL', t => {
   const f = fixture(t);

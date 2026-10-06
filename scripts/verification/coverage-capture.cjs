@@ -22,6 +22,9 @@ if (process.execArgv.includes('--test') && !singleProcess && process.env.NODE_TE
 
 const directory = process.env.PIE_TEST_COVERAGE_DIR;
 const root = process.env.PIE_TEST_COVERAGE_ROOT;
+const ownerCwd = process.env.PIE_TEST_COVERAGE_CWD;
+const ownerIncludesJSON = process.env.PIE_TEST_COVERAGE_INCLUDES;
+let ownerIncludes;
 // PID/thread pairs can be reused within one invocation. Keep each preload
 // generation distinct, with its process start time for raw V8 correlation.
 const captureId = randomUUID();
@@ -61,7 +64,11 @@ function included(url) {
   if (!filename) return false;
   const relative = path.relative(root, filename);
   if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return false;
-  return !relative.split(path.sep).some(part => excluded.has(part.toLowerCase()));
+  if (relative.split(path.sep).some(part => excluded.has(part.toLowerCase()))) return false;
+  // Match the accounting adapter's owner-relative glob semantics. The fixed
+  // inherited CWD must not follow chdir in this process or its children.
+  return ownerIncludes === undefined || ownerIncludes.length === 0
+    || ownerIncludes.some(glob => path.matchesGlob(path.relative(ownerCwd, filename).replaceAll('\\', '/'), glob));
 }
 
 function inlineOwnedSource(url, sourceMapURL) {
@@ -119,6 +126,16 @@ try {
   // The invocation owner creates and cleans up this directory.
   if (!fs.statSync(directory).isDirectory() || !fs.statSync(root).isDirectory()) {
     throw new Error('Capture directory and source root must exist');
+  }
+  if (ownerCwd !== undefined || ownerIncludesJSON !== undefined) {
+    if (!ownerCwd || !path.isAbsolute(ownerCwd) || ownerIncludesJSON === undefined) {
+      throw new Error('PIE_TEST_COVERAGE_CWD must be absolute and paired with PIE_TEST_COVERAGE_INCLUDES');
+    }
+    const includes = JSON.parse(ownerIncludesJSON);
+    if (!Array.isArray(includes) || includes.some(glob => typeof glob !== 'string')) {
+      throw new Error('PIE_TEST_COVERAGE_INCLUDES must be a JSON array of glob strings');
+    }
+    ownerIncludes = includes.map(glob => glob.replaceAll('\\', '/'));
   }
   session = new Session();
   session.connect();
