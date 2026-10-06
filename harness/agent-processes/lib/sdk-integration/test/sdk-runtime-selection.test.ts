@@ -142,7 +142,10 @@ test('workspace-development route is an explicit, provenance-free selection and 
   assert.deepEqual(parseSdkRuntimeSelection(fixture.selection), fixture.selection);
   assert.equal(sdkRuntimeSdkPath(fixture.selection), fixture.sdkPath);
   for (const surface of ['cold', 'full'] as const) {
-    assert.deepEqual(sdkRuntimeLoadMode(fixture.selection, surface), {
+    const mode: SdkLoadMode = surface === 'cold'
+      ? sdkRuntimeLoadMode(fixture.selection, 'cold')
+      : sdkRuntimeLoadMode(fixture.selection, 'full');
+    assert.deepEqual(mode, {
       mode: 'workspace-development', workspaceRoot: fixture.workspaceRoot, surface,
     });
   }
@@ -237,7 +240,7 @@ test('source selection verifies own target, immutable payload and canonical SDK 
   assert.deepEqual(verified, selection);
   assert.deepEqual(await readFile(descriptor.cliPath), cliBefore);
   for (const surface of ['cold', 'full'] as const) {
-    const mode = surface === 'cold' ? sdkRuntimeLoadMode(verified, 'cold') : sdkRuntimeLoadMode(verified, 'full');
+    const mode: SdkLoadMode = surface === 'cold' ? sdkRuntimeLoadMode(verified, 'cold') : sdkRuntimeLoadMode(verified, 'full');
     assert.equal(mode.mode, 'source-artifact');
     if (mode.mode === 'source-artifact') {
       assert.deepEqual(mode.backendTarget, currentBackendTarget());
