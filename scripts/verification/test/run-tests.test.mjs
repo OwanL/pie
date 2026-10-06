@@ -8,6 +8,7 @@ import { parseArgs as parseNativeArgs, resolveTestFiles } from '../test-node.mjs
 
 import {
   buildNativePackageArgs,
+  createCoverageScope,
   PACKAGE_CONFIGS,
   buildTestArgs,
   parseArgs,
@@ -154,6 +155,289 @@ test('retained coverage keeps overlays on unconfirmed or nested teardown, but di
   }
 });
 
+const coveredConfig = { ...lifetimeConfig, coverage: true, coverageIncludes: ['src/**/*.ts'],
+  thresholds: { lines: 80, branches: 75 } };
+const qualifiedCoverage = { coveredLinePercent: 60, coveredBranchPercent: 70,
+  files: [{ path: path.join(process.cwd(), 'src/subject.ts'), totalLineCount: 5, coveredLineCount: 3,
+    totalBranchCount: 10, coveredBranchCount: 7, coveredLinePercent: 60, coveredBranchPercent: 70,
+    lines: [{ line: 1, count: 1 }, { line: 2, count: 0 }] }] };
+function reporterResult(exitCode = 0) {
+  return { exitCode, teardownConfirmed: true, signal: null, stderr: '',
+    stdout: '__PI_TEST_SUMMARY__' + JSON.stringify({
+      summary: { success: exitCode === 0, counts: { passed: 1, failed: exitCode ? 1 : 0 } },
+      coverage: { coveredLinePercent: 100, coveredBranchPercent: 100 }, failures: [],
+    }) };
+}
+
+test('qualified accounting replaces Node aggregates after joined child and cleans captured failures', async () => {
+  for (const exitCode of [0, 1]) {
+    const events = [];
+    const result = await runPackage(coveredConfig, false, true, [], undefined, { sdkPath: '/fixture' }, {
+      createOverlay: () => ({ configPath: '/fixture/overlay', dispose: () => events.push('overlay disposed') }),
+      createCoverageScope: () => ({ directory: '/private/coverage', dispose: () => events.push('coverage disposed') }),
+      resolveTsx: () => '/unused/tsx',
+      runChild: async (_command, args, cwd, _signal, env) => {
+        assert.equal(cwd, coveredConfig.cwd);
+        assert.ok(args.includes('--test-concurrency=1'));
+        assert.match(env.NODE_OPTIONS, /--require=.*coverage-capture\.cjs/u);
+        assert.match(env.NODE_OPTIONS, /--inspect-port=0/u);
+        assert.equal(env.PIE_RUN_INTEGRATION_TESTS, '1');
+        assert.equal(env.PIE_TEST_COVERAGE_DIR, '/private/coverage');
+        assert.equal(env.NODE_V8_COVERAGE, path.join('/private/coverage', 'v8'));
+        assert.ok(path.isAbsolute(env.PIE_TEST_COVERAGE_ROOT));
+        events.push('joined');
+        return reporterResult(exitCode);
+      },
+      collectCoverage: async (options) => {
+        assert.deepEqual(events, ['joined']);
+        assert.equal(options.directory, '/private/coverage');
+        assert.equal(options.cwd, coveredConfig.cwd);
+        assert.deepEqual(options.includes, coveredConfig.coverageIncludes);
+        events.push('captured');
+        return qualifiedCoverage;
+      },
+    });
+    assert.strictEqual(result.coverage, qualifiedCoverage);
+    assert.equal(result.passed, false);
+    assert.equal(result.hasInfrastructureFailure, false);
+    assert.equal(result.summary.counts.passed, 1);
+    assert.equal(result.coverageFailures.length, 2);
+    assert.match(result.coverageDiagnostics[0], /subject\.ts.*uncovered lines: 2/u);
+    assert.deepEqual(events, ['joined', 'captured', 'overlay disposed', 'coverage disposed']);
+    assert.equal(result.retainedCoverage, undefined);
+  }
+});
+
+test('missing records and mapping failures retain evidence and cannot fall back to Node coverage', async () => {
+  for (const collectCoverage of [async () => ({ ...qualifiedCoverage, files: [] }),
+    async () => { throw new Error('Missing TypeScript source map'); }]) {
+    let overlayDisposed = false;
+    const result = await runPackage(coveredConfig, false, false, [], undefined, { sdkPath: '/fixture' }, {
+      createOverlay: () => ({ configPath: '/fixture/overlay', dispose: () => { overlayDisposed = true; } }),
+      createCoverageScope: () => ({ directory: '/private/evidence', dispose: () => assert.fail('evidence removed') }),
+      resolveTsx: () => '/unused/tsx', runChild: async () => reporterResult(), collectCoverage,
+    });
+    assert.equal(result.hasInfrastructureFailure, true);
+    assert.equal(result.coverage, null);
+    assert.equal(result.passed, false);
+    assert.equal(result.retainedCoverage, '/private/evidence');
+    assert.equal(result.retainedOverlay, '/fixture/overlay');
+    assert.equal(overlayDisposed, false);
+    assert.match(result.rawResult.diagnostics.join(';'), /Qualified source coverage/u);
+  }
+});
+
+test('uncertain lifetime and capture exit 125 retain both scopes without accounting', async () => {
+  for (const raw of [{ ...reporterResult(), teardownConfirmed: false }, reporterResult(125)]) {
+    const result = await runPackage(coveredConfig, false, false, [], undefined, { sdkPath: '/fixture' }, {
+      createOverlay: () => ({ configPath: '/fixture/overlay', dispose: () => assert.fail('overlay removed') }),
+      createCoverageScope: () => ({ directory: '/private/evidence', dispose: () => assert.fail('evidence removed') }),
+      resolveTsx: () => '/unused/tsx', runChild: async () => raw,
+      collectCoverage: () => assert.fail('accounting before confirmed lifetime'),
+    });
+    assert.equal(result.teardownConfirmed, false);
+    assert.equal(result.retainedOverlay, '/fixture/overlay');
+    assert.equal(result.retainedCoverage, '/private/evidence');
+  }
+});
+
+test('source recorder failure propagates exit 125 and retains both scopes', async () => {
+  const result = await runPackage(coveredConfig, false, false, [], undefined, { sdkPath: '/fixture' }, {
+    createOverlay: () => ({ configPath: '/fixture/overlay', dispose: () => assert.fail('overlay removed') }),
+    createCoverageScope: () => ({ directory: '/private/evidence', dispose: () => assert.fail('evidence removed') }),
+    resolveTsx: () => '/unused/tsx', runChild: async () => reporterResult(1),
+    collectCoverage: async () => { throw Object.assign(new Error('Source capture failed'), { exitCode: 125 }); },
+  });
+  assert.equal(result.rawResult.exitCode, 125);
+  assert.equal(result.teardownConfirmed, false);
+  assert.equal(result.retainedOverlay, '/fixture/overlay');
+  assert.equal(result.retainedCoverage, '/private/evidence');
+});
+
+test('single-process coverage inherits capture but no inspector-port flag; fast and no-coverage avoid scopes', async () => {
+  for (const [config, fast] of [[{ ...coveredConfig, singleProcessCoverage: true }, false],
+    [coveredConfig, true], [lifetimeConfig, false]]) {
+    const covered = !fast && config.coverage !== false;
+    await runPackage(config, fast, false, [], undefined, { sdkPath: '/fixture' }, {
+      createOverlay: () => ({ configPath: '/fixture/overlay', dispose() {} }),
+      createCoverageScope: () => {
+        assert.equal(covered, true);
+        return { directory: '/private/evidence', dispose() {} };
+      },
+      resolveTsx: () => '/unused/tsx',
+      runChild: async (_command, _args, _cwd, _signal, env) => {
+        if (covered) {
+          assert.match(env.NODE_OPTIONS, /coverage-capture/u);
+          assert.ok(!env.NODE_OPTIONS.includes('--inspect-port=0'));
+        } else assert.deepEqual(env, {});
+        return reporterResult();
+      },
+      collectCoverage: async () => { assert.equal(covered, true); return qualifiedCoverage; },
+    });
+  }
+});
+
+test('each real coverage scope owns a distinct OS-temp directory', () => {
+  const first = createCoverageScope();
+  const second = createCoverageScope();
+  try {
+    assert.notEqual(first.directory, second.directory);
+    assert.ok(path.isAbsolute(first.directory));
+    assert.ok(path.isAbsolute(second.directory));
+  } finally {
+    first.dispose();
+    second.dispose();
+  }
+});
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+function successfulOwner(config) {
+  return { config, passed: true, teardownConfirmed: true, summary: null };
+}
+
+test('release owners use four rolling slots, preserve selection and print in owner order', async (t) => {
+  t.mock.method(console, 'log', () => {});
+  const configs = Array.from({ length: 9 }, (_, index) => ({ ...lifetimeConfig, id: String(index) }));
+  const gates = configs.map(() => deferred());
+  const starts = configs.map(() => deferred());
+  const launched = [];
+  const printed = [];
+  let active = 0;
+  let peak = 0;
+  const runtime = {};
+  const controller = new AbortController();
+  const args = { fast: false, integration: true, testArgs: ['--test-only'] };
+  const running = runSelectedPackages(args, configs, runtime, controller.signal, {
+    runPackageImpl: async (config, fast, integration, testArgs, signal, receivedRuntime) => {
+      assert.strictEqual(config, configs[Number(config.id)]);
+      assert.deepEqual([fast, integration, testArgs], [false, true, args.testArgs]);
+      assert.strictEqual(signal, controller.signal);
+      assert.strictEqual(receivedRuntime, runtime);
+      launched.push(config.id);
+      peak = Math.max(peak, ++active);
+      starts[Number(config.id)].resolve();
+      await gates[Number(config.id)].promise;
+      active -= 1;
+      return successfulOwner(config);
+    },
+    printResult: (result) => printed.push(result.config.id),
+  });
+  await Promise.all(starts.slice(0, 4).map((start) => start.promise));
+  assert.deepEqual(launched, ['0', '1', '2', '3']);
+  gates[2].resolve();
+  await starts[4].promise;
+  assert.deepEqual(launched, ['0', '1', '2', '3', '4'], 'refill must not wait for the first owner or a whole batch');
+  for (const index of [4, 3, 5, 6]) {
+    gates[index].resolve();
+    await starts[launched.length].promise;
+  }
+  assert.equal(peak, 4);
+  assert.deepEqual(printed, [], 'printing waits for all launched jobs');
+  for (const gate of gates) gate.resolve();
+  await running;
+  assert.equal(active, 0);
+  assert.deepEqual(printed, configs.map((config) => config.id));
+});
+
+test('ordinary release failures still admit every selected owner', async (t) => {
+  t.mock.method(console, 'log', () => {});
+  const previousExitCode = process.exitCode;
+  const launched = [];
+  try {
+    await runSelectedPackages({ fast: false, testArgs: [] },
+      Array.from({ length: 7 }, (_, index) => ({ ...lifetimeConfig, id: String(index) })), {}, undefined, {
+        runPackageImpl: async (config) => {
+          launched.push(config.id);
+          return { ...successfulOwner(config), passed: config.id !== '0' };
+        },
+        printResult: () => {},
+      });
+    assert.deepEqual(launched, ['0', '1', '2', '3', '4', '5', '6']);
+    assert.equal(process.exitCode, 1);
+  } finally {
+    process.exitCode = previousExitCode;
+  }
+});
+
+test('cancellation stops release admission and joins all active owners', async (t) => {
+  t.mock.method(console, 'log', () => {});
+  const previousExitCode = process.exitCode;
+  const controller = new AbortController();
+  const gates = Array.from({ length: 4 }, deferred);
+  const launched = [];
+  const printed = [];
+  let settled = false;
+  try {
+    const running = runSelectedPackages({ fast: false, testArgs: [] },
+      Array.from({ length: 8 }, (_, index) => ({ ...lifetimeConfig, id: String(index) })), {}, controller.signal, {
+        runPackageImpl: async (config) => {
+          launched.push(config.id);
+          await gates[Number(config.id)].promise;
+          return successfulOwner(config);
+        },
+        printResult: (result) => printed.push(result.config.id),
+      });
+    const observed = running.finally(() => { settled = true; });
+    controller.abort();
+    gates[0].resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(settled, false);
+    assert.deepEqual(launched, ['0', '1', '2', '3']);
+    for (const gate of gates) gate.resolve();
+    await observed;
+    assert.deepEqual(printed, launched);
+    assert.equal(process.exitCode, 1);
+  } finally {
+    process.exitCode = previousExitCode;
+  }
+});
+
+test('pre-aborted selection admits no owners in either mode', async (t) => {
+  t.mock.method(console, 'log', () => {});
+  const previousExitCode = process.exitCode;
+  try {
+    for (const fast of [false, true]) {
+      const controller = new AbortController();
+      controller.abort();
+      await runSelectedPackages({ fast, testArgs: [] }, [lifetimeConfig], {}, controller.signal, {
+        runPackageImpl: () => assert.fail('aborted owner was admitted'),
+        printResult: () => assert.fail('unlaunched owner was printed'),
+      });
+      assert.equal(process.exitCode, 1);
+    }
+  } finally {
+    process.exitCode = previousExitCode;
+  }
+});
+
+test('fast owners remain sequential', async (t) => {
+  t.mock.method(console, 'log', () => {});
+  const first = deferred();
+  const secondStarted = deferred();
+  const launched = [];
+  const running = runSelectedPackages({ fast: true, testArgs: [] },
+    [{ ...lifetimeConfig, id: 'first' }, { ...lifetimeConfig, id: 'second' }], {}, undefined, {
+      runPackageImpl: async (config) => {
+        launched.push(config.id);
+        if (config.id === 'first') await first.promise;
+        else secondStarted.resolve();
+        return successfulOwner(config);
+      },
+      printResult: () => {},
+    });
+  assert.deepEqual(launched, ['first']);
+  first.resolve();
+  await secondStarted.promise;
+  await running;
+  assert.deepEqual(launched, ['first', 'second']);
+});
+
 test('retained coverage joins launched siblings and prints their evidence before propagating uncertainty', async (t) => {
   const lines = [];
   t.mock.method(console, 'log', (...args) => lines.push(args.join(' ')));
@@ -162,14 +446,19 @@ test('retained coverage joins launched siblings and prints their evidence before
   const started = new Promise((resolve) => { siblingStarted = resolve; });
   const delayed = new Promise((resolve) => { release = resolve; });
   let settled = false;
-  const running = runSelectedPackages({ fast: false, testArgs: [] },
-    [{ ...lifetimeConfig, id: 'uncertain' }, { ...lifetimeConfig, id: 'sibling' }], {}, undefined, {
+  const launched = [];
+  const configs = ['uncertain', 'sibling', 'third', 'fourth', 'queued', 'last']
+    .map((id) => ({ ...lifetimeConfig, id }));
+  const running = runSelectedPackages({ fast: false, testArgs: [] }, configs, {}, undefined, {
       runPackageImpl: async (config) => {
+        launched.push(config.id);
         if (config.id === 'uncertain') throw Object.assign(new Error('inner teardown denied'), {
           rawResult: { stdout: 'uncertain stdout', stderr: 'uncertain stderr' },
         });
-        siblingStarted();
-        await delayed;
+        if (config.id === 'sibling') {
+          siblingStarted();
+          await delayed;
+        }
         return { config, passed: false, teardownConfirmed: true, hasInfrastructureFailure: true,
           summary: null, coverage: null, failures: [], coverageFailures: [],
           rawResult: { stdout: 'sibling stdout', stderr: 'sibling stderr', diagnostics: ['sibling proof'] } };
@@ -182,6 +471,9 @@ test('retained coverage joins launched siblings and prints their evidence before
   release();
   const error = await observed;
   assert.equal(error.teardownUnconfirmed, true);
+  assert.deepEqual(launched, configs.map((config) => config.id), 'uncertainty must not discard queued owners');
+  assert.deepEqual(lines.filter((line) => line.startsWith('✖ ')).map((line) => line.split(' ')[1]),
+    configs.map((config) => config.id), 'uncertain results still print in owner order');
   for (const evidence of ['uncertain stdout', 'uncertain stderr', 'inner teardown denied', 'sibling stdout', 'sibling stderr', 'sibling proof']) {
     assert.ok(lines.join('\n').includes(evidence), evidence);
   }

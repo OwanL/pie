@@ -86,7 +86,8 @@ test('owner aliases resolve root-hoisted manifests without a host-local Preact i
     { main: './index.js' }, { 'bin/tsc': '' });
   const options = { dependencyOwnerRoot: hostRoot };
   assert.equal(existsSync(path.join(hostRoot, 'node_modules', 'preact')), false);
-  assert.equal(resolveOwnerModule('preact', options), path.join(preactRoot, 'dist', 'preact.cjs'));
+  assert.equal(resolveNativeOwnerControls(options, ['preact'], { helper: true })[0],
+    path.join(preactRoot, 'dist', 'preact.cjs'));
   const types = createTypeScriptResolution(options);
   assert.deepEqual(types.paths.preact, [path.join(preactRoot, 'types', 'index.d.ts')]);
   assert.deepEqual(types.paths['preact/hooks'], [path.join(preactRoot, 'types', 'hooks.d.ts')]);

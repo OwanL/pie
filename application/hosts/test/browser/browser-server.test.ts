@@ -13,6 +13,7 @@ import * as http from 'node:http';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { WebSocket } from 'ws';
 
 import { BrowserServer } from '../../browser/http/browser-server';
@@ -301,9 +302,9 @@ test('HTML requests refresh a replaced asset manifest and retain prior assets', 
 test('only an explicit development profile reloads connected browser renderers after a completed renderer build', async () => {
   const child = spawnSync(process.execPath, [
     '--import', 'tsx',
-    path.resolve('application/hosts/test/browser/browser-server-development-reload.fixture.ts'),
+    fileURLToPath(new URL('./browser-server-development-reload.fixture.ts', import.meta.url)),
   ], {
-    cwd: process.cwd(),
+    cwd: fileURLToPath(new URL('../../../../', import.meta.url)),
     encoding: 'utf8',
     timeout: 15_000,
     env: {

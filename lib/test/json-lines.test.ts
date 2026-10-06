@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
 import test from 'node:test';
 
-import { serializeJsonLine } from '../serialization/json-lines.js';
-import { serializeJsonLine as rpcSerializeJsonLine } from '../../harness/agent-processes/lib/rpc/jsonl.js';
+// Compare both exports within one loader graph, including under the legacy ESM runner.
+const require = createRequire(import.meta.url);
+const { serializeJsonLine } = require('../serialization/json-lines.js') as typeof import('../serialization/json-lines.js');
+const { serializeJsonLine: rpcSerializeJsonLine } = require('../../harness/agent-processes/lib/rpc/jsonl.js') as typeof import('../../harness/agent-processes/lib/rpc/jsonl.js');
 
 test('JSON line serializer retains exact stringify plus LF semantics and RPC compatibility', () => {
   assert.equal(rpcSerializeJsonLine, serializeJsonLine);

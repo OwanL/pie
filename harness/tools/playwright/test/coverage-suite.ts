@@ -5,8 +5,10 @@ export {};
 // records for the same extension modules. Fast development runs continue to
 // discover the individual *.test.ts files and use the two-batch plan.
 await import('./artifacts.test.js');
+await import('./backend-cleanup.test.js');
 await import('./backend.test.js');
 await import('./browser-smoke.test.js');
+await import('./child-scope.test.js');
 await import('./extension.test.js');
 // Node recursively folds the embedded-loader child process's alternate jiti
 // source maps into experimental coverage. Skip only that external compatibility

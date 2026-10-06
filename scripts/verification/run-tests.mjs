@@ -2,6 +2,8 @@
 
 import { spawn } from 'node:child_process';
 import path from 'node:path';
+import os from 'node:os';
+import { mkdtempSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
 import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
@@ -866,8 +868,31 @@ export function buildNativePackageArgs(config, runtime, testArgs = []) {
   ];
 }
 
+export function createCoverageScope() {
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'pie-source-coverage-'));
+  try { mkdirSync(path.join(directory, 'v8')); }
+  catch (error) { rmSync(directory, { recursive: true, force: true }); throw error; }
+  return { directory, dispose: () => rmSync(directory, { recursive: true, force: true }) };
+}
+
+async function collectCoverage(options) {
+  const errors = readdirSync(options.directory).filter((name) => name.startsWith('recorder-error-'));
+  if (errors.length) throw Object.assign(new Error(`Source capture failed: ${errors.join(', ')}`), { exitCode: 125 });
+  const { collectSourceCoverage } = await import('./source-coverage.mjs');
+  return collectSourceCoverage(options);
+}
+
+function coverageDiagnostics(coverage) {
+  return (coverage?.files ?? [])
+    .filter((file) => file.coveredLineCount < file.totalLineCount || file.coveredBranchCount < file.totalBranchCount)
+    .sort((a, b) => (b.totalLineCount - b.coveredLineCount) - (a.totalLineCount - a.coveredLineCount))
+    .slice(0, 10)
+    .map((file) => `${path.relative(repoRoot, file.path).replaceAll('\\', '/')} — ${formatCoverage(file)}; uncovered lines: ${file.lines.filter((line) => line.count === 0).map((line) => line.line).join(', ') || 'none'}`);
+}
+
 export async function runPackage(config, fast = false, integration = false, testArgs = [], signal, runtime, {
   createOverlay = createTsconfigOverlay, runChild = runChildProcess,
+  createCoverageScope: makeCoverageScope = createCoverageScope, collectCoverage: accountCoverage = collectCoverage,
   resolveTsx = (owner) => owner.testTsx === 'root' ? resolveLocalTsx(repoRoot)
     : owner.id === 'extension' ? resolveOwnerTsx() : resolveLocalTsx(owner.cwd),
 } = {}) {
@@ -885,8 +910,14 @@ export async function runPackage(config, fast = false, integration = false, test
   // npx and a platform shell. This preserves regexes/spaces in forwarded
   // node:test arguments and avoids command-resolution differences between cwd/shells.
   let rawResult;
+  let coverageScope;
+  let sourceCoverage = null;
+  let coverageCaptured = false;
+  let coverageError;
+  const coveredOwner = !fast && config.coverage !== false;
   let teardownConfirmed = true;
   try {
+    if (coveredOwner) coverageScope = makeCoverageScope(config);
     const args = fast ? buildNativePackageArgs(config, runtime, testArgs) : [
       resolveTsx(config),
       ...buildTestArgs({ ...config, tsxConfig: tsxOverlay.configPath }, false, testArgs),
@@ -897,34 +928,65 @@ export async function runPackage(config, fast = false, integration = false, test
       args,
       fast ? repoRoot : config.cwd,
       signal,
-      integration ? { PIE_RUN_INTEGRATION_TESTS: '1' } : {},
+      {
+        ...(integration ? { PIE_RUN_INTEGRATION_TESTS: '1' } : {}),
+        ...(coverageScope ? {
+          NODE_OPTIONS: [process.env.NODE_OPTIONS, `--require=${JSON.stringify(path.join(__dirname, 'coverage-capture.cjs'))}`,
+            ...(!config.singleProcessCoverage ? ['--inspect-port=0'] : [])].filter(Boolean).join(' '),
+          PIE_TEST_COVERAGE_DIR: coverageScope.directory,
+          PIE_TEST_COVERAGE_ROOT: repoRoot,
+          NODE_V8_COVERAGE: path.join(coverageScope.directory, 'v8'),
+        } : {}),
+      },
       true,
     );
     teardownConfirmed = rawResult.teardownConfirmed === true && rawResult.exitCode !== 125;
+    if (coverageScope && teardownConfirmed) {
+      try {
+        sourceCoverage = await accountCoverage({ directory: coverageScope.directory, root: repoRoot,
+          cwd: config.cwd, includes: config.coverageIncludes });
+        if (!sourceCoverage?.files?.length) throw new Error('Qualified source coverage records missing');
+        coverageCaptured = true;
+      } catch (error) {
+        sourceCoverage = null;
+        if (error.exitCode === 125) {
+          rawResult.exitCode = 125;
+          rawResult.teardownConfirmed = false;
+          teardownConfirmed = false;
+        }
+        const causes = [];
+        for (let cause = error; cause; cause = cause.cause) causes.push(String(cause));
+        coverageError = `Qualified source coverage failed: ${causes.join('; caused by ')}`;
+        rawResult.diagnostics = [...(rawResult.diagnostics ?? []), coverageError];
+      }
+    }
   } catch (error) {
     rawResult = { stdout: '', stderr: '', signal: null, ...error.rawResult,
       exitCode: teardownConfirmed ? 1 : 125, teardownConfirmed,
       diagnostics: [String(error), ...(error.rawResult?.diagnostics ?? [])] };
   } finally {
-    if (teardownConfirmed) tsxOverlay?.dispose();
+    if (teardownConfirmed && (!coverageScope || coverageCaptured)) tsxOverlay?.dispose();
+    if (teardownConfirmed && coverageCaptured) coverageScope?.dispose();
   }
   let report;
   try { report = parseReporterOutput(rawResult.stdout, rawResult.stderr); }
   catch (error) { rawResult.diagnostics = [...(rawResult.diagnostics ?? []), `Invalid test summary: ${error}`]; }
   const summary = report?.summary ?? null;
-  const coverage = report?.coverage ?? null;
+  const coverage = coveredOwner ? sourceCoverage : report?.coverage ?? null;
   const failures = report?.failures ?? [];
   const fileAccounting = report?.fileAccounting ?? null;
   const coverageFailures = fast ? [] : summarizeCoverageFailures(config, coverage);
 
   const hasTestFailures = Boolean(summary && (!summary.success || (summary.counts?.failed ?? 0) > 0 || failures.length > 0));
-  const hasInfrastructureFailure = !teardownConfirmed || !summary || rawResult.signal !== null || rawResult.timedOut || rawResult.aborted || (rawResult.exitCode !== 0 && !hasTestFailures);
+  const hasInfrastructureFailure = Boolean(coverageError) || !teardownConfirmed || !summary || rawResult.signal !== null || rawResult.timedOut || rawResult.aborted || (rawResult.exitCode !== 0 && !hasTestFailures);
   const passed = !hasInfrastructureFailure && !hasTestFailures && coverageFailures.length === 0;
 
   return {
     config,
     teardownConfirmed,
-    retainedOverlay: !teardownConfirmed ? tsxOverlay?.configPath : undefined,
+    retainedOverlay: !teardownConfirmed || (coverageScope && !coverageCaptured) ? tsxOverlay?.configPath : undefined,
+    retainedCoverage: coverageScope && !coverageCaptured ? coverageScope.directory : undefined,
+    coverageDiagnostics: coverageDiagnostics(coverage),
     rawResult,
     summary,
     coverage,
@@ -956,8 +1018,11 @@ function printPackageResult(result) {
     for (const failure of coverageFailures) {
       console.log(indent(`- ${failure}`, '    '));
     }
+    for (const diagnostic of result.coverageDiagnostics ?? []) console.log(indent(`- ${diagnostic}`, '    '));
   }
 
+  if (result.retainedCoverage) console.log(indent(`- retaining source coverage evidence: ${result.retainedCoverage}`, '    '));
+  if (result.teardownConfirmed && result.retainedOverlay) console.log(indent(`- retaining coverage overlay for accounting diagnostics: ${result.retainedOverlay}`, '    '));
   if (hasInfrastructureFailure) {
     for (const diagnostic of rawResult.diagnostics ?? []) console.log(indent(`- ${diagnostic}`, '    '));
     if (!result.teardownConfirmed) console.log(indent(`- retaining runtime${result.retainedOverlay ? ` and coverage overlay ${result.retainedOverlay}` : ''}: child lifetime unconfirmed`, '    '));
@@ -1071,15 +1136,21 @@ export async function runSelectedPackages(parsedArgs, selectedPackages, runtime,
           exitCode: 125, teardownConfirmed: false, diagnostics: [String(error), ...(error.rawResult?.diagnostics ?? [])] } };
     }
   };
-  let results;
-  if (parsedArgs.fast) {
-    results = [];
-    for (const config of executionConfigs) results.push(await runConfig(config));
-  } else {
-    // Each job converts rejection to an outcome: Promise.all explicitly joins
-    // every launched owner instead of failing fast and losing sibling evidence.
-    results = await Promise.all(executionConfigs.map(runConfig));
-  }
+  const results = [];
+  let nextIndex = 0;
+  const runNext = async () => {
+    while (nextIndex < executionConfigs.length && !signal?.aborted) {
+      const index = nextIndex++;
+      // Ordinary failures (including uncertain teardown) remain outcomes, not
+      // admission failures. Only cancellation stops launching selected owners.
+      results[index] = await runConfig(executionConfigs[index]);
+    }
+  };
+  // Rolling slots bound legacy owner startup/census load without changing test
+  // selection, per-owner deadlines, coverage gates, or native file concurrency.
+  // Each slot joins its current owner before refilling; all slots are joined
+  // before printing in selection order or propagating uncertain lifetime.
+  await Promise.all(Array.from({ length: Math.min(parsedArgs.fast ? 1 : 4, executionConfigs.length) }, runNext));
   for (const result of results) {
     printResult(result);
   }
@@ -1091,6 +1162,10 @@ export async function runSelectedPackages(parsedArgs, selectedPackages, runtime,
   const packageWord = results.length === 1 ? 'package' : 'packages';
 
   console.log('');
+  if (signal?.aborted) {
+    console.log(`Runner interrupted; ${executionConfigs.length - results.length} selected owners not launched.`);
+    process.exitCode = 1;
+  }
   if (failedResults.length === 0) {
     console.log(`Summary: ${passedCount}/${results.length} ${packageWord} passed — ${totals.passed} passed, ${totals.failed} failed, ${totals.skipped} skipped.`);
     return;

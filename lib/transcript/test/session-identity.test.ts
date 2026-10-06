@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
+import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { resolveSessionIdentity, sessionPathHash } from '../session-identity.js';
-import * as compatibility from '../../../harness/session-storage/ownership/session-identity.js';
+// Compare both exports within one loader graph, including under the legacy ESM runner.
+const require = createRequire(import.meta.url);
+const { resolveSessionIdentity, sessionPathHash } = require('../session-identity.js') as typeof import('../session-identity.js');
+const compatibility = require('../../../harness/session-storage/ownership/session-identity.js') as typeof import('../../../harness/session-storage/ownership/session-identity.js');
 
 test('session identity compatibility exports use the neutral implementation', () => {
   assert.equal(compatibility.resolveSessionIdentity, resolveSessionIdentity);

@@ -14,6 +14,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import syncFs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { existsSync, symlinkSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -320,6 +322,11 @@ describe('nonexistent cwd', () => {
 // ---------------------------------------------------------------------------
 
 describe('path normalisation', () => {
+  it('rejects a nonempty relative cwd rather than discovering process-relative skills', async () => {
+    const handler = await makeHandler();
+    assert.deepEqual(await handler({ cwd: ' skills/.. ', reason: 'startup' }, {}), {});
+  });
+
   it('handles cwd with a trailing path separator', async (t) => {
     const cwd = await makeTempDir();
     t.after(() => fs.rm(cwd, { recursive: true, force: true }));
@@ -476,6 +483,29 @@ describe('no shared mutable state across calls', () => {
 // ---------------------------------------------------------------------------
 
 describe('no caching between calls', () => {
+  it('returns {} if the skills directory disappears between exists and stat', async (t) => {
+    const cwd = await makeTempDir();
+    t.after(() => fs.rm(cwd, { recursive: true, force: true }));
+    const skillsPath = path.join(cwd, 'skills');
+    await fs.mkdir(skillsPath);
+    const handler = await makeHandler();
+    const realExists = syncFs.existsSync;
+    const probe = t.mock.method(syncFs, 'existsSync', (candidate: Parameters<typeof realExists>[0]) => {
+      const exists = realExists(candidate);
+      if (candidate === skillsPath && exists) syncFs.rmdirSync(skillsPath);
+      return exists;
+    });
+    syncBuiltinESMExports();
+    try {
+      assert.deepEqual(await handler({ cwd, reason: 'reload' }, {}), {});
+      assert.equal(probe.mock.callCount(), 1);
+      assert.equal(realExists(skillsPath), false);
+    } finally {
+      probe.mock.restore();
+      syncBuiltinESMExports();
+    }
+  });
+
   it('reflects filesystem state at call time — removal is visible on next call', async (t) => {
     const cwd = await makeTempDir();
     t.after(() => fs.rm(cwd, { recursive: true, force: true }));
