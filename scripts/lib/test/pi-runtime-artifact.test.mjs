@@ -304,7 +304,11 @@ test('rolling inspection refills freed slots and drains started siblings on fail
         await observed;
       });
       await Promise.all(started.slice(0, 4).map((gate) => gate.promise));
-      assert.deepEqual(admitted, [0, 1, 2, 3]);
+      // Workers claim entries in order, but their asynchronous lstat calls can
+      // reach readFile in any order. Assert membership, not filesystem timing.
+      const initialAdmissions = [...admitted];
+      assert.deepEqual([...initialAdmissions].sort((a, b) => a - b), [0, 1, 2, 3]);
+      assert.equal(active, 4);
       const failure = new Error('injected read failure');
       if (fail) gates[1].reject(failure);
       else gates[1].resolve();
@@ -314,22 +318,22 @@ test('rolling inspection refills freed slots and drains started siblings on fail
         await new Promise((resolve) => setImmediate(resolve));
         assert.equal(finished, false);
         assert.equal(active, 3);
-        assert.deepEqual(admitted, [0, 1, 2, 3]);
+        assert.deepEqual(admitted, initialAdmissions);
         for (const index of [0, 2, 3]) gates[index].resolve();
         assert.equal((await observed).error, failure);
         assert.equal(active, 0);
-        assert.deepEqual(admitted, [0, 1, 2, 3]);
+        assert.deepEqual(admitted, initialAdmissions);
       } else {
         await started[4].promise;
         assert.equal(active, 4);
-        assert.deepEqual(admitted, [0, 1, 2, 3, 4]);
+        assert.deepEqual(admitted, [...initialAdmissions, 4]);
         assert.equal(finished, false);
         for (const gate of gates) gate.resolve();
         const result = await observed;
         assert.ifError(result.error);
         injectedFs.setFs(fs);
         assert.deepEqual(result.value, await preparePiRuntimeManifest(root, provenance));
-        assert.deepEqual(admitted, names.map((_, index) => index));
+        assert.deepEqual([...admitted].sort((a, b) => a - b), names.map((_, index) => index));
         assert.equal(active, 0);
       }
       assert.equal(peak, 4);
