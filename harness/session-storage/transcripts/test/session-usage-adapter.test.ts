@@ -25,7 +25,7 @@ function compact(billing: unknown[]) {
 }
 
 test('snapshot uses durable billing identity, constituent entries, and ordered tool parts', () => {
-  const toolCall = { id: 'child', name: ' Subagent ', status: 'completed' as const,
+  const toolCall = { id: 'child', name: ' Subagent ', input: {}, status: 'completed' as const,
     result: { billing: [{ path: '0', usage: { ...usage, cost: 0 } }] } };
   const snapshot = buildSessionUsageSnapshot([
     message({ role: 'user' }),

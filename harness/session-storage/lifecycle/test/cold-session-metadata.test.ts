@@ -4,7 +4,12 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import test from 'node:test';
 
+import type { ModelSettings } from '../../../model-providers/catalog/model-contract.js';
 import { ColdSessionStore, StaleColdSessionLeaseError } from '../cold-session-store';
+
+function modelSettings(overrides: Partial<ModelSettings> = {}): ModelSettings {
+  return { defaultModel: 'default-model', defaultThinkingLevel: 'medium', ...overrides };
+}
 
 async function withStore(run: (store: ColdSessionStore, sessionPath: string, root: string, setManager: (manager: unknown) => void) => Promise<void>) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-cold-metadata-'));
@@ -32,20 +37,22 @@ test('hot durable metadata honors explicit thinking changes and otherwise uses s
       buildSessionContext: () => ({ thinkingLevel: 'high', model: { modelId: 'durable-model', provider: 'mock' } }),
       getCwd: () => '/durable-cwd',
     });
-    assert.deepEqual(await store.readDurableSessionMetadata(sessionPath, { defaultThinkingLevel: 'medium' }), {
+    assert.deepEqual(await store.readDurableSessionMetadata(sessionPath, modelSettings()), {
       cwd: '/durable-cwd', modelId: 'durable-model', provider: 'mock', thinkingLevel: 'high',
     });
     setManager({ getBranch: () => [], getCwd: () => '' });
-    assert.deepEqual(await store.readDurableSessionMetadata(sessionPath, { defaultThinkingLevel: 'medium' }), {
+    assert.deepEqual(await store.readDurableSessionMetadata(sessionPath, modelSettings()), {
       cwd: root, thinkingLevel: 'medium',
     });
-    assert.deepEqual(await store.readDurableSessionMetadata(sessionPath, {}), { cwd: root });
+    // Capture malformed wire settings to exercise the absent-default fallback.
+    const missingDefaults: unknown = {};
+    assert.deepEqual(await store.readDurableSessionMetadata(sessionPath, missingDefaults as ModelSettings), { cwd: root });
     setManager({
       getBranch: () => [{ type: 'thinking_level_change' }],
       buildSessionContext: () => ({ thinkingLevel: 'unknown', model: null }),
       getCwd: () => root,
     });
-    assert.deepEqual(await store.readDurableSessionMetadata(sessionPath, { defaultThinkingLevel: 'low' }), {
+    assert.deepEqual(await store.readDurableSessionMetadata(sessionPath, modelSettings({ defaultThinkingLevel: 'low' })), {
       cwd: root, thinkingLevel: 'low',
     });
   });
@@ -60,12 +67,12 @@ test('hot durable metadata rejects migration and ownership changes without cold 
       buildSessionContext: () => { store.leases.releaseCanonicalPaths([token]); return {}; },
       getCwd: () => root,
     });
-    await assert.rejects(store.readDurableSessionMetadata(sessionPath, {}),
+    await assert.rejects(store.readDurableSessionMetadata(sessionPath, modelSettings()),
       (error) => error instanceof StaleColdSessionLeaseError && error.reason === 'ownership-revision');
     assert.equal(opens, 1);
     store.leases.reserveCanonicalPaths([sessionPath], 'hot:replacement', { hideFromCatalog: false });
     await fs.writeFile(sessionPath, '{"type":"session","version":2}\n', 'utf8');
-    await assert.rejects(store.readDurableSessionMetadata(sessionPath, {}),
+    await assert.rejects(store.readDurableSessionMetadata(sessionPath, modelSettings()),
       (error: { code?: string }) => error.code === 'SESSION_SETTINGS_UNAVAILABLE');
     assert.equal(opens, 1, 'legacy hot metadata must not reach SDK migration');
     assert.equal(await fs.readFile(sessionPath, 'utf8'), '{"type":"session","version":2}\n');
@@ -80,7 +87,7 @@ test('cold durable metadata delegates a transcript-free open and omits absent op
       calls.push({ openedPath, options });
       return { session } as any;
     };
-    const settings = { defaultThinkingLevel: 'medium' as const };
+    const settings = modelSettings();
     assert.deepEqual(await store.readDurableSessionMetadata(sessionPath, settings), { cwd: root });
     session = { cwd: '/cold-cwd', modelId: 'model', provider: 'mock', thinkingLevel: 'low' };
     assert.deepEqual(await store.readDurableSessionMetadata(sessionPath, settings), session);

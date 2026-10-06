@@ -318,8 +318,9 @@ test('evicted durable sources are re-read by exact identity and reject changed p
     const before = pagesOf(emitted, 'a').length;
     await store.fetch('fetch', 'a', ADDRESS, page.ref, 4096, fence());
     assert.equal(pagesOf(emitted, 'a').length, before, failure);
-    assert.equal(errorsOf(emitted, 'a').at(-1)?.kind, 'detail.error');
-    assert.equal(errorsOf(emitted, 'a').at(-1)?.code, 'NOT_FOUND');
+    const error = errorsOf(emitted, 'a').at(-1);
+    assert.ok(error?.kind === 'detail.error');
+    assert.equal(error.code, 'NOT_FOUND');
     store.dispose();
     assert.deepEqual(store.debugState(), { sources: 0, subscriptions: 0, canonicalBytes: 0 });
   }
@@ -347,7 +348,11 @@ test('durable stream backpressure closes start/page owners and reports failed re
       assert.equal(store.owns('s'), false);
       assert.equal(terminalOf(emitted, 's'), undefined);
     }
-    if (blocked !== 'detail.start') assert.equal(errorsOf(emitted, 's').at(-1)?.code, 'UNAVAILABLE');
+    if (blocked !== 'detail.start') {
+      const error = errorsOf(emitted, 's').at(-1);
+      assert.ok(error?.kind === 'detail.error');
+      assert.equal(error.code, 'UNAVAILABLE');
+    }
   }
 });
 
@@ -355,7 +360,9 @@ test('durable subscribe rejects duplicate owners and unsafe resolver sizes befor
   const { store, emitted } = createStore();
   await store.subscribe('r', 's', ADDRESS, 4096, fence());
   await store.subscribe('duplicate', 's', ADDRESS, 4096, fence());
-  assert.equal(errorsOf(emitted, 's').at(-1)?.code, 'SUBSCRIPTION_CONFLICT');
+  const error = errorsOf(emitted, 's').at(-1);
+  assert.ok(error?.kind === 'detail.error');
+  assert.equal(error.code, 'SUBSCRIPTION_CONFLICT');
   assert.equal(startOf(emitted, 's')?.kind, 'detail.start');
   for (const value of [undefined, BigInt(1)]) {
     const messages: CoordinatorToHostDetailMessage[] = [];
