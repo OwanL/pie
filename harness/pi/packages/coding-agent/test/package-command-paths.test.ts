@@ -1,6 +1,6 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ENV_AGENT_DIR, PACKAGE_NAME, VERSION } from "../src/config.ts";
 import type { ResolvedPaths } from "../src/core/package-manager.ts";
@@ -21,6 +21,39 @@ describe("package commands", () => {
 	let originalPath: string | undefined;
 	let originalExitCode: typeof process.exitCode;
 	let originalExecPath: string;
+	let originalArgv1: string | undefined;
+
+	function privatePath(binDir: string): string {
+		if (process.platform !== "win32") return binDir;
+		if (!process.env.ComSpec) throw new Error("Windows manager fixtures require native ComSpec");
+		return [binDir, dirname(process.env.ComSpec)].join(delimiter);
+	}
+
+	function createFakePackageManager(manager: string, root: string, exitCode = 23): string {
+		const binDir = join(tempDir, "bin");
+		mkdirSync(binDir, { recursive: true });
+		const scriptPath = join(binDir, `${manager}.cjs`);
+		const recordPath = join(tempDir, `${manager}-argv.json`);
+		writeFileSync(
+			scriptPath,
+			`const fs=require("node:fs"),args=process.argv.slice(2),record=${JSON.stringify(recordPath)};
+const records=fs.existsSync(record)?JSON.parse(fs.readFileSync(record,"utf8")):[];
+records.push(args);fs.writeFileSync(record,JSON.stringify(records));
+if(args.length===2 && args[0]==="root" && args[1]==="-g") console.log(${JSON.stringify(root)});
+else process.exit(${exitCode});
+`,
+		);
+		const executable = join(binDir, process.platform === "win32" ? `${manager}.cmd` : manager);
+		const quoteSh = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+		writeFileSync(
+			executable,
+			process.platform === "win32"
+				? `@echo off\r\n"${originalExecPath}" "${scriptPath}" %*\r\nexit /b %errorlevel%\r\n`
+				: `#!/bin/sh\nexec ${quoteSh(originalExecPath)} ${quoteSh(scriptPath)} "$@"\n`,
+		);
+		chmodSync(executable, 0o755);
+		return recordPath;
+	}
 
 	function getNewerPatchVersion(): string {
 		const [major = "0", minor = "0", patch = "0"] = VERSION.split(".");
@@ -64,6 +97,9 @@ describe("package commands", () => {
 		originalPath = process.env.PATH;
 		originalExitCode = process.exitCode;
 		originalExecPath = process.execPath;
+		originalArgv1 = process.argv[1];
+		// No package command may discover a real manager from the developer's PATH.
+		process.env.PATH = privatePath(join(tempDir, "bin"));
 		process.exitCode = undefined;
 		vi.spyOn(process, "exit").mockImplementation(((code?: string | number | null) => {
 			if (code === undefined || code === null || Number(code) === 0) {
@@ -98,6 +134,8 @@ describe("package commands", () => {
 			process.env.PATH = originalPath;
 		}
 		Object.defineProperty(process, "execPath", { value: originalExecPath, configurable: true });
+		if (originalArgv1 === undefined) process.argv.splice(1, 1);
+		else process.argv[1] = originalArgv1;
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
@@ -376,6 +414,7 @@ describe("package commands", () => {
 		storage.withLock("global", () => JSON.stringify({ packages: ["npm:pi-tools"] }));
 		const settingsManager = SettingsManager.fromStorage(storage, { projectTrusted: true });
 		const resolvedPaths = extensionPaths(join(tempDir, "pkg"), "npm:pi-tools", "user", ["bar.ts"]);
+		const requestRender = vi.fn();
 		const selector = new ConfigSelectorComponent(
 			{ global: resolvedPaths, project: resolvedPaths },
 			settingsManager,
@@ -383,23 +422,32 @@ describe("package commands", () => {
 			agentDir,
 			() => {},
 			() => {},
-			() => {},
+			requestRender,
 			24,
 			"project",
 		);
 
-		selector.getResourceList().handleInput(" ");
+		const resourceList = selector.getResourceList();
+		const toggleSpy = vi.spyOn(resourceList, "onToggle");
+		resourceList.handleInput(" ");
 		expect(settingsManager.getProjectSettings().packages).toEqual([
-			{ source: "npm:pi-tools", autoload: false, extensions: ["-extensions/bar.ts"] },
+			{ source: "npm:pi-tools", autoload: false, extensions: [`-${join("extensions", "bar.ts")}`] },
 		]);
+		expect(toggleSpy).toHaveBeenLastCalledWith(expect.objectContaining({ enabled: false }), false);
+		expect(requestRender).toHaveBeenCalledTimes(1);
 
-		selector.getResourceList().handleInput(" ");
+		resourceList.handleInput(" ");
 		expect(settingsManager.getProjectSettings().packages).toEqual([
-			{ source: "npm:pi-tools", autoload: false, extensions: ["+extensions/bar.ts"] },
+			{ source: "npm:pi-tools", autoload: false, extensions: [`+${join("extensions", "bar.ts")}`] },
 		]);
+		expect(toggleSpy).toHaveBeenLastCalledWith(expect.objectContaining({ enabled: true }), true);
+		expect(requestRender).toHaveBeenCalledTimes(2);
 
-		selector.getResourceList().handleInput(" ");
+		resourceList.handleInput(" ");
 		expect(settingsManager.getProjectSettings().packages).toEqual([]);
+		expect(toggleSpy).toHaveBeenLastCalledWith(expect.objectContaining({ enabled: true }), true);
+		expect(requestRender).toHaveBeenCalledTimes(3);
+		expect(settingsManager.getGlobalSettings().packages).toEqual(["npm:pi-tools"]);
 	});
 
 	it("shows a friendly error for unknown install options", async () => {
@@ -587,22 +635,17 @@ else {
 		const globalRoot = join(tempDir, "pnpm", "global", "v11");
 		const selfPackageDir = join(globalRoot, "node_modules", "@earendil-works", "pi-coding-agent");
 		const fakeBinDir = join(tempDir, "bin");
-		const fakePnpmPath = join(fakeBinDir, process.platform === "win32" ? "pnpm.cmd" : "pnpm");
 		mkdirSync(selfPackageDir, { recursive: true });
-		mkdirSync(fakeBinDir, { recursive: true });
 		writeFileSync(join(selfPackageDir, "package.json"), JSON.stringify({ name: PACKAGE_NAME, version: VERSION }));
-		const fakePnpmScript =
-			process.platform === "win32"
-				? `@echo off\r\nif "%1"=="root" if "%2"=="-g" (echo ${globalRoot} & exit /b 0)\r\nexit /b 23\r\n`
-				: `#!/bin/sh\nif [ "$1" = "root" ] && [ "$2" = "-g" ]; then\n\tprintf '%s\\n' '${globalRoot.replaceAll("'", "'\\''")}'\n\texit 0\nfi\nexit 23\n`;
-		writeFileSync(fakePnpmPath, fakePnpmScript);
-		chmodSync(fakePnpmPath, 0o755);
-		process.env.PATH = `${fakeBinDir}${process.env.PATH ? `${delimiter}${process.env.PATH}` : ""}`;
+		const recordPath = createFakePackageManager("pnpm", join(globalRoot, "node_modules"));
+		const npmRecordPath = createFakePackageManager("npm", join(tempDir, "unrelated-npm-root"));
+		process.env.PATH = privatePath(fakeBinDir);
 		process.env.PI_PACKAGE_DIR = selfPackageDir;
 		Object.defineProperty(process, "execPath", {
-			value: join(tempDir, "pnpm", "bin", "node"),
+			value: join(selfPackageDir, "dist", "cli.js"),
 			configurable: true,
 		});
+		process.argv[1] = join(selfPackageDir, "dist", "cli.js");
 		vi.stubGlobal(
 			"fetch",
 			vi.fn(async () => Response.json({ version: getNewerPatchVersion() })),
@@ -621,6 +664,19 @@ else {
 			expect(stderr).toContain("exited with code 23");
 			expect(stderr).toContain("If pnpm reports missing package versions");
 			expect(stderr).toContain("Run `pnpm store prune` and retry `pi update --self`.");
+			const recordedCalls = JSON.parse(readFileSync(recordPath, "utf8")) as string[][];
+			expect(recordedCalls).toEqual([
+				["root", "-g"],
+				["root", "-g"],
+				[
+					"install",
+					"-g",
+					"--ignore-scripts",
+					"--config.minimumReleaseAge=0",
+					`${PACKAGE_NAME}@${getNewerPatchVersion()}`,
+				],
+			]);
+			expect(existsSync(npmRecordPath)).toBe(false);
 		} finally {
 			logSpy.mockRestore();
 			errorSpy.mockRestore();

@@ -47,14 +47,21 @@ async function loadPolicy(): Promise<Policy> {
   return await import(policyUrl) as Policy;
 }
 
-const EXCLUDE_FLAGS = (await loadPolicy()).grepExcludeFlags();
-const ALL_DIRS = (await loadPolicy()).PROTECTED_DIRECTORY_NAMES;
+let EXCLUDE_FLAGS: string;
+let ALL_DIRS: readonly string[];
+let PRUNE_EXPR: string;
+let PRUNE_WRAP: string;
+test.before(async () => {
+  const policy = await loadPolicy();
+  EXCLUDE_FLAGS = policy.grepExcludeFlags();
+  ALL_DIRS = policy.PROTECTED_DIRECTORY_NAMES;
+  PRUNE_EXPR = policy.findPruneExpression();
+  /** Bare-root find rewrite prefix: wrap the canonical prune expression. */
+  PRUNE_WRAP = `\\( ${PRUNE_EXPR} \\) -prune -o`;
+});
 /** Canonical exclude-dir flags excluding the given dirs (what a rewrite should ADD). */
 const MISSING_FLAGS = (...already: string[]) =>
   ALL_DIRS.filter((d) => !already.includes(d)).map((d) => `--exclude-dir=${d}`).join(' ');
-const PRUNE_EXPR = (await loadPolicy()).findPruneExpression();
-/** Bare-root find rewrite prefix: wrap the canonical prune expression. */
-const PRUNE_WRAP = `\\( ${PRUNE_EXPR} \\) -prune -o`;
 const gnu = () => true;
 const noGnu = () => false;
 

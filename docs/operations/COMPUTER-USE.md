@@ -4,7 +4,7 @@ Pie exposes one generic `computer` tool for visible Windows applications. The im
 
 ## Selected implementation
 
-Pinned dependencies are owned by the [extension manifest](../../extensions/computer-use/package.json) and [lockfile](../../extensions/computer-use/package-lock.json). The implementation lives under `harness/tools/computer-use/`, while the dependency manifest, lockfile, and `node_modules` stay in the extension directory:
+Dependencies are declared by the [extension manifest](../../extensions/computer-use/package.json) and pinned in the [shared workspace lock](../../pnpm-lock.yaml). The implementation lives under `harness/tools/computer-use/`; use the repository's [gated setup](../../README.md#multi-machine-workflow), not an extension-local npm install:
 
 - `@trycua/cua-driver` — discovery, accessibility observations, desktop capture, launch, primary focus, and lifecycle;
 - `@computer-use/nut-js` — foreground visible-region capture, generic focus fallback, and all physical keyboard/pointer delivery; a bounded built-in Win32 PID/HWND-validated fallback handles Windows foreground-lock cases left unresolved by both libraries;

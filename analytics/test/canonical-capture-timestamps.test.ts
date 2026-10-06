@@ -240,7 +240,7 @@ test('accounting adapter does not replace missing producer dates with its clock 
   const accounting = new BillableAccounting({
     getStorageDir: () => root, now: () => new Date('2026-09-12T12:00:00Z'),
     scheduleRender: () => undefined, dispatchArchEvent: () => undefined,
-    getCapturedPricingFacts: () => undefined, isPrivateSession: () => false,
+    getCapturedPricingFacts: () => undefined, resolveInvocationPricing: () => undefined, isPrivateSession: () => false,
     sessionIdentity: () => ({ sessionId: 'session' }), currentRunId: () => null,
     activeOperationId: () => null, markDerivedExportDirty: () => assert.fail('legacy export'),
     canonicalCapture: capture,

@@ -1,0 +1,8 @@
+language: typescript
+dependsOn: [pi, analytics, root, scripts]
+tasks:
+  test:
+    command: 'proto run node -- scripts/verification/test-node.mjs --tsconfig application/hosts/vscode/tsconfig.json --sdk-path harness/pi/packages/coding-agent --exclude "**/*.artifact.test.*" harness/agent-processes harness/model-providers harness/session-storage harness/tools/ask-user harness/tools/deferred-triggers harness/tools/execution-safety harness/tools/package-integrations harness/tools/result-processing harness/tools/session-changes harness/tools/session-control harness/tools/subagent harness/tools/warm-bash harness/tool-and-skill-selection harness/agent-instructions'
+    deps: ['pi:build']
+    inputs: ['/harness/**/*', '/harness/pi/**/*', '/analytics/**/*', '!/analytics/analysis/**/*', '/scripts/**/*', '/lib/**/*', '/extensions/computer-use/**/*', '/extensions/playwright/**/*', '/application/hosts/vscode/tsconfig.json', '@globs(lifecycle)', '@globs(protected)']
+    options: {cache: false}

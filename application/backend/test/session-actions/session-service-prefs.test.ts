@@ -17,6 +17,9 @@ import type { ChatPrefs } from '../../../lib/protocol/index.js';
 import type { SessionControlSettingsRequest } from '../../../../harness/agent-processes/lib/rpc/session-control-settings.js';
 
 function createPlatform(context: ReturnType<typeof createExtensionContext>) {
+  const unexpectedBackendStartup = (): never => {
+    throw new Error('Unexpected backendStartup call in session preference tests');
+  };
   return {
     storage: {
       get: <T>(key: string) => (context.globalState as { get<T>(key: string): T | undefined }).get<T>(key),
@@ -27,6 +30,11 @@ function createPlatform(context: ReturnType<typeof createExtensionContext>) {
     getWorkspaceCwd: () => '/test-workspace',
     getSetting: () => undefined,
     requestWindowAttention: () => undefined,
+    backendStartup: {
+      prepareDevelopmentEnvironment: unexpectedBackendStartup,
+      resolveBackendLaunchPaths: async () => unexpectedBackendStartup(),
+      prepareBackendEnvironment: unexpectedBackendStartup,
+    },
   };
 }
 

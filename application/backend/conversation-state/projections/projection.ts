@@ -41,7 +41,7 @@ import type {
 } from '../../../lib/protocol/index.js';
 import { EMPTY_TRANSCRIPT_WINDOW } from '../../../lib/protocol/index.js';
 import { EMPTY_AGGREGATE_STATS } from '../../../lib/protocol/index.js';
-import { pruningTotals } from '../../../frontend/transcript/pruning-totals.js';
+import { pruningTotals } from '../../../lib/transcript/pruning-totals.js';
 import { isPendingTabPath } from '../../../../lib/session-path.js';
 import { stripReqIds } from '../error-mapping.js';
 import { redactRendererErrorText } from '../../../../lib/sensitive-data/renderer-error-redaction.js';

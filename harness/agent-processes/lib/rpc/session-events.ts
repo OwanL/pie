@@ -14,6 +14,7 @@ import type {
   SessionSkillFactor,
   SessionToolSnippetFactor,
 } from '../../../../analytics/contracts/legacy-run-analytics-contracts.js';
+import type { AnalyticsAuxiliaryLlmUsageObservation } from '../../../../analytics/contracts/run-observation-inputs.js';
 
 export type {
   SessionAnalyticsFactors,
@@ -639,37 +640,8 @@ export interface CompactionPayload {
 
 /** Settlement evidence from one observable SDK LLM response. Optional token
  * fields plus instrumentationGap represent providers that omit usage. */
-export interface AuxiliaryLlmUsagePayload {
+export interface AuxiliaryLlmUsagePayload extends AnalyticsAuxiliaryLlmUsageObservation {
   sessionPath: string;
-  kind: 'assistant_message' | 'history_compaction' | 'branch_summary' | 'session_title' | 'other';
-  sourceId: string;
-  /** Runtime assistant message id that was streaming when this provider
-   * response settled. It is distinct from the canonical invocation identity;
-   * the host uses it only for the provisional live-cost handoff. */
-  provisionalMessageId?: string;
-  occurredAt: string;
-  modelId?: string;
-  provider?: string;
-  parentOperationId?: string;
-  inputTokens?: number;
-  outputTokens?: number;
-  cacheReadTokens?: number;
-  cacheWriteTokens?: number;
-  providerTotalTokens?: number;
-  /** Explicit channel completeness from the provider response. */
-  tokenChannelsKnown?: boolean;
-  tokenChannelPresence?: {
-    input: boolean;
-    output: boolean;
-    cacheRead: boolean;
-    cacheWrite: boolean;
-  };
-  reportedCostUsd?: number;
-  durationMs?: number;
-  startedAt?: string;
-  outcome?: 'succeeded' | 'failed' | 'cancelled' | 'unknown';
-  instrumentationGap?: boolean;
-  instrumentationGapReason?: string;
 }
 
 /** Operational (non-fatal) backend condition that the user should be made

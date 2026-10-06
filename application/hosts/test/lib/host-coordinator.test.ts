@@ -23,6 +23,8 @@ import {
   acquirePieHostOwnership,
   describePieHostRefusal,
   probePieHost,
+  resolvePieDevelopmentProfilePaths,
+  resolvePieHostRuntimeProfile,
   requestPieHostRelease,
   type PieHostOwnership,
 } from '../../lib/host-coordinator';
@@ -71,6 +73,95 @@ test('ownership contention: exactly one host acquires; the second is refused wit
   await release(first.status === 'acquired' ? first.ownership : undefined);
   // After release the port answers no probe.
   assert.equal(await probePieHost(port), undefined);
+});
+
+test('development profile requires explicit isolated state, identity, and a separate launcher-selected endpoint', () => {
+  const base = {
+    PIE_DEVELOPMENT_PROFILE_DIR: path.resolve('pi-profile'),
+    PIE_DEVELOPMENT_PI_WORKSPACE: path.resolve('pi-workspace'),
+    PIE_ALLOW_WORKSPACE_DEVELOPMENT_SDK: '1',
+  };
+  assert.throws(() => resolvePieHostRuntimeProfile(base), /PIE_HOST_PROFILE/u);
+  assert.throws(() => resolvePieHostRuntimeProfile({
+    ...base,
+    PIE_HOST_PROFILE: 'local-pi',
+  }), /PIE_HOST_COORDINATOR_PORT/u);
+  assert.throws(() => resolvePieHostRuntimeProfile({
+    ...base,
+    PIE_HOST_PROFILE: 'local-pi',
+    PIE_HOST_COORDINATOR_PORT: '1996',
+  }), /different from production port/u);
+
+  assert.deepEqual(resolvePieHostRuntimeProfile({
+    ...base,
+    PIE_HOST_PROFILE: 'local-pi',
+    PIE_HOST_COORDINATOR_PORT: '23147',
+  }), { name: 'local-pi', development: true, coordinatorPort: 23147 });
+});
+
+test('development SDK selection without an explicit profile root fails closed', () => {
+  assert.throws(() => resolvePieHostRuntimeProfile({
+    PIE_DEVELOPMENT_PI_WORKSPACE: path.resolve('pi-workspace'),
+    PIE_ALLOW_WORKSPACE_DEVELOPMENT_SDK: '1',
+    PIE_HOST_PROFILE: 'local-pi',
+    PIE_HOST_COORDINATOR_PORT: '23147',
+  }), /PIE_DEVELOPMENT_PROFILE_DIR is required/u);
+});
+
+test('development profile paths are constrained to the explicit root', () => {
+  const profileDir = path.resolve('isolated-profile');
+  const paths = resolvePieDevelopmentProfilePaths({ PIE_DEVELOPMENT_PROFILE_DIR: profileDir });
+  assert.deepEqual(paths, {
+    profileDir,
+    agentDir: path.join(profileDir, 'agent'),
+    authDir: path.join(profileDir, 'auth'),
+    authFile: path.join(profileDir, 'auth', 'auth.json'),
+    dataDir: path.join(profileDir, 'data'),
+    sessionDir: path.join(profileDir, 'data', 'sessions'),
+    sessionSettingsDir: path.join(profileDir, 'data', 'state', 'session-settings'),
+  });
+  assert.throws(() => resolvePieDevelopmentProfilePaths({
+    PIE_DEVELOPMENT_PROFILE_DIR: profileDir,
+    PI_CODING_AGENT_DIR: path.resolve('../production-agent'),
+  }), /agent directory must resolve within PIE_DEVELOPMENT_PROFILE_DIR/u);
+  assert.throws(() => resolvePieDevelopmentProfilePaths({
+    PIE_DEVELOPMENT_PROFILE_DIR: profileDir,
+    PI_CODING_AGENT_AUTH_DIR: path.resolve('../production-auth'),
+  }), /auth directory must resolve within PIE_DEVELOPMENT_PROFILE_DIR/u);
+  assert.throws(() => resolvePieDevelopmentProfilePaths({
+    PIE_DEVELOPMENT_PROFILE_DIR: profileDir,
+    PIE_DATA_DIR: path.resolve('../production-data'),
+  }), /data directory must resolve within PIE_DEVELOPMENT_PROFILE_DIR/u);
+  assert.throws(() => resolvePieDevelopmentProfilePaths({
+    PIE_DEVELOPMENT_PROFILE_DIR: profileDir,
+    PI_CODING_AGENT_SESSION_DIR: path.resolve('../production-sessions'),
+  }), /session directory must resolve within PIE_DEVELOPMENT_PROFILE_DIR/u);
+});
+
+test('profile mismatch fails closed without requesting production handoff', async () => {
+  const port = await freePort();
+  let handoffRequested = false;
+  const production = await acquirePieHostOwnership({
+    kind: 'standalone',
+    profile: 'production',
+    port,
+    onHandoffRequested: () => { handoffRequested = true; },
+  });
+  assert.equal(production.status, 'acquired');
+  if (production.status !== 'acquired') return;
+  try {
+    const development = await acquirePieHostOwnership({
+      kind: 'vscode',
+      profile: 'local-pi',
+      port,
+      handoffTimeoutMs: 10,
+    });
+    assert.equal(development.status, 'refused-profile-mismatch');
+    assert.equal(handoffRequested, false, 'a development profile never requests production shutdown');
+    assert.match(describePieHostRefusal(development as never, port), /will not hand off/);
+  } finally {
+    await production.ownership.release();
+  }
 });
 
 test('graceful handoff: VS Code requests standalone stop, waits bounded, acquires after release', { timeout: 15_000 }, async () => {
@@ -229,16 +320,24 @@ test('adapters acquire before runtime startup and release after shutdown complet
   assert.match(standaloneSource, /ownership\.abort\(\);/);
   assert.match(standaloneSource, /Active requests will stop; saved sessions will remain available\./);
   assert.match(standaloneSource, /requested pie to stop/);
+  assert.match(standaloneSource, /resolvePieHostRuntimeProfile/);
+  assert.match(standaloneSource, /hostProfile\.development \? 0 : undefined/,
+    'development standalone must not accept a production handoff request');
 
   // VS Code adapter: refusal notifications, visible bounded handoff progress,
   // and release only after `runtime.shutdown()` completes.
   assert.match(adapterSource, /showWarningMessage\(`pie did not start/);
   assert.match(adapterSource, /withProgress/);
   const shutdownIndex = adapterSource.indexOf('await this.runtime.shutdown();');
+  const readerReleaseIndex = adapterSource.indexOf('await this.backend.releaseDevelopmentReaders(this.backend.isRuntimeLifetimeTeardownConfirmed());');
   const releaseIndex = adapterSource.indexOf('await this.hostOwnership.release();');
+  assert.ok(shutdownIndex >= 0 && readerReleaseIndex > shutdownIndex,
+    'the VS Code host must settle the development SDK reader only after shutdown');
   assert.ok(shutdownIndex >= 0 && releaseIndex > shutdownIndex,
     'the VS Code adapter must release ownership only after the runtime shutdown');
   assert.match(adapterSource, /handoffTimeoutMs: resolvePieHostHandoffTimeoutMs\(\)/);
+  assert.match(adapterSource, /profile\.development \|\|/,
+    'development VS Code must not hand off from its isolated profile');
 
   // The machine-wide lock is a composition-root concern, not runtime state.
   assert.ok(!runtimeSource.includes('coordinator/host-coordinator'),

@@ -13,7 +13,7 @@ import type {
 import { auditLog } from '../../../../lib/structured-logging/pie-logger.js';
 import { formatOperationalErrorDetail } from '../../conversation-state/operational-error-detail';
 import { createOperationalIncident, type OperationalIncident } from '../../../../harness/agent-processes/lib/rpc/incident-payload.js';
-import type { SessionHostPlatform } from '../../../hosts/lib/platform-contracts/session-platform';
+import type { SessionHostPlatform } from '../../../lib/platform-contracts/session-platform.js';
 
 interface HandlerDeps {
   platform: SessionHostPlatform;

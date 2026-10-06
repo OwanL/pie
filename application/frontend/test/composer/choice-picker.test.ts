@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import test, { beforeEach } from 'node:test';
+import test, { afterEach, beforeEach } from 'node:test';
 
 import { h, render } from 'preact';
 import { act } from 'preact/test-utils';
@@ -14,11 +14,12 @@ let container: HTMLElement;
 beforeEach(() => {
   container = document.createElement('div');
   document.body.appendChild(container);
-  return () => {
-    render(null, container);
-    container.remove();
-    document.querySelectorAll('.choice-picker-dropdown').forEach((element) => element.remove());
-  };
+});
+
+afterEach(() => {
+  render(null, container);
+  container.remove();
+  document.querySelectorAll('.choice-picker-dropdown').forEach((element) => element.remove());
 });
 
 const options = [

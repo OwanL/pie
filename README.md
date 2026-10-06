@@ -30,15 +30,15 @@ Pie is currently developed and tested on Windows only. Other operating systems m
 
 ## Prerequisites
 
-- Node.js **24.16.0**, pinned by `.node-version`
-- npm **11.13.0**, pinned by `packageManager` in `package.json`
+- Node.js **24.16.0**, pinned by `.node-version` and `.prototools`
+- Proto-managed pnpm **10.34.4** and Moon **2.4.2**; the root `packageManager` also pins pnpm
 - VS Code, for interactive extension work
 
 Pi is built from the repository's pinned source and shipped with the extension as a verified `pi-runtime` artifact. Setup does not install a global `pi` CLI or rely on a host-local locked SDK.
 
 ## Install
 
-On a new Windows device, install Git, VS Code, and the exact Node.js version above, then clone to the location where you intend to keep Pie:
+On a new Windows device, install Git, VS Code, and the exact Node.js version above, then clone to the location where you intend to keep Pie. `install.bat` is the repository's setup entry point:
 
 ```cmd
 git clone https://github.com/OwanL/pie.git
@@ -46,7 +46,7 @@ cd pie
 .\install.bat
 ```
 
-Node.js must already be on PATH. The installer checks prerequisites before changing configuration and installs the pinned npm version if needed. Dependency setup also downloads Playwright's pinned Chromium browser, so allow internet access and time for that download. On an existing installation, close VS Code windows using Pie before reinstalling to avoid locked dependency files.
+Node.js must already be on PATH. For dependency-only setup, use `proto run pnpm -- run setup` (the `install:dependencies` script is an alias). Both enter the shared Proto-selected frozen pnpm install with lifecycle scripts disabled and a writer gate that refuses to modify the Pi workspace while development readers are active. On an existing installation, close development hosts and test processes that read the native Pi workspace before retrying setup; do not bypass the gate with a direct install command.
 
 Double-clicking `install.bat` also works; it pauses at the end so the window doesn't close immediately.
 
@@ -61,8 +61,10 @@ The installer is idempotent and safe to re-run. On each run it:
 5. **Writes `pie.agentDir`** to VS Code User settings so the extension host forwards the correct config directory, even before VS Code picks up updated User environment variables.
 6. **Repairs extension paths** in `settings.json` (committed paths may reference another machine's npm global tree).
 7. **Migrates session history** from legacy `~/.pi/agent/sessions/`, `data/sessions/`, and `<repo>/sessions/` roots into the current checkout's local `data/outcomes/sessions/` store.
-8. **Runs `npm run bootstrap -- --package`**. Bootstrap starts with root `npm ci` (whose postinstall restores the additional locked dependency trees), then acquires one verified source Pi artifact, restores configured Pi package sources through its local Node CLI, checks generated model files, builds and packages the VS Code extension, and checks that same artifact with doctor. No global Pi is installed or required.
-9. **Installs the resulting VSIX** when the VS Code CLI is available and runs post-install readiness checks for auth, paths, versions, and split-brain credentials.
+8. **Calls `proto run pnpm -- run bootstrap --package`**. After gated root setup, bootstrap defaults to compiling the existing Pi workspace and preparing a private pnpm-derived runtime artifact; it restores configured Pi package sources, checks generated models, builds the host, optionally packages it, and runs doctor. An explicit `--pi-runtime` instead reuses a verified artifact and skips workspace compilation. The host build explicitly selects `--delivery --pi-runtime`, writes delivery output, and does not publish.
+9. **Installs a produced VSIX** when the VS Code CLI is available and runs post-install readiness checks for auth, paths, versions, and split-brain credentials.
+
+Full install acceptance has not been run; this is an acceptance gap, not a missing-argument blocker. The [migration plan](docs/plans/PIE-PRODUCTIZATION.md) is the status authority.
 
 Configuration comes from Git, while credentials, sessions, logs, analytics, dependencies, and build outputs remain local to each machine.
 
@@ -112,7 +114,7 @@ The installer does not install a global `pi` CLI, and `pi /login` is no longer a
 
 1. Open VS Code Settings (JSON) and verify `"pie.agentDir": "C:\path\to\pie"` points to this checkout.
 2. Reload the VS Code window (Developer: Reload Window) — not just the panel.
-3. If running the extension from source, rebuild with `npm run extension:build` from the repository root.
+3. For the isolated source-development host, rebuild with `proto run pnpm -- run build` from the repository root; this writes local development output and does not publish to an installed extension.
 
 ### 401 / "invalid api key" error
 
@@ -130,13 +132,13 @@ This can happen when an older `pi` CLI was run in a shell that didn't inherit `P
 
 The backend verifies the `pi-runtime` artifact bundled with its built output for the selected Node target; it does not fall back to a global or host-local SDK. `pie.sdkPath` and `PI_SDK_PATH` are not supported runtime selectors.
 
-Run `npm run doctor` to verify the checkout-built artifact at `application/hosts/vscode/out/pi-runtime`. To check another artifact without changing it, pass an absolute path:
+Run `proto run pnpm -- run doctor` to verify the checkout-built artifact at `application/hosts/vscode/out/pi-runtime`. To check another artifact without changing it, pass an absolute path:
 
 ```bash
-npm run doctor -- --pi-runtime "<absolute artifact directory>"
+proto run pnpm -- run doctor -- --pi-runtime "<absolute artifact directory>"
 ```
 
-Doctor only verifies the selected artifact read-only; it does not build, acquire, or execute Pi. Under normal safe maintenance conditions, `npm run bootstrap` rebuilds and checks the checkout's artifact.
+Doctor verifies the selected artifact read-only; it does not build, acquire, or execute Pi. Bootstrap without `--pi-runtime` follows the default source-compilation/private-artifact path above; an explicit path selects verified artifact reuse and skips that compile.
 
 ### VS Code env vars not taking effect
 
@@ -146,30 +148,33 @@ Doctor only verifies the selected artifact read-only; it does not build, acquire
 
 ## Multi-machine workflow
 
-Use Git—not Dropbox, OneDrive, or copied working directories—to move configuration between Windows machines. Clone to the final location, select the pinned Node version, and run `install.bat`. Configure provider credentials independently on each machine; never transfer `auth.json`.
+Use Git—not Dropbox, OneDrive, or copied working directories—to move configuration between Windows machines. Clone to the final location and select the pinned Node version. The `install.bat` entry point sets up user/session/auth paths; see the migration plan linked above for full install acceptance status. Configure provider credentials independently on each machine; never transfer `auth.json`.
 
-For a deterministic dependency/build refresh after pulling, first close all VS Code windows using Pie (Windows may lock running extension dependency files), then run from an external terminal:
-
-```bash
-npm run bootstrap
-```
-
-Bootstrap runs root `npm ci`, restores configured Pi packages through a verified local source CLI, checks generated model files, then reuses one verified source artifact for the extension build and doctor. It does not install or require global Pi. Pass `--package` to also create a VSIX (`install.bat` uses this flow and installs the resulting package):
+For dependency refresh after pulling, close development hosts and tests that read the native Pi workspace, then run the shared gated setup from an external terminal:
 
 ```bash
-npm run bootstrap -- --package
+proto run pnpm -- run setup
+# Alias for the same script:
+proto run pnpm -- run install:dependencies
 ```
 
-To reuse an existing verified artifact, pass `npm run bootstrap -- --pi-runtime "<absolute artifact directory>"`. The source-runtime installer/bootstrap and doctor routes are implemented in this checkout; they do not establish a deployed runtime or completed cutover. During the active-manager safety gate, do not run `install.bat` or bootstrap, stage/publish an extension runtime, install the VSIX, or restart VS Code. Keep the active manager session uninterrupted. See the [migration plan](docs/plans/PIE-PRODUCTIZATION.md).
-
-`npm run doctor` verifies the checkout-built artifact at `application/hosts/vscode/out/pi-runtime` by default. An explicit `--pi-runtime` path overrides that selection for a read-only full-payload check against the executing Node target; neither route uses a global-Pi fallback or mutates the artifact:
+To build and doctor against an already verified artifact, pass its absolute artifact root explicitly. Add `--package` only when a VSIX is needed:
 
 ```bash
-npm run doctor
-npm run doctor -- --pi-runtime "<absolute artifact directory>"
+proto run pnpm -- run bootstrap -- --pi-runtime "<absolute verified artifact directory>"
+proto run pnpm -- run bootstrap -- --pi-runtime "<absolute verified artifact directory>" --package
 ```
 
-Dependency updates arrive as monthly Dependabot pull requests for each tracked lockfile root. Review and test those changes; do not run unpinned global upgrades independently on each machine.
+These explicit `--pi-runtime` commands verify and reuse the selected artifact, skipping source compilation; bootstrap without that option uses its default source-compilation/private-artifact path. Doctor is read-only. Gated setup is allowed when no development readers are active; preserve active workspace readers and the installed host rather than stopping them or bypassing the gate. Setup/build do not authorize publication, VSIX installation or an installed-host restart. See the [migration plan](docs/plans/PIE-PRODUCTIZATION.md) for acceptance status.
+
+`proto run pnpm -- run doctor` verifies the checkout-built artifact at `application/hosts/vscode/out/pi-runtime` by default. An explicit `--pi-runtime` path overrides that selection for a read-only full-payload check against the executing Node target; neither route uses a global-Pi fallback or mutates the artifact:
+
+```bash
+proto run pnpm -- run doctor
+proto run pnpm -- run doctor -- --pi-runtime "<absolute artifact directory>"
+```
+
+The main workspace uses one shared `pnpm-lock.yaml`. Review and test dependency changes against that lock; do not run host-local npm installs or unpinned global upgrades independently on each machine.
 
 See [Persistence and storage](#persistence-and-storage) below before sharing a checkout or backing up local state.
 
@@ -180,69 +185,83 @@ See [Persistence and storage](#persistence-and-storage) below before sharing a c
 Run the canonical wrappers from the repository root:
 
 ```bash
-# dependency-aware tests for working-tree changes (default final development test)
-npm test
+# Primary root test route: Moon's affected project-task graph
+proto run pnpm -- run test
 
-# focused test file(s) while iterating; pass multiple paths if needed
-npm run test:file -- application/backend/test/path/to/test.ts
+# Focused native Node test file (TypeScript is loaded through the local tsx setup)
+proto run pnpm -- run test:file application/backend/test/path/to/test.ts
 
-# full fast suite and opt-in integration suite
-npm run test:all
-npm run test:integration
+# Focused SDK-backed artifact fixture, using a separately verified runtime
+proto run pnpm -- run test:file --sdk-path "<absolute verified runtime root>/node_modules/@earendil-works/pi-coding-agent" harness/tool-and-skill-selection/prepass/test/completion-entry.artifact.test.ts
 
-# individual and combined validation
-npm run typecheck
-npm run lint
-npm run check      # model drift + typecheck + lint + changed tests
-npm run verify     # full verification: model drift + typecheck + lint + full fast suite + build
+# Dedicated SDK artifact-fixture task (without a path, it prepares one private SDK artifact)
+proto run pnpm -- run test:artifact
+# Or reuse an already verified runtime; this skips artifact preparation, not the Pi workspace build prerequisite
+proto run pnpm -- run test:artifact -- --pi-runtime "<absolute verified runtime root>"
 
-# release coverage gate, optionally scoped to one package
-npm run test:coverage
-npm run test:coverage -- --package extension
-npm run test:coverage -- --package subagent
+# All configured Moon project test tasks; opt-in integration route
+proto run pnpm -- run test:all
+proto run pnpm -- run test:integration
+
+# Individual root checks
+proto run pnpm -- run typecheck
+proto run pnpm -- run lint
+proto run pnpm -- run check
+proto run pnpm -- run verify
+
+# Compatibility alias for affected Moon tests; retained legacy coverage gate
+proto run pnpm -- run test:fast
+proto run pnpm -- run test:coverage
+proto run pnpm -- run test:coverage -- --package extension
+proto run pnpm -- run test:coverage -- --package subagent
+proto run pnpm -- run verify:release
+
+# Explicit nonpublishing delivery qualification, including both headless hosts/browser
+proto run pnpm -- run delivery:qualify
+# Reuse an existing verified runtime and skip Pi compilation/artifact construction
+proto run pnpm -- run delivery:qualify -- --pi-runtime "<absolute verified runtime root>"
 ```
 
-`npm test` traces changed files through static relative imports and file-URL fixtures, runs affected test files concurrently, and conservatively falls back to a package suite when a changed source has no dependency edge. Test-runner or global shared-infrastructure changes trigger the full fast suite. Use `npm run test:file` for focused tests rather than invoking `npx tsx` directly. Slow tests that require real SDK sessions, process trees, Git repositories, or shell pools live behind `npm run test:integration`. The slower release gate remains available as `npm run verify:release` or `npm run test:coverage`.
+`test` uses Moon's `:test --affected --include-relations` tasks with explicit consumer-source inputs. Project dependencies alone do not select consumer tests in Moon 2.4.2; deep task traversal is intentionally omitted because it can pull artifact tasks into ordinary checks. The uncached `proto run moon -- run root:graphTest` qualifies affected selection using temporary Git fixtures and NOOP commands, without running application builds or providers. It is not the legacy static-import/file-URL fixture selector. Affected dispatch is conservative at project granularity and may run a whole owning project's configured tests. Ordinary Moon test tasks exclude files matching `*.artifact.test.*`; this currently covers 30 fixtures (26 TypeScript and four `.mjs`, including development refresh), whose assertions remain in place for the separate artifact task. SDK-backed package-resolution, unbundled-module and CLI cases run in artifact companions; their SDK-free cases remain in ordinary tests. The generic native runner accepts repeatable `--include` and `--exclude <repo-relative glob>` filters. `test:all` dispatches all configured Moon `:test` tasks. `test:fast` and `test:changed` are affected-Moon aliases; legacy package commands with `--fast` now invoke the native runner. The old fast batching, impact selection, custom result cache and cost tooling are removed.
+
+`test:artifact` is the separate SDK-backed route: it delegates to Moon's `root:artifactTest` task (which depends on `pi:build`), then invokes the artifact runner once for the selected fixtures. It prepares one private SDK artifact, or accepts an explicit verified runtime via `-- --pi-runtime "<absolute verified runtime root>"` and skips private artifact preparation; the Pi workspace compilation prerequisite still runs either way. This route exercises production-style SDK bytes, not an application release build, publication, installation, or an SDK cache. The ordinary Moon test task's use of the compiled native workspace SDK is a task-boundary distinction, not a lightweight-artifact or speed claim. Some provider/integration cases still need credentials or explicit opt-in; existing skip flags remain unchanged, and this route does not mean every fixture or integration smoke was run or qualified.
+
+`test:file` runs native `node:test`; TypeScript test files use private per-file CommonJS entry wrappers with the local `tsx` loader, while JavaScript and `.mjs` entries use Node's standard loading. This does not use esbuild or a custom test queue, and the runner's process isolation remains in place. Focused checks qualify this compatibility route, not ESM namespace behavior, top-level await, or full native parity. Its `--sdk-path` option supplies module aliases from an already compiled SDK package; it does not acquire or verify an artifact, so SDK-backed source fixtures must use the coding-agent package from a separately verified `pi-runtime`, never the native workspace package. Do not invoke `npx tsx` directly.
+
+For explicit offline Pi Vitest qualification, use `proto run node -- scripts/verification/test-framework-offline.mjs --package ai --` (or `agent` / `coding-agent`, with Vitest arguments after `--`). This invocation isolates credentials and state, disables automatic local-model tests, denies external Node networking, and holds the workspace reader through confirmed teardown. It does not change ordinary developer commands or qualify skipped provider cases; native subprocess networking is not sandboxed.
+
+Native coverage is refused before child launch for TypeScript, including artifact fixtures. JavaScript and `.mjs` native coverage remains usable, including threshold enforcement. `test:coverage` and `verify:release` remain the supported coverage lane; replacement is explicitly deferred. Native TypeScript coverage and the evaluated c8/Monocart candidates remain unqualified, and those candidates were removed rather than added as dependencies. No coverage parity or full live/browser/provider qualification is claimed. The [migration plan](docs/plans/PIE-PRODUCTIZATION.md) owns evidence, status and remaining acceptance limits.
 
 Test and typecheck children have a 20-minute watchdog that kills the complete process tree on timeout or runner interruption (including `taskkill /T /F` on Windows). Override it with `PIE_TEST_PROCESS_TIMEOUT_MS`; set `0` only to disable it explicitly.
 
-### Build the pie VS Code extension
+When an explicitly selected SDK resolves to the native Pi workspace package, its development-reader lease blocks workspace setup/rebuild until reader teardown is confirmed. A denied operation reports the registered reader/writer identities; temporary native-runner diagnostics capture owned process identities in `teardown.json`. The gate fails closed and never reclaims registrations by PID or age. Do not kill an installed Pie process or blindly remove gate state; use the [canonical development-workspace gate](lib/development-runtime/lifetime.mjs) diagnostics and the [productization plan](docs/plans/PIE-PRODUCTIZATION.md) for status and recovery authority.
 
-For first-time setup, use `install.bat`: it also restores the managed `pi-web-access` and `pi-mcp-adapter` packages needed by the build. `npm ci` alone does not restore those Pi-managed packages. After setup, refresh dependency trees and build from the repository root:
+### Build and run Pie from source
 
-```bash
-npm ci                             # also restores the additional locked dependency trees via postinstall
-npm run extension:build            # validate + stage runtime + publish renderer
-npm run extension:build:validate   # compile/validate without publishing
-npm run extension:activate         # one-time startup loader setup or upgrade
-npm run extension:package          # produce a .vsix when needed
-```
-
-For an extension-only refresh after dependencies are already installed:
+Use the repository-root shortcuts through Proto so the pinned pnpm, Moon, and Node toolchain is selected:
 
 ```bash
-cd application/hosts/vscode
-npm run build      # compile/validate + publish one renderer generation
+proto run pnpm -- run build          # compile into application/hosts/vscode/out-dev
+proto run pnpm -- run watch          # development build plus shared renderer watch/reload
+proto run pnpm -- run dev            # launch the isolated standalone development host
+proto run pnpm -- run dev:vscode     # launch the isolated VS Code development host
 ```
 
-Useful extension commands:
+Ordinary build and watch are development-only. They compile the host/backend and the local Pi workspace into `application/hosts/vscode/out-dev`; this workspace route has no `pi-runtime` artifact manifest. They never stage or publish files to an installed extension, install anything, or assert that a runtime is loaded. The launcher keeps persistent state in a repository-specific development profile with separate agent settings, auth, sessions, data, home/temp, VS Code user data, and extension directories, and uses its own host coordinator. It seeds public defaults, not installed-host settings/auth/history; optional remote packages are not automatically acquired. Configure private development settings/auth in the printed profile. Ambient provider environment variables can still be inherited: profile isolation is not a credential sandbox. Session settings and legacy fallback paths are private too. It does not snapshot the Pi workspace. A reader gate protects compiled workspace use from Pi rebuilds: stop the development host before refreshing backend or real Pi code, run `build`, then relaunch. This recompiles the workspace and selects the refreshed Pi bytes without touching installed output. Renderer changes use the shared frontend rebuild; the running development host reloads completed renderer output, not HMR.
 
-- `npm run build:validate` — compile and validate coordinated host/renderer output without touching the installed extension
-- `npm run publish:renderer` — publish already-validated renderer output only
-- `npm run watch` — incremental Vite rebuilds plus a concurrent TypeScript watch; each complete emission publishes an immutable renderer generation
-- `npm run watch -- --skip-typecheck` — Vite-only watch when typechecking elsewhere
-- `npm run activate` — one-time startup loader setup or explicit upgrade; takes effect on the next normal VS Code restart without stopping running sessions
-- `npm run test` — unit tests
-- `npm run typecheck` — incremental type-only check
-- `npm run package` — produce a `.vsix`
+Development acceptance is opt-in and consumes existing `out-dev`; ordinary tests do not launch a visible Electron window. For private standalone and headless VS Code adapter checks, set `PIE_RUN_DEVELOPMENT_HOST_TESTS=1` and use `test:file` on `scripts/development/test/standalone-development.test.mjs` or `scripts/development/test/vscode-development.test.mjs`. The artifact refresh fixture uses the same opt-in and qualifies stop → private rebuild → relaunch against real Pi/session discovery. The VS Code fixture mocks the VS Code API; it is not Electron acceptance.
 
-Ordinary build/watch publication stages a complete immutable runtime under the matching installed extension, without overwriting loaded bundles or rewriting `package.json`. The startup loader validates content hashes and selects the newest complete generation on every normal VS Code startup. **Restarting VS Code therefore loads the latest successfully published build.** Active windows retain their own runtime leases and keep working; no automatic restart is performed. Startup displays “Loading updated Pie build…” for a new generation, while running windows show “Pie update ready”. Renderer-only changes can still publish live.
+Only after explicit user consent, run visible Electron acceptance from Git Bash:
 
-Older installations need `npm run extension:activate` once, or a new VSIX installation, to install the startup loader. This setup publishes immutable loader files and changes the next-start entrypoint, so even Windows does not need locked host files replaced. Restart VS Code when convenient afterward. Routine code changes need only a build and a normal restart, not another manual installation. Extension manifest/SDK dependency upgrades remain explicit installation work.
+```bash
+PIE_RUN_ELECTRON_ACCEPTANCE=1 proto run node -- scripts/development/test/electron-acceptance.mjs
+```
 
-Full-runtime publication retains the current and prior generations plus leased generations. A crashed host's lease is retained conservatively because orphan workers may still need its files; it is not automatically reclaimed merely because its parent PID disappeared. Pi packages, runtime dependencies, and assets are verified inside each output's `pi-runtime` artifact and share its lifetime. Startup checks the selected backend Node target and does not fall back to an external SDK installation. Development can select another verified artifact only with both `PIE_DEVELOPMENT_PI_RUNTIME=<absolute artifact directory>` and `PIE_ALLOW_DEVELOPMENT_RUNTIME=1`; `pie.sdkPath` and `PI_SDK_PATH` are not fallback selectors. Settings, credentials, sessions, and other user data remain outside runtime generations.
+The isolated real-Electron acceptance passed actual transcript synchronization, 15-second stable sidebar observation and confirmed teardown of all owned trees. This is not installed-host, all-browser or live-provider qualification; the [plan](docs/plans/PIE-PRODUCTIZATION.md) owns acceptance evidence and limits.
 
-Keep **built**, **staged**, **loaded**, and **behavior verified** distinct. Staged files are not evidence that existing windows have loaded the update.
+Delivery is a separate explicit path. `proto run pnpm -- run delivery:build` selects `--delivery` and writes the verified artifact under `application/hosts/vscode/out`; it does not publish it. `proto run pnpm -- run extension:package` packages a VSIX through the delivery path but does not install or publish it. `proto run pnpm -- run extension:publish` explicitly selects `--delivery --publish` and publishes to a matching installed extension. Loader installation/upgrade uses the explicit script command `proto run node -- scripts/build/build.mjs --delivery --activate`. Neither building nor publishing proves that an extension has been installed, loaded, or behavior-verified. See the [migration plan](docs/plans/PIE-PRODUCTIZATION.md) for acceptance tracking.
+
+`delivery:qualify` builds a new package under OS temp, then runs the existing relocated standalone and mocked VS Code bootstrap checks with headless browser first paint. Its default route uses reader-gated Pi compilation and fresh artifact preparation; explicit `--pi-runtime` verifies/reuses caller-owned bytes and skips Pi compilation. The task is uncached and is not part of ordinary checks. It never publishes, installs, starts visible Electron, downloads a browser, or sends provider prompts. Successful confirmed teardown removes the temporary package; failed, cancelled or uncertain child completion retains it and prints its location. This is delivered-byte smoke evidence, not installed-host adoption, real Electron acceptance, all browser behavior or coverage parity.
 
 ### Run the standalone localhost UI
 
@@ -254,10 +273,10 @@ After building the extension, start the standalone browser host on Windows:
 
 The launcher requires Windows PowerShell 5.1 and does not install or rebuild dependencies. It prompts for an **absolute workspace path**, then asks whether to enable trusted-LAN access (default **No**). The prompt always sends an explicit choice, so answering No disables LAN even if it was enabled in a prior run. You can pass `-AllowLan` to the launcher to opt in without the prompt. LAN access is unauthenticated and has no TLS: anyone who can reach the URL can execute Pie commands and read or modify files. Use it only on a trusted local network; internet/public access is unsupported. The launcher does not change firewall rules.
 
-The launcher requires the generated runtime first:
+The standalone launcher uses the delivery output, not the ordinary development build. Generate it locally without publishing or installing it:
 
 ```bash
-npm run extension:build
+proto run pnpm -- run delivery:build
 ```
 
 It launches the built `application/hosts/vscode/out/standalone.js` entry and prints the actual localhost URL, normally `http://127.0.0.1:1997` (or an assigned fallback port). It does **not** open a browser; paste a printed URL into one. With no saved preference, it binds only to loopback. If LAN is enabled, Pie also prints usable private IPv4 LAN URLs; use one of those from another device on the same trusted network.

@@ -76,7 +76,7 @@ function installFakeAcquisition(root, sourceArtifact, counter) {
 // package has no node_modules, while the new owner provides the compiler and a
 // fixture-only declaration. Vite is a tiny output stub to keep this test focused
 // on build's preflight rather than its bundling/publication pipeline.
-test('build preflight resolves moved extension source through the owner overlay and source-default SDK', async (t) => {
+test('delivery build preflight resolves moved extension source through the owner overlay and source-default SDK', async (t) => {
   const fixture = mkdtempSync(path.join(os.tmpdir(), 'pie-build-typecheck-'));
   t.after(() => rmSync(fixture, { recursive: true, force: true }));
   const privateBuilds = mkdtempSync(path.join(os.tmpdir(), 'pie-build-typecheck-output-'));
@@ -121,7 +121,7 @@ test('build preflight resolves moved extension source through the owner overlay 
     const id = '0123456789abcdefabcd';
     fs.mkdirSync(out, { recursive: true });
     if (process.argv.includes('node')) {
-      for (const name of ['extension.js', 'backend.js', 'worker-entry.js', 'analytics-recorder-worker.js', 'analytics-query-worker.js']) {
+      for (const name of ['extension.js', 'standalone.js', 'backend.js', 'worker-entry.js', 'analytics-recorder-worker.js', 'analytics-query-worker.js']) {
         fs.writeFileSync(path.join(out, name), '');
       }
       fs.writeFileSync(path.join(out, 'pie-build-id.txt'), id);
@@ -137,7 +137,7 @@ test('build preflight resolves moved extension source through the owner overlay 
   const acquisitionCount = path.join(fixture, 'acquisition-count.txt');
   installFakeAcquisition(fixture, sourceArtifact, acquisitionCount);
   assert.equal(existsSync(path.join(fixture, 'extension', 'node_modules')), false);
-  const result = spawnSync(process.execPath, [path.join(fixture, 'scripts', 'build', 'build.mjs'), '--no-sync'], {
+  const result = spawnSync(process.execPath, [path.join(fixture, 'scripts', 'build', 'build.mjs'), '--delivery', '--no-sync'], {
     cwd: owner, encoding: 'utf8', timeout: 60_000,
   });
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
@@ -151,7 +151,7 @@ test('build preflight resolves moved extension source through the owner overlay 
   write(owner, 'out/preserved.txt', 'shared output');
   write(owner, 'node_modules/.cache/typecheck/shared.tsbuildinfo', 'shared incremental state');
   const isolatedOutput = path.join(privateBuilds, 'valid output');
-  const isolated = spawnSync(process.execPath, [path.join(fixture, 'scripts', 'build', 'build.mjs'), '--output-dir', isolatedOutput], {
+  const isolated = spawnSync(process.execPath, [path.join(fixture, 'scripts', 'build', 'build.mjs'), '--delivery', '--output-dir', isolatedOutput], {
     cwd: owner, encoding: 'utf8', timeout: 60_000,
   });
   assert.equal(isolated.status, 0, `${isolated.stdout}\n${isolated.stderr}`);
@@ -164,7 +164,7 @@ test('build preflight resolves moved extension source through the owner overlay 
   // The build must still enforce the owner's declaration, not skip checking.
   write(fixture, 'extension/src/entry.ts', "import { owned } from 'owner-only';\nimport { candidateOnly } from '@earendil-works/pi-coding-agent';\nexport const result: number = owned() + candidateOnly();\n");
   const invalidOutput = path.join(privateBuilds, 'invalid output');
-  const invalid = spawnSync(process.execPath, [path.join(fixture, 'scripts', 'build', 'build.mjs'), '--output-dir', invalidOutput], {
+  const invalid = spawnSync(process.execPath, [path.join(fixture, 'scripts', 'build', 'build.mjs'), '--delivery', '--output-dir', invalidOutput], {
     cwd: owner, encoding: 'utf8', timeout: 60_000,
   });
   assert.equal(invalid.status, 1, `${invalid.stdout}\n${invalid.stderr}`);

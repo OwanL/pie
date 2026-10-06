@@ -10,7 +10,7 @@ export {
   textFromMessageParts,
   toolCallsFromMessageParts,
   upsertAssistantToolPart,
-} from './message-parts.js';
+} from '../../lib/transcript/message-parts.js';
 
 export function getRenderableUserParts(
   message: Pick<ChatMessage, 'role' | 'markdown' | 'userParts'>,

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { createLocalMessageId } from '../../frontend/composer/local-message-id';
+import { createLocalMessageId } from '../../lib/composer/local-message-id.js';
 import type { DeferredTriggerView } from '../../lib/protocol/index.js';
 import type { ArchState } from '../conversation-state/arch-state';
 import type { Event } from '../conversation-state/events';

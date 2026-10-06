@@ -3,7 +3,7 @@ import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
 
 import { BackendServer } from '../../harness/agent-processes/coordinator/index.js';
 import { createSyntheticSourceTestSdkRuntime } from '../../harness/agent-processes/test/fixtures/sdk-runtime-selection.js';
@@ -51,8 +51,27 @@ function entry(id: string, role: 'user' | 'assistant', text: string) {
   };
 }
 
-async function makeColdServer(options: { sessionCatalog?: any; contextThinkingLevel?: string } = {}) {
+const coldHarnessPreviousSessionDirs = new WeakMap<TestContext, string | undefined>();
+
+function bindColdHarnessSessionDir(t: TestContext, dir: string): void {
+  if (!coldHarnessPreviousSessionDirs.has(t)) {
+    const previous = process.env.PI_CODING_AGENT_SESSION_DIR;
+    coldHarnessPreviousSessionDirs.set(t, previous);
+    t.after(() => {
+      if (previous === undefined) delete process.env.PI_CODING_AGENT_SESSION_DIR;
+      else process.env.PI_CODING_AGENT_SESSION_DIR = previous;
+      coldHarnessPreviousSessionDirs.delete(t);
+    });
+  }
+  process.env.PI_CODING_AGENT_SESSION_DIR = dir;
+}
+
+async function makeColdServer(
+  t: TestContext,
+  options: { sessionCatalog?: any; contextThinkingLevel?: string } = {},
+) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-cold-browse-'));
+  bindColdHarnessSessionDir(t, dir);
   const sessionPath = path.join(dir, 'session.jsonl');
   await fs.writeFile(sessionPath, [
     JSON.stringify({ type: 'session', id: 'stable-session-id', version: 3, cwd: dir }),
@@ -77,6 +96,8 @@ async function makeColdServer(options: { sessionCatalog?: any; contextThinkingLe
     sessionCatalog: options.sessionCatalog,
   }) as any;
   server.agentDir = dir;
+  server.sessionDir = dir;
+  server.sessionDirResolved = true;
   server.sdk = {
     VERSION: 'test-sdk',
     SessionManager: {
@@ -200,8 +221,8 @@ async function seedLiveMembership(server: any, paths: readonly string[]): Promis
   assert.equal(server.liveSessionTitles.ready, true, "the host's startup membership establishes live-title admission");
 }
 
-test('cold open/preload/page/detail projections remain runtime-free and pages revalidate durable state', async () => {
-  const h = await makeColdServer();
+test('cold open/preload/page/detail projections remain runtime-free and pages revalidate durable state', async (t) => {
+  const h = await makeColdServer(t);
   try {
     const opened = await h.server.buildSessionOpenedPayload(h.sessionPath, 'selection-1');
     const preloaded = await h.server.buildSessionOpenedPayload(
@@ -246,12 +267,12 @@ test('cold open/preload/page/detail projections remain runtime-free and pages re
       maxEntries: 4,
     });
   } finally {
-    await fs.rm(h.dir, { recursive: true, force: true });
+    t.after(() => fs.rm(h.dir, { recursive: true, force: true }));
   }
 });
 
-test('fresh isolated inventory supplies full prompts for historical and empty cold opens without promotion', async () => {
-  const h = await makeColdServer();
+test('fresh isolated inventory supplies full prompts for historical and empty cold opens without promotion', async (t) => {
+  const h = await makeColdServer(t);
   let discoveries = 0;
   h.server.initialContextEstimateClient = {
     discover: async () => {
@@ -274,12 +295,12 @@ test('fresh isolated inventory supplies full prompts for historical and empty co
     assert.deepEqual(empty.initialContextEstimate, { tokens: 321, contextWindow: 1000 });
     assert.equal(discoveries, 2, 'each public cold open uses a fresh session-specific inventory');
   } finally {
-    await fs.rm(h.dir, { recursive: true, force: true });
+    t.after(() => fs.rm(h.dir, { recursive: true, force: true }));
   }
 });
 
-test('cold discovery failure publishes an authoritative catalog omission with its disabled-entry sidecar', async () => {
-  const h = await makeColdServer();
+test('cold discovery failure publishes an authoritative catalog omission with its disabled-entry sidecar', async (t) => {
+  const h = await makeColdServer(t);
   const previousSettingsDir = process.env[SESSION_SETTINGS_DIR_ENV];
   process.env[SESSION_SETTINGS_DIR_ENV] = h.dir;
   h.server.initialContextEstimateClient = { discover: async () => undefined };
@@ -294,12 +315,12 @@ test('cold discovery failure publishes an authoritative catalog omission with it
   } finally {
     if (previousSettingsDir === undefined) delete process.env[SESSION_SETTINGS_DIR_ENV];
     else process.env[SESSION_SETTINGS_DIR_ENV] = previousSettingsDir;
-    await fs.rm(h.dir, { recursive: true, force: true });
+    t.after(() => fs.rm(h.dir, { recursive: true, force: true }));
   }
 });
 
-test('cold discovery retries when model settings and prompt toggles change before its final snapshot', async () => {
-  const h = await makeColdServer();
+test('cold discovery retries when model settings and prompt toggles change before its final snapshot', async (t) => {
+  const h = await makeColdServer(t);
   const previousSettingsDir = process.env[SESSION_SETTINGS_DIR_ENV];
   process.env[SESSION_SETTINGS_DIR_ENV] = h.dir;
   let markFirstDiscovery!: () => void;
@@ -339,12 +360,12 @@ test('cold discovery retries when model settings and prompt toggles change befor
     releaseFirstDiscovery();
     if (previousSettingsDir === undefined) delete process.env[SESSION_SETTINGS_DIR_ENV];
     else process.env[SESSION_SETTINGS_DIR_ENV] = previousSettingsDir;
-    await fs.rm(h.dir, { recursive: true, force: true });
+    t.after(() => fs.rm(h.dir, { recursive: true, force: true }));
   }
 });
 
-test('cold discovery drops the empty-session estimate when history appears before publication', async () => {
-  const h = await makeColdServer();
+test('cold discovery drops the empty-session estimate when history appears before publication', async (t) => {
+  const h = await makeColdServer(t);
   h.replaceBranch([]);
   await fs.writeFile(
     h.sessionPath,
@@ -379,12 +400,12 @@ test('cold discovery drops the empty-session estimate when history appears befor
     assert.equal(opened.systemPrompts?.find((prompt: any) => prompt.id === 'harness')?.text, 'Complete cold prompt text.');
   } finally {
     releaseFirstDiscovery();
-    await fs.rm(h.dir, { recursive: true, force: true });
+    t.after(() => fs.rm(h.dir, { recursive: true, force: true }));
   }
 });
 
-test('cold reopen hydrates persisted prompt exclusions into its discovered catalog', async () => {
-  const h = await makeColdServer();
+test('cold reopen hydrates persisted prompt exclusions into its discovered catalog', async (t) => {
+  const h = await makeColdServer(t);
   const previousSettingsDir = process.env[SESSION_SETTINGS_DIR_ENV];
   process.env[SESSION_SETTINGS_DIR_ENV] = h.dir;
   h.server.initialContextEstimateClient = { discover: async () => inventory() };
@@ -398,12 +419,12 @@ test('cold reopen hydrates persisted prompt exclusions into its discovered catal
   } finally {
     if (previousSettingsDir === undefined) delete process.env[SESSION_SETTINGS_DIR_ENV];
     else process.env[SESSION_SETTINGS_DIR_ENV] = previousSettingsDir;
-    await fs.rm(h.dir, { recursive: true, force: true });
+    t.after(() => fs.rm(h.dir, { recursive: true, force: true }));
   }
 });
 
-test('cold sessions inherit configured reasoning until the branch records an explicit choice', async () => {
-  const h = await makeColdServer({ contextThinkingLevel: 'off' });
+test('cold sessions inherit configured reasoning until the branch records an explicit choice', async (t) => {
+  const h = await makeColdServer(t, { contextThinkingLevel: 'off' });
   try {
     await fs.writeFile(path.join(h.dir, 'settings.json'), JSON.stringify({
       defaultModel: 'model-a', defaultThinkingLevel: 'high',
@@ -418,12 +439,12 @@ test('cold sessions inherit configured reasoning until the branch records an exp
     const explicit = await h.server.buildSessionOpenedPayload(h.sessionPath);
     assert.equal(explicit.session.thinkingLevel, 'off');
   } finally {
-    await fs.rm(h.dir, { recursive: true, force: true });
+    t.after(() => fs.rm(h.dir, { recursive: true, force: true }));
   }
 });
 
-test('cold list and models.list use coordinator metadata without promotion', async () => {
-  const h = await makeColdServer();
+test('cold list and models.list use coordinator metadata without promotion', async (t) => {
+  const h = await makeColdServer(t);
   try {
     const sessions = await h.server.handleRequest({
       id: 'list-cold', method: 'session.list',
@@ -435,12 +456,12 @@ test('cold list and models.list use coordinator metadata without promotion', asy
     assert.deepEqual(models.map((model: { id: string }) => model.id), ['model-a', 'model-b']);
     assert.deepEqual(h.counts(), { managerOpens: 0 });
   } finally {
-    await fs.rm(h.dir, { recursive: true, force: true });
+    t.after(() => fs.rm(h.dir, { recursive: true, force: true }));
   }
 });
 
-test('coordinator-routed cold settings survive snapshot rebuild and backend-generation replacement without promotion', async () => {
-  const h = await makeColdServer();
+test('coordinator-routed cold settings survive snapshot rebuild and backend-generation replacement without promotion', async (t) => {
+  const h = await makeColdServer(t);
   try {
     const updated = await h.server.handleRequest({
       id: 'settings-cold-durable',
@@ -480,12 +501,12 @@ test('coordinator-routed cold settings survive snapshot rebuild and backend-gene
       'thinking_level_change',
     ]);
   } finally {
-    await fs.rm(h.dir, { recursive: true, force: true });
+    t.after(() => fs.rm(h.dir, { recursive: true, force: true }));
   }
 });
 
-test('coordinator-routed cold system-prompt toggles persist and confirm without promotion', async () => {
-  const h = await makeColdServer();
+test('coordinator-routed cold system-prompt toggles persist and confirm without promotion', async (t) => {
+  const h = await makeColdServer(t);
   const previousSettingsDir = process.env[SESSION_SETTINGS_DIR_ENV];
   process.env[SESSION_SETTINGS_DIR_ENV] = h.dir;
   try {
@@ -515,12 +536,12 @@ test('coordinator-routed cold system-prompt toggles persist and confirm without 
   } finally {
     if (previousSettingsDir === undefined) delete process.env[SESSION_SETTINGS_DIR_ENV];
     else process.env[SESSION_SETTINGS_DIR_ENV] = previousSettingsDir;
-    await fs.rm(h.dir, { recursive: true, force: true });
+    t.after(() => fs.rm(h.dir, { recursive: true, force: true }));
   }
 });
 
-test('cold session.opened has a metadata-independent bounded fallback for huge names, settings, and configured catalogs', async () => {
-  const h = await makeColdServer();
+test('cold session.opened has a metadata-independent bounded fallback for huge names, settings, and configured catalogs', async (t) => {
+  const h = await makeColdServer(t);
   try {
     const huge = 'x'.repeat(31 * 1024 * 1024);
     h.setSessionName(huge);
@@ -550,12 +571,12 @@ test('cold session.opened has a metadata-independent bounded fallback for huge n
     assert.deepEqual(payload.systemPromptDisabledEntries, ['skills']);
     assert.ok(sessionSnapshotLineBytes(payload, { kind: 'event', event: 'session.opened' }) <= SESSION_SNAPSHOT_MAX_LINE_BYTES);
   } finally {
-    await fs.rm(h.dir, { recursive: true, force: true });
+    t.after(() => fs.rm(h.dir, { recursive: true, force: true }));
   }
 });
 
-test('cold detail reads the current durable file without promoting a runtime', async () => {
-  const h = await makeColdServer();
+test('cold detail reads the current durable file without promoting a runtime', async (t) => {
+  const h = await makeColdServer(t);
   try {
     h.replaceBranch([entry('user-1', 'user', 'hello')]);
     await fs.writeFile(h.sessionPath, [
@@ -569,12 +590,12 @@ test('cold detail reads the current durable file without promoting a runtime', a
     });
     assert.equal(detail.status, 'unavailable');
   } finally {
-    await fs.rm(h.dir, { recursive: true, force: true });
+    t.after(() => fs.rm(h.dir, { recursive: true, force: true }));
   }
 });
 
-test('an externally rewritten retained session evicts its stale manager and reopens once', async () => {
-  const h = await makeColdServer();
+test('an externally rewritten retained session evicts its stale manager and reopens once', async (t) => {
+  const h = await makeColdServer(t);
   try {
     const createdPath = path.join(h.dir, 'externally-rewritten.jsonl');
     await fs.writeFile(createdPath, `${JSON.stringify({ type: 'session', id: 'rewritten', version: 3, cwd: h.dir })}\n`);
@@ -593,11 +614,11 @@ test('an externally rewritten retained session evicts its stale manager and reop
     assert.equal(h.counts().managerOpens, opensBeforeRewrite + 1);
     assert.equal(h.server.coldSessionManagerHandles.size, 0, 'the stale handle is not selected again');
   } finally {
-    await fs.rm(h.dir, { recursive: true, force: true });
+    t.after(() => fs.rm(h.dir, { recursive: true, force: true }));
   }
 });
 
-test('public JSONL app.ping reaches the response writer before a blocked cold catalog operation is released', async () => {
+test('public JSONL app.ping reaches the response writer before a blocked cold catalog operation is released', async (t) => {
   let markStarted!: () => void;
   let releaseList!: () => void;
   const started = new Promise<void>((resolve) => { markStarted = resolve; });
@@ -612,7 +633,7 @@ test('public JSONL app.ping reaches the response writer before a blocked cold ca
     refresh: () => undefined,
     remove: () => undefined,
   };
-  const h = await makeColdServer({ sessionCatalog: catalog });
+  const h = await makeColdServer(t, { sessionCatalog: catalog });
   const originalWrite = process.stdout.write;
   const responses: Array<{ id: string; ok: boolean; result?: any }> = [];
   let markPingWritten!: () => void;
@@ -680,12 +701,12 @@ test('public JSONL app.ping reaches the response writer before a blocked cold ca
   } finally {
     releaseList();
     (process.stdout as any).write = originalWrite;
-    await fs.rm(h.dir, { recursive: true, force: true });
+    t.after(() => fs.rm(h.dir, { recursive: true, force: true }));
   }
 });
 
-test('cold forget routes through the store and removes the durable session without runtime creation', async () => {
-  const h = await makeColdServer();
+test('cold forget routes through the store and removes the durable session without runtime creation', async (t) => {
+  const h = await makeColdServer(t);
   try {
     h.server.emit = () => undefined;
     h.server.emitSessionListChanged = async () => undefined;
@@ -694,12 +715,12 @@ test('cold forget routes through the store and removes the durable session witho
     }), { sessionPath: h.sessionPath, forgotten: true });
     assert.equal(await fs.stat(h.sessionPath).then(() => true, () => false), false);
   } finally {
-    await fs.rm(h.dir, { recursive: true, force: true });
+    t.after(() => fs.rm(h.dir, { recursive: true, force: true }));
   }
 });
 
-test('duplicate of a hot session forks through its owner and retains coordinator idempotency', async () => {
-  const h = await makeColdServer();
+test('duplicate of a hot session forks through its owner and retains coordinator idempotency', async (t) => {
+  const h = await makeColdServer(t);
   try {
     await seedLiveMembership(h.server, [h.sessionPath]);
     const duplicatePath = path.join(h.dir, 'hot-duplicate.jsonl');
@@ -813,12 +834,12 @@ test('duplicate of a hot session forks through its owner and retains coordinator
     assert.equal(snapshotCalls, 2, 'retry republishes the existing hot destination snapshot');
     assert.equal(privateRequestIds.at(-1), 'snapshot:duplicate-hot-retry');
   } finally {
-    await fs.rm(h.dir, { recursive: true, force: true });
+    t.after(() => fs.rm(h.dir, { recursive: true, force: true }));
   }
 });
 
-test('distinct concurrent duplicate requests serialize at a hot source and create two durable copies', async () => {
-  const h = await makeColdServer();
+test('distinct concurrent duplicate requests serialize at a hot source and create two durable copies', async (t) => {
+  const h = await makeColdServer(t);
   try {
     await seedLiveMembership(h.server, [h.sessionPath]);
     const hotDuplicatePath = path.join(h.dir, 'concurrent-hot-duplicate.jsonl');
@@ -924,12 +945,12 @@ test('distinct concurrent duplicate requests serialize at a hot source and creat
       coldDuplicatePath,
     ]));
   } finally {
-    await fs.rm(h.dir, { recursive: true, force: true });
+    t.after(() => fs.rm(h.dir, { recursive: true, force: true }));
   }
 });
 
-test('duplicate reselects a hot owner when promotion starts immediately before cold capture', async () => {
-  const h = await makeColdServer();
+test('duplicate reselects a hot owner when promotion starts immediately before cold capture', async (t) => {
+  const h = await makeColdServer(t);
   try {
     const duplicatePath = path.join(h.dir, 'raced-hot-duplicate.jsonl');
     const store = h.server.initializeColdSessionStore();
@@ -974,12 +995,12 @@ test('duplicate reselects a hot owner when promotion starts immediately before c
     assert.equal(hotAttempts, 1, 'the bounded retry selects the settled hot owner');
     assert.equal(h.counts().managerOpens, 0, 'the reserved source is never opened cold');
   } finally {
-    await fs.rm(h.dir, { recursive: true, force: true });
+    t.after(() => fs.rm(h.dir, { recursive: true, force: true }));
   }
 });
 
-test('a cold read that arrives during promotion waits for the hot owner instead of reopening under its fence', async () => {
-  const h = await makeColdServer();
+test('a cold read that arrives during promotion waits for the hot owner instead of reopening under its fence', async (t) => {
+  const h = await makeColdServer(t);
   try {
     let releasePromotion!: () => void;
     const promotion = new Promise<void>((resolve) => { releasePromotion = resolve; });
@@ -1030,12 +1051,12 @@ test('a cold read that arrives during promotion waits for the hot owner instead 
       },
     }]);
   } finally {
-    await fs.rm(h.dir, { recursive: true, force: true });
+    t.after(() => fs.rm(h.dir, { recursive: true, force: true }));
   }
 });
 
-test('stale cold session.opened publication follows promotion and refreshes through the hot owner', async () => {
-  const h = await makeColdServer();
+test('stale cold session.opened publication follows promotion and refreshes through the hot owner', async (t) => {
+  const h = await makeColdServer(t);
   try {
     const stale = await h.server.buildSessionOpenedPayload(
       h.sessionPath,
@@ -1087,12 +1108,12 @@ test('stale cold session.opened publication follows promotion and refreshes thro
       operationAttempt: 3,
     });
   } finally {
-    await fs.rm(h.dir, { recursive: true, force: true });
+    t.after(() => fs.rm(h.dir, { recursive: true, force: true }));
   }
 });
 
-test('a slow create cannot overwrite a newer host-local viewed transition', async () => {
-  const h = await makeColdServer();
+test('a slow create cannot overwrite a newer host-local viewed transition', async (t) => {
+  const h = await makeColdServer(t);
   try {
     const a = path.join(h.dir, 'a.jsonl');
     const b = h.sessionPath;
@@ -1127,12 +1148,12 @@ test('a slow create cannot overwrite a newer host-local viewed transition', asyn
 
     assert.equal(h.server.viewedSessionPath, b);
   } finally {
-    await fs.rm(h.dir, { recursive: true, force: true });
+    t.after(() => fs.rm(h.dir, { recursive: true, force: true }));
   }
 });
 
-test('a slow cold session.open cannot overwrite a newer host-local viewed transition', async () => {
-  const h = await makeColdServer();
+test('a slow cold session.open cannot overwrite a newer host-local viewed transition', async (t) => {
+  const h = await makeColdServer(t);
   let releaseMembershipRead: () => void = () => undefined;
   let releaseOpen: () => void = () => undefined;
   let titleNamespaceHydration: Promise<void> | undefined;
@@ -1207,6 +1228,6 @@ test('a slow cold session.open cannot overwrite a newer host-local viewed transi
     releaseMembershipRead();
     releaseOpen();
     await titleNamespaceHydration?.catch(() => undefined);
-    await fs.rm(h.dir, { recursive: true, force: true });
+    t.after(() => fs.rm(h.dir, { recursive: true, force: true }));
   }
 });

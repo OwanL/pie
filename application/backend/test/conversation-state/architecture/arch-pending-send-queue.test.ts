@@ -17,7 +17,7 @@ import assert from 'node:assert/strict';
 import { reducer, initialArchState, type ArchState } from '../../../conversation-state/reducer';
 import type { Event } from '../../../conversation-state/events';
 import type { Effect } from '../../../conversation-state/effects/effects';
-import { PENDING_SESSION_PREFIX } from '../../../../frontend/session-tabs/tab-behavior';
+import { PENDING_SESSION_PREFIX } from '../../../../lib/session-tabs/tab-behavior.js';
 import type { ComposerInput, SessionSummary } from '../../../../lib/protocol/index.js';
 
 const PENDING = `${PENDING_SESSION_PREFIX}abc-123`;

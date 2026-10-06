@@ -2,7 +2,7 @@
 // Windows installer operations dispatcher.
 //
 // install.bat handles cmd-specific concerns (environment persistence,
-// interactive prompts, exit handling, and executable PATH hints) and delegates
+// interactive prompts, exit handling, and VS Code CLI discovery) and delegates
 // testable business logic here. Each subcommand is a focused,
 // side-effect-bounded operation invoked at the right point in its flow:
 //
@@ -17,8 +17,8 @@
 //   node scripts/install/run.mjs readiness --auth <path> [--in-tree-auth <path>] [--auth-dir <dir>] [--repo-root <dir>] [--vscode-agent-dir-expected <dir>]
 //   node scripts/install/run.mjs has-jsonl <path> [--no-recurse]
 //
-// `verify-toolchain` is a dry run: it reports Node/npm drift plus Pi source
-// provenance, but never installs anything or requires a global Pi CLI.
+// `verify-toolchain` is a dry run: it reports Proto-selected Node/pnpm drift
+// plus Pi source provenance, but never installs anything or requires a global Pi CLI.
 
 import { spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
@@ -27,7 +27,6 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
 import { readJsonFile, writeJsonFile } from './lib/json.mjs';
-import { repairExtensionPaths } from './lib/settings-repair.mjs';
 import { mergeAuthProviders, readAuthProviders, relocateAuthFile } from './lib/auth.mjs';
 import { mergeAgentDirSetting, resolveVscodeSettingsDirs } from './lib/vscode-settings.mjs';
 import { checkAuthReadiness, checkSplitBrain, checkVscodeAgentDir } from './lib/readiness.mjs';
@@ -39,32 +38,26 @@ import { validateAuthDirectory } from './lib/auth-directory.mjs';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '..', '..');
 
-// Run a CLI command portably: on Windows, npm and other CLIs are .cmd shims that
-// spawnSync (shell:false) cannot resolve directly, so route through cmd.exe,
-// matching scripts/lib/subprocess.mjs's spawnCliSync for these command shims.
+// Run a CLI command portably: on Windows, CLI shims cannot be resolved by
+// spawnSync (shell:false), so route through cmd.exe, matching the shared
+// subprocess helper's handling of Windows command shims.
 function run(command, args, cwd = repoRoot) {
   return process.platform === 'win32'
     ? spawnSync(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', command, ...args], { cwd, encoding: 'utf8', windowsHide: true })
     : spawnSync(command, args, { cwd, encoding: 'utf8' });
 }
 
-function npmConfigGetPrefix() {
-  const result = run('npm', ['config', 'get', 'prefix']);
-  if (result.status !== 0) return '';
-  return (result.stdout ?? '').trim();
-}
-
 function printHelp() {
   console.log(`Usage: node scripts/install/run.mjs <command> [args]
 
 Commands:
-  repair-settings <settings.json>       Rewrite absolute extension paths to this machine's npm prefix.
+  repair-settings <settings.json>       Report legacy global npm extension paths without rewriting them.
   merge-auth <in-tree> <secure>         Merge split-brain in-tree auth.json into the secure location and remove the in-tree copy.
   relocate-auth <src> <dest>            Atomically copy auth.json to the secure location with SHA-256 verification (no in-tree removal/ACL/env).
   configure-sessions <repoRoot>        Rewrite settings.json#sessionDir to the canonical store and migrate legacy session history.
   validate-auth-dir <repoRoot> <savedDir> Require the saved auth directory to be outside the Git checkout.
-  pinned-versions                       Print pinned Node/npm/Pi source versions (one per line).
-  verify-toolchain [--json]             Dry-run: report Node/npm drift and Pi source provenance (never installs).
+  pinned-versions                       Print pinned Node/pnpm/Pi source versions (one per line).
+  verify-toolchain [--json]             Dry-run: report Proto-selected Node/pnpm drift and Pi source provenance (never installs).
   write-vscode-agent-dir <repoRoot>     Write pie.agentDir into each existing VS Code User settings.json.
   readiness --auth <path> [...]         Print auth/provider/split-brain (and optional pie.agentDir) readiness checks.
   has-jsonl <path> [--no-recurse]       Print 1 if the dir contains *.jsonl, else 0.`);
@@ -80,27 +73,11 @@ function cmdRepairSettings(args) {
     console.warn(`WARN: could not parse ${settingsPath}; skipping extension path repair.`);
     return;
   }
-  const npmPrefix = npmConfigGetPrefix();
-  if (!npmPrefix) {
-    console.warn("WARN: Could not resolve 'npm config get prefix'; skipping extension path repair in settings.json.");
-    return;
+  const legacyPaths = (Array.isArray(settings.extensions) ? settings.extensions : [])
+    .filter((entry) => typeof entry === 'string' && /[\\/]node_modules[\\/]/i.test(entry));
+  if (legacyPaths.length > 0) {
+    console.warn(`WARN: ${legacyPaths.length} legacy node_modules extension path(s) were left unchanged in ${settingsPath}. Replace them with a repository-owned extension path or a versioned settings.packages source; no global npm-prefix or installed-SDK fallback is used.`);
   }
-
-  const result = repairExtensionPaths(settings, { npmPrefix, platform: process.platform });
-  for (const { from, to, pkg } of result.rewritten) {
-    console.log(`==> Rewriting extension path '${from}' -> '${to}'`);
-    if (!existsSync(path.join(npmPrefix, 'node_modules', pkg))) {
-      console.warn(`WARN: Extension package '${pkg}' is not installed under the npm global prefix. Install it with: npm i -g ${pkg}`);
-    }
-  }
-  if (!result.changed) return;
-
-  const backup = `${settingsPath}.extensions.${Date.now()}.bak`;
-  copyFileSync(settingsPath, backup);
-  // No trailing newline: matches the git-tracked settings.json style.
-  writeJsonFile(settingsPath, result.settings, { trailingNewline: false });
-  console.log('==> Normalized extension paths in settings.json');
-  console.log(`==> Backed up the previous settings.json to ${backup}`);
 }
 
 function cmdMergeAuth(args) {
@@ -162,10 +139,12 @@ function cmdVerifyToolchain(args) {
   const pinned = readPinnedVersions(repoRoot);
 
   const actualNode = process.versions.node;
-  const npmResult = run('npm', ['--version']);
-  const actualNpm = ((npmResult.stdout || '').trim() || (npmResult.stderr || '').trim());
+  const pnpmResult = run('proto', ['run', 'pnpm', '--', '--version'], repoRoot);
+  const actualPnpm = pnpmResult.status === 0
+    ? ((pnpmResult.stdout || '').trim() || (pnpmResult.stderr || '').trim())
+    : '';
 
-  const status = verifyToolchain({ pinned, actual: { node: actualNode, npm: actualNpm } });
+  const status = verifyToolchain({ pinned, actual: { node: actualNode, pnpm: actualPnpm } });
 
   if (asJson) {
     process.stdout.write(`${JSON.stringify({ pinned, ...status })}\n`);
@@ -179,9 +158,8 @@ function cmdVerifyToolchain(args) {
     return `  ${label} ${s.actual || 'unavailable'}${drift}${tag}`;
   };
   console.log(fmtLine('Node', status.node));
-  console.log(fmtLine('npm ', status.npm));
+  console.log(fmtLine('pnpm', status.pnpm));
   console.log(`  Pi source ${status.piSource.version || 'unavailable'} (${status.piSource.provenance})`);
-  if (status.npm.installCommand) console.log(`  would run: ${status.npm.installCommand.join(' ')}`);
   if (!status.allOk) process.exitCode = 1;
 }
 
@@ -288,14 +266,13 @@ function cmdValidateAuthDir(args) {
 }
 
 function cmdPinnedVersions() {
-  // Single source of truth for Node/npm pins and the Pi source version. Prints
-  // those values one per line; the Pi version is provenance, not a CLI check.
-  const { node, npm, piSource } = readPinnedVersions(repoRoot);
-  if (!node || !npm || !piSource) {
-    console.error('Could not resolve pinned Node/npm/Pi source versions.');
+  // Print repository Proto Node/pnpm pins and Pi source provenance one per line.
+  const { node, pnpm, piSource } = readPinnedVersions(repoRoot);
+  if (!node || !pnpm || !piSource) {
+    console.error('Could not resolve pinned Node/pnpm/Pi source versions.');
     process.exit(1);
   }
-  process.stdout.write(`${node}\n${npm}\n${piSource}\n`);
+  process.stdout.write(`${node}\n${pnpm}\n${piSource}\n`);
 }
 
 const commands = {

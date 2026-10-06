@@ -211,7 +211,7 @@ test('doctor wires explicit and default routes without global-Pi fallback', () =
   const source = readFileSync(new URL('../doctor.mjs', import.meta.url), 'utf8');
   assert.match(source, /resolvePiRuntimeRoute\(parsePiRuntimeRoute\(process\.argv\), repoRoot\)/);
   assert.match(source, /collectPiRuntimeArtifactRoute\(\{ artifactDir: piRuntimeRoute\.artifactDir \}\)/);
-  assert.match(source, /Build the checkout's VS Code application under normal safe conditions, or pass --pi-runtime/);
+  assert.match(source, /Run proto run pnpm -- run delivery:build explicitly under normal safe conditions[\s\S]*?or pass --pi-runtime <absolute verified artifact root>/);
   assert.match(source, /if \(piRuntimeRoute\.usageError\)[\s\S]*?else if \(ci && !piRuntimeRoute\.explicit\)/);
   assert.match(source, /explicit pi-runtime artifact route; no global pi CLI lookup or fallback/);
   assert.doesNotMatch(source, /npm", \["root", "-g"\]/);

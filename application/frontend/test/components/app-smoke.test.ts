@@ -2,7 +2,7 @@
  * Smoke test: mounts the App shell with a canned ViewState and asserts basic
  * rendering + interactions work without acquireVsCodeApi.
  */
-import test, { beforeEach } from 'node:test';
+import test, { afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { installDom } from '../helpers/dom';
@@ -135,10 +135,11 @@ beforeEach(() => {
   container = document.createElement('div');
   container.id = 'app';
   document.body.appendChild(container);
-  return () => {
-    render(null, container);
-    container.remove();
-  };
+});
+
+afterEach(() => {
+  render(null, container);
+  container.remove();
 });
 
 test('App keeps a fixed answer surface for a subagent question when its transcript card is stale', () => {

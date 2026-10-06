@@ -55,7 +55,7 @@ import type {
   SessionControlSettingsRequest,
 } from '../../../../harness/agent-processes/lib/rpc/session-control-settings.js';
 import type { LiveLifecycleWatermark, LiveTurnCheckpoint } from '../../../lib/protocol/live-pipeline.js';
-import { isLivePipelineTraceEnabled, recordLivePipelineTrace } from '../../agent-connection/live-pipeline-trace-runtime.js';
+import { isLivePipelineTraceEnabled, recordLivePipelineTrace } from '../../../lib/live-pipeline-trace-runtime.js';
 import {
   SessionOperationEffectController,
   type CommitAwareRequestOptions,

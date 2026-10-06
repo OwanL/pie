@@ -3,7 +3,7 @@ import { produce } from 'immer';
 import type { ArchState } from '../arch-state.js';
 import type { Command } from '../commands.js';
 import type { ComposerInput } from '../../../lib/protocol/index.js';
-import { decodedBase64ByteLength, MAX_AGGREGATE_IMAGE_INPUT_BYTES } from '../../../frontend/composer/image-constraints.js';
+import { decodedBase64ByteLength, MAX_AGGREGATE_IMAGE_INPUT_BYTES } from '../../../lib/composer/image-constraints.js';
 import type { ReducerResult } from './helpers.js';
 
 export function handleAddComposerInput(state: ArchState, cmd: Extract<Command, { kind: 'AddComposerInput' }>): ReducerResult {

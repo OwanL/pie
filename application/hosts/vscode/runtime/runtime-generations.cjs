@@ -1,8 +1,10 @@
 'use strict';
 
 const fs = require('node:fs/promises');
+const fileStreams = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const os = require('node:os');
 
 const RUNTIME_DIRECTORY = 'pie-runtime';
 const GENERATIONS_DIRECTORY = 'generations';
@@ -21,8 +23,209 @@ const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const LOCK_RETRY_MS = 25;
 const LOCK_METADATA_GRACE_MS = 2_000;
 const LOCK_TIMEOUT_MS = 60_000;
+const FILE_SCAN_CONCURRENCY = 8;
+const HASH_FILE_READ_CHUNK_BYTES = 64 * 1024;
+const STARTUP_TIMING_FILE = path.join(os.tmpdir(), 'pie-startup-timing.jsonl');
+const STARTUP_TIMING_TAG = 'DEBUG-startup-profile';
+const STARTUP_TIMING_MAX_BYTES = 1_048_576;
+const STARTUP_TIMING_MAX_RECORD_BYTES = 4_096;
+const MAX_REPORTED_GENERATIONS = 8;
 
 let sequence = 0;
+let startupTimingWriteQueue = Promise.resolve();
+
+function monotonicNow() {
+  return process.hrtime.bigint();
+}
+
+function elapsedMs(startedAt) {
+  return Number(process.hrtime.bigint() - startedAt) / 1_000_000;
+}
+
+function roundedMs(milliseconds) {
+  return Math.round(milliseconds * 1000) / 1000;
+}
+
+function createPublishTiming() {
+  if (!process.env.PIE_BUILD_TIMING) return null;
+  return {
+    snapshot: 0,
+    copy: 0,
+    stagedScan: 0,
+    stagedVerify: 0,
+    previousSelections: 0,
+    cleanup: 0,
+  };
+}
+
+function recordBuildPhase(timing, phase, startedAt) {
+  if (timing) timing[phase] = elapsedMs(startedAt);
+}
+
+function emitPublishTiming(timing) {
+  if (!timing) return;
+  try {
+    console.log(`[pie-build-timing] ${JSON.stringify({
+      event: 'runtime-generation-publish',
+      phasesMs: Object.fromEntries(Object.entries(timing).map(([phase, milliseconds]) => [phase, roundedMs(milliseconds)])),
+    })}`);
+  } catch {
+    // Build instrumentation is observational only.
+  }
+}
+
+function startupTimingPath() {
+  const tempRoot = path.resolve(os.tmpdir());
+  const configuredPath = process.env.PIE_STARTUP_TIMING_FILE;
+  if (typeof configuredPath === 'string' && configuredPath.length > 0) {
+    const resolvedPath = path.resolve(configuredPath);
+    const relativePath = path.relative(tempRoot, resolvedPath);
+    if (relativePath === '' || (!relativePath.startsWith(`..${path.sep}`) && relativePath !== '..' && !path.isAbsolute(relativePath))) {
+      return resolvedPath;
+    }
+  }
+  return STARTUP_TIMING_FILE;
+}
+
+function queueStartupTiming(record) {
+  let line;
+  let filePath;
+  try {
+    line = `${JSON.stringify({
+      ...record,
+      tag: STARTUP_TIMING_TAG,
+      timestamp: new Date().toISOString(),
+      pid: process.pid,
+    })}\n`;
+    if (Buffer.byteLength(line, 'utf8') > STARTUP_TIMING_MAX_RECORD_BYTES) return;
+    filePath = startupTimingPath();
+  } catch {
+    return;
+  }
+
+  startupTimingWriteQueue = startupTimingWriteQueue.then(async () => {
+    try {
+      const backupPath = `${filePath}.1`;
+      let existingSize = 0;
+      try {
+        existingSize = (await fs.stat(filePath)).size;
+      } catch (error) {
+        if (errorCode(error) !== 'ENOENT') return;
+      }
+      if (existingSize + Buffer.byteLength(line, 'utf8') > STARTUP_TIMING_MAX_BYTES) {
+        await fs.rm(backupPath, { force: true });
+        try {
+          await fs.rename(filePath, backupPath);
+        } catch (error) {
+          if (errorCode(error) !== 'ENOENT') return;
+        }
+      }
+      await fs.appendFile(filePath, line, { encoding: 'utf8', mode: 0o600, flag: 'a' });
+      await fs.chmod(filePath, 0o600).catch(() => undefined);
+    } catch {
+      // Startup instrumentation is best effort and must never affect runtime selection.
+    }
+  }).catch(() => undefined);
+}
+
+function createAcquisitionTiming() {
+  return {
+    startedAt: monotonicNow(),
+    outcome: 'error',
+    lockWaitMs: 0,
+    selectionVerificationMs: 0,
+    cleanupMs: 0,
+    verifications: new Map(),
+    verificationOverflow: null,
+  };
+}
+
+function createVerificationSummary(generation) {
+  return {
+    generation,
+    count: 0,
+    failures: 0,
+    totalMs: 0,
+    files: 0,
+    bytes: 0,
+    phasesMs: {
+      manifestMs: 0,
+      fileScanMs: 0,
+      manifestComparisonMs: 0,
+      contentHashMs: 0,
+      outputShapeMs: 0,
+    },
+  };
+}
+
+function recordVerification(timing, generation, verification) {
+  if (!timing) return;
+  let summary = timing.verifications.get(generation);
+  if (!summary && timing.verifications.size < MAX_REPORTED_GENERATIONS) {
+    summary = createVerificationSummary(generation);
+    timing.verifications.set(generation, summary);
+  }
+  if (!summary) {
+    if (!timing.verificationOverflow) {
+      timing.verificationOverflow = {
+        count: 0,
+        failures: 0,
+        totalMs: 0,
+        files: 0,
+        bytes: 0,
+        phasesMs: {
+          manifestMs: 0,
+          fileScanMs: 0,
+          manifestComparisonMs: 0,
+          contentHashMs: 0,
+          outputShapeMs: 0,
+        },
+      };
+    }
+    summary = timing.verificationOverflow;
+  }
+  summary.count += 1;
+  summary.failures += verification.failed ? 1 : 0;
+  summary.totalMs += verification.totalMs;
+  summary.files += verification.files;
+  summary.bytes += verification.bytes;
+  for (const [phase, milliseconds] of Object.entries(verification.phasesMs)) {
+    summary.phasesMs[phase] += milliseconds;
+  }
+}
+
+function finalizeAcquisitionTiming(timing) {
+  const verifications = [...timing.verifications.values()].map((summary) => ({
+    generation: summary.generation,
+    count: summary.count,
+    failures: summary.failures,
+    totalMs: roundedMs(summary.totalMs),
+    files: summary.files,
+    bytes: summary.bytes,
+    phasesMs: Object.fromEntries(Object.entries(summary.phasesMs).map(([phase, milliseconds]) => [phase, roundedMs(milliseconds)])),
+  }));
+  let verificationOverflow;
+  if (timing.verificationOverflow) {
+    const summary = timing.verificationOverflow;
+    verificationOverflow = {
+      ...summary,
+      totalMs: roundedMs(summary.totalMs),
+      phasesMs: Object.fromEntries(Object.entries(summary.phasesMs).map(([phase, milliseconds]) => [phase, roundedMs(milliseconds)])),
+    };
+  }
+  queueStartupTiming({
+    schema: 1,
+    source: 'runtime-generations',
+    event: 'acquire',
+    outcome: timing.outcome,
+    acquisitionMs: roundedMs(elapsedMs(timing.startedAt)),
+    lockWaitMs: roundedMs(timing.lockWaitMs),
+    selectionVerificationMs: roundedMs(timing.selectionVerificationMs),
+    cleanupMs: roundedMs(timing.cleanupMs),
+    verification: verifications,
+    ...(verificationOverflow ? { verificationOverflow } : {}),
+  });
+}
 
 function errorCode(error) {
   return error && typeof error === 'object' && 'code' in error ? error.code : undefined;
@@ -150,13 +353,20 @@ async function readLockOwner(lockDir) {
  * record includes the PID so a crashed publisher can be distinguished from a
  * live one without ever replacing a live owner's lock.
  */
-async function acquireDirectoryLock(extensionDir) {
+async function acquireDirectoryLock(extensionDir, timing) {
   const root = runtimeRoot(extensionDir);
   await fs.mkdir(root, { recursive: true });
   const lockDir = path.join(root, LOCK_DIRECTORY);
   const token = crypto.randomBytes(16).toString('hex');
   const startedAt = Date.now();
   const deadline = startedAt + LOCK_TIMEOUT_MS;
+  let contentionStartedAt;
+
+  function recordLockWait() {
+    if (!timing || contentionStartedAt === undefined) return;
+    timing.lockWaitMs += elapsedMs(contentionStartedAt);
+    contentionStartedAt = undefined;
+  }
 
   for (;;) {
     try {
@@ -172,6 +382,7 @@ async function acquireDirectoryLock(extensionDir) {
         throw error;
       }
 
+      recordLockWait();
       let released = false;
       return async () => {
         if (released) return;
@@ -186,7 +397,11 @@ async function acquireDirectoryLock(extensionDir) {
         }
       };
     } catch (error) {
-      if (errorCode(error) !== 'EEXIST') throw error;
+      if (errorCode(error) !== 'EEXIST') {
+        recordLockWait();
+        throw error;
+      }
+      if (timing && contentionStartedAt === undefined) contentionStartedAt = monotonicNow();
       const owner = await readLockOwner(lockDir);
       if (owner && !ownerIsAlive(owner.pid)) {
         await fs.rm(lockDir, { recursive: true, force: true }).catch((removeError) => {
@@ -211,6 +426,7 @@ async function acquireDirectoryLock(extensionDir) {
       }
 
       if (Date.now() >= deadline) {
+        recordLockWait();
         throw new Error(`Timed out waiting for the Pie runtime lock at ${lockDir}.`);
       }
       await sleep(LOCK_RETRY_MS);
@@ -225,42 +441,108 @@ async function assertRegularFile(filePath, label) {
 }
 
 async function hashFile(filePath) {
-  const contents = await fs.readFile(filePath);
-  return {
-    sha256: crypto.createHash('sha256').update(contents).digest('hex'),
-    size: contents.length,
-  };
+  const hash = crypto.createHash('sha256');
+  let size = 0;
+  const stream = fileStreams.createReadStream(filePath, { highWaterMark: HASH_FILE_READ_CHUNK_BYTES });
+  for await (const chunk of stream) {
+    hash.update(chunk);
+    size += chunk.length;
+  }
+  return { sha256: hash.digest('hex'), size };
 }
 
 async function collectFileRecords(rootDir) {
   const root = path.resolve(rootDir);
   const rootInfo = await fs.lstat(root);
   if (!rootInfo.isDirectory()) throw new Error(`Runtime output is not a directory: ${rootDir}`);
-  const records = [];
+  const files = [];
 
   async function visit(directory, relativeDirectory) {
     const entries = await fs.readdir(directory, { withFileTypes: true });
     entries.sort((left, right) => left.name.localeCompare(right.name));
-    for (const entry of entries) {
+    const candidates = entries.map((entry) => {
       const relative = relativeDirectory ? path.join(relativeDirectory, entry.name) : entry.name;
       const normalized = normalizeFileRecordPath(relative);
-      const absolute = safeChildPath(root, normalized, 'runtime output path');
-      const info = await fs.lstat(absolute);
-      if (info.isSymbolicLink()) {
-        throw new Error(`Runtime output may not contain symlinks: ${normalized}`);
+      return {
+        path: normalized,
+        absolute: safeChildPath(root, normalized, 'runtime output path'),
+      };
+    });
+    const metadata = new Array(candidates.length);
+    let nextCandidateIndex = 0;
+    let failed = false;
+    let firstError;
+
+    async function checkMetadata() {
+      try {
+        while (!failed) {
+          const index = nextCandidateIndex;
+          nextCandidateIndex += 1;
+          if (index >= candidates.length) return;
+          const candidate = candidates[index];
+          const info = await fs.lstat(candidate.absolute);
+          if (info.isSymbolicLink()) {
+            throw new Error(`Runtime output may not contain symlinks: ${candidate.path}`);
+          }
+          if (!info.isDirectory() && !info.isFile()) {
+            throw new Error(`Unsupported runtime output entry: ${candidate.path}`);
+          }
+          metadata[index] = { ...candidate, isDirectory: info.isDirectory() };
+        }
+      } catch (error) {
+        if (!failed) {
+          failed = true;
+          firstError = error;
+        }
       }
-      if (info.isDirectory()) {
-        await visit(absolute, normalized);
-      } else if (info.isFile()) {
-        const digest = await hashFile(absolute);
-        records.push({ path: normalized, sha256: digest.sha256, size: digest.size });
+    }
+
+    const workerCount = Math.min(FILE_SCAN_CONCURRENCY, candidates.length);
+    const workerResults = await Promise.allSettled(Array.from({ length: workerCount }, () => checkMetadata()));
+    if (failed) throw firstError;
+    const rejectedWorker = workerResults.find((result) => result.status === 'rejected');
+    if (rejectedWorker) throw rejectedWorker.reason;
+
+    for (const candidate of metadata) {
+      if (candidate.isDirectory) {
+        await visit(candidate.absolute, candidate.path);
       } else {
-        throw new Error(`Unsupported runtime output entry: ${normalized}`);
+        files.push({ path: candidate.path, absolute: candidate.absolute });
       }
     }
   }
 
   await visit(root, '');
+
+  const records = new Array(files.length);
+  let nextFileIndex = 0;
+  let failed = false;
+  let firstError;
+  async function hashFiles() {
+    while (!failed) {
+      const index = nextFileIndex;
+      nextFileIndex += 1;
+      if (index >= files.length) return;
+      const file = files[index];
+      try {
+        const digest = await hashFile(file.absolute);
+        records[index] = { path: file.path, sha256: digest.sha256, size: digest.size };
+      } catch (error) {
+        if (!failed) {
+          failed = true;
+          firstError = error;
+        }
+        return;
+      }
+    }
+  }
+
+  const workerCount = Math.min(FILE_SCAN_CONCURRENCY, files.length);
+  const workerResults = await Promise.allSettled(Array.from({ length: workerCount }, () => hashFiles()));
+  if (failed) throw firstError;
+  const rejectedWorker = workerResults.find((result) => result.status === 'rejected');
+  if (rejectedWorker) throw rejectedWorker.reason;
+
   records.sort((left, right) => left.path.localeCompare(right.path));
   return records;
 }
@@ -294,26 +576,92 @@ async function copyTree(sourceDir, destinationDir) {
   if (!sourceInfo.isDirectory()) throw new Error(`Runtime source output is not a directory: ${sourceDir}`);
   await fs.mkdir(destinationDir, { recursive: true });
 
-  async function visit(sourceDirectory, destinationDirectory) {
-    const entries = await fs.readdir(sourceDirectory, { withFileTypes: true });
-    entries.sort((left, right) => left.name.localeCompare(right.name));
-    for (const entry of entries) {
-      const sourcePath = path.join(sourceDirectory, entry.name);
-      const destinationPath = path.join(destinationDirectory, entry.name);
-      const info = await fs.lstat(sourcePath);
-      if (info.isSymbolicLink()) throw new Error(`Runtime source may not contain symlinks: ${entry.name}`);
-      if (info.isDirectory()) {
-        await fs.mkdir(destinationPath, { recursive: true });
-        await visit(sourcePath, destinationPath);
-      } else if (info.isFile()) {
-        await fs.copyFile(sourcePath, destinationPath);
-      } else {
-        throw new Error(`Unsupported runtime source entry: ${entry.name}`);
-      }
+  const inFlightCopies = new Set();
+  let firstCopyError;
+
+  async function copyFileBounded(sourcePath, destinationPath) {
+    while (inFlightCopies.size >= FILE_SCAN_CONCURRENCY) {
+      await Promise.race([...inFlightCopies].map((copy) => copy.then(() => undefined, () => undefined)));
+    }
+    if (firstCopyError) throw firstCopyError;
+
+    const copy = fs.copyFile(sourcePath, destinationPath).catch((error) => {
+      if (!firstCopyError) firstCopyError = error;
+      throw error;
+    });
+    inFlightCopies.add(copy);
+    copy.then(
+      () => inFlightCopies.delete(copy),
+      () => inFlightCopies.delete(copy),
+    ).catch(() => undefined);
+    return { promise: copy };
+  }
+
+  async function drainCopies() {
+    while (inFlightCopies.size > 0) {
+      await Promise.allSettled([...inFlightCopies]);
     }
   }
 
-  await visit(source, destinationDir);
+  async function visit(sourceDirectory, destinationDirectory) {
+    if (firstCopyError) throw firstCopyError;
+    const entries = await fs.readdir(sourceDirectory, { withFileTypes: true });
+    entries.sort((left, right) => left.name.localeCompare(right.name));
+    const candidates = entries.map((entry) => ({
+      name: entry.name,
+      sourcePath: path.join(sourceDirectory, entry.name),
+      destinationPath: path.join(destinationDirectory, entry.name),
+    }));
+    const metadata = new Array(candidates.length);
+    let nextCandidateIndex = 0;
+    let firstMetadataError;
+
+    async function checkMetadata() {
+      while (!firstMetadataError && !firstCopyError) {
+        const index = nextCandidateIndex;
+        nextCandidateIndex += 1;
+        if (index >= candidates.length) return;
+        const candidate = candidates[index];
+        try {
+          const info = await fs.lstat(candidate.sourcePath);
+          if (info.isSymbolicLink()) {
+            throw new Error(`Runtime source may not contain symlinks: ${candidate.name}`);
+          }
+          if (!info.isDirectory() && !info.isFile()) {
+            throw new Error(`Unsupported runtime source entry: ${candidate.name}`);
+          }
+          metadata[index] = { ...candidate, isDirectory: info.isDirectory() };
+        } catch (error) {
+          if (!firstMetadataError) firstMetadataError = error;
+        }
+      }
+    }
+
+    const metadataWorkerCount = Math.min(FILE_SCAN_CONCURRENCY, candidates.length);
+    await Promise.allSettled(Array.from({ length: metadataWorkerCount }, () => checkMetadata()));
+    if (firstMetadataError) throw firstMetadataError;
+    if (firstCopyError) throw firstCopyError;
+
+    const fileCopies = [];
+    for (const candidate of metadata) {
+      if (firstCopyError) break;
+      if (candidate.isDirectory) {
+        await fs.mkdir(candidate.destinationPath, { recursive: true });
+        await visit(candidate.sourcePath, candidate.destinationPath);
+      } else {
+        const scheduledCopy = await copyFileBounded(candidate.sourcePath, candidate.destinationPath);
+        fileCopies.push(scheduledCopy.promise);
+      }
+    }
+    await Promise.allSettled(fileCopies);
+    if (firstCopyError) throw firstCopyError;
+  }
+
+  try {
+    await visit(source, destinationDir);
+  } finally {
+    await drainCopies();
+  }
 }
 
 function assertManifestObject(manifest, manifestPath) {
@@ -462,36 +810,94 @@ function validateRuntimeManifest(manifest, generation, identity) {
   return { records, buildId, rendererBuildId };
 }
 
-async function verifyStoredGeneration(generationDir, generation, identity) {
-  assertGeneration(generation);
-  const manifest = await readJson(path.join(generationDir, RUNTIME_MANIFEST_FILE));
-  const validated = validateRuntimeManifest(manifest, generation, identity);
-  const outDir = path.join(generationDir, 'out');
-  const actualRecords = await collectFileRecords(outDir);
-  const actualByPath = recordsByPath(actualRecords);
-  if (actualByPath.size !== validated.records.length) {
-    throw new Error('Pie runtime output does not match its manifest file set.');
-  }
+async function verifyStoredGeneration(generationDir, generation, identity, timing) {
+  const startedAt = timing ? monotonicNow() : null;
+  const phasesMs = timing ? {
+    manifestMs: 0,
+    fileScanMs: 0,
+    manifestComparisonMs: 0,
+    contentHashMs: 0,
+    outputShapeMs: 0,
+  } : null;
+  let files = 0;
+  let bytes = 0;
+  let failed = true;
+  try {
+    assertGeneration(generation);
+    const manifestStartedAt = timing ? monotonicNow() : null;
+    let manifest;
+    let validated;
+    try {
+      manifest = await readJson(path.join(generationDir, RUNTIME_MANIFEST_FILE));
+      validated = validateRuntimeManifest(manifest, generation, identity);
+    } finally {
+      if (timing) phasesMs.manifestMs += elapsedMs(manifestStartedAt);
+    }
+    const outDir = path.join(generationDir, 'out');
+    const fileScanStartedAt = timing ? monotonicNow() : null;
+    let actualRecords;
+    try {
+      actualRecords = await collectFileRecords(outDir);
+      if (timing) {
+        files = actualRecords.length;
+        bytes = actualRecords.reduce((total, record) => total + record.size, 0);
+      }
+    } finally {
+      if (timing) phasesMs.fileScanMs += elapsedMs(fileScanStartedAt);
+    }
+    const comparisonStartedAt = timing ? monotonicNow() : null;
+    try {
+      const actualByPath = recordsByPath(actualRecords);
+      if (actualByPath.size !== validated.records.length) {
+        throw new Error('Pie runtime output does not match its manifest file set.');
+      }
 
-  for (const expected of validated.records) {
-    const actual = actualByPath.get(expected.path);
-    if (!actual || actual.size !== expected.size || actual.sha256 !== expected.sha256) {
-      throw new Error(`Pie runtime file checksum mismatch: ${expected.path}`);
+      for (const expected of validated.records) {
+        const actual = actualByPath.get(expected.path);
+        if (!actual || actual.size !== expected.size || actual.sha256 !== expected.sha256) {
+          throw new Error(`Pie runtime file checksum mismatch: ${expected.path}`);
+        }
+      }
+    } finally {
+      if (timing) phasesMs.manifestComparisonMs += elapsedMs(comparisonStartedAt);
+    }
+
+    const contentHashStartedAt = timing ? monotonicNow() : null;
+    try {
+      const actualGeneration = hashRecords(actualRecords);
+      if (actualGeneration !== generation) throw new Error('Pie runtime content hash mismatch.');
+    } finally {
+      if (timing) phasesMs.contentHashMs += elapsedMs(contentHashStartedAt);
+    }
+
+    const outputShapeStartedAt = timing ? monotonicNow() : null;
+    let buildIds;
+    try {
+      buildIds = await verifyOutputShape(outDir);
+      if (buildIds.buildId !== validated.buildId || buildIds.rendererBuildId !== validated.rendererBuildId) {
+        throw new Error('Pie runtime build identity does not match its manifest.');
+      }
+    } finally {
+      if (timing) phasesMs.outputShapeMs += elapsedMs(outputShapeStartedAt);
+    }
+    failed = false;
+    return {
+      generation,
+      outDir,
+      buildId: buildIds.buildId,
+      rendererBuildId: buildIds.rendererBuildId,
+    };
+  } finally {
+    if (timing) {
+      recordVerification(timing, generation, {
+        failed,
+        totalMs: elapsedMs(startedAt),
+        files,
+        bytes,
+        phasesMs,
+      });
     }
   }
-
-  const actualGeneration = hashRecords(actualRecords);
-  if (actualGeneration !== generation) throw new Error('Pie runtime content hash mismatch.');
-  const buildIds = await verifyOutputShape(outDir);
-  if (buildIds.buildId !== validated.buildId || buildIds.rendererBuildId !== validated.rendererBuildId) {
-    throw new Error('Pie runtime build identity does not match its manifest.');
-  }
-  return {
-    generation,
-    outDir,
-    buildId: buildIds.buildId,
-    rendererBuildId: buildIds.rendererBuildId,
-  };
 }
 
 function selectionMarkerName(publishedAt, generation) {
@@ -514,48 +920,66 @@ function leaseGenerationFromName(name) {
   return match ? match[1] : null;
 }
 
-async function listSelectionRecords(root, identity, { allowMissing = true } = {}) {
-  const selectionsDir = path.join(root, SELECTIONS_DIRECTORY);
-  let entries;
+async function listSelectionRecords(root, identity, { allowMissing = true, timing, limit = 2 } = {}) {
+  const startedAt = timing ? monotonicNow() : null;
   try {
-    entries = await fs.readdir(selectionsDir, { withFileTypes: true });
-  } catch (error) {
-    if (errorCode(error) === 'ENOENT' && allowMissing) return [];
-    throw error;
-  }
-
-  const records = [];
-  for (const entry of entries) {
-    if (!entry.isFile() || !entry.name.endsWith('.json') || entry.name.startsWith('.')) continue;
-    let markerName;
+    const selectionsDir = path.join(root, SELECTIONS_DIRECTORY);
+    let entries;
     try {
-      markerName = safeSelectionName(entry.name);
-    } catch {
-      continue;
+      entries = await fs.readdir(selectionsDir, { withFileTypes: true });
+    } catch (error) {
+      if (errorCode(error) === 'ENOENT' && allowMissing) return [];
+      throw error;
     }
-    try {
-      const marker = await readJson(path.join(selectionsDir, markerName));
-      if (!isPlainObject(marker) || marker.schema !== RUNTIME_SCHEMA || !isPlainObject(marker.identity)) continue;
-      const markerIdentity = assertIdentity(marker.identity);
-      if (!sameIdentity(markerIdentity, identity)) continue;
-      assertGeneration(marker.generation);
-      if (!Number.isSafeInteger(marker.publishedAt) || marker.publishedAt < 0) continue;
-      const generationDir = path.join(root, GENERATIONS_DIRECTORY, marker.generation);
-      const verified = await verifyStoredGeneration(generationDir, marker.generation, identity);
-      records.push({
-        name: markerName,
-        generation: marker.generation,
-        outDir: verified.outDir,
-        publishedAt: marker.publishedAt,
-      });
-    } catch {
-      // A torn marker or damaged newest generation is deliberately skipped;
-      // resolution continues with the next complete marker.
-    }
-  }
 
-  records.sort((left, right) => right.publishedAt - left.publishedAt || right.name.localeCompare(left.name));
-  return records;
+    const candidates = [];
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith('.json') || entry.name.startsWith('.')) continue;
+      let markerName;
+      try {
+        markerName = safeSelectionName(entry.name);
+      } catch {
+        continue;
+      }
+      try {
+        const marker = await readJson(path.join(selectionsDir, markerName));
+        if (!isPlainObject(marker) || marker.schema !== RUNTIME_SCHEMA || !isPlainObject(marker.identity)) continue;
+        const markerIdentity = assertIdentity(marker.identity);
+        if (!sameIdentity(markerIdentity, identity)) continue;
+        assertGeneration(marker.generation);
+        if (!Number.isSafeInteger(marker.publishedAt) || marker.publishedAt < 0) continue;
+        candidates.push({
+          name: markerName,
+          generation: marker.generation,
+          publishedAt: marker.publishedAt,
+        });
+      } catch {
+        // A torn marker is deliberately skipped; other markers may still select
+        // a complete generation.
+      }
+    }
+
+    candidates.sort((left, right) => right.publishedAt - left.publishedAt || right.name.localeCompare(left.name));
+    const records = [];
+    if (limit === 0) return records;
+    const verifiedGenerations = new Set();
+    for (const candidate of candidates) {
+      if (verifiedGenerations.has(candidate.generation)) continue;
+      verifiedGenerations.add(candidate.generation);
+      try {
+        const generationDir = path.join(root, GENERATIONS_DIRECTORY, candidate.generation);
+        const verified = await verifyStoredGeneration(generationDir, candidate.generation, identity, timing);
+        records.push({ ...candidate, outDir: verified.outDir });
+        if (records.length >= limit) break;
+      } catch {
+        // A damaged generation is deliberately skipped; resolution continues
+        // with the next distinct complete generation.
+      }
+    }
+    return records;
+  } finally {
+    if (timing) timing.selectionVerificationMs += elapsedMs(startedAt);
+  }
 }
 
 async function listLeasedGenerations(root, { allowMissing = true } = {}) {
@@ -577,7 +1001,7 @@ async function listLeasedGenerations(root, { allowMissing = true } = {}) {
   return generations;
 }
 
-async function cleanupRuntime(root, identity) {
+async function cleanupRuntime(root, identity, timing, verifiedSelectionRecords) {
   const selectionsDir = path.join(root, SELECTIONS_DIRECTORY);
   const generationsDir = path.join(root, GENERATIONS_DIRECTORY);
   const leasesDir = path.join(root, LEASES_DIRECTORY);
@@ -596,7 +1020,7 @@ async function cleanupRuntime(root, identity) {
     throw error;
   }
 
-  const records = await listSelectionRecords(root, identity, { allowMissing: false });
+  const records = verifiedSelectionRecords ?? await listSelectionRecords(root, identity, { allowMissing: false, timing, limit: 2 });
   const retainedGenerations = new Set();
   const retainedMarkers = new Set();
   for (const record of records) {
@@ -628,9 +1052,9 @@ async function cleanupRuntime(root, identity) {
   }
 }
 
-async function resolveRuntimeGenerationUnlocked(extensionDir, identity) {
+async function resolveRuntimeGenerationUnlocked(extensionDir, identity, timing, verifiedSelectionRecords) {
   const root = runtimeRoot(extensionDir);
-  const records = await listSelectionRecords(root, identity);
+  const records = verifiedSelectionRecords ?? await listSelectionRecords(root, identity, { timing, limit: 1 });
   if (records[0]) {
     return {
       generation: records[0].generation,
@@ -652,8 +1076,25 @@ async function publishRuntimeGeneration({ sourceOutDir, extensionDir, identity, 
   if (typeof beforeSelect !== 'undefined' && typeof beforeSelect !== 'function') {
     throw new Error('beforeSelect must be a function.');
   }
-  const sourceSnapshot = await snapshotSource(sourceOutDir);
-  const releaseLock = await acquireDirectoryLock(extensionDir);
+  const buildTiming = createPublishTiming();
+  const snapshotStartedAt = buildTiming ? monotonicNow() : null;
+  let sourceSnapshot;
+  try {
+    sourceSnapshot = await snapshotSource(sourceOutDir);
+  } catch (error) {
+    recordBuildPhase(buildTiming, 'snapshot', snapshotStartedAt);
+    emitPublishTiming(buildTiming);
+    throw error;
+  }
+  recordBuildPhase(buildTiming, 'snapshot', snapshotStartedAt);
+
+  let releaseLock;
+  try {
+    releaseLock = await acquireDirectoryLock(extensionDir);
+  } catch (error) {
+    emitPublishTiming(buildTiming);
+    throw error;
+  }
   const root = runtimeRoot(extensionDir);
   const generationsDir = path.join(root, GENERATIONS_DIRECTORY);
   const selectionsDir = path.join(root, SELECTIONS_DIRECTORY);
@@ -686,25 +1127,42 @@ async function publishRuntimeGeneration({ sourceOutDir, extensionDir, identity, 
       stagingDir = path.join(generationsDir, stagingName);
       await fs.rm(stagingDir, { recursive: true, force: true });
       await fs.mkdir(stagingDir, { recursive: true });
-      await copyTree(sourceOutDir, path.join(stagingDir, 'out'));
-
-      const stagedRecords = await collectFileRecords(path.join(stagingDir, 'out'));
-      if (hashRecords(stagedRecords) !== generation) {
-        throw new Error('Runtime source changed while it was being staged.');
+      const copyStartedAt = buildTiming ? monotonicNow() : null;
+      try {
+        await copyTree(sourceOutDir, path.join(stagingDir, 'out'));
+      } finally {
+        recordBuildPhase(buildTiming, 'copy', copyStartedAt);
       }
-      const stagedBuildIds = await verifyOutputShape(path.join(stagingDir, 'out'));
-      await fs.writeFile(
-        path.join(stagingDir, RUNTIME_MANIFEST_FILE),
-        `${JSON.stringify(runtimeManifestFor({
-          identity: normalizedIdentity,
-          generation,
-          buildId: stagedBuildIds.buildId,
-          rendererBuildId: stagedBuildIds.rendererBuildId,
-          records: stagedRecords,
-        }), null, 2)}\n`,
-        { flag: 'wx' },
-      );
-      await verifyStoredGeneration(stagingDir, generation, normalizedIdentity);
+
+      const stagedScanStartedAt = buildTiming ? monotonicNow() : null;
+      let stagedRecords;
+      try {
+        stagedRecords = await collectFileRecords(path.join(stagingDir, 'out'));
+        if (hashRecords(stagedRecords) !== generation) {
+          throw new Error('Runtime source changed while it was being staged.');
+        }
+      } finally {
+        recordBuildPhase(buildTiming, 'stagedScan', stagedScanStartedAt);
+      }
+
+      const stagedVerifyStartedAt = buildTiming ? monotonicNow() : null;
+      try {
+        const stagedBuildIds = await verifyOutputShape(path.join(stagingDir, 'out'));
+        await fs.writeFile(
+          path.join(stagingDir, RUNTIME_MANIFEST_FILE),
+          `${JSON.stringify(runtimeManifestFor({
+            identity: normalizedIdentity,
+            generation,
+            buildId: stagedBuildIds.buildId,
+            rendererBuildId: stagedBuildIds.rendererBuildId,
+            records: stagedRecords,
+          }), null, 2)}\n`,
+          { flag: 'wx' },
+        );
+        await verifyStoredGeneration(stagingDir, generation, normalizedIdentity);
+      } finally {
+        recordBuildPhase(buildTiming, 'stagedVerify', stagedVerifyStartedAt);
+      }
 
       try {
         await fs.rename(stagingDir, generationDir);
@@ -717,7 +1175,13 @@ async function publishRuntimeGeneration({ sourceOutDir, extensionDir, identity, 
       }
     }
 
-    const previousSelections = await listSelectionRecords(root, normalizedIdentity, { allowMissing: false });
+    const previousSelectionsStartedAt = buildTiming ? monotonicNow() : null;
+    let previousSelections;
+    try {
+      previousSelections = await listSelectionRecords(root, normalizedIdentity, { allowMissing: false, limit: 1 });
+    } finally {
+      recordBuildPhase(buildTiming, 'previousSelections', previousSelectionsStartedAt);
+    }
     const publishedAt = Math.max(Date.now(), (previousSelections[0]?.publishedAt ?? -1) + 1);
     await beforeSelect?.({ generation, outDir, publishedAt });
 
@@ -736,18 +1200,25 @@ async function publishRuntimeGeneration({ sourceOutDir, extensionDir, identity, 
     );
     await fs.rename(markerStaging, markerPath);
 
+    const cleanupStartedAt = buildTiming ? monotonicNow() : null;
     try {
       await cleanupRuntime(root, normalizedIdentity);
     } catch (error) {
       // Selection is already durable. Retention is best effort so a transient
       // filesystem failure cannot turn a complete publication into a failure.
       console.warn(`[pie-runtime] retention cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      recordBuildPhase(buildTiming, 'cleanup', cleanupStartedAt);
     }
 
     return { generation, outDir, publishedAt };
   } finally {
-    if (stagingDir) await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
-    await releaseLock();
+    try {
+      if (stagingDir) await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
+      await releaseLock();
+    } finally {
+      emitPublishTiming(buildTiming);
+    }
   }
 }
 
@@ -763,61 +1234,77 @@ async function resolveRuntimeGeneration({ extensionDir, identity }) {
 }
 
 async function acquireRuntimeGeneration({ extensionDir, identity }) {
-  const normalizedIdentity = assertIdentity(identity);
-  const releaseLock = await acquireDirectoryLock(extensionDir);
-  const root = runtimeRoot(extensionDir);
-  let leasePath;
-  let resolved;
+  const timing = createAcquisitionTiming();
   try {
-    await Promise.all([
-      fs.mkdir(path.join(root, GENERATIONS_DIRECTORY), { recursive: true }),
-      fs.mkdir(path.join(root, SELECTIONS_DIRECTORY), { recursive: true }),
-      fs.mkdir(path.join(root, LEASES_DIRECTORY), { recursive: true }),
-    ]);
-    resolved = await resolveRuntimeGenerationUnlocked(extensionDir, normalizedIdentity);
-    if (resolved.generation !== null) {
-      const token = crypto.randomBytes(16).toString('hex');
-      const leasesDir = path.join(root, LEASES_DIRECTORY);
-      await fs.mkdir(leasesDir, { recursive: true });
-      const name = leaseName(resolved.generation, token);
-      leasePath = path.join(leasesDir, name);
-      const leaseStaging = path.join(leasesDir, `.staging-${name}`);
-      await fs.writeFile(
-        leaseStaging,
-        `${JSON.stringify({
-          schema: RUNTIME_SCHEMA,
-          identity: normalizedIdentity,
-          generation: resolved.generation,
-          pid: process.pid,
-          createdAt: Date.now(),
-        })}\n`,
-        { flag: 'wx' },
-      );
-      await fs.rename(leaseStaging, leasePath);
-    }
-    await cleanupRuntime(root, normalizedIdentity);
-  } catch (error) {
-    if (leasePath) await fs.rm(leasePath, { force: true }).catch(() => undefined);
-    await releaseLock();
-    throw error;
-  }
-  await releaseLock();
-
-  let released = false;
-  return {
-    ...resolved,
-    release: async () => {
-      if (released) return;
-      released = true;
-      const releaseLeaseLock = await acquireDirectoryLock(extensionDir);
-      try {
-        if (leasePath) await fs.rm(leasePath, { force: true });
-        await cleanupRuntime(root, normalizedIdentity);
-      } finally {
-        await releaseLeaseLock();
+    const normalizedIdentity = assertIdentity(identity);
+    const releaseLock = await acquireDirectoryLock(extensionDir, timing);
+    const root = runtimeRoot(extensionDir);
+    let leasePath;
+    let resolved;
+    try {
+      await Promise.all([
+        fs.mkdir(path.join(root, GENERATIONS_DIRECTORY), { recursive: true }),
+        fs.mkdir(path.join(root, SELECTIONS_DIRECTORY), { recursive: true }),
+        fs.mkdir(path.join(root, LEASES_DIRECTORY), { recursive: true }),
+      ]);
+      const verifiedSelectionRecords = await listSelectionRecords(root, normalizedIdentity, { timing, limit: 2 });
+      resolved = await resolveRuntimeGenerationUnlocked(extensionDir, normalizedIdentity, timing, verifiedSelectionRecords);
+      if (resolved.generation !== null) {
+        const token = crypto.randomBytes(16).toString('hex');
+        const leasesDir = path.join(root, LEASES_DIRECTORY);
+        await fs.mkdir(leasesDir, { recursive: true });
+        const name = leaseName(resolved.generation, token);
+        leasePath = path.join(leasesDir, name);
+        const leaseStaging = path.join(leasesDir, `.staging-${name}`);
+        await fs.writeFile(
+          leaseStaging,
+          `${JSON.stringify({
+            schema: RUNTIME_SCHEMA,
+            identity: normalizedIdentity,
+            generation: resolved.generation,
+            pid: process.pid,
+            createdAt: Date.now(),
+          })}\n`,
+          { flag: 'wx' },
+        );
+        await fs.rename(leaseStaging, leasePath);
       }
-    },
-  };
+      const cleanupStartedAt = monotonicNow();
+      try {
+        await cleanupRuntime(root, normalizedIdentity, timing, verifiedSelectionRecords);
+      } finally {
+        timing.cleanupMs += elapsedMs(cleanupStartedAt);
+      }
+    } catch (error) {
+      if (leasePath) await fs.rm(leasePath, { force: true }).catch(() => undefined);
+      await releaseLock();
+      throw error;
+    }
+    await releaseLock();
+
+    let released = false;
+    timing.outcome = 'success';
+    return {
+      ...resolved,
+      release: async () => {
+        if (released) return;
+        released = true;
+        const releaseLeaseLock = await acquireDirectoryLock(extensionDir);
+        try {
+          if (leasePath) await fs.rm(leasePath, { force: true });
+          await cleanupRuntime(root, normalizedIdentity);
+        } finally {
+          await releaseLeaseLock();
+        }
+      },
+    };
+  } finally {
+    try {
+      finalizeAcquisitionTiming(timing);
+    } catch {
+      // Instrumentation is observational only.
+    }
+  }
 }
 
 module.exports = {

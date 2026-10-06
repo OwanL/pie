@@ -1,4 +1,4 @@
-import type { ToolCall } from '../../../harness/agent-processes/lib/rpc/message-contract.js';
+import type { ToolCallAnalysisInput } from '../../contracts/tool-call-analysis-input.js';
 import { normalizeToolCallName } from './summary';
 import {
   EMPTY_FILE_MUTATION_DELTA,
@@ -81,7 +81,7 @@ function buildFileMutationDelta(partial: Partial<FileMutationDelta>): FileMutati
   };
 }
 
-function fileMutationFromPatch(toolCall: ToolCall): FileMutationDelta | null {
+function fileMutationFromPatch(toolCall: ToolCallAnalysisInput): FileMutationDelta | null {
   if (!(toolCall.input && typeof toolCall.input === 'object' && !Array.isArray(toolCall.input))) {
     return null;
   }
@@ -106,7 +106,7 @@ function fileMutationFromPatch(toolCall: ToolCall): FileMutationDelta | null {
   });
 }
 
-export function getFileMutationFromToolCall(toolCall: ToolCall): FileMutationDelta {
+export function getFileMutationFromToolCall(toolCall: ToolCallAnalysisInput): FileMutationDelta {
   const normalizedToolName = normalizeToolCallName(toolCall.name);
   const patchDelta = fileMutationFromPatch(toolCall);
   if (patchDelta) {
@@ -203,7 +203,7 @@ export function createEmptyFileMutationDelta(): FileMutationDelta {
   return { ...EMPTY_FILE_MUTATION_DELTA, editCountsByFile: {}, readCountsByFile: {} };
 }
 
-export function getFileExtensionFromToolCall(toolCall: ToolCall): FileExtensionAnalysis | null {
+export function getFileExtensionFromToolCall(toolCall: ToolCallAnalysisInput): FileExtensionAnalysis | null {
   const filePath = extractFirstPathFromInput(toolCall.input);
   if (!filePath) {
     return null;

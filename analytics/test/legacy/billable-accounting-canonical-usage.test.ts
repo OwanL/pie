@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { BillableAccounting, type BillableAccountingDeps } from '../../legacy/billable-accounting/service';
+import { buildSubagentUsageSamples } from '../../../harness/session-storage/transcripts/session-usage-adapter.js';
 import type { CanonicalAnalyticsCapture, CanonicalProviderSettlement } from '../../capture/canonical-capture.js';
 
 function accountingWithCapture(
@@ -25,6 +26,7 @@ function accountingWithCapture(
     scheduleRender: () => undefined,
     dispatchArchEvent: () => undefined,
     getCapturedPricingFacts: () => undefined,
+    resolveInvocationPricing: () => undefined,
     isPrivateSession: () => false,
     sessionIdentity: () => ({ sessionId: 'session-id-1' }),
     currentRunId: () => null,
@@ -202,7 +204,11 @@ test('canonical subagent reconciliation routes mixed attempt capture status item
         }],
       },
     };
-    accounting.observeSubagentToolResult('/sessions/mixed.jsonl', terminalTool);
+    accounting.observeSubagentToolResult(
+      '/sessions/mixed.jsonl',
+      terminalTool.id,
+      buildSubagentUsageSamples(terminalTool),
+    );
 
     assert.deepEqual(
       captured.map((record) => record.invocationId),
@@ -222,7 +228,11 @@ test('canonical subagent reconciliation routes mixed attempt capture status item
     assert.match(String(captureGaps[3]?.fields.reason), /no valid fact ownership receipt/);
     const firstGapDelivery = captureGaps.map((gap) => ({ ...gap, fields: { ...gap.fields } }));
     nowMs += 60_000;
-    accounting.observeSubagentToolResult('/sessions/mixed.jsonl', terminalTool);
+    accounting.observeSubagentToolResult(
+      '/sessions/mixed.jsonl',
+      terminalTool.id,
+      buildSubagentUsageSamples(terminalTool),
+    );
     assert.deepEqual(
       captureGaps.slice(firstGapDelivery.length),
       firstGapDelivery,
@@ -278,7 +288,11 @@ test('canonical capture keeps declared-unknown channels unknown instead of fabri
         }],
       },
     };
-    accounting.observeSubagentToolResult('/sessions/gap.jsonl', omittedGapTool);
+    accounting.observeSubagentToolResult(
+      '/sessions/gap.jsonl',
+      omittedGapTool.id,
+      buildSubagentUsageSamples(omittedGapTool),
+    );
     // Both the attempt-gap and omitted-invocation evidence rows are captured.
     assert.equal(captured.length, 2);
     for (const sample of captured) {

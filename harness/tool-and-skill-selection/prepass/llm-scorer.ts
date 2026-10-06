@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { PruningConfig } from "../settings/config-types.js";
 import { providerReportedCostUsd } from "../../model-providers/pricing/provider-cost.js";
 import { parseJsonOrThrow } from "../../../lib/structured-logging/error-message.js";
@@ -80,7 +81,7 @@ let promptTemplateOverride: string | null = null;
 
 function loadPromptTemplate(): string {
 	try {
-		return readFileSync(path.join(import.meta.dirname, "pruning-system-prompt.md"), "utf-8").trim();
+		return readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "pruning-system-prompt.md"), "utf-8").trim();
 	} catch {
 		return [
 			"You are a relevance curator for a coding agent's prompt-pruning prepass.",

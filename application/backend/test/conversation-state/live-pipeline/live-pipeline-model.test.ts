@@ -12,7 +12,7 @@ import {
   type TurnSemanticEnvelope,
 } from '../../../../../harness/agent-processes/lib/rpc/live-pipeline';
 import { diffJsonValues, type JsonSafeValue } from '../../../../../lib/json-structural-patch';
-import { transcriptRenderSignature } from '../../../../frontend/transcript/render-signature';
+import { transcriptRenderSignature } from '../../../../lib/transcript/render-signature.js';
 
 const base = {
   protocolVersion: 7,

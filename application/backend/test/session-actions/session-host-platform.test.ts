@@ -16,7 +16,8 @@ import { BackendClient } from '../../agent-connection/client';
 import { startSessionBackend } from '../../agent-connection/startup';
 import { SessionService } from '../../session-actions/service';
 import { SessionServiceState } from '../../session-actions/state';
-import { selectRuntimeSetting, type SessionHostPlatform } from '../../../hosts/lib/platform-contracts/session-platform';
+import { selectRuntimeSetting, type SessionHostPlatform } from '../../../lib/platform-contracts/session-platform.js';
+import { createBackendStartupPlatform } from '../../../hosts/lib/backend-startup';
 import { PI_RUNTIME_PACKAGES, PI_RUNTIME_SDK_RELATIVE_PATH } from '../../../../lib/pi-runtime/artifact.mjs';
 import { writePiRuntimeManifest } from '../../../../scripts/lib/pi-runtime-artifact.mjs';
 import { resolveGenerationPiRuntime } from '../../../hosts/lib/pi-runtime-resolution';
@@ -66,7 +67,7 @@ function createPlatformFixture(overrides: Partial<SessionHostPlatform> = {}): Pl
   const storage = makeStore();
   const pieSettings = new Map<string, unknown>();
   const legacySettings = new Map<string, unknown>();
-  const platform: SessionHostPlatform = {
+  const platformBase = {
     storage,
     extensionPath: '/test-extension',
     getRuntimeOutputDirectory: () => '/test-out',
@@ -80,6 +81,10 @@ function createPlatformFixture(overrides: Partial<SessionHostPlatform> = {}): Pl
     },
     requestWindowAttention: () => undefined,
     ...overrides,
+  };
+  const platform: SessionHostPlatform = {
+    ...platformBase,
+    backendStartup: overrides.backendStartup ?? createBackendStartupPlatform(platformBase),
   };
   return { platform, storage, pieSettings, legacySettings };
 }
@@ -130,8 +135,18 @@ function createTempRoot(t: { after: (fn: () => void) => void }): string {
   return tempRoot;
 }
 
+function configureDevelopmentProfile(tempRoot: string): void {
+  process.env.PIE_DEVELOPMENT_PROFILE_DIR = path.join(tempRoot, 'development-profile');
+  process.env.PIE_HOST_PROFILE = 'local-development';
+  process.env.PIE_HOST_COORDINATOR_PORT = '23147';
+}
+
 function isolateRuntimeOverrideEnvironment(): () => void {
-  const keys = ['PI_SDK_PATH', 'PIE_DEVELOPMENT_PI_RUNTIME', 'PIE_ALLOW_DEVELOPMENT_RUNTIME'] as const;
+  const keys = [
+    'PI_SDK_PATH', 'PIE_DEVELOPMENT_PI_RUNTIME', 'PIE_ALLOW_DEVELOPMENT_RUNTIME',
+    'PIE_DEVELOPMENT_PROFILE_DIR', 'PIE_HOST_PROFILE', 'PIE_HOST_COORDINATOR_PORT',
+    'PI_CODING_AGENT_DIR', 'PI_CODING_AGENT_AUTH_DIR', 'PI_CODING_AGENT_SESSION_DIR', 'PIE_DATA_DIR', 'PIE_ALLOW_IN_TREE_AUTH',
+  ] as const;
   const previous = new Map(keys.map((key) => [key, process.env[key]]));
   for (const key of keys) delete process.env[key];
   return () => {
@@ -148,6 +163,7 @@ async function withIsolatedStartupEnvironment<T>(run: () => Promise<T>): Promise
   const keys = ['PI_CODING_AGENT_DIR', 'PIE_ALLOW_IN_TREE_AUTH'] as const;
   const previous = new Map(keys.map((key) => [key, process.env[key]]));
   for (const key of keys) delete process.env[key];
+  configureDevelopmentProfile(path.join(os.tmpdir(), `pie-startup-test-${process.pid}`));
   try {
     return await run();
   } finally {
@@ -520,6 +536,7 @@ test('startSessionBackend fails closed when a development artifact is selected w
   const restoreRuntimeEnvironment = isolateRuntimeOverrideEnvironment();
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
   process.env.PIE_DEVELOPMENT_PI_RUNTIME = developmentRuntime.descriptor.artifactDir;
+  configureDevelopmentProfile(tempRoot);
   delete process.env.PI_CODING_AGENT_DIR;
   try {
     await startSessionBackend({

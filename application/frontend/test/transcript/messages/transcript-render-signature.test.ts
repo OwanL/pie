@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { transcriptRenderSignature } from '../../../transcript/render-signature';
+import { transcriptRenderSignature } from '../../../../lib/transcript/render-signature.js';
 import { EMPTY_VIEW_STATE } from '../../../lib/hooks/use-host-sync';
 
 function state() {

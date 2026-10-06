@@ -9,7 +9,6 @@ import {
   type AnalyticsWriterFencePurpose,
   type AnalyticsWriterIdentity,
 } from './session-lifecycle-writer-store.js';
-import type { SessionManagerFenceRegistry } from '../../harness/session-storage/ownership/session-manager-fence.js';
 
 export const ANALYTICS_WRITER_FENCE_PROTOCOL = 'pie-analytics-writer-fence-v1' as const;
 export const ANALYTICS_WRITER_FENCE_SCHEMA = 1 as const;
@@ -72,9 +71,15 @@ export interface AnalyticsHostWriterFenceHandler {
   freeze(request: AnalyticsWriterFenceRequest): Promise<AnalyticsWriterFenceLocalAcknowledgement>;
 }
 
+interface AnalyticsHostWriterFenceRegistryPort {
+  revoke(): void;
+  waitForIdle(timeoutMs: number): Promise<number>;
+  isRevoked(): boolean;
+}
+
 export interface AnalyticsHostWriterFenceOptions {
   identity: AnalyticsHandoffHostIdentity;
-  registry?: SessionManagerFenceRegistry;
+  registry?: AnalyticsHostWriterFenceRegistryPort;
   /** Revokes non-SessionManager writers at the host's own admission seam. */
   revokeAdmission?: (request: AnalyticsWriterFenceRequest) => void;
   isAdmissionRevoked?: () => boolean;

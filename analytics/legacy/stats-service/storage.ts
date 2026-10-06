@@ -1,13 +1,13 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
-import { serializeJsonLine } from '../../../harness/agent-processes/lib/rpc/jsonl.js';
+import { serializeJsonLine } from '../../../lib/serialization/json-lines.js';
 import { toErrorMessage, parseJsonOrThrow } from '../../../lib/structured-logging/error-message';
 import { atomicWriteText as atomicWriteTextImpl } from '../../../lib/temporary-files/atomic-write';
 import { withTransientFsRetry, defaultFsRetryDelay, type FsRetryDelay } from '../../../lib/temporary-files/fs-retry';
 import { readOptionalText } from '../checkpoint-io';
 import { appendPieError, appendPieLog } from '../../../lib/structured-logging/pie-logger';
-import { resolveSessionIdentity } from '../../../harness/session-storage/ownership/session-identity';
+import { resolveSessionIdentity } from '../../../lib/transcript/session-identity';
 import { workspaceHash } from './helpers.js';
 import { writeCheckpointToDisk } from './persistence';
 import { withFileUpdateLock } from '../../../lib/temporary-files/settings-json-update';

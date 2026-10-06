@@ -232,7 +232,7 @@ function assertSameTree(left, right) {
   }
 }
 
-test('source-bound isolated build selects candidate graph and materializes a complete verified artifact', async (t) => {
+test('explicit delivery source-bound isolated build selects candidate graph and materializes a complete verified artifact', async (t) => {
   const fixture = makeBuildFixture(t);
   const artifact = await writePiRuntimeManifest(fixture.artifactDir, {
     upstreamVersion: '0.80.6',
@@ -242,7 +242,7 @@ test('source-bound isolated build selects candidate graph and materializes a com
     target: { platform: process.platform, arch: process.arch, nodeAbi: process.versions.modules },
   });
   const output = path.join(fixture.outputs, 'candidate-build');
-  const result = runBuild(fixture, ['--output-dir', output, '--pi-runtime', fixture.artifactDir]);
+  const result = runBuild(fixture, ['--delivery', '--output-dir', output, '--pi-runtime', fixture.artifactDir]);
   assertBuildSucceeded(result);
   assert.match(result.stdout, /Running TypeScript check/);
   assert.match(result.stdout, /Coordinated host\/webview identity/);
@@ -253,6 +253,7 @@ test('source-bound isolated build selects candidate graph and materializes a com
     path.join(artifact.sdkPath, 'dist', 'index.d.ts'),
     'TypeScript resolves the explicit candidate SDK graph, not the installed owner copy',
   );
+  assert.ok(existsSync(path.join(output, 'standalone.js')), 'the actual Vite config emits the standalone host entry');
   const bundledHost = readFileSync(path.join(output, 'extension.js'), 'utf8');
   assert.match(bundledHost, /verified-candidate-sdk-graph/, 'the actual Vite config bundles the selected candidate SDK alias');
   const rendererRoot = path.join(output, 'webview', 'panel');
@@ -278,7 +279,7 @@ test('source-bound isolated build selects candidate graph and materializes a com
   assert.equal(copied.identity, artifact.identity, 'the complete copied artifact re-verifies to the source identity');
 });
 
-test('ordinary source-default build acquires once and selects its SDK graph', async (t) => {
+test('explicit delivery build acquires once and selects its SDK graph', async (t) => {
   const fixture = makeBuildFixture(t);
   const runtime = await writePiRuntimeManifest(fixture.artifactDir, {
     upstreamVersion: '0.80.6',
@@ -288,15 +289,15 @@ test('ordinary source-default build acquires once and selects its SDK graph', as
     target: { platform: process.platform, arch: process.arch, nodeAbi: process.versions.modules },
   });
 
-  const result = runBuild(fixture, ['--no-sync']);
+  const result = runBuild(fixture, ['--delivery', '--no-sync']);
   assertBuildSucceeded(result);
   assert.match(result.stdout, /Running TypeScript check/);
   assert.match(readFileSync(path.join(fixture.owner, 'out', 'extension.js'), 'utf8'), /verified-candidate-sdk-graph/);
-  assert.equal(readFileSync(path.join(fixture.directory, 'acquisition-count.txt'), 'utf8'), '1', 'typecheck and both bundles reuse one source-default acquisition');
+  assert.equal(readFileSync(path.join(fixture.directory, 'acquisition-count.txt'), 'utf8'), '1', 'typecheck and both bundles reuse one delivery artifact acquisition');
   assert.equal(runtime.identity.length, 64);
 });
 
-test('source-default acquisition and private artifact reuse coexist with invalid-artifact preflight', async (t) => {
+test('delivery acquisition and private artifact reuse coexist with invalid-artifact preflight', async (t) => {
   const fixture = makeBuildFixture(t);
   const valid = await writePiRuntimeManifest(fixture.artifactDir, {
     upstreamVersion: '0.80.6',
@@ -309,7 +310,7 @@ test('source-default acquisition and private artifact reuse coexist with invalid
   write(sharedOutput, 'shared-sentinel.txt', 'must remain untouched\n');
   rmSync(sharedOutput, { recursive: true, force: true });
 
-  const reusedWithoutOutput = runBuild(fixture, ['--pi-runtime', fixture.artifactDir, '--skip-typecheck', '--no-sync']);
+  const reusedWithoutOutput = runBuild(fixture, ['--delivery', '--pi-runtime', fixture.artifactDir, '--skip-typecheck', '--no-sync']);
   assertBuildSucceeded(reusedWithoutOutput);
   assert.ok(existsSync(path.join(sharedOutput, 'extension.js')), 'a private fixture can reuse an explicit artifact with its default output');
   assert.ok(existsSync(path.join(sharedOutput, 'pi-runtime', 'manifest.json')));
@@ -339,7 +340,7 @@ test('source-default acquisition and private artifact reuse coexist with invalid
   write(fixture.artifactDir, 'node_modules/@earendil-works/pi-coding-agent/dist/index.js', 'export const changedAfterManifest = true;\n');
   for (const [name, artifactPath] of cases) {
     const output = path.join(fixture.outputs, `${name}-rejected`);
-    const rejected = runBuild(fixture, ['--output-dir', output, '--pi-runtime', artifactPath, '--skip-typecheck']);
+    const rejected = runBuild(fixture, ['--delivery', '--output-dir', output, '--pi-runtime', artifactPath, '--skip-typecheck']);
     assertBuildRejected(rejected);
     assert.equal(existsSync(output), false, `${name} artifact rejected before isolated output creation`);
     assert.equal(existsSync(path.join(fixture.owner, 'node_modules', '.cache')), false, `${name} artifact caused no dependency-cache writes`);

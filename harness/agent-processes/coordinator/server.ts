@@ -115,7 +115,14 @@ import {
   type SdkAuthStorage,
   type SdkModelRegistry,
 } from '../lib/sdk-integration/sdk';
-import { parseSdkRuntimeSelection, verifySdkRuntimeSelection, sdkRuntimeLoadMode, type SdkRuntimeSelection } from '../lib/sdk-integration/sdk-runtime-selection';
+import {
+  assertWorkspaceDevelopmentSdkOptIn,
+  parseSdkRuntimeSelection,
+  verifySdkRuntimeSelection,
+  sdkRuntimeSdkPath,
+  sdkRuntimeLoadMode,
+  type SdkRuntimeSelection,
+} from '../lib/sdk-integration/sdk-runtime-selection';
 import { ProviderGate, type ProviderConcurrencyConfig } from '../../model-providers/concurrency/provider-gate.js';
 import { resolveProviderMaxConcurrentRequests } from '../../model-providers/concurrency/provider-concurrency.js';
 import { markDisabledEntries } from '../../agent-instructions/prompt-assembly/system-prompts.js';
@@ -184,6 +191,11 @@ const ISOLATED_PROMOTION_METHODS = new Set([
   'message.continue',
   'message.compact',
 ]);
+
+/** Open the coordinator-owned canonical SQLite lifecycle store. */
+function canonicalSQLiteSessionLifecycleStore(stateDir: string): SessionLifecycleStore {
+  return new SessionLifecycleStore(path.join(stateDir, 'session-lifecycle.sqlite'));
+}
 /** Keep a transition-bound Stop below the host's 15-second RPC deadline. */
 const INTERRUPT_TRANSITION_WAIT_MS = 10_000;
 const AGENT_SESSION_CONTROL_MAX_LIST_ITEMS = 256;
@@ -478,8 +490,8 @@ function installBackendFatalHandlers(): void {
 
 export class BackendServer {
   private sdk!: ColdCoordinatorSdkModule;
-  private readonly sdkPath: string;
-  private readonly sourceArtifactDescriptor: unknown;
+  private sdkPath: string;
+  private readonly sdkRuntimeSelection: SdkRuntimeSelection;
   private sdkRuntime!: SdkRuntimeSelection;
   private readonly startupCwd: string;
   /** Host-authoritative generation shared by backend, coordinator, worker, and detail fences. */
@@ -666,8 +678,10 @@ export class BackendServer {
 
   constructor(options: {
     sdkPath: string;
-    /** Required generation-local Pi artifact forwarded by the host. */
-    sourceArtifactDescriptor: unknown;
+    /** Generation-local Pi artifact forwarded by the production host. */
+    sourceArtifactDescriptor?: unknown;
+    /** Explicit route used by workspace-development launches. */
+    sdkRuntimeSelection?: unknown;
     cwd: string;
     backendGeneration?: number;
     hostPid?: number;
@@ -689,8 +703,14 @@ export class BackendServer {
     hostCloseHandoffTimeoutMs?: number;
   }) {
     this.sdkPath = options.sdkPath;
-    const selection = parseSdkRuntimeSelection({ kind: 'source-artifact', descriptor: options.sourceArtifactDescriptor });
-    this.sourceArtifactDescriptor = selection.descriptor;
+    if (options.sourceArtifactDescriptor !== undefined && options.sdkRuntimeSelection !== undefined) {
+      throw new TypeError('Provide exactly one SDK runtime selection route.');
+    }
+    const selection = options.sdkRuntimeSelection !== undefined
+      ? parseSdkRuntimeSelection(options.sdkRuntimeSelection)
+      : parseSdkRuntimeSelection({ kind: 'source-artifact', descriptor: options.sourceArtifactDescriptor });
+    if (selection.kind === 'workspace-development') assertWorkspaceDevelopmentSdkOptIn();
+    this.sdkRuntimeSelection = selection;
     this.startupCwd = options.cwd;
     this.backendGeneration = options.backendGeneration ?? 1;
     if (!Number.isSafeInteger(this.backendGeneration) || this.backendGeneration <= 0) {
@@ -702,6 +722,7 @@ export class BackendServer {
             agentDir: () => this.agentDir,
             buildId: analyticsWriterBuildId(),
             hostPid: () => this.hostPid,
+            openWriterStore: canonicalSQLiteSessionLifecycleStore,
           },
           { descriptor: options.analyticsActivation },
         )
@@ -807,13 +828,11 @@ export class BackendServer {
     // Install fatal handlers first so even an early spawn-time rejection is
     // surfaced. Idempotent (module-level guard).
     installBackendFatalHandlers();
-    // Independently verify the host-selected artifact against this executing
-    // Node target before importing the SDK or starting any owned child.
-    const sdkRuntime = await verifySdkRuntimeSelection(
-      this.sdkPath,
-      { kind: 'source-artifact', descriptor: this.sourceArtifactDescriptor },
-    );
+    // Independently resolve and validate the selected SDK route in this
+    // process before importing the SDK or starting any owned child.
+    const sdkRuntime = await verifySdkRuntimeSelection(this.sdkPath, this.sdkRuntimeSelection);
     this.sdkRuntime = sdkRuntime;
+    this.sdkPath = sdkRuntimeSdkPath(sdkRuntime);
     if (this.initialContextEstimateEntryPath) {
       this.initialContextEstimateClient = new InitialContextEstimateClient({
         entryPath: this.initialContextEstimateEntryPath,
@@ -1129,10 +1148,7 @@ export class BackendServer {
 
     process.stdin.on('end', () => {
       detachReader();
-      void (async () => {
-        await Promise.allSettled([...this.inFlightInputRequests]);
-        await this.dispose();
-      })().then(
+      void this.drainInputRequestsAndDispose().then(
         () => process.exit(0),
         (error) => { log(`backend disposal failed closed: ${toErrorMessage(error)}`); process.exitCode = 1; },
       );
@@ -2454,7 +2470,7 @@ export class BackendServer {
     }
     if (!this.lifecycleStore || !this.lifecycleBarrier) {
       const dataPaths = resolvePieDataPaths({ agentDir: this.agentDir });
-      this.lifecycleStore = new SessionLifecycleStore(path.join(dataPaths.stateDir, 'session-lifecycle.sqlite'));
+      this.lifecycleStore = canonicalSQLiteSessionLifecycleStore(dataPaths.stateDir);
       this.lifecycleBarrier = new SessionFilesystemMutationBarrier({
         store: this.lifecycleStore,
         lockRoot: path.join(dataPaths.stateDir, 'session-mutation-locks'),
@@ -5301,6 +5317,28 @@ export class BackendServer {
    * waiting for provider teardown. The old runtime is fenced before any async
    * work so late SDK events cannot revive or terminalize the request twice.
    */
+
+  /** EOF cancels only optional, nonmutating inventory discovery. Accepted
+   * requests (especially settings writers) still finish before full teardown.
+   * Keep the client installed so disposal can confirm even late child cleanup;
+   * an early cleanup failure must neither skip drainage nor become success. */
+  private async drainInputRequestsAndDispose(): Promise<void> {
+    const failures: unknown[] = [];
+    try {
+      await this.initialContextEstimateClient?.dispose();
+    } catch (error) {
+      failures.push(error);
+    }
+    await Promise.allSettled([...this.inFlightInputRequests]);
+    try {
+      await this.dispose();
+    } catch (error) {
+      failures.push(error);
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(failures, 'Backend EOF disposal failed closed.');
+    }
+  }
 
   async dispose(): Promise<void> {
     if (!this.disposePromise) this.disposePromise = this.disposeOnce();

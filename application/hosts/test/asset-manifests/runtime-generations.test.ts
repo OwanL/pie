@@ -13,6 +13,8 @@ type RuntimeGeneration = { generation: string | null; outDir: string; publishedA
 type PublishedGeneration = { generation: string; outDir: string; publishedAt: number };
 type RuntimeLease = RuntimeGeneration & { release(): Promise<void> };
 type RuntimeApi = {
+  RUNTIME_DIRECTORY: string;
+  SELECTIONS_DIRECTORY: string;
   publishRuntimeGeneration(options: {
     sourceOutDir: string;
     extensionDir: string;
@@ -76,6 +78,83 @@ async function withTempRoot<T>(callback: (root: string) => Promise<T>): Promise<
     await rm(root, { recursive: true, force: true });
   }
 }
+
+async function withTimingFile<T>(filePath: string, callback: () => Promise<T>): Promise<T> {
+  const previous = process.env.PIE_STARTUP_TIMING_FILE;
+  process.env.PIE_STARTUP_TIMING_FILE = filePath;
+  try {
+    return await callback();
+  } finally {
+    if (previous === undefined) delete process.env.PIE_STARTUP_TIMING_FILE;
+    else process.env.PIE_STARTUP_TIMING_FILE = previous;
+  }
+}
+
+async function waitForTimingRows(filePath: string): Promise<Array<Record<string, unknown>>> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      const contents = await readFile(filePath, 'utf8');
+      const rows = contents.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+      if (rows.length > 0) return rows;
+    } catch {
+      // The diagnostic append is intentionally asynchronous and best effort.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('Runtime acquisition timing record was not written.');
+}
+
+async function addSelectionMarker(extensionDir: string, generation: string, publishedAt: number, suffix: string): Promise<string> {
+  const selectionsDir = path.join(extensionDir, runtime.RUNTIME_DIRECTORY, runtime.SELECTIONS_DIRECTORY);
+  const name = `${String(publishedAt).padStart(13, '0')}-${String(process.pid).padStart(10, '0')}-999999999-${generation}-${suffix.padStart(16, '0')}.json`;
+  await writeFile(path.join(selectionsDir, name), JSON.stringify({ schema: 1, identity: IDENTITY, generation, publishedAt }));
+  return name;
+}
+
+test('records bounded acquisition and per-generation verification phase timings', async () => withTempRoot(async (root) => {
+  const extensionDir = path.join(root, 'extension');
+  const diagnosticFile = path.join(root, 'startup-timing.jsonl');
+  await withTimingFile(diagnosticFile, async () => {
+    const source = await createRuntimeSource(root, 'timed');
+    const published = await runtime.publishRuntimeGeneration({ sourceOutDir: source, extensionDir, identity: IDENTITY });
+    const lease = await runtime.acquireRuntimeGeneration({ extensionDir, identity: IDENTITY });
+    assert.equal(lease.generation, published.generation);
+    await lease.release();
+
+    const rows = await waitForTimingRows(diagnosticFile);
+    for (const row of rows) {
+      assert.equal(row.tag, 'DEBUG-startup-profile');
+      assert.equal(row.pid, process.pid);
+      assert.equal(typeof row.timestamp, 'string');
+      assert.equal(new Date(row.timestamp as string).toISOString(), row.timestamp);
+    }
+    const acquisition = rows.find((row) => row.source === 'runtime-generations' && row.event === 'acquire');
+    assert.ok(acquisition);
+    assert.equal(acquisition.outcome, 'success');
+    for (const field of ['acquisitionMs', 'lockWaitMs', 'selectionVerificationMs', 'cleanupMs']) {
+      assert.equal(typeof acquisition[field], 'number', `${field} should be a duration`);
+    }
+    const verifications = acquisition.verification as Array<Record<string, unknown>>;
+    assert.equal(verifications.length, 1);
+    assert.equal(verifications[0]?.generation, published.generation);
+    assert.equal(verifications[0]?.count, 1, 'selection verification is reused by retention cleanup');
+    assert.ok(Number(verifications[0]?.files) > 0);
+    assert.ok(Number(verifications[0]?.bytes) > 0);
+    const phases = verifications[0]?.phasesMs as Record<string, unknown>;
+    for (const phase of ['manifestMs', 'fileScanMs', 'manifestComparisonMs', 'contentHashMs', 'outputShapeMs']) {
+      assert.equal(typeof phases[phase], 'number', `${phase} should be a duration`);
+    }
+    const serialized = JSON.stringify(acquisition);
+    assert.doesNotMatch(serialized, /startup-timing|extensionDir|identity|publisher|version|session/iu);
+    assert.ok((await stat(diagnosticFile)).size <= 1_048_576);
+
+    // A diagnostics write failure is best effort; runtime acquisition still works.
+    process.env.PIE_STARTUP_TIMING_FILE = root;
+    const leaseWithoutDiagnostics = await runtime.acquireRuntimeGeneration({ extensionDir, identity: IDENTITY });
+    assert.equal(leaseWithoutDiagnostics.generation, published.generation);
+    await leaseWithoutDiagnostics.release();
+  });
+}));
 
 test('publishes a verified full-output content generation, not just the build ID', async () => withTempRoot(async (root) => {
   const extensionDir = path.join(root, 'extension');
@@ -190,6 +269,112 @@ test('skips torn or damaged newest markers and rejects manifest traversal', asyn
   );
 }));
 
+test('reuses verified selection results while failed generations fall back and leases remain protected', async () => withTempRoot(async (root) => {
+  const extensionDir = path.join(root, 'extension');
+  const sourceA = await createRuntimeSource(root, 'reuse-a');
+  const sourceB = await createRuntimeSource(root, 'reuse-b');
+  const first = await runtime.publishRuntimeGeneration({ sourceOutDir: sourceA, extensionDir, identity: IDENTITY });
+  const second = await runtime.publishRuntimeGeneration({ sourceOutDir: sourceB, extensionDir, identity: IDENTITY });
+  const leaseB = await runtime.acquireRuntimeGeneration({ extensionDir, identity: IDENTITY });
+  assert.equal(leaseB.generation, second.generation);
+
+  let fallbackLease: RuntimeLease | undefined;
+  try {
+    await writeFile(path.join(second.outDir, 'backend.js'), 'damaged');
+    const diagnosticFile = path.join(root, 'fallback-timing.jsonl');
+    await withTimingFile(diagnosticFile, async () => {
+      fallbackLease = await runtime.acquireRuntimeGeneration({ extensionDir, identity: IDENTITY });
+      assert.equal(fallbackLease.generation, first.generation, 'a damaged newest selection falls back to the next verified generation');
+
+      const rows = await waitForTimingRows(diagnosticFile);
+      const acquisition = rows.find((row) => row.source === 'runtime-generations' && row.event === 'acquire');
+      assert.ok(acquisition);
+      const verifications = acquisition.verification as Array<Record<string, unknown>>;
+      const failed = verifications.find((verification) => verification.generation === second.generation);
+      const fallback = verifications.find((verification) => verification.generation === first.generation);
+      assert.equal(failed?.count, 1, 'the failed candidate is not re-verified during cleanup');
+      assert.equal(failed?.failures, 1);
+      assert.equal(fallback?.count, 1, 'the selected fallback is not re-verified during cleanup');
+      assert.equal(fallback?.failures, 0);
+    });
+
+    assert.equal(await exists(path.join(extensionDir, 'pie-runtime', 'generations', second.generation, 'out')), true, 'the lease protects a damaged generation');
+    assert.ok(fallbackLease, 'the fallback lease was acquired');
+    await fallbackLease.release();
+    fallbackLease = undefined;
+    await leaseB.release();
+    assert.equal(await exists(path.join(extensionDir, 'pie-runtime', 'generations', second.generation, 'out')), false, 'releasing the last lease makes the failed generation reclaimable');
+  } finally {
+    if (fallbackLease) await fallbackLease.release();
+    await leaseB.release();
+  }
+}));
+
+test('bounds marker verification to distinct valid generations while honoring leases', async () => withTempRoot(async (root) => {
+  const extensionDir = path.join(root, 'extension');
+  const published: Record<string, PublishedGeneration> = {};
+  const leases: RuntimeLease[] = [];
+  let selectedLease: RuntimeLease | undefined;
+  try {
+    for (const name of ['oldest', 'older', 'prior', 'newest']) {
+      const source = await createRuntimeSource(root, `bounded-${name}`);
+      published[name] = await runtime.publishRuntimeGeneration({ sourceOutDir: source, extensionDir, identity: IDENTITY });
+      leases.push(await runtime.acquireRuntimeGeneration({ extensionDir, identity: IDENTITY }));
+    }
+
+    const oldest = published.oldest!;
+    const older = published.older!;
+    const prior = published.prior!;
+    const newest = published.newest!;
+    const duplicateNewest = await addSelectionMarker(extensionDir, newest.generation, newest.publishedAt, 'f'.repeat(16));
+    const duplicatePrior = await addSelectionMarker(extensionDir, prior.generation, prior.publishedAt, 'e'.repeat(16));
+    await addSelectionMarker(extensionDir, older.generation, older.publishedAt, 'd'.repeat(16));
+    await addSelectionMarker(extensionDir, oldest.generation, oldest.publishedAt, 'c'.repeat(16));
+    await writeFile(path.join(newest.outDir, 'backend.js'), 'damaged');
+
+    const diagnosticFile = path.join(root, 'bounded-selection-timing.jsonl');
+    await withTimingFile(diagnosticFile, async () => {
+      selectedLease = await runtime.acquireRuntimeGeneration({ extensionDir, identity: IDENTITY });
+    });
+    assert.ok(selectedLease, 'the fallback lease was acquired');
+    assert.equal(selectedLease.generation, prior.generation, 'the damaged newest generation falls back');
+
+    const rows = await waitForTimingRows(diagnosticFile);
+    const acquisition = rows.find((row) => row.source === 'runtime-generations' && row.event === 'acquire');
+    assert.ok(acquisition);
+    const verifications = acquisition.verification as Array<Record<string, unknown>>;
+    const summaries = new Map(verifications.map((verification) => [verification.generation, verification]));
+    assert.equal(summaries.get(newest.generation)?.count, 1, 'duplicate markers do not re-verify a failed generation');
+    assert.equal(summaries.get(newest.generation)?.failures, 1);
+    assert.equal(summaries.get(prior.generation)?.count, 1, 'the newest duplicate marker represents its generation');
+    assert.equal(summaries.get(older.generation)?.count, 1, 'verification continues until two distinct generations pass');
+    assert.equal(summaries.has(oldest.generation), false, 'older candidates are not scanned after two valid generations');
+
+    const selectionNames = (await readdir(path.join(extensionDir, 'pie-runtime', 'selections'))).filter((name) => name.endsWith('.json'));
+    const priorMarkers = [];
+    const retainedMarkerGenerations = new Set<string>();
+    for (const name of selectionNames) {
+      const marker = JSON.parse(await readFile(path.join(extensionDir, 'pie-runtime', 'selections', name), 'utf8')) as { generation?: string };
+      if (marker.generation) retainedMarkerGenerations.add(marker.generation);
+      if (marker.generation === prior.generation) priorMarkers.push(name);
+    }
+    assert.deepEqual(priorMarkers, [duplicatePrior], 'cleanup retains the newest marker for a generation');
+    assert.deepEqual([...retainedMarkerGenerations].sort(), [older.generation, prior.generation].sort(), 'cleanup retains two distinct valid selections');
+    assert.equal(selectionNames.includes(duplicateNewest), false, 'the damaged generation is not retained as a selected record');
+
+    for (const generation of [oldest, older, prior, newest]) {
+      assert.equal(
+        await exists(path.join(extensionDir, 'pie-runtime', 'generations', generation.generation, 'out')),
+        true,
+        'leases preserve generations outside the two selected records',
+      );
+    }
+  } finally {
+    if (selectedLease) await selectedLease.release();
+    for (const lease of leases.reverse()) await lease.release();
+  }
+}));
+
 test('serializes concurrent publication and retains leased generations until release', async () => withTempRoot(async (root) => {
   const extensionDir = path.join(root, 'extension');
   const sources = await Promise.all([
@@ -258,10 +443,10 @@ test('fails closed when selection or lease metadata directories cannot be read',
   const first = await runtime.publishRuntimeGeneration({ sourceOutDir: sourceA, extensionDir, identity: IDENTITY });
   const lease = await runtime.acquireRuntimeGeneration({ extensionDir, identity: IDENTITY });
   assert.equal(lease.generation, first.generation);
-  await runtime.publishRuntimeGeneration({ sourceOutDir: sourceB, extensionDir, identity: IDENTITY });
+  const second = await runtime.publishRuntimeGeneration({ sourceOutDir: sourceB, extensionDir, identity: IDENTITY });
 
   const leasesDir = path.join(extensionDir, 'pie-runtime', 'leases');
-  await runtime.publishRuntimeGeneration({
+  const third = await runtime.publishRuntimeGeneration({
     sourceOutDir: sourceC,
     extensionDir,
     identity: IDENTITY,
@@ -270,11 +455,13 @@ test('fails closed when selection or lease metadata directories cannot be read',
       await writeFile(leasesDir, 'not a directory');
     },
   });
-  assert.equal(
-    await exists(path.join(extensionDir, 'pie-runtime', 'generations', first.generation, 'out')),
-    true,
-    'cleanup does not delete a generation when lease knowledge is unavailable',
-  );
+  for (const published of [first, second, third]) {
+    assert.equal(
+      await exists(path.join(extensionDir, 'pie-runtime', 'generations', published.generation, 'out')),
+      true,
+      'unreadable lease metadata leaves every generation untouched',
+    );
+  }
 
   const selectionsDir = path.join(extensionDir, 'pie-runtime', 'selections');
   await rm(selectionsDir, { recursive: true, force: true });

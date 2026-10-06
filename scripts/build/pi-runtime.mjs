@@ -2,19 +2,23 @@
 // Private source-to-artifact builder. Never installs into the checkout or publishes.
 import { createHash } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, lstatSync, realpathSync } from 'node:fs';
-import { copyFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { existsSync, lstatSync } from 'node:fs';
+import { copyFile, lstat, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { gzipSync } from 'node:zlib';
+import { parse as parseYaml } from 'yaml';
+import { acquireDevelopmentReader } from '../../lib/development-runtime/lifetime.mjs';
+import { watchChildProcess, withProcessTreeIsolation } from '../lib/process-watchdog.mjs';
 import { PI_RUNTIME_PACKAGES, writePiRuntimeManifest, verifyPiRuntimeArtifact } from '../lib/pi-runtime-artifact.mjs';
 import { readPinnedPiSourceVersion } from '../lib/sdk-version.mjs';
+import { fingerprintCompiledPiOutputs } from '../../lib/development-runtime/compiled-output.mjs';
 
 const REPOSITORY = fileURLToPath(new URL('../../', import.meta.url));
-const OWNER = path.join(REPOSITORY, 'harness/pi-runtime');
 const SOURCE = path.join(REPOSITORY, 'harness/pi');
 const PACKAGE_DIRS = ['tui', 'ai', 'agent', 'coding-agent'];
+const WORKSPACE_PACKAGE_DIRS = Object.fromEntries(PACKAGE_DIRS.map((dir, index) => [PI_RUNTIME_PACKAGES[index], `harness/pi/packages/${dir}`]));
+const DEPLOY_METADATA = new Set(['.bin', '.pnpm', '.modules.yaml', '.pnpm-workspace-state-v1.json']);
 const UPSTREAM = '2b3fda9921b5590f285165287bd442a25817f17b';
 const sha = (bytes, algorithm = 'sha256', encoding = 'hex') => createHash(algorithm).update(bytes).digest(encoding);
 const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object'
@@ -22,7 +26,6 @@ const canonical = value => Array.isArray(value) ? value.map(canonical) : value &
 const jsonText = value => `${JSON.stringify(canonical(value), null, 2)}\n`;
 const readJson = async file => JSON.parse(await readFile(file, 'utf8'));
 const check = (condition, message) => { if (!condition) throw new Error(message); };
-const slug = name => name.slice(name.lastIndexOf('/') + 1);
 
 /** Resolve the required helper for the current native target; Linux has none. */
 export function resolveNativeModifierHelper(runtimeRoot, platform, arch, fileExists = existsSync) {
@@ -40,76 +43,22 @@ export function resolveNativeModifierHelper(runtimeRoot, platform, arch, fileExi
   return helper;
 }
 
-/** Derived metadata only: runtime source package.json remains its sole editable authority. */
-export function sanitizePackageManifest(manifest) {
-  const allowed = ['name', 'version', 'description', 'type', 'main', 'module', 'types', 'typings', 'exports',
-    'imports', 'bin', 'dependencies', 'optionalDependencies', 'peerDependencies', 'peerDependenciesMeta',
-    'engines', 'os', 'cpu', 'sideEffects', 'piConfig', 'license', 'author', 'repository', 'keywords'];
-  return canonical(Object.fromEntries(allowed.filter(key => Object.hasOwn(manifest, key)).map(key => [key, manifest[key]])));
-}
-
-/** Deterministic ustar + gzip, independent of npm version, source mtimes and compiled bytes. */
-export function createManifestTarball(manifest) {
-  const body = Buffer.from(jsonText(sanitizePackageManifest(manifest)));
-  const header = Buffer.alloc(512);
-  const text = (offset, size, value) => header.write(value, offset, size, 'ascii');
-  const octal = (offset, size, value) => text(offset, size, `${value.toString(8).padStart(size - 1, '0')}\0`);
-  text(0, 100, 'package/package.json'); octal(100, 8, 0o644); octal(108, 8, 0); octal(116, 8, 0);
-  octal(124, 12, body.length); octal(136, 12, 0); header.fill(32, 148, 156);
-  text(156, 1, '0'); text(257, 6, 'ustar\0'); text(263, 2, '00');
-  text(148, 8, `${header.reduce((sum, byte) => sum + byte, 0).toString(8).padStart(6, '0')}\0 `);
-  const compressed = gzipSync(Buffer.concat([header, body, Buffer.alloc((512 - body.length % 512) % 512), Buffer.alloc(1024)]), { level: 9 });
-  compressed[9] = 255; // gzip OS=unknown: Windows/Unix produce the same manifest tarball.
-  return compressed;
-}
-
 function validateManifests(manifests, expectedVersion = readPinnedPiSourceVersion(REPOSITORY)) {
   check(manifests.length === 4 && JSON.stringify(manifests.map(m => m.name).sort()) === JSON.stringify([...PI_RUNTIME_PACKAGES].sort()), 'Expected exactly four local Pi manifests');
   for (const manifest of manifests) check(manifest.version === expectedVersion, `Unexpected ${manifest.name} version; expected in-tree Pi source version ${expectedVersion}`);
 }
-export function createRuntimeOwnerManifest(manifests) {
-  validateManifests(manifests);
-  return canonical({ name: 'pie-private-pi-runtime', version: '1.0.0', private: true,
-    dependencies: Object.fromEntries(manifests.map(m => [m.name, `file:tarballs/${slug(m.name)}.tgz`])) });
-}
-
-/** Validate graph before npm can interpret the lock. Integrity is checked separately against derived bytes. */
-export function assertRuntimeLock(lock, manifests) {
-  const owner = createRuntimeOwnerManifest(manifests);
-  check(lock.lockfileVersion === 3 && lock.packages, 'Expected npm runtime lockfile v3');
-  check(JSON.stringify(canonical(lock.packages['']?.dependencies)) === JSON.stringify(owner.dependencies), 'Runtime lock owner drift; explicitly refresh lock');
-  const expected = new Set(manifests.map(m => `node_modules/${m.name}`));
-  for (const [key, record] of Object.entries(lock.packages)) {
-    check(!record.link, `Runtime lock must not contain links: ${key}`);
-    const isPi = /(?:^|\/)node_modules\/@(?:earendil-works|mariozechner)\/pi-[^/]+$/.test(key)
-      || /^@(?:earendil-works|mariozechner)\/pi-/.test(record.name ?? '')
-      || /(?:earendil-works|mariozechner)(?:\/|%2f)pi-[^/]+/i.test(record.resolved ?? '');
-    if (isPi) check(expected.has(key), `Unexpected/nested Pi package: ${key}`);
-    if (key && !expected.has(key)) {
-      check(typeof record.version === 'string' && /^https:\/\/registry\.npmjs\.org\//.test(record.resolved ?? '') && /^sha(?:256|384|512)-/.test(record.integrity ?? ''), `Ordinary dependency must be registry-pinned with integrity: ${key}`);
-    }
-  }
-  for (const manifest of manifests) {
-    const record = lock.packages[`node_modules/${manifest.name}`];
-    check(record?.version === manifest.version && record.resolved === owner.dependencies[manifest.name]
-      && /^sha512-/.test(record.integrity ?? ''), `Missing/mismatched local Pi lock entry: ${manifest.name}`);
-    for (const field of ['dependencies', 'optionalDependencies', 'peerDependencies', 'peerDependenciesMeta']) {
-      check(JSON.stringify(canonical(record[field] ?? {})) === JSON.stringify(canonical(manifest[field] ?? {})), `Runtime lock ${field} drift: ${manifest.name}`);
-    }
-  }
-}
-
 const isWithin = (file, root) => { const rel = path.relative(root, file); return rel === '' || (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel)); };
 /** New, explicitly addressed private output only; never overwrite an existing directory. */
 export function assertPrivateOutput(output, repositoryRoot = REPOSITORY) {
   check(typeof output === 'string' && path.isAbsolute(output), 'Output must be an explicit absolute private path');
   const absolute = path.resolve(output);
-  check(isWithin(absolute, path.resolve(os.tmpdir())) && absolute !== path.resolve(os.tmpdir()), 'Output must be a new directory beneath OS temporary storage');
-  const forbidden = [repositoryRoot, path.join(os.homedir(), '.vscode'), path.join(os.homedir(), '.vscode-insiders'),
-    path.join(os.homedir(), '.pi'), path.join(os.homedir(), '.config'), 'C:/dev/data'];
+  const home = os.homedir();
+  const forbidden = [repositoryRoot, path.join(home, 'Documents'), path.join(home, '.vscode'), path.join(home, '.vscode-insiders'),
+    path.join(home, '.pi'), path.join(home, '.config'), 'C:/dev/data'];
   check(!forbidden.some(root => isWithin(absolute, path.resolve(root))), 'Output is inside a protected live location');
   check(!/(?:^|[\\/])(?:node_modules|out|settings|data)(?:[\\/]|$)/i.test(absolute), 'Output must not target shared dependencies/output/data/settings');
-  check(absolute !== path.parse(absolute).root && absolute !== path.resolve(os.homedir()), 'Output must not be a root/home directory');
+  check(absolute !== path.parse(absolute).root && absolute !== path.resolve(home), 'Output must not be a root/home directory');
+  check(isWithin(absolute, path.resolve(os.tmpdir())) && absolute !== path.resolve(os.tmpdir()), 'Output must be a new directory beneath OS temporary storage');
   let current = absolute;
   while (true) {
     if (existsSync(current)) check(!lstatSync(current).isSymbolicLink(), `Symlink/junction output ancestor: ${current}`);
@@ -129,26 +78,71 @@ export function buildChildEnvironment(parent, privateRoot) {
     npm_config_cache: path.join(privateRoot, 'npm-cache') };
 }
 
-function npmCli() {
-  const candidates = [path.join(path.dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js')];
-  for (const dir of (process.env.PATH ?? process.env.Path ?? '').split(path.delimiter)) {
-    candidates.push(path.join(dir, 'node_modules/npm/bin/npm-cli.js'), path.resolve(dir, '../lib/node_modules/npm/bin/npm-cli.js'));
-  }
-  const found = candidates.find(file => existsSync(file));
-  check(found, 'Cannot locate npm CLI beside Node/on PATH; no installation attempted');
-  return realpathSync(found);
-}
-async function run(executable, args, cwd, env, label) {
-  console.log(`[pi-runtime] ${label}`);
-  await new Promise((resolve, reject) => {
-    const child = spawn(executable, args, { cwd, env, stdio: 'inherit', windowsHide: true });
-    child.once('error', reject);
-    child.once('exit', (code, signal) => code === 0 ? resolve() : reject(new Error(`${label} failed (${signal ?? code})`)));
+function forwardChildOutput(source, destination) {
+  if (!source) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    let pendingWrites = 0;
+    let ended = false;
+    let settled = false;
+    const finish = () => {
+      if (ended && pendingWrites === 0 && !settled) { settled = true; resolve(); }
+    };
+    source.on('data', chunk => {
+      source.pause();
+      pendingWrites += 1;
+      destination.write(chunk, error => {
+        pendingWrites -= 1;
+        if (error && !settled) { settled = true; reject(error); return; }
+        if (!ended) source.resume();
+        finish();
+      });
+    });
+    source.once('end', () => { ended = true; finish(); });
+    source.once('close', () => {
+      if (!ended && !settled) { settled = true; reject(new Error('Child output stream closed before reaching EOF.')); }
+    });
+    source.once('error', error => { if (!settled) { settled = true; reject(error); } });
+    source.resume();
   });
 }
-async function npm(args, cwd, env, work) {
-  await run(process.execPath, [npmCli(), ...args, '--ignore-scripts', '--bin-links=false', '--no-audit', '--no-fund',
-    '--registry=https://registry.npmjs.org', `--userconfig=${path.join(work, 'user.npmrc')}`, `--globalconfig=${path.join(work, 'global.npmrc')}`], cwd, env, `npm ${args.join(' ')}`);
+
+export async function run(executable, args, cwd, env, label, dependencies = {}) {
+  console.log(`[pi-runtime] ${label}`);
+  const spawnChild = dependencies.spawn ?? spawn;
+  const watch = dependencies.watchChildProcess ?? watchChildProcess;
+  const child = spawnChild(executable, args, withProcessTreeIsolation({ cwd, env, stdio: ['inherit', 'pipe', 'pipe'], windowsHide: true }));
+  const drains = [forwardChildOutput(child.stdout, process.stdout), forwardChildOutput(child.stderr, process.stderr)]
+    .map(promise => promise.then(() => undefined, error => error));
+  const watchdog = watch(child, { label });
+  let result;
+  try {
+    result = await new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', (code, signal) => resolve({ code, signal }));
+    });
+    const drainErrors = (await Promise.all(drains)).filter(Boolean);
+    if (drainErrors.length > 0) throw drainErrors[0];
+  } catch (error) {
+    try {
+      const teardown = await watchdog.settle();
+      if (!teardown.gone) throw new Error(`Owned process tree remains: ${teardown.survivors.join(', ')}`);
+    } catch (teardownError) {
+      throw Object.assign(new Error(`${label} teardown is unconfirmed; retaining the Pi workspace reader.`, { cause: teardownError }), { teardownUnconfirmed: true });
+    }
+    throw error;
+  }
+
+  let teardown;
+  try { teardown = await watchdog.settle(); }
+  catch (error) {
+    throw Object.assign(new Error(`${label} teardown is unconfirmed; retaining the Pi workspace reader.`, { cause: error }), { teardownUnconfirmed: true });
+  }
+  if (!teardown.gone) {
+    throw Object.assign(new Error(`${label} teardown is unconfirmed; owned process tree remains (${teardown.survivors.join(', ')}); retaining the Pi workspace reader.`), { teardownUnconfirmed: true });
+  }
+  if (watchdog.timedOut || watchdog.aborted || result.code !== 0) {
+    throw new Error(`${label} failed (${result.signal ?? result.code})${watchdog.timedOut ? ' after timeout' : ''}${watchdog.aborted ? ' after cancellation' : ''}`);
+  }
 }
 async function copyTree(source, destination, exclude = []) {
   const entries = (await readdir(source, { withFileTypes: true })).filter(entry => !exclude.includes(entry.name));
@@ -159,6 +153,50 @@ async function copyTree(source, destination, exclude = []) {
     else { check(entry.isFile(), 'Unsupported file type'); await copyFile(path.join(source, entry.name), path.join(destination, entry.name)); }
   }
 }
+
+/** Copy pnpm's production node_modules into ordinary independent files, dropping only layout metadata. */
+export async function materializeDeployedNodeModules(source, destination, piLicenseFile) {
+  const sourceInfo = await lstat(source);
+  check(sourceInfo.isDirectory() && !sourceInfo.isSymbolicLink(), `Expected a real deployed node_modules directory: ${source}`);
+  check(!existsSync(destination), `Runtime node_modules destination already exists: ${destination}`);
+  const licenseInfo = await lstat(piLicenseFile);
+  check(licenseInfo.isFile() && !licenseInfo.isSymbolicLink(), `Expected an ordinary Pi license file: ${piLicenseFile}`);
+  await mkdir(destination);
+  for (const entry of await readdir(source, { withFileTypes: true })) {
+    if (DEPLOY_METADATA.has(entry.name)) continue;
+    const from = path.join(source, entry.name);
+    const to = path.join(destination, entry.name);
+    const info = await lstat(from);
+    check(!info.isSymbolicLink(), `Refusing pnpm deployment symlink: ${from}`);
+    if (info.isDirectory()) await copyTree(from, to, [...DEPLOY_METADATA]);
+    else { check(info.isFile(), `Unsupported pnpm deployment entry: ${from}`); await copyFile(from, to); }
+  }
+  for (const name of PI_RUNTIME_PACKAGES) {
+    const packageDir = path.join(destination, name);
+    const info = await lstat(packageDir);
+    check(info.isDirectory() && !info.isSymbolicLink(), `Missing deployed Pi package directory: ${name}`);
+    await copyFile(piLicenseFile, path.join(packageDir, 'LICENSE'));
+  }
+  await assertIndependentTree(destination);
+  return destination;
+}
+
+export async function assertIndependentTree(root) {
+  const rootInfo = await lstat(root);
+  check(rootInfo.isDirectory() && !rootInfo.isSymbolicLink(), `Expected a real materialized runtime directory: ${root}`);
+  const pending = [root];
+  for (let index = 0; index < pending.length; index++) {
+    const directory = pending[index];
+    for (const name of await readdir(directory)) {
+      const file = path.join(directory, name);
+      const info = await lstat(file);
+      check(!info.isSymbolicLink(), `Materialized runtime contains a symlink: ${file}`);
+      if (info.isDirectory()) pending.push(file);
+      else check(info.isFile() && info.nlink === 1, `Materialized runtime contains a non-file or shared hardlink: ${file}`);
+    }
+  }
+}
+
 function ordinaryPiSourceFile(repositoryRoot, relative) {
   const segments = ['harness', 'pi', ...relative.split('/')];
   let current = repositoryRoot;
@@ -198,6 +236,9 @@ async function sourceTreeSha256(repositoryRoot = REPOSITORY, env = process.env, 
   for (const name of names) {
     const relative = name.slice('harness/pi/'.length);
     check(name.startsWith('harness/pi/') && relative.length > 0, `Unexpected Pi source inventory entry: ${name}`);
+    // Retained npm metadata is not an input to the shared pnpm graph.
+    // Nested examples metadata remains part of the source payload.
+    if (relative === 'package-lock.json') continue;
     check(!relative.split('/').some(part => ['node_modules', 'dist', '.git'].includes(part)), `Generated source inventory entry: ${name}`);
     const original = ordinaryPiSourceFile(repositoryRoot, relative);
     if (!original) continue; // A tracked deletion is absent from the current source tree.
@@ -217,14 +258,71 @@ async function sourceTreeSha256(repositoryRoot = REPOSITORY, env = process.env, 
   }
   return sha(JSON.stringify(records));
 }
-async function snapshotSource(destination, env) {
-  return sourceTreeSha256(REPOSITORY, env, destination);
+async function readWorkspaceDeployInputs(repositoryRoot) {
+  const paths = {
+    packageManifest: path.join(repositoryRoot, 'package.json'),
+    mainLock: path.join(repositoryRoot, 'pnpm-lock.yaml'),
+    workspace: path.join(repositoryRoot, 'pnpm-workspace.yaml'),
+    protoTools: path.join(repositoryRoot, '.prototools'),
+    npmrc: path.join(repositoryRoot, '.npmrc'),
+  };
+  const entries = await Promise.all(Object.entries(paths).map(async ([name, file]) => [name, await readFile(file)]));
+  const bytes = Object.fromEntries(entries);
+  const packageManifest = JSON.parse(bytes.packageManifest.toString('utf8'));
+  const lock = parseYaml(bytes.mainLock.toString('utf8'));
+  const workspace = parseYaml(bytes.workspace.toString('utf8'));
+  const pinnedPackageManager = /^pnpm@([0-9]+\.[0-9]+\.[0-9]+)$/u.exec(packageManifest.packageManager ?? '')?.[1];
+  const protoToolsText = bytes.protoTools.toString('utf8');
+  const pinnedProtoPnpm = /^\s*pnpm\s*=\s*["']([^"']+)["']\s*$/mu.exec(protoToolsText)?.[1];
+  const pinnedNodeVersion = /^\s*node\s*=\s*["']([^"']+)["']\s*$/mu.exec(protoToolsText)?.[1];
+  check(packageManifest.name === 'pi-config' && packageManifest.private === true, 'Expected the private pi-config workspace root');
+  check(pinnedPackageManager, 'Root package.json must pin pnpm with packageManager');
+  check(pinnedProtoPnpm === pinnedPackageManager, 'Root packageManager and .prototools pnpm pins must match');
+  check(pinnedNodeVersion, '.prototools must pin the Node build toolchain');
+  check(/^\s*node-linker\s*=\s*hoisted\s*$/mu.test(bytes.npmrc.toString('utf8')), 'Production deploy requires the checked-in hoisted pnpm layout');
+  check(/^\s*ignore-scripts\s*=\s*true\s*$/mu.test(bytes.npmrc.toString('utf8')), 'Production deploy requires scripts-disabled pnpm settings');
+  check(workspace?.injectWorkspacePackages === true && lock?.settings?.injectWorkspacePackages === true, 'Workspace injection must be enabled in pnpm configuration and lock');
+  check(lock?.lockfileVersion === '9.0' && lock.importers?.['.'], 'Expected the locked pnpm v9 root importer');
+  const rootDependencies = packageManifest.dependencies ?? {};
+  const lockDependencies = lock.importers['.'].dependencies ?? {};
+  for (const name of PI_RUNTIME_PACKAGES) {
+    const relative = WORKSPACE_PACKAGE_DIRS[name];
+    check(rootDependencies[name] === 'workspace:*', `Root production dependencies must include ${name} as a workspace package`);
+    const version = lockDependencies[name]?.version;
+    // pnpm 10 injection records file paths with optional peer-resolution suffixes.
+    // Match the whole local path, not a prefix; the raw lock bytes remain fingerprinted.
+    const injectedPath = typeof version === 'string'
+      ? /^file:([^()]+)(?:\([^()]+\))*$/u.exec(version)?.[1] : undefined;
+    check(lockDependencies[name]?.specifier === 'workspace:*' &&
+      (version === `link:${relative}` || injectedPath === relative),
+      `Main pnpm lock must resolve ${name} to ${relative}`);
+  }
+  const workspaceDirectories = new Set(workspace.packages ?? []);
+  for (const relative of Object.values(WORKSPACE_PACKAGE_DIRS)) {
+    check(workspaceDirectories.has(relative), `pnpm-workspace.yaml must include ${relative}`);
+  }
+  const digests = Object.fromEntries(Object.entries(bytes).map(([name, value]) => [name, sha(value)]));
+  const toolchainSha256 = sha(JSON.stringify(canonical({
+    packageManager: packageManifest.packageManager,
+    protoTools: digests.protoTools,
+    npmrc: digests.npmrc,
+  })));
+  const lockSha256 = sha(JSON.stringify(canonical({
+    main: { packageManifest: digests.packageManifest, pnpmLock: digests.mainLock, workspace: digests.workspace },
+    toolchain: toolchainSha256,
+  })));
+  return {
+    ...digests,
+    packageManifest,
+    pnpmVersion: pinnedPackageManager,
+    pinnedNodeVersion,
+    mainLockSha256: digests.mainLock,
+    toolchainSha256,
+    lockSha256,
+  };
 }
 
-/** Fingerprint the exact source and target inputs used when adopting a built Pi runtime.
- * The second argument injects inventory/source reads for deterministic private-fixture races only.
- */
-export async function computePiRuntimeInputFingerprint({
+async function capturePiRuntimeInputs({
   repositoryRoot = REPOSITORY,
   env = process.env,
   target = { platform: process.platform, arch: process.arch, nodeAbi: process.versions.modules },
@@ -232,51 +330,49 @@ export async function computePiRuntimeInputFingerprint({
 } = {}, dependencies = {}) {
   check(target && typeof target.platform === 'string' && typeof target.arch === 'string' && typeof target.nodeAbi === 'string', 'Invalid Pi runtime fingerprint target');
   check(typeof nodeVersion === 'string', 'Invalid Pi runtime fingerprint Node version');
-  const sourceTree = await sourceTreeSha256(repositoryRoot, env, undefined, dependencies);
-  const packageManifest = await readFile(path.join(repositoryRoot, 'harness/pi-runtime/package.json'));
-  const runtimeLock = await readFile(path.join(repositoryRoot, 'harness/pi-runtime/package-lock.json'));
+  const workspaceRoot = dependencies.workspaceRepositoryRoot ?? (dependencies.inventory !== undefined ? REPOSITORY : repositoryRoot);
+  const [sourceTreeDigest, workspace] = await Promise.all([
+    sourceTreeSha256(repositoryRoot, env, undefined, dependencies),
+    readWorkspaceDeployInputs(workspaceRoot),
+  ]);
+  return { sourceTreeSha256: sourceTreeDigest, ...workspace, target: { platform: target.platform, arch: target.arch, nodeAbi: target.nodeAbi }, nodeVersion };
+}
+function fingerprintPiRuntimeInputs(inputs) {
   return sha(JSON.stringify(canonical({
-    sourceTree,
-    runtimeOwner: { packageManifest: sha(packageManifest), runtimeLock: sha(runtimeLock) },
-    target: { platform: target.platform, arch: target.arch, nodeAbi: target.nodeAbi },
-    nodeVersion,
+    sourceTreeSha256: inputs.sourceTreeSha256,
+    lockSha256: inputs.lockSha256,
+    target: inputs.target,
+    nodeVersion: inputs.nodeVersion,
   })));
 }
-async function prepareStubs(root, manifests) {
-  await mkdir(path.join(root, 'tarballs'), { recursive: true });
-  await writeFile(path.join(root, 'package.json'), jsonText(createRuntimeOwnerManifest(manifests)));
-  for (const manifest of manifests) await writeFile(path.join(root, 'tarballs', `${slug(manifest.name)}.tgz`), createManifestTarball(manifest));
+
+/** Fingerprint the exact source, shared workspace lock, toolchain and target inputs.
+ * The second argument injects source inventory/reads for deterministic private-fixture races only.
+ */
+export async function computePiRuntimeInputFingerprint(options = {}, dependencies = {}) {
+  return fingerprintPiRuntimeInputs(await capturePiRuntimeInputs(options, dependencies));
 }
-function assertTarballIntegrity(lock, manifests) {
-  for (const manifest of manifests) check(lock.packages[`node_modules/${manifest.name}`].integrity === `sha512-${sha(createManifestTarball(manifest), 'sha512', 'base64')}`, `Derived metadata changed for ${manifest.name}; run explicit --refresh-lock`);
-}
-async function copyRuntimeFiles(source, runtime) {
-  for (let index = 0; index < PACKAGE_DIRS.length; index++) {
-    const from = path.join(source, 'packages', PACKAGE_DIRS[index]);
-    const to = path.join(runtime, 'node_modules', PI_RUNTIME_PACKAGES[index]);
-    await copyTree(path.join(from, 'dist'), path.join(to, 'dist'));
-    await copyFile(path.join(source, 'LICENSE'), path.join(to, 'LICENSE'));
-    for (const name of ['README.md', 'CHANGELOG.md']) if (existsSync(path.join(from, name))) await copyFile(path.join(from, name), path.join(to, name));
-    if (PACKAGE_DIRS[index] === 'tui') {
-      for (const platform of ['win32', 'darwin']) await copyTree(path.join(from, 'native', platform, 'prebuilds'), path.join(to, 'native', platform, 'prebuilds'));
-    }
-    if (PACKAGE_DIRS[index] === 'coding-agent') {
-      for (const name of ['docs', 'examples']) await copyTree(path.join(from, name), path.join(to, name), ['node_modules']);
-      if (existsSync(path.join(from, 'containerization.md'))) await copyFile(path.join(from, 'containerization.md'), path.join(to, 'containerization.md'));
-      const assets = ['modes/interactive/theme', 'modes/interactive/assets', 'core/export-html'];
-      for (const relative of assets) {
-        const copyAssets = async (dir, target) => {
-          for (const entry of await readdir(dir, { withFileTypes: true })) {
-            check(!entry.isSymbolicLink(), 'Asset link is forbidden');
-            const file = path.join(dir, entry.name), output = path.join(target, entry.name);
-            if (entry.isDirectory()) await copyAssets(file, output);
-            else if (/\.(json|png|html|css|js)$/.test(entry.name)) { await mkdir(target, { recursive: true }); await copyFile(file, output); }
-          }
-        };
-        await copyAssets(path.join(from, 'src', relative), path.join(to, 'dist', relative));
-      }
-    }
+
+/** Require the shared Pi workspace compiler's evidence to match current inputs and Node. */
+export async function assertPiWorkspaceBuildStamp({ workspaceRoot = SOURCE, inputFingerprint, nodeVersion = process.version } = {}) {
+  check(typeof inputFingerprint === 'string' && /^[a-f0-9]{64}$/u.test(inputFingerprint), 'Expected a valid current Pi runtime input fingerprint');
+  const stampPath = path.join(workspaceRoot, '.cache', 'build.json');
+  let stamp;
+  try {
+    const info = await lstat(stampPath);
+    check(info.isFile() && info.nlink === 1, `Pi workspace build evidence must be an ordinary file: ${stampPath}`);
+    stamp = await readJson(stampPath);
+  } catch (error) {
+    if (error.code === 'ENOENT') throw new Error(`Missing Pi workspace build evidence at ${stampPath}; run node scripts/build/pi-workspace.mjs first`, { cause: error });
+    if (error instanceof SyntaxError) throw new Error(`Invalid Pi workspace build evidence at ${stampPath}`, { cause: error });
+    throw error;
   }
+  check(stamp && !Array.isArray(stamp) && stamp.schema === 1, `Unsupported Pi workspace build evidence schema at ${stampPath}`);
+  check(stamp.inputFingerprint === inputFingerprint, `Stale Pi workspace dist: build evidence does not match current source/lock/toolchain inputs; run node scripts/build/pi-workspace.mjs`);
+  check(stamp.node === nodeVersion, `Stale Pi workspace dist: build evidence was produced by Node ${String(stamp.node)}, current Node is ${nodeVersion}; run node scripts/build/pi-workspace.mjs`);
+  check(typeof stamp.compiledSha256 === 'string' && stamp.compiledSha256 === await fingerprintCompiledPiOutputs(workspaceRoot),
+    'Stale Pi workspace dist: compiled bytes differ from build evidence; rebuild the Pi workspace');
+  return stamp;
 }
 
 // Imported before SDK code, denies JS network/process escape points. Child's credential-free
@@ -312,68 +408,64 @@ async function smoke(runtime, work, env) {
 }
 
 /** Explicit output owns all scratch and artifact bytes. A failed build is retained for diagnosis. */
-export async function buildPiRuntime({ output, refreshLock = false }) {
+export async function buildPiRuntime({ output, refreshLock } = {}) {
+  check(refreshLock === undefined, 'The npm --refresh-lock route is retired; use the shared pnpm lock');
   assertPrivateOutput(output);
   await mkdir(output, { recursive: true });
   const work = path.join(output, 'work'); await mkdir(work);
   const env = buildChildEnvironment(process.env, work);
   for (const key of ['HOME', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'npm_config_cache']) await mkdir(env[key], { recursive: true });
-  for (const name of ['user.npmrc', 'global.npmrc']) await writeFile(path.join(work, name), '');
-  const source = path.join(work, 'source');
-  const sourceTreeSha256 = await snapshotSource(source, env);
+  const reader = await acquireDevelopmentReader(SOURCE);
+  let teardownConfirmed = true;
+  try {
   const piSourceVersion = readPinnedPiSourceVersion(REPOSITORY);
-  const manifests = await Promise.all(PACKAGE_DIRS.map(dir => readJson(path.join(source, 'packages', dir, 'package.json'))));
+  const manifests = await Promise.all(PACKAGE_DIRS.map(dir => readJson(path.join(SOURCE, 'packages', dir, 'package.json'))));
   validateManifests(manifests, piSourceVersion);
-  const install = path.join(work, 'runtime-install'); await prepareStubs(install, manifests);
-  const lockFile = path.join(OWNER, 'package-lock.json');
-  if (refreshLock) {
-    if (existsSync(lockFile)) {
-      // Preserve ordinary pins, but force npm to inspect newly derived Pi metadata
-      // even when its file: URL and upstream version have not changed.
-      const previous = await readJson(lockFile);
-      previous.packages[''] = createRuntimeOwnerManifest(manifests);
-      delete previous.packages[''].private;
-      for (const name of PI_RUNTIME_PACKAGES) delete previous.packages[`node_modules/${name}`];
-      await writeFile(path.join(install, 'package-lock.json'), jsonText(previous));
-    }
-    await npm(['install', '--package-lock-only'], install, env, work);
-    const lock = await readJson(path.join(install, 'package-lock.json')); assertRuntimeLock(lock, manifests); assertTarballIntegrity(lock, manifests);
-    await mkdir(OWNER, { recursive: true });
-    await copyFile(path.join(install, 'package.json'), path.join(OWNER, 'package.json'));
-    await copyFile(path.join(install, 'package-lock.json'), lockFile);
-    console.log(`[pi-runtime] Refreshed derived runtime dependency authority only; private evidence: ${output}`);
-    return { output, refreshedLock: true };
+  const inputEvidence = await capturePiRuntimeInputs();
+  check(inputEvidence.pinnedNodeVersion === process.version.slice(1), `Run the pinned Node ${inputEvidence.pinnedNodeVersion} toolchain (current ${process.version})`);
+  const compilation = await assertPiWorkspaceBuildStamp({ inputFingerprint: fingerprintPiRuntimeInputs(inputEvidence) });
+  for (const dir of PACKAGE_DIRS) {
+    check(existsSync(path.join(SOURCE, 'packages', dir, 'dist')), `Missing shared Pi ${dir}/dist output; run node scripts/build/pi-workspace.mjs before production deploy`);
   }
-  check(existsSync(lockFile), 'Runtime dependency lock missing; explicitly run --refresh-lock first');
-  check((await readFile(path.join(OWNER, 'package.json'), 'utf8')) === jsonText(createRuntimeOwnerManifest(manifests)), 'Derived runtime owner manifest drift; explicitly refresh lock');
-  const lockBytes = await readFile(lockFile); const lock = JSON.parse(lockBytes); assertRuntimeLock(lock, manifests); assertTarballIntegrity(lock, manifests);
-  await writeFile(path.join(install, 'package-lock.json'), lockBytes);
-  await npm(['ci'], source, env, work);
-  const compiler = path.join(source, 'node_modules/@typescript/native-preview/bin/tsgo.js');
-  check(existsSync(compiler), 'Pinned source compiler missing after scripts-disabled install');
-  for (const dir of PACKAGE_DIRS) await run(process.execPath, [compiler, '-p', 'tsconfig.build.json'], path.join(source, 'packages', dir), env, `compile ${dir} (retained generated source)`);
-  await npm(['ci'], install, env, work);
+
+  const deploy = path.join(work, 'deploy-staging');
+  await run('proto', ['run', 'pnpm', '--', '--filter', 'pi-config', 'deploy', '--prod', deploy], REPOSITORY, process.env,
+    'pnpm production workspace deploy (locked, scripts-disabled project settings)');
   const runtime = path.join(output, 'pi-runtime'); await mkdir(runtime);
-  await copyTree(path.join(install, 'node_modules'), path.join(runtime, 'node_modules'));
-  await copyRuntimeFiles(source, runtime);
+  await materializeDeployedNodeModules(path.join(deploy, 'node_modules'), path.join(runtime, 'node_modules'), path.join(SOURCE, 'LICENSE'));
+  check(await fingerprintCompiledPiOutputs(SOURCE, { runtimeRoot: runtime }) === compilation.compiledSha256,
+    'Deployed Pi compiled bytes do not match the selected workspace compilation');
   await smoke(runtime, work, env);
+  await assertPiWorkspaceBuildStamp({ inputFingerprint: fingerprintPiRuntimeInputs(inputEvidence) });
+
+  const afterDeploy = await capturePiRuntimeInputs();
+  check(fingerprintPiRuntimeInputs(inputEvidence) === fingerprintPiRuntimeInputs(afterDeploy),
+    'Pi source/shared lock/toolchain/target changed during deploy; retain output and retry with stable inputs');
   const verified = await writePiRuntimeManifest(runtime, { upstreamVersion: piSourceVersion, upstreamCommit: UPSTREAM,
-    sourceTreeSha256, lockSha256: sha(lockBytes), target: { platform: process.platform, arch: process.arch, nodeAbi: process.versions.modules } });
+    sourceTreeSha256: inputEvidence.sourceTreeSha256, lockSha256: inputEvidence.lockSha256, target: inputEvidence.target });
   await verifyPiRuntimeArtifact(runtime);
   await writeFile(path.join(output, 'build-evidence.json'), jsonText({ identity: verified.identity, sdkPath: verified.sdkPath,
-    sourceTreeSha256, buildLockSha256: sha(await readFile(path.join(source, 'package-lock.json'))), runtimeLockSha256: sha(lockBytes), node: process.version, offlineSmoke: true }));
+    sourceTreeSha256: inputEvidence.sourceTreeSha256, mainLockSha256: inputEvidence.mainLockSha256,
+    lockSha256: inputEvidence.lockSha256, compiledSha256: compilation.compiledSha256,
+    toolchainSha256: inputEvidence.toolchainSha256, node: process.version, pnpm: inputEvidence.pnpmVersion, offlineSmoke: true }));
   console.log(`[pi-runtime] Verified ${verified.identity}\n${runtime}`);
   return verified;
+  } catch (error) {
+    if (error?.teardownUnconfirmed === true) teardownConfirmed = false;
+    throw error;
+  } finally {
+    await reader.release({ teardownConfirmed });
+  }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2);
-  if (args.includes('--help')) console.log('node scripts/build/pi-runtime.mjs --output <new-absolute-private-directory> [--refresh-lock]\nDefault: private snapshot/install/compile/materialize/offline smoke/verify. --refresh-lock: explicit dependency metadata refresh only. Never deploys.');
+  if (args.includes('--help')) console.log('node scripts/build/pi-runtime.mjs --output <new-absolute-private-directory>\nLocked pnpm production deploy/materialize/offline smoke/verify (requires current harness/pi/.cache/build.json evidence; run scripts/build/pi-workspace.mjs first).');
   else {
     const outputIndex = args.indexOf('--output');
     check(outputIndex >= 0 && args[outputIndex + 1], 'Required --output <new-absolute-private-directory>');
     const valid = args.filter((_, i) => i !== outputIndex && i !== outputIndex + 1);
-    check(valid.every(arg => arg === '--refresh-lock'), 'Unknown builder argument');
-    buildPiRuntime({ output: args[outputIndex + 1], refreshLock: args.includes('--refresh-lock') }).catch(error => { console.error(error); process.exitCode = 1; });
+    check(valid.length === 0, 'Unknown builder argument (the npm --refresh-lock route is retired)');
+    buildPiRuntime({ output: args[outputIndex + 1] }).catch(error => { console.error(error); process.exitCode = 1; });
   }
 }

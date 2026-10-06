@@ -1,0 +1,15 @@
+packages:
+  - '.'
+  - application/hosts/vscode
+  - analytics/analysis
+  - extensions/computer-use
+  - extensions/playwright
+  - harness/pi/packages/ai
+  - harness/pi/packages/agent
+  - harness/pi/packages/tui
+  - harness/pi/packages/coding-agent
+
+# Production deployment uses the same graph, never registry Pi packages.
+injectWorkspacePackages: true
+syncInjectedDepsAfterScripts:
+  - build

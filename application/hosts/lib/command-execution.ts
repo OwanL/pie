@@ -1,7 +1,7 @@
 import * as cp from 'node:child_process';
 
 import { resolveCommandInvocation } from './command-invocation';
-import type { CommandResult } from './runtime-resolution';
+import type { CommandResult } from './command-result';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_BUFFER_BYTES = 10 * 1024 * 1024;

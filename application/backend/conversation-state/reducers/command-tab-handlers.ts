@@ -14,7 +14,7 @@ import {
   movePinnedItem,
   findPinnedGroupIndex,
   pinAndMergeToFirstPinned,
-} from '../../../frontend/session-tabs/tab-behavior.js';
+} from '../../../lib/session-tabs/tab-behavior.js';
 import { isPendingTabPath } from '../../../../lib/session-path.js';
 
 /** Build a `PersistTabs` effect carrying the full sessions tab slice

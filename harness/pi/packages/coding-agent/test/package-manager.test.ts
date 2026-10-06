@@ -1,11 +1,17 @@
+import { type ChildProcess, spawn as spawnNode } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DefaultPackageManager, type ProgressEvent, type ResolvedResource } from "../src/core/package-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+
+function createDirectoryAlias(target: string, alias: string): void {
+	// Junctions preserve physical-path aliasing without Windows symlink privileges.
+	symlinkSync(resolve(target), alias, process.platform === "win32" ? "junction" : "dir");
+}
 
 function normalizeForMatch(value: string): string {
 	return value.replace(/\\/g, "/");
@@ -26,6 +32,7 @@ class MockSpawnedProcess extends EventEmitter {
 }
 
 interface PackageManagerInternals {
+	spawnCommand(command: string, args: string[], options?: { cwd?: string }): ChildProcess;
 	runCommand(command: string, args: string[], options?: { cwd?: string }): Promise<void>;
 	runCommandCapture(
 		command: string,
@@ -47,6 +54,34 @@ interface PackageManagerInternals {
 		source: { type: "git"; repo: string; host: string; path: string; pinned: boolean; ref?: string },
 		scope: "user" | "project" | "temporary",
 	): string;
+}
+
+function interceptFailedInstall(manager: DefaultPackageManager, tempDir: string, command: string, args: string[]) {
+	const fixturePath = join(tempDir, "failed-install.cjs");
+	const recordPath = join(tempDir, "install-argv.json");
+	writeFileSync(
+		fixturePath,
+		`const fs = require("node:fs");
+const record = ${JSON.stringify(recordPath)};
+const calls = fs.existsSync(record) ? JSON.parse(fs.readFileSync(record, "utf8")) : [];
+calls.push({ args: process.argv.slice(2), cwd: fs.realpathSync(process.cwd()) });
+fs.writeFileSync(record, JSON.stringify(calls));
+process.exit(23);
+`,
+	);
+	const spawnSpy = vi.spyOn(manager as unknown as PackageManagerInternals, "spawnCommand").mockImplementation(
+		(actualCommand, actualArgs, options) => {
+			// Never fall back to a real npm/git command, including unexpected calls.
+			expect(actualCommand).toBe(command);
+			expect(actualArgs).toEqual(args);
+			expect(options).toBeUndefined();
+			return spawnNode(process.execPath, [fixturePath, ...actualArgs], {
+				cwd: options?.cwd,
+				stdio: "ignore",
+			});
+		},
+	);
+	return { spawnSpy, recordPath };
 }
 
 // Helper to check if a resource is enabled
@@ -212,14 +247,14 @@ Content`,
 
 				mkdirSync(join(agentDir), { recursive: true });
 				mkdirSync(join(tempDir, ".pi"), { recursive: true });
-				symlinkSync(sharedExtensionsDir, join(agentDir, "extensions"), "dir");
-				symlinkSync(sharedSkillsDir, join(agentDir, "skills"), "dir");
-				symlinkSync(sharedPromptsDir, join(agentDir, "prompts"), "dir");
-				symlinkSync(sharedThemesDir, join(agentDir, "themes"), "dir");
-				symlinkSync(sharedExtensionsDir, join(tempDir, ".pi", "extensions"), "dir");
-				symlinkSync(sharedSkillsDir, join(tempDir, ".pi", "skills"), "dir");
-				symlinkSync(sharedPromptsDir, join(tempDir, ".pi", "prompts"), "dir");
-				symlinkSync(sharedThemesDir, join(tempDir, ".pi", "themes"), "dir");
+				createDirectoryAlias(sharedExtensionsDir, join(agentDir, "extensions"));
+				createDirectoryAlias(sharedSkillsDir, join(agentDir, "skills"));
+				createDirectoryAlias(sharedPromptsDir, join(agentDir, "prompts"));
+				createDirectoryAlias(sharedThemesDir, join(agentDir, "themes"));
+				createDirectoryAlias(sharedExtensionsDir, join(tempDir, ".pi", "extensions"));
+				createDirectoryAlias(sharedSkillsDir, join(tempDir, ".pi", "skills"));
+				createDirectoryAlias(sharedPromptsDir, join(tempDir, ".pi", "prompts"));
+				createDirectoryAlias(sharedThemesDir, join(tempDir, ".pi", "themes"));
 
 				const result = await packageManager.resolve();
 
@@ -504,9 +539,7 @@ Content`,
 				const agentSkillsDir = join(agentDir, "skills");
 				const agentsSkillsDir = join(tempDir, ".agents", "skills");
 				mkdirSync(agentsSkillsDir, { recursive: true });
-				// Use junction on Windows to avoid EPERM when symlink privileges are unavailable.
-				const directoryLinkType = process.platform === "win32" ? "junction" : "dir";
-				symlinkSync(agentsSkillsDir, agentSkillsDir, directoryLinkType);
+				createDirectoryAlias(agentsSkillsDir, agentSkillsDir);
 
 				const skillPath = join(agentsSkillsDir, "foo", "SKILL.md");
 				mkdirSync(join(agentsSkillsDir, "foo"), { recursive: true });
@@ -1089,42 +1122,49 @@ Content`,
 			const events: ProgressEvent[] = [];
 			packageManager.setProgressCallback((event) => events.push(event));
 
-			// Use public install method which emits progress events
-			try {
-				await packageManager.install("npm:nonexistent-package@1.0.0");
-			} catch {
-				// Expected to fail - package doesn't exist
-			}
+			// Unit coverage of failed-install progress, not real registry integration.
+			const source = "npm:nonexistent-package@1.0.0";
+			const args = [
+				"install",
+				"nonexistent-package@1.0.0",
+				"--prefix",
+				join(agentDir, "npm"),
+				"--legacy-peer-deps",
+			];
+			const { spawnSpy, recordPath } = interceptFailedInstall(packageManager, tempDir, "npm", args);
+			const errorMessage = `npm ${args.join(" ")} failed with code 23`;
 
-			// Should have emitted start event before failure
-			expect(events.some((e) => e.type === "start" && e.action === "install")).toBe(true);
-			// Should have emitted error event
-			expect(events.some((e) => e.type === "error")).toBe(true);
+			await expect(packageManager.install(source)).rejects.toThrow(errorMessage);
+
+			expect(events).toEqual([
+				{ type: "start", action: "install", source, message: `Installing ${source}...` },
+				{ type: "error", action: "install", source, message: errorMessage },
+			]);
+			expect(spawnSpy).toHaveBeenCalledExactlyOnceWith("npm", args, undefined);
+			expect(JSON.parse(readFileSync(recordPath, "utf8"))).toEqual([
+				{ args, cwd: realpathSync(process.cwd()) },
+			]);
 		});
 
 		it("should recognize github URLs without git: prefix", async () => {
 			const events: ProgressEvent[] = [];
 			packageManager.setProgressCallback((event) => events.push(event));
-			const previousGitTerminalPrompt = process.env.GIT_TERMINAL_PROMPT;
-			process.env.GIT_TERMINAL_PROMPT = "0";
+			// Exercise URL parsing and clone intent, not real GitHub integration.
+			const source = "https://github.com/nonexistent/repo";
+			const args = ["clone", source, join(agentDir, "git", "github.com", "nonexistent", "repo")];
+			const { spawnSpy, recordPath } = interceptFailedInstall(packageManager, tempDir, "git", args);
+			const errorMessage = `git ${args.join(" ")} failed with code 23`;
 
-			try {
-				// This should be parsed as a git source, not throw "unsupported"
-				try {
-					await packageManager.install("https://github.com/nonexistent/repo");
-				} catch {
-					// Expected to fail - repo doesn't exist
-				}
-			} finally {
-				if (previousGitTerminalPrompt === undefined) {
-					delete process.env.GIT_TERMINAL_PROMPT;
-				} else {
-					process.env.GIT_TERMINAL_PROMPT = previousGitTerminalPrompt;
-				}
-			}
+			await expect(packageManager.install(source)).rejects.toThrow(errorMessage);
 
-			// Should have attempted clone, not thrown unsupported error
-			expect(events.some((e) => e.type === "start" && e.action === "install")).toBe(true);
+			expect(events).toEqual([
+				{ type: "start", action: "install", source, message: `Installing ${source}...` },
+				{ type: "error", action: "install", source, message: errorMessage },
+			]);
+			expect(spawnSpy).toHaveBeenCalledExactlyOnceWith("git", args, undefined);
+			expect(JSON.parse(readFileSync(recordPath, "utf8"))).toEqual([
+				{ args, cwd: realpathSync(process.cwd()) },
+			]);
 		});
 
 		it("should parse package source types from docs examples", () => {

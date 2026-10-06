@@ -25,7 +25,7 @@ import {
   unpinPinnedGroup,
   movePinnedItem,
   pinAndMergeToFirstPinned,
-} from '../tab-behavior';
+} from '../../../lib/session-tabs/tab-behavior.js';
 
 const sessions = [
   {

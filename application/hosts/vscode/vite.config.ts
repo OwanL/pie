@@ -20,6 +20,7 @@ const frontendDir = path.join(repoDir, 'application', 'frontend');
 const isolatedOutputDir = process.env.PIE_BUILD_OUTPUT_DIR;
 const selectedPiRuntimeSdkPath = process.env.PIE_BUILD_PI_RUNTIME_SDK_PATH || undefined;
 const selectedPiRuntimeIdentity = process.env.PIE_BUILD_PI_RUNTIME_IDENTITY || undefined;
+const developmentBuild = process.env.PIE_BUILD_DEVELOPMENT === '1';
 const outDir = isolatedOutputDir || path.join(rootDir, 'out');
 
 /**
@@ -77,7 +78,7 @@ function buildIdentityInputs(identityRoot = rootDir): string[] {
     ...(fs.existsSync(path.join(identityRoot, 'runtime')) ? sourceFiles(path.join(identityRoot, 'runtime')) : []),
     ...(production && fs.existsSync(buildHelpers) ? sourceFiles(buildHelpers) : []),
     path.join(identityRoot, 'package.json'),
-    path.join(identityRoot, 'package-lock.json'),
+    ...(production ? [path.join(repoDir, 'pnpm-lock.yaml'), path.join(repoDir, '.prototools'), path.join(repoDir, 'pnpm-workspace.yaml')] : []),
     path.join(identityRoot, 'tsconfig.json'),
     path.join(identityRoot, 'vite.config.ts'),
     path.join(helperRoot, 'scripts', 'lib', 'package-resolution.mjs'),
@@ -119,7 +120,9 @@ export function createBuildIdentityPlugin(
     buildStart() {
       const inputs = buildIdentityInputs(identityRoot);
       buildId = computeBuildId(inputs, identityRoot, runtimeIdentity);
-      for (const input of inputs) this.addWatchFile(input);
+      // Development watches Vite's actual import closure, not test files or a
+      // second source-fingerprint poll. Delivery retains coordinated identity.
+      if (!developmentBuild) for (const input of inputs) this.addWatchFile(input);
     },
     renderChunk(code) {
       const replaced = code.replaceAll(BUILD_ID_SENTINEL, buildId);
@@ -157,7 +160,7 @@ export default defineConfig(({ mode }) => {
       build: {
         target: 'node20',
         outDir,
-        emptyOutDir: true,
+        emptyOutDir: !developmentBuild,
         manifest: false,
         ssr: true,
         rollupOptions: {

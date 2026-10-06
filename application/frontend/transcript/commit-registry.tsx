@@ -4,11 +4,11 @@
 import { createContext, type ComponentChildren } from 'preact';
 import { useCallback, useContext, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
 
-import type { ChatMessage, ToolCall, TranscriptWindow, WebviewToHostMessage } from '../../lib/protocol/index.js';
+import { EMPTY_TRANSCRIPT_WINDOW, type ChatMessage, type ToolCall, type TranscriptWindow, type WebviewToHostMessage } from '../../lib/protocol/index.js';
 import { boundedTextIdentity, equalBoundedTextIdentity } from './commit-identity';
 import { assistantPartsFromMessage, getRenderableUserParts } from './parts';
 import { reasoningSummary } from './markdown';
-import { recordRenderSurface } from '../shell/render-error';
+import { recordRenderEvidenceTarget, recordRenderSurface } from '../shell/render-error';
 
 // Bound for the renderer-owned offscreen-position scan only. Transcript row
 // count is NOT corruption evidence: the host budget (240 loaded rows) can be
@@ -174,6 +174,61 @@ export function useTranscriptCommitRegistry(): CommitRegistryValue {
 export function useCommittedAppSurface(surface: AppCommitSurface): void {
   const registry = useTranscriptCommitRegistry();
   useLayoutEffect(() => registry.commitAppSurface(surface), [registry.commitAppSurface, surface]);
+}
+
+/** Committed no-tabs and startup loading branches may prove no transcript,
+ * independently of data readiness. Loading that hides a session, tabs, rows or
+ * a nonempty window cannot prove this; recovery/suspense do not use this hook. */
+export function useCommittedEmptyTranscript(
+  state: TranscriptCommitTarget['state'],
+  postMessage: (message: WebviewToHostMessage) => void,
+): void {
+  const registry = useTranscriptCommitRegistry();
+  const generationRef = useRef(0);
+  const lastTargetRef = useRef<TranscriptCommitTarget | null>(null);
+  useLayoutEffect(() => {
+    const generation = registry.mountHost();
+    generationRef.current = generation;
+    return () => registry.unmountHost(generation);
+  }, [registry.mountHost, registry.unmountHost]);
+  useLayoutEffect(() => {
+    const target = registry.target;
+    if (!target || lastTargetRef.current === target) return;
+    // Prove that this branch and the accepted target both describe no session
+    // and no rows. Reuse the transcript comparator for structure/window checks;
+    // an empty app surface alone is not transcript correctness evidence.
+    if (state.activeSessionPath !== null || state.openTabPaths.length !== 0
+      || state.transcript.length !== 0 || target.state.activeSessionPath !== null
+      || target.state.openTabPaths.length !== 0
+      || !equalWindow(state.transcriptWindow, EMPTY_TRANSCRIPT_WINDOW)
+      || !equalWindow(target.state.transcriptWindow, EMPTY_TRANSCRIPT_WINDOW)) return;
+    const decision = decideTranscriptCommit(target, registry.leaves, {
+      renderedTranscript: state.transcript,
+      window: state.transcriptWindow,
+      mountedVirtualRowIndexes: [],
+      rowIndexByMessageId: new Map(),
+      intentionallyHiddenMessageIds: new Set(),
+    });
+    if (!decision.matches || decision.evidence !== 'no-transcript') return;
+    lastTargetRef.current = target;
+    recordRenderEvidenceTarget(target, 'app');
+    const payload = {
+      revision: target.revision,
+      viewGeneration: target.viewGeneration,
+      identity: target.expectedTranscriptIdentity,
+      mountGeneration: generationRef.current,
+      evidence: decision.evidence,
+    } as const;
+    postMessage({ type: 'transcriptCommitted', payload });
+    const frame = requestAnimationFrame(() => {
+      postMessage({
+        type: 'paintObserved',
+        payload: { ...payload, latencyMs: Math.max(0, performance.now() - target.acceptedAt) },
+      });
+    });
+    // Advancing the target or leaving this branch cancels stale paint evidence.
+    return () => cancelAnimationFrame(frame);
+  }, [registry.target, state.activeSessionPath, state.openTabPaths, state.transcript, state.transcriptWindow, postMessage]);
 }
 
 export interface MessageCommitOwner {

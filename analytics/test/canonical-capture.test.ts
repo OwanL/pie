@@ -523,6 +523,7 @@ test('canonical accounting seam is exclusive and never falls through to the lega
       scheduleRender: () => undefined,
       dispatchArchEvent: () => undefined,
       getCapturedPricingFacts: () => undefined,
+      resolveInvocationPricing: () => undefined,
       isPrivateSession: () => false,
       sessionIdentity: () => ({ sessionId: 'session-exclusive', provider: 'provider-a', modelId: 'model-a' }),
       currentRunId: () => 'run-exclusive',

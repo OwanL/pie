@@ -16,8 +16,10 @@ import {
   type AnalyticsHandoffInventoryProof,
   type AnalyticsHandoffStatus,
 } from '../contracts/host-status-messages.js';
-import { SessionLifecycleStore } from '../../harness/session-storage/lifecycle/session-lifecycle-store.js';
-import type { AnalyticsHostRecord } from './session-lifecycle-writer-store.js';
+import type {
+  AnalyticsHostRecord,
+  AnalyticsHostRegistryPort,
+} from '../contracts/session-lifecycle-writer.js';
 import {
   assertFreshAnalyticsWriterFenceRequest,
   createSignedAnalyticsWriterFenceAcknowledgement,
@@ -37,7 +39,7 @@ import {
 } from './controlled-restart.js';
 
 export interface AnalyticsHandoffControlOptions {
-  registry: SessionLifecycleStore;
+  registry: AnalyticsHostRegistryPort;
   identity: AnalyticsHandoffHostIdentity;
   key?: string;
   pipeName?: string;

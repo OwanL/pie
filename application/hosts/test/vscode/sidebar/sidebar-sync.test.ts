@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { buildStateEnvelope, createSidebarSyncState } from '../../../lib/renderer-delivery/sync';
-import { setStreamDiagEnabled } from '../../../lib/renderer-delivery/stream-telemetry';
-import { transcriptRenderSignature } from '../../../../frontend/transcript/render-signature';
+import { setStreamDiagEnabled } from '../../../../lib/stream-telemetry.js';
+import { transcriptRenderSignature } from '../../../../lib/transcript/render-signature.js';
 import {
   DEFAULT_CHAT_PREFS,
   DEFAULT_SESSION_TITLES_SETTINGS,

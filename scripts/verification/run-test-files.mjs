@@ -29,7 +29,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createTsconfigOverlay, resolveOwnerTsx } from '../lib/package-resolution.mjs';
-import { PACKAGE_DIRECTIVES, resolvePackageEntry } from '../lib/test-packages.mjs';
+import { isSdkIndependentTestFile, PACKAGE_DIRECTIVES, resolvePackageEntry } from '../lib/test-packages.mjs';
 import { extractRuntimeArgs, resolveRuntimeSelection, verificationChildEnv, withVerificationRuntime } from './verification-runtime.mjs';
 import { withoutGitRepositoryEnv } from '../lib/git-environment.mjs';
 import { withoutPiHarnessEnv } from '../lib/pi-harness-env.mjs';
@@ -140,6 +140,28 @@ export function normalizeRepoRelative(repoRoot, input) {
     throw new Error(`Test file is outside the repo: ${input}`);
   }
   return { repoRel, abs };
+}
+
+/**
+ * Whether this exact focused-file selection can run without acquiring/verifying
+ * a Pi runtime. Any explicit selection, empty input, unlisted file, or mixed
+ * invocation remains on the ordinary verified-runtime path.
+ *
+ * @param {string} repoRoot
+ * @param {string[]} inputs
+ * @param {{ artifactDir?: string, sdkPath?: string }} [selection]
+ * @returns {boolean}
+ */
+export function requiresVerifiedRuntime(repoRoot, inputs, selection = {}) {
+  if (selection.artifactDir !== undefined || selection.sdkPath !== undefined || inputs.length === 0) return true;
+  return !inputs.every((input) => {
+    try {
+      return isSdkIndependentTestFile(normalizeRepoRelative(repoRoot, input).repoRel);
+    } catch {
+      // Preserve the normal path's validation/error handling for invalid inputs.
+      return false;
+    }
+  });
 }
 
 /**
@@ -438,34 +460,42 @@ export async function main() {
   const processAbort = abortOnProcessSignals();
   const failures = [];
   let passedGroups = 0;
-  try {
-    await withVerificationRuntime(selection, processAbort.signal, async (runtime) => {
-      for (const group of groups) {
-        const overlay = createGroupTsconfigOverlay(repoRoot, group, { sdkPath: runtime.sdkPath });
-        if (overlay) overlays.set(group.id, overlay);
-      }
-      const results = await runGroupQueue(groups, async (group) => {
-        const overlay = overlays.get(group.id);
-        const args = buildTsxArgs(overlay ? { ...group, tsxConfig: overlay.configPath } : group);
-        const fileWord = group.files.length === 1 ? 'file' : 'files';
-        console.log(`\n▶ ${group.id} (${group.files.length} ${fileWord})`);
-        const code = await runGroup(group, args, processAbort.signal);
-        if (code === 0) {
-          passedGroups += 1;
-          console.log(`✓ ${group.id}`);
-        } else {
-          console.log(`✖ ${group.id} (exit ${code})`);
-          failures.push(group.id);
-        }
-        return code;
-      }, { signal: processAbort.signal });
-      for (let index = 0; index < results.length; index += 1) {
-        if (results[index] !== undefined) continue;
-        const group = groups[index];
-        console.log(`\n✖ ${group.id} (not started: aborted)`);
+  const executeGroups = async (runtime) => {
+    for (const group of groups) {
+      const overlay = createGroupTsconfigOverlay(repoRoot, group, { sdkPath: runtime?.sdkPath });
+      if (overlay) overlays.set(group.id, overlay);
+    }
+    const results = await runGroupQueue(groups, async (group) => {
+      const overlay = overlays.get(group.id);
+      const args = buildTsxArgs(overlay ? { ...group, tsxConfig: overlay.configPath } : group);
+      const fileWord = group.files.length === 1 ? 'file' : 'files';
+      console.log(`\n▶ ${group.id} (${group.files.length} ${fileWord})`);
+      const code = await runGroup(group, args, processAbort.signal);
+      if (code === 0) {
+        passedGroups += 1;
+        console.log(`✓ ${group.id}`);
+      } else {
+        console.log(`✖ ${group.id} (exit ${code})`);
         failures.push(group.id);
       }
-    });
+      return code;
+    }, { signal: processAbort.signal });
+    for (let index = 0; index < results.length; index += 1) {
+      if (results[index] !== undefined) continue;
+      const group = groups[index];
+      console.log(`\n✖ ${group.id} (not started: aborted)`);
+      failures.push(group.id);
+    }
+  };
+  try {
+    if (requiresVerifiedRuntime(repoRoot, files, selection)) {
+      await withVerificationRuntime(selection, processAbort.signal, executeGroups);
+    } else {
+      // This is an exact registry allowlist, not a recovery path. No Pi runtime
+      // is acquired for these tests; every other/default or mixed invocation
+      // remains on the verified-runtime path above.
+      await executeGroups(undefined);
+    }
   } finally {
     processAbort.dispose();
     for (const overlay of overlays.values()) overlay.dispose();

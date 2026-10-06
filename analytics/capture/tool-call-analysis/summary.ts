@@ -1,4 +1,4 @@
-import type { ToolCall } from '../../../harness/agent-processes/lib/rpc/message-contract.js';
+import type { ToolCallAnalysisInput } from '../../contracts/tool-call-analysis-input.js';
 
 const TOOL_CALL_SUMMARY_MAX_LENGTH = 300;
 
@@ -136,7 +136,7 @@ function skillNameFromPath(value: string): string | null {
   return match ? match[1] : null;
 }
 
-export function getSkillNameFromToolCall(toolCall: ToolCall): string | null {
+export function getSkillNameFromToolCall(toolCall: ToolCallAnalysisInput): string | null {
   const normalizedToolName = normalizeToolCallName(toolCall.name);
   if (normalizedToolName !== 'read' && normalizedToolName !== 'read_file') {
     return null;

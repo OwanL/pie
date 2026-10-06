@@ -5,7 +5,7 @@
  * placeholder assistant row shows a pending "pruning skills/tools" chip with a
  * Cancel button that reuses the interrupt dispatch.
  */
-import test, { beforeEach } from 'node:test';
+import test, { afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { installDom } from '../../helpers/dom';
@@ -73,10 +73,11 @@ beforeEach(() => {
   container = document.createElement('div');
   container.id = 'app';
   document.body.appendChild(container);
-  return () => {
-    render(null, container);
-    container.remove();
-  };
+});
+
+afterEach(() => {
+  render(null, container);
+  container.remove();
 });
 
 test('Brief F: no bottom prepass chip while phase is idle', () => {

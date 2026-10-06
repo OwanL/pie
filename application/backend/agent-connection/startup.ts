@@ -3,21 +3,13 @@ import { statSync } from 'node:fs';
 
 import { BackendClient } from './client';
 import { buildRestoredSessionPlan, filterRestorableStoredTabs } from '../conversation-state/restored-session-plan';
-import { normalizeStoredTabPaths, normalizeStoredPinnedTabGroups } from '../../frontend/session-tabs/tab-behavior';
-import { createCommandExecutor } from '../../hosts/lib/command-execution';
-
-import {
-  probeBackendNodeTarget,
-  resolveNodePath,
-} from '../../hosts/lib/runtime-resolution';
-import { resolveGenerationPiRuntime } from '../../hosts/lib/pi-runtime-resolution';
-import type { GenerationPiRuntimeDescriptor } from '../../hosts/lib/pi-runtime-resolution';
-import { resolveAgentDir } from '../../hosts/lib/agent-dir-resolution';
+import { normalizeStoredTabPaths, normalizeStoredPinnedTabGroups } from '../../lib/session-tabs/tab-behavior.js';
+import type { BackendLaunchPaths } from '../../lib/platform-contracts/session-platform.js';
 import { buildRuntimePrefsPayload } from '../../lib/protocol/index.js';
 import type { ChatPrefs, SessionSummary } from '../../lib/protocol/index.js';
-import { SessionService } from '../session-actions/service';
-import { SessionServiceEvents } from '../session-actions/events';
-import { PRIVATE_SESSION_PATHS_STORAGE_KEY, SessionServiceState } from '../session-actions/state';
+import type { SessionServiceEvents } from '../session-actions/events';
+import { PRIVATE_SESSION_PATHS_STORAGE_KEY } from '../session-actions/state';
+import type { SessionServiceState } from '../session-actions/state';
 import { buildRestoredSessionSummaries } from '../conversation-state/restored-session-summaries';
 import { bootLog } from '../../../lib/structured-logging/pie-logger';
 import { toErrorMessage } from '../../../lib/structured-logging/error-message';
@@ -27,11 +19,9 @@ import { seedHistoryCompactionEnvironment } from '../session-actions/runtime-pre
 import type { AnalyticsBackendDescriptor } from '../../../analytics/authority/activation.js';
 import type { ArchState } from '../conversation-state/arch-state';
 import type { Event } from '../conversation-state/events';
-import type { SessionHostPlatform } from '../../hosts/lib/platform-contracts/session-platform';
+import type { SessionHostPlatform } from '../../lib/platform-contracts/session-platform.js';
 
 const PREFS_STORAGE_KEY = 'chatPrefs';
-const DEVELOPMENT_RUNTIME_PATH_ENV = 'PIE_DEVELOPMENT_PI_RUNTIME';
-const ALLOW_DEVELOPMENT_RUNTIME_ENV = 'PIE_ALLOW_DEVELOPMENT_RUNTIME';
 
 /** Only classify an explicitly private path as missing when the filesystem
  * confirms ENOENT/ENOTDIR. Sharing violations and other transient stat errors
@@ -50,13 +40,20 @@ function isPrivateSessionPathRestorable(sessionPath: string): boolean {
   }
 }
 
+interface StartupSessionService {
+  loadPruningSettings(): Promise<void>;
+  loadToolResultPruningSettings(): Promise<void>;
+  loadSessionTitlesSettings(): Promise<void>;
+  schedulePrivateSessionCleanup(storedPrivatePaths: readonly string[], restoredTabPaths: readonly string[]): void;
+}
+
 interface StartSessionBackendOptions {
   platform: SessionHostPlatform;
   backend: BackendClient;
   scheduleRender: () => void;
   events: SessionServiceEvents;
   state: SessionServiceState;
-  service: SessionService;
+  service: StartupSessionService;
   openSession: (sessionPath: string) => void;
   getArchState: () => ArchState;
   dispatchArch: (event: Event) => void;
@@ -203,128 +200,27 @@ function bootLogRestorePrepared(
   });
 }
 
-async function resolveRuntimePaths(options: StartSessionBackendOptions): Promise<{
-  nodePath: string;
-  sdkPath: string;
-  sourceArtifactDescriptor: GenerationPiRuntimeDescriptor;
-} | null> {
+async function resolveRuntimePaths(options: StartSessionBackendOptions): Promise<BackendLaunchPaths | null> {
   try {
-    const configuredNodePath = options.platform.getSetting<string>('nodePath', 'nodePath');
-    const nodePath = path.resolve(resolveNodePath({
-      configuredPath: configuredNodePath,
-      env: process.env as NodeJS.ProcessEnv,
-    }));
-    const exec = createCommandExecutor();
-    const target = await probeBackendNodeTarget(nodePath, { exec });
-
-    const developmentArtifactDir = process.env[DEVELOPMENT_RUNTIME_PATH_ENV]?.trim();
-    if (developmentArtifactDir && process.env[ALLOW_DEVELOPMENT_RUNTIME_ENV] !== '1') {
-      throw new Error(
-        `${DEVELOPMENT_RUNTIME_PATH_ENV} requires ${ALLOW_DEVELOPMENT_RUNTIME_ENV}=1.`,
-      );
-    }
-    const runtime = await resolveGenerationPiRuntime({
-      runtimeOutDir: options.platform.getRuntimeOutputDirectory(),
-      target,
-      ...(developmentArtifactDir ? {
-        developmentOverride: {
-          artifactDir: developmentArtifactDir,
-          allowDevelopmentRuntime: true,
-        },
-      } : {}),
-    });
-    return {
-      nodePath,
-      sdkPath: runtime.sdkPath,
-      sourceArtifactDescriptor: runtime,
-    };
+    return await options.platform.backendStartup.resolveBackendLaunchPaths();
   } catch (err) {
     options.dispatchArch({ kind: 'NoticeShown', notice:
       `pie setup error: ${toErrorMessage(err)}. ` +
         'Set pie.nodePath to a usable Node executable and ensure this generation contains a matching out/pi-runtime artifact. ' +
-        `A verified development artifact requires ${DEVELOPMENT_RUNTIME_PATH_ENV} and ${ALLOW_DEVELOPMENT_RUNTIME_ENV}=1.`,
+        'A verified development artifact requires PIE_DEVELOPMENT_PI_RUNTIME and PIE_ALLOW_DEVELOPMENT_RUNTIME=1.',
     });
     return null;
   }
 }
 
-function setupInTreeAuthEnv(platform: SessionHostPlatform): void {
-  const allowInTreeAuth = platform.getSetting<boolean>('allowInTreeAuth') ?? false;
-  if (allowInTreeAuth) {
-    process.env.PIE_ALLOW_IN_TREE_AUTH = '1';
-  } else {
-    delete process.env.PIE_ALLOW_IN_TREE_AUTH;
-  }
-}
 
-/**
- * Ensure PI_CODING_AGENT_DIR is set in process.env before the backend is
- * spawned. The backend inherits process.env and the pi SDK uses
- * PI_CODING_AGENT_DIR to resolve `getAgentDir()` — which controls where
- * settings.json, models.json, and auth.json are read from.
- *
- * Candidates (pie.agentDir setting, PI_CODING_AGENT_DIR env var, and the
- * known checkout agent root) are VALIDATED: a dir is only trusted if
- * it actually contains settings.json. This is what makes the recurring
- * "custom provider missing" failure self-healing: a STALE pie.agentDir
- * pointing at a path from another machine (or after a repo relocation) used
- * to silently overwrite a correct PI_CODING_AGENT_DIR env var, leaving the
- * backend to read models.json from a non-existent dir — so custom providers
- * (defined ONLY in models.json, never built-in) vanished with no
- * error. Now stale candidates are rejected (logged) and resolution falls
- * through to a valid dir instead of clobbering a good env var.
- *
- * `extensionPath` identifies a checkout only in a known source package layout.
- * An installed extension does not imply an agent dir in its parent directory.
- */
-function setupAgentDirEnv(options: StartSessionBackendOptions): void {
-  const configuredAgentDir = (options.platform.getSetting<string>('agentDir') ?? '').trim();
-  const result = resolveAgentDir({
-    configuredAgentDir,
-    envAgentDir: process.env.PI_CODING_AGENT_DIR,
-    extensionPath: options.platform.extensionPath,
-  });
-
-  if (result.agentDir) {
-    process.env.PI_CODING_AGENT_DIR = result.agentDir;
-  } else {
-    // No candidate validated. Clear any stale value so the backend doesn't
-    // read a non-existent dir; the pi SDK will fall back to ~/.pi/agent.
-    delete process.env.PI_CODING_AGENT_DIR;
-    const tried = result.rejections
-      .map((r) => `${r.source}="${r.candidate}" (${r.reason})`)
-      .join('; ');
-    appendPieLog('warn', 'startup', 'no valid agent dir found', {
-      tried: tried || 'none',
-      note: 'Custom providers will be unavailable. Set pie.agentDir to the directory containing settings.json and models.json.',
-    });
-    return;
-  }
-
-  // Surface stale-setting recovery so the user understands WHY providers were
-  // missing and can fix the persisted setting (rather than relying on the
-  // env-var fallback indefinitely). The notice is only shown when the setting
-  // was set but a DIFFERENT source actually resolved — i.e. the setting is stale.
-  const settingRejected = result.rejections.some((r) => r.source === 'setting');
-  if (settingRejected && result.source !== 'setting') {
-    const sourceLabel =
-      result.source === 'env' ? 'the PI_CODING_AGENT_DIR env var'
-      : result.source === 'extension-relative' ? 'the checkout agent dir'
-      : 'a fallback';
-    options.dispatchArch({
-      kind: 'NoticeShown',
-      notice:
-        `pie.agentDir points to a path that no longer exists${configuredAgentDir ? ` (${configuredAgentDir})` : ''}. ` +
-        `Recovering using ${sourceLabel} (${result.agentDir}). Set pie.agentDir to this path, or re-run the installer, to clear this warning.`,
-    });
-  }
-}
 
 async function startBackendWithLogging(
   options: StartSessionBackendOptions,
   nodePath: string,
   sdkPath: string,
-  sourceArtifactDescriptor: GenerationPiRuntimeDescriptor,
+  sourceArtifactDescriptor: BackendLaunchPaths['sourceArtifactDescriptor'],
+  sdkRuntimeSelection: BackendLaunchPaths['sdkRuntimeSelection'],
   backendPath: string,
   workspaceCwd: string,
   restoredStartupPath: string | null,
@@ -344,7 +240,8 @@ async function startBackendWithLogging(
     await options.backend.start({
       nodePath,
       sdkPath,
-      sourceArtifactDescriptor,
+      ...(sourceArtifactDescriptor ? { sourceArtifactDescriptor } : {}),
+      ...(sdkRuntimeSelection ? { sdkRuntimeSelection } : {}),
       backendPath,
       cwd: workspaceCwd,
       analyticsActivation: options.getAnalyticsBackendDescriptor?.(),
@@ -385,7 +282,8 @@ export async function spawnBackend(
   backendArgs: {
     nodePath: string;
     sdkPath: string;
-    sourceArtifactDescriptor: GenerationPiRuntimeDescriptor;
+    sourceArtifactDescriptor?: BackendLaunchPaths['sourceArtifactDescriptor'];
+    sdkRuntimeSelection?: BackendLaunchPaths['sdkRuntimeSelection'];
     backendPath: string;
     cwd: string;
     restoredStartupPath: string | null;
@@ -396,6 +294,7 @@ export async function spawnBackend(
     backendArgs.nodePath,
     backendArgs.sdkPath,
     backendArgs.sourceArtifactDescriptor,
+    backendArgs.sdkRuntimeSelection,
     backendArgs.backendPath,
     backendArgs.cwd,
     backendArgs.restoredStartupPath,
@@ -474,6 +373,16 @@ export async function startSessionBackend(options: StartSessionBackendOptions): 
 
   dispatchArch({ kind: 'WorkspaceCwdChanged', workspaceCwd });
 
+  try {
+    // The startup settings services can read/write PI_CODING_AGENT_DIR, so
+    // establish the isolated profile before any settings or session work.
+    options.platform.backendStartup.prepareDevelopmentEnvironment();
+  } catch (error) {
+    dispatchArch({ kind: 'NoticeShown', notice: `pie setup error: ${toErrorMessage(error)}` });
+    options.scheduleRender();
+    return;
+  }
+
   applyStoredPrefs(options);
   // Settings families are independent and may each hit settings.json plus
   // VS Code globalState. Keep them on the same cold-start critical-path step
@@ -533,11 +442,12 @@ export async function startSessionBackend(options: StartSessionBackendOptions): 
     options.scheduleRender();
     return;
   }
-  const { nodePath, sdkPath, sourceArtifactDescriptor } = paths;
+  const { nodePath, sdkPath, sourceArtifactDescriptor, sdkRuntimeSelection } = paths;
 
   const backendPath = path.join(options.platform.getRuntimeOutputDirectory(), 'backend.js');
-  setupAgentDirEnv(options);
-  setupInTreeAuthEnv(options.platform);
+  options.platform.backendStartup.prepareBackendEnvironment((notice) => {
+    dispatchArch({ kind: 'NoticeShown', notice });
+  });
   // The child inherits this before SDK load, closing the startup window where
   // automatic compaction could otherwise use pi's native defaults while the
   // runtimePrefs.set snapshot waits behind cold session restoration.
@@ -555,7 +465,7 @@ export async function startSessionBackend(options: StartSessionBackendOptions): 
   // BackendServer.start() time — no separate proxy process needed.
   const { started } = await spawnBackend(
     options,
-    { nodePath, sdkPath, sourceArtifactDescriptor, backendPath, cwd: workspaceCwd, restoredStartupPath },
+    { nodePath, sdkPath, sourceArtifactDescriptor, sdkRuntimeSelection, backendPath, cwd: workspaceCwd, restoredStartupPath },
   );
   if (!started) {
     options.events.detach();

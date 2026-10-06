@@ -4,11 +4,12 @@ import * as path from 'node:path';
 
 import * as vscode from 'vscode';
 
-import type { HostRuntimePlatform, HostRendererSurface } from '../../lib/platform-contracts/platform.js';
+import type { HostRuntimePlatform, HostRendererSurface } from '../../../lib/platform-contracts/platform.js';
 import { buildWorkspaceAnalyticsId } from '../../../../analytics/legacy/run-analytics/storage';
 import { requestWindowAttention } from '../completion-attention.js';
-import type { SessionHostPlatform } from '../../lib/platform-contracts/session-platform';
-import { selectRuntimeSetting } from '../../lib/platform-contracts/session-platform';
+import type { SessionHostPlatform } from '../../../lib/platform-contracts/session-platform.js';
+import { selectRuntimeSetting } from '../../../lib/platform-contracts/session-platform.js';
+import { createBackendStartupPlatform } from '../../lib/backend-startup';
 import { createBrowserServer } from '../../browser/http/browser-server-factory.js';
 import { showPieLogs } from '../logging/pie-logger-adapter.js';
 import { readBrowserServerSettings } from '../../browser/settings';
@@ -20,6 +21,7 @@ import {
   readImagePreviewWithFallback,
   type FilePathResolverAdapter,
 } from '../editor-integration/open-file';
+import { getWebviewAssetDir } from './hot-reload';
 import { runtimeOutputDirectory, runtimeRendererSelection } from './runtime-location';
 import { appendPieLog } from '../../../../lib/structured-logging/pie-logger';
 import { toErrorMessage } from '../../../../lib/structured-logging/error-message';
@@ -95,7 +97,7 @@ function getLegacyWorkspaceAnalyticsIds(): string[] {
  *  keys and the `pie` → `piAssistant` setting fallback are identical to the
  *  previous direct `vscode.ExtensionContext` usage. */
 function createSessionHostPlatform(context: vscode.ExtensionContext): SessionHostPlatform {
-  return {
+  const sessionPlatform: Omit<SessionHostPlatform, 'backendStartup'> = {
     storage: {
       get: (key) => context.globalState.get(key),
       update: (key, value) => context.globalState.update(key, value),
@@ -117,6 +119,10 @@ function createSessionHostPlatform(context: vscode.ExtensionContext): SessionHos
       vscode.env.appName,
       vscode.workspace.name ?? vscode.workspace.workspaceFolders?.[0]?.name,
     ),
+  };
+  return {
+    ...sessionPlatform,
+    backendStartup: createBackendStartupPlatform(sessionPlatform),
   };
 }
 
@@ -164,7 +170,7 @@ function createFilePathResolver(): FilePathResolverAdapter {
 }
 
 /** VS Code adapters for the shared {@link HostRuntime} platform seam
- *  (`application/hosts/lib/platform-contracts/platform.ts`). Every member mirrors the exact behavior of
+ *  (`application/lib/platform-contracts/platform.ts`). Every member mirrors the exact behavior of
  *  the previous direct `vscode` usage in the extension-host composition;
  *  workspace-dependent reads stay lazy so the adapter always reflects the
  *  window's current state. */
@@ -177,7 +183,7 @@ export function createVscodeHostRuntimePlatform(
     ...sessionPlatform,
     createBrowserServer: (options) => createBrowserServer({
       ...options,
-      assetDir: path.join(context.extensionPath, 'out', 'webview', 'panel'),
+      assetDir: getWebviewAssetDir(context),
       rendererSelection: runtimeRendererSelection(context),
       iconPath: path.join(context.extensionPath, 'media', 'icon.svg'),
       titleSuffix: vscode.workspace.name ?? undefined,

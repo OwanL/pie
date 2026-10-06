@@ -8,7 +8,7 @@ import type {
 } from '../../lib/protocol/index.js';
 import { modelSupportsInputKind } from './model-capability';
 import type { GetArchState } from './model-capability';
-import { ALLOWED_IMAGE_MIME_TYPES, decodedBase64ByteLength, MAX_AGGREGATE_IMAGE_INPUT_BYTES, MAX_IMAGE_INPUT_BYTES } from '../../frontend/composer/image-constraints.js';
+import { ALLOWED_IMAGE_MIME_TYPES, decodedBase64ByteLength, MAX_AGGREGATE_IMAGE_INPUT_BYTES, MAX_IMAGE_INPUT_BYTES } from '../../lib/composer/image-constraints.js';
 
 import type { Event } from './events';
 

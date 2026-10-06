@@ -9,7 +9,7 @@ import type {
 import { resolvePanelSurface, resolveLoadingStatus } from './panel-state';
 import { isTranscriptHydrating } from '../transcript/state';
 import { resolveComposerModelState } from '../composer/model-state';
-import { isPendingTabPath } from '../session-tabs/tab-behavior';
+import { isPendingTabPath } from '../../lib/session-tabs/tab-behavior.js';
 
 export function useAppBodyDerivedState(
   viewState: ViewState,

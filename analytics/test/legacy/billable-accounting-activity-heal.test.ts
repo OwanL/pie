@@ -25,6 +25,7 @@ function accountingFor(dir: string): BillableAccounting {
     scheduleRender: () => undefined,
     dispatchArchEvent: () => undefined,
     getCapturedPricingFacts: () => undefined,
+    resolveInvocationPricing: () => undefined,
     isPrivateSession: (sessionPath) => sessionPath.startsWith('/workspace/private'),
     sessionIdentity: () => ({ sessionId: null }),
     currentRunId: () => null,

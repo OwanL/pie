@@ -2,15 +2,11 @@ import * as fsAsync from 'node:fs/promises';
 import * as path from 'node:path';
 
 import { loadModelPricing } from './pricing';
-import type { ModelPricingRecord } from './pricing-core';
+import type { ModelPricingRecord, PricingCatalog } from '../../../analytics/contracts/model-pricing-facts.js';
 import { appendPieLog } from '../../../lib/structured-logging/pie-logger';
 import { toErrorMessage } from '../../../lib/structured-logging/error-message';
 
-/** Loaded pricing catalog plus the stat signature that produced it. */
-export interface PricingCatalog {
-  signature: string;
-  map: Map<string, ModelPricingRecord[]>;
-}
+export type { PricingCatalog } from '../../../analytics/contracts/model-pricing-facts.js';
 
 /**
  * Owns the aggregate-strip pricing cache: active and historical pricing keyed

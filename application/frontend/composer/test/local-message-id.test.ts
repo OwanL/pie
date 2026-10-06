@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createLocalMessageId } from '../local-message-id';
+import { createLocalMessageId } from '../../../lib/composer/local-message-id.js';
 
 test('createLocalMessageId creates send ids by default', (t) => {
   t.mock.method(crypto, 'randomUUID', () => 'test-uuid-1');

@@ -1,0 +1,39 @@
+language: typescript
+dependsOn: [backend, frontend, app-common, host-common, browser, root, analytics, scripts]
+tasks:
+  build:
+    command: 'proto run node -- scripts/build/build.mjs'
+    deps: ['pi:build']
+    inputs: ['/application/hosts/vscode/**/*', '/application/backend/**/*', '/application/frontend/**/*', '/application/lib/**/*', '/application/hosts/lib/**/*', '/application/hosts/browser/**/*', '/analytics/**/*', '!/analytics/analysis/**/*', '/harness/**/*', '/harness/pi/**/*', '/scripts/**/*', '/lib/**/*', '@globs(lifecycle)', '@globs(protected)']
+    outputs: ['out-dev']
+    options: {cache: false}
+  delivery:
+    command: 'proto run node -- scripts/build/build.mjs --delivery'
+    deps: ['pi:build']
+    inputs: ['/application/hosts/vscode/**/*', '/application/backend/**/*', '/application/frontend/**/*', '/application/lib/**/*', '/application/hosts/lib/**/*', '/application/hosts/browser/**/*', '/analytics/**/*', '!/analytics/analysis/**/*', '/harness/**/*', '/harness/pi/**/*', '/scripts/**/*', '/lib/**/*', '@globs(lifecycle)', '@globs(protected)']
+    outputs: ['out']
+    options: {cache: false}
+  watch:
+    command: 'proto run node -- scripts/build/build.mjs --watch'
+    deps: ['pi:build']
+    inputs: ['/application/hosts/vscode/**/*', '/application/backend/**/*', '/application/frontend/**/*', '/application/lib/**/*', '/application/hosts/lib/**/*', '/application/hosts/browser/**/*', '/analytics/**/*', '!/analytics/analysis/**/*', '/harness/**/*', '/harness/pi/**/*', '/scripts/**/*', '/lib/**/*', '@globs(lifecycle)', '@globs(protected)']
+    options: {cache: false, persistent: true}
+  dev:
+    command: 'proto run node -- scripts/development/launch.mjs vscode'
+    deps: ['build']
+    inputs: ['/application/hosts/vscode/**/*', '/application/backend/**/*', '/application/frontend/**/*', '/application/lib/**/*', '/application/hosts/lib/**/*', '/application/hosts/browser/**/*', '/analytics/**/*', '!/analytics/analysis/**/*', '/harness/**/*', '/harness/pi/**/*', '/scripts/**/*', '/lib/**/*', '@globs(lifecycle)', '@globs(protected)']
+    options: {cache: false, persistent: true}
+  typecheck:
+    command: 'proto run node -- scripts/verification/typecheck-project.mjs application/hosts/vscode/tsconfig.json --sdk-path harness/pi/packages/coding-agent'
+    deps: ['pi:build']
+    inputs: ['/application/hosts/vscode/**/*', '/application/backend/**/*', '/application/frontend/**/*', '/application/lib/**/*', '/application/hosts/lib/**/*', '/application/hosts/browser/**/*', '/analytics/**/*', '!/analytics/analysis/**/*', '/harness/**/*', '/harness/pi/**/*', '/scripts/**/*', '/lib/**/*', '@globs(lifecycle)', '@globs(protected)']
+  test:
+    command: 'proto run node -- scripts/verification/test-node.mjs --tsconfig application/hosts/vscode/tsconfig.json --sdk-path harness/pi/packages/coding-agent --exclude "**/*.artifact.test.*" application/hosts/test/vscode application/hosts/test/asset-manifests application/hosts/vscode/test test/integration'
+    deps: ['pi:build']
+    inputs: ['/application/hosts/vscode/**/*', '/application/backend/**/*', '/application/frontend/**/*', '/application/lib/**/*', '/application/hosts/lib/**/*', '/application/hosts/browser/**/*', '/analytics/**/*', '!/analytics/analysis/**/*', '/harness/**/*', '/harness/pi/**/*', '/scripts/**/*', '/lib/**/*', '/application/hosts/test/vscode/**/*', '/application/hosts/test/asset-manifests/**/*', '/test/integration/**/*', '@globs(lifecycle)', '@globs(protected)']
+    options: {cache: false}
+  browser:
+    command: 'proto run pnpm -- --dir application/hosts/vscode exec playwright test'
+    deps: ['build']
+    inputs: ['/application/hosts/vscode/**/*', '/application/backend/**/*', '/application/frontend/**/*', '/application/lib/**/*', '/application/hosts/lib/**/*', '/application/hosts/browser/**/*', '/analytics/**/*', '!/analytics/analysis/**/*', '/harness/**/*', '/harness/pi/**/*', '/scripts/**/*', '/lib/**/*', '/test/integration/**/*.pw.ts', '@globs(lifecycle)', '@globs(protected)']
+    options: {cache: false}

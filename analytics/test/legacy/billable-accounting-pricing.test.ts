@@ -7,6 +7,7 @@ import test from 'node:test';
 import { BillableAccounting, type BillableAccountingDeps } from '../../legacy/billable-accounting/service';
 import type { BillableInvocationRecord } from '../../usage-accounting/billable-invocation';
 import { CapturedPricingFactsLoader } from '../../../harness/model-providers/pricing/captured-pricing-facts.js';
+import { resolveCapturedInvocationPricing } from '../../../harness/model-providers/pricing/captured-invocation-pricing.js';
 
 function accountingWithAgentDir(agentDir: string, tempDir: string): BillableAccounting {
   const pricingFacts = new CapturedPricingFactsLoader({ getAgentDir: () => agentDir });
@@ -18,6 +19,7 @@ function accountingWithAgentDir(agentDir: string, tempDir: string): BillableAcco
     // Settlement consumes captured pricing facts; the loader (provider
     // pricing owner) reads the fixture catalog at the moved location.
     getCapturedPricingFacts: () => pricingFacts.get(),
+    resolveInvocationPricing: resolveCapturedInvocationPricing,
     isPrivateSession: () => false,
     sessionIdentity: () => ({ sessionId: 'session-id-1' }),
     currentRunId: () => null,
@@ -102,6 +104,7 @@ test('settlement stays explicitly unpriced without injected captured facts, even
       scheduleRender: () => undefined,
       dispatchArchEvent: () => undefined,
       getCapturedPricingFacts: () => undefined,
+      resolveInvocationPricing: resolveCapturedInvocationPricing,
       isPrivateSession: () => false,
       sessionIdentity: () => ({ sessionId: 'session-id-1' }),
       currentRunId: () => null,

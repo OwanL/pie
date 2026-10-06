@@ -1,6 +1,6 @@
 /**
  * Standalone worker for the verified-source SDK discovery regression
- * (driven by sdk-discovery.test.ts, which spawns this script).
+ * (driven by harness/tool-and-skill-selection/test/sdk-discovery.artifact.test.ts, which spawns this script).
  *
  * The real SDK's extension loader evaluates the repo's TS modules through its
  * own ESM import chain. If that happened inside the test-runner child that

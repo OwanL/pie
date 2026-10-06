@@ -2,6 +2,7 @@ import { createInterface } from "node:readline";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Text } from "@earendil-works/pi-tui";
 import { spawn } from "child_process";
+import { Minimatch } from "minimatch";
 import path from "path";
 import { type Static, Type } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
@@ -140,8 +141,9 @@ export function createFindToolDefinition(
 					fn();
 				};
 				const onAbort = () => {
-					stopChild?.();
-					settle(() => reject(new Error("Operation aborted")));
+					// An owned child must close before the operation completes.
+					if (stopChild) stopChild();
+					else settle(() => reject(new Error("Operation aborted")));
 				};
 				signal?.addEventListener("abort", onAbort, { once: true });
 
@@ -238,11 +240,13 @@ export function createFindToolDefinition(
 							current = parent;
 						}
 						if (!insideGitRepo) args.push("--no-require-git");
-						args.push("--max-results", String(effectiveLimit));
+						// Windows fd's full-path globstar misses zero-directory matches.
+						// Keep fd discovery/ignore handling, but match complete root-relative
+						// paths with Minimatch. Basename and POSIX fd matching stay unchanged.
+						const useRelativeMatcher = process.platform === "win32" && pattern.includes("/");
+						let relativeMatcher: Minimatch | undefined;
+						if (!useRelativeMatcher) args.push("--max-results", String(effectiveLimit));
 
-						// fd --glob matches against the basename unless --full-path is set; in --full-path
-						// mode it matches against the absolute candidate path, so a path-containing
-						// pattern like 'src/**/*.spec.ts' needs a leading '**/' to match anything.
 						let effectivePattern = pattern;
 						if (pattern.includes("/")) {
 							args.push("--full-path");
@@ -250,44 +254,96 @@ export function createFindToolDefinition(
 								effectivePattern = `**/${pattern}`;
 							}
 						}
-						args.push("--", effectivePattern, searchPath);
-
-						const child = spawn(fdPath, args, { stdio: ["ignore", "pipe", "pipe"] });
-						const rl = createInterface({ input: child.stdout });
-						let stderr = "";
-						const lines: string[] = [];
-
-						stopChild = () => {
-							if (!child.killed) {
-								child.kill();
-							}
+						const relativeCandidate = (rawLine: string) => {
+							const line = rawLine.replace(/\r$/, "").trim();
+							const hadTrailingSlash = line.endsWith("/") || line.endsWith("\\");
+							let relativePath = line.startsWith(searchPath)
+								? line.slice(searchPath.length + 1)
+								: path.relative(searchPath, line);
+							if (hadTrailingSlash && !relativePath.endsWith("/")) relativePath += "/";
+							return toPosixPath(relativePath);
 						};
 
-						const cleanup = () => {
-							rl.close();
-						};
+						// Both preflight and listing use the same bounded, abortable child
+						// ownership. Never resolve/reject on 'error' or kill before 'close'.
+						const runFd = (fdArgs: string[], validation = false) =>
+							new Promise<{
+								code: number | null;
+								stderr: string;
+								lines: string[];
+								stopReason: "exit" | "bytes" | "results" | "abort";
+							}>((resolveFd, rejectFd) => {
+								if (signal?.aborted) {
+									rejectFd(new Error("Operation aborted"));
+									return;
+								}
+								const child = spawn(fdPath, fdArgs, { stdio: ["ignore", "pipe", "pipe"] });
+								const rl = createInterface({ input: child.stdout });
+								let stderr = "";
+								let stderrBytes = 0;
+								let outputBytes = 0;
+								let stopReason: "exit" | "bytes" | "results" | "abort" = "exit";
+								let spawnError: Error | undefined;
+								const lines: string[] = [];
+								const stop = (reason: "bytes" | "results" | "abort") => {
+									stopReason = reason;
+									if (!child.killed) child.kill();
+								};
+								stopChild = () => stop("abort");
+								child.stderr.on("data", (chunk: Buffer) => {
+									const remaining = DEFAULT_MAX_BYTES - stderrBytes;
+									if (remaining > 0) stderr += chunk.subarray(0, remaining).toString();
+									stderrBytes += chunk.length;
+								});
+								rl.on("line", (line) => {
+									if (stopReason !== "exit" || !line.trim()) return;
+									const candidate = validation ? line : relativeCandidate(line);
+									if (!validation && relativeMatcher && !relativeMatcher.match(candidate.replace(/\/$/, ""))) {
+										return;
+									}
+									// Keep the complete first overflow candidate so truncateHead can
+									// report byte truncation without ever inventing a partial filename.
+									outputBytes += Buffer.byteLength(candidate) + (lines.length > 0 ? 1 : 0);
+									lines.push(candidate);
+									if (outputBytes > DEFAULT_MAX_BYTES) stop("bytes");
+									else if (!validation && useRelativeMatcher && lines.length >= effectiveLimit) stop("results");
+								});
+								child.on("error", (error) => {
+									spawnError = error;
+								});
+								child.on("close", (code) => {
+									rl.close();
+									stopChild = undefined;
+									if (signal?.aborted) rejectFd(new Error("Operation aborted"));
+									else if (spawnError) rejectFd(new Error(`Failed to run fd: ${spawnError.message}`));
+									else resolveFd({ code, stderr, lines, stopReason });
+								});
+							});
 
-						child.stderr?.on("data", (chunk) => {
-							stderr += chunk.toString();
-						});
-
-						rl.on("line", (line) => {
-							lines.push(line);
-						});
-
-						child.on("error", (error) => {
-							cleanup();
-							settle(() => reject(new Error(`Failed to run fd: ${error.message}`)));
-						});
-
-						child.on("close", (code) => {
-							cleanup();
-							if (signal?.aborted) {
-								settle(() => reject(new Error("Operation aborted")));
-								return;
+						if (useRelativeMatcher) {
+							// fd 10.5 parses before discovery; depth zero validates the legacy
+							// effective glob (and error text) without walking or creating a fixture.
+							const validation = await runFd([...args, "--max-depth", "0", "--", effectivePattern, searchPath], true);
+							if (validation.code !== 0) {
+								throw new Error(validation.stderr.trim() || `fd exited with code ${validation.code}`);
 							}
+							// Compile once, after fd validation so native errors take precedence.
+							// The original slash-pattern stays anchored to the search root;
+							// POSIX-style escaping and fd's default smart-case are retained.
+							relativeMatcher = new Minimatch(pattern, {
+								dot: true, // fd discovery includes hidden entries via --hidden.
+								nocase: pattern === pattern.toLowerCase(),
+								noext: true, // fd globs treat extglob syntax literally.
+								platform: "linux",
+								nonegate: true,
+								nocomment: true,
+							});
+						}
+						args.push("--", useRelativeMatcher ? "*" : effectivePattern, searchPath);
+						const { code, stderr, lines, stopReason } = await runFd(args);
+						{
 							const output = lines.join("\n");
-							if (code !== 0) {
+							if (code !== 0 && stopReason === "exit") {
 								const errorMsg = stderr.trim() || `fd exited with code ${code}`;
 								if (!output) {
 									settle(() => reject(new Error(errorMsg)));
@@ -304,23 +360,8 @@ export function createFindToolDefinition(
 								return;
 							}
 
-							const relativized: string[] = [];
-							for (const rawLine of lines) {
-								const line = rawLine.replace(/\r$/, "").trim();
-								if (!line) continue;
-								const hadTrailingSlash = line.endsWith("/") || line.endsWith("\\");
-								let relativePath = line;
-								if (line.startsWith(searchPath)) {
-									relativePath = line.slice(searchPath.length + 1);
-								} else {
-									relativePath = path.relative(searchPath, line);
-								}
-								if (hadTrailingSlash && !relativePath.endsWith("/")) relativePath += "/";
-								relativized.push(toPosixPath(relativePath));
-							}
-
-							const resultLimitReached = relativized.length >= effectiveLimit;
-							const rawOutput = relativized.join("\n");
+							const resultLimitReached = lines.length >= effectiveLimit;
+							const rawOutput = lines.join("\n");
 							const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
 							let resultOutput = truncation.content;
 							const details: FindToolDetails = {};
@@ -344,7 +385,7 @@ export function createFindToolDefinition(
 									details: Object.keys(details).length > 0 ? details : undefined,
 								}),
 							);
-						});
+						}
 					} catch (e) {
 						if (signal?.aborted) {
 							settle(() => reject(new Error("Operation aborted")));

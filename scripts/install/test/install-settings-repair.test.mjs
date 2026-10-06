@@ -4,11 +4,17 @@
 // on already-repaired settings must report changed=false.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 import { repairExtensionPaths } from '../lib/settings-repair.mjs';
+import { inferRepoRoot } from '../../lib/sdk-version.mjs';
 
 const POSIX = 'posix';
 const WIN = 'win32';
+const repoRoot = inferRepoRoot();
 
 test('rewrites an absolute node_modules path to the local npm prefix (posix)', () => {
   const settings = { extensions: ['/home/other/.npm-global/node_modules/pi-web-access'] };
@@ -63,4 +69,29 @@ test('ignores non-string extension entries', () => {
   assert.equal(result.changed, true);
   assert.deepEqual(result.settings.extensions[0], { name: 'object-entry' });
   assert.equal(result.settings.extensions[1], '/local/node_modules/x');
+});
+
+test('installer no longer rewrites legacy global paths or falls back to the installed SDK', () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'pie-install-settings-paths-'));
+  const settingsPath = path.join(root, 'settings.json');
+  const original = {
+    extensions: ['C:/Users/old/AppData/Roaming/npm/node_modules/legacy-extension'],
+    packages: ['npm:pi-web-access@0.27.0'],
+    skills: ['harness/agent-instructions/skills'],
+  };
+  try {
+    writeFileSync(settingsPath, JSON.stringify(original));
+    const before = readFileSync(settingsPath);
+    const result = spawnSync(process.execPath, [path.join(repoRoot, 'scripts', 'install', 'run.mjs'), 'repair-settings', settingsPath], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(readFileSync(settingsPath), before, 'settings and repository-owned seed paths remain untouched');
+    assert.match(result.stderr, /legacy node_modules extension path\(s\) were left unchanged/);
+    assert.match(result.stderr, /no global npm-prefix or installed-SDK fallback is used/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { parseArgs } from '../backend-args.js';
 import { BackendServer } from '../server.js';
+import { WORKSPACE_DEVELOPMENT_SDK_OPT_IN_ENV } from '../../lib/sdk-integration/sdk-runtime-selection.js';
 
 const sourceArtifactDescriptor = {
   schemaVersion: 1,
@@ -94,6 +95,46 @@ test('coordinator boundaries reject missing and legacy artifact input without SD
     () => new BackendServer({ sdkPath: '/sdk', cwd: '/work' } as ConstructorParameters<typeof BackendServer>[0]),
     /descriptor is invalid/,
   );
+});
+
+test('coordinator accepts an explicit workspace-development route only with the development environment opt-in', () => {
+  const workspaceRoot = '/work/pi';
+  const sdkPath = '/work/pi/packages/coding-agent';
+  const sdkRuntimeSelection = { kind: 'workspace-development', workspaceRoot };
+  const args = ['--sdkPath', sdkPath, '--sdkRuntimeSelection', JSON.stringify(sdkRuntimeSelection)];
+  assert.deepEqual(parseArgs(args, { [WORKSPACE_DEVELOPMENT_SDK_OPT_IN_ENV]: '1' }), {
+    sdkPath, cwd: process.cwd(), backendGeneration: 1, sdkRuntimeSelection,
+  });
+  assert.throws(() => parseArgs(args, {}), new RegExp(`${WORKSPACE_DEVELOPMENT_SDK_OPT_IN_ENV}=1`));
+  assert.throws(() => parseArgs(['--sdkPath', '/sdk', '--sdkRuntimeSelection', '{'], {
+    [WORKSPACE_DEVELOPMENT_SDK_OPT_IN_ENV]: '1',
+  }), /Malformed JSON for --sdkRuntimeSelection/);
+  assert.throws(() => parseArgs(['--sdkPath', '/sdk', '--sdkRuntimeSelection', JSON.stringify({
+    kind: 'workspace-development', workspaceRoot: 'relative',
+  })], { [WORKSPACE_DEVELOPMENT_SDK_OPT_IN_ENV]: '1' }), /workspaceRoot must be an absolute path/);
+  assert.throws(() => parseArgs([
+    ...sourceArgs, '--sdkRuntimeSelection', JSON.stringify(sdkRuntimeSelection),
+  ], { [WORKSPACE_DEVELOPMENT_SDK_OPT_IN_ENV]: '1' }), /Duplicate SDK runtime selection/);
+  assert.throws(() => parseArgs([
+    '--sdkPath', '/sdk', '--sdkRuntimeSelection', JSON.stringify(sdkRuntimeSelection),
+  ], { [WORKSPACE_DEVELOPMENT_SDK_OPT_IN_ENV]: '1' }), /does not identify the selected workspace-development/);
+});
+
+test('BackendServer direct workspace-development selection also requires the explicit opt-in', () => {
+  const sdkRuntimeSelection = { kind: 'workspace-development', workspaceRoot: '/work/pi' };
+  const previous = process.env[WORKSPACE_DEVELOPMENT_SDK_OPT_IN_ENV];
+  delete process.env[WORKSPACE_DEVELOPMENT_SDK_OPT_IN_ENV];
+  try {
+    assert.throws(() => new BackendServer({
+      sdkPath: '/work/pi/packages/coding-agent',
+      sdkRuntimeSelection,
+      cwd: '/work',
+      workerEntryPath: '/worker.js',
+    }), new RegExp(`${WORKSPACE_DEVELOPMENT_SDK_OPT_IN_ENV}=1`));
+  } finally {
+    if (previous === undefined) delete process.env[WORKSPACE_DEVELOPMENT_SDK_OPT_IN_ENV];
+    else process.env[WORKSPACE_DEVELOPMENT_SDK_OPT_IN_ENV] = previous;
+  }
 });
 
 test('parseArgs carries a complete analytics descriptor and rejects partial or malformed snapshots', () => {

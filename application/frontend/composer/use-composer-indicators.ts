@@ -14,7 +14,7 @@ import type {
   TranscriptWindow,
   WorkingTimeState,
 } from '../../lib/protocol/index.js';
-import type { TokenRateIndicatorState } from '../../backend/analytics-views/token-rate';
+import type { TokenRateIndicatorState } from '../../lib/protocol/token-rate.js';
 import type {
   ContextWindowBreakdown,
   ContextWindowBreakdownEntry,

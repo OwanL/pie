@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
-import { repoRoot, readPinnedNodeVersion, readPinnedNpmVersion, readPinnedPiSourceVersion } from "../install/toolchain.mjs";
-import { collectEnvironmentDiagnostics } from "./doctor-environment.mjs";
+import { repoRoot, readPinnedNodeVersion, readPinnedPnpmVersion, readPinnedPiSourceVersion } from "../install/toolchain.mjs";
+import { collectEnvironmentDiagnostics, collectWorkspaceDependencyDiagnostics } from "./doctor-environment.mjs";
 import { collectStrandedLegacySessions } from "./doctor-sessions.mjs";
 import { collectPostMigrationOutcomeDrift } from "./doctor-outcomes.mjs";
 import { spawnCliSync } from "../lib/subprocess.mjs";
@@ -43,21 +43,18 @@ if ("codePage" in encoding) {
 for (const message of diagnostics.pathWarnings) warn(message);
 
 const pinnedNode = readPinnedNodeVersion();
-const pinnedNpm = readPinnedNpmVersion();
+const pinnedPnpm = readPinnedPnpmVersion();
 const pinnedPiSourceVersion = readPinnedPiSourceVersion();
 process.versions.node === pinnedNode ? ok(`Node ${pinnedNode}`) : fail(`Node ${process.versions.node}; expected ${pinnedNode}`);
-const npm = run("npm", ["--version"]);
-const actualNpm = npm.stdout?.trim() ?? "";
-npm.status === 0 && actualNpm === pinnedNpm ? ok(`npm ${pinnedNpm}`) : fail(`npm ${actualNpm || "unavailable"}; expected ${pinnedNpm}`);
-
-for (const relative of ["package-lock.json", "application/hosts/vscode/package-lock.json", "analytics/analysis/package-lock.json"]) {
-  fs.existsSync(path.join(repoRoot, relative)) ? ok(`${relative} present`) : fail(`${relative} missing`);
-}
-for (const relative of [".", "application/hosts/vscode", "analytics/analysis"]) {
-  const result = run("npm", ["ls", "--depth=0", "--include=dev"], path.join(repoRoot, relative));
-  result.status === 0
-    ? ok(`${relative === "." ? "root" : relative} dependencies installed`)
-    : fail(`${relative === "." ? "root" : relative} dependencies incomplete; run npm ci at the repo root`);
+const dependencyDiagnostics = collectWorkspaceDependencyDiagnostics({ root: repoRoot, pinnedPnpm, run });
+dependencyDiagnostics.lockfilePresent ? ok("pnpm-lock.yaml present") : fail("pnpm-lock.yaml missing");
+dependencyDiagnostics.pnpmCompatible
+  ? ok(`Proto-resolved pnpm ${pinnedPnpm}`)
+  : fail(`Proto-resolved pnpm ${dependencyDiagnostics.actualPnpm || "unavailable"}; expected ${pinnedPnpm}`);
+if (dependencyDiagnostics.dependenciesChecked) {
+  dependencyDiagnostics.dependenciesReady
+    ? ok("workspace dependencies installed (root pnpm graph)")
+    : fail("workspace dependencies incomplete; stop isolated development hosts, then run proto run pnpm -- run setup at the repo root (the workspace-reader gate must be clear; preserve installed Pie)");
 }
 
 const settings = JSON.parse(fs.readFileSync(path.join(repoRoot, "settings.json"), "utf8"));
@@ -151,7 +148,7 @@ if (piRuntimeRoute.usageError) {
         : `checkout-built pi runtime artifact selected (${route.artifactDir}); no global pi CLI lookup or fallback`);
     }
   } else if (!piRuntimeRoute.explicit) {
-    fail(`checkout pi runtime artifact at ${piRuntimeRoute.artifactDir} could not be verified read-only: ${route.detail}. Build the checkout's VS Code application under normal safe conditions, or pass --pi-runtime <absolute artifact root>.`);
+    fail(`checkout pi runtime artifact at ${piRuntimeRoute.artifactDir} could not be verified read-only: ${route.detail}. Run proto run pnpm -- run delivery:build explicitly under normal safe conditions (ordinary build writes out-dev, not this delivery artifact), or pass --pi-runtime <absolute verified artifact root> to reuse an artifact.`);
   } else {
     fail(`explicit pi runtime artifact failed read-only verification for the executing Node target: ${route.detail}`);
   }

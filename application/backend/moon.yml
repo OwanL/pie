@@ -1,0 +1,13 @@
+language: typescript
+dependsOn: [app-common, root, analytics, harness]
+tasks:
+  test:
+    command: 'proto run node -- scripts/verification/test-node.mjs --tsconfig application/hosts/vscode/tsconfig.json --sdk-path harness/pi/packages/coding-agent --exclude "**/*.artifact.test.*" application/backend'
+    deps: ['pi:build']
+    # Renderer and host seams are imported by tests, not by the production backend.
+    inputs: ['/application/backend/**/*', '/application/frontend/**/*', '/application/hosts/browser/**/*', '/application/hosts/lib/**/*', '/application/hosts/vscode/**/*', '/application/lib/**/*', '/analytics/**/*', '!/analytics/analysis/**/*', '/harness/**/*', '/harness/pi/**/*', '/scripts/**/*', '/lib/**/*', '@globs(lifecycle)', '@globs(protected)']
+    options: {cache: false}
+  typecheck:
+    command: 'proto run node -- scripts/verification/typecheck-project.mjs application/backend/tsconfig.json --sdk-path harness/pi/packages/coding-agent'
+    deps: ['pi:build']
+    inputs: ['/application/backend/**/*', '/application/lib/**/*', '/analytics/**/*', '!/analytics/analysis/**/*', '/harness/**/*', '/harness/pi/**/*', '/scripts/**/*', '/lib/**/*', '/extensions/tsconfig.base.json', '@globs(lifecycle)', '@globs(protected)']

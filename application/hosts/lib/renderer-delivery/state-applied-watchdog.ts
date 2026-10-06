@@ -1,6 +1,6 @@
 import { bootLog } from '../../../../lib/structured-logging/pie-logger';
 import { appendPieLog } from '../../../../lib/structured-logging/pie-logger';
-import { recordWatchdog } from './stream-telemetry';
+import { recordWatchdog } from '../../../lib/stream-telemetry.js';
 import type { StateDeliveryRecovery } from './state-delivery-controller';
 
 /** Provisional retry count preserved from the previous watchdog; not calibrated. */

@@ -3,13 +3,19 @@ import test from 'node:test';
 import path from 'node:path';
 import os from 'node:os';
 import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
-import { configureRuntimeLocation, runtimeOutputDirectory, runtimeRendererSelection } from '../../../vscode/runtime/runtime-location';
+import { configureRuntimeLocation, runtimeOutputDirectory, runtimeRendererSelection, runtimeWebviewAssetDirectory } from '../../../vscode/runtime/runtime-location';
 import { resolvePublishedWebviewDir } from '../../../lib/asset-manifests/published-generations';
 import { BrowserStaticAssets } from '../../../browser/static-assets/static-assets';
 import { publishRendererGeneration } from '../../../../../scripts/build/publication.mjs';
 import { hasRuntimeBootstrap, installRuntimeBootstrap } from '../../../../../scripts/build/runtime-publication.mjs';
 
 const identity = { publisher: 'pie', name: 'pie', version: '0.3.0' };
+
+test('VS Code browser server takes assets from the context-selected runtime output', async () => {
+  const source = await readFile(new URL('../../../vscode/runtime/host-runtime-platform.ts', import.meta.url), 'utf8');
+  assert.match(source, /assetDir: getWebviewAssetDir\(context\)/);
+  assert.match(source, /import \{ getWebviewAssetDir \} from '\.\/hot-reload'/);
+});
 
 test('runtime paths are pinned per extension context; default remains packaged output', () => {
   const first = { extensionPath: '/installed/pie' };
@@ -19,6 +25,17 @@ test('runtime paths are pinned per extension context; default remains packaged o
   assert.equal(runtimeOutputDirectory(first), '/generation/one/out');
   assert.equal(runtimeOutputDirectory(second), '/generation/two/out');
   assert.equal(runtimeOutputDirectory({ extensionPath: '/source/pie' }), path.join('/source/pie', 'out'));
+  assert.equal(runtimeWebviewAssetDirectory(first), path.join('/installed/pie', 'out', 'webview', 'panel'),
+    'production keeps watching and serving shared extension renderer publications');
+  const previousWorkspace = process.env.PIE_DEVELOPMENT_PI_WORKSPACE;
+  process.env.PIE_DEVELOPMENT_PI_WORKSPACE = '/pi/workspace';
+  try {
+    assert.equal(runtimeWebviewAssetDirectory(first), path.join('/generation/one/out', 'webview', 'panel'),
+      'development assets follow this extension context selected output');
+  } finally {
+    if (previousWorkspace === undefined) delete process.env.PIE_DEVELOPMENT_PI_WORKSPACE;
+    else process.env.PIE_DEVELOPMENT_PI_WORKSPACE = previousWorkspace;
+  }
   assert.deepEqual(runtimeRendererSelection(first), { fallbackDir: path.join('/generation/one/out', 'webview', 'panel'), notBefore: 100 });
 });
 

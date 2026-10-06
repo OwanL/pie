@@ -1,6 +1,6 @@
 // Focused unit tests for scripts/lib/test-packages.mjs — the shared file→package
 // classification and global test-infrastructure detection used by both
-// run-test-files.mjs and run-affected-tests.mjs.
+// run-test-files.mjs.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -8,12 +8,12 @@ import {
   ALL_PACKAGE_IDS,
   PACKAGE_REGISTRY,
   classifyFileToPackage,
-  isGlobalTestInfra,
-  isUnownedCodeSource,
-  mapFilesToPackages,
+  packageSdkIndependentTestFiles,
   packageSourceRoots,
   packageTestFiles,
   packageTestRoots,
+  SDK_INDEPENDENT_TEST_FILES,
+  isSdkIndependentTestFile,
   resolvePackageEntry,
 } from '../../lib/test-packages.mjs';
 
@@ -31,7 +31,16 @@ test('PACKAGE_DIRECTIVES covers package dirs, owned and retired source dirs, and
   assert.deepEqual(ALL_PACKAGE_IDS, expected);
   // The classification view covers package/source owners, nested/distributed
   // test roots, retired source identities, and exact root-integration files.
-  assert.equal(PACKAGE_DIRECTIVES.length, 203, 'routing view covers dirs, owned dirs, test roots, and explicit test files');
+  assert.equal(PACKAGE_DIRECTIVES.length, 209, 'routing view covers dirs, owned dirs, test roots, and explicit test files');
+  for (const file of [
+    'application/lib/composer/local-message-id.ts',
+    'application/lib/session-tabs/tab-behavior.ts',
+    'application/lib/transcript/message-parts.ts',
+    'application/lib/platform-contracts/platform.ts',
+    'application/lib/renderer-delivery/renderer-view-state.ts',
+    'application/lib/test/renderer-delivery/renderer-view-state.test.ts',
+    'application/lib/test/source-boundaries.test.ts',
+  ]) assert.equal(classifyFileToPackage(file), 'extension', `${file} retains its compatibility owner`);
 });
 
 test('source/test root defaults keep single-root enumeration identical', () => {
@@ -46,6 +55,31 @@ test('source/test root defaults keep single-root enumeration identical', () => {
   assert.deepEqual(packageTestRoots(scripts), ['scripts/test', ...scripts.testRoots]);
 });
 
+test('SDK-independent focused tests are an exact file allowlist owned by extension and scripts', () => {
+  const expected = [
+    'application/hosts/test/asset-manifests/bootstrap.test.ts',
+    'application/hosts/test/asset-manifests/runtime-generations.test.ts',
+    'application/hosts/test/asset-manifests/runtime-scan-concurrency.test.ts',
+    'application/hosts/test/asset-manifests/runtime-copy-concurrency.test.ts',
+  ];
+  const scriptsExpected = [
+    'scripts/lib/test/package-resolution.test.mjs',
+    'scripts/lib/test/unbundled-owner-resolution.test.mjs',
+    'scripts/install/test/source-pi-cli.test.mjs',
+  ];
+  assert.deepEqual(SDK_INDEPENDENT_TEST_FILES, [...expected, ...scriptsExpected]);
+  assert.deepEqual(packageSdkIndependentTestFiles(resolvePackageEntry('extension')), expected);
+  assert.deepEqual(packageSdkIndependentTestFiles(resolvePackageEntry('scripts')), scriptsExpected);
+  assert.deepEqual(PACKAGE_REGISTRY.filter((entry) => packageSdkIndependentTestFiles(entry).length > 0).map((entry) => entry.id), ['extension', 'scripts']);
+  for (const file of [...expected, ...scriptsExpected]) assert.equal(isSdkIndependentTestFile(file), true, file);
+  for (const file of [
+    'application/hosts/test/asset-manifests/other.test.ts',
+    'application/hosts/other/asset-manifests/bootstrap.test.ts',
+    'scripts/lib/test/other.test.mjs',
+    'scripts/install/test/source-pi-cli.artifact.test.mjs',
+  ]) assert.equal(isSdkIndependentTestFile(file), false, file);
+});
+
 test('analysis owns the relocated workspace and keeps the retired source path routable', () => {
   const analysis = resolvePackageEntry('analysis');
   assert.deepEqual(packageSourceRoots(analysis), ['analytics/analysis', 'analysis']);
@@ -56,7 +90,7 @@ test('analysis owns the relocated workspace and keeps the retired source path ro
   assert.equal(classifyFileToPackage('analytics/analysis/scripts/build-db.ts'), 'analysis');
   assert.equal(classifyFileToPackage('analytics/analysis/README.md'), 'analysis');
   // Shared root integration suites route by exact file to their distinct owners.
-  assert.equal(classifyFileToPackage('test/integration/dynamic-tool-activation.test.ts'), 'skill-pruner');
+  assert.equal(classifyFileToPackage('test/integration/dynamic-tool-activation.artifact.test.ts'), 'skill-pruner');
   assert.equal(classifyFileToPackage('test/integration/tool-catalog.test.ts'), 'tool-catalog');
   assert.equal(classifyFileToPackage('test/integration/backend-model-profiles.test.ts'), 'model-provider-catalog');
   assert.equal(classifyFileToPackage('test/integration/backend-cold-session-browse.test.ts'), 'session-storage-transcripts');
@@ -113,8 +147,8 @@ test('classifyFileToPackage maps a file under each package directory to its id',
   assert.equal(classifyFileToPackage('test/integration/large-detail.e2e.ts'), 'extension');
   assert.equal(classifyFileToPackage('harness/agent-processes/lib/rpc/test/worker-client-args.test.ts'), 'agent-processes-rpc');
   assert.equal(classifyFileToPackage('test/integration/backend-expected-cancellation-log.test.ts'), 'agent-processes-coordinator');
-  assert.equal(classifyFileToPackage('test/integration/real-sdk-image-persistence.test.ts'), 'session-storage-transcripts');
-  assert.equal(classifyFileToPackage('test/integration/sdk-terminal-durability.test.ts'), 'session-storage-transcripts');
+  assert.equal(classifyFileToPackage('test/integration/real-sdk-image-persistence.artifact.test.ts'), 'session-storage-transcripts');
+  assert.equal(classifyFileToPackage('test/integration/sdk-terminal-durability.artifact.test.ts'), 'session-storage-transcripts');
   assert.equal(classifyFileToPackage('analytics/analysis/test/pricing.test.ts'), 'analysis');
   assert.equal(classifyFileToPackage('analytics/analysis/scripts/build-db.ts'), 'analysis');
   assert.equal(classifyFileToPackage('scripts/verification/test/run-tests.test.mjs'), 'scripts');
@@ -142,7 +176,7 @@ test('classifyFileToPackage maps a file under each package directory to its id',
   assert.equal(classifyFileToPackage('harness/tool-and-skill-selection/lifecycle/register.ts'), 'skill-pruner');
   assert.equal(classifyFileToPackage('harness/tool-and-skill-selection/state/pruned-skills.ts'), 'skill-pruner');
   assert.equal(classifyFileToPackage('extensions/skill-pruner/index.ts'), 'skill-pruner');
-  assert.equal(classifyFileToPackage('test/integration/dynamic-tool-activation.test.ts'), 'skill-pruner');
+  assert.equal(classifyFileToPackage('test/integration/dynamic-tool-activation.artifact.test.ts'), 'skill-pruner');
   assert.equal(classifyFileToPackage('extensions/cwd-skills/index.ts'), 'cwd-skills');
   assert.equal(classifyFileToPackage('extensions/copilot-model-discovery/index.ts'), 'copilot-model-discovery');
   assert.equal(classifyFileToPackage('harness/model-providers/model-discovery/copilot-models.ts'), 'copilot-model-discovery');
@@ -168,8 +202,6 @@ test('every migrated discovery adapter remains assigned to its tool tests', () =
   for (const id of ['ask-user', 'subagent', 'warm-bash', 'deferred-triggers', 'session-changes', 'computer-use', 'playwright']) {
     const shim = `extensions/${id}/index.ts`;
     assert.equal(classifyFileToPackage(shim), id);
-    const plan = mapFilesToPackages([shim]);
-    assert.ok(plan.selectAll || plan.packageIds.includes(id), `${shim} must not silently skip its tests`);
   }
 });
 
@@ -191,150 +223,17 @@ test('classifyFileToPackage returns null for non-package paths', () => {
   assert.equal(classifyFileToPackage(/** @type {unknown} */ (undefined)), null);
 });
 
-test('isGlobalTestInfra recognises the test tooling and root config', () => {
-  // exact paths
-  for (const p of [
-    'scripts/verification/run-tests.mjs',
-    'scripts/verification/run-test-files.mjs',
-    'scripts/verification/run-affected-tests.mjs',
+test('retired fast batching has no registry metadata and preserves source scopes', () => {
+  for (const entry of PACKAGE_REGISTRY) {
+    assert.equal(Object.hasOwn(entry, 'fastBatch'), false, `${entry.id} has no retired batch plan`);
+  }
+  for (const file of [
     'scripts/verification/run-fast-extension-tests.mjs',
     'scripts/verification/run-fast-batched-tests.mjs',
-    'scripts/verification/test-reporter.mjs',
-    'package.json',
-    'package-lock.json',
-    '.node-version',
-    'tools/index.ts',
-    'tools/backend.ts',
-    'tools/tsconfig.json',
+    'scripts/verification/update-extension-test-costs.mjs',
+    'scripts/verification/test-costs-reporter.mjs',
+    'scripts/verification/extension-test-costs.json',
   ]) {
-    assert.equal(isGlobalTestInfra(p), true, `${p} should be global`);
+    assert.equal(classifyFileToPackage(file), 'scripts', 'retirement preserves the scripts source scope');
   }
-  // prefixes
-  assert.equal(isGlobalTestInfra('scripts/lib/sdk-version.mjs'), true);
-  assert.equal(isGlobalTestInfra('shared/pricing-core.ts'), true);
-  assert.equal(isGlobalTestInfra('shared/subagent-context.ts'), true);
-  assert.equal(isGlobalTestInfra('extensions/ask-user/index.ts'), true);
-  assert.equal(isGlobalTestInfra('tools/session-control/index.ts'), true);
-});
-
-test('isGlobalTestInfra is false for per-package and unrelated paths', () => {
-  // per-package config stays per-package (not global)
-  assert.equal(isGlobalTestInfra('application/hosts/vscode/package.json'), false);
-  assert.equal(isGlobalTestInfra('extension/src/backend/tsconfig.json'), false);
-  assert.equal(isGlobalTestInfra('tools/subagent/tsconfig.json'), false);
-  assert.equal(isGlobalTestInfra('extensions/subagent/index.ts'), false);
-  assert.equal(isGlobalTestInfra('tools/request-capability/index.ts'), false);
-  assert.equal(isGlobalTestInfra('analysis/package-lock.json'), false);
-  assert.equal(isGlobalTestInfra('analytics/analysis/package-lock.json'), false);
-  assert.equal(isGlobalTestInfra('scripts/verification/test/run-test-files.test.mjs'), false);
-  // unrelated
-  assert.equal(isGlobalTestInfra('README.md'), false);
-  assert.equal(isGlobalTestInfra('docs/x.md'), false);
-  assert.equal(isGlobalTestInfra('settings.json'), false);
-  assert.equal(isGlobalTestInfra('extension/test/foo.test.ts'), false);
-});
-
-test('mapFilesToPackages maps package files and de-duplicates ids', () => {
-  const plan = mapFilesToPackages([
-    'extension/test/a.test.ts',
-    'extension/src/backend/sdk.ts',     // same package, different file
-    'harness/tools/subagent/test/schema.test.ts',
-    'harness/tools/ask-user/test/loader-shim.test.ts',
-    'analytics/analysis/test/pricing.test.ts',
-    'scripts/verification/test/run-tests.test.mjs',
-  ]);
-  assert.equal(plan.selectAll, false);
-  assert.deepEqual(plan.packageIds, ['analysis', 'ask-user', 'extension', 'scripts', 'subagent']);
-  assert.deepEqual(plan.unowned, []);
-});
-
-test('mapFilesToPackages assigns moved and externally owned sources to their test packages', () => {
-  const plan = mapFilesToPackages([
-    'extensions/subagent/index.ts',
-    'tools/request-capability/index.ts',
-    'harness/tools/session-control/index.ts',
-    'test/integration/tool-catalog.test.ts',
-  ]);
-  assert.equal(plan.selectAll, false);
-  assert.deepEqual(plan.packageIds, ['session-control', 'skill-pruner', 'subagent', 'tool-catalog']);
-  assert.deepEqual(plan.unowned, []);
-});
-
-test('mapFilesToPackages covers root maintenance scripts', () => {
-  const plan = mapFilesToPackages([
-    'scripts/verification/run-typechecks.mjs',
-    'scripts/model-config/sync-models.mjs',
-    'scripts/install/install-dependencies.mjs',
-  ]);
-  assert.equal(plan.selectAll, false);
-  assert.deepEqual(plan.packageIds, ['scripts']);
-  assert.deepEqual(plan.unowned, []);
-});
-
-test('mapFilesToPackages selects ALL when any global infra file changes', () => {
-  const plan = mapFilesToPackages([
-    'extension/test/a.test.ts',
-    'scripts/verification/run-tests.mjs', // global => select all
-    'harness/tools/subagent/test/schema.test.ts',
-  ]);
-  assert.equal(plan.selectAll, true);
-  assert.deepEqual(plan.unowned, []);
-});
-
-test('mapFilesToPackages broadens unknown-ownership code files instead of selecting zero tests', () => {
-  // A code file under no registered root (created, moved, or a future
-  // distributed root that was never declared) must broaden, never select zero.
-  for (const file of [
-    'harness/some-new-owner/slice.ts',
-    'application/backend/future-owner/slice.ts',
-    'new-root/nested/module.test.ts',
-    'stray.ts',
-  ]) {
-    assert.equal(isUnownedCodeSource(file), true, file);
-    const plan = mapFilesToPackages([file]);
-    assert.equal(plan.selectAll, true, `${file} must broaden verification`);
-    assert.deepEqual(plan.packageIds, [], `${file} must not be silently attributed`);
-    assert.deepEqual(plan.unowned, [file]);
-  }
-  // Broadening dominates even alongside owned changes; ids stay de-duplicated.
-  const mixed = mapFilesToPackages(['extension/test/a.test.ts', 'harness/unknown.ts', 'harness/other.ts']);
-  assert.equal(mixed.selectAll, true);
-  assert.deepEqual(mixed.packageIds, ['extension']);
-  assert.deepEqual(mixed.unowned, ['harness/unknown.ts', 'harness/other.ts']);
-  // Unknown ownership broadens even when every other change is unowned.
-  const only = mapFilesToPackages(['harness/session-storage/store.ts']);
-  assert.equal(only.selectAll, true);
-  assert.deepEqual(only.packageIds, []);
-});
-
-test('isUnownedCodeSource ignores non-code, global-infra, and owned maintenance scripts', () => {
-  assert.equal(isUnownedCodeSource('README.md'), false);
-  assert.equal(isUnownedCodeSource('docs/contracts/STATE_CONTRACT.md'), false);
-  assert.equal(isUnownedCodeSource('settings.json'), false);
-  assert.equal(isUnownedCodeSource('models.yaml'), false);
-  assert.equal(isUnownedCodeSource(''), false);
-  assert.equal(isUnownedCodeSource(undefined), false);
-  // global infra and scripts-package files are owned, not unknown
-  assert.equal(isUnownedCodeSource('scripts/lib/test-packages.mjs'), false);
-  assert.equal(isUnownedCodeSource('scripts/verification/run-typechecks.mjs'), false);
-  assert.equal(isUnownedCodeSource('shared/pricing-core.ts'), false);
-  assert.equal(isUnownedCodeSource('extension/src/backend/sdk.ts'), false);
-});
-
-test('mapFilesToPackages ignores unrelated files', () => {
-  const plan = mapFilesToPackages([
-    'README.md',
-    'docs/contracts/STATE_CONTRACT.md',
-    'settings.json',
-  ]);
-  assert.equal(plan.selectAll, false);
-  assert.deepEqual(plan.packageIds, []);
-  assert.deepEqual(plan.unowned, []);
-});
-
-test('mapFilesToPackages returns empty plan for no input', () => {
-  const plan = mapFilesToPackages([]);
-  assert.equal(plan.selectAll, false);
-  assert.deepEqual(plan.packageIds, []);
-  assert.deepEqual(plan.unowned, []);
 });

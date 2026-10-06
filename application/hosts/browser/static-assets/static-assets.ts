@@ -157,12 +157,18 @@ export class BrowserStaticAssets {
 
   private selectedAssetDir: string | null = null;
 
-  constructor(private readonly assetDir: string, private readonly rendererSelection: RendererSelectionOptions = {}) {}
+  constructor(
+    private readonly assetDir: string,
+    private readonly rendererSelection: RendererSelectionOptions = {},
+    private readonly preferDirectAssetDir = false,
+  ) {}
 
   /** Load the manifest and resolve the serving allowlist. Throws when the
    *  webview bundle is missing/malformed (terminal server start failure). */
   async load(): Promise<void> {
-    const selectedAssetDir = await resolvePublishedWebviewDir(this.assetDir, this.rendererSelection);
+    const selectedAssetDir = this.preferDirectAssetDir
+      ? path.resolve(this.assetDir)
+      : await resolvePublishedWebviewDir(this.assetDir, this.rendererSelection);
     const manifest = await loadViteManifest(selectedAssetDir);
     const entry = findEntryChunk(manifest);
     if (!entry) {
@@ -202,6 +208,10 @@ export class BrowserStaticAssets {
         .map((css) => currentFiles.get(urlKeyFor(css)))
         .filter((p): p is string => !!p),
     };
+  }
+
+  getSelectedAssetDir(): string {
+    return this.selectedAssetDir ?? path.resolve(this.assetDir);
   }
 
   getAssetVersion(): string {

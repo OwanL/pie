@@ -276,18 +276,17 @@ Validation uses `INVALID_ARGUMENTS`; uncategorized backend action failures use `
 
 ## Install and version ownership
 
-The [extension manifest](../../extensions/playwright/package.json) and [committed lockfile](../../extensions/playwright/package-lock.json) own the runtime dependencies independently of `application/hosts/vscode/node_modules`. The implementation lives under `harness/tools/playwright/`, and dependency installation stays with its own `extensions/playwright/` owner:
+The [extension manifest](../../extensions/playwright/package.json) declares runtime dependencies pinned by the [shared workspace lock](../../pnpm-lock.yaml). The implementation lives under `harness/tools/playwright/`; use the repository's [gated setup](../../README.md#multi-machine-workflow), not an extension-local npm install:
 
 - `playwright` — browser automation and Chromium installation;
 - `pngjs` — bounded screenshot encoding.
 
-Pi packages remain optional `peerDependencies` with `"*"` ranges, preventing npm from installing a second SDK/TypeBox generation. Development tests resolve the embedded host's pinned Pi `0.80.6` and TypeBox `1.1.38` through a test-only runtime tsconfig, and an integration test loads the extension through that embedded Pi loader.
+Pi packages remain optional `peerDependencies` with `"*"` ranges. The shared workspace selects the local Pi packages; ordinary tests use the compiled workspace SDK and the artifact integration fixture uses a separately verified runtime.
 
-Repository dependency installation includes `extensions/playwright/`, then explicitly runs:
+Repository setup includes `extensions/playwright/` but does not download browsers. Install Chromium explicitly when needed:
 
 ```bash
-cd extensions/playwright
-npx playwright install chromium
+proto run pnpm -- --dir extensions/playwright exec playwright install chromium
 ```
 
 The runtime checks `chromium.executablePath()` and returns `BROWSER_NOT_INSTALLED` with the root repair command when the pinned executable is absent. It never falls back to machine Chrome or Edge.

@@ -12,7 +12,7 @@ import { FileChangesPanel } from '../file-changes/file-changes-panel';
 import { LoadingIndicator } from './loading-indicator';
 import type { PanelSurface } from './panel-state';
 import type { AppHandlers } from './use-app-handlers';
-import { useCommittedAppSurface } from '../transcript/commit-registry';
+import { useCommittedAppSurface, useCommittedEmptyTranscript, type TranscriptCommitTarget } from '../transcript/commit-registry';
 
 export interface PanelMainProps {
   panelSurface: PanelSurface;
@@ -68,6 +68,36 @@ function TranscriptSuspenseSurface() {
   );
 }
 
+function LoadingSurface({ state, postMessage, status }: {
+  state: TranscriptCommitTarget['state'];
+  postMessage: PanelMainProps['postMessage'];
+  status: string;
+}) {
+  useCommittedEmptyTranscript(state, postMessage);
+  return (
+    <div class="empty-state empty-state--loading">
+      <LoadingIndicator status={status} />
+    </div>
+  );
+}
+
+function NoTabsSurface({ state, postMessage, onNewSession }: {
+  state: TranscriptCommitTarget['state'];
+  postMessage: PanelMainProps['postMessage'];
+  onNewSession: PanelMainProps['handlers']['handleNewSession'];
+}) {
+  useCommittedEmptyTranscript(state, postMessage);
+  return (
+    <div class="empty-state">
+      <div class="empty-state-title">Start a session</div>
+      <div class="empty-state-sub">
+        Sessions stay in tabs, and model settings remain visible while you work.
+      </div>
+      <button class="btn" onClick={onNewSession}>New Session</button>
+    </div>
+  );
+}
+
 export const PanelMain = memo(function PanelMain({
   panelSurface,
   hasActiveTabs,
@@ -118,17 +148,17 @@ export const PanelMain = memo(function PanelMain({
       )}
       <div class="panel-content">
       {panelSurface === 'loading' ? (
-        <div class="empty-state empty-state--loading">
-          <LoadingIndicator status={loadingStatus} />
-        </div>
+        <LoadingSurface
+          state={{ transcript: mergedTranscript, transcriptWindow, activeSessionPath, openTabPaths }}
+          postMessage={postMessage}
+          status={loadingStatus}
+        />
       ) : !hasActiveTabs ? (
-        <div class="empty-state">
-          <div class="empty-state-title">Start a session</div>
-          <div class="empty-state-sub">
-            Sessions stay in tabs, and model settings remain visible while you work.
-          </div>
-          <button class="btn" onClick={handlers.handleNewSession}>New Session</button>
-        </div>
+        <NoTabsSurface
+          state={{ transcript: mergedTranscript, transcriptWindow, activeSessionPath, openTabPaths }}
+          postMessage={postMessage}
+          onNewSession={handlers.handleNewSession}
+        />
       ) : needsSessionRecovery ? (
         <div class="empty-state empty-state--loading">
           <LoadingIndicator status={loadingStatus} />

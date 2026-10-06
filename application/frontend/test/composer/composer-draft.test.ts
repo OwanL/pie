@@ -1,4 +1,4 @@
-import test, { beforeEach } from 'node:test';
+import test, { afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { installDom } from '../helpers/dom';
@@ -14,17 +14,18 @@ import { useState } from 'preact/hooks';
 
 import { useComposerInput } from '../../composer/hooks';
 import type { ComposerInputDraft, WebviewToHostMessage } from '../../../lib/protocol/index.js';
-import { PENDING_SESSION_PREFIX } from '../../session-tabs/tab-behavior';
+import { PENDING_SESSION_PREFIX } from '../../../lib/session-tabs/tab-behavior.js';
 
 let container: HTMLElement;
 
 beforeEach(() => {
   container = document.createElement('div');
   document.body.appendChild(container);
-  return () => {
-    render(null, container);
-    container.remove();
-  };
+});
+
+afterEach(() => {
+  render(null, container);
+  container.remove();
 });
 
 // Minimal fake-timer registry so the draft-post debounce can be flushed

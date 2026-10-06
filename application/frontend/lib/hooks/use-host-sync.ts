@@ -179,7 +179,15 @@ function useHydrateViewState() {
   const stableAvailableModelsRef = useRef<ModelInfo[]>([]);
 
   return useCallback((raw: ViewState): ViewState => {
-    validateViewState(raw);
+    const violations = validateViewState(raw);
+    if (violations.length > 0) {
+      webviewLog(
+        'error',
+        'state-validator',
+        `Host delivered ViewState with ${violations.length} invalid field(s)`,
+        { violations },
+      );
+    }
     const prefs = pickStable(stablePrefsRef.current, { ...DEFAULT_CHAT_PREFS, ...raw.prefs });
     stablePrefsRef.current = prefs;
     const pruningSettings = pickStable(stablePruningSettingsRef.current, {

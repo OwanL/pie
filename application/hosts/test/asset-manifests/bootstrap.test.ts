@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { mkdtemp, mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -86,6 +86,114 @@ async function withTempRoot<T>(callback: (root: string) => Promise<T>): Promise<
     delete (globalThis as typeof globalThis & { __pieBootstrapEvents?: string[] }).__pieBootstrapEvents;
   }
 }
+
+async function withTimingFile<T>(filePath: string, callback: () => Promise<T>): Promise<T> {
+  const previous = process.env.PIE_STARTUP_TIMING_FILE;
+  process.env.PIE_STARTUP_TIMING_FILE = filePath;
+  try {
+    return await callback();
+  } finally {
+    if (previous === undefined) delete process.env.PIE_STARTUP_TIMING_FILE;
+    else process.env.PIE_STARTUP_TIMING_FILE = previous;
+  }
+}
+
+async function waitForTimingRows(
+  filePath: string,
+  ready: (rows: Array<Record<string, unknown>>) => boolean = (rows) => rows.length > 0,
+): Promise<Array<Record<string, unknown>>> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      const contents = await readFile(filePath, 'utf8');
+      const rows = contents.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+      if (ready(rows)) return rows;
+    } catch {
+      // The diagnostic append is intentionally asynchronous and best effort.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('Startup timing record was not written.');
+}
+
+test('writes bounded timing-only bootstrap diagnostics without delaying activation', async () => withTempRoot(async (root) => {
+  const diagnosticFile = path.join(root, 'startup-timing.jsonl');
+  await withTimingFile(diagnosticFile, async () => {
+    let completeDelegateActivation!: () => void;
+    let notifyDelegateStarted!: () => void;
+    const delegateStarted = new Promise<void>((resolve) => { notifyDelegateStarted = resolve; });
+    const delegateGate = new Promise<void>((resolve) => { completeDelegateActivation = resolve; });
+    const bootstrap = bootstrapModule.createBootstrap({
+      vscode: { window: {} },
+      identityProvider: async () => IDENTITY,
+      runtimeGenerations: {
+        async acquireRuntimeGeneration() {
+          return { generation: null, outDir: path.join(root, 'out'), publishedAt: 0, async release() {} };
+        },
+        async resolveRuntimeGeneration() {
+          return { generation: null, outDir: path.join(root, 'out'), publishedAt: 0 };
+        },
+      },
+      watch: noOpWatch,
+      requireModule() {
+        return {
+          async activate() {
+            notifyDelegateStarted();
+            await delegateGate;
+            return { async deactivate() {} };
+          },
+        };
+      },
+    });
+    const activationPromise = bootstrap.activate(makeContext(root, new Map()));
+    await delegateStarted;
+    const entryRows = await waitForTimingRows(diagnosticFile, (records) => records.some((row) => row.source === 'bootstrap' && row.event === 'activation-entry'));
+    assert.equal(entryRows.some((row) => row.source === 'bootstrap' && row.event === 'activation'), false, 'activation-entry must be recorded before delegated activation completes');
+    completeDelegateActivation();
+    await activationPromise;
+    const rows = await waitForTimingRows(diagnosticFile, (records) => records.some((row) => row.source === 'bootstrap' && row.event === 'activation'));
+    for (const row of rows) {
+      assert.equal(row.tag, 'DEBUG-startup-profile');
+      assert.equal(row.pid, process.pid);
+      assert.equal(typeof row.timestamp, 'string');
+      assert.equal(new Date(row.timestamp as string).toISOString(), row.timestamp);
+    }
+    const entries = rows.filter((row) => row.source === 'bootstrap' && row.event === 'activation-entry');
+    assert.equal(entries.length, 1);
+    const entry = entries[0]!;
+    assert.equal(entry.tag, 'DEBUG-startup-profile');
+    assert.equal(entry.pid, process.pid);
+    assert.equal(typeof entry.timestamp, 'string');
+    assert.equal(typeof entry.bootstrapModuleStartedAt, 'string');
+    assert.equal(new Date(entry.bootstrapModuleStartedAt as string).toISOString(), entry.bootstrapModuleStartedAt);
+    assert.equal(typeof entry.bootstrapModuleMs, 'number');
+
+    const activation = rows.find((row) => row.source === 'bootstrap' && row.event === 'activation');
+    assert.ok(activation);
+    assert.equal(activation.tag, 'DEBUG-startup-profile');
+    assert.equal(activation.pid, process.pid);
+    assert.equal(typeof activation.timestamp, 'string');
+    assert.equal(activation.outcome, 'success');
+    assert.equal(typeof activation.bootstrapModuleMs, 'number');
+    assert.equal(typeof activation.activationSyncPrefixMs, 'number');
+    assert.equal(typeof activation.activationMs, 'number');
+    assert.equal(typeof activation.delegateRequireMs, 'number');
+    assert.equal(typeof activation.delegateActivateMs, 'number');
+    assert.deepEqual(Object.keys(activation).sort(), [
+      'activationMs', 'activationSyncPrefixMs', 'bootstrapModuleMs', 'delegateActivateMs',
+      'delegateRequireMs', 'event', 'identityReadMs', 'outcome', 'pid', 'schema', 'source',
+      'tag', 'timestamp',
+    ]);
+    assert.doesNotMatch(JSON.stringify(activation), /startup-timing|pie-bootstrap|publisher|version|session/iu);
+    assert.ok((await stat(diagnosticFile)).size <= 1_048_576);
+    await bootstrap.deactivate();
+
+    // A directory cannot be used as the diagnostics file. The write failure is
+    // asynchronous and must not prevent another normal activation.
+    process.env.PIE_STARTUP_TIMING_FILE = root;
+    await bootstrap.activate(makeContext(root, new Map()));
+    await bootstrap.deactivate();
+  });
+}));
 
 // This test exercises real runtime generation copy/verification and lease cleanup.
 // Under the full fast suite, the second publication alone took over 13 s, so keep

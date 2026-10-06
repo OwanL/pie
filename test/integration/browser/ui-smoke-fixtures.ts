@@ -20,7 +20,9 @@ type Fixtures = {
   viewState: Partial<ViewState>;
 };
 
-const assetDir = path.resolve(__dirname, '../../../application/hosts/vscode/out/webview/panel');
+const assetDir = process.env.PIE_BROWSER_ASSET_DIR
+  ? path.resolve(process.env.PIE_BROWSER_ASSET_DIR)
+  : path.resolve(__dirname, '../../../application/hosts/vscode/out-dev/webview/panel');
 
 async function startIsolatedHost(viewStateOverrides: Partial<ViewState>): Promise<{ host: IsolatedHost; dispose: () => Promise<void> }> {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'pie-ui-smoke-'));

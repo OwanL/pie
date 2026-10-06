@@ -1,5 +1,5 @@
 import { execFile, spawnSync } from "child_process";
-import { existsSync, type FSWatcher, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { existsSync, type FSWatcher, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -38,6 +38,7 @@ vi.mock("child_process", () => ({
 }));
 
 import { FooterDataProvider } from "../src/core/footer-data-provider.ts";
+import { closeWatcher, watchWithErrorHandler } from "../src/utils/fs-watch.ts";
 
 type WorktreeFixture = {
 	worktreeDir: string;
@@ -104,6 +105,32 @@ describe("FooterDataProvider reftable branch detection", () => {
 		if (tempDir && existsSync(tempDir)) {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
+	});
+
+	it("watches changes through the caller's temp path, including Windows short aliases", async () => {
+		const repoDir = createPlainRepo(tempDir);
+		const gitDir = join(repoDir, ".git");
+		if (process.platform === "win32" && /~\d/.test(tmpdir())) {
+			// Keep the short caller path: canonicalizing the fixture would hide the native abort.
+			expect(realpathSync.native(gitDir).toLowerCase()).not.toBe(gitDir.toLowerCase());
+		}
+		const listener = vi.fn();
+		const onError = vi.fn();
+		const watcher = watchWithErrorHandler(gitDir, listener, onError);
+		try {
+			expect(watcher).not.toBeNull();
+			writeFileSync(join(gitDir, "HEAD"), "ref: refs/heads/foo\n");
+			await waitFor(() => listener.mock.calls.some(([, filename]) => filename === "HEAD"));
+			expect(onError).not.toHaveBeenCalled();
+		} finally {
+			closeWatcher(watcher);
+		}
+	});
+
+	it("reports a missing watch path synchronously", () => {
+		const onError = vi.fn();
+		expect(watchWithErrorHandler(join(tempDir, "missing"), vi.fn(), onError)).toBeNull();
+		expect(onError).toHaveBeenCalledTimes(1);
 	});
 
 	it("uses HEAD directly in a regular repo from a nested directory", () => {

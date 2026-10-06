@@ -24,9 +24,11 @@ import {
   type BillableAccountingDeps,
   type BillableAccountingPersistenceFailureNotice,
 } from '../billable-accounting/service';
-import type { CapturedPricingFacts } from '../../../harness/model-providers/pricing/captured-pricing-facts.js';
+import type { CapturedPricingFacts } from '../../contracts/model-pricing-facts.js';
+import type { InvocationPricingResolver } from '../../contracts/invocation-pricing-resolver.js';
 import type { CanonicalAnalyticsCapture } from '../../capture/canonical-capture.js';
 import type { WorkingTimeService } from '../working-time-service';
+import type { SubagentObservationSource } from '../../contracts/subagent-observation.js';
 
 /** Ports the settlement needs from its presentation façade and host. */
 export interface LegacyStatsSettlementPorts {
@@ -37,6 +39,8 @@ export interface LegacyStatsSettlementPorts {
    *  settlement accounting consumes the facts and never resolves runtime
    *  catalogs itself. */
   readonly getCapturedPricingFacts: () => CapturedPricingFacts | undefined;
+  readonly resolveInvocationPricing: InvocationPricingResolver;
+  readonly subagentObservationSource: SubagentObservationSource;
   readonly isPrivateSession: (sessionPath: string) => boolean;
   readonly sessionIdentity: (sessionPath: string) => { sessionId: string | null; modelId?: string; provider?: string };
   readonly currentRunId: (sessionPath: string) => string | null;
@@ -78,6 +82,7 @@ export interface LegacyStatsSettlementOptions {
 export class LegacyStatsSettlement {
   readonly storage: RunAnalyticsStorage;
   readonly accounting: BillableAccounting;
+  readonly subagentObservationSource: SubagentObservationSource;
 
   /** Runs captured at startup whose historical usage migration is deferred to
    * the background continuation. */
@@ -87,6 +92,7 @@ export class LegacyStatsSettlement {
 
   constructor(ports: LegacyStatsSettlementPorts, options: LegacyStatsSettlementOptions) {
     this.ports = ports;
+    this.subagentObservationSource = ports.subagentObservationSource;
     const {
       dataOutcomesRootPath,
       legacyUsageDataRootPath,
@@ -119,6 +125,7 @@ export class LegacyStatsSettlement {
       scheduleRender: ports.scheduleRender,
       dispatchArchEvent: ports.dispatchArchEvent,
       getCapturedPricingFacts: ports.getCapturedPricingFacts,
+      resolveInvocationPricing: ports.resolveInvocationPricing,
       isPrivateSession: (sessionPath) => ports.isPrivateSession(sessionPath),
       sessionIdentity: (sessionPath) => ports.sessionIdentity(sessionPath),
       currentRunId: (sessionPath) => ports.currentRunId(sessionPath),

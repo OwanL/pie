@@ -12,17 +12,15 @@
  * installed, and legacy callers (no descriptor) keep legacy behavior.
  */
 
-import path from 'node:path';
-
 import { resolvePieDataPaths } from '../../lib/data-root/pie-data-root.js';
 import { ActivationStore } from './activation-store.js';
 import type { AnalyticsBackendDescriptor } from './activation.js';
 import {
   createSessionLifecycleWriterAdmission,
   type AnalyticsWriterIdentity,
+  type AnalyticsWriterStorePort,
   type SessionLifecycleWriterAdmission,
 } from './session-lifecycle-writer-store.js';
-import { SessionLifecycleStore } from '../../harness/session-storage/lifecycle/session-lifecycle-store.js';
 
 /** Ports the authority needs from its host process. Everything is injected:
  * the authority has no coordinator implementation dependency. */
@@ -35,6 +33,8 @@ export interface BackendAnalyticsActivationPorts {
   readonly buildId: string;
   /** Host process identity carried by the writer lease. */
   readonly hostPid: () => number | undefined;
+  /** Storage-owner factory for its canonical SQLite lifecycle store. */
+  readonly openWriterStore: (stateDir: string) => AnalyticsWriterStorePort;
 }
 
 export interface BackendAnalyticsActivationOptions {
@@ -52,7 +52,7 @@ export interface BackendAnalyticsActivationOptions {
  * install a durable writer.
  */
 export class BackendAnalyticsActivation {
-  private writerStore?: SessionLifecycleStore;
+  private writerStore?: AnalyticsWriterStorePort;
   private writerAdmission?: SessionLifecycleWriterAdmission;
   private writerIdentity?: AnalyticsWriterIdentity;
   private writerStateDir?: string;
@@ -139,9 +139,7 @@ export class BackendAnalyticsActivation {
       agentDir: this.ports.agentDir(),
     });
     this.writerStateDir = dataPaths.stateDir;
-    const store = new SessionLifecycleStore(
-      path.join(dataPaths.stateDir, 'session-lifecycle.sqlite'),
-    );
+    const store = this.ports.openWriterStore(dataPaths.stateDir);
     this.writerStore = store;
     const identity: AnalyticsWriterIdentity = {
       hostInstanceId: descriptor.hostInstanceId,

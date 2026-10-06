@@ -59,9 +59,13 @@ function makeFixture(t, { webviewFails = true, uncertainClose = false } = {}) {
     'Promise.all(children.map(({ completion }) => completion)),',
     "Promise.all(children.map(({ completion }) => completion)).then(async () => { if (process.env.PIE_BUILD_TEST_TRACE) await appendFile(process.env.PIE_BUILD_TEST_TRACE, JSON.stringify({ event: 'drain-complete', childPids: children.map(({ child }) => child.pid) }) + '\\n'); }),",
   );
+  // Observe, rather than delay, the owned watch queue. A completed poll alone
+  // does not imply publication is idle; its runtime copy may have queued work.
+  // Emit the barrier only after that same queue completes, with no pending
+  // debounce timer and no output changes waiting for the fixture watcher.
   build = build.replace(
     'const startPoll = () => { polling = poll(); };',
-    "const startPoll = () => { process.env.PIE_BUILD_TEST_POLL = '1'; polling = poll().finally(async () => { delete process.env.PIE_BUILD_TEST_POLL; await appendFile(process.env.PIE_BUILD_TEST_TRACE, JSON.stringify({ event: 'poll-complete' }) + '\\n'); }); };",
+    "const startPoll = () => { process.env.PIE_BUILD_TEST_POLL = '1'; polling = poll().finally(async () => { delete process.env.PIE_BUILD_TEST_POLL; await appendFile(process.env.PIE_BUILD_TEST_TRACE, JSON.stringify({ event: 'poll-complete' }) + '\\n'); const observedQueue = syncQueue; void observedQueue.then(async () => { if (watching && !publicationPaused && syncQueue === observedQueue && syncTimer === undefined && builtOutputWatcher.fixtureSettled()) await appendFile(process.env.PIE_BUILD_TEST_TRACE, JSON.stringify({ event: 'watch-settled' }) + '\\n'); }); }); };",
   );
   if (uncertainClose) {
     assert.ok(build.includes('record.closed = true;\n    resolve();'));
@@ -109,12 +113,17 @@ function fakeOutputWatcher() {
         return rows.sort().join('\\n');
       };
       let last = snapshot();
-      const timer = setInterval(() => {
-        try { const next = snapshot(); if (next !== last) { last = next; listener('change', 'fixture-output'); } }
-        catch (error) { listener('error', error); }
-      }, 25);
+      const check = () => {
+        try {
+          const next = snapshot();
+          if (next !== last) { last = next; listener('change', 'fixture-output'); return false; }
+          return true;
+        } catch (error) { listener('error', error); return false; }
+      };
+      const timer = setInterval(check, 25);
       timer.unref();
-      return { on() { return this; }, close() { clearInterval(timer); } };
+      // A synchronous scan also accounts for output not yet seen by the timer.
+      return { on() { return this; }, close() { clearInterval(timer); }, fixtureSettled: check };
     }
   `;
 }
@@ -269,7 +278,7 @@ function fakeVite(trace, owner, webviewFails) {
       const id = fs.existsSync(${JSON.stringify(path.join(path.dirname(trace), 'identity.txt'))}) ? fs.readFileSync(${JSON.stringify(path.join(path.dirname(trace), 'identity.txt'))}, 'utf8').trim() : '0123456789abcdefabcd';
       fs.mkdirSync(output, { recursive: true });
       if (nodeMode) {
-        for (const name of ['extension.js', 'backend.js', 'worker-entry.js', 'analytics-recorder-worker.js', 'analytics-query-worker.js']) fs.writeFileSync(path.join(output, name), 'fixture');
+        for (const name of ['extension.js', 'standalone.js', 'backend.js', 'worker-entry.js', 'analytics-recorder-worker.js', 'analytics-query-worker.js']) fs.writeFileSync(path.join(output, name), 'fixture');
         fs.writeFileSync(path.join(output, 'pie-build-id.txt'), id + '\\n');
       } else {
         const web = path.join(output, 'webview/panel');
@@ -360,7 +369,7 @@ function events(fixture) {
 }
 
 function runBuild(fixture) {
-  return spawnSync(process.execPath, [path.join(fixture.repo, 'scripts/build/build.mjs'), '--skip-typecheck', '--no-sync'], {
+  return spawnSync(process.execPath, [path.join(fixture.repo, 'scripts/build/build.mjs'), '--delivery', '--skip-typecheck', '--no-sync'], {
     cwd: fixture.owner, encoding: 'utf8', timeout: 15_000,
   });
 }
@@ -417,7 +426,7 @@ test('uncertain child-close acknowledgement retains the private artifact', (t) =
 
 test('SIGTERM drains watch children but retains the private Pi artifact', async (t) => {
   const fixture = makeFixture(t);
-  const child = startWatch(fixture, ['--watch', '--no-sync']);
+  const child = startWatch(fixture, ['--delivery', '--watch', '--no-sync']);
   t.after(async () => {
     if (child.exitCode !== null) return;
     if (process.platform === 'win32' && child.connected) child.send('fixture:SIGTERM');

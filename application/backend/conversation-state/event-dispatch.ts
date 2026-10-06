@@ -67,7 +67,7 @@ import {
   isToolStartedPayload,
 } from '../../../harness/agent-processes/lib/rpc/event-payload-validation.js';
 import { appendPieLog } from '../../../lib/structured-logging/pie-logger.js';
-import { isLivePipelineTraceEnabled, recordLivePipelineTrace } from '../agent-connection/live-pipeline-trace-runtime.js';
+import { isLivePipelineTraceEnabled, recordLivePipelineTrace } from '../../lib/live-pipeline-trace-runtime.js';
 import { isLiveLifecycleWatermark, isTurnSemanticEnvelope, type LiveLifecycleWatermark, type TurnSemanticEnvelope } from '../../lib/protocol/live-pipeline.js';
 import { isCoordinatorToHostDetailMessage, type CoordinatorToHostDetailMessage } from '../../../harness/agent-processes/lib/rpc/subagent-detail.js';
 import {

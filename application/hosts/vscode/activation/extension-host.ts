@@ -13,23 +13,23 @@ import { createVscodeHostRuntimePlatform } from '../runtime/host-runtime-platfor
 import {
   acquirePieHostOwnership,
   describePieHostRefusal,
-  resolvePieHostCoordinatorPort,
   resolvePieHostHandoffTimeoutMs,
+  resolvePieHostRuntimeProfile,
   type PieHostAcquisition,
   type PieHostOwnership,
 } from '../../lib/host-coordinator';
 import { appendPieLog } from '../../../../lib/structured-logging/pie-logger';
 import { HostRuntime } from '../../../backend/composition/host-runtime.js';
-import type { HostRendererSurface, HostRuntimeStatus } from '../../lib/platform-contracts/platform.js';
+import type { HostRendererSurface, HostRuntimeStatus } from '../../../lib/platform-contracts/platform.js';
 import { getDefaultRunAnalyticsExportPath } from '../../../../analytics/legacy/run-analytics/storage';
 import type { SessionOperationSource } from '../../../backend/conversation-state/operation-types.js';
 import { toErrorMessage } from '../../../../lib/structured-logging/error-message';
-import { getDiagPath, isStreamDiagEnabled, setStreamDiagEnabled } from '../../lib/renderer-delivery/stream-telemetry';
+import { getDiagPath, isStreamDiagEnabled, setStreamDiagEnabled } from '../../../lib/stream-telemetry.js';
 import {
   getLivePipelineTraceHealth,
   getLivePipelineTracePath,
   setLivePipelineTraceEnabled,
-} from '../../../backend/agent-connection/live-pipeline-trace-runtime';
+} from '../../../lib/live-pipeline-trace-runtime.js';
 import {
   getPieLogDir,
   getPieLogPath,
@@ -108,7 +108,7 @@ export class PieExtension implements vscode.Disposable {
     if (acquisition.status !== 'acquired') {
       // Visible refusal notification; pie starts nothing in this window.
       this.ownershipRefused = true;
-      const message = describePieHostRefusal(acquisition, resolvePieHostCoordinatorPort());
+      const message = describePieHostRefusal(acquisition, resolvePieHostRuntimeProfile().coordinatorPort);
       if (acquisition.status === 'refused-host-active') {
         void vscode.window.showWarningMessage(`pie did not start: ${message}`);
       } else {
@@ -133,15 +133,23 @@ export class PieExtension implements vscode.Disposable {
    *  graceful handoff when a standalone host owns it; fail closed on timeout
    *  or on an unresponsive (foreign) port occupant. */
   private async acquireHostOwnership(): Promise<PieHostAcquisition> {
-    const port = resolvePieHostCoordinatorPort();
+    const profile = resolvePieHostRuntimeProfile();
+    const port = profile.coordinatorPort;
     // Fast path: no visible progress on the common "nothing else is running"
-    // boot. `handoffTimeoutMs: 0` refuses immediately on any active host.
-    const quick = await acquirePieHostOwnership({ kind: 'vscode', port, handoffTimeoutMs: 0 });
-    if (quick.status !== 'refused-host-active' || quick.active.kind === 'vscode') {
+    // boot. Development profiles never hand off, even to another development
+    // host; production retains its existing standalone handoff behavior.
+    const quick = await acquirePieHostOwnership({
+      kind: 'vscode',
+      profile: profile.name,
+      port,
+      handoffTimeoutMs: 0,
+    });
+    if (profile.development || quick.status !== 'refused-host-active'
+        || quick.active.kind === 'vscode' || quick.active.profile !== profile.name) {
       return quick;
     }
-    // A standalone host is active: visibly wait a bounded time for its
-    // graceful shutdown and release, then acquire only on a fresh bind.
+    // A production standalone host is active: visibly wait a bounded time for
+    // its graceful shutdown and release, then acquire only on a fresh bind.
     return vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Notification,
@@ -150,6 +158,7 @@ export class PieExtension implements vscode.Disposable {
       },
       (progress) => acquirePieHostOwnership({
         kind: 'vscode',
+        profile: profile.name,
         port,
         handoffTimeoutMs: resolvePieHostHandoffTimeoutMs(),
         onHandoffStart: (active) => progress.report({
@@ -510,7 +519,22 @@ export class PieExtension implements vscode.Disposable {
       // The runtime owns the ordered backend/analytics/service teardown. The
       // VS Code shell surfaces are released after that order completes,
       // matching the previous single-composition shutdown sequence.
-      await this.runtime.shutdown();
+      try {
+        await this.runtime.shutdown();
+      } catch (error) {
+        // The false fence explicitly retains a reader when runtime teardown is
+        // not known to have completed; ownership and the reader both fail closed.
+        await this.backend.releaseDevelopmentReaders(false).catch((readerError: unknown) => {
+          appendPieLog('warn', 'host-coordinator', 'could not retain development SDK reader after uncertain VS Code shutdown', {
+            error: toErrorMessage(readerError),
+          });
+        });
+        throw error;
+      }
+      // The development SDK reader outlives every backend restart and is
+      // released only after the complete host shutdown proves all owned
+      // backend generations have torn down.
+      await this.backend.releaseDevelopmentReaders(this.backend.isRuntimeLifetimeTeardownConfirmed());
       this.sidebarProvider.dispose();
       this.statusBar.dispose();
       // Machine-wide ownership is released last: only after shutdown has

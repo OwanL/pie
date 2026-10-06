@@ -311,7 +311,7 @@ describe("CombinedAutocompleteProvider", () => {
 					"some_file.txt": "symlinked",
 				},
 			});
-			symlinkSync("../outside", join(baseDir, "symlinked_dir"));
+			symlinkSync(outsideDir, join(baseDir, "symlinked_dir"), process.platform === "win32" ? "junction" : "dir");
 
 			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
 			const line = "@some";
@@ -328,7 +328,7 @@ describe("CombinedAutocompleteProvider", () => {
 					"nested/file.txt": "symlinked",
 				},
 			});
-			symlinkSync("../outside", join(baseDir, "symlinked_dir"));
+			symlinkSync(outsideDir, join(baseDir, "symlinked_dir"), process.platform === "win32" ? "junction" : "dir");
 
 			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
 			const line = "@symlinked";
@@ -338,14 +338,22 @@ describe("CombinedAutocompleteProvider", () => {
 			assert.ok(values.includes("@symlinked_dir/"));
 		});
 
-		test("returns symlinked files without requiring type l", async () => {
+		test("returns symlinked files without requiring type l", async (t) => {
 			setupFolder(baseDir, {
 				files: {
 					"original.txt": "content",
 				},
 			});
 			const linkPath = join(baseDir, "link.txt");
-			symlinkSync("original.txt", linkPath);
+			try {
+				symlinkSync("original.txt", linkPath, "file");
+			} catch (error) {
+				if (process.platform === "win32" && (error as NodeJS.ErrnoException).code === "EPERM") {
+					t.skip("Windows denied file symlink creation (EPERM); requires Developer Mode or symlink privilege");
+					return;
+				}
+				throw error;
+			}
 
 			const provider = new CombinedAutocompleteProvider([], baseDir, requireFdPath());
 			const line = "@link";

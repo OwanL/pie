@@ -1,5 +1,7 @@
 import * as cp from 'node:child_process';
 import * as path from 'node:path';
+import { realpath } from 'node:fs/promises';
+import { acquireDevelopmentReader, type DevelopmentReader } from '../../../lib/development-runtime/lifetime.mjs';
 
 import { attachJsonlLineReader, JSONL_MAX_LINE_BYTES, serializeJsonLine } from '../../../harness/agent-processes/lib/rpc/jsonl.js';
 import { resolvePieDataPaths } from '../../../lib/data-root/pie-data-root';
@@ -19,14 +21,14 @@ import {
   getLivePipelineTraceRunId,
   isLivePipelineTraceEnabled,
   recordLivePipelineTrace,
-} from './live-pipeline-trace-runtime';
+} from '../../lib/live-pipeline-trace-runtime.js';
 import { classifyBackendStderrLine } from './stderr-classifier';
 import { reapOrphanedBackends, type OrphanReapResult } from './orphan-reaper';
 import { deriveTrustedSdkRoot } from './trusted-sdk-root';
 import type { CommitAwareRequestOptions } from '../conversation-state/effects/effect-runner';
 import { createOperationalIncident, type OperationalIncident } from '../../../harness/agent-processes/lib/rpc/incident-payload.js';
 import type { AnalyticsBackendDescriptor } from '../../../analytics/authority/activation.js';
-import type { GenerationPiRuntimeDescriptor } from '../../hosts/lib/pi-runtime-resolution';
+import type { GenerationPiRuntimeDescriptor } from '../../../lib/pi-runtime/artifact.mjs';
 import { assertProtocolVersion, isEventEnvelope, isResponseEnvelope } from '../../../harness/agent-processes/lib/rpc/wire.js';
 import type { EventEnvelope, ResponseEnvelope } from '../../../harness/agent-processes/lib/rpc/wire.js';
 import type { BackendReadyPayload } from '../../../harness/agent-processes/lib/rpc/session-events.js';
@@ -38,6 +40,8 @@ export interface BackendStartOptions {
   cwd: string;
   /** Verified generation-local Pi runtime selected by host startup. */
   sourceArtifactDescriptor?: GenerationPiRuntimeDescriptor;
+  /** Explicit development-only route to a compiled local Pi source workspace. */
+  sdkRuntimeSelection?: WorkspaceDevelopmentSdkSelection;
   /** Immutable canonical analytics authority snapshot for this generation. */
   analyticsActivation?: AnalyticsBackendDescriptor;
 }
@@ -72,6 +76,28 @@ export interface BackendClientOptions {
    * options stay byte-identical.
    */
   standaloneConsoleIsolation?: boolean;
+  /** Test seam for the repo-owned persistent development reader API. */
+  developmentReaderAcquirer?: DevelopmentReaderAcquirer;
+}
+
+const WORKSPACE_DEVELOPMENT_SDK_OPT_IN_ENV = 'PIE_ALLOW_WORKSPACE_DEVELOPMENT_SDK';
+
+export interface WorkspaceDevelopmentSdkSelection {
+  kind: 'workspace-development';
+  workspaceRoot: string;
+}
+
+export type DevelopmentReaderAcquirer = (workspaceRoot: string) => Promise<DevelopmentReader>;
+
+interface BackendStartReservation {
+  cancelled: boolean;
+  preSpawnSettled: Promise<void>;
+  settlePreSpawn(): void;
+}
+
+interface NewlyAcquiredDevelopmentReader {
+  workspaceRoot: string;
+  reader: DevelopmentReader;
 }
 
 const ANALYTICS_DESCRIPTOR_KEYS = [
@@ -303,6 +329,7 @@ export class BackendClient implements Disposable {
   >();
 
   private proc?: cp.ChildProcess;
+  private startReservation?: BackendStartReservation;
   private requestCounter = 0;
   private stderrBuffer = '';
   private stderrLineBuffer = '';
@@ -317,6 +344,8 @@ export class BackendClient implements Disposable {
   /** Sticky across restart: a later clean coordinator cannot prove an earlier
    * generation's descendants exited. */
   private uncertainLifetimeGeneration = false;
+  /** Held for every SDK workspace this host has spawned, including across backend restarts. */
+  private readonly developmentReaders = new Map<string, DevelopmentReader>();
   /** Validate a ready descriptor before any public event listener (including
    * the retained analytics transport) can re-arm the new coordinator. */
   private readyValidation?: {
@@ -344,19 +373,78 @@ export class BackendClient implements Disposable {
     return this.pendingLifetimeGenerations === 0 && !this.uncertainLifetimeGeneration;
   }
 
+  /** Release SDK source readers only after the owning host's shutdown fence.
+   * Passing false deliberately leaves the persistent reader in place when any
+   * owned generation's teardown is uncertain. */
+  async releaseDevelopmentReaders(teardownConfirmed: boolean): Promise<void> {
+    for (const [workspaceRoot, reader] of this.developmentReaders) {
+      await reader.release({ teardownConfirmed });
+      if (teardownConfirmed) this.developmentReaders.delete(workspaceRoot);
+    }
+  }
+
+  private async acquireDevelopmentReader(
+    selection: WorkspaceDevelopmentSdkSelection,
+  ): Promise<NewlyAcquiredDevelopmentReader | undefined> {
+    if (process.env[WORKSPACE_DEVELOPMENT_SDK_OPT_IN_ENV] !== '1') {
+      throw new Error(`Workspace-development SDK selection requires ${WORKSPACE_DEVELOPMENT_SDK_OPT_IN_ENV}=1.`);
+    }
+    if (!path.isAbsolute(selection.workspaceRoot)) {
+      throw new Error('Workspace-development SDK root must be an absolute path.');
+    }
+    const workspaceRoot = await realpath(selection.workspaceRoot);
+    if (this.developmentReaders.has(workspaceRoot)) return undefined;
+    const reader = await (this.options.developmentReaderAcquirer ?? acquireDevelopmentReader)(workspaceRoot);
+    if (!reader || typeof reader.release !== 'function') {
+      throw new Error('Pi development runtime lifetime API returned an invalid reader.');
+    }
+    this.developmentReaders.set(workspaceRoot, reader);
+    return { workspaceRoot, reader };
+  }
+
   private terminateOwnedProcess(proc: cp.ChildProcess, signal?: NodeJS.Signals): void {
     this.forcedStops.add(proc);
     terminateProcessTree(proc, signal);
   }
 
   /**
-   * Start the backend. Safe to call again after a previous backend exited
-   * (we no longer hard-reject when `proc` is set — it's been cleared on exit).
+   * Start the backend. Concurrent startup attempts are rejected; a fresh start
+   * is allowed after the previous backend exits and clears `proc`.
    */
   async start(options: BackendStartOptions): Promise<BackendReadyPayload> {
-    if (this.proc) {
+    if (this.proc || this.startReservation) {
       throw new Error('Backend is already running');
     }
+    if (options.sourceArtifactDescriptor && options.sdkRuntimeSelection) {
+      throw new Error('Provide exactly one SDK runtime selection route.');
+    }
+    if (options.sdkRuntimeSelection) {
+      const expectedSdkPath = path.resolve(options.sdkRuntimeSelection.workspaceRoot, 'packages', 'coding-agent');
+      const actualSdkPath = path.resolve(options.sdkPath);
+      const matches = process.platform === 'win32'
+        ? expectedSdkPath.toLowerCase() === actualSdkPath.toLowerCase()
+        : expectedSdkPath === actualSdkPath;
+      if (!matches) throw new Error('SDK path does not identify the selected workspace-development package.');
+    }
+
+    // Reserve this client synchronously before any asynchronous startup work so
+    // concurrent callers cannot both acquire readers and spawn child processes.
+    let settlePreSpawn!: () => void;
+    const reservation: BackendStartReservation = {
+      cancelled: false,
+      preSpawnSettled: new Promise<void>((resolve) => { settlePreSpawn = resolve; }),
+      settlePreSpawn: () => settlePreSpawn(),
+    };
+    this.startReservation = reservation;
+    let newlyAcquiredReader: NewlyAcquiredDevelopmentReader | undefined;
+    let spawnAttempted = false;
+    try {
+      if (options.sdkRuntimeSelection) {
+        // This parent-owned reader is acquired before the backend child starts
+        // and therefore before it can import any SDK module from this workspace.
+        newlyAcquiredReader = await this.acquireDevelopmentReader(options.sdkRuntimeSelection);
+        if (reservation.cancelled) throw new Error('Backend start was cancelled.');
+      }
 
     // Reap any orphaned backend whose extension host is dead before spawning a
     // fresh one. This is the startup-time safety net for the recurring
@@ -454,6 +542,9 @@ export class BackendClient implements Disposable {
     const sourceArtifactArgs = options.sourceArtifactDescriptor
       ? ['--sourceArtifactDescriptor', JSON.stringify(options.sourceArtifactDescriptor)]
       : [];
+    const sdkRuntimeSelectionArgs = options.sdkRuntimeSelection
+      ? ['--sdkRuntimeSelection', JSON.stringify(options.sdkRuntimeSelection)]
+      : [];
     const analyticsArgs = options.analyticsActivation
       ? [
           '--analyticsGenerationId', options.analyticsActivation.generationId,
@@ -470,6 +561,7 @@ export class BackendClient implements Disposable {
         options.backendPath,
         '--sdkPath', options.sdkPath,
         ...sourceArtifactArgs,
+        ...sdkRuntimeSelectionArgs,
         '--cwd', options.cwd,
         '--hostPid', String(process.pid),
         '--backendGeneration', String(generation),
@@ -496,6 +588,7 @@ export class BackendClient implements Disposable {
           : {}),
       },
     );
+    spawnAttempted = true;
 
     appendPieLog('info', 'backend', 'starting pie backend', {
       backendPath: options.backendPath,
@@ -704,6 +797,20 @@ export class BackendClient implements Disposable {
         },
       });
     });
+    } finally {
+      try {
+        if (!spawnAttempted && newlyAcquiredReader
+          && this.developmentReaders.get(newlyAcquiredReader.workspaceRoot) === newlyAcquiredReader.reader) {
+          await newlyAcquiredReader.reader.release({ teardownConfirmed: true });
+          if (this.developmentReaders.get(newlyAcquiredReader.workspaceRoot) === newlyAcquiredReader.reader) {
+            this.developmentReaders.delete(newlyAcquiredReader.workspaceRoot);
+          }
+        }
+      } finally {
+        if (this.startReservation === reservation) this.startReservation = undefined;
+        reservation.settlePreSpawn();
+      }
+    }
   }
 
   /** Issue a JSON-RPC request and await its response.
@@ -822,6 +929,8 @@ export class BackendClient implements Disposable {
    * `start()` again afterwards to bring up a fresh process.
    */
   async stop(): Promise<void> {
+    const reservation = this.startReservation;
+    if (reservation) reservation.cancelled = true;
     if (!this.stopPromise) {
       const operation = this.stopProcessGracefully();
       const tracked = operation.finally(() => {
@@ -830,6 +939,7 @@ export class BackendClient implements Disposable {
       this.stopPromise = tracked;
     }
     await this.stopPromise;
+    if (reservation) await reservation.preSpawnSettled;
     // Keep stdout attached during graceful drain: accepted RPCs (especially
     // settings.set) must be allowed to resolve before shutdown. The exit
     // handler detaches the reader; reject only requests the backend could not

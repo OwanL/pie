@@ -21,7 +21,7 @@ import {
 } from '../contracts/contracts.js';
 import type { ActivityIntervalRecord } from '../contracts/activity-interval.js';
 import type { BillableInvocationRecord } from '../usage-accounting/billable-invocation.js';
-import type { ToolCall } from '../../harness/agent-processes/lib/rpc/message-contract.js';
+import type { ToolCallCaptureInput } from '../contracts/tool-call-analysis-input.js';
 import type { ToolCallAnalysis } from './tool-call-analysis/index.js';
 import type { DurationClockDomain } from '../contracts/timing.js';
 import { sanitizeAnalyticsDetail } from '../../lib/sensitive-data/sensitive-redaction.js';
@@ -477,7 +477,7 @@ export class CanonicalAnalyticsCapture {
 
   captureTool(
     context: AnalyticsSessionContext,
-    toolCall: ToolCall,
+    toolCall: ToolCallCaptureInput,
     phase: 'begin' | 'end' | 'transcriptEvidence',
     sourceKey: string,
     observedAtMs: number,
@@ -569,7 +569,7 @@ export class CanonicalAnalyticsCapture {
    * recorder through the stable scoped facet source key. */
   captureToolFacet(
     context: AnalyticsSessionContext,
-    toolCall: ToolCall,
+    toolCall: ToolCallCaptureInput,
     analysis: ToolCallAnalysis,
     cwd: string | null | undefined,
     observedAtMs: number,

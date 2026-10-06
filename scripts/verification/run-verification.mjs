@@ -12,6 +12,10 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../
 
 export function verificationStages(mode, runtime, root = repoRoot) {
   if (!['check', 'verify', 'verify:release'].includes(mode)) throw new Error(`Unknown verification mode: ${mode}`);
+  if (mode !== 'verify:release') {
+    return [['proto', 'run', 'moon', '--', 'run', 'root:models', ':typecheck', ':test',
+      ...(mode === 'check' ? ['--affected', '--include-relations'] : ['vscode:build'])]];
+  }
   const lint = JSON.parse(readFileSync(path.join(root, 'application/hosts/vscode/package.json'), 'utf8')).scripts.lint;
   const prefix = 'cd ../../.. && node ';
   // Keep the existing lint script authoritative, without a shell/npm child chain.
@@ -20,15 +24,15 @@ export function verificationStages(mode, runtime, root = repoRoot) {
     ['scripts/model-config/sync-models.mjs', '--check'],
     ['scripts/verification/run-typechecks.mjs', ...runtimeArgs(runtime)],
     lint.slice(prefix.length).split(/\s+/u),
-    [mode === 'check' ? 'scripts/verification/run-affected-tests.mjs' : 'scripts/verification/run-tests.mjs',
-      ...(mode === 'verify' ? ['--fast'] : []), ...runtimeArgs(runtime)],
-    ...(mode === 'check' ? [] : [['scripts/build/build.mjs', '--skip-typecheck', '--no-sync', ...runtimeArgs(runtime)]]),
+    ['scripts/verification/run-tests.mjs', ...runtimeArgs(runtime)],
+    ['scripts/build/build.mjs', '--skip-typecheck', '--no-sync', ...runtimeArgs(runtime)],
   ];
 }
 
 function runChild(args, signal, root) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, args, withProcessTreeIsolation({
+    const native = args[0] === 'proto';
+    const child = spawn(native ? 'proto' : process.execPath, native ? args.slice(1) : args, withProcessTreeIsolation({
       cwd: root, env: verificationChildEnv(withoutPiHarnessEnv(withoutGitRepositoryEnv(process.env))), stdio: 'inherit', windowsHide: true,
     }));
     const watchdog = watchChildProcess(child, { signal, timeoutMs: resolveChildProcessTimeoutMs(), label: args[0] });
@@ -44,6 +48,13 @@ function runChild(args, signal, root) {
 export async function runVerification(mode, selection, signal, { root = repoRoot, run = runChild, ...dependencies } = {}) {
   // Validate mode before artifact acquisition.
   if (!['check', 'verify', 'verify:release'].includes(mode)) throw new Error(`Unknown verification mode: ${mode}`);
+  if (mode !== 'verify:release') {
+    if (selection.artifactDir || selection.sdkPath) {
+      throw new Error('--pi-runtime/--sdk-path is not used by native check/verify; omit it, or use verify:release for artifact-backed coverage verification');
+    }
+    signal?.throwIfAborted();
+    return run(verificationStages(mode)[0], signal, root);
+  }
   return withVerificationRuntime(selection, signal, async (runtime) => {
     for (const args of verificationStages(mode, runtime, root)) {
       signal?.throwIfAborted();

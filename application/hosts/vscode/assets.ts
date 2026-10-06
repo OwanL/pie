@@ -83,7 +83,7 @@ export async function resolveWebviewHtml(
   context: vscode.ExtensionContext,
   webview: vscode.Webview,
 ): Promise<{ html: string; assetVersion: string }> {
-  const panelDir = getWebviewAssetDir(context.extensionPath, DEFAULT_WEBVIEW_VIEW_NAME);
+  const panelDir = getWebviewAssetDir(context, DEFAULT_WEBVIEW_VIEW_NAME);
   const baseDir = await resolvePublishedWebviewDir(panelDir, runtimeRendererSelection(context));
   const manifest = await readManifest(baseDir);
   const assetVersion = crypto.createHash('sha256').update(JSON.stringify(manifest)).digest('hex').slice(0, 16);
@@ -96,7 +96,7 @@ export async function resolveWebviewHtml(
 export function getWebviewRoots(context: vscode.ExtensionContext): vscode.Uri[] {
   const viewName = DEFAULT_WEBVIEW_VIEW_NAME;
   return [
-    vscode.Uri.joinPath(context.extensionUri, 'out', 'webview', viewName),
+    vscode.Uri.file(getWebviewAssetDir(context, viewName)),
     vscode.Uri.file(runtimeRendererSelection(context).fallbackDir),
   ];
 }

@@ -12,7 +12,7 @@ export { withIncrementedWindowCounts };
 
 import { TRANSCRIPT_WINDOW_BUDGETS } from '../../../lib/protocol/transcript-window.js';
 import type { Effect } from '../effects/effects.js';
-import { cleanPinnedTabGroups } from '../../../frontend/session-tabs/tab-behavior.js';
+import { cleanPinnedTabGroups } from '../../../lib/session-tabs/tab-behavior.js';
 import { startNextDeferredSetModel } from './set-model-handlers.js';
 import {
   clearRetiredInterruptEventFence,

@@ -16,7 +16,7 @@ import {
   textFromMessageParts,
   toolCallsFromMessageParts,
   upsertAssistantToolPart,
-} from '../../application/frontend/transcript/message-parts.js';
+} from '../../application/lib/transcript/message-parts.js';
 import type { ChatMessage, ChatMessagePart, ToolCall } from '../../application/lib/protocol/messages.js';
 
 function makeToolCall(overrides: Partial<ToolCall> = {}): ToolCall {

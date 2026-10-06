@@ -1,5 +1,5 @@
 import { isPendingTabPath } from '../../../lib/session-path.js';
-import { readStoredOpenTabPath } from '../../frontend/session-tabs/tab-behavior';
+import { readStoredOpenTabPath } from '../../lib/session-tabs/tab-behavior.js';
 
 export interface RestoredSessionPlan {
   startupPath: string | null;

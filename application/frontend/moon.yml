@@ -1,0 +1,9 @@
+language: typescript
+dependsOn: [app-common, root, analytics, harness]
+tasks:
+  test:
+    command: 'proto run node -- scripts/verification/test-node.mjs --tsconfig application/hosts/vscode/tsconfig.json --sdk-path harness/pi/packages/coding-agent --exclude "**/*.artifact.test.*" application/frontend'
+    deps: ['pi:build']
+    # Backend imports in UI fixtures do not make the renderer a production backend consumer.
+    inputs: ['/application/hosts/vscode/tsconfig.json', '/application/frontend/**/*', '/application/backend/**/*', '/application/lib/**/*', '/analytics/**/*', '!/analytics/analysis/**/*', '/harness/**/*', '/harness/pi/**/*', '/scripts/**/*', '/lib/**/*', '@globs(lifecycle)', '@globs(protected)']
+    options: {cache: false}

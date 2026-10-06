@@ -1,0 +1,26 @@
+$schema: 'https://moonrepo.dev/schemas/tasks.json'
+fileGroups:
+  lifecycle:
+    - '/{package.json,pnpm-lock.yaml,pnpm-workspace.yaml,.npmrc,.prototools}'
+    - '/.moon/**/*'
+    # Shared runner/preload changes conservatively affect every consumer.
+    - '/scripts/verification/*.mjs'
+    - '/scripts/lib/*.mjs'
+  protected:
+    # Project-relative and workspace-root exclusions cover both input glob forms.
+    - '!**/node_modules/**'
+    - '!**/dist/**'
+    - '!**/out/**'
+    - '!**/out-dev/**'
+    - '!**/.cache/**'
+    - '!**/data/**'
+    - '!**/coverage/**'
+    - '!/**/node_modules/**'
+    - '!/**/dist/**'
+    - '!/**/out/**'
+    - '!/**/out-dev/**'
+    - '!/**/.cache/**'
+    - '!/**/data/**'
+    - '!/**/coverage/**'
+taskOptions:
+  runFromWorkspaceRoot: true

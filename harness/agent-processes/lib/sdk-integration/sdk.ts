@@ -2,6 +2,7 @@ import * as path from 'node:path';
 import { realpath } from 'node:fs/promises';
 import type { PiRuntimeTarget } from '../../../../lib/pi-runtime/artifact.mjs';
 import { verifySdkRuntimeArtifactDescriptor } from './sdk-runtime-artifact';
+import { verifyWorkspaceDevelopmentSdkRoot } from './sdk-runtime-selection';
 import { createSourceSdkPolicyAdapter, type SourceSdkPolicyFactoryResult } from './source-sdk-policy';
 import type * as SourceSdk from '@earendil-works/pi-coding-agent';
 import { pathToFileURL } from 'node:url';
@@ -756,7 +757,13 @@ export interface SourceSdkLoadMode {
   surface?: 'cold' | 'full';
 }
 
-export type SdkLoadMode = SourceSdkLoadMode;
+export interface WorkspaceDevelopmentSdkLoadMode {
+  mode: 'workspace-development';
+  workspaceRoot: string;
+  surface?: 'cold' | 'full';
+}
+
+export type SdkLoadMode = SourceSdkLoadMode | WorkspaceDevelopmentSdkLoadMode;
 
 export async function loadSdk(
   sdkPath: string,
@@ -764,7 +771,15 @@ export async function loadSdk(
 ): Promise<SourceArtifactSdkModule>;
 export async function loadSdk(
   sdkPath: string,
+  mode: SdkLoadMode & { surface: 'full' },
+): Promise<SourceArtifactSdkModule>;
+export async function loadSdk(
+  sdkPath: string,
   mode: SourceSdkLoadMode & { surface: 'cold' },
+): Promise<ColdCoordinatorSdkModule>;
+export async function loadSdk(
+  sdkPath: string,
+  mode: SdkLoadMode & { surface: 'cold' },
 ): Promise<ColdCoordinatorSdkModule>;
 export async function loadSdk(
   sdkPath: string,
@@ -774,20 +789,27 @@ export async function loadSdk(
   sdkPath: string,
   mode: SdkLoadMode,
 ): Promise<ColdCoordinatorSdkModule | SourceArtifactSdkModule> {
-  return loadSourceSdk(sdkPath, mode);
+  return loadSelectedSdk(sdkPath, mode);
 }
 
-function assertSourceLoadMode(mode: SourceSdkLoadMode): void {
-  if (!mode || mode.mode !== 'source-artifact') {
-    throw new TypeError('An explicit source-artifact SDK descriptor selection is required.');
+function assertSdkLoadMode(mode: SdkLoadMode): void {
+  if (!mode || (mode.mode !== 'source-artifact' && mode.mode !== 'workspace-development')) {
+    throw new TypeError('An explicit source-artifact or workspace-development SDK selection is required.');
   }
   if (mode.surface !== undefined && mode.surface !== 'cold' && mode.surface !== 'full') {
-    throw new TypeError('Source SDK surface must be cold or full.');
+    throw new TypeError('SDK surface must be cold or full.');
   }
 }
 
-async function verifiedSourceSdkPath(sdkPath: string, mode: SourceSdkLoadMode): Promise<string> {
-  assertSourceLoadMode(mode);
+async function verifiedSdkPath(sdkPath: string, mode: SdkLoadMode): Promise<string> {
+  assertSdkLoadMode(mode);
+  if (mode.mode === 'workspace-development') {
+    const verified = await verifyWorkspaceDevelopmentSdkRoot({ kind: 'workspace-development', workspaceRoot: mode.workspaceRoot });
+    if (!path.isAbsolute(sdkPath) || await realpath(sdkPath) !== verified.sdkPath) {
+      throw new Error('Explicit SDK path does not match the verified workspace-development runtime.');
+    }
+    return verified.sdkPath;
+  }
   if (!mode.backendTarget) throw new TypeError('An explicit source SDK backend target is required.');
   const executingTarget: PiRuntimeTarget = {
     platform: process.platform, arch: process.arch, nodeAbi: process.versions.modules,
@@ -820,8 +842,8 @@ async function sourceInternalPath(sdkPath: string, relativePath: string): Promis
   return canonical;
 }
 
-async function loadSourceSdk(sdkPath: string, mode: SourceSdkLoadMode): Promise<SourceArtifactSdkModule | ColdCoordinatorSdkModule> {
-  const verifiedPath = await verifiedSourceSdkPath(sdkPath, mode);
+async function loadSelectedSdk(sdkPath: string, mode: SdkLoadMode): Promise<SourceArtifactSdkModule | ColdCoordinatorSdkModule> {
+  const verifiedPath = await verifiedSdkPath(sdkPath, mode);
   const policy = createSourceSdkPolicyAdapter({
     readHistoryCompactionSettings: readLiveHistoryCompactionSettings,
     beforeCompact: (event, session) => createCustomizedCompaction(compaction, session, event),
@@ -893,7 +915,7 @@ export async function loadSdkInternalModule<TModule>(
   relativePath: string,
   mode: SdkLoadMode,
 ): Promise<TModule> {
-  const verifiedPath = await verifiedSourceSdkPath(sdkPath, mode);
+  const verifiedPath = await verifiedSdkPath(sdkPath, mode);
   const entry = await sourceInternalPath(verifiedPath, relativePath);
   return await dynamicImport(pathToFileURL(entry).href) as TModule;
 }

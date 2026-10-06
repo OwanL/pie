@@ -2,32 +2,38 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import test, { after } from 'node:test';
+import test, { after, before } from 'node:test';
 
 import { buildDuckDbDatabase, openDuckDbQuerySession, runNamedDuckDbQuery, runDuckDbQuery } from '../scripts/duckdb.ts';
 import { prepareSourceAnalytics } from '../scripts/prepare.ts';
 import type { PreparedToolResultIssueRow } from '../scripts/contracts.ts';
 import { loadFixture } from './helpers.ts';
 
-// Building the DuckDB database from the fixture dominates test time (~450ms).
-// Build it ONCE at module load (top-level await) so the cost is paid during
-// module setup rather than attributed to any test case, then run every named
-// query against the shared database. (A `before()` hook would work functionally
-// but `node:test` rolls hook time into the first test's reported duration.)
-const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-analysis-duckdb-test-'));
-const sharedDbPath = path.join(tempDir, 'usage.duckdb');
-const exportsDir = path.join(tempDir, 'exports');
-const prepared = prepareSourceAnalytics(await loadFixture());
-await buildDuckDbDatabase({
-  dbPath: sharedDbPath,
-  exportsDir,
-  prepared,
+// Build once before the tests and share the database across named queries.
+// Node's CJS test adapter does not support top-level await, so initialize via
+// the normal async hook rather than moving any assertions out of the tests.
+let tempDir: string | undefined;
+let prepared!: ReturnType<typeof prepareSourceAnalytics>;
+let sharedDb!: Awaited<ReturnType<typeof openDuckDbQuerySession>>;
+
+before(async () => {
+  tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-analysis-duckdb-test-'));
+  const sharedDbPath = path.join(tempDir, 'usage.duckdb');
+  prepared = prepareSourceAnalytics(await loadFixture());
+  await buildDuckDbDatabase({
+    dbPath: sharedDbPath,
+    exportsDir: path.join(tempDir, 'exports'),
+    prepared,
+  });
+  sharedDb = await openDuckDbQuerySession(sharedDbPath);
 });
-const sharedDb = await openDuckDbQuerySession(sharedDbPath);
 
 after(async () => {
-  await sharedDb.close();
-  await fs.rm(tempDir, { recursive: true, force: true });
+  try {
+    await sharedDb?.close();
+  } finally {
+    if (tempDir !== undefined) await fs.rm(tempDir, { recursive: true, force: true });
+  }
 });
 
 test('DuckDB build and named queries work against the fixture', async () => {

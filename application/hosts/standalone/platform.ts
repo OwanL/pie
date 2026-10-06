@@ -14,13 +14,14 @@ import type {
   HostNotifications,
   HostRendererSurface,
   HostRuntimePlatform,
-} from '../lib/platform-contracts/platform.js';
+} from '../../lib/platform-contracts/platform.js';
 import {
   BROWSER_SERVER_ALLOW_LAN_STORAGE_KEY,
   readBrowserServerSettings,
 } from '../browser/settings';
 import { StandaloneHostStorage } from './storage';
 import type { StandaloneDependencyPaths } from './startup';
+import { createBackendStartupPlatform } from '../lib/backend-startup';
 
 const UNSUPPORTED_EDITOR_MESSAGE = 'Opening files in VS Code is unavailable in standalone mode.';
 
@@ -151,6 +152,21 @@ export function createStandaloneHostRuntimePlatform(
     stateDir: options.dataPaths.stateDir,
     workspaceCwd: options.workspaceCwd,
   });
+  const getSetting = <T>(name: string, fallbackName?: string): T | undefined => {
+    const values: Record<string, string | boolean | undefined> = {
+      nodePath: options.dependencies.nodePath,
+      sdkPath: options.dependencies.sdkPath,
+      agentDir: options.dependencies.agentDir,
+      allowInTreeAuth: process.env.PIE_ALLOW_IN_TREE_AUTH === '1',
+    };
+    const value = values[name] ?? (fallbackName === undefined ? undefined : values[fallbackName]);
+    return value as T | undefined;
+  };
+  const backendStartup = createBackendStartupPlatform({
+    extensionPath: options.extensionPath,
+    getRuntimeOutputDirectory: () => options.runtimeOutputDirectory,
+    getSetting,
+  });
 
   const notifications: HostNotifications = {
     showWarningMessage: (message) => postNotice(message, 'warning'),
@@ -194,19 +210,11 @@ export function createStandaloneHostRuntimePlatform(
     extensionPath: options.extensionPath,
     getRuntimeOutputDirectory: () => options.runtimeOutputDirectory,
     getWorkspaceCwd: () => options.workspaceCwd,
-    getSetting: <T>(name: string, fallbackName?: string): T | undefined => {
-      const values: Record<string, string | boolean | undefined> = {
-        nodePath: options.dependencies.nodePath,
-        sdkPath: options.dependencies.sdkPath,
-        agentDir: options.dependencies.agentDir,
-        allowInTreeAuth: process.env.PIE_ALLOW_IN_TREE_AUTH === '1',
-      };
-      const value = values[name] ?? (fallbackName === undefined ? undefined : values[fallbackName]);
-      return value as T | undefined;
-    },
+    getSetting,
     requestWindowAttention: () => {
       postNotice('pie needs your attention.', 'info');
     },
+    backendStartup,
     renderer,
     notifications,
     editor,

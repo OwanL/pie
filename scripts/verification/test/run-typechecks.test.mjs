@@ -83,7 +83,7 @@ test('resolveProjectCompiler resolves the registry-declared compiler owner-relat
     /must end with/,
   );
   assert.throws(
-    () => resolveProjectCompiler({ compiler: 'docs/node_modules/typescript/bin/tsc' }),
+    () => resolveProjectCompiler({ compiler: 'docs/node_modules/typescript/bin/tsc' }, fixtureRoot),
     /Cannot find module|Cannot find package|typescript/,
   );
 });

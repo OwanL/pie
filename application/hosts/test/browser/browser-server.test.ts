@@ -7,6 +7,7 @@
  */
 
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as http from 'node:http';
 import * as os from 'node:os';
@@ -295,6 +296,23 @@ test('HTML requests refresh a replaced asset manifest and retain prior assets', 
   assert.equal((await httpGet(port, '/assets/panel-abc123.js')).status, 200);
 
   await stop();
+});
+
+test('only an explicit development profile reloads connected browser renderers after a completed renderer build', async () => {
+  const child = spawnSync(process.execPath, [
+    '--import', 'tsx',
+    path.resolve('application/hosts/test/browser/browser-server-development-reload.fixture.ts'),
+  ], {
+    cwd: process.cwd(),
+    encoding: 'utf8',
+    timeout: 15_000,
+    env: {
+      ...process.env,
+      PIE_DEVELOPMENT_PI_WORKSPACE: path.resolve(os.tmpdir(), 'pi-development-workspace'),
+      PIE_DEVELOPMENT_PROFILE_DIR: path.resolve(os.tmpdir(), 'pie-development-profile'),
+    },
+  });
+  assert.equal(child.status, 0, `${child.stdout}\n${child.stderr}`);
 });
 
 test('an occupied preferred port falls back to an OS-assigned port (info-only)', async () => {

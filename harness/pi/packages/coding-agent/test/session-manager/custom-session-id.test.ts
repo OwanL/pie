@@ -1,8 +1,8 @@
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { SessionManager } from "../../src/core/session-manager.ts";
+import { type SessionHeader, SessionManager } from "../../src/core/session-manager.ts";
 
 const UUID_V7_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
@@ -79,7 +79,10 @@ describe("SessionManager.newSession with custom id", () => {
 		const sessionFile = session.getSessionFile()!;
 		expect(sessionFile).toContain("created-session-id");
 		expect(basename(sessionFile)).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z_created-session-id\.jsonl$/);
-		expect(existsSync(sessionFile)).toBe(false);
+		expect(existsSync(sessionFile)).toBe(true);
+		const persistedHeader: SessionHeader = JSON.parse(readFileSync(sessionFile, "utf-8").split("\n")[0]);
+		expect(persistedHeader.type).toBe("session");
+		expect(persistedHeader.id).toBe("created-session-id");
 	});
 
 	it("generates a UUIDv7 id when creating a branched session", () => {

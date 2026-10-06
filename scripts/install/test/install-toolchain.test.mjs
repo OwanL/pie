@@ -1,6 +1,5 @@
 // Focused unit tests for scripts/install/lib/toolchain.mjs — the pure
-// pinned-vs-actual comparison (no installs) used by the Windows installer and
-// exercised by the `verify-toolchain` dry-run.
+// Proto-selected pinned-vs-actual comparison used by the Windows installer.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -9,44 +8,42 @@ import { inferRepoRoot } from '../../lib/sdk-version.mjs';
 
 const repoRoot = inferRepoRoot();
 
-test('readPinnedVersions returns Node/npm pins and the matched in-tree Pi source version', () => {
-  const { node, npm, piSource } = readPinnedVersions(repoRoot);
+test('readPinnedVersions returns repository Proto Node/pnpm pins and matched in-tree Pi source version', () => {
+  const { node, pnpm, piSource } = readPinnedVersions(repoRoot);
   assert.match(node, /^\d+\.\d+\.\d+$/);
-  assert.match(npm, /^\d+\.\d+\.\d+$/);
+  assert.match(pnpm, /^\d+\.\d+\.\d+$/);
   assert.match(piSource, /^\d+\.\d+\.\d+$/);
-  // Cross-check against the committed pins.
   assert.equal(node, '24.16.0');
-  assert.equal(npm, '11.13.0');
+  assert.equal(pnpm, '10.34.4');
 });
 
-test('verifyToolchain does not require a globally installed Pi CLI', () => {
-  const pinned = { node: '24.16.0', npm: '11.13.0', piSource: '0.80.6' };
-  const status = verifyToolchain({ pinned, actual: { node: '24.16.0', npm: '11.13.0' } });
+test('verifyToolchain compares Node and pnpm without install recommendations or global Pi checks', () => {
+  const pinned = { node: '24.16.0', pnpm: '10.34.4', piSource: '0.80.6' };
+  const status = verifyToolchain({ pinned, actual: { node: '24.16.0', pnpm: '10.34.4' } });
   assert.equal(status.allOk, true);
   assert.equal(status.node.ok, true);
-  assert.equal(status.npm.installCommand, null);
+  assert.equal(status.pnpm.ok, true);
   assert.deepEqual(status.piSource, {
     version: '0.80.6',
     provenance: 'harness/pi/packages/{tui,ai,agent,coding-agent}/package.json',
   });
+  assert.equal('installCommand' in status.pnpm, false);
 });
 
-test('verifyToolchain reports npm drift with an install command and keeps Pi source informational', () => {
-  const pinned = { node: '24.16.0', npm: '11.13.0', piSource: '0.80.6' };
-  const status = verifyToolchain({ pinned, actual: { node: '24.16.0', npm: '10.9.8' } });
+test('verifyToolchain reports pnpm drift without offering to install it globally', () => {
+  const pinned = { node: '24.16.0', pnpm: '10.34.4', piSource: '0.80.6' };
+  const status = verifyToolchain({ pinned, actual: { node: '24.16.0', pnpm: '9.9.9' } });
   assert.equal(status.allOk, false);
-  assert.equal(status.npm.ok, false);
-  assert.deepEqual(status.npm.installCommand, ['npm', 'install', '-g', 'npm@11.13.0']);
-  assert.equal(status.piSource.version, '0.80.6');
+  assert.equal(status.pnpm.ok, false);
+  assert.equal(status.pnpm.actual, '9.9.9');
+  assert.equal('installCommand' in status.pnpm, false);
 });
 
-test('verifyToolchain reports node drift without any install command (node is never auto-installed)', () => {
-  const pinned = { node: '24.16.0', npm: '11.13.0', piSource: '0.80.6' };
-  const status = verifyToolchain({ pinned, actual: { node: '22.22.3', npm: '11.13.0' } });
+test('verifyToolchain reports node drift without installing runtimes or changing PATH', () => {
+  const pinned = { node: '24.16.0', pnpm: '10.34.4', piSource: '0.80.6' };
+  const status = verifyToolchain({ pinned, actual: { node: '22.22.3', pnpm: '10.34.4' } });
   assert.equal(status.allOk, false);
   assert.equal(status.node.ok, false);
   assert.equal(status.node.actual, '22.22.3');
-  // No install command is offered for Node — the wrapper hard-errors instead.
-  assert.equal(status.npm.installCommand, null);
-  assert.equal('pi' in status, false);
+  assert.equal(status.pnpm.ok, true);
 });

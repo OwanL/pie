@@ -3,14 +3,14 @@
 
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { ActiveRunSummary, SessionSummary } from '../../lib/protocol/index.js';
-import { isPendingTabPath } from './tab-behavior';
+import { isPendingTabPath } from '../../lib/session-tabs/tab-behavior.js';
 import { writeTextToClipboard } from '../lib/components/clipboard';
 import { useMenuListeners } from '../lib/components/useMenuListeners';
 import { useMenuTriggerAria } from '../lib/components/useMenuTriggerAria';
 import { useMenuViewportClamp } from '../lib/components/useMenuViewportClamp';
 import { getSessionTabRunMenuItems } from './run-state';
 import type { SessionTabContextAction, SessionTabContextMenuState } from './types';
-import type { PinnedItem } from './tab-behavior';
+import type { PinnedItem } from '../../lib/session-tabs/tab-behavior.js';
 import { CheckmarkIcon, CloseIcon, DuplicateIcon } from './icons';
 
 export interface SessionTabContextMenuProps {

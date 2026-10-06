@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { setKeybindings } from "@earendil-works/pi-tui";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
@@ -67,8 +67,11 @@ function createSymlinkedSessionPaths(): {
 	mkdirSync(sharedDir, { recursive: true });
 	const aliasASessions = join(aliasADir, "sessions");
 	const aliasBSessions = join(aliasBDir, "sessions");
-	symlinkSync(sharedDir, aliasASessions);
-	symlinkSync(sharedDir, aliasBSessions);
+	// Alias the parent directory so both filenames retain realpath identity on Windows
+	// without requiring file/directory symlink privileges. POSIX still uses symlinks.
+	const directoryLinkType = process.platform === "win32" ? "junction" : "dir";
+	symlinkSync(resolve(sharedDir), aliasASessions, directoryLinkType);
+	symlinkSync(resolve(sharedDir), aliasBSessions, directoryLinkType);
 
 	const parentRealPath = join(sharedDir, "parent.jsonl");
 	const childRealPath = join(sharedDir, "child.jsonl");

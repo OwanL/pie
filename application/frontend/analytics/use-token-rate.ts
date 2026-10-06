@@ -1,5 +1,5 @@
-import type { TokenRateIndicatorState } from '../../backend/analytics-views/token-rate';
-import { IDLE_STATE } from '../../backend/analytics-views/token-rate';
+import type { TokenRateIndicatorState } from '../../lib/protocol/token-rate.js';
+import { IDLE_STATE } from '../../lib/protocol/token-rate.js';
 
 /**
  * Live "average tokens per second" indicator — webview display side.
@@ -16,12 +16,10 @@ import { IDLE_STATE } from '../../backend/analytics-views/token-rate';
  * collecting for background sessions, so switching back continues smoothly
  * instead of restarting from the selection point.
  *
- * Re-exports the pure measurement primitives (`tickTokenRate`,
- * `createTokenRateAccumulator`, `TokenRateIndicatorState`) from `shared/` for
- * existing importers; the shared module is the single source of truth.
+ * Measurement and aggregation remain host-owned; the renderer consumes only
+ * the shared wire-contract state for its active session.
  */
-export { tickTokenRate, createTokenRateAccumulator, WINDOW_MS } from '../../backend/analytics-views/token-rate';
-export type { TokenRateIndicatorState, Accumulator } from '../../backend/analytics-views/token-rate';
+export type { TokenRateIndicatorState } from '../../lib/protocol/token-rate.js';
 
 export function useTokenRateIndicator({
   sessionPath,

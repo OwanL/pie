@@ -1,5 +1,5 @@
 import { encodeInt64, parseNonNegativeInt64, type AnalyticsToolFacetFields } from '../contracts/contracts.js';
-import type { ToolCall } from '../../harness/agent-processes/lib/rpc/message-contract.js';
+import type { ToolCallAnalysisInput } from '../contracts/tool-call-analysis-input.js';
 import { isRecord } from '../../lib/validation/type-guards.js';
 import { extractCommandText, type ToolCallAnalysis } from '../capture/tool-call-analysis/index.js';
 import { getPatchTextFromInput } from '../capture/tool-call-analysis/mutation-size.js';
@@ -86,7 +86,7 @@ function observedPathsFromInput(input: unknown): string[] {
 /** Derive one terminal tool's facet evidence from the analysis already computed
  * for that tool by the producer. No result body is traversed here. */
 export function deriveToolFacetEvidence(
-  toolCall: ToolCall,
+  toolCall: ToolCallAnalysisInput,
   analysis: ToolCallAnalysis,
   cwd?: string | null,
 ): ToolFacetEvidence {
@@ -111,7 +111,7 @@ export function deriveToolFacetEvidence(
  * absent (not zero) when the tool has no line-activity evidence, so recorded
  * zero evidence and unavailable evidence remain distinct. */
 export function buildToolFacetFields(
-  toolCall: ToolCall,
+  toolCall: ToolCallAnalysisInput,
   analysis: ToolCallAnalysis,
   scopedToolCallId: string,
   cwd?: string | null,

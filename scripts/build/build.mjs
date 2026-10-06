@@ -9,10 +9,21 @@ import {
   findCompatibleInstalledExtensionDir,
   publishRendererGeneration,
 } from './publication.mjs';
-import { hasRuntimeBootstrap, installRuntimeBootstrap, publishRuntimeGeneration, resolveRuntimeGeneration } from './runtime-publication.mjs';
+import { hasRuntimeBootstrap, installRuntimeBootstrap, publishRuntimeGeneration } from './runtime-publication.mjs';
 import { createTsconfigOverlay, resolveOwnerModule, resolvePackageRoots, resolveTypeScriptCompiler } from '../lib/package-resolution.mjs';
 import { withPiRuntime } from '../lib/pi-runtime-context.mjs';
 import { verifyPiRuntimeArtifact } from '../lib/pi-runtime-artifact.mjs';
+
+// Ordinary compilation never constructs a release or discovers installed Pie.
+// The legacy immutable lane remains explicitly selected for delivery/publication.
+const lifecycleArgs = process.argv.slice(2);
+const deliverySelected = lifecycleArgs.some(arg => ['--delivery', '--publish', '--activate', '--pi-runtime', '--output-dir'].includes(arg)
+  || arg.startsWith('--pi-runtime=') || arg.startsWith('--output-dir='));
+if (!deliverySelected) {
+  const { buildDevelopment } = await import('./build-development.mjs');
+  await buildDevelopment(lifecycleArgs);
+  process.exit(0);
+}
 
 // The distribution root follows the planned package layout: the VS Code host
 // package and its dependency owner live under application/hosts/vscode.
@@ -37,8 +48,9 @@ const requestedPiRuntime = piRuntimeOption === '--pi-runtime'
   : piRuntimeOption?.slice('--pi-runtime='.length);
 const watchMode = cliArgs.includes('--watch');
 const skipTypecheck = cliArgs.includes('--skip-typecheck');
-const noSync = isolatedOutput || cliArgs.includes('--no-sync');
+const noSync = isolatedOutput || cliArgs.includes('--no-sync') || !(cliArgs.includes('--publish') || cliArgs.includes('--activate'));
 const activate = cliArgs.includes('--activate');
+const buildTimingEnabled = process.env.PIE_BUILD_TIMING === '1';
 if (isolatedOutput && (activate || watchMode)) throw new Error('--output-dir cannot be combined with --activate or --watch.');
 if (piRuntimeOption !== undefined && (!requestedPiRuntime || requestedPiRuntime.startsWith('--'))) {
   throw new Error('--pi-runtime requires an artifact root.');
@@ -55,6 +67,7 @@ const buildIdentityFile = 'pie-build-id.txt';
 const buildIdentityPattern = /^[0-9a-f]{20}$/u;
 const requiredBuildFiles = Object.freeze([
   'extension.js',
+  'standalone.js',
   'backend.js',
   'worker-entry.js',
   'analytics-recorder-worker.js',
@@ -64,6 +77,29 @@ const requiredBuildFiles = Object.freeze([
 
 let syncTimer;
 let syncQueue = Promise.resolve();
+
+function startBuildTiming(label) {
+  if (!buildTimingEnabled) return () => {};
+  const startedAt = process.hrtime.bigint();
+  let reported = false;
+  return () => {
+    if (reported) return;
+    reported = true;
+    const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+    console.log(`[build] Timing ${label}: ${elapsedMs.toFixed(1)} ms`);
+  };
+}
+
+function withBuildTiming(label, operation) {
+  if (!buildTimingEnabled) return operation();
+  const finishTiming = startBuildTiming(label);
+  try {
+    return Promise.resolve(operation()).finally(finishTiming);
+  } catch (error) {
+    finishTiming();
+    throw error;
+  }
+}
 
 function installedExtensionRoots() {
   return [
@@ -114,18 +150,11 @@ async function validateOutputDirectory(requested) {
 }
 
 let selectedPiRuntime;
+let retainedRuntimeOutput;
 let selectedInputFingerprint;
 let publicationPaused = false;
 let children = [];
 const cancellation = new AbortController();
-// Explicit reuse is verified before any output writes, including ordinary out.
-if (requestedPiRuntime) {
-  const verified = await verifyPiRuntimeArtifact(requestedPiRuntime);
-  const canonicalOutput = await canonicalPath(outDir);
-  if (containsPath(verified.artifactDir, canonicalOutput) || containsPath(canonicalOutput, verified.artifactDir)) {
-    throw new Error('--output-dir must not overlap the verified --pi-runtime artifact.');
-  }
-}
 let fingerprint;
 let SourceInstability;
 if (!requestedPiRuntime) {
@@ -174,10 +203,9 @@ async function resolveCompatibleInstalledExtension(pkg) {
   return null;
 }
 
-async function reportInstalledHostStatus(extDir, pkg) {
+async function reportInstalledHostStatus(extDir, staged) {
   if (await hasRuntimeBootstrap(extDir)) {
-    const selected = await resolveRuntimeGeneration({ extensionDir: extDir, identity: pkg });
-    console.log(`[build] Runtime ${selected.generation ?? 'packaged'} is selected for the next VS Code startup. Running sessions keep their existing build; no restart was forced.`);
+    console.log(`[build] Published runtime ${staged.generation} → ${extDir}; the next activation selects the newest verified runtime. Running sessions keep their existing build; no restart was forced.`);
     return;
   }
   console.warn('[build] One-time startup-loader setup required: npm run extension:activate. It does not stop active sessions. Restart VS Code afterward; subsequent builds load automatically on restart.');
@@ -219,28 +247,49 @@ async function copyArtifactEntries(source, destination) {
 
 async function materializeSelectedPiRuntime() {
   if (!selectedPiRuntime) return;
-  const sourceBeforeCopy = await verifyPiRuntimeArtifact(selectedPiRuntime.artifactDir);
+  const sourceBeforeCopy = await withBuildTiming('runtime source verification before materialization', () =>
+    verifyPiRuntimeArtifact(selectedPiRuntime.artifactDir));
   if (sourceBeforeCopy.identity !== selectedPiRuntime.identity) {
     throw new Error('Verified --pi-runtime source identity changed during the build.');
   }
 
   const copiedDirectory = path.join(outDir, 'pi-runtime');
+  if (retainedRuntimeOutput?.identity === selectedPiRuntime.identity) {
+    const [copiedInfo, copiedRealPath] = await Promise.all([
+      lstat(copiedDirectory),
+      realpath(copiedDirectory),
+    ]);
+    if (copiedInfo.isSymbolicLink() || !copiedInfo.isDirectory()
+      || copiedInfo.dev !== retainedRuntimeOutput.dev || copiedInfo.ino !== retainedRuntimeOutput.ino
+      || copiedRealPath !== retainedRuntimeOutput.artifactDir) {
+      throw new Error('Preverified output Pi runtime changed during the build.');
+    }
+    const copied = await withBuildTiming('retained materialized runtime verification', () =>
+      verifyPiRuntimeArtifact(copiedDirectory));
+    if (copied.identity !== selectedPiRuntime.identity) {
+      throw new Error(`Retained output Pi runtime identity mismatch (${copied.identity} != ${selectedPiRuntime.identity}).`);
+    }
+    return;
+  }
+
   // Watch app-only emissions reuse the immutable copy. Never replace it while
   // dependent children are alive; rotation cleans output after their close.
   try {
-    const existing = await verifyPiRuntimeArtifact(copiedDirectory);
+    const existing = await withBuildTiming('existing materialized runtime verification', () =>
+      verifyPiRuntimeArtifact(copiedDirectory));
     if (existing.identity !== selectedPiRuntime.identity) throw new Error('Output Pi runtime belongs to another selection.');
     return;
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;
   }
   await mkdir(copiedDirectory);
-  await copyArtifactEntries(sourceBeforeCopy.artifactDir, copiedDirectory);
+  await withBuildTiming('verified runtime artifact copy', () =>
+    copyArtifactEntries(sourceBeforeCopy.artifactDir, copiedDirectory));
 
-  const [sourceAfterCopy, copied] = await Promise.all([
-    verifyPiRuntimeArtifact(selectedPiRuntime.artifactDir),
-    verifyPiRuntimeArtifact(copiedDirectory),
-  ]);
+  const [sourceAfterCopy, copied] = await withBuildTiming('post-copy runtime verification (parallel wall)', () => Promise.all([
+    withBuildTiming('post-copy source verification', () => verifyPiRuntimeArtifact(selectedPiRuntime.artifactDir)),
+    withBuildTiming('copied runtime verification', () => verifyPiRuntimeArtifact(copiedDirectory)),
+  ]));
   if (sourceAfterCopy.identity !== selectedPiRuntime.identity) {
     throw new Error('Verified --pi-runtime source identity changed while it was copied.');
   }
@@ -252,14 +301,14 @@ async function materializeSelectedPiRuntime() {
 
 async function publishToInstalledExtension() {
   await assertFreshSelection();
-  await verifyCoordinatedBuildIdentity();
+  await withBuildTiming('publication input identity verification', () => verifyCoordinatedBuildIdentity());
   await materializeSelectedPiRuntime();
   await assertFreshSelection();
   if (noSync) return;
 
   // Never mutate a loaded runtime: publish complete immutable output, then
   // let the startup loader select it on the next natural extension activation.
-  await verifyCoordinatedBuildIdentity();
+  await withBuildTiming('pre-publication identity verification', () => verifyCoordinatedBuildIdentity());
   if (watchMode && !skipTypecheck) {
     await runTypecheck('Validating runtime publication');
   }
@@ -270,20 +319,21 @@ async function publishToInstalledExtension() {
   // Source-default generations carry their verified runtime, not a machine's
   // legacy packaged SDK path.
   await assertFreshSelection();
-  const staged = await publishRuntimeGeneration({ sourceOutDir: outDir, extensionDir: extDir, identity: pkg });
+  const staged = await withBuildTiming('full runtime publication', () =>
+    publishRuntimeGeneration({ sourceOutDir: outDir, extensionDir: extDir, identity: pkg }));
   console.log(`[build] Staged complete runtime ${staged.generation} → ${extDir}`);
   if (activate) {
-    await installRuntimeBootstrap({ extensionDir: extDir, pkg });
+    await withBuildTiming('startup loader publication', () => installRuntimeBootstrap({ extensionDir: extDir, pkg }));
     console.log('[build] Startup loader installed. Restart VS Code when convenient to load the staged runtime; active sessions were not interrupted.');
   }
 
   await assertFreshSelection();
-  const published = await publishRendererGeneration({
+  const published = await withBuildTiming('renderer publication', () => publishRendererGeneration({
     sourceDir: path.join(outDir, webviewRelativeDir),
     extensionDir: extDir,
-  });
+  }));
   console.log(`[build] Published renderer generation ${published.generation} → ${extDir}`);
-  await reportInstalledHostStatus(extDir, pkg);
+  await withBuildTiming('installed host status reporting', () => reportInstalledHostStatus(extDir, staged));
 }
 
 function scheduleRendererPublication() {
@@ -295,7 +345,9 @@ function scheduleRendererPublication() {
   syncTimer = setTimeout(() => {
     syncTimer = undefined;
     syncQueue = syncQueue
-      .then(() => publicationPaused || cancellation.signal.aborted ? undefined : publishToInstalledExtension())
+      .then(() => publicationPaused || cancellation.signal.aborted
+        ? undefined
+        : withBuildTiming('publication pipeline', () => publishToInstalledExtension()))
       .catch((error) => {
         console.error('[build] Failed to sync installed extension output', error);
       });
@@ -344,10 +396,12 @@ function waitForChild(child, label) {
 }
 
 function runViteBuild(args = []) {
-  // The default bundled config loader writes node_modules/.vite-temp before
-  // evaluating config. Runner evaluates it in memory instead.
-  const child = spawnLocalCli(viteCli, ['build', ...(isolatedOutput ? ['--configLoader', 'runner'] : []), ...args], `Running Vite build ${args.join(' ')}`.trim());
-  return waitForChild(child, 'Vite build');
+  return withBuildTiming(`Vite build ${args.includes('--mode') ? args[args.indexOf('--mode') + 1] : 'webview'}`, () => {
+    // The default bundled config loader writes node_modules/.vite-temp before
+    // evaluating config. Runner evaluates it in memory instead.
+    const child = spawnLocalCli(viteCli, ['build', ...(isolatedOutput ? ['--configLoader', 'runner'] : []), ...args], `Running Vite build ${args.join(' ')}`.trim());
+    return waitForChild(child, 'Vite build');
+  });
 }
 
 function runViteWatch(mode) {
@@ -368,14 +422,17 @@ function createBuildTypecheckOverlay() {
 }
 
 async function runTypecheck(label) {
-  const overlay = createBuildTypecheckOverlay();
+  const finishTiming = startBuildTiming(label);
+  let overlay;
   try {
+    overlay = createBuildTypecheckOverlay();
     const buildInfoArgs = isolatedOutput
       ? ['--tsBuildInfoFile', path.join(outDir, '.cache', 'typecheck', 'extension.tsbuildinfo')]
       : [];
     await waitForChild(spawnLocalCli(tscCli, ['--noEmit', '--project', overlay.configPath, ...buildInfoArgs], label), 'TypeScript check');
   } finally {
-    overlay.dispose();
+    overlay?.dispose();
+    finishTiming();
   }
 }
 
@@ -421,27 +478,102 @@ async function typecheck() {
   }
 }
 
-async function buildOnce() {
+async function findReusableMaterializedRuntime() {
+  if (!selectedPiRuntime) return null;
+
+  let outputInfo;
+  try {
+    outputInfo = await lstat(outDir);
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+  if (outputInfo.isSymbolicLink() || !outputInfo.isDirectory()) return null;
+
+  const copiedDirectory = path.join(outDir, 'pi-runtime');
+  let copiedInfo;
+  try {
+    copiedInfo = await lstat(copiedDirectory);
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+  if (copiedInfo.isSymbolicLink() || !copiedInfo.isDirectory()) return null;
+
+  let verified;
+  try {
+    verified = await withBuildTiming('pre-clean materialized runtime verification', () =>
+      verifyPiRuntimeArtifact(copiedDirectory));
+  } catch {
+    // An incomplete, corrupt, or symlink-containing cache is not reusable.
+    // buildOnce will remove the entire output just as it did before this cache.
+    return null;
+  }
+  if (verified.identity !== selectedPiRuntime.identity) return null;
+  return { ...verified, dev: copiedInfo.dev, ino: copiedInfo.ino };
+}
+
+async function prepareOneShotOutput() {
   if (isolatedOutput) {
     // Claim the leaf exclusively before any build writes. No recursive cleanup
     // in isolated mode, even if another process creates it after validation.
     await mkdir(outDir);
-  } else {
-    await rm(outDir, { recursive: true, force: true });
-    await mkdir(outDir, { recursive: true });
+    return;
   }
+
+  const reusableRuntime = await findReusableMaterializedRuntime();
+  // The pre-clean artifact verification may take time. Do not clear output if
+  // the selected checkout inputs became stale while it was running.
+  await assertFreshSelection();
+
+  if (reusableRuntime) {
+    const copiedDirectory = path.join(outDir, 'pi-runtime');
+    let stillVerifiedPath = false;
+    try {
+      const [outputInfo, copiedInfo, copiedRealPath] = await Promise.all([
+        lstat(outDir),
+        lstat(copiedDirectory),
+        realpath(copiedDirectory),
+      ]);
+      stillVerifiedPath = !outputInfo.isSymbolicLink() && outputInfo.isDirectory()
+        && !copiedInfo.isSymbolicLink() && copiedInfo.isDirectory()
+        && copiedInfo.dev === reusableRuntime.dev && copiedInfo.ino === reusableRuntime.ino
+        && copiedRealPath === reusableRuntime.artifactDir;
+    } catch {
+      // Fall back to the established full output reset if the verified path
+      // disappeared or changed while it was being checked.
+    }
+
+    if (stillVerifiedPath) {
+      for (const entry of await readdir(outDir)) {
+        if (entry !== 'pi-runtime') {
+          // rm unlinks symlinks rather than traversing their targets.
+          await rm(path.join(outDir, entry), { recursive: true, force: true });
+        }
+      }
+      retainedRuntimeOutput = reusableRuntime;
+      return;
+    }
+  }
+
+  retainedRuntimeOutput = undefined;
+  await rm(outDir, { recursive: true, force: true });
+  await mkdir(outDir, { recursive: true });
+}
+
+async function buildOnce() {
+  await prepareOneShotOutput();
 
   await typecheck();
 
-  const bundles = await Promise.allSettled([
+  const bundles = await withBuildTiming('parallel Vite builds wall time', () => Promise.allSettled([
     runViteBuild(['--mode', 'node', '--emptyOutDir=false']),
     runViteBuild(),
-  ]);
+  ]));
   const failed = bundles.find((result) => result.status === 'rejected');
   if (failed) throw failed.reason;
-  await materializeSelectedPiRuntime();
-  await verifyCoordinatedBuildIdentity();
-  await publishToInstalledExtension();
+  await withBuildTiming('built output identity verification', () => verifyCoordinatedBuildIdentity());
+  await withBuildTiming('publication pipeline', () => publishToInstalledExtension());
 }
 
 function pausePublication() {
@@ -543,24 +675,44 @@ try {
   if (watchMode && requestedPiRuntime) console.log('[build] Watch Pi runtime is explicitly pinned; it does not follow mutable Pi sources.');
   do {
     try {
-      selectedInputFingerprint = fingerprint ? await readFingerprint() : undefined;
-      await withPiRuntime({ artifactDir: requestedPiRuntime, signal: cancellation.signal }, async (context) => {
-        selectedPiRuntime = context;
-        children = [];
-        publicationPaused = false;
-        try {
-          if (watchMode) await watchSelection();
-          else {
-            await assertFreshSelection();
-            await buildOnce();
+      selectedInputFingerprint = fingerprint
+        ? await withBuildTiming('Pi source input fingerprint', () => readFingerprint())
+        : undefined;
+      const finishSelectionTiming = startBuildTiming(requestedPiRuntime
+        ? 'explicit Pi runtime selection verification'
+        : 'Pi runtime acquisition and verification');
+      try {
+        await withPiRuntime({ artifactDir: requestedPiRuntime, signal: cancellation.signal }, async (context) => {
+          if (requestedPiRuntime) {
+            const [canonicalRuntime, canonicalOutput] = await Promise.all([
+              canonicalPath(context.artifactDir),
+              canonicalPath(outDir),
+            ]);
+            if (containsPath(canonicalRuntime, canonicalOutput) || containsPath(canonicalOutput, canonicalRuntime)) {
+              throw new Error('--output-dir must not overlap the verified --pi-runtime artifact.');
+            }
           }
-        } finally {
-          pausePublication();
-          await syncQueue;
-          await drainChildren({ stop: true });
-          context.confirmChildCompletion();
-        }
-      });
+          finishSelectionTiming();
+          selectedPiRuntime = context;
+          retainedRuntimeOutput = undefined;
+          children = [];
+          publicationPaused = false;
+          try {
+            if (watchMode) await watchSelection();
+            else {
+              await assertFreshSelection();
+              await buildOnce();
+            }
+          } finally {
+            pausePublication();
+            await syncQueue;
+            await drainChildren({ stop: true });
+            context.confirmChildCompletion();
+          }
+        });
+      } finally {
+        finishSelectionTiming();
+      }
     } catch (error) {
       if (!watchMode || !SourceInstability || !(error instanceof SourceInstability)) throw error;
       // The selection callback has already paused publication and drained ALL

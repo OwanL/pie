@@ -1,35 +1,40 @@
-import { spawnSync } from "node:child_process";
+#!/usr/bin/env node
+
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawnCliSync } from "../lib/subprocess.mjs";
+import { withDevelopmentWriter } from "../../lib/development-runtime/lifetime.mjs";
 import { repoRoot } from "./toolchain.mjs";
 
-const npmInvocation = (args, cwd, stdio) => {
-  const command = process.platform === "win32" ? (process.env.ComSpec ?? "cmd.exe") : "npm";
-  const commandArgs = process.platform === "win32"
-    ? ["/d", "/s", "/c", "npm", ...args]
-    : args;
-  return spawnSync(command, commandArgs, { cwd, stdio });
-};
-
-for (const directory of ["application/hosts/vscode", "analytics/analysis", "extensions/computer-use", "extensions/playwright"]) {
-  const cwd = `${repoRoot}/${directory}`;
-  const installed = npmInvocation(["ls", "--depth=0", "--include=dev"], cwd, "ignore");
-  if (installed.status === 0) {
-    console.log(`==> ${directory}/ dependencies already satisfy the package manifest`);
-    continue;
-  }
-  console.log(`\n==> Installing locked dependencies in ${directory}/`);
-  // npm install uses the committed lockfile while repairing an incomplete tree;
-  // unlike npm ci it does not destructively replace a VS Code-locked esbuild binary.
-  const result = npmInvocation(["install", "--include=dev"], cwd, "inherit");
-  if (result.status !== 0) process.exit(result.status ?? 1);
+/** The one repository-wide dependency setup; workspaces share the root lockfile. */
+export function buildRootInstallStep(root = repoRoot) {
+  return {
+    command: "proto",
+    args: ["run", "pnpm", "--", "install", "--frozen-lockfile", "--ignore-scripts"],
+    cwd: root,
+  };
 }
 
-// The playwright extension owns an independent runtime lockfile and an explicit
-// install of its pinned Chromium build. The CLI skips a revision that is
-// already present, and it never falls back to a machine Chrome/Edge at runtime.
-const playwrightDir = `${repoRoot}/extensions/playwright`;
-const chromiumInstall = npmInvocation(["exec", "--", "playwright", "install", "chromium"], playwrightDir, "inherit");
-if (chromiumInstall.status !== 0) {
-  console.error("\nFailed to install the Playwright-pinned Chromium build for extensions/playwright.");
-  console.error("Retry with: cd extensions/playwright && npx playwright install chromium");
-  process.exit(chromiumInstall.status ?? 1);
+/** Run the shared setup with an injectable process boundary for fixture tests. */
+export async function runRootInstall({ root = repoRoot, spawn = spawnCliSync, stdio = "inherit" } = {}) {
+  const step = buildRootInstallStep(root);
+  const workspace = path.join(root, "harness", "pi");
+  return withDevelopmentWriter(workspace, () => {
+    console.log(`\n==> ${step.command} ${step.args.join(" ")}`);
+    const result = spawn(step.command, step.args, { cwd: step.cwd, stdio });
+    if (result.error) throw result.error;
+    if (result.status !== 0) {
+      const error = new Error(`proto ${step.args.join(" ")} failed with exit code ${result.status ?? 1}`);
+      error.exitCode = result.status ?? 1;
+      throw error;
+    }
+    return step;
+  });
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  runRootInstall().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = typeof error?.exitCode === "number" ? error.exitCode : 1;
+  });
 }

@@ -6,8 +6,9 @@ import {
   createTokenRateAccumulator,
   tickTokenRate,
   WINDOW_MS,
-} from '../../analytics/use-token-rate';
-import { computeIdleDisplayState, IDLE_STATE } from '../../../backend/analytics-views/token-rate';
+  computeIdleDisplayState,
+  IDLE_STATE,
+} from '../../../backend/analytics-views/token-rate';
 import { encode as bpeEncode, decode as bpeDecode } from 'gpt-tokenizer/encoding/cl100k_base';
 
 const BASE_NOW = 1_700_000_0000;

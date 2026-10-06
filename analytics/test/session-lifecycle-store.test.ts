@@ -8,9 +8,11 @@ import test from 'node:test';
 
 import {
   SessionLifecycleStore,
+  requireWriterIdentity as requireHarnessWriterIdentity,
   sessionRetentionDeadline,
   storageCutoffRootCapability,
 } from '../../harness/session-storage/lifecycle/session-lifecycle-store.js';
+import { requireWriterIdentity } from '../contracts/session-lifecycle-writer.js';
 import { createSessionLifecycleWriterAdmission } from '../authority/session-lifecycle-writer-store.js';
 import {
   SessionExpiryScheduler,
@@ -22,6 +24,24 @@ function tempDatabase(): { root: string; databasePath: string } {
   const root = mkdtempSync(path.join(tmpdir(), 'pie-session-lifecycle-'));
   return { root, databasePath: path.join(root, 'lifecycle.sqlite') };
 }
+
+test('analytics-owned writer identity validation preserves the lifecycle-store re-export', () => {
+  const identity = {
+    hostInstanceId: 'writer-host',
+    workspaceId: 'writer-workspace',
+    generationId: 'writer-generation',
+    buildId: 'writer-build',
+    processId: 42,
+  };
+  assert.deepEqual(requireWriterIdentity(identity, 'writer identity'), identity);
+  assert.deepEqual(requireHarnessWriterIdentity(identity, 'writer identity'), identity);
+  assert.throws(() => requireWriterIdentity(null as never, 'writer identity'), /writer identity is invalid/u);
+  assert.throws(() => requireWriterIdentity({ ...identity, hostInstanceId: '' }, 'writer identity'), /hostInstanceId is required/u);
+  assert.throws(() => requireWriterIdentity({ ...identity, workspaceId: 'x\u0000y' }, 'writer identity'), /cannot contain NUL/u);
+  assert.throws(() => requireWriterIdentity({ ...identity, buildId: 'x'.repeat(513) }, 'writer identity'), /bounded length/u);
+  assert.throws(() => requireWriterIdentity({ ...identity, processId: 0 }, 'writer identity'), /positive safe integer/u);
+  assert.throws(() => requireWriterIdentity({ ...identity, processId: Number.MAX_SAFE_INTEGER + 1 }, 'writer identity'), /positive safe integer/u);
+});
 
 test('schema-v1 lifecycle databases add every required close and update column', () => {
   const temp = tempDatabase();

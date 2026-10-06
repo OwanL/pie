@@ -1,4 +1,4 @@
-import test, { beforeEach } from 'node:test';
+import test, { afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { installDom } from '../helpers/dom';
@@ -27,7 +27,11 @@ beforeEach(() => {
   clearCollapsibleCache();
   container = document.createElement('div');
   document.body.appendChild(container);
-  return () => { render(null, container); container.remove(); };
+});
+
+afterEach(() => {
+  render(null, container);
+  container.remove();
 });
 
 test('Collapsible: open header references the body via aria-controls; body carries the matching id', () => {

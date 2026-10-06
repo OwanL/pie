@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import test, { after } from 'node:test';
+import test, { after, before } from 'node:test';
 
 import { buildDuckDbDatabase, runNamedDuckDbQuery } from '../scripts/duckdb.ts';
 import { prepareSourceAnalytics } from '../scripts/prepare.ts';
@@ -36,27 +36,32 @@ function makeDecision(opts: Partial<PruningSourceDecision> & { timestamp: string
   };
 }
 
-const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-pruning-cost-'));
-const dbPath = path.join(tempDir, 'usage.duckdb');
-const exportsDir = path.join(tempDir, 'exports');
+let tempDir: string | undefined;
+let dbPath: string | undefined;
 
-const fixture: SourceAnalyticsPayload = deepClone(await loadFixture());
-// Two cohorts: old-code (no code_version / estimate — predates the field) and
-// new-code (git SHA + locally-estimated input size + provider-reported usage).
-fixture.pruningDecisions = [
-  makeDecision({ timestamp: '2026-07-09T05:00:00.000Z', sessionPath: 'SENTINEL_SESSION_PATH_ALPHA', llmLatencyMs: 8000 }),
-  makeDecision({ timestamp: '2026-07-09T05:30:00.000Z', sessionPath: 'SENTINEL_SESSION_PATH_ALPHA', llmLatencyMs: 9000, codeVersion: 'abc1234', prepassInputEstimateTokens: 950, prepassInputTokens: 980, prepassOutputTokens: 60 }),
-  makeDecision({ timestamp: '2026-07-09T06:00:00.000Z', sessionPath: 'SENTINEL_SESSION_PATH_ALPHA', llmLatencyMs: 6000, codeVersion: 'abc1234', prepassInputEstimateTokens: 950, prepassInputTokens: 970, prepassOutputTokens: 55 }),
-];
+before(async () => {
+  tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-pruning-cost-'));
+  dbPath = path.join(tempDir, 'usage.duckdb');
+  const exportsDir = path.join(tempDir, 'exports');
 
-await buildDuckDbDatabase({ dbPath, exportsDir, prepared: prepareSourceAnalytics(fixture) });
+  const fixture: SourceAnalyticsPayload = deepClone(await loadFixture());
+  // Two cohorts: old-code (no code_version / estimate — predates the field) and
+  // new-code (git SHA + locally-estimated input size + provider-reported usage).
+  fixture.pruningDecisions = [
+    makeDecision({ timestamp: '2026-07-09T05:00:00.000Z', sessionPath: 'SENTINEL_SESSION_PATH_ALPHA', llmLatencyMs: 8000 }),
+    makeDecision({ timestamp: '2026-07-09T05:30:00.000Z', sessionPath: 'SENTINEL_SESSION_PATH_ALPHA', llmLatencyMs: 9000, codeVersion: 'abc1234', prepassInputEstimateTokens: 950, prepassInputTokens: 980, prepassOutputTokens: 60 }),
+    makeDecision({ timestamp: '2026-07-09T06:00:00.000Z', sessionPath: 'SENTINEL_SESSION_PATH_ALPHA', llmLatencyMs: 6000, codeVersion: 'abc1234', prepassInputEstimateTokens: 950, prepassInputTokens: 970, prepassOutputTokens: 55 }),
+  ];
+
+  await buildDuckDbDatabase({ dbPath, exportsDir, prepared: prepareSourceAnalytics(fixture) });
+});
 
 after(async () => {
-  await fs.rm(tempDir, { recursive: true, force: true });
+  if (tempDir !== undefined) await fs.rm(tempDir, { recursive: true, force: true });
 });
 
 test('pruning_prepass_cost: groups by code_version cohort and surfaces the new cost columns', async () => {
-  const rows = await runNamedDuckDbQuery(dbPath, 'pruning_prepass_cost');
+  const rows = await runNamedDuckDbQuery(dbPath!, 'pruning_prepass_cost');
   // Two cohorts: old-code (NULL code_version) + new-code ("abc1234").
   assert.equal(rows.length, 2, `expected 2 cohorts, got ${rows.length}: ${JSON.stringify(rows)}`);
 

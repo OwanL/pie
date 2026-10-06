@@ -14,15 +14,9 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import { loadModelPricing } from './pricing.js';
-import type { ModelPricingRecord } from './pricing-core.js';
+import type { CapturedPricingFacts, ModelPricingRecord } from '../../../analytics/contracts/model-pricing-facts.js';
 
-/** Loaded provider/model pricing facts plus the catalog identity they were
- *  captured from. `catalogVersion` is the sha256 of the active `models.json`
- *  content, matching the legacy settlement rate-snapshot provenance. */
-export interface CapturedPricingFacts {
-  readonly catalogVersion: string;
-  readonly map: ReadonlyMap<string, ModelPricingRecord[]>;
-}
+export type { CapturedPricingFacts } from '../../../analytics/contracts/model-pricing-facts.js';
 
 export interface CapturedPricingFactsLoaderDeps {
   /** Resolve the catalog directory containing `models.json` and the generated

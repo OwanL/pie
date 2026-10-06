@@ -1,10 +1,10 @@
-import type { ComposerInput } from '../../../harness/agent-processes/lib/rpc/composer-input.js';
+import type { AnalyticsInputKind } from '../../contracts/run-observation-inputs.js';
 
 export function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
-export function isInputKindArray(value: unknown): value is Array<ComposerInput['kind']> {
+export function isInputKindArray(value: unknown): value is AnalyticsInputKind[] {
   return Array.isArray(value)
     && value.every((item) => item === 'filesystemPathRef' || item === 'imageBlob' || item === 'fileBlob');
 }

@@ -2,6 +2,7 @@ import { symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { NodeExecutionEnv } from "../../src/harness/env/nodejs.ts";
+import type { ExecutionEnv } from "../../src/harness/types.ts";
 import {
 	formatPromptTemplateInvocation,
 	loadPromptTemplates,
@@ -26,6 +27,29 @@ describe("loadPromptTemplates", () => {
 			{ name: "one", description: "One template", content: "Hello $1" },
 			{ name: "two", description: "First line description", content: "First line description\nBody" },
 		]);
+	});
+
+	it("derives template names from Windows execution paths", async () => {
+		const filePath = "C:\\workspace\\prompts\\review.md";
+		const env = {
+			cwd: "C:\\workspace",
+			fileInfo: async (path: string) =>
+				path === filePath
+					? {
+							ok: true,
+							value: { name: "review.md", path, kind: "file", size: 0, mtimeMs: 0 },
+						}
+					: { ok: false, error: { code: "not_found", message: "missing", path } },
+			readTextFile: async (path: string) =>
+				path === filePath
+					? { ok: true, value: "---\ndescription: Review\n---\nReview body" }
+					: { ok: false, error: { code: "not_found", message: "missing", path } },
+		} as unknown as ExecutionEnv;
+
+		const { promptTemplates, diagnostics } = await loadPromptTemplates(env, filePath);
+
+		expect(diagnostics).toEqual([]);
+		expect(promptTemplates).toEqual([{ name: "review", description: "Review", content: "Review body" }]);
 	});
 
 	it("preserves source info for sourced prompt templates", async () => {
@@ -65,11 +89,23 @@ describe("loadPromptTemplates", () => {
 		});
 	});
 
-	it("loads explicit markdown files and symlinked files", async () => {
+	it("loads explicit markdown files and symlinked files", async ({ skip }) => {
 		const root = createTempDir();
 		const env = new NodeExecutionEnv({ cwd: root });
 		await env.writeFile("target.md", "---\ndescription: Target\n---\nTarget body");
-		await symlink(join(root, "target.md"), join(root, "link.md"));
+		try {
+			await symlink(
+				join(root, "target.md"),
+				join(root, "link.md"),
+				process.platform === "win32" ? "file" : undefined,
+			);
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code === "EPERM" || code === "ENOSYS") {
+				skip(`File symlink fixture unavailable (${code}); symlink creation is not supported here.`);
+			}
+			throw error;
+		}
 
 		const { promptTemplates } = await loadPromptTemplates(env, ["target.md", "link.md"]);
 

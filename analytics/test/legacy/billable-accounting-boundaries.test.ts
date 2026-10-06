@@ -10,6 +10,7 @@ import { createInitialArchState, type ArchState } from '../../../application/bac
 import { StatsService } from '../../../application/backend/analytics-views';
 import type { ToolCall } from '../../../application/lib/protocol/index.js';
 import type { SessionUsageSample, SessionUsageSnapshot } from '../../usage-accounting/session-usage';
+import { buildSubagentUsageSamples } from '../../../harness/session-storage/transcripts/session-usage-adapter.js';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 
@@ -152,6 +153,8 @@ test('accounting adaptation lives in the billable-accounting module, not the Sta
   // Captured-rate handoff: the application composition constructs the
   // provider-owned loader; analytics never loads the catalog itself.
   assert.match(facade, /new CapturedPricingFactsLoader\(/);
+  assert.match(facade, /resolveInvocationPricing: resolveCapturedInvocationPricing/);
+  assert.match(facade, /buildSubagentUsageSamples\(toolCall\)/);
   // Ownership: the adaptation logic lives in BillableAccounting, not the façade.
   assert.doesNotMatch(facade, /private (?:async )?(?:appendUsageSample|migrateHistoricalRunUsage|pricingFor|recordInvocationActivity|persistInvocationRecord)\b/);
   assert.doesNotMatch(facade, /function (?:pruningUsageSamples|stableInvocationId|calculatedCost)\b/);
@@ -172,9 +175,13 @@ test('accounting adaptation lives in the billable-accounting module, not the Sta
   // The accounting module owns the durable ledger/timeline and stays acyclic.
   assert.match(accounting, /new BillableInvocationLedger/);
   assert.match(accounting, /new ActivityTimeline/);
-  // Captured-rate handoff: settlement consumes provider-loaded pricing facts
-  // and never resolves a runtime catalog (models.json/pricing-history) itself.
-  assert.match(accounting, /captured-pricing-facts\.js'/);
+  assert.doesNotMatch(accounting, /buildSubagentUsageSamples|message-contract\.js/);
+  // Pricing ownership is explicit: settlement keeps the captured-facts
+  // callback and delegates through the injected provider-owned resolver.
+  assert.match(accounting, /getCapturedPricingFacts\(\)/);
+  assert.match(accounting, /resolveInvocationPricing\(/);
+  assert.doesNotMatch(accounting, /pricingForPromptTokens|resolveApplicablePricing|capturedModelFact|function evidenceInterval\b|function calculatedCost\b/);
+  assert.doesNotMatch(accounting, /harness\/model-providers\/pricing/);
   assert.doesNotMatch(accounting, /loadModelPricing/);
   assert.doesNotMatch(accounting, /model-pricing-history/);
   assert.doesNotMatch(accounting, /node:fs'/);
@@ -183,6 +190,8 @@ test('accounting adaptation lives in the billable-accounting module, not the Sta
   assert.ok(accountingImports.every((target) => !target.includes('stats-service')),
     'billable accounting must not import the run-observation façade');
   assert.ok(accountingImports.every((target) => !target.includes('aggregate-stats-service')));
+  assert.ok(accountingImports.every((target) => !target.includes('harness/model-providers/pricing')),
+    'analytics accounting must not import provider pricing runtime modules');
 });
 
 test('analytics production owners do not import application implementation modules', async () => {
@@ -296,7 +305,7 @@ test('StatsService façade forwards accounting events with the same evidence as 
         ): void;
         observeAutoRetry(sessionPath: string, timing?: typeof RETRY_TIMING): void;
         observeSkillPruningUsage(sessionPath: string, messageId: string, occurredAt: string, details: unknown): void;
-        observeSubagentToolResult(sessionPath: string, toolCall: ToolCall): void;
+        observeSubagentToolResult(sessionPath: string, toolCallId: string, samples: SessionUsageSample[]): void;
         observeSessionUsageSnapshot(
           sessionPath: string,
           sessionId: string | undefined,
@@ -322,7 +331,12 @@ test('StatsService façade forwards accounting events with the same evidence as 
     accounting.observeAutoRetry(SESSION_PATH, RETRY_TIMING);
     accounting.observeAuxiliaryLlmUsage(SESSION_PATH, FAILED_ASSISTANT_SAMPLE);
     accounting.observeSkillPruningUsage(SESSION_PATH, 'message-p', new Date(OCCURRED_BASE + 400).toISOString(), PRUNING_DETAILS);
-    accounting.observeSubagentToolResult(SESSION_PATH, subagentToolCall());
+    const directSubagentTool = subagentToolCall();
+    accounting.observeSubagentToolResult(
+      SESSION_PATH,
+      directSubagentTool.id,
+      buildSubagentUsageSamples(directSubagentTool),
+    );
     accounting.observeSessionUsageSnapshot(SESSION_PATH, 'session-parity', SNAPSHOT);
 
     const facadeRecords = facadeStats.getBillableInvocationRecords();

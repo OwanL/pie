@@ -5,7 +5,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { memo } from 'preact/compat';
 
 import type { ActiveRunSummary, ExtensionUIRequestPayload, SessionCatalogProgress, SessionSummary } from '../../lib/protocol/index.js';
-import { derivePinnedItems, findPinnedGroupIndex } from './tab-behavior';
+import { derivePinnedItems, findPinnedGroupIndex } from '../../lib/session-tabs/tab-behavior.js';
 import { DropGap } from './drop-gap';
 import { FloatingSessionTab } from './floating-session-tab';
 import { SessionTab } from './session-tab';

@@ -13,7 +13,9 @@ import {
 
 /** SHAPE-ONLY descriptor for mock transport tests. Never verification evidence,
  * and never pass it to real SDK verification, import, or bootstrap. */
-export function createSyntheticSourceTestSdkRuntime(sdkPath: string): SdkRuntimeSelection {
+type SourceArtifactSdkRuntimeSelection = Extract<SdkRuntimeSelection, { kind: 'source-artifact' }>;
+
+export function createSyntheticSourceTestSdkRuntime(sdkPath: string): SourceArtifactSdkRuntimeSelection {
   if (!path.isAbsolute(sdkPath)) throw new TypeError('Synthetic SDK path must be absolute.');
   return {
     kind: 'source-artifact',
@@ -42,7 +44,7 @@ export function createSyntheticSourceTestSdkRuntime(sdkPath: string): SdkRuntime
 /** Build a descriptor from a read-only immutable artifact for real child tests. */
 export async function createSourceArtifactTestSdkRuntime(artifactDir: string): Promise<{
   readonly sdkPath: string;
-  readonly sdkRuntime: SdkRuntimeSelection;
+  readonly sdkRuntime: SourceArtifactSdkRuntimeSelection;
 }> {
   const verified = await verifyPiRuntimeArtifact(artifactDir, { target: currentBackendTarget() });
   const sdkPath = await realpath(path.join(verified.artifactDir, PI_RUNTIME_SDK_RELATIVE_PATH));

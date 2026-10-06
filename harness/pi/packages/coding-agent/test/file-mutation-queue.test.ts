@@ -1,10 +1,25 @@
-import { access, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { join, resolve } from "node:path";
+import { afterEach, describe, expect, it, type TestContext } from "vitest";
 import { createEditTool } from "../src/core/tools/edit.ts";
 import { withFileMutationQueue } from "../src/core/tools/file-mutation-queue.ts";
 import { createWriteTool } from "../src/core/tools/write.ts";
+
+async function createFileSymlink(target: string, link: string, context: TestContext): Promise<void> {
+	try {
+		await symlink(target, link, "file");
+	} catch (error) {
+		if (process.platform === "win32" && (error as NodeJS.ErrnoException).code === "EPERM") {
+			context.skip("Windows file symlink creation returned EPERM; requires Developer Mode or symlink privilege");
+		}
+		throw error;
+	}
+}
+
+async function createDirectoryAlias(target: string, link: string): Promise<void> {
+	await symlink(resolve(target), link, process.platform === "win32" ? "junction" : "dir");
+}
 
 function delay(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
@@ -74,12 +89,12 @@ describe("withFileMutationQueue", () => {
 		expect(order.indexOf("b:start")).toBeLessThan(order.indexOf("a:end"));
 	});
 
-	it("uses the same queue for symlink aliases", async () => {
+	it("uses the same queue for symlink aliases", async (context) => {
 		const dir = await createTempDir();
 		const targetPath = join(dir, "target.txt");
 		const symlinkPath = join(dir, "alias.txt");
 		await writeFile(targetPath, "hello\n", "utf8");
-		await symlink(targetPath, symlinkPath);
+		await createFileSymlink(targetPath, symlinkPath, context);
 
 		const order: string[] = [];
 		await Promise.all([
@@ -94,6 +109,34 @@ describe("withFileMutationQueue", () => {
 			}),
 		]);
 
+		expect(order).toEqual(["target:start", "target:end", "alias:start", "alias:end"]);
+	});
+});
+
+describe("directory aliases", () => {
+	it("uses the same queue for files reached through a directory alias", async () => {
+		const dir = await createTempDir();
+		const targetDir = join(dir, "target");
+		const aliasDir = join(dir, "alias");
+		await mkdir(targetDir);
+		const targetPath = join(targetDir, "file.txt");
+		const aliasPath = join(aliasDir, "file.txt");
+		await writeFile(targetPath, "hello\n", "utf8");
+		await createDirectoryAlias(targetDir, aliasDir);
+		expect(await realpath(aliasPath)).toBe(await realpath(targetPath));
+
+		const order: string[] = [];
+		await Promise.all([
+			withFileMutationQueue(targetPath, async () => {
+				order.push("target:start");
+				await delay(30);
+				order.push("target:end");
+			}),
+			withFileMutationQueue(aliasPath, async () => {
+				order.push("alias:start");
+				order.push("alias:end");
+			}),
+		]);
 		expect(order).toEqual(["target:start", "target:end", "alias:start", "alias:end"]);
 	});
 });

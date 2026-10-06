@@ -12,24 +12,16 @@ import type {
   BillableInvocationRecord,
 } from '../../usage-accounting/billable-invocation';
 import {
-  buildSubagentUsageSamples,
   sessionUsageSnapshotFromLedger,
   type SessionUsageSample,
   type SessionUsageSnapshot,
 } from '../../usage-accounting/session-usage';
 import type { AssistantUsage } from '../../contracts/legacy-run-analytics-contracts.js';
-import type { ToolCall } from '../../../harness/agent-processes/lib/rpc/message-contract.js';
-import type { AuxiliaryLlmUsagePayload } from '../../../harness/agent-processes/lib/rpc/session-events.js';
+import type { AnalyticsAuxiliaryLlmUsageObservation } from '../../contracts/run-observation-inputs.js';
 import { BillableInvocationLedger } from '../billable-invocation-ledger/service';
 import { ActivityTimeline } from '../activity-timeline/service';
-import type { CapturedPricingFacts } from '../../../harness/model-providers/pricing/captured-pricing-facts.js';
-import {
-  pricingForPromptTokens,
-  resolveApplicablePricing,
-  type ModelTokenPricing,
-  type PricingIntervalEvidence,
-} from '../../../harness/model-providers/pricing/pricing-core.js';
-import { capturedModelFact } from '../../usage-accounting/model-identity-facts.js';
+import type { CapturedPricingFacts } from '../../contracts/model-pricing-facts.js';
+import type { InvocationPricingResolver } from '../../contracts/invocation-pricing-resolver.js';
 import type { RunAnalyticsExportPayload } from '../run-analytics/query';
 import type { CanonicalProviderSettlement } from '../../capture/canonical-capture.js';
 
@@ -118,6 +110,7 @@ export interface BillableAccountingDeps {
    *  resolves runtime catalogs itself. Absent facts leave rows explicitly
    *  unpriced. */
   getCapturedPricingFacts: () => CapturedPricingFacts | undefined;
+  resolveInvocationPricing: InvocationPricingResolver;
   isPrivateSession: (sessionPath: string) => boolean;
   sessionIdentity: (
     sessionPath: string,
@@ -515,84 +508,86 @@ export class BillableAccounting {
     }
   }
 
-  /** Subagent tool results carry per-child usage samples that become
-   *  `subagent` ledger rows before terminal transport compaction loses them. */
-  observeSubagentToolResult(sessionPath: string, toolCall: ToolCall): void {
-    if (typeof toolCall.name === 'string' && toolCall.name.trim().toLowerCase() === 'subagent') {
-      const reconciledCaptureGaps = new Set<string>();
-      for (const sample of buildSubagentUsageSamples(toolCall)) {
-        const receipt = sample.producerCaptureReceipt;
-        if (this.deps.canonicalCapture && !receipt) {
-          const evidenceIdentity = sample.producerAttemptId ?? sample.sourceId;
-          const executionId = `subagent-reconciliation:${toolCall.id}:${evidenceIdentity}`;
-          if (!reconciledCaptureGaps.has(executionId)) {
-            reconciledCaptureGaps.add(executionId);
-            const identity = this.deps.sessionIdentity(sessionPath);
-            this.deps.canonicalCapture.captureExecution(
-              {
-                sessionId: identity.sessionId,
-                sessionPath,
-                runId: this.deps.currentRunId(sessionPath),
-                operationId: this.deps.activeOperationId(sessionPath),
-              },
-              executionId,
-              'phase',
-              `${executionId}:capture-gap`,
-              stableEvidenceTime(sample.endedAt),
-              {
-                ...(sample.producerAttemptId ? { attemptId: sample.producerAttemptId } : {}),
-                parentToolCallId: toolCall.id,
-                operationKind: 'subagent-attempt',
-                source: 'host-terminal-reconciliation',
-                captureIncomplete: true,
-                reason: 'The child terminal result had no valid fact ownership receipt; parent aggregates are reconciliation only.',
-              },
-            );
-          }
-          continue;
+  /** Subagent usage samples have been adapted at the application boundary;
+   *  this owner applies ledger and canonical-settlement authority rules. */
+  observeSubagentToolResult(
+    sessionPath: string,
+    toolCallId: string,
+    samples: SessionUsageSample[],
+  ): void {
+    const reconciledCaptureGaps = new Set<string>();
+    for (const sample of samples) {
+      const receipt = sample.producerCaptureReceipt;
+      if (this.deps.canonicalCapture && !receipt) {
+        const evidenceIdentity = sample.producerAttemptId ?? sample.sourceId;
+        const executionId = `subagent-reconciliation:${toolCallId}:${evidenceIdentity}`;
+        if (!reconciledCaptureGaps.has(executionId)) {
+          reconciledCaptureGaps.add(executionId);
+          const identity = this.deps.sessionIdentity(sessionPath);
+          this.deps.canonicalCapture.captureExecution(
+            {
+              sessionId: identity.sessionId,
+              sessionPath,
+              runId: this.deps.currentRunId(sessionPath),
+              operationId: this.deps.activeOperationId(sessionPath),
+            },
+            executionId,
+            'phase',
+            `${executionId}:capture-gap`,
+            stableEvidenceTime(sample.endedAt),
+            {
+              ...(sample.producerAttemptId ? { attemptId: sample.producerAttemptId } : {}),
+              parentToolCallId: toolCallId,
+              operationKind: 'subagent-attempt',
+              source: 'host-terminal-reconciliation',
+              captureIncomplete: true,
+              reason: 'The child terminal result had no valid fact ownership receipt; parent aggregates are reconciliation only.',
+            },
+          );
         }
-        if (this.deps.canonicalCapture && receipt?.factStatus === 'rejected') {
-          if (!reconciledCaptureGaps.has(receipt.executionId)) {
-            reconciledCaptureGaps.add(receipt.executionId);
-            const identity = this.deps.sessionIdentity(sessionPath);
-            this.deps.canonicalCapture.captureExecution(
-              {
-                sessionId: identity.sessionId,
-                sessionPath,
-                runId: this.deps.currentRunId(sessionPath),
-                operationId: this.deps.activeOperationId(sessionPath),
-              },
-              receipt.executionId,
-              'phase',
-              `subagent-reconciliation:${receipt.stableOriginId}:capture-gap`,
-              stableEvidenceTime(sample.endedAt),
-              {
-                attemptId: receipt.attemptId,
-                parentToolCallId: toolCall.id,
-                operationKind: 'subagent-attempt',
-                source: 'host-terminal-reconciliation',
-                captureIncomplete: true,
-                reason: 'The child fact ownership handoff was rejected; terminal aggregates are reconciliation only.',
-                lastSubmittedSequence: receipt.lastSubmittedSequence,
-                lastAcknowledgedSequence: receipt.lastAcknowledgedSequence ?? null,
-                terminalDetailPayloadId: receipt.terminalDetailPayloadId,
-                terminalDetailComplete: receipt.terminalDetailComplete,
-              },
-            );
-          }
-          continue;
-        }
-        if (this.deps.canonicalCapture && receipt?.factStatus === 'submitted') {
-          // The child owns these facts. The durable read model projects them;
-          // retaining parent copies would duplicate history in the host.
-          continue;
-        }
-        this.appendUsageSample(sessionPath, sample, {
-          kind: 'subagent',
-          toolId: toolCall.id,
-          stableMissingTime: !!this.deps.canonicalCapture,
-        });
+        continue;
       }
+      if (this.deps.canonicalCapture && receipt?.factStatus === 'rejected') {
+        if (!reconciledCaptureGaps.has(receipt.executionId)) {
+          reconciledCaptureGaps.add(receipt.executionId);
+          const identity = this.deps.sessionIdentity(sessionPath);
+          this.deps.canonicalCapture.captureExecution(
+            {
+              sessionId: identity.sessionId,
+              sessionPath,
+              runId: this.deps.currentRunId(sessionPath),
+              operationId: this.deps.activeOperationId(sessionPath),
+            },
+            receipt.executionId,
+            'phase',
+            `subagent-reconciliation:${receipt.stableOriginId}:capture-gap`,
+            stableEvidenceTime(sample.endedAt),
+            {
+              attemptId: receipt.attemptId,
+              parentToolCallId: toolCallId,
+              operationKind: 'subagent-attempt',
+              source: 'host-terminal-reconciliation',
+              captureIncomplete: true,
+              reason: 'The child fact ownership handoff was rejected; terminal aggregates are reconciliation only.',
+              lastSubmittedSequence: receipt.lastSubmittedSequence,
+              lastAcknowledgedSequence: receipt.lastAcknowledgedSequence ?? null,
+              terminalDetailPayloadId: receipt.terminalDetailPayloadId,
+              terminalDetailComplete: receipt.terminalDetailComplete,
+            },
+          );
+        }
+        continue;
+      }
+      if (this.deps.canonicalCapture && receipt?.factStatus === 'submitted') {
+        // The child owns these facts. The durable read model projects them;
+        // retaining parent copies would duplicate history in the host.
+        continue;
+      }
+      this.appendUsageSample(sessionPath, sample, {
+        kind: 'subagent',
+        toolId: toolCallId,
+        stableMissingTime: !!this.deps.canonicalCapture,
+      });
     }
   }
 
@@ -784,14 +779,14 @@ export class BillableAccounting {
    *  caller can forward compatible run-analytics observations exactly once. */
   observeAuxiliaryLlmUsage(
     sessionPath: string,
-    sample: Omit<AuxiliaryLlmUsagePayload, 'sessionPath'>,
+    sample: AnalyticsAuxiliaryLlmUsageObservation,
   ): {
     channelsKnown: boolean;
     invocationId: string;
     kind: BillableInvocationKind;
     canonicalAccepted?: boolean;
     record?: BillableInvocationRecord;
-    sample: Omit<AuxiliaryLlmUsagePayload, 'sessionPath'>
+    sample: AnalyticsAuxiliaryLlmUsageObservation
       & { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number };
   } {
     const declaredPresence = sample.tokenChannelPresence;
@@ -1017,54 +1012,6 @@ export class BillableAccounting {
     };
   }
 
-  private pricingFor(
-    modelId: string | undefined,
-    provider: string | undefined,
-    usage: Pick<SessionUsageSample, 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheWriteTokens' | 'startedAt' | 'endedAt'>,
-  ): BillableInvocationRecord['pricing'] {
-    if (!modelId) return undefined;
-    // Captured facts are supplied by the provider pricing owner; the
-    // settlement never resolves a runtime catalog itself. Without facts the
-    // row stays explicitly unpriced.
-    const facts = this.deps.getCapturedPricingFacts();
-    if (!facts) return undefined;
-    const key = capturedModelFact(modelId, facts.map)?.factKey;
-    const records = key ? facts.map.get(key) : undefined;
-    // A matching provider wins; a unique record is unambiguous only when the
-    // provider dimension is absent. An explicitly named provider without a
-    // matching record stays unknown — never another provider's rate.
-    const pricing = provider
-      ? records?.find((record) => record.provider === provider)?.pricing
-      : records?.length === 1 ? records[0]?.pricing : undefined;
-    if (!pricing) return undefined;
-    // Shared eligibility resolution with the original observed timestamps:
-    // scheduled (peak-window) pricing applies only when both interval
-    // endpoints are valid and the interval lies entirely within one band,
-    // and unsupported cache-read usage stays unpriced. Missing or
-    // band-crossing evidence keeps the record explicitly unpriced.
-    const band = resolveApplicablePricing(pricing, {
-      interval: evidenceInterval(usage.startedAt, usage.endedAt),
-      cacheReadTokens: usage.cacheReadTokens,
-    });
-    if (!band) return undefined;
-    const effective = pricingForPromptTokens(
-      band,
-      usage.inputTokens,
-      usage.cacheReadTokens,
-      usage.cacheWriteTokens,
-    );
-    return {
-      catalogVersion: facts.catalogVersion,
-      calculatedCostUsd: calculatedCost(usage, effective),
-      rateSnapshot: {
-        inputTokensUsdPerMillion: effective.input,
-        outputTokensUsdPerMillion: effective.output,
-        cacheReadTokensUsdPerMillion: effective.cacheRead,
-        cacheWriteTokensUsdPerMillion: effective.cacheWrite,
-      },
-    };
-  }
-
   /** Persist one invocation row and its correlated activity interval as one
    *  workspace transaction. Returns whether the row was actually appended as
    *  a durable ordinary ledger row (private/process-local and duplicate rows
@@ -1157,7 +1104,12 @@ export class BillableAccounting {
     const gap = sample.instrumentationGap === true || sample.provenance === 'unknown' || !channelsKnown;
     const pricing = gap || !channelsKnown
       || sample.provenance === 'unpriced' || sample.provenance === 'unknown'
-      ? undefined : this.pricingFor(model, provider, sample);
+      ? undefined : this.deps.resolveInvocationPricing({
+        facts: this.deps.getCapturedPricingFacts(),
+        modelId: model,
+        provider,
+        usage: sample,
+      });
     const provenance = sample.provenance
       ?? (sample.reportedCostUsd !== undefined ? 'exact'
         : gap ? 'unknown'
@@ -1291,23 +1243,6 @@ function stableEvidenceTime(value: string | undefined): number {
   return Number.isFinite(parsed) && parsed >= 0 ? Math.trunc(parsed) : 0;
 }
 
-/** Evidence interval for pricing applicability, only when both observed
- *  endpoints are valid timestamps. Missing or invalid times stay missing —
- *  they are never repaired into synthesized timing evidence. */
-function evidenceInterval(
-  startedAt: string | undefined,
-  endedAt: string | undefined,
-): PricingIntervalEvidence | undefined {
-  if (!startedAt || !endedAt) return undefined;
-  const startedAtMs = Date.parse(startedAt);
-  const endedAtMs = Date.parse(endedAt);
-  if (!Number.isFinite(startedAtMs) || !Number.isFinite(endedAtMs)
-    || startedAtMs < 0 || endedAtMs < 0) {
-    return undefined;
-  }
-  return { startedAtMs, endedAtMs };
-}
-
 function normalizeInvocationTimes(
   startedAtValue: string | undefined,
   endedAtValue: string | undefined,
@@ -1337,16 +1272,6 @@ function stableInvocationId(sessionIdentity: string, kind: BillableInvocationKin
 function ledgerKind(kind: SessionUsageSample['kind']): BillableInvocationKind {
   if (kind === 'assistant') return 'conversation';
   return kind;
-}
-
-function calculatedCost(
-  usage: Pick<SessionUsageSample, 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheWriteTokens'>,
-  pricing: ModelTokenPricing,
-): number {
-  return (usage.inputTokens * pricing.input
-    + usage.outputTokens * pricing.output
-    + usage.cacheReadTokens * pricing.cacheRead
-    + usage.cacheWriteTokens * pricing.cacheWrite) / 1_000_000;
 }
 
 function pruningUsageSamples(messageId: string, occurredAt: string, details: unknown): SessionUsageSample[] {

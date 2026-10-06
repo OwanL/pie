@@ -1,7 +1,7 @@
 /**
  * MCP server discovery + per-server enable/disable, delegated to the pinned
- * `pi-mcp-adapter` package's own config module (settings.json#packages →
- * `npm:pi-mcp-adapter@2.20.1`).
+ * workspace-pinned `pi-mcp-adapter@2.20.1` config module. Interactive Pi
+ * package installation is not a build prerequisite.
  *
  * Rationale: the adapter is the authority on MCP config semantics — scope
  * precedence (`~/.config/mcp/mcp.json` → `~/.agents/*` → `<agent dir>/mcp.json`
@@ -9,8 +9,9 @@
  * lower-precedence-disabled nuance of the `disabled` field. Reimplementing any
  * of that here would drift. The adapter's `config.ts` is pure file I/O with no
  * side effects (unlike `index.ts`, whose default export instantiates the whole
- * adapter), so bundling it into the worker is safe. The version is pinned by
- * the package lock; a major adapter upgrade may require revisiting this import.
+ * adapter), so bundling it into the worker is safe. The config entry is not
+ * exported by the pinned package, so its workspace source path is explicit.
+ * The root pnpm lock pins these bytes; an adapter upgrade must check this import.
  *
  * Toggling writes ONLY the `disabled` field into `.pi/mcp.json` (the project
  * Pi-overrides layer) via the adapter's own writer — never server definitions
@@ -21,8 +22,8 @@ import {
   getProjectPiConfigPath,
   loadMcpConfig,
   writeProjectServerDisabledOverride,
-} from '../../../../npm/node_modules/pi-mcp-adapter/config.ts';
-import { isServerDisabled } from '../../../../npm/node_modules/pi-mcp-adapter/types.ts';
+} from '../../../../node_modules/pi-mcp-adapter/config.ts';
+import { isServerDisabled } from 'pi-mcp-adapter/types';
 
 /** Effective per-server view: name + merged `disabled` state. */
 export interface McpServerEntryView {

@@ -16,7 +16,7 @@ import type {
 } from '../../lib/protocol/index.js';
 import { formatToolResult } from '../transcript/tool-result-format.js';
 import { getSubagentResultEntries, type RawMessage } from '../../../harness/agent-processes/workers/subagent-result';
-import { estimateLiveAssistantOutputTokens } from '../../backend/analytics-views/token-rate';
+import { estimateLiveAssistantOutputTokens } from '../../lib/analytics/live-output-tokens.js';
 import {
   assistantUsageFromSample,
   type SessionUsageSnapshot,

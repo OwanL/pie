@@ -22,10 +22,17 @@ function callHandleCtrlZ(context: HandleCtrlZThis): void {
 }
 
 const interactiveModePrototype = InteractiveMode.prototype as unknown;
+const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
+
+function setPlatform(platform: NodeJS.Platform): void {
+	// handleCtrlZ reads this dynamically; no module reload or real OS/signal changes are needed.
+	Object.defineProperty(process, "platform", { configurable: true, value: platform });
+}
 
 describe("InteractiveMode.handleCtrlZ", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
+		Object.defineProperty(process, "platform", platformDescriptor);
 	});
 
 	test("shows a status message and skips suspend on Windows", () => {
@@ -36,26 +43,18 @@ describe("InteractiveMode.handleCtrlZ", () => {
 		};
 		const showStatus = vi.fn();
 		const context: HandleCtrlZThis & { showStatus: (message: string) => void } = { ui, showStatus };
-		const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
-		Object.defineProperty(process, "platform", {
-			configurable: true,
-			value: "win32",
-		});
+		setPlatform("win32");
 		const setIntervalSpy = vi.spyOn(globalThis, "setInterval");
 		const processOnSpy = vi.spyOn(process, "on");
 		const processOnceSpy = vi.spyOn(process, "once");
-		const processKillSpy = vi.spyOn(process, "kill");
+		const processKillSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
 
-		try {
-			callHandleCtrlZ(context);
-		} finally {
-			if (platformDescriptor) {
-				Object.defineProperty(process, "platform", platformDescriptor);
-			}
-		}
+		callHandleCtrlZ(context);
 
 		expect(showStatus).toHaveBeenCalledWith("Suspend to background is not supported on Windows");
 		expect(ui.stop).not.toHaveBeenCalled();
+		expect(ui.start).not.toHaveBeenCalled();
+		expect(ui.requestRender).not.toHaveBeenCalled();
 		expect(setIntervalSpy).not.toHaveBeenCalled();
 		expect(processOnSpy).not.toHaveBeenCalledWith("SIGINT", expect.any(Function));
 		expect(processOnceSpy).not.toHaveBeenCalledWith("SIGCONT", expect.any(Function));
@@ -63,6 +62,7 @@ describe("InteractiveMode.handleCtrlZ", () => {
 	});
 
 	test("keeps the process alive while suspended and restores the TUI on SIGCONT", () => {
+		setPlatform("linux");
 		const ui: FakeUi = {
 			start: vi.fn(),
 			stop: vi.fn(),
@@ -113,6 +113,7 @@ describe("InteractiveMode.handleCtrlZ", () => {
 	});
 
 	test("cleans up the temporary handlers if suspension fails", () => {
+		setPlatform("linux");
 		const ui: FakeUi = {
 			start: vi.fn(),
 			stop: vi.fn(),

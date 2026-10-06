@@ -14,6 +14,7 @@ import { CanonicalAnalyticsCapture } from '../../../../analytics/capture/canonic
 import { SqliteAnalyticsRecorder } from '../../../../analytics/recording/sqlite-recorder.js';
 import { BillableAccounting } from '../../../../analytics/legacy/billable-accounting/service.js';
 import { getSubagentBillingEntries } from '../../../agent-processes/workers/subagent-result.js';
+import { buildSubagentUsageSamples } from '../../../session-storage/transcripts/session-usage-adapter.js';
 import { captureSubagentTerminalResult } from '../analytics-capture.js';
 import { buildAttemptRecord } from '../retry.js';
 import type {
@@ -284,8 +285,16 @@ test('subagent producer facts reconcile through SQLite without terminal aggregat
       status: 'completed' as const,
       result: terminalResult,
     };
-    accounting.observeSubagentToolResult('/fixture/root.jsonl', terminalTool);
-    accounting.observeSubagentToolResult('/fixture/root.jsonl', terminalTool);
+    accounting.observeSubagentToolResult(
+      '/fixture/root.jsonl',
+      terminalTool.id,
+      buildSubagentUsageSamples(terminalTool),
+    );
+    accounting.observeSubagentToolResult(
+      '/fixture/root.jsonl',
+      terminalTool.id,
+      buildSubagentUsageSamples(terminalTool),
+    );
 
     const summary = recorder.readProviderAccountingSummary(rootSessionId);
     assert.equal(summary.invocationCount, 4);

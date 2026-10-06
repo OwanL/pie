@@ -1,5 +1,5 @@
 import type { ChatMessage, TranscriptWindow } from '../../lib/protocol/index.js';
-import { restoreToolCallResultsFromParts } from '../../frontend/transcript/message-parts.js';
+import { restoreToolCallResultsFromParts } from '../../lib/transcript/message-parts.js';
 import { normalizeTranscriptWindow } from './transcript-window';
 import { reconcileDurableMessageRenderMetadata } from '../conversation-state/live-pipeline/terminal-reconciliation';
 

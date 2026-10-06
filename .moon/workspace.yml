@@ -1,0 +1,31 @@
+$schema: 'https://moonrepo.dev/schemas/workspace.json'
+projects:
+  sources:
+    root: '.'
+    pi: 'harness/pi'
+    app-common: 'application/lib'
+    frontend: 'application/frontend'
+    backend: 'application/backend'
+    host-common: 'application/hosts/lib'
+    vscode: 'application/hosts/vscode'
+    browser: 'application/hosts/browser'
+    standalone: 'application/hosts/standalone'
+    analytics: 'analytics'
+    harness: 'harness'
+    computer-use: 'extensions/computer-use'
+    playwright: 'extensions/playwright'
+    analysis: 'analytics/analysis'
+    scripts: 'scripts'
+hasher:
+  ignorePatterns:
+    - '**/node_modules/**'
+    - '**/dist/**'
+    - '**/.cache/**'
+    - '**/coverage/**'
+    - '**/out/**'
+    - '**/out-dev/**'
+    - '**/data/**'
+    - '.moon/cache/**'
+vcs:
+  defaultBranch: 'master'
+  provider: 'github'

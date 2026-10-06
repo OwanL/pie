@@ -33,7 +33,7 @@ import type {
   WebviewToHostMessage,
   WorkingTimeState,
 } from '../../lib/protocol/index.js';
-import type { TokenRateIndicatorState } from '../../backend/analytics-views/token-rate';
+import type { TokenRateIndicatorState } from '../../lib/protocol/token-rate.js';
 import { describeComposerInputSummary } from '../composer/inputs';
 import { ComposerAttachments } from '../composer/attachments';
 import { ComposerToolbar } from '../composer/toolbar';

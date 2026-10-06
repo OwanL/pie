@@ -4,8 +4,8 @@ import path from 'node:path';
 import type {
   AnalyticsHostPage,
   AnalyticsHostRecord,
-} from './session-lifecycle-writer-store.js';
-import type { SessionLifecycleStore } from '../../harness/session-storage/lifecycle/session-lifecycle-store.js';
+  AnalyticsHostRegistryPort,
+} from '../contracts/session-lifecycle-writer.js';
 import {
   readProcessCensus,
   type BackendProcessOwnerEvidence,
@@ -96,7 +96,7 @@ export interface AnalyticsHostDiscoveryRecord {
 export interface AnalyticsHostDiscoveryOptions {
   workspaceId: string;
   /** Existing lifecycle authority; discovery never opens a second registry. */
-  registry: Pick<SessionLifecycleStore, 'listAnalyticsHosts'>;
+  registry: Pick<AnalyticsHostRegistryPort, 'listAnalyticsHosts'>;
   /** `<extension>/pie-runtime`, owned by runtime-generations.cjs. */
   runtimeRootPath: string;
   runtimeIdentity: RuntimeGenerationIdentity;
@@ -262,7 +262,7 @@ export async function readRuntimeLeaseEvidence(
 }
 
 async function readHostRegistry(
-  registry: Pick<SessionLifecycleStore, 'listAnalyticsHosts'>,
+  registry: Pick<AnalyticsHostRegistryPort, 'listAnalyticsHosts'>,
   workspaceId: string,
 ): Promise<{ hosts: readonly AnalyticsHostRecord[]; complete: boolean; reasons: readonly AnalyticsDiscoveryReason[] }> {
   const hosts: AnalyticsHostRecord[] = [];

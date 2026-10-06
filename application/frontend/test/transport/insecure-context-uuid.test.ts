@@ -19,7 +19,7 @@ import { storageWrites } from './setup-session-storage';
 import type { WebviewToHostMessage } from '../../../lib/protocol/index.js';
 import { PIE_BUILD_ID } from '../../../../lib/build-identity.js';
 import { WEBVIEW_PROTOCOL_VERSION } from '../../../lib/protocol/envelopes.js';
-import { createLocalMessageId } from '../../composer/local-message-id';
+import { createLocalMessageId } from '../../../lib/composer/local-message-id.js';
 import { BrowserClientTransport } from '../../transport/client-transport';
 
 // Augment the fake window installed above with the browser fields the

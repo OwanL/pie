@@ -1,9 +1,9 @@
 import type { HostToWebviewMessage, ViewState } from '../../../lib/protocol/index.js';
 import { PIE_BUILD_ID } from '../../../../lib/build-identity.js';
 import { WEBVIEW_PROTOCOL_VERSION } from '../../../lib/protocol/envelopes.js';
-import { omitRedundantToolCallMirrorForTransport } from '../../../frontend/transcript/message-parts.js';
-import { transcriptRenderSignature } from '../../../frontend/transcript/render-signature';
-import { isStreamDiagEnabled } from './stream-telemetry';
+import { omitRedundantToolCallMirrorForTransport } from '../../../lib/transcript/message-parts.js';
+import { transcriptRenderSignature } from '../../../lib/transcript/render-signature.js';
+import { isStreamDiagEnabled } from '../../../lib/stream-telemetry.js';
 
 /** Process-wide envelope identity. Delivery/dirty ownership lives exclusively
  * in StateDeliveryController. */

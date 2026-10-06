@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { cp, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {
@@ -238,6 +239,102 @@ test('symlinked payload directories and artifact roots are rejected without foll
   const rootLink = path.join(path.dirname(root), 'root-link');
   await symlink(root, rootLink, process.platform === 'win32' ? 'junction' : 'dir');
   await assert.rejects(verifyPiRuntimeArtifact(rootLink), /artifact root must be a real directory/);
+});
+
+test('rolling inspection refills freed slots and drains started siblings on failure', async (t) => {
+  // Inject only the filesystem import, leaving the production scanner unchanged
+  // and avoiding timing assumptions about disk speed or OS file locks.
+  const moduleUrl = (source) => `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
+  const fsUrl = moduleUrl(`
+    let fs;
+    export function setFs(value) { fs = value; }
+    export const lstat = (...args) => fs.lstat(...args);
+    export const readdir = (...args) => fs.readdir(...args);
+    export const readFile = (...args) => fs.readFile(...args);
+    export const realpath = (...args) => fs.realpath(...args);
+  `);
+  const injectedFs = await import(fsUrl);
+  const source = await readFile(new URL('../../../lib/pi-runtime/artifact.mjs', import.meta.url), 'utf8');
+  const { preparePiRuntimeManifest } = await import(moduleUrl(source.replace("'node:fs/promises'", JSON.stringify(fsUrl))));
+  const deferred = () => {
+    let resolve, reject;
+    const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+    return { promise, resolve, reject };
+  };
+  for (const fail of [false, true]) {
+    await t.test(fail ? 'failure drains siblings' : 'success refills a slot', { timeout: 10000 }, async (t) => {
+      const root = await fixture(t);
+      const ordinary = path.join(root, 'node_modules', 'ordinary');
+      await rm(ordinary, { recursive: true });
+      const names = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+      for (const name of names) await put(root, `node_modules/ordinary/${name}`, name);
+      const canonicalOrdinary = await fs.realpath(ordinary);
+      const gates = names.map(deferred);
+      const started = names.map(deferred);
+      const completed = names.map(deferred);
+      const admitted = [];
+      let active = 0;
+      let peak = 0;
+      injectedFs.setFs({
+        ...fs,
+        async readFile(file, ...args) {
+          if (path.dirname(file) !== canonicalOrdinary) return fs.readFile(file, ...args);
+          const index = names.indexOf(path.basename(file));
+          admitted.push(index);
+          peak = Math.max(peak, ++active);
+          started[index].resolve();
+          try {
+            await gates[index].promise;
+            return await fs.readFile(file, ...args);
+          } finally {
+            active -= 1;
+            completed[index].resolve();
+          }
+        },
+      });
+      let finished = false;
+      const inspection = preparePiRuntimeManifest(root, provenance);
+      const observed = inspection.then(
+        (value) => { finished = true; return { value }; },
+        (error) => { finished = true; return { error }; },
+      );
+      // Always release test-owned gates even if an assertion fails.
+      t.after(async () => {
+        for (const gate of gates) gate.resolve();
+        await observed;
+      });
+      await Promise.all(started.slice(0, 4).map((gate) => gate.promise));
+      assert.deepEqual(admitted, [0, 1, 2, 3]);
+      const failure = new Error('injected read failure');
+      if (fail) gates[1].reject(failure);
+      else gates[1].resolve();
+      if (fail) {
+        await completed[1].promise;
+        // Let the worker observe the rejection, without using a wall-clock wait.
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(finished, false);
+        assert.equal(active, 3);
+        assert.deepEqual(admitted, [0, 1, 2, 3]);
+        for (const index of [0, 2, 3]) gates[index].resolve();
+        assert.equal((await observed).error, failure);
+        assert.equal(active, 0);
+        assert.deepEqual(admitted, [0, 1, 2, 3]);
+      } else {
+        await started[4].promise;
+        assert.equal(active, 4);
+        assert.deepEqual(admitted, [0, 1, 2, 3, 4]);
+        assert.equal(finished, false);
+        for (const gate of gates) gate.resolve();
+        const result = await observed;
+        assert.ifError(result.error);
+        injectedFs.setFs(fs);
+        assert.deepEqual(result.value, await preparePiRuntimeManifest(root, provenance));
+        assert.deepEqual(admitted, names.map((_, index) => index));
+        assert.equal(active, 0);
+      }
+      assert.equal(peak, 4);
+    });
+  }
 });
 
 test('parallel inspection drains sibling file reads before failure cleanup', async (t) => {

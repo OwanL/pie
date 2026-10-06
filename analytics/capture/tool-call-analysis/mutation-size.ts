@@ -1,4 +1,4 @@
-import type { ToolCall } from '../../../harness/agent-processes/lib/rpc/message-contract.js';
+import type { ToolCallAnalysisInput } from '../../contracts/tool-call-analysis-input.js';
 import { normalizeToolCallName } from './summary';
 import { isRecord } from '../../../lib/validation/type-guards';
 import type { EditSizeStats } from './mutation-types';
@@ -272,7 +272,7 @@ export function getEditStatsFromInput(input: Record<string, unknown>): EditSizeS
   return patchText ? editStatsFromPatchText(patchText) : null;
 }
 
-function readSizeHintFromToolCall(toolCall: ToolCall): string | null {
+function readSizeHintFromToolCall(toolCall: ToolCallAnalysisInput): string | null {
   if (!isRecord(toolCall.input)) {
     return null;
   }
@@ -299,7 +299,7 @@ function readSizeHintFromToolCall(toolCall: ToolCall): string | null {
   return formatLineHint('', lineCount);
 }
 
-function createSizeHintFromToolCall(toolCall: ToolCall): string | null {
+function createSizeHintFromToolCall(toolCall: ToolCallAnalysisInput): string | null {
   if (!isRecord(toolCall.input)) {
     return null;
   }
@@ -308,7 +308,7 @@ function createSizeHintFromToolCall(toolCall: ToolCall): string | null {
   return formatLineHint('+', inputLineCount);
 }
 
-function editSizeHintFromToolCall(toolCall: ToolCall): string | null {
+function editSizeHintFromToolCall(toolCall: ToolCallAnalysisInput): string | null {
   if (!isRecord(toolCall.input)) {
     return null;
   }
@@ -316,7 +316,7 @@ function editSizeHintFromToolCall(toolCall: ToolCall): string | null {
   return formatEditSizeHint(getEditStatsFromInput(toolCall.input));
 }
 
-export function getToolCallSizeHint(toolCall: ToolCall): string | null {
+export function getToolCallSizeHint(toolCall: ToolCallAnalysisInput): string | null {
   if (toolCall.status === 'failed') {
     return null;
   }

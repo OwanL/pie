@@ -12,6 +12,9 @@ test('standalone synthetic lease release requires explicit complete backend life
           backend: {
             stop: async () => { calls.push('coordinator-exit'); },
             dispose: () => { calls.push('backend-dispose'); },
+            releaseDevelopmentReaders: async (teardownConfirmed: boolean) => {
+              calls.push(`reader-release:${teardownConfirmed}`);
+            },
             ...(confirmed === undefined ? {} : { isRuntimeLifetimeTeardownConfirmed: () => confirmed === true }),
           },
         },
@@ -31,11 +34,15 @@ test('standalone synthetic lease release requires explicit complete backend life
       }
       assert.equal(calls.includes('lease-release'), confirmed === true,
         `coordinator exit alone cannot release a lease (${confirmed}, startup=${startupFailure})`);
+      assert.equal(calls.includes(`reader-release:${confirmed === true}`), true,
+        `the SDK reader receives explicit lifetime evidence (${confirmed}, startup=${startupFailure})`);
       assert.ok(calls.includes(startupFailure ? 'ownership-abort' : 'ownership-release'));
       assert.ok(calls.includes('restore'));
       if (confirmed === true) {
         assert.ok(calls.indexOf('lease-release') > calls.indexOf('browser'));
         assert.ok(calls.indexOf('lease-release') > calls.indexOf('coordinator-exit'));
+        assert.ok(calls.indexOf('reader-release:true') > calls.indexOf('browser'));
+        assert.ok(calls.indexOf('reader-release:true') > calls.indexOf('coordinator-exit'));
       }
     }
   }

@@ -40,10 +40,12 @@ test('mixed text/image results are emitted only for image-capable models and sur
     const mixed = await buildToolResult('observe', response, true);
     assert.deepEqual(mixed.content.map((part) => part.type), ['text', 'image']);
     const [text] = mixed.content; assert.equal(text.type, 'text'); assert.match(text.text, /cursor: {"x":10,"y":20}/);
-    const [{ runPipeline }, { DEFAULT_CONFIG }] = await Promise.all([
+    const [pipelineModule, typesModule] = await Promise.all([
       dynamicImport(new URL('../../result-processing/pipeline.ts', import.meta.url).href),
       dynamicImport(new URL('../../result-processing/types.ts', import.meta.url).href),
     ]);
+    const { runPipeline } = pipelineModule.default ?? pipelineModule;
+    const { DEFAULT_CONFIG } = typesModule.default ?? typesModule;
     assert.equal(runPipeline({ toolName: 'computer', toolCallId: 'x', input: {}, content: mixed.content, details: mixed.details, isError: false }, DEFAULT_CONFIG), null, 'multipart image content must be left untouched');
     const textOnly = await buildToolResult('observe', response, false);
     assert.deepEqual(textOnly.content.map((part) => part.type), ['text']);

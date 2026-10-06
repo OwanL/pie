@@ -14,11 +14,11 @@ import {
   type SessionTokenUsageSummary,
 } from '../../session-tabs/token-usage';
 import {
-  buildSessionUsageSnapshot,
   mergeSessionUsageSnapshots,
   sessionUsageSnapshotFromLedger,
   type SessionUsageSnapshot,
 } from '../../../../analytics/usage-accounting/session-usage';
+import { buildSessionUsageSnapshot } from '../../../../harness/session-storage/transcripts/session-usage-adapter.js';
 import { estimateTextTokens } from '../../../../lib/token-estimation';
 
 function makeSummary(partial: Partial<SessionTokenUsageSummary> = {}): SessionTokenUsageSummary {

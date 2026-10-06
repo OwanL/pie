@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import test, { afterEach } from 'node:test';
 
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -38,8 +38,36 @@ type FakeServer = {
   };
 };
 
+const ownedServers = new Map<BackendServer, unknown>();
+
+afterEach(async () => {
+  const servers = [...ownedServers];
+  ownedServers.clear();
+  const disposals = await Promise.allSettled(servers.map(async ([server, workerRuntimeRouter]) => {
+    const internal = server as unknown as {
+      workerRuntimeRouter?: unknown;
+      hostCloseRequests: Map<string, { sessionPath: string }>;
+      acknowledgeHostCloseRequest(params: {
+        sessionPath: string; requestId: string; phase: 'completed';
+      }): Promise<unknown>;
+    };
+    internal.workerRuntimeRouter = workerRuntimeRouter;
+    await Promise.all([...internal.hostCloseRequests].map(([requestId, { sessionPath }]) => (
+      internal.acknowledgeHostCloseRequest({ sessionPath, requestId, phase: 'completed' })
+    )));
+    await server.dispose();
+  }));
+  const failed = disposals.find((disposal) => disposal.status === 'rejected');
+  if (failed?.status === 'rejected') throw failed.reason;
+});
+
+function trackServer(server: BackendServer): FakeServer {
+  ownedServers.set(server, (server as unknown as { workerRuntimeRouter?: unknown }).workerRuntimeRouter);
+  return server as unknown as FakeServer;
+}
+
 function serverForTests(): FakeServer {
-  return new BackendServer({ sdkPath: '/sdk', sourceArtifactDescriptor, cwd: '/workspace', workerEntryPath: '/worker.js' }) as unknown as FakeServer;
+  return trackServer(new BackendServer({ sdkPath: '/sdk', sourceArtifactDescriptor, cwd: '/workspace', workerEntryPath: '/worker.js' }));
 }
 
 function frame(action: string, payload: Record<string, unknown> = {}): unknown {
@@ -1652,9 +1680,9 @@ test('agent close emits a typed host bridge request and reports acceptance for t
 });
 
 test('self-close source loss releases the host close after the bounded response-handoff timeout', async () => {
-  const server = new BackendServer({
+  const server = trackServer(new BackendServer({
     sdkPath: '/sdk', sourceArtifactDescriptor, cwd: '/workspace', workerEntryPath: '/worker.js', hostCloseHandoffTimeoutMs: 10,
-  }) as unknown as FakeServer;
+  }));
   const events: Array<{ event: string; payload?: unknown }> = [];
   (server as unknown as { emit(event: string, payload?: unknown): void }).emit = (event, payload) => {
     events.push({ event, payload });

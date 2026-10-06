@@ -1,13 +1,13 @@
-import type { SessionLifecycleStore } from '../../harness/session-storage/lifecycle/session-lifecycle-store.js';
 import type {
   AnalyticsHostRecord,
+  AnalyticsHostRegistryPort,
   AnalyticsWriterIdentity,
   AnalyticsWriterLeaseRecord,
-} from './session-lifecycle-writer-store.js';
+} from '../contracts/session-lifecycle-writer.js';
 import type { ProcessOwnerReadResult } from './process-census.js';
 
 export interface AnalyticsHostRecoveryOptions {
-  registry: Pick<SessionLifecycleStore,
+  registry: Pick<AnalyticsHostRegistryPort,
     'listAnalyticsHosts' | 'listAnalyticsWriterLeases' | 'recoverAnalyticsHostAfterProcessExit'>;
   workspaceId: string;
   readProcessCensus: () => Promise<ProcessOwnerReadResult>;

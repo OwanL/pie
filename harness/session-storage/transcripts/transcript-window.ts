@@ -5,7 +5,8 @@ import type {
 } from '../../agent-processes/lib/rpc/session-events.js';
 import { TRANSCRIPT_WINDOW_BUDGETS } from './transcript-window-contract.js';
 import { compactDurableMessageDetails } from './lazy-details';
-import { buildSessionUsageSnapshot, type SessionUsageSnapshot } from '../../../analytics/usage-accounting/session-usage';
+import type { SessionUsageSnapshot } from '../../../analytics/usage-accounting/session-usage.js';
+import { buildSessionUsageSnapshot } from './session-usage-adapter.js';
 import { mapTranscript, type SessionEntryLike } from './transcript';
 
 export interface DisplayTranscriptCache {

@@ -58,7 +58,7 @@ import type { LiveSubagentDetailAddress, DetailCursor, DetailPageRef } from '../
 import { DetailSubscriptionService } from '../transcript-delivery/detail-subscriptions';
 import { PrivateSessionCleanup } from './private-session-cleanup';
 import type { AnalyticsBackendDescriptor } from '../../../analytics/authority/activation.js';
-import type { HostDisposable, SessionHostPlatform } from '../../hosts/lib/platform-contracts/session-platform';
+import type { HostDisposable, SessionHostPlatform } from '../../lib/platform-contracts/session-platform.js';
 
 /** Host-owned identities the detail subscription service fences its
  *  imperatives with: the current webview document generation and the current

@@ -1,0 +1,8 @@
+language: typescript
+dependsOn: [harness]
+tasks:
+  test:
+    command: 'proto run node -- scripts/verification/test-node.mjs --tsconfig application/hosts/vscode/tsconfig.json --sdk-path harness/pi/packages/coding-agent --exclude "**/*.artifact.test.*" harness/tools/playwright/test'
+    deps: ['pi:build']
+    inputs: ['/application/hosts/vscode/tsconfig.json', '/extensions/playwright/**/*', '/harness/**/*', '/harness/pi/**/*', '/analytics/**/*', '!/analytics/analysis/**/*', '/scripts/**/*', '/lib/**/*', '@globs(lifecycle)', '@globs(protected)']
+    options: {cache: false}

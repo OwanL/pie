@@ -7,7 +7,7 @@ import type {
   ComposerInputDraft,
   WebviewToHostMessage,
 } from '../../lib/protocol/index.js';
-import { isPendingTabPath } from '../session-tabs/tab-behavior';
+import { isPendingTabPath } from '../../lib/session-tabs/tab-behavior.js';
 import { useUndo } from './use-undo';
 import { shouldHandleGlobalComposerPaste } from './affordances';
 import {
@@ -18,7 +18,7 @@ import {
 } from './file-drop';
 
 export { useComposerIndicators } from './use-composer-indicators';
-export { useTokenRateIndicator, tickTokenRate, createTokenRateAccumulator } from '../analytics/use-token-rate';
+export { useTokenRateIndicator } from '../analytics/use-token-rate';
 export type { TokenRateIndicatorState } from '../analytics/use-token-rate';
 export { computeTurnLatencyStats, formatAvgTurnLatency, formatTurnLatencyTooltipLines } from '../analytics/turn-latency';
 export type { TurnLatencyStats } from '../analytics/turn-latency';

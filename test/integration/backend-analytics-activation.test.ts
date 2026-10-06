@@ -23,7 +23,12 @@ const SHA_B = 'b'.repeat(64);
 
 function activationFor(root: string, descriptor?: AnalyticsBackendDescriptor): BackendAnalyticsActivation {
   return new BackendAnalyticsActivation(
-    { agentDir: () => root, buildId: PIE_BUILD_ID, hostPid: () => process.pid },
+    {
+      agentDir: () => root,
+      buildId: PIE_BUILD_ID,
+      hostPid: () => process.pid,
+      openWriterStore: (stateDir) => new SessionLifecycleStore(path.join(stateDir, 'session-lifecycle.sqlite')),
+    },
     descriptor ? { descriptor } : {},
   );
 }
@@ -171,6 +176,7 @@ test('the backend writer identity uses the loaded host-boot marker, not the mani
     // Prove the identity is actually admissible against a registry row
     // registered the way the extension host registers one.
     const lifecycle = new SessionLifecycleStore(path.join(stateDir, 'session-lifecycle.sqlite'));
+    let release: (() => void) | undefined;
     try {
       lifecycle.registerAnalyticsHost({
         hostInstanceId: identity.hostInstanceId,
@@ -182,7 +188,13 @@ test('the backend writer identity uses the loaded host-boot marker, not the mani
         registeredAtMs: String(Date.now()),
       });
       lifecycle.assertAnalyticsWriterAdmitted(identity, 0);
+      activation.openWriterAdmission();
+      activation.admission!.assertAdmitted();
+      release = activation.admission!.acquire();
+      assert.equal(lifecycle.listAnalyticsWriterLeases(identity.workspaceId).length, 1);
     } finally {
+      release?.();
+      activation.close();
       lifecycle.close();
     }
   } finally {

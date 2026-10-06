@@ -1,4 +1,4 @@
-import type { ToolCall } from '../../../harness/agent-processes/lib/rpc/message-contract.js';
+import type { ToolCallAnalysisInput } from '../../contracts/tool-call-analysis-input.js';
 import { isRecord } from '../../../lib/validation/type-guards';
 import {
   getSkillNameFromToolCall,
@@ -205,7 +205,7 @@ function isGhPrChecksPending(command: string, exitCode: number | null): boolean 
  * `probe_no_match` result issue.
  */
 function classifyToolOutcome(
-  toolCall: ToolCall,
+  toolCall: ToolCallAnalysisInput,
   verificationKinds: VerificationCommandKind[],
 ): { failure: ToolFailureDetails | null; resultIssue: ToolResultIssueDetails | null } {
   if (toolCall.status !== 'failed') {
@@ -273,7 +273,7 @@ function classifyToolOutcome(
   return { failure: { kind: 'unknown', exitCode, errorExcerpt }, resultIssue: null };
 }
 
-export function analyzeToolCall(toolCall: ToolCall): ToolCallAnalysis {
+export function analyzeToolCall(toolCall: ToolCallAnalysisInput): ToolCallAnalysis {
   const normalizedToolName = normalizeToolCallName(toolCall.name);
   const skillName = getSkillNameFromToolCall(toolCall);
   const verificationKinds = classifyVerificationCommandKindsFromInput(toolCall.input);

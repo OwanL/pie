@@ -1,4 +1,4 @@
-import { type FSWatcher, type WatchListener, watch } from "node:fs";
+import { type FSWatcher, realpathSync, type WatchListener, watch } from "node:fs";
 
 export const FS_WATCH_RETRY_DELAY_MS = 5000;
 
@@ -20,7 +20,9 @@ export function watchWithErrorHandler(
 	onError: () => void,
 ): FSWatcher | null {
 	try {
-		const watcher = watch(path, listener);
+		// Node 24's Windows libuv watcher can abort on 8.3 aliases before an error can be caught.
+		const watchPath = process.platform === "win32" ? realpathSync.native(path) : path;
+		const watcher = watch(watchPath, listener);
 		watcher.on("error", onError);
 		return watcher;
 	} catch {

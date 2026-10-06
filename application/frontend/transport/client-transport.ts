@@ -160,6 +160,9 @@ const RELOAD_REQUIRED_CLOSE_REASONS = new Set([
   'protocol-violation',
   'too-many-malformed-messages',
 ]);
+/** Development watcher closes are safe to reload automatically; protocol and
+ *  production asset failures remain latched without reloading the document. */
+const DEVELOPMENT_RENDERER_REBUILT_CLOSE_REASON = 'development-renderer-rebuilt';
 /** Browser WebSocket.close() only permits 1000 or application codes
  *  (3000-4999); use a private application code for client-detected policy
  *  failures while preserving the typed reason used by both peers. */
@@ -196,6 +199,8 @@ export interface BrowserClientTransportOptions {
   now?: () => number;
   setTimeout?(callback: () => void, delayMs: number): unknown;
   clearTimeout?(handle: unknown): void;
+  /** Reload the current document after a completed development renderer build. */
+  reloadPage?(): void;
 }
 
 /** The browser transport's parsed hello identity (internal): replaced on
@@ -223,6 +228,7 @@ export class BrowserClientTransport implements ClientTransport {
   private reconnectTimer: unknown = undefined;
   private reconnectAttempt = 0;
   private compatibilityBlocked = false;
+  private developmentReloadRequested = false;
   private disposed = false;
   private readonly handlers = new Set<(message: HostToWebviewMessage) => void>();
   private readonly stateHandlers = new Set<(state: ClientConnectionState) => void>();
@@ -334,7 +340,19 @@ export class BrowserClientTransport implements ClientTransport {
       for (const handler of this.handlers) handler(typed);
     };
     socket.onclose = (event) => {
-      if (this.socket === socket) this.socket = null;
+      const isCurrentSocket = this.socket === socket;
+      if (isCurrentSocket) this.socket = null;
+      if (event.reason === DEVELOPMENT_RENDERER_REBUILT_CLOSE_REASON) {
+        // Ignore delayed/duplicate close events from an obsolete socket. A
+        // completed development build reloads this document at most once.
+        if (!isCurrentSocket || this.developmentReloadRequested) return;
+        this.developmentReloadRequested = true;
+        this.identity = null;
+        this.latchReloadRequired();
+        if (this.options.reloadPage) this.options.reloadPage();
+        else window.location.reload();
+        return;
+      }
       this.identity = null;
       if (RELOAD_REQUIRED_CLOSE_REASONS.has(event.reason)) {
         this.latchReloadRequired();

@@ -58,11 +58,32 @@ async function makeTempProject(): Promise<string> {
   return cwd;
 }
 
+test('MCP config uses the exact root workspace adapter pin and its config-only entry', async () => {
+  const root = path.resolve(__dirname, '../../../../..');
+  const manifest = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf-8'));
+  assert.equal(manifest.devDependencies['pi-mcp-adapter'], '2.20.1');
+
+  const installed = JSON.parse(await fs.readFile(path.join(root, 'node_modules/pi-mcp-adapter/package.json'), 'utf-8'));
+  assert.equal(installed.version, manifest.devDependencies['pi-mcp-adapter']);
+
+  // Config is intentionally not a public export in this pin. Do not fall back
+  // to the adapter's side-effectful index or the ignored private Pi install.
+  const source = await fs.readFile(path.join(root, 'harness/tools/package-integrations/mcp/mcp-config.ts'), 'utf-8');
+  assert.match(source, /from\s+['"]\.\.\/\.\.\/\.\.\/\.\.\/node_modules\/pi-mcp-adapter\/config\.ts['"]/);
+  assert.match(source, /from\s+['"]pi-mcp-adapter\/types['"]/);
+  assert.doesNotMatch(source, /npm[\\/]node_modules/);
+  assert.doesNotMatch(source, /from\s+['"](?:pi-mcp-adapter|[^'"]*pi-mcp-adapter\/index(?:\.ts)?)['"]/);
+});
+
 test('mcp.list returns the effective server list with merged disabled state', async (t) => {
   const cwd = await makeTempProject();
   t.after(() => fs.rm(cwd, { recursive: true, force: true }));
 
   const result = await mcpList(cwd);
+  assert.deepEqual(result.servers, [
+    { name: 'echo', disabled: false },
+    { name: 'jira', disabled: true },
+  ], 'only the temporary project servers should be discovered');
   const echo = result.servers.find((s) => s.name === 'echo');
   const jira = result.servers.find((s) => s.name === 'jira');
   assert.ok(echo, 'server from project .mcp.json must be listed');
@@ -146,6 +167,10 @@ test('mcp RPCs reach the backend through BackendServer.handleRequest without a h
   server.emitSessionListChanged = async () => undefined;
 
   const listed = await server.handleRequest({ v: 1, id: 'server-mcp-list', method: 'mcp.list', params: {} }) as McpListResult;
+  assert.deepEqual(listed.servers, [
+    { name: 'echo', disabled: false },
+    { name: 'jira', disabled: true },
+  ], 'coordinator config discovery must stay isolated from user servers');
   const echo = listed.servers.find((s) => s.name === 'echo');
   const jira = listed.servers.find((s) => s.name === 'jira');
   assert.ok(echo, 'mcp.list through BackendServer must list the project server');

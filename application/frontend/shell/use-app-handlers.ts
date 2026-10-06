@@ -9,7 +9,7 @@ import type {
   ToolResultPruningSettings,
   WebviewToHostMessage,
 } from '../../lib/protocol/index.js';
-import { createLocalMessageId } from '../composer/local-message-id';
+import { createLocalMessageId } from '../../lib/composer/local-message-id.js';
 import { createUuidV4 } from '../../../lib/uuid';
 import type { TranscriptContextMenuType } from './chat-prefs';
 import type { ContextMenuState } from '../lib/components/context-menu';

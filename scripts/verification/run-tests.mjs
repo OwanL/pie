@@ -1,9 +1,6 @@
 #!/usr/bin/env node
 
-import { spawn, spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -16,19 +13,18 @@ import {
 import { withoutGitRepositoryEnv } from '../lib/git-environment.mjs';
 import { withoutPiHarnessEnv } from '../lib/pi-harness-env.mjs';
 import { createTsconfigOverlay, resolveOwnerTsx } from '../lib/package-resolution.mjs';
-import { PACKAGE_REGISTRY, ROOT_BATCH_PACKAGE_IDS } from '../lib/test-packages.mjs';
+import { PACKAGE_REGISTRY } from '../lib/test-packages.mjs';
 import { resolveLocalTsx } from './run-test-files.mjs';
 
-import { extractRuntimeArgs, runtimeArgs, verificationChildEnv, withVerificationRuntime } from './verification-runtime.mjs';
+import { extractRuntimeArgs, verificationChildEnv, withVerificationRuntime } from './verification-runtime.mjs';
 
 const REPORT_PREFIX = '__PI_TEST_SUMMARY__';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '../..');
 const reporterSpecifier = pathToFileURL(path.join(__dirname, 'test-reporter.mjs')).href;
-const fastCachePath = path.join(repoRoot, '.cache', 'test-results', 'unit-suite.json');
 
 // Package identity, ordering, aliases, test cwd, tsx/tsc compiler selection,
-// batching, and fast concurrency live in scripts/lib/test-packages.mjs
+// and fast concurrency live in scripts/lib/test-packages.mjs
 // (PACKAGE_REGISTRY). Only per-package test/coverage metadata is local here;
 // scripts/verification/test/package-registry-drift.test.mjs fails when the two diverge.
 const PACKAGE_TEST_METADATA = {
@@ -41,14 +37,15 @@ const PACKAGE_TEST_METADATA = {
       '../../../test/integration/chat-message-parts.test.ts',
       '../../../test/integration/runtime-trace-bridge.test.ts',
       '../../../test/integration/tool-result-format.test.ts',
-      '../../../test/integration/pie-harness-prompt.test.ts',
-      '../../../test/integration/system-prompt-provider-payload.test.ts',
+      '../../../test/integration/pie-harness-prompt.artifact.test.ts',
+      '../../../test/integration/system-prompt-provider-payload.artifact.test.ts',
       '../../../test/integration/perf/auto-follow-reflow.test.ts',
       '../../../test/integration/perf/webview-render-count.test.ts',
       '../../../test/integration/worker-detail-webview-seam.test.ts',
       '../../frontend/**/*.test.ts',
       '../../frontend/**/*.test.tsx',
       '../../lib/protocol/test/**/*.test.ts',
+      '../../lib/test/**/*.test.ts',
       'test/**/*.test.ts',
       'test/**/*.test.tsx',
       'test/**/*.test.mjs',
@@ -59,6 +56,13 @@ const PACKAGE_TEST_METADATA = {
     coverageIncludes: [
       '../../frontend/**/*.ts',
       '../../frontend/**/*.tsx',
+      // Retain the frontend/host implementation denominator after shared-source moves.
+      '../../lib/composer/*.ts',
+      '../../lib/session-tabs/*.ts',
+      '../../lib/transcript/*.ts',
+      '../../lib/platform-contracts/*.ts',
+      '../../lib/renderer-delivery/*.ts',
+      '../../lib/stream-telemetry.ts',
       '**/*.ts',
       '**/*.tsx',
       '../**/*.ts',
@@ -68,7 +72,6 @@ const PACKAGE_TEST_METADATA = {
       '../../../harness/session-storage/ownership/session-identity.ts',
     ],
     thresholds: { lines: 80, branches: 75 },
-    fastRunner: path.join(repoRoot, 'scripts', 'verification', 'run-fast-extension-tests.mjs'),
   },
   analysis: {
     testGlobs: ['./test/**/*.test.ts'],
@@ -93,6 +96,7 @@ const PACKAGE_TEST_METADATA = {
       'scripts/lib/test/**/*.test.mjs',
       'scripts/migrations/test/**/*.test.mjs',
       'scripts/model-config/test/**/*.test.ts',
+      'scripts/model-config/test/**/*.test.mjs',
       'scripts/verification/test/**/*.test.mjs',
     ],
     // These tests exercise the test/typecheck runners, migration/install, and
@@ -144,7 +148,7 @@ const PACKAGE_TEST_METADATA = {
     testGlobs: [
       'harness/tool-and-skill-selection/**/*.test.ts',
       'extensions/skill-pruner/test/**/*.test.ts',
-      'test/integration/dynamic-tool-activation.test.ts',
+      'test/integration/dynamic-tool-activation.artifact.test.ts',
     ],
     coverageIncludes: [
       'harness/tool-and-skill-selection/settings/*.ts',
@@ -291,8 +295,8 @@ const PACKAGE_TEST_METADATA = {
     testGlobs: [
       'harness/session-storage/transcripts/test/**/*.test.ts',
       'test/integration/backend-cold-session-browse.test.ts',
-      'test/integration/real-sdk-image-persistence.test.ts',
-      'test/integration/sdk-terminal-durability.test.ts',
+      'test/integration/real-sdk-image-persistence.artifact.test.ts',
+      'test/integration/sdk-terminal-durability.artifact.test.ts',
     ],
     coverageIncludes: [
       'harness/session-storage/transcripts/*.ts',
@@ -500,8 +504,6 @@ export const PACKAGE_CONFIGS = PACKAGE_REGISTRY.map((entry) => {
     ...(entry.tsxConfig ? { tsxConfig: entry.tsxConfig } : {}),
     ...(entry.testTsx ? { testTsx: entry.testTsx } : {}),
     ...(entry.includeOwnerDependencies ? { includeOwnerDependencies: true } : {}),
-    // A dedicated fast-batch mode is named after its package.
-    ...(entry.fastBatch ? { fastBatchMode: entry.id } : {}),
     ...(entry.fastConcurrency !== undefined ? { fastConcurrency: entry.fastConcurrency } : {}),
     ...metadata,
   };
@@ -626,81 +628,6 @@ function resolveSelectedPackages(selectedIds) {
   return resolved;
 }
 
-export function groupFastPackageConfigs(configs) {
-  if (configs.length <= 1) {
-    return configs;
-  }
-
-  const groups = new Map();
-  for (const config of configs) {
-    const key = `${config.cwd}\0${config.tsxConfig ?? ''}`;
-    const existing = groups.get(key);
-    if (existing) {
-      existing.members.push(config);
-      existing.testGlobs.push(...config.testGlobs);
-      if (config.includeOwnerDependencies) existing.includeOwnerDependencies = true;
-      continue;
-    }
-    groups.set(key, {
-      ...config,
-      members: [config],
-      testGlobs: [...config.testGlobs],
-      coverage: false,
-    });
-  }
-
-  return [...groups.values()].map((group) => {
-    const ids = group.members.map((member) => member.id);
-    const isRootGroup = group.cwd === repoRoot && !group.tsxConfig;
-    // fastConcurrency comes from the package registry via the first member;
-    // merged root-group members all share the registry's root budget.
-    const isFullRootBatch = isRootGroup
-      && ids.length === ROOT_BATCH_PACKAGE_IDS.length
-      && ROOT_BATCH_PACKAGE_IDS.every((id) => ids.includes(id));
-    return {
-      ...group,
-      id: ids.length === 1 ? ids[0] : `${ids.length} root packages`,
-      fastBatchMode: isFullRootBatch ? 'root' : group.fastBatchMode,
-    };
-  });
-}
-
-function repoTestFingerprint(runtimeIdentity) {
-  const git = (...args) => {
-    const result = spawnSync('git', ['-C', repoRoot, ...args], { encoding: 'buffer', windowsHide: true });
-    if (result.status !== 0) {
-      throw new Error(`git ${args.join(' ')} failed while building the test-cache key`);
-    }
-    return result.stdout;
-  };
-  const hash = createHash('sha256');
-  hash.update(process.version);
-  hash.update(runtimeIdentity);
-  hash.update(git('rev-parse', 'HEAD'));
-  hash.update(git('diff', '--binary', 'HEAD'));
-  const untracked = git('ls-files', '--others', '--exclude-standard', '-z')
-    .toString('utf8').split('\0').filter(Boolean).sort();
-  for (const relativePath of untracked) {
-    hash.update(relativePath);
-    hash.update(readFileSync(path.join(repoRoot, relativePath)));
-  }
-  return hash.digest('hex');
-}
-
-async function readFastCache(fingerprint) {
-  try {
-    const cached = JSON.parse(await readFile(fastCachePath, 'utf8'));
-    return cached.fingerprint === fingerprint ? cached : null;
-  } catch {
-    return null;
-  }
-}
-
-async function writeFastCache(fingerprint, totals) {
-  await mkdir(path.dirname(fastCachePath), { recursive: true });
-  await writeFile(fastCachePath, JSON.stringify({ fingerprint, totals }), 'utf8');
-}
-
 function formatPercent(value) {
   return `${value.toFixed(1)}%`;
 }
@@ -789,61 +716,6 @@ function summarizeCoverageFailures(config, coverage) {
     failures.push(`branch coverage ${formatPercent(coverage.coveredBranchPercent)} < ${config.thresholds.branches}%`);
   }
   return failures;
-}
-
-/**
- * Run a broad fast suite without multiplying package-level Node runners.
- * Extension tests have their own bundled/esbuild wave and are exclusive with
- * other package runners. Remaining groups share a fixed three-runner budget;
- * each group's node:test concurrency is already bounded by the package registry.
- * Results retain the caller's package order even though extension runs first.
- */
-export async function runFastPackageQueue(configs, runConfig, concurrency = 3) {
-  if (!Number.isInteger(concurrency) || concurrency < 1) {
-    throw new Error(`Fast package concurrency must be a positive integer; received ${concurrency}.`);
-  }
-
-  const results = new Array(configs.length);
-  let hasFailure = false;
-  let firstFailure;
-  const run = async (index) => {
-    try {
-      results[index] = await runConfig(configs[index]);
-    } catch (error) {
-      if (!hasFailure) firstFailure = error;
-      hasFailure = true;
-    }
-  };
-
-  const extensionIndex = configs.findIndex((config) => config.id === 'extension');
-  if (extensionIndex !== -1) await run(extensionIndex);
-
-  const queuedIndexes = configs.map((_, index) => index).filter((index) => index !== extensionIndex);
-  let nextIndex = 0;
-  const workerCount = Math.min(concurrency, queuedIndexes.length);
-  const workers = Array.from({ length: workerCount }, async () => {
-    for (;;) {
-      const queueIndex = nextIndex;
-      nextIndex += 1;
-      if (queueIndex >= queuedIndexes.length) return;
-      await run(queuedIndexes[queueIndex]);
-    }
-  });
-
-  await Promise.all(workers);
-  if (hasFailure) throw firstFailure;
-  return results;
-}
-
-export function buildFastRunnerArgs(config) {
-  const args = config.fastBatchMode ? [config.fastBatchMode] : [];
-  // The root runner makes one batch per test root. Honor the shared root
-  // package budget instead of launching all roots at once (currently 30 child
-  // test processes on a full checkout).
-  if (config.fastBatchMode === 'root' && config.fastConcurrency !== undefined) {
-    args.push(`--test-concurrency=${config.fastConcurrency}`);
-  }
-  return args;
 }
 
 export function buildTestArgs(config, fast = false, testArgs = []) {
@@ -971,15 +843,34 @@ function runChildProcess(command, args, cwd, signal, envOverrides = {}, verifyCl
   });
 }
 
+export function buildNativePackageArgs(config, runtime, testArgs = []) {
+  // Registry globs are relative to each owner's test cwd, while the native
+  // runner discovers indexed/nonignored files relative to the repository.
+  const globs = config.testGlobs.map((glob) =>
+    path.relative(repoRoot, path.resolve(config.cwd, glob)).replaceAll('\\', '/'));
+  const includes = globs.flatMap((glob) => ['--include', glob]);
+  const selectors = [...new Set(globs.map((glob) => {
+    const wildcard = glob.search(/[*?{\[]/u);
+    return wildcard < 0 ? glob : glob.slice(0, glob.lastIndexOf('/', wildcard)) || '.';
+  }))];
+  return [
+    path.join(repoRoot, 'scripts', 'verification', 'test-node.mjs'),
+    '--tsconfig', config.tsxConfig ?? 'application/hosts/vscode/tsconfig.json',
+    '--sdk-path', runtime.sdkPath,
+    ...includes,
+    ...selectors,
+    '--',
+    `--test-reporter=${path.join(__dirname, 'test-reporter.mjs')}`,
+    ...testArgs,
+  ];
+}
+
 async function runPackage(config, fast = false, integration = false, testArgs = [], signal, runtime) {
-  const useFastRunner = fast && (config.fastRunner || config.fastBatchMode) && testArgs.length === 0;
-  const fastRunner = config.fastRunner ?? path.join(repoRoot, 'scripts', 'verification', 'run-fast-batched-tests.mjs');
-  const fastRunnerArgs = buildFastRunnerArgs(config);
   // Packages with a registry tsxConfig run through a generated overlay config
   // (owner-relative aliases extending the checked-in base tsconfig) instead of
-  // the raw repo-relative path; dedicated fast-batch modes overlay inside
-  // their own runner. The overlay is disposed after the run in all paths.
-  const tsxOverlay = !useFastRunner
+  // the raw repo-relative path. Native fast runs manage their own overlay.
+  // The coverage overlay is disposed after the run in all paths.
+  const tsxOverlay = !fast
     ? createTsconfigOverlay(path.join(repoRoot, config.tsxConfig ?? 'application/hosts/vscode/tsconfig.json'), {
       includeOwnerDependencies: config.includeOwnerDependencies === true,
       sdkPath: runtime.sdkPath,
@@ -990,14 +881,15 @@ async function runPackage(config, fast = false, integration = false, testArgs = 
   // node:test arguments and avoids command-resolution differences between cwd/shells.
   let rawResult;
   try {
-    const args = useFastRunner ? [] : buildTestArgs(tsxOverlay ? { ...config, tsxConfig: tsxOverlay.configPath } : config, fast, testArgs);
-    const tsxCli = config.testTsx === 'root'
-      ? resolveLocalTsx(repoRoot)
-      : config.id === 'extension' ? resolveOwnerTsx() : resolveLocalTsx(config.cwd);
+    const args = fast ? buildNativePackageArgs(config, runtime, testArgs) : [
+      config.testTsx === 'root' ? resolveLocalTsx(repoRoot)
+        : config.id === 'extension' ? resolveOwnerTsx() : resolveLocalTsx(config.cwd),
+      ...buildTestArgs({ ...config, tsxConfig: tsxOverlay.configPath }, false, testArgs),
+    ];
     rawResult = await runChildProcess(
       process.execPath,
-      useFastRunner ? [fastRunner, ...fastRunnerArgs, ...runtimeArgs(runtime)] : [tsxCli, ...args],
-      config.cwd,
+      args,
+      fast ? repoRoot : config.cwd,
       signal,
       integration ? { PIE_RUN_INTEGRATION_TESTS: '1' } : {},
       true,
@@ -1034,11 +926,10 @@ function printPackageResult(result) {
   const status = passed ? '✓' : '✖';
   const counts = summary?.counts ?? null;
   const durationMs = summary?.durationMs ?? 0;
-  const flakySuffix = result.flakyRerun ? ' (flaky: passed on rerun)' : '';
 
-  console.log(`${status} ${config.id} — ${formatCounts(counts)} — ${formatCoverage(coverage)} — ${formatDuration(durationMs)}${flakySuffix}`);
+  console.log(`${status} ${config.id} — ${formatCounts(counts)} — ${formatCoverage(coverage)} — ${formatDuration(durationMs)}`);
 
-  if (failures.length > 0 && !result.flakyRerun) {
+  if (failures.length > 0) {
     console.log(indent('failing tests:'));
     for (const failure of failures) {
       console.log(indent(formatFailureDetails(failure), '    '));
@@ -1095,96 +986,6 @@ function aggregateCounts(results) {
   });
 }
 
-/**
- * Rerun-once fallback for failed packages in fast mode.
- *
- * The fast suite deliberately oversubscribes the machine (parallel package
- * runners + file concurrency), so a small class of wall-clock-budget tests can
- * fail transiently under load even though they always pass in isolation. A
- * failed package is re-run once with far less contention; if the rerun passes
- * the failure is reported as flaky and never cached. A rerun that also fails
- * keeps the original failure (with its diagnostics) — this never masks a real
- * regression, it only absorbs load-induced noise.
- */
-export async function attemptFlakyRerun(result, fast, integration, testArgs, signal, rerunFiles = runFailedFiles, runtime) {
-  // The reporter (including the batched runner's aggregate) treats missing or
-  // duplicate test-file dispatch as a failure independent of test assertions.
-  // A selective rerun can only validate attributed tests, not the original
-  // package's file enumeration, so it must not clear that failure.
-  const accountingMismatch = result.fileAccounting?.success === false
-    || result.failures.some((failure) => failure.name === 'test-file accounting mismatch'
-      || failure.name === 'aggregate test-file accounting mismatch');
-  if (accountingMismatch) {
-    console.log(`✖ ${result.config.id}: original test-file accounting mismatch — flaky rerun skipped; original failure stands.`);
-    return result;
-  }
-
-  const failedFiles = [...new Set(
-    result.failures
-      .map((failure) => failure.file)
-      .filter((file) => typeof file === 'string' && file.length > 0)
-      .map((file) => {
-        // Reporters emit absolute paths; tolerate already-relative ones.
-        const relative = path.isAbsolute(file)
-          ? path.relative(repoRoot, file)
-          : file.replace(/^[.\\/]+/u, '');
-        return relative.replace(/\\/g, '/');
-      })
-      .filter((relative) => relative && !relative.startsWith('..') && !path.isAbsolute(relative)),
-  )];
-  if (failedFiles.length === 0) {
-    // No file attribution (infrastructure failure / missing summary) — rerun
-    // the whole package so the same load conditions apply.
-    const rerun = await runPackage(result.config, fast, integration, testArgs, signal, runtime);
-    if (rerun.passed) {
-      console.log(`⚠ ${result.config.id} failed under parallel load but passed on a full-package rerun — treated as flaky.`);
-      return { ...rerun, flakyRerun: true };
-    }
-    console.log(`✖ ${result.config.id}: rerun also failed — original failure stands.`);
-    return result;
-  }
-
-  const rerun = await rerunFiles(failedFiles, signal, runtime);
-  if (rerun.passed) {
-    console.log(`⚠ ${result.config.id}: ${failedFiles.length} failing test file(s) (${failedFiles.join(', ')}) passed on rerun — treated as flaky, not cached.`);
-    for (const failure of result.failures) console.log(indent(formatFailureDetails(failure), '    '));
-    const counts = result.summary?.counts;
-    return {
-      ...result,
-      passed: true,
-      hasInfrastructureFailure: false,
-      flakyRerun: true,
-      // Zero the original failure counts so the aggregate totals reflect the
-      // rerun pass, not the transient first-run failure.
-      summary: counts ? {
-        ...result.summary,
-        counts: {
-          ...counts,
-          passed: (counts.passed ?? 0) + (counts.failed ?? 0),
-          failed: 0,
-        },
-      } : undefined,
-    };
-  }
-  console.log(`✖ ${result.config.id}: rerun of ${failedFiles.join(', ')} also failed — original failure stands.`);
-  return result;
-}
-
-/** Re-run specific repo-relative test files through the tight dev-loop runner. */
-async function runFailedFiles(files, signal, runtime) {
-  const rawResult = await runChildProcess(
-    process.execPath,
-    [path.join(repoRoot, 'scripts', 'verification', 'run-test-files.mjs'), ...files, ...runtimeArgs(runtime)],
-    repoRoot,
-    signal,
-    {},
-    true,
-  );
-  return {
-    passed: rawResult.exitCode === 0 && !rawResult.timedOut && !rawResult.aborted && rawResult.signal === null,
-  };
-}
-
 async function main() {
   let parsedArgs;
   let selection;
@@ -1227,33 +1028,10 @@ async function main() {
 }
 
 async function runSelectedPackages(parsedArgs, selectedPackages, runtime, signal) {
-  const cacheable = parsedArgs.fast
-    && parsedArgs.selected.length === 0
-    && !parsedArgs.integration
-    && process.env.PIE_RUN_INTEGRATION_TESTS !== '1'
-    && parsedArgs.testArgs.length === 0;
-  let fingerprint;
-  if (cacheable) {
-    try {
-      fingerprint = repoTestFingerprint(runtime.identity);
-      const cached = await readFastCache(fingerprint);
-      if (cached) {
-        const totals = cached.totals;
-        console.log(`✓ cached repo-wide unit suite — ${totals.passed} passed, ${totals.skipped} skipped`);
-        console.log('\nSummary: unchanged sources match the last successful unit run.');
-        return;
-      }
-    } catch {
-      // Cache failures must never prevent tests from running.
-      fingerprint = undefined;
-    }
-  }
-
-  // A separate node:test runner per package multiplies Node's default worker
-  // count and badly oversubscribes the machine. Fast repo-wide runs combine
-  // packages that share a cwd/tsx configuration, then divide file concurrency
-  // across the four resulting runners.
-  const executionConfigs = parsedArgs.fast ? groupFastPackageConfigs(selectedPackages) : selectedPackages;
+  // Keep each registry owner's config and selection intact. Native file
+  // concurrency is bounded by test-node; run owners sequentially in fast mode
+  // instead of multiplying that budget or merging incompatible owner aliases.
+  const executionConfigs = selectedPackages;
 
   const runConfig = (config) => runPackage(
     config,
@@ -1263,28 +1041,12 @@ async function runSelectedPackages(parsedArgs, selectedPackages, runtime, signal
     signal,
     runtime,
   );
-  const isBroadFastSuite = parsedArgs.fast
-    && parsedArgs.selected.length === 0
-    && parsedArgs.testArgs.length === 0;
-  let results = isBroadFastSuite
-    ? await runFastPackageQueue(executionConfigs, runConfig)
-    : await Promise.all(executionConfigs.map(runConfig));
-  // Absorb load-induced flakiness in the fast loop: re-run failed packages
-  // once under minimal contention before declaring a red suite. Coverage
-  // (verify) runs, integration runs, and pattern-filtered runs stay strict.
-  if (parsedArgs.fast && parsedArgs.testArgs.length === 0 && !parsedArgs.integration) {
-    results = await Promise.all(results.map(async (result) => {
-      if (result.passed) return result;
-      return await attemptFlakyRerun(
-        result,
-        parsedArgs.fast,
-        parsedArgs.integration,
-        parsedArgs.testArgs,
-        signal,
-        runFailedFiles,
-        runtime,
-      );
-    }));
+  let results;
+  if (parsedArgs.fast) {
+    results = [];
+    for (const config of executionConfigs) results.push(await runConfig(config));
+  } else {
+    results = await Promise.all(executionConfigs.map(runConfig));
   }
   for (const result of results) {
     printPackageResult(result);
@@ -1297,22 +1059,7 @@ async function runSelectedPackages(parsedArgs, selectedPackages, runtime, signal
 
   console.log('');
   if (failedResults.length === 0) {
-    const flakyCount = results.filter((result) => result.flakyRerun).length;
-    if (flakyCount > 0) {
-      console.log(`Summary: ${passedCount}/${results.length} ${packageWord} passed (${flakyCount} flaky on rerun) — ${totals.passed} passed, ${totals.failed} failed, ${totals.skipped} skipped.`);
-    } else {
-      console.log(`Summary: ${passedCount}/${results.length} ${packageWord} passed — ${totals.passed} passed, ${totals.failed} failed, ${totals.skipped} skipped.`);
-    }
-    if (fingerprint && !results.some((result) => result.flakyRerun)) {
-      try {
-        // Do not cache a pass if files changed while the suite was running.
-        if (repoTestFingerprint(runtime.identity) === fingerprint) {
-          await writeFastCache(fingerprint, totals);
-        }
-      } catch {
-        // A failed cache write does not change a successful test result.
-      }
-    }
+    console.log(`Summary: ${passedCount}/${results.length} ${packageWord} passed — ${totals.passed} passed, ${totals.failed} failed, ${totals.skipped} skipped.`);
     return;
   }
 

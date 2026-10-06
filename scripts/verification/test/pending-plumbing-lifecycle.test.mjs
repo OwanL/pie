@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { existsSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -9,9 +8,6 @@ import { buildRunnerInvocation, runPackageGroup } from '../run-package-group.mjs
 import { extractRuntimeArgs, withVerificationRuntime } from '../verification-runtime.mjs';
 import { parseArgs, buildTestArgs } from '../run-tests.mjs';
 import { runProject, runWithConcurrency } from '../run-typechecks.mjs';
-import { runSuite } from '../run-fast-batched-tests.mjs';
-import { TEST_FILE_ACCOUNTING_ENV } from '../test-reporter.mjs';
-import { abortOnProcessSignals } from '../../lib/process-watchdog.mjs';
 
 function deferred() {
   let resolve;
@@ -110,77 +106,4 @@ test('typecheck keeps overlay through teardown and retains it if teardown is unc
     await checked;
     assert.equal(disposed, gone);
   }
-});
-
-for (const cancel of [false, true]) {
-  test(`fast batches retain config and signal lifetime until sibling ${cancel ? 'cancellation' : 'failure'} is drained`, async () => {
-    const target = new EventEmitter();
-    const abort = abortOnProcessSignals(target, 'linux');
-    const bothStarted = deferred();
-    const release = deferred();
-    let tempDir;
-    let dispatched = 0;
-    let settled = false;
-    const failure = new Error('first batch failed');
-    const pending = runSuite({ mode: 'fixture' }, {}, abort.signal, {
-      buildPlan: async (_mode, directory) => {
-        tempDir = directory;
-        return { cwd: directory, batches: ['batch.mts'], forceExitFiles: ['force.test.ts'], expectedFiles: [], directFiles: [] };
-      },
-      createTsconfigOverlay: (_base, { directory }) => {
-        const configPath = path.join(directory, 'overlay.json');
-        writeFileSync(configPath, '{}');
-        return { configPath };
-      },
-      run: async (_command, _args, _cwd, env, signal) => {
-        const index = dispatched++;
-        if (dispatched === 2) bothStarted.resolve();
-        if (index === 0) {
-          await bothStarted.promise;
-          if (cancel) target.emit('SIGTERM');
-          throw failure;
-        }
-        await release.promise;
-        assert.equal(signal.aborted, cancel);
-        assert.ok(existsSync(env[TEST_FILE_ACCOUNTING_ENV]));
-        assert.ok(existsSync(env.TSX_TSCONFIG_PATH));
-        assert.equal(target.listenerCount('SIGINT'), 1);
-        return { code: 0, signal: null, stdout: '', stderr: '' };
-      },
-    });
-    const checked = assert.rejects(pending.finally(() => abort.dispose()), (error) => error === failure).then(() => { settled = true; });
-    await bothStarted.promise;
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(settled, false);
-    assert.ok(existsSync(tempDir));
-    release.resolve();
-    await checked;
-    assert.equal(existsSync(tempDir), false);
-    assert.equal(target.listenerCount('SIGINT'), 0);
-  });
-}
-
-test('fast batches retain files on uncertain sibling teardown even if a different sibling fails first', async (t) => {
-  let tempDir;
-  const second = deferred();
-  const failure = new Error('first failure');
-  let dispatched = 0;
-  const pending = runSuite({ mode: 'fixture' }, {}, undefined, {
-    buildPlan: async (_mode, directory) => {
-      tempDir = directory;
-      t.after(() => rm(directory, { recursive: true, force: true }));
-      return { cwd: directory, batches: ['batch.mts'], forceExitFiles: ['force.test.ts'], expectedFiles: [], directFiles: [] };
-    },
-    createTsconfigOverlay: (_base, { directory }) => ({ configPath: path.join(directory, 'overlay.json') }),
-    run: async () => {
-      if (dispatched++ === 0) throw failure;
-      await second.promise;
-      throw Object.assign(new Error('uncertain'), { teardownUnconfirmed: true });
-    },
-  });
-  const checked = assert.rejects(pending, (error) => error.cause === failure && error.teardownUnconfirmed === true);
-  await new Promise((resolve) => setImmediate(resolve));
-  second.resolve();
-  await checked;
-  assert.ok(existsSync(tempDir));
 });

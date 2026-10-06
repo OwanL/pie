@@ -10,7 +10,7 @@ installDom();
 
 import { SessionTab } from '../../session-tabs/session-tab';
 import { SessionTabContextMenu } from '../../session-tabs/session-tab-context-menu';
-import { PENDING_SESSION_PREFIX } from '../../session-tabs/tab-behavior';
+import { PENDING_SESSION_PREFIX } from '../../../lib/session-tabs/tab-behavior.js';
 import type { SessionSummary } from '../../../lib/protocol/index.js';
 
 test('pending new-session tab shows background preparation without disabling interaction', () => {

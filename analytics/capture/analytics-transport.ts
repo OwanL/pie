@@ -22,11 +22,10 @@ import {
   AnalyticsCaptureCapacityError,
   type AnalyticsRecorderCaptureDisposition,
 } from '../recording/recorder-supervisor.js';
-import type { EventEnvelope } from '../../harness/agent-processes/lib/rpc/wire.js';
 
 export interface AnalyticsTransportBackend {
   getGeneration(): number;
-  onEvent(listener: (event: EventEnvelope) => void): { dispose(): void };
+  onEvent(listener: (event: { event: string; payload?: unknown }) => void): { dispose(): void };
   onExit(listener: () => void): { dispose(): void };
   request<Result = unknown>(method: string, params?: unknown): Promise<Result>;
 }

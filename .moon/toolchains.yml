@@ -1,0 +1,3 @@
+# Proto is the version authority. System tasks invoke its pinned Node directly;
+# Moon must not rewrite manifests, install dependencies, or sync TS references.
+{}

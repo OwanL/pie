@@ -16,11 +16,11 @@ const packageNames = {
 type SourcePackageRoots = Record<keyof typeof packageNames, string>;
 
 function packageRootFromEntry(entry: string, packageName: string): string {
-  let directory = path.dirname(realpathSync(entry));
+  let directory = path.dirname(realpathSync.native(entry));
   while (directory !== path.dirname(directory)) {
     try {
       const manifest = JSON.parse(readFileSync(path.join(directory, 'package.json'), 'utf8')) as { name?: string };
-      if (manifest.name === packageName) return realpathSync(directory);
+      if (manifest.name === packageName) return realpathSync.native(directory);
     } catch {
       // Keep walking toward the package root; the alias target may be several levels deep.
     }
@@ -48,11 +48,13 @@ function candidateGraphFromTsxConfig(): { piRoot: string; packageRoots: SourcePa
       return [key, packageRootFromEntry(entry, packageName)];
     }),
   ) as SourcePackageRoots;
-  const piRoot = realpathSync(path.resolve(packageRoots.codingAgent, '../../..'));
+  // Match the artifact verifier's native canonicalization, including Windows
+  // short temp-directory names. This remains the same verified byte graph.
+  const piRoot = realpathSync.native(path.resolve(packageRoots.codingAgent, '../../..'));
 
   for (const key of Object.keys(packageNames) as Array<keyof typeof packageNames>) {
     const packageName = packageNames[key];
-    const expectedRoot = realpathSync(path.join(piRoot, 'node_modules', ...packageName.split('/')));
+    const expectedRoot = realpathSync.native(path.join(piRoot, 'node_modules', ...packageName.split('/')));
     if (packageRoots[key] !== expectedRoot) {
       throw new Error(`Candidate ${packageName} is outside the materialized SDK graph: ${packageRoots[key]}`);
     }
@@ -90,7 +92,7 @@ export const sourceDescriptor: GenerationPiRuntimeDescriptor = {
   schemaVersion: 1,
   artifactDir: verified.artifactDir,
   sdkPath: verified.sdkPath,
-  cliPath: realpathSync(path.join(verified.sdkPath, 'dist/cli.js')),
+  cliPath: realpathSync.native(path.join(verified.sdkPath, 'dist/cli.js')),
   identity: verified.identity,
   manifest: verified.manifest,
 };

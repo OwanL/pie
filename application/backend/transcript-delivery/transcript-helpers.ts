@@ -8,7 +8,7 @@ import {
   buildAssistantParts,
   cloneToolCall,
   isEmptyToolCallInput,
-} from '../../frontend/transcript/message-parts.js';
+} from '../../lib/transcript/message-parts.js';
 
 export function ensureAssistantParts(message: ChatMessage): ChatMessagePart[] {
   if (message.parts) {

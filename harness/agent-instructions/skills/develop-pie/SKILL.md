@@ -21,10 +21,10 @@ For setup, storage, and repository-wide workflows, see [`README.md`](../../../..
 
 ## Common practices
 
-- Use the repository-root test wrappers: `test:file` for focused checks while iterating and `npm test` as the default final development test. `npm test` resolves working-tree changes to affected tests, runs package groups concurrently, and conservatively broadens when dependency evidence is incomplete. Do not invoke `npx tsx` directly. Use `test:coverage` only for an explicit release coverage gate.
-- After any runtime-source edit under `application/`, `analytics/`, `harness/`, or `lib/`, run `npm run extension:build`. It validates and stages a complete immutable runtime in a matching installed extension, and publishes live renderer assets. The startup loader automatically selects the newest verified runtime on the next normal VS Code restart; loaded windows retain their leased host/backend files. Never force a restart or interrupt active work merely to deploy a fix.
-- Older installations need `npm run extension:activate` once to install the startup loader. This command stages immutable loader files and updates the entrypoint for the next restart without replacing locked running bundles. Routine changes need only a successful build and a normal restart, not another installation command. SDK/dependency or extension manifest upgrades remain explicit package/install work.
-- For a user-reported bug, distinguish built, staged, loaded, and behavior verified. Check the staged generation and running build evidence, not just build success. A pending host update is not a live fix; tell the user it will load on their next normal restart. Do not mistake reopening the sidebar for restarting the extension host.
+- Use the repository-root Proto/pnpm scripts. The primary `test` route is Moon's affected task graph (`:test --affected --include-relations`), not a static-import/file-URL test-file selector. Explicit task inputs cover consumer sources; project dependencies alone do not propagate consumer selection in Moon 2.4.2. Do not add deep task traversal to ordinary checks: it can include artifact tasks. Use the uncached `proto run moon -- run root:graphTest` for NOOP affected-selection qualification in temporary Git fixtures. Ordinary Moon test tasks exclude files matching `*.artifact.test.*` (currently 30 fixtures: 26 TypeScript and four `.mjs`, including development refresh), which are retained for the separate `test:artifact` route. SDK-backed package-resolution, unbundled-module and CLI cases run in artifact companions; their SDK-free cases remain in ordinary tests. Generic native test selection supports repeatable `--include` and `--exclude <repo-relative glob>` file globs. Use `test:file` for focused native `node:test` work, and do not invoke `npx tsx` directly. TypeScript entries use private CommonJS wrappers with the local `tsx` loader; JavaScript and `.mjs` entries use Node's standard loading. This focused compatibility route does not qualify full native parity; see the root [README test guidance](../../../../README.md#test-and-validate) for coverage limits and retained legacy routes. Its optional `--sdk-path` supplies aliases from an already compiled SDK package but does not verify/acquire an artifact; SDK-backed source fixtures must point at the coding-agent package inside an independently verified `pi-runtime`, not `harness/pi/packages/coding-agent`.
+- Ordinary build/watch are local development only: `proto run pnpm -- run build` and `proto run pnpm -- run watch` write to `application/hosts/vscode/out-dev` and never publish. Use `proto run pnpm -- run dev` or `proto run pnpm -- run dev:vscode` for the isolated development host. Backend/Pi refresh requires stop → build → relaunch; shared renderer rebuilds reload the development host and are not HMR. See the root [README lifecycle](../../../../README.md#build-and-run-pie-from-source) for the profile, reader gate, and explicit delivery route.
+- Artifact delivery is separate: `proto run pnpm -- run delivery:build` builds only, while `proto run pnpm -- run extension:publish` explicitly publishes. Loader setup/upgrade additionally requires the explicit `--delivery --activate` route. Build/publication success does not establish installation, loading, or behavior verification; keep those states distinct. See the root [README lifecycle](../../../../README.md#build-and-run-pie-from-source) for workflow details.
+- For a user-reported bug, distinguish built, staged, loaded, and behavior verified. Check the staged generation and running build evidence, not just build success. A staged delivery is not a live fix; only report it as loaded after checking the active host and matching delivery setup. Do not mistake reopening the sidebar for restarting the extension host.
 - Treat [`docs/contracts/STATE_CONTRACT.md`](../../../../docs/contracts/STATE_CONTRACT.md) as authoritative for host↔webview synchronization. Contract changes require matching tests under the owning test roots, including `test/integration/sync-contract.test.ts`.
 - Analytics have one active authority at a time, selected by the activation manifest: legacy (run analytics + billable ledger, the default) or canonical (the SQLite store under the resolved data root). Capture is never a dual-write between them. See [`docs/contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md`](../../../../docs/contracts/ANALYTICS_IMPLEMENTATION_CONTRACT.md) before changing capture, privacy, or storage paths; the `PIE_STORAGE_CUTOFF_AUTHORIZATION` cutoff and any activation must not be described as active without evidence.
 - Keep the host architecture CQRS/Elm-style MVI: pure reducer, one effect runner, passive webview, explicit session addressing, and `Record<string, T>` host collections rather than `Map`/`Set`.
@@ -47,42 +47,49 @@ Do not conflate these mechanisms:
 Run from the repository root unless noted:
 
 ```bash
-npm ci                                      # install all locked dependency trees
-npm run test                                # changed-file affected development testing
-npm run test:file -- path/to/owner/test.ts
-npm run test:all                             # full fast suite
-npm run test:all -- --package extension --test-name-pattern="pattern"
-npm run test:changed                        # fast suites affected by working-tree changes
-npm run typecheck                           # all TypeScript projects
-npm run lint                                # all configured lint checks (currently the extension)
-npm run check                               # model drift + typecheck + lint + changed tests
-npm run verify                              # full verification: drift + typecheck + lint + all fast suites + build
-npm run verify:release                      # release gate: replaces the fast suites with coverage-gated runs
-npm run sync-models                         # regenerate centralized model configuration
-npm run sync-models -- --check              # fail on generated-config drift
-npm run extension:build                     # validate + stage runtime + live renderer publish
-npm run extension:build:validate            # compile/validate without publishing
-npm run extension:activate                  # one-time startup loader setup or explicit upgrade
-npm run extension:package                   # build a .vsix from the root
-npm run extension:test:browser              # extension Playwright browser suite
-npm run analytics:query -- --name core_runs # query the retained DuckDB workspace (legacy run-analytics sources)
-npm run doctor                              # non-destructive installation/config check
+proto run pnpm -- run setup                 # gated frozen-lockfile dependency setup
+proto run pnpm -- run install:dependencies  # alias for setup
+proto run pnpm -- run test                  # primary affected Moon project tasks
+proto run pnpm -- run test:file path/to/owner/test.ts
+proto run pnpm -- run test:artifact         # artifact fixtures; prepares one private SDK artifact
+proto run pnpm -- run test:artifact -- --pi-runtime "<absolute verified runtime root>" # reuse artifact
+proto run pnpm -- run test:all              # all configured Moon :test project tasks
+proto run pnpm -- run test:integration      # retained opt-in integration route
+proto run pnpm -- run test:fast              # compatibility alias for affected Moon tasks
+proto run pnpm -- run test:coverage          # retained legacy coverage gate
+proto run pnpm -- run typecheck
+proto run pnpm -- run lint                  # extension-owned lint command
+proto run pnpm -- run check                 # model drift + typecheck + affected Moon tests
+proto run pnpm -- run verify                # model drift + typecheck + Moon tests + VS Code build
+proto run pnpm -- run verify:release        # coverage-gated legacy release route
+proto run pnpm -- run sync-models           # regenerate centralized model configuration
+proto run pnpm -- run sync-models -- --check
+proto run pnpm -- run build                 # local development output only: application/hosts/vscode/out-dev
+proto run pnpm -- run watch                 # local development build/watch; no publication
+proto run pnpm -- run dev                   # isolated standalone development host
+proto run pnpm -- run dev:vscode            # isolated VS Code development host
+proto run pnpm -- run delivery:build        # explicit artifact build only: application/hosts/vscode/out
+proto run pnpm -- run delivery:qualify      # uncached private delivery + relocated headless hosts/browser; no publication
+proto run pnpm -- run extension:package     # package a VSIX; does not install or publish
+proto run pnpm -- run extension:publish     # explicit --delivery --publish publication
+proto run pnpm -- run extension:test:browser
+proto run pnpm -- run analytics:query -- --name core_runs
+proto run pnpm -- run doctor                # non-destructive installation/config check
 ```
 
-Extension-only loop:
+For a focused SDK-backed fixture, pass `--sdk-path` before the selector and use the coding-agent package from a separately verified artifact (not the native Pi workspace). For example, `completion-entry.artifact.test.ts` can be selected with `test:file`:
 
 ```bash
-cd application/hosts/vscode
-npm run build            # validate + stage runtime + renderer publish
-npm run build:validate   # compile/validate only
-npm run publish:renderer # publish existing renderer output
-npm run activate         # startup loader setup/upgrade; loads on next restart
-npm run watch            # incremental validation + runtime/renderer publication
-npm run test             # extension tests
-npm run typecheck        # extension typecheck
-npm run lint             # extension ESLint
-npm run package          # build a .vsix
+proto run pnpm -- run test:file --sdk-path "<absolute verified runtime root>/node_modules/@earendil-works/pi-coding-agent" harness/tool-and-skill-selection/prepass/test/completion-entry.artifact.test.ts
 ```
+
+The `test:file` runner checks that the selected SDK package graph is compiled/coherent; it does not itself verify the artifact manifest or acquire a runtime. The dedicated `test:artifact` command delegates to Moon `root:artifactTest`, whose `pi:build` dependency compiles the workspace, then prepares one private SDK artifact (or reuses the explicit verified runtime) and invokes the native runner once for the artifact fixtures. This task boundary is not a lightweight-artifact or speed claim. These are production-style SDK bytes, not an application release build, publication or installation; no SDK cache is added. An explicit `-- --pi-runtime <absolute runtime root>` reuses a verified artifact and skips private artifact preparation, but not the Pi workspace build prerequisite. Some provider/integration cases remain opt-in or skip without credentials; do not report the task as running or qualifying all fixtures or integration smoke tests. Native TypeScript coverage and evaluated c8/Monocart candidates remain unqualified; the candidates were removed, not added as dependencies. Keep the legacy coverage gate and provider skip flags. `test:fast` aliases affected Moon tasks; legacy package `--fast` invokes native dispatch, not the removed batching/impact/custom result-cache/cost tooling. No full live/browser/provider or coverage parity is claimed.
+
+`delivery:qualify` composes the existing gated Pi compiler, external-output delivery build and relocated-host/browser fixtures in an invocation-owned OS-temp package. Explicit `-- --pi-runtime <absolute runtime root>` verifies/reuses caller bytes and skips Pi compilation. It does not publish/install, launch visible Electron, download browsers or send prompts. Failure/cancellation/uncertain nested teardown retains the package; success removes it after confirmed completion. It is a smoke route, not coverage, all-browser, installed-host or real-Electron qualification.
+
+Root setup uses the shared frozen pnpm installer behind the [development-workspace gate](../../../../lib/development-runtime/lifetime.mjs). Setup/rebuild is allowed only without active workspace readers; preserve the installed host. Registrations fail closed and are not reclaimed by PID or age: do not kill installed Pie or delete gate state. Bootstrap's default compiles Pi and prepares a private shared-lock artifact; explicit `--pi-runtime` verifies/reuses one and skips compilation. Neither route publishes. The [runtime guide](../../../../harness/pi-runtime/README.md) owns construction details; there is one shared lock and no npm bridge refresh route.
+
+For real development Pi/backend refresh, stop the isolated host → `build` → relaunch; renderer watch only rebuilds/reloads renderer output. The printed development profile owns private settings/auth/session-settings and does not copy installed state; ambient provider variables may still be inherited, so this is not a credential sandbox. Development standalone/headless adapter and refresh checks require `PIE_RUN_DEVELOPMENT_HOST_TESTS=1`. Visible real-Electron acceptance requires explicit user consent and `PIE_RUN_ELECTRON_ACCEPTANCE=1`; never launch it as an ordinary check. See the root [README](../../../../README.md#build-and-run-pie-from-source) for practical commands and distinctions; the [migration plan](../../../../docs/plans/PIE-PRODUCTIZATION.md) owns acceptance/status.
 
 Choose focused tests while iterating, then run checks proportionate to the changed behavior.
 

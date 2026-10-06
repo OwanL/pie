@@ -12,10 +12,10 @@ import type { StateDeliveryClock } from '../lib/renderer-delivery/state-delivery
 import type {
   HostRuntimeBrowserServerOptions,
   InlineConfirmRequest,
-} from '../lib/platform-contracts/browser-server-seam.js';
+} from '../../lib/platform-contracts/browser-server-seam.js';
 
 /** Canonical browser-server settings/lifecycle shapes are defined once in the
- *  host-neutral seam (`application/hosts/lib/platform-contracts/browser-server-seam.ts`) and re-exported
+ *  host-neutral seam (`application/lib/platform-contracts/browser-server-seam.ts`) and re-exported
  *  here for the browser-server domain and its consumers; they are never
  *  mirrored. */
 export type {
@@ -26,7 +26,7 @@ export type {
   BrowserServerState,
   HostRuntimeBrowserServerOptions,
   InlineConfirmRequest,
-} from '../lib/platform-contracts/browser-server-seam.js';
+} from '../../lib/platform-contracts/browser-server-seam.js';
 
 /** Concrete construction options: the host-neutral factory options from the
  *  runtime seam extended with the concrete hosts' asset/icon/title locations.

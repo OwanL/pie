@@ -3,10 +3,10 @@ REM ============================================================================
 REM  install.bat -- Bootstrap the pie portable coding-agent config on Windows.
 REM
 REM  Native Windows (cmd.exe) installer. It does NOT require PowerShell, WSL,
-REM  Git Bash, or any Unix tools: only cmd built-ins, node/npm, and the shared
+REM  Git Bash, or any Unix tools: only cmd built-ins, Proto-managed Node/pnpm,
 REM  Node runner (scripts/install/run.mjs), which holds the testable installer
-REM  business logic. winget/icacls/reg/where are native Windows
-REM  utilities used only where a cmd built-in cannot do the job.
+REM  business logic. icacls/reg/where are native Windows utilities used only
+REM  where a cmd built-in cannot do the job.
 REM
 REM  Run once after cloning:
 REM    install.bat            (full install)
@@ -58,20 +58,7 @@ if "%MODE%"=="check" goto :check
 REM --- preflight: validate prerequisites before any persistent mutations -----
 call :check_node
 if "%NODE_MISSING%"=="1" goto :no_node
-where npm >nul 2>nul || goto :no_npm
-set "PIN_NODE="
-set "PIN_NPM="
-set "PIN_PI_SOURCE="
-for /f "delims=" %%L in ('node "%RUNNER%" pinned-versions 2^>nul') do if not defined PIN_NODE set "PIN_NODE=%%L"
-for /f "skip=1 delims=" %%L in ('node "%RUNNER%" pinned-versions 2^>nul') do if not defined PIN_NPM set "PIN_NPM=%%L"
-for /f "skip=2 delims=" %%L in ('node "%RUNNER%" pinned-versions 2^>nul') do if not defined PIN_PI_SOURCE set "PIN_PI_SOURCE=%%L"
-if not defined PIN_NODE goto :pins_failed
-if not defined PIN_NPM goto :pins_failed
-if not defined PIN_PI_SOURCE goto :pins_failed
-if /i not "%NODE_VERSION%"=="%PIN_NODE%" (
-  echo ==^> Node.js %PIN_NODE% is required for reproducible installs; found %NODE_VERSION%. See .node-version.
-  goto :error
-)
+call :run_proto run node -- "%RUNNER%" verify-toolchain || goto :toolchain_failed
 
 REM --- auth relocation consent preflight (read-only) ------------------------
 REM Bootstrap rejects credentials in the checkout. Decide before setx or any
@@ -84,7 +71,7 @@ set "TARGET_AUTH=%TARGET_AUTH_DIR%\auth.json"
 call :read_user_env PI_CODING_AGENT_AUTH_DIR
 set "AUTH_DIR_ENV=%USER_ENV_VALUE%"
 if defined AUTH_DIR_ENV (
-  node "%RUNNER%" validate-auth-dir "%REPO_ROOT%" "%AUTH_DIR_ENV%" || goto :invalid_saved_auth_dir
+  call :run_proto run node -- "%RUNNER%" validate-auth-dir "%REPO_ROOT%" "%AUTH_DIR_ENV%" || goto :invalid_saved_auth_dir
 )
 set "AUTH_RELOCATION_REQUIRED=0"
 if exist "%IN_TREE_AUTH%" set "AUTH_RELOCATION_REQUIRED=1"
@@ -151,24 +138,14 @@ REM --- settings.json#sessionDir rewrite + global outcomes migration ----------
 REM  Preserve reviews and run analytics alongside transcripts when repairing a
 REM  displaced session authority. Derived exports/open checkpoints are rebuilt.
 if defined PROCESS_SESSION_DIR (
-  node "%REPO_ROOT%\scripts\migrations\migrate-outcomes-store.mjs" --source-session-dir "%PROCESS_SESSION_DIR%" --dest "%REPO_ROOT%\data\outcomes" || goto :error
+  call :run_proto run node -- "%REPO_ROOT%\scripts\migrations\migrate-outcomes-store.mjs" --source-session-dir "%PROCESS_SESSION_DIR%" --dest "%REPO_ROOT%\data\outcomes" || goto :error
 )
 if defined EXISTING_SESSION_DIR if /i not "%EXISTING_SESSION_DIR%"=="%PROCESS_SESSION_DIR%" (
-  node "%REPO_ROOT%\scripts\migrations\migrate-outcomes-store.mjs" --source-session-dir "%EXISTING_SESSION_DIR%" --dest "%REPO_ROOT%\data\outcomes" || goto :error
+  call :run_proto run node -- "%REPO_ROOT%\scripts\migrations\migrate-outcomes-store.mjs" --source-session-dir "%EXISTING_SESSION_DIR%" --dest "%REPO_ROOT%\data\outcomes" || goto :error
 )
 REM  Batch cannot parse/rewrite JSON; the shared runner owns legacy transcript
 REM  migration and the canonical settings.json rewrite.
-node "%RUNNER%" configure-sessions "%REPO_ROOT%" || goto :error
-
-REM --- pinned npm version ----------------------------------------------------
-for /f "delims=" %%V in ('npm --version 2^>nul') do set "ACTUAL_NPM=%%V"
-if /i not "%ACTUAL_NPM%"=="%PIN_NPM%" (
-  echo ==^> Installing pinned npm@%PIN_NPM% (found %ACTUAL_NPM%)
-  call npm install -g "npm@%PIN_NPM%" || goto :error
-)
-
-REM --- repair absolute extension paths in settings.json ---------------------
-node "%RUNNER%" repair-settings "%REPO_ROOT%\settings.json" || goto :error
+call :run_proto run node -- "%RUNNER%" configure-sessions "%REPO_ROOT%" || goto :error
 
 REM --- relocate auth.json out of the working tree ---------------------------
 if exist "%IN_TREE_AUTH%" goto :auth_in_tree
@@ -188,7 +165,7 @@ if defined AUTH_DIR_ENV goto :merge_auth
 if not "%AUTH_RELOCATION_APPROVED%"=="1" goto :auth_not_approved
 goto :do_relocate
 :do_relocate
-node "%RUNNER%" relocate-auth "%IN_TREE_AUTH%" "%TARGET_AUTH%" || goto :error
+call :run_proto run node -- "%RUNNER%" relocate-auth "%IN_TREE_AUTH%" "%TARGET_AUTH%" || goto :error
 icacls "%TARGET_AUTH%" /inheritance:r /grant:r "%USERDOMAIN%\%USERNAME%:F" >nul 2>&1
 if errorlevel 1 echo ==^> WARN: could not restrict ACLs on '%TARGET_AUTH%' - continuing; LOCALAPPDATA is already user-private
 call :setx_user PI_CODING_AGENT_AUTH_DIR "%TARGET_AUTH_DIR%" || goto :error
@@ -204,18 +181,18 @@ goto :after_relocate
 REM The User-scope value may not be in this installer's inherited environment.
 set "PI_CODING_AGENT_AUTH_DIR=%AUTH_DIR_ENV%"
 set "SECURE_AUTH=%AUTH_DIR_ENV%\auth.json"
-node "%RUNNER%" merge-auth "%IN_TREE_AUTH%" "%SECURE_AUTH%" || goto :error
+call :run_proto run node -- "%RUNNER%" merge-auth "%IN_TREE_AUTH%" "%SECURE_AUTH%" || goto :error
 echo     in-tree auth.json removed to prevent future split-brain; backend reads from PI_CODING_AGENT_AUTH_DIR
 :after_relocate
 
-REM --- source bootstrap: root ci, package restore, build and VSIX package ----
-REM Bootstrap owns runtime acquisition and package/build ordering. Run after
-REM auth relocation so it can enforce credential-location protections.
+REM --- source bootstrap: shared pnpm setup, build and VSIX package ------------
+REM Bootstrap owns the one frozen root install, runtime acquisition and package/build ordering.
+REM Run after auth relocation so it can enforce credential-location protections.
 echo.
 echo ==^> Bootstrapping and packaging the pie VSCode extension
 set "VSCODE_HOST_DIR=%REPO_ROOT%\application\hosts\vscode"
 pushd "%REPO_ROOT%" || goto :error
-call npm run bootstrap -- --package
+call proto run pnpm -- run bootstrap --package
 set "BOOTSTRAP_RC=%ERRORLEVEL%"
 popd
 if not "%BOOTSTRAP_RC%"=="0" (
@@ -244,18 +221,18 @@ call "%CODE_CLI%" --install-extension "%VSIX%" || (
 )
 
 REM --- write pie.agentDir to VS Code User settings --------------------------
-node "%RUNNER%" write-vscode-agent-dir "%REPO_ROOT%" || goto :error
+call :run_proto run node -- "%RUNNER%" write-vscode-agent-dir "%REPO_ROOT%" || goto :error
 
 REM The old backend may have remained alive during build/install with its stale
 REM process environment. Reconcile displaced authorities once more; merging is
 REM append-only and idempotent. Doctor detects any writes made after this pass.
 if defined PROCESS_SESSION_DIR (
   echo ==^> Finalizing process-level displaced outcomes after extension installation
-  node "%REPO_ROOT%\scripts\migrations\migrate-outcomes-store.mjs" --source-session-dir "%PROCESS_SESSION_DIR%" --dest "%REPO_ROOT%\data\outcomes" || goto :error
+  call :run_proto run node -- "%REPO_ROOT%\scripts\migrations\migrate-outcomes-store.mjs" --source-session-dir "%PROCESS_SESSION_DIR%" --dest "%REPO_ROOT%\data\outcomes" || goto :error
 )
 if defined EXISTING_SESSION_DIR if /i not "%EXISTING_SESSION_DIR%"=="%PROCESS_SESSION_DIR%" (
   echo ==^> Finalizing user-level displaced outcomes after extension installation
-  node "%REPO_ROOT%\scripts\migrations\migrate-outcomes-store.mjs" --source-session-dir "%EXISTING_SESSION_DIR%" --dest "%REPO_ROOT%\data\outcomes" || goto :error
+  call :run_proto run node -- "%REPO_ROOT%\scripts\migrations\migrate-outcomes-store.mjs" --source-session-dir "%EXISTING_SESSION_DIR%" --dest "%REPO_ROOT%\data\outcomes" || goto :error
 )
 
 echo.
@@ -297,10 +274,11 @@ echo ==^> install.bat --check - dry run: nothing will be installed or mutated
 echo.
 call :check_node
 if "%NODE_MISSING%"=="1" ( call :node_hint & exit /b 1 )
-where npm >nul 2>nul || ( echo ==^> npm not found on PATH; npm ships with Node.js - install Node.js first. & exit /b 1 )
-echo ==^> Checking pinned toolchain...
-node "%RUNNER%" verify-toolchain
+echo ==^> Checking Proto-selected toolchain...
+pushd "%REPO_ROOT%" >nul || exit /b 1
+proto run node -- "%RUNNER%" verify-toolchain
 set "TOOLCHAIN_RC=%ERRORLEVEL%"
+popd >nul
 echo.
 echo ==^> Auth/readiness check...
 call :readiness_check
@@ -308,10 +286,10 @@ echo.
 echo ==^> Would-do - run install.bat without --check to perform these:
 echo   - setx PI_CODING_AGENT_DIR / PI_CODING_AGENT_SESSION_DIR at User scope
 echo   - configure global outcomes: sessions + reviews + completed run analytics
-echo   - repair extension paths in settings.json
+echo   - preserve repository-owned settings/package paths (no global npm-prefix rewrite)
 echo   - relocate/merge auth.json if present
-echo   - npm install -g pinned npm if drifted
-echo   - source bootstrap: restore packages + build/package pie VSIX + code --install-extension
+echo   - Proto-managed pnpm install --frozen-lockfile --ignore-scripts for the shared workspace
+echo   - source bootstrap: build/package pie VSIX + code --install-extension
 echo   - write pie.agentDir to VS Code User settings
 exit /b %TOOLCHAIN_RC%
 
@@ -333,12 +311,8 @@ exit /b 1
 call :node_hint
 goto :error
 
-:no_npm
-echo ==^> npm is required but was not found on PATH. npm ships with Node.js: https://nodejs.org/
-goto :error
-
-:pins_failed
-echo ==^> Could not resolve pinned Node/npm or the Pi source version.
+:toolchain_failed
+echo ==^> Proto-selected Node/pnpm do not match the repository pins, or pinned pnpm is unavailable.
 goto :error
 
 :auth_not_approved
@@ -355,24 +329,27 @@ set "PIN_NODE_HINT="
 if exist "%REPO_ROOT%\.node-version" for /f "delims=" %%V in ('type "%REPO_ROOT%\.node-version"') do set "PIN_NODE_HINT=%%V"
 if "%PIN_NODE_HINT:~0,1%"=="v" set "PIN_NODE_HINT=%PIN_NODE_HINT:~1%"
 echo.
-echo ==^> Node.js is required but was not found on PATH.
+echo ==^> Proto-managed Node.js is required but was not found.
 if defined PIN_NODE_HINT (
-  echo     Install Node.js %PIN_NODE_HINT%, pinned by .node-version:
-  echo       winget install OpenJS.NodeJS.LTS --version %PIN_NODE_HINT%
-  echo     or download it from https://nodejs.org/ and pick the exact %PIN_NODE_HINT% build.
+  echo     Install Proto and make Node.js %PIN_NODE_HINT% available from the repository pin in .prototools.
 ) else (
-  echo     Install Node.js - the version in .node-version - from https://nodejs.org/
+  echo     Install Proto and make the Node.js version pinned by .prototools available.
 )
-echo     Then open a new terminal and re-run install.bat.
+echo     This installer does not install global runtimes or modify PATH. Re-run install.bat after Proto is ready.
 exit /b 0
 
+:run_proto
+REM Run Proto in the checkout so its repository version pins are authoritative.
+pushd "%REPO_ROOT%" >nul || exit /b 1
+call proto %*
+set "PROTO_RC=%ERRORLEVEL%"
+popd >nul
+exit /b %PROTO_RC%
+
 :check_node
-REM Sets NODE_VERSION (leading 'v' stripped) and NODE_MISSING=1 if absent.
-set "NODE_VERSION="
+REM Sets NODE_MISSING=1 if the repository Proto launcher is unavailable.
 set "NODE_MISSING=0"
-where node >nul 2>nul || ( set "NODE_MISSING=1" & exit /b 0 )
-for /f "delims=" %%V in ('node --version 2^>nul') do set "NODE_VERSION=%%V"
-if "%NODE_VERSION:~0,1%"=="v" set "NODE_VERSION=%NODE_VERSION:~1%"
+where proto >nul 2>nul || set "NODE_MISSING=1"
 exit /b 0
 
 :resolve_code_cli
@@ -394,7 +371,7 @@ if defined PI_CODING_AGENT_AUTH_DIR set "AUTH_DIR_RESOLVED=%PI_CODING_AGENT_AUTH
 set "BACKEND_AUTH=%AUTH_DIR_RESOLVED%\auth.json"
 set "PROVIDER_ENV_PRESENT=0"
 for %%P in (ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY) do call :check_provider %%P
-node "%RUNNER%" readiness --auth "%BACKEND_AUTH%" --in-tree-auth "%REPO_ROOT%\auth.json" --auth-dir "%AUTH_DIR_RESOLVED%" --repo-root "%REPO_ROOT%" --provider-env-present %PROVIDER_ENV_PRESENT% --vscode-agent-dir-expected "%REPO_ROOT%"
+call :run_proto run node -- "%RUNNER%" readiness --auth "%BACKEND_AUTH%" --in-tree-auth "%REPO_ROOT%\auth.json" --auth-dir "%AUTH_DIR_RESOLVED%" --repo-root "%REPO_ROOT%" --provider-env-present %PROVIDER_ENV_PRESENT% --vscode-agent-dir-expected "%REPO_ROOT%"
 exit /b %ERRORLEVEL%
 
 :check_provider
@@ -420,15 +397,15 @@ exit /b 0
 :help
 echo Usage: install.bat [--check] [--help] [--no-pause]
 echo.
-echo   no args    Full install: configure env/sessions, pin Node/npm, relocate auth,
+echo   no args    Full install: configure env/sessions, use pinned Proto Node/pnpm, relocate auth,
 echo              bootstrap Pi from source, build and install the pie VS Code extension.
 echo   --check    Dry run: verify the pinned toolchain and readiness without mutating
 echo              anything - no setx, no installs, no builds.
 echo   --help     Show this help and exit.
 echo   --no-pause Do not pause before exiting - for scripted use.
 echo.
-echo Requires Node.js on PATH, pinned by .node-version. If Node is absent, --check
-echo or a full run prints the exact winget/download command to install it.
+echo Requires Proto with Node.js and pnpm available at the repository pins in .prototools.
+echo This installer does not install global runtimes or modify PATH.
 exit /b 0
 
 :done

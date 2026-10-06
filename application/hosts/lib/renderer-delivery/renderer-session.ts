@@ -16,12 +16,12 @@
  */
 
 import { auditLog, bootLog, isBootLogEnabled } from '../../../../lib/structured-logging/pie-logger';
-import { recordSnapshotPost } from './stream-telemetry';
+import { recordSnapshotPost } from '../../../lib/stream-telemetry.js';
 import { appendPieError, appendPieLog } from '../../../../lib/structured-logging/pie-logger';
 import {
   isLivePipelineTraceEnabled,
   recordLivePipelineTrace,
-} from '../../../backend/agent-connection/live-pipeline-trace-runtime';
+} from '../../../lib/live-pipeline-trace-runtime.js';
 import { StateAppliedWatchdog } from './state-applied-watchdog';
 import { WebviewReadinessProbe, READINESS_PROBE_MAX_ATTEMPTS } from './readiness-probe';
 import {

@@ -12,6 +12,7 @@ import {
   inferRepoRoot,
   resolveLocalTsx,
   normalizeRepoRelative,
+  requiresVerifiedRuntime,
   classifyTestFile,
   groupFilesByPackage,
   buildTsxArgs,
@@ -119,6 +120,26 @@ test('normalizeRepoRelative rejects paths outside the repo', () => {
   assert.throws(() => normalizeRepoRelative(repoRoot, '../outside-file.ts'), /outside the repo/);
 });
 
+test('only the exact registered test:file allowlist skips default verified-runtime acquisition', () => {
+  const independent = [
+    'application/hosts/test/asset-manifests/bootstrap.test.ts',
+    'application/hosts/test/asset-manifests/runtime-generations.test.ts',
+    'application/hosts/test/asset-manifests/runtime-scan-concurrency.test.ts',
+    'application/hosts/test/asset-manifests/runtime-copy-concurrency.test.ts',
+  ];
+  for (const file of independent) assert.equal(requiresVerifiedRuntime(repoRoot, [file]), false, file);
+  assert.equal(requiresVerifiedRuntime(repoRoot, [path.join(repoRoot, independent[0])]), false, 'absolute listed paths normalize exactly');
+  assert.equal(requiresVerifiedRuntime(repoRoot, independent), false, 'all-listed multi-file invocation skips acquisition');
+  assert.equal(requiresVerifiedRuntime(repoRoot, [independent[0], 'application/hosts/test/asset-manifests/other.test.ts']), true,
+    'a mixed listed/unlisted invocation still requires a verified runtime');
+  assert.equal(requiresVerifiedRuntime(repoRoot, ['application/hosts/test/asset-manifests/other.test.ts']), true);
+  assert.equal(requiresVerifiedRuntime(repoRoot, ['application/hosts/test/asset-manifests/bootstrap-copy.test.ts']), true,
+    'matching filename stems are not a path heuristic');
+  assert.equal(requiresVerifiedRuntime(repoRoot, []), true);
+  assert.equal(requiresVerifiedRuntime(repoRoot, independent, { artifactDir: path.join(os.tmpdir(), 'explicit-runtime') }), true);
+  assert.equal(requiresVerifiedRuntime(repoRoot, independent, { sdkPath: path.join(os.tmpdir(), 'explicit-sdk') }), true);
+});
+
 test('classifyTestFile uses the registered root tsx for extension files with cross-owner ESM imports', () => {
   const d = classifyTestFile(repoRoot, 'application/frontend/test/components/app-smoke.test.ts');
   assert.equal(d.id, 'extension');
@@ -176,10 +197,10 @@ test('classifyTestFile routes selector owner and root integration tests to skill
   assert.equal(selector.id, 'skill-pruner');
   assert.equal(selector.tsxConfig, undefined);
   assert.equal(selector.relativeFilePath, 'harness/tool-and-skill-selection/prepass/test/llm-scorer.test.ts');
-  const integration = classifyTestFile(repoRoot, 'test/integration/dynamic-tool-activation.test.ts');
+  const integration = classifyTestFile(repoRoot, 'test/integration/dynamic-tool-activation.artifact.test.ts');
   assert.equal(integration.id, 'skill-pruner');
   assert.equal(integration.tsxConfig, undefined);
-  assert.equal(integration.relativeFilePath, 'test/integration/dynamic-tool-activation.test.ts');
+  assert.equal(integration.relativeFilePath, 'test/integration/dynamic-tool-activation.artifact.test.ts');
   const retained = classifyTestFile(repoRoot, 'extensions/skill-pruner/test/copilot-headers.test.ts');
   assert.equal(retained.id, 'skill-pruner');
 });
@@ -207,7 +228,7 @@ test('groupFilesByPackage groups real files by package (sorted) and sets subagen
     'application/frontend/test/components/app-smoke.test.ts',
     'application/backend/test/composition/host-runtime.test.ts',
     'harness/tool-and-skill-selection/test/integration.test.ts',
-    'test/integration/dynamic-tool-activation.test.ts',
+    'test/integration/dynamic-tool-activation.artifact.test.ts',
     'harness/tools/subagent/test/schema.test.ts',
     'harness/agent-instructions/agent-discovery/test/agents.test.ts',
     'analytics/analysis/test/pricing.test.ts',
@@ -221,7 +242,7 @@ test('groupFilesByPackage groups real files by package (sorted) and sets subagen
   assert.equal(selector.tsxConfig, undefined);
   assert.deepEqual(selector.files, [
     'harness/tool-and-skill-selection/test/integration.test.ts',
-    'test/integration/dynamic-tool-activation.test.ts',
+    'test/integration/dynamic-tool-activation.artifact.test.ts',
   ]);
   const subagent = groups.find((g) => g.id === 'subagent');
   assert.equal(subagent.tsxConfig, 'harness/tools/subagent/tsconfig.json');

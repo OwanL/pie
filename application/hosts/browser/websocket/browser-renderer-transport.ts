@@ -42,6 +42,7 @@ export const BROWSER_CLOSE_REASONS = {
   handshakeOrder: 'ready-required',
   malformedRate: 'too-many-malformed-messages',
   protocolViolation: 'protocol-violation',
+  developmentRendererRebuilt: 'development-renderer-rebuilt',
   serverShutdown: 'server-shutdown',
   recovery: 'recovery',
   clientLimit: 'client-limit',

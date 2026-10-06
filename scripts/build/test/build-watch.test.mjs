@@ -12,7 +12,7 @@ function rendererCount(fixture) {
   return events(fixture).filter(item => item.event === 'renderer-publication').length;
 }
 
-function startWatchBuild(t, fixture, args = ['--watch']) {
+function startWatchBuild(t, fixture, args = ['--delivery', '--publish', '--watch']) {
   const child = startWatch(fixture, args);
   t.after(async () => {
     if (child.exitCode !== null || child.signalCode !== null) return;
@@ -131,18 +131,34 @@ for (const stage of ['polling', 'publication', 'acquisition']) {
       const fixture = makeFixture(t, { webviewFails: false });
       const child = startWatchBuild(t, fixture);
       await waitFor(() => rendererCount(fixture) >= 1, child, 'initial publication');
-      await waitFor(() => events(fixture).some(item => item.event === 'poll-complete'), child, 'initial publication settles before injection');
+      // Copying the runtime can enqueue another publication after the first
+      // renderer event. Require an idle queue/timer and current watcher snapshot.
+      await waitFor(() => events(fixture).some(item => item.event === 'watch-settled'), child, 'initial publication queue settles before injection');
       const first = events(fixture).find(item => item.event === 'acquire-complete');
       const published = rendererCount(fixture);
       writeFileSync(path.join(fixture.controls, `race-${stage}-${kind}`), 'race');
       if (stage === 'acquisition') writeFileSync(fixture.fingerprintFile, 'fresh source');
       if (stage === 'publication') writeFileSync(path.join(outputDir(fixture), 'app-race.js'), 'edit');
       await waitFor(() => events(fixture).some(item => item.event === 'source-race'), child, 'injected source mutation');
-      await waitFor(() => rendererCount(fixture) > published, child, 'fresh stable publication after retry');
+      const freshCount = stage === 'acquisition' ? 3 : 2;
+      await waitFor(() => events(fixture).some(item => item.event === 'acquire-complete' && item.count === freshCount), child, 'retry artifact acquisition completes');
+      const latest = events(fixture).find(item => item.event === 'acquire-complete' && item.count === freshCount);
+      assert.notEqual(latest.identity, first.identity);
+      await waitFor(() => {
+        const records = events(fixture);
+        const runtimeAt = records.findIndex(item => item.event === 'runtime-publication' && item.identity === latest.identity);
+        return runtimeAt >= 0 && records.slice(runtimeAt + 1).some(item => item.event === 'renderer-publication');
+      }, child, 'new runtime identity and subsequent renderer publication');
       assert.equal(child.exitCode, null, 'watch remains live');
       const records = events(fixture);
-      const latest = records.filter(item => item.event === 'acquire-complete').at(-1);
-      assert.notEqual(latest.identity, first.identity);
+      const raceAt = records.findIndex(item => item.event === 'source-race');
+      const freshAt = records.findIndex(item => item.event === 'acquire-complete' && item.count === freshCount);
+      const isPublication = item => /^(runtime|renderer)-publication$/u.test(item.event);
+      assert.ok(freshAt > raceAt, 'stable acquisition completes after observed instability');
+      assert.equal(records.slice(raceAt + 1, freshAt).some(isPublication), false,
+        'the retired selection never publishes while retry acquisition is pending');
+      assert.ok(records.slice(raceAt + 1).filter(item => item.event === 'runtime-publication').every(item => item.identity === latest.identity),
+        'no old runtime identity publishes after observed instability');
       assert.equal(records.filter(item => item.event === 'runtime-publication').at(-1).identity, latest.identity);
       const next = records.find(item => item.event === 'acquire-start' && item.count === 2);
       const oldChildren = records.filter(item => item.event === 'child-start' && item.watch).slice(0, 3);
@@ -164,7 +180,7 @@ for (const stage of ['polling', 'acquisition']) {
       const fixture = makeFixture(t, { webviewFails: false });
       const child = startWatchBuild(t, fixture);
       await waitFor(() => rendererCount(fixture) >= 1, child, 'initial publication');
-      await waitFor(() => events(fixture).some(item => item.event === 'poll-complete'), child, 'initial publication settles before injection');
+      await waitFor(() => events(fixture).some(item => item.event === 'watch-settled'), child, 'initial publication queue settles before injection');
       const published = rendererCount(fixture);
       writeFileSync(path.join(fixture.controls, `race-${stage}-${kind}`), 'fail');
       if (stage === 'acquisition') writeFileSync(fixture.fingerprintFile, 'force acquisition');
@@ -205,7 +221,7 @@ test('explicitly pinned watch ignores mutable source fingerprints', async (t) =>
   const fixture = makeFixture(t, { webviewFails: false });
   const pinned = path.join(fixture.directory, 'pinned-runtime');
   await makePinnedArtifact(fixture, pinned);
-  const child = startWatchBuild(t, fixture, ['--watch', '--pi-runtime', pinned, '--no-sync']);
+  const child = startWatchBuild(t, fixture, ['--delivery', '--watch', '--pi-runtime', pinned, '--no-sync']);
   await waitFor(() => events(fixture).filter(item => item.event === 'child-start' && item.watch).length === 3, child, 'pinned watchers start');
   assert.match(child.stdoutText, /explicitly pinned/u);
   assert.equal(existsSync(path.join(fixture.directory, 'acquisitions.txt')), false, 'an explicit artifact is reused, never reacquired');

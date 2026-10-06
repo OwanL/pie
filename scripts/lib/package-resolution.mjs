@@ -151,11 +151,16 @@ function packageInfoAt(root, packageName, conditions = ['import', 'require', 'no
 }
 
 function packageInfoFromOwner(ownerRoot, packageName, options) {
-  return packageInfoAt(path.join(ownerRoot, 'node_modules', ...packageName.split('/')), packageName, undefined, options);
+  // Workspace installs may hoist dependencies to an ancestor node_modules.
+  // Find the manifest from the owner's Node context, including packages whose
+  // export map hides package.json or which have no root executable entry.
+  const ownerRequire = createOwnerRequire({ dependencyOwnerRoot: ownerRoot });
+  const packageRoot = packageRootFromRequire(ownerRequire, packageName, ownerRoot, { graphLabel: 'Dependency owner graph' });
+  return packageInfoAt(packageRoot, packageName, undefined, options);
 }
 
 /** Find a package root through the supplied require context's Node search paths. */
-function packageRootFromRequire(packageRequire, packageName, context, { allowMissing = false } = {}) {
+function packageRootFromRequire(packageRequire, packageName, context, { allowMissing = false, graphLabel = 'Candidate SDK graph' } = {}) {
   const searchPaths = packageRequire.resolve.paths(packageName) ?? [];
   for (const modulesRoot of searchPaths) {
     const packageRoot = path.join(modulesRoot, ...packageName.split('/'));
@@ -165,15 +170,15 @@ function packageRootFromRequire(packageRequire, packageName, context, { allowMis
     try {
       manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
     } catch (error) {
-      throw new Error(`Invalid ${packageName} manifest in candidate SDK graph at ${manifestPath}: ${error.message}`, { cause: error });
+      throw new Error(`Invalid ${packageName} manifest in ${graphLabel} at ${manifestPath}: ${error.message}`, { cause: error });
     }
     if (manifest.name !== packageName) {
-      throw new Error(`Expected ${packageName} in candidate SDK graph at ${manifestPath}, found ${manifest.name ?? '(unnamed package)'}`);
+      throw new Error(`Expected ${packageName} in ${graphLabel} at ${manifestPath}, found ${manifest.name ?? '(unnamed package)'}`);
     }
     return realpathSync(packageRoot);
   }
   if (allowMissing) return undefined;
-  throw new Error(`Candidate SDK graph at ${context} cannot resolve ${packageName} through its Node module search paths (${searchPaths.join(path.delimiter)})`);
+  throw new Error(`${graphLabel} at ${context} cannot resolve ${packageName} through its Node module search paths (${searchPaths.join(path.delimiter)})`);
 }
 
 function coherentPiPackageDependencies(sdk, piPackages) {
@@ -393,11 +398,31 @@ function piAliases(options) {
   })).concat([...byCurrentName].map(([name, packageInfo]) => ({ name, package: packageInfo })));
 }
 
+/** Owner-local and ancestor module paths only; Node's global paths are not owners. */
+function ownerModuleSearchPaths(options) {
+  const ownerRoot = resolveOwnerRoot(options);
+  const ancestorModules = new Set();
+  for (let directory = ownerRoot; ; directory = path.dirname(directory)) {
+    ancestorModules.add(path.join(directory, 'node_modules'));
+    if (path.dirname(directory) === directory) break;
+  }
+  return (createOwnerRequire(options).resolve.paths('@types/vscode') ?? [])
+    .filter((modulesRoot) => ancestorModules.has(path.normalize(modulesRoot)));
+}
+
+function ownerTypeRoots(options) {
+  const roots = ownerModuleSearchPaths(options).map((modulesRoot) => path.join(modulesRoot, '@types'))
+    .filter((root) => existsSync(root));
+  // Keep missing types diagnostic behavior when no installed owner root exists.
+  return roots.length ? roots : [path.join(resolveOwnerRoot(options), 'node_modules', '@types')];
+}
+
 /**
  * TypeScript compiler options shared by moved source roots and registry-owned
  * tsconfigs. Selected SDK paths point at package declaration exports; without
  * an explicit SDK selection, only owner packages such as Preact are aliased.
- * Type roots stay with the application dependency owner. JSX uses Preact's automatic runtime.
+ * Type roots follow the application dependency owner's local/ancestor Node
+ * search paths, in owner-first order. JSX uses Preact's automatic runtime.
  */
 export function createTypeScriptResolution(options = {}) {
   const ownerRoot = resolveOwnerRoot(options);
@@ -420,7 +445,7 @@ export function createTypeScriptResolution(options = {}) {
   return Object.freeze({
     baseUrl: ownerRoot,
     paths: Object.freeze(paths),
-    typeRoots: Object.freeze([path.join(ownerRoot, 'node_modules', '@types')]),
+    typeRoots: Object.freeze(ownerTypeRoots(options)),
     jsxImportSource: 'preact',
   });
 }
@@ -705,7 +730,23 @@ function candidateRuntimeDependencyPaths(options, conditions, declaredPaths = {}
   return paths;
 }
 
-function ownerDependencyPaths(options, conditions) {
+/** Bundled script declarations may own subpaths without adjacent .d.ts files. */
+function ambientPackageTypeMappings(packageInfo, packageName, options) {
+  const target = packageInfo.manifest.types ?? packageInfo.manifest.typings;
+  if (typeof target !== 'string') return [];
+  const declaration = path.resolve(packageInfo.root, target);
+  if (!existsSync(declaration)) return [];
+  const typescript = createOwnerRequire(options)('typescript');
+  const source = typescript.createSourceFile(declaration, readFileSync(declaration, 'utf8'), typescript.ScriptTarget.Latest);
+  // External-module declarations are augmentations, not standalone entries.
+  if (typescript.isExternalModule(source)) return [];
+  return source.statements.filter((statement) => typescript.isModuleDeclaration(statement)
+    && typescript.isStringLiteral(statement.name)
+    && (statement.name.text === packageName || statement.name.text.startsWith(`${packageName}/`)))
+    .map((statement) => ({ key: statement.name.text, replacement: declaration }));
+}
+
+function ownerDependencyPaths(options, conditions, declarationFiles = new Set()) {
   const ownerRoot = resolveOwnerRoot(options);
   const manifest = JSON.parse(readFileSync(path.join(ownerRoot, 'package.json'), 'utf8'));
   const sdkGraph = sdkRuntimeDependencyGraph(options);
@@ -716,6 +757,9 @@ function ownerDependencyPaths(options, conditions) {
     ...Object.keys(manifest.dependencies ?? {}),
     ...Object.keys(manifest.devDependencies ?? {}),
   ])) {
+    // Declaration packages have no executable export. Optional SDK peers may
+    // mention @types packages without installing them in its runtime graph.
+    if (!conditions.includes('types') && name.startsWith('@types/')) continue;
     // SDK identities and candidate SDK runtime dependencies must not be
     // redirected to a potentially different host-owner copy.
     if (isSdkIdentitySpecifier(name)) continue;
@@ -743,13 +787,17 @@ function ownerDependencyPaths(options, conditions) {
     // Still require the installed manifest; SDK identity resolution remains strict.
     const packageInfo = packageInfoFromOwner(ownerRoot, name, { allowEntryless: true });
     const typechecking = conditions.includes('types');
-    const declarationPackage = path.join(ownerRoot, 'node_modules', '@types', ...name.replace(/^@/, '').replace('/', '__').split('/'));
+    const declarationName = name.replace(/^@/, '').replace('/', '__');
+    const declarationPackage = typechecking
+      ? ownerModuleSearchPaths(options).map((modulesRoot) => path.join(modulesRoot, '@types', declarationName))
+        .find((root) => existsSync(path.join(root, 'index.d.ts')))
+      : undefined;
     for (const mapping of exportMappings(packageInfo, name, runtimeConditionsForPackage(name, conditions))) {
       // TS does not walk back from absolute paths aliases to discover a
       // package's @types sibling. Give untyped owner packages their installed
       // declaration entry, and prefer adjacent declarations over JS exports.
       const declaration = mapping.replacement.replace(/\.(?:mjs|cjs|js)$/u, '.d.ts');
-      paths[mapping.key] = [typechecking && mapping.key === name && existsSync(path.join(declarationPackage, 'index.d.ts'))
+      paths[mapping.key] = [typechecking && mapping.key === name && declarationPackage
         ? path.join(declarationPackage, 'index.d.ts')
         : typechecking && (existsSync(declaration) || mapping.replacement.includes('*')) ? declaration
           : mapping.replacement];
@@ -757,6 +805,15 @@ function ownerDependencyPaths(options, conditions) {
     // Packages without export maps may still expose subpaths.
     if (!packageInfo.manifest.exports) {
       paths[`${name}/*`] = [path.join(packageInfo.root, '*')];
+    }
+    if (typechecking) {
+      for (const mapping of ambientPackageTypeMappings(packageInfo, name, options)) {
+        // Ambient wildcard modules cannot be used as path targets (TS2306).
+        // Load their real declaration script as a root instead, and let TS
+        // match its declared module names rather than forcing a JS alias.
+        delete paths[mapping.key];
+        declarationFiles.add(mapping.replacement);
+      }
     }
   }
   return paths;
@@ -794,7 +851,7 @@ function overlayPathsFromBase(declaredPaths, helperPaths, pathsBase) {
  * Get the effective paths and their declaring base (including `extends`),
  * without walking config `include` globs.
  */
-function effectiveTsconfigOptions(configPath, options) {
+function effectiveTsconfig(configPath, options) {
   const typescript = createOwnerRequire(options)('typescript');
   const parsed = typescript.getParsedCommandLineOfConfigFile(configPath, {}, {
     ...typescript.sys,
@@ -803,7 +860,7 @@ function effectiveTsconfigOptions(configPath, options) {
       throw new Error(typescript.flattenDiagnosticMessageText(diagnostic.messageText, '\n'));
     },
   });
-  return parsed?.options;
+  return parsed;
 }
 
 /**
@@ -849,13 +906,18 @@ export function createTsconfigOverlay(baseConfigPath, options = {}) {
     const declaredPaths = readTsconfigJson(absoluteBase, options).compilerOptions?.paths;
     const candidateSdk = options.sdkPath !== undefined;
     const helperPaths = options.typescript ? createTypeScriptResolution(options).paths : createTsxResolution(options).paths;
-    const effectiveOptions = declaredPaths || options.includeOwnerDependencies || candidateSdk || options.typescript
-      ? effectiveTsconfigOptions(absoluteBase, options) : undefined;
+    const effectiveConfig = declaredPaths || options.includeOwnerDependencies || candidateSdk || options.typescript
+      ? effectiveTsconfig(absoluteBase, options) : undefined;
+    const effectiveOptions = effectiveConfig?.options;
     const basePaths = options.includeOwnerDependencies || candidateSdk ? effectiveOptions?.paths ?? declaredPaths : declaredPaths;
     const conditions = options.typescript
       ? ['types', 'import', 'default', 'require'] : ['import', 'require', 'node', 'default'];
-    const ownerPaths = options.includeOwnerDependencies ? ownerDependencyPaths(options, conditions) : {};
-    const candidateRuntimePaths = candidateSdk
+    // Linked workspace packages retain their native per-package dependency
+    // ancestry. A single global tsx path map cannot safely flatten versions.
+    const declarationFiles = new Set();
+    const ownerPaths = options.includeOwnerDependencies && !options.nativeWorkspace
+      ? ownerDependencyPaths(options, conditions, declarationFiles) : {};
+    const candidateRuntimePaths = candidateSdk && !options.nativeWorkspace
       ? candidateRuntimeDependencyPaths(options, conditions, basePaths ?? {}, ownerPaths, helperPaths)
       : {};
     const candidateSdkPaths = candidateSdk
@@ -876,11 +938,16 @@ export function createTsconfigOverlay(baseConfigPath, options = {}) {
       : undefined;
     // TS resolves `types` references from the config/source ancestry, not from
     // compilerOptions.paths. Detached source and temp overlays need the owner's
-    // @types explicitly; vite/client is a package subpath rather than an @types
-    // package, so only configs which request it also need the owner module root.
+    // local or ancestor-hoisted @types explicitly. Explicit package types such
+    // as vite/client also need conventional owner module search paths.
     // Keep inherited typeRoots (already absolute after TS parses `extends`) and
     // leave the inherited `types` list unchanged.
-    const ownerModules = path.join(resolveOwnerRoot(options), 'node_modules');
+    const ownerModulePaths = ownerModuleSearchPaths(options);
+    const requestedPackageTypes = effectiveOptions?.types?.some((name) => {
+      const packageName = name.split('/').slice(0, name.startsWith('@') ? 2 : 1).join('/');
+      return !name.startsWith('@types/') && ownerModulePaths.some((modulesRoot) =>
+        existsSync(path.join(modulesRoot, ...packageName.split('/'), 'package.json')));
+    });
     // With no explicit typeRoots, relocating a TS config also relocates its
     // default @types ancestry. Preserve the base config's native search roots,
     // not the temporary overlay's ancestry or an unrelated dependency owner.
@@ -892,13 +959,22 @@ export function createTsconfigOverlay(baseConfigPath, options = {}) {
     const typeRoots = options.includeOwnerDependencies && options.typescript
       ? [...new Set([
         ...(effectiveOptions?.typeRoots ?? []).map((root) => path.normalize(root)),
-        path.join(ownerModules, '@types'),
-        ...(effectiveOptions?.types?.includes('vite/client') ? [ownerModules] : []),
+        ...ownerTypeRoots(options),
+        ...(requestedPackageTypes ? ownerModulePaths : []),
       ])]
       : defaultTypeRoots;
     const configPath = path.join(directory, 'tsconfig.overlay.json');
     writeFileSync(configPath, JSON.stringify({
       extends: absoluteBase,
+      // Config parsing above disables directory enumeration: fileNames holds
+      // only inherited explicit files. Preserve those while adding bundled
+      // declaration scripts; inherited include/exclude globs stay untouched.
+      ...(declarationFiles.size ? {
+        files: [...new Set([...(effectiveConfig?.fileNames ?? []), ...declarationFiles])],
+        // Adding files must not suppress the original implicit include.
+        ...(effectiveConfig?.raw?.include === undefined && effectiveConfig?.raw?.files === undefined
+          ? { include: [`${path.dirname(absoluteBase).split(path.sep).join('/')}/**/*`] } : {}),
+      } : {}),
       ...(overlayPaths || typeRoots ? { compilerOptions: {
         ...(overlayPaths ? { paths: overlayPaths } : {}),
         ...(typeRoots ? { typeRoots } : {}),

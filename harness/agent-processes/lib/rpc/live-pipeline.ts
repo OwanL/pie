@@ -1,4 +1,17 @@
 import type { ChatMessage, ToolCall } from './message-contract.js';
+export type { SubagentBillingCaptureReceipt } from '../../../../analytics/contracts/subagent-billing-capture-receipt.js';
+import type {
+  SubagentBillingAttempt,
+  SubagentBillingEntry,
+  SubagentBillingInvocation,
+  SubagentBillingUsage,
+} from '../../../../analytics/contracts/subagent-observation.js';
+export type {
+  SubagentBillingAttempt,
+  SubagentBillingEntry,
+  SubagentBillingInvocation,
+  SubagentBillingUsage,
+} from '../../../../analytics/contracts/subagent-observation.js';
 import type { ThinkingLevel } from '../../../model-providers/catalog/thinking-level.js';
 import type { DurationClockDomain } from '../../../../analytics/contracts/timing.js';
 import type { LiveSubagentDetailAddress, SubagentChildIdentity } from './subagent-detail.js';
@@ -162,74 +175,6 @@ export interface SubagentChildPreview {
   stopReason?: string;
   errorMessage?: string;
   stderr?: string;
-}
-
-export interface SubagentBillingUsage {
-  input: number;
-  output: number;
-  cacheRead: number;
-  cacheWrite: number;
-  totalTokens?: number;
-  /** Number of provider turns represented by an aggregate legacy usage record. */
-  turns?: number;
-  /** False when one or more numeric channel values are placeholders. */
-  tokenChannelsKnown?: boolean;
-  tokenChannelPresence?: {
-    input: boolean;
-    output: boolean;
-    cacheRead: boolean;
-    cacheWrite: boolean;
-  };
-  /** Legacy compact alias for explicit provider-reported billing. */
-  cost?: number;
-  /** Explicit provider/invoice billing evidence. */
-  reportedCostUsd?: number;
-  providerReportedCostUsd?: number;
-}
-
-export interface SubagentBillingAttempt {
-  attemptId: string;
-  model?: string;
-  provider?: string;
-  usage?: SubagentBillingUsage;
-  providerResponseObserved?: boolean;
-  outcome?: 'success' | 'failure' | 'aborted';
-  startedAt?: number;
-  completedAt?: number;
-  analyticsCaptureReceipt?: SubagentBillingCaptureReceipt;
-}
-
-export interface SubagentBillingInvocation extends SubagentBillingAttempt {
-  invocationId: string;
-  canonicalInvocationId?: string;
-}
-
-export interface SubagentBillingCaptureReceipt {
-  factStatus: 'disabled' | 'submitted' | 'rejected';
-  generationId: string;
-  stableOriginId: string;
-  executionId: string;
-  attemptId: string;
-  terminalDetailPayloadId: string;
-  lastSubmittedSequence: number;
-  lastAcknowledgedSequence?: number | string;
-  terminalDetailComplete: boolean;
-}
-
-export interface SubagentBillingEntry {
-  /** Stable recursive position within the terminal subagent result. */
-  path: string;
-  model?: string;
-  selectedModel?: string;
-  provider?: string;
-  /** Epoch milliseconds of the latest observed child provider response. */
-  occurredAt?: number;
-  usage?: SubagentBillingUsage;
-  attempts?: SubagentBillingAttempt[];
-  invocations?: SubagentBillingInvocation[];
-  /** Observable responses omitted from bounded transport; consumers emit one
-   * explicit gap settlement per omitted response. */
-  omittedInvocationCount?: number;
 }
 
 export type LiveAssistantPart =

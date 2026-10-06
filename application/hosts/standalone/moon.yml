@@ -1,0 +1,13 @@
+language: typescript
+dependsOn: [backend, app-common, host-common, browser, root, analytics, harness, vscode]
+tasks:
+  test:
+    command: 'proto run node -- scripts/verification/test-node.mjs --tsconfig application/hosts/vscode/tsconfig.json --sdk-path harness/pi/packages/coding-agent --exclude "**/*.artifact.test.*" application/hosts/standalone'
+    deps: ['pi:build']
+    inputs: ['/application/hosts/standalone/**/*', '/application/backend/**/*', '/application/frontend/**/*', '/application/lib/**/*', '/application/hosts/lib/**/*', '/application/hosts/browser/**/*', '/application/hosts/vscode/**/*', '/analytics/**/*', '!/analytics/analysis/**/*', '/harness/**/*', '/harness/pi/**/*', '/scripts/**/*', '/lib/**/*', '@globs(lifecycle)', '@globs(protected)']
+    options: {cache: false}
+  dev:
+    command: 'proto run node -- scripts/development/launch.mjs standalone'
+    deps: ['vscode:build']
+    inputs: ['/application/hosts/standalone/**/*', '/application/backend/**/*', '/application/frontend/**/*', '/application/lib/**/*', '/application/hosts/lib/**/*', '/application/hosts/browser/**/*', '/application/hosts/vscode/**/*', '/analytics/**/*', '!/analytics/analysis/**/*', '/harness/**/*', '/harness/pi/**/*', '/scripts/**/*', '/lib/**/*', '@globs(lifecycle)', '@globs(protected)']
+    options: {cache: false, persistent: true}

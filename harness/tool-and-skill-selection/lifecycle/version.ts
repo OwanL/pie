@@ -1,5 +1,6 @@
 import { execSync, exec } from "node:child_process";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 let cached: string | undefined;
 /** True while an async pre-warm `exec` is in flight, so repeated `register()`
@@ -14,7 +15,7 @@ let prewarming = false;
  * `@earendil-works/pi-coding-agent` peer dependency, which is only resolvable
  * inside the pi runtime (not under standalone `tsx` test runs).
  */
-const CONFIG_ROOT = path.resolve(import.meta.dirname, "..", "..", "..");
+const CONFIG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
 /**
  * Resolve the short git SHA of the repo HEAD once (cached for the process

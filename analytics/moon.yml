@@ -1,0 +1,13 @@
+language: typescript
+dependsOn: [root]
+tasks:
+  test:
+    command: 'proto run node -- scripts/verification/test-node.mjs --tsconfig application/hosts/vscode/tsconfig.json --sdk-path harness/pi/packages/coding-agent --exclude "**/*.artifact.test.*" analytics/test analytics/authority/test analytics/contracts/test analytics/capture/tool-call-analysis/test'
+    deps: ['pi:build']
+    # Cross-owner fixture imports are invalidation boundaries, not production dependencies.
+    inputs: ['/analytics/**/*', '!/analytics/analysis/**/*', '/analytics/analysis/scripts/source.ts', '/analytics/analysis/scripts/source-auto.ts', '/analytics/analysis/scripts/contracts.ts', '/application/lib/**/*', '/application/backend/**/*', '/application/frontend/**/*', '/application/hosts/lib/**/*', '/application/hosts/browser/**/*', '/application/hosts/vscode/**/*', '/harness/**/*', '/scripts/**/*', '/lib/**/*', '@globs(lifecycle)', '@globs(protected)']
+    options: {cache: false}
+  typecheck:
+    command: 'proto run node -- scripts/verification/typecheck-project.mjs analytics/tsconfig.json --sdk-path harness/pi/packages/coding-agent'
+    deps: ['pi:build']
+    inputs: ['/analytics/**/*', '!/analytics/analysis/**/*', '/lib/**/*', '@globs(lifecycle)', '@globs(protected)']

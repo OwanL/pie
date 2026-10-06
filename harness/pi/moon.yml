@@ -1,0 +1,35 @@
+language: typescript
+tasks:
+  build:
+    command: 'proto run node -- scripts/build/pi-workspace.mjs'
+    inputs: ['/harness/pi/**/*', '/lib/**/*', '@globs(lifecycle)', '/scripts/build/pi-workspace.mjs', '/scripts/build/pi-runtime.mjs', '@globs(protected)']
+    outputs: ['packages/tui/dist', 'packages/ai/dist', 'packages/agent/dist', 'packages/coding-agent/dist', '.cache/build.json']
+    options:
+      # Cache hydration must also respect reader exclusion. Until a gated
+      # hydration hook is qualified, compilation is incremental, not cached.
+      cache: false
+  test:
+    command: 'proto run node -- -e "console.log(\"Pi-owned suites complete\")"'
+    deps: ['testTui', 'testAi', 'testAgent', 'testCodingAgent']
+    inputs: ['/harness/pi/**/*', '/lib/**/*', '@globs(lifecycle)', '@globs(protected)']
+    options: {cache: false}
+  testTui:
+    command: 'proto run node -- scripts/verification/test-node.mjs harness/pi/packages/tui/test'
+    deps: ['build']
+    inputs: ['/harness/pi/packages/tui/**/*', '/lib/**/*', '@globs(lifecycle)', '@globs(protected)']
+    options: {cache: false}
+  testAgent:
+    command: 'proto run pnpm -- --dir harness/pi/packages/agent exec vitest run'
+    deps: ['build']
+    inputs: ['/harness/pi/packages/agent/**/*', '/harness/pi/packages/ai/**/*', '/lib/**/*', '@globs(lifecycle)', '@globs(protected)']
+    options: {cache: false}
+  testAi:
+    command: 'proto run pnpm -- --dir harness/pi/packages/ai exec vitest run'
+    deps: ['build']
+    inputs: ['/harness/pi/packages/ai/**/*', '/lib/**/*', '@globs(lifecycle)', '@globs(protected)']
+    options: {cache: false}
+  testCodingAgent:
+    command: 'proto run pnpm -- --dir harness/pi/packages/coding-agent exec vitest run'
+    deps: ['build']
+    inputs: ['/harness/pi/packages/**/*', '/lib/**/*', '@globs(lifecycle)', '@globs(protected)']
+    options: {cache: false}

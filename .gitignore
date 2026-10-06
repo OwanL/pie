@@ -54,12 +54,18 @@ data/proxy/
 # VS Code host distribution/dependency outputs (source and test roots stay under /extension).
 /application/hosts/vscode/node_modules/
 /application/hosts/vscode/out/
+/application/hosts/vscode/out-dev/
 /application/hosts/vscode/pie-runtime/
 /application/hosts/vscode/pie-bootstrap/
 /application/hosts/vscode/qualitas-report.json
 /application/hosts/vscode/.qualitas.config.js
 /analysis/site/dist/
 *.vsix
+
+# Moon caches only task-owned outputs, not development profiles.
+.moon/cache/
+.moon/docker/
+.moon/logs/
 
 # Build / test caches
 __pycache__/

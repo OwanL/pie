@@ -14,6 +14,7 @@ import {
 } from '../lib/runtime-resolution';
 import { resolveGenerationPiRuntime, type GenerationPiRuntimeDescriptor } from '../lib/pi-runtime-resolution';
 import { resolvePieDataPaths, type PieDataRootPaths } from '../../../lib/data-root/pie-data-root';
+import { resolvePieDevelopmentProfilePaths, type PieDevelopmentProfilePaths } from '../lib/host-coordinator';
 import type { RuntimeGenerationIdentity } from '../../../analytics/authority/analytics-handoff-discovery';
 import {
   acquireRuntimeGeneration,
@@ -25,6 +26,11 @@ export interface StandaloneDependencyPaths {
   nodePath: string;
   sdkPath: string;
   agentDir?: string;
+}
+
+export interface WorkspaceDevelopmentSdkSelection {
+  kind: 'workspace-development';
+  workspaceRoot: string;
 }
 
 export interface StandaloneRuntimePaths {
@@ -41,11 +47,14 @@ export interface StandaloneEnvironment {
   paths: StandaloneRuntimePaths;
   dependencies: StandaloneDependencyPaths;
   dataPaths: PieDataRootPaths;
+  developmentProfilePaths?: PieDevelopmentProfilePaths;
   runtimeIdentity?: RuntimeGenerationIdentity;
   /** A real lease exists only when startup selected a managed generation. */
   runtimeLease?: Pick<RuntimeLease, 'release'>;
   /** Exact verified artifact snapshot for the selected backend Node target. */
   sourceArtifactDescriptor?: GenerationPiRuntimeDescriptor;
+  /** Explicit workspace SDK route; production continues to use the artifact descriptor. */
+  sdkRuntimeSelection?: WorkspaceDevelopmentSdkSelection;
 }
 
 export interface ResolveStandaloneEnvironmentOptions {
@@ -128,18 +137,36 @@ async function resolveDependencies(
   runtimeOutputDirectory: string,
   options: {
     dependencies?: StandaloneDependencyPaths;
+    developmentProfilePaths?: PieDevelopmentProfilePaths;
     env: NodeJS.ProcessEnv;
     exec: CommandExecutor;
   },
-): Promise<{ dependencies: StandaloneDependencyPaths; sourceArtifactDescriptor: GenerationPiRuntimeDescriptor }> {
+): Promise<{
+  dependencies: StandaloneDependencyPaths;
+  sourceArtifactDescriptor?: GenerationPiRuntimeDescriptor;
+  sdkRuntimeSelection?: WorkspaceDevelopmentSdkSelection;
+}> {
+  const developmentWorkspace = options.env.PIE_DEVELOPMENT_PI_WORKSPACE?.trim();
   const developmentArtifactDir = options.env.PIE_DEVELOPMENT_PI_RUNTIME?.trim();
+  if (developmentWorkspace && developmentArtifactDir) {
+    throw new StandaloneStartupError('PIE_DEVELOPMENT_PI_WORKSPACE and PIE_DEVELOPMENT_PI_RUNTIME cannot be selected together.');
+  }
+  if (developmentWorkspace && !path.isAbsolute(developmentWorkspace)) {
+    throw new StandaloneStartupError('PIE_DEVELOPMENT_PI_WORKSPACE must be an absolute Pi workspace root.');
+  }
+  if (developmentWorkspace && options.env.PIE_ALLOW_WORKSPACE_DEVELOPMENT_SDK !== '1') {
+    throw new StandaloneStartupError('PIE_DEVELOPMENT_PI_WORKSPACE requires PIE_ALLOW_WORKSPACE_DEVELOPMENT_SDK=1.');
+  }
   if (developmentArtifactDir && options.env.PIE_ALLOW_DEVELOPMENT_RUNTIME !== '1') {
     throw new StandaloneStartupError('PIE_DEVELOPMENT_PI_RUNTIME requires PIE_ALLOW_DEVELOPMENT_RUNTIME=1.');
   }
-  const candidateSdkPath = path.join(
-    developmentArtifactDir ?? path.join(runtimeOutputDirectory, 'pi-runtime'),
-    'node_modules', '@earendil-works', 'pi-coding-agent',
-  );
+  const workspaceRoot = developmentWorkspace ? path.resolve(developmentWorkspace) : undefined;
+  const candidateSdkPath = workspaceRoot
+    ? path.join(workspaceRoot, 'packages', 'coding-agent')
+    : path.join(
+        developmentArtifactDir ?? path.join(runtimeOutputDirectory, 'pi-runtime'),
+        'node_modules', '@earendil-works', 'pi-coding-agent',
+      );
   const { nodeEngine } = validateSdk(candidateSdkPath);
 
   let nodePath: string;
@@ -163,33 +190,42 @@ async function resolveDependencies(
     throw new StandaloneStartupError(`Could not resolve a compatible Node.js runtime: ${error instanceof Error ? error.message : String(error)}`);
   }
 
-  let sourceArtifactDescriptor: GenerationPiRuntimeDescriptor;
+  let sourceArtifactDescriptor: GenerationPiRuntimeDescriptor | undefined;
+  const sdkRuntimeSelection: WorkspaceDevelopmentSdkSelection | undefined = workspaceRoot
+    ? { kind: 'workspace-development', workspaceRoot }
+    : undefined;
   try {
     const target = await probeBackendNodeTarget(nodePath, { exec: options.exec, env: options.env });
-    sourceArtifactDescriptor = await resolveGenerationPiRuntime({
-      runtimeOutDir: runtimeOutputDirectory,
-      target,
-      ...(developmentArtifactDir ? {
-        developmentOverride: { artifactDir: developmentArtifactDir, allowDevelopmentRuntime: true },
-      } : {}),
-    });
+    if (!workspaceRoot) {
+      sourceArtifactDescriptor = await resolveGenerationPiRuntime({
+        runtimeOutDir: runtimeOutputDirectory,
+        target,
+        ...(developmentArtifactDir ? {
+          developmentOverride: { artifactDir: developmentArtifactDir, allowDevelopmentRuntime: true },
+        } : {}),
+      });
+    }
   } catch (error) {
-    throw new StandaloneStartupError(`Could not verify the standalone PI runtime artifact: ${error instanceof Error ? error.message : String(error)}`);
+    const runtimeLabel = workspaceRoot ? 'workspace-development Pi SDK' : 'standalone PI runtime artifact';
+    throw new StandaloneStartupError(`Could not verify the ${runtimeLabel}: ${error instanceof Error ? error.message : String(error)}`);
   }
 
-  const resolvedAgentDir: ResolvedAgentDir = resolveAgentDir({
-    envAgentDir: options.dependencies?.agentDir ?? options.env.PI_CODING_AGENT_DIR,
-    extensionPath,
-  });
+  const resolvedAgentDir: ResolvedAgentDir | { agentDir: string } = options.developmentProfilePaths
+    ? { agentDir: options.developmentProfilePaths.agentDir }
+    : resolveAgentDir({
+        envAgentDir: options.dependencies?.agentDir ?? options.env.PI_CODING_AGENT_DIR,
+        extensionPath,
+      });
   return {
     dependencies: {
       nodePath,
-      // Explicit/global SDK overrides are deliberately ignored: the only SDK
-      // accepted in production is the one bound by the verified artifact.
-      sdkPath: sourceArtifactDescriptor.sdkPath,
+      // Production remains bound to the verified artifact; workspace mode is
+      // selected only by its explicit opt-in and carries its own route below.
+      sdkPath: sourceArtifactDescriptor?.sdkPath ?? candidateSdkPath,
       ...(resolvedAgentDir.agentDir ? { agentDir: resolvedAgentDir.agentDir } : {}),
     },
-    sourceArtifactDescriptor,
+    ...(sourceArtifactDescriptor ? { sourceArtifactDescriptor } : {}),
+    ...(sdkRuntimeSelection ? { sdkRuntimeSelection } : {}),
   };
 }
 
@@ -296,8 +332,19 @@ export async function resolveStandaloneEnvironment(
   options: ResolveStandaloneEnvironmentOptions,
 ): Promise<StandaloneEnvironment> {
   const injectedEnvironment = options.environment;
+  const startupEnvironment = options.env ?? process.env;
+  const suppliedDependencies = options.dependencies ?? injectedEnvironment?.dependencies;
   const extensionPath = path.resolve(options.extensionPath || injectedEnvironment?.paths.extensionPath || '');
   const runtimeIdentity = readRuntimeIdentity(extensionPath);
+  let developmentProfilePaths: PieDevelopmentProfilePaths | undefined;
+  try {
+    developmentProfilePaths = resolvePieDevelopmentProfilePaths(startupEnvironment, {
+      ...(suppliedDependencies?.agentDir ? { agentDir: suppliedDependencies.agentDir } : {}),
+      ...(options.dataRoot ? { dataDir: options.dataRoot } : {}),
+    });
+  } catch (error) {
+    throw new StandaloneStartupError(`Could not resolve the isolated development profile: ${error instanceof Error ? error.message : String(error)}`);
+  }
   const skipValidation = options.skipValidation === true;
   const runtimeSelection = skipValidation
     ? {
@@ -317,6 +364,7 @@ export async function resolveStandaloneEnvironment(
 
     let dependencies: StandaloneDependencyPaths;
     let sourceArtifactDescriptor: GenerationPiRuntimeDescriptor | undefined;
+    let sdkRuntimeSelection: WorkspaceDevelopmentSdkSelection | undefined = injectedEnvironment?.sdkRuntimeSelection;
     if (skipValidation) {
       dependencies = options.dependencies ?? injectedEnvironment?.dependencies ?? {
         nodePath: process.execPath,
@@ -326,28 +374,39 @@ export async function resolveStandaloneEnvironment(
       const injectedDependencies = options.dependencies ?? injectedEnvironment?.dependencies;
       const resolved = await resolveDependencies(extensionPath, runtimeSelection.runtimeOutputDirectory, {
         ...(injectedDependencies ? { dependencies: injectedDependencies } : {}),
-        env: options.env ?? process.env,
+        ...(developmentProfilePaths ? { developmentProfilePaths } : {}),
+        env: startupEnvironment,
         exec: options.exec ?? createCommandExecutor(),
       });
       dependencies = resolved.dependencies;
       sourceArtifactDescriptor = resolved.sourceArtifactDescriptor;
+      sdkRuntimeSelection = resolved.sdkRuntimeSelection;
+    }
+    if (developmentProfilePaths) {
+      // The test/embedding skip-validation seam must not bypass profile
+      // isolation for mutable SDK state.
+      dependencies = { ...dependencies, agentDir: developmentProfilePaths.agentDir };
     }
     if (!skipValidation) {
       requireFile(dependencies.nodePath, 'Standalone Node.js runtime');
       validateSdk(dependencies.sdkPath);
-      if (dependencies.agentDir) requireDirectory(dependencies.agentDir, 'PI agent directory');
+      if (dependencies.agentDir && !developmentProfilePaths) requireDirectory(dependencies.agentDir, 'PI agent directory');
     }
 
-    const dataPaths = injectedEnvironment?.dataPaths ?? workspaceDataPaths(options.dataRoot, dependencies.agentDir);
+    const dataPaths = developmentProfilePaths
+      ? workspaceDataPaths(developmentProfilePaths.dataDir, developmentProfilePaths.agentDir)
+      : injectedEnvironment?.dataPaths ?? workspaceDataPaths(options.dataRoot, dependencies.agentDir);
     // Never accept identity injected by an embedding caller: the package manifest
     // is the authority used by the generation manager and activation checks.
     const environment = {
       paths,
       dependencies,
       dataPaths,
+      ...(developmentProfilePaths ? { developmentProfilePaths } : {}),
       ...(runtimeIdentity ? { runtimeIdentity } : {}),
       ...(runtimeSelection.runtimeLease ? { runtimeLease: runtimeSelection.runtimeLease } : {}),
       ...(sourceArtifactDescriptor ? { sourceArtifactDescriptor } : {}),
+      ...(sdkRuntimeSelection ? { sdkRuntimeSelection } : {}),
     };
     validateStandaloneRuntimeIdentity(environment);
     return environment;

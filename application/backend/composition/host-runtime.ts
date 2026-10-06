@@ -9,15 +9,15 @@ import type { BackendClient } from '../agent-connection/client.js';
 import type {
   BrowserServerLifecycleEvent,
   BrowserServerService,
-} from '../../hosts/lib/platform-contracts/browser-server-seam.js';
+} from '../../lib/platform-contracts/browser-server-seam.js';
 import {
   shouldShowCompletionNotification,
   type SessionCompletionEvent,
 } from './completion-attention.js';
-import { compactRendererViewState } from '../../hosts/lib/renderer-delivery/renderer-view-state.js';
+import { compactRendererViewState } from '../../lib/renderer-delivery/renderer-view-state.js';
 import type { BrowserServerViewState } from '../../lib/protocol/webview.js';
 import { SessionService } from '../session-actions/service.js';
-import type { HostRuntimePlatform, HostRuntimeHooks } from '../../hosts/lib/platform-contracts/platform.js';
+import type { HostRuntimePlatform, HostRuntimeHooks } from '../../lib/platform-contracts/platform.js';
 import { TokenRateService } from '../analytics-views/token-rate-service.js';
 import { AggregateStatsService } from '../analytics-views/aggregate-stats-service.js';
 import { EMPTY_PROVIDER_GATE_STATS, type ProviderGateStats } from '../../../analytics/contracts/aggregate-stats.js';
@@ -58,7 +58,7 @@ import {
   disposeLivePipelineTrace,
   isLivePipelineTraceEnabled,
   recordLivePipelineTrace,
-} from '../agent-connection/live-pipeline-trace-runtime.js';
+} from '../../lib/live-pipeline-trace-runtime.js';
 import { deriveSessionNameFromText } from '../../../harness/session-storage/metadata/session-name.js';
 import { isPendingTabPath } from '../../../lib/session-path.js';
 import { appendPieLog } from '../../../lib/structured-logging/pie-logger.js';

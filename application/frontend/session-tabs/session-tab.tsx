@@ -4,7 +4,7 @@
 import { memo } from 'preact/compat';
 
 import type { SessionSummary } from '../../lib/protocol/index.js';
-import { isPendingTabPath } from './tab-behavior';
+import { isPendingTabPath } from '../../lib/session-tabs/tab-behavior.js';
 import { handleContextMenuKeyRequest } from '../lib/components/context-menu-key';
 import { AgentIcon } from './icons';
 import { getTabAvatarColor, getTabAvatarLabel } from './tab-avatar';

@@ -2,7 +2,7 @@
 /** @jsxImportSource preact */
 
 import assert from 'node:assert/strict';
-import test, { beforeEach } from 'node:test';
+import test, { afterEach, beforeEach } from 'node:test';
 
 import { installDom } from '../helpers/dom';
 installDom();
@@ -40,10 +40,11 @@ beforeEach(() => {
   clearCollapsibleCache();
   container = document.createElement('div');
   document.body.appendChild(container);
-  return () => {
-    render(null, container);
-    container.remove();
-  };
+});
+
+afterEach(() => {
+  render(null, container);
+  container.remove();
 });
 
 test('an address promotion reaches a mounted expanded completed card', async () => {

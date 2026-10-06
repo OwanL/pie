@@ -21,7 +21,7 @@ import type { ChatMessage, ComposerInput, SessionSummary } from '../../../lib/pr
 import { AGENT_MESSAGE_CUSTOM_TYPE } from '../../../lib/protocol/messages.js';
 import { LIVE_PIPELINE_LIMITS } from '../../../../harness/agent-processes/lib/rpc/live-pipeline.js';
 import { NEW_SESSION_NAME } from '../../../../harness/session-storage/metadata/session-name.js';
-import { reorderOpenTabsPinnedFirst, replacePathInPinnedTabGroups, reconcilePinnedGroups } from '../../../frontend/session-tabs/tab-behavior.js';
+import { reorderOpenTabsPinnedFirst, replacePathInPinnedTabGroups, reconcilePinnedGroups } from '../../../lib/session-tabs/tab-behavior.js';
 import { resolveSessionOpenedTranscript } from '../../transcript-delivery/session-opened-transcript.js';
 import { materializeInterruptedLiveTurn } from '../live-pipeline/projection.js';
 import { pendingOwnerKey, pruneExpiredTerminalAttempts, terminalAttemptKey } from '../live-pipeline/model.js';

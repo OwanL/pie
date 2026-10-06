@@ -109,8 +109,11 @@ async function fixture(t: test.TestContext, options: { selected?: boolean; artif
 
 function isolateStandaloneStartupEnvironment(): () => void {
   const keys = [
-    'PI_SDK_PATH', 'PI_NODE_PATH', 'PI_CODING_AGENT_DIR', 'PIE_ALLOW_IN_TREE_AUTH',
-    'PIE_DEVELOPMENT_PI_RUNTIME', 'PIE_ALLOW_DEVELOPMENT_RUNTIME',
+    'PI_SDK_PATH', 'PI_NODE_PATH', 'PI_CODING_AGENT_DIR', 'PI_CODING_AGENT_AUTH_DIR',
+    'PI_CODING_AGENT_SESSION_DIR', 'PIE_DATA_DIR', 'PIE_ALLOW_IN_TREE_AUTH',
+    'PIE_DEVELOPMENT_PROFILE_DIR', 'PIE_DEVELOPMENT_PI_RUNTIME', 'PIE_ALLOW_DEVELOPMENT_RUNTIME',
+    'PIE_DEVELOPMENT_PI_WORKSPACE', 'PIE_ALLOW_WORKSPACE_DEVELOPMENT_SDK',
+    'PIE_HOST_PROFILE', 'PIE_HOST_COORDINATOR_PORT',
   ] as const;
   const previous = new Map(keys.map((key) => [key, process.env[key]]));
   for (const key of keys) delete process.env[key];
@@ -655,11 +658,70 @@ test('standalone platform forwards its independently verified selected artifact 
   }
 });
 
+test('standalone workspace SDK selection requires opt-in and emits an explicit workspace route', async (t) => {
+  const prepared = await fixture(t, { artifact: false });
+  const workspaceRoot = path.join(prepared.root, 'pi-workspace');
+  await put(workspaceRoot, 'packages/coding-agent/package.json', JSON.stringify({
+    name: '@earendil-works/pi-coding-agent',
+    version: '0.80.6-dev',
+  }));
+  await put(workspaceRoot, 'packages/coding-agent/dist/index.js', 'export {}\n');
+  const profileDir = path.join(prepared.root, 'development-profile');
+  await put(prepared.root, 'settings.json', '{}'); // Valid checkout-relative candidate must still be ignored in development.
+  const env = {
+    ...process.env,
+    PIE_DEVELOPMENT_PROFILE_DIR: profileDir,
+    PI_CODING_AGENT_DIR: path.join(profileDir, 'agent'),
+    PI_CODING_AGENT_AUTH_DIR: path.join(profileDir, 'auth'),
+    PIE_DATA_DIR: path.join(profileDir, 'data'),
+    PI_CODING_AGENT_SESSION_DIR: path.join(profileDir, 'data', 'sessions'),
+    PIE_DEVELOPMENT_PI_WORKSPACE: workspaceRoot,
+  };
+
+  await assert.rejects(resolveStandaloneEnvironment({
+    extensionPath: prepared.extensionPath,
+    runtimeOutputDirectory: prepared.output,
+    env: { ...process.env, PIE_DEVELOPMENT_PI_WORKSPACE: workspaceRoot },
+    exec: artifactProbe(),
+  }), /PIE_DEVELOPMENT_PROFILE_DIR is required/u);
+
+  await assert.rejects(resolveStandaloneEnvironment({
+    extensionPath: prepared.extensionPath,
+    runtimeOutputDirectory: prepared.output,
+    env,
+    exec: artifactProbe(),
+  }), /PIE_ALLOW_WORKSPACE_DEVELOPMENT_SDK=1/);
+
+  const selected = await resolveStandaloneEnvironment({
+    extensionPath: prepared.extensionPath,
+    runtimeOutputDirectory: prepared.output,
+    dependencies: { nodePath: process.execPath, sdkPath: '/ignored/external/sdk' },
+    env: { ...env, PIE_ALLOW_WORKSPACE_DEVELOPMENT_SDK: '1' },
+    exec: artifactProbe(),
+  });
+  assert.equal(selected.dependencies.sdkPath, path.join(workspaceRoot, 'packages', 'coding-agent'));
+  assert.equal(selected.dependencies.agentDir, path.join(profileDir, 'agent'));
+  assert.equal(selected.dataPaths.rootDir, path.join(profileDir, 'data'));
+  assert.equal(selected.developmentProfilePaths?.authDir, path.join(profileDir, 'auth'));
+  assert.equal(selected.developmentProfilePaths?.authFile, path.join(profileDir, 'auth', 'auth.json'));
+  assert.deepEqual(selected.sdkRuntimeSelection, { kind: 'workspace-development', workspaceRoot });
+  assert.equal(selected.sourceArtifactDescriptor, undefined, 'development must not fabricate production artifact identity');
+});
+
 test('standalone development artifact requires opt-in and then uses only the verified override descriptor', async (t) => {
   const prepared = await fixture(t, { artifact: false });
   const developmentArtifact = path.join(prepared.root, 'private-development-runtime');
   await makeOutput(developmentArtifact);
-  const env = { ...process.env, PIE_DEVELOPMENT_PI_RUNTIME: path.join(developmentArtifact, 'pi-runtime') };
+  const profileDir = path.join(prepared.root, 'development-profile');
+  const env = {
+    ...process.env,
+    PIE_DEVELOPMENT_PROFILE_DIR: profileDir,
+    PI_CODING_AGENT_DIR: path.join(profileDir, 'agent'),
+    PI_CODING_AGENT_AUTH_DIR: path.join(profileDir, 'auth'),
+    PIE_DATA_DIR: path.join(profileDir, 'data'),
+    PI_CODING_AGENT_SESSION_DIR: path.join(profileDir, 'data', 'sessions'),
+    PIE_DEVELOPMENT_PI_RUNTIME: path.join(developmentArtifact, 'pi-runtime'),
+  };
 
   await assert.rejects(resolveStandaloneEnvironment({
     extensionPath: prepared.extensionPath,

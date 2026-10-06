@@ -1,6 +1,6 @@
 import type { RunObserver } from '../../analytics-views';
 import type { ArchState } from '../../conversation-state/arch-state';
-import { recordStreamEvent } from '../../../hosts/lib/renderer-delivery/stream-telemetry';
+import { recordStreamEvent } from '../../../lib/stream-telemetry.js';
 import type { SessionServiceState } from '../state';
 import type { Event } from '../../conversation-state/events';
 import type {

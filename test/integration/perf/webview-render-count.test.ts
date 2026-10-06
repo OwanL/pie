@@ -73,7 +73,7 @@ import {
 } from '../../../application/frontend/transcript/message-item';
 import type { RenderToolCall, TranscriptContextMenuHandler } from '../../../application/frontend/transcript/types';
 import { useComposerIndicators } from '../../../application/frontend/composer/use-composer-indicators';
-import { buildSessionUsageSnapshot } from '../../../analytics/usage-accounting/session-usage';
+import { buildSessionUsageSnapshot } from '../../../harness/session-storage/transcripts/session-usage-adapter.js';
 
 type IndicatorsInputs = Parameters<typeof useComposerIndicators>[0];
 

@@ -13,7 +13,7 @@ import { shouldFlashFinishedTab } from '../../composition/completion-attention.j
 import { backendExitEvents, type InterruptedSessionActivity } from '../../agent-connection/backend-exit-events.js';
 import { appendPieLog } from '../../../../lib/structured-logging/pie-logger.js';
 import type { DeferredTriggerRegistry } from '../../deferred-triggers/registry';
-import type { HostDisposable } from '../../../hosts/lib/platform-contracts/session-platform';
+import type { HostDisposable } from '../../../lib/platform-contracts/session-platform.js';
 
 export interface ApplySessionOpenedDeps {
   getArchState: () => ArchState;

@@ -8,13 +8,10 @@
   "typescript.preferences.quoteStyle": "single",
   "javascript.preferences.quoteStyle": "single",
   "github.copilot.chat.claudeAgent.allowDangerouslySkipPermissions": true,
-  // pie.sdkPath is intentionally NOT set here. Resolution prefers explicit
-  // User settings / PI_SDK_PATH, then the repo-local SDK pinned by
-  // application/hosts/vscode/package-lock.json, before cached or global fallbacks — see
-  // extension/src/shared/runtime-resolution.ts. Committing an absolute,
-  // username-scoped path here breaks every other machine on pull.
-  // To pin a non-standard SDK location, set pie.sdkPath in VS Code *User*
-  // settings (per-machine), or set PI_SDK_PATH.
+  // pie.sdkPath and PI_SDK_PATH are not runtime selectors. Production uses
+  // the verified pi-runtime bundled with the selected delivery; development
+  // uses the explicitly selected local workspace SDK. See README.md.
+  // Do not commit absolute, username-scoped runtime paths here.
   // Hide PI runtime artifacts from the explorer
   "files.exclude": {
     "data/": true,

@@ -1,5 +1,6 @@
+import { realpathSync } from "node:fs";
 import { access, chmod, realpath, symlink } from "node:fs/promises";
-import { delimiter, join } from "node:path";
+import { basename, delimiter, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { NodeExecutionEnv } from "../../src/harness/env/nodejs.ts";
 import { FileError, getOrThrow } from "../../src/harness/types.ts";
@@ -7,6 +8,10 @@ import { executeShellWithCapture } from "../../src/harness/utils/shell-output.ts
 import { createTempDir } from "./session-test-utils.ts";
 
 const chmodRestorePaths: string[] = [];
+
+async function createDirectorySymlink(target: string, path: string): Promise<void> {
+	await symlink(target, path, process.platform === "win32" ? "junction" : "dir");
+}
 
 afterEach(async () => {
 	for (const path of chmodRestorePaths.splice(0)) {
@@ -50,8 +55,7 @@ describe("NodeExecutionEnv", () => {
 		const env = new NodeExecutionEnv({ cwd: root });
 		getOrThrow(await env.createDir("dir", { recursive: true }));
 		getOrThrow(await env.writeFile("dir/file.txt", "hello"));
-		await symlink(join(root, "dir/file.txt"), join(root, "file-link"));
-		await symlink(join(root, "dir"), join(root, "dir-link"));
+		await createDirectorySymlink(join(root, "dir"), join(root, "dir-link"));
 
 		expect(getOrThrow(await env.fileInfo("dir"))).toMatchObject({
 			name: "dir",
@@ -64,24 +68,66 @@ describe("NodeExecutionEnv", () => {
 			kind: "file",
 			size: 5,
 		});
-		expect(getOrThrow(await env.fileInfo("file-link"))).toMatchObject({
-			name: "file-link",
-			path: join(root, "file-link"),
-			kind: "symlink",
-		});
 		expect(getOrThrow(await env.fileInfo("dir-link"))).toMatchObject({
 			name: "dir-link",
 			path: join(root, "dir-link"),
 			kind: "symlink",
 		});
+	});
+
+	it("returns fileInfo for file symlinks without following them", async ({ skip }) => {
+		const root = createTempDir();
+		const env = new NodeExecutionEnv({ cwd: root });
+		getOrThrow(await env.createDir("dir", { recursive: true }));
+		getOrThrow(await env.writeFile("dir/file.txt", "hello"));
+		try {
+			await symlink(
+				join(root, "dir/file.txt"),
+				join(root, "file-link"),
+				process.platform === "win32" ? "file" : undefined,
+			);
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code === "EPERM" || code === "ENOSYS") {
+				skip(`File symlink fixture unavailable (${code}); symlink creation is not supported here.`);
+			}
+			throw error;
+		}
+
+		expect(getOrThrow(await env.fileInfo("file-link"))).toMatchObject({
+			name: "file-link",
+			path: join(root, "file-link"),
+			kind: "symlink",
+		});
 		expect(getOrThrow(await env.canonicalPath("file-link"))).toBe(await realpath(join(root, "dir/file.txt")));
 	});
 
-	it("lists symlinks as symlinks", async () => {
+	it("uses the native basename for local file metadata", async () => {
+		const root = createTempDir();
+		const env = new NodeExecutionEnv({ cwd: root });
+		const filePath = join(root, "nested", "file.txt");
+		getOrThrow(await env.writeFile(filePath, "hello"));
+
+		expect(getOrThrow(await env.fileInfo(filePath)).name).toBe(basename(filePath));
+	});
+
+	it("lists symlinks as symlinks", async ({ skip }) => {
 		const root = createTempDir();
 		const env = new NodeExecutionEnv({ cwd: root });
 		getOrThrow(await env.writeFile("target.txt", "hello"));
-		await symlink(join(root, "target.txt"), join(root, "link.txt"));
+		try {
+			await symlink(
+				join(root, "target.txt"),
+				join(root, "link.txt"),
+				process.platform === "win32" ? "file" : undefined,
+			);
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code === "EPERM" || code === "ENOSYS") {
+				skip(`File symlink fixture unavailable (${code}); symlink creation is not supported here.`);
+			}
+			throw error;
+		}
 
 		const entries = getOrThrow(await env.listDir("."));
 		expect(
@@ -194,11 +240,11 @@ describe("NodeExecutionEnv", () => {
 		const root = createTempDir();
 		const env = new NodeExecutionEnv({ cwd: root });
 		const result = getOrThrow(
-			await env.exec('printf \'%s:%s\' "$PWD" "$NODE_ENV_TEST"', {
+			await env.exec('node -e "process.stdout.write(JSON.stringify([process.cwd(), process.env.NODE_ENV_TEST]))"', {
 				env: { NODE_ENV_TEST: "ok" },
 			}),
 		);
-		expect(result).toEqual({ stdout: `${await realpath(root)}:ok`, stderr: "", exitCode: 0 });
+		expect(result).toEqual({ stdout: JSON.stringify([realpathSync(root), "ok"]), stderr: "", exitCode: 0 });
 	});
 
 	it("uses stdin command transport for legacy WSL bash paths", async () => {

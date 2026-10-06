@@ -1,5 +1,7 @@
 // Playwright-only spec; the .pw.ts suffix keeps it out of pie's node:test discovery.
-import { expect, test, type Page } from '@playwright/test';
+import type { Page } from '@playwright/test';
+
+import { expect, test } from './ui-smoke-fixtures.js';
 
 interface BrowserSocketWindow extends Window {
   __pieTestSockets?: WebSocket[];
@@ -70,6 +72,19 @@ async function getToolbarHitboxOverlaps(page: Page): Promise<Array<{ a: string; 
 }
 
 test.describe('composer toolbar overflow in Chromium', () => {
+  test.use({
+    viewState: {
+      modelSettings: { defaultModel: 'fixture-model', defaultProvider: 'fixture', defaultThinkingLevel: 'medium' },
+      availableModels: [{ id: 'fixture-model', name: 'Offline fixture model', provider: 'fixture', reasoning: true, inputKinds: ['text'], contextWindow: 128_000 }],
+      contextUsage: { tokens: 32_000, contextWindow: 128_000, percent: 25 },
+      browserServer: {
+        running: true, localUrl: 'http://127.0.0.1:0', port: 0, clientCount: 1,
+        lanEnabled: false, configuredLanEnabled: false, lanUrls: [],
+        changePending: false, pendingLanEnabled: null, changeError: null,
+      },
+    },
+  });
+
   test('keeps pinned controls and every visible hitbox separate at phone widths', async ({ page }) => {
     for (const width of [390, 320, 240]) {
       await openComposer(page, width, 640);

@@ -7,7 +7,7 @@ import {
   sanitizeProviderToolProtocolParts,
   textFromMessageParts,
   toolCallsFromMessageParts,
-} from '../../../frontend/transcript/message-parts.js';
+} from '../../../lib/transcript/message-parts.js';
 import { toolsForTurn } from './model.js';
 import { reconstructSubagentDetailAddresses } from './subagent-detail-addresses.js';
 

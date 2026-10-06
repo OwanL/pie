@@ -20,13 +20,13 @@ import {
 } from '../../../harness/agent-processes/lib/rpc/session-control-settings.js';
 import { SessionServiceState } from './state';
 import type { DeferredTriggerRegistry } from '../deferred-triggers/registry';
-import type { SessionHostPlatform, HostDisposable } from '../../hosts/lib/platform-contracts/session-platform';
+import type { SessionHostPlatform, HostDisposable } from '../../lib/platform-contracts/session-platform.js';
 import { onMessageDelta, onMessageThinking, onMessageToolCallDelta, onMessageStarted, onMessageFinished, onMessageAborted, onPreflightFailed, onQueuedDelivered, onRetryStarted, onRetryEnded, onRetryMeasured, onCompaction, onCompactionStarted, onAuxiliaryLlmUsage, reconcileServingModelConfig } from './handlers/streaming.js';
 import { onToolStarted, onToolFinished, onToolProgress } from './handlers/tools.js';
 import { onSessionListChanged, onCustomMessage, onExtensionUIRequest, onError, onOperationalError, onContextUsageChanged } from './handlers/session.js';
 import { applySessionOpenedPayload, handleBusyChangedPayload, attach as attachHandlers, detach as detachHandlers } from './handlers/attach.js';
 import { auditLog } from '../../../lib/structured-logging/pie-logger.js';
-import { isLivePipelineTraceEnabled, recordLivePipelineTrace } from '../agent-connection/live-pipeline-trace-runtime.js';
+import { isLivePipelineTraceEnabled, recordLivePipelineTrace } from '../../lib/live-pipeline-trace-runtime.js';
 
 interface SessionServiceEventsOptions {
   platform: SessionHostPlatform;

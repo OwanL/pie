@@ -3,7 +3,7 @@ import type { Command } from '../commands.js';
 import type { ModelInfo, SessionSummary } from '../../../lib/protocol/index.js';
 import type { ReducerResult } from './helpers.js';
 import { evictSession, removeFromArray } from './helpers.js';
-import { getNextVisibleTabPathOnClose, moveOpenTabPath, insertTabRespectingPinnedPrefix, cleanPinnedTabGroups } from '../../../frontend/session-tabs/tab-behavior.js';
+import { getNextVisibleTabPathOnClose, moveOpenTabPath, insertTabRespectingPinnedPrefix, cleanPinnedTabGroups } from '../../../lib/session-tabs/tab-behavior.js';
 import { isPendingTabPath } from '../../../../lib/session-path.js';
 import {
   activeInterruptOperation,

@@ -1,28 +1,35 @@
 {
   "name": "pi-config",
   "private": true,
+  "files": [
+    "README.md"
+  ],
   "engines": {
     "node": ">=24.16.0",
-    "npm": ">=11.13.0"
+    "pnpm": ">=10.34.4"
   },
-  "packageManager": "npm@11.13.0",
-  "//workspaces": "npm workspaces are intentionally NOT enabled. Extension packages are loaded directly by pi and verified by the root test/typecheck runners. Activating workspaces would require package.json files for every extension and would change root dependency installation.",
+  "packageManager": "pnpm@10.34.4",
   "scripts": {
-    "postinstall": "node ./scripts/install/install-dependencies.mjs",
-    "install:dependencies": "node ./scripts/install/install-dependencies.mjs",
-    "test": "node ./scripts/verification/run-affected-tests.mjs",
-    "test:fast": "node ./scripts/verification/run-affected-tests.mjs",
-    "test:all": "node ./scripts/verification/run-tests.mjs --fast",
+    "setup": "proto run node -- scripts/install/install-dependencies.mjs",
+    "install:dependencies": "proto run node -- scripts/install/install-dependencies.mjs",
+    "build": "proto run moon -- run vscode:build",
+    "watch": "proto run moon -- run vscode:watch",
+    "dev": "proto run moon -- run standalone:dev",
+    "dev:vscode": "proto run moon -- run vscode:dev",
+    "test": "proto run moon -- run :test --affected --include-relations",
+    "test:fast": "proto run moon -- run :test --affected --include-relations",
+    "test:all": "proto run moon -- run :test",
+    "test:artifact": "proto run moon -- run root:artifactTest",
     "test:coverage": "node ./scripts/verification/run-tests.mjs",
     "test:integration": "node ./scripts/verification/run-tests.mjs --fast --integration",
     "test:large-detail": "npm --prefix application/hosts/vscode run test:large-detail",
-    "test:file": "node ./scripts/verification/run-test-files.mjs",
-    "test:changed": "node ./scripts/verification/run-affected-tests.mjs",
-    "test:scripts": "node ./scripts/verification/run-tests.mjs --fast --package scripts",
+    "test:file": "node ./scripts/verification/test-node.mjs",
+    "test:changed": "proto run moon -- run :test --affected --include-relations",
+    "test:scripts": "proto run moon -- run scripts:test",
     "lint": "npm --prefix application/hosts/vscode run lint --",
-    "typecheck": "node ./scripts/verification/run-typechecks.mjs",
-    "check": "node ./scripts/verification/run-verification.mjs check",
-    "verify": "node ./scripts/verification/run-verification.mjs verify",
+    "typecheck": "proto run moon -- run :typecheck",
+    "check": "proto run moon -- run root:models :typecheck :test --affected --include-relations",
+    "verify": "proto run moon -- run root:models :typecheck :test vscode:build",
     "verify:release": "node ./scripts/verification/run-verification.mjs verify:release",
     "analytics:typecheck": "npm --prefix analytics/analysis run typecheck --",
     "analytics:test": "node ./scripts/verification/run-tests.mjs --package analysis",
@@ -34,12 +41,15 @@
     "doctor": "node ./scripts/diagnostics/doctor.mjs",
     "extension:build": "npm --prefix application/hosts/vscode run build --",
     "extension:build:validate": "npm --prefix application/hosts/vscode run build:validate --",
-    "extension:build:after-typecheck": "npm --prefix application/hosts/vscode run build -- --skip-typecheck --no-sync",
+    "extension:build:after-typecheck": "node scripts/build/build.mjs --skip-typecheck",
+    "delivery:build": "proto run moon -- run vscode:delivery",
+    "delivery:qualify": "proto run moon -- run root:deliveryQualification",
+    "extension:publish": "node scripts/build/build.mjs --delivery --publish",
     "extension:publish:renderer": "npm --prefix application/hosts/vscode run publish:renderer --",
     "extension:activate": "npm --prefix application/hosts/vscode run activate --",
     "extension:package": "npm --prefix application/hosts/vscode run package --",
     "extension:test": "node ./scripts/verification/run-tests.mjs --package extension",
-    "extension:test:browser": "npm --prefix application/hosts/vscode run test:browser --",
+    "extension:test:browser": "proto run pnpm -- exec playwright test --config application/hosts/vscode/playwright.config.ts",
     "perf:activity-timeline": "node ./scripts/verification/run-test-files.mjs test/integration/perf/activity-timeline.perf.ts",
     "perf:analytics": "node ./scripts/verification/run-test-files.mjs test/integration/perf/analytics.perf.ts",
     "perf:startup-accounting": "node ./scripts/verification/run-test-files.mjs test/integration/perf/startup-accounting.perf.ts",
@@ -52,12 +62,36 @@
     "extensions:typecheck": "node ./scripts/verification/run-package-group.mjs typechecks extensions",
     "sync-models": "node ./scripts/model-config/sync-models.mjs"
   },
-  "devDependencies": {
-    "@types/node": "^25.9.3",
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "workspace:*",
+    "@earendil-works/pi-ai": "workspace:*",
+    "@earendil-works/pi-coding-agent": "workspace:*",
+    "@earendil-works/pi-tui": "workspace:*",
     "gpt-tokenizer": "^3.4.0",
-    "tsx": "^4.22.3"
+    "highlight.js": "11.11.1",
+    "immer": "^11.1.8",
+    "ws": "^8.21.0",
+    "yaml": "2.9.0"
   },
-  "overrides": {
-    "esbuild": ">=0.28.1"
+  "devDependencies": {
+    "@types/node": "25.9.3",
+    "@types/ws": "^8.18.1",
+    "@typescript/native-preview": "7.0.0-dev.20260120.1",
+    "esbuild": "0.28.1",
+    "pi-mcp-adapter": "2.20.1",
+    "preact": "^10.29.1",
+    "preact-render-to-string": "^6.6.7",
+    "tsx": "4.22.3",
+    "typescript": "5.9.3"
+  },
+  "pnpm": {
+    "overrides": {
+      "esbuild": "0.28.1",
+      "rimraf": "6.1.2",
+      "@earendil-works/pi-ai": "workspace:*",
+      "@earendil-works/pi-agent-core": "workspace:*",
+      "@earendil-works/pi-tui": "workspace:*",
+      "@earendil-works/pi-coding-agent": "workspace:*"
+    }
   }
 }

@@ -9,8 +9,6 @@ import { withPiRuntime } from '../../lib/pi-runtime-context.mjs';
 import { PI_RUNTIME_PACKAGES, PI_RUNTIME_SDK_RELATIVE_PATH, writePiRuntimeManifest, verifyPiRuntimeArtifact } from '../../lib/pi-runtime-artifact.mjs';
 import { extractRuntimeArgs, resolveRuntimeSelection, withVerificationRuntime } from '../verification-runtime.mjs';
 import { runVerification, verificationStages } from '../run-verification.mjs';
-import { runAffectedSelection } from '../run-affected-tests.mjs';
-import { attemptFlakyRerun } from '../run-tests.mjs';
 import { createGroupTsconfigOverlay, buildTsxArgs, resolveLocalTsx, runGroup } from '../run-test-files.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
@@ -50,10 +48,28 @@ test('explicit runtime transport is unambiguous, absolute, and respects --', () 
   assert.throws(() => extractRuntimeArgs(['--sdk-path'], { allowSdkPath: true }), /requires/);
 });
 
-test('check/verify/release acquire once and reuse the same verified graph in nested children/retries/build', async (t) => {
+test('native check/verify dispatch Moon without artifact acquisition or publication', async () => {
+  for (const mode of ['check', 'verify']) {
+    const calls = [];
+    const dependencies = {
+      withPiRuntime: () => { throw new Error('Native route acquired an artifact'); },
+      run: async (args) => { calls.push(args); return 0; },
+    };
+    assert.equal(await runVerification(mode, {}, undefined, dependencies), 0);
+    assert.deepEqual(calls, [['proto', 'run', 'moon', '--', 'run', 'root:models', ':typecheck', ':test',
+      ...(mode === 'check' ? ['--affected', '--include-relations'] : ['vscode:build'])]]);
+    assert.doesNotMatch(calls.flat().join(' '), /delivery|publish|artifact|deep/);
+    calls.length = 0;
+    await assert.rejects(runVerification(mode, { artifactDir: path.resolve(os.tmpdir(), 'missing') }, undefined, dependencies), /not used.*omit it/);
+    assert.equal(calls.length, 0);
+    assert.equal(await runVerification(mode, {}, undefined, { ...dependencies, run: async () => 7 }), 7);
+  }
+});
+
+test('release acquires once and reuses the same verified graph in nested children/build', async (t) => {
   const candidate = await artifact(t);
   const before = await readFile(path.join(candidate.artifactDir, 'manifest.json'));
-  for (const mode of ['check', 'verify', 'verify:release']) {
+  for (const mode of ['verify:release']) {
     let acquisitions = 0;
     let confirmations = 0;
     const calls = [];
@@ -84,6 +100,10 @@ test('check/verify/release acquire once and reuse the same verified graph in nes
     assert.equal(acquisitions, 1);
     assert.equal(confirmations, 1);
     assert.deepEqual(calls, verificationStages(mode, candidate));
+    assert.ok(calls.some((args) => args[0] === 'scripts/verification/run-tests.mjs' && !args.includes('--fast')),
+      'release keeps the coverage-gated legacy runner');
+    assert.ok(calls.some((args) => args[0] === 'scripts/build/build.mjs'));
+    assert.doesNotMatch(calls.flat().join(' '), /--publish|--delivery/);
   }
   assert.deepEqual(await readFile(path.join(candidate.artifactDir, 'manifest.json')), before);
   assert.equal((await verifyPiRuntimeArtifact(candidate.artifactDir)).identity, candidate.identity);
@@ -93,10 +113,10 @@ test('failure stops later stages; uncertain teardown never confirms cleanup', as
   let confirmed = 0;
   let dispatched = 0;
   const dependencies = { withPiRuntime: async (_options, run) => run({ artifactDir: path.resolve(os.tmpdir()), confirmChildCompletion: () => { confirmed += 1; } }) };
-  assert.equal(await runVerification('verify', {}, undefined, { ...dependencies, run: async () => { dispatched += 1; return 7; } }), 7);
+  assert.equal(await runVerification('verify:release', {}, undefined, { ...dependencies, run: async () => { dispatched += 1; return 7; } }), 7);
   assert.equal(dispatched, 1);
   assert.equal(confirmed, 1);
-  await assert.rejects(runVerification('verify', {}, undefined, { ...dependencies, run: async () => { throw new Error('uncertain teardown'); } }), /uncertain/);
+  await assert.rejects(runVerification('verify:release', {}, undefined, { ...dependencies, run: async () => { throw new Error('uncertain teardown'); } }), /uncertain/);
   assert.equal(confirmed, 1);
   await assert.rejects(runVerification('bad', {}, undefined, dependencies), /Unknown/);
 });
@@ -125,37 +145,11 @@ assert.ok(aliases.typebox[0].startsWith(${JSON.stringify(candidate.artifactDir)}
   assert.equal((await verifyPiRuntimeArtifact(candidate.artifactDir)).identity, candidate.identity);
 });
 
-test('no-affected plan acquires nothing; affected file transport and selective retry retain the same context', async (t) => {
-  const candidate = await artifact(t);
-  const none = { withPiRuntime: () => { throw new Error('No-work plan acquired'); } };
-  assert.equal(await runAffectedSelection({ mode: 'none' }, {}, undefined, () => { throw new Error('No-work plan dispatched'); }, none), 0);
-  let acquisitions = 0;
-  let dispatches = 0;
-  const files = ['scripts/verification/test/run-typechecks.test.mjs'];
-  await runAffectedSelection({ mode: 'files', testFiles: files }, {}, undefined, async (_script, args, _signal, stdin) => {
-    dispatches += 1;
-    assert.deepEqual(JSON.parse(stdin), files);
-    assert.deepEqual(args, ['--files-from-stdin', '--pi-runtime', candidate.artifactDir]);
-    return 0;
-  }, { withPiRuntime: async (_options, run) => { acquisitions += 1; return run({ ...candidate, confirmChildCompletion() {} }); } });
-  assert.equal(acquisitions, 1);
-  assert.equal(dispatches, 1);
-  const result = { config: { id: 'fixture' }, failures: [{ name: 'failure', file: files[0] }],
-    summary: { counts: { passed: 0, failed: 1 } }, passed: false };
-  const retried = await attemptFlakyRerun(result, true, false, [], undefined, async (retryFiles, _signal, runtime) => {
-    assert.deepEqual(retryFiles, files);
-    assert.strictEqual(runtime, candidate);
-    return { passed: true };
-  }, candidate);
-  assert.equal(retried.passed, true);
-});
-
 test('help/list entrypoints do not acquire or validate a deliberately missing artifact', () => {
   const missing = path.resolve(os.tmpdir(), 'pie-artifact-that-does-not-exist');
   for (const [script, args] of [
     ['run-tests.mjs', ['--list']], ['run-typechecks.mjs', ['--list']], ['run-test-files.mjs', ['--help']],
-    ['run-affected-tests.mjs', ['--help']], ['run-verification.mjs', ['--help']],
-    ['run-fast-batched-tests.mjs', ['--help']], ['run-fast-extension-tests.mjs', ['--help']],
+    ['run-verification.mjs', ['--help']],
     ['run-package-group.mjs', ['tests', 'extensions', '--list']],
   ]) {
     const result = spawnSync(process.execPath, [path.join(root, 'scripts/verification', script), ...args, '--pi-runtime', missing], { encoding: 'utf8', timeout: 30_000, windowsHide: true });

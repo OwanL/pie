@@ -1,5 +1,11 @@
 import type { ChatMessage, ToolCall } from '../../lib/protocol/index.js';
+import { IDLE_STATE, type TokenRateIndicatorState } from '../../lib/protocol/token-rate.js';
 import { isRecord } from '../../../lib/validation/type-guards';
+import {
+  estimateBoundedTokens as estimateSharedBoundedTokens,
+  estimateLiveAssistantOutputTokens as estimateSharedLiveOutputTokens,
+  TOKEN_SAMPLE_CHARS,
+} from '../../lib/analytics/live-output-tokens.js';
 import { estimateTextTokens } from '../../../lib/token-estimation';
 import {
   getRenderableSubagentResultFromToolCall,
@@ -12,6 +18,9 @@ import {
   latencyDisplay,
   type TurnLatencyStats,
 } from '../../../lib/transcript/turn-latency';
+
+export { IDLE_STATE };
+export type { TokenRateIndicatorState };
 
 /**
  * Live "average tokens per second" measurement.
@@ -72,13 +81,6 @@ function countBpeTokens(text: string): number {
   return estimateTextTokens(text);
 }
 
-/** Char bound beyond which a text field is tail-sampled instead of fully
- * tokenized. Matches the backend's live subagent counter
- * (`estimatePossiblyLongTextTokens` in `tool-progress-normalizer.ts`) so the
- * host rate measurement uses the same bounded-estimate strategy as the
- * transport-side cumulative counters it mirrors. */
-const TOKEN_SAMPLE_CHARS = 8_192;
-
 /** Bounded-work token estimate: exact BPE for short text; for long text, the
  * tail window's token density scaled by total characters. Deliberately NOT an
  * exact incremental BPE claim — it is the same approximate magnitude estimate
@@ -92,12 +94,7 @@ const TOKEN_SAMPLE_CHARS = 8_192;
  * go through {@link updateFieldEstimate}, which prices only the appended tail
  * incrementally. */
 function estimateBoundedTokens(text: string): number {
-  if (typeof text !== 'string' || text.length <= TOKEN_SAMPLE_CHARS) {
-    return countBpeTokens(text);
-  }
-  const tail = text.slice(-TOKEN_SAMPLE_CHARS);
-  const tailTokens = countBpeTokens(tail);
-  return Math.round(tailTokens * (text.length / tail.length));
+  return estimateSharedBoundedTokens(text, countBpeTokens);
 }
 
 /** Bounded identity + cumulative token estimate for one long-lived text field
@@ -269,44 +266,7 @@ export const RATE_HOLD_MS = 30_000;
 /** Cap on retained samples to bound memory (~72s at 200ms ticks). */
 const MAX_SAMPLES = 360;
 
-export interface TokenRateIndicatorState {
-  /** Compact label e.g. "42 tok/s · 1.5s" (rate · avg turn latency); "—" when idle or measuring. */
-  label: string;
-  ariaLabel: string;
-  tooltip: string;
-  /** 'idle' (no session selected) | 'generating' | 'paused'. */
-  state: 'idle' | 'generating' | 'paused';
-  /** True while the generation clock is frozen (tool running / between turns / before the first token). */
-  paused: boolean;
-  /** Numeric active-generation tokens/sec, or `undefined` when no generation
-   * timing is available. This is the primary per-session/composer rate. A
-   * provisional value may be exposed during the first sampling interval; it is
-   * replaced by the generation-time window once it spans 300ms. */
-  rate?: number;
-  /** Provider-reported output tokens divided by the full assistant duration for
-   * the latest completed/error turn. This is separate from {@link rate}: it
-   * includes the initial wait and is the end-to-end/experienced throughput.
-   * It is also available as a fallback for a burst that completed before the
-   * live sampler observed two ticks. */
-  endToEndRate?: number;
-  /** True when {@link endToEndRate} uses visible-token estimation because the
-   * provider did not report output usage. */
-  endToEndRateEstimated?: boolean;
-  /**
-   * Estimated output tokens in the currently-unreported main turn and running
-   * subagents. This is transient: provider-reported usage replaces it when the
-   * turn/tool completes. Live cost and token totals use it while output streams.
-   */
-  liveOutputTokens?: number;
-}
 
-export const IDLE_STATE: TokenRateIndicatorState = {
-  label: '—',
-  ariaLabel: 'Generation rate: idle.',
-  tooltip: 'No active generation.',
-  state: 'idle',
-  paused: false,
-};
 
 interface Sample {
   /** Generation-clock value (ms) at the sample. */
@@ -434,13 +394,6 @@ function hasRunningToolCall(message: ChatMessage | null): boolean {
   return message.toolCalls.some((tc) => tc.status === 'running');
 }
 
-/** Estimated visible output tokens for a message: text + reasoning. Bounded
- * work per field (tail-sampled for long text — see {@link estimateBoundedTokens}). */
-function estimatedOutputTokens(message: ChatMessage | null): number {
-  if (!message) return 0;
-  return estimateBoundedTokens(message.markdown ?? '') + estimateBoundedTokens(message.thinking ?? '');
-}
-
 /** Incrementally estimate the streaming message's markdown + thinking fields,
  * reusing unchanged fields with zero tokenizer work. Appends tokenize only the
  * appended tail (bounded); a same-length correction is caught by exact
@@ -465,7 +418,7 @@ function updateStreamingContentEstimate(acc: Accumulator, message: ChatMessage |
  * bounded estimate. */
 function cachedTerminalOutputTokens(acc: Accumulator | undefined, message: ChatMessage | null): number {
   if (!message) return 0;
-  if (!acc) return estimatedOutputTokens(message);
+  if (!acc) return estimateBoundedTokens(message.markdown ?? '') + estimateBoundedTokens(message.thinking ?? '');
   let cache = acc.terminalEstimateCache;
   if (!cache || cache.id !== message.id) {
     cache = { id: message.id };
@@ -495,22 +448,12 @@ function provisionalToolCallDrafts(message: ChatMessage | null): Array<{ id: str
   return drafts;
 }
 
-/** One-shot bounded estimate of the visible draft tool-call tokens (used by
- * callers without an accumulator — see `estimateLiveAssistantOutputTokens`).
- * Internal per-tick measurement goes through `measureDraftingToolCall`, which
- * prices args incrementally. */
-function estimatedDraftingToolCallTokens(message: ChatMessage | null): number {
-  return provisionalToolCallDrafts(message).reduce(
-    (total, draft) => total + estimateBoundedTokens(draft.name) + estimateBoundedTokens(draft.argsText),
-    0,
-  );
-}
-
-/** Estimated model output currently visible on a streaming assistant message.
- * Includes reply text, reasoning, and the transient tool-call name/arguments so
- * live rate, token-total, chart, and cost projections use the same numerator. */
+/** Estimated model output currently visible on a message. Shared with the
+ * renderer's live-cost fallback; the injected tokenizer preserves this module's
+ * work-bound diagnostic counter. Per-tick accounting still uses incremental
+ * field estimates below. */
 export function estimateLiveAssistantOutputTokens(message: ChatMessage | null): number {
-  return estimatedOutputTokens(message) + estimatedDraftingToolCallTokens(message);
+  return estimateSharedLiveOutputTokens(message, countBpeTokens);
 }
 
 /** Track model-generated tool-call names + raw JSON independently from reply

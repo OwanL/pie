@@ -12,7 +12,7 @@ await import('./extension.test.js');
 // source maps into experimental coverage. Skip only that external compatibility
 // probe here; ordinary fast/root suites still execute it.
 process.env.PLAYWRIGHT_COVERAGE_RUN = '1';
-await import('./host-runtime-integration.test.js');
+await import('./host-runtime-integration.artifact.test.js');
 delete process.env.PLAYWRIGHT_COVERAGE_RUN;
 await import('./lifecycle.test.js');
 await import('./protocol.test.js');

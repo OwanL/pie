@@ -11,7 +11,7 @@ import { workspaceHash } from '../../legacy/stats-service/helpers.js';
 import { StatsService } from '../../../application/backend/analytics-views';
 import { isAuxiliaryLlmUsagePayload } from '../../../harness/agent-processes/lib/rpc/event-payload-validation.js';
 import { boundToolFinishedPayload } from '../../../harness/agent-processes/workers/session-event-handler';
-import { buildSubagentUsageSamples } from '../../usage-accounting/session-usage';
+import { buildSubagentUsageSamples } from '../../../harness/session-storage/transcripts/session-usage-adapter.js';
 import type { BillableInvocationRecord } from '../../usage-accounting/billable-invocation';
 
 function stateFor(sessionPath: string, privacyMode = false, sessionId = 'session-accounting'): ArchState {

@@ -1,6 +1,5 @@
 import { TAB_DRAG_VERTICAL_SLOP_PX } from './constants';
-import { getHorizontalDropIndex } from '../tab-behavior';
-import { derivePinnedItems, findPinnedGroupIndex } from '../tab-behavior';
+import { getHorizontalDropIndex, derivePinnedItems, findPinnedGroupIndex } from '../../../lib/session-tabs/tab-behavior.js';
 
 import type { TabDragCandidate, SessionTabDragState } from '../types';
 

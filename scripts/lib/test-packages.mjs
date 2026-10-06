@@ -2,10 +2,8 @@
 //
 // Every runner that needs "which packages exist and how do they run" consumes
 // this module instead of maintaining its own package list:
-//  - scripts/verification/run-tests.mjs (per-package test/coverage configs, fast grouping)
+//  - scripts/verification/run-tests.mjs (per-package test/coverage configs)
 //  - scripts/verification/run-test-files.mjs (focused file -> package classification + tsx config)
-//  - scripts/verification/run-affected-tests.mjs / scripts/lib/test-impact.mjs (changed files -> packages)
-//  - scripts/verification/run-fast-batched-tests.mjs (root/analysis/subagent/... fast batch modes)
 //  - scripts/verification/run-typechecks.mjs (typecheck projects + compiler selection)
 //  - scripts/verification/run-package-group.mjs (root package.json `extensions:*` scripts)
 //  - scripts/verification/test/package-registry-drift.test.mjs (fails when any runner or root
@@ -23,7 +21,7 @@
 // tools use explicit group metadata. `ownedDirs` routes compatibility adapters
 // and extracted implementation files to their existing test owner. `retiredSourceDirs`
 // retain absent historical paths only for rename/delete routing. Everything else a
-// runner needs — test cwd, tsx/tsc compiler, batching and concurrency — is explicit
+// runner needs — test cwd, tsx/tsc compiler and concurrency — is explicit
 // metadata below so runner adapters never re-derive it locally.
 
 /**
@@ -51,8 +49,10 @@
  *   the install owner directory.
  * @property {string[]} [testFiles] Explicit repo-relative test files routed to this
  *   verification id when a shared integration directory contains distinct owners.
+ * @property {string[]} [sdkIndependentTestFiles] Exact repo-relative test files that do
+ *   not import or exercise the selected Pi SDK and may skip runtime acquisition in `test:file`.
  * @property {string[]} [optionalTestRoots] Explicitly planned test roots that may
- *   not exist yet. Only these roots may be skipped by fast batch runners.
+ *   not exist yet. These are distinguished from required live test roots.
  * @property {string} [testCwd] Repo-relative cwd for test runs; absent = repo root.
  *   Set this only for packages that require a package-local test cwd; all other
  *   package test globs are resolved from the repo root.
@@ -65,20 +65,16 @@
  * @property {{ config: string, compiler: string }} [typecheck] Repo-relative project
  *   tsconfig and tsc binary for scripts/verification/run-typechecks.mjs. Absent = no TS project
  *   (the `scripts` package is plain .mjs).
- * @property {{ batches: number }} [fastBatch] File-batch count for the package's
- *   run-fast-batched-tests.mjs mode (mode name = package id). Absent = no dedicated
- *   batch mode.
- * @property {string} [testDir] Repo-relative test-file root walked by the fast
- *   batch runner; defaults to `<dir>/test`. `scripts` overrides it so its legacy
+ * @property {string} [testDir] Repo-relative default test-file root;
+ *   defaults to `<dir>/test`. `scripts` overrides it so its legacy
  *   root test directory remains registered alongside the grouped test roots.
  * @property {number} [fastConcurrency] `--test-concurrency` used in fast mode.
- *   Absent = Node's default. Repo-root packages share the root group budget (3).
+ *   Absent = Node's default.
  */
 
 /**
  * Each package, in canonical registration order. This order drives
- * `run-tests.mjs --list`, per-package execution order, the root fast-batch
- * composition, and the typecheck project order.
+ * `run-tests.mjs --list`, per-package execution order, and the typecheck project order.
  *
  * @type {PackageEntry[]}
  */
@@ -86,7 +82,10 @@ export const PACKAGE_REGISTRY = [
   {
     id: 'extension',
     dir: 'application/hosts/vscode',
-    sourceRoots: ['harness/agent-instructions/prompt-assembly', 'application/lib/protocol', 'application/frontend', 'application/hosts', 'test/integration/browser', 'test/integration/large-detail.e2e.ts'],
+    sourceRoots: ['harness/agent-instructions/prompt-assembly', 'application/lib/protocol',
+      'application/lib/composer', 'application/lib/session-tabs', 'application/lib/transcript',
+      'application/lib/platform-contracts', 'application/lib/renderer-delivery', 'application/lib/test',
+      'application/frontend', 'application/hosts', 'test/integration/browser', 'test/integration/large-detail.e2e.ts'],
     // Keep the deleted extension/ prefix routable for outstanding Git rename/deletion records.
     retiredSourceDirs: ['extension'],
     testRoots: [
@@ -96,6 +95,7 @@ export const PACKAGE_REGISTRY = [
       'application/frontend/session-tabs/test',
       'application/frontend/transcript/test',
       'application/lib/protocol/test',
+      'application/lib/test',
       'application/hosts/test',
       'application/hosts/lib/test',
       'application/hosts/standalone/test',
@@ -113,8 +113,14 @@ export const PACKAGE_REGISTRY = [
       'test/integration/chat-message-parts.test.ts',
       'test/integration/runtime-trace-bridge.test.ts',
       'test/integration/tool-result-format.test.ts',
-      'test/integration/pie-harness-prompt.test.ts',
-      'test/integration/system-prompt-provider-payload.test.ts',
+      'test/integration/pie-harness-prompt.artifact.test.ts',
+      'test/integration/system-prompt-provider-payload.artifact.test.ts',
+    ],
+    sdkIndependentTestFiles: [
+      'application/hosts/test/asset-manifests/bootstrap.test.ts',
+      'application/hosts/test/asset-manifests/runtime-generations.test.ts',
+      'application/hosts/test/asset-manifests/runtime-scan-concurrency.test.ts',
+      'application/hosts/test/asset-manifests/runtime-copy-concurrency.test.ts',
     ],
     testDir: 'application/frontend/test',
     testCwd: 'application/hosts/vscode',
@@ -134,12 +140,16 @@ export const PACKAGE_REGISTRY = [
     retiredSourceDirs: ['analysis'], // Retired source identity remains routable for changed/deleted paths.
     testCwd: 'analytics/analysis',
     typecheck: { config: 'analytics/analysis/tsconfig.json', compiler: 'analytics/analysis/node_modules/typescript/bin/tsc' },
-    fastBatch: { batches: 4 },
     fastConcurrency: 2,
   },
   {
     id: 'scripts',
     dir: 'scripts',
+    sdkIndependentTestFiles: [
+      'scripts/lib/test/package-resolution.test.mjs',
+      'scripts/lib/test/unbundled-owner-resolution.test.mjs',
+      'scripts/install/test/source-pi-cli.test.mjs',
+    ],
     testDir: 'scripts/test',
     testRoots: [
       'scripts/build/test',
@@ -202,7 +212,7 @@ export const PACKAGE_REGISTRY = [
       'harness/tool-and-skill-selection/lifecycle/test',
       'extensions/skill-pruner/test',
     ],
-    testFiles: ['test/integration/dynamic-tool-activation.test.ts'],
+    testFiles: ['test/integration/dynamic-tool-activation.artifact.test.ts'],
     typecheck: { config: 'harness/tool-and-skill-selection/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
     fastConcurrency: 3,
   },
@@ -274,7 +284,6 @@ export const PACKAGE_REGISTRY = [
     testRoots: ['harness/agent-instructions/agent-discovery/test'],
     tsxConfig: 'harness/tools/subagent/tsconfig.json',
     typecheck: { config: 'harness/tools/subagent/tsconfig.release.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
-    fastBatch: { batches: 4 },
     fastConcurrency: 4,
   },
   {
@@ -352,7 +361,6 @@ export const PACKAGE_REGISTRY = [
     retiredSourceDirs: ['tools/computer-use'],
     tsxConfig: 'harness/tools/computer-use/tsconfig.runtime.json',
     typecheck: { config: 'harness/tools/computer-use/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
-    fastBatch: { batches: 3 },
     fastConcurrency: 2,
   },
   {
@@ -371,7 +379,6 @@ export const PACKAGE_REGISTRY = [
     retiredSourceDirs: ['tools/playwright'],
     tsxConfig: 'harness/tools/playwright/tsconfig.runtime.json',
     typecheck: { config: 'harness/tools/playwright/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
-    fastBatch: { batches: 2 },
   },
   {
     id: 'session-storage-transcripts',
@@ -380,8 +387,8 @@ export const PACKAGE_REGISTRY = [
     // and real-SDK transcript integrations remain co-owned with their owners.
     testFiles: [
       'test/integration/backend-cold-session-browse.test.ts',
-      'test/integration/real-sdk-image-persistence.test.ts',
-      'test/integration/sdk-terminal-durability.test.ts',
+      'test/integration/real-sdk-image-persistence.artifact.test.ts',
+      'test/integration/sdk-terminal-durability.artifact.test.ts',
     ],
     tsxConfig: 'application/hosts/vscode/tsconfig.json',
     typecheck: { config: 'harness/session-storage/transcripts/tsconfig.json', compiler: 'application/hosts/vscode/node_modules/typescript/bin/tsc' },
@@ -625,16 +632,6 @@ export function resolvePackageEntry(id) {
 }
 
 /**
- * The packages merged into the single "root" fast-batch runner: they share the
- * repo-root cwd, need no tsx path aliases, and have no dedicated batch mode.
- * run-fast-batched-tests.mjs walks exactly these directories; run-tests.mjs
- * switches to `root` batch mode only when all of them are selected together.
- */
-export const ROOT_BATCH_PACKAGE_IDS = PACKAGE_REGISTRY
-  .filter((entry) => !entry.testCwd && !entry.tsxConfig && !entry.fastBatch)
-  .map((entry) => entry.id);
-
-/**
  * Repo-relative cwd for a package's test run (null = repo root).
  * @param {PackageEntry} entry
  * @returns {string | null}
@@ -677,6 +674,30 @@ export function packageTestFiles(entry) {
 }
 
 /**
+ * Exact repo-relative test files that may use `test:file` without selecting or
+ * building a verified Pi runtime. This is intentionally file metadata, not a
+ * directory or filename-pattern rule.
+ * @param {PackageEntry} entry
+ * @returns {string[]}
+ */
+export function packageSdkIndependentTestFiles(entry) {
+  return [...new Set(entry.sdkIndependentTestFiles ?? [])];
+}
+
+/** All exact test files eligible for the SDK-independent `test:file` path. */
+export const SDK_INDEPENDENT_TEST_FILES = Object.freeze(PACKAGE_REGISTRY.flatMap(packageSdkIndependentTestFiles));
+const SDK_INDEPENDENT_TEST_FILE_SET = new Set(SDK_INDEPENDENT_TEST_FILES);
+
+/**
+ * Whether the exact repo-relative file is registered as SDK-independent.
+ * @param {string} filePath
+ * @returns {boolean}
+ */
+export function isSdkIndependentTestFile(filePath) {
+  return typeof filePath === 'string' && SDK_INDEPENDENT_TEST_FILE_SET.has(filePath);
+}
+
+/**
  * Repo-relative test roots explicitly allowed to be absent before a planned migration.
  * @param {PackageEntry} entry
  * @returns {string[]}
@@ -686,35 +707,13 @@ export function packageOptionalTestRoots(entry) {
 }
 
 /**
- * Repo-relative test-file root for a package (walked by the fast batch runner).
- * Defaults to `<dir>/test`; only `scripts` overrides it because its package
- * directory is itself the test directory.
+ * Repo-relative default test-file root for a package.
+ * Defaults to `<dir>/test`; distributed layouts may override it.
  * @param {PackageEntry} entry
  * @returns {string}
  */
 export function packageTestDir(entry) {
   return entry.testDir ?? `${entry.dir}/test`;
-}
-
-/**
- * Fast-batch metadata for run-fast-batched-tests.mjs, or null when the package
- * has no dedicated batch mode.
- * @param {PackageEntry} entry
- * @returns {{ mode: string, testDir: string, testDirs: string[], testFiles: string[], optionalTestDirs: string[], batches: number, tsxConfig: string | null, testCwd: string | null } | null}
- */
-export function fastBatchMetadata(entry) {
-  if (!entry.fastBatch) return null;
-  return {
-    mode: entry.id,
-    testDir: packageTestDir(entry),
-    // Every routed test root is walked; only explicitly planned roots may be absent.
-    testDirs: packageTestRoots(entry),
-    testFiles: packageTestFiles(entry),
-    optionalTestDirs: packageOptionalTestRoots(entry),
-    batches: entry.fastBatch.batches,
-    tsxConfig: entry.tsxConfig ?? null,
-    testCwd: entry.testCwd ?? null,
-  };
 }
 
 /**
@@ -740,7 +739,7 @@ export const TYPECHECK_PROJECTS = PACKAGE_REGISTRY
 
 /**
  * Package/directory pairs — the classification view of the registry used by
- * test-impact.mjs and run-test-files.mjs. Built from every package's routed
+ * run-test-files.mjs. Built from every package's routed
  * source roots (`dir` + live/retired owned paths + explicit `sourceRoots`) and test roots,
  * in registration order with per-package de-duplication, so distributed and
  * planned roots classify to their verification id like any package dir.
@@ -761,68 +760,6 @@ export const PACKAGE_DIRECTIVES = PACKAGE_REGISTRY.flatMap((entry) => {
 });
 
 /**
- * Repo-relative paths whose changes can affect the test run of MORE than one
- * package, or are the test tooling itself. A change here selects ALL packages.
- *
- * Categories:
- *  - test tooling: the runners, the custom reporter, the group adapter, and
- *    shared script helpers (scripts/lib/). Script tests have their own
- *    package so changing one does not rerun every product package.
- *  - root toolchain config: root package.json / lockfile (provide tsx used by the
- *    extensions/* packages + @types/node) and the node version pins.
- *  - cross-cutting shared source: shared/ is imported at runtime by extension,
- *    analysis, and several extensions/*, so it has no single owning package.
- */
-const GLOBAL_INFRA_EXACT_PATHS = new Set([
-  'scripts/verification/run-tests.mjs',
-  'scripts/verification/run-test-files.mjs',
-  'scripts/verification/run-affected-tests.mjs',
-  'scripts/verification/run-fast-extension-tests.mjs',
-  'scripts/verification/run-fast-batched-tests.mjs',
-  'scripts/verification/run-package-group.mjs',
-  'scripts/verification/test-reporter.mjs',
-  'package.json',
-  'package-lock.json',
-  '.node-version',
-  // Shared tool eligibility/assembly affects primary, child, and inventory runtimes.
-  'tools/index.ts',
-  'tools/backend.ts',
-  'tools/tsconfig.json',
-  'application/hosts/vscode/tsconfig.json',
-]);
-
-/** File extensions treated as routable code for ownership checks. */
-const CODE_SOURCE_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.mjs', '.cjs', '.js', '.jsx'];
-
-/**
- * True for a repo-relative code file that no package routes and that is not
- * global test infrastructure. Such a file is "unknown ownership": affected-test
- * routing must broaden verification (run everything) instead of silently
- * selecting zero tests. Maintenance scripts under `scripts/` are owned by the
- * `scripts` package and never count as unknown.
- * @param {string} filePath - repo-relative path with forward slashes
- * @returns {boolean}
- */
-export function isUnownedCodeSource(filePath) {
-  if (typeof filePath !== 'string' || filePath.length === 0) {
-    return false;
-  }
-  if (isGlobalTestInfra(filePath)) return false;
-  if (classifyFileToPackage(filePath)) return false;
-  if (filePath.startsWith('scripts/') && filePath.endsWith('.mjs')) return false;
-  return CODE_SOURCE_EXTENSIONS.some((extension) => filePath.endsWith(extension));
-}
-
-const GLOBAL_INFRA_PREFIXES = [
-  'scripts/lib/',
-  'shared/',
-  // Discovery shims and backend tools cross package boundaries. Keep their
-  // integration coverage selected while the tool migration is incremental.
-  'extensions/ask-user/',
-  'tools/session-control/',
-];
-
-/**
  * Classify a repo-relative, forward-slash path to its owning package id.
  * @param {string} filePath - repo-relative path with forward slashes
  * @returns {string | null} package id, or null if the file is not under any package directory
@@ -837,64 +774,4 @@ export function classifyFileToPackage(filePath) {
     }
   }
   return null;
-}
-
-/**
- * True if a repo-relative, forward-slash path is global test-infrastructure /
- * config (a change here selects ALL packages).
- * @param {string} filePath
- * @returns {boolean}
- */
-export function isGlobalTestInfra(filePath) {
-  if (typeof filePath !== 'string' || filePath.length === 0) {
-    return false;
-  }
-  if (GLOBAL_INFRA_EXACT_PATHS.has(filePath)) {
-    return true;
-  }
-  return GLOBAL_INFRA_PREFIXES.some((prefix) => filePath.startsWith(prefix));
-}
-
-/**
- * Reduce a list of changed file paths to a run plan.
- *
- * If ANY file is global test-infrastructure/config, `selectAll` is true and
- * `packageIds` is the full set (caller should run all packages). Otherwise
- * `packageIds` is the sorted, de-duplicated set of affected package ids.
- * Changed code files under no registered root are unknown ownership: they
- * set `selectAll` and are listed in `unowned` so verification broadens
- * instead of silently selecting zero tests. Non-code paths (docs, settings,
- * manifests outside packages) stay ignored.
- *
- * @param {Iterable<string>} files - repo-relative, forward-slash paths
- * @returns {{ selectAll: boolean, packageIds: string[], unowned: string[] }}
- */
-export function mapFilesToPackages(files) {
-  let selectAll = false;
-  const ids = new Set();
-  const unowned = [];
-  for (const file of files) {
-    if (isGlobalTestInfra(file)) {
-      selectAll = true;
-      continue;
-    }
-    const id = classifyFileToPackage(file);
-    if (id) {
-      ids.add(id);
-    } else if (file.startsWith('scripts/') && file.endsWith('.mjs')) {
-      // Root maintenance scripts (typecheck/model sync/install/doctor/etc.)
-      // are exercised by the scripts package. The cross-package test
-      // runners and scripts/lib were already promoted to selectAll above.
-      ids.add('scripts');
-    } else if (isUnownedCodeSource(file)) {
-      // Unknown ownership must broaden, never select zero tests.
-      selectAll = true;
-      unowned.push(file);
-    }
-  }
-  return {
-    selectAll,
-    packageIds: [...ids].sort(),
-    unowned,
-  };
 }

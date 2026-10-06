@@ -7,7 +7,7 @@ import { writeTextToClipboard } from '../lib/components/clipboard';
 import { useMenuListeners } from '../lib/components/useMenuListeners';
 import { useMenuTriggerAria } from '../lib/components/useMenuTriggerAria';
 import { useMenuViewportClamp } from '../lib/components/useMenuViewportClamp';
-import type { PinnedItem } from './tab-behavior';
+import type { PinnedItem } from '../../lib/session-tabs/tab-behavior.js';
 import type { SessionSummary } from '../../lib/protocol/index.js';
 import type { SessionTabContextMenuState } from './types';
 import { CheckmarkIcon, CloseIcon } from './icons';

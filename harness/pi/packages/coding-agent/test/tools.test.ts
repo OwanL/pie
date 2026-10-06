@@ -1,5 +1,5 @@
 import { applyPatch } from "diff";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { accessSync, chmodSync, constants, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -421,17 +421,30 @@ describe("Coding Agent Tools", () => {
 			expect(readFileSync(testFile, "utf-8")).toBe(originalContent);
 		});
 
-		it("should include EACCES for read-only files", async () => {
+		it("should include the permission error code for read-only files", async (context) => {
 			const testFile = join(testDir, "edit-readonly.txt");
 			writeFileSync(testFile, "hello\n");
 			chmodSync(testFile, 0o444);
+			let writeAllowed = true;
+			let permissionCode: string | undefined;
+			try {
+				accessSync(testFile, constants.W_OK);
+			} catch (error) {
+				writeAllowed = false;
+				permissionCode = (error as NodeJS.ErrnoException).code;
+				expect(["EACCES", "EPERM"]).toContain(permissionCode);
+			}
+			if (writeAllowed) {
+				context.skip("chmod(0444) does not deny W_OK for this filesystem/user");
+				return;
+			}
 
 			await expect(
 				editTool.execute("test-call-14", {
 					path: testFile,
 					edits: [{ oldText: "hello", newText: "world" }],
 				}),
-			).rejects.toThrow(`Could not edit file: ${testFile}. Error code: EACCES.`);
+			).rejects.toThrow(`Could not edit file: ${testFile}. Error code: ${permissionCode}.`);
 		});
 
 		it("should include the original error message for unknown edit access errors", async () => {
@@ -460,10 +473,21 @@ describe("Coding Agent Tools", () => {
 			expect(result).toEqual({ error: `Could not edit file: ${missingFile}. Error code: ENOENT.` });
 		});
 
-		it("should include EACCES in diff preview for unreadable files", async () => {
+		it("should include EACCES in diff preview for unreadable files", async (context) => {
 			const unreadableFile = join(testDir, "unreadable-preview.txt");
 			writeFileSync(unreadableFile, "hello\n");
 			chmodSync(unreadableFile, 0o222);
+			let readAllowed = true;
+			try {
+				accessSync(unreadableFile, constants.R_OK);
+			} catch (error) {
+				readAllowed = false;
+				expect((error as NodeJS.ErrnoException).code).toBe("EACCES");
+			}
+			if (readAllowed) {
+				context.skip("chmod(0222) does not deny R_OK for this filesystem/user");
+				return;
+			}
 
 			const result = await computeEditsDiff(unreadableFile, [{ oldText: "hello", newText: "world" }], testDir);
 
@@ -808,17 +832,33 @@ describe("Coding Agent Tools", () => {
 			const marker = join(testDir, "grep-injection-marker");
 			const payload = join(testDir, "payload.sh");
 			const testFile = join(testDir, "target.txt");
-			writeFileSync(payload, `#!/bin/sh\necho executed > ${marker}\ncat "$1"\n`);
+			writeFileSync(payload, `#!/bin/sh\necho executed > '${marker.replace(/\\/g, "/")}'\ncat "$1"\n`);
 			chmodSync(payload, 0o755);
 			writeFileSync(testFile, "target\n");
 
 			const result = await grepTool.execute("test-call-grep-injection", {
 				pattern: `--pre=${payload}`,
 				path: testDir,
+				literal: true,
 			});
 
 			expect(getTextOutput(result)).toContain("No matches found");
 			expect(existsSync(marker)).toBe(false);
+		});
+
+		it("should match flag-like literal text with case-sensitive line labels", async () => {
+			const testFile = join(testDir, "flags.txt");
+			writeFileSync(testFile, "--ignore-case\n-hello\n--IGNORE-CASE\n-HELLO\n");
+
+			for (const [pattern, line] of [["--ignore-case", 1], ["-hello", 2]] as const) {
+				const result = await grepTool.execute("test-call-grep-flag-match", {
+					pattern,
+					path: testDir,
+					glob: "*.txt",
+					literal: true,
+				});
+				expect(getTextOutput(result).split("\n")).toEqual([`flags.txt:${line}: ${pattern}`]);
+			}
 		});
 	});
 

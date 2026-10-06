@@ -3,7 +3,7 @@
 
 import type { BrowserServerViewState, ChatPrefs, ExtensionInfo, LastCompactionSummary, McpServerInfo, ModelInfo, PruningCatalog, PruningResult, PruningSettings, ProviderGateStats, SessionTitlesSettings, SystemPromptEntry, ThinkingLevel, ToolResultPruningSettings } from '../../lib/protocol/index.js';
 import { THINKING_LEVEL_LABELS, THINKING_LEVEL_OPTIONS } from './thinking-level-options.js';
-import { isPendingTabPath } from '../session-tabs/tab-behavior.js';
+import { isPendingTabPath } from '../../lib/session-tabs/tab-behavior.js';
 
 import { useMemo } from 'preact/hooks';
 import { memo } from 'preact/compat';

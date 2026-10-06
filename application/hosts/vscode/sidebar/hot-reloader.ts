@@ -51,7 +51,7 @@ export class SidebarHotReloader {
   ensureAssetWatcher(): void {
     if (this.assetWatcher) return;
 
-    const assetDir = getWebviewAssetDir(this.deps.getContext().extensionPath, DEFAULT_WEBVIEW_VIEW_NAME);
+    const assetDir = getWebviewAssetDir(this.deps.getContext(), DEFAULT_WEBVIEW_VIEW_NAME);
     const watcher = vscode.workspace.createFileSystemWatcher(
       new vscode.RelativePattern(vscode.Uri.file(assetDir), '**/*'),
     );

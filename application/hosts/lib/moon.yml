@@ -1,0 +1,14 @@
+language: typescript
+dependsOn: [app-common, root, analytics]
+fileGroups:
+  # Shared generation support stays beside the immutable bootstrap for delivery.
+  # Both browser and VS Code consumers depend on these common task inputs.
+  generations:
+    - '/application/hosts/vscode/runtime/runtime-generations.cjs'
+    - '/application/hosts/vscode/runtime/runtime-generations.d.cts'
+tasks:
+  test:
+    command: 'proto run node -- scripts/verification/test-node.mjs --tsconfig application/hosts/vscode/tsconfig.json --sdk-path harness/pi/packages/coding-agent --exclude "**/*.artifact.test.*" application/hosts/lib/test application/hosts/test/lib application/hosts/test/renderer-delivery'
+    deps: ['pi:build']
+    inputs: ['/application/hosts/vscode/tsconfig.json', '/application/hosts/lib/**/*', '/application/lib/**/*', '/analytics/**/*', '!/analytics/analysis/**/*', '/harness/**/*', '/harness/pi/**/*', '/scripts/**/*', '/lib/**/*', '/application/hosts/test/lib/**/*', '/application/hosts/test/renderer-delivery/**/*', '@files(generations)', '@globs(lifecycle)', '@globs(protected)']
+    options: {cache: false}

@@ -1,4 +1,6 @@
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import path from "node:path";
 
 const nodeManagerSegments = new Map([
   [".nvm", "nvm"],
@@ -127,11 +129,32 @@ export function readEncodingInfo({ platform = process.platform, env = process.en
   return { capturedOutputDecoding: "UTF-8", locale: env.LC_ALL || env.LANG || "unset" };
 }
 
+// Inspect the installed root workspace only. Proto is the sole pnpm resolution
+// route, and list is read-only; never install packages or fall back to PATH pnpm.
+export function collectWorkspaceDependencyDiagnostics({ root, pinnedPnpm, run }) {
+  const lockfilePresent = existsSync(path.join(root, "pnpm-lock.yaml"));
+  const versionResult = run("proto", ["run", "pnpm", "--", "--version"], root);
+  const actualPnpm = versionResult.status === 0 ? String(versionResult.stdout ?? "").trim() : "";
+  const pnpmCompatible = actualPnpm === pinnedPnpm;
+  const dependencyResult = lockfilePresent && pnpmCompatible
+    ? run("proto", ["run", "pnpm", "--", "list", "--depth=0", "--recursive"], root)
+    : undefined;
+
+  return {
+    lockfilePresent,
+    pinnedPnpm,
+    actualPnpm,
+    pnpmCompatible,
+    dependenciesChecked: dependencyResult !== undefined,
+    dependenciesReady: dependencyResult?.status === 0,
+  };
+}
+
 export function collectEnvironmentDiagnostics({
   platform = process.platform,
   env = process.env,
   spawn = spawnSync,
-  executables = ["node", "npm", "pi", "bash", "git", "rg", "find", "jq"],
+  executables = ["node", "proto", "pi", "bash", "git", "rg", "find", "jq"],
 } = {}) {
   return {
     executables: executables.map((name) => resolveExecutable(name, { platform, spawn })),

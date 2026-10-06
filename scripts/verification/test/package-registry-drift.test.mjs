@@ -1,8 +1,8 @@
 // Drift check for the single-source package registry
 // (scripts/lib/test-packages.mjs). Fails if any runner (run-tests,
-// run-fast-batched-tests, run-typechecks, run-test-files) or any root
+// run-typechecks, run-test-files) or any root
 // package.json script diverges from the registry — package ids, ordering,
-// aliases, compiler differences, batching, and concurrency must all come from
+// aliases, compiler differences, and concurrency must all come from
 // the registry.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -15,19 +15,15 @@ import {
   PACKAGE_DIRECTIVES,
   PACKAGE_GROUPS,
   PACKAGE_REGISTRY,
-  ROOT_BATCH_PACKAGE_IDS,
   TYPECHECK_PROJECTS,
-  fastBatchMetadata,
   packageOptionalTestRoots,
   packageSourceRoots,
   packageTestFiles,
   packageTestRoots,
   resolvePackageEntry,
   typecheckProjectFor,
-  isGlobalTestInfra,
 } from '../../lib/test-packages.mjs';
-import { PACKAGE_CONFIGS } from '../run-tests.mjs';
-import { fastBatchDefinitions, resolveExistingBatchRoots, rootBatchDirs, rootBatchFiles } from '../run-fast-batched-tests.mjs';
+import { PACKAGE_CONFIGS, buildTestArgs } from '../run-tests.mjs';
 import { buildRunnerInvocation } from '../run-package-group.mjs';
 import { classifyTestFile, inferRepoRoot, resolveLocalTsx } from '../run-test-files.mjs';
 import { createTsconfigOverlay, createTsxResolution, resolvePackageRoots, resolveTypeScriptCompiler } from '../../lib/package-resolution.mjs';
@@ -54,7 +50,9 @@ function assertNoCrossPackageRootOverlaps(entries) {
 }
 
 function globMatchesFile(glob, cwd, absoluteFile) {
-  const pattern = glob.replace(/\\/g, '/').replace(/^\.\//u, '');
+  // Resolve the literal parent segments first: ../** must stay beneath its
+  // host root, not match another ../ segment and escape into application/lib.
+  const pattern = fwd(path.resolve(cwd, glob));
   let expression = '^';
   for (let index = 0; index < pattern.length; index += 1) {
     const character = pattern[index];
@@ -75,8 +73,7 @@ function globMatchesFile(glob, cwd, absoluteFile) {
     }
   }
   expression += '$';
-  const relative = fwd(path.relative(cwd, absoluteFile));
-  return new RegExp(expression, 'u').test(relative);
+  return new RegExp(expression, 'u').test(fwd(absoluteFile));
 }
 
 function enumerateTestFiles(directory, output = []) {
@@ -180,6 +177,51 @@ test('extension tests run from the relocated package owner', () => {
   assert.equal(entry.dir, 'application/hosts/vscode');
 });
 
+test('retained extension coverage follows relocated frontend and host implementations', () => {
+  const config = PACKAGE_CONFIGS.find((candidate) => candidate.id === 'extension');
+  const originalIncludes = ['../../frontend/**/*.ts', '../../frontend/**/*.tsx',
+    '**/*.ts', '**/*.tsx', '../**/*.ts', '../**/*.tsx'];
+  const relocations = [
+    ['application/frontend/composer/image-constraints.ts', 'application/lib/composer/image-constraints.ts'],
+    ['application/frontend/composer/local-message-id.ts', 'application/lib/composer/local-message-id.ts'],
+    ['application/frontend/session-tabs/tab-behavior.ts', 'application/lib/session-tabs/tab-behavior.ts'],
+    ['application/frontend/transcript/message-parts.ts', 'application/lib/transcript/message-parts.ts'],
+    ['application/frontend/transcript/pruning-totals.ts', 'application/lib/transcript/pruning-totals.ts'],
+    ['application/frontend/transcript/render-signature.ts', 'application/lib/transcript/render-signature.ts'],
+    ['application/hosts/lib/platform-contracts/browser-server-seam.ts', 'application/lib/platform-contracts/browser-server-seam.ts'],
+    ['application/hosts/lib/platform-contracts/platform.ts', 'application/lib/platform-contracts/platform.ts'],
+    ['application/hosts/lib/platform-contracts/session-platform.ts', 'application/lib/platform-contracts/session-platform.ts'],
+    ['application/hosts/lib/renderer-delivery/renderer-view-state.ts', 'application/lib/renderer-delivery/renderer-view-state.ts'],
+    ['application/hosts/lib/renderer-delivery/stream-telemetry.ts', 'application/lib/stream-telemetry.ts'],
+  ];
+  const coverageArgs = buildTestArgs(config);
+  for (const [original, relocated] of relocations) {
+    assert.ok(originalIncludes.some((glob) => globMatchesFile(glob, config.cwd, path.join(repoRoot, original))),
+      `${original} was in the retained denominator`);
+    const absolute = path.join(repoRoot, relocated);
+    assert.ok(existsSync(absolute), `${relocated} implementation must exist`);
+    assert.ok(!originalIncludes.some((glob) => globMatchesFile(glob, config.cwd, absolute)),
+      `${relocated} escapes the old frontend/host roots and needs an explicit include`);
+    assert.ok(config.coverageIncludes.some((glob) => globMatchesFile(glob, config.cwd, absolute)),
+      `${relocated} must remain in the retained denominator`);
+    assert.ok(coverageArgs.some((arg) => arg.startsWith('--test-coverage-include=')
+      && globMatchesFile(arg.slice('--test-coverage-include='.length), config.cwd, absolute)),
+      `${relocated} must reach the legacy coverage runner`);
+  }
+  const movedTest = 'application/lib/test/renderer-delivery/renderer-view-state.test.ts';
+  assert.ok(existsSync(path.join(repoRoot, movedTest)));
+  assert.ok(config.testGlobs.some((glob) => globMatchesFile(glob, config.cwd, path.join(repoRoot, movedTest))),
+    'the relocated renderer-view-state test must still run in the retained suite');
+  assert.ok(coverageArgs.includes('--experimental-test-coverage'));
+  assert.deepEqual(config.thresholds, { lines: 80, branches: 75 });
+  // Backend extractions were outside the frontend/host glob scope; do not turn
+  // this correction into a new general application/lib coverage gate.
+  for (const file of ['application/lib/analytics/live-output-tokens.ts',
+    'application/lib/protocol/token-rate.ts', 'application/lib/file-changes/contracts.ts']) {
+    assert.ok(!config.coverageIncludes.some((glob) => globMatchesFile(glob, config.cwd, path.join(repoRoot, file))), file);
+  }
+});
+
 test('explicit retired source roots remain routed for rename/delete analysis', () => {
   const expectedRetiredRoots = [
     { id: 'extension', root: 'extension' },
@@ -218,7 +260,7 @@ test('standalone host tests stay discoverable under the existing extension owner
   );
 });
 
-test('run-tests.mjs PACKAGE_CONFIGS match the registry exactly (ids, order, aliases, cwd, tsx, batching, concurrency)', () => {
+test('run-tests.mjs PACKAGE_CONFIGS match the registry exactly (ids, order, aliases, cwd, tsx, concurrency)', () => {
   assert.deepEqual(PACKAGE_CONFIGS.map((config) => config.id), ALL_PACKAGE_IDS, 'run-tests package ids/order must equal the registry');
   for (const [index, config] of PACKAGE_CONFIGS.entries()) {
     const entry = PACKAGE_REGISTRY[index];
@@ -229,7 +271,6 @@ test('run-tests.mjs PACKAGE_CONFIGS match the registry exactly (ids, order, alia
     assert.equal(config.tsxConfig, entry.tsxConfig, `${config.id} tsxConfig must come from the registry`);
     assert.equal(config.testTsx, entry.testTsx, `${config.id} test tsx selection must come from the registry`);
     assert.equal(config.includeOwnerDependencies, entry.includeOwnerDependencies || undefined, `${config.id} dependency owner resolution`);
-    assert.equal(config.fastBatchMode, entry.fastBatch ? entry.id : undefined, `${config.id} fastBatchMode`);
     assert.equal(config.fastConcurrency, entry.fastConcurrency, `${config.id} fastConcurrency`);
     assert.ok(config.testGlobs.length > 0, `${config.id} must declare testGlobs`);
   }
@@ -258,50 +299,6 @@ test('test glob coverage includes files under a root, not just a matching subfol
   const ancestorGlob = 'extensions/example/**/*.test.ts';
   assert.equal(testFiles.every((file) => globMatchesFile(ancestorGlob, repoRoot, file)), true,
     'a complete glob rooted at an ancestor must cover nested test files');
-});
-
-test('run-fast-batched-tests.mjs batch plans are registry-derived', () => {
-  assert.deepEqual(
-    rootBatchDirs,
-    [...new Set(ROOT_BATCH_PACKAGE_IDS.flatMap((id) => packageTestRoots(resolvePackageEntry(id))))],
-  );
-  assert.deepEqual(
-    rootBatchFiles,
-    [...new Set(ROOT_BATCH_PACKAGE_IDS.flatMap((id) => packageTestFiles(resolvePackageEntry(id))))],
-  );
-  const expectedModes = Object.fromEntries(
-    PACKAGE_REGISTRY
-      .map((entry) => [entry.id, fastBatchMetadata(entry)])
-      .filter(([, metadata]) => metadata !== null),
-  );
-  assert.deepEqual(Object.keys(fastBatchDefinitions).sort(), Object.keys(expectedModes).sort());
-  for (const [id, metadata] of Object.entries(expectedModes)) {
-    const definition = fastBatchDefinitions[id];
-    assert.equal(fwd(definition.dir), metadata.testDir, `${id} batch dir`);
-    assert.deepEqual(definition.dirs, metadata.testDirs, `${id} batch dirs must cover every routed test root`);
-    assert.deepEqual(definition.files, metadata.testFiles, `${id} explicit batch test files must come from the registry`);
-    assert.deepEqual(definition.optionalDirs, metadata.optionalTestDirs, `${id} optional batch roots must come from the registry`);
-    assert.deepEqual(metadata.testDirs, packageTestRoots(resolvePackageEntry(id)), `${id} batch testDirs must come from the registry`);
-    assert.deepEqual(metadata.optionalTestDirs, packageOptionalTestRoots(resolvePackageEntry(id)), `${id} optional roots must come from the registry`);
-    assert.equal(definition.batches, metadata.batches, `${id} batch count`);
-    assert.equal(definition.tsxConfig, metadata.tsxConfig, `${id} batch tsxConfig`);
-    const expectedCwd = metadata.testCwd ? path.join(repoRoot, metadata.testCwd) : repoRoot;
-    assert.equal(fwd(definition.cwd), fwd(expectedCwd), `${id} batch cwd`);
-  }
-});
-
-test('fast batch root resolution skips only explicit optional roots', () => {
-  const root = path.join(repoRoot, 'missing-root-fixture');
-  const exists = (absolute) => path.basename(absolute) === 'required';
-  assert.deepEqual(
-    resolveExistingBatchRoots(['required', 'planned'], ['planned'], root, exists),
-    ['required'],
-  );
-  assert.throws(
-    () => resolveExistingBatchRoots(['required', 'missing'], ['planned'], root, exists),
-    /Required fast-batch test root is missing: missing/,
-  );
-  assert.deepEqual(resolveExistingBatchRoots(['planned'], ['planned'], root, () => false), []);
 });
 
 test('run-typechecks.mjs projects cover every registry package with a TS project', () => {
@@ -376,19 +373,7 @@ test('root package.json extension scripts are the group adapter and all ids stay
   }
 });
 
-test('runner scripts and the group adapter stay classified as global test infrastructure', () => {
-  for (const script of [
-    'scripts/verification/run-tests.mjs',
-    'scripts/verification/run-test-files.mjs',
-    'scripts/verification/run-affected-tests.mjs',
-    'scripts/verification/run-fast-extension-tests.mjs',
-    'scripts/verification/run-fast-batched-tests.mjs',
-    'scripts/verification/run-package-group.mjs',
-    'scripts/verification/test-reporter.mjs',
-  ]) {
-    assert.equal(isGlobalTestInfra(script), true, `${script} must select all packages when changed`);
-  }
-  assert.equal(isGlobalTestInfra('scripts/lib/test-packages.mjs'), true);
+test('extension group membership remains stable', () => {
   for (const id of ['subagent', 'warm-bash', 'deferred-triggers', 'session-changes', 'computer-use', 'playwright']) {
     assert.ok(PACKAGE_GROUPS.extensions.includes(id), `${id} remains in the extensions test/typecheck group`);
   }

@@ -131,6 +131,35 @@ test('candidate overlay for an unconfigured group uses root SDK config and binds
   assert.equal(code, 0, 'detached fixture must execute imports through the candidate aliases');
 });
 
+test('SDK-independent test files still strictly validate explicit runtime selections', (t) => {
+  const fixtureRoot = makeFixture(t);
+  const allowlistedFile = 'application/hosts/test/asset-manifests/bootstrap.test.ts';
+  const invalidSdk = spawnSync(process.execPath, [
+    runnerPath,
+    '--sdk-path',
+    path.join(fixtureRoot, 'not-an-sdk'),
+    allowlistedFile,
+  ], { cwd: fixtureRoot, encoding: 'utf8', timeout: 30_000, windowsHide: true });
+  assert.equal(invalidSdk.error, undefined, invalidSdk.error?.message);
+  assert.equal(invalidSdk.status, 1);
+  const sdkOutput = `${invalidSdk.stdout}\n${invalidSdk.stderr}`;
+  assert.match(sdkOutput, /Invalid --sdk-path candidate/);
+  assert.match(sdkOutput, /verified materialized/i);
+  assert.doesNotMatch(sdkOutput, /▶ extension/u);
+
+  const invalidRuntime = spawnSync(process.execPath, [
+    runnerPath,
+    '--pi-runtime',
+    path.join(fixtureRoot, 'missing-runtime'),
+    allowlistedFile,
+  ], { cwd: fixtureRoot, encoding: 'utf8', timeout: 30_000, windowsHide: true });
+  assert.equal(invalidRuntime.error, undefined, invalidRuntime.error?.message);
+  assert.equal(invalidRuntime.status, 1);
+  const runtimeOutput = `${invalidRuntime.stdout}\n${invalidRuntime.stderr}`;
+  assert.match(runtimeOutput, /ENOENT|manifest/i);
+  assert.doesNotMatch(runtimeOutput, /▶ extension/u);
+});
+
 test('CLI rejects unpublished SDK fixtures and relative workspace candidates before discovery', (t) => {
   const fixtureRoot = makeFixture(t);
   const sdkPath = makeCandidateSdk(fixtureRoot);

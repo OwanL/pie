@@ -10,8 +10,7 @@ import {
 } from './run-analytics/types.js';
 import { appendPieLog } from '../../lib/structured-logging/pie-logger';
 import { toErrorMessage } from '../../lib/structured-logging/error-message';
-import type { ModelPricingRecord } from '../../harness/model-providers/pricing/pricing-core.js';
-import type { PricingCatalog } from '../../harness/model-providers/pricing/aggregate-pricing-cache.js';
+import type { ModelPricingRecord, PricingCatalog } from '../contracts/model-pricing-facts.js';
 
 /** Completed-run history authority consumed by the cache. Structural so the
  *  aggregate strip and tests can supply any compatible run analytics façade. */

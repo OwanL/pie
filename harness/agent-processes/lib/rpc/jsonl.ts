@@ -1,8 +1,6 @@
 import type { Readable } from 'node:stream';
 
-export function serializeJsonLine(value: unknown): string {
-  return `${JSON.stringify(value)}\n`;
-}
+export { serializeJsonLine } from '../../../../lib/serialization/json-lines.js';
 
 /** Shared hard limit for one complete UTF-8 JSONL record, including LF. */
 export const JSONL_MAX_LINE_BYTES = 32 * 1024 * 1024;

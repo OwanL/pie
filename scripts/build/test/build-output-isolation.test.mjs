@@ -2,20 +2,23 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { writePiRuntimeManifest } from '../../lib/pi-runtime-artifact.mjs';
+import { verifyPiRuntimeArtifact, writePiRuntimeManifest } from '../../lib/pi-runtime-artifact.mjs';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const vscodeDependencies = path.join(repositoryRoot, 'application', 'hosts', 'vscode', 'node_modules');
@@ -107,13 +110,25 @@ async function makeFixture(t) {
   write(repo, 'scripts/lib/pi-runtime-artifact.mjs', readFileSync(path.join(repositoryRoot, 'scripts', 'lib', 'pi-runtime-artifact.mjs')));
   write(repo, 'lib/pi-runtime/artifact.mjs', readFileSync(path.join(repositoryRoot, 'lib', 'pi-runtime', 'artifact.mjs')));
   write(repo, 'scripts/build/publication.mjs', `
-    export async function findCompatibleInstalledExtensionDir() { throw new Error('unexpected installed-extension lookup'); }
-    export async function publishRendererGeneration() { throw new Error('unexpected renderer publication'); }
+    export async function findCompatibleInstalledExtensionDir() {
+      if (process.env.PIE_TEST_INSTALLED_EXTENSION) return process.env.PIE_TEST_INSTALLED_EXTENSION;
+      throw new Error('unexpected installed-extension lookup');
+    }
+    export async function publishRendererGeneration() {
+      if (process.env.PIE_TEST_INSTALLED_EXTENSION) return { generation: 'renderer-fixture' };
+      throw new Error('unexpected renderer publication');
+    }
   `);
   write(repo, 'scripts/build/runtime-publication.mjs', `
-    export async function hasRuntimeBootstrap() { throw new Error('unexpected runtime publication'); }
+    export async function hasRuntimeBootstrap() {
+      if (process.env.PIE_TEST_INSTALLED_EXTENSION) return process.env.PIE_TEST_RUNTIME_BOOTSTRAP === '1';
+      throw new Error('unexpected runtime publication');
+    }
     export async function installRuntimeBootstrap() { throw new Error('unexpected runtime activation'); }
-    export async function publishRuntimeGeneration() { throw new Error('unexpected runtime publication'); }
+    export async function publishRuntimeGeneration() {
+      if (process.env.PIE_TEST_INSTALLED_EXTENSION) return { generation: 'staged-fixture' };
+      throw new Error('unexpected runtime publication');
+    }
     export async function resolveRuntimeGeneration() { throw new Error('unexpected runtime lookup'); }
   `);
   write(repo, 'scripts/lib/traversal-policy.mjs', `
@@ -169,8 +184,12 @@ async function makeFixture(t) {
     };
     fs.writeFileSync(path.join(outDir, 'fixture-vite-' + (nodeMode ? 'node' : 'webview') + '.json'), JSON.stringify(record, null, 2));
     const buildId = '0123456789abcdefabcd';
+    if (nodeMode && process.env.PIE_TEST_MUTATE_RETAINED_RUNTIME) {
+      fs.writeFileSync(process.env.PIE_TEST_MUTATE_RETAINED_RUNTIME, 'mutated during build');
+    }
     if (nodeMode) {
-      for (const name of ['extension.js', 'backend.js', 'worker-entry.js', 'analytics-recorder-worker.js', 'analytics-query-worker.js']) {
+      for (const name of ['extension.js', 'standalone.js', 'backend.js', 'worker-entry.js', 'analytics-recorder-worker.js', 'analytics-query-worker.js']) {
+        if (name === 'standalone.js' && process.env.PIE_TEST_OMIT_STANDALONE === '1') continue;
         fs.writeFileSync(path.join(outDir, name), 'fixture');
       }
       fs.writeFileSync(path.join(outDir, 'pie-build-id.txt'), buildId + '\\n');
@@ -213,7 +232,7 @@ async function makeFixture(t) {
 }
 
 function runBuild(fixture, args, extraEnv = {}, timeout = 30_000) {
-  return spawnSync(process.execPath, [path.join(fixture.repo, 'scripts', 'build', 'build.mjs'), ...args], {
+  return spawnSync(process.execPath, [path.join(fixture.repo, 'scripts', 'build', 'build.mjs'), '--delivery', ...args], {
     cwd: fixture.owner,
     encoding: 'utf8',
     timeout,
@@ -265,7 +284,7 @@ test('build --output-dir isolates output, typecheck state, child environment, an
   });
   assertBuildSucceeded(result);
 
-  for (const name of ['extension.js', 'backend.js', 'worker-entry.js', 'analytics-recorder-worker.js', 'analytics-query-worker.js', 'pie-build-id.txt']) {
+  for (const name of ['extension.js', 'standalone.js', 'backend.js', 'worker-entry.js', 'analytics-recorder-worker.js', 'analytics-query-worker.js', 'pie-build-id.txt']) {
     assert.ok(existsSync(path.join(output, name)), `missing isolated host output ${name}`);
   }
   assert.ok(existsSync(path.join(output, 'webview', 'panel', '.vite', 'manifest.json')));
@@ -303,6 +322,21 @@ test('build --output-dir isolates output, typecheck state, child environment, an
   assert.equal(readFileSync(fixture.acquisitionCount, 'utf8'), '1', 'one source-default acquisition is shared by typecheck and both Vite children');
 });
 
+test('build rejects missing standalone output before materializing the selected SDK', async (t) => {
+  const fixture = await makeFixture(t);
+  const output = path.join(fixture.outputRoot, 'missing-standalone');
+  const result = runBuild(fixture, ['--output-dir', output, '--pi-runtime', fixture.sourceArtifact, '--skip-typecheck'], {
+    PIE_TEST_OMIT_STANDALONE: '1',
+  });
+
+  assertBuildRejected(result);
+  assert.match(`${result.stdout}\n${result.stderr}`, /standalone\.js/u);
+  assert.equal(existsSync(path.join(output, 'standalone.js')), false);
+  assert.equal(existsSync(path.join(output, 'pi-runtime')), false, 'the selected SDK is rejected before it is copied into output');
+  assert.equal((await verifyPiRuntimeArtifact(fixture.sourceArtifact)).identity, fixture.runtime.identity,
+    'rejecting incomplete build output leaves the caller-owned SDK intact');
+});
+
 test('build clears inherited output override for the default child output path', async (t) => {
   const fixture = await makeFixture(t);
   const ignored = path.join(fixture.outputRoot, 'inherited-but-ignored');
@@ -326,6 +360,155 @@ test('build clears inherited output override for the default child output path',
     assert.equal(record.args.includes('--configLoader'), false, 'default config loading is unchanged');
   }
   assert.equal(readFileSync(fixture.acquisitionCount, 'utf8'), '1', 'both Vite children share one source-default acquisition');
+});
+
+test('explicit runtime overlap is rejected after one selection verification and before output writes', async (t) => {
+  const fixture = await makeFixture(t);
+  const output = path.join(fixture.owner, 'out');
+  const artifactDir = path.join(output, 'pi-runtime');
+  const runtime = await makeRuntimeArtifact(artifactDir);
+  write(output, 'preserved-before-rejection.txt', 'existing output');
+
+  const rejected = runBuild(fixture, ['--pi-runtime', artifactDir, '--skip-typecheck', '--no-sync'], {
+    PIE_BUILD_TIMING: '1',
+  });
+  assertBuildRejected(rejected);
+  assert.match(`${rejected.stdout}\n${rejected.stderr}`, /--output-dir must not overlap the verified --pi-runtime artifact/iu);
+  assert.equal((rejected.stdout.match(/Timing explicit Pi runtime selection verification:/gu) ?? []).length, 1,
+    'withPiRuntime performs and reports the single explicit artifact verification');
+  assert.equal((rejected.stdout.match(/Timing initial explicit Pi runtime verification:/gu) ?? []).length, 0,
+    'there is no separate pre-selection verification');
+  assert.equal(readFileSync(path.join(output, 'preserved-before-rejection.txt'), 'utf8'), 'existing output');
+  assert.equal((await verifyPiRuntimeArtifact(artifactDir)).identity, runtime.identity);
+});
+
+test('installed host status reports the staged runtime without resolving current selection', async (t) => {
+  const fixture = await makeFixture(t);
+  const installed = path.join(fixture.home, '.vscode', 'extensions', 'pie.fixture-1.0.0');
+  mkdirSync(installed, { recursive: true });
+
+  const published = runBuild(fixture, ['--publish', '--skip-typecheck'], {
+    PIE_TEST_INSTALLED_EXTENSION: installed,
+    PIE_TEST_RUNTIME_BOOTSTRAP: '1',
+    PIE_BUILD_TIMING: '1',
+  });
+  assertBuildSucceeded(published);
+  assert.ok(published.stdout.includes(`[build] Published runtime staged-fixture → ${installed}; the next activation selects the newest verified runtime.`));
+  assert.match(published.stdout, /Timing installed host status reporting:/u);
+  assert.doesNotMatch(published.stdout, /Runtime .* is selected for the next VS Code startup/u);
+
+  const missingBootstrap = runBuild(fixture, ['--publish', '--skip-typecheck'], {
+    PIE_TEST_INSTALLED_EXTENSION: installed,
+    PIE_TEST_RUNTIME_BOOTSTRAP: '0',
+  });
+  assertBuildSucceeded(missingBootstrap);
+  assert.ok(missingBootstrap.stderr.includes('[build] One-time startup-loader setup required: npm run extension:activate. It does not stop active sessions. Restart VS Code afterward; subsequent builds load automatically on restart.'));
+});
+
+test('one-shot build reuses a verified matching runtime and cleans the rest of output', async (t) => {
+  const fixture = await makeFixture(t);
+  const first = runBuild(fixture, ['--skip-typecheck', '--no-sync']);
+  assertBuildSucceeded(first);
+
+  const output = path.join(fixture.owner, 'out');
+  const cachedRuntime = path.join(output, 'pi-runtime');
+  const cachedFile = path.join(cachedRuntime, 'node_modules/@earendil-works/pi-coding-agent/LICENSE');
+  const oldTime = new Date('2000-01-01T00:00:00.000Z');
+  utimesSync(cachedFile, oldTime, oldTime);
+  write(output, 'stale-output.txt', 'remove this during the next build');
+  const external = path.join(fixture.directory, 'external-output-target');
+  mkdirSync(external);
+  writeFileSync(path.join(external, 'sentinel.txt'), 'do not follow output symlinks');
+  symlinkSync(external, path.join(output, 'obsolete-link'), process.platform === 'win32' ? 'junction' : 'dir');
+
+  const second = runBuild(fixture, ['--skip-typecheck', '--no-sync'], { PIE_BUILD_TIMING: '1' });
+  assertBuildSucceeded(second);
+  assert.equal(statSync(cachedFile).mtimeMs, oldTime.getTime(), 'matching runtime bytes were retained instead of recopied');
+  assert.equal(existsSync(path.join(output, 'stale-output.txt')), false, 'other output entries are cleared');
+  assert.equal(readFileSync(path.join(external, 'sentinel.txt'), 'utf8'), 'do not follow output symlinks');
+  assert.equal((second.stdout.match(/Timing pre-clean materialized runtime verification:/gu) ?? []).length, 1,
+    'the cached payload is fully verified before output cleanup');
+  assert.equal((second.stdout.match(/Timing existing materialized runtime verification:/gu) ?? []).length, 0,
+    'matching output follows the retained-runtime fast path');
+  assert.equal((second.stdout.match(/Timing retained materialized runtime verification:/gu) ?? []).length, 1,
+    'the retained payload is fully verified again after the build');
+  assert.doesNotMatch(second.stdout, /Materialized verified Pi runtime/u, 'matching output is not recopied');
+  assert.equal((await verifyPiRuntimeArtifact(cachedRuntime)).identity, fixture.runtime.identity);
+});
+
+test('one-shot build re-verifies retained runtime after builds before accepting output', async (t) => {
+  const fixture = await makeFixture(t);
+  const first = runBuild(fixture, ['--skip-typecheck', '--no-sync']);
+  assertBuildSucceeded(first);
+
+  const output = path.join(fixture.owner, 'out');
+  const copiedFile = path.join(output, 'pi-runtime/node_modules/@earendil-works/pi-coding-agent/dist/index.js');
+  write(output, 'stale-output.txt', 'pre-clean should remove this');
+  const mutated = runBuild(fixture, ['--skip-typecheck', '--no-sync'], {
+    PIE_TEST_MUTATE_RETAINED_RUNTIME: copiedFile,
+  });
+  assertBuildRejected(mutated);
+  assert.match(`${mutated.stdout}\n${mutated.stderr}`, /hash mismatch/iu);
+  assert.equal(readFileSync(copiedFile, 'utf8'), 'mutated during build');
+  assert.equal(existsSync(path.join(output, 'stale-output.txt')), false, 'the matching artifact was retained through pre-clean');
+});
+
+test('one-shot build discards a cache for a changed selected artifact identity', async (t) => {
+  const fixture = await makeFixture(t);
+  const first = runBuild(fixture, ['--skip-typecheck', '--no-sync']);
+  assertBuildSucceeded(first);
+  const output = path.join(fixture.owner, 'out');
+  write(output, 'stale-output.txt', 'old build output');
+
+  write(fixture.sourceArtifact, 'node_modules/@earendil-works/pi-coding-agent/dist/index.js', 'export const changedSelectedArtifact = true;\n');
+  const changed = await writePiRuntimeManifest(fixture.sourceArtifact, fixture.runtime.manifest);
+  assert.notEqual(changed.identity, fixture.runtime.identity);
+
+  const rebuilt = runBuild(fixture, ['--skip-typecheck', '--no-sync']);
+  assertBuildSucceeded(rebuilt);
+  assert.equal((await verifyPiRuntimeArtifact(path.join(output, 'pi-runtime'))).identity, changed.identity);
+  assert.equal(existsSync(path.join(output, 'stale-output.txt')), false, 'a different selected artifact triggers the full output reset');
+});
+
+test('one-shot build discards corrupt runtime output and rejects a corrupt source without clearing output', async (t) => {
+  const fixture = await makeFixture(t);
+  const first = runBuild(fixture, ['--skip-typecheck', '--no-sync']);
+  assertBuildSucceeded(first);
+  const output = path.join(fixture.owner, 'out');
+  const copiedFile = path.join(output, 'pi-runtime/node_modules/@earendil-works/pi-coding-agent/dist/index.js');
+  writeFileSync(copiedFile, 'corrupted output payload\n');
+  write(output, 'stale-output.txt', 'remove after invalid cache');
+
+  const rebuilt = runBuild(fixture, ['--skip-typecheck', '--no-sync']);
+  assertBuildSucceeded(rebuilt);
+  assert.equal((await verifyPiRuntimeArtifact(path.join(output, 'pi-runtime'))).identity, fixture.runtime.identity);
+  assert.equal(readFileSync(copiedFile, 'utf8'), 'export function candidateOnly() { return \'candidate-sdk\'; }\n');
+  assert.equal(existsSync(path.join(output, 'stale-output.txt')), false, 'corrupt cache triggers the full output reset');
+
+  write(output, 'preserved-after-source-rejection.txt', 'existing output');
+  write(fixture.sourceArtifact, 'node_modules/@earendil-works/pi-coding-agent/dist/index.js', 'corrupted source payload\n');
+  const rejected = runBuild(fixture, ['--pi-runtime', fixture.sourceArtifact, '--skip-typecheck', '--no-sync']);
+  assertBuildRejected(rejected);
+  assert.equal(readFileSync(path.join(output, 'preserved-after-source-rejection.txt'), 'utf8'), 'existing output');
+});
+
+test('one-shot build removes a symlinked runtime cache without following its target', async (t) => {
+  const fixture = await makeFixture(t);
+  const first = runBuild(fixture, ['--skip-typecheck', '--no-sync']);
+  assertBuildSucceeded(first);
+
+  const output = path.join(fixture.owner, 'out');
+  const cachedRuntime = path.join(output, 'pi-runtime');
+  rmSync(cachedRuntime, { recursive: true, force: true });
+  symlinkSync(fixture.sourceArtifact, cachedRuntime, process.platform === 'win32' ? 'junction' : 'dir');
+  write(output, 'stale-output.txt', 'remove after unsafe cache');
+
+  const rebuilt = runBuild(fixture, ['--skip-typecheck', '--no-sync']);
+  assertBuildSucceeded(rebuilt);
+  assert.equal(lstatSync(cachedRuntime).isSymbolicLink(), false, 'the cache symlink itself was removed');
+  assert.equal((await verifyPiRuntimeArtifact(cachedRuntime)).identity, fixture.runtime.identity);
+  assert.equal((await verifyPiRuntimeArtifact(fixture.sourceArtifact)).identity, fixture.runtime.identity, 'the linked artifact target remains intact');
+  assert.equal(existsSync(path.join(output, 'stale-output.txt')), false);
 });
 
 test('build accepts --output-dir=<absolute-path>', async (t) => {

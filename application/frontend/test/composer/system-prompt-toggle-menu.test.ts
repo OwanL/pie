@@ -1,4 +1,4 @@
-import test, { beforeEach } from 'node:test';
+import test, { afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { installDom } from '../helpers/dom';
@@ -19,11 +19,12 @@ type ToggleApplyResult = void | boolean | Promise<void | boolean>;
 beforeEach(() => {
   container = document.createElement('div');
   document.body.appendChild(container);
-  return () => {
-    render(null, container);
-    container.remove();
-    document.querySelectorAll('.system-prompt-toggle-dropdown').forEach((el) => el.remove());
-  };
+});
+
+afterEach(() => {
+  render(null, container);
+  container.remove();
+  document.querySelectorAll('.system-prompt-toggle-dropdown').forEach((el) => el.remove());
 });
 
 function providerEntry(): SystemPromptEntry {

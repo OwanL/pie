@@ -1,13 +1,10 @@
 import * as path from 'node:path';
 
 import { createCommandExecutor } from './command-execution';
+import type { CommandResult } from './command-result';
 import type { GenerationPiRuntimeBackendNodeTarget } from './pi-runtime-resolution';
 
-export interface CommandResult {
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-}
+export type { CommandResult } from './command-result';
 
 export interface CommandExecutorOptions {
   env?: NodeJS.ProcessEnv;
@@ -367,15 +364,15 @@ export function resolveNodePath(options: ResolveNodePathOptions): string {
 }
 
 /**
- * Resolve the directory of the installed PI SDK package.
+ * Retained compatibility resolver; production startup instead uses the verified
+ * artifact route in pi-runtime-resolution. These legacy selectors are not a
+ * supported way to override the production SDK.
  *
  * Candidate priority:
  *   1. `configuredPath` (`pie.sdkPath` setting — explicit override; validated)
  *   2. `PI_SDK_PATH` env var (explicit override; validated)
  *   3. `localCandidatePath`, then `localCandidatePaths` — pinned build-manifest
  *      SDK followed by the loaded package's own dependency; each validated.
- *      This is the portable default: version-locked by package-lock.json, so
- *      `git pull` + `npm ci` reproduces the exact SDK on every machine.
  *   4. `cachedPath` (globalState cache from a previous start, unless it points
  *      at the legacy `@mariozechner` global package)
  *   5. `npm root -g` discovery of the maintained or legacy global package

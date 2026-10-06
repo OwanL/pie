@@ -1,12 +1,6 @@
-/**
- * Runtime ViewState shape validator. Logs console errors for fields that are
- * missing or mistyped at the host → webview boundary so developers notice
- * immediately, even when defensive hydration masks the crash.
- */
+/** Runtime ViewState shape validator. Reporting remains the caller's concern. */
 
 import type { ViewState } from '../protocol/index.js';
-import { webviewLog } from '../../frontend/shell/log';
-
 interface FieldSpec {
   path: string;
   type: 'string' | 'number' | 'boolean' | 'object' | 'array';
@@ -385,15 +379,6 @@ export function validateViewState(state: ViewState): string[] {
   }
   violations.push(...validateSessionCapabilities(state.sessionCapabilitiesBySession));
   violations.push(...validateCanonicalActivityFields(state));
-
-  if (violations.length > 0) {
-    webviewLog(
-      'error',
-      'state-validator',
-      `Host delivered ViewState with ${violations.length} invalid field(s)`,
-      { violations },
-    );
-  }
 
   return violations;
 }

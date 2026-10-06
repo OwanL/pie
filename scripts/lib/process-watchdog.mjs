@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { ChildProcess, spawnSync } from 'node:child_process';
 import { setMaxListeners } from 'node:events';
 import process from 'node:process';
 
@@ -20,7 +20,8 @@ export function withProcessTreeIsolation(options, platform = process.platform) {
   return { ...options, detached: platform !== 'win32' };
 }
 
-function processRows(platform = process.platform, spawnSyncImpl = spawnSync) {
+function queryProcessRows(platform = process.platform, spawnSyncImpl = spawnSync) {
+  const unavailable = (reason) => ({ rows: [], available: false, reason });
   try {
     if (platform === 'win32') {
       // Deliberately query only identity and ancestry: never inspect command lines.
@@ -28,29 +29,44 @@ function processRows(platform = process.platform, spawnSyncImpl = spawnSync) {
       const result = spawnSyncImpl('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
         encoding: 'utf8', windowsHide: true, timeout: 5_000, maxBuffer: 8 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'],
       });
-      if (result?.status !== 0 || typeof result?.stdout !== 'string') return [];
-      return result.stdout.split(/\r?\n/u).flatMap((line) => {
-        const [pid, ppid, identity] = line.trim().split('|');
-        return Number(pid) > 0 ? [{ pid: Number(pid), ppid: Number(ppid), identity }] : [];
+      if (result?.status !== 0 || typeof result?.stdout !== 'string') {
+        const detail = result?.error?.message ?? `status ${String(result?.status)}`;
+        return unavailable(detail);
+      }
+      const rows = result.stdout.split(/\r?\n/u).flatMap((line) => {
+        const [pid, ppid, rawCreationDate] = line.trim().split('|');
+        if (!(Number(pid) > 0)) return [];
+        const creationDate = rawCreationDate?.trim() || null;
+        return [{ pid: Number(pid), ppid: Number(ppid), identity: creationDate, creationDate }];
       });
+      return { rows, available: true, reason: null };
     }
     const result = spawnSyncImpl('ps', ['-e', '-o', 'pid=,ppid=,lstart='], {
       encoding: 'utf8', timeout: 5_000, maxBuffer: 8 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'],
     });
-    if (result?.status !== 0 || typeof result?.stdout !== 'string') return [];
-    return result.stdout.split(/\r?\n/u).flatMap((line) => {
+    if (result?.status !== 0 || typeof result?.stdout !== 'string') {
+      const detail = result?.error?.message ?? `status ${String(result?.status)}`;
+      return unavailable(detail);
+    }
+    const rows = result.stdout.split(/\r?\n/u).flatMap((line) => {
       const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/u);
       return match ? [{ pid: Number(match[1]), ppid: Number(match[2]), identity: match[3] }] : [];
     });
-  } catch {
-    return [];
+    return { rows, available: true, reason: null };
+  } catch (error) {
+    return unavailable(error?.message ?? String(error));
   }
 }
 
+function processRows(platform = process.platform, spawnSyncImpl = spawnSync) {
+  return queryProcessRows(platform, spawnSyncImpl).rows;
+}
+
 /** Capture the owned ancestry before termination, including process identities. */
-export function snapshotProcessTree(rootPid, options = {}) {
-  if (!Number.isInteger(rootPid) || rootPid <= 0) return [];
-  const rows = processRows(options.platform, options.spawnSyncImpl);
+function captureProcessTree(rootPid, options = {}) {
+  if (!Number.isInteger(rootPid) || rootPid <= 0) return { owned: [], enumeration: { available: true } };
+  const enumeration = queryProcessRows(options.platform, options.spawnSyncImpl);
+  const rows = enumeration.rows;
   const children = new Map();
   for (const row of rows) {
     const list = children.get(row.ppid) ?? [];
@@ -63,7 +79,11 @@ export function snapshotProcessTree(rootPid, options = {}) {
   for (let cursor = 0; cursor < owned.length; cursor += 1) {
     owned.push(...(children.get(owned[cursor].pid) ?? []));
   }
-  return owned;
+  return { owned, enumeration };
+}
+
+export function snapshotProcessTree(rootPid, options = {}) {
+  return captureProcessTree(rootPid, options).owned;
 }
 
 function isAlive(pid, killImpl = process.kill) {
@@ -83,6 +103,10 @@ async function waitForExtinction(entries, timeoutMs, killImpl) {
     survivors = survivors.filter((entry) => isAlive(entry.pid, killImpl));
   }
   return survivors;
+}
+
+function isActiveChildProcess(child) {
+  return child instanceof ChildProcess && child.exitCode === null && child.signalCode === null;
 }
 
 function taskkill(pid, force, spawnSyncImpl, timeoutMs) {
@@ -105,9 +129,28 @@ export async function terminateProcessTree(child, {
   forceMs = DEFAULT_FORCED_TERMINATION_MS,
 } = {}) {
   const pid = child?.pid;
-  if (!Number.isInteger(pid) || pid <= 0) return { gone: true, survivors: [], ownedPids: [] };
-  const owned = snapshotProcessTree(pid, { platform, spawnSyncImpl });
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return { gone: true, survivors: [], ownedPids: [], ownedProcesses: [], survivorProcesses: [], diagnostics: [] };
+  }
+  const capture = captureProcessTree(pid, { platform, spawnSyncImpl });
+  const owned = capture.owned;
   const diagnostics = [];
+  if (platform === 'win32' && !capture.enumeration.available) {
+    diagnostics.push(`Windows process enumeration failed while capturing ownership (${capture.enumeration.reason}); descendant ownership is unknown`);
+  }
+  if (platform === 'win32' && child instanceof ChildProcess
+    && (child.exitCode !== null || child.signalCode !== null)
+    && capture.enumeration.rows.some((entry) => entry.pid === pid)) {
+    diagnostics.push(`Windows root PID ${pid} was present in the initial snapshot after its ChildProcess closed; captured tree ownership is unverified and taskkill skipped`);
+    return {
+      gone: false,
+      survivors: owned.map((entry) => entry.pid),
+      ownedPids: owned.map((entry) => entry.pid),
+      ownedProcesses: owned.map((entry) => ({ ...entry })),
+      survivorProcesses: owned.map((entry) => ({ ...entry })),
+      diagnostics,
+    };
+  }
 
   try {
     if (platform === 'win32') {
@@ -125,18 +168,41 @@ export async function terminateProcessTree(child, {
   if (survivors.length > 0) {
     try {
       if (platform === 'win32') {
-        // Prefer the still-live root tree. If it exited before a stubborn child,
-        // only target a captured PID whose creation identity still matches.
-        const current = new Map(processRows(platform, spawnSyncImpl).map((row) => [row.pid, row]));
-        const root = current.get(pid);
-        if ((root && (!owned[0].identity || root.identity === owned[0].identity)) || current.size === 0) {
-          taskkill(pid, true, spawnSyncImpl, Math.max(100, forceMs));
+        const enumeration = queryProcessRows(platform, spawnSyncImpl);
+        if (!enumeration.available) {
+          diagnostics.push(`Windows process enumeration failed before forced termination (${enumeration.reason}); taskkill skipped for all PIDs`);
+          if (owned[0]?.identity == null) {
+            diagnostics.push(`Windows root PID ${pid} has no captured creation identity to verify`);
+          }
         } else {
-          for (const entry of survivors) {
-            const now = current.get(entry.pid);
-            // If enumeration itself failed, the identity captured only one
-            // grace window ago is the best bounded fallback available.
-            if ((now && entry.identity && now.identity === entry.identity) || (current.size === 0 && entry.identity)) taskkill(entry.pid, true, spawnSyncImpl, Math.max(100, forceMs));
+          const current = new Map(enumeration.rows.map((row) => [row.pid, row]));
+          const rootEntry = owned[0];
+          const root = current.get(pid);
+          const rootMatches = rootEntry?.identity != null && root?.identity != null && root.identity === rootEntry.identity;
+          if (rootMatches) {
+            taskkill(pid, true, spawnSyncImpl, Math.max(100, forceMs));
+          } else if (rootEntry?.identity == null) {
+            diagnostics.push(`Windows root PID ${pid} has no captured creation identity; taskkill skipped`);
+          } else if (root?.identity == null) {
+            diagnostics.push(`Windows root PID ${pid} has no current creation identity; taskkill skipped`);
+          } else {
+            diagnostics.push(`Windows root PID ${pid} was reused (captured ${rootEntry.identity}, current ${root.identity}); root tree taskkill skipped`);
+          }
+
+          if (!rootMatches) {
+            for (const entry of survivors) {
+              if (entry.pid === pid) continue;
+              const now = current.get(entry.pid);
+              if (entry.identity != null && now?.identity != null && now.identity === entry.identity) {
+                taskkill(entry.pid, true, spawnSyncImpl, Math.max(100, forceMs));
+              } else if (entry.identity == null) {
+                diagnostics.push(`Windows survivor PID ${entry.pid} has no captured creation identity; taskkill skipped`);
+              } else if (now?.identity == null) {
+                diagnostics.push(`Windows survivor PID ${entry.pid} has no current creation identity; taskkill skipped`);
+              } else {
+                diagnostics.push(`Windows survivor PID ${entry.pid} was reused (captured ${entry.identity}, current ${now.identity}); taskkill skipped`);
+              }
+            }
           }
         }
       } else {
@@ -151,14 +217,40 @@ export async function terminateProcessTree(child, {
     } catch (error) {
       diagnostics.push(`forced termination failed: ${error?.message ?? error}`);
     }
-    try { child.kill?.('SIGKILL'); } catch {}
+    if (platform !== 'win32' || isActiveChildProcess(child)) {
+      try { child.kill?.('SIGKILL'); } catch {}
+    }
     survivors = await waitForExtinction(survivors, forceMs, killImpl);
+    if (platform === 'win32' && survivors.length > 0) {
+      const verification = queryProcessRows(platform, spawnSyncImpl);
+      if (!verification.available) {
+        diagnostics.push(`Windows process enumeration failed during final identity verification (${verification.reason}); live PIDs remain unconfirmed`);
+      } else {
+        const current = new Map(verification.rows.map((row) => [row.pid, row]));
+        survivors = survivors.filter((entry) => {
+          if (!isAlive(entry.pid, killImpl)) return false;
+          const now = current.get(entry.pid);
+          if (entry.identity != null && now?.identity != null && now.identity !== entry.identity) {
+            diagnostics.push(`Windows captured PID ${entry.pid} identity ${entry.identity} is gone; current PID identity is ${now.identity}`);
+            return false;
+          }
+          if (entry.identity == null) {
+            diagnostics.push(`Windows PID ${entry.pid} remains alive but its captured creation identity is unknown`);
+          } else if (now?.identity == null) {
+            diagnostics.push(`Windows PID ${entry.pid} remains alive but its current creation identity is unknown`);
+          }
+          return true;
+        });
+      }
+    }
   }
 
   return {
-    gone: survivors.length === 0,
+    gone: survivors.length === 0 && !(platform === 'win32' && !capture.enumeration.available),
     survivors: survivors.map((entry) => entry.pid),
     ownedPids: owned.map((entry) => entry.pid),
+    ownedProcesses: owned.map((entry) => ({ ...entry })),
+    survivorProcesses: survivors.map((entry) => ({ ...entry })),
     diagnostics,
   };
 }

@@ -1,7 +1,10 @@
 'use strict';
 
+const BOOTSTRAP_MODULE_STARTED_AT_ISO = new Date().toISOString();
+const BOOTSTRAP_MODULE_STARTED_AT = process.hrtime.bigint();
 const nodeFs = require('node:fs');
 const nodeFsPromises = require('node:fs/promises');
+const nodeOs = require('node:os');
 const path = require('node:path');
 const runtimeGenerations = require('./runtime-generations.cjs');
 
@@ -10,6 +13,77 @@ const UPDATED_PROGRESS_TITLE = 'Loading updated Pie build…';
 const PENDING_STATUS_TEXT = 'Pie update ready';
 const PENDING_STATUS_TOOLTIP = 'Pie update ready. Restart VS Code to load it.';
 const WATCH_DEBOUNCE_MS = 150;
+const STARTUP_TIMING_FILE = path.join(nodeOs.tmpdir(), 'pie-startup-timing.jsonl');
+const STARTUP_TIMING_TAG = 'DEBUG-startup-profile';
+const STARTUP_TIMING_MAX_BYTES = 1_048_576;
+const STARTUP_TIMING_MAX_RECORD_BYTES = 4_096;
+let startupTimingWriteQueue = Promise.resolve();
+
+function monotonicNow() {
+  return process.hrtime.bigint();
+}
+
+function elapsedMs(startedAt) {
+  return Number(process.hrtime.bigint() - startedAt) / 1_000_000;
+}
+
+function roundedMs(milliseconds) {
+  return Math.round(milliseconds * 1000) / 1000;
+}
+
+function startupTimingPath() {
+  const tempRoot = path.resolve(nodeOs.tmpdir());
+  const configuredPath = process.env.PIE_STARTUP_TIMING_FILE;
+  if (typeof configuredPath === 'string' && configuredPath.length > 0) {
+    const resolvedPath = path.resolve(configuredPath);
+    const relativePath = path.relative(tempRoot, resolvedPath);
+    if (relativePath === '' || (!relativePath.startsWith(`..${path.sep}`) && relativePath !== '..' && !path.isAbsolute(relativePath))) {
+      return resolvedPath;
+    }
+  }
+  return STARTUP_TIMING_FILE;
+}
+
+function queueStartupTiming(record) {
+  let line;
+  let filePath;
+  try {
+    line = `${JSON.stringify({
+      ...record,
+      tag: STARTUP_TIMING_TAG,
+      timestamp: new Date().toISOString(),
+      pid: process.pid,
+    })}\n`;
+    if (Buffer.byteLength(line, 'utf8') > STARTUP_TIMING_MAX_RECORD_BYTES) return;
+    filePath = startupTimingPath();
+  } catch {
+    return;
+  }
+
+  startupTimingWriteQueue = startupTimingWriteQueue.then(async () => {
+    try {
+      const backupPath = `${filePath}.1`;
+      let existingSize = 0;
+      try {
+        existingSize = (await nodeFsPromises.stat(filePath)).size;
+      } catch (error) {
+        if (error?.code !== 'ENOENT') return;
+      }
+      if (existingSize + Buffer.byteLength(line, 'utf8') > STARTUP_TIMING_MAX_BYTES) {
+        await nodeFsPromises.rm(backupPath, { force: true });
+        try {
+          await nodeFsPromises.rename(filePath, backupPath);
+        } catch (error) {
+          if (error?.code !== 'ENOENT') return;
+        }
+      }
+      await nodeFsPromises.appendFile(filePath, line, { encoding: 'utf8', mode: 0o600, flag: 'a' });
+      await nodeFsPromises.chmod(filePath, 0o600).catch(() => undefined);
+    } catch {
+      // Startup instrumentation is best effort and must never affect activation.
+    }
+  }).catch(() => undefined);
+}
 
 function defaultVscode() {
   return require('vscode');
@@ -170,23 +244,33 @@ function createBootstrap(overrides = {}) {
     }
   }
 
-  async function runDelegate(context, vscode, acquired, identity, previousGeneration) {
+  async function runDelegate(context, vscode, acquired, identity, previousGeneration, timing) {
     const runtimeEntry = path.join(acquired.outDir, 'extension.js');
     let loadedModule;
     let activatedValue;
     try {
       // This is intentionally the first require of extension.js. The lease was
       // created by acquireRuntimeGeneration before this point.
-      loadedModule = requireModule(runtimeEntry);
+      const requireStartedAt = monotonicNow();
+      try {
+        loadedModule = requireModule(runtimeEntry);
+      } finally {
+        timing.delegateRequireMs = roundedMs(elapsedMs(requireStartedAt));
+      }
       const delegate = delegateModule(loadedModule);
       if (!delegate || typeof delegate.activate !== 'function') {
         throw new Error(`Pie runtime entry does not export activate: ${runtimeEntry}`);
       }
-      activatedValue = await delegate.activate(context, {
-        runtimeOutDir: acquired.outDir,
-        generation: acquired.generation,
-        publishedAt: acquired.publishedAt,
-      });
+      const activateStartedAt = monotonicNow();
+      try {
+        activatedValue = await delegate.activate(context, {
+          runtimeOutDir: acquired.outDir,
+          generation: acquired.generation,
+          publishedAt: acquired.publishedAt,
+        });
+      } finally {
+        timing.delegateActivateMs = roundedMs(elapsedMs(activateStartedAt));
+      }
 
       if (acquired.generation !== null && context.globalState && typeof context.globalState.update === 'function') {
         try {
@@ -259,10 +343,16 @@ function createBootstrap(overrides = {}) {
     }
   }
 
-  async function activateOnce(context) {
+  async function activateOnceWork(context, timing) {
     const vscode = getVscode();
     const extensionDir = context.extensionPath;
-    const identity = await identityFor(extensionDir);
+    const identityStartedAt = monotonicNow();
+    let identity;
+    try {
+      identity = await identityFor(extensionDir);
+    } finally {
+      timing.identityReadMs = roundedMs(elapsedMs(identityStartedAt));
+    }
     const previousGeneration = lastLoadedGeneration(context.globalState);
     const acquired = await runtime.acquireRuntimeGeneration({ extensionDir, identity });
     const isUpdated = acquired.generation !== null && acquired.generation !== previousGeneration;
@@ -270,7 +360,7 @@ function createBootstrap(overrides = {}) {
     let delegateRunStarted = false;
     const run = () => {
       delegateRunStarted = true;
-      return runDelegate(context, vscode, acquired, identity, previousGeneration);
+      return runDelegate(context, vscode, acquired, identity, previousGeneration, timing);
     };
     try {
       if (isUpdated && vscode.window && typeof vscode.window.withProgress === 'function') {
@@ -299,10 +389,46 @@ function createBootstrap(overrides = {}) {
     }
   }
 
+  async function activateOnce(context, timing) {
+    try {
+      const value = await activateOnceWork(context, timing);
+      timing.outcome = 'success';
+      return value;
+    } finally {
+      timing.activationMs = roundedMs(elapsedMs(timing.startedAt));
+      queueStartupTiming({
+        schema: 1,
+        source: 'bootstrap',
+        event: 'activation',
+        outcome: timing.outcome,
+        bootstrapModuleMs: BOOTSTRAP_MODULE_LOAD_MS,
+        activationSyncPrefixMs: roundedMs(timing.activationSyncPrefixMs),
+        activationMs: timing.activationMs,
+        identityReadMs: roundedMs(timing.identityReadMs ?? 0),
+        delegateRequireMs: roundedMs(timing.delegateRequireMs ?? 0),
+        delegateActivateMs: roundedMs(timing.delegateActivateMs ?? 0),
+      });
+    }
+  }
+
   async function activate(context) {
     if (active) return active.activationResult;
     if (!activationInFlight) {
-      activationInFlight = activateOnce(context).finally(() => {
+      const timing = {
+        startedAt: monotonicNow(),
+        activationSyncPrefixMs: 0,
+        outcome: 'error',
+      };
+      queueStartupTiming({
+        schema: 1,
+        source: 'bootstrap',
+        event: 'activation-entry',
+        bootstrapModuleStartedAt: BOOTSTRAP_MODULE_STARTED_AT_ISO,
+        bootstrapModuleMs: BOOTSTRAP_MODULE_LOAD_MS,
+      });
+      const activation = activateOnce(context, timing);
+      timing.activationSyncPrefixMs = elapsedMs(timing.startedAt);
+      activationInFlight = activation.finally(() => {
         activationInFlight = null;
       });
     }
@@ -344,6 +470,7 @@ function createBootstrap(overrides = {}) {
 }
 
 const defaultBootstrap = createBootstrap();
+const BOOTSTRAP_MODULE_LOAD_MS = roundedMs(elapsedMs(BOOTSTRAP_MODULE_STARTED_AT));
 
 module.exports = {
   activate: (...args) => defaultBootstrap.activate(...args),

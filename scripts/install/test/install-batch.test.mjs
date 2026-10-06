@@ -6,10 +6,10 @@
 //   - static structural validation (CRLF, @echo off, no PS/WSL/Unix tools,
 //     every goto/call target resolves to a label, references the shared runner)
 //   - --help / --check execution smoke (parse + dispatch, no mutation)
-//   - the Node-absent bootstrap path (mocked PATH; precise actionable failure)
+//   - the Proto-absent bootstrap path (mocked PATH; precise actionable failure)
 //   - a full-install control-flow run against a temp repo with mocked
-//     setx/npm/code shims on PATH, so the whole flow executes without
-//     mutating real User env / VS Code settings / npm globals.
+//     setx/proto/code shims on PATH, so the whole flow executes without
+//     mutating real User env, VS Code settings, or global tooling.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -52,9 +52,9 @@ test('install.bat is CRLF, starts with @echo off, and references the shared runn
   const text = readFileSync(installBat, 'utf8');
   assert.match(text, /^@echo off\r?\n/);
   assert.match(text, /scripts[\\/]install[\\/]run\.mjs/);
-  assert.match(text, /call npm run bootstrap -- --package/);
-  assert.equal((text.match(/call npm run bootstrap -- --package/g) ?? []).length, 1);
-  assert.doesNotMatch(text, /resolve-pi|package-sources|PI_CMD|npm ci --include=dev|npm run build|npm run package|pi login|before running pi|pi CLI reads/);
+  assert.match(text, /call proto run pnpm -- run bootstrap --package/);
+  assert.equal((text.match(/call proto run pnpm -- run bootstrap --package/g) ?? []).length, 1);
+  assert.doesNotMatch(text, /resolve-pi|package-sources|PI_CMD|npm ci --include=dev|npm run build|npm run package|npm install -g|winget install|pi login|before running pi|pi CLI reads/);
 });
 
 test('install.bat invokes no PowerShell/WSL/Unix tools outside REM comments', () => {
@@ -72,15 +72,15 @@ test('preflight and unknown-argument handling fail before installer mutations', 
   assert.match(text, /echo Unknown argument: %~1 1>&2\r?\nexit \/b 1/);
 
   const preflight = text.indexOf('REM --- preflight: validate prerequisites before any persistent mutations');
-  const npmCheck = text.indexOf('where npm >nul 2>nul || goto :no_npm', preflight);
-  const nodePinCheck = text.indexOf('if /i not "%NODE_VERSION%"=="%PIN_NODE%"', preflight);
+  const nodeCheck = text.indexOf('call :check_node', preflight);
+  const toolchainCheck = text.indexOf('call :run_proto run node -- "%RUNNER%" verify-toolchain', preflight);
   const authConsent = text.indexOf('REM --- auth relocation consent preflight (read-only)');
   const authValidation = text.indexOf('validate-auth-dir "%REPO_ROOT%" "%AUTH_DIR_ENV%"', authConsent);
   const authPrompt = text.indexOf('set /p MOVE_CHOICE=', authConsent);
   const firstMutation = text.indexOf('call :setx_user PI_CODING_AGENT_DIR');
-  assert.ok(preflight >= 0 && npmCheck > preflight, 'npm availability is checked in preflight');
-  assert.ok(nodePinCheck > npmCheck, 'the exact Node pin is checked after prerequisites resolve');
-  assert.ok(authConsent > nodePinCheck && authConsent < firstMutation, 'auth relocation consent is decided before persistent changes');
+  assert.ok(preflight >= 0 && nodeCheck > preflight, 'Proto and its pinned Node are checked in preflight');
+  assert.ok(toolchainCheck > nodeCheck, 'Node/pnpm pin verification follows Proto availability');
+  assert.ok(authConsent > toolchainCheck && authConsent < firstMutation, 'auth relocation consent is decided before persistent changes');
   assert.ok(authValidation > authConsent && authValidation < authPrompt, 'saved auth directory is validated before any consent or persistent changes');
   assert.ok(authPrompt > authConsent && authPrompt < firstMutation, 'the user prompt precedes all persistent changes');
   assert.match(text, /if defined CI goto :auth_consent_ci/, 'CI deterministically approves the relocation prompt');
@@ -107,38 +107,35 @@ test('--help prints usage and exits 0 without mutating', { skip: !isWindows && '
   assert.match(r.stdout, /--check/);
 });
 
-test('--check runs the real shared runner and reports drift + would-do (read-only)', { skip: !isWindows && 'cmd.exe only' }, () => {
-  // A real-repo --check is machine-dependent in its exit code (0 if the host
-  // happens to match the pins, 1 on drift), so assert only on stable substrings
-  // that are always present regardless of drift direction.
-  const r = runBat(['--check']);
-  assert.ok([
-    0,
-    1,
-  ].includes(r.status), `unexpected exit ${r.status} (signal: ${r.signal ?? 'none'}, error: ${r.error ?? 'none'})\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}`);
-  assert.match(r.stdout, /install\.bat --check - dry run/);
-  assert.match(r.stdout, /Toolchain verification/);
-  assert.match(r.stdout, /Would-do - run install\.bat without --check/);
-  assert.match(r.stdout, /source bootstrap: restore packages \+ build\/package pie VSIX/);
-  assert.doesNotMatch(r.stdout, /global Pi|pi CLI|Installing pinned.*pi/i);
-  // No setx/install/build output should appear (dry run).
-  assert.doesNotMatch(r.stdout, /Installing pinned/);
+test('--check is a read-only toolchain/readiness branch and never enters installer operations', () => {
+  const text = readFileSync(installBat, 'utf8');
+  const checkLabel = text.indexOf('\r\n:check\r\n');
+  const checkStart = checkLabel + 2;
+  const labelsStart = text.indexOf('REM ===========================================================================\r\nREM  labels / subroutines', checkStart);
+  assert.ok(checkLabel >= 0 && labelsStart > checkStart, 'the dry-run branch is delimited');
+  const checkBody = text.slice(checkStart, labelsStart);
+  const executable = checkBody.split(/\r?\n/).filter((line) => !/^\s*(?:REM\b|echo\b)/i.test(line)).join('\n');
+  assert.match(checkBody, /proto run node -- "%RUNNER%" verify-toolchain/);
+  assert.match(checkBody, /call :readiness_check/);
+  assert.match(checkBody, /Would-do - run install\.bat without --check/);
+  assert.match(checkBody, /Proto-managed pnpm install --frozen-lockfile --ignore-scripts/);
+  assert.doesNotMatch(executable, /\bsetx\b|\bmkdir\b|\bdel\b|migrate-outcomes-store|run bootstrap|pnpm.*install/);
 });
 
-test('--check with no Node on PATH fails with an actionable bootstrap hint', { skip: !isWindows && 'cmd.exe only' }, () => {
-  // PATH excludes node but keeps system32 (where/reg/find) + a temp empty dir.
+test('--check with no Proto on PATH fails with an actionable bootstrap hint', { skip: !isWindows && 'cmd.exe only' }, () => {
+  // PATH excludes Proto but keeps system32 (where/reg/find) + a temp empty dir.
   const sysRoot = process.env.SystemRoot || 'C:\\Windows';
   const noNodePath = [`${sysRoot}\\System32`, sysRoot, os.tmpdir()].join(';');
   const r = runBat(['--check'], { env: { PATH: noNodePath } });
   assert.equal(r.status, 1);
-  assert.match(r.stdout, /Node\.js is required but was not found on PATH/);
+  assert.match(r.stdout, /Proto-managed Node\.js is required but was not found/);
   // The pinned version is read from .node-version (no Node needed) and surfaced.
   assert.match(r.stdout, /24\.16\.0/);
-  assert.match(r.stdout, /winget install OpenJS\.NodeJS\.LTS/);
-  assert.match(r.stdout, /https:\/\/nodejs\.org\//);
+  assert.match(r.stdout, /Install Proto/);
+  assert.match(r.stdout, /does not install global runtimes or modify PATH/);
 });
 
-test('full install runs end-to-end against a temp repo with mocked setx/npm/code shims', { skip: !isWindows && 'cmd.exe only' }, () => {
+test('full install runs end-to-end against a temp repo with mocked setx/proto/code shims', { skip: !isWindows && 'cmd.exe only' }, () => {
   const tmp = mkdtempSync(path.join(os.tmpdir(), 'pie-install-bat-'));
   try {
     // --- temp repo skeleton ---
@@ -165,11 +162,12 @@ test('full install runs end-to-end against a temp repo with mocked setx/npm/code
       mkdirSync(path.dirname(fixtureManifest), { recursive: true });
       cpSync(path.join(repoRoot, 'harness', 'pi', 'packages', packageName, 'package.json'), fixtureManifest);
     }
-    // Pins: node matches the REAL node running the test (so the node check
-    // passes); npm matches the shim-reported "9.9.9". Keep all pins in place
-    // before negative preflight cases mutate the Node pin below.
+    // Proto and duplicate manifest pins match the REAL node running the test;
+    // the pnpm shim reports 9.9.9. Negative preflight cases mutate both Node
+    // pins below so comparison stays about the selected runtime, not pin drift.
     writeFileSync(path.join(tRepo, '.node-version'), `${process.versions.node}\n`);
-    writeFileSync(path.join(tRepo, 'package.json'), JSON.stringify({ packageManager: 'npm@9.9.9' }));
+    writeFileSync(path.join(tRepo, '.prototools'), `node = "${process.versions.node}"\npnpm = "9.9.9"\n`);
+    writeFileSync(path.join(tRepo, 'package.json'), JSON.stringify({ packageManager: 'pnpm@9.9.9' }));
     writeFileSync(
       path.join(hostDir, 'package-lock.json'),
       JSON.stringify({ packages: { 'node_modules/@earendil-works/pi-coding-agent': { version: '9.9.9' } } }),
@@ -190,7 +188,27 @@ test('full install runs end-to-end against a temp repo with mocked setx/npm/code
     const crlf = (s) => s.replace(/\n/g, '\r\n');
     writeFileSync(path.join(shims, 'setx.cmd'), crlf('@echo off\n>>"%SHIM_LOG%" echo setx %*\nexit /b 0\n'));
     writeFileSync(path.join(shims, 'reg.cmd'), crlf('@echo off\nif /i "%~1"=="query" if /i "%~4"=="PI_CODING_AGENT_SESSION_DIR" if defined MOCK_USER_SESSION_DIR echo PI_CODING_AGENT_SESSION_DIR    REG_SZ    %MOCK_USER_SESSION_DIR%\nif /i "%~1"=="query" if /i "%~4"=="PI_CODING_AGENT_AUTH_DIR" if defined MOCK_USER_AUTH_DIR echo PI_CODING_AGENT_AUTH_DIR    REG_SZ    %MOCK_USER_AUTH_DIR%\nexit /b 0\n'));
-    writeFileSync(path.join(shims, 'npm.cmd'), crlf('@echo off\nif "%~1"=="--version" (echo 9.9.9 & exit /b 0)\n>>"%SHIM_LOG%" echo npm %* CWD=%CD% AUTH=%PI_CODING_AGENT_AUTH_DIR%\nif "%~1"=="run" if "%~2"=="bootstrap" if defined MOCK_BOOTSTRAP_FAIL exit /b 7\nexit /b 0\n'));
+    const protoHelper = path.join(tmp, 'proto-helper.mjs');
+    writeFileSync(protoHelper, `
+      import { appendFileSync } from 'node:fs';
+      import { spawnSync } from 'node:child_process';
+      import process from 'node:process';
+      const args = process.argv.slice(2);
+      if (args[0] !== 'run') process.exit(2);
+      if (args[1] === 'node') {
+        const childArgs = args.slice(args.indexOf('--') + 1);
+        if (childArgs[0] === '--version') { console.log(process.version); process.exit(0); }
+        const child = spawnSync(process.execPath, childArgs, { stdio: 'inherit' });
+        process.exit(child.status ?? 1);
+      }
+      if (args[1] === 'pnpm' && args[3] === '--version') { console.log(process.env.MOCK_PNPM_VERSION || '9.9.9'); process.exit(0); }
+      if (args[1] === 'pnpm' && args[3] === 'run' && args[4] === 'bootstrap') {
+        appendFileSync(process.env.SHIM_LOG, 'proto run pnpm -- run bootstrap --package CWD=' + process.cwd() + ' AUTH=' + (process.env.PI_CODING_AGENT_AUTH_DIR || '') + '\\\\n');
+        process.exit(process.env.MOCK_BOOTSTRAP_FAIL ? 7 : 0);
+      }
+      process.exit(0);
+    `);
+    writeFileSync(path.join(shims, 'proto.cmd'), crlf('@echo off\nnode "%PROTO_HELPER%" %*\nexit /b %ERRORLEVEL%\n'));
     writeFileSync(path.join(shims, 'code.cmd'), crlf('@echo off\n>>"%SHIM_LOG%" echo code %*\nexit /b 0\n'));
 
     // Distinct process- and HKCU-level authorities must both be migrated.
@@ -229,6 +247,8 @@ test('full install runs end-to-end against a temp repo with mocked setx/npm/code
       USERNAME: process.env.USERNAME || 'user',
       CI: '1',
       SHIM_LOG: shimLog,
+      PROTO_HELPER: protoHelper,
+      MOCK_PNPM_VERSION: '9.9.9',
       MIGRATION_LOG: migrationLog,
       PI_CODING_AGENT_SESSION_DIR: processSessions,
       MOCK_USER_SESSION_DIR: userSessions,
@@ -246,38 +266,38 @@ test('full install runs end-to-end against a temp repo with mocked setx/npm/code
     });
     assert.equal(unknownOption.status, 1, `unknown option must fail\nstdout:\n${unknownOption.stdout}\nstderr:\n${unknownOption.stderr}`);
     assert.match(`${unknownOption.stdout}${unknownOption.stderr}`, /Unknown argument: --bogus/);
-    assert.ok(!existsSync(shimLog), 'unknown options exit before setx/npm/pi/code shims run');
+    assert.ok(!existsSync(shimLog), 'unknown options exit before setx/proto/pi/code shims run');
     assert.deepEqual(readFileSync(settingsPath), settingsBeforePreflight, 'settings.json is untouched');
     assert.deepEqual(readFileSync(authPath), authBeforePreflight, 'auth.json is untouched');
     assert.ok(!existsSync(path.join(tRepo, 'data', 'outcomes', 'sessions')), 'sessions are not migrated');
     assert.ok(!existsSync(path.join(tmp, 'appdata', 'Code', 'User', 'settings.json')), 'VS Code settings are untouched');
 
     writeFileSync(path.join(tRepo, '.node-version'), '0.0.0\n');
+    writeFileSync(path.join(tRepo, '.prototools'), 'node = "0.0.0"\npnpm = "9.9.9"\n');
     const wrongNode = spawnSync(process.env.ComSpec, ['/d', '/s', '/c', `"${bat}" --no-pause`], {
       env, cwd: tRepo, encoding: 'utf8', windowsVerbatimArguments: true,
     });
     assert.equal(wrongNode.status, 1, `wrong Node pin must fail\nstdout:\n${wrongNode.stdout}\nstderr:\n${wrongNode.stderr}`);
-    assert.match(`${wrongNode.stdout}${wrongNode.stderr}`, /Node\.js 0\.0\.0 is required/);
+    assert.match(`${wrongNode.stdout}${wrongNode.stderr}`, /Node \d+\.\d+\.\d+ \(expected 0\.0\.0\) \[DRIFT\]/);
     assert.ok(!existsSync(shimLog), 'Node pin failure occurs before persistent commands');
     assert.deepEqual(readFileSync(settingsPath), settingsBeforePreflight, 'settings.json is untouched on Node pin failure');
     assert.deepEqual(readFileSync(authPath), authBeforePreflight, 'auth.json is untouched on Node pin failure');
     assert.ok(!existsSync(path.join(tRepo, 'data', 'outcomes', 'sessions')), 'sessions are not migrated on Node pin failure');
     assert.ok(!existsSync(path.join(tmp, 'appdata', 'Code', 'User', 'settings.json')), 'VS Code settings are untouched on Node pin failure');
 
-    const nodeOnlyDir = path.join(tmp, 'node-only');
-    mkdirSync(nodeOnlyDir);
-    writeFileSync(path.join(nodeOnlyDir, 'node.cmd'), crlf(`@echo off\n"${process.execPath}" %*\nexit /b %ERRORLEVEL%\n`));
-    const noNpm = spawnSync(process.env.ComSpec, ['/d', '/s', '/c', `"${bat}" --no-pause`], {
-      env: { ...env, PATH: [nodeOnlyDir, `${sysRoot}\\System32`, sysRoot].join(';') },
+    writeFileSync(path.join(tRepo, '.node-version'), `${process.versions.node}\n`);
+    writeFileSync(path.join(tRepo, '.prototools'), `node = "${process.versions.node}"\npnpm = "9.9.9"\n`);
+    const noProto = spawnSync(process.env.ComSpec, ['/d', '/s', '/c', `"${bat}" --no-pause`], {
+      env: { ...env, PATH: [`${sysRoot}\\System32`, sysRoot, nodeDir].join(';') },
       cwd: tRepo, encoding: 'utf8', windowsVerbatimArguments: true,
     });
-    assert.equal(noNpm.status, 1, `missing npm must fail\nstdout:\n${noNpm.stdout}\nstderr:\n${noNpm.stderr}`);
-    assert.match(`${noNpm.stdout}${noNpm.stderr}`, /npm is required but was not found on PATH/);
-    assert.ok(!existsSync(shimLog), 'npm availability failure occurs before persistent commands');
-    assert.deepEqual(readFileSync(settingsPath), settingsBeforePreflight, 'settings.json is untouched when npm is missing');
-    assert.deepEqual(readFileSync(authPath), authBeforePreflight, 'auth.json is untouched when npm is missing');
-    assert.ok(!existsSync(path.join(tRepo, 'data', 'outcomes', 'sessions')), 'sessions are not migrated when npm is missing');
-    assert.ok(!existsSync(path.join(tmp, 'appdata', 'Code', 'User', 'settings.json')), 'VS Code settings are untouched when npm is missing');
+    assert.equal(noProto.status, 1, `missing Proto must fail\\nstdout:\\n${noProto.stdout}\\nstderr:\\n${noProto.stderr}`);
+    assert.match(`${noProto.stdout}${noProto.stderr}`, /Proto-managed Node\.js is required but was not found/);
+    assert.ok(!existsSync(shimLog), 'missing Proto fails before persistent commands');
+    assert.deepEqual(readFileSync(settingsPath), settingsBeforePreflight, 'settings.json is untouched when Proto is missing');
+    assert.deepEqual(readFileSync(authPath), authBeforePreflight, 'auth.json is untouched when Proto is missing');
+    assert.ok(!existsSync(path.join(tRepo, 'data', 'outcomes', 'sessions')), 'sessions are not migrated when Proto is missing');
+    assert.ok(!existsSync(path.join(tmp, 'appdata', 'Code', 'User', 'settings.json')), 'VS Code settings are untouched when Proto is missing');
 
     // A saved auth path equal to or below the checkout is rejected before any
     // persistent/session/auth work, so merge-auth cannot delete the source.
@@ -296,7 +316,7 @@ test('full install runs end-to-end against a temp repo with mocked setx/npm/code
       assert.match(invalidOutput, /PI_CODING_AGENT_AUTH_DIR must point outside the Git checkout/);
       assert.match(invalidOutput, /Choose an external directory/);
       assert.doesNotMatch(invalidOutput, /preflight-fixture-secret/, 'validation does not read or print auth contents');
-      assert.equal(readFileSync(shimLog, 'utf8'), '', 'invalid saved auth path invokes no persistent setx/npm/code shims');
+      assert.equal(readFileSync(shimLog, 'utf8'), '', 'invalid saved auth path invokes no persistent setx/proto/code shims');
       assert.equal(readFileSync(migrationLog, 'utf8'), '', 'invalid saved auth path invokes no session migration');
       assert.doesNotMatch(invalidOutput, /Bootstrapping and packaging|Source bootstrap/, 'invalid saved auth path never bootstraps');
       assert.deepEqual(readFileSync(settingsPath), settingsBeforePreflight, 'settings.json is unchanged on invalid saved auth path');
@@ -337,7 +357,7 @@ test('full install runs end-to-end against a temp repo with mocked setx/npm/code
     });
     assert.equal(declinedInTree.status, 1, `declined auth relocation must abort\nstdout:\n${declinedInTree.stdout}\nstderr:\n${declinedInTree.stderr}`);
     assert.match(declinedInTree.stdout, /INSTALL ABORTED: auth relocation was declined/);
-    assert.ok(!existsSync(shimLog), 'declining invokes no setx/npm/code shims');
+    assert.ok(!existsSync(shimLog), 'declining invokes no persistent setx/proto/code shims');
     assert.equal(readFileSync(migrationLog, 'utf8'), '', 'declining invokes no global outcomes migration');
     assert.doesNotMatch(declinedInTree.stdout, /Outcomes migration|Source bootstrap/, 'declining performs no session migration or bootstrap');
     assert.deepEqual(readFileSync(settingsPath), settingsBeforePreflight, 'settings.json is untouched on relocation decline');
@@ -361,7 +381,7 @@ test('full install runs end-to-end against a temp repo with mocked setx/npm/code
     });
     assert.equal(declinedOldDefault.status, 1, `declined legacy auth relocation must abort\nstdout:\n${declinedOldDefault.stdout}\nstderr:\n${declinedOldDefault.stderr}`);
     assert.match(declinedOldDefault.stdout, /INSTALL ABORTED: auth relocation was declined/);
-    assert.ok(!existsSync(shimLog), 'declining legacy auth invokes no setx/npm/code shims');
+    assert.ok(!existsSync(shimLog), 'declining legacy auth invokes no persistent setx/proto/code shims');
     assert.equal(readFileSync(migrationLog, 'utf8'), '', 'declining legacy auth invokes no global outcomes migration');
     assert.doesNotMatch(declinedOldDefault.stdout, /Outcomes migration|Source bootstrap/, 'declining legacy auth performs no session migration or bootstrap');
     assert.deepEqual(readFileSync(oldAuthPath), oldAuthBytes, 'legacy auth bytes are unchanged on relocation decline');
@@ -376,8 +396,8 @@ test('full install runs end-to-end against a temp repo with mocked setx/npm/code
     });
 
     const log = existsSync(shimLog) ? readFileSync(shimLog, 'utf8') : '';
-    // The wrapper called every mutating external tool through the shims (no real
-    // setx/npm/code ran), proving the full control flow executes.
+    // The wrapper called persistent commands through fixture shims (no real
+    // User state, global tooling, or VS Code installation was changed).
     assert.equal(r.status, 0, `install failed\nstdout:\n${r.stdout}\nstderr:\n${r.stderr}\nshim log:\n${log}`);
     assert.match(log, /setx PI_CODING_AGENT_DIR/);
     assert.match(log, /setx PI_CODING_AGENT_SESSION_DIR/);
@@ -385,9 +405,9 @@ test('full install runs end-to-end against a temp repo with mocked setx/npm/code
     assert.ok(log.includes(`setx PI_CODING_AGENT_AUTH_DIR "${defaultAuthDir}"`), `clean install persists secure auth directory at User scope\nshim log:\n${log}\nstdout:\n${r.stdout}`);
     assert.ok(existsSync(defaultAuthDir), 'clean install initializes the secure auth directory without an in-tree auth.json');
     assert.ok(r.stdout.includes(`Auth:     ${defaultAuthDir}\\auth.json`), 'installer process resolves auth through the secure directory');
-    assert.ok(log.includes(`npm run bootstrap -- --package CWD=${tRepo}`), 'bootstrap runs from the repository root');
-    assert.equal((log.match(/npm run bootstrap -- --package/g) ?? []).length, 1, 'the root bootstrap runs exactly once');
-    assert.doesNotMatch(log, /npm ci|npm run build|npm run package|pi install|@earendil-works\/pi-coding-agent/);
+    assert.ok(log.includes(`proto run pnpm -- run bootstrap --package CWD=${tRepo}`), 'bootstrap runs from the repository root');
+    assert.equal((log.match(/proto run pnpm -- run bootstrap --package/g) ?? []).length, 1, 'the root bootstrap runs exactly once');
+    assert.doesNotMatch(log, /npm (?:ci|install)|pnpm -- run (?:build|package)|pi install|@earendil-works\/pi-coding-agent/);
     assert.match(log, /code --install-extension/);
     // write-vscode-agent-dir wrote pie.agentDir into the isolated APPDATA tree.
     const vsSettings = path.join(tmp, 'appdata', 'Code', 'User', 'settings.json');
@@ -451,7 +471,7 @@ test('full install runs end-to-end against a temp repo with mocked setx/npm/code
     assert.match(ciRelocation.stdout, /auth\.json moved to/);
     assert.ok(!existsSync(authPath), 'CI relocation removes credentials from the checkout before bootstrap');
     assert.deepEqual(JSON.parse(readFileSync(path.join(defaultAuthDir, 'auth.json'), 'utf8')), { openai: { apiKey: 'ci-fixture' } });
-    assert.match(ciRelocationLog, /npm run bootstrap -- --package/);
+    assert.match(ciRelocationLog, /proto run pnpm -- run bootstrap --package/);
     assert.doesNotMatch(ciRelocationLog, /code --install-extension/);
 
     // A bootstrap failure propagates to the installer and prevents VSIX install.
@@ -462,7 +482,7 @@ test('full install runs end-to-end against a temp repo with mocked setx/npm/code
     const failedBootstrapLog = readFileSync(shimLog, 'utf8');
     assert.equal(bootstrapFailure.status, 1);
     assert.match(bootstrapFailure.stdout, /Source bootstrap\/package failed with exit code 7/);
-    assert.equal((failedBootstrapLog.match(/npm run bootstrap -- --package/g) ?? []).length, 1);
+    assert.equal((failedBootstrapLog.match(/proto run pnpm -- run bootstrap --package/g) ?? []).length, 1);
     assert.doesNotMatch(failedBootstrapLog, /code --install-extension/);
   } finally {
     rmSync(tmp, { recursive: true, force: true });

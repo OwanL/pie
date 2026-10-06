@@ -48,7 +48,7 @@ function resolveDep(name) {
     }
   }
   throw new Error(
-    `Could not resolve "${name}" — run "npm install" in application/hosts/vscode/ (yaml and ajv are direct devDependencies of the VS Code host).`,
+    `Could not resolve "${name}" — stop isolated development hosts, then run "proto run pnpm -- run setup" at the repo root (the workspace-reader gate must be clear; preserve installed Pie). yaml and ajv resolve through the shared workspace installation.`,
   );
 }
 

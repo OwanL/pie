@@ -1,4 +1,4 @@
-import test, { beforeEach } from 'node:test';
+import test, { afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { installDom } from '../helpers/dom';
@@ -19,10 +19,11 @@ let container: HTMLElement;
 beforeEach(() => {
   container = document.createElement('div');
   document.body.appendChild(container);
-  return () => {
-    render(null, container);
-    container.remove();
-  };
+});
+
+afterEach(() => {
+  render(null, container);
+  container.remove();
 });
 
 interface TestHarnessProps {

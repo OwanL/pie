@@ -13,22 +13,24 @@ import {
 } from '../../../analytics/contracts/contracts.js';
 import { SessionManagerFenceAdmissionRevokedError } from '../ownership/session-manager-fence.js';
 import { ANALYTICS_HANDOFF_MAX_STATUS_HOSTS } from '../../../analytics/contracts/host-status-messages.js';
-import type {
-  AcknowledgeAnalyticsWriterFenceOptions,
-  AnalyticsHostPage,
-  AnalyticsHostRecord,
-  AnalyticsHostState,
-  AnalyticsWriterAdmissionState,
-  AnalyticsWriterFenceAcknowledgement,
-  AnalyticsWriterFencePurpose,
-  AnalyticsWriterFenceRecord,
-  AnalyticsWriterFenceState,
-  AnalyticsWriterIdentity,
-  AnalyticsWriterLeaseRecord,
-  BeginAnalyticsWriterFenceOptions,
-  ReopenAnalyticsWriterAdmissionOptions,
-  ReconcileOpenAnalyticsWriterAdmissionOptions,
-} from '../../../analytics/authority/session-lifecycle-writer-store.js';
+import {
+  requireWriterIdentity,
+  type AcknowledgeAnalyticsWriterFenceOptions,
+  type AnalyticsHostPage,
+  type AnalyticsHostRecord,
+  type AnalyticsHostState,
+  type AnalyticsWriterAdmissionState,
+  type AnalyticsWriterFenceAcknowledgement,
+  type AnalyticsWriterFencePurpose,
+  type AnalyticsWriterFenceRecord,
+  type AnalyticsWriterFenceState,
+  type AnalyticsWriterIdentity,
+  type AnalyticsWriterLeaseRecord,
+  type BeginAnalyticsWriterFenceOptions,
+  type ReopenAnalyticsWriterAdmissionOptions,
+  type ReconcileOpenAnalyticsWriterAdmissionOptions,
+} from '../../../analytics/contracts/session-lifecycle-writer.js';
+export { requireWriterIdentity };
 
 interface SqliteRunResult { changes: number | bigint }
 interface SqliteStatement {
@@ -269,22 +271,6 @@ function requireHostField(value: string, name: string, maxLength = 512): string 
   requireId(value, name);
   if (value.length > maxLength) throw new Error(`${name} exceeds the bounded length.`);
   return value;
-}
-
-export function requireWriterIdentity(value: AnalyticsWriterIdentity, name: string): AnalyticsWriterIdentity {
-  if (!value || typeof value !== 'object') throw new Error(`${name} is invalid.`);
-  return {
-    hostInstanceId: requireHostField(value.hostInstanceId, `${name}.hostInstanceId`),
-    workspaceId: requireHostField(value.workspaceId, `${name}.workspaceId`),
-    generationId: requireHostField(value.generationId, `${name}.generationId`),
-    buildId: requireHostField(value.buildId, `${name}.buildId`),
-    processId: (() => {
-      if (!Number.isSafeInteger(value.processId) || value.processId <= 0) {
-        throw new Error(`${name}.processId must be a positive safe integer.`);
-      }
-      return value.processId;
-    })(),
-  };
 }
 
 function writerIdentityFromHost(host: AnalyticsHostRecord): AnalyticsWriterIdentity {

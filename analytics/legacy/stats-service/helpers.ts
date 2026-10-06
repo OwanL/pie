@@ -1,6 +1,6 @@
 import * as crypto from 'node:crypto';
 
-import type { ComposerInput } from '../../../harness/agent-processes/lib/rpc/composer-input.js';
+import type { AnalyticsInputKind, RunInputObservation } from '../../contracts/run-observation-inputs.js';
 import type { RunSnapshot } from '../run-analytics/types.js';
 
 /** Stable workspace directory key used by the legacy analytics store. */
@@ -9,8 +9,8 @@ export function workspaceHash(workspaceId: string): string {
 }
 
 /** Capture privacy-safe input-kind and attachment-size facts for a run. */
-export function summarizeInputs(run: RunSnapshot, inputs: ComposerInput[]): void {
-  const kindsUsed = new Set<ComposerInput['kind']>(run.inputKindsUsed);
+export function summarizeInputs(run: RunSnapshot, inputs: RunInputObservation[]): void {
+  const kindsUsed = new Set<AnalyticsInputKind>(run.inputKindsUsed);
 
   for (const input of inputs) {
     kindsUsed.add(input.kind);

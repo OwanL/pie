@@ -9,6 +9,16 @@ test('withoutPiHarnessEnv strips pi-harness state from test process environments
     PI_CODING_AGENT_DIR: 'C:/real/pie',
     PI_CODING_AGENT_SESSION_DIR: 'C:/real/pie/data/outcomes/sessions',
     PI_CODING_AGENT_AUTH_DIR: 'C:/real/pie/auth',
+    PI_CONFIG_DIR: 'C:/real/pie/config',
+    PI_SDK_PATH: 'C:/real/pi-sdk',
+    PIE_DATA_DIR: 'C:/real/pie/data',
+    PIE_CACHE_DIR: 'C:/real/pie/data/cache',
+    PIE_STORAGE_CUTOFF_AUTHORIZATION: 'ambient-authorization',
+    PIE_DEVELOPMENT_PI_RUNTIME: 'C:/real/runtime',
+    PIE_ALLOW_DEVELOPMENT_RUNTIME: '1',
+    PIE_HOST_PROFILE: 'local-pi',
+    PIE_HOST_COORDINATOR_PORT: '1997',
+    PIE_ANALYTICS_HANDOFF_KEY: 'ambient-handoff-key',
     PIE_REVIEWS_DIR: 'C:/real/pie/data/outcomes/session-reviews',
     PIE_TRIGGERS_DIR: 'C:/real/pie/data/outcomes/deferred-triggers',
     PIE_SUBAGENT_MAX_TREE_SESSIONS: '100',
@@ -23,6 +33,7 @@ test('withoutPiHarnessEnv strips pi-harness state from test process environments
     PIE_EDITOR_VERSION: '1.90.0',
     PIE_SHELL: 'bash',
     PIE_BASH_DEFAULT_TIMEOUT: '120',
+    PIE_ALLOW_IN_TREE_AUTH: '1',
   };
 
   assert.deepEqual(withoutPiHarnessEnv(source), {

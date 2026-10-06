@@ -12,7 +12,7 @@ import {
   recordStreamEvent,
   recordWatchdog,
   setStreamDiagEnabled,
-} from '../../lib/renderer-delivery/stream-telemetry';
+} from '../../../lib/stream-telemetry.js';
 
 interface DiagRecord {
   ts: string;

@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import {
   collectEnvironmentDiagnostics,
+  collectWorkspaceDependencyDiagnostics,
   findNodeManagerPathWarnings,
   readEncodingInfo,
   resolveExecutable,
@@ -170,4 +174,62 @@ test("collects non-blocking diagnostics through injected process access", () => 
     encoding: { capturedOutputDecoding: "UTF-8", locale: "unset" },
     pathWarnings: [],
   });
+});
+
+test("checks the main pnpm workspace read-only through Proto's pinned pnpm", (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "pie-doctor-pnpm-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const lockfile = path.join(root, "pnpm-lock.yaml");
+  writeFileSync(lockfile, "lockfileVersion: '9.0'\n");
+  const before = readFileSync(lockfile, "utf8");
+  const calls = [];
+
+  const diagnostics = collectWorkspaceDependencyDiagnostics({
+    root,
+    pinnedPnpm: "10.34.4",
+    run(command, args, cwd) {
+      calls.push({ command, args, cwd });
+      return args.at(-1) === "--version"
+        ? { status: 0, stdout: "10.34.4\n" }
+        : { status: 0, stdout: "workspace packages ready\n" };
+    },
+  });
+
+  assert.deepEqual(diagnostics, {
+    lockfilePresent: true,
+    pinnedPnpm: "10.34.4",
+    actualPnpm: "10.34.4",
+    pnpmCompatible: true,
+    dependenciesChecked: true,
+    dependenciesReady: true,
+  });
+  assert.deepEqual(calls, [
+    { command: "proto", args: ["run", "pnpm", "--", "--version"], cwd: root },
+    { command: "proto", args: ["run", "pnpm", "--", "list", "--depth=0", "--recursive"], cwd: root },
+  ]);
+  assert.equal(readFileSync(lockfile, "utf8"), before, "the root lock is never mutated");
+});
+
+test("does not query the dependency graph without its root lock or matching Proto pnpm", (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "pie-doctor-pnpm-gated-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const calls = [];
+  const run = (command, args, cwd) => {
+    calls.push({ command, args, cwd });
+    return { status: 0, stdout: "10.34.3\n" };
+  };
+
+  const missingLock = collectWorkspaceDependencyDiagnostics({ root, pinnedPnpm: "10.34.4", run });
+  assert.equal(missingLock.lockfilePresent, false);
+  assert.equal(missingLock.pnpmCompatible, false);
+  assert.equal(missingLock.dependenciesChecked, false);
+  assert.equal(calls.length, 1, "only Proto's version probe runs without the main lock");
+
+  writeFileSync(path.join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+  calls.length = 0;
+  const mismatchedTool = collectWorkspaceDependencyDiagnostics({ root, pinnedPnpm: "10.34.4", run });
+  assert.equal(mismatchedTool.lockfilePresent, true);
+  assert.equal(mismatchedTool.actualPnpm, "10.34.3");
+  assert.equal(mismatchedTool.dependenciesChecked, false);
+  assert.equal(calls.length, 1, "a mismatched Proto tool never falls back to bare pnpm");
 });

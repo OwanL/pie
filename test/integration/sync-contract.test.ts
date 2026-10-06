@@ -51,10 +51,10 @@ test('runtime lease release stays behind awaited production backend shutdown', a
 
 test('host artifact delivery binds Pi to verified output and distinguishes standalone lifetimes', async () => {
   const contract = await readFile(new URL('../../docs/contracts/STATE_CONTRACT.md', import.meta.url), 'utf8');
-  assert.match(contract, /Pi runtime packages, dependencies, and assets are contained in that output's verified `pi-runtime` artifact and share its lifetime/u);
+  assert.match(contract, /Delivered Pi runtime packages, dependencies, and assets are contained in the verified `pi-runtime` artifact and share its lifetime/u);
   assert.match(contract, /selected backend Node executable's platform, architecture, and modules ABI/u);
   assert.match(contract, /missing, tampered, or incompatible artifacts fail setup without an external SDK pointer, cache, registry, or global-install fallback/u);
-  assert.match(contract, /development-only and requires explicit opt-in/u);
+  assert.match(contract, /development launcher instead selects the compiled local Pi workspace with explicit development opt-in and retains its reader registration until teardown is confirmed/u);
   assert.match(contract, /acquiring before artifact\/runtime use and releasing only after confirmed owned teardown; uncertain teardown retains the lease/u);
   assert.match(contract, /Packaged flat output has package-install lifetime, not generation-GC lease protection/u);
   assert.match(contract, /Explicit standalone output is caller-owned and must remain immutable and available until confirmed shutdown/u);
@@ -533,36 +533,6 @@ test('typed agent close bridge: stop-cleanup mode, coordinator-side fence, typed
   assert.match(contract, /joins an already-active reducer interrupt or starts one/u);
   assert.match(contract, /typed host close bridge acknowledgement effect exactly once/u);
   assert.match(contract, /restores the surviving tab without stealing focus or reissuing the close, while committed deletions are never restored/u);
-});
-
-// ---------------------------------------------------------------------------
-// busy-seq dedup contract: BusyChangedPayload may carry a `seq` counter that
-// monotonically increases per session. The host drops events whose seq is
-// less than or equal to the last accepted value to ignore re-orderings.
-// ---------------------------------------------------------------------------
-
-function acceptBusySeq(state: Map<string, number>, sessionPath: string, seq: number | undefined): boolean {
-  if (typeof seq !== 'number') return true;
-  const last = state.get(sessionPath) ?? 0;
-  if (seq <= last) return false;
-  state.set(sessionPath, seq);
-  return true;
-}
-
-test('busy-seq dedup ignores out-of-order events but accepts unordered (no seq)', () => {
-  const state = new Map<string, number>();
-  assert.equal(acceptBusySeq(state, '/a', 1), true);
-  assert.equal(acceptBusySeq(state, '/a', 2), true);
-  // Stale event from an earlier dispatch arrives late.
-  assert.equal(acceptBusySeq(state, '/a', 1), false);
-  // Same seq is also dropped.
-  assert.equal(acceptBusySeq(state, '/a', 2), false);
-  // Higher seq accepted.
-  assert.equal(acceptBusySeq(state, '/a', 3), true);
-  // Different session has independent counter.
-  assert.equal(acceptBusySeq(state, '/b', 1), true);
-  // Missing seq is always accepted (backward-compat).
-  assert.equal(acceptBusySeq(state, '/a', undefined), true);
 });
 
 test('completed and interrupted replies project explicit continuation capability without creating user input', async () => {

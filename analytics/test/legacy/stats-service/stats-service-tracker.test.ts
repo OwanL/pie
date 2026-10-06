@@ -8,7 +8,76 @@ import { reducer } from '../../../../application/backend/conversation-state/redu
 import type { Event } from '../../../../application/backend/conversation-state/events';
 import type { SettingsState } from '../../../../application/backend/conversation-state/arch-state';
 import type { AssistantUsage, ComposerInput, SessionAnalyticsFactors, ToolCall } from '../../../../application/lib/protocol/index.js';
+import {
+  getRenderableSubagentResult,
+  getSubagentBillingEntries,
+  getTerminalSubagentAttemptSamplesFromToolCall,
+} from '../../../../harness/agent-processes/workers/subagent-result.js';
+import { providerReportedCostUsd } from '../../../../harness/model-providers/pricing/provider-cost.js';
+import type { SubagentObservationSource } from '../../../contracts/subagent-observation.js';
+import { isRecord } from '../../../../lib/validation/type-guards.js';
 import { produce } from 'immer';
+
+const testSubagentObservationSource: SubagentObservationSource = {
+  getSubagentBillingEntries,
+  getRenderableSubagentResult: (rawResult) => {
+    const renderable = getRenderableSubagentResult(rawResult);
+    if (!renderable) return undefined;
+    return {
+      results: renderable.results.map((result) => ({
+        usage: result.usage,
+        model: result.model,
+        selectedModel: result.selectedModel,
+        provider: result.provider,
+        turnThroughputSamples: result.turnThroughputSamples,
+        attemptRecords: result.attemptRecords?.map((attempt) => {
+          if (!isRecord(attempt)) return {};
+          const rawUsage = attempt.usage;
+          if (!isRecord(rawUsage)) {
+            return {
+              attemptId: attempt.attemptId,
+              model: attempt.model,
+              provider: attempt.provider,
+            };
+          }
+          const rawCost = rawUsage.cost;
+          const cost = isRecord(rawCost)
+            ? {
+              providerReportedCostUsd: rawCost.providerReportedCostUsd,
+              reportedCostUsd: rawCost.reportedCostUsd,
+            }
+            : rawCost === null || typeof rawCost === 'string' || typeof rawCost === 'number'
+              || typeof rawCost === 'boolean' || Array.isArray(rawCost) ? rawCost : undefined;
+          return {
+            attemptId: attempt.attemptId,
+            model: attempt.model,
+            provider: attempt.provider,
+            usage: {
+              input: rawUsage.input,
+              output: rawUsage.output,
+              cacheRead: rawUsage.cacheRead,
+              cacheWrite: rawUsage.cacheWrite,
+              providerReportedCostUsd: rawUsage.providerReportedCostUsd,
+              reportedCostUsd: rawUsage.reportedCostUsd,
+              ...(cost === undefined ? {} : { cost }),
+            },
+          };
+        }),
+        messages: result.messages?.map((message) => {
+          const messageWithToolName = message as typeof message & { toolName?: unknown };
+          return {
+            role: message.role,
+            ...(typeof messageWithToolName.toolName === 'string'
+              ? { toolName: messageWithToolName.toolName } : {}),
+            details: message.details,
+          };
+        }),
+      })),
+    };
+  },
+  getTerminalSubagentAttemptSamplesFromToolCall,
+  readProviderReportedCostUsd: providerReportedCostUsd,
+};
 
 function createHarness() {
   const sessionPath = '/workspace/session.jsonl';
@@ -61,6 +130,7 @@ function createHarness() {
     scheduleRender: () => {
       renderCount += 1;
     },
+    subagentObservationSource: testSubagentObservationSource,
   });
 
   return {

@@ -1,14 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { repoRoot, readPinnedNodeVersion, readPinnedNpmVersion } from "./toolchain.mjs";
+import { repoRoot, readPinnedNodeVersion, readPinnedPnpmVersion } from "./toolchain.mjs";
 import { readConfiguredPackageSources } from "./lib/packages.mjs";
+import { runRootInstall } from "./install-dependencies.mjs";
 import { spawnCliSync } from "../lib/subprocess.mjs";
 import { withPiRuntime } from "../lib/pi-runtime-context.mjs";
+import { buildPiWorkspace } from "../build/pi-workspace.mjs";
 import { createSourcePiCli } from "./lib/source-pi-cli.mjs";
 import { validateAuthDirectory } from "./lib/auth-directory.mjs";
-
-const rootNpmCiStep = (root) => ({ command: "npm", args: ["ci", "--include=dev"], cwd: root });
 
 class BootstrapCommandError extends Error {
   constructor(command, args, status) {
@@ -66,8 +66,9 @@ export function parseBootstrapArgs(args) {
 }
 
 /**
- * Pure description of the post-root-ci bootstrap steps. It neither acquires nor
- * installs a runtime; callers supply the already selected artifact explicitly.
+ * Pure description of bootstrap operations, including the shared gated root
+ * install. It neither acquires nor installs a runtime; callers supply the
+ * already selected artifact explicitly.
  */
 export function buildCommandPlan({
   root = repoRoot,
@@ -81,18 +82,18 @@ export function buildCommandPlan({
   }
   const hostRoot = path.join(root, "application", "hosts", "vscode");
   return [
-    rootNpmCiStep(root),
+    { operation: "root-install", cwd: root },
     ...packageSources.map((source) => ({ operation: "source-pi-cli", args: ["install", source], cwd: root })),
     { command: nodeExecutable, args: ["scripts/model-config/sync-models.mjs", "--check"], cwd: root },
     {
-      command: "npm",
-      args: ["run", "build", "--", "--pi-runtime", artifactDir],
-      cwd: hostRoot,
+      command: "proto",
+      args: ["run", "node", "--", "scripts/build/build.mjs", "--delivery", "--pi-runtime", artifactDir],
+      cwd: root,
     },
     ...(packageExtension ? [{
-      command: nodeExecutable,
-      args: ["node_modules/@vscode/vsce/vsce", "package", "--no-dependencies", "--allow-missing-repository", "--skip-license"],
-      cwd: hostRoot,
+      command: "proto",
+      args: ["run", "pnpm", "--", "--dir", hostRoot, "exec", "vsce", "package", "--no-dependencies", "--allow-missing-repository", "--skip-license"],
+      cwd: root,
     }] : []),
     { command: nodeExecutable, args: ["scripts/diagnostics/doctor.mjs", "--skip-model-check", "--pi-runtime", artifactDir], cwd: root },
   ];
@@ -107,12 +108,15 @@ export async function runBootstrap({
   package: packageExtension = false,
   spawn = spawnCliSync,
   acquireRuntime = withPiRuntime,
+  compilePiWorkspace = buildPiWorkspace,
   createPiCli = createSourcePiCli,
   runtimeTarget = { platform: process.platform, arch: process.arch, nodeAbi: process.versions.modules },
 } = {}) {
-  // Root npm ci owns the root/host dependency setup and must finish before any
-  // private Pi runtime is built or reused.
-  runSync(rootNpmCiStep(root), spawn);
+  // One gated Proto-selected root install owns every workspace dependency.
+  // A source-default artifact must follow a fresh compiled-workspace stamp;
+  // explicit verified artifact reuse does not depend on checkout compilation.
+  await runRootInstall({ root, spawn });
+  if (artifactDir === undefined) await compilePiWorkspace();
 
   return acquireRuntime({ artifactDir }, async (context) => {
     let childCompletionKnown = true;
@@ -143,7 +147,7 @@ export async function runBootstrap({
 
 function validateBootstrapEnvironment() {
   const nodeVersion = readPinnedNodeVersion();
-  const npmVersion = readPinnedNpmVersion();
+  const pnpmVersion = readPinnedPnpmVersion();
   const authDir = process.env.PI_CODING_AGENT_AUTH_DIR;
   const authDirValidation = validateAuthDirectory({ repoRoot, authDir });
   if (!authDirValidation.valid) {
@@ -156,8 +160,10 @@ function validateBootstrapEnvironment() {
     if (hasCredentials) throw new Error("Refusing to bootstrap with credentials in the working tree; re-run .\\install.bat");
   }
   if (process.versions.node !== nodeVersion) throw new Error(`Node ${nodeVersion} required; found ${process.versions.node}`);
-  const npm = spawnCliSync("npm", ["--version"], { encoding: "utf8" });
-  if (npm.stdout.trim() !== npmVersion) throw new Error(`npm ${npmVersion} required; found ${npm.stdout.trim() || "unavailable"}`);
+  const pnpm = spawnCliSync("proto", ["run", "pnpm", "--", "--version"], { cwd: repoRoot, encoding: "utf8" });
+  if (pnpm.status !== 0 || (pnpm.stdout ?? "").trim() !== pnpmVersion) {
+    throw new Error(`pnpm ${pnpmVersion} required through Proto; found ${(pnpm.stdout ?? "").trim() || "unavailable"}`);
+  }
 }
 
 async function main() {

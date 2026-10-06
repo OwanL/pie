@@ -1,12 +1,12 @@
-import * as path from 'node:path';
+import { runtimeWebviewAssetDirectory } from './runtime-location';
 
 export const DEFAULT_WEBVIEW_VIEW_NAME = 'panel';
 
 export function getWebviewAssetDir(
-  extensionPath: string,
+  context: { extensionPath: string },
   viewName = DEFAULT_WEBVIEW_VIEW_NAME,
 ): string {
-  return path.join(extensionPath, 'out', 'webview', viewName);
+  return runtimeWebviewAssetDirectory(context, viewName);
 }
 
 export function isHotReloadAssetFileName(

@@ -21,9 +21,9 @@ import { HostRuntime } from '../../composition/host-runtime.js';
 import type {
   HostRuntimePlatform,
   HostRendererSurface,
-} from '../../../hosts/lib/platform-contracts/platform.js';
+} from '../../../lib/platform-contracts/platform.js';
 import type { HostToWebviewMessage, RendererCommandContext, WebviewToHostMessage } from '../../../lib/protocol/index.js';
-import { selectRuntimeSetting } from '../../../hosts/lib/platform-contracts/session-platform';
+import { selectRuntimeSetting } from '../../../lib/platform-contracts/session-platform.js';
 import type { FileDiffCoreLike } from '../../file-changes/file-diff-service';
 
 // ─── Stubs ───────────────────────────────────────────────────────────────────
@@ -110,6 +110,11 @@ function createPlatformFixture(options: {
       return undefined;
     },
     requestWindowAttention: () => { recorder.attentionRequests++; },
+    backendStartup: {
+      prepareDevelopmentEnvironment: () => undefined,
+      resolveBackendLaunchPaths: async () => ({ nodePath: process.execPath, sdkPath: '/test-sdk' }),
+      prepareBackendEnvironment: () => undefined,
+    },
     renderer,
     notifications: {
       showWarningMessage: (message) => { recorder.notifications.push(`warn:${message}`); },
@@ -528,7 +533,7 @@ test('HostRuntime keeps legacy analytics authority with a fresh data root: canon
 
 test('host runtime modules must not import vscode or VS Code-only adapters', async () => {
   const runtimeSource = await readFile(new URL('../../composition/host-runtime.ts', import.meta.url), 'utf8');
-  const platformSource = await readFile(new URL('../../../hosts/lib/platform-contracts/platform.ts', import.meta.url), 'utf8');
+  const platformSource = await readFile(new URL('../../../lib/platform-contracts/platform.ts', import.meta.url), 'utf8');
   for (const [name, source] of [['host-runtime.ts', runtimeSource], ['platform.ts', platformSource]] as const) {
     const imports = Array.from(source.matchAll(/from\s+['"]([^'"]+)['"]/g)).map((m) => m[1]);
     for (const imp of imports) {
@@ -542,15 +547,15 @@ test('host runtime modules must not import vscode or VS Code-only adapters', asy
 
 test('browser-server seam is owned by the host-neutral runtime; no concrete implementation imports (including type-only)', async () => {
   const runtimeSource = await readFile(new URL('../../composition/host-runtime.ts', import.meta.url), 'utf8');
-  const platformSource = await readFile(new URL('../../../hosts/lib/platform-contracts/platform.ts', import.meta.url), 'utf8');
-  const seamSource = await readFile(new URL('../../../hosts/lib/platform-contracts/browser-server-seam.ts', import.meta.url), 'utf8');
+  const platformSource = await readFile(new URL('../../../lib/platform-contracts/platform.ts', import.meta.url), 'utf8');
+  const seamSource = await readFile(new URL('../../../lib/platform-contracts/browser-server-seam.ts', import.meta.url), 'utf8');
   const browserServerSource = await readFile(new URL('../../../hosts/browser/http/browser-server.ts', import.meta.url), 'utf8');
   const typesSource = await readFile(new URL('../../../hosts/browser/types.ts', import.meta.url), 'utf8');
 
   // Every import specifier must avoid the concrete browser-server domain —
   // the regex matches the `from` clause of both value and `import type`
   // imports, so type-only dependencies respect ownership too. The seam module
-  // itself lives in `application/hosts/lib/platform-contracts/`, so its own
+  // itself lives in `application/lib/platform-contracts/`, so its own
   // platform-contract specifier is not a concrete-domain import.
   for (const [name, source] of [
     ['host-runtime.ts', runtimeSource],
@@ -584,7 +589,7 @@ test('browser-server seam is owned by the host-neutral runtime; no concrete impl
   // re-exported from the seam, never redeclared in the browser-server module.
   assert.ok(browserServerSource.includes('export class BrowserServer implements BrowserServerService'),
     'the BrowserServer implementation must declare the host-neutral service contract');
-  assert.ok(typesSource.includes("from '../lib/platform-contracts/browser-server-seam.js'"),
+  assert.ok(typesSource.includes("from '../../lib/platform-contracts/browser-server-seam.js'"),
     'browser-server types must re-export the canonical shapes from the host-neutral seam');
   assert.ok(!typesSource.includes('export interface BrowserServerSettings')
     && !typesSource.includes('export type BrowserServerLifecycleEvent'),
@@ -612,8 +617,8 @@ test('BrowserServer construction stays in concrete hosts; PieExtension stays a t
     'the standalone platform adapter selects the browser service factory');
   assert.ok(browserFactorySource.includes('new BrowserServer'),
     'the browser host factory constructs the concrete server');
-  assert.ok(vscodePlatformSource.includes("assetDir: path.join(context.extensionPath, 'out', 'webview', 'panel')"),
-    'VS Code asset paths stay in its concrete adapter');
+  assert.ok(vscodePlatformSource.includes('assetDir: getWebviewAssetDir(context)'),
+    'VS Code asset selection stays in its concrete adapter and honors the admitted development output');
   assert.ok(standalonePlatformSource.includes("assetDir: path.join(options.runtimeOutputDirectory, 'webview', 'panel')"),
     'standalone asset paths stay in its concrete adapter (runtime output directory)');
   assert.ok(standalonePlatformSource.includes("fallbackDir: path.join(options.runtimeOutputDirectory, 'webview', 'panel')"),

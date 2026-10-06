@@ -1,10 +1,11 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { PrepassConfig, PruningConfig, PruningMode, PruningStrategy, ToolPruningConfig } from "./config-types.js";
 import { toErrorMessage, parseJsonOrThrow } from "../../../lib/structured-logging/error-message.js";
 
 /** Root of the pi-config repo, resolved from this extension's known position. */
-const CONFIG_ROOT = path.resolve(import.meta.dirname, "..", "..", "..");
+const CONFIG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
 export const DEFAULT_TOOL_CONFIG: ToolPruningConfig = {
 	strategy: "discretion",

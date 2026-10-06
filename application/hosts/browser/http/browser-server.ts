@@ -25,9 +25,11 @@
  * per socket (in the transport), and no state in `/health` or logs.
  */
 
+import { watch, type FSWatcher } from 'node:fs';
 import * as http from 'node:http';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
+import * as path from 'node:path';
 
 import { WebSocketServer, type WebSocket } from 'ws';
 
@@ -59,6 +61,8 @@ import type {
 const WS_ROUTE = '/ws';
 const HEALTH_ROUTE = '/health';
 const FAVICON_ROUTE = '/favicon.svg';
+const DEVELOPMENT_RENDERER_RELOAD_DEBOUNCE_MS = 150;
+const DEVELOPMENT_BUILD_ID_PATTERN = /^[0-9a-f]{20}$/u;
 
 const SYSTEM_CLOCK: BrowserClock = {
   now: () => Date.now(),
@@ -100,10 +104,22 @@ export class BrowserServer implements BrowserServerService {
   private stopRequested = false;
   private disposed = false;
   private allowedLanAddresses: string[] = [];
+  private readonly developmentRendererReloadEnabled: boolean;
+  private developmentRendererWatchers: FSWatcher[] = [];
+  private developmentRendererReloadTimer: unknown;
+  private developmentRendererRefreshInFlight = false;
+  private developmentRendererRefreshPending = false;
+  private developmentRendererWatchGeneration = 0;
+  private watchedDevelopmentAssetVersion: string | null = null;
 
   constructor(private readonly options: BrowserServerOptions) {
     this.clock = options.clock ?? SYSTEM_CLOCK;
-    this.staticAssets = new BrowserStaticAssets(options.assetDir, options.rendererSelection);
+    this.developmentRendererReloadEnabled = isExplicitDevelopmentProfile(process.env);
+    this.staticAssets = new BrowserStaticAssets(
+      options.assetDir,
+      options.rendererSelection,
+      this.developmentRendererReloadEnabled,
+    );
     this.hub = new RendererHub({
       clock: this.clock,
       hostInstanceId: options.hostInstanceId,
@@ -176,7 +192,10 @@ export class BrowserServer implements BrowserServerService {
     if (this.startPromise) return this.startPromise;
     if (this.disposed) return Promise.resolve({ kind: 'failed', reason: 'disposed' });
     this.stopRequested = false;
-    this.startPromise = this.doStart().finally(() => {
+    this.startPromise = this.doStart().catch((error: unknown) => {
+      this.stopDevelopmentRendererWatcher();
+      throw error;
+    }).finally(() => {
       this.startPromise = null;
     });
     return this.startPromise;
@@ -247,6 +266,7 @@ export class BrowserServer implements BrowserServerService {
 
     const url = pageUrl(port);
     const actualBindAddress = this.actualAddress(httpServer) ?? bindAddress;
+    this.startDevelopmentRendererWatcher();
     this.allowedLanAddresses = settings.allowLan
       ? this.readLanIPv4Addresses()
       : [];
@@ -262,6 +282,7 @@ export class BrowserServer implements BrowserServerService {
       startedAt: this.clock.now(),
       preferred,
     };
+    this.scheduleDevelopmentRendererRefresh();
     if (preferred) this.emit({ kind: 'started', url, preferred: true, lanEnabled: settings.allowLan, lanUrls });
     else this.emit({ kind: 'fallback', url, lanEnabled: settings.allowLan, lanUrls });
     return { kind: 'started', url, port, preferred };
@@ -288,6 +309,7 @@ export class BrowserServer implements BrowserServerService {
         startedAt: null,
       };
       this.allowedLanAddresses = [];
+      this.stopDevelopmentRendererWatcher();
       for (const rendererId of Object.keys(this.transports)) {
         this.confirmations.cancelForRenderer(rendererId);
       }
@@ -500,6 +522,123 @@ export class BrowserServer implements BrowserServerService {
 
   // ─── Plumbing ─────────────────────────────────────────────────────────────
 
+  private startDevelopmentRendererWatcher(): void {
+    if (!this.developmentRendererReloadEnabled || this.developmentRendererWatchers.length > 0) return;
+
+    const assetDir = this.staticAssets.getSelectedAssetDir();
+    this.developmentRendererWatchGeneration += 1;
+    this.watchedDevelopmentAssetVersion = this.staticAssets.getAssetVersion();
+    try {
+      this.attachDevelopmentRendererWatchers(assetDir);
+      // The caller schedules a reconciliation after publishing running state.
+    } catch {
+      // Watching is an optional development convenience; a filesystem watcher
+      // failure must not take down an otherwise healthy browser server.
+      this.stopDevelopmentRendererWatcher();
+    }
+  }
+
+  private scheduleDevelopmentRendererRefresh(): void {
+    if (!this.developmentRendererReloadEnabled || !this.state.running) return;
+    if (this.developmentRendererReloadTimer !== undefined) {
+      this.clock.clearTimeout(this.developmentRendererReloadTimer);
+    }
+    this.developmentRendererReloadTimer = this.clock.setTimeout(() => {
+      this.developmentRendererReloadTimer = undefined;
+      // Reattach after each quiet window because Vite may atomically replace
+      // either watched file (some platforms bind fs.watch to the old inode).
+      const generation = this.developmentRendererWatchGeneration;
+      this.reattachDevelopmentRendererWatchers();
+      void this.refreshDevelopmentRenderer(generation);
+    }, DEVELOPMENT_RENDERER_RELOAD_DEBOUNCE_MS);
+  }
+
+  private attachDevelopmentRendererWatchers(assetDir: string): void {
+    const watchers: FSWatcher[] = [];
+    try {
+      const onChange = (): void => this.scheduleDevelopmentRendererRefresh();
+      watchers.push(watch(path.join(assetDir, 'pie-build-id.txt'), { persistent: false, encoding: 'utf8' }, onChange));
+      watchers.push(watch(path.join(assetDir, '.vite', 'manifest.json'), { persistent: false, encoding: 'utf8' }, onChange));
+      for (const watcher of watchers) watcher.on('error', () => this.stopDevelopmentRendererWatcher());
+      this.developmentRendererWatchers = watchers;
+    } catch {
+      for (const watcher of watchers) watcher.close();
+      this.developmentRendererWatchers = [];
+    }
+  }
+
+  private reattachDevelopmentRendererWatchers(): void {
+    if (!this.developmentRendererReloadEnabled || !this.state.running) return;
+    for (const watcher of this.developmentRendererWatchers) watcher.close();
+    this.developmentRendererWatchers = [];
+    this.attachDevelopmentRendererWatchers(this.staticAssets.getSelectedAssetDir());
+  }
+
+  private async refreshDevelopmentRenderer(generation: number): Promise<void> {
+    if (this.developmentRendererRefreshInFlight) {
+      this.developmentRendererRefreshPending = true;
+      return;
+    }
+    this.developmentRendererRefreshInFlight = true;
+    try {
+      if (!this.state.running || generation !== this.developmentRendererWatchGeneration) return;
+      const assetDir = this.staticAssets.getSelectedAssetDir();
+      const markerPath = path.join(assetDir, 'pie-build-id.txt');
+      const manifestPath = path.join(assetDir, '.vite', 'manifest.json');
+      const [markerBefore, manifestBefore] = await Promise.all([
+        fs.readFile(markerPath, 'utf8'),
+        fs.readFile(manifestPath, 'utf8'),
+      ]);
+      if (!DEVELOPMENT_BUILD_ID_PATTERN.test(markerBefore.trim())) return;
+
+      // load() keeps the last valid serving allowlist until the new manifest
+      // and every referenced file are complete. The before/after reads reject
+      // a build that is still replacing its marker or manifest.
+      await this.staticAssets.load();
+      if (!this.state.running || generation !== this.developmentRendererWatchGeneration) return;
+      const [markerAfter, manifestAfter] = await Promise.all([
+        fs.readFile(markerPath, 'utf8'),
+        fs.readFile(manifestPath, 'utf8'),
+      ]);
+      if (!this.state.running || generation !== this.developmentRendererWatchGeneration) return;
+      if (markerBefore !== markerAfter || manifestBefore !== manifestAfter) return;
+
+      const nextAssetVersion = this.staticAssets.getAssetVersion();
+      if (nextAssetVersion === this.watchedDevelopmentAssetVersion) return;
+      this.watchedDevelopmentAssetVersion = nextAssetVersion;
+
+      // This path is enabled only for an explicit development profile. Once
+      // the stable build is published, tell attached pages to reload; the
+      // production asset-mismatch and protocol-failure latches remain inert.
+      for (const transport of Object.values(this.transports)) {
+        if (transport.isAttached()) {
+          transport.closeSocket(BROWSER_CLOSE_REASONS.developmentRendererRebuilt);
+        }
+      }
+    } catch {
+      // A partial/invalid build is not published to the HTTP allowlist and is
+      // not grounds to interrupt a renderer. The next marker/manifest event
+      // retries after Vite finishes writing.
+    } finally {
+      this.developmentRendererRefreshInFlight = false;
+      if (this.developmentRendererRefreshPending && this.state.running) {
+        this.developmentRendererRefreshPending = false;
+        this.scheduleDevelopmentRendererRefresh();
+      }
+    }
+  }
+
+  private stopDevelopmentRendererWatcher(): void {
+    this.developmentRendererWatchGeneration += 1;
+    if (this.developmentRendererReloadTimer !== undefined) {
+      this.clock.clearTimeout(this.developmentRendererReloadTimer);
+      this.developmentRendererReloadTimer = undefined;
+    }
+    for (const watcher of this.developmentRendererWatchers) watcher.close();
+    this.developmentRendererWatchers = [];
+    this.developmentRendererRefreshPending = false;
+  }
+
   private emit(event: BrowserServerLifecycleEvent): void {
     this.options.onLifecycle?.(event);
   }
@@ -557,6 +696,14 @@ export class BrowserServer implements BrowserServerService {
       return null;
     }
   }
+}
+
+/** Development-only renderer watching requires both explicit workspace and profile selection. */
+function isExplicitDevelopmentProfile(environment: NodeJS.ProcessEnv): boolean {
+  return Boolean(
+    environment.PIE_DEVELOPMENT_PI_WORKSPACE?.trim()
+      && environment.PIE_DEVELOPMENT_PROFILE_DIR?.trim(),
+  );
 }
 
 /** Parse and sanitize a request URL pathname; null on malformed URLs. */

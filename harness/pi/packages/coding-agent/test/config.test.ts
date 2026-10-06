@@ -1,7 +1,7 @@
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { accessSync, chmodSync, constants, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
-import { delimiter, join } from "path";
-import { afterEach, describe, expect, test } from "vitest";
+import { delimiter, dirname, join } from "path";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
 	detectInstallMethod,
 	getSelfUpdateCommand,
@@ -21,6 +21,19 @@ function setExecPath(value: string): void {
 		configurable: true,
 	});
 }
+
+// Never discover an installed manager through the developer's PATH. cross-spawn
+// needs the native cmd.exe directory on Windows to execute fixture-owned .cmd files.
+function privatePath(binDir?: string): string {
+	if (process.platform !== "win32") return binDir ?? join(tmpdir(), "pi-no-manager-bin");
+	const comSpec = process.env.ComSpec;
+	if (!comSpec) throw new Error("Windows manager fixtures require native ComSpec");
+	return [binDir, dirname(comSpec)].filter(Boolean).join(delimiter);
+}
+
+beforeEach(() => {
+	process.env.PATH = privatePath();
+});
 
 afterEach(() => {
 	if (execPathDescriptor) {
@@ -54,6 +67,13 @@ function createNpmPrefixInstall(template = "pi-prefix-"): { prefix: string; pack
 	const scopeDir = join(root, "@earendil-works");
 	const packageDir = join(scopeDir, "pi-coding-agent");
 	mkdirSync(packageDir, { recursive: true });
+	const binDir = join(prefix, "bin");
+	mkdirSync(binDir, { recursive: true });
+	writeFakeManager(binDir, "npm", [
+		{ args: ["root", "-g"], output: root },
+		{ args: ["--prefix", prefix, "root", "-g"], output: root },
+	]);
+	process.env.PATH = privatePath(binDir);
 	tempDir = prefix;
 	process.env.PI_PACKAGE_DIR = packageDir;
 	setExecPath(join(packageDir, "dist", "cli.js"));
@@ -67,10 +87,9 @@ function createPnpmGlobalInstall(): { root: string; packageDir: string } {
 	const packageDir = join(root, "@mariozechner", "pi-coding-agent");
 	mkdirSync(packageDir, { recursive: true });
 	mkdirSync(binDir, { recursive: true });
-	writeFileSync(join(binDir, process.platform === "win32" ? "pnpm.cmd" : "pnpm"), createFakePnpmScript(root));
-	chmodSync(join(binDir, process.platform === "win32" ? "pnpm.cmd" : "pnpm"), 0o755);
+	writeFakeManager(binDir, "pnpm", [{ args: ["root", "-g"], output: root }]);
 	tempDir = temp;
-	process.env.PATH = `${binDir}${delimiter}${originalPath ?? ""}`;
+	process.env.PATH = privatePath(binDir);
 	process.env.PI_PACKAGE_DIR = packageDir;
 	setExecPath(
 		join(
@@ -94,10 +113,9 @@ function createYarnGlobalInstall(): { globalDir: string; packageDir: string } {
 	const packageDir = join(globalDir, "node_modules", "@mariozechner", "pi-coding-agent");
 	mkdirSync(packageDir, { recursive: true });
 	mkdirSync(binDir, { recursive: true });
-	writeFileSync(join(binDir, process.platform === "win32" ? "yarn.cmd" : "yarn"), createFakeYarnScript(globalDir));
-	chmodSync(join(binDir, process.platform === "win32" ? "yarn.cmd" : "yarn"), 0o755);
+	writeFakeManager(binDir, "yarn", [{ args: ["global", "dir"], output: globalDir }]);
 	tempDir = temp;
-	process.env.PATH = `${binDir}${delimiter}${originalPath ?? ""}`;
+	process.env.PATH = privatePath(binDir);
 	process.env.PI_PACKAGE_DIR = packageDir;
 	setExecPath(join(globalDir, ".yarn", "@mariozechner", "pi-coding-agent", "dist", "cli.js"));
 	return { globalDir, packageDir };
@@ -112,37 +130,34 @@ function createBunGlobalInstall(): { packageDir: string } {
 	const packageDir = join(scopeDir, "pi-coding-agent");
 	mkdirSync(packageDir, { recursive: true });
 	mkdirSync(bunBin, { recursive: true });
-	writeFileSync(join(bunBin, process.platform === "win32" ? "bun.cmd" : "bun"), createFakeBunScript(bunBin));
-	chmodSync(join(bunBin, process.platform === "win32" ? "bun.cmd" : "bun"), 0o755);
+	writeFakeManager(bunBin, "bun", [{ args: ["pm", "bin", "-g"], output: bunBin }]);
 	tempDir = temp;
-	process.env.PATH = `${bunBin}${delimiter}${originalPath ?? ""}`;
+	process.env.PATH = privatePath(bunBin);
 	process.env.PI_PACKAGE_DIR = packageDir;
 	setExecPath(join(packageDir, "dist", "cli.js"));
 	return { packageDir };
 }
 
-function createFakePnpmScript(root: string): string {
-	if (process.platform === "win32") {
-		return `@echo off\r\nif "%1"=="root" if "%2"=="-g" echo ${root}\r\n`;
-	}
-	const escapedRoot = root.replaceAll("'", "'\\''");
-	return `#!/bin/sh\nif [ "$1" = "root" ] && [ "$2" = "-g" ]; then\n\tprintf '%s\\n' '${escapedRoot}'\n\texit 0\nfi\nexit 1\n`;
-}
-
-function createFakeYarnScript(globalDir: string): string {
-	if (process.platform === "win32") {
-		return `@echo off\r\nif "%1"=="global" if "%2"=="dir" echo ${globalDir}\r\n`;
-	}
-	const escapedGlobalDir = globalDir.replaceAll("'", "'\\''");
-	return `#!/bin/sh\nif [ "$1" = "global" ] && [ "$2" = "dir" ]; then\n\tprintf '%s\\n' '${escapedGlobalDir}'\n\texit 0\nfi\nexit 1\n`;
-}
-
-function createFakeBunScript(bunBin: string): string {
-	if (process.platform === "win32") {
-		return `@echo off\r\nif "%1"=="pm" if "%2"=="bin" if "%3"=="-g" echo ${bunBin}\r\n`;
-	}
-	const escapedBunBin = bunBin.replaceAll("'", "'\\''");
-	return `#!/bin/sh\nif [ "$1" = "pm" ] && [ "$2" = "bin" ] && [ "$3" = "-g" ]; then\n\tprintf '%s\\n' '${escapedBunBin}'\n\texit 0\nfi\nexit 1\n`;
+function writeFakeManager(binDir: string, manager: string, responses: { args: string[]; output: string }[]): void {
+	const executable = join(binDir, process.platform === "win32" ? `${manager}.cmd` : manager);
+	const quoteSh = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+	const script =
+		process.platform === "win32"
+			? `@echo off\r\n${responses
+					.map(({ args, output }, index) => {
+						const checks = [...args, ""].map((arg, i) => `if not "%~${i + 1}"=="${arg}" goto next${index}`);
+						const escapedOutput = output.replace(/[\^&|<>()]/g, "^$&");
+						return `${checks.join("\r\n")}\r\necho(${escapedOutput}\r\nexit /b 0\r\n:next${index}\r\n`;
+					})
+					.join("")}exit /b 1\r\n`
+			: `#!/bin/sh\n${responses
+					.map(({ args, output }) => {
+						const checks = [`[ "$#" = "${args.length}" ]`, ...args.map((arg, i) => `[ "$${i + 1}" = ${quoteSh(arg)} ]`)];
+						return `if ${checks.join(" && ")}; then\n\tprintf '%s\\n' ${quoteSh(output)}\n\texit 0\nfi\n`;
+					})
+					.join("")}exit 1\n`;
+	writeFileSync(executable, script);
+	chmodSync(executable, 0o755);
 }
 
 describe("detectInstallMethod", () => {
@@ -356,10 +371,9 @@ describe("detectInstallMethod", () => {
 		mkdirSync(storePackageDir, { recursive: true });
 		mkdirSync(binDir, { recursive: true });
 		writeFileSync(join(globalPackageDir, "package.json"), "{}");
-		writeFileSync(join(binDir, process.platform === "win32" ? "pnpm.cmd" : "pnpm"), createFakePnpmScript(root));
-		chmodSync(join(binDir, process.platform === "win32" ? "pnpm.cmd" : "pnpm"), 0o755);
+		writeFakeManager(binDir, "pnpm", [{ args: ["root", "-g"], output: root }]);
 		tempDir = temp;
-		process.env.PATH = `${binDir}${delimiter}${originalPath ?? ""}`;
+		process.env.PATH = privatePath(binDir);
 		process.env.PI_PACKAGE_DIR = storePackageDir;
 		process.argv[1] = join(globalPackageDir, "dist", "cli.js");
 		setExecPath(join(storePackageDir, "dist", "cli.js"));
@@ -425,13 +439,28 @@ describe("detectInstallMethod", () => {
 		});
 	});
 
-	test("does not self-update when npm install path is not writable", () => {
+	test("does not self-update when npm install path is not writable", (context) => {
 		const { packageDir } = createNpmPrefixInstall();
-		chmodSync(packageDir, 0o500);
+		try {
+			chmodSync(packageDir, 0o500);
+			let writable = true;
+			try {
+				accessSync(packageDir, constants.W_OK);
+			} catch (error) {
+				if (!["EACCES", "EPERM"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+				writable = false;
+			}
+			if (writable) {
+				context.skip("Permission capability unavailable: chmod(0500) still allows access(W_OK)");
+				return;
+			}
 
-		expect(getSelfUpdateCommand("@earendil-works/pi-coding-agent")).toBeUndefined();
-		expect(getSelfUpdateUnavailableInstruction("@earendil-works/pi-coding-agent")).toContain(
-			"the install path is not writable",
-		);
+			expect(getSelfUpdateCommand("@earendil-works/pi-coding-agent")).toBeUndefined();
+			expect(getSelfUpdateUnavailableInstruction("@earendil-works/pi-coding-agent")).toContain(
+				"the install path is not writable",
+			);
+		} finally {
+			chmodSync(packageDir, 0o700);
+		}
 	});
 });

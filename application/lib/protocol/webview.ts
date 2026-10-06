@@ -10,7 +10,7 @@ import type {
 } from '../../../analytics/contracts/working-time.js';
 import type { LiveTurnPhase } from './live-pipeline.js';
 import type { DeferredTriggerView } from './deferred-triggers.js';
-import type { TokenRateIndicatorState } from '../../backend/analytics-views/token-rate.js';
+import type { TokenRateIndicatorState } from './token-rate.js';
 import type {
   DetailChecksum,
   DetailCursor,

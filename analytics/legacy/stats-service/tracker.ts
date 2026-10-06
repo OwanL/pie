@@ -11,17 +11,11 @@ import type {
   AssistantUsage,
   ThinkingLevel,
 } from '../../contracts/legacy-run-analytics-contracts.js';
-import type { ComposerInput } from '../../../harness/agent-processes/lib/rpc/composer-input.js';
-import type { ToolCall } from '../../../harness/agent-processes/lib/rpc/message-contract.js';
+import type { RunInputObservation } from '../../contracts/run-observation-inputs.js';
+import type { RunToolObservation, SubagentObservationSource } from '../../contracts/subagent-observation.js';
 import { appendUnique, summarizeInputs } from './helpers.js';
 import { estimateTextTokens } from '../../../lib/token-estimation';
-import { providerReportedCostUsd } from '../../../harness/model-providers/pricing/provider-cost.js';
 import { isRecord } from '../../../lib/validation/type-guards';
-import {
-  getSubagentBillingEntries,
-  getRenderableSubagentResult,
-  getTerminalSubagentAttemptSamplesFromToolCall,
-} from '../../../harness/agent-processes/workers/subagent-result';
 import {
   MAX_USER_INPUT_SAMPLE_CHARS,
   type AuxiliaryLlmUsageSample,
@@ -48,16 +42,6 @@ function toNonNegativeInt(value: unknown): number {
   return Number.isFinite(value) && typeof value === 'number' && value > 0 ? Math.trunc(value) : 0;
 }
 
-/** New subagent captures use an explicit provider-report field. Numeric
- * `usage.cost` remains a legacy wire alias for already-produced results. */
-function reportedSubagentCost(value: unknown): number | undefined {
-  const explicit = providerReportedCostUsd(value);
-  if (explicit !== undefined) return explicit;
-  if (!isRecord(value)) return undefined;
-  const legacy = value.cost;
-  return typeof legacy === 'number' && Number.isFinite(legacy) && legacy >= 0 ? legacy : undefined;
-}
-
 function finiteOrNull(value: unknown): number | null {
   return Number.isFinite(value) && typeof value === 'number' ? value : null;
 }
@@ -66,12 +50,14 @@ interface SessionRunTrackerOptions {
   runState: SessionRunStateManagerPort;
   clearActiveRunSummary: (sessionPath: string) => void;
   scheduleRender: () => void;
+  subagentObservationSource: SubagentObservationSource;
 }
 
 export class SessionRunTracker {
   private readonly clearActiveRunSummary: (sessionPath: string) => void;
   private readonly scheduleRender: () => void;
   private readonly runState: SessionRunStateManagerPort;
+  private readonly subagentObservationSource: SubagentObservationSource;
   /**
    * Session paths currently mid-run (busy) across ALL sessions. Maintained on
    * the shared tracker instance so per-turn throughput samples can stamp how
@@ -84,6 +70,7 @@ export class SessionRunTracker {
     this.clearActiveRunSummary = options.clearActiveRunSummary;
     this.scheduleRender = options.scheduleRender;
     this.runState = options.runState;
+    this.subagentObservationSource = options.subagentObservationSource;
   }
 
   restore(checkpointSessions: Parameters<SessionRunStateManagerPort['restore']>[0]): void {
@@ -116,7 +103,7 @@ export class SessionRunTracker {
     return this.runState.getMostRelevantRun(sessionPath);
   }
 
-  prepareForSend(sessionPath: string, inputs: ComposerInput[], initialUserMessage = ''): string {
+  prepareForSend(sessionPath: string, inputs: RunInputObservation[], initialUserMessage = ''): string {
     const state = this.runState.getOrCreateSessionState(sessionPath);
 
     if (state.currentRun) {
@@ -363,7 +350,7 @@ export class SessionRunTracker {
     this.runState.persist();
   }
 
-  onToolStarted(sessionPath: string, toolCall: ToolCall): void {
+  onToolStarted(sessionPath: string, toolCall: RunToolObservation): void {
     const state = this.runState.sessions.get(sessionPath);
     const run = state?.currentRun;
     if (!run || !state) {
@@ -386,7 +373,7 @@ export class SessionRunTracker {
   /** `analysis` accepts the terminal analysis the caller already computed for
    *  this tool (shared with canonical facet capture) so the terminal is never
    *  reanalyzed; omitted callers keep the previous per-call analysis. */
-  onToolFinished(sessionPath: string, toolCall: ToolCall, analysis?: ToolCallAnalysis): void {
+  onToolFinished(sessionPath: string, toolCall: RunToolObservation, analysis?: ToolCallAnalysis): void {
     const state = this.runState.sessions.get(sessionPath);
     const run = state?.currentRun;
     if (!run || !state) {
@@ -515,7 +502,7 @@ export class SessionRunTracker {
   /** Count a terminal ask_user tool result exactly once (the finished-tool
    * dedupe above has already run). Only the settled outcome and privacy-safe
    * timestamped answer length are recorded — never question or answer text. */
-  private recordAskUserOutcome(run: RunSnapshot, toolCall: ToolCall): void {
+  private recordAskUserOutcome(run: RunSnapshot, toolCall: RunToolObservation): void {
     const cancelled = this.askUserCancelledFromResult(toolCall.result);
     if (cancelled === true) {
       run.askUserCancelledCount = (run.askUserCancelledCount ?? 0) + 1;
@@ -554,7 +541,7 @@ export class SessionRunTracker {
       toolExecutionIntervalsInCurrentRun: Array<{ startedAt: number; endedAt: number }>;
     },
     normalizedName: string,
-    toolCall: ToolCall,
+    toolCall: RunToolObservation,
   ): void {
     const durationMs = typeof toolCall.durationMs === 'number'
       && Number.isFinite(toolCall.durationMs) && toolCall.durationMs >= 0
@@ -653,15 +640,24 @@ export class SessionRunTracker {
     }
   }
 
+  /** Read explicit provider cost first, preserving the legacy scalar `cost` fallback. */
+  private reportedSubagentCost(value: unknown): number | undefined {
+    const explicit = this.subagentObservationSource.readProviderReportedCostUsd(value);
+    if (explicit !== undefined) return explicit;
+    if (!isRecord(value)) return undefined;
+    const legacy = value.cost;
+    return typeof legacy === 'number' && Number.isFinite(legacy) && legacy >= 0 ? legacy : undefined;
+  }
+
   /** Roll up sub-agent call/task counts and usage attribution. */
-  private recordSubagentUsage(run: RunSnapshot, analysis: ToolCallAnalysis, toolCall: ToolCall): void {
+  private recordSubagentUsage(run: RunSnapshot, analysis: ToolCallAnalysis, toolCall: RunToolObservation): void {
     run.toolUsage.subagentCallCount += analysis.subagentCallCount;
     run.toolUsage.subagentTaskCount += analysis.subagentTaskCount;
     run.toolUsage.subagentAgentNames = appendUnique(
       run.toolUsage.subagentAgentNames,
       analysis.subagentAgentNames,
     );
-    const billing = getSubagentBillingEntries(toolCall.result);
+    const billing = this.subagentObservationSource.getSubagentBillingEntries(toolCall.result);
     const usagePresence = (usage: {
       tokenChannelsKnown?: boolean;
       tokenChannelPresence?: {
@@ -747,7 +743,7 @@ export class SessionRunTracker {
           cacheWriteTokens: toNonNegativeInt(entryUsage.cacheWrite),
         };
         const invocationOrAttempts = (entry.invocations?.length ? entry.invocations : entry.attempts) ?? [];
-        const aggregateReportedCost = reportedSubagentCost(entry.usage);
+        const aggregateReportedCost = this.reportedSubagentCost(entry.usage);
         const entryChannelPresence = usagePresence(entryUsage);
         const entryChannelsKnown = Object.values(entryChannelPresence).every(Boolean);
         let attemptReportedCost = 0;
@@ -760,7 +756,7 @@ export class SessionRunTracker {
             cacheReadTokens: Math.min(remaining.cacheReadTokens, toNonNegativeInt(attempt.usage.cacheRead)),
             cacheWriteTokens: Math.min(remaining.cacheWriteTokens, toNonNegativeInt(attempt.usage.cacheWrite)),
           };
-          const attemptCost = reportedSubagentCost(attempt.usage);
+          const attemptCost = this.reportedSubagentCost(attempt.usage);
           const attemptChannelPresence = usagePresence(attempt.usage);
           const attemptChannelsKnown = Object.values(attemptChannelPresence).every(Boolean);
           if (attemptCost !== undefined) {
@@ -832,7 +828,7 @@ export class SessionRunTracker {
       return;
     }
 
-    const renderable = getRenderableSubagentResult(toolCall.result);
+    const renderable = this.subagentObservationSource.getRenderableSubagentResult(toolCall.result);
     if (!renderable) {
       return;
     }
@@ -858,11 +854,10 @@ export class SessionRunTracker {
             cacheReadTokens: toNonNegativeInt(usage.cacheRead),
             cacheWriteTokens: toNonNegativeInt(usage.cacheWrite),
           };
-          const rawResult = result as typeof result & { attemptRecords?: unknown[] };
-          const aggregateReportedCost = reportedSubagentCost(usage);
+          const aggregateReportedCost = this.reportedSubagentCost(usage);
           let attemptReportedCost = 0;
           let attemptReportedCount = 0;
-          for (const [attemptIndex, attempt] of (rawResult.attemptRecords ?? []).entries()) {
+          for (const [attemptIndex, attempt] of (result.attemptRecords ?? []).entries()) {
             if (!isRecord(attempt) || !isRecord(attempt.usage)) continue;
             const counts = {
               inputTokens: Math.min(remaining.inputTokens, toNonNegativeInt(attempt.usage.input)),
@@ -870,7 +865,7 @@ export class SessionRunTracker {
               cacheReadTokens: Math.min(remaining.cacheReadTokens, toNonNegativeInt(attempt.usage.cacheRead)),
               cacheWriteTokens: Math.min(remaining.cacheWriteTokens, toNonNegativeInt(attempt.usage.cacheWrite)),
             };
-            const attemptCost = reportedSubagentCost(attempt.usage);
+            const attemptCost = this.reportedSubagentCost(attempt.usage);
             if (attemptCost !== undefined) {
               attemptReportedCost += attemptCost;
               attemptReportedCount += 1;
@@ -897,7 +892,7 @@ export class SessionRunTracker {
             remaining.cacheWriteTokens -= counts.cacheWriteTokens;
           }
           const aggregateOwnsResidual = aggregateReportedCost !== undefined
-            && (rawResult.attemptRecords?.length ?? 0) > 0;
+            && (result.attemptRecords?.length ?? 0) > 0;
           // Exact aggregate evidence must not cause the leftover aggregate
           // tokens to be catalog-priced a second time.
           if (remaining.inputTokens + remaining.outputTokens + remaining.cacheReadTokens + remaining.cacheWriteTokens > 0
@@ -930,9 +925,8 @@ export class SessionRunTracker {
           }
         }
         for (const message of result.messages ?? []) {
-          const toolResult = message as typeof message & { toolName?: string; details?: unknown };
-          if (toolResult.role !== 'toolResult' || toolResult.toolName !== 'subagent') continue;
-          const nested = getRenderableSubagentResult(toolResult.details);
+          if (message.role !== 'toolResult' || message.toolName !== 'subagent') continue;
+          const nested = this.subagentObservationSource.getRenderableSubagentResult(message.details);
           if (nested) visitResults(nested.results, `${path}${index}.`, depth + 1);
         }
       });
@@ -945,8 +939,9 @@ export class SessionRunTracker {
    * Every terminal subagent tool call is accounted for at ingestion: a call
    * without parseable records increments explicit unknown coverage, so mixed
    * runs (one well-formed call plus one malformed call) stay mixed on reload. */
-  private recordSubagentLifecycle(run: RunSnapshot, toolCall: ToolCall): void {
-    const { samples: additions, coverageComplete } = getTerminalSubagentAttemptSamplesFromToolCall(toolCall);
+  private recordSubagentLifecycle(run: RunSnapshot, toolCall: RunToolObservation): void {
+    const { samples: additions, coverageComplete } = this.subagentObservationSource
+      .getTerminalSubagentAttemptSamplesFromToolCall(toolCall);
     // Presence of an empty list is meaningful: this run has new-format
     // lifecycle ingestion, so aggregate code must not apply the legacy fallback.
     // Persisting source IDs makes terminal replay after checkpoint restore
@@ -964,8 +959,8 @@ export class SessionRunTracker {
   }
 
   /** Forward nested subagent per-turn throughput into the parent run snapshot. */
-  private recordSubagentThroughput(run: RunSnapshot, toolCall: ToolCall): void {
-    const renderable = getRenderableSubagentResult(toolCall.result);
+  private recordSubagentThroughput(run: RunSnapshot, toolCall: RunToolObservation): void {
+    const renderable = this.subagentObservationSource.getRenderableSubagentResult(toolCall.result);
     if (!renderable) {
       return;
     }
@@ -1001,9 +996,8 @@ export class SessionRunTracker {
           });
         }
         for (const message of result.messages ?? []) {
-          const toolResult = message as typeof message & { toolName?: string; details?: unknown };
-          if (toolResult.role !== 'toolResult' || toolResult.toolName !== 'subagent') continue;
-          const nested = getRenderableSubagentResult(toolResult.details);
+          if (message.role !== 'toolResult' || message.toolName !== 'subagent') continue;
+          const nested = this.subagentObservationSource.getRenderableSubagentResult(message.details);
           if (nested) visitResults(nested.results, depth + 1);
         }
       }
@@ -1012,7 +1006,7 @@ export class SessionRunTracker {
   }
 
   /** Roll up verification-command counts (and failures, when the call failed). */
-  private recordVerification(run: RunSnapshot, toolCall: ToolCall, analysis: ToolCallAnalysis): void {
+  private recordVerification(run: RunSnapshot, toolCall: RunToolObservation, analysis: ToolCallAnalysis): void {
     run.verification.totalCount += analysis.verificationKinds.length;
     for (const kind of analysis.verificationKinds) {
       run.verification.countsByKind[kind] += 1;

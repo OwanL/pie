@@ -1,5 +1,5 @@
 import type { ChatMessage, PruningDetails, PruningMode } from '../../lib/protocol/index.js';
-import { pruningTotals } from './pruning-totals.js';
+import { pruningTotals } from '../../lib/transcript/pruning-totals.js';
 // Re-export the shared numeric helper so existing import paths (e.g.
 // pruning-header.tsx) keep working while the math lives in one place.
 export { pruningTotals };

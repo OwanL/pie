@@ -349,27 +349,46 @@ async function resolveKind(
 	return target.value.kind === "file" || target.value.kind === "directory" ? target.value.kind : undefined;
 }
 
+function isWindowsEnvPath(path: string): boolean {
+	return /^[a-z]:[\\/]/i.test(path) || path.startsWith("\\");
+}
+
 function joinEnvPath(base: string, child: string): string {
-	return `${base.replace(/\/+$/, "")}/${child.replace(/^\/+/, "")}`;
+	const windowsPath = isWindowsEnvPath(base);
+	const separator = windowsPath && base.includes("\\") ? "\\" : "/";
+	const normalizedBase = windowsPath ? base.replace(/[\\/]+$/, "") : base.replace(/\/+$/, "");
+	const normalizedChild = windowsPath ? child.replace(/^[\\/]+/, "") : child.replace(/^\/+/, "");
+	return `${normalizedBase}${separator}${normalizedChild}`;
 }
 
 function dirnameEnvPath(path: string): string {
-	const normalized = path.replace(/\/+$/, "");
-	const slashIndex = normalized.lastIndexOf("/");
-	return slashIndex <= 0 ? "/" : normalized.slice(0, slashIndex);
+	const windowsPath = isWindowsEnvPath(path);
+	const normalized = windowsPath ? path.replace(/[\\/]+$/, "") : path.replace(/\/+$/, "");
+	const separatorIndex = windowsPath
+		? Math.max(normalized.lastIndexOf("/"), normalized.lastIndexOf("\\"))
+		: normalized.lastIndexOf("/");
+	if (separatorIndex < 0) return "/";
+	if (separatorIndex === 0) return normalized.slice(0, 1);
+	if (windowsPath && separatorIndex === 2 && /^[a-z]:[\\/]/i.test(normalized)) return normalized.slice(0, 3);
+	return normalized.slice(0, separatorIndex);
 }
 
 function basenameEnvPath(path: string): string {
-	const normalized = path.replace(/\/+$/, "");
-	const slashIndex = normalized.lastIndexOf("/");
-	return slashIndex === -1 ? normalized : normalized.slice(slashIndex + 1);
+	const windowsPath = isWindowsEnvPath(path);
+	const normalized = windowsPath ? path.replace(/[\\/]+$/, "") : path.replace(/\/+$/, "");
+	const separatorIndex = windowsPath
+		? Math.max(normalized.lastIndexOf("/"), normalized.lastIndexOf("\\"))
+		: normalized.lastIndexOf("/");
+	return separatorIndex === -1 ? normalized : normalized.slice(separatorIndex + 1);
 }
 
 function relativeEnvPath(root: string, path: string): string {
-	const normalizedRoot = root.replace(/\/+$/, "");
-	const normalizedPath = path.replace(/\/+$/, "");
+	const windowsPath = isWindowsEnvPath(root) || isWindowsEnvPath(path);
+	const normalizedRoot = (windowsPath ? root.replace(/\\/g, "/") : root).replace(/\/+$/, "");
+	const normalizedPath = (windowsPath ? path.replace(/\\/g, "/") : path).replace(/\/+$/, "");
 	if (normalizedPath === normalizedRoot) return "";
-	return normalizedPath.startsWith(`${normalizedRoot}/`)
-		? normalizedPath.slice(normalizedRoot.length + 1)
+	const rootPrefix = normalizedRoot ? `${normalizedRoot}/` : "/";
+	return normalizedPath.startsWith(rootPrefix)
+		? normalizedPath.slice(rootPrefix.length)
 		: normalizedPath.replace(/^\/+/, "");
 }

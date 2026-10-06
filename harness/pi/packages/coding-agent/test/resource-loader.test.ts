@@ -1,6 +1,6 @@
-import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
@@ -11,6 +11,10 @@ import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import type { Skill } from "../src/core/skills.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
+
+function createDirectoryAlias(target: string, link: string): void {
+	symlinkSync(resolve(target), link, process.platform === "win32" ? "junction" : "dir");
+}
 
 describe("DefaultResourceLoader", () => {
 	let tempDir: string;
@@ -172,8 +176,14 @@ Project skill`,
 
 			mkdirSync(agentDir, { recursive: true });
 			mkdirSync(join(cwd, ".pi"), { recursive: true });
-			symlinkSync(sharedExtDir, join(agentDir, "extensions"), "dir");
-			symlinkSync(sharedExtDir, join(cwd, ".pi", "extensions"), "dir");
+			createDirectoryAlias(sharedExtDir, join(agentDir, "extensions"));
+			createDirectoryAlias(sharedExtDir, join(cwd, ".pi", "extensions"));
+			expect(realpathSync(join(agentDir, "extensions", "shared.ts"))).toBe(
+				realpathSync(join(sharedExtDir, "shared.ts")),
+			);
+			expect(realpathSync(join(cwd, ".pi", "extensions", "shared.ts"))).toBe(
+				realpathSync(join(sharedExtDir, "shared.ts")),
+			);
 
 			const loader = new DefaultResourceLoader({ cwd, agentDir });
 			await loader.reload();

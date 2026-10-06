@@ -1,9 +1,9 @@
 import type { Terminal as XtermTerminalType } from "@xterm/headless";
-import xterm from "@xterm/headless";
+import * as xterm from "@xterm/headless";
 import type { Terminal } from "../src/terminal.ts";
 
-// Extract Terminal class from the module
-const XtermTerminal = xterm.Terminal;
+// The CommonJS package exposes Terminal directly, including through an ESM namespace.
+const XtermTerminal: typeof xterm.Terminal = xterm.Terminal;
 
 /**
  * Virtual terminal for testing using xterm.js for accurate terminal emulation

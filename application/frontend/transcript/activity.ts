@@ -1,6 +1,6 @@
 import type { ChatMessage, ChatPrefs, PruningSettings, ToolCall } from '../../lib/protocol/index.js';
 import type { LiveTurnPhase } from '../../lib/protocol/live-pipeline.js';
-import { assistantPartsFromMessage, toolCallsFromMessageParts } from './message-parts.js';
+import { assistantPartsFromMessage, toolCallsFromMessageParts } from '../../lib/transcript/message-parts.js';
 import { estimateTextTokens } from '../../../lib/token-estimation';
 import { isPruningResultMessage } from './pruning';
 import type { TurnActivityTail } from './activity-tail';

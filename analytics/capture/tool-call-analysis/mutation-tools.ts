@@ -1,4 +1,4 @@
-import type { ToolCall } from '../../../harness/agent-processes/lib/rpc/message-contract.js';
+import type { ToolCallAnalysisInput } from '../../contracts/tool-call-analysis-input.js';
 import { normalizeToolCallName } from './summary';
 import { isRecord } from '../../../lib/validation/type-guards';
 import type { FileExtensionOperation } from './mutation-types';
@@ -83,7 +83,7 @@ export function hasPathLikeValue(value: unknown): boolean {
     || (Array.isArray(value) && value.some((entry) => typeof entry === 'string' && entry.trim().length > 0));
 }
 
-export function hasToolCallPathInput(toolCall: ToolCall): boolean {
+export function hasToolCallPathInput(toolCall: ToolCallAnalysisInput): boolean {
   if (!isRecord(toolCall.input)) {
     return false;
   }

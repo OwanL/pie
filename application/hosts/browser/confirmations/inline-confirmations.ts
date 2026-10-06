@@ -13,7 +13,7 @@
 import * as crypto from 'node:crypto';
 
 import type { HostToWebviewMessage } from '../../../lib/protocol/index.js';
-import type { InlineConfirmRequest } from '../../lib/platform-contracts/browser-server-seam.js';
+import type { InlineConfirmRequest } from '../../../lib/platform-contracts/browser-server-seam.js';
 
 export type { InlineConfirmRequest };
 

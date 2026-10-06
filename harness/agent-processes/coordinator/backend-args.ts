@@ -1,10 +1,16 @@
 import type { AnalyticsBackendDescriptor } from '../../../analytics/authority/activation.js';
+import path from 'node:path';
 import type { GenerationPiRuntimeDescriptor } from '../../../lib/pi-runtime/artifact.mjs';
-import { parseSdkRuntimeSelection } from '../lib/sdk-integration/sdk-runtime-selection';
+import {
+  assertWorkspaceDevelopmentSdkOptIn,
+  parseSdkRuntimeSelection,
+  sdkRuntimeSdkPath,
+  type SdkRuntimeSelection,
+} from '../lib/sdk-integration/sdk-runtime-selection';
 
 // ─── Argument parsing ────────────────────────────────────────────────────────
 
-export interface BackendArgs {
+interface BackendArgsCommon {
   sdkPath: string;
   cwd: string;
   /** Host-authoritative process generation, shared by public/detail/worker fences. */
@@ -13,12 +19,23 @@ export interface BackendArgs {
   hostPid?: number;
   /** Dedicated inherited descriptor whose EOF proves the host disappeared. */
   lifetimeFd?: number;
-  /** Verified generation-local Pi artifact selected by the production host. */
-  sourceArtifactDescriptor: GenerationPiRuntimeDescriptor;
   /** Immutable canonical analytics authority snapshot, supplied only by the
    * production host after its readiness probe succeeds. */
   analyticsActivation?: AnalyticsBackendDescriptor;
 }
+
+export type BackendArgs = BackendArgsCommon & (
+  | {
+      /** Verified generation-local Pi artifact selected by the production host. */
+      sourceArtifactDescriptor: GenerationPiRuntimeDescriptor;
+      sdkRuntimeSelection?: never;
+    }
+  | {
+      /** Explicit runtime route for development launches; never synthesized from a path. */
+      sdkRuntimeSelection: SdkRuntimeSelection;
+      sourceArtifactDescriptor?: never;
+    }
+);
 
 const ANALYTICS_DESCRIPTOR_FLAGS = new Set([
   '--analyticsGenerationId',
@@ -31,7 +48,7 @@ const ANALYTICS_DESCRIPTOR_FLAGS = new Set([
 const ANALYTICS_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const ANALYTICS_SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 
-export function parseArgs(argv: string[]): BackendArgs {
+export function parseArgs(argv: string[], environment: NodeJS.ProcessEnv = process.env): BackendArgs {
   let sdkPath = '';
   let cwd = process.cwd();
   let hostPid: number | undefined;
@@ -40,12 +57,15 @@ export function parseArgs(argv: string[]): BackendArgs {
   const analyticsValues: Record<string, string> = {};
   let sourceArtifactDescriptor: GenerationPiRuntimeDescriptor | undefined;
   let sourceArtifactDescriptorSeen = false;
+  let sdkRuntimeSelection: SdkRuntimeSelection | undefined;
+  let sdkRuntimeSelectionSeen = false;
 
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     const value = argv[index + 1];
     if (arg === '--sourceArtifactDescriptor') {
       if (sourceArtifactDescriptorSeen) throw new Error('Duplicate --sourceArtifactDescriptor argument.');
+      if (sdkRuntimeSelectionSeen) throw new Error('Duplicate SDK runtime selection argument.');
       sourceArtifactDescriptorSeen = true;
       if (!value || value.startsWith('--')) {
         throw new Error('Missing value for --sourceArtifactDescriptor.');
@@ -58,10 +78,31 @@ export function parseArgs(argv: string[]): BackendArgs {
       }
       try {
         const selection = parseSdkRuntimeSelection({ kind: 'source-artifact', descriptor });
+        if (selection.kind !== 'source-artifact') throw new TypeError('Source artifact selection expected.');
         sourceArtifactDescriptor = selection.descriptor;
       } catch (error) {
         const detail = error instanceof Error ? ` ${error.message}` : '';
         throw new Error(`Invalid --sourceArtifactDescriptor argument.${detail}`);
+      }
+      index += 1;
+      continue;
+    }
+    if (arg === '--sdkRuntimeSelection') {
+      if (sdkRuntimeSelectionSeen || sourceArtifactDescriptorSeen) throw new Error('Duplicate SDK runtime selection argument.');
+      sdkRuntimeSelectionSeen = true;
+      if (!value || value.startsWith('--')) throw new Error('Missing value for --sdkRuntimeSelection.');
+      let selection: unknown;
+      try {
+        selection = JSON.parse(value);
+      } catch {
+        throw new Error('Malformed JSON for --sdkRuntimeSelection.');
+      }
+      try {
+        sdkRuntimeSelection = parseSdkRuntimeSelection(selection);
+        if (sdkRuntimeSelection.kind === 'workspace-development') assertWorkspaceDevelopmentSdkOptIn(environment);
+      } catch (error) {
+        const detail = error instanceof Error ? ` ${error.message}` : '';
+        throw new Error(`Invalid --sdkRuntimeSelection argument.${detail}`);
       }
       index += 1;
       continue;
@@ -115,8 +156,17 @@ export function parseArgs(argv: string[]): BackendArgs {
   if (!sdkPath) {
     throw new Error('Missing required --sdkPath argument.');
   }
-  if (!sourceArtifactDescriptor) {
-    throw new Error('Missing required --sourceArtifactDescriptor argument.');
+  if (!sourceArtifactDescriptor && !sdkRuntimeSelection) {
+    throw new Error('Missing required --sourceArtifactDescriptor argument or --sdkRuntimeSelection argument.');
+  }
+  if (sdkRuntimeSelection?.kind === 'workspace-development') {
+    const expectedSdkPath = sdkRuntimeSdkPath(sdkRuntimeSelection);
+    const actual = path.resolve(sdkPath);
+    const expected = path.resolve(expectedSdkPath);
+    if (!path.isAbsolute(sdkPath)
+        || (process.platform === 'win32' ? actual.toLowerCase() !== expected.toLowerCase() : actual !== expected)) {
+      throw new Error('--sdkPath does not identify the selected workspace-development Pi package root.');
+    }
   }
 
   const analyticsFlagNames = [
@@ -155,13 +205,14 @@ export function parseArgs(argv: string[]): BackendArgs {
     };
   }
 
-  return {
+  const common: BackendArgsCommon = {
     sdkPath,
     cwd,
     backendGeneration,
     ...(hostPid === undefined ? {} : { hostPid }),
     ...(lifetimeFd === undefined ? {} : { lifetimeFd }),
-    sourceArtifactDescriptor,
     ...(analyticsActivation === undefined ? {} : { analyticsActivation }),
   };
+  if (sourceArtifactDescriptor !== undefined) return { ...common, sourceArtifactDescriptor };
+  return { ...common, sdkRuntimeSelection: sdkRuntimeSelection! };
 }

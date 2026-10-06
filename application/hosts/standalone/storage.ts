@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import * as path from 'node:path';
 
 import { updateSettingsJsonObject } from '../../../lib/temporary-files/settings-json-update';
-import type { SessionHostStorage } from '../lib/platform-contracts/session-platform';
+import type { SessionHostStorage } from '../../lib/platform-contracts/session-platform.js';
 
 /**
  * The standalone host owns only this small key/value document.  Sessions,

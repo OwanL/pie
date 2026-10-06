@@ -89,6 +89,7 @@ interface Harness {
   timers: Array<{ callback: () => void; delayMs: number }>;
   handshakes: Array<{ rendererId: string; viewGeneration: number }>;
   states: string[];
+  reloads: number;
 }
 
 function createBrowserHarness(): Harness {
@@ -96,6 +97,7 @@ function createBrowserHarness(): Harness {
   const timers: Array<{ callback: () => void; delayMs: number }> = [];
   const handshakes: Array<{ rendererId: string; viewGeneration: number }> = [];
   const states: string[] = [];
+  let reloads = 0;
   const transport = new BrowserClientTransport({
     wsRoute: '/ws',
     onHandshake: (identity) => handshakes.push({ rendererId: identity.rendererId, viewGeneration: identity.viewGeneration }),
@@ -105,9 +107,10 @@ function createBrowserHarness(): Harness {
       return timers.length;
     },
     clearTimeout: () => undefined,
+    reloadPage: () => { reloads += 1; },
   });
   transport.onConnectionStateChange((state) => states.push(state));
-  return { transport, timers, handshakes, states };
+  return { transport, timers, handshakes, states, get reloads() { return reloads; } };
 }
 
 function sendHello(socket: FakeWebSocket, viewGeneration = 5): void {
@@ -386,17 +389,46 @@ test('a failed ready send does not reset reconnect backoff', () => {
 });
 
 test('terminal policy closes latch reload-required and never reconnect', () => {
-  for (const reason of ['ready-required', 'renderer-asset-mismatch', 'protocol-violation', 'invalid-renderer-hello']) {
-    const { transport, timers, states } = createBrowserHarness();
+  for (const reason of [
+    'ready-required',
+    'renderer-asset-mismatch',
+    'protocol-violation',
+    'invalid-renderer-hello',
+    'too-many-malformed-messages',
+  ]) {
+    const { transport, timers, states, reloads } = createBrowserHarness();
     transport.connect();
     socketInstances[0]?.peerClose(1008, reason);
 
     assert.equal(transport.getConnectionState(), 'reload-required', reason);
     assert.deepEqual(states, ['connecting', 'reload-required'], reason);
+    assert.equal(reloads, 0, `${reason} must not reload the current document`);
     assert.equal(timers.length, 0, `${reason} must not arm a reconnect`);
     transport.connect();
     assert.equal(socketInstances.length, 1, `${reason} must remain latched`);
   }
+});
+
+test('development renderer rebuild reloads once and ignores duplicate or obsolete socket closes', () => {
+  const first = createBrowserHarness();
+  first.transport.connect();
+  const oldSocket = socketInstances[0]!;
+  oldSocket.peerClose();
+  first.timers[0]?.callback();
+  const currentSocket = socketInstances[1]!;
+
+  oldSocket.peerClose(1008, 'development-renderer-rebuilt');
+  assert.equal(first.reloads, 0, 'an obsolete socket close cannot reload the current document');
+  assert.equal(first.transport.getConnectionState(), 'connecting');
+
+  currentSocket.peerClose(1008, 'development-renderer-rebuilt');
+  assert.equal(first.reloads, 1);
+  assert.equal(first.transport.getConnectionState(), 'reload-required');
+  assert.equal(first.timers.length, 1, 'the initial ordinary disconnect was the only retry timer');
+  first.transport.connect();
+  currentSocket.peerClose(1008, 'development-renderer-rebuilt');
+  assert.equal(first.reloads, 1, 'duplicate close events do not reload again');
+  assert.equal(socketInstances.length, 2, 'the development close stays latched without reconnecting');
 });
 
 test('dispose(): cancels the reconnect timer and closes the socket permanently', () => {

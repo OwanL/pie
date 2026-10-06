@@ -2,7 +2,7 @@
 /** @jsxImportSource preact */
 
 import type { ToolCall } from '../../../lib/protocol/index.js';
-import { isEmptyToolCallInput } from '../message-parts.js';
+import { isEmptyToolCallInput } from '../../../lib/transcript/message-parts.js';
 import { extractExitCode } from '../tool-call-analysis';
 import { normalizeToolCallName } from '../tool-call-summary-model';
 import { ClickablePathButton } from '../../file-changes/file-path';

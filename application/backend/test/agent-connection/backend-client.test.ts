@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import * as cp from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import { mkdtemp, realpath, rm } from 'node:fs/promises';
+import os from 'node:os';
 import Module from 'node:module';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -106,7 +108,9 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
   const previousSessionDir = process.env.PI_CODING_AGENT_SESSION_DIR;
   const previousDataRoot = process.env.PIE_DATA_DIR;
   const previousEditorVersion = process.env.PIE_EDITOR_VERSION;
+  const previousWorkspaceSdkOptIn = process.env.PIE_ALLOW_WORKSPACE_DEVELOPMENT_SDK;
   delete process.env.PIE_TRUSTED_SDK_ROOT;
+  delete process.env.PIE_ALLOW_WORKSPACE_DEVELOPMENT_SDK;
   const agentDir = path.resolve('/mock/agent');
   const dataRoot = path.join(agentDir, 'runtime-data');
   process.env.PI_CODING_AGENT_DIR = agentDir;
@@ -120,6 +124,7 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
   let nextProc = fakeProc as unknown as cp.ChildProcess;
   let spawnOptions: cp.SpawnOptions | undefined;
   let spawnArgs: readonly string[] | undefined;
+  const developmentEvents: string[] = [];
   moduleWithLoad._load = function patchedLoad(request: string, parent: unknown, isMain: boolean) {
     if (request === 'node:child_process' || request === 'child_process') {
       return {
@@ -127,6 +132,7 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
         spawn: ((_command: string, args?: readonly string[], options?: cp.SpawnOptions) => {
           spawnArgs = args;
           spawnOptions = options;
+          developmentEvents.push('spawn');
           return nextProc;
         }) as typeof cp.spawn,
       };
@@ -164,6 +170,8 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
     const sourceDescriptorIndex = spawnArgs?.indexOf('--sourceArtifactDescriptor') ?? -1;
     assert.ok(sourceDescriptorIndex >= 0, 'the source artifact descriptor is passed explicitly on the CLI');
     assert.equal(spawnArgs?.[sourceDescriptorIndex + 1], JSON.stringify(sourceArtifactDescriptor));
+    assert.equal(spawnArgs?.includes('--sdkRuntimeSelection'), false,
+      'production keeps its source-artifact CLI route unchanged');
     assert.deepEqual(spawnOptions?.stdio, ['pipe', 'pipe', 'pipe', 'pipe']);
     assert.equal((spawnOptions?.env as NodeJS.ProcessEnv | undefined)?.PIE_EDITOR_VERSION, '1.102.3-test');
     assert.equal((spawnOptions?.env as NodeJS.ProcessEnv | undefined)?.PIE_TRUSTED_SDK_ROOT, undefined);
@@ -352,6 +360,166 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
       'a later clean restart cannot erase an earlier uncertain generation');
     drainingClient.dispose();
 
+    developmentEvents.length = 0;
+    const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'pie-sdk-workspace-reader-'));
+    try {
+      process.env.PIE_ALLOW_WORKSPACE_DEVELOPMENT_SDK = '1';
+      const developmentProc = new DrainingChildProcess();
+      nextProc = developmentProc as unknown as cp.ChildProcess;
+      const developmentClient = new BackendClient({
+        orphanReaper: noOrphans,
+        developmentReaderAcquirer: async (root) => {
+          developmentEvents.push(`acquire:${root}`);
+          return {
+            release: async ({ teardownConfirmed }) => {
+              developmentEvents.push(`release:${teardownConfirmed}`);
+            },
+          };
+        },
+      });
+      await developmentClient.start({
+        nodePath: '/mock/node',
+        backendPath: '/mock/backend.js',
+        sdkPath: path.join(workspaceRoot, 'packages', 'coding-agent'),
+        sdkRuntimeSelection: { kind: 'workspace-development', workspaceRoot },
+        cwd: '/mock/cwd',
+      });
+      assert.deepEqual(developmentEvents.slice(0, 2), [`acquire:${await realpath(workspaceRoot)}`, 'spawn'],
+        'the Pi workspace reader must be acquired before a backend can import the SDK');
+      const selectionIndex = spawnArgs?.indexOf('--sdkRuntimeSelection') ?? -1;
+      assert.ok(selectionIndex >= 0, 'workspace selection is an explicit backend argument');
+      assert.deepEqual(JSON.parse(spawnArgs?.[selectionIndex + 1] ?? 'null'), {
+        kind: 'workspace-development', workspaceRoot,
+      });
+      await developmentClient.releaseDevelopmentReaders(false);
+      assert.equal(developmentEvents.at(-1), 'release:false', 'uncertain runtime lifetime is retained by the reader API');
+      const developmentStop = developmentClient.stop();
+      developmentProc.releaseRequest();
+      await developmentStop;
+      assert.equal(developmentClient.isRuntimeLifetimeTeardownConfirmed(), true);
+      await developmentClient.releaseDevelopmentReaders(true);
+      assert.equal(developmentEvents.at(-1), 'release:true', 'confirmed owned shutdown releases the SDK reader');
+      developmentClient.dispose();
+
+      developmentEvents.length = 0;
+      const concurrentProc = new DrainingChildProcess();
+      nextProc = concurrentProc as unknown as cp.ChildProcess;
+      let resolveConcurrentReader!: (reader: { release(options: { teardownConfirmed: boolean }): Promise<void> }) => void;
+      let signalConcurrentAcquire!: () => void;
+      const concurrentAcquireStarted = new Promise<void>((resolve) => { signalConcurrentAcquire = resolve; });
+      const concurrentReader = new Promise<{ release(options: { teardownConfirmed: boolean }): Promise<void> }>(
+        (resolve) => { resolveConcurrentReader = resolve; },
+      );
+      let concurrentAcquireCount = 0;
+      const concurrentClient = new BackendClient({
+        readyTimeoutMs: 30,
+        orphanReaper: noOrphans,
+        developmentReaderAcquirer: async (root) => {
+          concurrentAcquireCount += 1;
+          developmentEvents.push(`acquire:${root}`);
+          signalConcurrentAcquire();
+          return concurrentReader;
+        },
+      });
+      const concurrentOptions = {
+        nodePath: '/mock/node',
+        backendPath: '/mock/backend.js',
+        sdkPath: path.join(workspaceRoot, 'packages', 'coding-agent'),
+        sdkRuntimeSelection: { kind: 'workspace-development' as const, workspaceRoot },
+        cwd: '/mock/cwd',
+      };
+      const firstConcurrentStart = concurrentClient.start(concurrentOptions);
+      await concurrentAcquireStarted;
+      const secondConcurrentStart = concurrentClient.start(concurrentOptions);
+      resolveConcurrentReader({
+        release: async ({ teardownConfirmed }) => { developmentEvents.push(`release:${teardownConfirmed}`); },
+      });
+      const concurrentOutcomes = await Promise.allSettled([firstConcurrentStart, secondConcurrentStart]);
+      assert.equal(concurrentOutcomes[0]?.status, 'fulfilled');
+      assert.equal(concurrentOutcomes[1]?.status, 'rejected');
+      if (concurrentOutcomes[1]?.status === 'rejected') {
+        assert.match(String(concurrentOutcomes[1].reason), /Backend is already running/u);
+      }
+      assert.equal(concurrentAcquireCount, 1, 'concurrent starts share the synchronous startup reservation');
+      assert.equal(developmentEvents.filter((event) => event === 'spawn').length, 1,
+        'only the reserved start may spawn, leaving no orphaned second backend');
+      const concurrentStop = concurrentClient.stop();
+      concurrentProc.releaseRequest();
+      await concurrentStop;
+      await concurrentClient.releaseDevelopmentReaders(true);
+      concurrentClient.dispose();
+
+      developmentEvents.length = 0;
+      const retryWorkspaceRoot = await mkdtemp(path.join(os.tmpdir(), 'pie-sdk-workspace-retry-'));
+      try {
+        let retryAcquisitions = 0;
+        const retryProc = new DrainingChildProcess();
+        nextProc = retryProc as unknown as cp.ChildProcess;
+        const retryClient = new BackendClient({
+          orphanReaper: noOrphans,
+          developmentReaderAcquirer: async () => {
+            retryAcquisitions += 1;
+            if (retryAcquisitions === 1) throw new Error('synthetic reader acquisition failure');
+            return { release: async ({ teardownConfirmed }) => { developmentEvents.push(`release:${teardownConfirmed}`); } };
+          },
+        });
+        const retryOptions = {
+          nodePath: '/mock/node',
+          backendPath: '/mock/backend.js',
+          sdkPath: path.join(retryWorkspaceRoot, 'packages', 'coding-agent'),
+          sdkRuntimeSelection: { kind: 'workspace-development' as const, workspaceRoot: retryWorkspaceRoot },
+          cwd: '/mock/cwd',
+        };
+        await assert.rejects(retryClient.start(retryOptions), /synthetic reader acquisition failure/u);
+        await retryClient.start(retryOptions);
+        assert.equal(retryAcquisitions, 2, 'a failed reader acquisition clears the reservation for retry');
+        assert.equal(developmentEvents.filter((event) => event === 'spawn').length, 1);
+        const retryStop = retryClient.stop();
+        retryProc.releaseRequest();
+        await retryStop;
+        await retryClient.releaseDevelopmentReaders(true);
+        retryClient.dispose();
+      } finally {
+        await rm(retryWorkspaceRoot, { recursive: true, force: true });
+      }
+
+      developmentEvents.length = 0;
+      let resolveStoppedReader!: (reader: { release(options: { teardownConfirmed: boolean }): Promise<void> }) => void;
+      let signalStoppedAcquire!: () => void;
+      const stoppedAcquireStarted = new Promise<void>((resolve) => { signalStoppedAcquire = resolve; });
+      const stoppedReader = new Promise<{ release(options: { teardownConfirmed: boolean }): Promise<void> }>(
+        (resolve) => { resolveStoppedReader = resolve; },
+      );
+      const stoppedClient = new BackendClient({
+        orphanReaper: noOrphans,
+        developmentReaderAcquirer: async () => {
+          signalStoppedAcquire();
+          return stoppedReader;
+        },
+      });
+      const stoppedStart = stoppedClient.start({
+        nodePath: '/mock/node',
+        backendPath: '/mock/backend.js',
+        sdkPath: path.join(workspaceRoot, 'packages', 'coding-agent'),
+        sdkRuntimeSelection: { kind: 'workspace-development', workspaceRoot },
+        cwd: '/mock/cwd',
+      });
+      await stoppedAcquireStarted;
+      const pendingStartupStop = stoppedClient.stop();
+      resolveStoppedReader({
+        release: async ({ teardownConfirmed }) => { developmentEvents.push(`release:${teardownConfirmed}`); },
+      });
+      await assert.rejects(stoppedStart, /Backend start was cancelled/u);
+      await pendingStartupStop;
+      assert.equal(developmentEvents.filter((event) => event === 'spawn').length, 0,
+        'stop cancels and joins pending reader acquisition before a child can become untracked');
+      assert.deepEqual(developmentEvents, ['release:true'],
+        'the never-spawned attempt releases its newly acquired reader before stop settles');
+      stoppedClient.dispose();
+    } finally {
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+
     const unexpectedProc = new FakeChildProcess();
     nextProc = unexpectedProc as unknown as cp.ChildProcess;
     const unexpectedClient = new BackendClient({ orphanReaper: noOrphans });
@@ -432,5 +600,7 @@ test('BackendClient.start resolves when backend.ready arrives immediately as std
     else process.env.PIE_DATA_DIR = previousDataRoot;
     if (previousEditorVersion === undefined) delete process.env.PIE_EDITOR_VERSION;
     else process.env.PIE_EDITOR_VERSION = previousEditorVersion;
+    if (previousWorkspaceSdkOptIn === undefined) delete process.env.PIE_ALLOW_WORKSPACE_DEVELOPMENT_SDK;
+    else process.env.PIE_ALLOW_WORKSPACE_DEVELOPMENT_SDK = previousWorkspaceSdkOptIn;
   }
 });

@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, type TestContext } from "vitest";
 import { canonicalizePath, getCwdRelativePath, isLocalPath, normalizePath, resolvePath } from "../src/utils/paths.ts";
 
 let tempDir: string;
@@ -19,6 +19,21 @@ function createTempDir(): string {
 	return tempDir;
 }
 
+function createFileSymlink(target: string, link: string, context: TestContext): void {
+	try {
+		symlinkSync(target, link, "file");
+	} catch (error) {
+		if (process.platform === "win32" && (error as NodeJS.ErrnoException).code === "EPERM") {
+			context.skip("Windows file symlink creation returned EPERM; requires Developer Mode or symlink privilege");
+		}
+		throw error;
+	}
+}
+
+function createDirectoryAlias(target: string, link: string): void {
+	symlinkSync(resolve(target), link, process.platform === "win32" ? "junction" : "dir");
+}
+
 describe("canonicalizePath", () => {
 	it("returns the real path for a regular file", () => {
 		const dir = createTempDir();
@@ -27,12 +42,12 @@ describe("canonicalizePath", () => {
 		expect(canonicalizePath(file)).toBe(realpathSync(file));
 	});
 
-	it("resolves symlinks to their targets", () => {
+	it("resolves symlinks to their targets", (context) => {
 		const dir = createTempDir();
 		const target = join(dir, "target.txt");
 		const link = join(dir, "link.txt");
 		writeFileSync(target, "hello");
-		symlinkSync(target, link);
+		createFileSymlink(target, link, context);
 		expect(canonicalizePath(link)).toBe(realpathSync(target));
 	});
 
@@ -41,7 +56,7 @@ describe("canonicalizePath", () => {
 		const targetDir = join(dir, "target-dir");
 		const linkDir = join(dir, "link-dir");
 		mkdirSync(targetDir);
-		symlinkSync(targetDir, linkDir, "dir");
+		createDirectoryAlias(targetDir, linkDir);
 		expect(canonicalizePath(linkDir)).toBe(realpathSync(targetDir));
 	});
 
@@ -51,12 +66,12 @@ describe("canonicalizePath", () => {
 		expect(canonicalizePath(nonexistent)).toBe(nonexistent);
 	});
 
-	it("falls back to the raw path for a dangling symlink", () => {
+	it("falls back to the raw path for a dangling symlink", (context) => {
 		const dir = createTempDir();
 		const target = join(dir, "target.txt");
 		const link = join(dir, "link.txt");
 		// Create a symlink whose target does not exist.
-		symlinkSync(target, link);
+		createFileSymlink(target, link, context);
 		// realpathSync would throw, so canonicalizePath returns the link path.
 		expect(canonicalizePath(link)).toBe(link);
 	});

@@ -18,6 +18,18 @@ export function runtimeOutputDirectory(context: { extensionPath: string }): stri
   return locations.get(context)?.runtimeOutDir ?? path.join(context.extensionPath, 'out');
 }
 
+/** Production renderer publications remain shared under extensionPath/out;
+ * development renderer builds are read from this context's selected output. */
+export function runtimeWebviewAssetDirectory(
+  context: { extensionPath: string },
+  viewName = 'panel',
+): string {
+  const outputDirectory = process.env.PIE_DEVELOPMENT_PI_WORKSPACE?.trim()
+    ? runtimeOutputDirectory(context)
+    : path.join(context.extensionPath, 'out');
+  return path.join(outputDirectory, 'webview', viewName);
+}
+
 export function runtimeRendererSelection(context: { extensionPath: string }): { fallbackDir: string; notBefore: number } {
   return {
     fallbackDir: path.join(runtimeOutputDirectory(context), 'webview', 'panel'),

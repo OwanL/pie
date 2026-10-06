@@ -7,7 +7,7 @@ import { BrowserServer } from '../browser/http/browser-server';
 import {
   acquirePieHostOwnership,
   describePieHostRefusal,
-  resolvePieHostCoordinatorPort,
+  resolvePieHostRuntimeProfile,
   type PieHostAcquisition,
   type PieHostOwnership,
 } from '../lib/host-coordinator';
@@ -24,7 +24,7 @@ import {
   StandaloneStartupError,
 } from './startup';
 import type { BrowserServerSettings } from '../browser/types';
-import type { HostRuntimePlatform } from '../lib/platform-contracts/platform.js';
+import type { HostRuntimePlatform } from '../../lib/platform-contracts/platform.js';
 
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 12_000;
 
@@ -155,7 +155,7 @@ export function createStandaloneBackendClient(): BackendClient {
 /** Surfaces the owned standalone shutdown needs. Structural so tests can
  *  inject fakes; `HostRuntime`/`BrowserServer`/`BackendClient` satisfy them. */
 export interface OwnedStandaloneShutdownSurfaces {
-  runtime: { shutdown(): Promise<void>; backend: Pick<BackendClient, 'stop' | 'dispose'> & Partial<Pick<BackendClient, 'isRuntimeLifetimeTeardownConfirmed'>> };
+  runtime: { shutdown(): Promise<void>; backend: Pick<BackendClient, 'stop' | 'dispose'> & Partial<Pick<BackendClient, 'isRuntimeLifetimeTeardownConfirmed' | 'releaseDevelopmentReaders'>> };
   browserServer: { stop(): Promise<void>; dispose(): void };
   ownership: PieHostOwnership;
   restoreEnvironment: () => void;
@@ -165,7 +165,7 @@ export interface OwnedStandaloneShutdownSurfaces {
 }
 
 export interface OwnedStandaloneStartupFailureSurfaces {
-  runtime?: { shutdown(): Promise<void>; backend: Pick<BackendClient, 'stop' | 'dispose'> & Partial<Pick<BackendClient, 'isRuntimeLifetimeTeardownConfirmed'>> };
+  runtime?: { shutdown(): Promise<void>; backend: Pick<BackendClient, 'stop' | 'dispose'> & Partial<Pick<BackendClient, 'isRuntimeLifetimeTeardownConfirmed' | 'releaseDevelopmentReaders'>> };
   browserServer?: { stop?(): Promise<void>; dispose(): void };
   ownership: PieHostOwnership;
   restoreEnvironment: () => void;
@@ -266,6 +266,11 @@ export async function shutdownOwnedStandaloneHost(surfaces: OwnedStandaloneShutd
   );
   runtime.backend.dispose();
   if (!backendConfirmedStopped) {
+    await runtime.backend.releaseDevelopmentReaders?.(false).catch((error: unknown) => {
+      appendPieLog('warn', 'host-coordinator', 'standalone shutdown could not retain development SDK reader cleanly', {
+        error: toErrorMessage(error),
+      });
+    });
     // Fail closed: retain the coordinator port (and the environment
     // overrides, which stay installed for the still-claimed host) rather than
     // handing the machine to a new host while this host's backend may still
@@ -296,8 +301,10 @@ export async function shutdownOwnedStandaloneHost(surfaces: OwnedStandaloneShutd
       if (graceTimer) clearTimeout(graceTimer);
     }
   }
+  const runtimeLifetimeConfirmed = shutdownConfirmed
+    && runtime.backend.isRuntimeLifetimeTeardownConfirmed?.() === true;
   let leaseReleaseError: unknown;
-  if (shutdownConfirmed && runtime.backend.isRuntimeLifetimeTeardownConfirmed?.() === true) {
+  if (runtimeLifetimeConfirmed) {
     try {
       await surfaces.runtimeLease?.release();
     } catch (error) {
@@ -306,6 +313,11 @@ export async function shutdownOwnedStandaloneHost(surfaces: OwnedStandaloneShutd
   } else if (surfaces.runtimeLease) {
     appendPieLog('warn', 'host-coordinator',
       'standalone shutdown could not confirm runtime, browser, and backend lifetime teardown; generation lease retained', {});
+  }
+  try {
+    await runtime.backend.releaseDevelopmentReaders?.(runtimeLifetimeConfirmed);
+  } catch (error) {
+    if (leaseReleaseError === undefined) leaseReleaseError = error;
   }
   try {
     await ownership.release();
@@ -370,6 +382,11 @@ export async function teardownAfterStandaloneStartupFailure(
       );
       surfaces.runtime.backend.dispose();
       if (!backendConfirmedStopped) {
+        await surfaces.runtime.backend.releaseDevelopmentReaders?.(false).catch((readerError: unknown) => {
+          appendPieLog('warn', 'host-coordinator', 'standalone startup teardown could not retain development SDK reader cleanly', {
+            error: toErrorMessage(readerError),
+          });
+        });
         appendPieLog('error', 'host-coordinator',
           'standalone startup teardown could not confirm backend exit; machine-wide host ownership retained', {});
         throw new Error(
@@ -383,8 +400,9 @@ export async function teardownAfterStandaloneStartupFailure(
     // With no runtime, no generation-consuming producers were constructed.
     // Otherwise release only after bounded runtime shutdown and browser stop
     // both succeeded as well as the confirmed backend exit above.
-    if (fullShutdownConfirmed && (surfaces.runtime === undefined
-      || surfaces.runtime.backend.isRuntimeLifetimeTeardownConfirmed?.() === true)) {
+    const runtimeLifetimeConfirmed = fullShutdownConfirmed && (surfaces.runtime === undefined
+      || surfaces.runtime.backend.isRuntimeLifetimeTeardownConfirmed?.() === true);
+    if (runtimeLifetimeConfirmed) {
       try {
         await surfaces.runtimeLease?.release();
       } catch (leaseError) {
@@ -397,6 +415,14 @@ export async function teardownAfterStandaloneStartupFailure(
     } else if (surfaces.runtimeLease) {
       appendPieLog('warn', 'host-coordinator',
         'standalone startup teardown could not confirm runtime, browser, and backend lifetime teardown; generation lease retained', {});
+    }
+    try {
+      await surfaces.runtime?.backend.releaseDevelopmentReaders?.(runtimeLifetimeConfirmed);
+    } catch (readerError) {
+      appendPieLog('warn', 'host-coordinator', 'standalone startup teardown could not settle development SDK reader', {
+        teardownConfirmed: runtimeLifetimeConfirmed,
+        error: toErrorMessage(readerError),
+      });
     }
     surfaces.ownership.abort();
   } finally {
@@ -512,19 +538,24 @@ export async function startStandalone(options: StandaloneStartOptions): Promise<
       },
     );
   };
+  const hostProfile = resolvePieHostRuntimeProfile(process.env, options.coordinatorPort);
   const ownershipAcquisition = await acquirePieHostOwnership({
     kind: 'standalone',
-    ...(options.coordinatorPort !== undefined ? { port: options.coordinatorPort } : {}),
-    onHandoffRequested: () => {
-      // Yielding message: names the requester, the stop request, and that
-      // Active requests stop during the graceful shutdown; saved sessions remain available.
-      writeLine(output.stdout ?? process.stdout, '[pie info] Another pie host (VS Code) requested pie to stop; stopping gracefully. Active requests will stop; saved sessions will remain available.');
-      appendPieLog('info', 'host-coordinator', 'standalone host yielded to a VS Code pie host; stop requested; saved sessions are retained', {});
-      requestGracefulStop();
-    },
+    profile: hostProfile.name,
+    port: hostProfile.coordinatorPort,
+    handoffTimeoutMs: hostProfile.development ? 0 : undefined,
+    ...(!hostProfile.development ? {
+      onHandoffRequested: () => {
+        // Yielding message: names the requester, the stop request, and that
+        // active requests stop during graceful shutdown while saved sessions remain available.
+        writeLine(output.stdout ?? process.stdout, '[pie info] Another pie host (VS Code) requested pie to stop; stopping gracefully. Active requests will stop; saved sessions will remain available.');
+        appendPieLog('info', 'host-coordinator', 'standalone host yielded to a VS Code pie host; stop requested; saved sessions are retained', {});
+        requestGracefulStop();
+      },
+    } : {}),
   });
   if (ownershipAcquisition.status !== 'acquired') {
-    throw new StandaloneHostActiveError(ownershipAcquisition, resolvePieHostCoordinatorPort(options.coordinatorPort));
+    throw new StandaloneHostActiveError(ownershipAcquisition, hostProfile.coordinatorPort);
   }
   const ownership: PieHostOwnership = ownershipAcquisition.ownership;
 
