@@ -4,6 +4,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import { collectSourceCoverage } from '../source-coverage.mjs';
 import { parseArgs as parseNativeArgs, resolveTestFiles } from '../test-node.mjs';
 
 import {
@@ -92,6 +96,10 @@ test('buildTestArgs can use a stable single-process release coverage entrypoint'
     coverageIncludes: ['src/**/*.ts'],
   };
   const releaseArgs = buildTestArgs(config, false);
+  assert.ok(releaseArgs.includes('--test'));
+  assert.ok(releaseArgs.includes('--test-concurrency=1'));
+  assert.equal(releaseArgs.includes('--experimental-test-coverage'), false);
+  assert.equal(releaseArgs.some((arg) => arg.startsWith('--test-coverage-include=')), false);
   assert.ok(releaseArgs.includes('test/coverage-suite.ts'));
   assert.equal(releaseArgs.includes('test/**/*.test.ts'), false);
   const fastArgs = buildTestArgs(config, true);
@@ -108,6 +116,64 @@ test('buildTestArgs can run infrastructure tests without coverage collection', (
   assert.equal(args.includes('--experimental-test-coverage'), false);
   assert.equal(args.some((arg) => arg.startsWith('--test-coverage-include=')), false);
   assert.ok(args.includes('--test-concurrency=1'));
+});
+
+test('actual Node CLI raw capture preserves branch/function negatives and reporter counts without native aggregation', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'pie-raw-cli-control-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const owner = path.join(root, 'owner');
+  mkdirSync(owner);
+  writeFileSync(path.join(owner, 'subject.mjs'), `export function branch(flag) {
+  if (flag) return 1;
+  return 2;
+}
+export function untouched() {
+  return 3;
+}
+`);
+  for (const positive of [false, true]) {
+    const directory = path.join(root, positive ? 'positive' : 'negative');
+    mkdirSync(path.join(directory, 'v8'), { recursive: true });
+    const entry = path.join(root, 'control.test.mjs');
+    writeFileSync(entry, `import test from 'node:test';
+import assert from 'node:assert/strict';
+import { branch, untouched } from './owner/subject.mjs';
+test('control', () => {
+  assert.equal(branch(true), 1);
+  ${positive ? 'assert.equal(branch(false), 2); assert.equal(untouched(), 3);' : ''}
+});
+test.skip('skipped control', () => {});
+`);
+    const includes = ['owner/**/*.mjs'];
+    const args = buildTestArgs({ testGlobs: [entry], coverageIncludes: includes }, false);
+    assert.equal(args.includes('--experimental-test-coverage'), false);
+    assert.equal(args.some((arg) => arg.startsWith('--test-coverage-include=')), false);
+    const env = { ...process.env };
+    delete env.NODE_TEST_CONTEXT;
+    const output = execFileSync(process.execPath, args, {
+      cwd: root, encoding: 'utf8', timeout: 30_000,
+      env: { ...env, NODE_OPTIONS: `--require=${JSON.stringify(fileURLToPath(new URL('../coverage-capture.cjs', import.meta.url)))} --inspect-port=0`,
+        NODE_V8_COVERAGE: path.join(directory, 'v8'), JITI_SOURCE_MAPS: 'true',
+        PIE_TEST_COVERAGE_DIR: directory, PIE_TEST_COVERAGE_ROOT: root,
+        PIE_TEST_COVERAGE_CWD: root, PIE_TEST_COVERAGE_INCLUDES: JSON.stringify(includes) },
+    });
+    const report = JSON.parse(output.split(/\r?\n/u).find(line => line.startsWith('__PI_TEST_SUMMARY__')).slice('__PI_TEST_SUMMARY__'.length));
+    assert.equal(report.summary.counts.passed, 1);
+    assert.equal(report.summary.counts.failed, 0);
+    assert.equal(report.summary.counts.skipped, 1);
+    assert.equal(report.coverage, null, 'Node must not compute a native aggregate');
+    const coverage = await collectSourceCoverage({ directory, root, cwd: root, includes });
+    assert.equal(coverage.totalFunctionCount, 2);
+    assert.equal(coverage.coveredFunctionCount, positive ? 2 : 1);
+    assert.equal(coverage.totalBranchCount, 2);
+    assert.equal(coverage.coveredBranchCount, positive ? 2 : 1);
+    if (positive) assert.equal(coverage.coveredLinePercent, 100);
+    else {
+      assert.ok(coverage.files[0].lines.some(line => line.line === 6 && line.count === 0));
+      assert.ok(coverage.files[0].branches.some(branch => branch.counts.includes(0)));
+    }
+    t.diagnostic(`${positive ? 'positive' : 'negative'}: ${coverage.coveredLineCount}/${coverage.totalLineCount} lines, ${coverage.coveredBranchCount}/${coverage.totalBranchCount} branches, ${coverage.coveredFunctionCount}/${coverage.totalFunctionCount} functions; reporter 1 passed/0 failed/1 skipped`);
+  }
 });
 
 function fakeChild(code = 0, output = 'captured stdout', errorOutput = 'captured stderr') {
@@ -179,6 +245,9 @@ test('qualified accounting replaces Node aggregates after joined child and clean
       runChild: async (_command, args, cwd, _signal, env) => {
         assert.equal(cwd, coveredConfig.cwd);
         assert.ok(args.includes('--test-concurrency=1'));
+        assert.equal(args.includes('--experimental-test-coverage'), false);
+        assert.equal(args.some((arg) => arg.startsWith('--test-coverage-include=')), false);
+        assert.equal(env.JITI_SOURCE_MAPS, 'true');
         assert.match(env.NODE_OPTIONS, /--require=.*coverage-capture\.cjs/u);
         assert.match(env.NODE_OPTIONS, /--inspect-port=0/u);
         assert.equal(env.PIE_RUN_INTEGRATION_TESTS, '1');
@@ -256,6 +325,23 @@ test('source recorder failure propagates exit 125 and retains both scopes', asyn
   assert.equal(result.retainedCoverage, '/private/evidence');
 });
 
+test('warm-bash coverage enables only its isolated pool contract, not provider integration', async () => {
+  let called = false;
+  await runPackage({ ...coveredConfig, id: 'warm-bash' }, false, false, [], undefined, { sdkPath: '/fixture' }, {
+    createOverlay: () => ({ configPath: '/fixture/overlay', dispose() {} }),
+    createCoverageScope: () => ({ directory: '/private/coverage', dispose() {} }),
+    resolveTsx: () => '/unused/tsx',
+    runChild: async (_command, _args, _cwd, _signal, env) => {
+      called = true;
+      assert.equal(env.PIE_RUN_WARM_BASH_POOL_TESTS, '1');
+      assert.equal(env.PIE_RUN_INTEGRATION_TESTS, undefined);
+      return reporterResult();
+    },
+    collectCoverage: async () => qualifiedCoverage,
+  });
+  assert.equal(called, true);
+});
+
 test('single-process coverage inherits capture but no inspector-port flag; fast and no-coverage avoid scopes', async () => {
   for (const [config, fast] of [[{ ...coveredConfig, singleProcessCoverage: true }, false],
     [coveredConfig, true], [lifetimeConfig, false]]) {
@@ -267,8 +353,10 @@ test('single-process coverage inherits capture but no inspector-port flag; fast 
         return { directory: '/private/evidence', dispose() {} };
       },
       resolveTsx: () => '/unused/tsx',
-      runChild: async (_command, _args, _cwd, _signal, env) => {
+      runChild: async (_command, args, _cwd, _signal, env) => {
         if (covered) {
+          assert.ok(args.includes('--experimental-test-isolation=none'));
+          assert.equal(env.JITI_SOURCE_MAPS, 'true');
           assert.match(env.NODE_OPTIONS, /coverage-capture/u);
           assert.ok(!env.NODE_OPTIONS.includes('--inspect-port=0'));
         } else assert.deepEqual(env, {});

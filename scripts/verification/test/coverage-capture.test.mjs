@@ -137,6 +137,111 @@ for (const format of ['cjs', 'esm']) {
   });
 }
 
+test('snapshots physical native JS before TSX dynamic-import transformed code executes', t => {
+  const f = fixture(t);
+  const filename = path.join(f.root, 'native.mjs');
+  const dependency = path.join(f.root, 'dependency.mjs');
+  writeFileSync(dependency, 'export const value = 42;\n');
+  const source = `import { writeFileSync } from 'node:fs';\nwriteFileSync(new URL(import.meta.url), 'changed after execution');\nexport const value = (await import('./dependency.mjs')).value;\n`;
+  writeFileSync(filename, source);
+  const entry = path.join(f.root, 'entry.mjs');
+  writeFileSync(entry, `import { value } from './native.mjs';\nif (value !== 42) throw new Error('import failed');\n`);
+  const result = f.run(['--import', tsxImport, entry]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(readFileSync(filename, 'utf8'), 'changed after execution');
+  assert.ok(!readdirSync(f.directory).some(name => name.startsWith('recorder-error-')));
+  const scripts = f.records().flatMap(record => record.scripts);
+  const script = scripts.find(script => sameFile(script.url, filename));
+  assert.ok(script, 'Native JS script captured');
+  assert.notEqual(script.code, source);
+  assert.match(script.code, /\.then\(/);
+  const map = JSON.parse(Buffer.from(script.sourceMapURL.split('base64,')[1], 'base64').toString());
+  assert.equal(map.sources.length, 1);
+  assert.ok(!map.sourcesContent || map.sourcesContent[0] == null);
+  assert.deepEqual(script.sourceSnapshots, [{ url: pathToFileURL(filename).href, content: source }]);
+  const plain = scripts.find(script => sameFile(script.url, dependency));
+  assert.equal(plain.code, 'export const value = 42;\n');
+  assert.equal(plain.sourceSnapshots, undefined, 'No snapshot for unmapped unchanged JS');
+});
+
+test('sparse snapshot reads stay self-origin, native JS, owner-selected and fail closed', t => {
+  const f = fixture(t);
+  const preloadSource = readFileSync(preload, 'utf8');
+  const native = path.join(f.root, 'native.js');
+  const typed = path.join(f.root, 'typed.ts');
+  const foreign = path.join(f.temporary, 'foreign.js');
+  const selected = path.join(f.root, 'selected.cjs');
+  const invalid = path.join(f.root, 'invalid.mjs');
+  const missing = path.join(f.root, 'missing.js');
+  const ordinaryDirectory = path.join(f.root, 'directory.js');
+  mkdirSync(ordinaryDirectory);
+  writeFileSync(native, 'physical bytes');
+  writeFileSync(selected, 'selected bytes');
+  writeFileSync(invalid, Buffer.from([0xff]));
+  const cases = [
+    { filename: native, sources: [native], expected: 'physical bytes' },
+    { filename: selected, sources: ['./selected.cjs'], expected: 'selected bytes' },
+    { filename: native, sources: [native], content: ['embedded bytes'] },
+    { filename: native, sources: [selected] },
+    { filename: native, sources: [native, foreign] },
+    { filename: typed, sources: [typed] },
+    { filename: foreign, sources: [foreign] },
+    { filename: path.join(f.root, 'out-dev', 'bundle.js'), sources: [selected] },
+    { filename: native, sources: [native], includes: ['selected.cjs'] },
+    { filename: missing, sources: [missing], error: true },
+    { filename: invalid, sources: [invalid], error: true },
+    { filename: ordinaryDirectory, sources: [ordinaryDirectory], error: true },
+    { filename: native, sources: [native], readError: true, error: true },
+  ];
+  for (const [index, item] of cases.entries()) {
+    const reads = [];
+    const fakeProcess = Object.assign(new EventEmitter(), {
+      pid: 1234, execArgv: [], env: { ...f.env, PIE_TEST_COVERAGE_CWD: f.root,
+        PIE_TEST_COVERAGE_INCLUDES: JSON.stringify(item.includes ?? []) },
+    });
+    const url = pathToFileURL(item.filename).href;
+    const sourceMapURL = `data:application/json;base64,${Buffer.from(JSON.stringify({
+      version: 3, sources: item.sources, sourcesContent: item.content, names: [], mappings: 'AAAA',
+    })).toString('base64')}`;
+    class Session extends EventEmitter {
+      connect() {}
+      post(method, params, callback) {
+        if (method === 'Debugger.enable') {
+          this.emit('Debugger.scriptParsed', { params: { scriptId: '1', url, sourceMapURL } });
+          params();
+        } else {
+          if (item.expected !== undefined) assert.deepEqual(reads, [item.filename], 'Read before getScriptSource');
+          callback(null, { scriptSource: 'exact generated code' });
+        }
+      }
+    }
+    runInNewContext(`(function(require, process) { ${preloadSource}\n})`, { Buffer, URL })(name => name === 'node:inspector' ? { Session }
+      : name === 'node:fs' ? { ...require(name), readFileSync(filename) {
+        reads.push(filename);
+        if (item.readError) throw new Error('required source read failed');
+        return readFileSync(filename);
+      } } : require(name), fakeProcess);
+    fakeProcess.emit('exit');
+    assert.equal(fakeProcess.exitCode, item.error ? 125 : undefined, `Case ${index}: ${readdirSync(f.directory).filter(name => name.startsWith('recorder-error-')).map(name => readFileSync(path.join(f.directory, name), 'utf8')).join('')}`);
+    const record = readdirSync(f.directory).filter(name => name.startsWith('scripts-'))
+      .map(name => JSON.parse(readFileSync(path.join(f.directory, name), 'utf8'))).at(-1);
+    const captured = record.scripts.find(script => script.url === url);
+    if (item.expected !== undefined) {
+      assert.deepEqual(captured.sourceSnapshots, [{ url, content: item.expected }]);
+      assert.equal(captured.code, 'exact generated code');
+      assert.equal(captured.sourceMapURL, sourceMapURL);
+    } else if (!item.error) {
+      assert.deepEqual(reads, [], `No widened read in case ${index}`);
+      assert.equal(captured?.sourceSnapshots, undefined);
+    } else {
+      const errorRecord = JSON.parse(readFileSync(path.join(f.directory, 'recorder-error-1234-0.json'), 'utf8'));
+      assert.ok(errorRecord.errors.some(error => error.stage === 'sourceSnapshot'));
+      assert.equal(captured, undefined);
+    }
+    for (const name of readdirSync(f.directory)) rmSync(path.join(f.directory, name));
+  }
+});
+
 for (const singleProcess of [false, true]) {
   test(`native CLI captures two test files (${singleProcess ? 'isolation=none' : 'process isolation'}) without an inspector listener`, t => {
     const f = fixture(t);

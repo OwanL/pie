@@ -45,6 +45,16 @@ async function eventually(predicate: () => boolean, message: string, timeoutMs =
   }
 }
 
+function killWorkerIgnoringEsrch(pid: number | undefined): void {
+  if (!pid) return;
+  try {
+    process.kill(pid, 'SIGKILL');
+  } catch (error) {
+    // Exit may race the cleanup kill; ignore ESRCH but keep all other errors visible.
+    if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+  }
+}
+
 function observation(
   sourceKey: string,
   subject: AnalyticsObservation['captureSubject'] = { kind: 'pendingCreate', operationId: 'pending-a' },
@@ -822,22 +832,33 @@ test('an unconfirmed terminal exit keeps the stop fence latched until explicit c
   const root = mkdtempSync(path.join(tmpdir(), 'pie-recorder-shutdown-timeout-'));
   const databasePath = path.join(root, 'shutdown-slow-exit.sqlite');
   const lifecycleLog = `${databasePath}.lifecycle.jsonl`;
+  const lifecycle: AnalyticsWorkerLifecycleEvent[] = [];
   const supervisor = new AnalyticsRecorderSupervisor({
     enabled: true,
     workerScript: lifecycleWorkerScript,
     databasePath,
     shutdownTimeoutMs: 25,
+    onWorkerLifecycle: (event) => lifecycle.push(event),
   });
   try {
     await supervisor.start();
     await assert.rejects(supervisor.shutdown(), /shutdown timed out/u);
     await assert.rejects(supervisor.start(), /shutting down/u);
-    await new Promise<void>((resolve) => setTimeout(resolve, 300));
+    // The fixture delays disconnect, but elapsed time is not proof that the
+    // owned child has exited. Wait for the supervisor's authoritative exit event.
+    await eventually(
+      () => lifecycle.some((event) => event.state === 'terminal'),
+      'the timed-out worker did not reach terminal exit',
+    );
+    assert.deepEqual(lifecycle.map((event) => event.state), ['spawned', 'ready', 'terminal']);
+    assert.deepEqual(lifecycle[2]?.identity, lifecycle[0]?.identity);
     assert.equal(readLog(lifecycleLog).filter((entry) => entry.type === 'started').length, 1);
     assert.equal(supervisor.workerPid, undefined);
+    await assert.rejects(supervisor.start(), /shutting down/u, 'late exit must not release the stop fence');
     await supervisor.shutdown();
   } finally {
-    if (supervisor.workerPid) process.kill(supervisor.workerPid, 'SIGKILL');
+    const ownedPid = supervisor.workerPid;
+    killWorkerIgnoringEsrch(ownedPid);
     rmSync(root, { recursive: true, force: true });
   }
 });

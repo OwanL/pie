@@ -4,6 +4,11 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
+// Keep source eligibility aligned with coverage-capture.cjs, including map origins.
+const excluded = new Set([
+  'node_modules', '.git', '.cache', 'cache', 'generated', 'build', 'dist',
+  'out', 'out-dev', 'coverage', 'data', 'sessions', 'logs', '.moon', '.turbo',
+]);
 // Coverage dependencies belong to the agent framework, not the native runner.
 const ownerRequire = createRequire(new URL('../../harness/pi/packages/agent/package.json', import.meta.url));
 const providerRequire = createRequire(ownerRequire.resolve('@vitest/coverage-v8'));
@@ -65,6 +70,35 @@ function decodeMap(capture, code) {
   if (!Array.isArray(map.sources)) throw new Error(`Missing source map identity: ${capture.url}`);
   const sources = map.sources.map(source => sourcePath(source, map, capture.url));
   return { ...map, sourceRoot: undefined, sourceOrigins: map.sources, sources: sources.map(source => pathToFileURL(source).href) };
+}
+
+// Only a pre-execution native-JS self snapshot can complete a sparse map.
+// Transformed bytes are not evidence of the authored source text.
+function completeNativeSelfMap(map, capture, filename) {
+  if (!map || capture.sourceSnapshots === undefined) return;
+  if (!Array.isArray(capture.sourceSnapshots)) throw new Error(`Invalid source snapshot: ${capture.url}`);
+  const snapshots = new Map();
+  for (const snapshot of capture.sourceSnapshots) {
+    const source = filePath(snapshot?.url);
+    if (!source || typeof snapshot.content !== 'string' || snapshot.content.length === 0) {
+      throw new Error(`Invalid source snapshot: ${capture.url}`);
+    }
+    const key = identity(source);
+    if (snapshots.has(key) && snapshots.get(key) !== snapshot.content) throw new Error(`Conflicting source snapshot: ${snapshot.url}`);
+    snapshots.set(key, snapshot.content);
+  }
+  map.sources.forEach((url, index) => {
+    const content = snapshots.get(identity(filePath(url)));
+    if (content !== undefined && typeof map.sourcesContent?.[index] === 'string'
+      && content !== map.sourcesContent[index]) throw new Error(`Conflicting source snapshot: ${url}`);
+  });
+  if (!/\.[cm]?js$/iu.test(filename) || map.sources.length !== 1
+    || identity(filePath(map.sources[0])) !== identity(filename)) return;
+  const content = snapshots.get(identity(filename));
+  if (content !== undefined && (map.sourcesContent == null
+    || (Array.isArray(map.sourcesContent) && map.sourcesContent.length <= 1 && map.sourcesContent[0] == null))) {
+    map.sourcesContent = [content];
+  }
 }
 
 function runtimeCode(capture, record) {
@@ -163,6 +197,8 @@ async function exportScaffold(ast, code, sourceMap, parseSource, parseExpression
   const candidates = scopes.flatMap(body => body.filter(node => knownHelpers.has(syntax(node))));
   if (!candidates.some(node => /^__export\d*$/u.test(node.declarations[0].id.name))) return undefined;
   const identifiers = new Set();
+  const anonymousDefaults = [];
+  const namedReexports = [];
   let authoredDebugExport = false;
   const visit = node => {
     if (!node || typeof node !== 'object') return;
@@ -181,7 +217,23 @@ async function exportScaffold(ast, code, sourceMap, parseSource, parseExpression
       visit(parseExpression(source, { plugins: ['estree'] }));
     } else {
       const jsx = /\.[jt]sx$/iu.test(filePath(sourceMap.sources[index]));
-      visit(parseSource(source, { sourceType: 'unambiguous', plugins: ['typescript', 'estree', ...(jsx ? ['jsx'] : [])] }).program);
+      const program = parseSource(source, { sourceType: 'unambiguous', plugins: ['typescript', 'estree', ...(jsx ? ['jsx'] : [])] }).program;
+      visit(program);
+      for (const node of program.body) {
+        if (node.type === 'ExportDefaultDeclaration' && node.declaration.type === 'FunctionDeclaration'
+          && node.declaration.id === null) {
+          anonymousDefaults.push({ source: sourceMap.sources[index], node });
+        }
+        if (node.type === 'ExportNamedDeclaration' && node.source) {
+          for (const specifier of node.specifiers) {
+            if (specifier.type === 'ExportSpecifier') namedReexports.push({
+              source: sourceMap.sources[index], node, from: node.source.value,
+              imported: specifier.local.name ?? specifier.local.value,
+              exported: specifier.exported.name ?? specifier.exported.value,
+            });
+          }
+        }
+      }
     }
   });
   const lineStarts = [0];
@@ -194,12 +246,45 @@ async function exportScaffold(ast, code, sourceMap, parseSource, parseExpression
   // esbuild reserves its helper names and may rename user bindings. A helper
   // therefore needs positive unmapped provenance, not just an absent TS name.
   const unmappedHelpers = new Set(candidates.filter(node => !mappedOffsets.some(offset => offset >= node.start && offset < node.end)));
-  const authoredIdentifier = node => {
-    if (identifiers.has(node.name)) return true;
+  const originalPosition = node => {
     let line = lineStarts.length - 1;
     while (lineStarts[line] > node.start) line -= 1;
-    const position = trace.originalPositionFor(traced, { line: line + 1, column: node.start - lineStarts[line] });
+    return trace.originalPositionFor(traced, { line: line + 1, column: node.start - lineStarts[line] });
+  };
+  const authoredIdentifier = node => {
+    if (identifiers.has(node.name)) return true;
+    const position = originalPosition(node);
     return position.name !== null && identifiers.has(position.name);
+  };
+  const mapsToExport = (generated, authored) => {
+    const position = originalPosition(generated);
+    const { start, end } = authored.node.loc;
+    return position.source === authored.source && position.line !== null
+      && (position.line > start.line || position.line === start.line && position.column >= start.column)
+      && (position.line < end.line || position.line === end.line && position.column < end.column);
+  };
+  const authoredGetter = (property, body) => {
+    const binding = property.value.body;
+    if (binding.type === 'Identifier') {
+      if (authoredIdentifier(binding)) return true;
+      // Anonymous default functions acquire a compiler binding. Verify that
+      // binding's declaration against the captured authored default export;
+      // only the getter/scaffold is ignored, never the function body.
+      return exportKey(property) === 'default' && body.some(node => node.type === 'FunctionDeclaration'
+        && node.id?.name === binding.name && anonymousDefaults.some(authored => mapsToExport(node, authored)));
+    }
+    if (binding.type !== 'MemberExpression' || binding.computed
+      || binding.object.type !== 'Identifier' || binding.property.type !== 'Identifier') return false;
+    // Named reexports are getters into a generated require binding. Require
+    // both exact import syntax and source-mapped authored export provenance.
+    return body.some(node => node.type === 'VariableDeclaration' && node.declarations.some(declaration =>
+      declaration.id.type === 'Identifier' && declaration.id.name === binding.object.name
+      && declaration.init?.type === 'CallExpression' && declaration.init.callee.type === 'Identifier'
+      && declaration.init.callee.name === 'require' && declaration.init.arguments.length === 1
+      && declaration.init.arguments[0].type === 'Literal'
+      && namedReexports.some(authored => authored.exported === exportKey(property)
+        && authored.imported === binding.property.name && authored.from === declaration.init.arguments[0].value
+        && mapsToExport(node, authored))));
   };
   const ignored = [];
   for (const body of scopes) {
@@ -226,7 +311,7 @@ async function exportScaffold(ast, code, sourceMap, parseSource, parseExpression
         && !property.method && property.kind === 'init'
         && (property.key.type === 'Identifier' || property.key.type === 'Literal')
         && property.value.type === 'ArrowFunctionExpression' && property.value.params.length === 0
-        && property.value.body.type === 'Identifier' && authoredIdentifier(property.value.body))) continue;
+        && authoredGetter(property, body))) continue;
       const assigned = assignment.type === 'ExpressionStatement' && assignment.expression;
       if (assigned?.type !== 'AssignmentExpression' || assigned.operator !== '='
         || assigned.left.type !== 'MemberExpression' || assigned.left.computed
@@ -236,7 +321,8 @@ async function exportScaffold(ast, code, sourceMap, parseSource, parseExpression
         || assigned.right.arguments.length !== 1 || assigned.right.arguments[0].name !== declaration.id.name) continue;
       ignored.push([table.start, assignment.end]);
       if (!authoredDebugExport) {
-        const bindings = new Map(getters.map(property => [exportKey(property), property.value.body.name]));
+        const bindings = new Map(getters.map(property => [exportKey(property), property.value.body.type === 'Identifier'
+          ? property.value.body.name : undefined]));
         // Require the trailing expression in this scope, the verified CJS
         // table, and exactly its export keys/bindings (including renamed classes).
         const trailing = body.at(-1);
@@ -279,9 +365,16 @@ function normalized(summary) {
 export async function collectSourceCoverage({ directory, root = repoRoot, cwd = root, includes = [] }) {
   const { convert, parse, parseSource, parseExpression, trace, coverage, mergeScriptCovs } = await loadDependencies();
   directory = path.resolve(directory);
+  root = path.resolve(root);
   cwd = path.resolve(root, cwd);
-  const included = filename => filename !== undefined && (includes.length === 0
-    || includes.some(glob => path.matchesGlob(path.relative(cwd, filename).replaceAll('\\', '/'), glob.replaceAll('\\', '/'))));
+  const included = filename => {
+    if (filename === undefined) return false;
+    const relative = path.relative(root, filename);
+    if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return false;
+    if (relative.split(path.sep).some(part => excluded.has(part.toLowerCase()))) return false;
+    return includes.length === 0
+      || includes.some(glob => path.matchesGlob(path.relative(cwd, filename).replaceAll('\\', '/'), glob.replaceAll('\\', '/')));
+  };
   const captures = new Map();
   for (const name of (await readdir(directory)).sort()) {
     const match = /^scripts-(\d+)-(\d+)(?:-([\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}))?\.json$/iu.exec(name);
@@ -330,25 +423,34 @@ export async function collectSourceCoverage({ directory, root = repoRoot, cwd = 
     // generation. A legacy capture without a start is safe only when alone.
     const generation = generations.find((item, index) => (item.startedAtMs === undefined || timestampMs >= item.startedAtMs)
       && (index === generations.length - 1 || timestampMs < generations[index + 1].startedAtMs));
-    if (!generation) throw new Error(`Missing script capture generation: ${name}`);
+    // Internal loader threads may have only foreign records and no recorder.
+    // Require a generation only after positively selecting an owned execution.
     for (const record of raw.result) {
       const filename = filePath(record.url);
       if (!filename) continue;
-      const capture = generation.scripts.get(record.scriptId);
+      const capture = generation?.scripts.get(record.scriptId);
       if (!capture) {
         // The raw cache is identity evidence only, never a replacement for
         // captured code or its strict inline map. Generated URLs can belong to
         // included authored sources even when their runtime path is excluded.
-        const rawMap = raw['source-map-cache']?.[record.url]?.data;
-        const includedOrigin = Array.isArray(rawMap?.sources) && rawMap.sources.some(source => {
+        const cached = raw['source-map-cache']?.[record.url];
+        const rawMap = cached?.data;
+        // Node's dependency cache may already contain incorrectly normalized
+        // absolute sources (e.g. saxes -> the owner's src/saxes.ts). Neither
+        // those paths nor an external map establish dependency ownership.
+        const dependency = filename.split(path.sep).some(part => part.toLowerCase() === 'node_modules');
+        const includedOrigin = !dependency && Array.isArray(rawMap?.sources) && rawMap.sources.some(source => {
           try {
-            return included(sourcePath(source, rawMap, record.url));
+            return included(sourcePath(source, rawMap, filePath(cached.url) ? cached.url : record.url));
           } catch {
             // Invalid identities cannot positively classify an excluded owner.
             return false;
           }
         });
-        if (included(filename) || includedOrigin) throw new Error(`Missing script capture: ${record.url} (${name}, script ${record.scriptId})`);
+        if (included(filename) || includedOrigin) {
+          if (!generation) throw new Error(`Missing script capture generation: ${name}`);
+          throw new Error(`Missing script capture: ${record.url} (${name}, script ${record.scriptId})`);
+        }
         continue;
       }
       // Native dependencies with external maps are outside this adapter's
@@ -360,6 +462,7 @@ export async function collectSourceCoverage({ directory, root = repoRoot, cwd = 
       if (!sourceFiles.some(included) && !included(filename)) continue;
       if (capture.url !== record.url) throw new Error(`Script capture URL mismatch: ${record.url}`);
       const { code, wrapperLength } = runtimeCode(capture, record);
+      completeNativeSelfMap(sourceMap, capture, filename);
       if (sourceMap && (sourceMap.version !== 3 || !Array.isArray(sourceMap.sourcesContent)
         || sourceMap.sources.length === 0 || sourceMap.sources.length !== sourceMap.sourcesContent.length
         || typeof sourceMap.mappings !== 'string' || sourceMap.sourcesContent.some(source => typeof source !== 'string'))) {

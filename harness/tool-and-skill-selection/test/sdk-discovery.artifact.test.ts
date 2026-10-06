@@ -12,12 +12,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { sourceDescriptor, sourceFixture, sourceLoadMode } from "../../agent-processes/lib/sdk-integration/test/source-fixture.js";
+import { buildSanitizedRealChildTestEnv, trustedTestChildCoverageEnv } from "../../agent-processes/test/fixtures/sanitized-real-child-env.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const tsxCli = path.join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs");
@@ -52,12 +53,12 @@ function writeNetworkDenialPreload(preloadPath: string, denialLogPath: string): 
 	].join("\n"), "utf-8");
 }
 
-function isolatedWorkerEnv(fixtureRoot: string, denialLogPath: string): NodeJS.ProcessEnv {
+function isolatedWorkerEnv(fixtureRoot: string, denialLogPath: string, base = process.env): NodeJS.ProcessEnv {
 	const allowed = new Set([
 		"path", "systemroot", "windir", "comspec", "pathext", "lang", "lc_all", "tz",
 	]);
 	const inherited = Object.fromEntries(
-		Object.entries(process.env).filter(([key]) => allowed.has(key.toLowerCase())),
+		Object.entries(base).filter(([key]) => allowed.has(key.toLowerCase())),
 	);
 	const home = path.join(fixtureRoot, "home");
 	const temp = path.join(fixtureRoot, "tmp");
@@ -79,11 +80,12 @@ function isolatedWorkerEnv(fixtureRoot: string, denialLogPath: string): NodeJS.P
 		PSModuleAnalysisCachePath: path.join(fixtureRoot, "psmodule", "moduleanalysis"),
 	};
 	for (const directory of Object.values(directories)) mkdirSync(directory, { recursive: true });
-	const tsconfigPath = process.env.TSX_TSCONFIG_PATH;
+	const tsconfigPath = base.TSX_TSCONFIG_PATH;
 	assert.ok(tsconfigPath && path.isAbsolute(tsconfigPath) && existsSync(tsconfigPath),
 		"the shared verification runner must provide its selected-SDK tsx alias config");
 	return {
 		...inherited,
+		...trustedTestChildCoverageEnv(base),
 		...directories,
 		TSX_TSCONFIG_PATH: tsconfigPath,
 		[SOURCE_MODE_ENV]: JSON.stringify(sourceLoadMode),
@@ -99,6 +101,103 @@ function isolatedWorkerEnv(fixtureRoot: string, denialLogPath: string): NodeJS.P
 		NO_PROXY: "*",
 	};
 }
+
+test("sanitized test children reject ambient options and incomplete or foreign coverage controls", () => {
+	const fixtureRoot = mkdtempSync(path.join(os.tmpdir(), "pie-trusted-child-env-"));
+	try {
+		const ambient = {
+			PATH: process.env.PATH,
+			TSX_TSCONFIG_PATH: process.env.TSX_TSCONFIG_PATH,
+			NODE_OPTIONS: "--require=/untrusted/preload.cjs --inspect=9229",
+			NODE_V8_COVERAGE: "/untrusted/raw",
+			JITI_SOURCE_MAPS: "false",
+			OPENAI_API_KEY: "ambient-secret",
+			ANTHROPIC_API_KEY: "ambient-secret",
+			OPENAI_BASE_URL: "https://untrusted.example",
+		};
+		for (const env of [
+			buildSanitizedRealChildTestEnv(ambient, fixtureRoot, "inventory"),
+			buildSanitizedRealChildTestEnv(ambient, fixtureRoot, "cold-helper"),
+			isolatedWorkerEnv(fixtureRoot, path.join(fixtureRoot, "denials"), ambient),
+		]) {
+			for (const key of ["NODE_OPTIONS", "NODE_V8_COVERAGE", "JITI_SOURCE_MAPS", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_BASE_URL"])
+				assert.equal(env[key], undefined, `${key} must not leak`);
+			assert.equal(env.PI_OFFLINE, "1");
+			assert.equal(env.HOME, path.join(fixtureRoot, "home"));
+		}
+		const directory = path.join(fixtureRoot, "coverage");
+		mkdirSync(path.join(directory, "v8"), { recursive: true, mode: 0o700 });
+		const controls = {
+			PIE_TEST_COVERAGE_DIR: directory,
+			PIE_TEST_COVERAGE_ROOT: repoRoot,
+			PIE_TEST_COVERAGE_CWD: repoRoot,
+			PIE_TEST_COVERAGE_INCLUDES: "[]",
+		};
+		for (const key of Object.keys(controls)) {
+			assert.deepEqual(trustedTestChildCoverageEnv({ ...controls, [key]: undefined }), {});
+		}
+		for (const invalid of [
+			{ PIE_TEST_COVERAGE_ROOT: fixtureRoot },
+			{ PIE_TEST_COVERAGE_DIR: repoRoot },
+			{ PIE_TEST_COVERAGE_DIR: path.join(fixtureRoot, "missing") },
+			{ PIE_TEST_COVERAGE_CWD: fixtureRoot },
+			{ PIE_TEST_COVERAGE_INCLUDES: "not-json" },
+			{ PIE_TEST_COVERAGE_INCLUDES: '[42]' },
+		]) assert.deepEqual(trustedTestChildCoverageEnv({ ...controls, ...invalid }), {});
+	} finally {
+		rmSync(fixtureRoot, { recursive: true, force: true });
+	}
+});
+
+test("trusted covered child captures raw counts with known source provenance", () => {
+	const fixtureRoot = mkdtempSync(path.join(os.tmpdir(), "pie-trusted-covered-child-"));
+	try {
+		const directory = path.join(fixtureRoot, "coverage");
+		mkdirSync(path.join(directory, "v8"), { recursive: true, mode: 0o700 });
+		const source = path.join(repoRoot, "harness/agent-processes/test/fixtures/sanitized-real-child-env.ts");
+		const base = {
+			...process.env,
+			NODE_OPTIONS: "--require=/untrusted/preload.cjs --inspect=9229",
+			NODE_V8_COVERAGE: "/untrusted/raw",
+			OPENAI_API_KEY: "ambient-secret",
+			PIE_TEST_COVERAGE_DIR: directory,
+			PIE_TEST_COVERAGE_ROOT: repoRoot,
+			PIE_TEST_COVERAGE_CWD: repoRoot,
+			PIE_TEST_COVERAGE_INCLUDES: JSON.stringify(["harness/agent-processes/test/fixtures/sanitized-real-child-env.ts"]),
+		};
+		const env = buildSanitizedRealChildTestEnv(base, fixtureRoot, "cold-helper");
+		const workerEnv = isolatedWorkerEnv(fixtureRoot, path.join(fixtureRoot, "denials"), base);
+		for (const childEnv of [env, workerEnv]) {
+			assert.equal(childEnv.NODE_OPTIONS, `--require=${JSON.stringify(path.join(repoRoot, "scripts/verification/coverage-capture.cjs"))}`);
+			assert.equal(childEnv.NODE_V8_COVERAGE, path.join(directory, "v8"));
+			assert.equal(childEnv.JITI_SOURCE_MAPS, "true");
+			assert.equal(childEnv.OPENAI_API_KEY, undefined);
+		}
+		const result = spawnSync(process.execPath, [
+			"--require", path.join(repoRoot, "node_modules/tsx/dist/cjs/index.cjs"),
+			"-e", `const fixture = require(${JSON.stringify(source)}); if (fixture.buildSanitizedRealChildTestEnv(process.env, ${JSON.stringify(fixtureRoot)}, 'cold-helper').PI_OFFLINE !== '1') process.exit(1);`,
+		], { cwd: repoRoot, env, encoding: "utf8", timeout: 30_000 });
+		assert.equal(result.status, 0, `${result.error ?? ""}\n${result.stderr}`);
+		const names = readdirSync(directory);
+		assert.ok(!names.some(name => name.startsWith("recorder-error-")));
+		const captures = names.filter(name => name.startsWith(`scripts-${result.pid}-`));
+		assert.ok(captures.length > 0, "child must have its own recorder evidence");
+		const scripts = captures.flatMap(name => JSON.parse(readFileSync(path.join(directory, name), "utf8")).scripts);
+		const authored = scripts.find((script: { url: string }) =>
+			(script.url.startsWith("file:") ? fileURLToPath(script.url) : script.url) === source);
+		assert.ok(authored, "recorder must identify the known fixture source");
+		assert.match(authored.code, /buildSanitizedRealChildTestEnv/u);
+		const rawNames = readdirSync(path.join(directory, "v8")).filter(name => name.startsWith(`coverage-${result.pid}-`));
+		assert.ok(rawNames.length > 0, "child must persist raw V8 counts");
+		const rawScripts = rawNames.flatMap(name => JSON.parse(readFileSync(path.join(directory, "v8", name), "utf8")).result);
+		assert.ok(rawScripts.some((script: any) => script.url === authored.url
+			&& script.scriptId === authored.scriptId
+			&& script.functions.some((fn: any) => fn.ranges.some((range: any) => range.count > 0))),
+			"raw executed counts must join to the recorder's known source identity");
+	} finally {
+		rmSync(fixtureRoot, { recursive: true, force: true });
+	}
+});
 
 test("verified source SDK discovery loads the root shim with one shared selector and recovery state", () => {
 	assert.equal(sourceDescriptor.artifactDir, sourceFixture.piRoot,
@@ -117,8 +216,8 @@ test("verified source SDK discovery loads the root shim with one shared selector
 			cwd: repoRoot,
 			encoding: "utf-8",
 			timeout: 120_000,
-			// Keep the worker out of the test runner's coverage merge; it evaluates
-			// the selected SDK and the same TS sources through its own ESM graph.
+			// Preserve process isolation while recording this worker separately in
+			// the invocation's raw V8/source scope (not the native test merge).
 			env: isolatedWorkerEnv(fixtureRoot, denialLogPath),
 		});
 		assert.equal(result.status, 0, `SDK discovery worker failed (${result.status}):\n${result.stdout}\n${result.stderr}`);

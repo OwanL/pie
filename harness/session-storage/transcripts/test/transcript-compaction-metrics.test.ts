@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { mapTranscript, type SessionEntryLike } from '../transcript';
+import { assistantErrorDetail, mapCustomMessage, mapTranscript, type SessionEntryLike } from '../transcript';
 import type { CompactionSummaryDetails } from '../../../agent-processes/lib/rpc/message-contract.js';
 
 function compactionEntry(id: string, summary = '## Kept context'): SessionEntryLike {
@@ -35,6 +35,49 @@ function metricsSidecar(
     },
   };
 }
+
+test('transport diagnostics retain error state without inventing phase or recovery facts', () => {
+  assert.equal(assistantErrorDetail({ errorMessage: '  disk unavailable  ' }), 'disk unavailable');
+  assert.equal(assistantErrorDetail({ errorMessage: ' ' }), undefined);
+  for (const [requestBytes, rendered] of [[0, '0 B'], [2048, '2.0 KiB'], [1048576, '1.0 MiB']] as const) {
+    const detail = assistantErrorDetail({ diagnostics: [{ type: 'provider_transport_failure',
+      error: { message: 'closed!', code: 1006 },
+      details: { phase: 'before_message_stream_start', configuredTransport: ' websocket ', requestBytes, fallbackTransport: 'sse' },
+    }] });
+    assert.equal(detail, `closed! WebSocket transport failed before output began (configured: websocket; request: ${rendered}; close code: 1006). SSE fallback was attempted.`);
+  }
+  for (const requestBytes of [-1, Infinity, undefined]) {
+    assert.equal(assistantErrorDetail({ diagnostics: [{ type: 'provider_transport_failure', details: { requestBytes } }] }),
+      'WebSocket transport failed.');
+  }
+  assert.equal(assistantErrorDetail({ diagnostics: [
+    { type: 'provider_transport_failure', error: { message: 'old' } },
+    { type: 'provider_transport_failure', details: { phase: 'after_message_stream_start' } },
+  ] }), 'WebSocket transport failed after output began. If this turn is retried, it and later requests for this session will use SSE.');
+});
+
+test('absent sideband payloads and hidden custom entries do not reset assistant aggregation', () => {
+  const timestamp = '2026-07-15T00:00:00.000Z';
+  const entry = (id: string, content: string): SessionEntryLike => ({ id, type: 'message', timestamp,
+    message: { role: 'assistant', content: [{ type: 'text', text: content }] } });
+  const transcript = mapTranscript([
+    entry('a', 'first'),
+    { id: 'missing', type: 'message', timestamp },
+    { id: 'hidden', type: 'custom_message', timestamp, content: 'hidden', display: false },
+    { id: 'empty', type: 'branch_summary', timestamp },
+    ...[undefined, [], { compactionEntryId: '' }, { compactionEntryId: 'c', tokensBefore: -1, estimatedTokensAfter: Infinity }]
+      .map((data, index): SessionEntryLike => ({ id: `side-${index}`, type: 'custom', timestamp,
+        customType: 'pie.compaction-metrics', data })),
+    entry('b', 'second'),
+    compactionEntry('c'),
+  ]);
+  assert.equal(transcript.length, 2);
+  assert.equal(transcript[0].markdown, 'first\n\nsecond');
+  assert.deepEqual(transcript[0].billingSourceEntryIds, ['a', 'b']);
+  assert.equal(transcript[1].customDetails, undefined);
+  assert.equal(mapCustomMessage('empty', { content: null }), null);
+  assert.equal(mapCustomMessage('number', { content: 42, timestamp })?.markdown, '42');
+});
 
 test('mapTranscript attaches a typed CompactionSummaryDetails to the matching compaction-summary row', () => {
   const entries: SessionEntryLike[] = [

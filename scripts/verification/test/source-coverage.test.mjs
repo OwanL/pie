@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { Session } from 'node:inspector';
 import { createRequire, Module } from 'node:module';
 import os from 'node:os';
@@ -21,13 +21,20 @@ function fixture(t) {
   return { root, directory, cwd: root, includes: ['owner/**/*.ts'] };
 }
 
-async function execute(options, source, { format = 'esm', call = '', threadId = 0, pid = 101, captureId, startedAtMs, timestampMs = 123, scriptId, runtimeName, minifyWhitespace = false, generatedCRLF = false, platform, nodeFile = false, tsxCjs = false, define } = {}) {
-  const sourceFile = path.join(options.root, 'owner', 'subject.ts');
-  const generated = tsxCjs ? sourceFile : path.join(options.root, `${runtimeName ?? `runtime-${pid}-${threadId}`}.${format === 'cjs' ? 'cjs' : 'mjs'}`);
+async function execute(options, source, { format = 'esm', call = '', threadId = 0, pid = 101, captureId, startedAtMs, timestampMs = 123, scriptId, runtimeName, minifyWhitespace = false, generatedCRLF = false, platform, nodeFile = false, tsxCjs = false, define, nativeJS, sparseMap = false, sourceSnapshots = false } = {}) {
+  const sourceFile = path.join(options.root, 'owner', `subject.${nativeJS ?? 'ts'}`);
+  const generated = tsxCjs || nativeJS ? sourceFile : path.join(options.root, `${runtimeName ?? `runtime-${pid}-${threadId}`}.${format === 'cjs' ? 'cjs' : 'mjs'}`);
+  let snapshots;
+  if (sourceSnapshots) {
+    mkdirSync(path.dirname(sourceFile), { recursive: true });
+    writeFileSync(sourceFile, source);
+    snapshots = [{ url: pathToFileURL(sourceFile).href, content: readFileSync(sourceFile, 'utf8') }];
+  }
   const output = transformSync(source, {
-    loader: 'ts', format, platform, sourcemap: 'inline', sourcefile: sourceFile, target: 'node22', minifyWhitespace, charset: 'utf8', define,
+    loader: nativeJS ? 'js' : 'ts', format, platform, sourcemap: 'inline', sourcesContent: !sparseMap, sourcefile: sourceFile, target: 'node22', minifyWhitespace, charset: 'utf8', define,
   }).code;
   const transformed = generatedCRLF ? output.replaceAll('\n', '\r\n') : output;
+  if (nativeJS) mkdirSync(path.dirname(sourceFile), { recursive: true });
   const code = format === 'cjs' ? Module.wrap(transformed) : transformed;
   const session = new Session();
   session.connect();
@@ -63,7 +70,8 @@ async function execute(options, source, { format = 'esm', call = '', threadId = 
     assert.ok(entry, 'Inspector captured the actual executed script');
     const metadata = parsed.find(item => item.scriptId === entry.scriptId);
     const actual = await post('Debugger.getScriptSource', { scriptId: entry.scriptId });
-    const capture = { scriptId: entry.scriptId, url: entry.url, code: actual.scriptSource, sourceMapURL: metadata.sourceMapURL };
+    const capture = { scriptId: entry.scriptId, url: entry.url, code: actual.scriptSource, sourceMapURL: metadata.sourceMapURL,
+      ...(sourceSnapshots ? { sourceSnapshots: snapshots } : {}) };
     // Declared generations may reuse Inspector IDs, just as a later process does.
     if (scriptId) entry.scriptId = capture.scriptId = scriptId;
     writeFileSync(path.join(options.directory, 'v8', `coverage-${pid}-${timestampMs}-${threadId}.json`), JSON.stringify({ result: [entry] }));
@@ -116,6 +124,31 @@ test('actual evaluated TSX CJS lexical wrapper excludes mapped helper leaks and 
   assert.equal(report.totalBranchCount, 0);
   assert.equal(report.totalFunctionCount, 0);
   assert.equal(report.coveredLinePercent, 100);
+});
+
+test('actual TSX anonymous default factory excludes only compiler scaffolding', async t => {
+  const options = fixture(t);
+  const { capture } = await execute(options, 'export default function (flag: boolean) { return flag ? 1 : 2; }\n', { tsxCjs: true });
+  assert.match(capture.code, /default:\(\)=>subject_default/u);
+  const report = await collectSourceCoverage(options);
+  // TSX's fully executed __name helper is retained; the factory is not.
+  assert.equal(report.totalFunctionCount, 2);
+  assert.equal(report.coveredFunctionCount, 1);
+  assert.equal(report.totalBranchCount, 2);
+  assert.equal(report.coveredBranchCount, 0);
+});
+
+test('actual TSX imported named reexport excludes compiler debug annotation, not untouched body', async t => {
+  const options = fixture(t);
+  mkdirSync(path.join(options.root, 'owner'), { recursive: true });
+  writeFileSync(path.join(options.root, 'owner', 'binding.js'), 'exports.value = 1;');
+  const { capture } = await execute(options, 'export { value as publicValue } from "./binding.js";\nexport function untouched(flag: boolean) { return flag ? 1 : 2; }\n', { tsxCjs: true });
+  assert.match(capture.code, /publicValue:\(\)=>import_binding.value/u);
+  const report = await collectSourceCoverage(options);
+  assert.equal(report.totalFunctionCount, 2);
+  assert.equal(report.coveredFunctionCount, 1);
+  assert.equal(report.totalBranchCount, 2);
+  assert.equal(report.coveredBranchCount, 0);
 });
 
 test('TSX nested authored AST-exact helpers and dead annotations remain uncovered', async t => {
@@ -215,6 +248,20 @@ test('Node debug annotation follows verified renamed class export bindings', asy
   assert.ok(!report.files[0].lines.some(item => item.line === 1));
 });
 
+test('anonymous default CJS and ESM graphs retain standard complementary branch counts', async t => {
+  const options = fixture(t);
+  const authored = 'export default function (flag: boolean) { return flag ? 1 : 2; }\n';
+  await execute(options, authored, { format: 'cjs', call: 'exports.default(true)', pid: 501 });
+  await execute(options, authored, { call: 'exports.default(false)', pid: 502 });
+  const report = await collectSourceCoverage(options);
+  assert.equal(report.convertedScripts, 2);
+  assert.equal(report.totalFunctionCount, 1);
+  assert.equal(report.coveredFunctionCount, 1);
+  assert.equal(report.totalBranchCount, 2);
+  assert.equal(report.coveredBranchCount, 2);
+  assert.ok(report.files[0].branches.every(branch => branch.counts.every(count => count === 1)));
+});
+
 test('CJS and ESM source-compatible unions cover both arms and are order stable', async t => {
   const options = fixture(t);
   await execute(options, source, { format: 'cjs', call: 'exports.untouched(true); exports.anonymous[0](true)', pid: 102 });
@@ -285,7 +332,9 @@ test('PID/thread/script ID reuse selects declared generations by raw timestamp, 
   const report = await collectSourceCoverage(options);
   assert.equal(report.files.length, 1, 'identical authored source merges normally');
   assert.equal(report.coveredFunctionCount, 1);
-  const raw = (timestamp, entry) => writeFileSync(path.join(options.directory, 'v8', `coverage-25324-${timestamp}-0.json`), JSON.stringify({ result: [entry] }));
+  const raw = (timestamp, entry) => writeFileSync(path.join(options.directory, 'v8', `coverage-25324-${timestamp}-0.json`), JSON.stringify({
+    result: [entry], 'source-map-cache': { [entry.url]: { data: { sources: [path.join(options.root, 'owner', 'subject.ts')] } } },
+  }));
   raw(99, first.entry);
   await assert.rejects(collectSourceCoverage(options), /Missing.*generation/i);
   rmSync(path.join(options.directory, 'v8', 'coverage-25324-99-0.json'));
@@ -461,6 +510,141 @@ test('uncaptured generated URLs fail closed when raw map origins are included', 
   entry.url = pathToFileURL(path.join(options.root, 'owner', 'subject.ts')).href;
   save({ sources: [null] });
   await assert.rejects(collectSourceCoverage(options), /Missing script capture:/u);
+});
+
+test('foreign loader-thread records need no generation, but owned records still do', async t => {
+  const options = fixture(t);
+  const rawPath = path.join(options.directory, 'v8', 'coverage-201-123-1.json');
+  const url = pathToFileURL(path.join(options.root, 'generated', 'loader.mjs')).href;
+  const save = (url, data) => writeFileSync(rawPath, JSON.stringify({
+    result: [{ scriptId: '77', url, functions: [] }], 'source-map-cache': { [url]: { data } },
+  }));
+  // A main-thread recorder is not evidence for the internal ESM loader thread.
+  writeFileSync(path.join(options.directory, 'scripts-201-0.json'), JSON.stringify({ schema: 1, pid: 201, threadId: 0, scripts: [] }));
+  save(url, { sources: ['../node_modules/foreign/src.ts'] });
+  assert.deepEqual((await collectSourceCoverage(options)).files, []);
+  save('node:internal/modules/esm/worker', undefined);
+  assert.deepEqual((await collectSourceCoverage(options)).files, []);
+  save(pathToFileURL(path.join(options.root, 'owner', 'subject.ts')).href, undefined);
+  await assert.rejects(collectSourceCoverage(options), /Missing script capture generation:/u);
+  save(url, { sources: ['../owner/subject.ts'] });
+  await assert.rejects(collectSourceCoverage(options), /Missing script capture generation:/u);
+});
+
+test('broad owner globs exclude protected and outside-root runtime paths and map origins', async t => {
+  const options = fixture(t);
+  options.cwd = path.join(options.root, 'owner');
+  options.includes = ['../**/*.ts', '../**/*.js'];
+  const rawPath = path.join(options.directory, 'v8', 'coverage-201-123-0.json');
+  const capturePath = path.join(options.directory, 'scripts-201-0.json');
+  const excluded = ['node_modules', '.git', '.cache', 'cache', 'generated', 'build', 'dist',
+    'out', 'out-dev', 'coverage', 'data', 'sessions', 'logs', '.moon', '.turbo'];
+  for (const filename of [
+    ...excluded.map(part => path.join(options.root, part.toUpperCase(), 'foreign.ts')),
+    path.join(options.root, '..', 'foreign.ts'),
+  ]) {
+    const sourceURL = pathToFileURL(filename).href;
+    const generatedURL = pathToFileURL(path.join(options.root, 'generated', 'foreign.js')).href;
+    const data = { version: 3, sources: [sourceURL], sourcesContent: ['const value = 1;'], names: [], mappings: 'AAAA' };
+    const sourceMapURL = `data:application/json;base64,${Buffer.from(JSON.stringify(data)).toString('base64')}`;
+    for (const url of [sourceURL, generatedURL]) {
+      const entry = { scriptId: '77', url, functions: [] };
+      writeFileSync(rawPath, JSON.stringify({ result: [entry], 'source-map-cache': { [url]: { data } } }));
+      for (const scripts of [[], [{ scriptId: '77', url, code: 'const value = 1;', sourceMapURL }]]) {
+        writeFileSync(capturePath, JSON.stringify({ schema: 1, pid: 201, threadId: 0, scripts }));
+        const report = await collectSourceCoverage(options);
+        assert.deepEqual(report.files, []);
+        assert.equal(report.convertedScripts, 0);
+        assert.equal(report.totalLineCount, 0);
+      }
+    }
+  }
+  // Widening to genuine owned origins still requires capture.
+  const url = pathToFileURL(path.join(options.root, 'generated', 'owned.js')).href;
+  writeFileSync(capturePath, JSON.stringify({ schema: 1, pid: 201, threadId: 0, scripts: [] }));
+  writeFileSync(rawPath, JSON.stringify({ result: [{ scriptId: '77', url, functions: [] }],
+    'source-map-cache': { [url]: { data: { sources: ['../owned/subject.ts'] } } } }));
+  await assert.rejects(collectSourceCoverage(options), /Missing script capture:/u);
+});
+
+test('dependency saxes external cached map cannot establish owner provenance', async t => {
+  const options = fixture(t);
+  options.cwd = path.join(options.root, 'application', 'hosts', 'vscode');
+  options.includes = ['src/**/*.ts'];
+  const url = pathToFileURL(path.join(options.cwd, 'node_modules', 'saxes', 'saxes.js')).href;
+  // Shape observed in Node's raw cache: an external dependency map has
+  // already been normalized to the unrelated owner's source directory.
+  const wrongSource = pathToFileURL(path.join(options.cwd, 'src', 'saxes.ts')).href;
+  const rawPath = path.join(options.directory, 'v8', 'coverage-201-123-0.json');
+  writeFileSync(rawPath, JSON.stringify({ result: [{ scriptId: '77', url, functions: [] }],
+    'source-map-cache': { [url]: { url: `${url}.map`, data: { version: 3, sources: [wrongSource], sourcesContent: [null], mappings: '' } } } }));
+  assert.deepEqual((await collectSourceCoverage(options)).files, []);
+  writeFileSync(path.join(options.directory, 'scripts-201-0.json'), JSON.stringify({ schema: 1, pid: 201, threadId: 0,
+    scripts: [{ scriptId: '77', url, code: '//# sourceMappingURL=saxes.js.map', sourceMapURL: 'saxes.js.map' }] }));
+  assert.deepEqual((await collectSourceCoverage(options)).files, []);
+  // An exact inline capture remains positive provenance, even in a dependency.
+  const sourceMapURL = `data:application/json;base64,${Buffer.from(JSON.stringify({ version: 3, sources: [wrongSource], sourcesContent: ['const value = 1;'], names: [], mappings: 'AAAA' })).toString('base64')}`;
+  writeFileSync(path.join(options.directory, 'scripts-201-0.json'), JSON.stringify({ schema: 1, pid: 201, threadId: 0,
+    scripts: [{ scriptId: '77', url, code: 'const value = 1;', sourceMapURL }] }));
+  assert.equal((await collectSourceCoverage(options)).convertedScripts, 1);
+});
+
+test('raw cache relative sources resolve against map URL, but absolute sources remain facts', async t => {
+  const options = fixture(t);
+  const url = pathToFileURL(path.join(options.root, 'generated', 'temp.js')).href;
+  const mapURL = pathToFileURL(path.join(options.root, 'owner', 'maps', 'temp.js.map')).href;
+  const save = sources => writeFileSync(path.join(options.directory, 'v8', 'coverage-201-123-0.json'), JSON.stringify({
+    result: [{ scriptId: '77', url, functions: [] }], 'source-map-cache': { [url]: { url: mapURL, data: { sources } } },
+  }));
+  save(['../subject.ts']);
+  await assert.rejects(collectSourceCoverage(options), /Missing script capture generation/u);
+  save([pathToFileURL(path.join(options.root, 'owner', 'subject.ts')).href]);
+  await assert.rejects(collectSourceCoverage(options), /Missing script capture generation/u);
+  save(['../../node_modules/foreign.ts']);
+  assert.deepEqual((await collectSourceCoverage(options)).files, []);
+});
+
+test('sparse transformed native JS self maps require exact pre-execution source snapshots', async t => {
+  for (const extension of ['mjs', 'js', 'cjs']) {
+    const options = fixture(t);
+    options.includes = ['owner/**/*'];
+    const physical = 'export function untouched(flag) {\n  return flag ? 1 : 2;\n}\n';
+    const record = await execute(options, physical, { nativeJS: extension, format: extension === 'mjs' ? 'esm' : 'cjs',
+      nodeFile: extension !== 'mjs', sparseMap: true, sourceSnapshots: true, minifyWhitespace: true });
+    assert.ok(!record.capture.code.startsWith(physical), 'runtime bytes differ from physical source');
+    const report = await collectSourceCoverage(options);
+    assert.equal(report.totalFunctionCount, 1);
+    assert.equal(report.coveredFunctionCount, 0);
+    assert.equal(report.totalBranchCount, 2);
+    assert.equal(report.coveredBranchCount, 0);
+    assert.ok(report.files[0].branches.every(branch => branch.locations.every(loc => loc.start.line === 2)));
+    // Conversion cannot reread a newer physical file or use transformed bytes.
+    writeFileSync(path.join(options.root, 'owner', `subject.${extension}`), 'throw new Error("modified");');
+    assert.deepEqual(await collectSourceCoverage(options), report);
+    const save = capture => writeFileSync(path.join(options.directory, 'scripts-101-0.json'), JSON.stringify({ schema: 1, pid: 101, threadId: 0, scripts: [capture] }));
+    for (const sourceSnapshots of [undefined, [], [{ url: record.capture.url + '.wrong', content: physical }],
+      [{ url: record.capture.url, content: '' }], [{ url: record.capture.url, content: physical }, { url: record.capture.url, content: physical + ' ' }]]) {
+      save({ ...record.capture, sourceSnapshots });
+      await assert.rejects(collectSourceCoverage(options), /source map identity|source snapshot/iu);
+    }
+    save({ ...record.capture, url: record.capture.url + '.wrong' });
+    await assert.rejects(collectSourceCoverage(options), /URL mismatch/u);
+    save(record.capture);
+    writeFileSync(path.join(options.directory, 'v8', 'coverage-202-123-0.json'), JSON.stringify({ result: [record.entry] }));
+    writeFileSync(path.join(options.directory, 'scripts-202-0.json'), JSON.stringify({ schema: 1, pid: 202, threadId: 0,
+      scripts: [{ ...record.capture, sourceSnapshots: [{ url: record.capture.url, content: physical + '\n// modified snapshot' }] }] }));
+    await assert.rejects(collectSourceCoverage(options), /Conflicting source identity/u);
+  }
+});
+
+test('snapshots cannot complete typed maps or override captured source content', async t => {
+  const options = fixture(t);
+  await execute(options, source, { sparseMap: true, sourceSnapshots: true });
+  await assert.rejects(collectSourceCoverage(options), /Incomplete source map identity/u);
+  const record = await execute(options, source, { sourceSnapshots: true, runtimeName: 'complete-map' });
+  record.capture.sourceSnapshots[0].content += '\n// modified snapshot';
+  writeFileSync(path.join(options.directory, 'scripts-101-0.json'), JSON.stringify({ schema: 1, pid: 101, threadId: 0, scripts: [record.capture] }));
+  await assert.rejects(collectSourceCoverage(options), /Conflicting source snapshot/u);
 });
 
 test('unknown native JavaScript uses captured code without excluding test-looking paths', async t => {

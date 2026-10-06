@@ -3,6 +3,10 @@ import test from 'node:test';
 
 import {
   compactDurableMessageDetails,
+  compactLiveReasoningPart,
+  compactSubagentFileChanges,
+  compactSubagentMessages,
+  jsonBytes,
   compactDurableMessageForTransport,
   compactSubagentResultPreview,
   compactToolCallDetail,
@@ -51,6 +55,68 @@ function durableMessage(): ChatMessage {
     }],
   };
 }
+
+test('missing durable payloads stay unavailable while flat reasoning and mirror-only tools remain retrievable', () => {
+  const full = durableMessage();
+  const compact = compactDurableMessageDetails(full, sessionPath);
+  const ref = compact.thinkingDetailRef!;
+  assert.equal(findDurableDetail([full], ref).status, 'loaded');
+  for (const changed of [
+    { ...ref, messageId: 'missing' },
+    { ...ref, partIndex: 99 },
+    { ...ref, partIndex: 1 },
+    { ...ref, partIndex: undefined },
+  ]) assert.deepEqual(findDurableDetail([full], changed), { status: 'unavailable' });
+  assert.deepEqual(findDurableDetail([{ ...full, thinking: undefined }], ref), { status: 'unavailable' });
+  const toolRef = compact.toolCalls![0]!.detailRef!;
+  assert.equal(findDurableDetail([{ ...full, parts: undefined }], toolRef).status, 'loaded');
+  assert.deepEqual(findDurableDetail([{ ...full, parts: undefined,
+    toolCalls: full.toolCalls!.map((tool) => ({ ...tool, result: undefined })) }], toolRef), { status: 'unavailable' });
+  const options = { sessionPath, messageId: 'm', partIndex: 0, sourceRevision: 2 };
+  assert.deepEqual(compactLiveReasoningPart('short', options), { kind: 'reasoning', text: 'short' });
+  const live = compactLiveReasoningPart('long\n'.repeat(5000), options);
+  assert.equal(live.detailRef?.source, 'live');
+  assert.equal(live.detailRef?.sourceRevision, 2);
+  assert.ok(live.text.length < 200);
+  const cycle: Record<string, unknown> = {};
+  cycle.self = cycle;
+  assert.equal(jsonBytes(cycle), Infinity);
+  assert.equal(jsonBytes(undefined), 0);
+});
+
+test('malformed preview sidebands are omitted and bounded file/tool evidence is sanitized', () => {
+  for (const value of [null, [], { results: [null, 3] }, { details: {} }]) {
+    assert.equal(compactSubagentResultPreview(value), undefined);
+  }
+  assert.equal(compactSubagentFileChanges({}), undefined);
+  assert.equal(compactSubagentFileChanges([null, { path: ' ', kind: 'created' }]), undefined);
+  assert.deepEqual(compactSubagentFileChanges([
+    { path: 'a', kind: 'modified', description: 'change', additions: 2.9, deletions: 0 },
+    { path: 'b', kind: 'deleted', additions: -1, deletions: Infinity },
+    { path: 'c', kind: 'unknown' },
+  ]), [
+    { path: 'a', kind: 'modified', description: 'change', additions: 2, deletions: 0 },
+    { path: 'b', kind: 'deleted' },
+  ]);
+  assert.equal(compactSubagentMessages(null), undefined);
+  const messages = compactSubagentMessages([null,
+    { role: 'assistant', content: [null, { type: 'text', text: 'private' },
+      { type: 'toolCall', name: 'read', arguments: {} },
+      { type: 'toolCall', name: 'write', arguments: 'command' },
+      { type: 'toolCall', name: 'delete', arguments: null },
+      { type: 'toolCall', name: 'subagent', arguments: { cwd: '/repo', task: 'private' } }] },
+    { role: 'toolResult', toolName: 'read', content: 'private' },
+    { role: 'toolResult', isError: true, content: 'private' },
+  ]);
+  assert.deepEqual(messages, [
+    { role: 'assistant', content: [
+      { type: 'toolCall', name: 'write', arguments: 'command' },
+      { type: 'toolCall', name: 'delete' },
+      { type: 'toolCall', name: 'subagent', arguments: { cwd: '/repo' } },
+    ] },
+    { role: 'toolResult', isError: true },
+  ]);
+});
 
 test('initial durable projection contains compact metadata but no large reasoning or recursive tool detail', () => {
   const full = durableMessage();

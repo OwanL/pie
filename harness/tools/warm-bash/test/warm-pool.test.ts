@@ -70,11 +70,12 @@ async function waitForReadyWorkers(pool: { getStats(): { ready: number } }, coun
 }
 
 const BASH = findTestBash();
-const RUN_INTEGRATION_TESTS = process.env.PIE_RUN_INTEGRATION_TESTS === '1';
+const RUN_REAL_BASH_TESTS = process.env.PIE_RUN_INTEGRATION_TESTS === '1'
+  || process.env.PIE_RUN_WARM_BASH_POOL_TESTS === '1';
 
 describe('warm-bash pool (real bash round-trip)', {
   concurrency: false,
-  skip: RUN_INTEGRATION_TESTS ? false : 'set PIE_RUN_INTEGRATION_TESTS=1 to run real-shell integration tests',
+  skip: RUN_REAL_BASH_TESTS ? false : 'set PIE_RUN_WARM_BASH_POOL_TESTS=1 (or PIE_RUN_INTEGRATION_TESTS=1) to run real-shell integration tests',
 }, () => {
   // Loaded dynamically (tsx) — typed loosely; the assertions guard behaviour.
   let Pool: any;
@@ -83,8 +84,13 @@ describe('warm-bash pool (real bash round-trip)', {
 
   async function makePool(): Promise<any> {
     const p = new Pool({ size: 1, shellPath: BASH, env: process.env });
-    await p.ready();
-    return p;
+    try {
+      await p.ready();
+      return p;
+    } catch (error) {
+      p.dispose();
+      throw error;
+    }
   }
 
   test.before(async () => {
@@ -459,12 +465,16 @@ describe('warm-bash pool (real bash round-trip)', {
 
   test('getStats reports disposed state and zeros after dispose', async () => {
     const pool = new Pool({ size: 1, shellPath: BASH, env: process.env });
-    await pool.ready();
-    pool.dispose();
-    const s = pool.getStats();
-    assert.equal(s.disposed, true);
-    assert.equal(s.ready, 0);
-    assert.equal(s.warming, 0);
+    try {
+      await pool.ready();
+      pool.dispose();
+      const s = pool.getStats();
+      assert.equal(s.disposed, true);
+      assert.equal(s.ready, 0);
+      assert.equal(s.warming, 0);
+    } finally {
+      pool.dispose();
+    }
   });
 
   test('custom warmup timeout is accepted (0 falls back to default)', async () => {

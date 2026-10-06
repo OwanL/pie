@@ -120,6 +120,52 @@ test('register requires a message and never writes a partial registration', asyn
   assert.deepEqual(readSidecar(), []);
 });
 
+test('all actions require persisted creator ownership and rejected inputs never write operations', async () => {
+  const { tools } = setup();
+  for (const action of ['register', 'list', 'cancel']) {
+    const result = await tools.defer_trigger.execute(
+      'no-session', { action }, undefined, undefined,
+      { sessionManager: { getSessionFile: () => undefined } },
+    ) as ToolResult;
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /no active session path/);
+  }
+  for (const [params, expected] of [
+    [{ action: 'unknown' }, /action must be/],
+    [{ action: 'cancel', triggerId: ' ' }, /triggerId must be/],
+    [{ action: 'register', message: 'wake', targetSession: '', triggers: [{ kind: 'user_input' }] }, /targetSession must be/],
+    [{ action: 'register', message: 'wake', triggers: [] }, /non-empty array/],
+  ] as const) {
+    const result = await tools.defer_trigger.execute('bad-input', params, undefined, undefined, context()) as ToolResult;
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, expected);
+  }
+  assert.deepEqual(readSidecar(), []);
+});
+
+test('cancel all consumes only creator-owned wakes and lists normalized OR conditions', async () => {
+  const { tools } = setup();
+  const execute = async (params: unknown, session: string) => tools.defer_trigger.execute(
+    'call', params, undefined, undefined, context(session),
+  ) as Promise<ToolResult>;
+  const registered = await execute({
+    action: 'register', message: 'resume target', targetSession: 'target.jsonl',
+    triggers: [{ kind: 'session_finished', sessionPath: 'watched.jsonl' }, { kind: 'timer', ms: 1_000 }],
+  }, 'creator.jsonl');
+  assert.equal(registered.isError, false);
+  assert.match(registered.content[0].text, /session_finished\(watched.jsonl\) OR timer\(1000ms\)/);
+  await execute({ action: 'register', message: 'foreign wake', triggers: [{ kind: 'session_finished' }] }, 'other.jsonl');
+  const listed = await execute({ action: 'list' }, 'creator.jsonl');
+  assert.match(listed.content[0].text, /target: target.jsonl/);
+  const cancelled = await execute({ action: 'cancel' }, 'creator.jsonl');
+  assert.equal(cancelled.isError, false);
+  assert.match(cancelled.content[0].text, /Cancelled all pending/);
+  assert.equal((await execute({ action: 'list' }, 'creator.jsonl')).details.count, 0);
+  const foreign = await execute({ action: 'list' }, 'other.jsonl');
+  assert.equal(foreign.details.count, 1);
+  assert.match(foreign.content[0].text, /session_finished\(any\)/);
+});
+
 test('register persists an explicit target session without changing creator ownership', async () => {
   const { tools } = setup();
   const result = await tools.defer_trigger.execute(

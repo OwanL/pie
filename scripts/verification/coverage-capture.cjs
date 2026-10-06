@@ -4,7 +4,8 @@
 // NODE_OPTIONS inheritance gives every child process / worker its own recorder.
 const fs = require('node:fs');
 const path = require('node:path');
-const { fileURLToPath } = require('node:url');
+const { fileURLToPath, pathToFileURL } = require('node:url');
+const { TextDecoder } = require('node:util');
 const { Session } = require('node:inspector');
 const { threadId } = require('node:worker_threads');
 const { randomUUID } = require('node:crypto');
@@ -71,7 +72,7 @@ function included(url) {
     || ownerIncludes.some(glob => path.matchesGlob(path.relative(ownerCwd, filename).replaceAll('\\', '/'), glob));
 }
 
-function inlineOwnedSource(url, sourceMapURL) {
+function inlineMap(sourceMapURL) {
   // Only inspector-provided inline metadata can widen capture. Never read an
   // external map or generated file, or infer a source from an unknown URL.
   if (typeof sourceMapURL !== 'string' || !sourceMapURL.startsWith('data:')) return false;
@@ -86,22 +87,46 @@ function inlineOwnedSource(url, sourceMapURL) {
     || (map.sourceRoot !== undefined && typeof map.sourceRoot !== 'string')) {
     throw new Error('Missing inline source map identity');
   }
-  const base = filePath(url);
+  return map;
+}
+
+function sourcePath(source, map, url) {
+  if (typeof source !== 'string' || !source || /^<.*>$/u.test(source)) return undefined;
+  const absolute = filePath(source);
+  if (absolute) return path.resolve(absolute);
+  if (/^[a-z]+:/iu.test(source)) return undefined;
   const sourceRoot = map.sourceRoot || '';
+  if (sourceRoot.startsWith('file:')) {
+    return filePath(new URL(source.replaceAll('\\', '/'), sourceRoot.endsWith('/') ? sourceRoot : `${sourceRoot}/`).href);
+  }
+  if (/^[a-z]+:/iu.test(sourceRoot) && !path.isAbsolute(sourceRoot)) return undefined;
+  const base = filePath(url);
+  if (!base && !path.isAbsolute(sourceRoot)) return undefined;
+  return path.resolve(base ? path.dirname(base) : sourceRoot, sourceRoot, source);
+}
+
+function inlineOwnedSource(url, map) {
+  if (!map) return false;
   return map.sources.some(source => {
-    // esbuild expression/anonymous inputs are not authored filenames, even
-    // when sourceRoot would place their synthetic names inside the repository.
-    if (typeof source !== 'string' || !source || /^<.*>$/u.test(source)) return false;
-    const absolute = filePath(source);
-    if (absolute) return included(absolute);
-    if (/^[a-z]+:/iu.test(source)) return false;
-    if (sourceRoot.startsWith('file:')) {
-      return included(new URL(source.replaceAll('\\', '/'), sourceRoot.endsWith('/') ? sourceRoot : `${sourceRoot}/`).href);
-    }
-    if (/^[a-z]+:/iu.test(sourceRoot) && !path.isAbsolute(sourceRoot)) return false;
-    if (!base && !path.isAbsolute(sourceRoot)) return false;
-    return included(path.resolve(base ? path.dirname(base) : sourceRoot, sourceRoot, source));
+    const filename = sourcePath(source, map, url);
+    return filename !== undefined && included(filename);
   });
+}
+
+function sourceSnapshots(url, map) {
+  const filename = filePath(url);
+  if (!map || !filename || !included(url) || !/\.(?:mjs|js|cjs)$/iu.test(filename)
+    || map.sources.length === 0) return undefined;
+  const same = other => other !== undefined && path.relative(filename, other) === '';
+  if (!map.sources.every(source => same(sourcePath(source, map, url)))) return undefined;
+  if (map.sources.every((_, index) => typeof map.sourcesContent?.[index] === 'string')) return undefined;
+  // Only an ordinary self-origin native JS file may fill sparse map content.
+  // Resolve/stat checks do not grant a wider read, including through symlinks.
+  if (!fs.lstatSync(filename).isFile() || !same(fs.realpathSync(filename))) {
+    throw new Error('Source snapshot requires an ordinary self-origin file');
+  }
+  const content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(fs.readFileSync(filename));
+  return [{ url: pathToFileURL(path.resolve(filename)).href, content }];
 }
 
 process.on('exit', () => {
@@ -143,8 +168,10 @@ try {
     let capture;
     try { capture = included(params.url); }
     catch (error) { recordError('url', error, { scriptId: params.scriptId, url: params.url }); return; }
+    let map;
     try {
-      capture = inlineOwnedSource(params.url, params.sourceMapURL) || capture;
+      map = inlineMap(params.sourceMapURL);
+      capture = inlineOwnedSource(params.url, map) || capture;
     } catch (error) {
       // A malformed map on an already eligible script must fail closed. For
       // foreign/unknown scripts it proves no repo origin and grants no capture.
@@ -152,6 +179,15 @@ try {
       return;
     }
     if (!capture) return;
+    let snapshots;
+    try {
+      // Read synchronously in scriptParsed, before the parsed script executes;
+      // never defer provenance reads to exit or even the source callback.
+      snapshots = sourceSnapshots(params.url, map);
+    } catch (error) {
+      recordError('sourceSnapshot', error, { scriptId: params.scriptId, url: params.url });
+      return;
+    }
     pending += 1;
     try {
       session.post('Debugger.getScriptSource', { scriptId: params.scriptId }, (error, result) => {
@@ -165,6 +201,7 @@ try {
           url: params.url,
           code: result.scriptSource,
           sourceMapURL: params.sourceMapURL ?? '',
+          ...(snapshots === undefined ? {} : { sourceSnapshots: snapshots }),
         });
       });
     } catch (error) {

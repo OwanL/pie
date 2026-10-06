@@ -738,12 +738,12 @@ export function buildTestArgs(config, fast = false, testArgs = []) {
     ...(fast
       ? ['--test-force-exit', ...(config.fastConcurrency ? [`--test-concurrency=${config.fastConcurrency}`] : [])]
       : ['--test-concurrency=1']),
-    ...(collectCoverage ? ['--experimental-test-coverage'] : []),
+    // NODE_V8_COVERAGE supplies detailed raw blocks; qualified source accounting
+    // is authoritative. Do not also compute Node's unused native aggregate.
     // Single-process coverage opt-in: run every test file in one process so the
     // coverage report comes from exactly one child (see 'skill-pruner').
     ...(collectCoverage && config.singleProcessCoverage ? ['--experimental-test-isolation=none'] : []),
     `--test-reporter=${reporterSpecifier}`,
-    ...(collectCoverage ? config.coverageIncludes.map((pattern) => `--test-coverage-include=${pattern}`) : []),
     ...testArgs,
     ...(collectCoverage && config.coverageTestGlobs ? config.coverageTestGlobs : config.testGlobs),
   ];
@@ -938,6 +938,10 @@ export async function runPackage(config, fast = false, integration = false, test
           PIE_TEST_COVERAGE_CWD: config.cwd,
           PIE_TEST_COVERAGE_INCLUDES: JSON.stringify(config.coverageIncludes),
           NODE_V8_COVERAGE: path.join(coverageScope.directory, 'v8'),
+          // Measurement only: Jiti's SDK discovery transforms need inline maps.
+          JITI_SOURCE_MAPS: 'true',
+          // Exercise the existing isolated shell contract without enabling provider integration.
+          ...(config.id === 'warm-bash' ? { PIE_RUN_WARM_BASH_POOL_TESTS: '1' } : {}),
         } : {}),
       },
       true,

@@ -101,6 +101,70 @@ const createSyntheticFingerprintIndexStore = (
   reconciliationSourceMatches: () => true,
 });
 
+test('indexed metadata tolerates malformed rows without accepting foreign or versioned provenance', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-session-metadata-defensive-'));
+  try {
+    const filePath = path.join(root, 'session.jsonl');
+    const marker = (data: unknown) => ({ type: 'custom', customType: 'pie.agent-created-session', data });
+    await fs.writeFile(filePath, [
+      '', '{bad json}', 'null', '[]', '42',
+      JSON.stringify({ type: 'session', cwd: 42, id: '  session-a  ', timestamp: 'invalid' }),
+      ...[
+        marker(null), marker([]), marker({ version: 2, sessionId: 'session-a' }),
+        marker({ version: 1, sessionId: 'foreign' }),
+        { type: 'session_info', name: '   ' },
+        { type: 'message' }, { type: 'message', message: [] },
+        { type: 'message', message: { role: 'toolResult', content: 'not a title' } },
+        { type: 'message', timestamp: 'invalid', message: { role: 'user', content: {} } },
+        { type: 'message', timestamp: '2026-01-01T00:00:01.000Z', message: {
+          role: 'user', timestamp: -1, content: [{ type: 'image' }, { type: 'text' }, { type: 'text', text: 'Defensive title' }],
+        } },
+      ].map((row) => JSON.stringify(row)),
+    ].join('\n'), 'utf8');
+    const first = await readMetadata(filePath);
+    assert.equal(first.summary.sessionId, 'session-a');
+    assert.equal(first.summary.cwd, '');
+    assert.equal(first.summary.agentCreated, undefined);
+    assert.equal(first.summary.messageCount, 5);
+    assert.equal(first.summary.name, 'Defensive title');
+    assert.equal(first.summary.modifiedAt, '2026-01-01T00:00:01.000Z');
+    assert.equal(first.checkpoint.endedWithNewline, false);
+
+    await fs.appendFile(filePath, `\n${JSON.stringify(marker({ version: 1, sessionId: 'session-a' }))}\n`, 'utf8');
+    const fingerprint = await statBackendSessionFile(filePath);
+    assert.ok(fingerprint);
+    const appended = await readIndexedSessionMetadata(fingerprint, first);
+    assert.equal(appended.status, 'ok');
+    assert.equal(appended.resumedAppend, false, 'an unterminated checkpoint must reparse rather than skip its final row');
+    assert.equal(appended.metadata.summary.agentCreated, true);
+    assert.equal(appended.metadata.summary.messageCount, 5);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('indexed metadata rejects absent and foreign roots and falls back to stat time for a minimal header', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-session-metadata-root-'));
+  try {
+    const filePath = path.join(root, 'session.jsonl');
+    for (const contents of ['', '\nnull\n[]\n', '{"type":"message"}\n', '{"type":"message"}']) {
+      await fs.writeFile(filePath, contents, 'utf8');
+      const fingerprint = await statBackendSessionFile(filePath);
+      assert.ok(fingerprint);
+      assert.deepEqual(await readIndexedSessionMetadata(fingerprint), { status: 'invalid' });
+    }
+    await writeJsonl(filePath, [{ type: 'session', id: ' ' }, { type: 'custom', customType: 'pie.agent-created-session', data: { version: 1, sessionId: ' ' } }]);
+    const metadata = await readMetadata(filePath);
+    assert.equal(metadata.summary.sessionId, undefined);
+    assert.equal(metadata.summary.headerTimestamp, undefined);
+    assert.equal(metadata.summary.agentCreated, undefined);
+    assert.equal(metadata.summary.modifiedAt, new Date(Number(BigInt(metadata.fingerprint.modifiedNs) / 1_000_000n)).toISOString());
+    assert.equal(metadata.summary.messageCount, 0);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test('persistent session index holds writer admission across every durable sidecar mutation', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-session-index-admission-'));
   let accepting = true;

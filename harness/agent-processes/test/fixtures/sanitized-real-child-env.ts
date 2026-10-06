@@ -1,4 +1,44 @@
 import * as path from 'node:path';
+import { realpathSync, statSync } from 'node:fs';
+import * as os from 'node:os';
+import { fileURLToPath } from 'node:url';
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..');
+
+/** Reconstruct only the invocation-owned recorder, never ambient Node options. */
+export function trustedTestChildCoverageEnv(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const directory = base.PIE_TEST_COVERAGE_DIR;
+  const root = base.PIE_TEST_COVERAGE_ROOT;
+  const cwd = base.PIE_TEST_COVERAGE_CWD;
+  const includesJSON = base.PIE_TEST_COVERAGE_INCLUDES;
+  if (!directory || !root || !cwd || includesJSON === undefined) return {};
+  try {
+    if (![directory, root, cwd].every(value => path.isAbsolute(value))) return {};
+    if (realpathSync(root) !== realpathSync(repoRoot)) return {};
+    const ownerRelative = path.relative(realpathSync(root), realpathSync(cwd));
+    if (ownerRelative === '..' || ownerRelative.startsWith(`..${path.sep}`) || path.isAbsolute(ownerRelative)) return {};
+    const privateRelative = path.relative(realpathSync(os.tmpdir()), realpathSync(directory));
+    if (!privateRelative || privateRelative === '..' || privateRelative.startsWith(`..${path.sep}`)
+      || path.isAbsolute(privateRelative) || realpathSync(directory) !== path.resolve(directory)) return {};
+    const scope = statSync(directory);
+    if (!scope.isDirectory() || (process.platform !== 'win32' && (scope.mode & 0o077) !== 0)) return {};
+    const v8 = path.join(directory, 'v8');
+    if (!statSync(v8).isDirectory() || realpathSync(v8) !== path.resolve(v8)) return {};
+    const includes: unknown = JSON.parse(includesJSON);
+    if (!Array.isArray(includes) || includes.some(value => typeof value !== 'string')) return {};
+    return {
+      PIE_TEST_COVERAGE_DIR: directory,
+      PIE_TEST_COVERAGE_ROOT: root,
+      PIE_TEST_COVERAGE_CWD: cwd,
+      PIE_TEST_COVERAGE_INCLUDES: includesJSON,
+      NODE_OPTIONS: `--require=${JSON.stringify(path.join(repoRoot, 'scripts/verification/coverage-capture.cjs'))}`,
+      NODE_V8_COVERAGE: v8,
+      JITI_SOURCE_MAPS: 'true',
+    };
+  } catch {
+    return {};
+  }
+}
 
 /** Keep source-artifact acceptance children offline and independent of the caller's credentials/configuration. */
 export function buildSanitizedRealChildTestEnv(
@@ -18,6 +58,7 @@ export function buildSanitizedRealChildTestEnv(
 
   return {
     ...env,
+    ...trustedTestChildCoverageEnv(base),
     HOME: home,
     USERPROFILE: home,
     ...(hasDriveRoot ? { HOMEDRIVE: home.slice(0, 2), HOMEPATH: home.slice(2) } : {}),

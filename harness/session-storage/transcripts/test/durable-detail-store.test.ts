@@ -286,6 +286,110 @@ test('source and subscription caches are bounded', async () => {
   assert.equal(errorsOf(emitted, 'subscription-b').length, 0);
 });
 
+test('evicted durable sources are re-read by exact identity and reject changed payloads', async () => {
+  for (const failure of ['identity', 'bytes', 'canonical', 'missing'] as const) {
+    let rereading = false;
+    const value = addressableResult({ text: 'x'.repeat(5000) });
+    const emitted: CoordinatorToHostDetailMessage[] = [];
+    const store = new DurableDetailStore({
+      budgets: { maxSources: 1, maxPageBytes: 4096 },
+      emit: (message) => { emitted.push(message); return true; },
+      resolve: async (_path, address, ref) => {
+        if (rereading && address.rootToolCallId === 'tool-1') {
+          assert.equal(ref?.messageId, 'msg-tool-1');
+          if (failure === 'missing') throw new DurableDetailNotFoundError('removed');
+        }
+        return {
+          value: rereading && address.rootToolCallId === 'tool-1'
+            ? failure === 'canonical' ? BigInt(1) : failure === 'bytes' ? { changed: true } : value
+            : value,
+          sizeBytes: 5000,
+          messageId: rereading && failure === 'identity' ? 'different' : `msg-${address.rootToolCallId}`,
+          toolCallId: address.rootToolCallId,
+          kind: 'tool-result',
+        };
+      },
+    });
+    await store.subscribe('a', 'a', ADDRESS, 4096, fence());
+    const page = asPage(pagesOf(emitted, 'a')[0]!);
+    assert.ok(page);
+    await store.subscribe('b', 'b', { ...ADDRESS, rootToolCallId: 'tool-2' }, 4096, fence());
+    rereading = true;
+    const before = pagesOf(emitted, 'a').length;
+    await store.fetch('fetch', 'a', ADDRESS, page.ref, 4096, fence());
+    assert.equal(pagesOf(emitted, 'a').length, before, failure);
+    assert.equal(errorsOf(emitted, 'a').at(-1)?.kind, 'detail.error');
+    assert.equal(errorsOf(emitted, 'a').at(-1)?.code, 'NOT_FOUND');
+    store.dispose();
+    assert.deepEqual(store.debugState(), { sources: 0, subscriptions: 0, canonicalBytes: 0 });
+  }
+});
+
+test('durable stream backpressure closes start/page owners and reports failed refetch delivery', async () => {
+  for (const blocked of ['detail.start', 'detail.page', 'fetch'] as const) {
+    const emitted: CoordinatorToHostDetailMessage[] = [];
+    let fetching = false;
+    const store = new DurableDetailStore({
+      resolve: async () => ({ value: { text: 'ok' }, sizeBytes: 13, messageId: 'm', toolCallId: 't', kind: 'tool-result' }),
+      emit: (message) => {
+        emitted.push(message);
+        return blocked === 'fetch' ? !fetching : message.kind !== blocked;
+      },
+    });
+    await store.subscribe('r', 's', ADDRESS, Number.NaN, fence());
+    if (blocked === 'fetch') {
+      const page = asPage(pagesOf(emitted, 's')[0]!);
+      assert.ok(page);
+      fetching = true;
+      await store.fetch('f', 's', ADDRESS, page.ref, 0, fence());
+      assert.equal(store.owns('s'), true);
+    } else {
+      assert.equal(store.owns('s'), false);
+      assert.equal(terminalOf(emitted, 's'), undefined);
+    }
+    if (blocked !== 'detail.start') assert.equal(errorsOf(emitted, 's').at(-1)?.code, 'UNAVAILABLE');
+  }
+});
+
+test('durable subscribe rejects duplicate owners and unsafe resolver sizes before streaming', async () => {
+  const { store, emitted } = createStore();
+  await store.subscribe('r', 's', ADDRESS, 4096, fence());
+  await store.subscribe('duplicate', 's', ADDRESS, 4096, fence());
+  assert.equal(errorsOf(emitted, 's').at(-1)?.code, 'SUBSCRIPTION_CONFLICT');
+  assert.equal(startOf(emitted, 's')?.kind, 'detail.start');
+  for (const value of [undefined, BigInt(1)]) {
+    const messages: CoordinatorToHostDetailMessage[] = [];
+    const invalid = new DurableDetailStore({
+      resolve: async () => ({ value, sizeBytes: value === undefined ? Number.MAX_SAFE_INTEGER + 1 : 1,
+        messageId: 'm', toolCallId: 't', kind: 'tool-result' }),
+      emit: (message) => { messages.push(message); return true; },
+    });
+    await invalid.subscribe('r', 's', ADDRESS, 4096, fence());
+    assert.equal(messages.length, 1);
+    assert.equal(messages[0]?.kind === 'detail.error' ? messages[0].code : undefined, 'INTERNAL_ERROR');
+    assert.equal(invalid.owns('s'), false);
+  }
+  assert.throws(() => createStore({ budgets: { maxSources: 0 } }), /positive safe integer/);
+  assert.throws(() => createStore({ budgets: { maxPageBytes: 1 } }), /envelope range/);
+});
+
+test('durable resolution prefers ordered parts and safely handles nested or malformed lineage', () => {
+  const nested = addressableResult({ ok: true });
+  const message = transcriptWithResult({ stale: true })[0]!;
+  message.parts = [{ kind: 'text', text: 'done' }, { kind: 'toolCall', toolCall: {
+    id: 'tool-1', name: 'subagent', input: {}, status: 'completed',
+    result: { children: [null, { liveAddressable: true, lineage: [null] }, { results: [nested] }] },
+  } }];
+  assert.deepEqual(resolveDurableDetailFromTranscript([message], SESSION_PATH, ADDRESS).value, nested);
+  const toolPart = message.parts[1];
+  assert.ok(toolPart?.kind === 'toolCall');
+  toolPart.toolCall.result = undefined;
+  assert.equal(resolveDurableDetailFromTranscript([message], SESSION_PATH, ADDRESS).status, 'not-found');
+  const cyclic = addressableResult({});
+  cyclic.result = cyclic;
+  assert.equal(resolveDurableDetailFromTranscript(transcriptWithResult(cyclic), SESSION_PATH, ADDRESS).status, 'not-addressable');
+});
+
 test('durable resolution addresses the root tool call and the lineage child', () => {
   const value = addressableResult({ exitCode: 7 });
   const resolution = resolveDurableDetailFromTranscript(transcriptWithResult(value), SESSION_PATH, ADDRESS);

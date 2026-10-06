@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
@@ -367,6 +367,27 @@ test("loadConfig rejects invalid prepass output token limits and warns", () => {
 	}))));
 	assert.equal(result.prepass, undefined);
 	assert.ok(warnings.some((w) => w.includes("maxOutputTokens")));
+});
+
+test("loadConfig rejects non-object pruning and invalid tool strategy without changing UI defaults", (t) => {
+	const dir = mkdtempSync(path.join(tmpdir(), "skill-pruner-contract-"));
+	t.after(() => rmSync(dir, { recursive: true, force: true }));
+	const settingsPath = path.join(dir, "settings.json");
+	for (const pruning of [null, false, "off"]) {
+		writeFileSync(settingsPath, JSON.stringify({ pruning }), "utf-8");
+		const { result, warnings } = captureWarns(() => loadConfig(settingsPath));
+		assert.deepEqual(result, DEFAULT_CONFIG);
+		assert.ok(warnings.some((warning) => warning.includes("settings.pruning must be an object")));
+	}
+	writeFileSync(settingsPath, JSON.stringify({ pruning: {
+		tools: { strategy: "invalid", alwaysKeep: ["read"] },
+	} }), "utf-8");
+	const { result, warnings } = captureWarns(() => loadConfig(settingsPath));
+	assert.equal(result.tools?.strategy, DEFAULT_TOOL_CONFIG.strategy);
+	assert.deepEqual(result.tools?.alwaysKeep, ["read"]);
+	assert.equal(result.mainAgentEnabled, true);
+	assert.equal(result.subagentEnabled, true);
+	assert.ok(warnings.some((warning) => warning.includes("pruning.tools.strategy")));
 });
 
 test("loadConfig allows zero for retry/backoff budgets", () => {
