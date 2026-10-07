@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -612,7 +612,7 @@ test('candidate Pi owners reject declared dependencies resolved to divergent nes
       && error.message.includes(realpathSync(candidate.roots['@earendil-works/pi-ai'])));
 });
 
-test('candidate overlays leave unaliased nested dependencies native and reject ambiguous exposed dependencies', (t) => {
+test('candidate overlays leave unaliased nested dependencies native and reject ambiguous exposed dependencies', async (t) => {
   const { fixtureRoot, sourceRoot } = makeFixture(t);
   const candidate = makeSdkCandidateGraph(fixtureRoot);
   const fakeOwner = makeCandidateOwner(fixtureRoot);
@@ -666,16 +666,58 @@ test('candidate overlays leave unaliased nested dependencies native and reject a
     'ordinary Pie imports use the artifact while package issuers retain their nested versions');
 
   const retryAliasConfig = writeTsConfig(sourceRoot, { paths: { retry: ['./host-retry.js'] } });
-  const overlayDirectories = () => new Set(readdirSync(os.tmpdir()).filter((entry) => entry.startsWith('pie-tsx-overlay-')));
-  const beforeFailure = overlayDirectories();
-  assert.throws(() => createTsconfigOverlay(retryAliasConfig, {
-    dependencyOwnerRoot: fakeOwner,
-    sdkPath: candidate.sdkRoot,
-    includeOwnerDependencies: true,
-  }), (error) => error.message.includes('Ambiguous candidate SDK runtime dependency retry:')
-    && error.message.includes('proper-lockfile')
-    && error.message.includes(`${path.join('harness', 'node_modules', 'pi')}`));
-  assert.deepEqual(overlayDirectories(), beforeFailure, 'failed overlay generation removes its owned temporary directory');
+  // A separate owner keeps a real overlay alive in the shared OS temp root.
+  // Its lifetime must not affect this fixture's failed-generation assertion.
+  const unrelated = spawn(process.execPath, ['--input-type=module', '-e', `
+    import { createTsconfigOverlay } from ${JSON.stringify(new URL('../package-resolution.mjs', import.meta.url).href)};
+    const overlay = createTsconfigOverlay(${JSON.stringify(baseConfig)}, {
+      dependencyOwnerRoot: ${JSON.stringify(fakeOwner)},
+    });
+    process.on('message', () => { overlay.dispose(); process.disconnect(); });
+    process.send(overlay.directory);
+  `], { stdio: ['ignore', 'ignore', 'inherit', 'ipc'], windowsHide: true });
+  const unrelatedExit = new Promise((resolve) => {
+    unrelated.once('error', () => resolve(null));
+    unrelated.once('exit', resolve);
+  });
+  let unrelatedDirectory;
+  try {
+    unrelatedDirectory = await new Promise((resolve, reject) => {
+      unrelated.once('message', resolve);
+      unrelated.once('error', reject);
+      unrelated.once('exit', () => reject(new Error('Unrelated overlay owner exited before readiness')));
+    });
+    assert.ok(existsSync(path.join(unrelatedDirectory, 'tsconfig.overlay.json')));
+    const ownedTempRoot = path.join(fixtureRoot, 'failed-overlay-temp');
+    mkdirSync(ownedTempRoot);
+    // directory would make the overlay caller-owned and bypass cleanup. Redirect
+    // os.tmpdir instead, only during this synchronous, serial test section.
+    const tempKeys = process.platform === 'win32' ? ['TEMP', 'TMP'] : ['TMPDIR', 'TMP', 'TEMP'];
+    const previousTemp = tempKeys.map((key) => [key, process.env[key]]);
+    try {
+      for (const key of tempKeys) process.env[key] = ownedTempRoot;
+      assert.equal(os.tmpdir(), ownedTempRoot);
+      assert.throws(() => createTsconfigOverlay(retryAliasConfig, {
+        dependencyOwnerRoot: fakeOwner,
+        sdkPath: candidate.sdkRoot,
+        includeOwnerDependencies: true,
+      }), (error) => error.message.includes('Ambiguous candidate SDK runtime dependency retry:')
+        && error.message.includes('proper-lockfile')
+        && error.message.includes(`${path.join('harness', 'node_modules', 'pi')}`));
+      assert.deepEqual(readdirSync(ownedTempRoot), [], 'failed overlay generation removes its owned temporary directory');
+      assert.ok(existsSync(path.join(unrelatedDirectory, 'tsconfig.overlay.json')),
+        'failed generation does not remove another owner\'s concurrent overlay');
+    } finally {
+      for (const [key, value] of previousTemp) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  } finally {
+    if (unrelated.connected) unrelated.send('dispose');
+    assert.equal(await unrelatedExit, 0, 'unrelated overlay owner exits cleanly');
+    if (unrelatedDirectory) assert.equal(existsSync(unrelatedDirectory), false, 'unrelated owner disposes its own overlay');
+  }
 });
 
 test('resolveOwnerModule forces canonical SDK identity even when the owner hoists a competitor copy', (t) => {

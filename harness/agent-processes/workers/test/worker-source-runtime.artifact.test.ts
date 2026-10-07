@@ -97,6 +97,7 @@ function buildSanitizedWorkerEnv(root: string, preload?: string): NodeJS.Process
     PI_CODING_AGENT_SESSION_DIR: path.join(root, 'sessions'),
     TSX_TSCONFIG_PATH: process.env.TSX_TSCONFIG_PATH,
     PIE_TEST_FORCE_OFFLINE: '1',
+    PIE_TEST_WORKER_BOOTSTRAP_TIMING: process.env.PIE_TEST_WORKER_BOOTSTRAP_TIMING === '1' ? '1' : undefined,
     PI_OFFLINE: '1',
     PI_SKIP_VERSION_CHECK: '1',
     PI_TELEMETRY: '0',
@@ -146,16 +147,26 @@ interface WorkerBootstrapProbe {
   status: 'ready' | 'failed';
   failure?: string;
   stderr: string;
+  spawnHrtimeNs?: string;
+  bootstrapElapsedNs?: string;
 }
 
 async function probeWorkerBootstrap(
   root: string,
   sdkRuntime: SdkRuntimeSelection,
   env: NodeJS.ProcessEnv,
+  workerEntryPath = WORKER_ENTRY,
 ): Promise<WorkerBootstrapProbe> {
   const sessionPath = path.join(root, 'sessions', 'ipc-probe.jsonl');
+  const spawn = sanitizedSpawn(root, env);
+  let spawnStartedNs: bigint | undefined;
+  let bootstrapElapsedNs: string | undefined;
+  const timing = () => env.PIE_TEST_WORKER_BOOTSTRAP_TIMING === '1' ? {
+    spawnHrtimeNs: spawnStartedNs?.toString(),
+    bootstrapElapsedNs,
+  } : {};
   const client = new WorkerClient({
-    workerEntryPath: WORKER_ENTRY,
+    workerEntryPath,
     coordinatorGeneration: 41,
     workerId: `ipc-probe-${sdkRuntime.kind}`,
     workerGeneration: 1,
@@ -165,16 +176,21 @@ async function probeWorkerBootstrap(
     missedHeartbeatMs: 5_000,
     startupTimeoutMs: 15_000,
     env,
-    spawn: sanitizedSpawn(root, env),
+    spawn: ((command, args, options) => {
+      spawnStartedNs = process.hrtime.bigint();
+      return spawn(command, args, options);
+    }) as typeof childProcess.spawn,
   });
   try {
     await client.start();
+    bootstrapElapsedNs = spawnStartedNs === undefined ? undefined : (process.hrtime.bigint() - spawnStartedNs).toString();
   } catch (error) {
     await client.waitForConfirmedExit(5_000).catch(() => undefined);
     return {
       status: 'failed',
       failure: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
       stderr: client.getSnapshot().stderrTail,
+      ...timing(),
     };
   }
 
@@ -182,7 +198,8 @@ async function probeWorkerBootstrap(
     assert.deepEqual(await client.ping(), { kind: 'pong' });
     assert.deepEqual(await client.shutdown('IPC bootstrap fixture complete'), { kind: 'shutting-down' });
     await client.waitForConfirmedExit(5_000);
-    return { status: 'ready', stderr: client.getSnapshot().stderrTail };
+    assert.equal(client.getSnapshot().status, 'exited', 'bootstrap-only worker shutdown confirms process exit');
+    return { status: 'ready', stderr: client.getSnapshot().stderrTail, ...timing() };
   } finally {
     if (client.getSnapshot().status !== 'exited' && client.getSnapshot().pid) {
       await client.forceKill().catch(() => undefined);
@@ -207,6 +224,45 @@ test('WorkerClient source bootstrap reaches the production inherited-fd boundary
       source: sourceProbe,
     }, null, 2));
     assert.equal(sourceProbe.status, 'ready', `Source bootstrap failed: ${sourceProbe.failure}\n${sourceProbe.stderr}`);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('production bundler emits an actual-source root worker entry with a lazy host chunk', { timeout: 180_000 }, async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pie-worker-entry-bundle-'));
+  try {
+    const selected = await sourceRuntime();
+    const output = path.join(root, 'bundle');
+    const wrapper = path.join(root, 'build.cjs');
+    await fs.writeFile(wrapper, `
+      const { pathToFileURL } = require('node:url');
+      (async () => {
+        const vite = await import(pathToFileURL(${JSON.stringify(path.resolve('application/hosts/vscode/node_modules/vite/dist/node/index.js'))}).href);
+        const config = require(${JSON.stringify(path.resolve('application/hosts/vscode/vite.config.ts'))}).default({ mode: 'node' });
+        // Root-entry acceptance only; build identity scanning is unrelated.
+        config.plugins = [];
+        config.build.rollupOptions.input = { 'worker-entry': ${JSON.stringify(WORKER_ENTRY)} };
+        config.build.outDir = ${JSON.stringify(output)};
+        config.cacheDir = ${JSON.stringify(path.join(root, 'cache'))};
+        await vite.build({ ...config, configFile: false, logLevel: 'error' });
+      })().catch(error => { console.error(error); process.exitCode = 1; });
+    `);
+    const env = buildSanitizedWorkerEnv(root);
+    await Promise.all(['workspace', 'home', 'tmp', 'sessions'].map(dir => fs.mkdir(path.join(root, dir), { recursive: true })));
+    const built = await runChild(process.execPath, [wrapper], {
+      cwd: path.resolve('.'),
+      env: { ...env, PIE_BUILD_PI_RUNTIME_SDK_PATH: selected.sdkPath, PIE_BUILD_OUTPUT_DIR: output },
+      stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+    }, 120_000);
+    assert.equal(built.code, 0, `actual-source worker bundle failed:\n${built.stderr}`);
+    const files = await fs.readdir(output);
+    assert.ok(files.some(file => /^worker-runtime-host-.*\.js$/.test(file)), 'promotion host is an emitted lazy chunk');
+    const entry = path.join(output, 'worker-entry.js');
+    const code = await fs.readFile(entry, 'utf8');
+    assert.ok(!code.includes("require('./worker-runtime-host')"), 'no unbundled source-relative host require');
+    const probe = await probeWorkerBootstrap(root, selected.sdkRuntime, env, entry);
+    assert.equal(probe.status, 'ready', `built worker bootstrap failed: ${probe.failure}\n${probe.stderr}`);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
@@ -339,6 +395,9 @@ test('WorkerClient bootstraps and promotes the read-only source artifact through
       throw error;
     }
 
+    if (env.PIE_TEST_WORKER_BOOTSTRAP_TIMING === '1') {
+      t.diagnostic(`source worker bootstrap startup stderr:\n${client.getSnapshot().stderrTail}`);
+    }
     const promotion = makePromotionPayload(selected.sdkPath, selected.sdkRuntime, root, workerId, sessionPath);
     const promoted = await client.requestFrame({
       kind: 'runtime.promote',
@@ -358,6 +417,7 @@ test('WorkerClient bootstraps and promotes the read-only source artifact through
     if (command.ok) assert.equal(command.result.kind, 'runtime.command');
     assert.deepEqual(await client.shutdown('source runtime fixture complete'), { kind: 'shutting-down' });
     await client.waitForConfirmedExit(10_000);
+    assert.equal(client.getSnapshot().status, 'exited', 'promoted worker disposal confirms process exit');
     assert.equal(await fs.stat(sessionPath).then((stat) => stat.isFile()), true);
   } finally {
     if (client && client.getSnapshot().status !== 'exited' && client.getSnapshot().pid) {

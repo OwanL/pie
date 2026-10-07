@@ -316,7 +316,7 @@ test('rolling inspection uses free slots across directory boundaries', { timeout
   held.resolve();
   const result = await observed;
   assert.ifError(result.error);
-  assert.ok(peak <= 4);
+  assert.ok(peak <= 8);
   assert.equal(active, 0);
   injectedFs.setFs(fs);
   assert.deepEqual(result.value, await preparePiRuntimeManifest(root, provenance));
@@ -329,7 +329,7 @@ test('rolling inspection refills freed slots and drains started siblings on fail
       const root = await fixture(t);
       const ordinary = path.join(root, 'node_modules', 'ordinary');
       await rm(ordinary, { recursive: true });
-      const names = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+      const names = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p'];
       for (const name of names) await put(root, `node_modules/ordinary/${name}`, name);
       const canonicalOrdinary = await fs.realpath(ordinary);
       const gates = names.map(deferred);
@@ -366,12 +366,12 @@ test('rolling inspection refills freed slots and drains started siblings on fail
         for (const gate of gates) gate.resolve();
         await observed;
       });
-      await Promise.all(started.slice(0, 4).map((gate) => gate.promise));
+      await Promise.all(started.slice(0, 8).map((gate) => gate.promise));
       // Workers claim entries in order, but their asynchronous lstat calls can
       // reach readFile in any order. Assert membership, not filesystem timing.
       const initialAdmissions = [...admitted];
-      assert.deepEqual([...initialAdmissions].sort((a, b) => a - b), [0, 1, 2, 3]);
-      assert.equal(active, 4);
+      assert.deepEqual([...initialAdmissions].sort((a, b) => a - b), [0, 1, 2, 3, 4, 5, 6, 7]);
+      assert.equal(active, 8);
       const failure = new Error('injected read failure');
       if (fail) gates[1].reject(failure);
       else gates[1].resolve();
@@ -380,20 +380,20 @@ test('rolling inspection refills freed slots and drains started siblings on fail
         // Let the worker observe the rejection, without using a wall-clock wait.
         await new Promise((resolve) => setImmediate(resolve));
         assert.equal(finished, false);
-        assert.equal(active, 3);
+        assert.equal(active, 7);
         assert.deepEqual(admitted, initialAdmissions);
         // A lower-path sibling fails later: selection must not depend on which
         // rejection happened first, and neither rejection may admit more work.
         const earlierPathFailure = new Error('injected lower-path read failure');
         gates[0].reject(earlierPathFailure);
-        for (const index of [2, 3]) gates[index].resolve();
+        for (const index of [2, 3, 4, 5, 6, 7]) gates[index].resolve();
         assert.equal((await observed).error, earlierPathFailure);
         assert.equal(active, 0);
         assert.deepEqual(admitted, initialAdmissions);
       } else {
-        await started[4].promise;
-        assert.equal(active, 4);
-        assert.deepEqual(admitted, [...initialAdmissions, 4]);
+        await started[8].promise;
+        assert.equal(active, 8);
+        assert.deepEqual(admitted, [...initialAdmissions, 8]);
         assert.equal(finished, false);
         for (const gate of gates) gate.resolve();
         const result = await observed;
@@ -403,7 +403,7 @@ test('rolling inspection refills freed slots and drains started siblings on fail
         assert.deepEqual([...admitted].sort((a, b) => a - b), names.map((_, index) => index));
         assert.equal(active, 0);
       }
-      assert.equal(peak, 4);
+      assert.equal(peak, 8);
     });
   }
 });
