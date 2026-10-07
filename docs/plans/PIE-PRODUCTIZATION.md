@@ -11,6 +11,12 @@
 
 ## Current direction and status
 
+### Windows source migration and release acceptance: done
+
+**Done (2026-10-07, accepted by the user).** Windows source migration and lifecycle work, release gates, verified VSIX, local staging and observed installed-backend startup are complete. The user reports normal use working well. See the [release evidence](#release-gate-correction-follow-up-2026-10-07) and [post-restart checkpoint](#post-restart-observation-and-scratch-cleanup-2026-10-07).
+
+The historical reader remains protected and still blocks Pi workspace writes. The broader [remaining workstreams](#planning-gates-and-unresolved-questions) stay open; macOS/Linux delivery, live-provider qualification and native coverage replacement remain deferred. This closes the accepted Windows section, not the whole productization plan.
+
 ### October 4 follow-up planning
 
 **Decision (2026-10-04):** investigate startup first. The user authorized subagent profiling to locate delays; this does not authorize a runtime fix, publication or restart. Measure cold activation, then choose the smallest evidence-backed performance change. Keep upstream review independent; establish UI outcomes before choosing provider/model ownership or wiring new screens. Broader UI redesign scope/document ownership remains open.
