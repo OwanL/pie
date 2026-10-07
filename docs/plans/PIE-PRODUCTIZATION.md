@@ -299,7 +299,13 @@ The retained VSIX is `.cache/release-candidates/0b2ffe00a/pie-0.3.0-0b2ffe00a.vs
 
 The user selected **stage for next restart**. No merge was needed: the changes were already on `master`. Exact bytes from the qualified `0b2ffe00a` VSIX were freshly extracted and published through the existing immutable-runtime authority to installed `pie.pie@0.3.0`. Independent resolution selects generation `b01ac0da8ee30ea9a2a8eabc0297d587b41c55bb480a8365159150ce121de1a6`, build `da77c362dcbf03bb9534`, with the qualified SDK identity above. The installed immutable loader already matches the candidate and required no upgrade. No separate live-renderer marker was published, so current code/UI was not reloaded. Existing runtime leases, their generations, loaded loader bytes, flat installed output, user settings and the uncertain workspace reader were preserved.
 
-This is local **next-start staging, not loaded adoption**. No VSIX installation, marketplace publication, push, forced restart or window closure occurred. Candidate metadata records the staging receipt; detailed evidence is `%TEMP%/pie-next-start-stage-7TEzrv/next-start-receipt.json` and `%TEMP%/pie-release-acceptance-oquSaL/candidate-next-start-stage.log`. Matching loaded behavior still requires a later user-controlled normal startup.
+This is local **next-start staging, not loaded adoption**. No VSIX installation, marketplace publication, push, forced restart or window closure occurred. Candidate metadata records the staging receipt; detailed evidence is `%TEMP%/pie-next-start-stage-7TEzrv/next-start-receipt.json` and `%TEMP%/pie-release-acceptance-oquSaL/candidate-next-start-stage.log`. Loaded behavior was still pending at this staging checkpoint; subsequent startup evidence is recorded below.
+
+### Post-restart observation and scratch cleanup (2026-10-07)
+
+The user's normal restart acquired generation `b01ac0da…` at 03:39:27Z, launched its backend and reached `backend.ready` at 03:39:55Z. Installed host/renderer bundle identity `da77c362dcbf03bb9534` and independently verified SDK identity match the retained candidate. This establishes installed backend adoption/readiness; the user's positive normal-use report is not formal new full-UI, real-Electron or live-provider qualification.
+
+Confirmed-success build and extraction scratch copies were removed after verifying independent installed output and owned teardown receipts. The VSIX, staging/cleanup receipts, gate evidence, settings and runtime leases remain preserved. Reader `f3e52899…` remains unreclaimed: observed machine boot preceded registration, and complete descendant extinction is still unproven. Pi workspace writes remain gated. The broader [remaining workstreams](#planning-gates-and-unresolved-questions) are separate from accepted Windows lifecycle/release work; native coverage replacement and other-OS qualification remain deferred.
 
 ### Historical design checklist
 
