@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -93,6 +94,14 @@ export function resolveProjectCompiler(project, projectRoot = repoRoot) {
   return resolveTypeScriptCompiler({ dependencyOwnerRoot: ownerRoot });
 }
 
+// Only current-run evidence is available. Never reconstruct or kill old trees.
+const boundedText = (value, limit = 2048) => String(value ?? '').slice(-limit);
+const boundedProcesses = (entries) => (entries ?? []).slice(0, 64).map((entry) => ({
+  pid: entry.pid, ppid: entry.ppid,
+  identity: entry.identity == null ? null : boundedText(entry.identity, 128),
+  creationDate: entry.creationDate == null ? null : boundedText(entry.creationDate, 128),
+}));
+
 export function runProject(project, signal, runtime, dependencies = {}) {
   const started = performance.now();
   const configPath = path.isAbsolute(project.config) ? project.config : path.join(repoRoot, project.config);
@@ -124,26 +133,58 @@ export function runProject(project, signal, runtime, dependencies = {}) {
     });
     child.stdout.on('data', (chunk) => { output += chunk; });
     child.stderr.on('data', (chunk) => { output += chunk; });
-    child.on('error', async (error) => {
-      const cleanup = await watchdog.settle().catch(() => ({ gone: false }));
-      if (cleanup.gone) overlay.dispose();
-      else error.teardownUnconfirmed = true;
-      reject(error);
-    });
-    child.on('close', async (code) => {
-      const cleanup = await watchdog.settle().catch(() => ({ gone: false }));
-      if (!cleanup.gone) {
-        reject(Object.assign(new Error(`${project.id}: typecheck tree teardown is unconfirmed`), { teardownUnconfirmed: true }));
+    let settling = false;
+    const finish = async (code, childError) => {
+      // Spawn errors can be followed by close. Claim settlement before awaiting
+      // so cleanup/disposal and the retained proof happen exactly once.
+      if (settling) return;
+      settling = true;
+      let cleanup;
+      let cleanupError;
+      try { cleanup = await watchdog.settle(); }
+      catch (error) {
+        cleanupError = error;
+        cleanup = { gone: false, diagnostics: [`watchdog settlement failed: ${boundedText(error?.message ?? error)}`] };
+      }
+      if (!cleanup?.gone) {
+        const diagnostics = (cleanup?.diagnostics ?? []).slice(0, 32).map((value) => boundedText(value));
+        if (!diagnostics.length) diagnostics.push('Watchdog did not confirm tree extinction; ownership or survivors may be unknown');
+        const diagnosticPath = path.join(overlay.directory, 'teardown.json');
+        const error = Object.assign(new Error(`${project.id}: typecheck tree teardown is unconfirmed`, {
+          cause: cleanupError ?? childError,
+        }), { teardownUnconfirmed: true, diagnosticPath });
+        const evidence = {
+          owner: { pid: process.pid, directory: boundedText(overlay.directory) },
+          project: { id: boundedText(project.id), config: boundedText(configPath), compiler: boundedText(project.compiler) },
+          sdkSelection: { sdkPath: boundedText(runtime.sdkPath), artifactDir: boundedText(runtime.artifactDir) },
+          childPid: child.pid ?? null,
+          gone: false, timedOut: watchdog.timedOut, aborted: watchdog.aborted,
+          diagnostics,
+          ownedProcesses: boundedProcesses(cleanup?.ownedProcesses),
+          survivorProcesses: boundedProcesses(cleanup?.survivorProcesses),
+          ownedPids: (cleanup?.ownedPids ?? []).slice(0, 64),
+          survivors: (cleanup?.survivors ?? []).slice(0, 64),
+          output: boundedText(output, 16384),
+          childError: childError ? boundedText(childError.message) : null,
+          evidenceScope: 'current run only; missing ownership evidence is unknown, not reconstructed',
+        };
+        try { writeFileSync(diagnosticPath, `${JSON.stringify(evidence)}\n`, { flag: 'wx', mode: 0o600 }); }
+        catch (writeError) { error.diagnosticWriteError = writeError; }
+        (dependencies.console ?? console).error(`${error.message}: ${diagnostics.join('; ')}; retained overlay ${overlay.directory}; diagnostics ${diagnosticPath}${error.diagnosticWriteError ? ` (write failed: ${boundedText(error.diagnosticWriteError.message)})` : ''}`);
+        reject(error);
         return;
       }
       overlay.dispose();
+      if (childError) { reject(childError); return; }
       resolve({
         project,
-        code: watchdog.timedOut || watchdog.aborted || !cleanup.gone ? 1 : (code ?? 1),
+        code: watchdog.timedOut || watchdog.aborted ? 1 : (code ?? 1),
         output,
         durationMs: performance.now() - started,
       });
-    });
+    };
+    child.on('error', (error) => { void finish(undefined, error); });
+    child.on('close', (code) => { void finish(code); });
   }).catch((error) => {
     // Synchronous setup failure launched no process. Unconfirmed trees retain
     // their overlay, even when the error/close events have both fired.
@@ -186,9 +227,11 @@ function printHelp() {
   console.log('Usage: node scripts/verification/run-typechecks.mjs [--project <id>] [--concurrency <n>] [--list]');
 }
 
-async function main() {
+export async function main(argv = process.argv.slice(2), dependencies = {}) {
+  const target = dependencies.process ?? process;
+  const logger = dependencies.console ?? console;
   try {
-    const selection = extractRuntimeArgs(process.argv.slice(2));
+    const selection = extractRuntimeArgs(argv);
     const args = parseArgs(selection.args);
     if (args.help) return printHelp();
     if (args.list) {
@@ -197,12 +240,12 @@ async function main() {
     }
     const projects = selectProjects(args.ids);
     const started = performance.now();
-    const processAbort = abortOnProcessSignals();
+    const processAbort = (dependencies.abortOnProcessSignals ?? abortOnProcessSignals)();
     let results;
     let teardownUnconfirmed = false;
     try {
-      results = await withVerificationRuntime(selection, processAbort.signal, (runtime) =>
-        runWithConcurrency(projects, args.concurrency, (project, signal) => runProject(project, signal, runtime), processAbort.signal));
+      results = await (dependencies.withVerificationRuntime ?? withVerificationRuntime)(selection, processAbort.signal, (runtime) =>
+        runWithConcurrency(projects, args.concurrency, (project, signal) => runProject(project, signal, runtime, dependencies), processAbort.signal));
     } catch (error) {
       teardownUnconfirmed = error?.teardownUnconfirmed === true;
       throw error;
@@ -215,10 +258,10 @@ async function main() {
       if (result.code !== 0 && result.output.trim()) console.log(result.output.trim());
     }
     console.log(`Typecheck completed in ${((performance.now() - started) / 1000).toFixed(1)}s.`);
-    if (processAbort.signal.aborted || results.filter(Boolean).some((result) => result.code !== 0)) process.exitCode = 1;
+    if (processAbort.signal.aborted || results.filter(Boolean).some((result) => result.code !== 0)) target.exitCode = 1;
   } catch (error) {
-    console.error(error instanceof Error ? error.message : String(error));
-    process.exitCode = 1;
+    logger.error(error instanceof Error ? error.message : String(error));
+    target.exitCode = error?.teardownUnconfirmed === true ? 125 : 1;
   }
 }
 
