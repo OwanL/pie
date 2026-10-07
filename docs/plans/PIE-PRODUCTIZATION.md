@@ -295,6 +295,12 @@ The retained VSIX is `.cache/release-candidates/0b2ffe00a/pie-0.3.0-0b2ffe00a.vs
 
 **Preserved constraints:** the original workspace reader `f3e52899-c91c-412e-ab95-475e3a04e88b` remains unproven extinct and was not reclaimed. Pi workspace output writes remain reader-gated. Earlier interrupted/uncertain profiles, alias overlays, diagnostics and the blocked candidate remain preserved; later success does not prove historical extinction. User-owned settings remain separate and uncommitted. Nothing was published, installed, pushed, restarted or closed.
 
+### Authorized next-start staging (2026-10-07)
+
+The user selected **stage for next restart**. No merge was needed: the changes were already on `master`. Exact bytes from the qualified `0b2ffe00a` VSIX were freshly extracted and published through the existing immutable-runtime authority to installed `pie.pie@0.3.0`. Independent resolution selects generation `b01ac0da8ee30ea9a2a8eabc0297d587b41c55bb480a8365159150ce121de1a6`, build `da77c362dcbf03bb9534`, with the qualified SDK identity above. The installed immutable loader already matches the candidate and required no upgrade. No separate live-renderer marker was published, so current code/UI was not reloaded. Existing runtime leases, their generations, loaded loader bytes, flat installed output, user settings and the uncertain workspace reader were preserved.
+
+This is local **next-start staging, not loaded adoption**. No VSIX installation, marketplace publication, push, forced restart or window closure occurred. Candidate metadata records the staging receipt; detailed evidence is `%TEMP%/pie-next-start-stage-7TEzrv/next-start-receipt.json` and `%TEMP%/pie-release-acceptance-oquSaL/candidate-next-start-stage.log`. Matching loaded behavior still requires a later user-controlled normal startup.
+
 ### Historical design checklist
 
 **Remaining decision/qualification order at the earlier audit stage (superseded by the implementation plan above):** the selected publication boundary, Moon/Proto/pnpm, shared dependency authority and incremental isolated execution above are constraints, not questions to reopen. The user-driven tooling discussion resolved those before the execution details.
